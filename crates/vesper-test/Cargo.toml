@@ -1,0 +1,12 @@
+[package]
+name = "vesper-test"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Anvil unified test harness DTOs, mode classifier, verdict cache schema, obligation ledger, mutant plans, and reporters"
+publish = false
+
+[dependencies]
+blake3 = "1.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+vesper-vault = { path = "../vesper-vault" }

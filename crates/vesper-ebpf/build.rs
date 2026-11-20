@@ -43,8 +43,8 @@ fn main() {
 const EDITS: &[(&str, &str)] = &[
     // 0 insn.rs: `lsh` encodes as `rsh`.
     (
-        "        AluOp::Lsh => (96, 0),\n",
-        "        AluOp::Lsh => (112, 0),\n",
+        "        AluOp::Lsh => (OP_LSH, 0),\n",
+        "        AluOp::Lsh => (OP_RSH, 0),\n",
     ),
     // 1 scalar.rs: tnum addition forgets the second operand's unknown bits.
     (
@@ -63,8 +63,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 4 helpers.rs: tc programs may call bpf_xdp_adjust_head.
     (
-        "        ProgramType::SchedCls => id == 84 || id == 86,\n",
-        "        ProgramType::SchedCls => id == 44 || id == 84 || id == 86,\n",
+        "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n",
+        "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n",
     ),
     // 5 program.rs: a ringbuf of 2048 bytes is accepted.
     (
@@ -104,7 +104,7 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 12 interp.rs (the run): the byte just before `data` is readable.
     (
-        "    if kind == 1 && at < i.data_off {\n",
-        "    if kind == 1 && wrapping_add(at, 1) < i.data_off {\n",
+        "    if kind == KIND_PACKET && at < i.data_off {\n",
+        "    if kind == KIND_PACKET && wrapping_add(at, 1) < i.data_off {\n",
     ),
 ];

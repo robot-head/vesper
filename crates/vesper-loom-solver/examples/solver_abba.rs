@@ -121,6 +121,7 @@ fn request(n: usize) -> ResolveRequest {
                     license: None,
                     capability_ceiling: ceiling.clone(),
                     forbid_unsafe_ffi: !ceiling.contains("Ffi[LibA]"),
+                    vsys: vec![],
                 },
                 features,
                 dependencies,

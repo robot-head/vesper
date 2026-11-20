@@ -11,8 +11,9 @@ use crate::conn::{
 use crate::rtt::RttEstimator;
 use crate::seq::{Seq, SeqMap};
 use crate::wire::{
-    self, Flags, HeaderFields, IpPair, MAX_HEADER_LEN, MAX_OPTIONS_LEN, MAX_SACK_BLOCKS,
-    MAX_WINDOW_SCALE, SackBlock, Segment, TcpOptions, Timestamps,
+    self, DEFAULT_IPV4_MSS, Flags, HeaderFields, IpPair, MAX_HEADER_LEN, MAX_OPTIONS_LEN,
+    MAX_SACK_BLOCKS, MAX_UNSCALED_WINDOW, MAX_WINDOW_SCALE, SackBlock, Segment, TcpOptions,
+    Timestamps, options as opt,
 };
 
 /// RFC 6675 DupThresh.
@@ -21,6 +22,14 @@ const DUP_THRESH: u32 = 3;
 const TS_TICK_NS: u64 = 1_000_000;
 /// RFC 9293 §3.4.1 ISN clock: one tick per 4 µs.
 const ISN_TICK_NS: u64 = 4_000;
+/// Largest receive buffer a configuration may ask for.
+const MAX_RECV_BUFFER: u32 = 1 << 30;
+/// Stream offsets stay below 2^62.
+const MAX_STREAM_OFFSET: u64 = 1 << 62;
+/// At most one challenge ACK per window (RFC 5961 §7), 1 s.
+const CHALLENGE_ACK_WINDOW_NS: u64 = 1_000_000_000;
+/// Cap on the persist timer's exponential backoff shift.
+const MAX_PERSIST_BACKOFF_SHIFT: u32 = 16;
 
 impl State {
     /// States in which sequence numbers of both sides are known.
@@ -209,7 +218,7 @@ fn validate(cfg: &Config) -> Result<(), TcpError> {
     if cfg.mss < MIN_SEND_MSS {
         return Err(TcpError::InvalidConfig("mss below 64"));
     }
-    if cfg.recv_buffer == 0 || cfg.recv_buffer > 1 << 30 {
+    if cfg.recv_buffer == 0 || cfg.recv_buffer > MAX_RECV_BUFFER {
         return Err(TcpError::InvalidConfig("recv_buffer must be in 1..=2^30"));
     }
     if cfg.window_scale.is_some_and(|s| s > MAX_WINDOW_SCALE) {
@@ -255,8 +264,8 @@ impl<C: CongestionController> Connection<C> {
             ws_ok: false,
             sack_ok: false,
             ts_ok: false,
-            peer_mss: 536,
-            smss: 536,
+            peer_mss: DEFAULT_IPV4_MSS,
+            smss: DEFAULT_IPV4_MSS as u32,
             need_syn: false,
             write_end: 0,
             fin_requested: false,
@@ -480,7 +489,7 @@ impl<C: CongestionController> Connection<C> {
         self.write_end = self
             .write_end
             .checked_add(n)
-            .filter(|&v| v < 1 << 62)
+            .filter(|&v| v < MAX_STREAM_OFFSET)
             .ok_or(TcpError::Overflow)?;
         Ok(())
     }
@@ -622,8 +631,8 @@ impl<C: CongestionController> Connection<C> {
         self.ws_ok = false;
         self.sack_ok = false;
         self.ts_ok = false;
-        self.peer_mss = 536;
-        self.smss = 536;
+        self.peer_mss = DEFAULT_IPV4_MSS;
+        self.smss = u32::from(DEFAULT_IPV4_MSS);
         self.need_syn = false;
         self.write_end = 0;
         self.fin_requested = false;
@@ -730,7 +739,11 @@ impl<C: CongestionController> Connection<C> {
 
     fn set_send_mss(&mut self) {
         let base = self.peer_mss.max(MIN_SEND_MSS).min(self.cfg.mss);
-        let ts = if self.ts_ok { 12 } else { 0 };
+        let ts = if self.ts_ok {
+            opt::PADDED_TIMESTAMPS_LEN as u32
+        } else {
+            0
+        };
         self.smss = u32::from(base) - ts;
         self.cc.on_mss(self.smss);
     }
@@ -776,7 +789,7 @@ impl<C: CongestionController> Connection<C> {
     }
 
     fn challenge_ack(&mut self, now: u64) {
-        if now.saturating_sub(self.challenge_window_ns) >= 1_000_000_000 {
+        if now.saturating_sub(self.challenge_window_ns) >= CHALLENGE_ACK_WINDOW_NS {
             self.challenge_window_ns = now;
             self.challenge_count = 0;
         }
@@ -1766,7 +1779,7 @@ impl<C: CongestionController> Connection<C> {
             let backoff = self
                 .rtt
                 .rto_ns()
-                .checked_shl(self.persist_backoff.min(16))
+                .checked_shl(self.persist_backoff.min(MAX_PERSIST_BACKOFF_SHIFT))
                 .unwrap_or(u64::MAX);
             self.persist_backoff = self.persist_backoff.saturating_add(1);
             self.persist_deadline = Some(now.saturating_add(backoff.min(self.cfg.rto.max_ns)));
@@ -1849,7 +1862,7 @@ impl<C: CongestionController> Connection<C> {
             return;
         }
         let space = (MAX_OPTIONS_LEN - o.encoded_len()).min(room);
-        if space < 12 {
+        if space < opt::PADDED_LEN + opt::SACK_BLOCK_LEN {
             return;
         }
         let max_blocks = ((space - 4) / 8).min(MAX_SACK_BLOCKS);
@@ -1883,11 +1896,11 @@ impl<C: CongestionController> Connection<C> {
         };
         let wnd = adv_right.saturating_sub(self.rcv_nxt);
         if syn {
-            let w = wnd.min(65535);
+            let w = wnd.min(MAX_UNSCALED_WINDOW);
             self.rcv_adv_right = self.rcv_adv_right.max(self.rcv_nxt + w);
             return w as u16;
         }
-        let scaled = (wnd >> self.rcv_wscale).min(65535);
+        let scaled = (wnd >> self.rcv_wscale).min(MAX_UNSCALED_WINDOW);
         self.rcv_adv_right = self
             .rcv_adv_right
             .max(self.rcv_nxt + (scaled << self.rcv_wscale));

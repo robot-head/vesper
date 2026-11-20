@@ -1143,3 +1143,38 @@ fn entry_value_traversal_caps_and_external_refusal_are_observable() {
     assert!(runtime.begin_external("simple", vec![]).is_err());
     failure(&observer.snapshot().unwrap(), Failure::UnsupportedExternal);
 }
+
+#[test]
+fn best_effort_pattern_traversal_truncates_without_failing_evaluation() {
+    let world = checked(
+        r#"
+        linear struct Ticket {}
+        copy struct Pair { left: i64, right: i64 }
+        fn tuple_pattern() -> i64 {
+            let (left, _) = (42, 22);
+            left
+        }
+        fn struct_pattern() -> i64 {
+            let Pair { left, right: _ } = Pair { left: 42, right: 22 };
+            left
+        }
+        "#,
+    );
+    let limits = Limits {
+        max_value_depth: 1,
+        ..Limits::default()
+    };
+    for entry in ["tuple_pattern", "struct_pattern"] {
+        let config = Config::new(&world, &["Ticket"], limits)
+            .unwrap()
+            .with_best_effort(true);
+        let mut runtime = Runtime::new(&world);
+        runtime.optimize = false;
+        let observer = runtime.observe_resources(config).unwrap();
+
+        answer(runtime.run(entry, vec![]));
+        let report = observer.snapshot().unwrap();
+        assert_closed(&report);
+        assert!(report.truncated());
+    }
+}

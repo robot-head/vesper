@@ -60,6 +60,114 @@ use self::program::{
     ProgramType
 };
 
+// Kernel UAPI values (src/helpers.rs, src/interp.rs, src/verifier.rs).
+// Helper ids, `enum bpf_func_id`.
+const MAP_LOOKUP_ELEM: u64 = 1;
+const MAP_UPDATE_ELEM: u64 = 2;
+const MAP_DELETE_ELEM: u64 = 3;
+const KTIME_GET_NS: u64 = 5;
+const GET_PRANDOM_U32: u64 = 7;
+const GET_SMP_PROCESSOR_ID: u64 = 8;
+const TAIL_CALL: u64 = 12;
+const GET_CURRENT_PID_TGID: u64 = 14;
+const GET_CURRENT_UID_GID: u64 = 15;
+const GET_CURRENT_COMM: u64 = 16;
+const XDP_ADJUST_HEAD: u64 = 44;
+const SK_LOOKUP_TCP: u64 = 84;
+const SK_RELEASE: u64 = 86;
+const RINGBUF_OUTPUT: u64 = 130;
+const RINGBUF_RESERVE: u64 = 131;
+const RINGBUF_SUBMIT: u64 = 132;
+const RINGBUF_DISCARD: u64 = 133;
+const LOOP: u64 = 181;
+
+// `enum bpf_map_type`.
+const BPF_MAP_TYPE_ARRAY: u64 = 2;
+const BPF_MAP_TYPE_PROG_ARRAY: u64 = 3;
+const BPF_MAP_TYPE_PERCPU_ARRAY: u64 = 6;
+const BPF_MAP_TYPE_RINGBUF: u64 = 27;
+
+// `bpf_map_update_elem` flags (BPF_ANY is 0).
+const BPF_NOEXIST: u64 = 1;
+const BPF_EXIST: u64 = 2;
+
+// errno values a helper returns negated.
+const ENOENT: u64 = 2;
+const E2BIG: u64 = 7;
+const EAGAIN: u64 = 11;
+const EEXIST: u64 = 17;
+const EINVAL: u64 = 22;
+
+// Limits: registers r0..r10, the stack of one frame, call frames,
+// `MAX_TAIL_CALL_CNT` and `BPF_MAX_LOOPS` (1 << 23).
+const MAX_BPF_REG: u64 = 11;
+const STACK_BYTES: u64 = 512;
+const MAX_CALL_FRAMES: u64 = 8;
+const MAX_TAIL_CALL_CNT: u64 = 33;
+const BPF_MAX_LOOPS: u64 = 8388608;
+
+// Ring buffer record header: length word with busy (1 << 31) and discard
+// (1 << 30) bits, then 4 bytes of page offset.
+const RINGBUF_BUSY_BIT: u64 = 2147483648;
+const RINGBUF_DISCARD_BIT: u64 = 1073741824;
+const RINGBUF_LEN_MASK: u64 = 2147483647;
+const RINGBUF_HDR_SZ: u64 = 8;
+
+// Region addresses: the first base (0x1000_0000), then page-aligned bases
+// with a guard page between regions.
+const FIRST_REGION_BASE: u64 = 268435456;
+const PAGE_SIZE: u64 = 4096;
+const PAGE_SHIFT: u64 = 12;
+
+// Contexts and packets: bytes of headroom before an XDP packet, the minimum
+// frame left by `bpf_xdp_adjust_head`, `sizeof(struct xdp_md)`, the
+// largest tracepoint record and `TASK_COMM_LEN`.
+const HEADROOM: u64 = 256;
+const ETH_HLEN: u64 = 14;
+const XDP_MD_SIZE: u64 = 24;
+const PERF_MAX_TRACE_SIZE: u64 = 2048;
+const TASK_COMM_LEN: u64 = 16;
+// `sizeof(bpf_sock_tuple.ipv4)`.
+const SOCK_TUPLE_IPV4: u64 = 12;
+// The flags word `bpf_local_irq_save` stores (IF set, x86 EFLAGS 0x246).
+const IRQ_FLAGS: u64 = 582;
+
+// `struct xdp_md` field offsets.
+const XDP_DATA: u64 = 0;
+const XDP_DATA_END: u64 = 4;
+const XDP_INGRESS_IFINDEX: u64 = 12;
+const XDP_RX_QUEUE_INDEX: u64 = 16;
+const LOOPBACK_IFINDEX: u64 = 1;
+
+// `struct __sk_buff` field offsets.
+const SKB_MARK: u64 = 8;
+const SKB_PRIORITY: u64 = 32;
+const SKB_TC_INDEX: u64 = 44;
+const SKB_CB: u64 = 48;
+const SKB_TC_CLASSID: u64 = 72;
+const SKB_DATA: u64 = 76;
+const SKB_DATA_END: u64 = 80;
+// Tracepoint records start with 8 bytes of common fields.
+const TRACE_COMMON_BYTES: u64 = 8;
+
+// FNV-1a (64-bit) for the map hash table and the xorshift64* multiplier.
+const FNV_OFFSET_BASIS: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+const XORSHIFT64_STAR_MUL: u64 = 2685821657736338717;
+
+// Region kinds (`I.rt` word 0).
+const KIND_CTX: u64 = 0;
+const KIND_PACKET: u64 = 1;
+const KIND_STACK: u64 = 2;
+const KIND_MAP_VALUE: u64 = 3;
+const KIND_RING: u64 = 4;
+const KIND_SOCKET: u64 = 5;
+
+// Program types as `ptype` carries them.
+const PT_XDP: u64 = 0;
+const PT_SCHED_CLS: u64 = 1;
+const PT_TRACEPOINT: u64 = 2;
+
 pub copy struct IErr {
     code: u64,
     pc: u64,
@@ -276,11 +384,11 @@ fn jump(pc: u64, off: u64) -> u64 {
 }
 
 fn ptype_of(t: u64) -> ProgramType {
-    if t == 0 {
+    if t == PT_XDP {
         ProgramType::Xdp
-    } else if t == 1 {
+    } else if t == PT_SCHED_CLS {
         ProgramType::SchedCls
-    } else if t == 2 {
+    } else if t == PT_TRACEPOINT {
         ProgramType::Tracepoint
     } else {
         ProgramType::Kprobe
@@ -321,7 +429,7 @@ fn uninit(inout i: I, lo: u64, hi: u64) {
 }
 
 fn init_all(inout i: I, v: bool) {
-    for r in w64(0)..w64(11) {
+    for r in w64(0)..w64(MAX_BPF_REG) {
         i.ri.try_set(r, v);
     }
 }
@@ -347,8 +455,8 @@ fn grow(inout i: I, n: u64, init: bool) {
         if left == 0 {
             break;
         }
-        let k = if left > 4096 {
-            4096
+        let k = if left > PAGE_SIZE {
+            PAGE_SIZE
         } else {
             left
         };
@@ -366,7 +474,11 @@ fn grow(inout i: I, n: u64, init: bool) {
 // `Env::alloc`: a region of `len` zero bytes.
 fn alloc(inout i: I, kind: u64, len: u64, init: bool) -> u64 {
     let base = i.next_base;
-    i.next_base = add(base, add(mul(shr(add(add(len, 4096), 4095), 12), 4096), 4096));
+    i
+        .next_base = add(
+        base,
+        add(mul(shr(add(add(len, PAGE_SIZE), sub(PAGE_SIZE, 1)), PAGE_SHIFT), PAGE_SIZE), PAGE_SIZE)
+    );
     let off = i.mem.len();
     grow(inout i, pad8(len), init);
     let id = shr(i.rt.len(), 3);
@@ -459,10 +571,10 @@ fn resolve(in i: I, pc: u64, x: Val, off: u64, n: u64) -> u64 eff [Fail[IErr]] {
         access(pc, 3, at, n, len);
     }
     let kind = rt(in i, p, 0);
-    if kind == 1 && at < i.data_off {
+    if kind == KIND_PACKET && at < i.data_off {
         access(pc, 4, 0, 0, 0);
     }
-    if kind == 5 {
+    if kind == KIND_SOCKET {
         access(pc, 5, 0, 0, 0);
     }
     at
@@ -500,29 +612,29 @@ fn pkt_ptr(in i: I, end: bool) -> Val {
 // from the context.
 fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
     let t = i.ptype;
-    if t == 0 {
-        if at == 0 {
+    if t == PT_XDP {
+        if at == XDP_DATA {
             return pkt_ptr(in i, false);
         }
-        if at == 4 {
+        if at == XDP_DATA_END {
             return pkt_ptr(in i, true);
         }
-        if at == 12 {
-            return scalar(1);
+        if at == XDP_INGRESS_IFINDEX {
+            return scalar(LOOPBACK_IFINDEX);
         }
-        if at == 16 {
+        if at == XDP_RX_QUEUE_INDEX {
             return scalar(0);
         }
         access(pc, 6, at, n, 0);
     }
-    if t == 1 {
-        if at == 76 && n == 4 {
+    if t == PT_SCHED_CLS {
+        if at == SKB_DATA && n == 4 {
             return pkt_ptr(in i, false);
         }
-        if at == 80 && n == 4 {
+        if at == SKB_DATA_END && n == 4 {
             return pkt_ptr(in i, true);
         }
-        if at < 76 {
+        if at < SKB_DATA {
             return Val {
                 v: 0,
                 p: plain()
@@ -530,7 +642,7 @@ fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
         }
         access(pc, 6, at, n, 0);
     }
-    if t == 2 && at < 8 {
+    if t == PT_TRACEPOINT && at < TRACE_COMMON_BYTES {
         access(pc, 6, at, n, 0);
     }
     Val {
@@ -541,30 +653,30 @@ fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
 
 fn skb_writable(at: u64) -> bool {
     at
-        == 8
+        == SKB_MARK
         || at
-        == 32
+        == SKB_PRIORITY
         || at
-        == 44
+        == SKB_TC_INDEX
         || at
-        == 48
+        == SKB_CB
         || at
-        == 52
+        == add(SKB_CB, 4)
         || at
-        == 56
+        == add(SKB_CB, 8)
         || at
-        == 60
+        == add(SKB_CB, 12)
         || at
-        == 64
+        == add(SKB_CB, 16)
         || at
-        == 72
+        == SKB_TC_CLASSID
 }
 
 fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]] {
     let at = resolve(in i, pc, x, off, n);
     let p = x.p;
-    if rt(in i, p, 0) == 0 {
-        let writable = i.ptype == 1 && n == 4 && skb_writable(at) && v.p == none();
+    if rt(in i, p, 0) == KIND_CTX {
+        let writable = i.ptype == PT_SCHED_CLS && n == 4 && skb_writable(at) && v.p == none();
         if !writable {
             access(pc, 7, at, n, 0);
         }
@@ -584,9 +696,9 @@ fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]]
 }
 
 fn new_stack(inout i: I) -> Val {
-    let r = alloc(inout i, 2, 512, false);
+    let r = alloc(inout i, KIND_STACK, STACK_BYTES, false);
     Val {
-        v: add(rt(in i, r, 1), 512),
+        v: add(rt(in i, r, 1), STACK_BYTES),
         p: r
     }
 }
@@ -605,7 +717,7 @@ fn mword(in i: I, m: u64, f: u64) -> u64 {
 }
 
 fn is_array_kind(t: u64) -> bool {
-    t == 2 || t == 6 || t == 3
+    t == BPF_MAP_TYPE_ARRAY || t == BPF_MAP_TYPE_PERCPU_ARRAY || t == BPF_MAP_TYPE_PROG_ARRAY
 }
 
 fn map_of(in i: I, pc: u64, x: Val) -> u64 eff [Fail[IErr]] {
@@ -619,10 +731,10 @@ fn map_of(in i: I, pc: u64, x: Val) -> u64 eff [Fail[IErr]] {
 }
 
 fn khash(m: u64, in key: ChunkSeq[u8]) -> u64 {
-    let mut h = 14695981039346656037 ^ m;
-    h = mul(h, 1099511628211);
+    let mut h = FNV_OFFSET_BASIS ^ m;
+    h = mul(h, FNV_PRIME);
     for k in 0..key.len() {
-        h = mul(h ^ gbyte(in key, k), 1099511628211);
+        h = mul(h ^ gbyte(in key, k), FNV_PRIME);
     }
     h ^ shr(h, 29)
 }
@@ -764,8 +876,8 @@ fn le32_bytes(v: u64) -> ChunkSeq[u8] {
 // `RingBuf::reserve`: (header offset, payload offset), or NONE.
 fn reserve(inout i: I, m: u64, len: u64) -> Val {
     let size = mword(in i, m, 4);
-    let total = mul(shr(add(add(len, 8), 7), 3), 8);
-    if len > sub(size, 8) {
+    let total = mul(shr(add(add(len, RINGBUF_HDR_SZ), 7), 3), 8);
+    if len > sub(size, RINGBUF_HDR_SZ) {
         return scalar(none());
     }
     let mask = sub(size, 1);
@@ -775,14 +887,14 @@ fn reserve(inout i: I, m: u64, len: u64) -> Val {
         return scalar(none());
     }
     let hdr = prod & mask;
-    let hb = le32_bytes((len & low32()) | 2147483648);
+    let hb = le32_bytes((len & low32()) | RINGBUF_BUSY_BIT);
     ring_log(inout i, m, hdr, in hb);
     let zb = le32_bytes(0);
     ring_log(inout i, m, add(hdr, 4), in zb);
     i.maps.try_set(add(mul(m, 7), 5), new_prod);
     Val {
         v: hdr,
-        p: add(hdr, 8) & mask
+        p: add(hdr, RINGBUF_HDR_SZ) & mask
     }
 }
 
@@ -818,9 +930,9 @@ fn commit(inout i: I, m: u64, hdr: u64, discard: bool) {
     for k in w64(0)..w64(4) {
         l = l | shl(ring_byte(in i, m, add(hdr, k)), mul(k, 8));
     }
-    l = l & 2147483647;
+    l = l & RINGBUF_LEN_MASK;
     if discard {
-        l = l | 1073741824;
+        l = l | RINGBUF_DISCARD_BIT;
     }
     let hb = le32_bytes(l);
     ring_log(inout i, m, hdr, in hb);
@@ -839,7 +951,7 @@ fn karg(in i: I, pc: u64, a: u64) -> Val eff [Fail[IErr]] {
 fn kslot(in i: I, pc: u64, code: u64) -> u64 eff [Fail[IErr]] {
     let p = karg(in i, pc, 0);
     let at = resolve(in i, pc, p, 0, 8);
-    if rt(in i, p.p, 0) != 2 {
+    if rt(in i, p.p, 0) != KIND_STACK {
         raise(4, pc, 6, code, 0, 0);
     }
     at
@@ -871,7 +983,7 @@ fn call_kfunc(inout i: I, pc: u64, code: u64) -> Val eff [Fail[IErr]] {
     if code == 4 {
         let at = kslot(in i, pc, code);
         let r = karg(in i, pc, 0).p;
-        kwrite(inout i, r, at, 582);
+        kwrite(inout i, r, at, IRQ_FLAGS);
         return unset;
     }
     if code == 5 {
@@ -886,9 +998,10 @@ fn call_kfunc(inout i: I, pc: u64, code: u64) -> Val eff [Fail[IErr]] {
         let mut kst: u64 = 0;
         let mut ret: u64 = 0;
         if start > end {
-            ret = neg(22);
-        } else if wrapping_i64(sub(wrapping_u64(end), wrapping_u64(start))) > 8388608 {
-            ret = neg(7);
+            ret = neg(EINVAL);
+        } else if wrapping_i64(sub(wrapping_u64(end), wrapping_u64(start)))
+            > wrapping_i64(BPF_MAX_LOOPS) {
+            ret = neg(E2BIG);
         } else {
             kst = pack(sub(wrapping_u64(start), 1), wrapping_u64(end));
         }
@@ -931,7 +1044,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
     -> Val eff [Fail[IErr]] {
     let m = map_of(in i, pc, a0);
     let t = mword(in i, m, 0);
-    if t == 27 {
+    if t == BPF_MAP_TYPE_RINGBUF {
         bad(pc, 8);
     }
     let ks = mword(in i, m, 1);
@@ -942,7 +1055,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
     } else {
         sub(gw(in i.tab, slot), 2)
     };
-    if id == 1 {
+    if id == MAP_LOOKUP_ELEM {
         if e == none() {
             return scalar(0);
         }
@@ -952,35 +1065,35 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
             p: r
         };
     }
-    if id == 2 {
+    if id == MAP_UPDATE_ELEM {
         let vs = mword(in i, m, 2);
         let val = read_mem(inout i, pc, a2, vs);
         let exists = e != none();
         let flags = a3.v;
-        if flags > 2 {
-            return ret_err(22);
+        if flags > BPF_EXIST {
+            return ret_err(EINVAL);
         }
         if is_array_kind(t) {
             if !exists {
-                return ret_err(7);
+                return ret_err(E2BIG);
             }
-            if flags == 1 {
-                return ret_err(17);
+            if flags == BPF_NOEXIST {
+                return ret_err(EEXIST);
             }
-        } else if flags == 1 && exists {
-            return ret_err(17);
-        } else if flags == 2 && !exists {
-            return ret_err(2);
+        } else if flags == BPF_NOEXIST && exists {
+            return ret_err(EEXIST);
+        } else if flags == BPF_EXIST && !exists {
+            return ret_err(ENOENT);
         }
         if !exists && gw(in i.counts, m) >= mword(in i, m, 3) {
-            return ret_err(7);
+            return ret_err(E2BIG);
         }
         if exists {
             let r = gw(in i.ent, add(mul(e, 4), 3));
             i.mem.try_copy_from(rt(in i, r, 2), in val.as_slice());
             return scalar(0);
         }
-        let r = alloc(inout i, 3, vs, true);
+        let r = alloc(inout i, KIND_MAP_VALUE, vs, true);
         i.mem.try_copy_from(rt(in i, r, 2), in val.as_slice());
         insert(inout i, m, in key, r);
         return scalar(0);
@@ -989,7 +1102,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
         remove(inout i, m, slot);
         return scalar(0);
     }
-    ret_err(2)
+    ret_err(ENOENT)
 }
 
 fn take_held(inout i: I, r: u64) -> bool {
@@ -1014,47 +1127,47 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
     let a1 = peek(in i, 2);
     let a2 = peek(in i, 3);
     let a3 = peek(in i, 4);
-    if id == 1 || id == 2 || id == 3 {
+    if id == MAP_LOOKUP_ELEM || id == MAP_UPDATE_ELEM || id == MAP_DELETE_ELEM {
         return map_elem(inout i, pc, id, a0, a1, a2, a3);
     }
-    if id == 5 {
+    if id == KTIME_GET_NS {
         return scalar(gw(in i.cfg, 1));
     }
-    if id == 7 {
+    if id == GET_PRANDOM_U32 {
         let mut x = i.prandom;
         x = x ^ shr(x, 12);
         x = x ^ shl(x, 25);
         x = x ^ shr(x, 27);
         i.prandom = x;
-        return scalar(shr(mul(x, 2685821657736338717), 32) & low32());
+        return scalar(shr(mul(x, XORSHIFT64_STAR_MUL), 32) & low32());
     }
-    if id == 8 {
+    if id == GET_SMP_PROCESSOR_ID {
         return scalar(gw(in i.cfg, 0));
     }
-    if id == 44 {
+    if id == XDP_ADJUST_HEAD {
         let delta = sext_const(a1.v & low32(), 32);
         if i.pkt == none() {
             bad(pc, 9);
         }
         let len = rt(in i, i.pkt, 3);
         let nw = add(i.data_off, delta);
-        if wrapping_i64(nw) < 0 || wrapping_i64(sub(len, nw)) < 14 {
-            return ret_err(22);
+        if wrapping_i64(nw) < 0 || wrapping_i64(sub(len, nw)) < wrapping_i64(ETH_HLEN) {
+            return ret_err(EINVAL);
         }
         i.data_off = nw;
         return scalar(0);
     }
-    if id == 131 {
+    if id == RINGBUF_RESERVE {
         let m = map_of(in i, pc, a0);
         let size = a1.v;
-        if mword(in i, m, 0) != 27 {
+        if mword(in i, m, 0) != BPF_MAP_TYPE_RINGBUF {
             bad(pc, 10);
         }
         let res = reserve(inout i, m, size);
         if res.v == none() {
             return scalar(0);
         }
-        let r = alloc(inout i, 4, size, true);
+        let r = alloc(inout i, KIND_RING, size, true);
         set_rt(inout i, r, 5, m);
         set_rt(inout i, r, 6, res.p);
         set_rt(inout i, r, 7, res.v);
@@ -1064,7 +1177,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
             p: r
         };
     }
-    if id == 132 || id == 133 {
+    if id == RINGBUF_SUBMIT || id == RINGBUF_DISCARD {
         let r = a0.p;
         if r == none() {
             bad(pc, 11);
@@ -1082,7 +1195,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
             bad(pc, 13);
         }
         take_held(inout i, r);
-        if rt(in i, r, 0) != 4 {
+        if rt(in i, r, 0) != KIND_RING {
             bad(pc, 11);
         }
         let m = rt(in i, r, 5);
@@ -1092,29 +1205,29 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         let pay_at = rt(in i, r, 6);
         let hdr_at = rt(in i, r, 7);
         ring_log(inout i, m, pay_at, in payload);
-        commit(inout i, m, hdr_at, id == 133);
+        commit(inout i, m, hdr_at, id == RINGBUF_DISCARD);
         set_rt(inout i, r, 4, 0);
         return scalar(0);
     }
-    if id == 130 {
+    if id == RINGBUF_OUTPUT {
         let m = map_of(in i, pc, a0);
         let size = a2.v;
         let bytes = read_mem(inout i, pc, a1, size);
-        if mword(in i, m, 0) != 27 {
+        if mword(in i, m, 0) != BPF_MAP_TYPE_RINGBUF {
             bad(pc, 14);
         }
         let res = reserve(inout i, m, size);
         if res.v == none() {
-            return ret_err(11);
+            return ret_err(EAGAIN);
         }
         ring_log(inout i, m, res.p, in bytes);
         commit(inout i, m, res.v, false);
         return scalar(0);
     }
-    if id == 84 {
+    if id == SK_LOOKUP_TCP {
         let size = a2.v;
         let tuple = read_mem(inout i, pc, a1, size);
-        if size != 12 {
+        if size != SOCK_TUPLE_IPV4 {
             return scalar(0);
         }
         let daddr = match tuple.try_read_u32_le(4) {
@@ -1136,14 +1249,14 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         if !hit {
             return scalar(0);
         }
-        let r = alloc(inout i, 5, 8, true);
+        let r = alloc(inout i, KIND_SOCKET, 8, true);
         i.held.push(r);
         return Val {
             v: rt(in i, r, 1),
             p: r
         };
     }
-    if id == 86 {
+    if id == SK_RELEASE {
         let r = a0.p;
         if r == none() {
             bad(pc, 15);
@@ -1154,22 +1267,22 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         set_rt(inout i, r, 4, 0);
         return scalar(0);
     }
-    if id == 14 {
+    if id == GET_CURRENT_PID_TGID {
         return scalar(shl(gw(in i.cfg, 5), 32) | gw(in i.cfg, 4));
     }
-    if id == 15 {
+    if id == GET_CURRENT_UID_GID {
         return scalar(shl(gw(in i.cfg, 7), 32) | gw(in i.cfg, 6));
     }
-    if id == 16 {
+    if id == GET_CURRENT_COMM {
         let size = a1.v;
         if size == 0 {
             bad(pc, 17);
         }
         let at = resolve(in i, pc, a0, 0, size);
-        let mut comm: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
+        let mut comm: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](TASK_COMM_LEN);
         let lo = gw(in i.cfg, 8);
         let hi = gw(in i.cfg, 9);
-        for k in w64(0)..w64(16) {
+        for k in w64(0)..w64(TASK_COMM_LEN) {
             let w = if k < 8 {
                 lo
             } else {
@@ -1177,9 +1290,9 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
             };
             comm.push(wrapping_u8(shr(w, mul(k & 7, 8))));
         }
-        let mut name_len: u64 = 16;
-        for k in w64(0)..w64(16) {
-            if name_len == 16 && gbyte(in comm, k) == 0 {
+        let mut name_len: u64 = TASK_COMM_LEN;
+        for k in w64(0)..w64(TASK_COMM_LEN) {
+            if name_len == TASK_COMM_LEN && gbyte(in comm, k) == 0 {
                 name_len = k;
             }
         }
@@ -1190,7 +1303,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         };
         let r = a0.p;
         let kind = rt(in i, r, 0);
-        if !(kind == 2 || kind == 3 || kind == 4) {
+        if !(kind == KIND_STACK || kind == KIND_MAP_VALUE || kind == KIND_RING) {
             bad(pc, 18);
         }
         let m = add(rt(in i, r, 2), at);
@@ -1522,14 +1635,14 @@ fn exec(
                     v: 0,
                     p: plain()
                 };
-                if rt(in i, p.p, 0) == 0 {
+                if rt(in i, p.p, 0) == KIND_CTX {
                     v = ctx_read(in i, pc, at, n);
                 }
                 if v.p == plain() {
                     let m = add(rt(in i, p.p, 2), at);
                     for k in 0..n {
                         if !is_init(in i, add(m, k)) {
-                            raise(3, pc, 0, sub(at, 512), 0, 0);
+                            raise(3, pc, 0, sub(at, STACK_BYTES), 0, 0);
                         }
                     }
                     let mut prov = none();
@@ -1583,7 +1696,7 @@ fn exec(
                 let n = size_bytes(size);
                 let at = resolve(in i, pc, p, off16(off), n);
                 let kind = rt(in i, p.p, 0);
-                if kind == 0 || kind == 1 {
+                if kind == KIND_CTX || kind == KIND_PACKET {
                     access(pc, 9, 0, 0, 0);
                 }
                 let m = add(rt(in i, p.p, 2), at);
@@ -1668,7 +1781,7 @@ fn exec(
             Insn::Call(target) => {
                 match target {
                     CallTarget::Local(off) => {
-                        if add(nframes(in i), 1) >= 8 {
+                        if add(nframes(in i), 1) >= MAX_CALL_FRAMES {
                             raise(8, pc, 0, 0, 0, 0);
                         }
                         push_frame(inout i, next, false, 0, 0, scalar(0));
@@ -1681,21 +1794,21 @@ fn exec(
                     },
                     CallTarget::Helper(id) => {
                         let hid = imm_bits(id);
-                        if hid == 181 {
+                        if hid == LOOP {
                             let n = get(in i, pc, 1).v;
                             let cb = get(in i, pc, 2);
                             let arg = get(in i, pc, 3);
                             if cb.p != none() || (cb.v & high32()) != func_tag() {
                                 bad(pc, 2);
                             }
-                            if n > 8388608 {
-                                set(inout i, 0, scalar(neg(7)));
+                            if n > BPF_MAX_LOOPS {
+                                set(inout i, 0, scalar(neg(E2BIG)));
                                 uninit(inout i, 1, 5);
                             } else if n == 0 {
                                 set(inout i, 0, scalar(0));
                                 uninit(inout i, 1, 5);
                             } else {
-                                if add(nframes(in i), 1) >= 8 {
+                                if add(nframes(in i), 1) >= MAX_CALL_FRAMES {
                                     raise(8, pc, 0, 0, 0, 0);
                                 }
                                 let entry = cb.v & low32();
@@ -1709,15 +1822,15 @@ fn exec(
                                 set(inout i, 2, arg);
                                 to = entry;
                             }
-                        } else if hid == 12 {
+                        } else if hid == TAIL_CALL {
                             let m = map_of(in i, pc, get(in i, pc, 2));
                             let index = get(in i, pc, 3).v & low32();
-                            if mword(in i, m, 0) != 3 {
+                            if mword(in i, m, 0) != BPF_MAP_TYPE_PROG_ARRAY {
                                 bad(pc, 3);
                             }
                             uninit(inout i, 0, 5);
                             let t = find_tail(in tails, m, index);
-                            if index >= mword(in i, m, 3) || i.tail_calls >= 33 {
+                            if index >= mword(in i, m, 3) || i.tail_calls >= MAX_TAIL_CALL_CNT {
                                 to = next;
                             } else {
                                 i.tail_calls = add(i.tail_calls, 1);
@@ -1839,8 +1952,8 @@ fn exec(
 // State in and out.
 
 fn blank(in maps: Slice[u64], in cfg: Slice[u64], ptype: u64) -> I {
-    let mut zeros: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](4096);
-    let mut ones: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](4096);
+    let mut zeros: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](PAGE_SIZE);
+    let mut ones: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](PAGE_SIZE);
     let mut z64: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
     let mut o64: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
     let mut w64s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](64);
@@ -1865,7 +1978,7 @@ fn blank(in maps: Slice[u64], in cfg: Slice[u64], ptype: u64) -> I {
     let mut rv: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut rp: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut ri: ChunkSeq[bool] = ChunkSeq::new[bool]();
-    for r in w64(0)..w64(11) {
+    for r in w64(0)..w64(MAX_BPF_REG) {
         rv.push(0);
         rp.push(none());
         ri.push(false);
@@ -1889,10 +2002,10 @@ fn blank(in maps: Slice[u64], in cfg: Slice[u64], ptype: u64) -> I {
         pbytes: 0,
         np: 0,
         ptrans: ChunkSeq::new[u64](),
-        next_base: 268435456,
+        next_base: FIRST_REGION_BASE,
         pkt: none(),
         ctx: none(),
-        data_off: 256,
+        data_off: HEADROOM,
         maps: mw,
         nmaps: nmaps,
         counts: counts,
@@ -2119,7 +2232,7 @@ pub fn new_env(in maps: Slice[u64]) -> RunOut {
         if is_array_kind(t) && t != 3 {
             let vs = mword(in i, m, 2);
             for k in 0..mword(in i, m, 3) {
-                let r = alloc(inout i, 3, vs, true);
+                let r = alloc(inout i, KIND_MAP_VALUE, vs, true);
                 let key = le32_bytes(k);
                 insert(inout i, m, in key, r);
             }
@@ -2185,7 +2298,7 @@ pub fn run_program(
     if input == 1 && pkt.len() > low32() {
         return short(3, 3, pkt.len(), 0);
     }
-    if input == 2 && ctxb.len() > 2048 {
+    if input == 2 && ctxb.len() > PERF_MAX_TRACE_SIZE {
         return short(3, 1, ctxb.len(), 0);
     }
     let pt = sw(in cfg, 10);
@@ -2198,18 +2311,18 @@ pub fn run_program(
         i.cmaps.push(m);
     }
     if input <= 1 {
-        let r = alloc(inout i, 1, add(256, pkt.len()), true);
-        i.mem.try_copy_from(add(rt(in i, r, 2), 256), in pkt);
+        let r = alloc(inout i, KIND_PACKET, add(HEADROOM, pkt.len()), true);
+        i.mem.try_copy_from(add(rt(in i, r, 2), HEADROOM), in pkt);
         i.pkt = r;
     }
     let clen = if input == 0 {
-        24
+        XDP_MD_SIZE
     } else if input == 2 {
-        2048
+        PERF_MAX_TRACE_SIZE
     } else {
         ctxb.len()
     };
-    let c = alloc(inout i, 0, clen, true);
+    let c = alloc(inout i, KIND_CTX, clen, true);
     if input != 0 {
         i.mem.try_copy_from(rt(in i, c, 2), in ctxb);
     }

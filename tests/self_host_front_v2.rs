@@ -11,11 +11,12 @@
 //! the parser test suites (`crates/vesper-syntax/tests`,
 //! `tests/self_host_parse.rs`), hand-written limit cases (depth, diagnostic,
 //! token and source-size limits) and a fuzzed corpus of edited repository
-//! sources and token soup from a fixed seed.
+//! sources and token soup from a fixed seed. `parse_tables_with_limits` is
+//! compared with `parse_with_limits` under explicit limits.
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use vesper::{check, native, packages};
-use vesper_syntax::parser;
+use vesper_syntax::{parser, recovery};
 
 const PACKAGE: &str = "packages/vesper-front";
 
@@ -35,7 +36,29 @@ struct Tables {
 
 /// The Rust parser's CST and diagnostics as rows.
 fn rust_tables(source: &str) -> Tables {
-    let parse = parser::parse(source);
+    parse_rows(&parser::parse(source))
+}
+
+/// `parse_with_limits` as rows: an `Err(LexLimit)` is no tokens or nodes
+/// and one E0003 at 0..0 with the limit's text (`parse_tables_with_limits`).
+fn rust_tables_with_limits(source: &str, limits: parser::ParseLimits) -> Tables {
+    match parser::parse_with_limits(source, limits) {
+        Ok(parse) => parse_rows(&parse),
+        Err(limit) => Tables {
+            diagnostics: vec![(3, 0, 0, limit.to_string())],
+            ..Tables::default()
+        },
+    }
+}
+
+fn parse_rows(parse: &parser::Parse) -> Tables {
+    tree_rows(&parse.syntax(), &parse.diagnostics)
+}
+
+fn tree_rows(
+    syntax: &parser::SyntaxNode,
+    diagnostics: &[vesper_syntax::ast::Diagnostic],
+) -> Tables {
     let mut t = Tables::default();
     fn walk(node: &parser::SyntaxNode, parent: u64, t: &mut Tables) {
         let id = t.nodes.len() as u64;
@@ -60,10 +83,10 @@ fn rust_tables(source: &str) -> Tables {
             }
         }
     }
-    walk(&parse.syntax(), u64::MAX, &mut t);
+    walk(syntax, u64::MAX, &mut t);
     let count = t.nodes.len() as u64;
     t.nodes[0][1] = count;
-    for d in &parse.diagnostics {
+    for d in diagnostics {
         let code = match d.code.as_str() {
             "E0001" => 1,
             "E0002" => 2,
@@ -83,8 +106,10 @@ fn rust_tables(source: &str) -> Tables {
 /// The compiled front end. `WordFunction` holds the JIT module.
 struct Front {
     tables: native::WordFunction,
+    with_limits: native::WordFunction,
     counts: native::WordFunction,
     lex: native::WordFunction,
+    editor: native::WordFunction,
 }
 
 fn front() -> &'static Front {
@@ -110,8 +135,10 @@ fn front() -> &'static Front {
         };
         Front {
             tables: compile("parse_tables"),
+            with_limits: compile("parse_tables_with_packed_limits"),
             counts: compile("parse_counts"),
             lex: compile("lex_count"),
+            editor: compile("parse_editor_tables"),
         }
     })
 }
@@ -148,31 +175,58 @@ fn take_words(handle: u64) -> Vec<u64> {
 }
 
 fn vesper_tables(source: &str) -> Tables {
-    let words = take_words(call(&front().tables, source));
-    let (leaves, nodes, diags) = (words[0] as usize, words[1] as usize, words[2] as usize);
-    let mut at = 3;
-    let mut row = || {
-        let r = [words[at], words[at + 1], words[at + 2], words[at + 3]];
-        at += 4;
-        r
-    };
-    let mut t = Tables::default();
-    for _ in 0..leaves {
-        t.tokens.push(row());
+    tables_from_words(&take_words(call(&front().tables, source)))
+}
+
+/// `parse_tables_with_limits` with the source, token and diagnostic limits.
+fn vesper_tables_with_limits(source: &str, limits: parser::ParseLimits) -> Tables {
+    let words = str_words(source);
+    // Native word functions take at most three words, so the token and
+    // diagnostic limits share one (`parse_tables_with_packed_limits`).
+    let counts = limits.max_tokens as u64 | (limits.max_diagnostics as u64) << 32;
+    // SAFETY: the entry takes an `in Str` (the address of its three words,
+    // which outlive the call) and two `u64` words.
+    let handle = unsafe {
+        front().with_limits.call(&[
+            words.as_ptr() as u64,
+            limits.max_source_bytes as u64,
+            counts,
+        ])
     }
-    for _ in 0..nodes {
-        t.nodes.push(row());
+    .unwrap();
+    tables_from_words(&take_words(handle))
+}
+
+fn tables_from_words(words: &[u64]) -> Tables {
+    let mut at = 0;
+    let t = tables_at(words, &mut at);
+    assert_eq!(at, words.len(), "trailing result words");
+    t
+}
+
+/// The `parse_tables` rows at `words[*at..]`; advances `at` past them.
+fn tables_at(words: &[u64], at: &mut usize) -> Tables {
+    let (leaves, nodes, diags) = (
+        words[*at] as usize,
+        words[*at + 1] as usize,
+        words[*at + 2] as usize,
+    );
+    let mut i = *at + 3;
+    let mut t = Tables::default();
+    for n in 0..leaves + nodes {
+        let r = [words[i], words[i + 1], words[i + 2], words[i + 3]];
+        i += 4;
+        if n < leaves {
+            t.tokens.push(r);
+        } else {
+            t.nodes.push(r);
+        }
     }
     for _ in 0..diags {
-        let (code, start, end, len) = (
-            words[at],
-            words[at + 1],
-            words[at + 2],
-            words[at + 3] as usize,
-        );
-        at += 4;
-        let bytes: Vec<u8> = words[at..at + len].iter().map(|&b| b as u8).collect();
-        at += len;
+        let (code, start, end, len) = (words[i], words[i + 1], words[i + 2], words[i + 3] as usize);
+        i += 4;
+        let bytes: Vec<u8> = words[i..i + len].iter().map(|&b| b as u8).collect();
+        i += len;
         t.diagnostics.push((
             code,
             start,
@@ -180,7 +234,7 @@ fn vesper_tables(source: &str) -> Tables {
             String::from_utf8(bytes).expect("UTF-8 message"),
         ));
     }
-    assert_eq!(at, words.len(), "trailing result words");
+    *at = i;
     t
 }
 
@@ -275,6 +329,22 @@ fn under_bazel() -> bool {
     std::env::var_os("TEST_SRCDIR").is_some()
 }
 
+#[test]
+fn test_blocks_match_the_rust_parser() {
+    for source in [
+        "test { fn example() -> bool { true } } fn main() {}",
+        "test /* comment */ { fn break() {} } fn f() { loop { break; } }",
+        "test { fn open() {",
+    ] {
+        if let Some(difference) = compare(source) {
+            panic!("{source}: {difference}");
+        }
+        if let Some(difference) = compare_editor(source, recovery::Limits::default()) {
+            panic!("{source} (editor): {difference}");
+        }
+    }
+}
+
 /// Every repository `.ves` file gives the same CST and diagnostics.
 #[test]
 fn repository_sources_match_the_rust_parser() {
@@ -301,6 +371,60 @@ fn repository_sources_match_the_rust_parser() {
         files.len(),
         failures.join("\n")
     );
+}
+
+/// `parse_tables_with_limits` against `parse_with_limits` over a grid of
+/// limits: out of range (`Err` from the preflight), an oversized source,
+/// token and diagnostic caps below and above the corpus, and the hard
+/// ceilings the formatter uses. Sources: a sample of repository files and
+/// the limit cases.
+#[test]
+fn explicit_limits_match_parse_with_limits() {
+    let files = repository_sources();
+    let mut sources: Vec<String> = files
+        .iter()
+        .step_by(17)
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    sources.push("`".repeat(300));
+    sources.push(format!("fn f() {{ {} }}", "let = ;".repeat(200)));
+    sources.push("a ".repeat(70000));
+    sources.push(format!("fn f() {{ {} }}", "x;".repeat(70000)));
+    sources.push("a".repeat((1 << 20) + 1));
+    sources.push(String::new());
+    let mut failures = vec![];
+    for (bytes, tokens, diagnostics) in [
+        (1 << 20, 65_536, 128),
+        (8 << 20, 262_144, 1),
+        (8 << 20, 262_144, 1024),
+        (8 << 20, 1, 1024),
+        (8 << 20, 7, 3),
+        (100, 65_536, 128),
+        (0, 65_536, 128),
+        ((8 << 20) + 1, 65_536, 128),
+        (1 << 20, 0, 128),
+        (1 << 20, 262_145, 128),
+        (1 << 20, 65_536, 0),
+        (1 << 20, 65_536, 1025),
+    ] {
+        let limits = parser::ParseLimits {
+            max_source_bytes: bytes,
+            max_tokens: tokens,
+            max_diagnostics: diagnostics,
+            ..parser::ParseLimits::default()
+        };
+        for (i, source) in sources.iter().enumerate() {
+            let rust = rust_tables_with_limits(source, limits);
+            let vesper = vesper_tables_with_limits(source, limits);
+            if rust != vesper {
+                failures.push(format!(
+                    "{limits:?} source {i}: {}",
+                    first_difference(source, &rust, &vesper)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// The string literals of a Rust test file that look like Vesper sources.
@@ -464,6 +588,7 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "fn f(s: S) { s[..]; s[a..]; s[..b]; s.a.b[..]; (s)[1..]; f()[..]; s[..][..]; s[1 + 2..] }",
         "fn f() { s[..; s[a.. }",
         "fn f(state: u8, with: u8) -> u8 { let linear = state + with; linear.with.state }",
+        "fn f(k: u8) -> u8 { match k { 1 | 2 | 3 => 0, T::A(x) | T::B(x) => x, (0, _) | (_, 0) => 1, 1 | => 2, | 1 => 3, 1 || 2 => 4, _ => 5 } }",
         "fn f() -> self::m::T[u8] eff [self::E, a: super::F, @a/b::G[u8] | r] { g[self::T](x); g[super::T](x); g[@a/b::T](x) }",
         "fn f() { let x = super::m::P { a: 1 }; match x { self::E::A(y) => y, @a/b::E::B { q } => q, super::C => 0 } }",
         "fn f() { handle self::m::E in { 0 } with { return x => x } }",
@@ -991,5 +1116,461 @@ fn backends_agree_on_small_sources() {
         );
         let status = std::process::Command::new(&exe).output().unwrap().status;
         assert_eq!(status.code(), Some((expected & 0xff) as i32), "executable");
+    }
+}
+
+// ---------------------------------------------------------------- editor mode
+
+/// One `parse_recovery`, as rows: the error code (`recover.ves`), or the
+/// CST and diagnostic rows, each declaration's 12 words and each site's
+/// words (`parse_editor_tables` in lib.ves).
+#[derive(Debug, PartialEq, Eq)]
+enum Editor {
+    Failed(u64),
+    Parsed {
+        tables: Tables,
+        declarations: Vec<[u64; 12]>,
+        sites: Vec<Vec<u64>>,
+    },
+}
+
+fn error_code(e: recovery::Error) -> u64 {
+    use recovery::{Error as E, Resource as R};
+    match e {
+        E::InvalidLimits => 1,
+        E::InvalidSpan => 2,
+        E::CstMismatch => 3,
+        E::InvalidInventory => 4,
+        E::Allocation => 5,
+        E::Unsupported => 6,
+        E::Budget(r) => {
+            10 + match r {
+                R::Source => 0,
+                R::Tokens => 1,
+                R::Diagnostics => 2,
+                R::Depth => 3,
+                R::Sites => 4,
+                R::Declarations => 5,
+                R::Metadata => 6,
+                R::Work => 7,
+                R::Identifier => 8,
+            }
+        }
+    }
+}
+
+fn span_words(span: Option<&std::ops::Range<usize>>) -> [u64; 2] {
+    span.map_or([u64::MAX; 2], |s| [s.start as u64, s.end as u64])
+}
+
+/// `vesper_syntax::parser::parse_recovery` as rows.
+fn rust_editor(source: &str, limits: recovery::Limits) -> Editor {
+    let syntax = match parser::parse_recovery(source, limits) {
+        Ok(s) => s,
+        Err(e) => return Editor::Failed(error_code(e)),
+    };
+    let tables = tree_rows(&syntax.syntax(), syntax.diagnostics());
+    let declarations = syntax
+        .declarations()
+        .iter()
+        .map(|d| {
+            let [ns, ne] = span_words(d.name_span.as_ref());
+            let [bs, be] = span_words(d.body_span.as_ref());
+            let [gs, ge] = span_words(d.body_green_span.as_ref());
+            [
+                d.kind as u64,
+                ns,
+                ne,
+                d.span.start as u64,
+                d.span.end as u64,
+                d.header_span.start as u64,
+                d.header_span.end as u64,
+                bs,
+                be,
+                gs,
+                ge,
+                d.status as u64,
+            ]
+        })
+        .collect();
+    let sites = syntax
+        .sites()
+        .iter()
+        .map(|s| {
+            let mut row = vec![
+                s.span.start as u64,
+                s.span.end as u64,
+                s.kind as u64,
+                s.owner.map_or(u64::MAX, |o| o as u64),
+            ];
+            match &s.receiver {
+                None => row.push(u64::MAX),
+                Some(r) => {
+                    row.push(r.projections.len() as u64);
+                    row.extend(span_words(Some(&r.root)));
+                    for p in &r.projections {
+                        row.extend(span_words(Some(p)));
+                    }
+                }
+            }
+            row
+        })
+        .collect();
+    Editor::Parsed {
+        tables,
+        declarations,
+        sites,
+    }
+}
+
+/// The packed limit words of `parse_editor_tables` (`editor_limits`).
+fn pack_limits(l: recovery::Limits) -> (u64, u64) {
+    let d = recovery::Limits::default();
+    assert_eq!(l.parse.max_source_bytes, d.parse.max_source_bytes);
+    assert_eq!(l.max_metadata_bytes, d.max_metadata_bytes);
+    let a = l.parse.max_diagnostics as u64
+        | (l.parse.max_depth as u64) << 8
+        | (l.max_sites as u64) << 16
+        | (l.max_declarations as u64) << 32
+        | (l.max_identifier_bytes as u64) << 48;
+    let b = l.max_work as u64 | (l.parse.max_tokens as u64) << 32;
+    (a, b)
+}
+
+fn vesper_editor(source: &str, limits: recovery::Limits) -> Editor {
+    let words = str_words(source);
+    let (a, b) = pack_limits(limits);
+    // SAFETY: the entry takes an `in Str` (the address of its three words,
+    // which outlive the call) and two `u64` words.
+    let handle = unsafe { front().editor.call(&[words.as_ptr() as u64, a, b]) }.unwrap();
+    let words = take_words(handle);
+    if words[0] != 0 {
+        assert_eq!(words.len(), 1, "a failed parse has one word");
+        return Editor::Failed(words[0]);
+    }
+    let (decls, sites) = (words[1] as usize, words[2] as usize);
+    let mut at = 3;
+    let tables = tables_at(&words, &mut at);
+    let mut declarations = vec![];
+    for _ in 0..decls {
+        let mut d = [0; 12];
+        d.copy_from_slice(&words[at..at + 12]);
+        at += 12;
+        declarations.push(d);
+    }
+    let mut out = vec![];
+    for _ in 0..sites {
+        let mut row = words[at..at + 5].to_vec();
+        at += 5;
+        if row[4] != u64::MAX {
+            let n = 2 + 2 * row[4] as usize;
+            row.extend_from_slice(&words[at..at + n]);
+            at += n;
+        }
+        out.push(row);
+    }
+    assert_eq!(at, words.len(), "trailing editor words");
+    Editor::Parsed {
+        tables,
+        declarations,
+        sites: out,
+    }
+}
+
+/// Compares one editor parse; returns the difference, if any.
+fn compare_editor(source: &str, limits: recovery::Limits) -> Option<String> {
+    let rust = rust_editor(source, limits);
+    let vesper = vesper_editor(source, limits);
+    if rust == vesper {
+        return None;
+    }
+    Some(match (&rust, &vesper) {
+        (
+            Editor::Parsed {
+                tables: rt,
+                declarations: rd,
+                sites: rs,
+            },
+            Editor::Parsed {
+                tables: vt,
+                declarations: vd,
+                sites: vs,
+            },
+        ) => {
+            if rt != vt {
+                first_difference(source, rt, vt)
+            } else if rd != vd {
+                let i = rd.iter().zip(vd).position(|(r, v)| r != v);
+                format!(
+                    "declaration {i:?}: rust {:?}, vesper {:?}",
+                    i.and_then(|i| rd.get(i)).or(rd.get(vd.len())),
+                    i.and_then(|i| vd.get(i)).or(vd.get(rd.len()))
+                )
+            } else {
+                let i = rs.iter().zip(vs).position(|(r, v)| r != v);
+                format!(
+                    "site {i:?}: rust {:?}, vesper {:?}",
+                    i.and_then(|i| rs.get(i)).or(rs.get(vs.len())),
+                    i.and_then(|i| vs.get(i)).or(vs.get(rs.len()))
+                )
+            }
+        }
+        _ => format!("rust {}, vesper {}", summary(&rust), summary(&vesper)),
+    })
+}
+
+fn summary(e: &Editor) -> String {
+    match e {
+        Editor::Failed(code) => format!("error {code}"),
+        Editor::Parsed {
+            declarations,
+            sites,
+            ..
+        } => format!("{} declarations, {} sites", declarations.len(), sites.len()),
+    }
+}
+
+/// Repository sources whole and cut short give the same editor syntax.
+#[test]
+fn editor_mode_matches_parse_recovery_on_the_repository() {
+    let files = repository_sources();
+    let limits = recovery::Limits::default();
+    let mut failures = vec![];
+    let mut parsed = 0;
+    for (n, path) in files.iter().enumerate() {
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let mut cases = vec![source.clone()];
+        if n % 3 == 0 {
+            // Cuts at a third, half and nine tenths of the file.
+            for cut in [source.len() / 3, source.len() / 2, source.len() * 9 / 10] {
+                let mut at = cut;
+                while !source.is_char_boundary(at) {
+                    at -= 1;
+                }
+                cases.push(source[..at].to_owned());
+            }
+        }
+        for (i, case) in cases.iter().enumerate() {
+            if let Editor::Parsed { .. } = rust_editor(case, limits) {
+                parsed += 1;
+            }
+            if let Some(d) = compare_editor(case, limits) {
+                failures.push(format!("{} case {i}: {d}", path.display()));
+            }
+        }
+        if failures.len() >= 10 {
+            break;
+        }
+    }
+    if !under_bazel() {
+        assert!(parsed >= 800, "{parsed} parsed sources");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Recovery paths: every editor branch of the parser and the driver.
+#[test]
+fn editor_mode_matches_parse_recovery_on_edge_cases() {
+    let mut cases: Vec<String> = [
+        "",
+        "   // only trivia\n",
+        "fn f() { x. }",
+        "fn f() { a.b.c. }",
+        "fn f() { (a).b. ; self.x. ; state.y. }",
+        "fn f() { a.b().c. ; a[0]. ; A::b. ; x.. }",
+        "fn f() { a. . }",
+        "fn f() -> u64 { let x = 1 let y = 2; y }",
+        "fn f() { g() h() }",
+        "fn f() { g(; let x = 1; }",
+        "fn f() { let x = ; x }",
+        "fn f() { if a { } else { } x y z; }",
+        "fn f() { [1, 2; }",
+        "fn f() { ) }",
+        "fn f() { x + }",
+        "fn f() { (x, ) ] }",
+        "fn f(x: u64 { x }",
+        "fn f() -> { 1 }",
+        "fn f[T](x: T) -> T { x }",
+        "pub fn f() {} @fip fn g() {} @fip pub fn h() {} pub @fip fn i() {}",
+        "copy fn f() {}",
+        "struct S { a: u64 } enum E { A, B(u64) } effect F { fn op() -> u64; }",
+        "struct S { a: u64",
+        "trait T { fn f(); } model M for T {}",
+        "impl S { fn f(self) {} } impl @T for S {}",
+        "use @a/b::c; use model M; pub use self::x;",
+        "tiled(8) struct S { a: u64 } tiled(x struct T {}",
+        "pub copy struct S {} pub linear enum E {}",
+        "fn f() { m!(1, 2) } fn g() {}",
+        "fn f() { quote { x } } fn g() { syntax_quote { y } }",
+        "fn f() { m!( } fn g() {}",
+        "x y z fn f() {}",
+        "fn f() {} $ fn g() {}",
+        "fn f() {} \"unterminated",
+        "fn f() { /* unterminated",
+        "fn f() { let x = 1; } }",
+        "fn f() { { { } }",
+        "fn f() { x.{ } }",
+        "fn () {}",
+        "struct {}",
+        "impl",
+        "fn f() { use model M; }",
+        "fn f() { match x { A => 1, } let y = 2 }",
+        "fn f() { handle E { } return 1 2 }",
+        "fn f() -> u64 { 1 }\r\n// c\r\nfn g() { x. }\r\n",
+        "fn break() { break } fn f() { break. }",
+        "fn f(in a: S) { a.b.with. }",
+        "fn f() { let a = b. let c = d; }",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    // Deep nesting inside a recovered statement and a body.
+    cases.push(format!("fn f() {{ x y {} }}", "(".repeat(60)));
+    cases.push(format!(
+        "fn f() {{ {}1{} }}",
+        "(".repeat(50),
+        ")".repeat(50)
+    ));
+    cases.push(format!("fn f() {{ m!{} }}", "(".repeat(60)));
+    // Many declarations and sites.
+    cases.push("fn f() {}\n".repeat(300));
+    cases.push("fn f() { x. }\n".repeat(300));
+    cases.push("fn f() { x. y. z. }\n".repeat(30));
+    // A long identifier and a large function (the work budget).
+    cases.push(format!("fn {}() {{}}", "a".repeat(300)));
+    cases.push(format!("fn f() {{ {} }}", "x + ".repeat(1200) + "x"));
+    cases.push(format!("fn f() {{ {} }}", "x + ".repeat(2100) + "x"));
+    // Corpus literals of the parser test suites.
+    for name in [
+        "recovery_parser.rs",
+        "incremental.rs",
+        "source_macro_syntax.rs",
+    ] {
+        if let Ok(text) =
+            std::fs::read_to_string(root().join("crates/vesper-syntax/tests").join(name))
+        {
+            cases.extend(rust_string_literals(&text));
+        }
+    }
+    let limits = recovery::Limits::default();
+    let mut failures = vec![];
+    for (i, source) in cases.iter().enumerate() {
+        if let Some(d) = compare_editor(source, limits) {
+            let shown: String = source.chars().take(120).collect();
+            failures.push(format!("case {i} {shown:?}: {d}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Edited repository sources and token soup, in editor mode.
+#[test]
+fn editor_mode_matches_parse_recovery_on_the_fuzzed_corpus() {
+    let mut files = repository_sources();
+    files.retain(|p| std::fs::metadata(p).is_ok_and(|m| m.len() < 64 * 1024));
+    let sources: Vec<String> = files
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    let rounds: usize = std::env::var("VESPER_FRONT_FUZZ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000);
+    let limits = recovery::Limits::default();
+    let mut rng = Rng(0x4544_4954_4f52_0a0a);
+    let mut failures = vec![];
+    for round in 0..rounds {
+        let source = if round % 4 == 3 {
+            soup(&mut rng)
+        } else {
+            let base = &sources[rng.below(sources.len())];
+            mutate(&mut rng, base)
+        };
+        if let Some(d) = compare_editor(&source, limits) {
+            let shown: String = source.chars().take(200).collect();
+            failures.push(format!("round {round} {shown:?}: {d}"));
+            if failures.len() >= 10 {
+                break;
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Every quota of `recovery::Limits` (but the metadata budget) fails or
+/// passes as in Rust.
+#[test]
+fn editor_limits_match_parse_recovery() {
+    let d = recovery::Limits::default();
+    let with = |f: &dyn Fn(&mut recovery::Limits)| {
+        let mut l = d;
+        f(&mut l);
+        l
+    };
+    let sets = [
+        with(&|l| l.parse.max_diagnostics = 1),
+        with(&|l| l.parse.max_diagnostics = 3),
+        with(&|l| l.parse.max_depth = 6),
+        with(&|l| l.parse.max_depth = 20),
+        with(&|l| l.parse.max_tokens = 300),
+        with(&|l| l.max_sites = 2),
+        with(&|l| l.max_declarations = 4),
+        with(&|l| l.max_identifier_bytes = 4),
+        with(&|l| l.max_work = 4000),
+        with(&|l| l.max_work = 60_000),
+        with(&|l| {
+            l.parse.max_diagnostics = 128;
+            l.parse.max_depth = 128;
+            l.max_sites = 4096;
+            l.max_declarations = 4096;
+        }),
+        with(&|l| l.parse.max_depth = 200),
+    ];
+    let files = repository_sources();
+    let mut sources: Vec<String> = files
+        .iter()
+        .step_by(23)
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    sources.extend(
+        [
+            "fn f() { x. y. }",
+            "fn f() { a b c d } fn g() { e f }",
+            "fn f() { ((((((((x)))))))) }",
+            "fn f() { x y ((((((((( }",
+            "fn f() {} fn g() {} fn h() {} fn i() {} fn j() {}",
+            "fn abcdef() {}",
+        ]
+        .map(String::from),
+    );
+    let mut failures = vec![];
+    for (i, limits) in sets.iter().enumerate() {
+        for source in &sources {
+            if let Some(diff) = compare_editor(source, *limits) {
+                let shown: String = source.chars().take(80).collect();
+                failures.push(format!("limits {i} {shown:?}: {diff}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Editor parses free every sequence they allocate.
+#[test]
+fn editor_parsing_frees_its_tables() {
+    let source = std::fs::read_to_string(root().join(PACKAGE).join("src/recover.ves")).unwrap();
+    let broken = source.replace("();", "(;").replace(".len()", ".");
+    let limits = recovery::Limits::default();
+    for s in [&source, &broken] {
+        let _ = vesper_editor(s, limits);
+        let before = vesper::seq::native_runtime::live_allocations();
+        let _ = vesper_editor(s, limits);
+        let after = vesper::seq::native_runtime::live_allocations();
+        assert_eq!(
+            before, after,
+            "live sequences before and after an editor parse"
+        );
     }
 }

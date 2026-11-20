@@ -2,11 +2,6 @@
 // including the 128-bit products the Rust code computed in u128 (from the
 // total full product `mul_wide`).
 
-// The draft's "Infinity" for volumes and rates.
-fn infinity() -> u64 {
-    18446744073709551615
-}
-
 fn min(a: u64, b: u64) -> u64 {
     if a < b {
         a
@@ -30,7 +25,7 @@ fn add_overflows(a: u64, b: u64) -> bool {
 fn sat_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
     if s < a {
-        infinity()
+        INFINITY
     } else {
         s
     }
@@ -47,7 +42,7 @@ fn sat_sub(a: u64, b: u64) -> u64 {
 fn sat_mul(a: u64, b: u64) -> u64 {
     let (lo, hi) = mul_wide(a, b);
     if hi != 0 {
-        infinity()
+        INFINITY
     } else {
         lo
     }
@@ -78,13 +73,13 @@ fn pow2(n: u32) -> u64 {
 // floor((hi * 2^64 + lo) / d), saturated to u64::MAX; `d > 0`.
 fn div_wide_sat(hi: u64, lo: u64, d: u64) -> u64 {
     if d == 0 {
-        return infinity();
+        return INFINITY;
     }
     if hi == 0 {
         return div(lo, d);
     }
     if hi >= d {
-        return infinity();
+        return INFINITY;
     }
     // Restoring long division: the remainder stays below d, and the bit
     // shifted out of it (`top`) stands for 2^64.
@@ -107,7 +102,7 @@ fn div_wide_sat(hi: u64, lo: u64, d: u64) -> u64 {
 // floor(a * b / c), saturated; `c > 0`.
 // The common case, both factors below 2^32, needs no wide product.
 fn mul_div_sat(a: u64, b: u64, c: u64) -> u64 {
-    if a <= 4294967295 && b <= 4294967295 {
+    if a <= U32_MAX && b <= U32_MAX {
         return div(wrapping_mul(a, b), c);
     }
     let (lo, hi) = mul_wide(a, b);
@@ -116,7 +111,7 @@ fn mul_div_sat(a: u64, b: u64, c: u64) -> u64 {
 
 // Whether a * b > c * d, exactly.
 fn product_gt(a: u64, b: u64, c: u64, d: u64) -> bool {
-    if a <= 4294967295 && b <= 4294967295 && c <= 4294967295 && d <= 4294967295 {
+    if a <= U32_MAX && b <= U32_MAX && c <= U32_MAX && d <= U32_MAX {
         return wrapping_mul(a, b) > wrapping_mul(c, d);
     }
     let (l1, h1) = mul_wide(a, b);
@@ -126,14 +121,14 @@ fn product_gt(a: u64, b: u64, c: u64, d: u64) -> bool {
 
 // Saturating `x * gain / 1000`; Infinity stays Infinity.
 pub fn mul_gain(x: u64, gain: u64) -> u64 {
-    if x == infinity() {
-        infinity()
+    if x == INFINITY {
+        INFINITY
     } else {
-        mul_div_sat(x, gain, 1000)
+        mul_div_sat(x, gain, GAIN_UNIT)
     }
 }
 
 // Saturating `bw * ns / 10^9`: bytes delivered at `bw` over `ns`.
 fn bw_volume(bw: u64, ns: u64) -> u64 {
-    mul_div_sat(bw, ns, 1000000000)
+    mul_div_sat(bw, ns, NANOS_PER_SEC)
 }

@@ -74,8 +74,8 @@ the evaluator and natively, and requires the seven traces in
 the Vesper `CacheBTree` and `RadixSeq`. Run a single suite by hand with:
 
 ```sh
-vesper run --no-opt --entry run_all packages/vesper-std/tests
-vesper jit --no-opt --entry trace_digest packages/vesper-std/tests
+vesper run --include-tests --no-opt --entry run_all packages/vesper-std/tests
+vesper jit --include-tests --no-opt --entry trace_digest packages/vesper-std/tests
 ```
 
 The self-hosted front end cannot parse `use` yet (#880), so these sources are

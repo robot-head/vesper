@@ -20,7 +20,7 @@ fn parser<'a>(
         kind: K::Eof,
         span: end..end,
     });
-    let item_names = super::contextual_item_names(&owned, source);
+    let item_names = super::contextual_item_names(&owned, source, false);
     Ok(Parser {
         source,
         tokens: owned,
@@ -45,6 +45,7 @@ fn parser<'a>(
         halted: false,
         halt_kind: None,
         expr_heights: Default::default(),
+        expansion: 0,
         editor: false,
         site_limit: 0,
         site_exhausted: false,

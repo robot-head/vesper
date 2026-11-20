@@ -88,6 +88,9 @@ use vesper_ffi::sys::{
 };
 
 pub mod drops;
+#[path = "ffi_lowering/eval_host.rs"]
+mod eval_host;
+pub use eval_host::EvalHost;
 #[path = "ffi_lowering/types.rs"]
 mod types;
 use types::ParamKind;
@@ -113,6 +116,35 @@ pub(crate) const SOURCE_SLICE: usize = usize::MAX;
 /// Trap code of a call through an `isolated(mpk)` trampoline whose
 /// protection-key mask was never configured (or would revoke key 0).
 pub const ISOLATION_TRAP: u8 = 5;
+/// Trap code of a `ForeignVal[NonNull[H]]` import that returned `NULL`.
+pub const NULL_HANDLE_TRAP: u8 = 6;
+/// Trap code of a `CStr` argument whose terminated copy could not be
+/// allocated.
+pub const CSTR_ALLOC_TRAP: u8 = 7;
+
+/// The C function that yields the calling thread's OS error code on
+/// `triple`, and whether it returns the address of `errno` (Unix) rather
+/// than the code itself (`GetLastError` on Windows).
+pub fn os_error_symbol(triple: &target_lexicon::Triple) -> Result<(&'static str, bool), String> {
+    use target_lexicon::OperatingSystem as Os;
+    match triple.operating_system {
+        Os::Linux => Ok(("__errno_location", true)),
+        Os::Darwin(_) | Os::MacOSX(_) | Os::IOS(_) | Os::Freebsd => Ok(("__error", true)),
+        Os::Windows => Ok(("GetLastError", false)),
+        other => Err(format!(
+            "`errno` results are not supported on {other} yet (Linux, macOS, FreeBSD and Windows are)"
+        )),
+    }
+}
+
+/// `GetLastError` for JIT code on Windows, whose symbol lookup does not
+/// search kernel32.
+#[cfg(windows)]
+extern "C" fn jit_last_error() -> u32 {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .map_or(0, |e| e as u32)
+}
 
 /// Handler tier a package grants an imported library (§13.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -251,6 +283,13 @@ impl Imports {
 }
 
 /// Whether `name` is the effect of an imported library.
+/// The host functions of the standard I/O libraries (`StdFs`, `StdProcess`,
+/// `StdEnv`, link name `vesper_std_host`), which the compiler links so
+/// `vesper jit` can bind their imports (#1150).
+pub fn std_host_symbols() -> Vec<(&'static str, *const u8)> {
+    vesper_std_host::symbols()
+}
+
 pub fn is_foreign_effect(name: &str) -> bool {
     name.starts_with(EFFECT_PREFIX)
 }
@@ -328,12 +367,16 @@ impl Drop for PlanGuard {
 /// The foreign symbols [`ForeignChecked::jit`] binds for the JIT module
 /// being built on this thread (empty otherwise).
 pub(crate) fn jit_symbols() -> Vec<(String, *const u8)> {
-    JIT_SYMBOLS.with(|s| {
+    #[allow(unused_mut)]
+    let mut out: Vec<(String, *const u8)> = JIT_SYMBOLS.with(|s| {
         s.borrow()
             .iter()
             .map(|(n, a)| (n.clone(), *a as *const u8))
             .collect()
-    })
+    });
+    #[cfg(windows)]
+    out.push(("GetLastError".into(), jit_last_error as *const u8));
+    out
 }
 struct JitGuard;
 impl Drop for JitGuard {
@@ -535,6 +578,24 @@ impl ForeignChecked {
     /// Every foreign call site, in source order.
     pub fn calls(&self) -> &[ForeignCall] {
         &self.calls
+    }
+    /// The `.vsys` link names and modes of the libraries the module calls,
+    /// sorted and without repeats (what an executable links).
+    pub fn link_names(&self) -> Vec<(String, LinkMode)> {
+        let mut out: Vec<(String, LinkMode)> = self
+            .calls
+            .iter()
+            .filter_map(|c| self.plan.libraries.get(&effect_name(&c.library)))
+            .map(|l| {
+                (
+                    l.descriptor.link().name().to_owned(),
+                    l.descriptor.link().mode(),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.dedup();
+        out
     }
     /// Run `compile` (which emits native code for [`Self::world`]) with the
     /// foreign-call plan in place, as [`Self::object`] does for one entry.
@@ -1376,6 +1437,7 @@ pub fn describe_parameter(p: &ParameterType) -> String {
                 }
             )
         }
+        ParameterType::CStr => "in Slice[u8]".into(),
     }
 }
 fn describe_value(v: &ValueType) -> String {
@@ -1389,6 +1451,8 @@ fn describe_value(v: &ValueType) -> String {
             handle,
             nullable: true,
         } => format!("Option[{}]", handle.name()),
-        ValueType::Handle { handle, .. } => handle.name().into(),
+        ValueType::Handle { handle, .. } | ValueType::NonNullHandle { handle } => {
+            handle.name().into()
+        }
     }
 }

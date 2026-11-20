@@ -2,23 +2,26 @@
 
 > Written 2026-11-19 against `main` at `9e801e7` (claim #1122). Updated
 > 2026-11-19 at `b35b515` with the SH0 results and the SH1 plan (part of
-> #1130). The
+> #1130), and 2026-11-20 at `bb5cee6` with the checker census and the SH2
+> plan (#1130). The
 > [manuscript](../manuscript/README.md) is the sole specification; §10
 > ("Verified Bootstrap") defines Stage 0 to Stage 2. This plan orders the work
 > to get there. Confirm live ownership on the issue board before acting.
 
-## Status (2026-11-19)
+## Status (2026-11-20)
 
-SH0 has merged except two pieces, both carried into SH1: the
-`vesper-diagnostics` port (#1128 part 2, SH1 lane 1) and the checker and IR
-census that plans SH2 (#1130, SH1 lane 15). Merged: the hybrid Stage 2 build
-(#1136), the tool split (#1133), std fs/process/env (#1139), the Cranelift
-shim (#1135), std graph/intern/arena/hash (#1140), the span and lean-syntax
-pilots (#1138) and front end v2 (#1141). Their reports are
-`docs/parallel-results/self-host-*.md`; the gaps they found are S12-S19
-below. SH1 is planned in
-[self-host-sh1](../agent-prompts/self-host-sh1/README.md) (#1128, #1145-#1157,
-#1130).
+SH0 has merged except the `vesper-diagnostics` port (#1128 part 2), which
+moved into SH1 as lane 1. SH1 is running
+([plan](../agent-prompts/self-host-sh1/README.md), #1128, #1145-#1157).
+The checker and IR census (#1130, SH1 lane 15) is done: five samples of real
+compiler code (layout, the IR check, region type checks, the type table and
+`World`, and a native lowering family through the Cranelift shim) match Rust
+exactly on 272 corpus worlds, and the checker samples run at 0.34x to 0.87x of
+Rust's time ([report](../parallel-results/self-host-census.md)). Its gaps are
+row S19 below. SH2 is planned in
+[self-host-sh2](../agent-prompts/self-host-sh2/README.md) (#1173-#1187).
+The SH0 reports are `docs/parallel-results/self-host-*.md`; their gaps are
+S12-S18.
 
 ## Where we are
 
@@ -175,7 +178,7 @@ measures them on compiler code before SH1 and SH2 are claimed.
 | S16 | **Compiler data across the ABI.** `World` and `ast::Type` cannot cross export ABI v3; `in` `Box` trees cannot be matched | every coarse swap (SH1-12 onward) | SH1-6 (#1149) |
 | S17 | **`.vsys` in packages.** Imports only from the root module of a library; no `bool`, no `CStr` | the driver (SH5), Cranelift users (SH4) | SH1-7 (#1150) |
 | S18 | **Compile time of large functions.** Superlinear `--no-opt` JIT, shared values rematerialized | compile-speed parity (S6) | SH1-8 (#1151) |
-| S19 | **Checker and IR shapes.** Not yet measured on compiler code | SH2 | SH1-15 census (#1130) |
+| S19 | **Checker and IR shapes.** Measured by the census: a struct that owns a sequence cannot be read out of a sequence (E1522) and std collections take only copy values; no `i128`/`u128`; `eff` cannot be a name; the checker's data (types, names, `World`, diagnostics) and a corpus harness exist only as local samples. The census samples keep a hash-consed type arena and interned names, which is why they beat Rust; SH2 keeps that design | SH2 | SH2-1 (#1173), SH2-2 (#1174), SH2-3 (#1175), SH2-4 (#1176) |
 
 ## Waves
 
@@ -183,8 +186,8 @@ measures them on compiler code before SH1 and SH2 are claimed.
 |---|---|--:|---|
 | **SH0** | Groundwork: hybrid build, tool split, std I/O, Cranelift shim, std data, toolchain pilots, front end v2, census | ~3k (pilots) | merged except #1128 part 2 and #1130, which moved into SH1 ([plan](../agent-prompts/self-host-sh0/README.md)) |
 | **SH1** | Front end: `vesper-diagnostics`, the `vesper-core` AST, front end v2 speed and editor mode, `vesper-fmt`, lexical `vesper-highlight`, `vesper-lint`, `vesper-forge` + `forge_frontend` (the wasm macro host stays extern), the parser swap into the hybrid build; seven gap lanes for S12-S18; the census that plans SH2 | ~36k | now ([plan](../agent-prompts/self-host-sh1/README.md), #1128, #1145-#1157, #1130) |
-| **SH2** | Checker: name resolution and packages, core typing and modes, effects and handlers, regions, sequences and strings, `dyn`, `fip`, layout; trait resolution through the Pact port | ~40k | after SH1's AST lane (9) and tree ABI lane (6); planned by SH1 lane 15 |
-| **SH3** | Place IR lowering, IR check, inliner, optimizer, bounds hoisting, e-graph rules | ~10k | after SH2's core typing lane |
+| **SH2** | Checker: four gap lanes (element borrows and owning collections, `i128`, contextual `eff`, the checker data package and corpus harness); the layout and IR-check swaps the census finished; name resolution and packages, core typing and modes, effects, regions and sequences, loops and atomics, `dyn`, `fip`, Pact trait resolution, tensor types; scoreboard and SH3 plan | ~36k | gap lanes now; ports after SH2-4 and SH1's AST lane (9); swaps after SH1's parser swap (12) ([plan](../agent-prompts/self-host-sh2/README.md), #1173-#1187) |
+| **SH3** | Place IR lowering, inliner, optimizer, bounds hoisting, e-graph rules (the IR check moved to SH2 lane 5) | ~9k | after SH2's core typing lane; planned by SH2 lane 15 |
 | **SH4** | Backends: native lowering through the shim (split by file family into about six lanes), export ABI, FFI lowering, freestanding, wasm, eBPF, backend verifiers | ~49k | after SH3 and SH0-4 |
 | **SH5** | Driver and tools: CLI, test runner, doctests, docs, LSP, Lean extraction, sim-session | ~50k | the driver lane after SH4; the rest in parallel |
 | **SH6** | Stage 2: the Vesper compiler built by the Rust compiler (Stage 1) rebuilds itself; stage 2 and stage 3 are bit-identical; `bootstrap/stage2.lock` and a CI gate; compile-time parity scoreboard against the Rust compiler; seed copies lose their users. SH6b: widen the verified backend to the compiler for the DDC check of §10.2 | none new | after SH5's driver lane |

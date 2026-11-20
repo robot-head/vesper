@@ -281,3 +281,30 @@ fn main() -> u64 { wrapping_add(wrapping_add(wrapping_mul(A[0], 10), A[1]), TABL
         12 + 4,
     );
 }
+
+/// A constant whose initializer is an integer literal has that value in the
+/// checker: it proves a divisor non-zero and an initializer built from
+/// other constants in range, as the literal would (#1159). A zero constant
+/// still leaves the division fallible.
+#[test]
+fn literal_constants_are_known_values() {
+    differential(
+        "known",
+        "const GAIN_UNIT: u64 = 1000;
+const LOSS_THRESH: u64 = 20;
+const KEEP: u64 = GAIN_UNIT - LOSS_THRESH;
+fn per_mille(x: u64) -> u64 { x / GAIN_UNIT }
+fn main() -> u64 {
+    wrapping_add(KEEP, wrapping_add(per_mille(4321), 4321 % LOSS_THRESH))
+}",
+        980 + 4 + 1,
+    );
+    rejects(
+        "const ZERO: u64 = 0; fn f(x: u64) -> u64 { x / ZERO } fn main() -> u64 { f(1) }",
+        "E0401",
+    );
+    rejects(
+        "const A: u64 = 1; const B: u64 = 2; const C: u64 = A - B; fn main() -> u64 { C }",
+        "E0401",
+    );
+}

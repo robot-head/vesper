@@ -3,12 +3,12 @@
 // ----------------------------------------------------------------
 
 fn clock_iss(in t: Tcb, now: u64) -> u32 {
-    wrapping_add(t.iss_base, wrapping_u32(now / 4000))
+    wrapping_add(t.iss_base, wrapping_u32(now / ISN_TICK_NS))
 }
 
 fn ts_now(now: u64) -> u32 {
     // The timestamp clock wraps by design (RFC 7323 §5.2).
-    wrapping_u32(now / 1000000)
+    wrapping_u32(now / TS_TICK_NS)
 }
 
 fn reset_tcb(inout t: Tcb) {
@@ -27,8 +27,8 @@ fn reset_tcb(inout t: Tcb) {
     t.ws_ok = false;
     t.sack_ok = false;
     t.ts_ok = false;
-    t.peer_mss = 536;
-    t.smss = 536;
+    t.peer_mss = DEFAULT_IPV4_MSS;
+    t.smss = widen_u32(DEFAULT_IPV4_MSS);
     t.need_syn = false;
     t.write_end = 0;
     t.fin_requested = false;
@@ -144,7 +144,7 @@ fn set_send_mss(inout t: Tcb) {
         base
     };
     let ts: u32 = if t.ts_ok {
-        12
+        wrapping_u32(PADDED_TIMESTAMPS_LEN)
     } else {
         0
     };
@@ -162,8 +162,8 @@ fn negotiate(inout t: Tcb, opts: Opts, ips: Ips) {
     match t.cfg.window_scale {
         Option::Some(ours) => match opts.window_scale {
             Option::Some(theirs) => {
-                t.snd_wscale = if theirs > 14 {
-                    14
+                t.snd_wscale = if theirs > MAX_WINDOW_SCALE {
+                    MAX_WINDOW_SCALE
                 } else {
                     theirs
                 };
@@ -221,7 +221,7 @@ fn queue_rst_reply(inout t: Tcb, ips_in: Ips, seg: Parsed, seq_len: u32) {
 }
 
 fn challenge_ack(inout t: Tcb, now: u64) {
-    if sat_sub64(now, t.challenge_window_ns) >= 1000000000 {
+    if sat_sub64(now, t.challenge_window_ns) >= CHALLENGE_ACK_WINDOW_NS {
         t.challenge_window_ns = now;
         t.challenge_count = 0;
     }

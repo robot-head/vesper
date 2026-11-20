@@ -64,12 +64,12 @@ impl ResponseBuilder {
         representation_length: usize,
         limits: ResponseLimits,
     ) -> Result<Self, ResponseError> {
-        if !(200..=599).contains(&status) {
+        if !(MIN_STATUS..=MAX_STATUS).contains(&status) {
             return Err(ResponseError::UnsupportedStatus);
         }
         // A valid 426 requires Upgrade, which this fixed-length subset cannot
         // produce. Informational switching responses are rejected above.
-        if status == 426 {
+        if status == UPGRADE_REQUIRED {
             return Err(ResponseError::UnsupportedUpgrade);
         }
         if context == ResponseContext::Connect {
@@ -81,17 +81,17 @@ impl ResponseBuilder {
         if representation_length > limits.max_body_bytes {
             return Err(ResponseError::BodyLimit);
         }
-        let mut head_length = add(15, reason(status).len())?;
+        let mut head_length = add(STATUS_LINE_FIXED_LEN, reason(status).len())?;
         let mut header_count = 1;
         if carries_length(status) {
             head_length = add(head_length, b"Content-Length: ".len())?;
             head_length = add(head_length, decimal_length(representation_length))?;
-            head_length = add(head_length, 2)?;
+            head_length = add(head_length, CRLF_LEN)?;
             header_count += 1;
         }
         head_length = add(head_length, b"Connection: ".len())?;
         head_length = add(head_length, policy_value(connection).len())?;
-        head_length = add(head_length, 4)?; // Connection CRLF + final empty line.
+        head_length = add(head_length, 2 * CRLF_LEN)?; // Connection CRLF + final empty line.
         let builder = Self {
             status,
             context,
@@ -113,7 +113,7 @@ impl ResponseBuilder {
         if name.is_empty() || !name.bytes().all(crate::reference::decoder::token) {
             return Err(ResponseError::InvalidHeaderName);
         }
-        if value.iter().any(|byte| *byte < 32 || *byte == 127) {
+        if value.iter().any(|byte| *byte < b' ' || *byte == DEL) {
             return Err(ResponseError::InvalidHeaderValue);
         }
         if name.eq_ignore_ascii_case("transfer-encoding")
@@ -236,11 +236,24 @@ fn copy_bytes(bytes: &[u8]) -> Result<Vec<u8>, ResponseError> {
     owned.extend_from_slice(bytes);
     Ok(owned)
 }
+/// Status codes this module treats specially (RFC 9110 §15).
+const NO_CONTENT: u16 = 204;
+const RESET_CONTENT: u16 = 205;
+const NOT_MODIFIED: u16 = 304;
+const UPGRADE_REQUIRED: u16 = 426;
+/// The final statuses a response may carry (1xx are rejected).
+const MIN_STATUS: u16 = 200;
+const MAX_STATUS: u16 = 599;
+/// `HTTP/1.1 NNN ` and the status line's CRLF.
+const STATUS_LINE_FIXED_LEN: usize = 15;
+const CRLF_LEN: usize = 2;
+/// The ASCII delete control byte.
+const DEL: u8 = 0x7f;
 fn body_forbidden(status: u16) -> bool {
-    matches!(status, 204 | 205 | 304)
+    matches!(status, NO_CONTENT | RESET_CONTENT | NOT_MODIFIED)
 }
 fn carries_length(status: u16) -> bool {
-    !matches!(status, 204 | 304)
+    !matches!(status, NO_CONTENT | NOT_MODIFIED)
 }
 fn decimal_length(mut value: usize) -> usize {
     let mut length = 1;

@@ -7,7 +7,7 @@ fn hdr64(in bytes: Slice[u8], at: u64) -> u64 {
 }
 
 pub fn segment_parse(in bytes: Slice[u8]) -> Result[Parsed, WireError] {
-    if bytes.len() < 20 {
+    if bytes.len() < HEADER_LEN {
         return Result::Err(WireError::Truncated);
     }
     // The fixed header as three wide reads: ports and sequence number;
@@ -17,10 +17,10 @@ pub fn segment_parse(in bytes: Slice[u8]) -> Result[Parsed, WireError] {
     let w1 = hdr64(in bytes, 8);
     let w2 = hdr64(in bytes, 12);
     let header_len = wrapping_mul(w1 >> 28 & 15, 4);
-    if header_len < 20 || header_len > bytes.len() {
+    if header_len < HEADER_LEN || header_len > bytes.len() {
         return Result::Err(WireError::BadDataOffset);
     }
-    match opts_parse_at(in bytes, 20, header_len) {
+    match opts_parse_at(in bytes, HEADER_LEN, header_len) {
         Result::Err(e) => Result::Err(e),
         Result::Ok(options) => Result::Ok(
             Parsed {
@@ -52,23 +52,23 @@ pub fn segment_seq_len(flags: u8, payload_len: u64) -> u32 {
 
 pub fn write_header(inout out: Slice[u8], h: Hdr, o: Opts) -> Result[u64, WireError] {
     let opt_len = opts_encoded_len(o);
-    if opt_len > 40 {
+    if opt_len > MAX_OPTIONS_LEN {
         return Result::Err(WireError::OptionsTooLong);
     }
-    let header_len = wrapping_add(20, opt_len);
+    let header_len = wrapping_add(HEADER_LEN, opt_len);
     if out.len() < header_len {
         return Result::Err(WireError::BufferTooSmall);
     }
-    wr16(inout out, 0, h.src_port);
-    wr16(inout out, 2, h.dst_port);
-    wr32(inout out, 4, h.seq);
-    wr32(inout out, 8, h.ack);
-    wr8(inout out, 12, wrapping_u8(header_len / 4) << 4);
-    wr8(inout out, 13, h.flags);
-    wr16(inout out, 14, h.window);
-    wr16(inout out, 16, 0);
-    wr16(inout out, 18, h.urgent);
-    opts_put(o, inout out, 20);
+    wr16(inout out, OFF_SRC_PORT, h.src_port);
+    wr16(inout out, OFF_DST_PORT, h.dst_port);
+    wr32(inout out, OFF_SEQ, h.seq);
+    wr32(inout out, OFF_ACK, h.ack);
+    wr8(inout out, OFF_DATA_OFFSET, wrapping_u8(header_len / 4) << 4);
+    wr8(inout out, OFF_FLAGS, h.flags);
+    wr16(inout out, OFF_WINDOW, h.window);
+    wr16(inout out, OFF_CHECKSUM, 0);
+    wr16(inout out, OFF_URGENT, h.urgent);
+    opts_put(o, inout out, HEADER_LEN);
     Result::Ok(header_len)
 }
 
@@ -78,14 +78,14 @@ pub fn ips_default_mss(ips: Ips) -> u16 {
             src,
             dst
         }
-        => 536,
+        => DEFAULT_IPV4_MSS,
         Ips::V6 {
             s0,
             s1,
             d0,
             d1
         }
-        => 1220,
+        => DEFAULT_IPV6_MSS,
     }
 }
 

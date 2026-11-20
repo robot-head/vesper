@@ -27,7 +27,11 @@ impl BbrConfig {
     pub const fn quic(smss: u32) -> Self {
         let ten = smss as u64 * 10;
         let two = smss as u64 * 2;
-        let floor = if two > 14_720 { two } else { 14_720 };
+        let floor = if two > INITIAL_WINDOW_FLOOR_BYTES {
+            two
+        } else {
+            INITIAL_WINDOW_FLOOR_BYTES
+        };
         let iw = if ten < floor { ten } else { floor };
         Self {
             smss,
@@ -38,12 +42,12 @@ impl BbrConfig {
             },
             has_selective_acks: true,
             offload: OffloadModel::Quic,
-            probe_seed: 0x6262_7233_7761_7270,
+            probe_seed: DEFAULT_PROBE_SEED,
         }
     }
 
     pub(super) fn validate(&self) -> Result<(), BbrError> {
-        if self.smss == 0 || self.smss > 65_535 {
+        if self.smss == 0 || self.smss > MAX_SMSS {
             return Err(BbrError::InvalidConfig("smss must be in 1..=65535"));
         }
         if self.initial_cwnd < self.smss {
@@ -573,7 +577,7 @@ impl Bbrv3 {
     pub(super) fn init_pacing_rate(&mut self) {
         let srtt = match self.srtt_ns {
             Some(s) if s > 0 => s,
-            _ => 1_000_000,
+            _ => DEFAULT_SRTT_NS,
         };
         let nominal = self.initial_cwnd as u128 * NANOS_PER_SEC as u128 / srtt as u128;
         let rate = nominal * STARTUP_PACING_GAIN as u128 / GAIN_UNIT as u128;
@@ -962,7 +966,7 @@ impl Bbrv3 {
 
     pub(super) fn raise_inflight_longterm_slope(&mut self) {
         let growth_this_round = 1u64 << self.bw_probe_up_rounds;
-        self.bw_probe_up_rounds = (self.bw_probe_up_rounds + 1).min(30);
+        self.bw_probe_up_rounds = (self.bw_probe_up_rounds + 1).min(MAX_PROBE_UP_ROUNDS);
         self.probe_up_acked_per_inc = (self.cwnd / growth_this_round).max(self.smss);
     }
 
@@ -1173,7 +1177,7 @@ impl Bbrv3 {
     }
 
     pub(super) fn set_send_quantum(&mut self) {
-        self.send_quantum = (self.pacing_rate / 1000)
+        self.send_quantum = (self.pacing_rate / MILLIS_PER_SEC)
             .min(MAX_SEND_QUANTUM)
             .max(2 * self.smss);
     }

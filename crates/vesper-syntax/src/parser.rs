@@ -66,6 +66,11 @@ impl Parse {
 /// Combined guarded descent/AST wrapping depth; additional helper frames are
 /// bounded by this count. This is not a checker/runtime termination guarantee.
 pub const HARD_PARSE_DEPTH: usize = 128;
+/// The total token weight of the match-arm bodies that or-pattern
+/// alternatives may copy in one parse. Each extra alternative copies its
+/// body, and nested or-patterns multiply, so without a budget a short
+/// source could expand into an exponentially large AST.
+pub const OR_PATTERN_EXPANSION: usize = 1 << 18;
 
 /// Built-in effect of a lexical Strata region (design §15.2). A source
 /// `region r { body }` block parses to a handler of this effect labelled `r`
@@ -104,7 +109,16 @@ impl Default for ParseLimits {
 /// bounded UTF-8 prefix CST. Within the byte budget all failure CSTs retain the
 /// complete source. Explicit callers should use parse_with_limits for preflight.
 pub fn parse(source: &str) -> Parse {
-    match parse_with_limits(source, ParseLimits::default()) {
+    parse_module(source, false)
+}
+
+/// Parse a module with its test-only declarations enabled.
+pub fn parse_for_tests(source: &str) -> Parse {
+    parse_module(source, true)
+}
+
+fn parse_module(source: &str, include_tests: bool) -> Parse {
+    match parse_module_with_limits(source, ParseLimits::default(), include_tests) {
         Ok(parsed) => parsed,
         Err(mut limit) => {
             let retained = lexer::prefix_boundary(source, ParseLimits::default().max_source_bytes);
@@ -127,6 +141,14 @@ pub fn parse(source: &str) -> Parse {
 /// Token/diagnostic/depth exhaustion returns an empty AST and E0003 with the
 /// complete byte-bounded source preserved losslessly in balanced CST nodes.
 pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lexer::LexLimit> {
+    parse_module_with_limits(source, limits, false)
+}
+
+fn parse_module_with_limits(
+    source: &str,
+    limits: ParseLimits,
+    include_tests: bool,
+) -> Result<Parse, lexer::LexLimit> {
     let lex_limits = lexer::LexLimits {
         max_source_bytes: limits.max_source_bytes,
         max_tokens: limits.max_tokens,
@@ -161,7 +183,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
             diagnostics,
         });
     }
-    let item_names = contextual_item_names(&tokens, source);
+    let item_names = contextual_item_names(&tokens, source, include_tests);
     let mut p = Parser {
         source,
         tokens,
@@ -181,6 +203,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
         halted: false,
         halt_kind: None,
         expr_heights: Default::default(),
+        expansion: 0,
         editor: false,
         site_limit: 0,
         site_exhausted: false,
@@ -190,15 +213,20 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
     p.builder.start_node(MODULE);
     let mut module = Module::default();
     while !p.at(K::Eof) {
-        let before = p.pos;
-        p.builder.start_node(ITEM);
-        if let Some(item) = p.item() {
-            module.items.push(item);
-        }
-        p.builder.finish_node();
-        if p.pos == before {
-            p.error("expected a declaration");
+        if include_tests && p.at_test_block() {
+            p.builder.start_node(ITEM);
             p.bump();
+            p.bump();
+            while !p.at(K::RBrace) && !p.at(K::Eof) {
+                if p.at_test_block() {
+                    p.error("test blocks must be at module scope");
+                }
+                p.push_item(&mut module.items);
+            }
+            p.expect(K::RBrace);
+            p.builder.finish_node();
+        } else {
+            p.push_item(&mut module.items);
         }
     }
     p.trivia();
@@ -239,6 +267,9 @@ struct Parser<'a> {
     halted: bool,
     halt_kind: Option<lexer::LexLimitKind>,
     expr_heights: std::collections::BTreeMap<(usize, usize), usize>,
+    /// Token weight of the or-pattern bodies copied so far (see
+    /// [`OR_PATTERN_EXPANSION`]).
+    expansion: usize,
     editor: bool,
     site_limit: usize,
     site_exhausted: bool,
@@ -750,11 +781,90 @@ impl Parser<'_> {
             false
         }
     }
+    /// Consumes a balanced `(...)` argument list for `@test(...)` or `@test_case(...)`.
+    fn attr_paren_args(&mut self) {
+        self.expect(K::LParen);
+        let mut depth: usize = 1;
+        while depth > 0 && !self.at(K::Eof) && !self.halted {
+            match self.kind() {
+                K::LParen => {
+                    depth += 1;
+                    self.bump();
+                }
+                K::RParen => {
+                    depth -= 1;
+                    self.bump();
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+        if depth > 0 && !self.halted {
+            self.error("unterminated attribute argument list");
+        }
+    }
+    fn test_attr(&mut self) -> bool {
+        if self.at(K::At) && self.at_word(1, "test") {
+            self.bump();
+            self.bump();
+            if self.at(K::LParen) {
+                self.attr_paren_args();
+            }
+            true
+        } else if self.at(K::At) && self.at_word(1, "test_case") {
+            self.bump();
+            self.bump();
+            if self.at(K::LParen) {
+                self.attr_paren_args();
+            } else {
+                self.error("@test_case requires an argument list in parentheses");
+            }
+            true
+        } else {
+            false
+        }
+    }
+    fn at_test_block(&self) -> bool {
+        self.at_word(0, "test") && self.nth(1) == K::LBrace
+    }
+
+    fn skip_test_block(&mut self) {
+        self.bump();
+        self.bump();
+        let mut depth = 1;
+        while depth != 0 && !self.at(K::Eof) {
+            match self.kind() {
+                K::LBrace => depth += 1,
+                K::RBrace => depth -= 1,
+                _ => {}
+            }
+            self.bump();
+        }
+        if depth != 0 {
+            self.expect(K::RBrace);
+        }
+    }
+
+    fn push_item(&mut self, items: &mut Vec<Item>) {
+        let before = self.pos;
+        self.builder.start_node(ITEM);
+        if let Some(item) = self.item() {
+            items.push(item);
+        }
+        self.builder.finish_node();
+        if self.pos == before {
+            self.error("expected a declaration");
+            self.bump();
+        }
+    }
+
     fn item(&mut self) -> Option<Item> {
-        // `pub` (before or after `@fip`) marks an importable item.
-        let public = self.at_word(0, "pub")
-            || (self.at(K::At) && self.at_word(1, "fip") && self.at_word(2, "pub"));
-        let item = self.declaration()?;
+        if self.at_test_block() {
+            self.skip_test_block();
+            return None;
+        }
+        let (item, public) = self.declaration()?;
         if public {
             match &item {
                 Item::Adt(a) => self.public_items.push(a.name.clone()),
@@ -765,7 +875,7 @@ impl Parser<'_> {
         }
         Some(item)
     }
-    fn declaration(&mut self) -> Option<Item> {
+    fn declaration(&mut self) -> Option<(Item, bool)> {
         let start = self.start();
         if self.at_word(0, "use") && self.at_word(1, "model") {
             self.use_model(0..self.source.len());
@@ -797,35 +907,51 @@ impl Parser<'_> {
             self.eat(K::Semi);
             return None;
         }
-        let mut fip = self.fip_attr();
-        let public = self.at_word(0, "pub")
-            && (self.at_word(1, "trait")
-                || (self.at_word(1, "const") && self.nth(2) == K::Upper)
-                || self.at_word(1, "model")
-                || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
-                || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
-                    && matches!(self.nth(2), K::Struct | K::Enum | K::Effect))
-                || (!fip
-                    && self.nth(1) == K::At
-                    && self.at_word(2, "fip")
-                    && self.nth(3) == K::Fn));
-        if public {
-            self.bump();
-        }
-        if !fip {
-            fip = self.fip_attr();
+        let mut fip = false;
+        let mut has_test_attr = false;
+        let mut public = false;
+        loop {
+            if self.fip_attr() {
+                fip = true;
+                continue;
+            }
+            if self.test_attr() {
+                has_test_attr = true;
+                continue;
+            }
+            if !public
+                && self.at_word(0, "pub")
+                && (self.at_word(1, "trait")
+                    || (self.at_word(1, "const") && self.nth(2) == K::Upper)
+                    || self.at_word(1, "model")
+                    || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
+                    || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
+                        && matches!(self.nth(2), K::Struct | K::Enum | K::Effect))
+                    || (self.nth(1) == K::At
+                        && (self.at_word(2, "fip")
+                            || self.at_word(2, "test")
+                            || self.at_word(2, "test_case"))))
+            {
+                self.bump();
+                public = true;
+                continue;
+            }
+            break;
         }
         if fip && !self.at(K::Fn) {
             self.error("@fip may only annotate a fn declaration");
         }
+        if has_test_attr && !self.at(K::Fn) {
+            self.error("@test and @test_case may only annotate a fn declaration");
+        }
         if self.at_word(0, "const") && self.nth(1) == K::Upper {
-            return Some(Item::Function(Box::new(self.const_item(start))));
+            return Some((Item::Function(Box::new(self.const_item(start))), public));
         }
         if self.at_word(0, "trait") {
-            return Some(Item::Trait(self.trait_decl(start, public)));
+            return Some((Item::Trait(self.trait_decl(start, public)), public));
         }
         if self.at_word(0, "model") {
-            return Some(Item::Conformance(self.model_decl(start, public)));
+            return Some((Item::Conformance(self.model_decl(start, public)), public));
         }
         let tile_width = if self.at_word(0, "tiled") && self.nth(1) == K::LParen {
             self.bump();
@@ -949,7 +1075,7 @@ impl Parser<'_> {
             }
             K::Fn => {
                 let mut function = self.function(false, fip);
-                if public || fip {
+                if public || fip || has_test_attr {
                     function.span.start = start;
                 }
                 Some(Item::Function(Box::new(function)))
@@ -976,7 +1102,7 @@ impl Parser<'_> {
                         trait_ref,
                     );
                     self.row_names = old_rows;
-                    return Some(Item::Conformance(c));
+                    return Some((Item::Conformance(c), public));
                 }
                 let trait_start = self.start();
                 let ty = self.ty();
@@ -1007,7 +1133,7 @@ impl Parser<'_> {
                         trait_ref,
                     );
                     self.row_names = old_rows;
-                    return Some(Item::Conformance(c));
+                    return Some((Item::Conformance(c), public));
                 }
                 self.expect(K::LBrace);
                 let mut methods = vec![];
@@ -1039,6 +1165,7 @@ impl Parser<'_> {
             }
             _ => None,
         }
+        .map(|item| (item, public))
     }
     fn function_header(&mut self) -> crate::macro_source::FunctionHeader {
         let start = self.start();
@@ -2209,14 +2336,33 @@ impl Parser<'_> {
         let mut arms = vec![];
         while !self.at(K::RBrace) && !self.at(K::Eof) {
             let before = self.pos;
-            let pat = self.pattern();
+            // `p | q => e` is one arm per alternative sharing the body: the
+            // AST holds consecutive arms whose bodies are the same expression
+            // (same span), which the checker groups again.
+            let mut alternatives = vec![self.pattern()];
+            while self.eat(K::Pipe) {
+                alternatives.push(self.pattern());
+            }
             self.expect(K::FatArrow);
             let outer_values = self.bound_values.mark();
-            pattern_bindings(&pat, &mut self.bound_values);
+            for pat in &alternatives {
+                pattern_bindings(pat, &mut self.bound_values);
+            }
+            let (body_start, expanded) = (self.pos, self.expansion);
             let body = self.expr();
             let block_body = matches!(body.kind, ExprKind::Block { .. });
             self.bound_values.restore(outer_values);
-            arms.push((pat, body));
+            // A body's weight is its tokens plus the copies nested in it.
+            let weight = (self.pos - body_start) + (self.expansion - expanded);
+            let copies = weight.saturating_mul(alternatives.len() - 1);
+            self.expansion = self.expansion.saturating_add(copies);
+            if self.expansion > OR_PATTERN_EXPANSION {
+                self.error("or-pattern alternatives copy too much code; split the match");
+                alternatives.truncate(1);
+            }
+            for pat in alternatives {
+                arms.push((pat, body.clone()));
+            }
             if !self.eat(K::Comma) && !self.at(K::RBrace) && !(block_body && self.pos > before) {
                 self.error("expected ',' between match arms");
                 break;
@@ -3011,18 +3157,39 @@ fn pattern_bindings(p: &Pattern, names: &mut scope::ScopedNames) {
 pub(crate) fn contextual_item_names(
     tokens: &[Token],
     source: &str,
+    include_tests: bool,
 ) -> std::collections::BTreeSet<String> {
     let mut names = std::collections::BTreeSet::new();
-    let mut significant = tokens
-        .iter()
-        .filter(|t| !matches!(t.kind, K::Whitespace | K::Comment | K::BlockComment));
+    let mut significant = tokens.iter().filter(|t| !t.kind.trivia()).peekable();
     let mut previous = None;
-    for t in &mut significant {
-        if previous == Some(K::Fn) && t.kind == K::Lower {
+    let mut depth = 0usize;
+    let mut skipping_test = false;
+    while let Some(t) = significant.next() {
+        if !include_tests
+            && depth == 0
+            && t.kind == K::Lower
+            && &source[t.span.clone()] == "test"
+            && significant
+                .peek()
+                .is_some_and(|next| next.kind == K::LBrace)
+        {
+            skipping_test = true;
+        }
+        if !skipping_test && previous == Some(K::Fn) && t.kind == K::Lower {
             let name = &source[t.span.clone()];
             if matches!(name, "break" | "continue" | "for" | "loop") {
                 names.insert(name.to_owned());
             }
+        }
+        match t.kind {
+            K::LBrace => depth += 1,
+            K::RBrace => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    skipping_test = false;
+                }
+            }
+            _ => {}
         }
         previous = Some(t.kind);
     }

@@ -22,7 +22,7 @@ pub fn tcb_poll_transmit(
 ) -> Result[Option[Tx], TcpFail] {
     t.edt_entry = Option::None;
     t.edt_armed_rto = false;
-    if out.len() < 60 {
+    if out.len() < MAX_HEADER_LEN {
         return Result::Err(TcpFail::BufferTooSmall);
     }
     match t.pending_rst {
@@ -261,7 +261,10 @@ fn try_new_data(
 
 fn arm_persist(inout t: Tcb, now: u64) {
     if !is_some(t.persist_deadline) {
-        let backoff = shl64(rtt_rto_ns(t.rtt), widen_u64(min32(t.persist_backoff, 16)));
+        let backoff = shl64(
+            rtt_rto_ns(t.rtt),
+            widen_u64(min32(t.persist_backoff, MAX_PERSIST_BACKOFF_SHIFT))
+        );
         t.persist_backoff = sat_add32(t.persist_backoff, 1);
         t.persist_deadline = Option::Some(sat_add64(now, min64(backoff, t.cfg.rto.max_ns)));
     }

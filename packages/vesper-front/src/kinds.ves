@@ -326,8 +326,9 @@ pub fn k_shr() -> u8 {
     80
 }
 
-// The Debug name of kind `k`, which `expected {k:?}, found {:?}` prints.
-pub fn kind_name(k: u8) -> String {
+// The Debug name of kind `k`, which `expected {k:?}, found {:?}` prints:
+// static text, so no call allocates.
+pub fn kind_name(k: u8) -> Str {
     match k {
         0 => "Whitespace",
         1 => "Comment",

@@ -9,7 +9,10 @@ pub use vesper_core::{ast, numeric};
 pub use vesper_pulse::frames;
 #[cfg(target_os = "linux")]
 pub use vesper_pulse::{io_driver, scheduler};
-pub use vesper_syntax::{lexer, parser};
+pub use vesper_syntax::{lexer, parser, test_attrs};
+pub mod anvil_hash;
+pub mod anvil_jit;
+pub mod anvil_sim;
 pub mod arrays;
 pub mod atomic_file;
 pub mod atomics;

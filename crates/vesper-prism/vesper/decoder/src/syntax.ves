@@ -1,6 +1,46 @@
 // Byte-level grammars of the decoder: tokens, targets, Host (with Rust std's
 // IPv4/IPv6 parsers) and field values.
 
+// ASCII bytes this module compares against (constants are per module).
+const NUL: u8 = 0;
+const TAB: u8 = 9;
+const SPACE: u8 = 32;
+const PERCENT: u8 = 37;
+const DOT: u8 = 46;
+const SLASH: u8 = 47;
+const DIGIT_0: u8 = 48;
+const DIGIT_9: u8 = 57;
+const COLON: u8 = 58;
+const UPPER_A: u8 = 65;
+const UPPER_F: u8 = 70;
+const UPPER_Z: u8 = 90;
+const LOWER_A: u8 = 97;
+const LOWER_F: u8 = 102;
+const LOWER_X: u8 = 120;
+const LOWER_Z: u8 = 122;
+// 'a' - 'A': adding it lowercases an ASCII capital.
+const ASCII_CASE_OFFSET: u8 = 32;
+// 'a' - 10 and 'A' - 10: subtracting them gives a hex letter's value.
+const LOWER_HEX_OFFSET: u8 = 87;
+const UPPER_HEX_OFFSET: u8 = 55;
+// `u64::MAX / 10` and `u64::MAX % 10`: the overflow check of a decimal read.
+const U64_MAX_DIV_10: u64 = 1844674407370955161;
+const U64_MAX_LAST_DIGIT: u64 = 5;
+
+// The RFC 9110 §5.6.2 `tchar` bytes (ALPHA, DIGIT and !#$%&'*+-.^_`|~):
+// bit `b` of LOW for bytes 0-63, bit `b - 64` of HIGH for 64-127.
+const TCHAR_MASK_LOW: u64 = 288068722172624896;
+const TCHAR_MASK_HIGH: u64 = 6341068274398134270;
+// RFC 9110 §5.5 field-value bytes: VCHAR, SP and HTAB (LOW) and 64-126
+// (HIGH); bytes 128-255 (obs-text) pass with `find_not_in`'s high flag.
+const FIELD_VALUE_MASK_LOW: u64 = 18446744069414584832;
+const FIELD_VCHAR_MASK_HIGH: u64 = 9223372036854775807;
+// The bytes RFC 3986 lets an origin-form target carry unescaped (ALPHA,
+// DIGIT and -._~!$&'()*+,;=:@/?): bit `b` of LOW for bytes 0-63, bit
+// `b - 64` of HIGH for 64-127.
+const TARGET_CHAR_MASK_LOW: u64 = 12682136353106821120;
+const TARGET_CHAR_MASK_HIGH: u64 = 5188146764422578175;
+
 pub fn inc(x: u64) -> u64 {
     wrapping_add(x, 1)
 }
@@ -29,11 +69,11 @@ pub fn queued(in front: Slice[u8], in back: Slice[u8], i: u64) -> u8 {
 }
 
 pub fn is_digit(b: u8) -> bool {
-    b >= 48 && b <= 57
+    b >= DIGIT_0 && b <= DIGIT_9
 }
 
 pub fn is_alpha(b: u8) -> bool {
-    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+    (b >= UPPER_A && b <= UPPER_Z) || (b >= LOWER_A && b <= LOWER_Z)
 }
 
 pub fn is_alnum(b: u8) -> bool {
@@ -41,12 +81,12 @@ pub fn is_alnum(b: u8) -> bool {
 }
 
 pub fn is_hex(b: u8) -> bool {
-    is_digit(b) || (b >= 65 && b <= 70) || (b >= 97 && b <= 102)
+    is_digit(b) || (b >= UPPER_A && b <= UPPER_F) || (b >= LOWER_A && b <= LOWER_F)
 }
 
 pub fn lower(b: u8) -> u8 {
-    if b >= 65 && b <= 90 {
-        wrapping_add(b, 32)
+    if b >= UPPER_A && b <= UPPER_Z {
+        wrapping_add(b, ASCII_CASE_OFFSET)
     } else {
         b
     }
@@ -57,8 +97,8 @@ pub fn lower(b: u8) -> u8 {
 // a comparison chain does not. `rotate_right` is the total shift.
 pub fn token(b: u8) -> bool {
     let i = widen_u64(b);
-    let low: u64 = 288068722172624896;
-    let high: u64 = 6341068274398134270;
+    let low = TCHAR_MASK_LOW;
+    let high = TCHAR_MASK_HIGH;
     if i < 64 {
         (rotate_right(low, i) & 1) == 1
     } else if i < 128 {
@@ -78,7 +118,7 @@ pub fn all_token(in s: Slice[u8], lo: u64, hi: u64) -> bool {
 }
 
 fn tokens(in s: Slice[u8]) -> bool {
-    match s.find_not_in(288068722172624896, 6341068274398134270, false) {
+    match s.find_not_in(TCHAR_MASK_LOW, TCHAR_MASK_HIGH, false) {
         Option::Some(i) => false,
         Option::None => true,
     }
@@ -86,7 +126,7 @@ fn tokens(in s: Slice[u8]) -> bool {
 
 // No control byte but tab (field values; bytes >= 128 are obs-text).
 pub fn value_ok(in s: Slice[u8]) -> bool {
-    match s.find_not_in(18446744069414584832, 9223372036854775807, true) {
+    match s.find_not_in(FIELD_VALUE_MASK_LOW, FIELD_VCHAR_MASK_HIGH, true) {
         Option::Some(i) => false,
         Option::None => true,
     }
@@ -97,7 +137,7 @@ fn same_fold(in a: Slice[u8], in b: Slice[u8]) -> bool {
 }
 
 fn target_run(in t: Slice[u8]) -> Option[u64] {
-    t.find_not_in(12682136353106821120, 5188146764422578175, false)
+    t.find_not_in(TARGET_CHAR_MASK_LOW, TARGET_CHAR_MASK_HIGH, false)
 }
 
 fn same_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
@@ -139,7 +179,7 @@ pub fn named(in s: Slice[u8], lo: u64, hi: u64, in lit: Str) -> bool {
 }
 
 pub fn is_ows(b: u8) -> bool {
-    b == 32 || b == 9
+    b == SPACE || b == TAB
 }
 
 pub copy struct Span {
@@ -188,7 +228,7 @@ pub fn find(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
             Option::None => (),
         }
     }
-    if b == 0 && end < hi && lo < hi {
+    if b == NUL && end < hi && lo < hi {
         if lo > end {
             lo
         } else {
@@ -203,8 +243,8 @@ pub fn find(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
 // -._~!$&'()*+,;=:@/?) as two 64-bit masks, like `token`.
 fn target_char(b: u8) -> bool {
     let i = widen_u64(b);
-    let low: u64 = 12682136353106821120;
-    let high: u64 = 5188146764422578175;
+    let low = TARGET_CHAR_MASK_LOW;
+    let high = TARGET_CHAR_MASK_HIGH;
     if i < 64 {
         (rotate_right(low, i) & 1) == 1
     } else if i < 128 {
@@ -219,10 +259,10 @@ pub fn valid_target(options: bool, in t: Slice[u8], lo: u64, hi: u64) -> bool {
     if n == 1 && byte(in t, lo) == 42 {
         return options;
     }
-    if n == 0 || byte(in t, lo) != 47 {
+    if n == 0 || byte(in t, lo) != SLASH {
         return false;
     }
-    if n >= 2 && byte(in t, inc(lo)) == 47 {
+    if n >= 2 && byte(in t, inc(lo)) == SLASH {
         return false;
     }
     let mut i = lo;
@@ -245,7 +285,7 @@ pub fn valid_target(options: bool, in t: Slice[u8], lo: u64, hi: u64) -> bool {
             Option::Some(b) => b,
             Option::None => 0,
         };
-        if b == 37 {
+        if b == PERCENT {
             let h1 = inc(i);
             let h2 = wrapping_add(i, 2);
             if h1 >= hi || !is_hex(byte(in t, h1)) || h2 >= hi || !is_hex(byte(in t, h2)) {
@@ -262,16 +302,24 @@ pub fn valid_target(options: bool, in t: Slice[u8], lo: u64, hi: u64) -> bool {
 }
 
 pub fn valid_port(in s: Slice[u8], lo: u64, hi: u64) -> bool {
-    read_number(in s, lo, hi, 10, max_u64(), true, 65535) == hi
+    read_number(in s, lo, hi, 10, max_u64(), true, MAX_PORT) == hi
 }
+
+// Authority limits (RFC 3986 §3.2.2-3.2.3, RFC 1035 §2.3.4).
+const MAX_PORT: u64 = 65535;
+const IPV4_OCTET_DIGITS: u64 = 3;
+const MAX_IPV4_OCTET: u64 = 255;
+const IPV6_GROUP_DIGITS: u64 = 4;
+const MAX_IPV6_GROUP: u64 = 65535;
+const MAX_DNS_LABEL_LEN: u64 = 63;
 
 pub fn digit_value(b: u8, radix: u64) -> u64 {
     if is_digit(b) {
-        wrapping_sub(widen_u64(b), 48)
-    } else if radix == 16 && b >= 97 && b <= 102 {
-        wrapping_sub(widen_u64(b), 87)
-    } else if radix == 16 && b >= 65 && b <= 70 {
-        wrapping_sub(widen_u64(b), 55)
+        wrapping_sub(widen_u64(b), widen_u64(DIGIT_0))
+    } else if radix == 16 && b >= LOWER_A && b <= LOWER_F {
+        wrapping_sub(widen_u64(b), widen_u64(LOWER_HEX_OFFSET))
+    } else if radix == 16 && b >= UPPER_A && b <= UPPER_F {
+        wrapping_sub(widen_u64(b), widen_u64(UPPER_HEX_OFFSET))
     } else {
         radix
     }
@@ -287,7 +335,7 @@ pub fn read_number(
     zero_prefix: bool,
     max_value: u64
 ) -> u64 {
-    let leading_zero = at < hi && byte(in s, at) == 48;
+    let leading_zero = at < hi && byte(in s, at) == DIGIT_0;
     let mut i = at;
     let mut value: u64 = 0;
     let mut digits: u64 = 0;
@@ -321,12 +369,12 @@ pub fn read_ipv4(in s: Slice[u8], at: u64, hi: u64) -> u64 {
     let mut i = at;
     for k in 0..4 {
         if k > 0 {
-            if i >= hi || byte(in s, i) != 46 {
+            if i >= hi || byte(in s, i) != DOT {
                 return max_u64();
             }
             i = inc(i);
         }
-        i = read_number(in s, i, hi, 10, 3, false, 255);
+        i = read_number(in s, i, hi, 10, IPV4_OCTET_DIGITS, false, MAX_IPV4_OCTET);
         if i == max_u64() {
             return max_u64();
         }
@@ -355,7 +403,7 @@ pub fn read_groups(in s: Slice[u8], at: u64, hi: u64, limit: u64) -> Groups {
         let mut start = i;
         let mut ok = true;
         if g > 0 {
-            if i < hi && byte(in s, i) == 58 {
+            if i < hi && byte(in s, i) == COLON {
                 start = inc(i);
             } else {
                 ok = false;
@@ -374,7 +422,7 @@ pub fn read_groups(in s: Slice[u8], at: u64, hi: u64, limit: u64) -> Groups {
                 };
             }
         }
-        let next = read_number(in s, start, hi, 16, 4, true, 65535);
+        let next = read_number(in s, start, hi, 16, IPV6_GROUP_DIGITS, true, MAX_IPV6_GROUP);
         if next == max_u64() {
             return groups(g, false, i);
         }
@@ -393,7 +441,7 @@ pub fn valid_ipv6(in s: Slice[u8], lo: u64, hi: u64) -> bool {
         return false;
     }
     let i = head.at;
-    if inc(i) >= hi || byte(in s, i) != 58 || byte(in s, inc(i)) != 58 {
+    if inc(i) >= hi || byte(in s, i) != COLON || byte(in s, inc(i)) != COLON {
         return false;
     }
     let limit = wrapping_sub(8, inc(head.count));
@@ -402,7 +450,12 @@ pub fn valid_ipv6(in s: Slice[u8], lo: u64, hi: u64) -> bool {
 }
 
 pub fn numeric_part(in s: Slice[u8], lo: u64, hi: u64) -> bool {
-    if wrapping_sub(hi, lo) >= 2 && byte(in s, lo) == 48 && lower(byte(in s, inc(lo))) == 120 {
+    if wrapping_sub(hi, lo)
+        >= 2
+        && byte(in s, lo)
+        == DIGIT_0
+        && lower(byte(in s, inc(lo)))
+        == LOWER_X {
         read_number(in s, wrapping_add(lo, 2), hi, 16, max_u64(), true, max_u64()) == hi
     } else {
         read_number(in s, lo, hi, 10, max_u64(), true, max_u64()) == hi
@@ -411,7 +464,7 @@ pub fn numeric_part(in s: Slice[u8], lo: u64, hi: u64) -> bool {
 
 pub fn valid_label(in s: Slice[u8], lo: u64, hi: u64) -> bool {
     let n = wrapping_sub(hi, lo);
-    if n == 0 || n > 63 {
+    if n == 0 || n > MAX_DNS_LABEL_LEN {
         return false;
     }
     if !is_alnum(byte(in s, lo)) || !is_alnum(byte(in s, dec(hi))) {
@@ -442,25 +495,25 @@ pub fn valid_host(in s: Slice[u8], lo: u64, hi: u64) -> bool {
         if after == hi {
             return true;
         }
-        return byte(in s, after) == 58 && valid_port(in s, inc(after), hi);
+        return byte(in s, after) == COLON && valid_port(in s, inc(after), hi);
     }
-    let colon = find(in s, lo, hi, 58);
+    let colon = find(in s, lo, hi, COLON);
     if colon < hi {
         let port_lo = inc(colon);
-        let port_hi = find(in s, port_lo, hi, 58);
+        let port_hi = find(in s, port_lo, hi, COLON);
         if !valid_port(in s, port_lo, port_hi) || port_hi < hi {
             return false;
         }
     }
     let host_hi = colon;
     let mut class_hi = host_hi;
-    if class_hi > lo && byte(in s, dec(class_hi)) == 46 {
+    if class_hi > lo && byte(in s, dec(class_hi)) == DOT {
         class_hi = dec(class_hi);
     }
     let mut numeric = true;
     let mut part = lo;
     loop {
-        let end = find(in s, part, class_hi, 46);
+        let end = find(in s, part, class_hi, DOT);
         if !numeric_part(in s, part, end) {
             numeric = false;
             break;
@@ -474,7 +527,7 @@ pub fn valid_host(in s: Slice[u8], lo: u64, hi: u64) -> bool {
         return read_ipv4(in s, lo, host_hi) == host_hi;
     }
     let mut name_hi = host_hi;
-    if name_hi > lo && byte(in s, dec(name_hi)) == 46 {
+    if name_hi > lo && byte(in s, dec(name_hi)) == DOT {
         name_hi = dec(name_hi);
     }
     let n = wrapping_sub(name_hi, lo);
@@ -483,7 +536,7 @@ pub fn valid_host(in s: Slice[u8], lo: u64, hi: u64) -> bool {
     }
     let mut label = lo;
     loop {
-        let end = find(in s, label, name_hi, 46);
+        let end = find(in s, label, name_hi, DOT);
         if !valid_label(in s, label, end) {
             return false;
         }
@@ -501,8 +554,8 @@ pub fn decimal(in s: Slice[u8], lo: u64, hi: u64) -> Option[u64] {
     }
     let mut v: u64 = 0;
     for i in lo..hi {
-        let d = wrapping_sub(widen_u64(byte(in s, i)), 48);
-        if d > 9 || v > 1844674407370955161 || (v == 1844674407370955161 && d > 5) {
+        let d = wrapping_sub(widen_u64(byte(in s, i)), widen_u64(DIGIT_0));
+        if d > 9 || v > U64_MAX_DIV_10 || (v == U64_MAX_DIV_10 && d > U64_MAX_LAST_DIGIT) {
             return Option::None;
         }
         v = wrapping_add(wrapping_mul(v, 10), d);

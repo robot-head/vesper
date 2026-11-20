@@ -105,3 +105,23 @@ pub fn ok_or[T: mod copy, E: mod copy](o: Option[T], error: E) -> Result[T, E] {
         Option::None => Result::Err(error),
     }
 }
+
+test {
+    // @case present(Option::Some(4), 7, 4)
+    // @case present_zero(Option::Some(0), 7, 0)
+    // @case absent(Option::None, 7, 7)
+    fn test_unwrap_or_u64(input: Option[u64], fallback: u64, expected: u64) -> bool {
+        unwrap_or(input, fallback) == expected
+    }
+
+    // @case both_present(Option::Some(4), Option::Some(9), true)
+    // @case left_absent(Option::None, Option::Some(9), false)
+    // @case right_absent(Option::Some(4), Option::None, false)
+    // @case both_absent(Option::None, Option::None, false)
+    fn test_zip_u64(left: Option[u64], right: Option[u64], expected_present: bool) -> bool {
+        match zip(left, right) {
+            Option::Some((a, b)) => expected_present && a == 4 && b == 9,
+            Option::None => !expected_present,
+        }
+    }
+}

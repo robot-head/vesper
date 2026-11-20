@@ -370,6 +370,10 @@ impl Runtime<'_> {
                 V(Value::UInt(sum, 64))
             }
             SeqOp::BytesEq => V(Value::Bool(byte_view(arg(0)?)? == byte_view(arg(1)?)?)),
+            SeqOp::BytesCmp => {
+                let order = byte_view(arg(0)?)?.cmp(&byte_view(arg(1)?)?);
+                V(Value::SInt(i64::from(order as i8), 32))
+            }
             SeqOp::EqIgnoreAsciiCase => V(Value::Bool(
                 byte_view(arg(0)?)?.eq_ignore_ascii_case(&byte_view(arg(1)?)?),
             )),
