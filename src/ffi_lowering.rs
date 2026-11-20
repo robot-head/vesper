@@ -536,16 +536,21 @@ impl ForeignChecked {
     pub fn calls(&self) -> &[ForeignCall] {
         &self.calls
     }
-    /// The `.vsys` link names of the libraries the module calls, sorted and
-    /// without repeats (what an executable links, as `-l<name>`).
-    pub fn link_names(&self) -> Vec<String> {
-        let mut out: Vec<String> = self
+    /// The `.vsys` link names and modes of the libraries the module calls,
+    /// sorted and without repeats (what an executable links).
+    pub fn link_names(&self) -> Vec<(String, LinkMode)> {
+        let mut out: Vec<(String, LinkMode)> = self
             .calls
             .iter()
             .filter_map(|c| self.plan.libraries.get(&effect_name(&c.library)))
-            .map(|l| l.descriptor.link().name().to_owned())
+            .map(|l| {
+                (
+                    l.descriptor.link().name().to_owned(),
+                    l.descriptor.link().mode(),
+                )
+            })
             .collect();
-        out.sort();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
         out.dedup();
         out
     }

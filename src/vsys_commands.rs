@@ -147,9 +147,19 @@ fn build(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), 
     }
     let path = c.output.clone().unwrap_or_else(|| PathBuf::from("a.out"));
     let object = path.with_extension("vesper.o");
+    // `native_code` runs the verifiers that capability effects
+    // (`ConstTime`, `Realtime`, `DetFloat`) imply, as for any executable.
     let (bytes, _) = checked
         .with_lowering(c.target, |world| {
-            vesper::native::object_with_options(world, "main", c.target, c.optimize)
+            crate::native_code(
+                world,
+                "main",
+                c.target,
+                c.optimize,
+                &Default::default(),
+                None,
+                (&c.package.package, ""),
+            )
         })
         .map_err(|e| e.to_string())?;
     fs::write(&object, bytes).map_err(|e| e.to_string())?;
@@ -159,8 +169,33 @@ fn build(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), 
         link.arg("-L").arg(dir);
     }
     let names = checked.link_names();
-    for name in &names {
-        link.arg(format!("-l{name}"));
+    for (name, mode) in &names {
+        match mode {
+            vesper_ffi::sys::LinkMode::Dynamic => {
+                link.arg(format!("-l{name}"));
+            }
+            // A static library links its archive even when a shared one sits
+            // beside it: the archive's path where a search directory has it,
+            // else `-Bstatic` (GNU and LLVM linkers).
+            vesper_ffi::sys::LinkMode::Static => {
+                match c
+                    .link_search
+                    .iter()
+                    .map(|d| d.join(format!("lib{name}.a")))
+                    .find(|p| p.is_file())
+                {
+                    Some(archive) => {
+                        link.arg(archive);
+                    }
+                    None if cfg!(target_os = "macos") => {
+                        link.arg(format!("-l{name}"));
+                    }
+                    None => {
+                        link.args(["-Wl,-Bstatic", &format!("-l{name}"), "-Wl,-Bdynamic"]);
+                    }
+                }
+            }
+        }
     }
     // A Rust staticlib (such as the standard I/O host) needs the platform's
     // threading and dynamic-loading libraries.

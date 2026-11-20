@@ -334,3 +334,74 @@ fn build_links_an_executable_with_a_dependency_library() {
     let status = Command::new(&exe).status().unwrap();
     assert_eq!(status.code(), Some(7));
 }
+
+/// An executable over a package with imports still runs the verifiers its
+/// capability effects imply: `Realtime` code calling `fmod` is refused.
+#[test]
+fn build_keeps_capability_implied_verifiers() {
+    if cfg!(windows) || !host_jit() {
+        return;
+    }
+    let t = Temp::new("rt");
+    let app = probe_graph(&t, "vsys = [\"sys/probe.vsys\"]");
+    t.write(
+        "app/src/main.ves",
+        "fn wrap_phase(phase: f64, period: f64) -> f64 eff [Realtime] {\n    phase % period\n}\n\n\
+         pub fn main() -> u64 {\n    let p = wrap_phase(7.5, 2.0);\n    if p > 1.0 { 1 } else { 0 }\n}\n",
+    );
+    let out = vesper()
+        .arg("build")
+        .arg(&app)
+        .arg("-o")
+        .arg(t.0.join("rt.bin"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("rt-unknown-callee"), "{err}");
+}
+
+/// A `link = "static"` library links its archive even when a shared library
+/// of the same name sits beside it (Linux: the linker would pick the `.so`).
+#[test]
+fn static_libraries_link_their_archive() {
+    if !cfg!(target_os = "linux") || !host_jit() {
+        return;
+    }
+    let t = Temp::new("static");
+    let app = probe_graph(&t, "vsys = [\"sys/probe.vsys\"]");
+    t.write(
+        "c/probe.c",
+        "#include <stdbool.h>\nbool probe_not(bool b) { return !b; }\n",
+    );
+    t.write(
+        "c/shared.c",
+        "#include <stdbool.h>\nbool probe_not(bool b) { return b; }\n",
+    );
+    let c = t.0.join("c");
+    run(Command::new("cc")
+        .current_dir(&c)
+        .args(["-c", "probe.c", "-o", "probe.o"]));
+    run(Command::new("ar")
+        .current_dir(&c)
+        .args(["rcs", "libprobe.a", "probe.o"]));
+    run(Command::new("cc").current_dir(&c).args([
+        "-shared",
+        "-fPIC",
+        "shared.c",
+        "-o",
+        "libprobe.so",
+    ]));
+    let exe = t.0.join("app.bin");
+    run(vesper()
+        .arg("build")
+        .arg(&app)
+        .arg("-o")
+        .arg(&exe)
+        .arg("--link-search")
+        .arg(&c));
+    // The archive's `probe_not` negates, so main returns 7; the shared one
+    // would give 9 (or fail to load).
+    let status = Command::new(&exe).status().unwrap();
+    assert_eq!(status.code(), Some(7));
+}
