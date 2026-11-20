@@ -34,7 +34,6 @@ const UPPER_HEX_OFFSET: u8 = 55;
 const TARGET_CHAR_MASK_LOW: u64 = 12682136353106821120;
 const TARGET_CHAR_MASK_HIGH: u64 = 5188146764422578175;
 
-
 copy enum Utf8Policy {
     Require,
     AllowBytes
