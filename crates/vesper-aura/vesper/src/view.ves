@@ -8,8 +8,10 @@ use self::codes::{
     b_teardown,
     b_text,
     b_total_text,
+    k_container,
     max_u64,
-    none_id
+    none_id,
+    v_text
 };
 use self::plan::{
     teardown
@@ -199,7 +201,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
         if node.scount > lim.subscriptions {
             return Option::Some(ViewFault::Budget(b_subscriptions()));
         }
-        if node.kind != 0 && node.ccount != 0 {
+        if node.kind != k_container() && node.ccount != 0 {
             return Option::Some(ViewFault::ChildrenOnLeaf(node.key));
         }
         for j in 0..node.pcount {
@@ -212,7 +214,7 @@ pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault
                     }
                 );
             }
-            if p.tag == 0 {
+            if p.tag == v_text() {
                 if p.tlen > lim.text {
                     return Option::Some(ViewFault::Budget(b_text()));
                 }
