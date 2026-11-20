@@ -5,6 +5,71 @@
 // Fallback path of the Rust build too.
 use self::Decoded;
 
+const ASCII_PLUS: u64 = 0x2b;
+const ASCII_MINUS: u64 = 0x2d;
+const ASCII_DOT: u64 = 0x2e;
+const ASCII_ZERO: u64 = 0x30;
+const ASCII_UPPER_E: u64 = 0x45;
+const ASCII_LOWER_E: u64 = 0x65;
+const DECIMAL_BASE: u64 = 10;
+const EXP_BASE: i64 = 10;
+// `digit_at` past the digits.
+const NOT_DIGIT: u64 = 10;
+// `byte_at` past the end: no byte has this value.
+const NO_BYTE: u64 = 256;
+// SWAR digit runs (fast_float): every byte of an eight-digit run has high
+// nibble 3, and adding 6 keeps it 3.
+const SWAR_HIGH_NIBBLES: u64 = 0xf0f0f0f0f0f0f0f0;
+const SWAR_PLUS_SIX: u64 = 0x0606060606060606;
+const SWAR_ALL_THREES: u64 = 0x3333333333333333;
+const SWAR_LOW_NIBBLES: u64 = 0x0f0f0f0f0f0f0f0f;
+// Pairwise combine: 10 * hi + lo per byte pair, then per u16 pair (100),
+// then per u32 pair (10^4).
+const SWAR_TENS: u64 = 2561;
+const SWAR_HUNDREDS: u64 = 6553601;
+const SWAR_TEN_THOUSANDS: u64 = 42949672960001;
+const SWAR_BYTE_PAIRS: u64 = 0x00ff00ff00ff00ff;
+const SWAR_U16_PAIRS: u64 = 0x0000ffff0000ffff;
+const SWAR_DIGITS: u64 = 8;
+const TEN_TO_EIGHT: u64 = 100000000;
+// The exponent saturates once `e * 10` could pass `EXP_CAP` (EXP_CAP / 10).
+const EXP_SATURATE: i64 = 461168601842738790;
+// u64 holds any 19-digit significand exactly.
+const MAX_EXACT_DIGITS: u64 = 19;
+// floor(log2(10^q)) ~= q * 217706 / 2^16 (Lemire).
+const LOG2_10_Q16: i64 = 217706;
+const LOG2_10_SHIFT: i64 = 16;
+// The power-of-five table covers 10^-342..10^308 (src/lemire.rs).
+const SMALLEST_POWER_OF_TEN: i64 = -342;
+const LARGEST_POWER_OF_TEN: i64 = 308;
+// Table index of 10^q: q - SMALLEST_POWER_OF_TEN.
+const POW5_INDEX_BIAS: i64 = 342;
+// Words per power-of-five entry (hi, lo).
+const POW5_WORDS: u64 = 2;
+// The low 9 bits of the high product that a 55-bit approximation drops.
+const PRODUCT_MASK: u64 = 511;
+// q in -27..=55 is exact even when the truncated low half is all ones.
+const MIN_SAFE_Q: i64 = -27;
+const MAX_SAFE_Q: i64 = 55;
+const SHIFT_BASE: u64 = 9;
+const EXPONENT_BIAS: i64 = 1023;
+// IEEE 754 binary64.
+const INFINITE_POWER: i64 = 0x7ff;
+const HIDDEN_BIT: u64 = 0x0010000000000000;
+const MANTISSA_MASK: u64 = 0x000fffffffffffff;
+const MANTISSA_OVERFLOW: u64 = 0x0020000000000000;
+const MANTISSA_AND_HIDDEN: u64 = 0xffefffffffffffff;
+const SIGN_BIT: u64 = 0x8000000000000000;
+const NOT_LOWEST_BIT: u64 = 0xfffffffffffffffe;
+// Round-to-even halfway cases are only exact for q in -4..=23.
+const MIN_EXPONENT_ROUND_TO_EVEN: i64 = -4;
+const MAX_EXPONENT_ROUND_TO_EVEN: i64 = 23;
+// Clinger: w <= 2^53 and |q| <= 22 is one exact float operation.
+const MAX_EXACT_INT: u64 = 0x0020000000000000;
+const MAX_EXACT_POW10: i64 = 22;
+const MIN_EXACT_POW10: i64 = -22;
+const U64_MAX: u64 = 0xffffffffffffffff;
+
 // A decimal `w * 10^q`; `truncated` when digits beyond the first 19
 // significant ones were dropped from `w`; `ok` is false when the text is
 // not a JSON number.
@@ -25,34 +90,30 @@ copy struct Fp {
 }
 
 // Exponent magnitudes are clamped to 2^62 (see src/lemire.rs).
-fn exp_cap() -> i64 {
-    4611686018427387904
-}
+const EXP_CAP: i64 = 4611686018427387904;
 
-fn mantissa_bits() -> u64 {
-    52
-}
+const MANTISSA_BITS: u64 = 52;
 
 // The digit value of the byte at `p`, or 10 when it is not a digit or `p`
 // is past the end.
 fn digit_at(in text: Slice[u8], p: u64) -> u64 {
     match text.try_get(p) {
         Option::Some(c) => {
-            let d = wrapping_sub(widen_u64(c), 48);
-            if d < 10 {
+            let d = wrapping_sub(widen_u64(c), ASCII_ZERO);
+            if d < DECIMAL_BASE {
                 d
             } else {
-                10
+                NOT_DIGIT
             }
         },
-        Option::None => 10,
+        Option::None => NOT_DIGIT,
     }
 }
 
 fn byte_at(in text: Slice[u8], p: u64) -> u64 {
     match text.try_get(p) {
         Option::Some(c) => widen_u64(c),
-        Option::None => 256,
+        Option::None => NO_BYTE,
     }
 }
 
@@ -64,16 +125,16 @@ fn eight_digits(in text: Slice[u8], p0: u64, w0: u64) -> (u64, u64) {
     loop {
         match text.try_read_u64_le(p) {
             Option::Some(v) => {
-                let hi = 17361641481138401520;
-                let all = (v & hi) | ((wrapping_add(v, 434041037028460038) & hi) >> 4);
-                if all != 3689348814741910323 {
+                let hi = SWAR_HIGH_NIBBLES;
+                let all = (v & hi) | ((wrapping_add(v, SWAR_PLUS_SIX) & hi) >> 4);
+                if all != SWAR_ALL_THREES {
                     break;
                 }
-                let a = wrapping_mul(v & 1085102592571150095, 2561) >> 8;
-                let b = wrapping_mul(a & 71777214294589695, 6553601) >> 16;
-                let c = wrapping_mul(b & 281470681808895, 42949672960001) >> 32;
-                w = wrapping_add(wrapping_mul(w, 100000000), c);
-                p = wrapping_add(p, 8);
+                let a = wrapping_mul(v & SWAR_LOW_NIBBLES, SWAR_TENS) >> 8;
+                let b = wrapping_mul(a & SWAR_BYTE_PAIRS, SWAR_HUNDREDS) >> 16;
+                let c = wrapping_mul(b & SWAR_U16_PAIRS, SWAR_TEN_THOUSANDS) >> 32;
+                w = wrapping_add(wrapping_mul(w, TEN_TO_EIGHT), c);
+                p = wrapping_add(p, SWAR_DIGITS);
             },
             Option::None => break,
         }
@@ -87,10 +148,10 @@ fn digits_from(in text: Slice[u8], p0: u64, w0: u64) -> (u64, u64) {
     let mut w = w1;
     loop {
         let d = digit_at(in text, p);
-        if d == 10 {
+        if d == NOT_DIGIT {
             break;
         }
-        w = wrapping_add(wrapping_mul(w, 10), d);
+        w = wrapping_add(wrapping_mul(w, DECIMAL_BASE), d);
         p = wrapping_add(p, 1);
     }
     (p, w)
@@ -110,7 +171,7 @@ fn not_number() -> Decimal {
 fn decimal(in text: Slice[u8]) -> Decimal {
     let n = text.len();
     let mut p: u64 = 0;
-    let negative = byte_at(in text, 0) == 45;
+    let negative = byte_at(in text, 0) == ASCII_MINUS;
     if negative {
         p = 1;
     }
@@ -122,12 +183,12 @@ fn decimal(in text: Slice[u8]) -> Decimal {
     if int_end == int_start {
         return not_number();
     }
-    if wrapping_sub(int_end, int_start) > 1 && byte_at(in text, int_start) == 48 {
+    if wrapping_sub(int_end, int_start) > 1 && byte_at(in text, int_start) == ASCII_ZERO {
         return not_number();
     }
     let mut frac_start = p;
     let mut frac_end = p;
-    if byte_at(in text, p) == 46 {
+    if byte_at(in text, p) == ASCII_DOT {
         p = wrapping_add(p, 1);
         frac_start = p;
         let (p2, w2) = digits_from(in text, p, w);
@@ -140,29 +201,29 @@ fn decimal(in text: Slice[u8]) -> Decimal {
     }
     let mut e: i64 = 0;
     let c = byte_at(in text, p);
-    if c == 101 || c == 69 {
+    if c == ASCII_LOWER_E || c == ASCII_UPPER_E {
         p = wrapping_add(p, 1);
         let mut exp_negative = false;
         let s = byte_at(in text, p);
-        if s == 45 {
+        if s == ASCII_MINUS {
             p = wrapping_add(p, 1);
             exp_negative = true;
-        } else if s == 43 {
+        } else if s == ASCII_PLUS {
             p = wrapping_add(p, 1);
         }
         let exp_start = p;
         loop {
             let d = digit_at(in text, p);
-            if d == 10 {
+            if d == NOT_DIGIT {
                 break;
             }
             // Saturate far beyond any digit count a slice can hold.
-            if e > 461168601842738790 {
-                e = exp_cap();
+            if e > EXP_SATURATE {
+                e = EXP_CAP;
             } else {
-                e = wrapping_add(wrapping_mul(e, 10), wrapping_i64(d));
-                if e > exp_cap() {
-                    e = exp_cap();
+                e = wrapping_add(wrapping_mul(e, EXP_BASE), wrapping_i64(d));
+                if e > EXP_CAP {
+                    e = EXP_CAP;
                 }
             }
             p = wrapping_add(p, 1);
@@ -187,7 +248,7 @@ fn decimal(in text: Slice[u8]) -> Decimal {
         q: wrapping_sub(e, wrapping_i64(frac_len)),
         truncated: false
     };
-    if digits > 19 {
+    if digits > MAX_EXACT_DIGITS {
         // Leading zeros do not count; re-read when there are too many
         // significant digits for `w` to be exact.
         let mut zeros: u64 = 0;
@@ -206,8 +267,8 @@ fn decimal(in text: Slice[u8]) -> Decimal {
                 zeros = wrapping_add(zeros, 1);
             } else {
                 seen = true;
-                if kept < 19 {
-                    w3 = wrapping_add(wrapping_mul(w3, 10), dv);
+                if kept < MAX_EXACT_DIGITS {
+                    w3 = wrapping_add(wrapping_mul(w3, DECIMAL_BASE), dv);
                     kept = wrapping_add(kept, 1);
                 } else if dv != 0 {
                     truncated = true;
@@ -215,10 +276,10 @@ fn decimal(in text: Slice[u8]) -> Decimal {
             }
         }
         let significant = wrapping_sub(digits, zeros);
-        if significant > 19 {
+        if significant > MAX_EXACT_DIGITS {
             d.w = w3;
             // Every significant digit past the 19th moves the scale by one.
-            d.q = wrapping_add(d.q, wrapping_i64(wrapping_sub(significant, 19)));
+            d.q = wrapping_add(d.q, wrapping_i64(wrapping_sub(significant, MAX_EXACT_DIGITS)));
             d.truncated = truncated;
         }
     }
@@ -268,27 +329,27 @@ fn fp(power2: i64, mantissa: u64) -> Fp {
 
 // floor(log2(10^q)) + 63.
 fn power(q: i64) -> i64 {
-    wrapping_add(wrapping_mul(q, 217706) >> 16, 63)
+    wrapping_add(wrapping_mul(q, LOG2_10_Q16) >> LOG2_10_SHIFT, 63)
 }
 
 // (src/lemire.rs `eisel_lemire`.)
 fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
-    if w == 0 || q < -342 {
+    if w == 0 || q < SMALLEST_POWER_OF_TEN {
         return fp(0, 0);
     }
-    if q > 308 {
-        return fp(2047, 0);
+    if q > LARGEST_POWER_OF_TEN {
+        return fp(INFINITE_POWER, 0);
     }
     let lz = clz64(w);
     let wn = bit_shl(w, lz);
     // The high 128 bits of `wn * 5^q` to 55 bits (`product_approx`).
-    let mask: u64 = 511;
-    let index = wrapping_u64(wrapping_add(q, 342));
-    let hi5 = match pow5.try_get(wrapping_mul(index, 2)) {
+    let mask: u64 = PRODUCT_MASK;
+    let index = wrapping_u64(wrapping_add(q, POW5_INDEX_BIAS));
+    let hi5 = match pow5.try_get(wrapping_mul(index, POW5_WORDS)) {
         Option::Some(v) => v,
         Option::None => 0,
     };
-    let lo5 = match pow5.try_get(wrapping_add(wrapping_mul(index, 2), 1)) {
+    let lo5 = match pow5.try_get(wrapping_add(wrapping_mul(index, POW5_WORDS), 1)) {
         Option::Some(v) => v,
         Option::None => 0,
     };
@@ -302,10 +363,10 @@ fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
             hi = wrapping_add(hi, 1);
         }
     }
-    if lo == 18446744073709551615 {
+    if lo == U64_MAX {
         // The truncated low half may hide a carry into the bits we keep;
         // Lemire shows this cannot change the result for q in -27..=55.
-        if q < -27 || q > 55 {
+        if q < MIN_SAFE_Q || q > MAX_SAFE_Q {
             return Fp {
                 ok: false,
                 power2: 0,
@@ -314,11 +375,11 @@ fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
         }
     }
     let upperbit = hi >> 63;
-    let shift = wrapping_add(upperbit, 9);
+    let shift = wrapping_add(upperbit, SHIFT_BASE);
     let mut mantissa = bit_shr(hi, shift);
     let mut power2 = wrapping_add(
         wrapping_sub(wrapping_add(power(q), wrapping_i64(upperbit)), wrapping_i64(lz)),
-        1023
+        EXPONENT_BIAS
     );
     if power2 <= 0 {
         // Subnormal (or zero) result.
@@ -329,37 +390,47 @@ fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
         mantissa = bit_shr(mantissa, wrapping_u64(s));
         mantissa = wrapping_add(mantissa, mantissa & 1);
         mantissa = mantissa >> 1;
-        let p2: i64 = if mantissa >= 4503599627370496 {
+        let p2: i64 = if mantissa >= HIDDEN_BIT {
             1
         } else {
             0
         };
-        return fp(p2, mantissa & 4503599627370495);
+        return fp(p2, mantissa & MANTISSA_MASK);
     }
     // A product exactly halfway between two doubles: round to even.
-    if lo <= 1 && q >= -4 && q <= 23 && mantissa & 3 == 1 && bit_shl(mantissa, shift) == hi {
-        mantissa = mantissa & 18446744073709551614;
+    if lo
+        <= 1
+        && q
+        >= MIN_EXPONENT_ROUND_TO_EVEN
+        && q
+        <= MAX_EXPONENT_ROUND_TO_EVEN
+        && mantissa
+        & 3
+        == 1
+        && bit_shl(mantissa, shift)
+        == hi {
+        mantissa = mantissa & NOT_LOWEST_BIT;
     }
     mantissa = wrapping_add(mantissa, mantissa & 1);
     mantissa = mantissa >> 1;
-    if mantissa >= 9007199254740992 {
-        mantissa = 4503599627370496;
+    if mantissa >= MANTISSA_OVERFLOW {
+        mantissa = HIDDEN_BIT;
         power2 = wrapping_add(power2, 1);
     }
-    mantissa = mantissa & 18442240474082181119;
-    if power2 >= 2047 {
-        return fp(2047, 0);
+    mantissa = mantissa & MANTISSA_AND_HIDDEN;
+    if power2 >= INFINITE_POWER {
+        return fp(INFINITE_POWER, 0);
     }
     fp(power2, mantissa)
 }
 
 fn assemble(negative: bool, f: Fp) -> u64 {
     let sign: u64 = if negative {
-        9223372036854775808
+        SIGN_BIT
     } else {
         0
     };
-    (wrapping_u64(f.power2) << 52) | f.mantissa | sign
+    (wrapping_u64(f.power2) << MANTISSA_BITS) | f.mantissa | sign
 }
 
 // 10^k for k in 0..=22, exactly.
@@ -387,7 +458,7 @@ pub fn decode_bits(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
         };
     }
     let sign: u64 = if d.negative {
-        9223372036854775808
+        SIGN_BIT
     } else {
         0
     };
@@ -397,7 +468,7 @@ pub fn decode_bits(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
             bits: sign
         };
     }
-    if !d.truncated && d.w <= 9007199254740992 && d.q >= -22 && d.q <= 22 {
+    if !d.truncated && d.w <= MAX_EXACT_INT && d.q >= MIN_EXACT_POW10 && d.q <= MAX_EXACT_POW10 {
         let w = nearest_f64(d.w);
         let value = if d.q < 0 {
             w / pow10(wrapping_sub(0, d.q))

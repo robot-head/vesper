@@ -64,7 +64,7 @@ vesper_port_object(
 vesper_port_object(
     name = "serde_vesper_divergent_encode",
     edit_src = "vesper/src/dragon.ves",
-    edits = {"out.try_set(p, 45);": "out.try_set(p, 43);"},
+    edits = {"out.try_set(p, ASCII_MINUS);": "out.try_set(p, ASCII_PLUS);"},
     library = "serde",
     rust_types = "crate::port_types",
     package = ":port_package",
