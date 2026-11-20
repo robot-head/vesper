@@ -323,7 +323,7 @@ impl SpinBarrier {
         }
         let mut spins = 0u32;
         while self.generation.load(Acquire) == generation {
-            if spins < 512 {
+            if spins < BARRIER_SPINS {
                 std::hint::spin_loop();
                 spins += 1;
             } else {
@@ -964,8 +964,8 @@ impl World {
                     );
                     let mag = det::max(det::max(p[0].abs(), p[1].abs()), p[2].abs());
                     let half = det::add(
-                        det::mul(half, 1.0078125),
-                        det::mul(det::add(mag, 1.0), 1.0 / 1_048_576.0),
+                        det::mul(half, BOX_INFLATE),
+                        det::mul(det::add(mag, 1.0), BOX_ABS_INFLATE),
                     );
                     scratch.boxes.push(Aabb::around(p, half));
                 }
@@ -1841,6 +1841,12 @@ impl World {
     }
 }
 
+/// Spins a barrier waiter makes before yielding.
+const BARRIER_SPINS: u32 = 512;
+/// Broadphase half extents are inflated by 2^-7 relative and 2^-20 per unit
+/// of position, so binary32 box rounding never drops a pair.
+const BOX_INFLATE: f32 = 1.0078125;
+const BOX_ABS_INFLATE: f32 = 1.0 / 1_048_576.0;
 const EPS: f32 = 1.0e-9;
 
 /// Position-level Coulomb friction (Macklin et al. 2014, eq. 24): the

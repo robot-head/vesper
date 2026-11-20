@@ -180,6 +180,25 @@ impl std::fmt::Display for RigidDiffError {
 impl std::error::Error for RigidDiffError {}
 
 /// Most contacts in one tick.
+/// Relative tolerance of a hull face: coplanar points and duplicate planes
+/// (scaled by the largest coordinate, at least `HULL_SCALE_FLOOR`).
+const HULL_REL_TOL: f64 = 1e-9;
+const HULL_SCALE_FLOOR: f64 = 1e-12;
+/// Squared segment length below which a segment is a point (closest points).
+const SEGMENT_EPS: f64 = 1e-18;
+/// How far a scene's quaternion norm may be from 1.
+const UNIT_QUAT_TOL: f64 = 1e-4;
+/// Separating-axis choice: another axis must beat the current one by this
+/// fraction of the margin (plus `SAT_ABS_BIAS`), so ties keep the face.
+const SAT_MARGIN_BIAS: f64 = 0.1;
+const SAT_ABS_BIAS: f64 = 1e-12;
+/// Relative tolerance of an edge-edge axis's support test and tie-break.
+const SAT_REL_TOL: f64 = 1e-9;
+/// Edges this close to parallel (relative to their lengths) give no axis.
+const EDGE_PARALLEL_TOL: f64 = 1e-6;
+/// Tangential motion below this length gets no friction direction.
+const TANGENT_MIN: f64 = 1e-12;
+
 pub const MAX_DIFF_CONTACTS: usize = 4096;
 
 // ----- scalars ----------------------------------------------------------------
@@ -377,15 +396,15 @@ fn hull_planes(v: &[[f64; 3]]) -> Vec<([f64; 3], f64)> {
     let scale = v
         .iter()
         .flat_map(|p| p.iter().map(|x| x.abs()))
-        .fold(1e-12f64, f64::max);
-    let tol = 1e-9 * scale;
+        .fold(HULL_SCALE_FLOOR, f64::max);
+    let tol = HULL_REL_TOL * scale;
     let mut planes: Vec<([f64; 3], f64)> = Vec::new();
     for i in 0..v.len() {
         for j in i + 1..v.len() {
             for k in j + 1..v.len() {
                 let n = cross64(sub64(v[j], v[i]), sub64(v[k], v[i]));
                 let len = dot64(n, n).sqrt();
-                if !(len > 1e-9 * scale * scale) {
+                if !(len > HULL_REL_TOL * scale * scale) {
                     continue;
                 }
                 let mut n = n.map(|x| x / len);
@@ -405,7 +424,7 @@ fn hull_planes(v: &[[f64; 3]]) -> Vec<([f64; 3], f64)> {
                 }
                 if !planes
                     .iter()
-                    .any(|(m, e)| dot64(*m, n) > 1.0 - 1e-9 && (e - d).abs() <= tol)
+                    .any(|(m, e)| dot64(*m, n) > 1.0 - HULL_REL_TOL && (e - d).abs() <= tol)
                 {
                     planes.push((n, d));
                 }
@@ -421,13 +440,13 @@ fn face_polygons(v: &[[f64; 3]], planes: &[([f64; 3], f64)]) -> Vec<Vec<[f64; 3]
     let scale = v
         .iter()
         .flat_map(|p| p.iter().map(|x| x.abs()))
-        .fold(1e-12f64, f64::max);
+        .fold(HULL_SCALE_FLOOR, f64::max);
     planes
         .iter()
         .map(|(n, d)| {
             let mut pts: Vec<[f64; 3]> = v
                 .iter()
-                .filter(|p| (dot64(*n, **p) - d).abs() <= 1e-9 * scale)
+                .filter(|p| (dot64(*n, **p) - d).abs() <= HULL_REL_TOL * scale)
                 .copied()
                 .collect();
             let k = pts.len() as f64;
@@ -619,7 +638,7 @@ fn closest_segments<R: Real>(p0: V<R>, p1: V<R>, q0: V<R>, q1: V<R>) -> (V<R>, V
     let a = vdot(d1, d1);
     let e = vdot(d2, d2);
     let f = vdot(d2, r);
-    let eps = 1e-18;
+    let eps = SEGMENT_EPS;
     let clamp01 = |x: R| {
         if x.v() < 0.0 {
             R::c(0.0)
@@ -743,7 +762,7 @@ impl<'s> Model<'s> {
                 return Err(bad("fields must be finite, masses >= 0"));
             }
             let n2: f64 = b.orientation.iter().map(|v| v * v).sum();
-            if (n2 - 1.0).abs() > 1e-4 {
+            if (n2 - 1.0).abs() > UNIT_QUAT_TOL {
                 return Err(bad("orientation must be a unit quaternion"));
             }
         }
@@ -846,11 +865,13 @@ impl<'s> Model<'s> {
                     }
                 }
                 let best = match sides {
-                    [Some(x), Some(y)] => Some(if y.0 > x.0 + 0.1 * margin + 1e-12 {
-                        y
-                    } else {
-                        x
-                    }),
+                    [Some(x), Some(y)] => {
+                        Some(if y.0 > x.0 + SAT_MARGIN_BIAS * margin + SAT_ABS_BIAS {
+                            y
+                        } else {
+                            x
+                        })
+                    }
                     [x, y] => x.or(y),
                 };
                 let Some((sep, rf, face)) = best else {
@@ -867,7 +888,7 @@ impl<'s> Model<'s> {
                             let axis = cross64(ea, eb);
                             let len = dot64(axis, axis).sqrt();
                             let scale = dot64(ea, ea).sqrt() * dot64(eb, eb).sqrt();
-                            if !(len > 1e-6 * scale) {
+                            if !(len > EDGE_PARALLEL_TOL * scale) {
                                 continue;
                             }
                             let mut n = axis.map(|x| x / len);
@@ -896,7 +917,7 @@ impl<'s> Model<'s> {
                                 vadd64(pj.x, rotate(pj.q, *r)),
                                 vadd64(pj.x, rotate(pj.q, *t)),
                             );
-                            let tol = 1e-9 * (1.0 + lo_i.abs() + hi_j.abs());
+                            let tol = SAT_REL_TOL * (1.0 + lo_i.abs() + hi_j.abs());
                             if dot64(n, a0) - lo_i > tol
                                 || dot64(n, a1) - lo_i > tol
                                 || hi_j - dot64(n, b0) > tol
@@ -906,7 +927,7 @@ impl<'s> Model<'s> {
                             }
                             let (ca, cb) = closest_segments(a0, a1, b0, b1);
                             let gap = dot64(sub64(ca, cb), sub64(ca, cb));
-                            let tie = 1e-9 * (1.0 + es.abs());
+                            let tie = SAT_REL_TOL * (1.0 + es.abs());
                             if best_edge.is_none_or(|(b, _, _, _, g)| {
                                 es > b + tie || (es > b - tie && gap < g)
                             }) {
@@ -915,7 +936,7 @@ impl<'s> Model<'s> {
                         }
                     }
                     if let Some((es, ea, eb, sign, _)) = best_edge
-                        && es > sep + 0.1 * margin + 1e-12
+                        && es > sep + SAT_MARGIN_BIAS * margin + SAT_ABS_BIAS
                     {
                         if es < margin {
                             push(
@@ -1234,7 +1255,7 @@ impl<'s> Model<'s> {
         }
         let tan = vsub(dp, vscale(n, vdot(dp, n)));
         let lt = vdot(tan, tan).sqrt();
-        if !(lt.v() > 1e-12) {
+        if !(lt.v() > TANGENT_MIN) {
             return;
         }
         let t = vscale(tan, R::c(1.0) / lt);
@@ -1305,7 +1326,7 @@ impl<'s> Model<'s> {
             let rel = self.relative_velocity(bodies, (a, b), (arm_a, arm_b));
             let vt = vsub(rel, vscale(n, vdot(rel, n)));
             let lvt = vdot(vt, vt).sqrt();
-            if !(lvt.v() > 1e-12) {
+            if !(lvt.v() > TANGENT_MIN) {
                 return;
             }
             let t = vscale(vt, R::c(1.0) / lvt);

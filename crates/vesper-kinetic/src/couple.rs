@@ -46,6 +46,9 @@ use crate::soft::{SoftError, SoftWorld};
 use crate::world::det;
 use sha2::Digest;
 
+/// Tangential motion below this length gets no friction direction.
+const TANGENT_MIN: f32 = 1.0e-12;
+
 type V3 = [f32; 3];
 
 /// Coupling parameters.
@@ -264,7 +267,7 @@ impl CoupledWorld {
                         let motion = sub(sub(pos[i], prev[i]), scale(vb, h));
                         let tan = sub(motion, scale(n, dot(motion, n)));
                         let lt = det::sqrt(dot(tan, tan));
-                        if lt > 1.0e-12 {
+                        if lt > TANGENT_MIN {
                             let t = scale(tan, det::div(1.0, lt));
                             let wt = det::add(wp, rigid.point_weight(b, arm, t));
                             let stop = det::div(lt, wt);

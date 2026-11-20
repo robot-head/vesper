@@ -501,9 +501,12 @@ fn finite_v(v: V) -> bool {
     v.iter().all(|x| x.is_finite())
 }
 
+/// `unit` refuses vectors no longer than this.
+const MIN_UNIT_LENGTH: f64 = 1e-12;
+
 fn unit(v: V) -> Option<V> {
     let l = dot3(v, v).sqrt();
-    (l.is_finite() && l > 1e-12).then(|| scale3(v, 1.0 / l))
+    (l.is_finite() && l > MIN_UNIT_LENGTH).then(|| scale3(v, 1.0 / l))
 }
 
 fn validate_drive(d: &ArticulationDrive) -> bool {

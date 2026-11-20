@@ -268,7 +268,7 @@ pub fn segment_capsule_inertia(
     let d = sub(b, a);
     let len = length(d);
     let size = det::max(length(a), length(b));
-    if length(mid) > det::mul(1.0e-5, det::add(size, 1.0)) {
+    if length(mid) > det::mul(CENTRED_TOL, det::add(size, 1.0)) {
         return Err(bad("segment must be centred on the body origin"));
     }
     let inv = capsule_inv_inertia(inv_mass, det::mul(len, 0.5), radius);
@@ -278,10 +278,32 @@ pub fn segment_capsule_inertia(
     Ok((inv, arc([0.0, 1.0, 0.0], scale(d, det::div(1.0, len)))))
 }
 
+/// A capsule segment must be centred to within this fraction of its size.
+const CENTRED_TOL: f32 = 1.0e-5;
+/// `arc` treats unit vectors this close to opposite as a half turn.
+const ARC_OPPOSITE_COS: f32 = -0.999_999;
+/// A hull's vertices span a volume when some triple's determinant exceeds
+/// this fraction of the cubed scale.
+const VOLUME_REL_TOL: f64 = 1e-9;
+/// How far a quaternion's norm may be from 1.
+const UNIT_QUAT_TOL: f64 = 1e-4;
+/// Relative outward rounding of a broadphase box to binary32.
+const BOX_ROUND_SLACK: f64 = 1e-6;
+/// Contact points closer than `CONTACT_MERGE_REL * (scale + CONTACT_MERGE_FLOOR)`
+/// merge when a manifold is reduced.
+const CONTACT_MERGE_REL: f64 = 1e-4;
+const CONTACT_MERGE_FLOOR: f64 = 1e-3;
+/// A manifold keeps candidates within this fraction of the contact margin
+/// (plus a relative tolerance) of the deepest point.
+const MANIFOLD_MARGIN_FRACTION: f64 = 0.25;
+const MANIFOLD_REL_TOL: f64 = 1e-6;
+/// Tangential (or rolling) motion below this length gets no friction direction.
+const TANGENT_MIN: f32 = 1.0e-9;
+
 /// The shortest-arc unit quaternion rotating unit `from` onto unit `to`.
 fn arc(from: V3, to: V3) -> Q {
     let c = dot(from, to);
-    if c < -0.999_999 {
+    if c < ARC_OPPOSITE_COS {
         // Opposite: a half turn about any axis perpendicular to `from`.
         let p = perpendicular(from);
         return [p[0], p[1], p[2], 0.0];
@@ -704,7 +726,7 @@ fn has_volume(v: &[V3]) -> bool {
                 let (a, b, c) = (d(&v[i]), d(&v[j]), d(&v[k]));
                 let det3 = a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
                     + a[2] * (b[0] * c[1] - b[1] * c[0]);
-                if det3.abs() > 1e-9 * scale * scale * scale {
+                if det3.abs() > VOLUME_REL_TOL * scale * scale * scale {
                     return true;
                 }
             }
@@ -1010,7 +1032,7 @@ impl RigidWorld {
                 .iter()
                 .map(|v| f64::from(*v) * f64::from(*v))
                 .sum();
-            if (f2 - 1.0).abs() > 1e-4 {
+            if (f2 - 1.0).abs() > UNIT_QUAT_TOL {
                 return Err(bad("inertia_frame must be a unit quaternion"));
             }
             let n2: f64 = b
@@ -1018,7 +1040,7 @@ impl RigidWorld {
                 .iter()
                 .map(|v| f64::from(*v) * f64::from(*v))
                 .sum();
-            if (n2 - 1.0).abs() > 1e-4 {
+            if (n2 - 1.0).abs() > UNIT_QUAT_TOL {
                 return Err(bad("orientation must be a unit quaternion"));
             }
             if b.collider as usize >= colliders.len() {
@@ -1404,7 +1426,7 @@ impl RigidWorld {
             }
             // Round outward so that no binary32 rounding can drop a pair.
             let out = |x: f64, up: bool| -> f32 {
-                let slack = 1e-6 * (x.abs() + 1.0);
+                let slack = BOX_ROUND_SLACK * (x.abs() + 1.0);
                 (if up { x + slack } else { x - slack }) as f32
             };
             self.boxes.push(Aabb {
@@ -1664,7 +1686,8 @@ impl RigidWorld {
         if cands.is_empty() {
             return Ok(());
         }
-        let merge = 1e-4 * (f64::from(self.bound_radius(s.collider)) + 1e-3);
+        let merge =
+            CONTACT_MERGE_REL * (f64::from(self.bound_radius(s.collider)) + CONTACT_MERGE_FLOOR);
         reduce(&mut cands, [0.0, 1.0, 0.0], merge);
         let material = combine(
             self.colliders[s.collider as usize].material,
@@ -1782,7 +1805,8 @@ impl RigidWorld {
             self.bound_radius(sa.collider),
             self.bound_radius(sb.collider),
         ));
-        let tol = 0.25 * f64::from(self.config.contact_margin) + 1e-6 * (scale + 1.0);
+        let tol = MANIFOLD_MARGIN_FRACTION * f64::from(self.config.contact_margin)
+            + MANIFOLD_REL_TOL * (scale + 1.0);
         let mut cands = vec![Candidate {
             pa: sep.point_a,
             pb: sep.point_b,
@@ -1819,7 +1843,11 @@ impl RigidWorld {
                 }
             }
         }
-        reduce(&mut cands, n, 1e-4 * (scale + 1e-3));
+        reduce(
+            &mut cands,
+            n,
+            CONTACT_MERGE_REL * (scale + CONTACT_MERGE_FLOOR),
+        );
         let material = combine(ca.material, cb.material);
         let mut m = ContactManifold {
             a: a as u32,
@@ -2109,7 +2137,7 @@ impl RigidWorld {
             let dp = sub(moved_a, moved_b);
             let dt_vec = sub(dp, scale(n, dot(dp, n)));
             let lt = length(dt_vec);
-            if lt > 1.0e-9 {
+            if lt > TANGENT_MIN {
                 let t = scale(dt_vec, det::div(1.0, lt));
                 let wt = self.weight(m, ra, rb, t);
                 if wt > 0.0 {
@@ -2163,7 +2191,7 @@ impl RigidWorld {
             let rel = self.relative_velocity(m, ra, rb, false);
             let vt = sub(rel, scale(n, dot(rel, n)));
             let lvt = length(vt);
-            if lvt > 1.0e-9 {
+            if lvt > TANGENT_MIN {
                 let t = scale(vt, det::div(1.0, lvt));
                 let wt = self.weight(m, ra, rb, t);
                 if wt > 0.0 {
@@ -2206,7 +2234,7 @@ impl RigidWorld {
             let rel = sub(wa, wb);
             let roll = sub(rel, scale(n, dot(rel, n)));
             let lr = length(roll);
-            if lr > 1.0e-9 {
+            if lr > TANGENT_MIN {
                 self.angular_friction(m, scale(roll, det::div(1.0, lr)), bound);
             }
         }
