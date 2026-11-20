@@ -95,6 +95,7 @@ fn rust_type(ty: &AbiType, types_path: &str) -> String {
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "str".into(),
         AbiType::Object { .. } => "vesper_port_abi::OpaqueObject<'static>".into(),
+        AbiType::Extern { name } => format!("{name}<'static>"),
     }
 }
 
@@ -387,6 +388,7 @@ fn error_variant(ty: &AbiType) -> String {
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "Str".into(),
         AbiType::Object { .. } => "Object".into(),
+        AbiType::Extern { name } => name.clone(),
     }
 }
 

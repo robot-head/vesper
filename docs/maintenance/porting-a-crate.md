@@ -174,8 +174,52 @@ library (`src/gauge.rs`, `vesper/gauge.ves`, `tests/gauge.rs`) is the
 pattern: `Meter` holds `repr::Gauge` or `Gauge`, `Samples` holds
 `Vec<repr::Sample>` or `Vec<Sample>`, and the tests run against both builds.
 
-Directives are line comments that start with `// @export`: `abi 3`
-(optionally `abi 3 options`), `instance` and `vsys`. Anything else after
+### Export ABI v4: compiler trees (#1149)
+
+`// @export abi 4` (optionally `abi 4 options`) keeps every v3 form and
+object and adds what compiler-shaped crates need: trees in both directions,
+and Rust data lent to Vesper. It is opt-in, so committed v3 bindings stay
+byte for byte. The manuscript rule is §16.6; `tests/tree_abi.rs` links a
+library into a Rust program and exercises every form.
+
+- **Owned trees.** Each handle type whose fields are copy values, `String`,
+  `Box[T]`, `Option[T]`, `ChunkSeq` of copy values or of handle types, or
+  other such handle types gets `<Type>Tree`, a plain Rust mirror
+  (`Box<_>`, `String`, `Vec<_>`, `Option<_>`, same variant and field names;
+  a positional struct field `0` is `field0`). `<Type>::encode(&tree)` builds
+  the Vesper value once in the library's allocations, and the handle frees
+  it on drop; `<Type>::decode()` (and `<Type>Ref::decode()`) copies one back.
+  This replaces a hand-written flat encoder (lean-syntax's 611-line `Enc`):
+  declare the tree as Vesper enums, encode it once, and walk it in Vesper
+  with borrowed matching (manuscript §4.3), `fn f(in t: Term)` with
+  `match t { Term::App(f, a) => match f { Box(g) => f(in g) .. } }`, which
+  reads the tree in place any number of times.
+- **Lent views of whole trees.** The v2 `<Type>Ref` views read a value in
+  place; in v4 a `ChunkSeq` of handle elements is an `<Elem>Seq<'a>` view
+  (`len`, `get`, `iter`) of `<Elem>Ref<'a>` views instead of an opaque
+  length, so Rust can walk a tree Vesper built without decoding it.
+- **Lent Rust handles.** A `.vsys` extern type declared in the library's
+  `// @export vsys direct rust=<path>` block (`affine extern type World;`
+  with accessor imports such as `fn world_type_count(in w: World) ->
+  ForeignVal[u64];`) may be an `in` parameter of an exported function. The
+  binding's `World<'a>` is made with `World::lend(&value)` from any Rust
+  value; the handle word is its address. The linking crate implements the
+  accessors at `<path>` over the same Rust type
+  (`extern "C" fn world_type_count(w: *const Types) -> u64`). Vesper only
+  passes the word on to the imports. This is how the checker's `World` and
+  `ast::Type` can reach a swapped Vesper module before they are ported.
+
+What it costs (`cargo test --release --test tree_abi -- --ignored
+--nocapture`, a 2,001-node term): the generated encoder runs about 394
+instructions per node against 45 for a flat word stream, because every box
+is its own `calloc` and every string makes and frees a sequence header;
+dropping the tree costs about 181 per node. A borrowed walk in Vesper costs
+about 133 per node. Port a crate's encoder to v4 when the Vesper side needs
+the tree shape (walking it more than once, matching on it), not to save
+boundary time. See `docs/parallel-results/self-host-tree-abi.md`.
+
+Directives are line comments that start with `// @export`: `abi 3` or
+`abi 4` (optionally followed by `options`), `instance` and `vsys`. Anything else after
 `@export` is an error, so a typo cannot be ignored silently. Write them in
 the package's root module (`src/lib.ves`). `abi` in another file of the
 package still applies, with a warning (ports placed it in the file that
@@ -198,6 +242,8 @@ What is exportable today:
   handle), and `String` fields of handles.
 - Handle types (non-`copy` structs and enums, affine or linear), with
   sequence, box, `Option` and nested handle fields.
+- With `abi 4`: `in` parameters of the library's `.vsys` extern types,
+  lent by Rust.
 - Instances of generic functions.
 
 Everything else is refused, with a message that names the function

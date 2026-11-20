@@ -23,6 +23,9 @@
 use super::*;
 use std::fmt::Write as _;
 
+#[path = "binding_v4.rs"]
+mod v4;
+
 struct Gen<'a> {
     interface: &'a LibraryInterface,
     options: &'a BindingOptions,
@@ -168,6 +171,7 @@ impl Gen<'_> {
             AbiType::Seq { elem } => format!("&mut Vec<{}>", self.copy_type(elem)),
             AbiType::Str { .. } if !inout => "&str".into(),
             AbiType::Str { .. } => "&mut String".into(),
+            AbiType::Extern { name } => format!("{name}<'_>"),
             ty if self.handle(ty).is_some() => {
                 let name = &self.handle(ty).expect("handle").name;
                 match p.pass() {
@@ -238,6 +242,16 @@ impl Gen<'_> {
             );
         }
         match ty {
+            // v4 (#1149): handle elements read in place.
+            AbiType::Seq { elem }
+                if self.interface.is_v4() && v4::seq_of_handles(self, elem).is_some() =>
+            {
+                let name = &v4::seq_of_handles(self, elem).expect("checked").name;
+                (
+                    format!("{name}Seq<'a>"),
+                    format!("unsafe {{ {name}Seq::from_handle({base}[{offset}]) }}"),
+                )
+            }
             // Elements Rust does not read (#1087): only the length.
             AbiType::Seq { elem } if self.owning(elem) => (
                 "vesper_port_abi::OpaqueSeq<'a>".into(),
@@ -577,6 +591,12 @@ impl Gen<'_> {
                     ));
                     args.push(format!("{seq} as i64"));
                 }
+                // v4 (#1149): the lent Rust value's address.
+                AbiType::Extern { .. } if p.pointer => {
+                    let _ = writeln!(out, "    let mut {arg} = [{n}.word()];");
+                    args.push(format!("{arg}.as_mut_ptr()"));
+                }
+                AbiType::Extern { .. } => args.push(format!("{n}.word() as i64")),
                 ty if self.handle(ty).is_some() => match p.pass() {
                     // v3 (#1087): lent as the caller's own words.
                     "in" if p.in_place => {
@@ -911,6 +931,9 @@ pub(super) fn generate(interface: &LibraryInterface, options: &BindingOptions) -
     for decl in interface.types.values().filter(|d| d.handle) {
         g.handle_type(&mut out, decl);
     }
+    if interface.is_v4() {
+        v4::items(&g, &mut out);
+    }
     if interface.is_v3() {
         g.mirrors(&mut out);
         for (m, words) in g.option_mirrors() {
@@ -949,6 +972,9 @@ pub(super) fn generate(interface: &LibraryInterface, options: &BindingOptions) -
         "    fn {}(capacity: i64, stride: i64) -> i64;\n    fn {}(seq: i64) -> i64;\n    fn {}() -> i64;",
         runtime.seq_new, runtime.seq_free, runtime.live_allocations
     );
+    if let Some(box_new) = &runtime.box_new {
+        let _ = writeln!(out, "    fn {box_new}(size: i64) -> i64;");
+    }
     for decl in interface.types.values() {
         if let Some(symbol) = &decl.drop_symbol {
             let _ = writeln!(out, "    fn {symbol}(value: *mut u64) -> i64;");

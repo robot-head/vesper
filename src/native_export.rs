@@ -142,6 +142,12 @@ pub const EXPORT_ABI_V2: &str = "vesper.native.export-abi/2";
 /// Version of a library that opts into in-place mirrors
 /// (`// @export abi 3`).
 pub const EXPORT_ABI_V3: &str = "vesper.native.export-abi/3";
+/// Version of a library that opts into compiler trees (`// @export abi 4`,
+/// #1149): everything v3 has, plus owned Rust trees of its handle types
+/// (`<Type>Tree`, encoded and decoded once), readable sequences of handles
+/// in lent views, `box_new` in the runtime, and `.vsys` extern-type handles
+/// that Rust lends to an `in` parameter.
+pub const EXPORT_ABI_V4: &str = "vesper.native.export-abi/4";
 
 /// Builtin types whose Rust counterparts live in `vesper-port-abi`, with
 /// the variant order that crate hard-codes.
@@ -252,6 +258,13 @@ pub enum AbiType {
     /// block `{vtable, value}` (manuscript §7.3); Rust never reads it, and
     /// the handle's drop glue drops the value through the vtable.
     Object {
+        name: String,
+    },
+    /// v4: an opaque `.vsys` extern-type handle (#1065) that Rust lends to
+    /// an `in` parameter (#1149): one word, the address of a Rust value
+    /// that Vesper reads only through the library's accessor imports, which
+    /// the linking Rust crate implements.
+    Extern {
         name: String,
     },
 }
@@ -374,6 +387,10 @@ pub struct RuntimeSymbols {
     pub seq_free: String,
     /// `live_allocations() -> i64`: live sequence and box allocations.
     pub live_allocations: String,
+    /// v4: `box_new(size) -> box`: a zeroed box of `size` bytes, which a
+    /// Rust-encoded tree (`<Type>Tree`) hands to Vesper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub box_new: Option<String>,
 }
 
 /// v2: an imported `.vsys` library whose symbols the linking crate provides.
@@ -416,9 +433,15 @@ impl LibraryInterface {
         self.abi == EXPORT_ABI_V2 || self.is_v3()
     }
 
-    /// Whether the library uses export ABI v3 (in-place mirrors).
+    /// Whether the library uses export ABI v3 (in-place mirrors) or later
+    /// (v4 libraries are v3 libraries).
     pub fn is_v3(&self) -> bool {
-        self.abi == EXPORT_ABI_V3
+        self.abi == EXPORT_ABI_V3 || self.is_v4()
+    }
+
+    /// Whether the library uses export ABI v4 (compiler trees, #1149).
+    pub fn is_v4(&self) -> bool {
+        self.abi == EXPORT_ABI_V4
     }
 
     /// Whether `ty` is a copy struct with a `#[repr(C)]` mirror.
@@ -466,6 +489,7 @@ pub fn plan_with(
         library,
         types: BTreeMap::new(),
         v2: false,
+        v4: directives.abi == Some(4),
         foreign: directives.vsys.iter().map(|v| v.library.clone()).collect(),
     };
     let mut errors = vec![];
@@ -547,7 +571,8 @@ pub fn plan_with(
     if !errors.is_empty() {
         return Err(errors);
     }
-    let v3 = directives.abi == Some(3);
+    let v4 = directives.abi == Some(4);
+    let v3 = directives.abi == Some(3) || v4;
     let options = v3 && directives.option_mirrors;
     let v2 = v3 || planner.v2 || !directives.vsys.is_empty() || !directives.instances.is_empty();
     if v3 {
@@ -588,7 +613,9 @@ pub fn plan_with(
         })
         .collect();
     Ok(LibraryInterface {
-        abi: if v3 {
+        abi: if v4 {
+            EXPORT_ABI_V4
+        } else if v3 {
             EXPORT_ABI_V3
         } else if v2 {
             EXPORT_ABI_V2
@@ -603,6 +630,7 @@ pub fn plan_with(
             seq_new: format!("vesper_{library}_seq_new"),
             seq_free: format!("vesper_{library}_seq_free"),
             live_allocations: format!("vesper_{library}_live_allocations"),
+            box_new: v4.then(|| format!("vesper_{library}_box_new")),
         }),
         foreign,
         option_mirrors: options,
@@ -615,6 +643,8 @@ struct Planner<'a> {
     types: BTreeMap<String, TypeDecl>,
     /// Whether any v2 form was used.
     v2: bool,
+    /// `// @export abi 4`: `.vsys` extern-type handles may be lent `in`.
+    v4: bool,
     /// Imported `.vsys` library names.
     foreign: Vec<String>,
 }
@@ -731,6 +761,14 @@ impl Planner<'_> {
             ty: source.to_string(),
             reason: reason.into(),
         };
+        if matches!(ty, AbiType::Extern { .. }) {
+            return match position {
+                Position::Param(Pass::In) => Ok(()),
+                _ => Err(refuse(
+                    "is an opaque .vsys extern-type handle; Rust lends one only to an `in` parameter (export ABI v4)",
+                )),
+            };
+        }
         if !self.owning(ty) {
             return Ok(());
         }
@@ -810,8 +848,12 @@ impl Planner<'_> {
                 })
             })
         {
+            // v4 (#1149): Rust lends its own value as the handle word.
+            if self.v4 {
+                return Ok(AbiType::Extern { name: n.clone() });
+            }
             return Err(refuse(
-                "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports)",
+                "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports, or, with `// @export abi 4`, is lent `in` by Rust)",
             ));
         }
         match ty {
@@ -1056,7 +1098,7 @@ fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
         AbiType::Seq { .. } | AbiType::Str { owned: true } => true,
         AbiType::Scalar { .. } | AbiType::Slice { .. } | AbiType::Str { owned: false } => false,
         // A boxed object's value may own anything; its vtable drops it.
-        AbiType::Object { .. } => false,
+        AbiType::Object { .. } | AbiType::Extern { .. } => false,
         AbiType::Tuple { items } => items.iter().any(|t| holds_sequence(t, types)),
         AbiType::Box { inner } => holds_sequence(inner, types),
         AbiType::Named { name, args } => {
@@ -1074,7 +1116,8 @@ pub(crate) fn owning(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
         | AbiType::Box { .. }
         | AbiType::Str { .. }
         | AbiType::Object { .. } => true,
-        AbiType::Scalar { .. } => false,
+        // Lent by Rust, never owned by the value that holds it.
+        AbiType::Scalar { .. } | AbiType::Extern { .. } => false,
         AbiType::Tuple { items } => items.iter().any(|t| owning(t, types)),
         AbiType::Named { name, args } => {
             types.get(name).is_some_and(|d| d.handle) || args.iter().any(|t| owning(t, types))
@@ -1088,7 +1131,8 @@ pub(crate) fn abi_words(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> u32
         AbiType::Scalar { .. }
         | AbiType::Seq { .. }
         | AbiType::Box { .. }
-        | AbiType::Object { .. } => 1,
+        | AbiType::Object { .. }
+        | AbiType::Extern { .. } => 1,
         AbiType::Slice { .. } | AbiType::Str { .. } => 3,
         AbiType::Tuple { items } => items
             .iter()

@@ -672,7 +672,9 @@ impl Flow<'_> {
                 let mut pass = *pass;
                 if pass == Pass::Sink
                     && self.scrutinees.contains(&i.dest)
-                    && s.slots.get(root).is_some_and(|slot| slot.pass != Pass::Sink)
+                    && s.slots
+                        .get(root)
+                        .is_some_and(|slot| slot.pass != Pass::Sink)
                     && self.mode(&i.ty) != Mode::Copy
                 {
                     pass = Pass::In;

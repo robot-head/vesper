@@ -2997,7 +2997,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 Ok(())
             }
             PatternKind::Wild => {
-                if !self.in_fip_fn && !self.borrowed_bind && crate::fip::type_contains_box(self.world, ty) {
+                if !self.in_fip_fn
+                    && !self.borrowed_bind
+                    && crate::fip::type_contains_box(self.world, ty)
+                {
                     self.drop_box_value(value, ty)?;
                 }
                 Ok(())

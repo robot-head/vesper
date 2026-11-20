@@ -86,7 +86,11 @@ fn native_runs(name: &str, source: &str, expected: u64, evaluate: bool) {
         let got = native::jit_with_options(&c.world, "main", optimize)
             .unwrap_or_else(|e| panic!("{name}: JIT (optimize {optimize}) failed: {e}"))
             .to_string();
-        assert_eq!(got, expected.to_string(), "{name}: JIT (optimize {optimize})");
+        assert_eq!(
+            got,
+            expected.to_string(),
+            "{name}: JIT (optimize {optimize})"
+        );
         assert!(
             fip::native_runtime::alloc_count() > 0,
             "{name}: the program allocates boxes"
