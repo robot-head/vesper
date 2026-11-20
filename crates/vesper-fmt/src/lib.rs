@@ -149,6 +149,9 @@ fn guarded_lex(
     }
     let mut stack = Vec::new();
     let mut path_counts = vec![0usize];
+    // Per delimiter level: the chain count where the latest `if` that does
+    // not continue an `else` started.
+    let mut if_bases: Vec<Option<usize>> = vec![None];
     let mut previous = None;
     // A block closed at the current level; the next token there decides
     // whether the chain continues (`{..} + x`, `}.f()`, `} else`) or a new
@@ -169,8 +172,22 @@ fn guarded_lex(
         // into one parent component. Child commas/semicolons cannot reset an
         // ancestor's expression chain (e.g. f(1,2)+f(1,2)+...).
         let counter = path_counts.last_mut().ok_or(Error::Conservation)?;
-        if std::mem::take(&mut after_block) && !continues_chain(token.kind, text) {
+        let closed_block = std::mem::take(&mut after_block);
+        if closed_block && token.kind == K::Else {
+            // `} else` goes back to where its `if` started: every arm of an
+            // `else if` chain is one component of the same expression, so a
+            // chain of any length counts like a single `if`.
+            if let Some(base) = if_bases.last().copied().flatten() {
+                *counter = base;
+            }
+        } else if closed_block && !continues_chain(token.kind, text) {
             *counter = 0;
+        }
+        if token.kind == K::If
+            && previous != Some(K::Else)
+            && let Some(base) = if_bases.last_mut()
+        {
+            *base = Some(*counter);
         }
         if matches!(token.kind, K::Semi | K::Comma) {
             *counter = 0;
@@ -189,6 +206,7 @@ fn guarded_lex(
             K::LParen | K::LBracket | K::LBrace => {
                 stack.push(token.kind);
                 path_counts.push(0);
+                if_bases.push(None);
                 if stack.len() > limits.max_depth.min(24) {
                     return Err(Error::DepthLimit);
                 }
@@ -205,6 +223,7 @@ fn guarded_lex(
                     });
                 }
                 path_counts.pop();
+                if_bases.pop();
                 if stack.is_empty() {
                     path_counts[0] = 0;
                 }
