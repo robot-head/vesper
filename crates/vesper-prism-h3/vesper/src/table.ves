@@ -11,6 +11,15 @@ use self::static_table::{
     static_ends
 };
 
+// 32-bit FNV-1a, folded to one of `buckets()` (256) buckets.
+const FNV_OFFSET_BASIS: u64 = 2166136261;
+const FNV_PRIME: u64 = 16777619;
+const BUCKET_MASK: u64 = 255;
+// RFC 9204 §3.2.1: an entry's size is its name and value lengths plus 32.
+const ENTRY_OVERHEAD: u64 = 32;
+// compact() waits for at least this many evicted slots.
+const COMPACT_MIN_SLOTS: u64 = 16;
+
 pub fn static_count() -> u64 {
     99
 }
@@ -31,11 +40,11 @@ fn buckets() -> u64 {
 
 // FNV-1a over the name, folded to a bucket.
 fn name_hash(in name: Slice[u8]) -> u64 {
-    let mut h: u64 = 2166136261;
+    let mut h: u64 = FNV_OFFSET_BASIS;
     for k in 0..name.len() {
-        h = wrapping_mul(h ^ widen_u64(byte(in name, k)), 16777619);
+        h = wrapping_mul(h ^ widen_u64(byte(in name, k)), FNV_PRIME);
     }
-    (h ^ (h >> 16)) & 255
+    (h ^ (h >> 16)) & BUCKET_MASK
 }
 
 fn static_name_at(in s: Static, i: u64, in name: Slice[u8]) -> bool {
@@ -92,7 +101,7 @@ pub fn static_new() -> Static {
             ) {
                 break;
             }
-            b = inc(b) & 255;
+            b = inc(b) & BUCKET_MASK;
         }
     }
     s
@@ -133,7 +142,7 @@ pub fn static_name(in s: Static, in name: Slice[u8]) -> Option[u64] {
         if static_name_at(in s, i, in name) {
             return Option::Some(i);
         }
-        b = inc(b) & 255;
+        b = inc(b) & BUCKET_MASK;
     }
     Option::None
 }
@@ -222,7 +231,7 @@ pub fn slot_value_hi(in t: Table, slot: u64) -> u64 {
 pub fn slot_size(in t: Table, slot: u64) -> u64 {
     wrapping_add(
         wrapping_add(word(in t.nlen.as_slice(), slot), word(in t.vlen.as_slice(), slot)),
-        32
+        ENTRY_OVERHEAD
     )
 }
 
@@ -285,7 +294,7 @@ fn shift_words(inout s: ChunkSeq[u64], from: u64) {
 // table, so eviction stays O(1) amortized.
 fn compact(inout t: Table) {
     let n = t.lo.len();
-    if t.head < 16 || wrapping_mul(t.head, 2) < n {
+    if t.head < COMPACT_MIN_SLOTS || wrapping_mul(t.head, 2) < n {
         return;
     }
     let base = word(in t.lo.as_slice(), t.head);
@@ -314,7 +323,7 @@ pub fn table_set_capacity(inout t: Table, capacity: u64) {
 
 // Inserts after evicting; the caller has checked that the entry fits.
 pub fn table_insert(inout t: Table, in name: Slice[u8], in value: Slice[u8]) {
-    let needed = wrapping_add(wrapping_add(name.len(), value.len()), 32);
+    let needed = wrapping_add(wrapping_add(name.len(), value.len()), ENTRY_OVERHEAD);
     loop {
         if wrapping_add(t.size, needed) <= t.capacity || t.head >= t.lo.len() {
             break;

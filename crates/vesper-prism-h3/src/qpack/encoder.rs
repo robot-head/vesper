@@ -16,6 +16,8 @@ use super::prefix::{decode_int, encode_int, encode_string};
 #[cfg(not(feature = "vesper-port"))]
 use super::static_table::STATIC_TABLE;
 #[cfg(not(feature = "vesper-port"))]
+use super::wire::*;
+#[cfg(not(feature = "vesper-port"))]
 use super::{Field, QpackError, Reason, Table, encode_ric, entry_size};
 
 /// How the encoder uses the dynamic table.
@@ -104,10 +106,10 @@ impl Encoder {
     pub fn apply_peer_settings(&mut self, max_table_capacity: u64, blocked_streams: u64) {
         self.peer_capacity = max_table_capacity;
         self.peer_blocked = blocked_streams;
-        self.max_entries = max_table_capacity / 32;
+        self.max_entries = max_table_capacity / ENTRY_OVERHEAD;
         let cap = self.cfg.max_table_capacity.min(max_table_capacity);
         if cap > 0 && cap != self.table.capacity() {
-            encode_int(&mut self.out, 0x20, 5, cap);
+            encode_int(&mut self.out, SET_CAPACITY, SET_CAPACITY_PREFIX, cap);
             self.table.set_capacity(cap);
         }
     }
@@ -161,7 +163,7 @@ impl Encoder {
     /// Inserts if the entries that must go are all evictable.
     fn try_insert(&mut self, name: &[u8], value: &[u8]) -> Option<u64> {
         let size = entry_size(name, value);
-        if size * 256 > self.table.capacity() * self.cfg.max_entry_share {
+        if size * ENTRY_SHARE_SCALE > self.table.capacity() * self.cfg.max_entry_share {
             return None;
         }
         let n = self.table.evictions_for(size)?;
@@ -171,14 +173,19 @@ impl Encoder {
         }
         // Instruction: name reference (static or dynamic) or literal name.
         if let Some(i) = static_name(name) {
-            encode_int(&mut self.out, 0xc0, 6, i as u64);
+            encode_int(
+                &mut self.out,
+                INSERT_NAME_REF | INSERT_NAME_REF_STATIC,
+                INSERT_NAME_REF_PREFIX,
+                i as u64,
+            );
         } else if let Some(abs) = self.dynamic_name(name, true) {
             let rel = self.table.insert_count() - abs - 1;
-            encode_int(&mut self.out, 0x80, 6, rel);
+            encode_int(&mut self.out, INSERT_NAME_REF, INSERT_NAME_REF_PREFIX, rel);
         } else {
-            encode_string(&mut self.out, 0x40, 5, name);
+            encode_string(&mut self.out, INSERT_LITERAL, INSERT_LITERAL_PREFIX, name);
         }
-        encode_string(&mut self.out, 0, 7, value);
+        encode_string(&mut self.out, 0, VALUE_PREFIX, value);
         for _ in 0..n {
             self.refs.pop_front();
         }
@@ -227,7 +234,12 @@ impl Encoder {
         for f in fields {
             let exact = static_exact(&f.name, &f.value);
             if let (Some(i), false) = (exact, f.sensitive) {
-                encode_int(&mut lines, 0xc0, 6, i as u64);
+                encode_int(
+                    &mut lines,
+                    INDEXED | INDEXED_STATIC,
+                    INDEXED_PREFIX,
+                    i as u64,
+                );
                 self.stats.static_refs += 1;
                 continue;
             }
@@ -248,9 +260,14 @@ impl Encoder {
                     });
                 if let Some(abs) = abs {
                     if abs < base {
-                        encode_int(&mut lines, 0x80, 6, base - abs - 1);
+                        encode_int(&mut lines, INDEXED, INDEXED_PREFIX, base - abs - 1);
                     } else {
-                        encode_int(&mut lines, 0x10, 4, abs - base);
+                        encode_int(
+                            &mut lines,
+                            INDEXED_POST_BASE,
+                            INDEXED_POST_BASE_PREFIX,
+                            abs - base,
+                        );
                     }
                     let slot = self.slot(abs);
                     self.refs[slot] += 1;
@@ -260,36 +277,62 @@ impl Encoder {
                 }
             }
             // A literal, with a name reference where one exists.
-            let n = if f.sensitive { 0x20 } else { 0 };
+            // The N bit of each literal form (the post-base name reference is
+            // the only one with no pattern bits).
+            let (ref_never, post_never, literal_never) = if f.sensitive {
+                (NAME_REF_NEVER, POST_BASE_NAME_REF_NEVER, LITERAL_NAME_NEVER)
+            } else {
+                (0, 0, 0)
+            };
             self.stats.literals += 1;
             if let Some(i) = static_name(&f.name) {
-                encode_int(&mut lines, 0x50 | n, 4, i as u64);
+                encode_int(
+                    &mut lines,
+                    NAME_REF | NAME_REF_STATIC | ref_never,
+                    NAME_REF_PREFIX,
+                    i as u64,
+                );
             } else if let Some(abs) = use_dynamic
                 .then(|| self.dynamic_name(&f.name, may_block))
                 .flatten()
             {
                 if abs < base {
-                    encode_int(&mut lines, 0x40 | n, 4, base - abs - 1);
+                    encode_int(
+                        &mut lines,
+                        NAME_REF | ref_never,
+                        NAME_REF_PREFIX,
+                        base - abs - 1,
+                    );
                 } else {
-                    encode_int(&mut lines, n >> 2, 3, abs - base);
+                    encode_int(
+                        &mut lines,
+                        post_never,
+                        POST_BASE_NAME_REF_PREFIX,
+                        abs - base,
+                    );
                 }
                 let slot = self.slot(abs);
                 self.refs[slot] += 1;
                 refs.push(abs);
             } else {
-                encode_string(&mut lines, 0x20 | n >> 1, 3, &f.name);
+                encode_string(
+                    &mut lines,
+                    LITERAL_NAME | literal_never,
+                    LITERAL_NAME_PREFIX,
+                    &f.name,
+                );
             }
-            encode_string(&mut lines, 0, 7, &f.value);
+            encode_string(&mut lines, 0, VALUE_PREFIX, &f.value);
         }
         let ric = refs.iter().max().map_or(0, |m| m + 1);
         let mut out = Vec::with_capacity(lines.len() + 4);
-        encode_int(&mut out, 0, 8, encode_ric(ric, self.max_entries));
+        encode_int(&mut out, 0, RIC_PREFIX, encode_ric(ric, self.max_entries));
         if ric == 0 {
             out.push(0);
         } else if base >= ric {
-            encode_int(&mut out, 0, 7, base - ric);
+            encode_int(&mut out, 0, DELTA_BASE_PREFIX, base - ric);
         } else {
-            encode_int(&mut out, 0x80, 7, ric - base - 1);
+            encode_int(&mut out, BASE_NEGATIVE, DELTA_BASE_PREFIX, ric - base - 1);
         }
         out.extend_from_slice(&lines);
         if ric > 0 {
@@ -325,14 +368,20 @@ impl Encoder {
         while at < self.pending.len() {
             let buf = &self.pending[at..];
             let first = buf[0];
-            let bits = if first & 0x80 != 0 { 7 } else { 6 };
+            // Section Acknowledgment has a 7-bit prefix; Stream Cancellation and
+            // Insert Count Increment have 6.
+            let bits = if first & SECTION_ACK != 0 {
+                SECTION_ACK_PREFIX
+            } else {
+                STREAM_CANCEL_PREFIX
+            };
             let (value, n) = match decode_int(buf, bits) {
                 Ok(v) => v,
                 Err(super::prefix::PrefixError::Incomplete) => break,
                 Err(e) => return Err(self.fail(Reason::from(e))),
             };
             at += n;
-            if first & 0x80 != 0 {
+            if first & SECTION_ACK != 0 {
                 // Section Acknowledgment.
                 let Some(i) = self.outstanding.iter().position(|s| s.stream_id == value) else {
                     return Err(self.fail(Reason::UnexpectedAcknowledgment(value)));
@@ -340,7 +389,7 @@ impl Encoder {
                 let s = self.outstanding.remove(i).expect("found");
                 self.known_received = self.known_received.max(s.ric);
                 self.release(s);
-            } else if first & 0x40 != 0 {
+            } else if first & STREAM_CANCEL != 0 {
                 // Stream Cancellation.
                 while let Some(i) = self.outstanding.iter().position(|s| s.stream_id == value) {
                     let s = self.outstanding.remove(i).expect("found");
@@ -363,8 +412,7 @@ impl Encoder {
             }
         }
         self.pending.drain(..at);
-        // Decoder instructions are at most 10 bytes.
-        if self.pending.len() > 16 {
+        if self.pending.len() > MAX_PENDING_INSTRUCTION {
             return Err(self.fail(Reason::InstructionTooLong));
         }
         Ok(())
