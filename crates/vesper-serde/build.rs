@@ -26,7 +26,11 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // lemire.ves: every Eisel-Lemire and Clinger result flips its low bit.
     ("lemire", "f.mantissa | sign", "(f.mantissa ^ 1) | sign"),
     // index.ves: the scalar parser refuses `e+` exponents.
-    ("index", "if s == ASCII_PLUS || s == ASCII_MINUS {", "if s == ASCII_MINUS {"),
+    (
+        "index",
+        "if s == ASCII_PLUS || s == ASCII_MINUS {",
+        "if s == ASCII_MINUS {",
+    ),
     // stage2.ves: stage 2 refuses fractions.
     (
         "stage2",
