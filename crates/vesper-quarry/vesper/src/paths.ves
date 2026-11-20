@@ -43,6 +43,13 @@ use self::stats::{
     pages
 };
 
+// Access path costs (spec/planner-ddl.md): scan `1000·pages(n) + 10·n`,
+// index `1000·height(n) + 1010·m`, index join
+// `1000·height(n)·keys + 1010·rows`.
+const PAGE_COST: u64 = 1000;
+const SCAN_ROW_COST: u64 = 10;
+const INDEX_ROW_COST: u64 = 1010;
+
 // Collect the scans (by binding) and, for each join, its right-hand scan:
 // scans[binding] = node; joins records (rhs binding, join node).
 // Scans of plan n by binding into `scans` (pre-filled with none), and
@@ -167,7 +174,10 @@ pub fn access_paths_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: S
         let mut outer = none();
         let mut outer_slot = none();
         let mut rows = n;
-        let mut cost = wrapping_add(wrapping_mul(1000, pages(n)), wrapping_mul(10, n));
+        let mut cost = wrapping_add(
+            wrapping_mul(PAGE_COST, pages(n)),
+            wrapping_mul(SCAN_ROW_COST, n)
+        );
         let base = cw(in q.rows, 0);
         // Index paths.
         for i in 0..nidx {
@@ -181,7 +191,10 @@ pub fn access_paths_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: S
                     let st = analyze(inout ds, inout q, d, k);
                     let bk = bound_kind(in q, bd);
                     let m = index_rows(in ds, in q, bd, bk, st, n);
-                    let c = wrapping_add(wrapping_mul(1000, height(n)), wrapping_mul(1010, m));
+                    let c = wrapping_add(
+                        wrapping_mul(PAGE_COST, height(n)),
+                        wrapping_mul(INDEX_ROW_COST, m)
+                    );
                     let at = wrapping_add(base, wrapping_mul(i, 6));
                     let no = ex(in q, at);
                     let nl = ex(in q, wrapping_add(at, 1));
@@ -241,8 +254,8 @@ pub fn access_paths_run(inout q: Q, inout ds: D, in prog: Slice[u64], in text: S
                                             ceil_div(wrapping_mul(kk, st.nonnull), st.distinct)
                                         };
                                         let c = wrapping_add(
-                                            wrapping_mul(wrapping_mul(1000, height(n)), kk),
-                                            wrapping_mul(1010, probe)
+                                            wrapping_mul(wrapping_mul(PAGE_COST, height(n)), kk),
+                                            wrapping_mul(INDEX_ROW_COST, probe)
                                         );
                                         let at = wrapping_add(base, wrapping_mul(i, 6));
                                         let no = ex(in q, at);

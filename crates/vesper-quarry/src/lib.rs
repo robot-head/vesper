@@ -216,11 +216,14 @@ pub(crate) fn bound(n: usize, max: usize, what: &str) -> Result<()> {
         Ok(())
     }
 }
+/// Identifiers are at most this many bytes.
+const MAX_IDENTIFIER_LEN: usize = 128;
+
 pub(crate) fn identifier(s: &str) -> Result<String> {
     let mut bytes = s.bytes();
     if !matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
         || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        || s.len() > 128
+        || s.len() > MAX_IDENTIFIER_LEN
     {
         return Err(Error::new(
             ErrorKind::Syntax,

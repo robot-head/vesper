@@ -130,8 +130,17 @@ pub fn analyze(inout ds: D, inout q: Q, d: u64, k: u64) -> Stat {
 
 pub fn continue_none() {}
 
+// spec/planner-ddl.md: `pages(n) = max(1, ceil(n / 64))` and
+// `height(n) = 1 + ceil(log_128(pages(n)))`.
+const ROWS_PER_PAGE: u64 = 64;
+const INDEX_FANOUT: u64 = 128;
+// spec/planner-ddl.md: with an unknown parameter, a range keeps
+// `ceil(n / 10)` rows and a one-sided bound `ceil(n / 4)`.
+const RANGE_SELECTIVITY: u64 = 10;
+const ONE_SIDED_SELECTIVITY: u64 = 4;
+
 pub fn pages(n: u64) -> u64 {
-    let p = ceil_div(n, 64);
+    let p = ceil_div(n, ROWS_PER_PAGE);
     if p == 0 {
         1
     } else {
@@ -148,7 +157,7 @@ pub fn height(n: u64) -> u64 {
         if reach >= p {
             break;
         }
-        reach = wrapping_mul(reach, 128);
+        reach = wrapping_mul(reach, INDEX_FANOUT);
         h = wrapping_add(h, 1);
     }
     h
@@ -310,9 +319,9 @@ pub fn index_rows(in ds: D, in q: Q, b: Bound, kind: u64, s: Stat, n: u64) -> u6
                 ceil_div(n, s.distinct)
             }
         } else if kind == 1 {
-            ceil_div(n, 10)
+            ceil_div(n, RANGE_SELECTIVITY)
         } else {
-            ceil_div(n, 4)
+            ceil_div(n, ONE_SIDED_SELECTIVITY)
         };
     }
     let mut m: u64 = 0;
