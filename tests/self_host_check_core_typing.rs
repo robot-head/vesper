@@ -110,11 +110,14 @@ fn relation_pairs(w: &World) -> Vec<(Type, Type)> {
     pairs
 }
 
+/// One `infer` case: the generics and the (expected, actual) pairs.
+type InferCase = (Vec<vesper::ast::Generic>, Vec<(Type, Type)>);
+
 /// `infer` cases of a world: for each generic function, its parameters (and
 /// result) against (a) themselves with the generics bound to world types,
 /// (b) unrelated world types, (c) integer literals on bare generic
 /// parameters, which merge into one representative literal.
-fn infer_cases(w: &World) -> Vec<(Vec<vesper::ast::Generic>, Vec<(Type, Type)>)> {
+fn infer_cases(w: &World) -> Vec<InferCase> {
     let mut ts = world_types(w);
     ts.sort_by_cached_key(|t| format!("{t:?}"));
     let mut cases = vec![];
@@ -168,28 +171,32 @@ fn infer_cases(w: &World) -> Vec<(Vec<vesper::ast::Generic>, Vec<(Type, Type)>)>
 }
 
 fn rust_relations(w: &World) -> String {
+    normalize(&relations_text(&relation_pairs(w), &infer_cases(w)))
+}
+
+fn relations_text(pairs: &[(Type, Type)], cases: &[InferCase]) -> String {
     let mut out = String::new();
-    for (a, b) in relation_pairs(w) {
-        let (j, errors) = probe::join_types(&a, &b);
+    for (a, b) in pairs {
+        let (j, errors) = probe::join_types(a, b);
         out.push_str(&format!(
             "P {} {} {}\nJ {j:?} {errors}\nR {:?}\n",
-            bit(vesper::check::compatible(&a, &b)),
-            bit(vesper::check::compatible(&b, &a)),
-            bit(probe::unresolved(&a)),
-            probe::refine_annotation(&a, &b),
+            bit(vesper::check::compatible(a, b)),
+            bit(vesper::check::compatible(b, a)),
+            bit(probe::unresolved(a)),
+            probe::refine_annotation(a, b),
         ));
     }
-    for (generics, pairs) in infer_cases(w) {
+    for (generics, pairs) in cases {
         let mut vars = BTreeMap::new();
-        for (e, a) in &pairs {
-            probe::infer(e, a, &generics, &mut vars);
+        for (e, a) in pairs {
+            probe::infer(e, a, generics, &mut vars);
         }
         for (k, v) in &vars {
             out.push_str(&format!("V {k} {v:?}\n"));
         }
         out.push_str("-\n");
     }
-    normalize(&out)
+    out
 }
 
 fn relations_input(w: &World) -> Vec<u8> {
@@ -275,18 +282,22 @@ fn pattern_cases(w: &World) -> Vec<(Type, Vec<Pattern>)> {
 }
 
 fn rust_patterns(w: &World) -> String {
+    patterns_text(w, &world_types(w), &pattern_cases(w))
+}
+
+fn patterns_text(w: &World, ts: &[Type], cases: &[(Type, Vec<Pattern>)]) -> String {
     let mut out = String::new();
-    for t in world_types(w) {
-        out.push_str(&format!("U {}\n", bit(probe::is_uninhabited(w, &t))));
+    for t in ts {
+        out.push_str(&format!("U {}\n", bit(probe::is_uninhabited(w, t))));
     }
-    for (t, pats) in pattern_cases(w) {
+    for (t, pats) in cases {
         let rows: Vec<Vec<Pattern>> = pats.iter().map(|p| vec![p.clone()]).collect();
-        let types = std::slice::from_ref(&t);
+        let types = std::slice::from_ref(t);
         out.push_str(&format!(
             "C {}\n",
             bit(probe::matrix_covered(w, &rows, types))
         ));
-        for p in &pats {
+        for p in pats {
             let row = [vec![p.clone()]];
             out.push_str(&format!(
                 "I {}\n",
@@ -388,9 +399,10 @@ fn unoptimized_agrees() {
     }
 }
 
-/// ABBA wall time of both tasks over the corpus (inputs encoded up front;
-/// the Rust side includes building its case lists, as the Vesper side
-/// includes decoding them). `CHECK_HARNESS_SPEED=1`.
+/// ABBA wall time of both tasks over the corpus. Both sides get their cases
+/// built up front (Rust: the type and pattern lists; Vesper: the encoded
+/// input, whose decoding it pays) and both produce the same text.
+/// `CHECK_HARNESS_SPEED=1`.
 #[test]
 #[ignore]
 fn speed_relations_and_patterns() {
@@ -401,12 +413,20 @@ fn speed_relations_and_patterns() {
     let pat = package().entry("core_typing_patterns", true);
     let rel_in: Vec<Vec<u8>> = corpus().iter().map(|c| relations_input(&c.world)).collect();
     let pat_in: Vec<Vec<u8>> = corpus().iter().map(|c| patterns_input(&c.world)).collect();
+    let rel_cases: Vec<_> = corpus()
+        .iter()
+        .map(|c| (relation_pairs(&c.world), infer_cases(&c.world)))
+        .collect();
+    let pat_cases: Vec<_> = corpus()
+        .iter()
+        .map(|c| (world_types(&c.world), pattern_cases(&c.world)))
+        .collect();
     abba(
         "relations",
         &mut || {
             time(|| {
-                for c in corpus() {
-                    std::hint::black_box(rust_relations(&c.world));
+                for (pairs, cases) in &rel_cases {
+                    std::hint::black_box(relations_text(pairs, cases));
                 }
             })
         },
@@ -422,8 +442,8 @@ fn speed_relations_and_patterns() {
         "patterns",
         &mut || {
             time(|| {
-                for c in corpus() {
-                    std::hint::black_box(rust_patterns(&c.world));
+                for (c, (ts, cases)) in corpus().iter().zip(&pat_cases) {
+                    std::hint::black_box(patterns_text(&c.world, ts, cases));
                 }
             })
         },
