@@ -18,7 +18,7 @@ use std::{
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
-use vesper::{check, fip, native, parser, runtime::Runtime};
+use vesper::{check, fip, native, parser, runtime::Runtime, seq::native_runtime as seq_runtime};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -82,6 +82,7 @@ fn native_runs(name: &str, source: &str, expected: u64, evaluate: bool) {
     }
     for optimize in [true, false] {
         fip::native_runtime::reset_counts();
+        let stray = seq_runtime::stray_frees();
         let got = native::jit_with_options(&c.world, "main", optimize)
             .unwrap_or_else(|e| panic!("{name}: JIT (optimize {optimize}) failed: {e}"))
             .to_string();
@@ -94,6 +95,11 @@ fn native_runs(name: &str, source: &str, expected: u64, evaluate: bool) {
             fip::native_runtime::free_count(),
             fip::native_runtime::alloc_count(),
             "{name}: JIT (optimize {optimize}) must free every box exactly once"
+        );
+        assert_eq!(
+            seq_runtime::stray_frees(),
+            stray,
+            "{name}: JIT (optimize {optimize}) freed a string or sequence that was not live"
         );
     }
     if links() {
@@ -408,4 +414,48 @@ fn f(sink e: Expr) -> u64 {
 fn main() -> u64 { 0 }
 ";
     assert_eq!(codes(src), ["E0303"]);
+}
+
+// ---------------------------------------------------------------------------
+// Strings bound by a borrowed match belong to the matched value: an unused
+// binding frees nothing (the executable runs under the allocator's checks,
+// and the string is read again after each call).
+
+const STRINGS: &str = "enum Term {
+    Nat(u64),
+    Lam {
+        name: String,
+        body: Box[Term]
+    }
+}
+
+fn lam_only(in t: Term) -> u64 {
+    match t {
+        Term::Lam { name, body } => 1,
+        _ => 0,
+    }
+}
+
+fn name_len(in t: Term) -> u64 {
+    match t {
+        Term::Lam { name, body } => name.len(),
+        _ => 0,
+    }
+}
+
+fn main() -> u64 {
+    let mut s = String::new();
+    s.push_str(\"a string long enough to own a buffer\");
+    let t = Term::Lam { name: s, body: Box::new(Term::Nat(1)) };
+    let a = lam_only(in t);
+    let b = name_len(in t);
+    let c = lam_only(in t);
+    let d = name_len(in t);
+    wrapping_add(wrapping_add(a, b), wrapping_add(c, d))
+}
+";
+
+#[test]
+fn borrowed_string_bindings_are_not_freed() {
+    native_runs("strings", STRINGS, 2 + 2 * 36, true);
 }

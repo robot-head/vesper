@@ -2724,6 +2724,8 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
         return plan;
     }
     let mut refused = BTreeSet::new();
+    // A borrowed `match` binds borrows: its owner frees the payloads.
+    let borrowed = borrowed_scrutinees(f);
     let defs: BTreeMap<ValueId, &Op> = f
         .blocks
         .iter()
@@ -2784,6 +2786,7 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
                 // A binding owns its value unless the value is a borrow; a
                 // `Box` pattern frees its box as it binds.
                 if matches!(defs.get(value), Some(Op::Read { pass, .. }) if *pass != Pass::Sink)
+                    || borrowed.contains(value)
                     || (!matches!(pattern.kind, PatternKind::Bind(_))
                         && pattern_has_box(world, pattern))
                 {
@@ -2872,6 +2875,15 @@ pub fn temporary_drops(
             && matches!(value_defs.get(value), Some(Op::Read { pass, .. }) if *pass != Pass::Sink)
         {
             borrow_bound.insert(n.clone());
+        }
+    }
+    // So are the names a borrowed `match` binds (§4.3).
+    let borrowed = borrowed_scrutinees(f);
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        if let Op::Bind { pattern, value } = &inst.op
+            && borrowed.contains(value)
+        {
+            pattern_bound_names(pattern, &mut borrow_bound);
         }
     }
     let mut uses: BTreeMap<ValueId, Uses> = BTreeMap::new();
