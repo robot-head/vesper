@@ -23,10 +23,10 @@ fn run_suites(suites: &[(&str, u64)]) {
 fn standard_library_packages() {
     run_suites(&[
         ("packages/vesper-std/collections", 52),
-        ("packages/vesper-std/fmt", 86),
+        ("packages/vesper-std/fmt", 90),
         ("packages/vesper-std/graph", 68),
         ("packages/vesper-std/hash", 42),
-        ("packages/vesper-std/sort", 60),
+        ("packages/vesper-std/sort", 64),
         ("packages/vesper-std/tests", 3),
     ]);
 }

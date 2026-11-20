@@ -695,20 +695,20 @@ fn standard_library_core_and_byte_source_unit_tests_pass() {
         ("packages/vesper-std/core/src/lib.ves", 23),
         ("packages/vesper-std/core/src/option.ves", 27),
         ("packages/vesper-std/core/src/result.ves", 13),
-        ("packages/vesper-std/core/src/saturating.ves", 128),
-        ("packages/vesper-std/fmt/src/lib.ves", 58),
+        ("packages/vesper-std/core/src/saturating.ves", 130),
+        ("packages/vesper-std/fmt/src/lib.ves", 62),
     ]);
 }
 
 #[test]
 fn standard_library_collection_source_unit_tests_pass() {
     check_source_unit_tests(&[
-        ("packages/vesper-std/arena/src/lib.ves", 19),
+        ("packages/vesper-std/arena/src/lib.ves", 23),
         ("packages/vesper-std/collections/src/flat_table.ves", 10),
         ("packages/vesper-std/collections/src/radix_seq.ves", 13),
         ("packages/vesper-std/graph/src/util.ves", 9),
         ("packages/vesper-std/hash/src/fast.ves", 23),
-        ("packages/vesper-std/intern/src/lib.ves", 15),
+        ("packages/vesper-std/intern/src/lib.ves", 33),
         ("packages/vesper-std/sort/src/unstable.ves", 23),
     ]);
 }
