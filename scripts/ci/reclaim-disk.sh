@@ -13,11 +13,14 @@
 # VESPER_CI_MIN_FREE_GB, it also drops Bazel's output tree with `bazel clean`;
 # the remote cache refills it. Nothing here skips or changes a test.
 #
-# Usage: reclaim-disk.sh [report]   (`report` only prints disk use)
+# Usage: reclaim-disk.sh [report|watch]
+#   report: only print disk use
+#   watch:  print free space every 2 minutes until killed (run it in the
+#           background), so a run that dies shows how full the disk was
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-min_free_gb="${VESPER_CI_MIN_FREE_GB:-30}"
+min_free_gb="${VESPER_CI_MIN_FREE_GB:-20}"
 tmp="${TMPDIR:-/tmp}"
 
 free_gb() {
@@ -30,6 +33,12 @@ report() {
   output_base="$(bazel info output_base 2>/dev/null || true)"
   timeout 120 du -sh "$tmp" "$HOME" ${output_base:+"$output_base"} 2>/dev/null || true
 }
+
+if [[ "${1:-}" == watch ]]; then
+  while sleep 120; do
+    echo "reclaim-disk: $(date -u +%H:%M:%S) $(free_gb) GB free"
+  done
+fi
 
 if [[ "${1:-}" == report ]]; then
   report "disk use"
