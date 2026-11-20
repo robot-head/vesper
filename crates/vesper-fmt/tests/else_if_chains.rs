@@ -19,7 +19,11 @@ fn long_else_if_chains_format_and_are_idempotent() {
         let out = format_source(&source, Limits::default())
             .unwrap_or_else(|e| panic!("{arms} arms: {e}"))
             .output;
-        assert_eq!(out.matches("} else if k == ").count(), arms - 1, "{arms} arms");
+        assert_eq!(
+            out.matches("} else if k == ").count(),
+            arms - 1,
+            "{arms} arms"
+        );
         let again = format_source(&out, Limits::default()).unwrap();
         assert!(!again.changed, "{arms} arms: not idempotent");
     }
@@ -41,6 +45,7 @@ fn chains_inside_expressions_still_count() {
     let arms = (1..60)
         .map(|i| format!(" else if k == {i} {{ {i} }}"))
         .collect::<String>();
-    let nested = format!("fn g(k: u64) -> u64 {{ h({{ if k == 0 {{ 0 }}{arms} else {{ 9 }} }}) }}\n");
+    let nested =
+        format!("fn g(k: u64) -> u64 {{ h({{ if k == 0 {{ 0 }}{arms} else {{ 9 }} }}) }}\n");
     format_source(&nested, Limits::default()).unwrap();
 }

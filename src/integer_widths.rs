@@ -27,6 +27,13 @@
 //! `sshr` in the kind's own width ([`lower_bit_builtin_calls`]).
 //! `wrapping_neg_k(x: k) -> k` (P3b gaps lane 7, #1092) is `0 - x` modulo
 //! the width, like Rust's `wrapping_neg`, lowered to one `ineg`.
+//!
+//! The checked builtins (SH1 lane 5, #1148) are reserved prelude functions
+//! of the same kind: `checked_add_k`, `checked_sub_k` and `checked_mul_k`
+//! take two `k` operands and return `Option[k]`, `None` exactly where `+`,
+//! `-` or `*` would raise `Fail[ArithOverflow]`, like Rust's `checked_add`.
+//! They are total: the source bodies use wrapping operators, comparisons,
+//! widening and `mul_wide` only ([`checked_builtin`]).
 use crate::ast::*;
 use crate::numeric::IntegerKind;
 use std::collections::BTreeSet;
@@ -66,6 +73,13 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
             }
         }
     }
+    // The 64-bit `checked_mul_k` bodies call `mul_wide`.
+    if used
+        .iter()
+        .any(|n| checked_builtin(n).is_some_and(|(op, k)| op == CheckedOp::Mul && k.bits() == 64))
+    {
+        used.insert(MUL_WIDE.to_string());
+    }
     let source: String = used
         .iter()
         .filter(|n| !defined.contains(*n))
@@ -73,6 +87,7 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
             crate::numeric::byte_order_source(n)
                 .or_else(|| wide_source(n))
                 .or_else(|| bit_source(n))
+                .or_else(|| checked_source(n))
         })
         .map(|f| f + "\n")
         .collect();
@@ -242,6 +257,112 @@ fn bit_source(name: &str) -> Option<String> {
             )
         }
     })
+}
+
+/// A checked builtin ([module docs](self)): `checked_add_k`, `checked_sub_k`
+/// and `checked_mul_k` return `Option[k]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+/// The checked builtin families, by name prefix (the suffix is the kind).
+pub const CHECKED_BUILTINS: [(&str, CheckedOp); 3] = [
+    ("checked_add_", CheckedOp::Add),
+    ("checked_sub_", CheckedOp::Sub),
+    ("checked_mul_", CheckedOp::Mul),
+];
+
+/// The checked builtin spelled `name`, with its integer kind.
+pub fn checked_builtin(name: &str) -> Option<(CheckedOp, IntegerKind)> {
+    CHECKED_BUILTINS.iter().find_map(|(prefix, op)| {
+        let kind = IntegerKind::from_name(name.strip_prefix(prefix)?)?;
+        Some((*op, kind))
+    })
+}
+
+impl CheckedOp {
+    /// The reference result: `None` where the checked operator overflows.
+    pub fn eval(self, kind: IntegerKind, a: i128, b: i128) -> Option<i128> {
+        let exact = match self {
+            Self::Add => a + b,
+            Self::Sub => a - b,
+            Self::Mul => a * b,
+        };
+        (kind.min()..=kind.max()).contains(&exact).then_some(exact)
+    }
+}
+
+/// The portable source of the checked builtin `name` (see [`CheckedOp`]).
+/// Every operation in it is total, so the function needs no `Fail`.
+fn checked_source(name: &str) -> Option<String> {
+    let (op, kind) = checked_builtin(name)?;
+    let k = kind.name();
+    let head = format!("fn {name}(a: {k}, b: {k}) -> Option[{k}]");
+    let some = |v: &str| format!("Option::Some({v})");
+    let body = match (op, kind.signed(), kind.bits()) {
+        // Unsigned: a carry out of the top bit leaves the sum below `a`.
+        (CheckedOp::Add, false, _) => format!(
+            "let s: {k} = wrapping_add(a, b); if s < a {{ Option::None }} else {{ {} }}",
+            some("s")
+        ),
+        (CheckedOp::Sub, false, _) => format!(
+            "if b > a {{ Option::None }} else {{ {} }}",
+            some("wrapping_sub(a, b)")
+        ),
+        // Signed: overflow flips the sign of a sum of like-signed operands,
+        // or of a difference of unlike-signed ones.
+        (CheckedOp::Add | CheckedOp::Sub, true, _) => {
+            let (wrap, like) = if op == CheckedOp::Add {
+                ("wrapping_add", "==")
+            } else {
+                ("wrapping_sub", "!=")
+            };
+            format!(
+                "let s: {k} = {wrap}(a, b); \
+                 if (a < 0) {like} (b < 0) && (s < 0) != (a < 0) {{ Option::None }} else {{ {} }}",
+                some("s")
+            )
+        }
+        // Narrow kinds: the exact product fits in 64 bits.
+        (CheckedOp::Mul, false, bits) if bits <= 32 => format!(
+            "let p: u64 = wrapping_mul(widen_u64(a), widen_u64(b)); \
+             if p > {} {{ Option::None }} else {{ {} }}",
+            kind.max(),
+            some(&format!("wrapping_{k}(p)"))
+        ),
+        (CheckedOp::Mul, true, bits) if bits <= 32 => format!(
+            "let p: i64 = wrapping_mul(widen_i64(a), widen_i64(b)); \
+             if p < {} || p > {} {{ Option::None }} else {{ {} }}",
+            kind.min(),
+            kind.max(),
+            some(&format!("wrapping_{k}(p)"))
+        ),
+        // 64-bit kinds: the high word of the full product of the magnitudes.
+        (CheckedOp::Mul, false, _) => format!(
+            "let (lo, hi) = mul_wide(wrapping_u64(a), wrapping_u64(b)); \
+             if hi != 0 {{ Option::None }} else {{ {} }}",
+            some(&format!("wrapping_{k}(lo)"))
+        ),
+        (CheckedOp::Mul, true, _) => format!(
+            "let zero: {k} = 0; \
+             let ua: u64 = if a < 0 {{ wrapping_u64(wrapping_sub(zero, a)) }} else {{ wrapping_u64(a) }}; \
+             let ub: u64 = if b < 0 {{ wrapping_u64(wrapping_sub(zero, b)) }} else {{ wrapping_u64(b) }}; \
+             let (lo, hi) = mul_wide(ua, ub); \
+             let limit: u64 = 9223372036854775807; \
+             if hi != 0 {{ Option::None }} \
+             else if (a < 0) != (b < 0) {{ \
+                 if lo > wrapping_add(limit, 1) {{ Option::None }} \
+                 else {{ {} }} }} \
+             else if lo > limit {{ Option::None }} \
+             else {{ {} }}",
+            some(&format!("wrapping_{k}(wrapping_sub(0, lo))")),
+            some(&format!("wrapping_{k}(lo)"))
+        ),
+    };
+    Some(format!("{head} {{ {body} }}"))
 }
 
 /// Native lowering of the bit builtins: every Place IR call of a reserved

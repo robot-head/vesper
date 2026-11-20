@@ -258,6 +258,7 @@ impl Generator<'_> {
             | SeqOp::Wide(_)
             | SeqOp::SumBe16
             | SeqOp::BytesEq
+            | SeqOp::BytesCmp
             | SeqOp::FindByte
             | SeqOp::FindEither
             | SeqOp::FindNotIn

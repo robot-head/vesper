@@ -81,7 +81,9 @@ fn cmp_orders_byte_views_like_memcmp_on_every_backend() {
     let mut state = 7u64;
     let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = vec![];
     for len in 0..40usize {
-        let a: Vec<u8> = (0..len).map(|_| b'a' + next(&mut state) as u8 % 3).collect();
+        let a: Vec<u8> = (0..len)
+            .map(|_| b'a' + next(&mut state) as u8 % 3)
+            .collect();
         pairs.push((a.clone(), a.clone()));
         let mut longer = a.clone();
         longer.push(b'a');

@@ -129,7 +129,10 @@ fn main() -> u64 {
     let sub = (0..=255u8)
         .filter(|a| (*a as i8).checked_sub(100).is_some())
         .count() as u64;
-    assert_eq!(agree("checked_loop", source), add + mul * 1000 + sub * 1_000_000);
+    assert_eq!(
+        agree("checked_loop", source),
+        add + mul * 1000 + sub * 1_000_000
+    );
 }
 
 #[test]

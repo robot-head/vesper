@@ -99,7 +99,11 @@ pub fn agree(name: &str, source: &str) -> u64 {
     assert_eq!(&x86[..4], b"\x7fELF", "{name}: x86-64 object");
     let (arm, _) =
         native::object_for_target(&c.world, "main", Some("aarch64-unknown-linux-gnu")).unwrap();
-    assert_eq!(u16::from_le_bytes([arm[18], arm[19]]), 183, "{name}: AArch64 object");
+    assert_eq!(
+        u16::from_le_bytes([arm[18], arm[19]]),
+        183,
+        "{name}: AArch64 object"
+    );
     let value: u64 = values[0]
         .1
         .parse()

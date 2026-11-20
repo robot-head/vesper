@@ -2209,14 +2209,24 @@ impl Parser<'_> {
         let mut arms = vec![];
         while !self.at(K::RBrace) && !self.at(K::Eof) {
             let before = self.pos;
-            let pat = self.pattern();
+            // `p | q => e` is one arm per alternative sharing the body: the
+            // AST holds consecutive arms whose bodies are the same expression
+            // (same span), which the checker groups again.
+            let mut alternatives = vec![self.pattern()];
+            while self.eat(K::Pipe) {
+                alternatives.push(self.pattern());
+            }
             self.expect(K::FatArrow);
             let outer_values = self.bound_values.mark();
-            pattern_bindings(&pat, &mut self.bound_values);
+            for pat in &alternatives {
+                pattern_bindings(pat, &mut self.bound_values);
+            }
             let body = self.expr();
             let block_body = matches!(body.kind, ExprKind::Block { .. });
             self.bound_values.restore(outer_values);
-            arms.push((pat, body));
+            for pat in alternatives {
+                arms.push((pat, body.clone()));
+            }
             if !self.eat(K::Comma) && !self.at(K::RBrace) && !(block_body && self.pos > before) {
                 self.error("expected ',' between match arms");
                 break;
