@@ -214,6 +214,7 @@ corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
 | Swap | Lane | Whole corpus wall | Whole corpus Ir | Swapped module alone | Report |
 |---|---|--:|--:|---|---|
 | `parse` (front end v2 + AST, read back into `Parse`) | SH1-12 (#1155) | 1.03x | 1.06x | 1.00x wall, 1.19x Ir over 911 sources | [self-host-parser-swap.md](../parallel-results/self-host-parser-swap.md) |
+| `pact` declaration pass (part 1, not swapped yet) | SH2-13 (#1185) | n/a | n/a | 0 differences on 1,874 cases; like-for-like timing comes with the swap | [self-host-check-pact.md](../parallel-results/self-host-check-pact.md) |
 
 ## Estimates
 
