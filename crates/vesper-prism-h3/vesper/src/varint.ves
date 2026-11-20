@@ -12,17 +12,28 @@ use self::prefix::{
     max_int
 };
 
+// QUIC variable-length integers (RFC 9000 §16): the top two bits of the
+// first byte give the length (1, 2, 4 or 8 bytes), the rest is the value.
+const VI_PREFIX_SHIFT: u64 = 6;
+const VI_VALUE_MASK: u64 = 0x3f;
+const VI1_LIMIT: u64 = 64;
+const VI2_LIMIT: u64 = 16384;
+const VI4_LIMIT: u64 = 1073741824;
+const VI2_PREFIX: u64 = 0x40;
+const VI4_PREFIX: u64 = 0x80;
+const VI8_PREFIX: u64 = 0xc0;
+
 // The varint at `buf[at]`, or `None` if the buffer ends inside it.
 pub fn vdec(in buf: Slice[u8], at: u64) -> Option[Num] {
     if at >= buf.len() {
         return Option::None;
     }
     let first = widen_u64(byte(in buf, at));
-    let len = shl(1, shr(first, 6));
+    let len = shl(1, shr(first, VI_PREFIX_SHIFT));
     if wrapping_sub(buf.len(), at) < len {
         return Option::None;
     }
-    let mut v = first & 63;
+    let mut v = first & VI_VALUE_MASK;
     let base = inc(at);
     for k in 0..wrapping_sub(len, 1) {
         v = shl(v, 8) | widen_u64(byte(in buf, wrapping_add(base, k)));
@@ -37,18 +48,18 @@ pub fn vdec(in buf: Slice[u8], at: u64) -> Option[Num] {
 
 // Appends `v` in its shortest form; false (nothing written) above 2^62 - 1.
 pub fn vput(inout out: ChunkSeq[u8], v: u64) -> bool {
-    if v < 64 {
+    if v < VI1_LIMIT {
         out.push(wrapping_u8(v));
-    } else if v < 16384 {
-        out.push(wrapping_u8(shr(v, 8) | 64));
+    } else if v < VI2_LIMIT {
+        out.push(wrapping_u8(shr(v, 8) | VI2_PREFIX));
         out.push(wrapping_u8(v));
-    } else if v < 1073741824 {
-        out.push(wrapping_u8(shr(v, 24) | 128));
+    } else if v < VI4_LIMIT {
+        out.push(wrapping_u8(shr(v, 24) | VI4_PREFIX));
         out.push(wrapping_u8(shr(v, 16)));
         out.push(wrapping_u8(shr(v, 8)));
         out.push(wrapping_u8(v));
     } else if v <= max_int() {
-        out.push(wrapping_u8(shr(v, 56) | 192));
+        out.push(wrapping_u8(shr(v, 56) | VI8_PREFIX));
         out.push(wrapping_u8(shr(v, 48)));
         out.push(wrapping_u8(shr(v, 40)));
         out.push(wrapping_u8(shr(v, 32)));
