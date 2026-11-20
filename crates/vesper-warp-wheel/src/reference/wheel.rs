@@ -76,7 +76,9 @@ impl<T> Wheel<T> {
         if !(1..=MAX_SLOT_BITS).contains(&config.slot_bits) {
             return Err(WheelConfigError::SlotBits(config.slot_bits));
         }
-        if config.levels == 0 || u32::from(config.levels) * u32::from(config.slot_bits) > MAX_SPAN_BITS {
+        if config.levels == 0
+            || u32::from(config.levels) * u32::from(config.slot_bits) > MAX_SPAN_BITS
+        {
             return Err(WheelConfigError::Levels(config.levels));
         }
         if config.capacity == 0 || config.capacity > MAX_CAPACITY {
