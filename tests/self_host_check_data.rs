@@ -20,7 +20,7 @@ type Subst = (Type, Vec<(String, Type)>);
 /// arguments of every instance of the ADT the world mentions, and each
 /// function type with an open row whose tail is bound to a row (its own
 /// instances again, which `substitute_effects` must not duplicate, plus one
-/// more and a new tail).
+/// more and a new tail), and empty substitutions of function types.
 fn substitutions(w: &World, types: &[Type]) -> Vec<Subst> {
     let mut out = vec![];
     for t in types {
@@ -58,6 +58,32 @@ fn substitutions(w: &World, types: &[Type]) -> Vec<Subst> {
         }
     }
     out.truncate(4000);
+    // An empty substitution still normalizes function rows: a repeated
+    // instance is dropped (and any function type in the world, as is).
+    let fail = Effect {
+        label: None,
+        name: "Fail".into(),
+        args: vec![Type::named("u8")],
+    };
+    out.push((
+        Type::Function {
+            params: vec![],
+            result: Box::new(Type::unit()),
+            effects: Effects {
+                instances: vec![fail.clone(), fail],
+                tail: None,
+            },
+            mode: Mode::Copy,
+        },
+        vec![],
+    ));
+    out.extend(
+        types
+            .iter()
+            .filter(|t| matches!(t, Type::Function { .. }))
+            .take(200)
+            .map(|t| (t.clone(), vec![])),
+    );
     out
 }
 

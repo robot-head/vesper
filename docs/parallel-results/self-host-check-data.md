@@ -58,7 +58,7 @@ with no diagnostics: **281 worlds** on this base (272 at the census base).
 
 | Task | Rust | Lines compared | Worlds differing |
 | --- | --- | --: | --: |
-| `check_data_types` | `Display`, `Debug`, `numeric::default_type` of every type each world mentions; `ast::substitute` of every ADT field under every instance's arguments, and of every open-row function type with its tail bound to a row (its own instances again plus one) | 22,631 | 0 |
+| `check_data_types` | `Display`, `Debug`, `numeric::default_type` of every type each world mentions; `ast::substitute` of every ADT field under every instance's arguments, and of every open-row function type with its tail bound to a row (its own instances again plus one), and empty substitutions of function types (Rust still drops repeated row instances there) | 23,381 | 0 |
 | `check_data_world` | `World::mode` (no bounds and under each ADT's generic bounds), `vector::layout_words`, `World::field` for each type's field names, a segment, tuple indices and a missing name, effectful rows, `World::constructor` (bare, qualified, wrongly qualified, missing), and for every expression span and its neighbour the expression type and partial/overflow membership | 1,571,515 | 0 |
 
 The JIT with the optimizer off returns the same text as with it on, on

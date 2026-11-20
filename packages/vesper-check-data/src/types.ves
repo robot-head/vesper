@@ -750,11 +750,10 @@ impl Vars {
     }
 }
 
-// `ast::substitute`.
+// `ast::substitute`. There is no shortcut for an empty substitution: Rust
+// still runs `substitute_effects` on every function row, which drops
+// repeated instances.
 pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
-    if vars.is_empty() {
-        return ty;
-    }
     let n = t.node(ty);
     if n.kind == K_NAMED {
         if n.n == 0 {
