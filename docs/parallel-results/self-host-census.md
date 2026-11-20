@@ -93,11 +93,32 @@ better number.
 
 ### Instruction counts (callgrind)
 
-(Callgrind runs in progress; this table is filled in before merge.)
+Collected only inside the measured call (`--toggle-collect`), over every
+tenth corpus world (27 worlds, `CENSUS_STRIDE=10`), one pass. The Vesper
+column is the run minus a zero-round run (input decode only); the lowering
+rows subtract a run on an empty plan (the JIT compile of the entry).
+
+| Sample | Rust Ir | Vesper Ir | Vesper / Rust |
+|---|--:|--:|--:|
+| Layout | 3,875,946 | 2,068,424 | 0.53 |
+| Region checks | 1,072,686 | 981,709 | 0.92 |
+| IR check | 4,874,866,876 | 2,553,014,754 | 0.52 |
+| Lowering, emission only (whole plan) | 23,588,735 | 55,420,391 | 2.35 |
+| Lowering, emission and Cranelift compile | 557,211,507 | 590,100,153 | 1.06 |
+
+The instruction counts agree with the wall clock that Vesper is faster on all
+three checker samples. Layout's wall ratio (0.34x) is lower than its
+instruction ratio (0.53x); this census did not look into why.
 
 ## Stage 1 guard evidence
 
-(The bootstrap-stage1 workflow run on this branch is linked here before merge.)
+None of the guarded paths are touched (the PR changes only
+`docs/`). The bootstrap-stage1 workflow ran on this branch at `74910a4`:
+[run 44654924275](https://github.com/robot-head/vesper/actions/runs/44654924275).
+"Stage 1 reproducibility and cross-backend ratchet" (a fresh
+`bootstrap/run.sh stage1 --reproduce --outcome`, compared with
+`bootstrap/stage1.lock` by `compare_outcome`) and "Stage 0 two-seed build
+and Path B" both passed, so every verified artifact digest equals the lock.
 
 ## Compiler gaps
 
