@@ -161,6 +161,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 13 (#1185): the trait frontend's declaration
+        # pass in Vesper over the same corpus. Anchored globs.
+        "test/self_host_check_pact": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -476,6 +483,8 @@ vesper_crate(
         # The checker data differential (#1176) checks every corpus world.
         "test/self_host_check_data": "long",
         "test/self_host_check_harness": "long",
+        # The trait declaration differential (#1185) checks every corpus world.
+        "test/self_host_check_pact": "long",
     },
 )
 
