@@ -156,3 +156,36 @@ fn prop_must_be_small(x: i64) -> bool {
         temp.0.join(capsule).display()
     );
 }
+
+#[test]
+fn anvil_mutation_gate_replays_property_tests() {
+    // A property-only suite: before property replay, every well-typed
+    // mutant of `max_of` survived because no test ran against it.
+    let src = r#"
+fn max_of(a: i64, b: i64) -> i64 {
+    if a > b { a } else { b }
+}
+
+@test(cases = 64)
+fn prop_max_is_upper_bound(a: i64, b: i64) -> bool {
+    let m = max_of(a, b);
+    m >= a && m >= b && (m == a || m == b)
+}
+"#;
+    let temp = TempDir::new(&[("prop_only.ves", src)]);
+    let out = vesper(
+        &temp.0,
+        &["test", "prop_only.ves", "--mutate", "--no-cache", "--json"],
+    );
+    let report = parse_json(&out);
+    assert_eq!(report["mode"], "mutate", "report: {report}");
+    let killed = report["killed"].as_u64().unwrap();
+    assert!(killed >= 1, "no mutant was killed: {report}");
+    let mutants = report["mutants"].as_array().expect("mutant reports");
+    assert!(
+        mutants
+            .iter()
+            .any(|m| m["killed_by"] == "prop_max_is_upper_bound"),
+        "no mutant was killed by the property test: {report}"
+    );
+}

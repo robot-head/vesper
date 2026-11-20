@@ -671,10 +671,67 @@ struct FileUnitTests {
     source: String,
     report: UnitTestFileReport,
     selected: Vec<(String, Span)>,
+    /// Property and SimPulse tests that passed on the baseline, replayed
+    /// against every well-typed mutant after the unit tests.
+    replay: Vec<ReplayTest>,
     /// Every test function of the file, whatever its mode or the filter:
     /// mutation testing never mutates these.
     test_names: BTreeSet<String>,
     parsed_items: Vec<Item>,
+}
+
+/// A non-unit test the mutation gate replays against each mutant.
+#[derive(Clone)]
+enum ReplayTest {
+    Property {
+        name: String,
+        cases: usize,
+        explicit: Vec<Vec<Value>>,
+    },
+    SimPulse {
+        name: String,
+        schedules: usize,
+        profile: String,
+        seed: u64,
+    },
+}
+
+impl ReplayTest {
+    /// Runs the test on a mutant's world; `Err` names the test and why it failed.
+    fn run(&self, world: &World, fuel: u64) -> Result<(), (String, String)> {
+        match self {
+            ReplayTest::Property {
+                name,
+                cases,
+                explicit,
+            } => {
+                let outcome = run_property_test(world, name, *cases, explicit, fuel);
+                if outcome.passed {
+                    Ok(())
+                } else {
+                    Err((
+                        name.clone(),
+                        outcome
+                            .failure_message
+                            .unwrap_or_else(|| "property failed".into()),
+                    ))
+                }
+            }
+            ReplayTest::SimPulse {
+                name,
+                schedules,
+                profile,
+                seed,
+            } => {
+                let outcome = run_simpulse_test_on_world(world, name, *schedules, profile, *seed);
+                if outcome.passed {
+                    Ok(())
+                } else {
+                    Err((name.clone(), "SimPulse schedule failed".into()))
+                }
+            }
+        }
+    }
 }
 
 fn collect_files(target: &Path) -> Result<Vec<(String, String)>, String> {
@@ -721,6 +778,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    replay: vec![],
                     test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
@@ -741,6 +799,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    replay: vec![],
                     test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
@@ -797,6 +856,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    replay: vec![],
                     test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
@@ -808,6 +868,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
         let mut case_reports: BTreeMap<String, UnitTestCaseReport> = BTreeMap::new();
         let mut unit_batch_selected: Vec<(String, Span)> = Vec::new();
         let mut unit_plans: BTreeMap<String, HarnessPlan> = BTreeMap::new();
+        let mut replay: Vec<ReplayTest> = Vec::new();
 
         for test in &selected_tests {
             let (line, column) = location(&source, test.span.start);
@@ -975,6 +1036,12 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     let passed = outcome.passed;
                     if !passed {
                         all_passed = false;
+                    } else {
+                        replay.push(ReplayTest::Property {
+                            name: test.name.clone(),
+                            cases: cases_n,
+                            explicit: explicit.clone(),
+                        });
                     }
                     let mut capsule = None;
                     let mut message = if passed {
@@ -1065,6 +1132,13 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     let passed = outcome.passed;
                     if !passed {
                         all_passed = false;
+                    } else {
+                        replay.push(ReplayTest::SimPulse {
+                            name: test.name.clone(),
+                            schedules,
+                            profile: profile.to_string(),
+                            seed: test.plan.seed,
+                        });
                     }
                     let message = if passed {
                         format!(
@@ -1165,6 +1239,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 error: None,
             },
             selected: unit_selected_pairs,
+            replay,
             test_names: all_test_names,
             parsed_items: parsed.module.items,
         });
@@ -1404,10 +1479,11 @@ fn collect_mutants_in_fn(
 
 fn collect_file_mutants(unit: &FileUnitTests) -> Vec<MutantCandidate> {
     // Mutants are replayed against the file's unit and budget-gate tests
-    // only (`unit.selected`). A file with none of those would report every
+    // (`unit.selected`) and its passing property and SimPulse tests
+    // (`unit.replay`). A file with none of those would report every
     // well-typed mutant as surviving without running a test, so it gets no
-    // mutants; property and SimPulse replay is not implemented yet.
-    if unit.selected.is_empty() {
+    // mutants.
+    if unit.selected.is_empty() && unit.replay.is_empty() {
         return Vec::new();
     }
     let test_names: std::collections::BTreeSet<&str> =
@@ -1479,7 +1555,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
     let total_candidates = all_candidates.len();
     if total_candidates == 0 {
         return Err(format!(
-            "no mutation sites found outside test functions in {} (mutants are replayed against unit and budget-gate tests only)",
+            "no mutation sites found outside test functions in {} (mutants are replayed against unit, budget-gate, property and SimPulse tests)",
             opts.path
         ));
     }
@@ -1519,9 +1595,19 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                 }
             }
             Ok((_, checked)) => {
-                let (passed, cases) =
+                let (unit_passed, cases) =
                     run_tests_on_world(&mutated, &checked.world, &unit.selected, opts.fuel, false);
-                if passed {
+                let mut killer = cases
+                    .into_iter()
+                    .find(|c| !c.passed)
+                    .map(|k| (k.name, k.message));
+                if unit_passed {
+                    killer = unit
+                        .replay
+                        .iter()
+                        .find_map(|t| t.run(&checked.world, opts.fuel).err());
+                }
+                if killer.is_none() {
                     survived += 1;
                     MutantReport {
                         index: idx,
@@ -1533,11 +1619,10 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                         replacement: cand.replacement.clone(),
                         status: MutantStatus::Survived,
                         killed_by: None,
-                        detail: Some("all unit tests still passed".into()),
+                        detail: Some("all replayed tests still passed".into()),
                     }
                 } else {
                     killed += 1;
-                    let killer = cases.into_iter().find(|c| !c.passed);
                     MutantReport {
                         index: idx,
                         file: cand.file.clone(),
@@ -1547,8 +1632,8 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                         original: cand.original.clone(),
                         replacement: cand.replacement.clone(),
                         status: MutantStatus::Killed,
-                        killed_by: killer.as_ref().map(|k| k.name.clone()),
-                        detail: killer.map(|k| k.message),
+                        killed_by: killer.as_ref().map(|k| k.0.clone()),
+                        detail: killer.map(|k| k.1),
                     }
                 }
             }
