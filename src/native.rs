@@ -3472,6 +3472,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                             let value = self.expr(&e)?;
                             if *pass == Pass::Sink && path.is_empty() {
                                 self.seq_drop_moved(root);
+                            } else if *pass == Pass::Sink
+                                && self.needs_drop(&ty)
+                                && self.split_place(&e).is_none()
+                                && self.seq_drop_slot_kind(root).is_some_and(|k| {
+                                    matches!(
+                                        k,
+                                        crate::fip::SeqDrop::Owned | crate::fip::SeqDrop::Fields
+                                    )
+                                })
+                            {
+                                let ptr = self.address(&e)?;
+                                self.seq_drop_field_moved(root, ptr, &ty);
                             }
                             value
                         }
@@ -7060,7 +7072,21 @@ impl<M: Module> Codegen<'_, '_, M> {
             for exit in self.exits.iter_mut().skip(h.control.exits_depth) {
                 exit.at = None;
             }
+            // So are the strings and sequences they own (#1145). The clause
+            // is emitted without those slots, so that a failure it raises
+            // does not free them again; the body's own code after this
+            // point (never reached once `raise` aborts) keeps them.
+            self.seq_drop_exit(h.control.exits_depth)?;
         }
+        let unwound: Vec<Vec<SeqDropSlot>> = if effect == "Fail" {
+            self.exits
+                .iter_mut()
+                .skip(h.control.exits_depth)
+                .map(|exit| std::mem::take(&mut exit.drops))
+                .collect()
+        } else {
+            vec![]
+        };
         let captures = self.copy_bindings(&h.captured, &h.captured_types)?;
         let old_vars = std::mem::replace(&mut self.vars, captures);
         let old_types = std::mem::replace(&mut self.local_types, h.captured_types.clone());
@@ -7157,6 +7183,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         // resumed body has freed them already).
         self.free_sink_blocks_within(Some(index))?;
         self.jump(h.control.dispatch, &[output.into()]);
+        for (exit, drops) in self
+            .exits
+            .iter_mut()
+            .skip(h.control.exits_depth)
+            .zip(unwound)
+        {
+            exit.drops = drops;
+        }
         self.b.switch_to_block(entry);
         if let Some(state) = h.state {
             self.def_var(state, self.b.block_params(entry)[1]);

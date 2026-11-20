@@ -2642,7 +2642,7 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
         } else if param.is_some() && needs_drop(world, ty) {
             SeqDrop::Owned
         } else if matches!(ty, Type::Named(n, _) if world.adts.contains_key(n))
-            && crate::seq::holds_sequence(world, ty)
+            && (crate::seq::holds_sequence(world, ty) || needs_drop(world, ty))
             && param.is_none()
         {
             SeqDrop::Fields
@@ -2693,8 +2693,13 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
                 root, path, pass, ..
             } if *pass == Pass::Sink => {
                 // Reading a field that owns nothing (such as `w.k`) copies
-                // it out and leaves the struct's drops alone.
-                if (!path.is_empty() && may_need_drop(world, &inst.ty))
+                // it out and leaves the struct's drops alone. Moving an
+                // owning field out of an owned aggregate empties that
+                // field in place, so the aggregate's drop frees the rest
+                // (#1145); any other partial move is not tracked.
+                if (!path.is_empty()
+                    && may_need_drop(world, &inst.ty)
+                    && !matches!(plan.get(root), Some(SeqDrop::Owned | SeqDrop::Fields)))
                     || plan.get(root) == Some(&SeqDrop::Str)
                 {
                     refused.insert(root.clone());
@@ -2828,7 +2833,8 @@ pub fn temporary_drops(
                     root, path, pass, ..
                 } => {
                     *pass == Pass::Sink
-                        && path.is_empty()
+                        && (path.is_empty()
+                            || matches!(plan.get(root), Some(SeqDrop::Owned | SeqDrop::Fields)))
                         && match plan.get(root) {
                             // A move out of an aggregate copies it and
                             // empties the source.
@@ -2856,6 +2862,19 @@ pub fn temporary_drops(
                     .filter(|a| a.pass != Pass::Sink && a.place.is_none())
                     .map(|a| a.value)
                     .collect(),
+                // A sequence or string operation that reads its `in`
+                // operands into a scalar (`f().len()`) borrows them; one
+                // whose result could be a view into them does not.
+                Op::Seq { args, .. }
+                    if matches!(&crate::numeric::default_type(&inst.ty),
+                        Type::Named(n, a) if a.is_empty()
+                            && (crate::numeric::is_scalar_name(n) || n == "bool")) =>
+                {
+                    args.iter()
+                        .filter(|a| a.pass == Pass::In && a.place.is_none())
+                        .map(|a| a.value)
+                        .collect()
+                }
                 _ => vec![],
             };
             let mut owning = crate::ir_inline::operands(&inst.op);

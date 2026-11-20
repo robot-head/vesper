@@ -42,7 +42,10 @@ fn execute(source: &str) -> String {
         );
         results.push(value);
     }
-    assert_eq!(results[0], results[1], "optimized and unoptimized JIT disagree");
+    assert_eq!(
+        results[0], results[1],
+        "optimized and unoptimized JIT disagree"
+    );
     let evaluated = Runtime::new(&w).run("main", vec![]).unwrap().to_string();
     assert_eq!(evaluated, results[0], "the evaluator and the JIT disagree");
     for target in ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"] {

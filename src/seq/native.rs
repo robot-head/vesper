@@ -46,9 +46,9 @@ fn seq_field_offsets(world: &World, layout: &Layout, base: i32, out: &mut Vec<i3
         return false;
     };
     for f in fields {
-        if seq::is_seq_type(&f.ty) {
+        if seq::is_seq_type(&f.ty) || crate::strings::is_string_type(&f.ty) {
             out.push(base + f.offset);
-        } else if !seq::holds_sequence(world, &f.ty) {
+        } else if !seq::holds_sequence(world, &f.ty) && !crate::fip::needs_drop(world, &f.ty) {
             continue;
         } else if seq::is_slice_type(&f.ty)
             || !seq_field_offsets(world, &f.layout, base + f.offset, out)
@@ -185,6 +185,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             .cloned()
     }
 
+    /// The kind of the drop slot that local `name` names, if it has one.
+    pub(super) fn seq_drop_slot_kind(&self, name: &str) -> Option<crate::fip::SeqDrop> {
+        self.seq_drop_slot(name).map(|s| s.kind)
+    }
+
     /// Frees what drop `slot` holds now: a sequence with the elements still
     /// in it, a string's buffer, or what an owned aggregate holds.
     fn seq_drop_free(&mut self, slot: &SeqDropSlot) -> Result<(), String> {
@@ -221,6 +226,28 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.seq_drop_free(slot)?;
         }
         Ok(())
+    }
+
+    /// A field moved out of an owned aggregate slot (`r.found` by value):
+    /// the read copied it out, so its bytes in the slot are zeroed and the
+    /// slot's drop frees only the fields still in it (§13). `ptr` is the
+    /// address of the moved field; `ty` its type.
+    pub(super) fn seq_drop_field_moved(&mut self, root: &str, ptr: ir::Value, ty: &Type) {
+        let Some(slot) = self.seq_drop_slot(root) else {
+            return;
+        };
+        if !matches!(
+            slot.kind,
+            crate::fip::SeqDrop::Owned | crate::fip::SeqDrop::Fields
+        ) {
+            return;
+        }
+        let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+        let size = Layout::of(self.world, &ty).map_or(0, |l| l.size);
+        for offset in (0..size).step_by(8) {
+            let zero = self.zero();
+            self.seq_set_word(ptr, offset as i32, zero);
+        }
     }
 
     /// A sequence or owned aggregate moved out of local `name` leaves its
