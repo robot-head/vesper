@@ -1553,11 +1553,66 @@ fn path_is_covered(path: &[String], moved: &[Vec<String>]) -> bool {
     moved.iter().any(|m| path.starts_with(m))
 }
 
+/// The `match` scrutinees of `f` that are borrows (§4.3): by-value reads
+/// of a non-copy place rooted at an `in`/`inout` parameter, or at a name
+/// that an earlier borrowed `match` bound. The checker types such a `match`
+/// as a borrow, so its pattern binds `in` borrows: no `Box` it unpacks is
+/// freed and nothing it binds is dropped.
+pub fn borrowed_scrutinees(f: &crate::ir::FunctionIr) -> BTreeSet<ValueId> {
+    use crate::ir::{Op, Terminator};
+    let matched: BTreeSet<ValueId> = f
+        .blocks
+        .iter()
+        .filter_map(|b| match &b.terminator {
+            Terminator::Match { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    let mut names: BTreeSet<String> = f
+        .params
+        .iter()
+        .filter(|p| p.pass != Pass::Sink)
+        .map(|p| p.name.clone())
+        .collect();
+    let mut out = BTreeSet::new();
+    loop {
+        let before = (names.len(), out.len());
+        for i in f.blocks.iter().flat_map(|b| &b.instructions) {
+            match &i.op {
+                Op::Read { root, .. } if matched.contains(&i.dest) && names.contains(root) => {
+                    out.insert(i.dest);
+                }
+                Op::Bind { pattern, value } if out.contains(value) => {
+                    pattern_bound_names(pattern, &mut names);
+                }
+                _ => {}
+            }
+        }
+        if (names.len(), out.len()) == before {
+            return out;
+        }
+    }
+}
+
+fn pattern_bound_names(p: &Pattern, out: &mut BTreeSet<String>) {
+    match &p.kind {
+        PatternKind::Bind(n) => {
+            out.insert(n.clone());
+        }
+        PatternKind::Tuple(ps) => ps.iter().for_each(|p| pattern_bound_names(p, out)),
+        PatternKind::Constructor { fields, .. } => {
+            fields.iter().for_each(|(_, p)| pattern_bound_names(p, out));
+        }
+        PatternKind::Wild | PatternKind::Literal(_) => {}
+    }
+}
+
 fn bind_drop_slots(
     world: &World,
     pat: &Pattern,
     ty: &Type,
     slots: &mut BTreeMap<String, DropSlotState>,
+    pass: Pass,
 ) {
     match &pat.kind {
         PatternKind::Bind(name) => {
@@ -1565,7 +1620,7 @@ fn bind_drop_slots(
                 name.clone(),
                 DropSlotState {
                     ty: ty.clone(),
-                    pass: Pass::Sink,
+                    pass,
                     moved: vec![],
                 },
             );
@@ -1573,14 +1628,14 @@ fn bind_drop_slots(
         PatternKind::Tuple(ps) => {
             if let Type::Tuple(ts) = ty {
                 for (p, t) in ps.iter().zip(ts) {
-                    bind_drop_slots(world, p, t, slots);
+                    bind_drop_slots(world, p, t, slots, pass);
                 }
             }
         }
         PatternKind::Constructor { name, fields, .. } => {
             if is_box_pattern(world, pat) {
                 let inner = box_inner(world, ty).cloned().unwrap_or(Type::Infer);
-                bind_drop_slots(world, &fields[0].1, &inner, slots);
+                bind_drop_slots(world, &fields[0].1, &inner, slots, pass);
                 return;
             }
             if let Some((a, v)) = world.constructor(name) {
@@ -1595,7 +1650,7 @@ fn bind_drop_slots(
                 };
                 for (fnm, sub) in fields {
                     if let Some(f) = v.fields.iter().find(|f| &f.name == fnm) {
-                        bind_drop_slots(world, sub, &substitute(&f.ty, &vars), slots);
+                        bind_drop_slots(world, sub, &substitute(&f.ty, &vars), slots, pass);
                     }
                 }
             }
@@ -2165,6 +2220,7 @@ fn block_drops(
     plan: &mut Elaboration,
 ) -> (BTreeMap<String, DropSlotState>, bool) {
     use crate::ir::{Op, Terminator};
+    let borrowed = borrowed_scrutinees(f);
     let mut owned_values: BTreeMap<ValueId, Type> = BTreeMap::new();
     for &param_id in &f.blocks[b].params {
         if let Some(ty) = f.values.get(&param_id)
@@ -2224,7 +2280,7 @@ fn block_drops(
                 pass,
                 projections,
             } => {
-                if *pass == Pass::Sink {
+                if *pass == Pass::Sink && slots.get(root).is_none_or(|s| s.pass == Pass::Sink) {
                     if let Some(slot) = slots.get_mut(root) {
                         if projections.is_empty() {
                             if !slot.moved.contains(path) {
@@ -2248,7 +2304,14 @@ fn block_drops(
             Op::Bind { pattern, value } => {
                 owned_values.remove(value);
                 let val_ty = f.values.get(value).cloned().unwrap_or(Type::Infer);
-                bind_drop_slots(world, pattern, &val_ty, &mut slots);
+                // A `match` of a borrowed place binds borrows: the place's
+                // owner frees the payloads.
+                let pass = if borrowed.contains(value) {
+                    Pass::In
+                } else {
+                    Pass::Sink
+                };
+                bind_drop_slots(world, pattern, &val_ty, &mut slots, pass);
             }
             Op::Write { place, value, .. } => {
                 owned_values.remove(value);

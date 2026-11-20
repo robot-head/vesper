@@ -1358,6 +1358,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 split: BTreeMap::new(),
                 current_call_slot: None,
                 in_fip_fn: f.fip,
+                borrowed_bind: false,
                 trace_fail,
                 trace_entry: trace_entry.map(|(e, id)| (e.to_owned(), id)),
                 session: None,
@@ -2242,6 +2243,9 @@ struct Codegen<'a, 'b, M: Module> {
     current_call_slot: Option<crate::fip::CallSlot>,
     /// True while emitting code for an `@fip` function (prevents emitting non-FIP drops/frees).
     in_fip_fn: bool,
+    /// Binding a borrowed `match` scrutinee ([`crate::fip::borrowed_scrutinees`]):
+    /// no `Box` is freed and nothing is dropped.
+    borrowed_bind: bool,
     trace_fail: Option<ir::Value>,
     trace_entry: Option<(String, FuncId)>,
     /// Present only while compiling a suspending session entry: external
@@ -2925,7 +2929,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 unreachable!();
             };
             self.bind_ir(bind_dest, slot_index, true, &fields[0].1, inner_val, &inner)?;
-            if !self.in_fip_fn {
+            if !self.in_fip_fn && !self.borrowed_bind {
                 self.fip_box_free(value)?;
             }
             return Ok(());
@@ -2979,7 +2983,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let v = self.load(ptr, &f.ty)?;
                     self.bind_ir(bind_dest, slot_index, inside_box, p, v, &f.ty)?;
                 }
-                if !self.in_fip_fn {
+                if !self.in_fip_fn && !self.borrowed_bind {
                     for f in fs {
                         if !fields.iter().any(|(n, _)| n == &f.name)
                             && crate::fip::type_contains_box(self.world, &f.ty)
@@ -2993,7 +2997,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 Ok(())
             }
             PatternKind::Wild => {
-                if !self.in_fip_fn && crate::fip::type_contains_box(self.world, ty) {
+                if !self.in_fip_fn && !self.borrowed_bind && crate::fip::type_contains_box(self.world, ty) {
                     self.drop_box_value(value, ty)?;
                 }
                 Ok(())
@@ -3125,6 +3129,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut home_pointers = aggregates::HomePointers::new();
         let split_sources = aggregates::split_sources(f, &split_ok);
         // Reads whose split target the read itself bound (`split_copy`).
+        let borrowed_scrutinees = crate::fip::borrowed_scrutinees(f);
         let mut bound_early = BTreeSet::new();
         // Sequence headers read once before the loops that keep them.
         let mut header_hoists = if self.operands_only && !self.in_fip_fn {
@@ -3485,7 +3490,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let mut slot_index = 0;
                         if !self.seq_fused_bind(inst.dest, pattern, *value)? {
                             let bound = self.seq_drop_rebind(pattern, values[value])?;
+                            self.borrowed_bind = borrowed_scrutinees.contains(value);
                             self.bind_ir(inst.dest, &mut slot_index, false, pattern, bound, &t)?;
+                            self.borrowed_bind = false;
                             self.seq_drop_bound(pattern)?;
                         }
                         self.zero()

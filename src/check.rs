@@ -618,6 +618,7 @@ pub(crate) fn check_core(
             caps: vec![],
             cap_aliases: BTreeMap::new(),
             loans: vec![],
+            match_borrows: vec![],
             reserved_loans: BTreeSet::new(),
             handler_frames: vec![],
             slice_args: BTreeMap::new(),
@@ -738,6 +739,10 @@ struct Checker<'a> {
     caps: Vec<Effect>,
     cap_aliases: BTreeMap<String, String>,
     loans: Vec<(Place, Pass, Span)>,
+    /// Places that an enclosing borrowed `match` lends to its arms' `in`
+    /// bindings (§4.3), with the scrutinee's span: inside the arms they may
+    /// be read but not written, lent `inout` or moved.
+    match_borrows: Vec<(Place, Span)>,
     /// Origin spans of the `inout` argument loans in `loans` (receivers and
     /// plain arguments): two-phase borrows (§4.3) reserve them while the
     /// call's other arguments are evaluated, so those arguments may read the
@@ -1401,6 +1406,26 @@ impl Checker<'_> {
                 self.related(origin, "conflicting argument access requested here");
                 self.related(b.span.clone(), "accessed binding introduced here");
                 self.help("An exclusive argument loan cannot overlap another access while the call's arguments are evaluated.");
+            }
+        }
+        if matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy)
+        {
+            for (borrowed, origin) in self.match_borrows.clone() {
+                if borrowed.overlaps(p) {
+                    transfer_allowed = false;
+                    self.error(
+                        "E0301",
+                        format!(
+                            "access to '{}' conflicts with the borrow of '{}' by an enclosing match",
+                            p.display(),
+                            borrowed.display()
+                        ),
+                        span.clone(),
+                    );
+                    self.related(origin, "this match lends the place to its arms");
+                    self.help("The bindings of a match on a borrowed place borrow its payloads; the place cannot be written, lent `inout` or moved until the match ends.");
+                }
             }
         }
         match usage {
@@ -2078,14 +2103,26 @@ impl Checker<'_> {
                 result
             }
             ExprKind::Match { value, arms } => {
-                let t = self.expr(value, env, Usage::Own);
+                // Matching a place of a borrowed (`in`/`inout`) binding whose
+                // type is not copy borrows it: the pattern's bindings are
+                // `in` borrows of its payloads, `Box` contents included, so a
+                // borrowed tree can be walked any number of times (§4.3).
+                let borrowed = self.borrowed_scrutinee(value, env);
+                let usage = borrowed.map_or(Usage::Own, |_| Usage::Borrow(Pass::In));
+                let t = self.expr(value, env, usage);
                 self.coverage(arms, &t, e.span.clone());
+                let borrow_base = self.match_borrows.len();
+                if borrowed.is_some()
+                    && let Some(p) = Place::from_expr(value)
+                {
+                    self.match_borrows.push((p, value.span.clone()));
+                }
                 let original = env.clone();
                 let mut branches = vec![];
                 let mut result = Type::named("Never");
                 for (pat, body) in arms {
                     let mut arm = original.clone();
-                    self.bind(pat, &t, &mut arm);
+                    self.bind_mode(pat, &t, &mut arm, borrowed.unwrap_or(Pass::Sink));
                     let arm_type = self.expr_expected(body, &mut arm, Usage::Own, expected);
                     let names = arm
                         .bindings
@@ -2117,6 +2154,7 @@ impl Checker<'_> {
                         branches.push(arm);
                     }
                 }
+                self.match_borrows.truncate(borrow_base);
                 for (_, body) in arms {
                     self.constrain_literals(body, &result);
                 }
@@ -4103,6 +4141,18 @@ impl Checker<'_> {
         op == "/"
             && (b.is_some_and(|(lo, hi)| lo > -1 || hi < -1)
                 || a.is_some_and(|(lo, _)| lo > kind.min()))
+    }
+    /// `Some(Pass::In)` when `value` is a place of an `in` or `inout`
+    /// binding and its type is not copy: `match` then borrows the place
+    /// instead of moving it, and binds its payloads as `in` borrows.
+    fn borrowed_scrutinee(&self, value: &Expr, env: &Env) -> Option<Pass> {
+        let p = Place::from_expr(value)?;
+        let b = env.bindings.get(&p.root)?;
+        if b.pass == Pass::Sink {
+            return None;
+        }
+        let ty = self.world.field(&b.ty, &p.path)?;
+        (self.mode(&ty) != Mode::Copy).then_some(Pass::In)
     }
     fn bind(&mut self, p: &Pattern, ty: &Type, env: &mut Env) {
         self.bind_mode(p, ty, env, Pass::Sink);
