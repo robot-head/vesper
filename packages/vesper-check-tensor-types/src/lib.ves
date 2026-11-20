@@ -1,0 +1,291 @@
+// @vesper/check-tensor-types: the checker half of src/tensor_types (shape
+// inference, kinds, dimensions) in Vesper (self-hosting wave SH2, lane 14,
+// #1186). Rust stays the default checker; nothing here replaces Rust code.
+//
+// The entry `check_tensor_types` takes one `in Str` input from
+// tests/self_host_check_tensor_types.rs: the source text, the wire
+// diagnostics and the checked wires of `tensor_types::wire::check` (the
+// Bridge layout checker stays in Rust). It parses the source with
+// @vesper/ast and returns the report text (`pack_text`) the Rust side
+// prints from `tensor_types::active` and `tensor_types::analyze`.
+
+use @vesper/ast::{
+    Ast
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper/check-data::input::{
+    Reader
+};
+use @vesper/check-data::{
+    pack_text
+};
+use @vesper/check-data::util::{
+    push_decimal,
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use self::state::{
+    St,
+    st_new,
+    put,
+    put_dim,
+    put_ty,
+    cmp_names,
+};
+use self::kinds::{
+    Cx,
+    Ob,
+    cx_new,
+    active,
+    set32,
+    at32,
+};
+use self::infer::{
+    analyze,
+};
+
+const NONE: u32 = 4294967295;
+
+
+// Reads a length-prefixed byte string into `out`.
+fn read_bytes(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u8]) {
+    let n = r.word(in b);
+    let start = r.pos;
+    for i in 0..n {
+        let c = match b.try_get(wrapping_add(start, i)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        out.push(c);
+    }
+    r.pos = wrapping_add(start, wrapping_mul(wrapping_add(n, 7) / 8, 8));
+}
+
+fn put_kind(inout o: ChunkSeq[u8], k: u8) {
+    if k == 0 {
+        put(inout o, in "Dim");
+    } else if k == 1 {
+        put(inout o, in "DType");
+    } else {
+        put(inout o, in "Type");
+    }
+}
+
+// Sorts distinct names by their bytes.
+fn sort_names(in st: St, inout v: ChunkSeq[u32]) {
+    let n = v.len();
+    for i in 1..n {
+        let x = u32_at(in v, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = u32_at(in v, wrapping_sub(j, 1));
+            if cmp_names(in st, y, x) <= 0 {
+                break;
+            }
+            let ok = v.try_set(j, y);
+            j = wrapping_sub(j, 1);
+        }
+        let ok2 = v.try_set(j, x);
+    }
+}
+
+fn contains(in v: ChunkSeq[u32], x: u32) -> bool {
+    for i in 0..v.len() {
+        if u32_at(in v, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+fn put_ob(in st: St, inout o: ChunkSeq[u8], b: Ob) {
+    st.names.write(b.r, inout o);
+    put(inout o, in ": ");
+    if b.k == 0 {
+        put_dim(in st, inout o, b.d1);
+        put(inout o, in " must be even");
+    } else {
+        put_dim(in st, inout o, b.d2);
+        put(inout o, in " must be a multiple of ");
+        put_dim(in st, inout o, b.d1);
+    }
+}
+
+// The report: `inactive`, or `active` then one `D` line per diagnostic,
+// one `K` line per ADT's kinds and one `S` block per signature (sorted by
+// name, as Rust's `BTreeMap`s iterate).
+fn report(in st: St, in cx: Cx, inout o: ChunkSeq[u8]) {
+    put(inout o, in "active\n");
+    for i in 0..st.dcode.len() {
+        put(inout o, in "D E0");
+        push_decimal(inout o, widen_u64(u32_at(in st.dcode, i)));
+        put(inout o, in " @");
+        push_decimal(inout o, u64_at(in st.dstart, i));
+        put(inout o, in "..");
+        push_decimal(inout o, u64_at(in st.dend, i));
+        o.push(32);
+        let x = u64_at(in st.dma, i);
+        let y = u64_at(in st.dmb, i);
+        for k in x..y {
+            o.push(u8_at(in st.dtext, k));
+        }
+        o.push(10);
+    }
+    let mut names = ChunkSeq::new[u32]();
+    for i in 0..cx.ak_row.len() {
+        if u32_at(in cx.ak_row, i) != NONE {
+            names.push(wrapping_u32(i));
+        }
+    }
+    sort_names(in st, inout names);
+    for i in 0..names.len() {
+        let n = u32_at(in names, i);
+        let row = at32(in cx.ak_row, n);
+        put(inout o, in "K ");
+        st.names.write(n, inout o);
+        for k in 0..widen_u64(u32_at(in cx.ak_n, widen_u64(row))) {
+            o.push(32);
+            put_kind(inout o, u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), k)));
+        }
+        o.push(10);
+    }
+    let mut sigs = ChunkSeq::new[u32]();
+    for i in 0..cx.sg_row.len() {
+        if u32_at(in cx.sg_row, i) != NONE {
+            sigs.push(wrapping_u32(i));
+        }
+    }
+    sort_names(in st, inout sigs);
+    for i in 0..sigs.len() {
+        let n = u32_at(in sigs, i);
+        let row = widen_u64(at32(in cx.sg_row, n));
+        put(inout o, in "S ");
+        st.names.write(n, inout o);
+        o.push(10);
+        let ga = widen_u64(u32_at(in cx.sg_ga, row));
+        for g in 0..widen_u64(u32_at(in cx.sg_gn, row)) {
+            put(inout o, in " G ");
+            st.names.write(u32_at(in cx.sg_gsym, wrapping_add(ga, g)), inout o);
+            o.push(32);
+            put_kind(inout o, u8_at(in cx.sg_gkind, wrapping_add(ga, g)));
+            o.push(10);
+        }
+        let pa = widen_u64(u32_at(in cx.sg_pa, row));
+        for p in 0..widen_u64(u32_at(in cx.sg_pn, row)) {
+            let pass = u8_at(in cx.sg_ppass, wrapping_add(pa, p));
+            if pass == 0 {
+                put(inout o, in " P In ");
+            } else if pass == 1 {
+                put(inout o, in " P Inout ");
+            } else {
+                put(inout o, in " P Sink ");
+            }
+            put_ty(in st, inout o, u32_at(in cx.sg_pty, wrapping_add(pa, p)));
+            o.push(10);
+        }
+        put(inout o, in " R ");
+        put_ty(in st, inout o, u32_at(in cx.sg_res, row));
+        o.push(10);
+        if u8_at(in cx.sg_pool, row) == 1 {
+            put(inout o, in " L ");
+            put_dim(in st, inout o, u32_at(in cx.sg_kv, row));
+            put(inout o, in ", ");
+            put_dim(in st, inout o, u32_at(in cx.sg_hd, row));
+            o.push(10);
+        }
+        let oa = widen_u64(u32_at(in cx.sg_oa, row));
+        for k in 0..widen_u64(u32_at(in cx.sg_on, row)) {
+            let b = match cx.obs.try_get(wrapping_add(oa, k)) {
+                Option::Some(x) => x,
+                Option::None => Ob {
+                    k: 0,
+                    d1: 0,
+                    d2: 0,
+                    r: 0
+                },
+            };
+            put(inout o, in " O ");
+            put_ob(in st, inout o, b);
+            o.push(10);
+        }
+    }
+}
+
+// Interns every AST symbol into the checker's names (`St.amap`).
+fn map_names(inout st: St, in a: Ast) {
+    for i in 0..a.names.len() {
+        let mut s = String::new();
+        let ok = a.names.resolve_into(symbol_from_id(wrapping_u32(i)), inout s);
+        let n = st.names.intern(in s.as_bytes());
+        st.amap.push(n);
+    }
+}
+
+// Input words: the source (length, bytes); the wire diagnostics (count,
+// then code number, start, end, message); the checked wires (count, then
+// name, has-format flag, mismatch message).
+pub fn check_tensor_types(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let n = r.word(in b);
+    let l = lower_source(in input[8..wrapping_add(8, n)]);
+    r.pos = wrapping_add(8, wrapping_mul(wrapping_add(n, 7) / 8, 8));
+    let mut st = st_new();
+    map_names(inout st, in l.ast);
+    let mut cx = cx_new(inout st);
+    let mut out = ChunkSeq::new[u8]();
+    if !active(inout st, in l.ast) {
+        put(inout out, in "inactive\n");
+        return pack_text(in out);
+    }
+    let nd = r.word(in b);
+    for i in 0..nd {
+        let code = r.word(in b);
+        let start = r.word(in b);
+        let end = r.word(in b);
+        let mut m = ChunkSeq::new[u8]();
+        read_bytes(inout r, in b, inout m);
+        st.dcode.push(wrapping_u32(code));
+        st.dstart.push(start);
+        st.dend.push(end);
+        st.dma.push(st.dtext.len());
+        st.dtext.extend(in m.as_slice());
+        st.dmb.push(st.dtext.len());
+    }
+    let nw = r.word(in b);
+    for i in 0..nw {
+        let mut name = ChunkSeq::new[u8]();
+        read_bytes(inout r, in b, inout name);
+        let s = st.names.intern(in name.as_slice());
+        let has = r.word(in b);
+        let mut m = ChunkSeq::new[u8]();
+        read_bytes(inout r, in b, inout m);
+        if has == 1 {
+            set32(inout cx.wire, s, 1);
+        } else {
+            let row = wrapping_u32(cx.wa.len());
+            cx.wa.push(cx.wtext.len());
+            cx.wtext.extend(in m.as_slice());
+            cx.wb.push(cx.wtext.len());
+            set32(inout cx.wire, s, wrapping_add(row, 2));
+        }
+    }
+    analyze(inout st, inout cx, in l.ast);
+    report(in st, in cx, inout out);
+    pack_text(in out)
+}

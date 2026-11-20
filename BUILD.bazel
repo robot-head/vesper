@@ -156,6 +156,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 14 (#1186): the tensor types checker port,
+        # differential over fixtures, checker sources, mutants and corpus.
+        "test/self_host_check_tensor_types": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         "test/self_host_check_harness": glob([
             "examples/**",
             "packages/**",
@@ -476,6 +483,9 @@ vesper_crate(
         # The checker data differential (#1176) checks every corpus world.
         "test/self_host_check_data": "long",
         "test/self_host_check_harness": "long",
+        # The tensor types differential (#1186) JIT-compiles the port and
+        # replays mutants and the corpus.
+        "test/self_host_check_tensor_types": "eternal",
     },
 )
 

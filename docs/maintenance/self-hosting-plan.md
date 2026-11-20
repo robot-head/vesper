@@ -215,6 +215,15 @@ corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
 |---|---|--:|--:|---|---|
 | `parse` (front end v2 + AST, read back into `Parse`) | SH1-12 (#1155) | 1.03x | 1.06x | 1.00x wall, 1.19x Ir over 911 sources | [self-host-parser-swap.md](../parallel-results/self-host-parser-swap.md) |
 
+**SH2 checker port scoreboard.** Each row is one checker pass ported to
+Vesper, timed against the Rust pass with ABBA, `port-compiler` profile,
+Linux x86-64. A row gets whole-corpus numbers when its pass is swapped into
+the hybrid build.
+
+| Pass | Lane | Differential | Pass alone, Vesper / Rust | Hybrid swap | Report |
+|---|---|---|--:|---|---|
+| tensor types (`infer`, `dim`, `types`; not `elaborate`) | SH2-14 (#1186) | 0 diffs: 57 fixtures, 1,880 mutants, 852 corpus | 0.28x rejected fixtures, 0.49x corpus | part 2 | [self-host-check-tensor-types.md](../parallel-results/self-host-check-tensor-types.md) |
+
 ## Estimates
 
 These are rough. They come from the port waves so far, where one lane ported
