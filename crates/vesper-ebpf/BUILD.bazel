@@ -88,7 +88,7 @@ filegroup(
         ("btf", "btf", "        if kind == 0 || kind > 19 {\n", "        if kind == 0 || kind > 20 {\n"),
         ("core", "core", "        if slen(in strs, mname) == 0 {\n", "        if slen(in strs, mname) == 99 {\n"),
         ("btf_ext", "btf_ext", "        out.push(lc & 1023);\n", "        out.push(lc & 511);\n"),
-        ("interp_run", "interp", "    if kind == 1 && at < i.data_off {\n", "    if kind == 1 && wrapping_add(at, 1) < i.data_off {\n"),
+        ("interp_run", "interp", "    if kind == KIND_PACKET && at < i.data_off {\n", "    if kind == KIND_PACKET && wrapping_add(at, 1) < i.data_off {\n"),
     ]
 ]
 
