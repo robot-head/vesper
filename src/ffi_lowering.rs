@@ -251,6 +251,13 @@ impl Imports {
 }
 
 /// Whether `name` is the effect of an imported library.
+/// The host functions of the standard I/O libraries (`StdFs`, `StdProcess`,
+/// `StdEnv`, link name `vesper_std_host`), which the compiler links so
+/// `vesper jit` can bind their imports (#1150).
+pub fn std_host_symbols() -> Vec<(&'static str, *const u8)> {
+    vesper_std_host::symbols()
+}
+
 pub fn is_foreign_effect(name: &str) -> bool {
     name.starts_with(EFFECT_PREFIX)
 }

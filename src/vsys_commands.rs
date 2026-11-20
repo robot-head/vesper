@@ -101,7 +101,7 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
 /// library linked as [`STD_HOST`].
 fn host_symbols(imports: &Imports) -> Result<Vec<(&'static str, *const u8)>, String> {
     let mut out = vec![];
-    let std = vesper_std_host::symbols();
+    let std = ffi_lowering::std_host_symbols();
     for (library, _) in imports.libraries() {
         if library.link().name() != STD_HOST {
             return Err(format!(
