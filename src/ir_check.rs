@@ -162,6 +162,7 @@ pub fn validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
             local_consumes: BTreeMap::new(),
             reservable: reservable(f),
             scrutinees: scrutinees(f),
+            views: element_views(world, f),
         };
         checker.function(f);
         diagnostics.extend(checker.diagnostics);
@@ -282,6 +283,27 @@ struct Flow<'a> {
     reservable: BTreeSet<ValueId>,
     /// The values that a `match` terminator inspects ([`scrutinees`]).
     scrutinees: BTreeSet<ValueId>,
+    /// The `try_get` values of element view matches ([`element_views`]).
+    views: BTreeMap<ValueId, Pass>,
+}
+/// The `try_get`/`try_get_mut` values of `f` that element view matches
+/// (§13) inspect, with how their `Some(x)` binds the element: an `in` or
+/// `inout` borrow its sequence keeps owning.
+fn element_views(world: &World, f: &FunctionIr) -> BTreeMap<ValueId, Pass> {
+    if world.element_views.is_empty() {
+        return BTreeMap::new();
+    }
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter(|i| matches!(i.op, Op::Seq { .. }))
+        .filter_map(|i| {
+            world
+                .element_views
+                .get(&(i.span.start, i.span.end))
+                .map(|pass| (i.dest, *pass))
+        })
+        .collect()
 }
 /// The values `f` matches on. A by-value read of a borrowed slot's
 /// non-copy place that only a `match` inspects is a borrow (§4.3): the
@@ -642,6 +664,9 @@ impl Flow<'_> {
             }
         }
     }
+    fn element_view(&self, value: ValueId) -> Option<Pass> {
+        self.views.get(&value).copied()
+    }
     fn instruction(&mut self, s: &mut State, i: &Instruction) {
         let mut owned = true;
         let mut loan = None;
@@ -701,7 +726,10 @@ impl Flow<'_> {
                     .map(|v| v.ty.clone())
                     .unwrap_or(Type::Infer);
                 // A borrowed scrutinee binds borrows of its payloads.
-                let pass = if self.scrutinees.contains(value)
+                let view = self.element_view(*value);
+                let pass = if let Some(pass) = view {
+                    pass
+                } else if self.scrutinees.contains(value)
                     && s.values.get(value).is_some_and(|v| !v.owned)
                 {
                     Pass::In
@@ -775,6 +803,16 @@ impl Flow<'_> {
                 }
             }
             Op::Tiled { args, .. } | Op::Seq { args, .. } | Op::Fip { args, .. } => {
+                // An element view's `try_get` (§13) names an element its
+                // sequence keeps owning.
+                if matches!(i.op, Op::Seq { .. })
+                    && self
+                        .world
+                        .element_views
+                        .contains_key(&(i.span.start, i.span.end))
+                {
+                    owned = false;
+                }
                 self.activate(s, args, &i.span);
                 for a in args {
                     if a.pass == Pass::Sink {
