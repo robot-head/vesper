@@ -206,6 +206,13 @@ impl Checker<'_> {
                 Some((b, false)) => Some(b),
                 _ => None,
             });
+        // A view of a string literal, or of the static text a `-> Str`
+        // function returns, is a view of static bytes and never dangles.
+        if base.is_some_and(|b| self.static_text_source(b)) {
+            self.slice_args
+                .insert((value.span.start, value.span.end), Pass::In);
+            return true;
+        }
         let Some(root) = base.and_then(Place::from_expr) else {
             return false;
         };
@@ -219,6 +226,16 @@ impl Checker<'_> {
                 .insert((value.span.start, value.span.end), Pass::In);
         }
         bound
+    }
+
+    /// A string literal or a call of a `-> Str` function: static text.
+    pub(in crate::check) fn static_text_source(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Literal(Literal::String(_)) => true,
+            ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Name(n)
+                if self.world.functions.get(n).is_some_and(|f| is_str_type(&f.result))),
+            _ => false,
+        }
     }
 
     /// A `Str` (or, for `as_bytes`, `Slice[u8]`) view of `base`, allowed only

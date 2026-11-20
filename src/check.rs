@@ -184,7 +184,8 @@ impl World {
                 Item::Function(f) => {
                     if crate::numeric::wrapping_intrinsic(&f.name).is_some()
                         || ((f.name == crate::integer_widths::MUL_WIDE
-                            || crate::integer_widths::bit_builtin(&f.name).is_some())
+                            || crate::integer_widths::bit_builtin(&f.name).is_some()
+                            || crate::integer_widths::checked_builtin(&f.name).is_some())
                             && (builtin_count..builtin_count + module.items.len()).contains(&index))
                     {
                         errors.push(Diagnostic::new(
@@ -452,6 +453,7 @@ impl World {
                 overflow_ops: BTreeSet::new(),
                 dead: 0,
                 string_capacity: 0,
+                static_text: false,
                 bounds: BTreeMap::new(),
                 generics: vec![],
                 allowed: Effects::default(),
@@ -740,6 +742,7 @@ pub(crate) fn check_core(
             overflow_ops: BTreeSet::new(),
             dead: 0,
             string_capacity: 0,
+            static_text: false,
             bounds: BTreeMap::new(),
             generics: vec![],
             allowed: Effects::default(),
@@ -860,6 +863,9 @@ struct Checker<'a> {
     overflow_ops: BTreeSet<(usize, usize)>,
     dead: usize,
     string_capacity: usize,
+    /// Checking the body of a `-> Str` function: string literals the
+    /// result expects are static `Str` text.
+    static_text: bool,
     bounds: BTreeMap<String, Mode>,
     generics: Vec<Generic>,
     allowed: Effects,
@@ -1341,7 +1347,12 @@ impl Checker<'_> {
         self.valid_effects(&f.effects, &f.generics, f.span.clone());
         if let Some(body) = &f.body {
             let outer = self.enter_function(&f.result);
+            let static_text = std::mem::replace(
+                &mut self.static_text,
+                crate::strings::is_str_type(&f.result),
+            );
             let actual = self.expr_expected(body, &mut env, Usage::Own, &f.result);
+            self.static_text = static_text;
             let actual = self.leave_function(outer, actual, body.span.clone());
             self.expect_type(&f.result, &actual, body.span.clone());
             self.results
@@ -1608,6 +1619,13 @@ impl Checker<'_> {
                         }
                         t
                     }
+                } else if matches!(l, Literal::String(_))
+                    && self.static_text
+                    && crate::strings::is_str_type(expected)
+                {
+                    // A literal is static text: a `-> Str` function returns
+                    // it as a view of its static bytes.
+                    expected.clone()
                 } else if matches!(l, Literal::Float(_))
                     && crate::numeric::FloatKind::from_type(expected)
                         == Some(crate::numeric::FloatKind::F32)
@@ -2211,9 +2229,15 @@ impl Checker<'_> {
                 let original = env.clone();
                 let mut branches = vec![];
                 let mut result = Type::named("Never");
+                // An or-pattern arm `p | q => e` arrives as consecutive arms
+                // sharing one body expression (the same span). Each
+                // alternative must bind the same names at the same types.
+                let mut group: Option<(Span, Vec<(String, Type)>)> = None;
                 for (pat, body) in arms {
                     let mut arm = original.clone();
                     self.bind(pat, &t, &mut arm);
+                    let repeat = group.as_ref().is_some_and(|(s, _)| *s == body.span);
+                    let before = self.diagnostics.len();
                     let arm_type = self.expr_expected(body, &mut arm, Usage::Own, expected);
                     let names = arm
                         .bindings
@@ -2226,6 +2250,31 @@ impl Checker<'_> {
                         })
                         .map(|(n, _)| n.clone())
                         .collect::<Vec<_>>();
+                    let typed = names
+                        .iter()
+                        .map(|n| (n.clone(), arm.bindings[n].ty.clone()))
+                        .collect::<Vec<_>>();
+                    if repeat {
+                        // The shared body was checked for an earlier
+                        // alternative: keep only diagnostics that are new.
+                        let fresh = self.diagnostics.split_off(before);
+                        for d in fresh {
+                            if !self.diagnostics[..before].iter().any(|o| {
+                                o.code == d.code && o.span == d.span && o.message == d.message
+                            }) {
+                                self.diagnostics.push(d);
+                            }
+                        }
+                        if group.as_ref().is_some_and(|(_, first)| *first != typed) {
+                            self.error(
+                                "E0214",
+                                "every alternative of an or-pattern must bind the same names at the same types",
+                                pat.span.clone(),
+                            );
+                        }
+                    } else {
+                        group = Some((body.span.clone(), typed));
+                    }
                     self.exhaust(&arm, names.clone(), body.span.clone());
                     for n in names {
                         arm.bindings.remove(&n);
@@ -4023,6 +4072,26 @@ impl Checker<'_> {
                 let ExprKind::Name(name) = &callee.kind else {
                     return None;
                 };
+                // A module constant whose initializer is an integer literal
+                // (manuscript §2.2) has that value.
+                if args.is_empty()
+                    && crate::arrays::is_const_function(name)
+                    && !env.bindings.contains_key(name)
+                {
+                    let mut body = self.world.functions.get(name)?.body.as_ref()?;
+                    while let ExprKind::Block {
+                        statements,
+                        tail: Some(tail),
+                    } = &body.kind
+                        && statements.is_empty()
+                    {
+                        body = tail;
+                    }
+                    return match body.kind {
+                        ExprKind::Literal(Literal::Int(n)) => Some(n),
+                        _ => None,
+                    };
+                }
                 let op = crate::numeric::wrapping_intrinsic(name)?;
                 if env.bindings.contains_key(name) || args.len() != 2 {
                     return None;

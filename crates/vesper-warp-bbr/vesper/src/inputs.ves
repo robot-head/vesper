@@ -236,7 +236,7 @@ fn finish_ack(inout b: Bbrv3, now_ns: u64, inout p: AckProgress) {
         Option::None => 0,
     };
     if rs.interval_ns >= lifetime && rs.interval_ns != 0 {
-        rs.delivery_rate = mul_div_sat(rs.delivered, 1000000000, rs.interval_ns);
+        rs.delivery_rate = mul_div_sat(rs.delivered, NANOS_PER_SEC, rs.interval_ns);
     }
     rs.tx_in_flight = p.newest_tx_in_flight;
     rs.lost = sat_sub(congested(in b), p.newest_lost);
@@ -323,7 +323,7 @@ pub fn bbrv3_on_persistent_congestion(inout b: Bbrv3, now_ns: u64) eff [Fail[Bbr
     b.last_now_ns = now_ns;
     save_cwnd(inout b);
     save_state_upon_loss(inout b);
-    b.cwnd = min(sat_add(b.inflight, b.smss), 4294967295);
+    b.cwnd = min(sat_add(b.inflight, b.smss), U32_MAX);
     b.in_recovery = true;
     b.recovery_start_ns = now_ns;
 }

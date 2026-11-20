@@ -2180,6 +2180,12 @@ fn match_expr(inout p: P) -> Ex {
         let before = p.pos;
         let mark = p.binds.len();
         pattern(inout p);
+        loop {
+            if !eat(inout p, k_pipe()) {
+                break;
+            }
+            pattern(inout p);
+        }
         expect(inout p, k_fat_arrow());
         let outer = p.vals_trail.len();
         bind_values(inout p, mark);
@@ -2308,30 +2314,17 @@ fn binary(inout p: P, min: u64) -> Ex {
 // Precedence of a binary operator kind (0 for none); assignments are 1.
 fn precedence(k: u8) -> u64 {
     match k {
-        48 => 1,
-        49 => 1,
-        50 => 1,
-        51 => 1,
-        52 => 1,
-        53 => 1,
+        48 | 49 | 50 | 51 | 52 | 53 => 1,
         66 => 2,
         65 => 3,
-        59 => 4,
-        60 => 4,
-        61 => 5,
-        62 => 5,
-        63 => 5,
-        64 => 5,
+        59 | 60 => 4,
+        61 | 62 | 63 | 64 => 5,
         68 => 6,
         78 => 7,
         77 => 8,
-        79 => 9,
-        80 => 9,
-        54 => 10,
-        55 => 10,
-        56 => 11,
-        57 => 11,
-        58 => 11,
+        79 | 80 => 9,
+        54 | 55 => 10,
+        56 | 57 | 58 => 11,
         _ => 0,
     }
 }

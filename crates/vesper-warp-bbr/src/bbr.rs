@@ -10,8 +10,8 @@ use crate::events::{BbrError, CongestionEvent};
 use crate::filter::{CycleMax, WindowedMax};
 use crate::pacing::NANOS_PER_SEC;
 
-// The Vesper source spells the constants below as literals; the Vesper
-// build does not read every one of them.
+// `vesper/src/types.ves` declares the same constants under the same names;
+// the Vesper build does not read every one of them.
 
 /// The draft's "Infinity" for volumes and rates.
 pub const INFINITY: u64 = u64::MAX;
@@ -70,6 +70,25 @@ pub const PROBE_WAIT_RANGE_NS: u64 = NANOS_PER_SEC;
 /// Cap on Reno-coexistence rounds.
 #[cfg_attr(feature = "vesper-port", allow(dead_code))]
 pub const RENO_ROUNDS_CAP: u64 = 63;
+/// Cap on `bw_probe_up_rounds`, so `1 << rounds` stays in range.
+#[cfg_attr(feature = "vesper-port", allow(dead_code))]
+pub const MAX_PROBE_UP_ROUNDS: u32 = 30;
+/// The smoothed RTT assumed before there is a sample, 1 ms.
+#[cfg_attr(feature = "vesper-port", allow(dead_code))]
+pub const DEFAULT_SRTT_NS: u64 = 1_000_000;
+/// `pacing_rate / MILLIS_PER_SEC` is one millisecond of data.
+#[cfg_attr(feature = "vesper-port", allow(dead_code))]
+pub const MILLIS_PER_SEC: u64 = 1000;
+/// RFC 9002 §7.2 initial window floor:
+/// `min(10 * smss, max(INITIAL_WINDOW_FLOOR_BYTES, 2 * smss))`.
+#[cfg_attr(feature = "vesper-port", allow(dead_code))]
+pub const INITIAL_WINDOW_FLOOR_BYTES: u64 = 14_720;
+/// The largest accepted sender maximum segment size.
+#[cfg_attr(feature = "vesper-port", allow(dead_code))]
+pub const MAX_SMSS: u32 = 65_535;
+/// The default seed of the ProbeBW wait generator (`b"bbr3warp"`).
+#[cfg_attr(feature = "vesper-port", allow(dead_code))]
+pub const DEFAULT_PROBE_SEED: u64 = 0x6262_7233_7761_7270;
 
 /// `BBR.state`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
