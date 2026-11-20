@@ -252,3 +252,151 @@ pub fn fnv1a64(in s: Slice[u8]) -> u64 {
         i = wrapping_add(i, 1);
     }
 }
+
+test {
+    fn bytes_equal(in a: Slice[u8], in b: Slice[u8]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        for i in 0..a.len() {
+            if a.try_get(i) != b.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case zero(0, 10, 0, in ":0")
+    // @case binary_padded(5, 2, 8, in ":00000101")
+    // @case octal(83, 8, 1, in ":123")
+    // @case base_36(1295, 36, 1, in ":zz")
+    // @case width_is_minimum(65535, 16, 2, in ":ffff")
+    // @case radix_too_small(5, 1, 0, in ":")
+    // @case radix_too_large(5, 37, 0, in ":")
+    fn test_write_radix(value: u64, radix: u64, width: u64, in expected: Str) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        out.push(58);
+        write_u64_radix(inout out, value, radix, width);
+        bytes_equal(in out.as_slice(), in expected.as_bytes())
+    }
+
+    // @case zero(0, in "0")
+    // @case decimal(123, in "123")
+    // @case maximum(18446744073709551615, in "18446744073709551615")
+    fn test_write_u64(value: u64, in expected: Str) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        write_u64(inout out, value);
+        bytes_equal(in out.as_slice(), in expected.as_bytes())
+    }
+
+    // @case zero(0, in "0")
+    // @case positive(42, in "42")
+    // @case negative(-42, in "-42")
+    // @case minimum(-9223372036854775808, in "-9223372036854775808")
+    // @case maximum(9223372036854775807, in "9223372036854775807")
+    fn test_write_i64(value: i64, in expected: Str) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        write_i64(inout out, value);
+        bytes_equal(in out.as_slice(), in expected.as_bytes())
+    }
+
+    // @case padded_zero(0, 3, in "000")
+    // @case lowercase(175, 1, in "af")
+    fn test_write_hex(value: u64, width: u64, in expected: Str) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        write_hex_u64(inout out, value, width);
+        bytes_equal(in out.as_slice(), in expected.as_bytes())
+    }
+
+    // @case truth(true, in "true")
+    // @case falsity(false, in "false")
+    fn test_write_bool(value: bool, in expected: Str) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        write_bool(inout out, value);
+        bytes_equal(in out.as_slice(), in expected.as_bytes())
+    }
+
+    // @case empty(in "", in ":")
+    // @case ascii(in "abc", in ":abc")
+    // @case utf8(in "é水", in ":é水")
+    fn test_write_bytes(in value: Str, in expected: Str) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        out.push(58);
+        write_bytes(inout out, in value.as_bytes());
+        bytes_equal(in out.as_slice(), in expected.as_bytes())
+    }
+
+    fn parse_error_matches(actual: ParseIntError, expected: ParseIntError) -> bool {
+        match (actual, expected) {
+            (ParseIntError::EmptyInput, ParseIntError::EmptyInput) => true,
+            (ParseIntError::InvalidDigit, ParseIntError::InvalidDigit) => true,
+            (ParseIntError::OutOfRange, ParseIntError::OutOfRange) => true,
+            _ => false,
+        }
+    }
+
+    fn unsigned_matches(actual: Result[u64, ParseIntError], expected: Result[u64, ParseIntError])
+        -> bool {
+        match (actual, expected) {
+            (Result::Ok(a), Result::Ok(b)) => a == b,
+            (Result::Err(a), Result::Err(b)) => parse_error_matches(a, b),
+            _ => false,
+        }
+    }
+
+    // @case binary(in "1010", 2, Result::Ok(10))
+    // @case mixed_hex(in "aF", 16, Result::Ok(175))
+    // @case max_radix(in "Zz", 36, Result::Ok(1295))
+    // @case max_hex(in "FFFFFFFFFFFFFFFF", 16, Result::Ok(18446744073709551615))
+    // @case scaling_overflow(in "10000000000000000", 16, Result::Err(ParseIntError::OutOfRange))
+    // @case low_radix(in "1", 1, Result::Err(ParseIntError::InvalidDigit))
+    // @case high_radix(in "1", 37, Result::Err(ParseIntError::InvalidDigit))
+    // @case empty(in "", 10, Result::Err(ParseIntError::EmptyInput))
+    // @case digit_equals_radix(in "2", 2, Result::Err(ParseIntError::InvalidDigit))
+    // @case letter_equals_radix(in "G", 16, Result::Err(ParseIntError::InvalidDigit))
+    // @case no_prefix(in "0xff", 16, Result::Err(ParseIntError::InvalidDigit))
+    fn test_parse_radix(in input: Str, radix: u64, expected: Result[u64, ParseIntError]) -> bool {
+        unsigned_matches(parse_u64_radix(in input.as_bytes(), radix), expected)
+    }
+
+    // @case zero_with_padding(in "000", Result::Ok(0))
+    // @case maximum(in "18446744073709551615", Result::Ok(18446744073709551615))
+    // @case addition_overflow(in "18446744073709551616", Result::Err(ParseIntError::OutOfRange))
+    // @case empty(in "", Result::Err(ParseIntError::EmptyInput))
+    // @case no_sign(in "+1", Result::Err(ParseIntError::InvalidDigit))
+    // @case no_space(in "1 ", Result::Err(ParseIntError::InvalidDigit))
+    // @case no_separator(in "1_0", Result::Err(ParseIntError::InvalidDigit))
+    // @case no_unicode_digit(in "４", Result::Err(ParseIntError::InvalidDigit))
+    fn test_parse_u64(in input: Str, expected: Result[u64, ParseIntError]) -> bool {
+        unsigned_matches(parse_u64(in input.as_bytes()), expected)
+    }
+
+    // @case unsigned_spelling(in "42", Result::Ok(42))
+    // @case positive(in "+42", Result::Ok(42))
+    // @case negative(in "-42", Result::Ok(-42))
+    // @case negative_zero(in "-0", Result::Ok(0))
+    // @case minimum(in "-9223372036854775808", Result::Ok(-9223372036854775808))
+    // @case maximum(in "9223372036854775807", Result::Ok(9223372036854775807))
+    // @case too_negative(in "-9223372036854775809", Result::Err(ParseIntError::OutOfRange))
+    // @case too_positive(in "9223372036854775808", Result::Err(ParseIntError::OutOfRange))
+    // @case empty(in "", Result::Err(ParseIntError::EmptyInput))
+    // @case lone_minus(in "-", Result::Err(ParseIntError::EmptyInput))
+    // @case lone_plus(in "+", Result::Err(ParseIntError::EmptyInput))
+    // @case two_signs(in "+-1", Result::Err(ParseIntError::InvalidDigit))
+    // @case invalid_suffix(in "-2x", Result::Err(ParseIntError::InvalidDigit))
+    fn test_parse_i64(in input: Str, expected: Result[i64, ParseIntError]) -> bool {
+        match (parse_i64(in input.as_bytes()), expected) {
+            (Result::Ok(a), Result::Ok(b)) => a == b,
+            (Result::Err(a), Result::Err(b)) => parse_error_matches(a, b),
+            _ => false,
+        }
+    }
+
+    // @case empty(in "", 0xcbf29ce484222325)
+    // @case single_byte(in "a", 0xaf63dc4c8601ec8c)
+    // @case multi_byte(in "abc", 0xe71fa2190541574b)
+    // @case foobar(in "foobar", 0x85944171f73967e8)
+    fn test_fnv1a64(in input: Str, expected: u64) -> bool {
+        fnv1a64(in input.as_bytes()) == expected
+    }
+}

@@ -968,10 +968,17 @@ impl<'a> Runtime<'a> {
     }
     /// Install the entry function's linear effects at the host boundary. The
     /// host must resume each operation, including I/O errors and cancellation.
-    pub fn begin_external(
+    pub fn begin_external(self, entry: &str, args: Vec<Value>) -> Result<Execution<'a>, String> {
+        self.begin_external_for(entry, args, |_| true)
+    }
+
+    /// Install only the entry effects handled by this host. Other effects
+    /// follow ordinary evaluation and fail if performed without a handler.
+    pub(crate) fn begin_external_for(
         mut self,
         entry: &str,
         args: Vec<Value>,
+        handles: impl Fn(&str) -> bool,
     ) -> Result<Execution<'a>, String> {
         if let Some(trace) = &mut self.resource_trace {
             trace.begin_run().map_err(|e| e.to_string())?;
@@ -995,6 +1002,9 @@ impl<'a> Runtime<'a> {
         }
         let mut caller = Env::new();
         for effect in &function.effects.instances {
+            if !handles(&effect.name) {
+                continue;
+            }
             if !self.world.effects[&effect.name].linear {
                 return Err("external effects must guarantee one-shot resumption".into());
             }

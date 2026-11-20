@@ -272,3 +272,60 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
         old
     }
 }
+
+test {
+    use self::btree::btree_new;
+
+    // @case empty(0)
+    // @case single(1)
+    // @case full_leaf(16)
+    // @case leaf_split(17)
+    // @case internal_split(160)
+    fn test_insert_remove(count: u64) -> bool {
+        let mut tree = btree_new[u64, u64]();
+        let mut remaining = count;
+        loop {
+            if remaining == 0 {
+                break;
+            }
+            remaining = wrapping_sub(remaining, 1);
+            let key = remaining << 1;
+            let value = wrapping_add(remaining, 1000);
+            if tree.insert(key, value) != Option::None {
+                return false;
+            }
+        }
+        if tree.len() != count || tree.is_empty() != (count == 0) {
+            return false;
+        }
+        for i in 0..count {
+            let key = i << 1;
+            let value = wrapping_add(i, 1000);
+            if tree.get(key) != Option::Some(value) || !tree.contains_key(key) {
+                return false;
+            }
+            if tree.remove(wrapping_add(key, 1)) != Option::None {
+                return false;
+            }
+        }
+        for i in 0..count {
+            let key = i << 1;
+            let old = wrapping_add(i, 1000);
+            let new = wrapping_add(i, 2000);
+            if tree.insert(key, new) != Option::Some(old) || tree.get(key) != Option::Some(new) {
+                return false;
+            }
+        }
+        if tree.len() != count {
+            return false;
+        }
+        for i in 0..count {
+            let key = i << 1;
+            let value = wrapping_add(i, 2000);
+            if tree.remove(key) != Option::Some(value) || tree.contains_key(key) {
+                return false;
+            }
+        }
+        tree.is_empty() && tree.len() == 0 && tree.remove(0) == Option::None
+    }
+}

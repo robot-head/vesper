@@ -115,9 +115,25 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
-        "test/test_runner_cli": [
-            "packages/vesper-std/core/src/option.ves",
-            "packages/vesper-std/core/src/saturating.ves",
+        "test/imported_source_tests": glob([
+            "packages/vesper-ast/Loom.toml",
+            "packages/vesper-ast/src/*.ves",
+            "packages/vesper-front/Loom.toml",
+            "packages/vesper-front/src/*.ves",
+            "packages/vesper-std/*/Loom.toml",
+            "packages/vesper-std/*/src/*.ves",
+        ]) + [
+            "//crates/vesper-prism-h3:files",
+            "//crates/vesper-semver:files",
+        ],
+        "test/test_runner_cli": glob([
+            "packages/vesper-std/*/src/*.ves",
+        ]) + [
+            "//crates/vesper-crucible:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-simpulse:files",
+            "packages/vesper-ast/src/text.ves",
+            "packages/vesper-front/src/util.ves",
         ],
         # Self-hosting SH0 lane 7 (#1129): the front end v2 against the Rust
         # parser on the root package's `.ves` files and the parser test suites.
@@ -456,6 +472,8 @@ vesper_crate(
         "test/format_proof_cli": "long",
         "test/forge_provenance_cli": "long",
         "test/verify_extract_cli": "long",
+        # Front-end and AST tests check and lower their full package closures.
+        "test/imported_source_tests": "long",
         # Fresh replay covers both complete model import closures.
         "test/logos42_acceptance": "eternal",
         "test/oracle42_acceptance": "long",

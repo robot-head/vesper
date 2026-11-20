@@ -1725,3 +1725,51 @@ pub fn references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
     ref_term(inout r, in s, in pool, inout at);
     r.found
 }
+
+test {
+    // @case plain(in "lemma", true)
+    // @case unicode(in "αβ", true)
+    // @case quoted_by_printer(in "two words", true)
+    // @case empty(in "", false)
+    // @case root_marker(in "_root_", false)
+    // @case line_feed(in "a\nb", false)
+    // @case left_delimiter(in "left«", false)
+    // @case right_delimiter(in "right»", false)
+    // @case c1_control(in "a\u0085b", false)
+    // @case unicode_line_separator(in "a\u2028b", false)
+    // @case unicode_paragraph_separator(in "a\u2029b", false)
+    // @case direction_override(in "a\u202eb", false)
+    // @case direction_isolate(in "a\u2066b", false)
+    // @case byte_order_mark(in "\ufeffname", false)
+    fn test_ident(in text: Str, expected: bool) -> bool {
+        valid_ident(in text) == expected
+    }
+
+    // @case zero(in "0", true)
+    // @case digits(in "9876543210", true)
+    // @case arbitrary_precision(in "18446744073709551616000", true)
+    // @case empty(in "", false)
+    // @case leading_zero(in "01", false)
+    // @case positive_sign(in "+1", false)
+    // @case negative_sign(in "-1", false)
+    // @case trailing_space(in "1 ", false)
+    // @case fraction(in "1.0", false)
+    // @case unicode_digit(in "４", false)
+    fn test_decimal(in text: Str, expected: bool) -> bool {
+        valid_decimal(in text) == expected
+    }
+
+    // @case single(in "A", true)
+    // @case qualified(in "Data.List_2.Basic", true)
+    // @case empty(in "", false)
+    // @case leading_dot(in ".Data", false)
+    // @case trailing_dot(in "Data.", false)
+    // @case empty_component(in "Data..List", false)
+    // @case digit_at_start(in "Data.2List", false)
+    // @case underscore_at_start(in "Data._List", false)
+    // @case punctuation(in "Data.List-2", false)
+    // @case unicode_component(in "Data.α", false)
+    fn test_module_name(in text: Str, expected: bool) -> bool {
+        valid_module(in text) == expected
+    }
+}

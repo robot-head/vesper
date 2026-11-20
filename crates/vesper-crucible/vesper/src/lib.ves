@@ -2892,3 +2892,116 @@ pub fn search_backtrack(inout s: Search) -> bool {
 pub fn search_stats(in s: Search) -> SearchStats {
     s.stats
 }
+
+test {
+    // @case empty(0, 0, 0, 0)
+    // @case one_maximum(1, 18446744073709551615, 0, 18446744073709551615)
+    // @case one_carry(2, 18446744073709551615, 1, 18446744073709551614)
+    // @case repeated_carry(3, 18446744073709551615, 2, 18446744073709551613)
+    // @case small_values(3, 16, 0, 48)
+    fn test_tape_key(count: u64, value: u64, high: u64, low: u64) -> bool {
+        let mut values = ChunkSeq::new[u64]();
+        values.resize(count, value);
+        let key = tape_key(in values.as_slice());
+        key.len == count && key.hi == high && key.lo == low
+    }
+
+    // @case empty_input(in "", 2, 1, 0, 0, 0, 0, Option::None)
+    // @case header_only(in "vesper-crucible-tape/1", 0, 0, 0, 0, 0, 0, Option::None)
+    // @case wrong_version(in "  vesper-crucible-tape/2  ", 1, 2, 0, 2, 24, 0, Option::None)
+    // @case canonical(in "vesper-crucible-tape/1\n0\nffffffffffffffff\n", 2, 0, 0, 0, 0, 2, Option::Some(18446744073709551615))
+    // @case trims_lines(in " \nvesper-crucible-tape/1 \r\n\t00a \n\n", 1, 0, 0, 0, 0, 1, Option::Some(10))
+    // @case refuses_uppercase(in "vesper-crucible-tape/1\n1\nFF", 2, 3, 1, 0, 0, 1, Option::Some(1))
+    // @case refuses_prefix(in "vesper-crucible-tape/1\n0x1", 1, 3, 0, 0, 0, 0, Option::None)
+    // @case refuses_wide_word(in "vesper-crucible-tape/1\n10000000000000000", 1, 3, 0, 0, 0, 0, Option::None)
+    // @case limit_exceeded(in "vesper-crucible-tape/1\n1\n2", 1, 4, 0, 0, 0, 1, Option::Some(1))
+    fn test_parse_tape(
+        in text: Str,
+        limit: u64,
+        code: u64,
+        index: u64,
+        start: u64,
+        end: u64,
+        count: u64,
+        last: Option[u64]
+    ) -> bool {
+        let parsed = tape_parse(in text, limit);
+        parsed
+            .code
+            == code
+            && parsed
+            .index
+            == index
+            && parsed
+            .start
+            == start
+            && parsed
+            .end
+            == end
+            && parsed
+            .values
+            .len()
+            == count
+            && parsed
+            .values
+            .try_get(wrapping_sub(count, 1))
+            == last
+    }
+
+    // @case empty(0, 0, in "vesper-crucible-tape/1\n")
+    // @case zero(1, 0, in "vesper-crucible-tape/1\n0\n")
+    // @case repeated_hex(2, 175, in "vesper-crucible-tape/1\naf\naf\n")
+    // @case maximum(1, 18446744073709551615, in "vesper-crucible-tape/1\nffffffffffffffff\n")
+    fn test_write_tape(count: u64, word: u64, in expected: Str) -> bool {
+        let mut values = ChunkSeq::new[u64]();
+        values.resize(count, word);
+        let actual = tape_to_text(in values.as_slice());
+        let bytes = expected.as_bytes();
+        if actual.len() != bytes.len() {
+            return false;
+        }
+        for i in 0..actual.len() {
+            if actual.try_get(i) != bytes.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case exact_replay(3, 0, 1, 5, false, false, 0, 0, 3)
+    // @case clamps_replay(8, 0, 1, 5, false, false, 0, 0, 5)
+    // @case overrun_strict(3, 1, 2, 5, false, false, 0, 1, 0)
+    // @case overrun_budget(3, 0, 0, 5, true, false, 0, 1, 0)
+    // @case random_zero_max(3, 1, 2, 0, true, false, 0, 0, 0)
+    // @case never_bernoulli(3, 1, 2, 5, true, true, 0, 0, 0)
+    // @case always_bernoulli(3, 1, 2, 5, true, true, 1024, 0, 1)
+    // @case clamped_bernoulli(3, 1, 2, 0, true, true, 1024, 0, 0)
+    fn test_source_draw(
+        prefix_value: u64,
+        position: u64,
+        budget: u64,
+        max: u64,
+        random: bool,
+        bernoulli: bool,
+        numerator: u64,
+        code: u64,
+        value: u64
+    ) -> bool {
+        let mut rng = Rng {
+            word: 0
+        };
+        let mut prefix = ChunkSeq::new[u64]();
+        prefix.push(prefix_value);
+        let draw = source_draw(
+            inout rng,
+            in prefix.as_slice(),
+            position,
+            budget,
+            max,
+            random,
+            bernoulli,
+            numerator
+        );
+        draw.code == code && draw.value == value
+    }
+}
