@@ -925,6 +925,7 @@ fn compile_session_with_linkage<M: Module>(
             local_types: BTreeMap::new(),
             generic_vars: BTreeMap::new(),
             pointers: BTreeMap::new(),
+            narrow_homes: BTreeMap::new(),
             handlers: vec![],
             exits: vec![],
             inline_depth: 0,
@@ -949,6 +950,7 @@ fn compile_session_with_linkage<M: Module>(
             result_buffer: None,
             forced_call_vars: None,
             discard_slot: None,
+            element_writebacks: vec![],
             session: Some(SessionCodegen {
                 ctx: context,
                 park,

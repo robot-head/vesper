@@ -1345,6 +1345,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 local_types,
                 generic_vars: generic_vars.clone(),
                 pointers,
+                narrow_homes: BTreeMap::new(),
                 handlers: vec![],
                 exits: vec![],
                 inline_depth: 0,
@@ -1376,6 +1377,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 result_buffer: own_abi.result_words.and(sret),
                 forced_call_vars: None,
                 discard_slot: None,
+                element_writebacks: vec![],
             };
             c.set_location(f.span.start);
             // Function-value parameters bound to top-level functions by
@@ -2246,6 +2248,10 @@ struct Codegen<'a, 'b, M: Module> {
     local_types: BTreeMap<String, Type>,
     generic_vars: BTreeMap<String, Type>,
     pointers: BTreeMap<u32, Variable>,
+    /// Variables bound to an element view (§13) of a `u8`, `bool` or `u32`
+    /// element: every read loads the element and every write stores it, at
+    /// its width (the element's address variable and its type).
+    narrow_homes: BTreeMap<u32, (Variable, Type)>,
     handlers: Vec<Handler>,
     /// The graphs being emitted, innermost last: the targets of `return`
     /// ([`crate::ir::Op::Exit`]) by lowered function or closure name.
@@ -2316,6 +2322,10 @@ struct Codegen<'a, 'b, M: Module> {
     /// The slot an optimized out-of-bounds `try_set` writes instead of the
     /// sequence (#1151), created by the first such store.
     discard_slot: Option<ir::StackSlot>,
+    /// Element views (§13) of elements stored in fewer than 8 bytes, lent
+    /// through a word of scratch: (scratch, element address, element type),
+    /// written back when the call or place primitive that borrows them ends.
+    element_writebacks: Vec<(ir::Value, ir::Value, Type)>,
 }
 /// The Cranelift source location of source byte `offset`. Locations are
 /// byte offsets into the checked module's source; the all-ones value is
@@ -2402,6 +2412,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             .or_default()
             .merge(&info);
         self.b.def_var(variable, value);
+        if let Some((address, elem)) = self.narrow_homes.get(&variable.as_u32()).cloned() {
+            let pointer = self.b.use_var(address);
+            // The element is stored at its width; a failure here is a type
+            // the view's binding already accepted.
+            let _ = self.seq_store_elem(pointer, value, &elem);
+        }
         if let Some(address) = self.pointers.get(&variable.as_u32()).copied() {
             let pointer = self.b.use_var(address);
             self.b.ins().store(ir::MemFlags::new(), value, pointer, 0);
@@ -2409,6 +2425,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
     }
     fn use_var(&mut self, variable: Variable) -> ir::Value {
+        if let Some((address, elem)) = self.narrow_homes.get(&variable.as_u32()).cloned() {
+            let pointer = self.b.use_var(address);
+            if let Ok(value) = self.seq_load_elem(pointer, &elem) {
+                return value;
+            }
+        }
         let mut value = self.b.use_var(variable);
         if let Some(address) = self.pointers.get(&variable.as_u32()).copied() {
             let pointer = self.b.use_var(address);
@@ -2839,6 +2861,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     ) -> Result<ir::Value, String> {
         let mut actuals = vec![];
         let mut restores = vec![];
+        let writebacks = self.element_writebacks.len();
         for (arg, param) in args.iter().zip(params) {
             let value = if param.pass == Pass::Inout {
                 let ptr = self.address(&arg.expr)?;
@@ -2923,6 +2946,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             let value = self.load(ptr, &ty)?;
             self.def_var(variable, value);
         }
+        self.seq_element_writeback(writebacks)?;
         Ok(result)
     }
     fn zero(&mut self) -> ir::Value {
@@ -3574,6 +3598,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         ));
                         let mut slot_index = 0;
                         if !self.seq_fused_bind(inst.dest, pattern, *value)? {
+                            self.seq_unfused_view(f, *value)?;
                             let bound = self.seq_drop_rebind(pattern, values[value])?;
                             self.borrowed_bind = borrowed_scrutinees.contains(value);
                             self.bind_ir(inst.dest, &mut slot_index, false, pattern, bound, &t)?;
@@ -3741,6 +3766,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 // A slice view argument is a value, not a place,
                                 // and so is a boxed object lent from a
                                 // sequence element (§7.3).
+                                if let Some(element) =
+                                    self.element_view_arg(f, a, &values, &inst.span)?
+                                {
+                                    return Ok(Arg {
+                                        pass: a.pass,
+                                        explicit: true,
+                                        expr: element,
+                                    });
+                                }
                                 let view = a.place.is_none()
                                     && f.values.get(&a.value).is_some_and(|t| {
                                         crate::seq::is_slice_type(t)
@@ -3791,6 +3825,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let es = args
                             .iter()
                             .map(|a| {
+                                if let Some(element) =
+                                    self.element_view_arg(f, a, &values, &inst.span)?
+                                {
+                                    return Ok(Arg {
+                                        pass: a.pass,
+                                        explicit: true,
+                                        expr: element,
+                                    });
+                                }
                                 let expr = if a.pass == Pass::Inout {
                                     ir_place_expr(
                                         a.place
@@ -3869,22 +3912,32 @@ impl<M: Module> Codegen<'_, '_, M> {
                         ));
                         // A hoisted read is in bounds by its loop's guard.
                         let checked = !matches!(op, crate::seq::SeqOp::Hoisted(_));
-                        self.seq_fused_try_get(inst.dest, operands, &receiver_type, checked)?
+                        let view = self
+                            .world
+                            .element_views
+                            .contains_key(&(inst.span.start, inst.span.end));
+                        self.seq_fused_try_get(inst.dest, operands, &receiver_type, checked, view)?
                     }
                     Op::Seq { op, args } if op.place_primitive() => {
                         // `swap` and `replace` write their `inout` places.
                         let [a, b] = args.as_slice() else {
                             return Err(format!("native {} needs two operands", op.name()));
                         };
-                        let place = |a: &crate::ir::Argument| {
+                        let place = |this: &mut Self, a: &crate::ir::Argument| {
+                            // An element view (§13) is its element's place.
+                            if let Some(element) =
+                                this.element_view_arg(f, a, &values, &inst.span)?
+                            {
+                                return Ok(element);
+                            }
                             a.place
                                 .as_ref()
                                 .map(|p| ir_place_expr(p, inst.span.clone()))
                                 .ok_or_else(|| format!("native {} lacks a place", op.name()))
                         };
-                        let first = place(a)?;
+                        let first = place(self, a)?;
                         let second = if *op == crate::seq::SeqOp::Swap {
-                            place(b)?
+                            place(self, b)?
                         } else {
                             self.ir_temp(b.value, &values, &f.values)?
                         };
@@ -4358,6 +4411,23 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Ok(ptr);
         }
         match &e.kind {
+            ExprKind::Name(n)
+                if self
+                    .vars
+                    .get(n)
+                    .is_some_and(|v| self.narrow_homes.contains_key(&v.as_u32())) =>
+            {
+                // A narrow element view is lent as a word of scratch and
+                // written back when the borrowing call ends.
+                let var = self.vars[n];
+                let (address, elem) = self.narrow_homes[&var.as_u32()].clone();
+                let value = self.use_var(var);
+                let scratch = self.alloc_uninit(8);
+                self.b.ins().store(ir::MemFlags::new(), value, scratch, 0);
+                let pointer = self.b.use_var(address);
+                self.element_writebacks.push((scratch, pointer, elem));
+                Ok(scratch)
+            }
             ExprKind::Name(n) => {
                 let var = *self.vars.get(n).ok_or("unknown native place")?;
                 let t = self.local_types.get(n).ok_or("native place lacks type")?;
@@ -4393,6 +4463,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 })?;
                 let ptr = self.address(base)?;
                 Ok(self.offset(ptr, f.offset))
+            }
+            // An element view (§13): the element's address in its buffer.
+            ExprKind::Index(base, index) if crate::seq::interval(e).is_none() => {
+                self.seq_element_address(base, index)
             }
             _ => Err("native mutable argument requires a place".into()),
         }
@@ -6410,6 +6484,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let result_layout = Layout::of(self.world, &f.result)?;
         let mut values = vec![];
         let mut restores = vec![];
+        let writebacks = self.element_writebacks.len();
         let mut sink_blocks = vec![];
         let declared = self.world.functions[name].params.clone();
         for ((arg, param), declared) in args.iter().zip(&f.params).zip(&declared) {
@@ -6632,6 +6707,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.in_fip_fn = fip_scope;
             self.capabilities = capability_scope;
             let result = result?;
+            self.seq_element_writeback(writebacks)?;
             for lent in self.sink_blocks.split_off(lent) {
                 self.free_sink_block(lent)?;
             }
@@ -6763,6 +6839,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             if pass_trace {
                 self.check_trace_failed();
             }
+            // Narrow element views lent through scratch (§13) keep the
+            // callee's writes even when it raises: write them back before
+            // the status can transfer control to a handler.
+            self.seq_element_writeback(writebacks)?;
             if let Some(record) = record {
                 if status_call {
                     let status = self.b.inst_results(call)[1];
@@ -7111,6 +7191,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut values = vec![];
         let mut refs = vec![];
         let mut restores = vec![];
+        let writebacks = self.element_writebacks.len();
         for (arg, param) in args.iter().zip(&signature.params) {
             let value = self.expr(&arg.expr)?;
             values.push(value);
@@ -7140,6 +7221,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .store(ir::MemFlags::new(), value, destination, 0);
             }
         }
+        self.seq_element_writeback(writebacks)?;
         Ok(result)
     }
     fn perform_values(

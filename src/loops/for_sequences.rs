@@ -23,8 +23,10 @@
 //!
 //! An array index under the loop's range is in bounds, so the read is total;
 //! a sequence element is read with the total `try_get`, whose `None` arm is
-//! unreachable because the body cannot change the length. Non-`copy`
-//! elements (which need element views) are refused for now (`E0213`).
+//! unreachable because the body cannot change the length. A non-`copy`
+//! element of a sequence is lent to the body as an `in` element view (§13),
+//! so the pattern is a name or `_`; arrays and views of non-`copy` elements
+//! are refused for now (`E0213`).
 use super::{Checker, Env, Place, Usage};
 use crate::ast::*;
 use std::collections::BTreeMap;
@@ -40,12 +42,14 @@ pub(super) enum Plan {
     /// A fixed array, read by index. `place` is false for a temporary,
     /// bound with the annotation `ty` when its literals need one.
     Array { place: bool, ty: Option<Type> },
-    /// A `ChunkSeq` or `Slice`, read with `try_get`.
-    Seq { place: bool },
+    /// A `ChunkSeq` or `Slice`, read with `try_get`. `lend` when the
+    /// elements are not `copy`: the pattern (a name or `_`) binds an `in`
+    /// element view (§13) instead of a copy.
+    Seq { place: bool, lend: bool },
     /// A view of a place (`s.as_bytes()`, `xs.as_slice()`, `xs[a..b]`),
     /// read with `try_get` on the view; `interval` when its bounds are
     /// evaluated once into hidden bindings.
-    View { interval: bool },
+    View { interval: bool, lend: bool },
 }
 
 /// The place a view expression borrows, and its interval bounds.
@@ -121,12 +125,23 @@ impl Checker<'_> {
         let (element, plan) = if let Some((t, _)) = crate::arrays::element(&ty) {
             (t.clone(), Plan::Array { place, ty: literal })
         } else if let Some(t) = crate::seq::elem(&ty) {
+            // A non-copy element is lent as an element view; only a name or
+            // `_` can bind one.
+            // (A view receiver cannot lend an element view yet.)
+            let lend = view.is_none()
+                && self.mode(t) != Mode::Copy
+                && !super::unresolved(t)
+                && matches!(pat.kind, PatternKind::Bind(_) | PatternKind::Wild);
             let plan = match view {
                 Some((_, bounds)) => Plan::View {
                     interval: bounds.is_some(),
+                    lend,
                 },
-                None => Plan::Seq { place },
+                None => Plan::Seq { place, lend },
             };
+            if lend {
+                return Some((t.clone(), plan));
+            }
             (t.clone(), plan)
         } else {
             if !super::unresolved(&ty) {
@@ -143,7 +158,7 @@ impl Checker<'_> {
         if self.mode(&element) != Mode::Copy && !super::unresolved(&element) {
             self.error(
                 "E0213",
-                format!("'for' over elements of non-copy type '{element}' is not supported yet; iterate the indices and lend each element"),
+                format!("'for' over elements of non-copy type '{element}' binds an element view: write a name or '_' and iterate a sequence place (arrays and views of non-copy elements are not iterable yet)"),
                 iter.span.clone(),
             );
             return None;
@@ -312,9 +327,11 @@ impl Rewriter<'_> {
         let source = match &plan {
             Plan::StaticText(_)
             | Plan::Array { place: true, .. }
-            | Plan::Seq { place: true }
-            | Plan::View { interval: false } => *iter,
-            Plan::View { interval: true } => {
+            | Plan::Seq { place: true, .. }
+            | Plan::View {
+                interval: false, ..
+            } => *iter,
+            Plan::View { interval: true, .. } => {
                 let ExprKind::Index(base, interval) = iter.kind else {
                     unreachable!()
                 };
@@ -361,7 +378,7 @@ impl Rewriter<'_> {
                 });
                 self.name(&name)
             }
-            Plan::Seq { place: false } => {
+            Plan::Seq { place: false, .. } => {
                 let name = seq_name(k);
                 let pat = Pattern {
                     kind: PatternKind::Bind(name.clone()),
@@ -433,7 +450,7 @@ impl Rewriter<'_> {
                 };
                 (bound, inner)
             }
-            Plan::Seq { .. } | Plan::View { .. } => {
+            Plan::Seq { lend, .. } | Plan::View { lend, .. } => {
                 let receiver = self.respan(&source);
                 let bound = self.method(source, "len", vec![]);
                 let i = read_index(self);
@@ -441,9 +458,15 @@ impl Rewriter<'_> {
                 // The element binds through a `let`, so the pattern must be
                 // irrefutable (`E0210`) as for an array.
                 let element = format!("{HIDDEN_PREFIX}{k}_x");
-                let payload = Pattern {
-                    kind: PatternKind::Bind(element.clone()),
-                    span: self.fresh(),
+                let (payload, pat) = if lend {
+                    // `Some(x)` binds an `in` view of the element.
+                    (pat, None)
+                } else {
+                    let payload = Pattern {
+                        kind: PatternKind::Bind(element.clone()),
+                        span: self.fresh(),
+                    };
+                    (payload, Some(pat))
                 };
                 let some = Pattern {
                     kind: PatternKind::Constructor {
@@ -458,16 +481,18 @@ impl Rewriter<'_> {
                     kind: PatternKind::Wild,
                     span: self.fresh(),
                 };
+                let mut statements = vec![];
+                if let Some(pat) = pat {
+                    statements.push(Statement::Let {
+                        pat,
+                        ty: Type::Infer,
+                        value,
+                        mutable: false,
+                    });
+                }
+                statements.push(body_stmt);
                 let arm = self.node(ExprKind::Block {
-                    statements: vec![
-                        Statement::Let {
-                            pat,
-                            ty: Type::Infer,
-                            value,
-                            mutable: false,
-                        },
-                        body_stmt,
-                    ],
+                    statements,
                     tail: None,
                 });
                 let skip = self.node(ExprKind::Block {

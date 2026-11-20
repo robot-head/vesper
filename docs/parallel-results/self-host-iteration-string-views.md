@@ -21,8 +21,10 @@ now iterates, in index order:
 - a temporary (`for x in make()`), evaluated once into a hidden binding the
   loop owns and drops.
 
-Elements must be `copy` for now (`E0213` otherwise; non-copy elements need
-#1221's element views, a follow-up). The length is read once and an
+`copy` elements bind by value. A non-copy element of a `ChunkSeq`/`Slice`
+place or bound view is lent to the body as an `in` element view (#1221,
+merged while this lane ran), so the pattern is a name or `_`; arrays of
+non-copy elements and slice views of a `let mut` place stay `E0213`. The length is read once and an
 interval's bounds are evaluated once. The body may read the iterated place but
 not write it, lend it `inout` or move it (`E0301`, "conflicts with the 'for'
 loop that iterates 'xs'"), so every iteration reads in bounds.
@@ -95,7 +97,7 @@ the PR.
 ## Tests
 
 - `tests/for_sequences.rs`: string-literal arrays with `break`/`continue`;
-  nested loops over one `ChunkSeq`, slice parameters, intervals of a `let mut`
+  nested loops over one `ChunkSeq`, non-copy `String` elements lent as views (a local and a field), slice parameters, intervals of a `let mut`
   sequence, `as_slice()`, a temporary; arrays (place and literal), a field
   path and tuple patterns in a method; string bytes; rejections (push,
   assign, move in the body, view of a pushed sequence, non-copy elements, a
@@ -138,9 +140,11 @@ The view form is 0.37x the instructions and allocates nothing per call (the
 
 ## Compiler gaps
 
-1. **Non-copy elements.** `for s in names` over `ChunkSeq[String]` is
-   `E0213`. Needs #1221's element views to bind `in` views.
-   `fn f(in q: ChunkSeq[String]) { for s in q { } }`
+1. **Non-copy elements of views and arrays.** `for s in q` over a
+   `ChunkSeq[String]` place lends element views, but a view receiver cannot
+   lend one (`q[0..1].try_get(i)` with a non-copy element is `E1522`) and
+   arrays have no element views, so both stay `E0213`.
+   `fn f() { let mut q: ChunkSeq[String] = ChunkSeq::new(); for s in q[0..1] { } }`
 2. **Views inside results.** `fn tail(in s: Str) -> Option[Str]` is `E1530`,
    hence the offset-returning helpers.
 3. **Text views as receivers.** A `Str`/`as_bytes()` view of a `let mut`
@@ -166,7 +170,7 @@ should drop it (and `CONTROL_MESSAGES` its message).
 
 ## What is left
 
-- Non-copy elements through element views (after #1221).
+- Non-copy elements of view expressions and arrays.
 - `for` over a `String`'s chars, and over `TiledSeq`/other collections.
 - Lifetime-carrying view results (`-> Option[Str]` borrowing an `in`
   parameter), which would let the split helpers return views.

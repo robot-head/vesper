@@ -214,6 +214,38 @@ fn main() -> u64 {
 }
 
 #[test]
+fn non_copy_elements_are_lent() {
+    let source = r#"fn count(in s: String) -> u64 { s.len() }
+struct W { names: ChunkSeq[String] }
+fn total(in w: W) -> u64 {
+    let mut n: u64 = 0;
+    for s in w.names { n = wrapping_add(n, count(s)); }
+    n
+}
+fn main() -> u64 {
+    let mut q: ChunkSeq[String] = ChunkSeq::new();
+    let mut a = String::new();
+    a.push_str("ab");
+    let mut b = String::new();
+    b.push_str("cde");
+    q.push(a);
+    q.push(b);
+    let mut n: u64 = 0;
+    for s in q {
+        n = wrapping_add(n, count(s));
+        if s == "ab" { n = wrapping_add(n, 100); }
+    }
+    for _ in q { n = wrapping_add(n, 1000); }
+    let q2 = q;
+    for s in q2[1..2] { n = wrapping_add(n, wrapping_mul(count(s), 10000)); }
+    let w = W { names: q2 };
+    wrapping_add(n, total(w))
+}
+"#;
+    assert_eq!(differential("non_copy", source), 32110);
+}
+
+#[test]
 fn rejected_loops() {
     for (body, code, needle) in [
         (
@@ -237,7 +269,17 @@ fn rejected_loops() {
             "conflicts with the 'for' loop",
         ),
         (
-            "fn f() -> u64 { let ys: ChunkSeq[String] = ChunkSeq::new(); for y in ys { } 0 }",
+            "fn f() -> u64 { let mut ys: ChunkSeq[String] = ChunkSeq::new(); for y in ys[0..0] { } 0 }",
+            "E0213",
+            "non-copy",
+        ),
+        (
+            "fn take(sink s: String) -> u64 { s.len() }\nfn f() -> u64 { let ys: ChunkSeq[String] = ChunkSeq::new(); let mut n = 0; for y in ys { n = take(y); } n }",
+            "E0305",
+            "",
+        ),
+        (
+            "fn f() -> u64 { let ys: ChunkSeq[(String, u64)] = ChunkSeq::new(); for (y, n) in ys { } 0 }",
             "E0213",
             "non-copy",
         ),

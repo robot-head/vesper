@@ -36,37 +36,78 @@ impl Slot {
             .cell
             .try_borrow()
             .map_err(|_| "runtime value is mutably borrowed")?;
-        let mut v = &*cell;
-        for f in &self.path {
-            v = match v {
-                Value::Data { fields, .. } => fields
-                    .get(f)
-                    .ok_or_else(|| format!("unknown field '{f}'"))?,
-                Value::Tuple(v) => v
-                    .get(f.parse::<usize>().map_err(|_| "invalid tuple index")?)
-                    .ok_or("tuple index out of bounds")?,
-                _ => return Err("field access requires aggregate".into()),
-            };
-        }
-        Ok(v.clone())
+        slot_get(&cell, &self.path)
     }
     fn set(&self, value: Value) -> Result<(), String> {
         let mut cell = self
             .cell
             .try_borrow_mut()
             .map_err(|_| "runtime value is already borrowed")?;
-        let mut v = &mut *cell;
-        for f in &self.path {
-            v = match v {
-                Value::Data { fields, .. } => fields.get_mut(f).ok_or("unknown field")?,
-                Value::Tuple(v) => v
-                    .get_mut(f.parse::<usize>().map_err(|_| "invalid index")?)
-                    .ok_or("index out of bounds")?,
-                _ => return Err("assignment requires aggregate".into()),
-            };
+        slot_set(&mut cell, &self.path, value)
+    }
+}
+/// The path segment of sequence element `i` in a [`Slot`] path: an element
+/// view (§13) lent to an `inout` parameter names the element in place.
+fn element_segment(i: usize) -> String {
+    format!("#{i}")
+}
+fn element_index(segment: &str) -> Option<usize> {
+    segment.strip_prefix('#')?.parse().ok()
+}
+fn slot_get(v: &Value, path: &[String]) -> Result<Value, String> {
+    let Some((f, rest)) = path.split_first() else {
+        return Ok(v.clone());
+    };
+    match v {
+        Value::Data { fields, .. } => slot_get(
+            fields
+                .get(f)
+                .ok_or_else(|| format!("unknown field '{f}'"))?,
+            rest,
+        ),
+        Value::Tuple(v) => slot_get(
+            v.get(f.parse::<usize>().map_err(|_| "invalid tuple index")?)
+                .ok_or("tuple index out of bounds")?,
+            rest,
+        ),
+        Value::Seq(cell) if element_index(f).is_some() => {
+            let items = cell
+                .try_borrow()
+                .map_err(|_| "sequence is mutably borrowed")?;
+            let i = element_index(f).unwrap_or(usize::MAX);
+            slot_get(items.get(i).ok_or("element view out of bounds")?, rest)
         }
+        _ => Err("field access requires aggregate".into()),
+    }
+}
+fn slot_set(v: &mut Value, path: &[String], value: Value) -> Result<(), String> {
+    let Some((f, rest)) = path.split_first() else {
         *v = value;
-        Ok(())
+        return Ok(());
+    };
+    match v {
+        Value::Data { fields, .. } => {
+            slot_set(fields.get_mut(f).ok_or("unknown field")?, rest, value)
+        }
+        Value::Tuple(v) => slot_set(
+            v.get_mut(f.parse::<usize>().map_err(|_| "invalid index")?)
+                .ok_or("index out of bounds")?,
+            rest,
+            value,
+        ),
+        Value::Seq(cell) if element_index(f).is_some() => {
+            let cell = cell.clone();
+            let mut items = cell
+                .try_borrow_mut()
+                .map_err(|_| "sequence is already borrowed")?;
+            let i = element_index(f).unwrap_or(usize::MAX);
+            slot_set(
+                items.get_mut(i).ok_or("element view out of bounds")?,
+                rest,
+                value,
+            )
+        }
+        _ => Err("assignment requires aggregate".into()),
     }
 }
 #[derive(Clone)]
@@ -1195,6 +1236,17 @@ impl<'a> Runtime<'a> {
                     slot.get()?
                 }
             }
+            Op::Bind { pattern, value }
+                if self.element_view_bind(
+                    &state.function,
+                    &state.values,
+                    &mut state.env,
+                    &pattern,
+                    value,
+                )? =>
+            {
+                Value::Tuple(vec![])
+            }
             Op::Bind { pattern, value } => {
                 let value = get(value)?;
                 if !self.bind_owned_pattern(&pattern, &value, &mut state.env)? {
@@ -1331,9 +1383,18 @@ impl<'a> Runtime<'a> {
                 };
                 let first = get(a.value)?;
                 let second = get(b.value)?;
-                let a = slot_of(a.place)?;
+                // An element view (§13) names its element in place.
+                let a_element = self.element_ref(&state, &a);
+                let b_element = self.element_ref(&state, &b);
+                let a = match a_element {
+                    Some(slot) => slot,
+                    None => slot_of(a.place)?,
+                };
                 if op == crate::seq::SeqOp::Swap {
-                    let b = slot_of(b.place)?;
+                    let b = match b_element {
+                        Some(slot) => slot,
+                        None => slot_of(b.place)?,
+                    };
                     a.set(second)?;
                     b.set(first)?;
                     Value::Tuple(vec![])
@@ -1471,12 +1532,15 @@ impl<'a> Runtime<'a> {
                 let refs = args
                     .iter()
                     .map(|a| {
-                        a.place.as_ref().and_then(|p| {
-                            state.env.get(&p.root).cloned().map(|mut s| {
-                                s.path.extend(p.path.clone());
-                                s
+                        a.place
+                            .as_ref()
+                            .and_then(|p| {
+                                state.env.get(&p.root).cloned().map(|mut s| {
+                                    s.path.extend(p.path.clone());
+                                    s
+                                })
                             })
-                        })
+                            .or_else(|| self.element_ref(&state, a))
                     })
                     .collect();
                 let callee = if self.world.functions.contains_key(&callee) {
@@ -1523,12 +1587,15 @@ impl<'a> Runtime<'a> {
                 let refs = args
                     .iter()
                     .map(|a| {
-                        a.place.as_ref().and_then(|p| {
-                            state.env.get(&p.root).cloned().map(|mut s| {
-                                s.path.extend(p.path.clone());
-                                s
+                        a.place
+                            .as_ref()
+                            .and_then(|p| {
+                                state.env.get(&p.root).cloned().map(|mut s| {
+                                    s.path.extend(p.path.clone());
+                                    s
+                                })
                             })
-                        })
+                            .or_else(|| self.element_ref(&state, a))
                     })
                     .collect();
                 let caller = evidence_environment(&state.env);
@@ -3613,5 +3680,117 @@ fn result_error(t: &Type) -> Option<Type> {
     match t {
         Type::Named(n, args) if n == "Result" && args.len() == 2 => Some(args[1].clone()),
         _ => None,
+    }
+}
+
+impl Runtime<'_> {
+    /// The slot of the sequence element an `inout` argument lends in place
+    /// (an element view, §13): `arg` is the value of `s[i]` (`Get` or
+    /// `SliceGet` of a sequence place), and the slot names element `i` of
+    /// that sequence's cell, so the callee's writes reach the element.
+    /// Binds `Some(x)` of an element view `match` (§13): `x` names the
+    /// element in its sequence's cell, so an `inout` view's writes reach it.
+    /// `false` when `value` is not an element view's `try_get`.
+    fn element_view_bind(
+        &self,
+        function: &str,
+        values: &BTreeMap<crate::ir::ValueId, Value>,
+        env: &mut Env,
+        pattern: &Pattern,
+        value: crate::ir::ValueId,
+    ) -> Result<bool, String> {
+        use crate::seq::SeqOp;
+        if self.world.element_views.is_empty() {
+            return Ok(false);
+        }
+        let Some(f) = self.program.functions.get(function) else {
+            return Ok(false);
+        };
+        let Some(def) = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .find(|i| i.dest == value)
+        else {
+            return Ok(false);
+        };
+        let crate::ir::Op::Seq {
+            op: SeqOp::TryGet | SeqOp::Hoisted(crate::seq::Access::TryGet),
+            args,
+        } = &def.op
+        else {
+            return Ok(false);
+        };
+        if !self
+            .world
+            .element_views
+            .contains_key(&(def.span.start, def.span.end))
+        {
+            return Ok(false);
+        }
+        let PatternKind::Constructor { name, fields, .. } = &pattern.kind else {
+            return Ok(false);
+        };
+        let (true, Some((_, inner))) = (name.ends_with("Some"), fields.first()) else {
+            return Ok(false);
+        };
+        let (Some(base), Some(index)) = (args.first(), args.get(1)) else {
+            return Ok(false);
+        };
+        let index = match values.get(&index.value) {
+            Some(Value::UInt(i, _)) => usize::try_from(*i).ok(),
+            Some(Value::Int(i)) => usize::try_from(*i).ok(),
+            _ => None,
+        }
+        .ok_or("an element view's index is not an integer")?;
+        let (cell, start) = match values.get(&base.value) {
+            Some(Value::Seq(cell)) => (cell.clone(), 0),
+            Some(Value::Slice { seq, start, .. }) => (seq.clone(), *start),
+            _ => return Err("an element view's receiver is not a sequence".into()),
+        };
+        let slot = Slot {
+            cell: Rc::new(RefCell::new(Value::Seq(cell))),
+            path: vec![element_segment(start + index)],
+        };
+        if !bind_pattern_slot(inner, &slot, env)? {
+            return Err("IR binding pattern mismatch".into());
+        }
+        Ok(true)
+    }
+    fn element_ref(&self, state: &IrState, arg: &crate::ir::Argument) -> Option<Slot> {
+        use crate::seq::SeqOp;
+        if arg.pass != Pass::Inout {
+            return None;
+        }
+        let f = self.program.functions.get(&state.function)?;
+        let def = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .find(|i| i.dest == arg.value)?;
+        let crate::ir::Op::Seq {
+            op: SeqOp::Get | SeqOp::SliceGet | SeqOp::Hoisted(crate::seq::Access::Get),
+            args,
+        } = &def.op
+        else {
+            return None;
+        };
+        let (Some(base), Some(index)) = (args.first(), args.get(1)) else {
+            return None;
+        };
+        let index = match state.values.get(&index.value)? {
+            Value::UInt(i, _) => usize::try_from(*i).ok()?,
+            Value::Int(i) => usize::try_from(*i).ok()?,
+            _ => return None,
+        };
+        let (cell, start) = match state.values.get(&base.value)? {
+            Value::Seq(cell) => (cell.clone(), 0),
+            Value::Slice { seq, start, .. } => (seq.clone(), *start),
+            _ => return None,
+        };
+        Some(Slot {
+            cell: Rc::new(RefCell::new(Value::Seq(cell))),
+            path: vec![element_segment(start + index)],
+        })
     }
 }
