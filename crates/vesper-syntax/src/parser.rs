@@ -109,7 +109,16 @@ impl Default for ParseLimits {
 /// bounded UTF-8 prefix CST. Within the byte budget all failure CSTs retain the
 /// complete source. Explicit callers should use parse_with_limits for preflight.
 pub fn parse(source: &str) -> Parse {
-    match parse_with_limits(source, ParseLimits::default()) {
+    parse_module(source, false)
+}
+
+/// Parse a module with its test-only declarations enabled.
+pub fn parse_for_tests(source: &str) -> Parse {
+    parse_module(source, true)
+}
+
+fn parse_module(source: &str, include_tests: bool) -> Parse {
+    match parse_module_with_limits(source, ParseLimits::default(), include_tests) {
         Ok(parsed) => parsed,
         Err(mut limit) => {
             let retained = lexer::prefix_boundary(source, ParseLimits::default().max_source_bytes);
@@ -132,6 +141,14 @@ pub fn parse(source: &str) -> Parse {
 /// Token/diagnostic/depth exhaustion returns an empty AST and E0003 with the
 /// complete byte-bounded source preserved losslessly in balanced CST nodes.
 pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lexer::LexLimit> {
+    parse_module_with_limits(source, limits, false)
+}
+
+fn parse_module_with_limits(
+    source: &str,
+    limits: ParseLimits,
+    include_tests: bool,
+) -> Result<Parse, lexer::LexLimit> {
     let lex_limits = lexer::LexLimits {
         max_source_bytes: limits.max_source_bytes,
         max_tokens: limits.max_tokens,
@@ -166,7 +183,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
             diagnostics,
         });
     }
-    let item_names = contextual_item_names(&tokens, source);
+    let item_names = contextual_item_names(&tokens, source, include_tests);
     let mut p = Parser {
         source,
         tokens,
@@ -196,15 +213,20 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
     p.builder.start_node(MODULE);
     let mut module = Module::default();
     while !p.at(K::Eof) {
-        let before = p.pos;
-        p.builder.start_node(ITEM);
-        if let Some(item) = p.item() {
-            module.items.push(item);
-        }
-        p.builder.finish_node();
-        if p.pos == before {
-            p.error("expected a declaration");
+        if include_tests && p.at_test_block() {
+            p.builder.start_node(ITEM);
             p.bump();
+            p.bump();
+            while !p.at(K::RBrace) && !p.at(K::Eof) {
+                if p.at_test_block() {
+                    p.error("test blocks must be at module scope");
+                }
+                p.push_item(&mut module.items);
+            }
+            p.expect(K::RBrace);
+            p.builder.finish_node();
+        } else {
+            p.push_item(&mut module.items);
         }
     }
     p.trivia();
@@ -803,7 +825,45 @@ impl Parser<'_> {
             false
         }
     }
+    fn at_test_block(&self) -> bool {
+        self.at_word(0, "test") && self.nth(1) == K::LBrace
+    }
+
+    fn skip_test_block(&mut self) {
+        self.bump();
+        self.bump();
+        let mut depth = 1;
+        while depth != 0 && !self.at(K::Eof) {
+            match self.kind() {
+                K::LBrace => depth += 1,
+                K::RBrace => depth -= 1,
+                _ => {}
+            }
+            self.bump();
+        }
+        if depth != 0 {
+            self.expect(K::RBrace);
+        }
+    }
+
+    fn push_item(&mut self, items: &mut Vec<Item>) {
+        let before = self.pos;
+        self.builder.start_node(ITEM);
+        if let Some(item) = self.item() {
+            items.push(item);
+        }
+        self.builder.finish_node();
+        if self.pos == before {
+            self.error("expected a declaration");
+            self.bump();
+        }
+    }
+
     fn item(&mut self) -> Option<Item> {
+        if self.at_test_block() {
+            self.skip_test_block();
+            return None;
+        }
         let (item, public) = self.declaration()?;
         if public {
             match &item {
@@ -3097,18 +3157,39 @@ fn pattern_bindings(p: &Pattern, names: &mut scope::ScopedNames) {
 pub(crate) fn contextual_item_names(
     tokens: &[Token],
     source: &str,
+    include_tests: bool,
 ) -> std::collections::BTreeSet<String> {
     let mut names = std::collections::BTreeSet::new();
-    let mut significant = tokens
-        .iter()
-        .filter(|t| !matches!(t.kind, K::Whitespace | K::Comment | K::BlockComment));
+    let mut significant = tokens.iter().filter(|t| !t.kind.trivia()).peekable();
     let mut previous = None;
-    for t in &mut significant {
-        if previous == Some(K::Fn) && t.kind == K::Lower {
+    let mut depth = 0usize;
+    let mut skipping_test = false;
+    while let Some(t) = significant.next() {
+        if !include_tests
+            && depth == 0
+            && t.kind == K::Lower
+            && &source[t.span.clone()] == "test"
+            && significant
+                .peek()
+                .is_some_and(|next| next.kind == K::LBrace)
+        {
+            skipping_test = true;
+        }
+        if !skipping_test && previous == Some(K::Fn) && t.kind == K::Lower {
             let name = &source[t.span.clone()];
             if matches!(name, "break" | "continue" | "for" | "loop") {
                 names.insert(name.to_owned());
             }
+        }
+        match t.kind {
+            K::LBrace => depth += 1,
+            K::RBrace => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    skipping_test = false;
+                }
+            }
+            _ => {}
         }
         previous = Some(t.kind);
     }

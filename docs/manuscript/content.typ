@@ -284,7 +284,8 @@ The following are design intentions; the productions and examples do not yet est
 
 ```text
 (* ==================== 1. MODULES & TOP-LEVEL DECLARATIONS ============== *)
-Module         ::= ( UseDecl | Attr* Item )* ;
+Module         ::= ( UseDecl | Attr* Item | TestBlock )* ;
+TestBlock      ::= 'test' '{' ( UseDecl | Attr* Item )* '}' ;
 UseDecl        ::= Vis? 'use' UseRoot ( '::' LowerIdent )* '::' UseTarget ';' ;
 UseRoot        ::= '@' LowerIdent ( '-' LowerIdent )* '/' LowerIdent  (* dependency *)
                  | 'self'                              (* this package's root *)
@@ -489,6 +490,11 @@ FieldPatList   ::= ( LowerIdent ( ':' Pat )? ) ( ',' FieldPatList )? ;
 UpperIdent     ::= /[A-Z][A-Za-z0-9_]*/ ;
 LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 ```
+
+A top-level `test { ... }` block contributes its declarations and imports to
+the enclosing module when tests are enabled. These declarations can use that
+module's private items. Ordinary builds skip the contents of test blocks
+during declaration collection and type checking.
 
 *Contextual names.* `state`, `linear` and `with` are keywords only where their forms start (`handle E state p = e in`, `linear struct`, `} with {`); wherever a `LowerIdent` is expected (a binding, parameter, field, member or expression name) they are ordinary names, so `fn f(state: u64)` and `let with = ..` parse. The other keywords cannot be names, and a diagnostic names the keyword it found. *Open intervals.* In `p[a..b]` either bound may be omitted: `p[..b]` is `p[0..b]`, and `p[a..]` and `p[..]` read `p.len()` for the upper bound, so `p` must then be a place path (a name followed by fields).
 

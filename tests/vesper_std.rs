@@ -30,7 +30,12 @@ const TRACE_ENTRIES: [(&str, &str); 7] = [
 ];
 
 fn world(dir: &str) -> check::Checked {
-    let assembled = packages::load(Path::new(dir)).unwrap();
+    let assembled = if dir == TESTS {
+        packages::load_for_tests(Path::new(dir))
+    } else {
+        packages::load(Path::new(dir))
+    }
+    .unwrap();
     assert!(
         assembled.ok(),
         "{dir}: {:?} {:?}",

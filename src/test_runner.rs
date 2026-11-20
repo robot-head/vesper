@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write,
     fs::OpenOptions,
     io::Read,
     path::Path,
@@ -10,9 +11,9 @@ use vesper::{
     anvil_sim::{
         format_value_literal, run_property_test, run_simpulse_test_on_world, write_vchrono_capsule,
     },
-    ast::{Expr, ExprKind, Function, Item, Literal, Span, Statement, Type},
+    ast::{Diagnostic, Expr, ExprKind, Function, Item, Literal, Module, Span, Statement, Type},
     check::{self, World},
-    lexer::{self, TokenKind as K},
+    lexer::{self, Token, TokenKind as K},
     native::batch::{BatchLimits, NativeBatch},
     parser,
     runtime::{Runtime, Value},
@@ -233,6 +234,192 @@ fn is_test_marker(comment_text: &str) -> bool {
         || trimmed.starts_with("@test(")
 }
 
+fn case_marker(comment: &str) -> Option<&str> {
+    let rest = comment
+        .trim_start_matches('/')
+        .trim_start()
+        .strip_prefix("@case")?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
+}
+
+fn preceding_comments(tokens: &[Token], fn_start: usize) -> impl Iterator<Item = &Token> {
+    let end = tokens.partition_point(|t| t.span.end <= fn_start);
+    tokens[..end]
+        .iter()
+        .rev()
+        .take_while(|t| matches!(t.kind, K::Whitespace | K::Comment))
+        .filter(|t| t.kind == K::Comment)
+}
+
+struct CaseWrapper {
+    entry: String,
+    generated: Span,
+    function_index: usize,
+}
+
+struct TestCase {
+    name: String,
+    span: Span,
+    wrapper: CaseWrapper,
+}
+
+impl TestCase {
+    fn error(&self, source: &str, message: &str) -> String {
+        let (line, column) = location(source, self.span.start);
+        format!("{line}:{column}: {}: {message}", self.name)
+    }
+}
+
+fn prepare_tests(source: &str) -> Result<(parser::Parse, Vec<TestCase>), String> {
+    let parsed = parser::parse_for_tests(source);
+    if let Some(d) = parsed.diagnostics.first() {
+        return Err(test_diagnostic(
+            source,
+            &[],
+            d,
+            "syntax",
+            parsed.diagnostics.len(),
+        ));
+    }
+    let (tokens, _) = lexer::lex(source);
+    let names: BTreeSet<&str> = parsed
+        .module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Function(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut tests = Vec::new();
+    let mut expanded = None;
+    let mut next_entry = 0;
+    for (function_index, item) in parsed.module.items.iter().enumerate() {
+        let Item::Function(f) = item else {
+            continue;
+        };
+        let rows: Vec<_> = preceding_comments(&tokens, f.span.start)
+            .filter_map(|comment| {
+                case_marker(&source[comment.span.clone()]).map(|row| (row, comment.span.clone()))
+            })
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        if !f.generics.is_empty() {
+            return Err(format!("test function '{}' cannot be generic", f.name));
+        }
+        if f.body.is_none() {
+            return Err(format!("test function '{}' must have a body", f.name));
+        }
+
+        let mut labels = BTreeSet::new();
+        for (row, span) in rows.into_iter().rev() {
+            let (label, args) = row.split_once('(').unwrap_or_default();
+            let label = label.trim_end();
+            let mut bytes = label.bytes();
+            if !bytes
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                || !args.ends_with(')')
+            {
+                let (line, column) = location(source, span.start);
+                return Err(format!(
+                    "{line}:{column}: expected @case name(arguments) for '{}'",
+                    f.name
+                ));
+            }
+            if !labels.insert(label) {
+                let (line, column) = location(source, span.start);
+                return Err(format!(
+                    "{line}:{column}: duplicate test case '{}::{label}'",
+                    f.name
+                ));
+            }
+            let entry = loop {
+                let name = format!("__vesper_test_case_{next_entry}");
+                next_entry += 1;
+                if !names.contains(name.as_str()) {
+                    break name;
+                }
+            };
+            let expanded = expanded.get_or_insert_with(|| source.to_owned());
+            let start = expanded.len() + 1;
+            write!(expanded, "\nfn {entry}() {{ {}({args} }}", f.name).unwrap();
+            tests.push(TestCase {
+                name: format!("{}::{label}", f.name),
+                span,
+                wrapper: CaseWrapper {
+                    entry,
+                    generated: start..expanded.len(),
+                    function_index,
+                },
+            });
+        }
+    }
+    let Some(expanded) = expanded else {
+        return Ok((parsed, tests));
+    };
+
+    // Reparse with the original module in scope so literals, constants and
+    // argument expressions follow the same rules as ordinary calls.
+    let mut lowered = parser::parse_for_tests(&expanded);
+    if let Some(d) = lowered.diagnostics.first() {
+        return Err(test_diagnostic(
+            source,
+            &tests,
+            d,
+            "syntax",
+            lowered.diagnostics.len(),
+        ));
+    }
+    let first_wrapper = parsed.module.items.len();
+    for (test, index) in tests.iter().zip(first_wrapper..) {
+        let wrapper = &test.wrapper;
+        let Item::Function(target) = &parsed.module.items[wrapper.function_index] else {
+            unreachable!("only functions can declare cases");
+        };
+        // A row must parse as one direct call, contained in its own wrapper.
+        let Some(Item::Function(f)) = lowered.module.items.get_mut(index) else {
+            return Err(test.error(source, "expected a single argument list"));
+        };
+        let valid_body = matches!(
+            f.body.as_ref().map(|body| &body.kind),
+            Some(ExprKind::Block { statements, tail: Some(tail) })
+                if statements.is_empty()
+                && matches!(&tail.kind, ExprKind::Call { callee, .. }
+                    if matches!(&callee.kind, ExprKind::Name(name) if name == &target.name))
+        );
+        if f.span != wrapper.generated || f.name != wrapper.entry || !valid_body {
+            return Err(test.error(source, "expected a single argument list"));
+        }
+        f.result = target.result.clone();
+        f.effects = target.effects.clone();
+    }
+    Ok((lowered, tests))
+}
+
+fn test_diagnostic(
+    source: &str,
+    tests: &[TestCase],
+    diagnostic: &Diagnostic,
+    kind: &str,
+    count: usize,
+) -> String {
+    let message = format!(
+        "{count} {kind} error(s); first: {} {}",
+        diagnostic.code, diagnostic.message
+    );
+    if let Some(test) = tests.iter().find(|test| {
+        let span = &test.wrapper.generated;
+        span.start <= diagnostic.span.start && diagnostic.span.start <= span.end
+    }) {
+        return test.error(source, &message);
+    }
+    message
+}
+
 struct DiscoveredTest {
     name: String,
     span: Span,
@@ -446,7 +633,11 @@ fn test_fingerprint(fn_hash: &str, test: &DiscoveredTest, fuel: u64) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn discover_tests(source: &str, items: &[Item]) -> Result<Vec<DiscoveredTest>, String> {
+fn discover_tests(
+    source: &str,
+    items: &[Item],
+    cases: &[TestCase],
+) -> Result<Vec<DiscoveredTest>, String> {
     let (tokens, _) = lexer::lex(source);
     let parsed_attrs = test_attrs::extract_test_attrs(source);
     let attr_map: BTreeMap<&str, &FunctionTestAttrs> = parsed_attrs
@@ -454,6 +645,17 @@ fn discover_tests(source: &str, items: &[Item]) -> Result<Vec<DiscoveredTest>, S
         .map(|a| (a.fn_name.as_str(), a))
         .collect();
 
+    let case_entries: BTreeMap<&str, &TestCase> = cases
+        .iter()
+        .map(|case| (case.wrapper.entry.as_str(), case))
+        .collect();
+    let case_targets: BTreeSet<&str> = cases
+        .iter()
+        .filter_map(|case| match &items[case.wrapper.function_index] {
+            Item::Function(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut tests = Vec::new();
     for item in items {
         let Item::Function(f) = item else {
@@ -462,9 +664,11 @@ fn discover_tests(source: &str, items: &[Item]) -> Result<Vec<DiscoveredTest>, S
         let has_real_attr = attr_map
             .get(f.name.as_str())
             .is_some_and(|a| a.test.is_some() || !a.test_cases.is_empty());
-        let marked = has_preceding_test_comment(source, &tokens, f.span.start);
-        let named = f.name.starts_with("test_");
-        if !has_real_attr && !marked && !named {
+        let case = case_entries.get(f.name.as_str());
+        let legacy = !case_targets.contains(f.name.as_str())
+            && (f.name.starts_with("test_")
+                || has_preceding_test_comment(source, &tokens, f.span.start));
+        if !has_real_attr && !legacy && case.is_none() {
             continue;
         }
         if !f.generics.is_empty() {
@@ -473,7 +677,12 @@ fn discover_tests(source: &str, items: &[Item]) -> Result<Vec<DiscoveredTest>, S
         if f.body.is_none() {
             return Err(format!("test function '{}' must have a body", f.name));
         }
-        let (sig, raw_cases) = syntax_attr_to_anvil(f, attr_map.get(f.name.as_str()).copied());
+        let (mut sig, raw_cases) = syntax_attr_to_anvil(f, attr_map.get(f.name.as_str()).copied());
+        if case.is_some() {
+            // Each named row is an explicit unit invocation. Effect rows
+            // on the wrapper still participate in ordinary type checking.
+            sig.effects.clear();
+        }
         let plan = classify(&sig);
         if !f.params.is_empty() && !has_real_attr {
             return Err(format!(
@@ -482,13 +691,14 @@ fn discover_tests(source: &str, items: &[Item]) -> Result<Vec<DiscoveredTest>, S
             ));
         }
         tests.push(DiscoveredTest {
-            name: f.name.clone(),
-            span: f.span.clone(),
+            name: case.map_or_else(|| f.name.clone(), |case| case.name.clone()),
+            span: case.map_or_else(|| f.span.clone(), |case| case.span.clone()),
             plan,
             raw_cases,
             func: (**f).clone(),
         });
     }
+    tests.sort_by_key(|test| test.span.start);
     Ok(tests)
 }
 
@@ -497,21 +707,8 @@ fn has_preceding_test_comment(
     tokens: &[vesper::lexer::Token],
     fn_start: usize,
 ) -> bool {
-    let mut idx = tokens.partition_point(|t| t.span.end <= fn_start);
-    while idx > 0 {
-        idx -= 1;
-        let tok = &tokens[idx];
-        match tok.kind {
-            K::Whitespace => continue,
-            K::Comment => {
-                if is_test_marker(&source[tok.span.clone()]) {
-                    return true;
-                }
-            }
-            _ => break,
-        }
-    }
-    false
+    preceding_comments(tokens, fn_start)
+        .any(|comment| is_test_marker(&source[comment.span.clone()]))
 }
 
 fn evaluate_outcome(result: Result<Value, String>) -> (bool, Option<String>, String) {
@@ -540,17 +737,33 @@ fn evaluate_outcome(result: Result<Value, String>) -> (bool, Option<String>, Str
     }
 }
 
+struct UnitEntry {
+    name: String,
+    entry: String,
+    span: Span,
+}
+
+impl From<&DiscoveredTest> for UnitEntry {
+    fn from(test: &DiscoveredTest) -> Self {
+        Self {
+            name: test.name.clone(),
+            entry: test.func.name.clone(),
+            span: test.span.clone(),
+        }
+    }
+}
+
 fn run_tests_on_world(
     source: &str,
     world: &World,
-    selected: &[(String, Span)],
+    selected: &[UnitEntry],
     fuel: u64,
     prefer_jit: bool,
 ) -> (bool, Vec<UnitTestCaseReport>) {
     let mut fallback: BTreeMap<&str, String> = Default::default();
     let mut batch = None;
     if prefer_jit && !selected.is_empty() {
-        let names: Vec<&str> = selected.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = selected.iter().map(|test| test.entry.as_str()).collect();
         match NativeBatch::compile(world, &names, BatchLimits::default()) {
             Ok(b) => batch = Some(b),
             Err(_) => {
@@ -576,8 +789,8 @@ fn run_tests_on_world(
             }
         }
     } else {
-        for (name, _) in selected {
-            fallback.insert(name.as_str(), "mutation gate uses evaluator".into());
+        for test in selected {
+            fallback.insert(test.entry.as_str(), "mutation gate uses evaluator".into());
         }
     }
 
@@ -585,14 +798,15 @@ fn run_tests_on_world(
     let mut evaluator = None;
     let mut cases = Vec::with_capacity(selected.len());
     let mut all_passed = true;
-    for (name, span) in selected {
-        let (line, column) = location(source, span.start);
+    for test in selected {
+        let entry = test.entry.as_str();
+        let (line, column) = location(source, test.span.start);
         let ((mut passed, result, mut message, engine, fallback_reason), ledger_report) = ledger
             .audit_frame(|| {
-                if let Some(reason) = fallback.get(name.as_str()) {
+                if let Some(reason) = fallback.get(entry) {
                     let runtime = evaluator.get_or_insert_with(|| Runtime::new(world));
                     runtime.fuel = fuel;
-                    let (passed, result, message) = evaluate_outcome(runtime.run(name, vec![]));
+                    let (passed, result, message) = evaluate_outcome(runtime.run(entry, vec![]));
                     (
                         passed,
                         result,
@@ -602,7 +816,7 @@ fn run_tests_on_world(
                     )
                 } else {
                     let b = batch.as_mut().expect("jit batch available");
-                    let (passed, result, message) = evaluate_outcome(b.run(name));
+                    let (passed, result, message) = evaluate_outcome(b.run(entry));
                     (passed, result, message, TestEngine::Jit, None)
                 }
             });
@@ -617,7 +831,7 @@ fn run_tests_on_world(
             all_passed = false;
         }
         cases.push(UnitTestCaseReport {
-            name: name.clone(),
+            name: test.name.clone(),
             line,
             column,
             passed,
@@ -634,50 +848,44 @@ fn run_tests_on_world(
     (all_passed, cases)
 }
 
-fn parse_module(source: &str) -> Result<parser::Parse, String> {
-    let parsed = parser::parse(source);
-    if let Some(d) = parsed.diagnostics.first() {
-        return Err(format!(
-            "{} syntax error(s); first: {} {}",
-            parsed.diagnostics.len(),
-            d.code,
-            d.message
-        ));
-    }
-    Ok(parsed)
+fn without_negative_tests(mut module: Module, negative: &BTreeSet<String>) -> Module {
+    module.items.retain(|item| match item {
+        Item::Function(f) => !negative.contains(&f.name),
+        _ => true,
+    });
+    module
 }
 
-fn check_parsed(parsed: &parser::Parse) -> Result<check::Checked, String> {
-    let checked = check::check(&parsed.module);
-    if let Some(d) = checked.diagnostics.first() {
-        return Err(format!(
-            "{} semantic error(s); first: {} {}",
-            checked.diagnostics.len(),
-            d.code,
-            d.message
+fn checked_for_mutation(
+    source: &str,
+    negative: &BTreeSet<String>,
+) -> Result<check::Checked, String> {
+    let (parsed, cases) = prepare_tests(source)?;
+    let world = check::check(&without_negative_tests(parsed.module, negative));
+    if let Some(diagnostic) = world.diagnostics.first() {
+        return Err(test_diagnostic(
+            source,
+            &cases,
+            diagnostic,
+            "semantic",
+            world.diagnostics.len(),
         ));
     }
-    Ok(checked)
-}
-
-fn check_module(source: &str) -> Result<(parser::Parse, check::Checked), String> {
-    let parsed = parse_module(source)?;
-    let checked = check_parsed(&parsed)?;
-    Ok((parsed, checked))
+    Ok(world)
 }
 
 struct FileUnitTests {
     display: String,
     source: String,
     report: UnitTestFileReport,
-    selected: Vec<(String, Span)>,
+    selected: Vec<UnitEntry>,
     /// Property and SimPulse tests that passed on the baseline, replayed
     /// against every well-typed mutant after the unit tests.
     replay: Vec<ReplayTest>,
     /// Every test function of the file, whatever its mode or the filter:
     /// mutation testing never mutates these.
     test_names: BTreeSet<String>,
-    parsed_items: Vec<Item>,
+    expect_error_names: BTreeSet<String>,
 }
 
 /// A non-unit test the mutation gate replays against each mutant.
@@ -764,7 +972,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
     };
 
     for (display, source) in files {
-        let parsed = match parse_module(&source) {
+        let (parsed, cases) = match prepare_tests(&source) {
             Ok(ok) => ok,
             Err(error) => {
                 all_passed = false;
@@ -780,12 +988,12 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     selected: vec![],
                     replay: vec![],
                     test_names: BTreeSet::new(),
-                    parsed_items: vec![],
+                    expect_error_names: BTreeSet::new(),
                 });
                 continue;
             }
         };
-        let discovered = match discover_tests(&source, &parsed.module.items) {
+        let discovered = match discover_tests(&source, &parsed.module.items, &cases) {
             Ok(list) => list,
             Err(error) => {
                 all_passed = false;
@@ -801,7 +1009,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     selected: vec![],
                     replay: vec![],
                     test_names: BTreeSet::new(),
-                    parsed_items: vec![],
+                    expect_error_names: BTreeSet::new(),
                 });
                 continue;
             }
@@ -812,9 +1020,10 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
         let expect_error_names: BTreeSet<String> = discovered
             .iter()
             .filter(|t| t.plan.primary_mode == TestMode::ExpectError)
-            .map(|t| t.name.clone())
+            .map(|t| t.func.name.clone())
             .collect();
-        let all_test_names: BTreeSet<String> = discovered.iter().map(|t| t.name.clone()).collect();
+        let all_test_names: BTreeSet<String> =
+            discovered.iter().map(|t| t.func.name.clone()).collect();
         let selected_tests: Vec<DiscoveredTest> = discovered
             .into_iter()
             .filter(|t| {
@@ -830,21 +1039,12 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
 
         // Filter out ExpectError functions before checking the positive module
         // so intentional substructural failures never poison sibling tests.
-        let mut positive_module = parsed.module.clone();
-        positive_module.items.retain(|item| match item {
-            Item::Function(f) => !expect_error_names.contains(&f.name),
-            _ => true,
-        });
+        let positive_module = without_negative_tests(parsed.module.clone(), &expect_error_names);
         let checked = match check::check(&positive_module) {
             c if c.diagnostics.is_empty() => c,
             c => {
                 let d = &c.diagnostics[0];
-                let error = format!(
-                    "{} semantic error(s); first: {} {}",
-                    c.diagnostics.len(),
-                    d.code,
-                    d.message
-                );
+                let error = test_diagnostic(&source, &cases, d, "semantic", c.diagnostics.len());
                 all_passed = false;
                 results.push(FileUnitTests {
                     display: display.clone(),
@@ -858,7 +1058,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     selected: vec![],
                     replay: vec![],
                     test_names: BTreeSet::new(),
-                    parsed_items: vec![],
+                    expect_error_names: BTreeSet::new(),
                 });
                 continue;
             }
@@ -866,14 +1066,14 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
 
         let fn_graph = FunctionGraph::from_module(&parsed.module);
         let mut case_reports: BTreeMap<String, UnitTestCaseReport> = BTreeMap::new();
-        let mut unit_batch_selected: Vec<(String, Span)> = Vec::new();
+        let mut unit_batch_selected = Vec::new();
         let mut unit_plans: BTreeMap<String, HarnessPlan> = BTreeMap::new();
         let mut replay: Vec<ReplayTest> = Vec::new();
 
         for test in &selected_tests {
             let (line, column) = location(&source, test.span.start);
             let fn_hash = fn_graph
-                .transitive_fn_blake3(&test.name)
+                .transitive_fn_blake3(&test.func.name)
                 .unwrap_or_default();
             let cache_key = VerdictKey {
                 fn_blake3: test_fingerprint(&fn_hash, test, opts.fuel),
@@ -918,7 +1118,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
 
             match test.plan.primary_mode {
                 TestMode::Unit | TestMode::BudgetGate => {
-                    unit_batch_selected.push((test.name.clone(), test.span.clone()));
+                    unit_batch_selected.push(UnitEntry::from(test));
                     unit_plans.insert(test.name.clone(), test.plan.clone());
                 }
                 TestMode::ExpectError => {
@@ -1223,10 +1423,10 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 ordered_cases.push(rep);
             }
         }
-        let unit_selected_pairs: Vec<(String, Span)> = selected_tests
+        let unit_selected: Vec<UnitEntry> = selected_tests
             .iter()
             .filter(|t| matches!(t.plan.primary_mode, TestMode::Unit | TestMode::BudgetGate))
-            .map(|t| (t.name.clone(), t.span.clone()))
+            .map(UnitEntry::from)
             .collect();
 
         results.push(FileUnitTests {
@@ -1238,10 +1438,10 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 tests: ordered_cases,
                 error: None,
             },
-            selected: unit_selected_pairs,
+            selected: unit_selected,
             replay,
             test_names: all_test_names,
-            parsed_items: parsed.module.items,
+            expect_error_names,
         });
     }
 
@@ -1490,12 +1690,15 @@ fn collect_file_mutants(unit: &FileUnitTests) -> Vec<MutantCandidate> {
         unit.test_names.iter().map(String::as_str).collect();
     let (tokens, _) = lexer::lex(&unit.source);
     let mut candidates = Vec::new();
-    for item in &unit.parsed_items {
+    for item in &parser::parse(&unit.source).module.items {
         match item {
             Item::Function(f) => {
                 if !test_names.contains(f.name.as_str())
                     && !f.name.starts_with("test_")
-                    && !has_preceding_test_comment(&unit.source, &tokens, f.span.start)
+                    && !preceding_comments(&tokens, f.span.start).any(|comment| {
+                        let text = &unit.source[comment.span.clone()];
+                        is_test_marker(text) || case_marker(text).is_some()
+                    })
                 {
                     collect_mutants_in_fn(&unit.display, &unit.source, &tokens, f, &mut candidates);
                 }
@@ -1530,6 +1733,9 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
             println!("{summary}");
         } else {
             for f in &files {
+                if let Some(error) = &f.report.error {
+                    println!("{}: FAIL: {error}", f.display);
+                }
                 for t in &f.report.tests {
                     if !t.passed {
                         println!(
@@ -1578,7 +1784,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
         mutated.push_str(&cand.replacement);
         mutated.push_str(&unit.source[cand.end..]);
 
-        let report = match check_module(&mutated) {
+        let report = match checked_for_mutation(&mutated, &unit.expect_error_names) {
             Err(err) => {
                 ill_typed += 1;
                 MutantReport {
@@ -1594,7 +1800,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                     detail: Some(err),
                 }
             }
-            Ok((_, checked)) => {
+            Ok(checked) => {
                 let (unit_passed, cases) =
                     run_tests_on_world(&mutated, &checked.world, &unit.selected, opts.fuel, false);
                 let mut killer = cases

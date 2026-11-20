@@ -1,5 +1,5 @@
 //! Token-stream parser for `@test`, `@test(...)`, and `@test_case(...)`
-//! attributes attached to top-level `fn` declarations.
+//! attributes attached to module functions, including functions inside a test block.
 //!
 //! This module extracts structured test metadata directly from the real
 //! [`crate::lexer`] token stream without altering `vesper_core::ast::Function`.
@@ -195,6 +195,7 @@ impl<'a> AttrStream<'a> {
     fn extract_all(&mut self) -> Vec<FunctionTestAttrs> {
         let mut results = Vec::new();
         let mut brace_depth: usize = 0;
+        let mut test_block = false;
         let mut pending_test: Option<TestAttr> = None;
         let mut pending_cases: Vec<TestCaseAttr> = Vec::new();
         let mut first_attr_start: Option<usize> = None;
@@ -207,6 +208,24 @@ impl<'a> AttrStream<'a> {
                     _ => {}
                 }
                 self.bump();
+                continue;
+            }
+
+            if !test_block && self.at_word(0, "test") && self.nth_kind(1) == K::LBrace {
+                pending_test = None;
+                pending_cases.clear();
+                first_attr_start = None;
+                self.bump();
+                self.bump();
+                test_block = true;
+                continue;
+            }
+            if test_block && self.kind() == K::RBrace {
+                pending_test = None;
+                pending_cases.clear();
+                first_attr_start = None;
+                self.bump();
+                test_block = false;
                 continue;
             }
 

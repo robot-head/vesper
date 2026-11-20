@@ -1187,8 +1187,33 @@ fn pub_item_follows(in p: P) -> bool {
     )
 }
 
+// Keep inactive test declarations as lossless tokens in the ordinary CST.
+fn skip_test_block(inout p: P) {
+    bump(inout p);
+    bump(inout p);
+    let mut depth: u64 = 1;
+    loop {
+        if depth == 0 || at(in p, k_eof()) {
+            break;
+        }
+        if at(in p, k_l_brace()) {
+            depth = inc(depth);
+        } else if at(in p, k_r_brace()) {
+            depth = wrapping_sub(depth, 1);
+        }
+        bump(inout p);
+    }
+    if depth != 0 {
+        expect(inout p, k_r_brace());
+    }
+}
+
 // `Parser::declaration`: whether it produced an item.
 fn declaration(inout p: P) -> bool {
+    if at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace() {
+        skip_test_block(inout p);
+        return false;
+    }
     if at_word(in p, 0, w_use()) && at_word(in p, 1, w_model()) {
         use_model(inout p);
         return false;
@@ -3308,16 +3333,42 @@ fn index_tokens(inout p: P) {
 // `contextual_item_names`: `fn break()` and friends keep the word a name.
 fn contextual_item_names(inout p: P) {
     let mut previous: u8 = 255;
+    let mut depth: u64 = 0;
+    let mut skipping_test = false;
     for j in 0..p.sig.len() {
         let i = w32(in p.sig, j);
         let k = tk(in p, i);
-        if previous == k_fn() && k == k_lower() {
+        if depth
+            == 0
+            && k
+            == k_lower()
+            && tword(in p, i)
+            == w_test()
+            && inc(j)
+            < p
+            .sig
+            .len()
+            && tk(in p, w32(in p.sig, inc(j)))
+            == k_l_brace() {
+            skipping_test = true;
+        }
+        if !skipping_test && previous == k_fn() && k == k_lower() {
             let w = tword(in p, i);
             if w == w_break() || w == w_continue() || w == w_for() || w == w_loop() {
                 let sym = tsym(in p, i);
                 if !bound(in p, sym) {
                     val_insert(inout p, sym);
                 }
+            }
+        }
+        if k == k_l_brace() {
+            depth = inc(depth);
+        } else if k == k_r_brace() {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+            }
+            if depth == 0 {
+                skipping_test = false;
             }
         }
         previous = k;

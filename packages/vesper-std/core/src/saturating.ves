@@ -236,3 +236,34 @@ pub fn saturating_mul_i64(a: i64, b: i64) -> i64 {
         }
     }
 }
+
+test {
+    // @case exact(40, 2, 42)
+    // @case upper_bound(126, 1, 127)
+    // @case above_max(127, 1, 127)
+    // @case below_min(-128, -1, -128)
+    fn test_saturating_add_i8(a: i8, b: i8, expected: i8) -> bool {
+        saturating_add_i8(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case above_max(127, -1, 127)
+    // @case below_min(-128, 1, -128)
+    fn test_saturating_sub_i8(a: i8, b: i8, expected: i8) -> bool {
+        saturating_sub_i8(a, b) == expected
+    }
+
+    // @case exact(-6, 7, -42)
+    // @case above_max(-128, -1, 127)
+    // @case below_min(-65, 2, -128)
+    fn test_saturating_mul_i8(a: i8, b: i8, expected: i8) -> bool {
+        saturating_mul_i8(a, b) == expected
+    }
+
+    // @case zero(18446744073709551615, 0, 0)
+    // @case upper_bound(18446744073709551615, 1, 18446744073709551615)
+    // @case overflow(9223372036854775808, 2, 18446744073709551615)
+    fn test_saturating_mul_u64(a: u64, b: u64, expected: u64) -> bool {
+        saturating_mul_u64(a, b) == expected
+    }
+}

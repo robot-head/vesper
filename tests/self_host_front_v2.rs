@@ -329,6 +329,22 @@ fn under_bazel() -> bool {
     std::env::var_os("TEST_SRCDIR").is_some()
 }
 
+#[test]
+fn test_blocks_match_the_rust_parser() {
+    for source in [
+        "test { fn example() -> bool { true } } fn main() {}",
+        "test /* comment */ { fn break() {} } fn f() { loop { break; } }",
+        "test { fn open() {",
+    ] {
+        if let Some(difference) = compare(source) {
+            panic!("{source}: {difference}");
+        }
+        if let Some(difference) = compare_editor(source, recovery::Limits::default()) {
+            panic!("{source} (editor): {difference}");
+        }
+    }
+}
+
 /// Every repository `.ves` file gives the same CST and diagnostics.
 #[test]
 fn repository_sources_match_the_rust_parser() {

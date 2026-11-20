@@ -64,27 +64,29 @@ fn clamp_zero(x: i64) -> i64 {
     if x < 0 { 0 } else { x }
 }
 
-@test
-fn anvil_unit_jit() -> bool {
-    clamp_zero(-5) == 0 && clamp_zero(9) == 9
-}
+test {
+    @test
+    fn anvil_unit_jit() -> bool {
+        clamp_zero(-5) == 0 && clamp_zero(9) == 9
+    }
 
-@test(cases = 32)
-@test_case(0, 0)
-@test_case(a = 7, b = -3)
-fn anvil_property_comm(a: i64, b: i64) -> bool {
-    (a == b) == (b == a) && ((a < b) == (b > a))
-}
+    @test(cases = 32)
+    @test_case(0, 0)
+    @test_case(a = 7, b = -3)
+    fn anvil_property_comm(a: i64, b: i64) -> bool {
+        (a == b) == (b == a) && ((a < b) == (b > a))
+    }
 
-@test(sim_schedules = 4, fault_profile = TornWalSector)
-fn anvil_simpulse_dpor() -> bool {
-    clamp_zero(42) == 42
-}
+    @test(sim_schedules = 4, fault_profile = TornWalSector)
+    fn anvil_simpulse_dpor() -> bool {
+        clamp_zero(42) == 42
+    }
 
-@test(expect_error = E0302, primary = "tx", related = "linear binding introduced here")
-fn anvil_negative_linear_leak() -> i64 {
-    let tx = WriteTxn { id: 1 };
-    0
+    @test(expect_error = E0302, primary = "tx", related = "linear binding introduced here")
+    fn anvil_negative_linear_leak() -> i64 {
+        let tx = WriteTxn { id: 1 };
+        0
+    }
 }
 "#;
 
@@ -92,6 +94,12 @@ fn anvil_negative_linear_leak() -> i64 {
 fn anvil_unifies_unit_property_simpulse_and_expect_error_via_cli() {
     let temp = TempDir::new(&[("anvil.ves", ANVIL_SUITE)]);
     let file = temp.path("anvil.ves");
+    let check = vesper(&temp.0, &["check", file.to_str().unwrap()]);
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
     let out = vesper(
         &temp.0,
         &["test", file.to_str().unwrap(), "--no-cache", "--json"],

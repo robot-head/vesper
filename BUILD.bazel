@@ -115,6 +115,10 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
+        "test/test_runner_cli": [
+            "packages/vesper-std/core/src/option.ves",
+            "packages/vesper-std/core/src/saturating.ves",
+        ],
         # Self-hosting SH0 lane 7 (#1129): the front end v2 against the Rust
         # parser on the root package's `.ves` files and the parser test suites.
         # Anchored globs: a root `**` glob without the vesper_crate `_NEVER`

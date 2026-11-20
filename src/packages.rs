@@ -260,8 +260,18 @@ pub fn is_package(path: &Path) -> bool {
 /// them into one module. `Err` is an I/O failure; language and manifest
 /// errors are reported in [`Assembled`].
 pub fn load(dir: &Path) -> Result<Assembled, String> {
+    load_with_tests(dir, false)
+}
+
+/// Include test-only declarations in the root package. Dependencies are
+/// loaded in ordinary mode.
+pub fn load_for_tests(dir: &Path) -> Result<Assembled, String> {
+    load_with_tests(dir, true)
+}
+
+fn load_with_tests(dir: &Path, include_tests: bool) -> Result<Assembled, String> {
     let mut loader = Loader::default();
-    let root = loader.package(dir, dir.to_path_buf(), &mut vec![])?;
+    let root = loader.package(dir, dir.to_path_buf(), &mut vec![], include_tests)?;
     let package = root
         .map(|i| loader.packages[i].name.as_str().to_owned())
         .unwrap_or_default();
@@ -417,6 +427,7 @@ impl Loader {
         dir: &Path,
         shown: PathBuf,
         stack: &mut Vec<(PathBuf, String)>,
+        include_tests: bool,
     ) -> Result<Option<usize>, String> {
         let canonical = fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         if let Some(i) = stack.iter().position(|(p, _)| *p == canonical) {
@@ -506,7 +517,12 @@ impl Loader {
                 ));
                 continue;
             }
-            let parsed = crate::parser::parse(&self.sources.files[file].text);
+            let source = &self.sources.files[file].text;
+            let parsed = if include_tests {
+                crate::parser::parse_for_tests(source)
+            } else {
+                crate::parser::parse(source)
+            };
             for d in parsed.diagnostics {
                 self.diagnostics.push(PackageDiagnostic {
                     file: Some(file),
@@ -569,7 +585,8 @@ impl Loader {
                 ));
                 continue;
             }
-            let Some(dep_index) = self.package(&dep_dir, normalize(&shown.join(path)), stack)?
+            let Some(dep_index) =
+                self.package(&dep_dir, normalize(&shown.join(path)), stack, false)?
             else {
                 continue;
             };
