@@ -124,8 +124,28 @@ the branch; its result is recorded in the PR.
 
 ## Numbers
 
-See "Numbers" in the PR body (release ABBA of `abba_against_vec_state`,
-256 blocks x 8 rounds).
+The census state pool (256 blocks x 8 rounds), optimized JIT
+(`WordFunction`) against a release Rust `Vec<State>`, median of 18 ABBA
+samples on this 4-core cloud box (`tests/disjoint_borrows_pool.rs` and
+`tests/owning_collections_pool.rs`, run back to back):
+
+| Shape | Wall | vs Rust |
+|---|---|---|
+| Rust `Vec<State>` | 2.38 ms | 1.00x |
+| element-view matches (`pool_views`, #1221) | 2.96 ms | 1.24x |
+| paths through elements (`pool_paths`, this lane) | 3.28 ms | 1.38x |
+| (second run) element-view matches | 3.49 ms | 1.36x of 2.57 ms |
+| (second run) flat-pool workaround | 3.17 ms | 1.24x of 2.57 ms |
+
+#1221 measured views at 1.62x on another box. Here run-to-run noise is
+about 10%. The paths shape is about 11% slower than the hand-written view
+matches. It is the same program with two differences: its `None` arms raise
+instead of returning an empty sequence, so `pool_paths` carries
+`Fail[RuntimeError]` and is entered through a handler (`paths_entry`), and
+the two `in` paths nest two views around the call. The views themselves
+cost the same bounds check and address in both shapes. Not measured:
+callgrind Ir, and a checker port's hot loop rewritten with paths (the open
+SH2 checker ports are on other branches).
 
 ## Compiler gaps
 
