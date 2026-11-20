@@ -82,6 +82,89 @@ pub const CCA_REALM_ENDORSEMENT_PROFILE: &str = "tag:arm.com,2025:cca_realm#1.0.
 pub const NI_SHA256: i64 = 1;
 pub const NI_SHA384: i64 = 7;
 pub const NI_SHA512: i64 = 8;
+/// Digest lengths of SHA-256, SHA-384 and SHA-512.
+const SHA256_LEN: usize = 32;
+const SHA384_LEN: usize = 48;
+const SHA512_LEN: usize = 64;
+/// CCA endorsement profile limits: a 32-byte implementation ID, a RoTPK
+/// index of 0..=5 with at most 48 keys, a personalization value of at most
+/// 64 bytes, and a platform instance ID that is a 33-byte RAND UEID
+/// (type 0x01, RFC 9711 §4.2.1).
+const CCA_IMPLEMENTATION_ID_LEN: usize = 32;
+const ROTPK_MAX_INDEX: u64 = 5;
+const MAX_ROTPK_KEYS: usize = 48;
+const CCA_MAX_PERSONALIZATION_LEN: usize = 64;
+const UEID_RAND_LEN: usize = 33;
+const UEID_TYPE_RAND: u8 = 0x01;
+
+/// Integer map keys of the CoRIM and CoMID CDDL (draft-ietf-rats-corim),
+/// one module per map.
+mod key {
+    pub(super) mod corim {
+        pub(crate) const ID: i64 = 0;
+        pub(crate) const TAGS: i64 = 1;
+        pub(crate) const PROFILE: i64 = 3;
+        pub(crate) const VALIDITY: i64 = 4;
+        pub(crate) const ENTITIES: i64 = 5;
+    }
+    pub(super) mod meta {
+        pub(crate) const SIGNER: i64 = 0;
+        pub(crate) const SIGNATURE_VALIDITY: i64 = 1;
+    }
+    pub(super) mod signer {
+        pub(crate) const NAME: i64 = 0;
+        pub(crate) const URI: i64 = 1;
+    }
+    pub(super) mod validity {
+        pub(crate) const NOT_BEFORE: i64 = 0;
+        pub(crate) const NOT_AFTER: i64 = 1;
+    }
+    pub(super) mod entity {
+        pub(crate) const NAME: i64 = 0;
+        pub(crate) const REGID: i64 = 1;
+        pub(crate) const ROLES: i64 = 2;
+    }
+    pub(super) mod comid {
+        pub(crate) const TAG_IDENTITY: i64 = 1;
+        pub(crate) const TRIPLES: i64 = 4;
+    }
+    pub(super) mod tag_identity {
+        pub(crate) const ID: i64 = 0;
+        pub(crate) const VERSION: i64 = 1;
+    }
+    pub(super) mod triples {
+        pub(crate) const REFERENCE: i64 = 0;
+        pub(crate) const ATTEST_KEY: i64 = 3;
+    }
+    pub(super) mod environment {
+        pub(crate) const CLASS: i64 = 0;
+        pub(crate) const INSTANCE: i64 = 1;
+        pub(crate) const GROUP: i64 = 2;
+    }
+    pub(super) mod class {
+        pub(crate) const ID: i64 = 0;
+        pub(crate) const VENDOR: i64 = 1;
+        pub(crate) const MODEL: i64 = 2;
+        pub(crate) const LAYER: i64 = 3;
+        pub(crate) const INDEX: i64 = 4;
+    }
+    pub(super) mod measurement {
+        pub(crate) const MKEY: i64 = 0;
+        pub(crate) const MVAL: i64 = 1;
+        pub(crate) const AUTHORIZED_BY: i64 = 2;
+    }
+    pub(super) mod mval {
+        pub(crate) const VERSION: i64 = 0;
+        pub(crate) const DIGESTS: i64 = 2;
+        pub(crate) const RAW_VALUE: i64 = 4;
+        pub(crate) const NAME: i64 = 11;
+        pub(crate) const CRYPTOKEYS: i64 = 13;
+    }
+    pub(super) mod version {
+        pub(crate) const VERSION: i64 = 0;
+        pub(crate) const SCHEME: i64 = 1;
+    }
+}
 
 // ------------------------------------------------------------ model --
 
@@ -351,9 +434,15 @@ fn time(v: &Value, field: &'static str) -> Result<u64, ParseError> {
 
 fn validity(v: &Value, field: &'static str) -> Result<CorimValidity, ParseError> {
     let m = IntMap::new(v, field)?;
-    m.only(&[0, 1], field)?;
-    let not_before = m.get(0).map(|t| time(t, field)).transpose()?;
-    let not_after = time(m.req(1, field)?, field)?;
+    m.only(
+        &[key::validity::NOT_BEFORE, key::validity::NOT_AFTER],
+        field,
+    )?;
+    let not_before = m
+        .get(key::validity::NOT_BEFORE)
+        .map(|t| time(t, field))
+        .transpose()?;
+    let not_after = time(m.req(key::validity::NOT_AFTER, field)?, field)?;
     if not_before.is_some_and(|nb| nb > not_after) {
         return Err(err(field, "not-before after not-after"));
     }
@@ -378,7 +467,7 @@ fn parse_entities(v: &Value) -> Result<Vec<CorimEntity>, ParseError> {
         .iter()
         .map(|e| {
             let m = IntMap::new(e, "entity")?;
-            let roles = match m.get(2) {
+            let roles = match m.get(key::entity::ROLES) {
                 None => Vec::new(),
                 Some(r) => array(r, "entity roles")?
                     .iter()
@@ -386,8 +475,11 @@ fn parse_entities(v: &Value) -> Result<Vec<CorimEntity>, ParseError> {
                     .collect::<Result<_, _>>()?,
             };
             Ok(CorimEntity {
-                name: text(m.req(0, "entity name")?, "entity name")?,
-                regid: m.get(1).map(|r| uri(r, "entity regid")).transpose()?,
+                name: text(m.req(key::entity::NAME, "entity name")?, "entity name")?,
+                regid: m
+                    .get(key::entity::REGID)
+                    .map(|r| uri(r, "entity regid"))
+                    .transpose()?,
                 roles,
             })
         })
@@ -396,9 +488,18 @@ fn parse_entities(v: &Value) -> Result<Vec<CorimEntity>, ParseError> {
 
 fn parse_class(v: &Value, env: &mut Environment) -> Result<(), ParseError> {
     let m = IntMap::new(v, "class")?;
-    m.only(&[0, 1, 2, 3, 4], "class")?;
+    m.only(
+        &[
+            key::class::ID,
+            key::class::VENDOR,
+            key::class::MODEL,
+            key::class::LAYER,
+            key::class::INDEX,
+        ],
+        "class",
+    )?;
     env.has_class = true;
-    env.class_id = match m.get(0) {
+    env.class_id = match m.get(key::class::ID) {
         None => None,
         Some(c) => Some(match tagged(c) {
             Some((TAG_UUID, inner)) => ClassId::Uuid(uuid(inner, "class id")?),
@@ -407,21 +508,40 @@ fn parse_class(v: &Value, env: &mut Environment) -> Result<(), ParseError> {
             _ => return Err(err("class id", "expected tagged UUID, OID or bytes")),
         }),
     };
-    env.vendor = m.get(1).map(|x| text(x, "class vendor")).transpose()?;
-    env.model = m.get(2).map(|x| text(x, "class model")).transpose()?;
-    env.layer = m.get(3).map(|x| uint(x, "class layer")).transpose()?;
-    env.index = m.get(4).map(|x| uint(x, "class index")).transpose()?;
+    env.vendor = m
+        .get(key::class::VENDOR)
+        .map(|x| text(x, "class vendor"))
+        .transpose()?;
+    env.model = m
+        .get(key::class::MODEL)
+        .map(|x| text(x, "class model"))
+        .transpose()?;
+    env.layer = m
+        .get(key::class::LAYER)
+        .map(|x| uint(x, "class layer"))
+        .transpose()?;
+    env.index = m
+        .get(key::class::INDEX)
+        .map(|x| uint(x, "class index"))
+        .transpose()?;
     Ok(())
 }
 
 fn parse_environment(v: &Value) -> Result<Environment, ParseError> {
     let m = IntMap::new(v, "environment")?;
-    m.only(&[0, 1, 2], "environment")?;
+    m.only(
+        &[
+            key::environment::CLASS,
+            key::environment::INSTANCE,
+            key::environment::GROUP,
+        ],
+        "environment",
+    )?;
     let mut env = Environment::default();
-    if let Some(c) = m.get(0) {
+    if let Some(c) = m.get(key::environment::CLASS) {
         parse_class(c, &mut env)?;
     }
-    env.instance = match m.get(1) {
+    env.instance = match m.get(key::environment::INSTANCE) {
         None => None,
         Some(i) => Some(match tagged(i) {
             Some((TAG_UEID, inner)) => Instance::Ueid(bstr(inner, "instance")?.to_vec()),
@@ -431,7 +551,7 @@ fn parse_environment(v: &Value) -> Result<Environment, ParseError> {
             None => return Err(err("instance", "expected tagged instance")),
         }),
     };
-    env.has_group = m.get(2).is_some();
+    env.has_group = m.get(key::environment::GROUP).is_some();
     if !env.has_class && env.instance.is_none() && !env.has_group {
         return Err(err("environment", "empty"));
     }
@@ -467,13 +587,13 @@ fn parse_mval(v: &Value) -> Result<MeasurementValues, ParseError> {
     let mut out = MeasurementValues::default();
     for (k, val) in &m.0 {
         match *k {
-            0 => {
+            key::mval::VERSION => {
                 let vm = IntMap::new(val, "version")?;
-                vm.only(&[0, 1], "version")?;
-                out.version = Some(text(vm.req(0, "version")?, "version")?);
-                out.version_has_scheme = vm.get(1).is_some();
+                vm.only(&[key::version::VERSION, key::version::SCHEME], "version")?;
+                out.version = Some(text(vm.req(key::version::VERSION, "version")?, "version")?);
+                out.version_has_scheme = vm.get(key::version::SCHEME).is_some();
             }
-            2 => {
+            key::mval::DIGESTS => {
                 let ds = array(val, "digests")?;
                 if ds.is_empty() {
                     return Err(err("digests", "empty"));
@@ -488,7 +608,7 @@ fn parse_mval(v: &Value) -> Result<MeasurementValues, ParseError> {
                     }
                 }
             }
-            4 => {
+            key::mval::RAW_VALUE => {
                 out.raw_value = Some(match tagged(val) {
                     Some((TAG_BYTES, inner)) => RawValue {
                         value: bstr(inner, "raw value")?.to_vec(),
@@ -506,8 +626,8 @@ fn parse_mval(v: &Value) -> Result<MeasurementValues, ParseError> {
                     _ => return Err(err("raw value", "expected tag 560 or 563")),
                 });
             }
-            11 => out.name = Some(text(val, "measurement name")?),
-            13 => {
+            key::mval::NAME => out.name = Some(text(val, "measurement name")?),
+            key::mval::CRYPTOKEYS => {
                 out.cryptokeys = array(val, "cryptokeys")?
                     .iter()
                     .map(parse_crypto_key)
@@ -521,8 +641,15 @@ fn parse_mval(v: &Value) -> Result<MeasurementValues, ParseError> {
 
 fn parse_measurement(v: &Value) -> Result<Measurement, ParseError> {
     let m = IntMap::new(v, "measurement")?;
-    m.only(&[0, 1, 2], "measurement")?;
-    let mkey = match m.get(0) {
+    m.only(
+        &[
+            key::measurement::MKEY,
+            key::measurement::MVAL,
+            key::measurement::AUTHORIZED_BY,
+        ],
+        "measurement",
+    )?;
+    let mkey = match m.get(key::measurement::MKEY) {
         None => None,
         Some(Value::Text(t)) => Some(Mkey::Text(t.clone())),
         Some(Value::Integer(i)) => Some(Mkey::Uint(
@@ -534,21 +661,33 @@ fn parse_measurement(v: &Value) -> Result<Measurement, ParseError> {
     };
     Ok(Measurement {
         mkey,
-        values: parse_mval(m.req(1, "measurement values")?)?,
-        has_authorized_by: m.get(2).is_some(),
+        values: parse_mval(m.req(key::measurement::MVAL, "measurement values")?)?,
+        has_authorized_by: m.get(key::measurement::AUTHORIZED_BY).is_some(),
     })
 }
 
 fn parse_comid(bytes: &[u8]) -> Result<Comid, ParseError> {
     let v = decode_value(bytes, "CoMID")?;
     let m = IntMap::new(&v, "CoMID")?;
-    let ti = IntMap::new(m.req(1, "CoMID tag identity")?, "CoMID tag identity")?;
-    ti.only(&[0, 1], "CoMID tag identity")?;
-    let triples = IntMap::new(m.req(4, "CoMID triples")?, "CoMID triples")?;
+    let ti = IntMap::new(
+        m.req(key::comid::TAG_IDENTITY, "CoMID tag identity")?,
+        "CoMID tag identity",
+    )?;
+    ti.only(
+        &[key::tag_identity::ID, key::tag_identity::VERSION],
+        "CoMID tag identity",
+    )?;
+    let triples = IntMap::new(
+        m.req(key::comid::TRIPLES, "CoMID triples")?,
+        "CoMID triples",
+    )?;
     let mut comid = Comid {
-        tag_id: id(ti.req(0, "CoMID tag id")?, "CoMID tag id")?,
+        tag_id: id(
+            ti.req(key::tag_identity::ID, "CoMID tag id")?,
+            "CoMID tag id",
+        )?,
         tag_version: ti
-            .get(1)
+            .get(key::tag_identity::VERSION)
             .map(|x| uint(x, "tag version"))
             .transpose()?
             .unwrap_or(0),
@@ -558,7 +697,7 @@ fn parse_comid(bytes: &[u8]) -> Result<Comid, ParseError> {
     };
     for (k, val) in &triples.0 {
         match *k {
-            0 => {
+            key::triples::REFERENCE => {
                 for t in array(val, "reference triples")? {
                     match array(t, "reference triple")? {
                         [env, ms] => comid.reference_values.push(ReferenceTriple {
@@ -575,7 +714,7 @@ fn parse_comid(bytes: &[u8]) -> Result<Comid, ParseError> {
                     }
                 }
             }
-            3 => {
+            key::triples::ATTEST_KEY => {
                 for t in array(val, "attest-key triples")? {
                     let (env, keys, has_conditions) = match array(t, "attest-key triple")? {
                         [env, keys] => (env, keys, false),
@@ -606,7 +745,7 @@ fn parse_corim_value(v: &Value) -> Result<Corim, ParseError> {
     let m = IntMap::new(inner, "CoRIM")?;
     let mut comids = Vec::new();
     let mut other_tags = 0;
-    let tags = array(m.req(1, "CoRIM tags")?, "CoRIM tags")?;
+    let tags = array(m.req(key::corim::TAGS, "CoRIM tags")?, "CoRIM tags")?;
     if tags.is_empty() {
         return Err(err("CoRIM tags", "empty"));
     }
@@ -617,7 +756,7 @@ fn parse_corim_value(v: &Value) -> Result<Corim, ParseError> {
             None => return Err(err("CoRIM tags", "untagged entry")),
         }
     }
-    let profile = match m.get(3) {
+    let profile = match m.get(key::corim::PROFILE) {
         None => None,
         Some(p) => Some(match tagged(p) {
             Some((TAG_URI, inner)) => CorimProfile::Uri(text(inner, "profile")?),
@@ -626,14 +765,14 @@ fn parse_corim_value(v: &Value) -> Result<Corim, ParseError> {
         }),
     };
     Ok(Corim {
-        id: id(m.req(0, "CoRIM id")?, "CoRIM id")?,
+        id: id(m.req(key::corim::ID, "CoRIM id")?, "CoRIM id")?,
         profile,
         validity: m
-            .get(4)
+            .get(key::corim::VALIDITY)
             .map(|x| validity(x, "CoRIM validity"))
             .transpose()?,
         entities: m
-            .get(5)
+            .get(key::corim::ENTITIES)
             .map(parse_entities)
             .transpose()?
             .unwrap_or_default(),
@@ -713,14 +852,23 @@ fn check_len(bytes: &[u8]) -> Result<(), ParseError> {
 fn parse_meta(bytes: &[u8]) -> Result<CorimSigner, ParseError> {
     let v = decode_value(bytes, "corim-meta")?;
     let m = IntMap::new(&v, "corim-meta")?;
-    m.only(&[0, 1], "corim-meta")?;
-    let s = IntMap::new(m.req(0, "corim-meta signer")?, "corim-meta signer")?;
-    s.only(&[0, 1], "corim-meta signer")?;
+    m.only(
+        &[key::meta::SIGNER, key::meta::SIGNATURE_VALIDITY],
+        "corim-meta",
+    )?;
+    let s = IntMap::new(
+        m.req(key::meta::SIGNER, "corim-meta signer")?,
+        "corim-meta signer",
+    )?;
+    s.only(&[key::signer::NAME, key::signer::URI], "corim-meta signer")?;
     Ok(CorimSigner {
-        name: text(s.req(0, "signer name")?, "signer name")?,
-        uri: s.get(1).map(|u| uri(u, "signer uri")).transpose()?,
+        name: text(s.req(key::signer::NAME, "signer name")?, "signer name")?,
+        uri: s
+            .get(key::signer::URI)
+            .map(|u| uri(u, "signer uri"))
+            .transpose()?,
         signature_validity: m
-            .get(1)
+            .get(key::meta::SIGNATURE_VALIDITY)
             .map(|x| validity(x, "signature validity"))
             .transpose()?,
     })
@@ -788,7 +936,7 @@ pub struct CcaPlatformReference {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CcaRealmReference {
     pub rim: Vec<u8>,
-    pub rems: [Option<Vec<u8>>; 4],
+    pub rems: [Option<Vec<u8>>; crate::cca::CCA_REMS],
     pub personalization: Option<Vec<u8>>,
 }
 
@@ -808,14 +956,14 @@ fn profile_err(reason: impl Into<String>) -> AttestError {
 }
 
 fn digest_len_ok(b: &[u8]) -> bool {
-    matches!(b.len(), 32 | 48 | 64)
+    matches!(b.len(), SHA256_LEN | SHA384_LEN | SHA512_LEN)
 }
 
 fn alg_len(alg: i64) -> Option<usize> {
     match alg {
-        NI_SHA256 => Some(32),
-        NI_SHA384 => Some(48),
-        NI_SHA512 => Some(64),
+        NI_SHA256 => Some(SHA256_LEN),
+        NI_SHA384 => Some(SHA384_LEN),
+        NI_SHA512 => Some(SHA512_LEN),
         _ => None,
     }
 }
@@ -913,7 +1061,7 @@ fn rotpk_key(k: &str) -> Option<(String, u64)> {
     if (name != "CM" && name != "DM") || idx.len() != 1 {
         return None;
     }
-    let i = idx.parse::<u64>().ok().filter(|i| *i <= 5)?;
+    let i = idx.parse::<u64>().ok().filter(|i| *i <= ROTPK_MAX_INDEX)?;
     Some((name.to_owned(), i))
 }
 
@@ -960,7 +1108,7 @@ impl CcaCorimStore {
                 return Err(profile_err(format!("{what}: instance/group not allowed")));
             }
             let impl_id = class_bytes(&t.environment, &what)?;
-            if impl_id.len() != 32 {
+            if impl_id.len() != CCA_IMPLEMENTATION_ID_LEN {
                 return Err(profile_err(format!(
                     "{what}: implementation-id must be 32 bytes"
                 )));
@@ -1032,7 +1180,7 @@ impl CcaCorimStore {
                             return Err(profile_err(format!("{what}: invalid mkey {k:?}")));
                         };
                         check_plain_values(v, &["cryptokeys"], &what)?;
-                        if v.cryptokeys.is_empty() || v.cryptokeys.len() > 48 {
+                        if v.cryptokeys.is_empty() || v.cryptokeys.len() > MAX_ROTPK_KEYS {
                             return Err(profile_err(format!("{what}: RoTPK keys count")));
                         }
                         let hashes = v
@@ -1068,13 +1216,15 @@ impl CcaCorimStore {
                 });
             }
             let impl_id = class_bytes(&t.environment, &what)?;
-            if impl_id.len() != 32 {
+            if impl_id.len() != CCA_IMPLEMENTATION_ID_LEN {
                 return Err(profile_err(format!(
                     "{what}: implementation-id must be 32 bytes"
                 )));
             }
             let instance = match &t.environment.instance {
-                Some(Instance::Ueid(u)) if u.len() == 33 && u[0] == 0x01 => u.clone(),
+                Some(Instance::Ueid(u)) if u.len() == UEID_RAND_LEN && u[0] == UEID_TYPE_RAND => {
+                    u.clone()
+                }
                 Some(Instance::Ueid(_)) => {
                     return Err(profile_err(format!(
                         "{what}: instance-id must be 33 bytes starting 0x01"
@@ -1185,7 +1335,7 @@ impl CcaCorimStore {
                                 what: "masked cca.rpv",
                             });
                         }
-                        if rv.value.is_empty() || rv.value.len() > 64 {
+                        if rv.value.is_empty() || rv.value.len() > CCA_MAX_PERSONALIZATION_LEN {
                             return Err(profile_err(format!("{what}: cca.rpv length")));
                         }
                         if r.personalization.replace(rv.value.clone()).is_some() {
@@ -1339,7 +1489,7 @@ fn appraise_platform(
 fn appraise_realm(
     token: &CcaToken,
     r: &CcaRealmReference,
-) -> Result<([bool; 4], bool), AttestError> {
+) -> Result<([bool; crate::cca::CCA_REMS], bool), AttestError> {
     let rc = &token.realm_claims;
     if let Some(p) = &r.personalization
         && !ct_eq(p, &rc.personalization)

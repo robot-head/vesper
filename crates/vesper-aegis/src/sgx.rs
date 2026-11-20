@@ -33,9 +33,9 @@ use crate::claims::ct_eq;
 use crate::error::Format;
 use crate::error::{AttestError, ParseError};
 use crate::intel::{
-    ComponentJson, PckExtensions, QeIdentity, TcbStatus, TdxCollateral, TdxTcbEvaluation, all_ge,
-    check_embedded_root, check_window, collateral, date, evaluate_qe, hex_array,
-    parse_pck_extensions, push_unique, svn16, verify_signed,
+    ComponentJson, PckExtensions, QeIdentity, TCB_INFO_VERSION, TCB_TYPE, TcbStatus, TdxCollateral,
+    TdxTcbEvaluation, all_ge, check_embedded_root, check_window, collateral, date, evaluate_qe,
+    hex_array, parse_pck_extensions, push_unique, svn16, verify_signed,
 };
 #[cfg(not(vesper_port))]
 use crate::reader::Reader;
@@ -155,21 +155,21 @@ impl SgxQuote {
     /// Bounds-checked parse; the input must contain exactly one quote.
     #[cfg(vesper_port)]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        Ok(Self::parse_port(bytes, 0)?.0)
+        Ok(Self::parse_port(bytes, crate::port::TAIL_EXACT)?.0)
     }
 
     /// Parse from a fixed-size quote buffer: bytes after the quote's
     /// declared length must all be zero.
     #[cfg(vesper_port)]
     pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
-        Ok(Self::parse_port(bytes, 1)?.0)
+        Ok(Self::parse_port(bytes, crate::port::TAIL_PADDED)?.0)
     }
 
     /// Parse one quote from the start of `bytes`; returns it and the number
     /// of bytes it occupies.
     #[cfg(vesper_port)]
     pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
-        Self::parse_port(bytes, 2)
+        Self::parse_port(bytes, crate::port::TAIL_PREFIX)
     }
 
     /// `mode`: 0 exact, 1 zero padded, 2 prefix (vesper/src/reader.ves).
@@ -417,13 +417,13 @@ impl SgxTcbInfo {
                 format!("{:?}, expected SGX", j.id),
             ));
         }
-        if j.version != 3 {
+        if j.version != TCB_INFO_VERSION {
             return Err(collateral(
                 "tcbInfo.version",
-                format!("{}, expected 3", j.version),
+                format!("{}, expected {TCB_INFO_VERSION}", j.version),
             ));
         }
-        if j.tcb_type != 0 {
+        if j.tcb_type != TCB_TYPE {
             return Err(collateral("tcbInfo.tcbType", format!("{}", j.tcb_type)));
         }
         if j.tcb_levels.is_empty() {

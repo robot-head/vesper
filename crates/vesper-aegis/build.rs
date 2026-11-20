@@ -30,22 +30,34 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // snp.rs: report version 7 is accepted.
     (
         "snp",
-        "if version < 2 || version > 6 {",
-        "if version < 2 || version > 7 {",
+        "if version < SNP_REPORT_MIN_VERSION || version > SNP_REPORT_MAX_VERSION {",
+        "if version < SNP_REPORT_MIN_VERSION || version > 7 {",
     ),
     // tdx.rs: a TD 1.5 "ex" body is one byte shorter (the vendor's v5
     // type-4 sample no longer parses).
-    ("tdx", "            885\n", "            884\n"),
+    (
+        "tdx",
+        "const TDX_BODY_TD15_EX_LEN: u64 = 885;",
+        "const TDX_BODY_TD15_EX_LEN: u64 = 884;",
+    ),
     // sgx.rs: the PCK chain must be certification data type 6, not 5.
-    ("sgx", "if cert_type != 5 {", "if cert_type != 6 {"),
+    (
+        "sgx",
+        "if cert_type != CERT_DATA_PCK_CHAIN_PEM {",
+        "if cert_type != 6 {",
+    ),
     // claims.rs: the CCA architecture tag is refused on the wire.
-    ("wire", "if tag < 1 || tag > 3 {", "if tag < 1 || tag > 2 {"),
+    (
+        "wire",
+        "if tag < ARCH_TDX || tag > ARCH_CCA {",
+        "if tag < ARCH_TDX || tag > ARCH_SNP {",
+    ),
     // policy.rs: a TCB SVN equal to the floor is stale.
     ("policy", "if tcb_svn < floor {", "if tcb_svn <= floor {"),
     // time.rs: a timestamp without a fraction must end in "Y".
     (
         "time",
-        "        byte(in s, 19) == 90\n",
+        "        byte(in s, 19) == UPPER_Z\n",
         "        byte(in s, 19) == 89\n",
     ),
 ];

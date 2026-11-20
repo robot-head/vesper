@@ -40,6 +40,13 @@ use x509_parser::der_parser::der::parse_der;
 
 /// Intel SGX extension in PCK certificates.
 pub const SGX_EXTENSION_OID: &str = "1.2.840.113741.1.13.1";
+/// SGX and TDX TCBs have sixteen one-byte SVN components.
+pub(crate) const TCB_COMPONENTS: usize = 16;
+/// Intel PCS collateral formats this crate reads: TCB info version 3 with
+/// `tcbType` 0, and QE identity version 2.
+pub(crate) const TCB_INFO_VERSION: u32 = 3;
+pub(crate) const TCB_TYPE: u32 = 0;
+pub(crate) const QE_IDENTITY_VERSION: u32 = 2;
 
 /// A TCB status as Intel publishes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -458,11 +465,14 @@ fn hex_digit(c: u8) -> Option<u8> {
     }
 }
 
-pub(crate) fn svn16(c: &[ComponentJson], what: &'static str) -> Result<[u8; 16], AttestError> {
-    if c.len() != 16 {
+pub(crate) fn svn16(
+    c: &[ComponentJson],
+    what: &'static str,
+) -> Result<[u8; TCB_COMPONENTS], AttestError> {
+    if c.len() != TCB_COMPONENTS {
         return Err(collateral(
             what,
-            format!("{} components, expected 16", c.len()),
+            format!("{} components, expected {TCB_COMPONENTS}", c.len()),
         ));
     }
     let mut out = [0u8; 16];
@@ -537,13 +547,13 @@ impl TdxTcbInfo {
                 format!("{:?}, expected TDX", j.id),
             ));
         }
-        if j.version != 3 {
+        if j.version != TCB_INFO_VERSION {
             return Err(collateral(
                 "tcbInfo.version",
-                format!("{}, expected 3", j.version),
+                format!("{}, expected {TCB_INFO_VERSION}", j.version),
             ));
         }
-        if j.tcb_type != 0 {
+        if j.tcb_type != TCB_TYPE {
             return Err(collateral("tcbInfo.tcbType", format!("{}", j.tcb_type)));
         }
         if j.tcb_levels.is_empty() {
@@ -616,10 +626,10 @@ impl QeIdentity {
                 format!("{:?}, expected {expected_id}", j.id),
             ));
         }
-        if j.version != 2 {
+        if j.version != QE_IDENTITY_VERSION {
             return Err(collateral(
                 "enclaveIdentity.version",
-                format!("{}, expected 2", j.version),
+                format!("{}, expected {QE_IDENTITY_VERSION}", j.version),
             ));
         }
         Ok(QeIdentity {
@@ -789,7 +799,7 @@ fn parse_configuration(o: &BerObject<'_>) -> Result<PckPlatformConfiguration, At
 
 fn parse_tcb(o: &BerObject<'_>) -> Result<([u8; 16], u16, [u8; 16]), AttestError> {
     let prefix = format!("{SGX_EXTENSION_OID}.2.");
-    let mut comps = [None::<u8>; 16];
+    let mut comps = [None::<u8>; TCB_COMPONENTS];
     let mut pce_svn = None;
     let mut cpu_svn = None;
     for item in seq(o)? {

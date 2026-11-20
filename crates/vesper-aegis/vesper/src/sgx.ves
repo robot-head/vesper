@@ -24,6 +24,22 @@ use self::tdx::{
     qe_report
 };
 
+// src/sgx.rs: quote version 3, ECDSA P-256 attestation keys, the 384-byte
+// report body and PCK chain certification data (type 5). Field widths in
+// the parsers follow the layout tables, in order.
+const SGX_QUOTE_VERSION: u64 = 3;
+const SGX_ATT_KEY_ECDSA_P256: u64 = 2;
+const SGX_REPORT_BODY_LEN: u64 = 384;
+const CERT_DATA_PCK_CHAIN_PEM: u64 = 5;
+// Format code (lib.ves), the result words `parse` reserves, and its byte
+// hint: the input plus the signed header and body (432 bytes) and raw QE
+// report (384) it copies, capped as in tdx.ves.
+const FORMAT_SGX_QUOTE_V3: u64 = 1;
+const QUOTE_WORDS: u64 = 14;
+const COPIED_BYTES: u64 = 816;
+const RESERVE_HINT_MAX: u64 = 16384;
+const RESERVE_HINT_CAP: u64 = 17200;
+
 // SgxReportBody::parse. Words: misc_select, isv_prod_id, isv_svn,
 // config_svn. Bytes: cpu_svn, isv_ext_prod_id, attributes, mr_enclave,
 // mr_signer, config_id, isv_family_id, report_data.
@@ -58,21 +74,21 @@ pub fn report_body(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d
 // PEM chain.
 pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
     -> u64 eff [Fail[AErr]] {
-    let mut r = rd(0, b.len(), 1);
-    w.reserve(14);
+    let mut r = rd(0, b.len(), FORMAT_SGX_QUOTE_V3);
+    w.reserve(QUOTE_WORDS);
     // A hint only, capped as in tdx.ves.
-    let hint = if b.len() < 16384 {
-        wrapping_add(b.len(), 816)
+    let hint = if b.len() < RESERVE_HINT_MAX {
+        wrapping_add(b.len(), COPIED_BYTES)
     } else {
-        17200
+        RESERVE_HINT_CAP
     };
     d.reserve(hint);
     let version = rd_u16(in b, inout r, 80);
-    if version != 3 {
+    if version != SGX_QUOTE_VERSION {
         unsupported(in r, 80, version);
     }
     let att_key_type = rd_u16(in b, inout r, 81);
-    if att_key_type != 2 {
+    if att_key_type != SGX_ATT_KEY_ECDSA_P256 {
         unsupported(in r, 81, att_key_type);
     }
     reserved(in b, inout r, 4, 120);
@@ -87,28 +103,28 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
 
     let sig_len = rd_u32(in b, inout r, 92);
     if sig_len > max_sig_data() {
-        raise(k_over_budget(), 1, 92, max_sig_data(), sig_len);
+        raise(k_over_budget(), FORMAT_SGX_QUOTE_V3, 92, max_sig_data(), sig_len);
     }
     let sig = take(inout r, sig_len, 93);
     let used = r.pos;
 
-    let mut s = rd(sig, wrapping_add(sig, sig_len), 1);
+    let mut s = rd(sig, wrapping_add(sig, sig_len), FORMAT_SGX_QUOTE_V3);
     arr(in b, inout s, 64, 94, inout d);
     arr(in b, inout s, 64, 95, inout d);
-    let qe = take(inout s, 384, 121);
-    d.extend(in b[qe..wrapping_add(qe, 384)]);
-    let mut q = rd(qe, wrapping_add(qe, 384), 1);
+    let qe = take(inout s, SGX_REPORT_BODY_LEN, 121);
+    d.extend(in b[qe..wrapping_add(qe, SGX_REPORT_BODY_LEN)]);
+    let mut q = rd(qe, wrapping_add(qe, SGX_REPORT_BODY_LEN), FORMAT_SGX_QUOTE_V3);
     qe_report(in b, inout q, inout w, inout d);
     arr(in b, inout s, 64, 99, inout d);
     let auth_len = rd_u16(in b, inout s, 100);
     blob(in b, inout s, auth_len, 101, inout w, inout d);
     let cert_type = rd_u16(in b, inout s, 96);
-    if cert_type != 5 {
+    if cert_type != CERT_DATA_PCK_CHAIN_PEM {
         unsupported(in s, 96, cert_type);
     }
     let cert_size = rd_u32(in b, inout s, 97);
     blob(in b, inout s, cert_size, 98, inout w, inout d);
     finish(in s);
-    tail(in b, used, mode, 1);
+    tail(in b, used, mode, FORMAT_SGX_QUOTE_V3);
     used
 }
