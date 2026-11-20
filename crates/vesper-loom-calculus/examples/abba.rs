@@ -101,6 +101,7 @@ fn solution(n: usize, bump: u64) -> Solution {
                     license: None,
                     capability_ceiling: ceiling.clone(),
                     forbid_unsafe_ffi: !ceiling.contains("Ffi[LibA]"),
+                    vsys: vec![],
                 },
                 features,
                 dependencies,

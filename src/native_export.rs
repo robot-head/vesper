@@ -1280,13 +1280,30 @@ fn diagnostics(path: &str, ds: &[crate::ast::Diagnostic], what: &str) -> ExportE
 /// `public_items` when `None`) plus one generated wrapper per instance.
 pub fn compile_module(
     path: &str,
-    mut module: crate::ast::Module,
+    module: crate::ast::Module,
     source: &str,
     options: &LibraryOptions<'_>,
     instances: &[Instance],
     public: Option<&BTreeSet<String>>,
 ) -> Result<Library, ExportError> {
+    compile_package_module(path, module, source, &[], options, instances, public)
+}
+
+/// [`compile_module`] for the assembled module of a package graph, with the
+/// `.vsys` libraries its packages carry (`[package] vsys` in each
+/// `Loom.toml`, [`crate::packages::Assembled::vsys`]) imported beside the
+/// source's own `@export vsys` directives.
+pub fn compile_package_module(
+    path: &str,
+    mut module: crate::ast::Module,
+    source: &str,
+    packages: &[crate::packages::PackageVsys],
+    options: &LibraryOptions<'_>,
+    instances: &[Instance],
+    public: Option<&BTreeSet<String>>,
+) -> Result<Library, ExportError> {
     let mut directives = Directives::parse(source, options.target)?;
+    directives.add_packages(packages, options.target)?;
     directives.instances.extend(instances.iter().cloned());
     let mut public = match public {
         Some(p) => p.clone(),

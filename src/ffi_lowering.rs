@@ -536,6 +536,19 @@ impl ForeignChecked {
     pub fn calls(&self) -> &[ForeignCall] {
         &self.calls
     }
+    /// The `.vsys` link names of the libraries the module calls, sorted and
+    /// without repeats (what an executable links, as `-l<name>`).
+    pub fn link_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .calls
+            .iter()
+            .filter_map(|c| self.plan.libraries.get(&effect_name(&c.library)))
+            .map(|l| l.descriptor.link().name().to_owned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
     /// Run `compile` (which emits native code for [`Self::world`]) with the
     /// foreign-call plan in place, as [`Self::object`] does for one entry.
     /// `vesper build --lib` uses it for libraries that import `.vsys`

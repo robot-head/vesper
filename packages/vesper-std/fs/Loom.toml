@@ -3,3 +3,6 @@ name = "@vesper-std/fs"
 version = "0.1.0"
 edition = "2026"
 capability_ceiling = ["Fail", "Alloc", "Ffi[StdFs]"]
+# The `.vsys` library this package imports (manuscript §16.3): every package
+# that depends on it, and every executable over it, gets it from here.
+vsys = ["fs.vsys"]
