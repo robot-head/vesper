@@ -13,14 +13,14 @@
 // |     fn vcl_module_free(sink m: Module) -> ForeignVal[Unit];
 // |     fn vcl_module_error(in m: Module, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
 // |     fn vcl_module_pointer_type(in m: Module) -> ForeignVal[u32];
-// |     fn vcl_module_keep_clif(inout m: Module, keep: u32) -> ForeignVal[Unit];
+// |     fn vcl_module_keep_clif(inout m: Module, keep: bool) -> ForeignVal[Unit];
 // |     fn vcl_module_code_bytes(in m: Module) -> ForeignVal[u64];
 // |     fn vcl_module_clif(in m: Module, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
 // |     fn vcl_sig_new(inout m: Module, call_conv: u32) -> ForeignVal[u32];
 // |     fn vcl_sig_param(inout m: Module, sig: u32, ty: u32) -> ForeignVal[u32];
 // |     fn vcl_sig_return(inout m: Module, sig: u32, ty: u32) -> ForeignVal[u32];
 // |     fn vcl_declare_function(inout m: Module, nocapture in name: CSlice[u8], linkage: u32, sig: u32) -> ForeignVal[u32];
-// |     fn vcl_declare_data(inout m: Module, nocapture in name: CSlice[u8], linkage: u32, writable: u32, tls: u32) -> ForeignVal[u32];
+// |     fn vcl_declare_data(inout m: Module, nocapture in name: CSlice[u8], linkage: u32, writable: bool, tls: bool) -> ForeignVal[u32];
 // |     fn vcl_define_function(inout m: Module, func: u32, sink b: Builder) -> ForeignVal[u32];
 // |     fn vcl_define_data(inout m: Module, data: u32, sink d: Data) -> ForeignVal[u32];
 // |     fn vcl_module_finish(sink m: Module) -> ForeignVal[Option[Object]];
@@ -89,7 +89,7 @@
 // |     fn vcl_brif(inout b: Builder, c: u32, then_blk: u32, nocapture in then_args: CSlice[u32], else_blk: u32, nocapture in else_args: CSlice[u32]) -> ForeignVal[Unit];
 // |     fn vcl_return(inout b: Builder, nocapture in vals: CSlice[u32]) -> ForeignVal[Unit];
 // |     fn vcl_trap(inout b: Builder, code: u32) -> ForeignVal[Unit];
-// |     fn vcl_trap_if(inout b: Builder, c: u32, if_nonzero: u32, code: u32) -> ForeignVal[Unit];
+// |     fn vcl_trap_if(inout b: Builder, c: u32, if_nonzero: bool, code: u32) -> ForeignVal[Unit];
 // |     fn vcl_emit(inout b: Builder, nocapture in code: CSlice[u64], nocapture inout out: CSlice[u32]) -> ForeignVal[u32];
 // | }
 //
@@ -323,14 +323,7 @@ pub fn module_pointer_type(in m: Module) -> Ty eff [Ffi[Cranelift]] {
     }
 }
 pub fn module_keep_clif(inout m: Module, keep: bool) eff [Ffi[Cranelift]] {
-    Cranelift::vcl_module_keep_clif(
-        inout m,
-        if keep {
-            1
-        } else {
-            0
-        }
-    );
+    Cranelift::vcl_module_keep_clif(inout m, keep);
 }
 pub fn module_code_bytes(in m: Module) -> u64 eff [Ffi[Cranelift]] {
     Cranelift::vcl_module_code_bytes(in m)
@@ -355,17 +348,7 @@ pub fn declare_function(inout m: Module, in name: Slice[u8], linkage: u32, sig: 
 pub fn declare_data(inout m: Module, in name: Slice[u8], linkage: u32, writable: bool)
     -> DataId eff [Ffi[Cranelift]] {
     DataId {
-        id: Cranelift::vcl_declare_data(
-            inout m,
-            in name,
-            linkage,
-            if writable {
-                1
-            } else {
-                0
-            },
-            0
-        )
+        id: Cranelift::vcl_declare_data(inout m, in name, linkage, writable, false)
     }
 }
 // Compile and define `func` from `b`; false if it failed
@@ -913,10 +896,10 @@ pub fn ins_trap(inout b: Builder, code: u32) eff [Ffi[Cranelift]] {
     Cranelift::vcl_trap(inout b, code);
 }
 pub fn ins_trapnz(inout b: Builder, c: Value, code: u32) eff [Ffi[Cranelift]] {
-    Cranelift::vcl_trap_if(inout b, c.id, 1, code);
+    Cranelift::vcl_trap_if(inout b, c.id, true, code);
 }
 pub fn ins_trapz(inout b: Builder, c: Value, code: u32) eff [Ffi[Cranelift]] {
-    Cranelift::vcl_trap_if(inout b, c.id, 0, code);
+    Cranelift::vcl_trap_if(inout b, c.id, false, code);
 }
 
 // ---------------------------------------------------------------------------
