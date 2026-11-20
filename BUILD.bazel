@@ -161,6 +161,12 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 7 (#1179): core typing on the same corpus.
+        "test/self_host_check_core_typing": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -476,6 +482,8 @@ vesper_crate(
         # The checker data differential (#1176) checks every corpus world.
         "test/self_host_check_data": "long",
         "test/self_host_check_harness": "long",
+        # The core typing differential (#1179) checks every corpus world.
+        "test/self_host_check_core_typing": "long",
     },
 )
 
