@@ -18,6 +18,31 @@ use self::varint::{
     put_record
 };
 
+// CLOSE_WEBTRANSPORT_SESSION: a 32-bit application error code, then the
+// UTF-8 reason.
+const CLOSE_CODE_LEN: u64 = 4;
+// CapsuleReader modes.
+const MODE_HEADER: u64 = 0;
+const MODE_SKIP: u64 = 2;
+const MODE_VALUE: u64 = 3;
+// Well-formed UTF-8 (Unicode Table 3-7, RFC 3629 §4): continuation bytes,
+// the lead-byte ranges of 2-, 3- and 4-byte sequences, and the narrower
+// second-byte ranges after E0 (no overlong forms), ED (no surrogates), F0
+// (no overlong forms) and F4 (nothing above U+10FFFF).
+const UTF8_CONT_LO: u8 = 0x80;
+const UTF8_CONT_HI: u8 = 0xbf;
+const UTF8_LEAD2_LO: u8 = 0xc2;
+const UTF8_LEAD2_HI: u8 = 0xdf;
+const UTF8_LEAD3_LO: u8 = 0xe0;
+const UTF8_LEAD3_HI: u8 = 0xef;
+const UTF8_E0_SECOND_LO: u8 = 0xa0;
+const UTF8_SURROGATE_LEAD: u8 = 0xed;
+const UTF8_ED_SECOND_HI: u8 = 0x9f;
+const UTF8_LEAD4_LO: u8 = 0xf0;
+const UTF8_LEAD4_HI: u8 = 0xf4;
+const UTF8_F0_SECOND_LO: u8 = 0x90;
+const UTF8_F4_SECOND_HI: u8 = 0x8f;
+
 fn datagram_type() -> u64 {
     0
 }
@@ -34,12 +59,11 @@ pub fn max_close_reason() -> u64 {
     1024
 }
 
-// Modes: 0 header, 2 skip, 3 value.
 pub fn capsule_reader_new(max_value: u64) -> CapsuleReaderCore {
     CapsuleReaderCore {
         buf: ChunkSeq::new[u8](),
         head: 0,
-        mode: 0,
+        mode: MODE_HEADER,
         remaining: 0,
         ty: 0,
         len: 0,
@@ -61,12 +85,12 @@ pub fn capsule_buffered(in r: CapsuleReaderCore) -> u64 {
 }
 
 pub fn capsule_at_boundary(in r: CapsuleReaderCore) -> bool {
-    r.mode == 0 && r.head >= r.buf.len()
+    r.mode == MODE_HEADER && r.head >= r.buf.len()
 }
 
 fn cont(in s: Slice[u8], i: u64) -> bool {
     let c = byte(in s, i);
-    i < s.len() && c >= 128 && c <= 191
+    i < s.len() && c >= UTF8_CONT_LO && c <= UTF8_CONT_HI
 }
 
 fn in_range(in s: Slice[u8], i: u64, lo: u8, hi: u8) -> bool {
@@ -83,38 +107,38 @@ pub fn valid_utf8(in s: Slice[u8]) -> bool {
             return true;
         }
         let c = byte(in s, i);
-        if c < 128 {
+        if c < UTF8_CONT_LO {
             i = inc(i);
-        } else if c >= 194 && c <= 223 {
+        } else if c >= UTF8_LEAD2_LO && c <= UTF8_LEAD2_HI {
             if !cont(in s, inc(i)) {
                 return false;
             }
             i = wrapping_add(i, 2);
-        } else if c >= 224 && c <= 239 {
-            let lo: u8 = if c == 224 {
-                160
+        } else if c >= UTF8_LEAD3_LO && c <= UTF8_LEAD3_HI {
+            let lo: u8 = if c == UTF8_LEAD3_LO {
+                UTF8_E0_SECOND_LO
             } else {
-                128
+                UTF8_CONT_LO
             };
-            let hi: u8 = if c == 237 {
-                159
+            let hi: u8 = if c == UTF8_SURROGATE_LEAD {
+                UTF8_ED_SECOND_HI
             } else {
-                191
+                UTF8_CONT_HI
             };
             if !in_range(in s, inc(i), lo, hi) || !cont(in s, wrapping_add(i, 2)) {
                 return false;
             }
             i = wrapping_add(i, 3);
-        } else if c >= 240 && c <= 244 {
-            let lo: u8 = if c == 240 {
-                144
+        } else if c >= UTF8_LEAD4_LO && c <= UTF8_LEAD4_HI {
+            let lo: u8 = if c == UTF8_LEAD4_LO {
+                UTF8_F0_SECOND_LO
             } else {
-                128
+                UTF8_CONT_LO
             };
-            let hi: u8 = if c == 244 {
-                143
+            let hi: u8 = if c == UTF8_LEAD4_HI {
+                UTF8_F4_SECOND_HI
             } else {
-                191
+                UTF8_CONT_HI
             };
             if !in_range(in s, inc(i), lo, hi)
                 || !cont(in s, wrapping_add(i, 2))
@@ -136,14 +160,14 @@ fn parse_value(ty: u64, in v: Slice[u8], inout out: ChunkSeq[u8])
     }
     if ty == close_type() {
         let n = v.len();
-        if n < 4 {
+        if n < CLOSE_CODE_LEN {
             return Result::Err(
                 CapsuleError::Malformed {
                     capsule_type: ty
                 }
             );
         }
-        if !valid_utf8(in v[4..n]) {
+        if !valid_utf8(in v[(CLOSE_CODE_LEN)..n]) {
             return Result::Err(
                 CapsuleError::Malformed {
                     capsule_type: ty
@@ -153,7 +177,7 @@ fn parse_value(ty: u64, in v: Slice[u8], inout out: ChunkSeq[u8])
         let code = (widen_u64(byte(in v, 0)) << 24) | (widen_u64(byte(in v, 1)) << 16) | (
             widen_u64(byte(in v, 2)) << 8
         ) | widen_u64(byte(in v, 3));
-        out.extend(in v[4..n]);
+        out.extend(in v[(CLOSE_CODE_LEN)..n]);
         return Result::Ok(CapsuleOut::CloseSession(wrapping_u32(code)));
     }
     if v.len() != 0 {
@@ -171,7 +195,7 @@ pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleErr
     r.out.clear();
     loop {
         let avail = wrapping_sub(r.buf.len(), r.head);
-        if r.mode == 0 {
+        if r.mode == MODE_HEADER {
             let t = match vdec(in r.buf.as_slice(), r.head) {
                 Option::Some(n) => n,
                 Option::None => return Result::Ok(CapsuleOut::None),
@@ -185,7 +209,7 @@ pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleErr
             let len = l.value;
             if ty == datagram_type() || ty == close_type() || ty == drain_type() {
                 let bound = if ty == close_type() {
-                    wrapping_add(4, max_close_reason())
+                    wrapping_add(CLOSE_CODE_LEN, max_close_reason())
                 } else {
                     r.max_value
                 };
@@ -197,22 +221,22 @@ pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleErr
                         }
                     );
                 }
-                r.mode = 3;
+                r.mode = MODE_VALUE;
                 r.ty = ty;
                 r.len = len;
             } else {
-                r.mode = 2;
+                r.mode = MODE_SKIP;
                 r.remaining = len;
                 return Result::Ok(CapsuleOut::Unknown(ty));
             }
-        } else if r.mode == 2 {
+        } else if r.mode == MODE_SKIP {
             let n = min64(r.remaining, avail);
             r.head = wrapping_add(r.head, n);
             r.remaining = wrapping_sub(r.remaining, n);
             if r.remaining > 0 {
                 return Result::Ok(CapsuleOut::None);
             }
-            r.mode = 0;
+            r.mode = MODE_HEADER;
         } else {
             if avail < r.len {
                 return Result::Ok(CapsuleOut::None);
@@ -220,7 +244,7 @@ pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleErr
             let lo = r.head;
             let hi = wrapping_add(lo, r.len);
             r.head = hi;
-            r.mode = 0;
+            r.mode = MODE_HEADER;
             return parse_value(r.ty, in r.buf[lo..hi], inout r.out);
         }
     }
