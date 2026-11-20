@@ -996,6 +996,13 @@ fn desugarings_and_limits_match_the_rust_ast() {
         // Literal values.
         "fn f() { 0x1f; 1_000; 18446744073709551615; 18446744073709551616; 0x_; \"a\\n\\t\\\"\\\\\\/\\b\\f\\r\"; \"\\u00e9\\uD834\\uDD1E\"; \"\\uD800\"; \"\\q\"; \"é\" }",
         "fn f() { 1.5; 0.1; 1e10; 1E-5; 2.5e+3; 1e400; 1e-400; 4.9e-324; 2.4e-324; 2.5e-324; 1.7976931348623157e308; 1.7976931348623159e308; 0.000; 00.5e-3 }",
+        // Or-patterns (#1163): one arm per alternative sharing the body.
+        "fn f(x: E) -> u8 { match x { E::A | E::B => 1, E::C(n) | E::D(n) => n, _ => { let y = 2; y } } }",
+        "fn f(x: u8) -> u8 { match x { 1 | 2 | 3 => match x { 4 | 5 => 0, _ => 1 }, _ => 2 } }",
+        // Test blocks and attributes (#1171) outside test mode.
+        "test { fn helper() {} @test fn t() {} } fn break() {} test { fn loop() {} } fn g() { loop }",
+        "@test fn a() {} @test(should_fail) pub fn b() {} pub @test_case(1, (2, 3)) fn c(x: u8) {} @fip @test pub fn d() {}",
+        "@test struct S {} @test_case fn e() {} test fn h() {}",
         // A tile width equal to u32::MAX is still present.
         "tiled(4294967295) struct S {} tiled(4294967294) struct T {} tiled(4294967296) struct U {} tiled() struct V {}",
         // Recovery.
@@ -1014,6 +1021,15 @@ fn desugarings_and_limits_match_the_rust_ast() {
         cases.push(format!("fn f() {}{}", "{".repeat(n), "}".repeat(n)));
         cases.push(format!("fn f() {{ x{} }}", " + y".repeat(n)));
         cases.push(format!("fn f() {{ {}1 }}", "-".repeat(n)));
+    }
+    // The or-pattern expansion budget: a body copied too often keeps one
+    // alternative.
+    for alts in [2, 300, 500] {
+        let pats = vec!["1"; alts].join(" | ");
+        let body = format!("{{ {} 0 }}", "x; ".repeat(300));
+        cases.push(format!(
+            "fn f(x: u8) -> u8 {{ match x {{ {pats} => {body}, _ => 1 }} }}"
+        ));
     }
     // Diagnostics past the 128 limit, and the token limit.
     for n in [127, 128, 129] {

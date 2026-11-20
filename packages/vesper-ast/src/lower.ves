@@ -75,13 +75,18 @@ use @vesper/front::{
 };
 use @vesper/front::lex::{
     lex,
+    max_diagnostics,
     max_source_bytes,
+    token_end,
+    token_sym,
+    token_word,
     trivia_kind
 };
 use @vesper/front::diag::{
     diags_new
 };
 use @vesper/front::parse::{
+    hard_depth,
     parse_tokens
 };
 use @vesper/front::kinds::{
@@ -165,6 +170,8 @@ use @vesper/front::words::{
     w_model,
     w_pub,
     w_fip,
+    w_test,
+    w_test_case,
     w_trait,
     w_tiled,
     w_wire,
@@ -236,6 +243,11 @@ pub struct L {
     evpos: ChunkSeq[u32],
     evc: u64,
     desync: u64,
+    // Token weight of the or-pattern bodies copied so far
+    // (`Parser::expansion`, `OR_PATTERN_EXPANSION`).
+    expansion: u64,
+    // Whether the last `declaration` was `pub` (its tuple's `bool`).
+    decl_public: bool,
     buf: String,
     s: Syms
 }
@@ -282,7 +294,7 @@ fn tk(in l: L, i: u64) -> u8 {
 }
 
 fn tword(in l: L, i: u64) -> u8 {
-    u8_at(in l.p.t.word, i)
+    token_word(in l.p.t, i)
 }
 
 fn tstart(in l: L, i: u64) -> u64 {
@@ -290,7 +302,7 @@ fn tstart(in l: L, i: u64) -> u64 {
 }
 
 fn tend(in l: L, i: u64) -> u64 {
-    w(u32_at(in l.p.t.end, i))
+    token_end(in l.p.t, i)
 }
 
 // `Parser::index`.
@@ -412,7 +424,7 @@ fn intern_text(inout l: L, a: u64, b: u64) -> u32 {
 
 // The AST symbol of token `i`'s text.
 fn tok_name(inout l: L, i: u64) -> u32 {
-    let fs = w(u32_at(in l.p.t.sym, i));
+    let fs = w(token_sym(in l.p.t, i));
     if fs != 0 {
         let m = u32_at(in l.symmap, fs);
         if m != 0 {
@@ -1153,6 +1165,84 @@ fn fields(inout l: L) -> u32 {
     list_from(inout l, m)
 }
 
+// `Parser::attr_paren_args`: a balanced `(...)` after `@test` or
+// `@test_case`.
+fn attr_paren_args(inout l: L) {
+    expect(inout l, k_l_paren());
+    let mut depth: u64 = 1;
+    loop {
+        if depth == 0 || at(in l, k_eof()) || l.p.halted {
+            break;
+        }
+        if at(in l, k_l_paren()) {
+            depth = inc(depth);
+        } else if at(in l, k_r_paren()) {
+            depth = wrapping_sub(depth, 1);
+        }
+        bump(inout l);
+    }
+}
+
+// `Parser::test_attr`.
+fn test_attr(inout l: L) -> bool {
+    if at(in l, k_at()) && (at_word(in l, 1, w_test()) || at_word(in l, 1, w_test_case())) {
+        bump(inout l);
+        bump(inout l);
+        if at(in l, k_l_paren()) {
+            attr_paren_args(inout l);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+// `Parser::at_test_block`: `test { ... }`.
+fn at_test_block(in l: L) -> bool {
+    at_word(in l, 0, w_test()) && nth(in l, 1) == k_l_brace()
+}
+
+// `Parser::skip_test_block` (`parse` leaves test blocks out).
+fn skip_test_block(inout l: L) {
+    bump(inout l);
+    bump(inout l);
+    let mut depth: u64 = 1;
+    loop {
+        if depth == 0 || at(in l, k_eof()) {
+            break;
+        }
+        if at(in l, k_l_brace()) {
+            depth = inc(depth);
+        } else if at(in l, k_r_brace()) {
+            depth = wrapping_sub(depth, 1);
+        }
+        bump(inout l);
+    }
+    if depth != 0 {
+        expect(inout l, k_r_brace());
+    }
+}
+
+// The item kinds `pub` may precede in `Parser::declaration`.
+fn pub_item_follows(in l: L) -> bool {
+    at_word(in l, 1, w_trait())
+        || (at_word(in l, 1, w_const()) && nth(in l, 2) == k_upper())
+        || at_word(in l, 1, w_model())
+        || nth(in l, 1)
+        == k_fn()
+        || is_type_decl_kind(nth(in l, 1))
+        || (is_mode_kind(nth(in l, 1)) && is_type_decl_kind(nth(in l, 2)))
+        || (
+        nth(in l, 1)
+            == k_at()
+            && (
+            at_word(in l, 2, w_fip())
+                || at_word(in l, 2, w_test())
+                || at_word(in l, 2, w_test_case())
+        )
+    )
+}
+
 fn fip_attr(inout l: L) -> bool {
     if at(in l, k_at()) && at_word(in l, 1, w_fip()) {
         bump(inout l);
@@ -1207,13 +1297,16 @@ fn item_name(in l: L, it: u32) -> u32 {
 
 // `Parser::item`.
 fn item(inout l: L) {
-    let public = at_word(in l, 0, w_pub())
-        || (at(in l, k_at()) && at_word(in l, 1, w_fip()) && at_word(in l, 2, w_pub()));
+    if at_test_block(in l) {
+        skip_test_block(inout l);
+        return;
+    }
+    l.decl_public = false;
     let it = declaration(inout l);
     if it == none() {
         return;
     }
-    if public {
+    if l.decl_public {
         let n = item_name(in l, it);
         if n != none() {
             l.ast.m_public.push(n);
@@ -1253,26 +1346,26 @@ fn declaration(inout l: L) -> u32 {
         eat(inout l, k_semi());
         return none();
     }
-    let mut fip = fip_attr(inout l);
-    let public = at_word(in l, 0, w_pub())
-        && (
-        at_word(in l, 1, w_trait())
-            || (at_word(in l, 1, w_const()) && nth(in l, 2) == k_upper())
-            || at_word(in l, 1, w_model())
-            || nth(in l, 1)
-            == k_fn()
-            || is_type_decl_kind(nth(in l, 1))
-            || (is_mode_kind(nth(in l, 1)) && is_type_decl_kind(nth(in l, 2)))
-            || (
-            !fip && nth(in l, 1) == k_at() && at_word(in l, 2, w_fip()) && nth(in l, 3) == k_fn()
-        )
-    );
-    if public {
-        bump(inout l);
+    let mut fip = false;
+    let mut has_test_attr = false;
+    let mut public = false;
+    loop {
+        if fip_attr(inout l) {
+            fip = true;
+            continue;
+        }
+        if test_attr(inout l) {
+            has_test_attr = true;
+            continue;
+        }
+        if !public && at_word(in l, 0, w_pub()) && pub_item_follows(in l) {
+            bump(inout l);
+            public = true;
+            continue;
+        }
+        break;
     }
-    if !fip {
-        fip = fip_attr(inout l);
-    }
+    l.decl_public = public;
     if at_word(in l, 0, w_const()) && nth(in l, 1) == k_upper() {
         let f = const_item(inout l, start);
         return item_node(inout l, 2, f);
@@ -1466,7 +1559,7 @@ fn declaration(inout l: L) -> u32 {
         item_node(inout l, 3, e.raw())
     } else if k == k_fn() {
         let f = function(inout l, false, fip);
-        if public || fip {
+        if public || fip || has_test_attr {
             set_fn_start(inout l, f, start);
         }
         item_node(inout l, 2, f)
@@ -2027,6 +2120,12 @@ fn type_leaves(in a: Ast, t: u32) -> u64 {
     } else {
         sum
     }
+}
+
+// `OR_PATTERN_EXPANSION`: the token weight or-pattern alternatives may
+// copy in one parse.
+fn or_pattern_expansion() -> u64 {
+    262144
 }
 
 fn saturating_add_u64(a: u64, b: u64) -> u64 {
@@ -2906,15 +3005,48 @@ fn match_expr(inout l: L) -> u32 {
             break;
         }
         let before = l.pos;
-        let pat = pattern(inout l);
+        // `p | q => e`: one arm per alternative, sharing the body.
+        let alts = mark(in l);
+        let first = pattern(inout l);
+        push(inout l, first);
+        loop {
+            if !eat(inout l, k_pipe()) {
+                break;
+            }
+            let alt = pattern(inout l);
+            push(inout l, alt);
+        }
         expect(inout l, k_fat_arrow());
         let outer = vals_mark(in l);
-        bind_pattern(inout l, pat);
+        for i in alts..l.stk.len() {
+            let pat = u32_at(in l.stk, i);
+            bind_pattern(inout l, pat);
+        }
+        let body_start = l.pos;
+        let expanded = l.expansion;
         let body = expr(inout l);
         let block_body = ex(in l, body).kind == 5;
         vals_restore(inout l, outer);
-        push(inout l, pat);
-        push(inout l, body);
+        let n = wrapping_sub(l.stk.len(), alts);
+        let weight = saturating_add_u64(
+            wrapping_sub(l.pos, body_start),
+            wrapping_sub(l.expansion, expanded)
+        );
+        let copies = saturating_mul_u64(weight, wrapping_sub(n, 1));
+        l.expansion = saturating_add_u64(l.expansion, copies);
+        let mut keep = n;
+        if l.expansion > or_pattern_expansion() {
+            keep = 1;
+        }
+        let mut pats = ChunkSeq::new[u32]();
+        for i in alts..wrapping_add(alts, keep) {
+            pats.push(u32_at(in l.stk, i));
+        }
+        l.stk.truncate(alts);
+        for i in 0..pats.len() {
+            push(inout l, u32_at(in pats, i));
+            push(inout l, body);
+        }
         if !eat(inout l, k_comma()) && !at(in l, k_r_brace()) && !(block_body && l.pos > before) {
             break;
         }
@@ -3745,7 +3877,7 @@ pub fn lower_source(in source: Str) -> L {
         text.push_str(in source);
         lex(in b, inout d)
     };
-    let p = parse_tokens(in b, t, d);
+    let p = parse_tokens(in b, t, d, max_diagnostics(), hard_depth());
     let mut l = L {
         p: p,
         text: text,
@@ -3762,6 +3894,8 @@ pub fn lower_source(in source: Str) -> L {
         evpos: ChunkSeq::new[u32](),
         evc: 0,
         desync: 0,
+        expansion: 0,
+        decl_public: false,
         buf: String::new(),
         s: s
     };
@@ -3792,10 +3926,28 @@ fn run(inout l: L) {
     }
     // `contextual_item_names`: `fn break` and friends stay names.
     let mut prev_fn = false;
-    for j in 0..l.p.sig.len() {
+    let mut depth: u64 = 0;
+    let mut skipping_test = false;
+    let nsig = l.p.sig.len();
+    for j in 0..nsig {
         let i = w(u32_at(in l.p.sig, j));
         let k = tk(in l, i);
-        if prev_fn && k == k_lower() {
+        if depth == 0 && k == k_lower() && tword(in l, i) == w_test() && inc(j) < nsig {
+            if tk(in l, w(u32_at(in l.p.sig, inc(j)))) == k_l_brace() {
+                skipping_test = true;
+            }
+        }
+        if k == k_l_brace() {
+            depth = inc(depth);
+        } else if k == k_r_brace() {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+            }
+            if depth == 0 {
+                skipping_test = false;
+            }
+        }
+        if !skipping_test && prev_fn && k == k_lower() {
             let wd = tword(in l, i);
             if wd == w_break() || wd == w_continue() || wd == w_for() || wd == w_loop() {
                 let n = tok_name(inout l, i);

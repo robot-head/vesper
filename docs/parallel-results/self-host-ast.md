@@ -3,7 +3,7 @@
 > The [manuscript](../manuscript/README.md) is the sole specification.
 > Confirm live ownership on the issue board before acting.
 
-Claim: #1152. Base: `main` at `e29e63d` (SH1 plan PR #1158). Lane prompt:
+Claim: #1152. Base: `main` at `e29e63d` (SH1 plan PR #1158), merged up to `92e1e91`. Lane prompt:
 `docs/agent-prompts/self-host-sh1/09-ast.md`.
 
 ## Summary
@@ -31,7 +31,11 @@ The Rust parser stays the default and no Rust code changed.
   rows, `use` items, traits, models, conformances, where clauses, blocks,
   expressions at every precedence, postfix forms, closures, handlers,
   regions, loops and `for`, struct literals, slice intervals, array literals,
-  patterns, and the `const` use rewrite). It walks the front end's
+  patterns, and the `const` use rewrite). After merging `main` it also has
+  what #1163 and #1171 added while this lane was open: or-pattern match arms
+  (one arm per alternative, sharing one body node, with the
+  `OR_PATTERN_EXPANSION` budget), `@test`/`@test_case` attributes, and
+  skipped `test { ... }` blocks, which `contextual_item_names` also skips. It walks the front end's
   significant tokens again, with the diagnostics, depth and height bookkeeping
   removed because the front end already decided them: a halted or limited
   parse gives the empty module, as in Rust. Where the Rust parser looks ahead
