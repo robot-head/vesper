@@ -1,14 +1,49 @@
 //! Checked, bounded host rendering of supplied compiler diagnostic evidence.
 //! Validation does not establish semantic causality or proof authority.
-#![forbid(unsafe_code)]
-use ariadne::{Config, IndexType, Label, Report, ReportKind, Source};
-use serde_json::{Value, json};
-use std::{
-    io::{self, Write},
-    mem::size_of,
-};
+// The seed build (the compiler's copy) stays safe. The port-backed build
+// links the Vesper port through the generated binding, which calls the C ABI.
+#![cfg_attr(not(vesper_port), forbid(unsafe_code))]
+#![cfg_attr(vesper_port, deny(unsafe_code))]
+#[cfg(not(vesper_port))]
+use ariadne::{Config, IndexType, Report, ReportKind, Source};
+use serde_json::Value;
+#[cfg(not(vesper_port))]
+use serde_json::json;
+#[cfg(not(vesper_port))]
+use std::io::{self, Write};
+use std::mem::size_of;
 use vesper_core::ast::Diagnostic;
-use vesper_span::{ByteSpan, DiagnosticData, Diagnostics, LineIndex, Range, Resource, Severity};
+#[cfg(not(vesper_port))]
+use vesper_span::Range;
+use vesper_span::{ByteSpan, DiagnosticData, Diagnostics, LineIndex, Resource, Severity};
+
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-diagnostics`, `"rust"` for the seed copy
+/// `vesper-diagnostics-seed` that the compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the port's runtime, for leak tests.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::live_allocations()
+}
+
+/// `size_of` of the records the budgets charge: Ariadne's line and label
+/// records (the terminal preflight charges them in both builds).
+pub(crate) const ARIADNE_LINE_SIZE: usize = size_of::<ariadne::Line>();
+pub(crate) const ARIADNE_LABEL_SIZE: usize =
+    size_of::<ariadne::Label<(&str, std::ops::Range<usize>)>>();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
@@ -61,14 +96,17 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+#[cfg_attr(vesper_port, allow(dead_code))]
 fn checked_add(a: usize, b: usize, r: Resource) -> Result<usize, Error> {
     a.checked_add(b)
         .ok_or(Error::Span(vesper_span::Error::Budget(r)))
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 fn checked_mul(a: usize, b: usize, r: Resource) -> Result<usize, Error> {
     a.checked_mul(b)
         .ok_or(Error::Span(vesper_span::Error::Budget(r)))
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 fn bound(n: usize, max: usize, r: Resource) -> Result<(), Error> {
     if n > max {
         Err(Error::Span(vesper_span::Error::Budget(r)))
@@ -89,6 +127,7 @@ fn span(span: &std::ops::Range<usize>) -> ByteSpan {
         end: span.end,
     }
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 fn valid_span(text: &str, span: ByteSpan) -> Result<(), Error> {
     let fail = |e| Error::Span(e);
     if span.start > span.end {
@@ -119,9 +158,13 @@ pub struct Prepared<'a> {
     limits: Limits,
     label_count: usize,
     text_bytes: usize,
+    /// The port's flat model of `data` and its text pool (src/port.rs).
+    #[cfg(vesper_port)]
+    model: (Vec<u64>, String),
 }
 /// Checks every aggregate, span, text and count before copying any metadata.
 /// The resulting DTO is also checked by vesper_span::Diagnostics.
+#[cfg(not(vesper_port))]
 pub fn prepare<'a>(
     index: &'a LineIndex,
     diagnostics: &[Diagnostic],
@@ -202,6 +245,40 @@ pub fn prepare<'a>(
         Resource::Work,
     )?;
     bound(work, cap.max_work, Resource::Work)?;
+    let data = copies(diagnostics)?;
+    let data = Diagnostics::new(index, &data, cap).map_err(Error::Span)?;
+    Ok(Prepared {
+        index,
+        data,
+        limits,
+        label_count: labels,
+        text_bytes: text,
+    })
+}
+/// Checks every aggregate, span, text and count before copying any metadata
+/// (in the Vesper port). The resulting DTO is also checked by
+/// vesper_span::Diagnostics.
+#[cfg(vesper_port)]
+pub fn prepare<'a>(
+    index: &'a LineIndex,
+    diagnostics: &[Diagnostic],
+    limits: Limits,
+) -> Result<Prepared<'a>, Error> {
+    let totals = port::prepare(index.text(), diagnostics, limits)?;
+    let data = copies(diagnostics)?;
+    let data = Diagnostics::new(index, &data, limits.span).map_err(Error::Span)?;
+    let model = port::encode_model(data.data());
+    Ok(Prepared {
+        index,
+        data,
+        limits,
+        label_count: totals.labels,
+        text_bytes: totals.text,
+        model,
+    })
+}
+/// The checked copies: the primary label first, then the related labels.
+fn copies(diagnostics: &[Diagnostic]) -> Result<Vec<DiagnosticData>, Error> {
     let mut data = Vec::new();
     data.try_reserve_exact(diagnostics.len())
         .map_err(|_| Error::Allocation)?;
@@ -231,14 +308,7 @@ pub fn prepare<'a>(
             fixes: Vec::new(),
         });
     }
-    let data = Diagnostics::new(index, &data, cap).map_err(Error::Span)?;
-    Ok(Prepared {
-        index,
-        data,
-        limits,
-        label_count: labels,
-        text_bytes: text,
-    })
+    Ok(data)
 }
 impl Prepared<'_> {
     pub fn source(&self) -> &str {
@@ -247,6 +317,7 @@ impl Prepared<'_> {
     pub fn data(&self) -> &[DiagnosticData] {
         self.data.data()
     }
+    #[cfg(not(vesper_port))]
     fn name(&self, name: &str) -> Result<(), Error> {
         if name.is_empty() || name.len() > self.limits.max_name_bytes {
             return Err(Error::Name);
@@ -259,6 +330,7 @@ impl Prepared<'_> {
     }
     /// Standard LSP diagnostics with actual relatedInformation and optional
     /// bounded data.help. The entire result is preflighted before DOM copies.
+    #[cfg(not(vesper_port))]
     pub fn to_lsp(&self, uri: &str) -> Result<Vec<Value>, Error> {
         self.name(uri)?;
         let cap = self.limits.span;
@@ -388,9 +460,37 @@ impl Prepared<'_> {
         }
         Ok(output)
     }
-    /// Complete private terminal output, with Ariadne explicitly in byte mode.
-    /// No external writer or filesystem cache is used.
+    /// The LSP diagnostics of `to_lsp` as one compact JSON array.
+    #[cfg(not(vesper_port))]
+    pub fn lsp_json(&self, uri: &str) -> Result<Vec<u8>, Error> {
+        serde_json::to_vec(&self.to_lsp(uri)?).map_err(|_| Error::Output)
+    }
+    /// Standard LSP diagnostics with actual relatedInformation and optional
+    /// bounded data.help, produced as JSON by the Vesper port and parsed.
+    #[cfg(vesper_port)]
+    pub fn to_lsp(&self, uri: &str) -> Result<Vec<Value>, Error> {
+        serde_json::from_slice(&self.lsp_json(uri)?).map_err(|_| Error::Output)
+    }
+    /// The LSP diagnostics of `to_lsp` as one compact JSON array.
+    #[cfg(vesper_port)]
+    pub fn lsp_json(&self, uri: &str) -> Result<Vec<u8>, Error> {
+        port::lsp(self, uri)
+    }
+    /// Complete private terminal output, with Ariadne explicitly in byte mode
+    /// and colors disabled. No external writer or filesystem cache is used.
     pub fn terminal(&self, file: &str) -> Result<Vec<u8>, Error> {
+        self.render(file, false)
+    }
+    /// `terminal` with Ariadne's default colors (ANSI escapes).
+    pub fn terminal_colored(&self, file: &str) -> Result<Vec<u8>, Error> {
+        self.render(file, true)
+    }
+    #[cfg(vesper_port)]
+    fn render(&self, file: &str, color: bool) -> Result<Vec<u8>, Error> {
+        port::terminal(self, file, color)
+    }
+    #[cfg(not(vesper_port))]
+    fn render(&self, file: &str, color: bool) -> Result<Vec<u8>, Error> {
         self.name(file)?;
         if self.data().is_empty() {
             return Ok(Vec::new());
@@ -438,7 +538,7 @@ impl Prepared<'_> {
         bound(lines, cap.max_lines, Resource::Lines)?;
         let mut metadata = checked_mul(
             checked_mul(lines, 2, Resource::Metadata)?,
-            size_of::<ariadne::Line>(),
+            ARIADNE_LINE_SIZE,
             Resource::Metadata,
         )?;
         metadata = checked_add(
@@ -465,11 +565,7 @@ impl Prepared<'_> {
             )?;
             metadata = checked_add(
                 metadata,
-                checked_mul(
-                    d.labels.len(),
-                    size_of::<Label<(&str, std::ops::Range<usize>)>>() * 16,
-                    Resource::Metadata,
-                )?,
+                checked_mul(d.labels.len(), ARIADNE_LABEL_SIZE * 16, Resource::Metadata)?,
                 Resource::Metadata,
             )?;
             work = checked_add(
@@ -508,12 +604,12 @@ impl Prepared<'_> {
                 .with_message(&d.message)
                 .with_config(
                     Config::default()
-                        .with_color(false)
+                        .with_color(color)
                         .with_index_type(IndexType::Byte),
                 );
             for (at, label) in d.labels.iter().enumerate() {
-                let mut label =
-                    Label::new((file, label.span.start..label.span.end)).with_order(at as i32);
+                let mut label = ariadne::Label::new((file, label.span.start..label.span.end))
+                    .with_order(at as i32);
                 if at == 0 {
                     label = label.with_message(&d.message);
                 } else {
@@ -531,12 +627,15 @@ impl Prepared<'_> {
         Ok(output.bytes)
     }
 }
+#[cfg(not(vesper_port))]
 fn range_value(r: Range) -> Value {
     json!({"start":{"line":r.start.line,"character":r.start.character},"end":{"line":r.end.line,"character":r.end.character}})
 }
+#[cfg(not(vesper_port))]
 fn digits(n: u32) -> usize {
     n.checked_ilog10().map_or(1, |n| n as usize + 1)
 }
+#[cfg(not(vesper_port))]
 fn range_size(r: Range) -> usize {
     b"{\"start\":{\"line\":".len()
         + digits(r.start.line)
@@ -548,6 +647,7 @@ fn range_size(r: Range) -> usize {
         + digits(r.end.character)
         + 2
 }
+#[cfg(not(vesper_port))]
 fn quoted(s: &str) -> Result<usize, Error> {
     let mut size = 2;
     for b in s.bytes() {
@@ -563,11 +663,13 @@ fn quoted(s: &str) -> Result<usize, Error> {
     }
     Ok(size)
 }
+#[cfg(not(vesper_port))]
 struct Output {
     bytes: Vec<u8>,
     limit: usize,
     failure: Option<Error>,
 }
+#[cfg(not(vesper_port))]
 impl Write for Output {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
         if self
