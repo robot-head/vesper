@@ -302,8 +302,13 @@ fn pattern_names_into(p: &Pattern, out: &mut Vec<String>) {
     }
 }
 
-/// Names assigned anywhere in `body` (closures included) or lent `inout`.
-fn written_names(body: &Expr) -> BTreeSet<String> {
+/// Names assigned anywhere in `body` (closures included) or that a call may
+/// write: an argument the call lends `inout`, whether the call site says so
+/// or the callee's parameter mode infers it, and a method receiver. Only a
+/// user function's by-value parameter, a constructor field and the integer
+/// conversions, wrapping and rotation builtins are known not to write an
+/// argument; any other callee may.
+fn written_names(checker: &Checker, body: &Expr) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     crate::regions::visit_expr(body, &mut |e| match &e.kind {
         ExprKind::Assign(_, place, _) => {
@@ -312,8 +317,22 @@ fn written_names(body: &Expr) -> BTreeSet<String> {
             }
         }
         ExprKind::Call { callee, args, .. } => {
-            for a in args.iter().filter(|a| a.pass == Pass::Inout) {
-                if let Some(p) = Place::from_expr(&a.expr) {
+            let by_value = |i: usize| -> bool {
+                let ExprKind::Name(name) = &callee.kind else {
+                    return false;
+                };
+                if let Some(f) = checker.world.functions.get(name) {
+                    return f.params.get(i).is_some_and(|p| p.pass != Pass::Inout);
+                }
+                checker.world.constructor(name).is_some()
+                    || crate::numeric::conversion(name).is_some()
+                    || crate::numeric::wrapping_intrinsic(name).is_some()
+                    || crate::numeric::rotate_intrinsic(name).is_some()
+            };
+            for (i, a) in args.iter().enumerate() {
+                if (a.pass == Pass::Inout || !by_value(i))
+                    && let Some(p) = Place::from_expr(&a.expr)
+                {
                     out.insert(p.root);
                 }
             }
@@ -359,7 +378,7 @@ impl Checker<'_> {
             .insert(name.to_string(), Some(None));
         let summary = Summary {
             checker: self,
-            written: written_names(body),
+            written: written_names(self, body),
         };
         let scope = f
             .params

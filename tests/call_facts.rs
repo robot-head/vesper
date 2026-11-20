@@ -165,6 +165,10 @@ fn no_fact_where_a_divisor_can_be_zero() {
         "fn d(x: u64) -> u64 { let mut y: u64 = x; if y != 0 { y = 0; y } else { 1 } }",
         // A guard on a name lent `inout`.
         "fn zero(inout v: u64) { v = 0; }\nfn d(x: u64) -> u64 { let mut y: u64 = x; if y != 0 { zero(inout y); y } else { 1 } }",
+        // The same with the mode inferred from the callee (codex review).
+        "fn zero(inout v: u64) { v = 0; }\nfn d(x: u64) -> u64 { let mut y: u64 = x; if y != 0 { zero(y); y } else { 1 } }",
+        // A call of a local closure may write what it is passed.
+        "fn d(x: u64) -> u64 { let mut y: u64 = x; let f = |inout v: u64| { v = 0; }; if y != 0 { f(y); y } else { 1 } }",
         // A narrowing that may fail: a handler may resume it with any `u8`.
         "fn d(x: u64) -> u8 eff [Fail[ArithOverflow]] { if x == 0 { 1 } else { narrow_u8(x) } }",
         // A loop's value is not bounded.
