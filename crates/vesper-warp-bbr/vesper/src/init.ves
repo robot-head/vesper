@@ -7,13 +7,13 @@
 pub fn bbr_config_quic(smss: u32) -> BbrConfig {
     let ten = wrapping_mul(widen_u64(smss), 10);
     let two = wrapping_mul(widen_u64(smss), 2);
-    let iw = min(ten, max(two, 14720));
+    let iw = min(ten, max(two, INITIAL_WINDOW_FLOOR_BYTES));
     BbrConfig {
         smss: smss,
-        initial_cwnd: wrapping_u32(min(iw, 4294967295)),
+        initial_cwnd: wrapping_u32(min(iw, U32_MAX)),
         has_selective_acks: true,
         offload: OffloadModel::Quic,
-        probe_seed: 0x6262723377617270
+        probe_seed: DEFAULT_PROBE_SEED
     }
 }
 
@@ -30,12 +30,12 @@ pub fn bbr_state_is_probe_bw(s: BbrState) -> bool {
 
 // A volume saturated to the u32 window type of the contract.
 pub fn saturate_u32(x: u64) -> u32 {
-    wrapping_u32(min(x, 4294967295))
+    wrapping_u32(min(x, U32_MAX))
 }
 
 // Infinity as None.
 pub fn finite(x: u64) -> Option[u64] {
-    if x == infinity() {
+    if x == INFINITY {
         Option::None
     } else {
         Option::Some(x)
@@ -49,7 +49,7 @@ pub fn app_limited_marked(app_limited: u64) -> bool {
 
 // The configuration check of `OnInit()`.
 fn config_fault(c: BbrConfig) -> Option[BbrFault] {
-    if c.smss == 0 || c.smss > 65535 {
+    if c.smss == 0 || c.smss > MAX_SMSS {
         Option::Some(BbrFault::InvalidConfig(0))
     } else if c.initial_cwnd < c.smss {
         Option::Some(BbrFault::InvalidConfig(1))
@@ -115,8 +115,8 @@ pub fn bbrv3_new(config: BbrConfig, now_ns: u64) -> Result[Bbrv3, BbrFault] {
         ce_in_loss_round: false,
         rs: empty_rate_sample(),
         bbr_state: BbrState::Startup,
-        pacing_gain: 2770,
-        cwnd_gain: 2000,
+        pacing_gain: STARTUP_PACING_GAIN,
+        cwnd_gain: DEFAULT_CWND_GAIN,
         round_count: 0,
         round_start: false,
         next_round_delivered: 0,
@@ -127,7 +127,7 @@ pub fn bbrv3_new(config: BbrConfig, now_ns: u64) -> Result[Bbrv3, BbrFault] {
             current: 0
         },
         max_bw: 0,
-        bw_shortterm: infinity(),
+        bw_shortterm: INFINITY,
         bw: 0,
         cycle_count: 0,
         min_rtt_ns: Option::None,
@@ -140,8 +140,8 @@ pub fn bbrv3_new(config: BbrConfig, now_ns: u64) -> Result[Bbrv3, BbrFault] {
         extra_acked_delivered: 0,
         offload_budget: 0,
         max_inflight: 0,
-        inflight_longterm: infinity(),
-        inflight_shortterm: infinity(),
+        inflight_longterm: INFINITY,
+        inflight_shortterm: INFINITY,
         bw_latest: 0,
         inflight_latest: 0,
         loss_round_delivered: 0,
@@ -155,7 +155,7 @@ pub fn bbrv3_new(config: BbrConfig, now_ns: u64) -> Result[Bbrv3, BbrFault] {
         is_bw_probe_stopping: false,
         check_probe_loss: false,
         bw_probe_up_acked: 0,
-        probe_up_acked_per_inc: infinity(),
+        probe_up_acked_per_inc: INFINITY,
         bw_probe_up_rounds: 0,
         rounds_since_probe_up: 0,
         bw_probe_wait_ns: 0,
@@ -169,7 +169,7 @@ pub fn bbrv3_new(config: BbrConfig, now_ns: u64) -> Result[Bbrv3, BbrFault] {
         prior_cwnd: 0,
         probe_rtt_done_stamp_ns: Option::None,
         probe_rtt_round_done: false,
-        probe_rtt_cwnd: infinity()
+        probe_rtt_cwnd: INFINITY
     };
     init_pacing_rate(inout b);
     set_send_quantum(inout b);
@@ -193,7 +193,7 @@ pub fn check_time(last_ns: u64, now_ns: u64) eff [Fail[BbrFault]] {
 }
 
 fn pn_fault(pn: u64) -> Option[BbrFault] {
-    if pn > 4611686018427387903 {
+    if pn > MAX_PACKET_NUMBER {
         Option::Some(
             BbrFault::PacketNumberOutOfRange {
                 pn: pn
