@@ -8,17 +8,32 @@ use self::{
 use self::term::{
     add,
     bt,
+    e_env,
+    e_ph,
     fa,
     fb,
+    g_impl,
+    g_mode,
     inc,
+    k_list,
+    k_slist,
     kid,
+    m_const,
     mk,
     mk2,
     mkl,
     nlen,
     none,
+    q_ambig,
+    q_nosol,
+    q_proven,
+    q_unsup,
     sub,
     sw,
+    t_ctor,
+    t_proj,
+    t_ref,
+    t_var,
     tg,
     vidx,
     vkind
@@ -53,6 +68,17 @@ use self::query::{
     solve_query
 };
 
+// Coherence checks run with the default solver limits, as in the Rust `SolverConfig::default()`. The
+// depth bound keeps recursion within a 2 MiB thread stack.
+const DEFAULT_MAX_DEPTH: u64 = 48;
+const DEFAULT_MAX_STEPS: u64 = 100000;
+const DEFAULT_MAX_FIX: u64 = 16;
+
+// ASCII bytes.
+const TAB: u8 = 9;
+const CR: u8 = 13;
+const SPACE: u8 = 32;
+
 // `check_orphan`: true when legal; otherwise the message is appended to
 // txt and false is returned.
 pub fn orphan(inout s: S, c: u64) -> bool {
@@ -77,12 +103,12 @@ pub fn orphan(inout s: S, c: u64) -> bool {
         };
         i = inc(i);
         let k = tg(in s, ty);
-        if k == 1 {
+        if k == t_ctor() {
             if sw(in s.ct_pkg, fa(in s, ty)) == pkg {
                 return true;
             }
             pos = inc(pos);
-        } else if k == 2 {
+        } else if k == t_var() {
             lit(inout s, "orphan canonical impl: uncovered parameter ");
             let h1 = fa(in s, ty);
             r_var(inout s, h1);
@@ -90,7 +116,7 @@ pub fn orphan(inout s: S, c: u64) -> bool {
             num(inout s, pos);
             lit(inout s, " precedes any local type; declare a named `model` instead");
             return false;
-        } else if k == 3 {
+        } else if k == t_proj() {
             lit(inout s, "projection in impl head");
             return false;
         }
@@ -166,10 +192,10 @@ pub fn conformance_env(inout s: S, c: u64) -> u64 {
             break;
         }
         let w = kid(in s, wh, i);
-        if tg(in s, w) == 16 {
+        if tg(in s, w) == g_mode() {
             let ty = fa(in s, w);
             let bd = fb(in s, w);
-            if tg(in s, ty) == 2 && vkind(fa(in s, ty)) == 0 && tg(in s, bd) == 4 {
+            if tg(in s, ty) == t_var() && vkind(fa(in s, ty)) == 0 && tg(in s, bd) == m_const() {
                 let p = vidx(fa(in s, ty));
                 let m = fa(in s, bd);
                 let old = sw(in bounds, p);
@@ -188,7 +214,7 @@ pub fn conformance_env(inout s: S, c: u64) -> u64 {
         }
         i = inc(i);
     }
-    let asm = mkl(inout s, 27, 0, 0, 0, from);
+    let asm = mkl(inout s, k_list(), 0, 0, 0, from);
     let f2 = s.tmp.len();
     i = 0;
     loop {
@@ -197,18 +223,18 @@ pub fn conformance_env(inout s: S, c: u64) -> u64 {
         }
         let k = kid(in s, params, i);
         let b = sw(in bounds, i);
-        let p = mk2(inout s, 54, k, b);
+        let p = mk2(inout s, e_ph(), k, b);
         s.tmp.push(p);
         i = inc(i);
     }
-    let phs = mkl(inout s, 27, 0, 0, 0, f2);
+    let phs = mkl(inout s, k_list(), 0, 0, 0, f2);
     let f3 = s.tmp.len();
-    let scopes = mkl(inout s, 27, 0, 0, 0, f3);
-    mk(inout s, 55, phs, asm, scopes)
+    let scopes = mkl(inout s, k_list(), 0, 0, 0, f3);
+    mk(inout s, e_env(), phs, asm, scopes)
 }
 
 fn is_space(b: u8) -> bool {
-    b == 32 || (b >= 9 && b <= 13)
+    b == SPACE || (b >= TAB && b <= CR)
 }
 
 // `trim_end` of txt[off ..].
@@ -246,9 +272,9 @@ fn assoc_idx(inout s: S, ai: u64) {
 fn wf_goal(inout s: S, sv: u64, sa: u64, env: u64, ai: u64, value: u64, g: u64) {
     let base = s.dg_code.len();
     let f0 = s.tmp.len();
-    let binders = mkl(inout s, 28, 0, 0, 0, f0);
+    let binders = mkl(inout s, k_slist(), 0, 0, 0, f0);
     let o = solve_query(inout s, 0, 1, env, binders, g);
-    if o != 0 && tg(in s, o) == 29 {
+    if o != 0 && tg(in s, o) == q_proven() {
         return;
     }
     let off = s.txt.len();
@@ -266,15 +292,15 @@ fn wf_goal(inout s: S, sv: u64, sa: u64, env: u64, ai: u64, value: u64, g: u64) 
         truncate_diags(inout s, base);
     } else {
         let t = tg(in s, o);
-        if t == 31 {
+        if t == q_nosol() {
             lit(inout s, "no-solution\n");
             let at = s.txt.len();
             let f = fa(in s, o);
             r_failure(inout s, f, 0);
             trim_from(inout s, at);
-        } else if t == 30 {
+        } else if t == q_ambig() {
             lit(inout s, "ambiguous");
-        } else if t == 32 {
+        } else if t == q_unsup() {
             lit(inout s, "unsupported");
         } else {
             lit(inout s, "overflow");
@@ -309,7 +335,7 @@ fn well_formed(inout s: S, c: u64, sv: u64, sa: u64) {
         s.tmp.push(a);
         i = inc(i);
     }
-    let binder = mkl(inout s, 27, 0, 0, 0, from);
+    let binder = mkl(inout s, k_list(), 0, 0, 0, from);
     reset_solver(inout s);
     let vals = sw(in s.cf_vals, c);
     let nv = nlen(in s, vals);
@@ -339,7 +365,7 @@ fn well_formed(inout s: S, c: u64, sv: u64, sa: u64) {
             let gf = s.tmp.len();
             let m0 = sw(in s.as_mode, x);
             let m = inst(inout s, m0, binder);
-            let g0 = mk2(inout s, 16, value, m);
+            let g0 = mk2(inout s, g_mode(), value, m);
             s.tmp.push(g0);
             let nb = sw(in s.as_bd_n, x);
             let bat = sw(in s.as_bd_at, x);
@@ -373,15 +399,15 @@ fn well_formed(inout s: S, c: u64, sv: u64, sa: u64) {
                         s.tmp.push(a);
                         j = inc(j);
                     }
-                    let tref = mkl(inout s, 13, bt, value, 0, af);
+                    let tref = mkl(inout s, t_ref(), bt, value, 0, af);
                     let bb = sw(in s.bd_brand, y);
                     let brand = inst(inout s, bb, binder);
-                    let g = mk2(inout s, 14, tref, brand);
+                    let g = mk2(inout s, g_impl(), tref, brand);
                     s.tmp.push(g);
                     bi = inc(bi);
                 }
             }
-            let goals = mkl(inout s, 27, 0, 0, 0, gf);
+            let goals = mkl(inout s, k_list(), 0, 0, 0, gf);
             let ng = nlen(in s, goals);
             let mut k: u64 = 0;
             loop {
@@ -403,9 +429,9 @@ pub fn check_coherence(inout s: S) {
     let md = s.max_depth;
     let ms = s.max_steps;
     let mf = s.max_fix;
-    s.max_depth = 48;
-    s.max_steps = 100000;
-    s.max_fix = 16;
+    s.max_depth = DEFAULT_MAX_DEPTH;
+    s.max_steps = DEFAULT_MAX_STEPS;
+    s.max_fix = DEFAULT_MAX_FIX;
     let ni = s.nimpl;
     let mut i: u64 = 0;
     loop {

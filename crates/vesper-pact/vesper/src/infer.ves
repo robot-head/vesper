@@ -16,10 +16,17 @@ use self::term::{
     fa,
     fb,
     flags,
+    g_row,
     inc,
     is_inf,
+    k_list,
+    kd_brand,
+    kd_mode,
+    kd_row,
+    kd_type,
     kid,
     kind_of,
+    l_eff,
     label_key,
     mk,
     mkl,
@@ -27,6 +34,9 @@ use self::term::{
     none,
     setw,
     sw,
+    t_ctor,
+    t_proj,
+    t_var,
     tg,
     var_arg,
     vidx,
@@ -65,7 +75,7 @@ pub fn fresh_args(inout s: S, inout cx: ChunkSeq[u64], kinds: u64) -> u64 {
         s.tmp.push(a);
         i = inc(i);
     }
-    mkl(inout s, 27, 0, 0, 0, from)
+    mkl(inout s, k_list(), 0, 0, 0, from)
 }
 
 fn bind(inout cx: ChunkSeq[u64], i: u64, value: u64) {
@@ -104,13 +114,13 @@ pub fn unify_arg(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
     if ka != class(tg(in s, b)) {
         return 1;
     }
-    if ka == 0 {
+    if ka == kd_type() {
         unify_ty(inout s, inout cx, a, b)
-    } else if ka == 1 {
+    } else if ka == kd_mode() {
         unify_mode(inout s, inout cx, a, b)
-    } else if ka == 2 {
+    } else if ka == kd_row() {
         unify_row(inout s, inout cx, a, b)
-    } else if ka == 3 {
+    } else if ka == kd_brand() {
         unify_brand(inout s, inout cx, a, b)
     } else if a == b {
         0
@@ -135,7 +145,7 @@ pub fn unify_trait_ref(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u
 fn shallow(in s: S, in cx: ChunkSeq[u64], t: u64) -> u64 {
     let mut t = t;
     loop {
-        if tg(in s, t) != 2 {
+        if tg(in s, t) != t_var() {
             return t;
         }
         let v = cx_val(in cx, fa(in s, t));
@@ -163,31 +173,31 @@ pub fn unify_ty(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
     let b = shallow(in s, in cx, b);
     let ta = tg(in s, a);
     let tb = tg(in s, b);
-    if ta == 2 && is_inf(fa(in s, a)) {
-        if tb == 2 && fa(in s, b) == fa(in s, a) {
+    if ta == t_var() && is_inf(fa(in s, a)) {
+        if tb == t_var() && fa(in s, b) == fa(in s, a) {
             return 0;
         }
         let x = vidx(fa(in s, a));
         return bind_ty(inout s, inout cx, x, b);
     }
-    if tb == 2 && is_inf(fa(in s, b)) {
+    if tb == t_var() && is_inf(fa(in s, b)) {
         let x = vidx(fa(in s, b));
         return bind_ty(inout s, inout cx, x, a);
     }
-    if ta == 2 && tb == 2 {
+    if ta == t_var() && tb == t_var() {
         return if a == b {
             0
         } else {
             1
         };
     }
-    if ta == 1 && tb == 1 {
+    if ta == t_ctor() && tb == t_ctor() {
         if fa(in s, a) != fa(in s, b) {
             return 1;
         }
         return unify_args(inout s, inout cx, a, b);
     }
-    if ta == 3 && tb == 3 {
+    if ta == t_proj() && tb == t_proj() {
         // Rigid projections are not injective: only identity succeeds.
         let p1 = resolve(inout s, in cx, a);
         if p1 == 0 {
@@ -263,7 +273,7 @@ fn only(inout s: S, r: u64, other: u64, t: u64) -> u64 {
         }
         i = inc(i);
     }
-    mkl(inout s, 6, t, 0, 0, from)
+    mkl(inout s, g_row(), t, 0, 0, from)
 }
 
 fn bind_row(inout s: S, inout cx: ChunkSeq[u64], x: u64, row: u64) -> u64 {
@@ -305,7 +315,7 @@ pub fn unify_row(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
             }
             let lb = kid(in s, b, j);
             if label_key(in s, lb) == k {
-                if tg(in s, la) == 11 && tg(in s, lb) == 11 {
+                if tg(in s, la) == l_eff() && tg(in s, lb) == l_eff() {
                     let r = unify_args(inout s, inout cx, la, lb);
                     if r != 0 {
                         return r;

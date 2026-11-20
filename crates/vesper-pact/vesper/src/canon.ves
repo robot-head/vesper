@@ -4,16 +4,31 @@ use self::{
     S
 };
 use self::term::{
+    b_var,
+    e_env,
     fa,
     fb,
     fc,
+    g_cap,
+    g_impl,
+    g_mode,
+    g_row,
     inc,
+    k_list,
+    k_slist,
     kid,
+    l_cap,
+    l_eff,
+    m_var,
     mk,
     mkl,
     nlen,
     none,
     sw,
+    t_ctor,
+    t_proj,
+    t_ref,
+    t_var,
     tg,
     vidx,
     vkind
@@ -53,12 +68,12 @@ fn on_var(inout s: S, v: u64, what: u64) {
 // fold would stop (a row repeating a label), as the Rust visitor does.
 pub fn visit(inout s: S, n: u64, what: u64) -> bool {
     let t = tg(in s, n);
-    if t == 2 || t == 5 || t == 9 || t == 10 || t == 12 {
+    if t == t_var() || t == m_var() || t == b_var() || t == g_cap() || t == l_cap() {
         let v = fa(in s, n);
         on_var(inout s, v, what);
         return true;
     }
-    if t == 6 {
+    if t == g_row() {
         let len = nlen(in s, n);
         let mut i: u64 = 0;
         loop {
@@ -77,7 +92,7 @@ pub fn visit(inout s: S, n: u64, what: u64) -> bool {
         }
         return row_dup(in s, n) == none();
     }
-    if t == 3 || (t >= 14 && t <= 16) {
+    if t == t_proj() || (t >= g_impl() && t <= g_mode()) {
         let a = fa(in s, n);
         if !visit(inout s, a, what) {
             return false;
@@ -85,13 +100,13 @@ pub fn visit(inout s: S, n: u64, what: u64) -> bool {
         let b = fb(in s, n);
         return visit(inout s, b, what);
     }
-    if t == 13 {
+    if t == t_ref() {
         let b = fb(in s, n);
         if !visit(inout s, b, what) {
             return false;
         }
     }
-    if t == 1 || t == 11 || t == 13 {
+    if t == t_ctor() || t == l_eff() || t == t_ref() {
         let len = nlen(in s, n);
         let mut i: u64 = 0;
         loop {
@@ -147,7 +162,7 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
         s.tmp.push(x);
         i = inc(i);
     }
-    let asm2 = mkl(inout s, 27, 0, 0, 0, from);
+    let asm2 = mkl(inout s, k_list(), 0, 0, 0, from);
     let phs = fa(in s, env);
     let nph = nlen(in s, phs);
     let no = s.ford.len();
@@ -165,7 +180,7 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
         s.tmp.push(p);
         j = inc(j);
     }
-    let phs2 = mkl(inout s, 27, 0, 0, 0, f2);
+    let phs2 = mkl(inout s, k_list(), 0, 0, 0, f2);
     let scopes = fc(in s, env);
     let ns = nlen(in s, scopes);
     let f3 = s.tmp.len();
@@ -180,8 +195,8 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
         }
         j = inc(j);
     }
-    let scopes2 = mkl(inout s, 27, 0, 0, 0, f3);
-    s.cenv = mk(inout s, 55, phs2, asm2, scopes2);
+    let scopes2 = mkl(inout s, k_list(), 0, 0, 0, f3);
+    s.cenv = mk(inout s, e_env(), phs2, asm2, scopes2);
     s.cgoal = g;
     let f4 = s.tmp.len();
     j = 0;
@@ -193,7 +208,7 @@ pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
         s.tmp.push(o);
         j = inc(j);
     }
-    s.corigin = mkl(inout s, 28, 0, 0, 0, f4);
+    s.corigin = mkl(inout s, k_slist(), 0, 0, 0, f4);
     true
 }
 
@@ -218,5 +233,5 @@ pub fn binders_slist(inout s: S) -> u64 {
         s.tmp.push(k);
         i = inc(i);
     }
-    mkl(inout s, 28, 0, 0, 0, from)
+    mkl(inout s, k_slist(), 0, 0, 0, from)
 }

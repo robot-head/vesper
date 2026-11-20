@@ -26,6 +26,9 @@ use self::render::{
     r_id
 };
 
+// ASCII bytes.
+const NEWLINE: u8 = 10;
+
 // Records the diagnostic whose message is txt[off ..].
 pub fn emit(inout s: S, code: u64, sv: u64, sa: u64, sb: u64, off: u64) {
     let len = sub(s.txt.len(), off);
@@ -237,7 +240,7 @@ pub fn render_diags(inout s: S, base: u64) {
         let off = sw(in s.dg_off, i);
         let len = sw(in s.dg_len, i);
         copy_txt(inout s, off, len);
-        byte(inout s, 10);
+        byte(inout s, NEWLINE);
         i = inc(i);
     }
 }

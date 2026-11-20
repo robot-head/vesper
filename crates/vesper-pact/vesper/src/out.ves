@@ -18,16 +18,46 @@ use self::{
     S
 };
 use self::term::{
+    am_mode,
+    am_multi,
+    am_noninj,
+    am_scoped,
+    am_self,
+    b_canon,
+    c_nested,
     fa,
     fb,
     fc,
+    g_impl,
+    g_mode,
+    g_peq,
+    g_row,
     inc,
     kid,
+    l_eff,
     nlen,
     none,
+    q_ambig,
+    q_nosol,
+    q_proven,
+    q_unsup,
+    r_cands,
+    r_mode,
+    r_modelmis,
+    r_nocand,
+    st_alias,
+    st_assume,
+    st_cohyp,
+    st_conf,
+    st_passume,
+    st_pconf,
     sub,
     sw,
-    tg
+    t_ctor,
+    t_proj,
+    tg,
+    un_dup,
+    un_mixed
 };
 
 pub fn w(inout s: S, x: u64) {
@@ -74,27 +104,27 @@ pub fn w_term(inout s: S, n: u64) {
     let t = tg(in s, n);
     let a = fa(in s, n);
     let b = fb(in s, n);
-    if t == 1 || t == 11 {
+    if t == t_ctor() || t == l_eff() {
         w(inout s, t);
         w(inout s, a);
         w_kids(inout s, n);
-    } else if t == 3 {
+    } else if t == t_proj() {
         w(inout s, 3);
         w_tref(inout s, a);
         w_term(inout s, b);
         let h20 = fc(in s, n);
         w(inout s, h20);
-    } else if t == 6 {
+    } else if t == g_row() {
         w(inout s, 6);
         w_kids(inout s, n);
         w(inout s, a);
-    } else if t == 7 {
+    } else if t == b_canon() {
         w(inout s, 7);
-    } else if t == 14 {
+    } else if t == g_impl() {
         w(inout s, 14);
         w_tref(inout s, a);
         w_term(inout s, b);
-    } else if t == 15 {
+    } else if t == g_peq() {
         w(inout s, 15);
         let tr = fa(in s, a);
         w_tref(inout s, tr);
@@ -103,7 +133,7 @@ pub fn w_term(inout s: S, n: u64) {
         let h19 = fc(in s, a);
         w(inout s, h19);
         w_term(inout s, b);
-    } else if t == 16 {
+    } else if t == g_mode() {
         w(inout s, 16);
         w_term(inout s, a);
         w_term(inout s, b);
@@ -118,22 +148,22 @@ pub fn w_der(inout s: S, d: u64) {
     w_term(inout s, g);
     let st = fb(in s, d);
     let t = tg(in s, st);
-    if t == 18 {
+    if t == st_conf() {
         w(inout s, 0);
         let h18 = fa(in s, st);
         w(inout s, h18);
         w_kids(inout s, st);
-    } else if t == 21 {
+    } else if t == st_pconf() {
         w(inout s, 3);
         let h17 = fa(in s, st);
         w(inout s, h17);
         let h16 = fb(in s, st);
         w(inout s, h16);
         w_kids(inout s, st);
-    } else if t == 19 || t == 20 || t == 22 {
-        let code: u64 = if t == 19 {
+    } else if t == st_assume() || t == st_alias() || t == st_passume() {
+        let code: u64 = if t == st_assume() {
             1
-        } else if t == 20 {
+        } else if t == st_alias() {
             2
         } else {
             4
@@ -162,9 +192,9 @@ pub fn w_failure(inout s: S, f: u64) {
     w_term(inout s, g);
     let r = fb(in s, f);
     let t = tg(in s, r);
-    if t == 44 {
+    if t == r_nocand() {
         w(inout s, 0);
-    } else if t == 45 {
+    } else if t == r_cands() {
         w(inout s, 1);
         let n = nlen(in s, r);
         w(inout s, n);
@@ -177,7 +207,7 @@ pub fn w_failure(inout s: S, f: u64) {
             let h14 = fa(in s, c);
             w(inout s, h14);
             let cause = fb(in s, c);
-            if tg(in s, cause) == 50 {
+            if tg(in s, cause) == c_nested() {
                 w(inout s, 0);
                 let inner = fa(in s, cause);
                 w_failure(inout s, inner);
@@ -186,13 +216,13 @@ pub fn w_failure(inout s: S, f: u64) {
             }
             i = inc(i);
         }
-    } else if t == 46 {
+    } else if t == r_mode() {
         w(inout s, 2);
         let a = fa(in s, r);
         w_term(inout s, a);
         let b = fb(in s, r);
         w_term(inout s, b);
-    } else if t == 47 {
+    } else if t == r_modelmis() {
         w(inout s, 3);
         let h13 = fa(in s, r);
         w(inout s, h13);
@@ -203,7 +233,7 @@ pub fn w_failure(inout s: S, f: u64) {
 
 // Whether a derivation closes a coinductive cycle.
 pub fn uses_coinduction(in s: S, d: u64) -> bool {
-    if tg(in s, fb(in s, d)) == 26 {
+    if tg(in s, fb(in s, d)) == st_cohyp() {
         return true;
     }
     let n = nlen(in s, d);
@@ -223,7 +253,7 @@ pub fn uses_coinduction(in s: S, d: u64) -> bool {
 pub fn w_outcome(inout s: S, o: u64) {
     let t = tg(in s, o);
     let a = fa(in s, o);
-    if t == 29 {
+    if t == q_proven() {
         w(inout s, 0);
         w_slist(inout s, a);
         let vals = fb(in s, o);
@@ -236,15 +266,15 @@ pub fn w_outcome(inout s: S, o: u64) {
             0
         };
         w(inout s, co);
-    } else if t == 30 {
+    } else if t == q_ambig() {
         w(inout s, 1);
         let at = tg(in s, a);
-        if at == 34 {
+        if at == am_self() {
             w(inout s, 0);
-        } else if at == 35 || at == 36 {
+        } else if at == am_multi() || at == am_scoped() {
             w(
                 inout s,
-                if at == 35 {
+                if at == am_multi() {
                     1
                 } else {
                     2
@@ -252,26 +282,26 @@ pub fn w_outcome(inout s: S, o: u64) {
             );
             let l = fa(in s, a);
             w_slist(inout s, l);
-        } else if at == 37 {
+        } else if at == am_mode() {
             w(inout s, 3);
-        } else if at == 38 {
+        } else if at == am_noninj() {
             w(inout s, 4);
         } else {
             w(inout s, 5);
             let g = fa(in s, a);
             w_term(inout s, g);
         }
-    } else if t == 31 {
+    } else if t == q_nosol() {
         w(inout s, 2);
         w_failure(inout s, a);
-    } else if t == 32 {
+    } else if t == q_unsup() {
         w(inout s, 3);
         let rt = tg(in s, a);
-        if rt == 40 {
+        if rt == un_dup() {
             w(inout s, 0);
             let h12 = fa(in s, a);
             w(inout s, h12);
-        } else if rt == 41 {
+        } else if rt == un_mixed() {
             w(inout s, 1);
             let g = fa(in s, a);
             w_term(inout s, g);

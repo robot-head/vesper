@@ -5,17 +5,30 @@ use self::{
     S
 };
 use self::term::{
+    am_stalled,
+    c_nested,
+    cf_node,
+    f_node,
     fa,
     fb,
     fc,
     inc,
+    k_list,
     kid,
     mk,
     mk1,
     mk2,
     mkl,
     nlen,
-    tg
+    q_ambig,
+    q_nosol,
+    q_proven,
+    q_unsup,
+    r_cands,
+    r_mode,
+    tg,
+    un_dup,
+    un_mixed
 };
 use self::fold::{
     run
@@ -84,7 +97,7 @@ fn restore_failure(inout s: S, f: u64) -> u64 {
     let g2 = restore(inout s, g);
     let r = fb(in s, f);
     let t = tg(in s, r);
-    let r2 = if t == 45 {
+    let r2 = if t == r_cands() {
         let from = s.tmp.len();
         let n = nlen(in s, r);
         let mut i: u64 = 0;
@@ -94,29 +107,29 @@ fn restore_failure(inout s: S, f: u64) -> u64 {
             }
             let c = kid(in s, r, i);
             let cause = fb(in s, c);
-            let cause2 = if tg(in s, cause) == 50 {
+            let cause2 = if tg(in s, cause) == c_nested() {
                 let inner = fa(in s, cause);
                 let inner2 = restore_failure(inout s, inner);
-                mk1(inout s, 50, inner2)
+                mk1(inout s, c_nested(), inner2)
             } else {
                 cause
             };
             let source = fa(in s, c);
-            let c2 = mk2(inout s, 49, source, cause2);
+            let c2 = mk2(inout s, cf_node(), source, cause2);
             s.tmp.push(c2);
             i = inc(i);
         }
-        mkl(inout s, 45, 0, 0, 0, from)
-    } else if t == 46 {
+        mkl(inout s, r_cands(), 0, 0, 0, from)
+    } else if t == r_mode() {
         let a = fa(in s, r);
         let b = fb(in s, r);
         let a2 = restore(inout s, a);
         let b2 = restore(inout s, b);
-        mk2(inout s, 46, a2, b2)
+        mk2(inout s, r_mode(), a2, b2)
     } else {
         r
     };
-    mk2(inout s, 43, g2, r2)
+    mk2(inout s, f_node(), g2, r2)
 }
 
 fn restore_outcome(inout s: S, o: u64, origin: u64) -> u64 {
@@ -124,7 +137,7 @@ fn restore_outcome(inout s: S, o: u64, origin: u64) -> u64 {
     s.fsub = origin;
     let t = tg(in s, o);
     let a = fa(in s, o);
-    let r = if t == 29 {
+    let r = if t == q_proven() {
         let vals = fb(in s, o);
         let from = s.tmp.len();
         let n = nlen(in s, vals);
@@ -138,23 +151,23 @@ fn restore_outcome(inout s: S, o: u64, origin: u64) -> u64 {
             s.tmp.push(v2);
             i = inc(i);
         }
-        let vals2 = mkl(inout s, 27, 0, 0, 0, from);
+        let vals2 = mkl(inout s, k_list(), 0, 0, 0, from);
         let d = fc(in s, o);
         let d2 = restore(inout s, d);
-        mk(inout s, 29, a, vals2, d2)
-    } else if t == 31 {
+        mk(inout s, q_proven(), a, vals2, d2)
+    } else if t == q_nosol() {
         let f = restore_failure(inout s, a);
-        mk1(inout s, 31, f)
-    } else if t == 30 && tg(in s, a) == 39 {
+        mk1(inout s, q_nosol(), f)
+    } else if t == q_ambig() && tg(in s, a) == am_stalled() {
         let g = fa(in s, a);
         let g2 = restore(inout s, g);
-        let am = mk1(inout s, 39, g2);
-        mk1(inout s, 30, am)
-    } else if t == 32 && tg(in s, a) == 41 {
+        let am = mk1(inout s, am_stalled(), g2);
+        mk1(inout s, q_ambig(), am)
+    } else if t == q_unsup() && tg(in s, a) == un_mixed() {
         let g = fa(in s, a);
         let g2 = restore(inout s, g);
-        let un = mk1(inout s, 41, g2);
-        mk1(inout s, 32, un)
+        let un = mk1(inout s, un_mixed(), g2);
+        mk1(inout s, q_unsup(), un)
     } else {
         o
     };
@@ -171,8 +184,8 @@ pub fn solve_query(inout s: S, maj: u64, min: u64, env: u64, binders: u64, goal:
     s.steps = 0;
     if !canon_placeholders(inout s, env, goal) {
         let k = s.dkey;
-        let r = mk1(inout s, 40, k);
-        return mk1(inout s, 32, r);
+        let r = mk1(inout s, un_dup(), k);
+        return mk1(inout s, q_unsup(), r);
     }
     let cenv = s.cenv;
     let cgoal = s.cgoal;
@@ -181,9 +194,9 @@ pub fn solve_query(inout s: S, maj: u64, min: u64, env: u64, binders: u64, goal:
     let vars = fresh_args(inout s, inout cx, binders);
     let from = s.tmp.len();
     s.tmp.push(cgoal);
-    let goals = mkl(inout s, 27, 0, 0, 0, from);
+    let goals = mkl(inout s, k_list(), 0, 0, 0, from);
     let r = drive(inout s, cenv, inout cx, goals);
-    let outcome = if tg(in s, r) == 27 {
+    let outcome = if tg(in s, r) == k_list() {
         let d = kid(in s, r, 0);
         make_response(inout s, in cx, vars, d)
     } else {

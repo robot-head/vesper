@@ -31,16 +31,32 @@ use self::{
 };
 use self::term::{
     add,
+    b_canon,
+    b_named,
+    b_var,
+    d_node,
     dec,
+    e_env,
+    e_ph,
     fa,
     fb,
     fc,
     flags,
+    g_cap,
+    g_impl,
+    g_mode,
+    g_peq,
+    g_row,
     inc,
     iw,
+    k_list,
+    k_slist,
     kid,
     kind_of,
+    l_cap,
+    l_eff,
     label_key,
+    m_var,
     mk,
     mk0,
     mk1,
@@ -50,8 +66,17 @@ use self::term::{
     none,
     push_kids,
     snil,
+    st_alias,
+    st_assume,
+    st_conf,
+    st_passume,
+    st_pconf,
     sub,
     sw,
+    t_ctor,
+    t_proj,
+    t_ref,
+    t_var,
     tg,
     vidx,
     vkind
@@ -72,6 +97,9 @@ use self::diag::{
     sort_diags
 };
 
+// ASCII bytes.
+const DOT: u8 = 46;
+
 pub fn rd(inout s: S, in w: Slice[u64]) -> u64 {
     let x = iw(in w, s.pos);
     s.pos = inc(s.pos);
@@ -91,7 +119,7 @@ pub fn rd_slist(inout s: S, in w: Slice[u64]) -> u64 {
         s.tmp.push(x);
         i = inc(i);
     }
-    mkl(inout s, 28, 0, 0, 0, from)
+    mkl(inout s, k_slist(), 0, 0, 0, from)
 }
 
 fn rd_args(inout s: S, in w: Slice[u64]) -> u64 {
@@ -113,47 +141,47 @@ pub fn rd_tref(inout s: S, in w: Slice[u64]) -> u64 {
     let t = rd(inout s, in w);
     let st = rd_term(inout s, in w);
     let from = rd_args(inout s, in w);
-    mkl(inout s, 13, t, st, 0, from)
+    mkl(inout s, t_ref(), t, st, 0, from)
 }
 
 // A list node of n terms.
 pub fn rd_list(inout s: S, in w: Slice[u64]) -> u64 {
     let from = rd_args(inout s, in w);
-    mkl(inout s, 27, 0, 0, 0, from)
+    mkl(inout s, k_list(), 0, 0, 0, from)
 }
 
 pub fn rd_term(inout s: S, in w: Slice[u64]) -> u64 {
     let tag = rd(inout s, in w);
-    if tag == 1 || tag == 11 {
+    if tag == t_ctor() || tag == l_eff() {
         let c = rd(inout s, in w);
         let from = rd_args(inout s, in w);
         mkl(inout s, tag, c, 0, 0, from)
-    } else if tag == 3 {
+    } else if tag == t_proj() {
         let tr = rd_tref(inout s, in w);
         let b = rd_term(inout s, in w);
         let a = rd(inout s, in w);
-        mk(inout s, 3, tr, b, a)
-    } else if tag == 6 {
+        mk(inout s, t_proj(), tr, b, a)
+    } else if tag == g_row() {
         let from = rd_args(inout s, in w);
         let tail = rd(inout s, in w);
-        mkl(inout s, 6, tail, 0, 0, from)
-    } else if tag == 7 {
-        mk0(inout s, 7)
-    } else if tag == 14 {
+        mkl(inout s, g_row(), tail, 0, 0, from)
+    } else if tag == b_canon() {
+        mk0(inout s, b_canon())
+    } else if tag == g_impl() {
         let tr = rd_tref(inout s, in w);
         let b = rd_term(inout s, in w);
-        mk2(inout s, 14, tr, b)
-    } else if tag == 15 {
+        mk2(inout s, g_impl(), tr, b)
+    } else if tag == g_peq() {
         let tr = rd_tref(inout s, in w);
         let b = rd_term(inout s, in w);
         let a = rd(inout s, in w);
-        let p = mk(inout s, 3, tr, b, a);
+        let p = mk(inout s, t_proj(), tr, b, a);
         let ty = rd_term(inout s, in w);
-        mk2(inout s, 15, p, ty)
-    } else if tag == 16 {
+        mk2(inout s, g_peq(), p, ty)
+    } else if tag == g_mode() {
         let ty = rd_term(inout s, in w);
         let m = rd_term(inout s, in w);
-        mk2(inout s, 16, ty, m)
+        mk2(inout s, g_mode(), ty, m)
     } else {
         let x = rd(inout s, in w);
         mk1(inout s, tag, x)
@@ -165,16 +193,16 @@ pub fn rd_term(inout s: S, in w: Slice[u64]) -> u64 {
 pub fn rd_der(inout s: S, in w: Slice[u64]) -> u64 {
     let g = rd_term(inout s, in w);
     let t = rd(inout s, in w);
-    let st = if t == 18 {
+    let st = if t == st_conf() {
         let src = rd(inout s, in w);
         let from = rd_args(inout s, in w);
-        mkl(inout s, 18, src, 0, 0, from)
-    } else if t == 21 {
+        mkl(inout s, st_conf(), src, 0, 0, from)
+    } else if t == st_pconf() {
         let src = rd(inout s, in w);
         let k = rd(inout s, in w);
         let from = rd_args(inout s, in w);
-        mkl(inout s, 21, src, k, 0, from)
-    } else if t == 19 || t == 20 || t == 22 {
+        mkl(inout s, st_pconf(), src, k, 0, from)
+    } else if t == st_assume() || t == st_alias() || t == st_passume() {
         let x = rd(inout s, in w);
         mk1(inout s, t, x)
     } else {
@@ -191,7 +219,7 @@ pub fn rd_der(inout s: S, in w: Slice[u64]) -> u64 {
         s.tmp.push(c);
         i = inc(i);
     }
-    mkl(inout s, 17, g, st, 0, from)
+    mkl(inout s, d_node(), g, st, 0, from)
 }
 
 fn rd_conformance(inout s: S, in w: Slice[u64], id: u64) {
@@ -360,11 +388,11 @@ pub fn rd_env(inout s: S, in w: Slice[u64]) -> u64 {
         }
         let k = rd(inout s, in w);
         let b = rd(inout s, in w);
-        let p = mk2(inout s, 54, k, b);
+        let p = mk2(inout s, e_ph(), k, b);
         s.tmp.push(p);
         i = inc(i);
     }
-    let phs = mkl(inout s, 27, 0, 0, 0, from);
+    let phs = mkl(inout s, k_list(), 0, 0, 0, from);
     let asm = rd_list(inout s, in w);
     let ns = rd(inout s, in w);
     let from2 = s.tmp.len();
@@ -377,8 +405,8 @@ pub fn rd_env(inout s: S, in w: Slice[u64]) -> u64 {
         s.tmp.push(sc);
         i = inc(i);
     }
-    let scopes = mkl(inout s, 27, 0, 0, 0, from2);
-    mk(inout s, 55, phs, asm, scopes)
+    let scopes = mkl(inout s, k_list(), 0, 0, 0, from2);
+    mk(inout s, e_env(), phs, asm, scopes)
 }
 
 // A query: s.qmaj, s.qmin, s.qenv, s.qbinders, s.qgoal.
@@ -404,7 +432,7 @@ pub fn check_schema(inout s: S, maj: u64, min: u64) -> bool {
         let off = begin(in s);
         lit(inout s, "unsupported schema ");
         num(inout s, maj);
-        byte(inout s, 46);
+        byte(inout s, DOT);
         num(inout s, min);
         lit(inout s, " (this solver accepts 0.0..=0.1)");
         emit(inout s, 0, 0, 0, 0, off);
@@ -517,7 +545,7 @@ pub fn validate_program(inout s: S) {
         let from = s.tmp.len();
         s.tmp.push(0);
         push_kids(inout s, params);
-        let binder = mkl(inout s, 28, 0, 0, 0, from);
+        let binder = mkl(inout s, k_slist(), 0, 0, 0, from);
         s.sc_kind = 0;
         s.sc_params = binder;
         let at = sw(in s.tr_as_at, i);
@@ -541,7 +569,7 @@ pub fn validate_program(inout s: S) {
                 let bb = sw(in s.bd_brand, add(bat, b));
                 if v_trait_args(inout s, bt, bargs, 3, id, 0) {
                     v_brand(inout s, bb, 3, id, 0);
-                    if tg(in s, bb) == 9 {
+                    if tg(in s, bb) == b_var() {
                         let off = begin(in s);
                         lit(inout s, "bound on ");
                         r_id(inout s, "assoc", ai);
@@ -704,14 +732,14 @@ pub fn row_dup(in s: S, r: u64) -> u64 {
 // the walk stopped at a row with a repeated label (the fold's error).
 fn mark_bound(inout s: S, n: u64) -> bool {
     let t = tg(in s, n);
-    if t == 2 || t == 5 || t == 9 || t == 10 || t == 12 {
+    if t == t_var() || t == m_var() || t == b_var() || t == g_cap() || t == l_cap() {
         let v = fa(in s, n);
         if vkind(v) == 0 && vidx(v) < s.seen.len() {
             let _ = s.seen.try_set(vidx(v), 1);
         }
         return true;
     }
-    if t == 6 {
+    if t == g_row() {
         let len = nlen(in s, n);
         let mut i: u64 = 0;
         loop {
@@ -730,7 +758,7 @@ fn mark_bound(inout s: S, n: u64) -> bool {
         }
         return row_dup(in s, n) == none();
     }
-    if t == 3 {
+    if t == t_proj() {
         let a = fa(in s, n);
         if !mark_bound(inout s, a) {
             return false;
@@ -738,13 +766,13 @@ fn mark_bound(inout s: S, n: u64) -> bool {
         let b = fb(in s, n);
         return mark_bound(inout s, b);
     }
-    if t == 13 {
+    if t == t_ref() {
         let b = fb(in s, n);
         if !mark_bound(inout s, b) {
             return false;
         }
     }
-    if t == 1 || t == 11 || t == 13 {
+    if t == t_ctor() || t == l_eff() || t == t_ref() {
         let len = nlen(in s, n);
         let mut i: u64 = 0;
         loop {
@@ -832,10 +860,10 @@ pub fn v_goal(inout s: S, g: u64, sv: u64, sa: u64, sb: u64) {
     let t = tg(in s, g);
     let a = fa(in s, g);
     let b = fb(in s, g);
-    if t == 14 {
+    if t == g_impl() {
         let _ = v_trait_ref(inout s, a, sv, sa, sb);
         v_brand(inout s, b, sv, sa, sb);
-    } else if t == 15 {
+    } else if t == g_peq() {
         v_projection(inout s, a, sv, sa, sb);
         v_ty(inout s, b, sv, sa, sb);
     } else {
@@ -864,7 +892,7 @@ fn v_projection(inout s: S, p: u64, sv: u64, sa: u64, sb: u64) {
 
 pub fn v_ty(inout s: S, t: u64, sv: u64, sa: u64, sb: u64) {
     let tag = tg(in s, t);
-    if tag == 1 {
+    if tag == t_ctor() {
         let c = fa(in s, t);
         if c >= s.ct_id.len() {
             unknown(inout s, "type", c, sv, sa, sb);
@@ -872,7 +900,7 @@ pub fn v_ty(inout s: S, t: u64, sv: u64, sa: u64, sb: u64) {
         }
         let params = sw(in s.ct_params, c);
         let _ = v_args(inout s, params, t, sv, sa, sb, 1, c);
-    } else if tag == 2 {
+    } else if tag == t_var() {
         let v = fa(in s, t);
         v_var(inout s, v, 0, sv, sa, sb);
     } else {
@@ -882,13 +910,13 @@ pub fn v_ty(inout s: S, t: u64, sv: u64, sa: u64, sb: u64) {
 
 pub fn v_arg(inout s: S, a: u64, sv: u64, sa: u64, sb: u64) {
     let t = tg(in s, a);
-    if t <= 3 {
+    if t <= t_proj() {
         v_ty(inout s, a, sv, sa, sb);
-    } else if t <= 5 {
+    } else if t <= m_var() {
         v_mode(inout s, a, sv, sa, sb);
-    } else if t == 6 {
+    } else if t == g_row() {
         v_row(inout s, a, sv, sa, sb);
-    } else if t <= 9 {
+    } else if t <= b_var() {
         v_brand(inout s, a, sv, sa, sb);
     } else {
         let v = fa(in s, a);
@@ -897,7 +925,7 @@ pub fn v_arg(inout s: S, a: u64, sv: u64, sa: u64, sb: u64) {
 }
 
 fn v_mode(inout s: S, m: u64, sv: u64, sa: u64, sb: u64) {
-    if tg(in s, m) == 5 {
+    if tg(in s, m) == m_var() {
         let v = fa(in s, m);
         v_var(inout s, v, 1, sv, sa, sb);
     }
@@ -905,10 +933,10 @@ fn v_mode(inout s: S, m: u64, sv: u64, sa: u64, sb: u64) {
 
 fn v_brand(inout s: S, b: u64, sv: u64, sa: u64, sb: u64) {
     let t = tg(in s, b);
-    if t == 9 {
+    if t == b_var() {
         let v = fa(in s, b);
         v_var(inout s, v, 3, sv, sa, sb);
-    } else if t == 8 {
+    } else if t == b_named() {
         let m = fa(in s, b);
         if m >= s.nmodel {
             unknown(inout s, "model", m, sv, sa, sb);
@@ -961,7 +989,7 @@ fn v_row(inout s: S, r: u64, sv: u64, sa: u64, sb: u64) {
         }
         let l = kid(in s, r, i);
         let e = fa(in s, l);
-        if tg(in s, l) == 11 {
+        if tg(in s, l) == l_eff() {
             if e >= s.ef_id.len() {
                 unknown(inout s, "effect", e, sv, sa, sb);
             } else {
@@ -1062,18 +1090,18 @@ pub fn validate_query(inout s: S, maj: u64, min: u64, env: u64, binders: u64, go
         }
         let a = kid(in s, asm, i);
         let t = tg(in s, a);
-        if t == 16 {
+        if t == g_mode() {
             let off = begin(in s);
             lit(inout s, "mode assumptions must be placeholder mode bounds");
             emit(inout s, 8, 7, 0, 0, off);
         } else {
             v_goal(inout s, a, 7, 0, 0);
-            let brand = if t == 14 {
+            let brand = if t == g_impl() {
                 fb(in s, a)
             } else {
                 fb(in s, fa(in s, a))
             };
-            if tg(in s, brand) == 9 && vkind(fa(in s, brand)) == 2 {
+            if tg(in s, brand) == b_var() && vkind(fa(in s, brand)) == 2 {
                 let off = begin(in s);
                 lit(inout s, "assumption brand must be explicit");
                 emit(inout s, 5, 7, 0, 0, off);

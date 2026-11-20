@@ -52,7 +52,8 @@ included, and many of them are fine as they are.
 | #1206 | Grammar: X.690 identifier/length octets, universal tags and DER kinds, LEB128 and u24 frames, Protobuf wire types/field-number range/ZigZag masks, Cap'n Proto pointer fields, segment table and packing runs, FlatBuffers offsets and vtables, Arrow IPC framing/`MetadataVersion`/`MessageHeader`/struct sizes, grammar rule tags and metadata/capture layouts, Unicode Table 3-7, hard ceilings (Rust and port). FlatBuffer field ids, slot widths and error kinds stay literal | `grammar_abba window` (2,000 decodes) Ir: Protobuf 227.979 M -> 227.975 M, DER 189.242 M -> 189.237 M |
 | #1207 | Aegis: SEV-SNP report versions, signature algorithm, FLAGS reserved bits, ETCB layout, Venice family/models and P-384 signature components; TDX quote versions, body types and lengths, attestation key and TEE type, certification data types; SGX quote and report body; Intel TCB info/QE identity versions; X.509 DER tags and TBS fields, SEC1 points; CCA REMs, RoTPK and digest lengths; CoRIM CDDL map keys; civil-time (Hinnant) constants; claims wire layouts, architectures and TCB components; port tail modes (Rust and port). Format codes, error kinds and field widths in layout order stay literal | `abba window port` (1,000 passes) Ir: snp 35,484,197 -> 35,483,973, tdx 43,505,390 -> 43,505,166, sgx 23,801,174 -> 23,800,961, policy 105,848,700 -> 105,848,494 |
 | #1208 | Kinetic: the fdlibm `exp`/`log`/`sin`/`cos`/`atan2` coefficients and high-word thresholds (fdlibm names, as `_BITS` patterns in the port), IEEE binary64/binary32 fields, crmath formats, Machin and ln 2 series constants, working-precision and error-bound terms, GJK/EPA tolerances and iteration caps, the Morton magic-bits masks, LBVH child words, SAP radix and pair-key passes (Rust counterparts of the ported modules and the whole port; the rigid/world/diff physics tolerances are left for a follow-up). Status codes stay literal | `abba one port` (200 runs) Ir: crmath 9.067 G -> 8.959 G (-1.2%), lbvh 4.9820 G -> 4.9812 G, gjk 915.9 M -> 915.8 M, fastmath, morton, sap and colorer unchanged |
-| next | Kinetic physics (Rust only): hull, separating-axis and edge tolerances, segment and tangent minimums, unit-quaternion and unit-vector checks, contact merge and manifold tolerances, broadphase box rounding and inflation, the barrier spin count. Config defaults (`dt`, substeps, margins) stay in their `Default` impls, where the field names already say what they are | Rust-only code, no port change |
+| #1211 | Kinetic physics (Rust only): hull, separating-axis and edge tolerances, segment and tangent minimums, unit-quaternion and unit-vector checks, contact merge and manifold tolerances, broadphase box rounding and inflation, the barrier spin count. Config defaults (`dt`, substeps, margins) stay in their `Default` impls, where the field names already say what they are | Rust-only code, no port change |
+| next | Pact port: every node tag and kind/flag constant now uses the `term.ves` tag functions (`t_ctor()` ... `e_env()`) instead of bare numbers, child-reference masks, ASCII bytes, the FNV-1a, Fibonacci-hashing and SplitMix64 multipliers and slot shifts, and the default solver limits (as in the Rust `SolverConfig::default()`). Diagnostic codes and the derivation wire codes in `out.ves` stay documented numbers | `abba once` Ir: fixture 7,516,603 -> 7,440,968 (-1.0%), large 213.90 M -> 206.96 M (-3.2%) |
 
 ## Order
 
@@ -96,6 +97,10 @@ literals first (2026-11-20).
 
 ## Gaps left
 
+- A `pub const` can't be imported from another module: `use self::term::{REF_A}`
+  fails with E0111 ("module self::term has no item"). The pact port keeps
+  its zero-argument tag functions for shared tags and declares per-module
+  constants (ASCII bytes, hash multipliers) where they are used.
 - Named constants in a hot byte loop can cost a little: in the `.BTF.ext`
   access-string parser (`parse_u32`), writing `ASCII_0`/`ASCII_9`/`U32_MAX`
   instead of literals costs about 14 K Ir per warm `ext` call (1.5%). The
