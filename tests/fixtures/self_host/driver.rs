@@ -329,6 +329,8 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // The front end v2 (#1129) is a package that imports
                     // with `use` (#880).
                     || path.ends_with("packages/vesper-front")
+                    // The AST package (#1152) imports with `use` too.
+                    || path.ends_with("packages/vesper-ast")
                     // The Quarry port (#904) uses `use`-free syntax the
                     // Stage 1 parser lacks (#880); it joins with the others.
                     || path.ends_with("crates/vesper-quarry/vesper")

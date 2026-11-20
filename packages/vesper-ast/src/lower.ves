@@ -1,0 +1,3816 @@
+// The lowering from the front end v2 tables to the AST: the AST-building
+// half of crates/vesper-syntax/src/parser.rs (`parse_with_limits` with the
+// default limits, batch mode), transliterated function by function, over
+// the token table and CST events of @vesper/front's `parse_tokens`.
+//
+// The front end has already parsed the source: it decided where every
+// token goes, reported every diagnostic and applied the depth, diagnostic
+// and token limits. This walk re-reads the same significant tokens in the
+// same order and builds the AST nodes the Rust parser builds alongside its
+// CST. It uses the front end's tables three ways:
+// - a halted or token-limited parse gives the empty module, as in Rust;
+// - the CST events decide whether `e[` opens a generic call or an index
+//   (an index's `[` is followed by an EXPR node or `..`), so the walk keeps
+//   no `row_names` scope or tiled-accessor tests;
+// - every consumed token is checked against the next token event of the
+//   CST; `L.desync` counts mismatches (0 when the walk follows the front
+//   end exactly; the differential test asserts it).
+// Diagnostics are not rebuilt: an error never changes the AST of a parse
+// that did not halt, only which tokens the recovery consumes, and those
+// paths are transliterated.
+
+use self::{
+    Ast,
+    ast_new,
+    none,
+    ListRef,
+    Lit,
+    ExprNode,
+    PatNode,
+    TypeNode,
+    StmtNode,
+    ArgNode,
+    ClauseNode,
+    ParamNode,
+    EffectsNode,
+    EffectNode,
+    GenericNode,
+    FieldNode,
+    VariantNode,
+    AdtNode,
+    FnNode,
+    EffectDeclNode,
+    ImplNode,
+    TraitNode,
+    AssocDeclNode,
+    TraitRefNode,
+    WhereNode,
+    AssocBindNode,
+    ConfNode,
+    ItemNode,
+    ModelUseNode,
+    BoundNode,
+    UseNode,
+    UseNameNode,
+    list_len,
+    list_at,
+    expr_at,
+    pat_at,
+    type_at,
+    lit_at,
+    type_name
+};
+use self::text::{
+    parse_float,
+    decode_string
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use @vesper/front::{
+    P
+};
+use @vesper/front::lex::{
+    lex,
+    max_source_bytes,
+    trivia_kind
+};
+use @vesper/front::diag::{
+    diags_new
+};
+use @vesper/front::parse::{
+    parse_tokens
+};
+use @vesper/front::kinds::{
+    k_upper,
+    k_lower,
+    k_float,
+    k_int,
+    k_string,
+    k_struct,
+    k_enum,
+    k_effect,
+    k_impl,
+    k_fn,
+    k_let,
+    k_copy,
+    k_affine,
+    k_linear,
+    k_mod,
+    k_eff,
+    k_in,
+    k_inout,
+    k_sink,
+    k_self_kw,
+    k_handle,
+    k_state,
+    k_with,
+    k_return,
+    k_match,
+    k_if,
+    k_else,
+    k_true,
+    k_false,
+    k_l_paren,
+    k_r_paren,
+    k_l_brace,
+    k_r_brace,
+    k_l_bracket,
+    k_r_bracket,
+    k_comma,
+    k_semi,
+    k_colon,
+    k_colon_colon,
+    k_dot,
+    k_question,
+    k_at,
+    k_at_at,
+    k_arrow,
+    k_fat_arrow,
+    k_eq,
+    k_plus_eq,
+    k_star_eq,
+    k_slash_eq,
+    k_percent_eq,
+    k_minus_eq,
+    k_plus,
+    k_minus,
+    k_star,
+    k_slash,
+    k_percent,
+    k_eq_eq,
+    k_ne,
+    k_lt,
+    k_le,
+    k_gt,
+    k_ge,
+    k_and,
+    k_or,
+    k_bang,
+    k_pipe,
+    k_eof,
+    k_tilde,
+    k_dot_dot,
+    k_dot_dot_eq,
+    k_amp,
+    k_caret,
+    k_shl,
+    k_shr
+};
+use @vesper/front::words::{
+    w_use,
+    w_model,
+    w_pub,
+    w_fip,
+    w_trait,
+    w_tiled,
+    w_wire,
+    w_for,
+    w_where,
+    w_as,
+    w_type,
+    w_dim,
+    w_dyn,
+    w_hot,
+    w_cold,
+    w_mut,
+    w_region,
+    w_loop,
+    w_break,
+    w_continue,
+    w_underscore,
+    w_super,
+    w_const,
+    is_primitive_word
+};
+
+// Symbols the lowering writes itself.
+pub copy struct Syms {
+    error: u32,
+    empty: u32,
+    ret: u32,
+    region: u32,
+    region_marker: u32,
+    dyn_: u32,
+    shape: u32,
+    star: u32,
+    projection: u32,
+    any: u32,
+    splat: u32,
+    len: u32,
+    fn_: u32,
+    fn_mut: u32,
+    fn_once: u32,
+    brk: u32,
+    cont: u32,
+    for_: u32
+}
+
+// The lowering state.
+pub struct L {
+    // The front end's parse: tokens, CST events, `halted`.
+    p: P,
+    // The source, for interning token text.
+    text: String,
+    ast: Ast,
+    // Front-end symbol to AST symbol + 1 (0 before it is interned).
+    symmap: ChunkSeq[u32],
+    // Token index of the cursor (as `Parser::pos`).
+    pos: u64,
+    // End of the last consumed token (`Parser::end`).
+    last: u64,
+    no_struct: bool,
+    // `bound_values`: a live count per AST symbol and an undo trail.
+    vals: ChunkSeq[u32],
+    vals_trail: ChunkSeq[u32],
+    // Scratch stack the lists are built on.
+    stk: ChunkSeq[u32],
+    // `pending_bounds`: BoundNode indices.
+    pending: ChunkSeq[u32],
+    // Names of the module's constants.
+    consts: ChunkSeq[u32],
+    // CST event position of each token, and the cursor of the sync check.
+    evpos: ChunkSeq[u32],
+    evc: u64,
+    desync: u64,
+    buf: String,
+    s: Syms
+}
+
+// ---------------------------------------------------------------- helpers
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn max_array_length() -> u64 {
+    65536
+}
+
+// ---------------------------------------------------------------- cursor
+
+fn tk(in l: L, i: u64) -> u8 {
+    match l.p.t.kind.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => k_eof(),
+    }
+}
+
+fn tword(in l: L, i: u64) -> u8 {
+    u8_at(in l.p.t.word, i)
+}
+
+fn tstart(in l: L, i: u64) -> u64 {
+    w(u32_at(in l.p.t.start, i))
+}
+
+fn tend(in l: L, i: u64) -> u64 {
+    w(u32_at(in l.p.t.end, i))
+}
+
+// `Parser::index`.
+fn idx(in l: L, n: u64) -> u64 {
+    let j = wrapping_add(w(u32_at(in l.p.rank, l.pos)), n);
+    if j < l.p.sig.len() {
+        w(u32_at(in l.p.sig, j))
+    } else {
+        wrapping_sub(l.p.ntok, 1)
+    }
+}
+
+fn kind(in l: L) -> u8 {
+    tk(in l, idx(in l, 0))
+}
+
+fn nth(in l: L, n: u64) -> u8 {
+    tk(in l, idx(in l, n))
+}
+
+fn at(in l: L, k: u8) -> bool {
+    kind(in l) == k
+}
+
+fn at_word(in l: L, n: u64, word: u8) -> bool {
+    let i = idx(in l, n);
+    tk(in l, i) == k_lower() && tword(in l, i) == word
+}
+
+fn cur_start(in l: L) -> u64 {
+    tstart(in l, idx(in l, 0))
+}
+
+// Checks that token `i` is the next token the CST holds.
+fn sync(inout l: L, i: u64) {
+    loop {
+        let e = match l.p.ev.try_get(l.evc) {
+            Option::Some(v) => v,
+            Option::None => {
+                l.desync = inc(l.desync);
+                return;
+            },
+        };
+        l.evc = inc(l.evc);
+        if e < 2147483648 {
+            let t = w(e);
+            if t == i {
+                return;
+            }
+            if !trivia_kind(tk(in l, t)) {
+                l.desync = inc(l.desync);
+                return;
+            }
+        }
+    }
+}
+
+// `Parser::bump`: the index of the consumed token (the Eof token, which is
+// never consumed, at the end).
+fn bump(inout l: L) -> u64 {
+    let i = idx(in l, 0);
+    if tk(in l, i) != k_eof() {
+        sync(inout l, i);
+        l.pos = inc(i);
+        l.last = tend(in l, i);
+    }
+    i
+}
+
+fn eat(inout l: L, k: u8) -> bool {
+    if at(in l, k) {
+        bump(inout l);
+        true
+    } else {
+        false
+    }
+}
+
+// `Parser::expect`: its diagnostic is the front end's.
+fn expect(inout l: L, k: u8) {
+    eat(inout l, k);
+}
+
+// Whether the `[` at the cursor opens an index (the CST holds an EXPR node
+// or `..` after it) rather than generic arguments.
+fn index_ahead(in l: L) -> bool {
+    let i = idx(in l, 0);
+    let mut e = inc(w(u32_at(in l.evpos, i)));
+    loop {
+        let v = match l.p.ev.try_get(e) {
+            Option::Some(v) => v,
+            Option::None => return false,
+        };
+        if v == 4294967295 {
+            return false;
+        }
+        if v >= 2147483648 {
+            return v == 2147483850;
+        }
+        let k = tk(in l, w(v));
+        if !trivia_kind(k) {
+            return k == k_dot_dot();
+        }
+        e = inc(e);
+    }
+}
+
+// ---------------------------------------------------------------- names
+
+fn intern_buf(inout l: L) -> u32 {
+    let s = l.ast.names.intern(in l.buf);
+    s.id()
+}
+
+fn intern_text(inout l: L, a: u64, b: u64) -> u32 {
+    let s = l.ast.names.intern(in l.text[a..b]);
+    s.id()
+}
+
+// The AST symbol of token `i`'s text.
+fn tok_name(inout l: L, i: u64) -> u32 {
+    let fs = w(u32_at(in l.p.t.sym, i));
+    if fs != 0 {
+        let m = u32_at(in l.symmap, fs);
+        if m != 0 {
+            return wrapping_sub(m, 1);
+        }
+    }
+    let a = tstart(in l, i);
+    let b = tend(in l, i);
+    intern_text(inout l, a, b)
+}
+
+fn push_name(inout l: L, sym: u32) {
+    l.ast.names.resolve_into(symbol_from_id(sym), inout l.buf);
+}
+
+fn push_tok(inout l: L, i: u64) {
+    let a = tstart(in l, i);
+    let b = tend(in l, i);
+    l.buf.push_str(in l.text[a..b]);
+}
+
+// `a` + `sep` + `b` as one symbol.
+fn join_names(inout l: L, a: u32, in sep: Str, b: u32) -> u32 {
+    l.buf.clear();
+    push_name(inout l, a);
+    l.buf.push_str(in sep);
+    push_name(inout l, b);
+    intern_buf(inout l)
+}
+
+fn decimal_name(inout l: L, v: u64) -> u32 {
+    l.buf.clear();
+    push_decimal(inout l.buf, v);
+    intern_buf(inout l)
+}
+
+fn push_decimal(inout s: String, v: u64) {
+    if v >= 10 {
+        push_decimal(inout s, v / 10);
+    }
+    s.push_char(wrapping_u32(wrapping_add(v % 10, 48)));
+}
+
+fn same_name(a: u32, b: u32) -> bool {
+    a == b
+}
+
+// ---------------------------------------------------------------- scopes
+
+fn bound(in l: L, sym: u32) -> bool {
+    u32_at(in l.vals, w(sym)) != 0
+}
+
+fn val_insert(inout l: L, sym: u32) {
+    if sym == none() {
+        return;
+    }
+    let i = w(sym);
+    if i >= l.vals.len() {
+        l.vals.resize(wrapping_add(i, 64), 0);
+    }
+    let c = u32_at(in l.vals, i);
+    l.vals.try_set(i, wrapping_add(c, 1));
+    l.vals_trail.push(sym);
+}
+
+fn vals_mark(in l: L) -> u64 {
+    l.vals_trail.len()
+}
+
+fn vals_restore(inout l: L, mark: u64) {
+    loop {
+        if l.vals_trail.len() <= mark {
+            return;
+        }
+        let last = wrapping_sub(l.vals_trail.len(), 1);
+        let sym = u32_at(in l.vals_trail, last);
+        l.vals_trail.truncate(last);
+        let c = u32_at(in l.vals, w(sym));
+        l.vals.try_set(w(sym), wrapping_sub(c, 1));
+    }
+}
+
+// `pattern_bindings`.
+fn bind_pattern(inout l: L, pat: u32) {
+    let p = pat_at(in l.ast, pat);
+    if p.kind == 2 {
+        val_insert(inout l, p.a);
+    } else if p.kind == 4 {
+        for i in 0..list_len(in l.ast, p.a) {
+            let q = list_at(in l.ast, p.a, i);
+            bind_pattern(inout l, q);
+        }
+    } else if p.kind == 5 {
+        let n = list_len(in l.ast, p.b) >> 1;
+        for i in 0..n {
+            let q = list_at(in l.ast, p.b, wrapping_add(wrapping_mul(i, 2), 1));
+            bind_pattern(inout l, q);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- nodes
+
+fn mark(in l: L) -> u64 {
+    l.stk.len()
+}
+
+fn push(inout l: L, v: u32) {
+    l.stk.push(v);
+}
+
+// The words pushed on the scratch stack since `m`, as a list.
+fn list_from(inout l: L, m: u64) -> u32 {
+    let n = wrapping_sub(l.stk.len(), m);
+    if n == 0 {
+        return 0;
+    }
+    let first = n32(l.ast.pool.len());
+    for i in m..l.stk.len() {
+        let v = u32_at(in l.stk, i);
+        l.ast.pool.push(v);
+    }
+    l.stk.truncate(m);
+    let r = l
+        .ast
+        .lists
+        .alloc(
+        ListRef {
+            first: first,
+            len: n32(n)
+        }
+    );
+    r.raw()
+}
+
+fn lit(inout l: L, kind: u8, neg: bool, bits: u64) -> u32 {
+    let i = l
+        .ast
+        .lits
+        .alloc(
+        Lit {
+            kind: kind,
+            neg: neg,
+            bits: bits
+        }
+    );
+    i.raw()
+}
+
+fn mk(inout l: L, kind: u8, start: u64, end: u64, a: u32, b: u32, c: u32) -> u32 {
+    let i = l
+        .ast
+        .exprs
+        .alloc(
+        ExprNode {
+            kind: kind,
+            start: n32(start),
+            end: n32(end),
+            a: a,
+            b: b,
+            c: c,
+            d: none(),
+            e: none()
+        }
+    );
+    i.raw()
+}
+
+fn mk5(inout l: L, kind: u8, start: u64, end: u64, a: u32, b: u32, c: u32, d: u32, e: u32) -> u32 {
+    let i = l
+        .ast
+        .exprs
+        .alloc(
+        ExprNode {
+            kind: kind,
+            start: n32(start),
+            end: n32(end),
+            a: a,
+            b: b,
+            c: c,
+            d: d,
+            e: e
+        }
+    );
+    i.raw()
+}
+
+fn mkp(inout l: L, kind: u8, start: u64, end: u64, a: u32, b: u32, c: u32) -> u32 {
+    let i = l
+        .ast
+        .pats
+        .alloc(
+        PatNode {
+            kind: kind,
+            start: n32(start),
+            end: n32(end),
+            a: a,
+            b: b,
+            c: c
+        }
+    );
+    i.raw()
+}
+
+fn mkt(inout l: L, kind: u8, a: u32, b: u32, c: u32, d: u32) -> u32 {
+    let i = l
+        .ast
+        .types
+        .alloc(
+        TypeNode {
+            kind: kind,
+            a: a,
+            b: b,
+            c: c,
+            d: d
+        }
+    );
+    i.raw()
+}
+
+fn named(inout l: L, name: u32, args: u32) -> u32 {
+    mkt(inout l, 1, name, args, 0, 0)
+}
+
+fn infer(inout l: L) -> u32 {
+    mkt(inout l, 5, 0, 0, 0, 0)
+}
+
+fn unit(inout l: L) -> u32 {
+    mkt(inout l, 2, 0, 0, 0, 0)
+}
+
+fn effects_node(inout l: L, instances: u32, tail: u32) -> u32 {
+    let i = l
+        .ast
+        .effects
+        .alloc(
+        EffectsNode {
+            instances: instances,
+            tail: tail
+        }
+    );
+    i.raw()
+}
+
+fn effect_node(inout l: L, label: u32, name: u32, args: u32) -> u32 {
+    let i = l
+        .ast
+        .effect_nodes
+        .alloc(
+        EffectNode {
+            label: label,
+            name: name,
+            args: args
+        }
+    );
+    i.raw()
+}
+
+fn ex(in l: L, e: u32) -> ExprNode {
+    expr_at(in l.ast, e)
+}
+
+fn espan_start(in l: L, e: u32) -> u64 {
+    w(ex(in l, e).start)
+}
+
+fn espan_end(in l: L, e: u32) -> u64 {
+    w(ex(in l, e).end)
+}
+
+fn bound_at(in l: L, b: u32) -> BoundNode {
+    l
+        .ast
+        .bounds
+        .get_or(
+        idx_from_raw[BoundNode](b),
+        BoundNode {
+            param: none(),
+            trait_ref: none(),
+            start: 0,
+            end: 0,
+            owner: none()
+        }
+    )
+}
+
+fn set_owner(inout l: L, b: u32, owner: u32) {
+    let mut v = bound_at(in l, b);
+    v.owner = owner;
+    l.ast.bounds.set(idx_from_raw[BoundNode](b), v);
+}
+
+fn push_bound(inout l: L, param: u32, tr: u32, start: u64, end: u64, owner: u32) {
+    let i = l
+        .ast
+        .bounds
+        .alloc(
+        BoundNode {
+            param: param,
+            trait_ref: tr,
+            start: n32(start),
+            end: n32(end),
+            owner: owner
+        }
+    );
+    l.ast.m_bounds.push(i.raw());
+}
+
+fn fn_at(in l: L, f: u32) -> FnNode {
+    l
+        .ast
+        .fns
+        .get_or(
+        idx_from_raw[FnNode](f),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn item_node(inout l: L, kind: u8, node: u32) -> u32 {
+    let i = l
+        .ast
+        .items
+        .alloc(
+        ItemNode {
+            kind: kind,
+            node: node
+        }
+    );
+    i.raw()
+}
+
+// ---------------------------------------------------------------- literals
+
+fn hex_value(c: u8) -> u64 {
+    if c >= 48 && c <= 57 {
+        widen_u64(wrapping_sub(c, 48))
+    } else if c >= 97 && c <= 102 {
+        widen_u64(wrapping_sub(c, 87))
+    } else if c >= 65 && c <= 70 {
+        widen_u64(wrapping_sub(c, 55))
+    } else {
+        16
+    }
+}
+
+// The value of Int token `i` (`_` removed), and whether it is at most
+// `u64::MAX`.
+fn int_value(in l: L, i: u64) -> (bool, u64) {
+    let s = tstart(in l, i);
+    let e = tend(in l, i);
+    let x = u8_at(in l.p.src, inc(s));
+    let hex = wrapping_sub(e, s) >= 2 && u8_at(in l.p.src, s) == 48 && (x == 120 || x == 88);
+    let from = if hex {
+        wrapping_add(s, 2)
+    } else {
+        s
+    };
+    let mut v: u64 = 0;
+    let mut digits: u64 = 0;
+    for j in from..e {
+        let c = u8_at(in l.p.src, j);
+        if c != 95 {
+            let d = hex_value(c);
+            if hex {
+                if v > 1152921504606846975 {
+                    return (false, 0);
+                }
+                v = wrapping_add(wrapping_shl_u64(v, 4), d);
+            } else {
+                if v > 1844674407370955161 || (v == 1844674407370955161 && d > 5) {
+                    return (false, 0);
+                }
+                v = wrapping_add(wrapping_mul(v, 10), d);
+            }
+            digits = inc(digits);
+        }
+    }
+    if digits == 0 {
+        return (false, 0);
+    }
+    (true, v)
+}
+
+// `digits.parse::<u32>()` on the raw text of Int token `i`.
+fn u32_value(in l: L, i: u64) -> (bool, u64) {
+    let s = tstart(in l, i);
+    let e = tend(in l, i);
+    let mut v: u64 = 0;
+    for j in s..e {
+        let c = u8_at(in l.p.src, j);
+        if c < 48 || c > 57 {
+            return (false, 0);
+        }
+        v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+        if v > 4294967295 {
+            return (false, 0);
+        }
+    }
+    (true, v)
+}
+
+// `Parser::literal`: a Lit index, or NONE.
+fn literal(inout l: L) -> u32 {
+    let k = kind(in l);
+    if k == k_int() {
+        let i = bump(inout l);
+        let (ok, v) = int_value(in l, i);
+        lit(
+            inout l,
+            1,
+            false,
+            if ok {
+                v
+            } else {
+                0
+            }
+        )
+    } else if k == k_float() {
+        let i = bump(inout l);
+        let bits = parse_float(in l.p.src, tstart(in l, i), tend(in l, i));
+        lit(inout l, 2, false, bits)
+    } else if k == k_true() {
+        bump(inout l);
+        lit(inout l, 3, false, 1)
+    } else if k == k_false() {
+        bump(inout l);
+        lit(inout l, 3, false, 0)
+    } else if k == k_string() {
+        let i = bump(inout l);
+        l.buf.clear();
+        decode_string(in l.text, tstart(in l, i), tend(in l, i), inout l.buf);
+        let s = intern_buf(inout l);
+        lit(inout l, 4, false, widen_u64(s))
+    } else {
+        none()
+    }
+}
+
+// The negation of an Int literal (`-n` on the i128).
+fn negate(inout l: L, li: u32) -> u32 {
+    let v = lit_at(in l.ast, li);
+    if v.kind == 1 {
+        lit(inout l, 1, !v.neg && v.bits != 0, v.bits)
+    } else if v.kind == 2 {
+        lit(inout l, 2, false, v.bits ^ 9223372036854775808)
+    } else {
+        li
+    }
+}
+
+// ---------------------------------------------------------------- names
+
+fn ident(inout l: L) -> u32 {
+    let k = kind(in l);
+    if k == k_lower() || k == k_upper() || k == k_self_kw() {
+        let i = bump(inout l);
+        tok_name(inout l, i)
+    } else if !at(in l, k_eof()) {
+        let i = bump(inout l);
+        tok_name(inout l, i)
+    } else {
+        l.s.error
+    }
+}
+
+fn contextual_name(k: u8) -> bool {
+    k == k_state() || k == k_linear() || k == k_with()
+}
+
+fn at_contextual_name(in l: L) -> bool {
+    contextual_name(kind(in l))
+}
+
+fn lower(inout l: L) -> u32 {
+    if at_contextual_name(in l) {
+        let i = bump(inout l);
+        return tok_name(inout l, i);
+    }
+    ident(inout l)
+}
+
+fn upper(inout l: L) -> u32 {
+    ident(inout l)
+}
+
+// `Parser::at_path_root`.
+fn at_path_root(in l: L) -> bool {
+    let k = kind(in l);
+    if k == k_self_kw() {
+        return nth(in l, 1) == k_colon_colon();
+    }
+    if k == k_lower() {
+        return at_word(in l, 0, w_super()) && nth(in l, 1) == k_colon_colon();
+    }
+    if k != k_at() {
+        return false;
+    }
+    let mut end = tend(in l, idx(in l, 0));
+    let mut n: u64 = 1;
+    loop {
+        let kn = nth(in l, n);
+        if !(kn == k_lower() || kn == k_minus() || kn == k_slash() || kn == k_int())
+            || tstart(in l, idx(in l, n))
+            != end {
+            break;
+        }
+        end = tend(in l, idx(in l, n));
+        n = inc(n);
+    }
+    n > 1 && nth(in l, n) == k_colon_colon()
+}
+
+// `Parser::package_name` into `buf`.
+fn package_name_buf(inout l: L) {
+    let i = bump(inout l);
+    push_tok(inout l, i);
+    loop {
+        let k = kind(in l);
+        if !(k == k_lower() || k == k_minus() || k == k_slash() || k == k_int())
+            || cur_start(in l)
+            != l
+            .last {
+            return;
+        }
+        let j = bump(inout l);
+        push_tok(inout l, j);
+    }
+}
+
+fn package_name(inout l: L) -> u32 {
+    l.buf.clear();
+    package_name_buf(inout l);
+    intern_buf(inout l)
+}
+
+// `Parser::qualified_path`, and whether its last segment is upper-case.
+fn qualified_path(inout l: L) -> (u32, bool) {
+    l.buf.clear();
+    if at(in l, k_at()) {
+        package_name_buf(inout l);
+    } else {
+        let i = bump(inout l);
+        push_tok(inout l, i);
+    }
+    let mut upper_last = false;
+    loop {
+        let n1 = nth(in l, 1);
+        if !at(in l, k_colon_colon())
+            || !(n1 == k_lower() || n1 == k_upper() || contextual_name(n1)) {
+            break;
+        }
+        bump(inout l);
+        l.buf.push_str(in "::");
+        let i = bump(inout l);
+        push_tok(inout l, i);
+        upper_last = tk(in l, i) == k_upper();
+    }
+    let s = intern_buf(inout l);
+    (s, upper_last)
+}
+
+// `Parser::mode`: 0 Copy, 1 Affine, 2 Linear, 3 none.
+fn mode(inout l: L) -> u8 {
+    let k = kind(in l);
+    if k == k_copy() {
+        bump(inout l);
+        0
+    } else if k == k_affine() {
+        bump(inout l);
+        1
+    } else if k == k_linear() {
+        bump(inout l);
+        2
+    } else {
+        3
+    }
+}
+
+// `Parser::pass`: the pass, plus 4 when it was written.
+fn pass(inout l: L) -> u8 {
+    let k = kind(in l);
+    if k == k_in() {
+        bump(inout l);
+        4
+    } else if k == k_inout() {
+        bump(inout l);
+        5
+    } else if k == k_sink() {
+        bump(inout l);
+        6
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------- items
+
+fn generics(inout l: L) -> u32 {
+    let m = mark(in l);
+    if !eat(inout l, k_l_bracket()) {
+        return 0;
+    }
+    loop {
+        if at(in l, k_r_bracket()) || at(in l, k_eof()) {
+            break;
+        }
+        let before = l.pos;
+        let row = at(in l, k_lower());
+        let name = ident(inout l);
+        let mut bound: u8 = 2;
+        if eat(inout l, k_colon()) {
+            if row {
+                expect(inout l, k_eff());
+            } else if at_word(in l, 0, w_dim()) {
+                bump(inout l);
+            } else {
+                loop {
+                    if at(in l, k_upper()) {
+                        let start = cur_start(in l);
+                        let tr = trait_ref(inout l);
+                        let end = l.last;
+                        let b = l
+                            .ast
+                            .bounds
+                            .alloc(
+                            BoundNode {
+                                param: name,
+                                trait_ref: tr,
+                                start: n32(start),
+                                end: n32(end),
+                                owner: l.s.empty
+                            }
+                        );
+                        l.pending.push(b.raw());
+                    } else {
+                        expect(inout l, k_mod());
+                        let md = mode(inout l);
+                        bound = if md == 3 {
+                            2
+                        } else {
+                            md
+                        };
+                    }
+                    if !eat(inout l, k_plus()) {
+                        break;
+                    }
+                }
+            }
+        }
+        let g = l
+            .ast
+            .generics
+            .alloc(
+            GenericNode {
+                name: name,
+                bound: bound,
+                row: row
+            }
+        );
+        push(inout l, g.raw());
+        if !eat(inout l, k_comma()) || l.pos == before {
+            break;
+        }
+    }
+    expect(inout l, k_r_bracket());
+    list_from(inout l, m)
+}
+
+fn fields(inout l: L) -> u32 {
+    let m = mark(in l);
+    expect(inout l, k_l_brace());
+    loop {
+        if at(in l, k_r_brace()) || at(in l, k_eof()) {
+            break;
+        }
+        if at_word(in l, 0, w_pub())
+            && (
+            (nth(in l, 1) == k_lower() && nth(in l, 2) == k_colon())
+                || (
+                (at_word(in l, 1, w_hot()) || at_word(in l, 1, w_cold()))
+                    && nth(in l, 2)
+                    == k_lower()
+                    && nth(in l, 3)
+                    == k_colon()
+            )
+        ) {
+            bump(inout l);
+        }
+        let mut temperature: u8 = 0;
+        if at_word(in l, 0, w_hot()) && nth(in l, 1) == k_lower() {
+            bump(inout l);
+            temperature = 1;
+        } else if at_word(in l, 0, w_cold()) && nth(in l, 1) == k_lower() {
+            bump(inout l);
+            temperature = 2;
+        }
+        let name = lower(inout l);
+        expect(inout l, k_colon());
+        let t = ty(inout l);
+        let mut modality: u8 = 3;
+        if eat(inout l, k_at_at()) {
+            let md = mode(inout l);
+            modality = if md == 3 {
+                2
+            } else {
+                md
+            };
+        }
+        let f = l
+            .ast
+            .fields
+            .alloc(
+            FieldNode {
+                name: name,
+                ty: t,
+                modality: modality,
+                temperature: temperature
+            }
+        );
+        push(inout l, f.raw());
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    expect(inout l, k_r_brace());
+    list_from(inout l, m)
+}
+
+fn fip_attr(inout l: L) -> bool {
+    if at(in l, k_at()) && at_word(in l, 1, w_fip()) {
+        bump(inout l);
+        bump(inout l);
+        true
+    } else {
+        false
+    }
+}
+
+fn is_mode_kind(k: u8) -> bool {
+    k == k_copy() || k == k_affine() || k == k_linear()
+}
+
+fn is_type_decl_kind(k: u8) -> bool {
+    k == k_struct() || k == k_enum() || k == k_effect()
+}
+
+fn import_root(in l: L, n: u64) -> bool {
+    let k = nth(in l, n);
+    k == k_at() || k == k_self_kw() || at_word(in l, n, w_super())
+}
+
+// The item's name for `public_items`, or NONE.
+fn item_name(in l: L, it: u32) -> u32 {
+    let node = l
+        .ast
+        .items
+        .get_or(
+        idx_from_raw[ItemNode](it),
+        ItemNode {
+            kind: 0,
+            node: 0
+        }
+    );
+    if node.kind == 1 {
+        match l.ast.adts.get(idx_from_raw[AdtNode](node.node)) {
+            Option::Some(a) => a.name,
+            Option::None => none(),
+        }
+    } else if node.kind == 2 {
+        fn_at(in l, node.node).name
+    } else if node.kind == 3 {
+        match l.ast.effect_decls.get(idx_from_raw[EffectDeclNode](node.node)) {
+            Option::Some(e) => e.name,
+            Option::None => none(),
+        }
+    } else {
+        none()
+    }
+}
+
+// `Parser::item`.
+fn item(inout l: L) {
+    let public = at_word(in l, 0, w_pub())
+        || (at(in l, k_at()) && at_word(in l, 1, w_fip()) && at_word(in l, 2, w_pub()));
+    let it = declaration(inout l);
+    if it == none() {
+        return;
+    }
+    if public {
+        let n = item_name(in l, it);
+        if n != none() {
+            l.ast.m_public.push(n);
+        }
+    }
+    l.ast.m_items.push(it);
+}
+
+// `Parser::declaration`: an ItemNode index, or NONE.
+fn declaration(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    if at_word(in l, 0, w_use()) && at_word(in l, 1, w_model()) {
+        let n = l.p.src.len();
+        use_model(inout l, 0, n);
+        return none();
+    }
+    if at_word(in l, 0, w_use()) && import_root(in l, 1) {
+        use_item(inout l, false);
+        return none();
+    }
+    if at_word(in l, 0, w_pub()) && at_word(in l, 1, w_use()) && import_root(in l, 2) {
+        bump(inout l);
+        use_item(inout l, true);
+        return none();
+    }
+    if at_word(in l, 0, w_use()) && nth(in l, 1) == k_lower() && nth(in l, 2) == k_colon_colon() {
+        bump(inout l);
+        bump(inout l);
+        loop {
+            if !eat(inout l, k_colon_colon()) {
+                break;
+            }
+            if !eat(inout l, k_lower()) && !eat(inout l, k_upper()) {
+                break;
+            }
+        }
+        eat(inout l, k_semi());
+        return none();
+    }
+    let mut fip = fip_attr(inout l);
+    let public = at_word(in l, 0, w_pub())
+        && (
+        at_word(in l, 1, w_trait())
+            || (at_word(in l, 1, w_const()) && nth(in l, 2) == k_upper())
+            || at_word(in l, 1, w_model())
+            || nth(in l, 1)
+            == k_fn()
+            || is_type_decl_kind(nth(in l, 1))
+            || (is_mode_kind(nth(in l, 1)) && is_type_decl_kind(nth(in l, 2)))
+            || (
+            !fip && nth(in l, 1) == k_at() && at_word(in l, 2, w_fip()) && nth(in l, 3) == k_fn()
+        )
+    );
+    if public {
+        bump(inout l);
+    }
+    if !fip {
+        fip = fip_attr(inout l);
+    }
+    if at_word(in l, 0, w_const()) && nth(in l, 1) == k_upper() {
+        let f = const_item(inout l, start);
+        return item_node(inout l, 2, f);
+    }
+    if at_word(in l, 0, w_trait()) {
+        let t = trait_decl(inout l, start, public);
+        return item_node(inout l, 5, t);
+    }
+    if at_word(in l, 0, w_model()) {
+        let c = model_decl(inout l, start, public);
+        return item_node(inout l, 6, c);
+    }
+    let mut tile: u32 = none();
+    if at_word(in l, 0, w_tiled()) && nth(in l, 1) == k_l_paren() {
+        bump(inout l);
+        expect(inout l, k_l_paren());
+        let mut width: u64 = 0;
+        if at(in l, k_int()) {
+            let digits = bump(inout l);
+            let (ok, v) = u32_value(in l, digits);
+            if ok {
+                width = v;
+            }
+        }
+        expect(inout l, k_r_paren());
+        tile = n32(width);
+    }
+    let md = if at_word(in l, 0, w_wire()) && nth(in l, 1) == k_struct() {
+        bump(inout l);
+        0
+    } else {
+        let m = mode(inout l);
+        if m == 3 {
+            1
+        } else {
+            m
+        }
+    };
+    let k = kind(in l);
+    if k == k_struct() {
+        bump(inout l);
+        let name = upper(inout l);
+        let gs = generics(inout l);
+        own_type_bounds(inout l, name);
+        let fs = fields(inout l);
+        let v = l
+            .ast
+            .variants
+            .alloc(
+            VariantNode {
+                name: name,
+                fields: fs,
+                named: true
+            }
+        );
+        let m = mark(in l);
+        push(inout l, v.raw());
+        let vs = list_from(inout l, m);
+        let end = l.last;
+        let a = l
+            .ast
+            .adts
+            .alloc(
+            AdtNode {
+                name: name,
+                mode: md,
+                generics: gs,
+                variants: vs,
+                is_enum: false,
+                tile_width: tile,
+                start: n32(start),
+                end: n32(end)
+            }
+        );
+        item_node(inout l, 1, a.raw())
+    } else if k == k_enum() {
+        bump(inout l);
+        let name = upper(inout l);
+        let gs = generics(inout l);
+        own_type_bounds(inout l, name);
+        expect(inout l, k_l_brace());
+        let m = mark(in l);
+        loop {
+            if at(in l, k_r_brace()) || at(in l, k_eof()) {
+                break;
+            }
+            let vname = upper(inout l);
+            let named = at(in l, k_l_brace());
+            let fs = if named {
+                fields(inout l)
+            } else if eat(inout l, k_l_paren()) {
+                let fm = mark(in l);
+                let mut n: u64 = 0;
+                loop {
+                    if at(in l, k_r_paren()) || at(in l, k_eof()) {
+                        break;
+                    }
+                    let fname = decimal_name(inout l, n);
+                    let t = ty(inout l);
+                    let f = l
+                        .ast
+                        .fields
+                        .alloc(
+                        FieldNode {
+                            name: fname,
+                            ty: t,
+                            modality: 3,
+                            temperature: 0
+                        }
+                    );
+                    push(inout l, f.raw());
+                    n = inc(n);
+                    if !eat(inout l, k_comma()) {
+                        break;
+                    }
+                }
+                expect(inout l, k_r_paren());
+                list_from(inout l, fm)
+            } else {
+                0
+            };
+            let v = l
+                .ast
+                .variants
+                .alloc(
+                VariantNode {
+                    name: vname,
+                    fields: fs,
+                    named: named
+                }
+            );
+            push(inout l, v.raw());
+            if !eat(inout l, k_comma()) {
+                break;
+            }
+        }
+        expect(inout l, k_r_brace());
+        let vs = list_from(inout l, m);
+        let end = l.last;
+        let a = l
+            .ast
+            .adts
+            .alloc(
+            AdtNode {
+                name: name,
+                mode: md,
+                generics: gs,
+                variants: vs,
+                is_enum: true,
+                tile_width: none(),
+                start: n32(start),
+                end: n32(end)
+            }
+        );
+        item_node(inout l, 1, a.raw())
+    } else if k == k_effect() {
+        bump(inout l);
+        let name = upper(inout l);
+        let gs = generics(inout l);
+        expect(inout l, k_l_brace());
+        let m = mark(in l);
+        loop {
+            if !at(in l, k_fn()) {
+                break;
+            }
+            let bm = l.ast.m_bounds.len();
+            let f = function(inout l, true, false);
+            push(inout l, f);
+            unsupported_owned(inout l, bm);
+        }
+        expect(inout l, k_r_brace());
+        let ops = list_from(inout l, m);
+        let end = l.last;
+        let e = l
+            .ast
+            .effect_decls
+            .alloc(
+            EffectDeclNode {
+                name: name,
+                linear: md == 2,
+                generics: gs,
+                ops: ops,
+                start: n32(start),
+                end: n32(end)
+            }
+        );
+        item_node(inout l, 3, e.raw())
+    } else if k == k_fn() {
+        let f = function(inout l, false, fip);
+        if public || fip {
+            set_fn_start(inout l, f, start);
+        }
+        item_node(inout l, 2, f)
+    } else if k == k_impl() {
+        impl_decl(inout l, start)
+    } else {
+        none()
+    }
+}
+
+fn set_fn_start(inout l: L, f: u32, start: u64) {
+    let mut v = fn_at(in l, f);
+    v.start = n32(start);
+    l.ast.fns.set(idx_from_raw[FnNode](f), v);
+}
+
+// Takes the pending bounds (`std::mem::take(&mut self.pending_bounds)`)
+// onto the scratch stack and returns their mark.
+fn take_pending(inout l: L) -> u64 {
+    let m = mark(in l);
+    for i in 0..l.pending.len() {
+        let b = u32_at(in l.pending, i);
+        push(inout l, b);
+    }
+    l.pending.clear();
+    m
+}
+
+// The `impl` arm of `Parser::declaration` (at `impl`).
+fn impl_decl(inout l: L, start: u64) -> u32 {
+    bump(inout l);
+    let gs = generics(inout l);
+    let bm = take_pending(inout l);
+    let bounds = list_from(inout l, bm);
+    if at(in l, k_at()) {
+        let tr = trait_ref(inout l);
+        if at_word(in l, 0, w_for()) {
+            bump(inout l);
+        }
+        let c = conformance_rest(inout l, start, none(), false, gs, bounds, tr);
+        return item_node(inout l, 6, c);
+    }
+    let trait_start = cur_start(in l);
+    let t = ty(inout l);
+    if at_word(in l, 0, w_for()) {
+        bump(inout l);
+        let tn = type_at(in l.ast, t);
+        let end = l.last;
+        let tr = if tn.kind == 1 {
+            trait_ref_node(inout l, none(), tn.a, tn.b, trait_start, end)
+        } else {
+            let e = l.s.error;
+            trait_ref_node(inout l, none(), e, 0, trait_start, end)
+        };
+        let c = conformance_rest(inout l, start, none(), false, gs, bounds, tr);
+        return item_node(inout l, 6, c);
+    }
+    expect(inout l, k_l_brace());
+    let m = mark(in l);
+    let bmark = l.ast.m_bounds.len();
+    loop {
+        if !at_method(in l) {
+            break;
+        }
+        let f = method(inout l);
+        push(inout l, f);
+    }
+    expect(inout l, k_r_brace());
+    let methods = list_from(inout l, m);
+    let owner = type_name(in l.ast, t);
+    let owner_name = if owner == none() {
+        l.s.empty
+    } else {
+        owner
+    };
+    for i in bmark..l.ast.m_bounds.len() {
+        let b = u32_at(in l.ast.m_bounds, i);
+        let o = bound_at(in l, b).owner;
+        let joined = join_names(inout l, owner_name, in "::", o);
+        set_owner(inout l, b, joined);
+    }
+    for i in 0..list_len(in l.ast, bounds) {
+        let b = bound_at(in l, list_at(in l.ast, bounds, i));
+        for j in 0..list_len(in l.ast, methods) {
+            let mname = fn_at(in l, list_at(in l.ast, methods, j)).name;
+            let o = join_names(inout l, owner_name, in "::", mname);
+            push_bound(inout l, b.param, b.trait_ref, w(b.start), w(b.end), o);
+        }
+    }
+    let im = l
+        .ast
+        .impls
+        .alloc(
+        ImplNode {
+            ty: t,
+            generics: gs,
+            methods: methods
+        }
+    );
+    item_node(inout l, 4, im.raw())
+}
+
+fn trait_ref_node(inout l: L, package: u32, name: u32, args: u32, start: u64, end: u64) -> u32 {
+    let i = l
+        .ast
+        .trait_refs
+        .alloc(
+        TraitRefNode {
+            package: package,
+            name: name,
+            args: args,
+            start: n32(start),
+            end: n32(end)
+        }
+    );
+    i.raw()
+}
+
+// `Parser::function_header` and `Parser::function`: a FnNode index.
+fn function(inout l: L, op: bool, fip: bool) -> u32 {
+    let old_values = vals_mark(in l);
+    let start = cur_start(in l);
+    expect(inout l, k_fn());
+    let name = lower(inout l);
+    let gs = generics(inout l);
+    for i in 0..l.pending.len() {
+        let b = u32_at(in l.pending, i);
+        set_owner(inout l, b, name);
+        l.ast.m_bounds.push(b);
+    }
+    l.pending.clear();
+    expect(inout l, k_l_paren());
+    let ps = params(inout l, k_r_paren());
+    for i in 0..list_len(in l.ast, ps) {
+        let pn = match l.ast.params.get(idx_from_raw[ParamNode](list_at(in l.ast, ps, i))) {
+            Option::Some(p) => p.name,
+            Option::None => none(),
+        };
+        val_insert(inout l, pn);
+    }
+    expect(inout l, k_r_paren());
+    let result = if eat(inout l, k_arrow()) {
+        ty(inout l)
+    } else {
+        unit(inout l)
+    };
+    let effs = effects(inout l);
+    if at_word(in l, 0, w_where()) {
+        let wl = where_clauses(inout l);
+        for i in 0..list_len(in l.ast, wl) {
+            let wn = l
+                .ast
+                .wheres
+                .get_or(
+                idx_from_raw[WhereNode](list_at(in l.ast, wl, i)),
+                WhereNode {
+                    ty: none(),
+                    trait_ref: none(),
+                    start: 0,
+                    end: 0
+                }
+            );
+            let tn = type_name(in l.ast, wn.ty);
+            let param = if tn == none() {
+                l.s.empty
+            } else {
+                tn
+            };
+            push_bound(inout l, param, wn.trait_ref, w(wn.start), w(wn.end), name);
+        }
+    }
+    let body = if op {
+        expect(inout l, k_semi());
+        none()
+    } else {
+        block(inout l)
+    };
+    vals_restore(inout l, old_values);
+    let end = l.last;
+    let f = l
+        .ast
+        .fns
+        .alloc(
+        FnNode {
+            name: name,
+            fip: fip,
+            generics: gs,
+            params: ps,
+            result: result,
+            effects: effs,
+            body: body,
+            start: n32(start),
+            end: n32(end)
+        }
+    );
+    f.raw()
+}
+
+fn at_method(in l: L) -> bool {
+    at(in l, k_fn())
+        || (
+        at_word(in l, 0, w_pub())
+            && (nth(in l, 1) == k_fn() || (nth(in l, 1) == k_at() && at_word(in l, 2, w_fip())))
+    )
+        || (at(in l, k_at()) && at_word(in l, 1, w_fip()))
+}
+
+fn method(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    let mut fip = fip_attr(inout l);
+    let public = at_word(in l, 0, w_pub())
+        && (
+        nth(in l, 1) == k_fn() || (!fip && nth(in l, 1) == k_at() && at_word(in l, 2, w_fip()))
+    );
+    if public {
+        bump(inout l);
+    }
+    if !fip {
+        fip = fip_attr(inout l);
+    }
+    let f = function(inout l, false, fip);
+    if public || fip {
+        set_fn_start(inout l, f, start);
+    }
+    f
+}
+
+// `Parser::const_item`: `const NAME: T = expr;` as the function `const$NAME`.
+fn const_item(inout l: L, start: u64) -> u32 {
+    bump(inout l);
+    let name = upper(inout l);
+    expect(inout l, k_colon());
+    let result = ty(inout l);
+    expect(inout l, k_eq());
+    let value = expr(inout l);
+    expect(inout l, k_semi());
+    let end = l.last;
+    l.buf.clear();
+    l.buf.push_str(in "const$");
+    push_name(inout l, name);
+    let fname = intern_buf(inout l);
+    l.consts.push(name);
+    let vs = espan_start(in l, value);
+    let ve = espan_end(in l, value);
+    let body = mk(inout l, 5, vs, ve, 0, value, none());
+    let effs = effects_node(inout l, 0, none());
+    let f = l
+        .ast
+        .fns
+        .alloc(
+        FnNode {
+            name: fname,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: result,
+            effects: effs,
+            body: body,
+            start: n32(start),
+            end: n32(end)
+        }
+    );
+    f.raw()
+}
+
+fn params(inout l: L, end: u8) -> u32 {
+    let m = mark(in l);
+    loop {
+        if at(in l, end) || at(in l, k_eof()) {
+            break;
+        }
+        let start = cur_start(in l);
+        let ps = pass(inout l) & 3;
+        let name = lower(inout l);
+        let projections = if eat(inout l, k_dot()) {
+            place_tree(inout l)
+        } else {
+            0
+        };
+        let t = if eat(inout l, k_colon()) {
+            ty(inout l)
+        } else {
+            infer(inout l)
+        };
+        let last = l.last;
+        let p = l
+            .ast
+            .params
+            .alloc(
+            ParamNode {
+                name: name,
+                pass: ps,
+                projections: projections,
+                ty: t,
+                start: n32(start),
+                end: n32(last)
+            }
+        );
+        push(inout l, p.raw());
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    list_from(inout l, m)
+}
+
+// `Parser::place_tree`: a list of projections, each a list of names.
+fn place_tree(inout l: L) -> u32 {
+    if eat(inout l, k_l_brace()) {
+        let m = mark(in l);
+        loop {
+            if at(in l, k_r_brace()) || at(in l, k_eof()) {
+                break;
+            }
+            let inner = place_tree(inout l);
+            for i in 0..list_len(in l.ast, inner) {
+                let v = list_at(in l.ast, inner, i);
+                push(inout l, v);
+            }
+            if !eat(inout l, k_comma()) {
+                break;
+            }
+        }
+        expect(inout l, k_r_brace());
+        list_from(inout l, m)
+    } else {
+        let name = lower(inout l);
+        if eat(inout l, k_dot()) {
+            let inner = place_tree(inout l);
+            let m = mark(in l);
+            for i in 0..list_len(in l.ast, inner) {
+                let proj = list_at(in l.ast, inner, i);
+                let pm = mark(in l);
+                push(inout l, name);
+                for j in 0..list_len(in l.ast, proj) {
+                    let v = list_at(in l.ast, proj, j);
+                    push(inout l, v);
+                }
+                // Build the prefixed projection, then keep it on the stack.
+                let pl = list_from(inout l, pm);
+                push(inout l, pl);
+            }
+            list_from(inout l, m)
+        } else {
+            let pm = mark(in l);
+            push(inout l, name);
+            let one = list_from(inout l, pm);
+            let m = mark(in l);
+            push(inout l, one);
+            list_from(inout l, m)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- types
+
+fn ty(inout l: L) -> u32 {
+    let result = if eat(inout l, k_fn()) {
+        let md = if eat(inout l, k_at()) {
+            let m = mode(inout l);
+            if m == 3 {
+                1
+            } else {
+                m
+            }
+        } else {
+            1
+        };
+        function_signature(inout l, md)
+    } else if eat(inout l, k_l_paren()) {
+        let m = mark(in l);
+        loop {
+            if at(in l, k_r_paren()) || at(in l, k_eof()) {
+                break;
+            }
+            let t = ty(inout l);
+            push(inout l, t);
+            if !eat(inout l, k_comma()) {
+                break;
+            }
+        }
+        expect(inout l, k_r_paren());
+        let args = list_from(inout l, m);
+        mkt(inout l, 2, args, 0, 0, 0)
+    } else if at(in l, k_l_bracket()) && array_type_ahead(in l) {
+        bump(inout l);
+        let element = ty(inout l);
+        expect(inout l, k_semi());
+        let mut n = array_length(inout l);
+        expect(inout l, k_r_bracket());
+        if saturating_mul_u64(type_leaves(in l.ast, element), n) > max_array_length() {
+            n = 0;
+        }
+        let m = mark(in l);
+        for i in 0..n {
+            push(inout l, element);
+        }
+        let args = list_from(inout l, m);
+        mkt(inout l, 2, args, 0, 0, 0)
+    } else if eat(inout l, k_l_bracket()) {
+        let m = mark(in l);
+        loop {
+            if at(in l, k_r_bracket()) || at(in l, k_eof()) {
+                break;
+            }
+            let before = l.pos;
+            let d = dimension(inout l);
+            push(inout l, d);
+            if !eat(inout l, k_comma()) || l.pos == before {
+                break;
+            }
+        }
+        expect(inout l, k_r_bracket());
+        let dims = list_from(inout l, m);
+        let s = l.s.shape;
+        named(inout l, s, dims)
+    } else if eat(inout l, k_lt()) {
+        let self_ty = ty(inout l);
+        if at_word(in l, 0, w_as()) {
+            bump(inout l);
+        }
+        let trait_name = upper(inout l);
+        let trait_args = type_args(inout l);
+        expect(inout l, k_gt());
+        expect(inout l, k_colon_colon());
+        let assoc = upper(inout l);
+        projection(inout l, self_ty, trait_name, trait_args, assoc)
+    } else if at_word(in l, 0, w_dyn()) && nth(in l, 1) == k_upper() {
+        bump(inout l);
+        let name = upper(inout l);
+        let is_fn = same_name(name, l.s.fn_)
+            || same_name(name, l.s.fn_mut)
+            || same_name(name, l.s.fn_once);
+        let inner = if is_fn && at(in l, k_l_paren()) {
+            let sig = function_signature(inout l, 1);
+            let m = mark(in l);
+            push(inout l, sig);
+            let args = list_from(inout l, m);
+            named(inout l, name, args)
+        } else {
+            let args = type_args(inout l);
+            named(inout l, name, args)
+        };
+        let m = mark(in l);
+        push(inout l, inner);
+        let args = list_from(inout l, m);
+        let d = l.s.dyn_;
+        named(inout l, d, args)
+    } else if at_path_root(in l) {
+        let (name, _) = qualified_path(inout l);
+        let args = type_args(inout l);
+        named(inout l, name, args)
+    } else {
+        let name = ident(inout l);
+        if at(in l, k_colon_colon()) && nth(in l, 1) == k_upper() {
+            bump(inout l);
+            let assoc = upper(inout l);
+            let self_ty = named(inout l, name, 0);
+            let any = l.s.any;
+            projection(inout l, self_ty, any, 0, assoc)
+        } else {
+            let args = type_args(inout l);
+            named(inout l, name, args)
+        }
+    };
+    result
+}
+
+// `projection_type`: `Named($projection, [self, Named(trait, args), Named(assoc)])`.
+fn projection(inout l: L, self_ty: u32, trait_name: u32, trait_args: u32, assoc: u32) -> u32 {
+    let tr = named(inout l, trait_name, trait_args);
+    let a = named(inout l, assoc, 0);
+    let m = mark(in l);
+    push(inout l, self_ty);
+    push(inout l, tr);
+    push(inout l, a);
+    let args = list_from(inout l, m);
+    let p = l.s.projection;
+    named(inout l, p, args)
+}
+
+// `Parser::function_signature`.
+fn function_signature(inout l: L, md: u8) -> u32 {
+    expect(inout l, k_l_paren());
+    let m = mark(in l);
+    loop {
+        if at(in l, k_r_paren()) || at(in l, k_eof()) {
+            break;
+        }
+        let ps = pass(inout l) & 3;
+        let t = ty(inout l);
+        push(inout l, widen_u32(ps));
+        push(inout l, t);
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    expect(inout l, k_r_paren());
+    let ps = list_from(inout l, m);
+    let result = if eat(inout l, k_arrow()) {
+        ty(inout l)
+    } else {
+        unit(inout l)
+    };
+    let effs = effects(inout l);
+    mkt(inout l, 3, ps, result, effs, widen_u32(md))
+}
+
+fn array_type_ahead(in l: L) -> bool {
+    let mut depth: u64 = 0;
+    for i in l.pos..l.p.ntok {
+        let k = tk(in l, i);
+        if k == k_l_bracket() || k == k_l_paren() || k == k_l_brace() {
+            depth = inc(depth);
+        } else if k == k_r_bracket() || k == k_r_paren() || k == k_r_brace() {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+            }
+            if depth == 0 {
+                return false;
+            }
+        } else if k == k_semi() && depth == 1 {
+            return true;
+        } else if k == k_eof() {
+            return false;
+        }
+    }
+    false
+}
+
+// `Parser::array_length`: 0 after an error.
+fn array_length(inout l: L) -> u64 {
+    if !at(in l, k_int()) {
+        return 0;
+    }
+    let i = bump(inout l);
+    let (ok, v) = int_value(in l, i);
+    if ok && v <= max_array_length() {
+        v
+    } else {
+        0
+    }
+}
+
+// The scalar elements of a value of type `t`, through nested tuples.
+fn type_leaves(in a: Ast, t: u32) -> u64 {
+    let n = type_at(in a, t);
+    if n.kind != 2 {
+        return 1;
+    }
+    let mut sum: u64 = 0;
+    for i in 0..list_len(in a, n.a) {
+        let x = type_leaves(in a, list_at(in a, n.a, i));
+        sum = saturating_add_u64(sum, x);
+    }
+    if sum == 0 {
+        1
+    } else {
+        sum
+    }
+}
+
+fn saturating_add_u64(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        18446744073709551615
+    } else {
+        s
+    }
+}
+
+fn saturating_mul_u64(a: u64, b: u64) -> u64 {
+    let max: u64 = 18446744073709551615;
+    if (a >> 32) != 0 && (b >> 32) != 0 {
+        return max;
+    }
+    let big = if a > b {
+        a
+    } else {
+        b
+    };
+    let small = if a > b {
+        b
+    } else {
+        a
+    };
+    let hi = wrapping_mul(big >> 32, small);
+    if (hi >> 32) != 0 {
+        return max;
+    }
+    let lo = wrapping_mul(big & 4294967295, small);
+    let sum = wrapping_add(lo, wrapping_shl_u64(hi, 32));
+    if sum < lo {
+        max
+    } else {
+        sum
+    }
+}
+
+fn dimension(inout l: L) -> u32 {
+    let mut d = dimension_factor(inout l);
+    loop {
+        if !eat(inout l, k_star()) {
+            break;
+        }
+        let right = dimension_factor(inout l);
+        let m = mark(in l);
+        push(inout l, d);
+        push(inout l, right);
+        let args = list_from(inout l, m);
+        let s = l.s.star;
+        d = named(inout l, s, args);
+    }
+    d
+}
+
+fn dimension_factor(inout l: L) -> u32 {
+    if at(in l, k_int()) {
+        let i = bump(inout l);
+        let n = tok_name(inout l, i);
+        named(inout l, n, 0)
+    } else {
+        ty(inout l)
+    }
+}
+
+fn type_args(inout l: L) -> u32 {
+    let m = mark(in l);
+    if !eat(inout l, k_l_bracket()) {
+        return 0;
+    }
+    loop {
+        if at(in l, k_r_bracket()) || at(in l, k_eof()) {
+            break;
+        }
+        let cur = idx(in l, 0);
+        if at(in l, k_lower())
+            && !is_primitive_word(tword(in l, cur))
+            && !at_path_root(in l)
+            && !(tword(in l, cur) == w_dyn() && nth(in l, 1) == k_upper()) {
+            let li = bump(inout l);
+            let label = tok_name(inout l, li);
+            if eat(inout l, k_colon()) {
+                let name = upper(inout l);
+                let types = type_args(inout l);
+                let tail = if eat(inout l, k_pipe()) {
+                    lower(inout l)
+                } else {
+                    none()
+                };
+                let e = effect_node(inout l, label, name, types);
+                let em = mark(in l);
+                push(inout l, e);
+                let inst = list_from(inout l, em);
+                let effs = effects_node(inout l, inst, tail);
+                let t = mkt(inout l, 4, effs, 0, 0, 0);
+                push(inout l, t);
+            } else {
+                let effs = effects_node(inout l, 0, label);
+                let t = mkt(inout l, 4, effs, 0, 0, 0);
+                push(inout l, t);
+            }
+        } else if at(in l, k_int()) {
+            let i = bump(inout l);
+            let n = tok_name(inout l, i);
+            let t = named(inout l, n, 0);
+            push(inout l, t);
+        } else {
+            let t = ty(inout l);
+            if eat(inout l, k_pipe()) {
+                let tail = lower(inout l);
+                let tn = type_at(in l.ast, t);
+                if tn.kind == 1 {
+                    let e = effect_node(inout l, none(), tn.a, tn.b);
+                    let em = mark(in l);
+                    push(inout l, e);
+                    let inst = list_from(inout l, em);
+                    let effs = effects_node(inout l, inst, tail);
+                    let r = mkt(inout l, 4, effs, 0, 0, 0);
+                    push(inout l, r);
+                } else {
+                    push(inout l, t);
+                }
+            } else {
+                push(inout l, t);
+            }
+        }
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    expect(inout l, k_r_bracket());
+    list_from(inout l, m)
+}
+
+fn effects(inout l: L) -> u32 {
+    if !eat(inout l, k_eff()) {
+        return effects_node(inout l, 0, none());
+    }
+    expect(inout l, k_l_bracket());
+    let m = mark(in l);
+    let mut tail: u32 = none();
+    loop {
+        if at(in l, k_r_bracket()) || at(in l, k_eof()) {
+            break;
+        }
+        if eat(inout l, k_pipe()) {
+            tail = lower(inout l);
+            break;
+        }
+        if at(in l, k_lower()) && nth(in l, 1) != k_colon() && !at_path_root(in l) {
+            tail = lower(inout l);
+            break;
+        }
+        let label = if at(in l, k_lower()) && !at_path_root(in l) {
+            let lb = lower(inout l);
+            expect(inout l, k_colon());
+            lb
+        } else {
+            none()
+        };
+        let name = if at_path_root(in l) {
+            let (n, _) = qualified_path(inout l);
+            n
+        } else {
+            upper(inout l)
+        };
+        let args = type_args(inout l);
+        let e = effect_node(inout l, label, name, args);
+        push(inout l, e);
+        if !eat(inout l, k_comma()) && !at(in l, k_pipe()) {
+            break;
+        }
+    }
+    expect(inout l, k_r_bracket());
+    let inst = list_from(inout l, m);
+    effects_node(inout l, inst, tail)
+}
+
+// `use (@scope/name | self | super ..) :: .. ;` (a `pub` has been consumed).
+fn use_item(inout l: L, public: bool) {
+    let start = cur_start(in l);
+    bump(inout l);
+    let mut supers: u32 = 0;
+    let package = if at(in l, k_at()) {
+        package_name(inout l)
+    } else if at_word(in l, 0, w_super()) {
+        bump(inout l);
+        supers = 1;
+        loop {
+            if !at(in l, k_colon_colon()) || !at_word(in l, 1, w_super()) {
+                break;
+            }
+            bump(inout l);
+            bump(inout l);
+            supers = wrapping_add(supers, 1);
+        }
+        none()
+    } else {
+        bump(inout l);
+        none()
+    };
+    let pm = mark(in l);
+    let mut names_list: u32 = 0;
+    let mut path_list: u32 = 0;
+    // Path segments go on the stack first; the names follow them.
+    let mut segs: u64 = 0;
+    loop {
+        if !eat(inout l, k_colon_colon()) {
+            break;
+        }
+        if at(in l, k_l_brace()) {
+            bump(inout l);
+            loop {
+                if at(in l, k_r_brace()) || at(in l, k_eof()) {
+                    break;
+                }
+                let before = l.pos;
+                let n = use_name(inout l);
+                push(inout l, n);
+                if !eat(inout l, k_comma()) || l.pos == before {
+                    break;
+                }
+            }
+            expect(inout l, k_r_brace());
+            break;
+        }
+        if (at(in l, k_lower()) || at_contextual_name(in l)) && nth(in l, 1) == k_colon_colon() {
+            let i = bump(inout l);
+            let s = tok_name(inout l, i);
+            push(inout l, s);
+            segs = inc(segs);
+            continue;
+        }
+        let n = use_name(inout l);
+        push(inout l, n);
+        break;
+    }
+    expect(inout l, k_semi());
+    names_list = list_from(inout l, wrapping_add(pm, segs));
+    path_list = list_from(inout l, pm);
+    let end = l.last;
+    let u = l
+        .ast
+        .uses
+        .alloc(
+        UseNode {
+            package: package,
+            supers: supers,
+            path: path_list,
+            names: names_list,
+            public: public,
+            start: n32(start),
+            end: n32(end)
+        }
+    );
+    l.ast.m_uses.push(u.raw());
+}
+
+fn use_name_kind(in l: L) -> bool {
+    let k = kind(in l);
+    k == k_lower() || k == k_upper() || at_contextual_name(in l)
+}
+
+fn use_name(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    let name = if use_name_kind(in l) {
+        let i = bump(inout l);
+        tok_name(inout l, i)
+    } else {
+        l.s.error
+    };
+    let alias = if at_word(in l, 0, w_as()) {
+        bump(inout l);
+        if use_name_kind(in l) {
+            let i = bump(inout l);
+            tok_name(inout l, i)
+        } else {
+            none()
+        }
+    } else {
+        none()
+    };
+    let end = l.last;
+    let u = l
+        .ast
+        .use_names
+        .alloc(
+        UseNameNode {
+            name: name,
+            alias: alias,
+            start: n32(start),
+            end: n32(end)
+        }
+    );
+    u.raw()
+}
+
+fn trait_ref(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    let package = if at(in l, k_at()) {
+        let pk = package_name(inout l);
+        expect(inout l, k_colon_colon());
+        pk
+    } else {
+        none()
+    };
+    let name = upper(inout l);
+    let args = type_args(inout l);
+    let end = l.last;
+    trait_ref_node(inout l, package, name, args, start, end)
+}
+
+// `where T: Trait[args], ..` at `where`: a list of WhereNode.
+fn where_clauses(inout l: L) -> u32 {
+    let m = mark(in l);
+    bump(inout l);
+    loop {
+        let start = cur_start(in l);
+        let t = ty(inout l);
+        expect(inout l, k_colon());
+        let tr = trait_ref(inout l);
+        let end = l.last;
+        let wn = l
+            .ast
+            .wheres
+            .alloc(
+            WhereNode {
+                ty: t,
+                trait_ref: tr,
+                start: n32(start),
+                end: n32(end)
+            }
+        );
+        push(inout l, wn.raw());
+        if !eat(inout l, k_comma()) || at(in l, k_l_brace()) || at(in l, k_semi()) {
+            break;
+        }
+    }
+    list_from(inout l, m)
+}
+
+fn use_model(inout l: L, scope_start: u64, scope_end: u64) {
+    let start = cur_start(in l);
+    bump(inout l);
+    bump(inout l);
+    let model = upper(inout l);
+    expect(inout l, k_semi());
+    let end = l.last;
+    let u = l
+        .ast
+        .model_uses
+        .alloc(
+        ModelUseNode {
+            model: model,
+            start: n32(start),
+            end: n32(end),
+            scope_start: n32(scope_start),
+            scope_end: n32(scope_end)
+        }
+    );
+    l.ast.m_model_uses.push(u.raw());
+}
+
+fn trait_decl(inout l: L, start: u64, public: bool) -> u32 {
+    bump(inout l);
+    let name = upper(inout l);
+    let gs = generics(inout l);
+    l.pending.clear();
+    expect(inout l, k_l_brace());
+    let am = mark(in l);
+    // Associated types and methods interleave in source; collect them on
+    // two stacks: the methods go on `later` until the assoc list is built.
+    let mut later = ChunkSeq::new[u32]();
+    loop {
+        if at(in l, k_r_brace()) || at(in l, k_eof()) {
+            break;
+        }
+        let before = l.pos;
+        if at_word(in l, 0, w_type()) {
+            let s = cur_start(in l);
+            bump(inout l);
+            let an = upper(inout l);
+            let bound = if eat(inout l, k_colon()) {
+                expect(inout l, k_mod());
+                let md = mode(inout l);
+                if md == 3 {
+                    2
+                } else {
+                    md
+                }
+            } else {
+                2
+            };
+            expect(inout l, k_semi());
+            let end = l.last;
+            let a = l
+                .ast
+                .assoc_decls
+                .alloc(
+                AssocDeclNode {
+                    name: an,
+                    bound: bound,
+                    start: n32(s),
+                    end: n32(end)
+                }
+            );
+            push(inout l, a.raw());
+        } else if at(in l, k_fn()) {
+            let bm = l.ast.m_bounds.len();
+            let f = function(inout l, true, false);
+            later.push(f);
+            unsupported_owned(inout l, bm);
+        }
+        if l.pos == before {
+            bump(inout l);
+        }
+    }
+    expect(inout l, k_r_brace());
+    let assoc = list_from(inout l, am);
+    let mm = mark(in l);
+    for i in 0..later.len() {
+        let f = u32_at(in later, i);
+        push(inout l, f);
+    }
+    let methods = list_from(inout l, mm);
+    let end = l.last;
+    let t = l
+        .ast
+        .traits
+        .alloc(
+        TraitNode {
+            name: name,
+            public: public,
+            generics: gs,
+            assoc: assoc,
+            methods: methods,
+            start: n32(start),
+            end: n32(end)
+        }
+    );
+    t.raw()
+}
+
+fn model_decl(inout l: L, start: u64, public: bool) -> u32 {
+    bump(inout l);
+    let name = upper(inout l);
+    let gs = generics(inout l);
+    let bm = take_pending(inout l);
+    let bounds = list_from(inout l, bm);
+    expect(inout l, k_colon());
+    let tr = trait_ref(inout l);
+    if at_word(in l, 0, w_for()) {
+        bump(inout l);
+    }
+    conformance_rest(inout l, start, name, public, gs, bounds, tr)
+}
+
+fn own_type_bounds(inout l: L, name: u32) {
+    for i in 0..l.pending.len() {
+        let b = u32_at(in l.pending, i);
+        set_owner(inout l, b, name);
+        l.ast.m_bounds.push(b);
+    }
+    l.pending.clear();
+}
+
+fn unsupported_owned(inout l: L, from: u64) {
+    for i in from..l.ast.m_bounds.len() {
+        let b = u32_at(in l.ast.m_bounds, i);
+        let o = bound_at(in l, b).owner;
+        l.buf.clear();
+        l.buf.push_str(in "$unsupported::");
+        push_name(inout l, o);
+        let s = intern_buf(inout l);
+        set_owner(inout l, b, s);
+    }
+}
+
+fn conformance_rest(inout l: L, start: u64, model: u32, public: bool, gs: u32, bounds: u32, tr: u32)
+    -> u32 {
+    let self_ty = ty(inout l);
+    let wm = mark(in l);
+    for i in 0..list_len(in l.ast, bounds) {
+        let b = bound_at(in l, list_at(in l.ast, bounds, i));
+        let t = named(inout l, b.param, 0);
+        let wn = l
+            .ast
+            .wheres
+            .alloc(
+            WhereNode {
+                ty: t,
+                trait_ref: b.trait_ref,
+                start: b.start,
+                end: b.end
+            }
+        );
+        push(inout l, wn.raw());
+    }
+    if at_word(in l, 0, w_where()) {
+        let extra = where_clauses(inout l);
+        for i in 0..list_len(in l.ast, extra) {
+            let v = list_at(in l.ast, extra, i);
+            push(inout l, v);
+        }
+    }
+    let wheres = list_from(inout l, wm);
+    expect(inout l, k_l_brace());
+    let am = mark(in l);
+    let mut later = ChunkSeq::new[u32]();
+    loop {
+        if at(in l, k_r_brace()) || at(in l, k_eof()) {
+            break;
+        }
+        let before = l.pos;
+        if at_word(in l, 0, w_type()) {
+            let s = cur_start(in l);
+            bump(inout l);
+            let an = upper(inout l);
+            expect(inout l, k_eq());
+            let t = ty(inout l);
+            expect(inout l, k_semi());
+            let end = l.last;
+            let a = l
+                .ast
+                .assoc_binds
+                .alloc(
+                AssocBindNode {
+                    name: an,
+                    ty: t,
+                    start: n32(s),
+                    end: n32(end)
+                }
+            );
+            push(inout l, a.raw());
+        } else if at_method(in l) {
+            let bm = l.ast.m_bounds.len();
+            let f = method(inout l);
+            later.push(f);
+            unsupported_owned(inout l, bm);
+        }
+        if l.pos == before {
+            bump(inout l);
+        }
+    }
+    expect(inout l, k_r_brace());
+    let assoc = list_from(inout l, am);
+    let mm = mark(in l);
+    for i in 0..later.len() {
+        let f = u32_at(in later, i);
+        push(inout l, f);
+    }
+    let methods = list_from(inout l, mm);
+    let end = l.last;
+    let c = l
+        .ast
+        .confs
+        .alloc(
+        ConfNode {
+            model: model,
+            public: public,
+            generics: gs,
+            trait_ref: tr,
+            self_ty: self_ty,
+            wheres: wheres,
+            assoc: assoc,
+            methods: methods,
+            start: n32(start),
+            end: n32(end)
+        }
+    );
+    c.raw()
+}
+
+// ---------------------------------------------------------------- blocks
+
+fn is_block_like(k: u8) -> bool {
+    k == 17 || k == 18 || k == 13 || k == 14
+}
+
+fn block(inout l: L) -> u32 {
+    let outer = vals_mark(in l);
+    let start = cur_start(in l);
+    expect(inout l, k_l_brace());
+    let m = mark(in l);
+    let mut tail: u32 = none();
+    loop {
+        if at(in l, k_r_brace()) || at(in l, k_eof()) {
+            break;
+        }
+        let before = l.pos;
+        if at_word(in l, 0, w_use()) && at_word(in l, 1, w_model()) {
+            use_model(inout l, start, start);
+            continue;
+        }
+        if eat(inout l, k_let()) {
+            let mutable = at_word(in l, 0, w_mut()) && nth(in l, 1) != k_colon();
+            if mutable {
+                bump(inout l);
+            }
+            let pat = pattern(inout l);
+            let t = if eat(inout l, k_colon()) {
+                ty(inout l)
+            } else {
+                infer(inout l)
+            };
+            expect(inout l, k_eq());
+            let value = expr(inout l);
+            expect(inout l, k_semi());
+            bind_pattern(inout l, pat);
+            let s = l
+                .ast
+                .stmts
+                .alloc(
+                StmtNode {
+                    kind: 1,
+                    pat: pat,
+                    ty: t,
+                    value: value,
+                    mutable: mutable
+                }
+            );
+            push(inout l, s.raw());
+        } else {
+            let e = expr(inout l);
+            if eat(inout l, k_semi()) {
+                push_stmt(inout l, e);
+            } else {
+                let en = ex(in l, e);
+                let end = widen_u64(en.end);
+                let closes = end
+                    != 0
+                    && end
+                    <= l
+                    .p
+                    .src
+                    .len()
+                    && u8_at(in l.p.src, wrapping_sub(end, 1))
+                    == 125;
+                if is_block_like(en.kind)
+                    && closes
+                    && !at(in l, k_r_brace())
+                    && !at(in l, k_eof()) {
+                    push_stmt(inout l, e);
+                } else {
+                    tail = e;
+                    break;
+                }
+            }
+        }
+        if before == l.pos {
+            bump(inout l);
+        }
+    }
+    expect(inout l, k_r_brace());
+    vals_restore(inout l, outer);
+    let end = l.last;
+    let stmts = list_from(inout l, m);
+    for i in 0..l.ast.m_model_uses.len() {
+        let ui = idx_from_raw[ModelUseNode](u32_at(in l.ast.m_model_uses, i));
+        match l.ast.model_uses.get(ui) {
+            Option::Some(u) => {
+                if widen_u64(u.scope_start) == start && widen_u64(u.scope_end) == start {
+                    let mut v = u;
+                    v.scope_end = n32(end);
+                    l.ast.model_uses.set(ui, v);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    mk(inout l, 5, start, end, stmts, tail, none())
+}
+
+fn push_stmt(inout l: L, e: u32) {
+    let s = l
+        .ast
+        .stmts
+        .alloc(
+        StmtNode {
+            kind: 2,
+            pat: none(),
+            ty: none(),
+            value: e,
+            mutable: false
+        }
+    );
+    push(inout l, s.raw());
+}
+
+// ---------------------------------------------------------------- expressions
+
+fn expr(inout l: L) -> u32 {
+    let k = kind(in l);
+    if k == k_handle() {
+        handle_expr(inout l)
+    } else if k
+        == k_lower()
+        && at_word(in l, 0, w_region())
+        && nth(in l, 1)
+        == k_lower()
+        && (nth(in l, 2) == k_l_brace() || nth(in l, 2) == k_l_paren()) {
+        region(inout l)
+    } else if k == k_match() {
+        match_expr(inout l)
+    } else if k == k_if() {
+        if_expr(inout l)
+    } else if k == k_lower() && at_word(in l, 0, w_loop()) && nth(in l, 1) == k_l_brace() {
+        loop_expr(inout l)
+    } else {
+        expr_rest(inout l, k)
+    }
+}
+
+fn expr_rest(inout l: L, k: u8) -> u32 {
+    if k == k_lower() && at_word(in l, 0, w_for()) && for_header(in l) {
+        for_expr(inout l)
+    } else if k == k_lower() && at_word(in l, 0, w_break()) && !bound(in l, l.s.brk) {
+        jump_expr(inout l, false)
+    } else if k == k_lower() && at_continue(in l) {
+        let start = cur_start(in l);
+        bump(inout l);
+        let end = l.last;
+        mk(inout l, 22, start, end, none(), none(), none())
+    } else if k == k_return() {
+        jump_expr(inout l, true)
+    } else if k == k_pipe() || k == k_or() {
+        closure(inout l)
+    } else {
+        binary(inout l, 0)
+    }
+}
+
+fn loop_expr(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    bump(inout l);
+    let body = block(inout l);
+    let end = l.last;
+    mk(inout l, 17, start, end, body, none(), none())
+}
+
+fn for_header(in l: L) -> bool {
+    let k = nth(in l, 1);
+    !bound(in l, l.s.for_)
+        && (
+        k
+            == k_lower()
+            || k
+            == k_upper()
+            || k
+            == k_l_paren()
+            || k
+            == k_int()
+            || k
+            == k_true()
+            || k
+            == k_false()
+    )
+}
+
+fn for_expr(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    bump(inout l);
+    let pat = pattern(inout l);
+    expect(inout l, k_in());
+    let old = l.no_struct;
+    l.no_struct = true;
+    let first = binary(inout l, 2);
+    let iter = if at(in l, k_dot_dot()) || at(in l, k_dot_dot_eq()) {
+        let inclusive = at(in l, k_dot_dot_eq());
+        bump(inout l);
+        let end = binary(inout l, 2);
+        let s = espan_start(in l, first);
+        let e = espan_end(in l, end);
+        mk(
+            inout l,
+            19,
+            s,
+            e,
+            first,
+            end,
+            if inclusive {
+                1
+            } else {
+                0
+            }
+        )
+    } else {
+        first
+    };
+    l.no_struct = old;
+    let outer = vals_mark(in l);
+    bind_pattern(inout l, pat);
+    let body = block(inout l);
+    vals_restore(inout l, outer);
+    let end = l.last;
+    mk(inout l, 18, start, end, pat, iter, body)
+}
+
+fn ends_value(k: u8) -> bool {
+    k
+        == k_semi()
+        || k
+        == k_r_brace()
+        || k
+        == k_r_paren()
+        || k
+        == k_r_bracket()
+        || k
+        == k_comma()
+        || k
+        == k_eof()
+}
+
+fn jump_expr(inout l: L, ret: bool) -> u32 {
+    let start = cur_start(in l);
+    bump(inout l);
+    let value = if ends_value(kind(in l)) {
+        none()
+    } else {
+        expr(inout l)
+    };
+    let end = l.last;
+    mk(
+        inout l,
+        if ret {
+            21
+        } else {
+            20
+        },
+        start,
+        end,
+        value,
+        none(),
+        none()
+    )
+}
+
+fn at_continue(in l: L) -> bool {
+    at_word(in l, 0, w_continue()) && !bound(in l, l.s.cont) && ends_value(nth(in l, 1))
+}
+
+fn restricted(inout l: L) -> u32 {
+    let old = l.no_struct;
+    l.no_struct = true;
+    let e = expr(inout l);
+    l.no_struct = old;
+    e
+}
+
+fn if_expr(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    expect(inout l, k_if());
+    let condition = restricted(inout l);
+    let then = block(inout l);
+    let otherwise = if eat(inout l, k_else()) {
+        if at(in l, k_if()) {
+            if_expr(inout l)
+        } else {
+            block(inout l)
+        }
+    } else {
+        none()
+    };
+    let end = l.last;
+    mk(inout l, 13, start, end, condition, then, otherwise)
+}
+
+fn match_expr(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    expect(inout l, k_match());
+    let value = restricted(inout l);
+    expect(inout l, k_l_brace());
+    let m = mark(in l);
+    loop {
+        if at(in l, k_r_brace()) || at(in l, k_eof()) {
+            break;
+        }
+        let before = l.pos;
+        let pat = pattern(inout l);
+        expect(inout l, k_fat_arrow());
+        let outer = vals_mark(in l);
+        bind_pattern(inout l, pat);
+        let body = expr(inout l);
+        let block_body = ex(in l, body).kind == 5;
+        vals_restore(inout l, outer);
+        push(inout l, pat);
+        push(inout l, body);
+        if !eat(inout l, k_comma()) && !at(in l, k_r_brace()) && !(block_body && l.pos > before) {
+            break;
+        }
+    }
+    expect(inout l, k_r_brace());
+    let arms = list_from(inout l, m);
+    let end = l.last;
+    mk(inout l, 14, start, end, value, arms, none())
+}
+
+fn closure(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    let ps = if eat(inout l, k_or()) {
+        0
+    } else {
+        expect(inout l, k_pipe());
+        let p = params(inout l, k_pipe());
+        expect(inout l, k_pipe());
+        p
+    };
+    let md = if eat(inout l, k_at()) {
+        mode(inout l)
+    } else {
+        3
+    };
+    let result = if eat(inout l, k_arrow()) {
+        ty(inout l)
+    } else {
+        infer(inout l)
+    };
+    let infer_effects = !at(in l, k_eff());
+    let effs = effects(inout l);
+    let outer = vals_mark(in l);
+    for i in 0..list_len(in l.ast, ps) {
+        let pn = match l.ast.params.get(idx_from_raw[ParamNode](list_at(in l.ast, ps, i))) {
+            Option::Some(p) => p.name,
+            Option::None => none(),
+        };
+        val_insert(inout l, pn);
+    }
+    let body = expr(inout l);
+    vals_restore(inout l, outer);
+    let end = l.last;
+    let flags = wrapping_add(
+        widen_u32(md),
+        if infer_effects {
+            256
+        } else {
+            0
+        }
+    );
+    mk5(inout l, 15, start, end, ps, flags, result, effs, body)
+}
+
+fn clause(inout l: L, name: u32, pats: u32, body: u32) -> u32 {
+    let c = l
+        .ast
+        .clauses
+        .alloc(
+        ClauseNode {
+            name: name,
+            pats: pats,
+            body: body
+        }
+    );
+    c.raw()
+}
+
+fn handle_expr(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    expect(inout l, k_handle());
+    let label = if at(in l, k_lower()) {
+        let lb = lower(inout l);
+        expect(inout l, k_colon());
+        lb
+    } else {
+        none()
+    };
+    let name = if at_path_root(in l) {
+        let (n, _) = qualified_path(inout l);
+        n
+    } else {
+        upper(inout l)
+    };
+    let args = type_args(inout l);
+    let eff_node = effect_node(inout l, label, name, args);
+    let mut state_pat: u32 = none();
+    let mut state_expr: u32 = none();
+    if eat(inout l, k_state()) {
+        state_pat = pattern(inout l);
+        expect(inout l, k_eq());
+        state_expr = expr(inout l);
+    }
+    expect(inout l, k_in());
+    let body = block(inout l);
+    expect(inout l, k_with());
+    expect(inout l, k_l_brace());
+    expect(inout l, k_return());
+    let pat = pattern(inout l);
+    expect(inout l, k_fat_arrow());
+    let outer = vals_mark(in l);
+    bind_pattern(inout l, pat);
+    let ret_body = expr(inout l);
+    vals_restore(inout l, outer);
+    let pm = mark(in l);
+    push(inout l, pat);
+    let pats = list_from(inout l, pm);
+    let r = l.s.ret;
+    let ret = clause(inout l, r, pats, ret_body);
+    eat(inout l, k_comma());
+    let cm = mark(in l);
+    push(inout l, ret);
+    loop {
+        if at(in l, k_r_brace()) || at(in l, k_eof()) {
+            break;
+        }
+        let op = lower(inout l);
+        expect(inout l, k_l_paren());
+        let ps = pattern_list(inout l, k_r_paren());
+        expect(inout l, k_r_paren());
+        expect(inout l, k_fat_arrow());
+        let outer2 = vals_mark(in l);
+        for i in 0..list_len(in l.ast, ps) {
+            let q = list_at(in l.ast, ps, i);
+            bind_pattern(inout l, q);
+        }
+        let b = expr(inout l);
+        vals_restore(inout l, outer2);
+        let c = clause(inout l, op, ps, b);
+        push(inout l, c);
+        eat(inout l, k_comma());
+    }
+    expect(inout l, k_r_brace());
+    let clauses = list_from(inout l, cm);
+    let end = l.last;
+    mk5(inout l, 16, start, end, eff_node, state_pat, state_expr, body, clauses)
+}
+
+// `region r { body }` / `region r(capacity) { body }` as a handler of the
+// built-in `Region` effect.
+fn region(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    bump(inout l);
+    let label = lower(inout l);
+    let mut marker = l.s.region_marker;
+    if eat(inout l, k_l_paren()) {
+        let mut capacity: u64 = 1;
+        if at(in l, k_int()) {
+            let li = literal(inout l);
+            let v = lit_at(in l.ast, li);
+            if v.kind == 1 && !v.neg && v.bits > 0 && v.bits <= 1073741824 {
+                capacity = v.bits;
+            }
+        }
+        expect(inout l, k_r_paren());
+        l.buf.clear();
+        l.buf.push_str(in "$region:");
+        push_decimal(inout l.buf, capacity);
+        marker = intern_buf(inout l);
+    }
+    let body = block(inout l);
+    let end = l.last;
+    let be = espan_end(in l, body);
+    let at_start = if be == 0 {
+        0
+    } else {
+        wrapping_sub(be, 1)
+    };
+    let bind = mkp(inout l, 2, at_start, be, marker, none(), none());
+    let pm = mark(in l);
+    push(inout l, bind);
+    let pats = list_from(inout l, pm);
+    let ret_body = mk(inout l, 2, at_start, be, marker, none(), none());
+    let r = l.s.ret;
+    let ret = clause(inout l, r, pats, ret_body);
+    let cm = mark(in l);
+    push(inout l, ret);
+    let clauses = list_from(inout l, cm);
+    let rg = l.s.region;
+    let eff_node = effect_node(inout l, label, rg, 0);
+    mk5(inout l, 16, start, end, eff_node, none(), none(), body, clauses)
+}
+
+// The binding power of the operator at the cursor (0 for none) and
+// whether it is an assignment.
+fn precedence(k: u8) -> (u8, bool) {
+    if k
+        == k_eq()
+        || k
+        == k_plus_eq()
+        || k
+        == k_minus_eq()
+        || k
+        == k_star_eq()
+        || k
+        == k_slash_eq()
+        || k
+        == k_percent_eq() {
+        (1, true)
+    } else if k == k_or() {
+        (2, false)
+    } else if k == k_and() {
+        (3, false)
+    } else if k == k_eq_eq() || k == k_ne() {
+        (4, false)
+    } else if k == k_lt() || k == k_le() || k == k_gt() || k == k_ge() {
+        (5, false)
+    } else {
+        precedence_bits(k)
+    }
+}
+
+fn precedence_bits(k: u8) -> (u8, bool) {
+    if k == k_pipe() {
+        (6, false)
+    } else if k == k_caret() {
+        (7, false)
+    } else if k == k_amp() {
+        (8, false)
+    } else if k == k_shl() || k == k_shr() {
+        (9, false)
+    } else if k == k_plus() || k == k_minus() {
+        (10, false)
+    } else if k == k_star() || k == k_slash() || k == k_percent() {
+        (11, false)
+    } else {
+        (0, false)
+    }
+}
+
+fn binary(inout l: L, min: u8) -> u32 {
+    let k = kind(in l);
+    let mut lhs = if k == k_minus() || k == k_bang() || k == k_tilde() {
+        let start = cur_start(in l);
+        let oi = bump(inout l);
+        let op = tok_name(inout l, oi);
+        let v = binary(inout l, 12);
+        let vn = ex(in l, v);
+        let end = l.last;
+        if k == k_minus() && vn.kind == 1 && lit_at(in l.ast, vn.a).kind == 1 {
+            let n = negate(inout l, vn.a);
+            mk(inout l, 1, start, end, n, none(), none())
+        } else {
+            mk(inout l, 10, start, end, op, v, none())
+        }
+    } else {
+        postfix(inout l)
+    };
+    loop {
+        let (prec, right) = precedence(kind(in l));
+        if prec == 0 || prec < min {
+            break;
+        }
+        let oi = bump(inout l);
+        let op = tok_name(inout l, oi);
+        let rhs = if right {
+            expr(inout l)
+        } else {
+            binary(inout l, wrapping_add(prec, 1))
+        };
+        let s = espan_start(in l, lhs);
+        let e = espan_end(in l, rhs);
+        lhs = mk(
+            inout l,
+            if right {
+                12
+            } else {
+                11
+            },
+            s,
+            e,
+            op,
+            lhs,
+            rhs
+        );
+    }
+    lhs
+}
+
+fn postfix(inout l: L) -> u32 {
+    let mut e = primary(inout l);
+    loop {
+        let k = kind(in l);
+        if !(k == k_l_paren() || k == k_l_bracket() || k == k_dot() || k == k_question()) {
+            break;
+        }
+        let start = espan_start(in l, e);
+        if k == k_l_paren() {
+            bump(inout l);
+            let a = args(inout l);
+            expect(inout l, k_r_paren());
+            let end = l.last;
+            e = mk(inout l, 6, start, end, e, 0, a);
+        } else if k == k_l_bracket() {
+            if index_ahead(in l) {
+                bump(inout l);
+                let index = if at(in l, k_dot_dot()) {
+                    open_interval(inout l, e, none())
+                } else {
+                    let i = expr(inout l);
+                    if at(in l, k_dot_dot()) {
+                        if nth(in l, 1) == k_r_bracket() {
+                            open_interval(inout l, e, i)
+                        } else {
+                            let oi = bump(inout l);
+                            let op = tok_name(inout l, oi);
+                            let hi = expr(inout l);
+                            let s = espan_start(in l, i);
+                            let en = espan_end(in l, hi);
+                            mk(inout l, 11, s, en, op, i, hi)
+                        }
+                    } else {
+                        i
+                    }
+                };
+                expect(inout l, k_r_bracket());
+                let end = l.last;
+                e = mk(inout l, 8, start, end, e, index, none());
+            } else {
+                let types = type_args(inout l);
+                expect(inout l, k_l_paren());
+                let a = args(inout l);
+                expect(inout l, k_r_paren());
+                let end = l.last;
+                e = mk(inout l, 6, start, end, e, types, a);
+            }
+        } else if k == k_dot() {
+            bump(inout l);
+            let f = lower(inout l);
+            let end = l.last;
+            e = mk(inout l, 7, start, end, e, f, none());
+        } else {
+            bump(inout l);
+            let end = l.last;
+            e = mk(inout l, 9, start, end, e, none(), none());
+        }
+    }
+    e
+}
+
+fn args(inout l: L) -> u32 {
+    let m = mark(in l);
+    loop {
+        if at(in l, k_r_paren()) || at(in l, k_eof()) {
+            break;
+        }
+        let ps = pass(inout l);
+        let value = expr(inout l);
+        let a = l
+            .ast
+            .args
+            .alloc(
+            ArgNode {
+                pass: ps & 3,
+                explicit: ps >= 4,
+                expr: value
+            }
+        );
+        push(inout l, a.raw());
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    list_from(inout l, m)
+}
+
+fn primary(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    let li = literal(inout l);
+    if li != none() {
+        let end = l.last;
+        return mk(inout l, 1, start, end, li, none(), none());
+    }
+    let k = kind(in l);
+    if at_path_root(in l) {
+        let (name, upper_last) = qualified_path(inout l);
+        if upper_last && at(in l, k_l_brace()) && !l.no_struct {
+            return struct_literal(inout l, start, name);
+        }
+        let end = l.last;
+        return mk(inout l, 2, start, end, name, none(), none());
+    }
+    if k == k_lower() || k == k_self_kw() || contextual_name(k) {
+        let i = bump(inout l);
+        let n = tok_name(inout l, i);
+        let end = l.last;
+        return mk(inout l, 2, start, end, n, none(), none());
+    }
+    if k == k_upper() {
+        let i = bump(inout l);
+        let mut name = tok_name(inout l, i);
+        loop {
+            if !eat(inout l, k_colon_colon()) {
+                break;
+            }
+            let seg = ident(inout l);
+            name = join_names(inout l, name, in "::", seg);
+        }
+        if at(in l, k_l_brace()) && !l.no_struct {
+            return struct_literal(inout l, start, name);
+        }
+        let end = l.last;
+        return mk(inout l, 2, start, end, name, none(), none());
+    }
+    if k == k_l_paren() {
+        bump(inout l);
+        let m = mark(in l);
+        let mut comma = false;
+        loop {
+            if at(in l, k_r_paren()) || at(in l, k_eof()) {
+                break;
+            }
+            let v = expr(inout l);
+            push(inout l, v);
+            comma = eat(inout l, k_comma());
+            if !comma {
+                break;
+            }
+        }
+        expect(inout l, k_r_paren());
+        if wrapping_sub(l.stk.len(), m) == 1 && !comma {
+            let only = u32_at(in l.stk, m);
+            l.stk.truncate(m);
+            return only;
+        }
+        let values = list_from(inout l, m);
+        let end = l.last;
+        return mk(inout l, 3, start, end, values, none(), none());
+    }
+    if k == k_l_bracket() {
+        return array_literal(inout l, start);
+    }
+    if k == k_l_brace() {
+        return block(inout l);
+    }
+    if !at(in l, k_eof()) {
+        bump(inout l);
+    }
+    let end = l.last;
+    mk(inout l, 3, start, end, 0, none(), none())
+}
+
+// `[a, b, c]` or `[x; N]`.
+fn array_literal(inout l: L, start: u64) -> u32 {
+    expect(inout l, k_l_bracket());
+    let m = mark(in l);
+    loop {
+        if at(in l, k_r_bracket()) || at(in l, k_eof()) {
+            break;
+        }
+        let value = expr(inout l);
+        if l.stk.len() == m && eat(inout l, k_semi()) {
+            let mut n = array_length(inout l);
+            expect(inout l, k_r_bracket());
+            if saturating_mul_u64(expr_leaves(in l.ast, value), n) > max_array_length() {
+                n = 0;
+            }
+            let end = l.last;
+            return splat(inout l, value, n, start, end);
+        }
+        push(inout l, value);
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    expect(inout l, k_r_bracket());
+    let values = list_from(inout l, m);
+    let end = l.last;
+    mk(inout l, 3, start, end, values, none(), none())
+}
+
+fn expr_leaves(in a: Ast, e: u32) -> u64 {
+    let n = expr_at(in a, e);
+    if n.kind == 3 {
+        let mut sum: u64 = 0;
+        for i in 0..list_len(in a, n.a) {
+            sum = saturating_add_u64(sum, expr_leaves(in a, list_at(in a, n.a, i)));
+        }
+        if sum == 0 {
+            1
+        } else {
+            sum
+        }
+    } else if n.kind == 5 && n.b != none() {
+        expr_leaves(in a, n.b)
+    } else {
+        1
+    }
+}
+
+fn pure_operand(in a: Ast, e: u32) -> bool {
+    let n = expr_at(in a, e);
+    if n.kind == 1 || n.kind == 2 {
+        true
+    } else if n.kind == 10 {
+        pure_operand(in a, n.b)
+    } else if n.kind == 11 {
+        pure_operand(in a, n.b) && pure_operand(in a, n.c)
+    } else {
+        false
+    }
+}
+
+// `[value; n]` as the `n`-tuple of `value` (`splat`).
+fn splat(inout l: L, value: u32, n: u64, start: u64, end: u64) -> u32 {
+    if pure_operand(in l.ast, value) {
+        let m = mark(in l);
+        for i in 0..n {
+            push(inout l, value);
+        }
+        let values = list_from(inout l, m);
+        return mk(inout l, 3, start, end, values, none(), none());
+    }
+    let vs = espan_start(in l, value);
+    let ve = espan_end(in l, value);
+    let sp = l.s.splat;
+    let name = mk(inout l, 2, vs, ve, sp, none(), none());
+    let pat = mkp(inout l, 2, vs, ve, sp, none(), none());
+    let t = infer(inout l);
+    let st = l
+        .ast
+        .stmts
+        .alloc(
+        StmtNode {
+            kind: 1,
+            pat: pat,
+            ty: t,
+            value: value,
+            mutable: false
+        }
+    );
+    let sm = mark(in l);
+    push(inout l, st.raw());
+    let stmts = list_from(inout l, sm);
+    let m = mark(in l);
+    for i in 0..n {
+        push(inout l, name);
+    }
+    let values = list_from(inout l, m);
+    let tail = mk(inout l, 3, start, end, values, none(), none());
+    mk(inout l, 5, start, end, stmts, tail, none())
+}
+
+// Whether `e` is a place path (a name and fields), which `open_interval`
+// copies.
+fn is_place(in a: Ast, e: u32) -> bool {
+    let n = expr_at(in a, e);
+    if n.kind == 2 {
+        true
+    } else if n.kind == 7 {
+        is_place(in a, n.a)
+    } else {
+        false
+    }
+}
+
+// A copy of place path `e` with fresh spans from `fresh`, innermost first;
+// returns the copy and the next fresh offset.
+fn copy_place(inout l: L, e: u32, base: u64, fresh: u64) -> (u32, u64) {
+    let n = ex(in l, e);
+    if n.kind == 2 {
+        let c = mk(inout l, 2, base, fresh, n.a, none(), none());
+        (c, inc(fresh))
+    } else {
+        let (inner, next) = copy_place(inout l, n.a, base, fresh);
+        let c = mk(inout l, 7, base, next, inner, n.b, none());
+        (c, inc(next))
+    }
+}
+
+// `p[..]`, `p[..b]`, `p[a..]` at `..` inside `p[`.
+fn open_interval(inout l: L, base: u32, lo_in: u32) -> u32 {
+    let dots = idx(in l, 0);
+    let ds = tstart(in l, dots);
+    let de = tend(in l, dots);
+    let oi = bump(inout l);
+    let op = tok_name(inout l, oi);
+    let first = inc(ds);
+    let lo = if lo_in == none() {
+        let z = lit(inout l, 1, false, 0);
+        mk(inout l, 1, ds, ds, z, none(), none())
+    } else {
+        lo_in
+    };
+    let hi = if at(in l, k_r_bracket()) {
+        if is_place(in l.ast, base) {
+            let (place, next) = copy_place(inout l, base, first, first);
+            let ln = l.s.len;
+            let len = mk(inout l, 7, first, next, place, ln, none());
+            let call_end = inc(next);
+            mk(inout l, 6, first, call_end, len, 0, 0)
+        } else {
+            let s = cur_start(in l);
+            mk(inout l, 3, s, s, 0, none(), none())
+        }
+    } else {
+        expr(inout l)
+    };
+    let ls = espan_start(in l, lo);
+    let he = espan_end(in l, hi);
+    let s = if ls < ds {
+        ls
+    } else {
+        ds
+    };
+    let e = if he > de {
+        he
+    } else {
+        de
+    };
+    mk(inout l, 11, s, e, op, lo, hi)
+}
+
+fn struct_literal(inout l: L, start: u64, name: u32) -> u32 {
+    bump(inout l);
+    let m = mark(in l);
+    loop {
+        if at(in l, k_r_brace()) || at(in l, k_eof()) {
+            break;
+        }
+        let fs = cur_start(in l);
+        let field = lower(inout l);
+        let value = if eat(inout l, k_colon()) {
+            expr(inout l)
+        } else {
+            let fe = l.last;
+            mk(inout l, 2, fs, fe, field, none(), none())
+        };
+        push(inout l, field);
+        push(inout l, value);
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    expect(inout l, k_r_brace());
+    let fields = list_from(inout l, m);
+    let end = l.last;
+    mk(inout l, 4, start, end, name, fields, none())
+}
+
+// ---------------------------------------------------------------- patterns
+
+fn pattern_list(inout l: L, end: u8) -> u32 {
+    let m = mark(in l);
+    loop {
+        if at(in l, end) || at(in l, k_eof()) {
+            break;
+        }
+        let p = pattern(inout l);
+        push(inout l, p);
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    list_from(inout l, m)
+}
+
+fn pattern(inout l: L) -> u32 {
+    let start = cur_start(in l);
+    let negative = eat(inout l, k_minus());
+    let li = literal(inout l);
+    if li != none() {
+        let v = if negative {
+            negate(inout l, li)
+        } else {
+            li
+        };
+        let end = l.last;
+        return mkp(inout l, 3, start, end, v, none(), none());
+    }
+    let k = kind(in l);
+    if at_path_root(in l) {
+        let (name, _) = qualified_path(inout l);
+        return constructor_pattern(inout l, start, name);
+    }
+    if k == k_lower() || contextual_name(k) {
+        let i = bump(inout l);
+        let end = l.last;
+        if k == k_lower() && tword(in l, i) == w_underscore() {
+            return mkp(inout l, 1, start, end, none(), none(), none());
+        }
+        let n = tok_name(inout l, i);
+        return mkp(inout l, 2, start, end, n, none(), none());
+    }
+    if k == k_upper() {
+        let mut name = upper(inout l);
+        loop {
+            if !eat(inout l, k_colon_colon()) {
+                break;
+            }
+            let seg = upper(inout l);
+            name = join_names(inout l, name, in "::", seg);
+        }
+        return constructor_pattern(inout l, start, name);
+    }
+    if k == k_l_paren() {
+        bump(inout l);
+        let ps = pattern_list(inout l, k_r_paren());
+        expect(inout l, k_r_paren());
+        let end = l.last;
+        return mkp(inout l, 4, start, end, ps, none(), none());
+    }
+    if !at(in l, k_eof()) {
+        bump(inout l);
+    }
+    let end = l.last;
+    mkp(inout l, 1, start, end, none(), none(), none())
+}
+
+fn constructor_pattern(inout l: L, start: u64, name: u32) -> u32 {
+    let named_fields = at(in l, k_l_brace());
+    let m = mark(in l);
+    if eat(inout l, k_l_paren()) {
+        let ps = pattern_list(inout l, k_r_paren());
+        for i in 0..list_len(in l.ast, ps) {
+            let fname = decimal_name(inout l, i);
+            push(inout l, fname);
+            let q = list_at(in l.ast, ps, i);
+            push(inout l, q);
+        }
+        expect(inout l, k_r_paren());
+    } else if eat(inout l, k_l_brace()) {
+        loop {
+            if at(in l, k_r_brace()) || at(in l, k_eof()) {
+                break;
+            }
+            let fs = cur_start(in l);
+            let field = lower(inout l);
+            let p = if eat(inout l, k_colon()) {
+                pattern(inout l)
+            } else {
+                let fe = l.last;
+                mkp(inout l, 2, fs, fe, field, none(), none())
+            };
+            push(inout l, field);
+            push(inout l, p);
+            if !eat(inout l, k_comma()) {
+                break;
+            }
+        }
+        expect(inout l, k_r_brace());
+    }
+    let fields = list_from(inout l, m);
+    let end = l.last;
+    mkp(
+        inout l,
+        5,
+        start,
+        end,
+        name,
+        fields,
+        if named_fields {
+            1
+        } else {
+            0
+        }
+    )
+}
+
+// ---------------------------------------------------------------- module
+
+// `lower_const_uses`: every use `NAME` of a constant this module declares
+// becomes a call of `const$NAME` (with an empty callee span).
+fn lower_const_uses(inout l: L) {
+    if l.consts.len() == 0 {
+        return;
+    }
+    let mut is_const = ChunkSeq::new[u8]();
+    is_const.resize(l.ast.names.len(), 0);
+    for i in 0..l.consts.len() {
+        is_const.try_set(widen_u64(u32_at(in l.consts, i)), 1);
+    }
+    let n = l.ast.exprs.len();
+    for i in 0..n {
+        let e = ex(in l, n32(i));
+        if e.kind == 2 && u8_at(in is_const, widen_u64(e.a)) == 1 {
+            l.buf.clear();
+            l.buf.push_str(in "const$");
+            push_name(inout l, e.a);
+            let cn = intern_buf(inout l);
+            let s = widen_u64(e.start);
+            let callee = mk(inout l, 2, s, s, cn, none(), none());
+            let mut v = e;
+            v.kind = 6;
+            v.a = callee;
+            v.b = 0;
+            v.c = 0;
+            l.ast.exprs.set(idx_from_raw[ExprNode](n32(i)), v);
+        }
+    }
+}
+
+fn syms_new(inout a: Ast) -> Syms {
+    Syms {
+        error: a.names.intern(in "<error>").id(),
+        empty: a.names.intern(in "").id(),
+        ret: a.names.intern(in "return").id(),
+        region: a.names.intern(in "Region").id(),
+        region_marker: a.names.intern(in "$region").id(),
+        dyn_: a.names.intern(in "dyn").id(),
+        shape: a.names.intern(in "[]").id(),
+        star: a.names.intern(in "*").id(),
+        projection: a.names.intern(in "$projection").id(),
+        any: a.names.intern(in "$any").id(),
+        splat: a.names.intern(in "$splat").id(),
+        len: a.names.intern(in "len").id(),
+        fn_: a.names.intern(in "Fn").id(),
+        fn_mut: a.names.intern(in "FnMut").id(),
+        fn_once: a.names.intern(in "FnOnce").id(),
+        brk: a.names.intern(in "break").id(),
+        cont: a.names.intern(in "continue").id(),
+        for_: a.names.intern(in "for").id()
+    }
+}
+
+// Lexes and parses `source` with the front end, then lowers its tables to
+// the AST (`parse(source).module`).
+pub fn lower_source(in source: Str) -> L {
+    let b = source.as_bytes();
+    let mut a = ast_new();
+    let s = syms_new(inout a);
+    let mut text = String::new();
+    let mut d = diags_new();
+    let oversized = b.len() > max_source_bytes();
+    let t = if oversized {
+        lex(in "".as_bytes(), inout d)
+    } else {
+        text.push_str(in source);
+        lex(in b, inout d)
+    };
+    let p = parse_tokens(in b, t, d);
+    let mut l = L {
+        p: p,
+        text: text,
+        ast: a,
+        symmap: ChunkSeq::new[u32](),
+        pos: 0,
+        last: 0,
+        no_struct: false,
+        vals: ChunkSeq::new[u32](),
+        vals_trail: ChunkSeq::new[u32](),
+        stk: ChunkSeq::new[u32](),
+        pending: ChunkSeq::new[u32](),
+        consts: ChunkSeq::new[u32](),
+        evpos: ChunkSeq::new[u32](),
+        evc: 0,
+        desync: 0,
+        buf: String::new(),
+        s: s
+    };
+    if oversized || l.p.halted || l.p.t.limited {
+        return l;
+    }
+    run(inout l);
+    l
+}
+
+fn run(inout l: L) {
+    // Intern every identifier symbol once.
+    let nsyms = l.p.t.sym_start.len();
+    l.symmap.resize(inc(nsyms), 0);
+    for k in 0..nsyms {
+        let a = w(u32_at(in l.p.t.sym_start, k));
+        let b = w(u32_at(in l.p.t.sym_end, k));
+        let s = intern_text(inout l, a, b);
+        l.symmap.try_set(inc(k), wrapping_add(s, 1));
+    }
+    // Token event positions, for `index_ahead`.
+    l.evpos.resize(l.p.ntok, 0);
+    for e in 0..l.p.ev.len() {
+        let v = u32_at(in l.p.ev, e);
+        if v < 2147483648 {
+            l.evpos.try_set(w(v), n32(e));
+        }
+    }
+    // `contextual_item_names`: `fn break` and friends stay names.
+    let mut prev_fn = false;
+    for j in 0..l.p.sig.len() {
+        let i = w(u32_at(in l.p.sig, j));
+        let k = tk(in l, i);
+        if prev_fn && k == k_lower() {
+            let wd = tword(in l, i);
+            if wd == w_break() || wd == w_continue() || wd == w_for() || wd == w_loop() {
+                let n = tok_name(inout l, i);
+                if !bound(in l, n) {
+                    val_insert(inout l, n);
+                }
+            }
+        }
+        prev_fn = k == k_fn();
+    }
+    loop {
+        if at(in l, k_eof()) {
+            break;
+        }
+        let before = l.pos;
+        item(inout l);
+        if l.pos == before {
+            bump(inout l);
+        }
+    }
+    lower_const_uses(inout l);
+}

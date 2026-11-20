@@ -1,0 +1,1103 @@
+// The canonical dump of an AST: one line per node, in preorder, each
+// indented one space per level. tests/self_host_ast.rs writes the same
+// text for a `vesper_core::ast::Module`; the two must be equal byte for
+// byte. Names and strings are quoted with `"`, `\` and bytes outside
+// 0x20..0x7e written `\xHH`; an absent name is `-`; spans are `@start..end`;
+// floats are their bit patterns in hex.
+
+use self::{
+    Ast,
+    none,
+    ExprNode,
+    PatNode,
+    TypeNode,
+    Lit,
+    list_len,
+    list_at,
+    expr_at,
+    pat_at,
+    type_at,
+    lit_at,
+    StmtNode,
+    ArgNode,
+    ClauseNode,
+    ParamNode,
+    EffectsNode,
+    EffectNode,
+    GenericNode,
+    FieldNode,
+    VariantNode,
+    AdtNode,
+    FnNode,
+    EffectDeclNode,
+    ImplNode,
+    TraitNode,
+    AssocDeclNode,
+    TraitRefNode,
+    WhereNode,
+    AssocBindNode,
+    ConfNode,
+    ItemNode,
+    ModelUseNode,
+    BoundNode,
+    UseNode,
+    UseNameNode
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+fn hex_char(v: u64) -> u8 {
+    if v < 10 {
+        wrapping_u8(wrapping_add(v, 48))
+    } else {
+        wrapping_u8(wrapping_add(v, 87))
+    }
+}
+
+fn put_span(inout o: ChunkSeq[u8], start: u32, end: u32) {
+    put(inout o, in " @");
+    put_u64(inout o, widen_u64(start));
+    put(inout o, in "..");
+    put_u64(inout o, widen_u64(end));
+}
+
+fn put_bool(inout o: ChunkSeq[u8], b: bool) {
+    if b {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+}
+
+// A quoted name, or `-` for NONE.
+fn put_q(inout o: ChunkSeq[u8], in a: Ast, sym: u32) {
+    if sym == none() {
+        o.push(45);
+        return;
+    }
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    o.push(34);
+    for i in s..e {
+        let c = match a.names.text_byte(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c < 32 || c > 126 || c == 34 || c == 92 {
+            o.push(92);
+            o.push(120);
+            o.push(hex_char(widen_u64(c >> 4)));
+            o.push(hex_char(widen_u64(c & 15)));
+        } else {
+            o.push(c);
+        }
+    }
+    o.push(34);
+}
+
+fn open(inout o: ChunkSeq[u8], depth: u64) {
+    for i in 0..depth {
+        o.push(32);
+    }
+}
+
+fn nl(inout o: ChunkSeq[u8]) {
+    o.push(10);
+}
+
+fn put_mode(inout o: ChunkSeq[u8], m: u8) {
+    if m == 0 {
+        put(inout o, in "copy");
+    } else if m == 1 {
+        put(inout o, in "affine");
+    } else if m == 2 {
+        put(inout o, in "linear");
+    } else {
+        o.push(45);
+    }
+}
+
+fn put_pass(inout o: ChunkSeq[u8], p: u8) {
+    if p == 0 {
+        put(inout o, in "in");
+    } else if p == 1 {
+        put(inout o, in "inout");
+    } else {
+        put(inout o, in "sink");
+    }
+}
+
+fn put_lit(inout o: ChunkSeq[u8], in a: Ast, li: u32) {
+    let v = lit_at(in a, li);
+    if v.kind == 1 {
+        put(inout o, in "int ");
+        if v.neg {
+            o.push(45);
+        }
+        put_u64(inout o, v.bits);
+    } else if v.kind == 2 {
+        put(inout o, in "float 0x");
+        let mut k: u64 = 16;
+        loop {
+            if k == 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            o.push(hex_char(wrapping_shr_u64(v.bits, wrapping_u32(wrapping_mul(k, 4))) & 15));
+        }
+    } else if v.kind == 3 {
+        if v.bits == 1 {
+            put(inout o, in "bool true");
+        } else {
+            put(inout o, in "bool false");
+        }
+    } else {
+        put(inout o, in "str ");
+        put_q(inout o, in a, wrapping_u32(v.bits));
+    }
+}
+
+// ---------------------------------------------------------------- types
+
+fn effects_at(in a: Ast, e: u32) -> EffectsNode {
+    a
+        .effects
+        .get_or(
+        idx_from_raw[EffectsNode](e),
+        EffectsNode {
+            instances: 0,
+            tail: none()
+        }
+    )
+}
+
+fn effect_at(in a: Ast, e: u32) -> EffectNode {
+    a
+        .effect_nodes
+        .get_or(
+        idx_from_raw[EffectNode](e),
+        EffectNode {
+            label: none(),
+            name: none(),
+            args: 0
+        }
+    )
+}
+
+fn dump_effect(inout o: ChunkSeq[u8], in a: Ast, e: u32, depth: u64) {
+    let n = effect_at(in a, e);
+    open(inout o, depth);
+    put(inout o, in "effect label=");
+    put_q(inout o, in a, n.label);
+    o.push(32);
+    put_q(inout o, in a, n.name);
+    nl(inout o);
+    for i in 0..list_len(in a, n.args) {
+        dump_type(inout o, in a, list_at(in a, n.args, i), wrapping_add(depth, 1));
+    }
+}
+
+fn dump_effects(inout o: ChunkSeq[u8], in a: Ast, e: u32, depth: u64) {
+    let n = effects_at(in a, e);
+    open(inout o, depth);
+    put(inout o, in "effects tail=");
+    put_q(inout o, in a, n.tail);
+    nl(inout o);
+    for i in 0..list_len(in a, n.instances) {
+        dump_effect(inout o, in a, list_at(in a, n.instances, i), wrapping_add(depth, 1));
+    }
+}
+
+fn dump_type(inout o: ChunkSeq[u8], in a: Ast, t: u32, depth: u64) {
+    let n = type_at(in a, t);
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    if n.kind == 1 {
+        put(inout o, in "T ");
+        put_q(inout o, in a, n.a);
+        nl(inout o);
+        for i in 0..list_len(in a, n.b) {
+            dump_type(inout o, in a, list_at(in a, n.b, i), d1);
+        }
+    } else if n.kind == 2 {
+        put(inout o, in "T tuple");
+        nl(inout o);
+        for i in 0..list_len(in a, n.a) {
+            dump_type(inout o, in a, list_at(in a, n.a, i), d1);
+        }
+    } else if n.kind == 3 {
+        put(inout o, in "T fn mode=");
+        put_mode(inout o, wrapping_u8(n.d));
+        nl(inout o);
+        let pairs = list_len(in a, n.a) >> 1;
+        for i in 0..pairs {
+            open(inout o, d1);
+            put(inout o, in "tparam pass=");
+            put_pass(inout o, wrapping_u8(list_at(in a, n.a, wrapping_mul(i, 2))));
+            nl(inout o);
+            dump_type(
+                inout o,
+                in a,
+                list_at(in a, n.a, wrapping_add(wrapping_mul(i, 2), 1)),
+                wrapping_add(d1, 1)
+            );
+        }
+        open(inout o, d1);
+        put(inout o, in "result");
+        nl(inout o);
+        dump_type(inout o, in a, n.b, wrapping_add(d1, 1));
+        dump_effects(inout o, in a, n.c, d1);
+    } else if n.kind == 4 {
+        put(inout o, in "T row");
+        nl(inout o);
+        dump_effects(inout o, in a, n.a, d1);
+    } else if n.kind == 5 {
+        put(inout o, in "T _");
+        nl(inout o);
+    } else {
+        put(inout o, in "T int");
+        nl(inout o);
+    }
+}
+
+// ---------------------------------------------------------------- patterns
+
+fn dump_pat(inout o: ChunkSeq[u8], in a: Ast, p: u32, depth: u64) {
+    let n = pat_at(in a, p);
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    if n.kind == 1 {
+        put(inout o, in "P _");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+    } else if n.kind == 2 {
+        put(inout o, in "P bind ");
+        put_q(inout o, in a, n.a);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+    } else if n.kind == 3 {
+        put(inout o, in "P lit ");
+        put_lit(inout o, in a, n.a);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+    } else if n.kind == 4 {
+        put(inout o, in "P tuple");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        for i in 0..list_len(in a, n.a) {
+            dump_pat(inout o, in a, list_at(in a, n.a, i), d1);
+        }
+    } else {
+        put(inout o, in "P ctor ");
+        put_q(inout o, in a, n.a);
+        put(inout o, in " named=");
+        put_bool(inout o, n.c == 1);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        let pairs = list_len(in a, n.b) >> 1;
+        for i in 0..pairs {
+            open(inout o, d1);
+            put(inout o, in "pfield ");
+            put_q(inout o, in a, list_at(in a, n.b, wrapping_mul(i, 2)));
+            nl(inout o);
+            dump_pat(
+                inout o,
+                in a,
+                list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                wrapping_add(d1, 1)
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------- expressions
+
+fn label(inout o: ChunkSeq[u8], depth: u64, in s: Str) {
+    open(inout o, depth);
+    put(inout o, in s);
+    nl(inout o);
+}
+
+fn param_at(in a: Ast, p: u32) -> ParamNode {
+    a
+        .params
+        .get_or(
+        idx_from_raw[ParamNode](p),
+        ParamNode {
+            name: none(),
+            pass: 0,
+            projections: 0,
+            ty: none(),
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn dump_param(inout o: ChunkSeq[u8], in a: Ast, p: u32, depth: u64) {
+    let n = param_at(in a, p);
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    put(inout o, in "param ");
+    put_q(inout o, in a, n.name);
+    put(inout o, in " pass=");
+    put_pass(inout o, n.pass);
+    put_span(inout o, n.start, n.end);
+    nl(inout o);
+    for i in 0..list_len(in a, n.projections) {
+        let proj = list_at(in a, n.projections, i);
+        open(inout o, d1);
+        put(inout o, in "proj");
+        for j in 0..list_len(in a, proj) {
+            o.push(32);
+            put_q(inout o, in a, list_at(in a, proj, j));
+        }
+        nl(inout o);
+    }
+    dump_type(inout o, in a, n.ty, d1);
+}
+
+fn clause_at(in a: Ast, c: u32) -> ClauseNode {
+    a
+        .clauses
+        .get_or(
+        idx_from_raw[ClauseNode](c),
+        ClauseNode {
+            name: none(),
+            pats: 0,
+            body: none()
+        }
+    )
+}
+
+fn dump_clause(inout o: ChunkSeq[u8], in a: Ast, c: u32, depth: u64) {
+    let n = clause_at(in a, c);
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    put(inout o, in "clause ");
+    put_q(inout o, in a, n.name);
+    nl(inout o);
+    for i in 0..list_len(in a, n.pats) {
+        dump_pat(inout o, in a, list_at(in a, n.pats, i), d1);
+    }
+    dump_expr(inout o, in a, n.body, d1);
+}
+
+fn dump_expr(inout o: ChunkSeq[u8], in a: Ast, e: u32, depth: u64) {
+    let n = expr_at(in a, e);
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    let k = n.kind;
+    if k == 1 {
+        put(inout o, in "E lit ");
+        put_lit(inout o, in a, n.a);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+    } else if k == 2 {
+        put(inout o, in "E name ");
+        put_q(inout o, in a, n.a);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+    } else if k == 3 {
+        put(inout o, in "E tuple");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        for i in 0..list_len(in a, n.a) {
+            dump_expr(inout o, in a, list_at(in a, n.a, i), d1);
+        }
+    } else if k == 4 {
+        put(inout o, in "E struct ");
+        put_q(inout o, in a, n.a);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        let pairs = list_len(in a, n.b) >> 1;
+        for i in 0..pairs {
+            open(inout o, d1);
+            put(inout o, in "sfield ");
+            put_q(inout o, in a, list_at(in a, n.b, wrapping_mul(i, 2)));
+            nl(inout o);
+            dump_expr(
+                inout o,
+                in a,
+                list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                wrapping_add(d1, 1)
+            );
+        }
+    } else if k == 5 {
+        put(inout o, in "E block");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        for i in 0..list_len(in a, n.a) {
+            dump_stmt(inout o, in a, list_at(in a, n.a, i), d1);
+        }
+        if n.b != none() {
+            label(inout o, d1, in "tail");
+            dump_expr(inout o, in a, n.b, wrapping_add(d1, 1));
+        }
+    } else if k == 6 {
+        put(inout o, in "E call");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.a, d1);
+        label(inout o, d1, in "targs");
+        for i in 0..list_len(in a, n.b) {
+            dump_type(inout o, in a, list_at(in a, n.b, i), wrapping_add(d1, 1));
+        }
+        for i in 0..list_len(in a, n.c) {
+            let arg = a
+                .args
+                .get_or(
+                idx_from_raw[ArgNode](list_at(in a, n.c, i)),
+                ArgNode {
+                    pass: 0,
+                    explicit: false,
+                    expr: none()
+                }
+            );
+            open(inout o, d1);
+            put(inout o, in "arg pass=");
+            put_pass(inout o, arg.pass);
+            put(inout o, in " explicit=");
+            put_bool(inout o, arg.explicit);
+            nl(inout o);
+            dump_expr(inout o, in a, arg.expr, wrapping_add(d1, 1));
+        }
+    } else if k == 7 {
+        put(inout o, in "E field ");
+        put_q(inout o, in a, n.b);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.a, d1);
+    } else {
+        dump_expr_rest(inout o, in a, n, depth);
+    }
+}
+
+fn dump_expr_rest(inout o: ChunkSeq[u8], in a: Ast, n: ExprNode, depth: u64) {
+    let d1 = wrapping_add(depth, 1);
+    let k = n.kind;
+    if k == 8 {
+        put(inout o, in "E index");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.a, d1);
+        dump_expr(inout o, in a, n.b, d1);
+    } else if k == 9 {
+        put(inout o, in "E try");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.a, d1);
+    } else if k == 10 || k == 11 || k == 12 {
+        if k == 10 {
+            put(inout o, in "E unary ");
+        } else if k == 11 {
+            put(inout o, in "E binary ");
+        } else {
+            put(inout o, in "E assign ");
+        }
+        put_q(inout o, in a, n.a);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.b, d1);
+        if k != 10 {
+            dump_expr(inout o, in a, n.c, d1);
+        }
+    } else if k == 13 {
+        put(inout o, in "E if");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.a, d1);
+        dump_expr(inout o, in a, n.b, d1);
+        if n.c != none() {
+            label(inout o, d1, in "else");
+            dump_expr(inout o, in a, n.c, wrapping_add(d1, 1));
+        }
+    } else if k == 14 {
+        put(inout o, in "E match");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.a, d1);
+        let pairs = list_len(in a, n.b) >> 1;
+        for i in 0..pairs {
+            label(inout o, d1, in "arm");
+            dump_pat(inout o, in a, list_at(in a, n.b, wrapping_mul(i, 2)), wrapping_add(d1, 1));
+            dump_expr(
+                inout o,
+                in a,
+                list_at(in a, n.b, wrapping_add(wrapping_mul(i, 2), 1)),
+                wrapping_add(d1, 1)
+            );
+        }
+    } else if k == 15 {
+        put(inout o, in "E closure mode=");
+        put_mode(inout o, wrapping_u8(n.b & 255));
+        put(inout o, in " infer=");
+        put_bool(inout o, n.b >= 256);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        for i in 0..list_len(in a, n.a) {
+            dump_param(inout o, in a, list_at(in a, n.a, i), d1);
+        }
+        label(inout o, d1, in "result");
+        dump_type(inout o, in a, n.c, wrapping_add(d1, 1));
+        dump_effects(inout o, in a, n.d, d1);
+        dump_expr(inout o, in a, n.e, d1);
+    } else if k == 16 {
+        put(inout o, in "E handle");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_effect(inout o, in a, n.a, d1);
+        if n.b != none() {
+            label(inout o, d1, in "state");
+            dump_pat(inout o, in a, n.b, wrapping_add(d1, 1));
+            dump_expr(inout o, in a, n.c, wrapping_add(d1, 1));
+        }
+        dump_expr(inout o, in a, n.d, d1);
+        for i in 0..list_len(in a, n.e) {
+            dump_clause(inout o, in a, list_at(in a, n.e, i), d1);
+        }
+    } else if k == 17 {
+        put(inout o, in "E loop");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.a, d1);
+    } else if k == 18 {
+        put(inout o, in "E for");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_pat(inout o, in a, n.a, d1);
+        dump_expr(inout o, in a, n.b, d1);
+        dump_expr(inout o, in a, n.c, d1);
+    } else if k == 19 {
+        put(inout o, in "E range inclusive=");
+        put_bool(inout o, n.c == 1);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_expr(inout o, in a, n.a, d1);
+        dump_expr(inout o, in a, n.b, d1);
+    } else if k == 20 || k == 21 {
+        if k == 20 {
+            put(inout o, in "E break");
+        } else {
+            put(inout o, in "E return");
+        }
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        if n.a != none() {
+            dump_expr(inout o, in a, n.a, d1);
+        }
+    } else {
+        put(inout o, in "E continue");
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+    }
+}
+
+fn dump_stmt(inout o: ChunkSeq[u8], in a: Ast, s: u32, depth: u64) {
+    let n = a
+        .stmts
+        .get_or(
+        idx_from_raw[StmtNode](s),
+        StmtNode {
+            kind: 0,
+            pat: none(),
+            ty: none(),
+            value: none(),
+            mutable: false
+        }
+    );
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    if n.kind == 1 {
+        put(inout o, in "let mut=");
+        put_bool(inout o, n.mutable);
+        nl(inout o);
+        dump_pat(inout o, in a, n.pat, d1);
+        dump_type(inout o, in a, n.ty, d1);
+        dump_expr(inout o, in a, n.value, d1);
+    } else {
+        put(inout o, in "stmt");
+        nl(inout o);
+        dump_expr(inout o, in a, n.value, d1);
+    }
+}
+
+// ---------------------------------------------------------------- items
+
+fn dump_generics(inout o: ChunkSeq[u8], in a: Ast, list: u32, depth: u64) {
+    for i in 0..list_len(in a, list) {
+        let g = a
+            .generics
+            .get_or(
+            idx_from_raw[GenericNode](list_at(in a, list, i)),
+            GenericNode {
+                name: none(),
+                bound: 0,
+                row: false
+            }
+        );
+        open(inout o, depth);
+        put(inout o, in "generic ");
+        put_q(inout o, in a, g.name);
+        put(inout o, in " bound=");
+        put_mode(inout o, g.bound);
+        put(inout o, in " row=");
+        put_bool(inout o, g.row);
+        nl(inout o);
+    }
+}
+
+fn dump_fn(inout o: ChunkSeq[u8], in a: Ast, f: u32, depth: u64) {
+    let n = a
+        .fns
+        .get_or(
+        idx_from_raw[FnNode](f),
+        FnNode {
+            name: none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: none(),
+            effects: none(),
+            body: none(),
+            start: 0,
+            end: 0
+        }
+    );
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    put(inout o, in "fn ");
+    put_q(inout o, in a, n.name);
+    put(inout o, in " fip=");
+    put_bool(inout o, n.fip);
+    put_span(inout o, n.start, n.end);
+    nl(inout o);
+    dump_generics(inout o, in a, n.generics, d1);
+    for i in 0..list_len(in a, n.params) {
+        dump_param(inout o, in a, list_at(in a, n.params, i), d1);
+    }
+    label(inout o, d1, in "result");
+    dump_type(inout o, in a, n.result, wrapping_add(d1, 1));
+    dump_effects(inout o, in a, n.effects, d1);
+    if n.body != none() {
+        label(inout o, d1, in "body");
+        dump_expr(inout o, in a, n.body, wrapping_add(d1, 1));
+    }
+}
+
+fn dump_fns(inout o: ChunkSeq[u8], in a: Ast, list: u32, depth: u64) {
+    for i in 0..list_len(in a, list) {
+        dump_fn(inout o, in a, list_at(in a, list, i), depth);
+    }
+}
+
+fn dump_trait_ref(inout o: ChunkSeq[u8], in a: Ast, t: u32, depth: u64) {
+    let n = a
+        .trait_refs
+        .get_or(
+        idx_from_raw[TraitRefNode](t),
+        TraitRefNode {
+            package: none(),
+            name: none(),
+            args: 0,
+            start: 0,
+            end: 0
+        }
+    );
+    open(inout o, depth);
+    put(inout o, in "trait_ref pkg=");
+    put_q(inout o, in a, n.package);
+    o.push(32);
+    put_q(inout o, in a, n.name);
+    put_span(inout o, n.start, n.end);
+    nl(inout o);
+    for i in 0..list_len(in a, n.args) {
+        dump_type(inout o, in a, list_at(in a, n.args, i), wrapping_add(depth, 1));
+    }
+}
+
+fn dump_field(inout o: ChunkSeq[u8], in a: Ast, f: u32, depth: u64) {
+    let n = a
+        .fields
+        .get_or(
+        idx_from_raw[FieldNode](f),
+        FieldNode {
+            name: none(),
+            ty: none(),
+            modality: 3,
+            temperature: 0
+        }
+    );
+    open(inout o, depth);
+    put(inout o, in "field ");
+    put_q(inout o, in a, n.name);
+    put(inout o, in " modality=");
+    put_mode(inout o, n.modality);
+    put(inout o, in " temp=");
+    if n.temperature == 1 {
+        put(inout o, in "hot");
+    } else if n.temperature == 2 {
+        put(inout o, in "cold");
+    } else {
+        o.push(45);
+    }
+    nl(inout o);
+    dump_type(inout o, in a, n.ty, wrapping_add(depth, 1));
+}
+
+fn dump_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32, depth: u64) {
+    let n = a
+        .adts
+        .get_or(
+        idx_from_raw[AdtNode](x),
+        AdtNode {
+            name: none(),
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tile_width: none(),
+            start: 0,
+            end: 0
+        }
+    );
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    put(inout o, in "adt ");
+    put_q(inout o, in a, n.name);
+    put(inout o, in " mode=");
+    put_mode(inout o, n.mode);
+    put(inout o, in " enum=");
+    put_bool(inout o, n.is_enum);
+    put(inout o, in " tile=");
+    if n.tile_width == none() {
+        o.push(45);
+    } else {
+        put_u64(inout o, widen_u64(n.tile_width));
+    }
+    put_span(inout o, n.start, n.end);
+    nl(inout o);
+    dump_generics(inout o, in a, n.generics, d1);
+    for i in 0..list_len(in a, n.variants) {
+        let v = a
+            .variants
+            .get_or(
+            idx_from_raw[VariantNode](list_at(in a, n.variants, i)),
+            VariantNode {
+                name: none(),
+                fields: 0,
+                named: false
+            }
+        );
+        open(inout o, d1);
+        put(inout o, in "variant ");
+        put_q(inout o, in a, v.name);
+        put(inout o, in " named=");
+        put_bool(inout o, v.named);
+        nl(inout o);
+        for j in 0..list_len(in a, v.fields) {
+            dump_field(inout o, in a, list_at(in a, v.fields, j), wrapping_add(d1, 1));
+        }
+    }
+}
+
+fn dump_item(inout o: ChunkSeq[u8], in a: Ast, it: u32, depth: u64) {
+    let item = a
+        .items
+        .get_or(
+        idx_from_raw[ItemNode](it),
+        ItemNode {
+            kind: 0,
+            node: 0
+        }
+    );
+    let d1 = wrapping_add(depth, 1);
+    if item.kind == 1 {
+        dump_adt(inout o, in a, item.node, depth);
+    } else if item.kind == 2 {
+        dump_fn(inout o, in a, item.node, depth);
+    } else if item.kind == 3 {
+        let n = a
+            .effect_decls
+            .get_or(
+            idx_from_raw[EffectDeclNode](item.node),
+            EffectDeclNode {
+                name: none(),
+                linear: false,
+                generics: 0,
+                ops: 0,
+                start: 0,
+                end: 0
+            }
+        );
+        open(inout o, depth);
+        put(inout o, in "effect_decl ");
+        put_q(inout o, in a, n.name);
+        put(inout o, in " linear=");
+        put_bool(inout o, n.linear);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_generics(inout o, in a, n.generics, d1);
+        dump_fns(inout o, in a, n.ops, d1);
+    } else if item.kind == 4 {
+        let n = a
+            .impls
+            .get_or(
+            idx_from_raw[ImplNode](item.node),
+            ImplNode {
+                ty: none(),
+                generics: 0,
+                methods: 0
+            }
+        );
+        label(inout o, depth, in "impl");
+        dump_type(inout o, in a, n.ty, d1);
+        dump_generics(inout o, in a, n.generics, d1);
+        dump_fns(inout o, in a, n.methods, d1);
+    } else if item.kind == 5 {
+        let n = a
+            .traits
+            .get_or(
+            idx_from_raw[TraitNode](item.node),
+            TraitNode {
+                name: none(),
+                public: false,
+                generics: 0,
+                assoc: 0,
+                methods: 0,
+                start: 0,
+                end: 0
+            }
+        );
+        open(inout o, depth);
+        put(inout o, in "trait ");
+        put_q(inout o, in a, n.name);
+        put(inout o, in " pub=");
+        put_bool(inout o, n.public);
+        put_span(inout o, n.start, n.end);
+        nl(inout o);
+        dump_generics(inout o, in a, n.generics, d1);
+        for i in 0..list_len(in a, n.assoc) {
+            let s = a
+                .assoc_decls
+                .get_or(
+                idx_from_raw[AssocDeclNode](list_at(in a, n.assoc, i)),
+                AssocDeclNode {
+                    name: none(),
+                    bound: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
+            open(inout o, d1);
+            put(inout o, in "assoc ");
+            put_q(inout o, in a, s.name);
+            put(inout o, in " bound=");
+            put_mode(inout o, s.bound);
+            put_span(inout o, s.start, s.end);
+            nl(inout o);
+        }
+        dump_fns(inout o, in a, n.methods, d1);
+    } else {
+        dump_conf(inout o, in a, item.node, depth);
+    }
+}
+
+fn dump_conf(inout o: ChunkSeq[u8], in a: Ast, c: u32, depth: u64) {
+    let n = a
+        .confs
+        .get_or(
+        idx_from_raw[ConfNode](c),
+        ConfNode {
+            model: none(),
+            public: false,
+            generics: 0,
+            trait_ref: none(),
+            self_ty: none(),
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    );
+    let d1 = wrapping_add(depth, 1);
+    open(inout o, depth);
+    if n.model == none() {
+        put(inout o, in "conformance canonical");
+    } else {
+        put(inout o, in "conformance model ");
+        put_q(inout o, in a, n.model);
+        put(inout o, in " pub=");
+        put_bool(inout o, n.public);
+    }
+    put_span(inout o, n.start, n.end);
+    nl(inout o);
+    dump_generics(inout o, in a, n.generics, d1);
+    dump_trait_ref(inout o, in a, n.trait_ref, d1);
+    label(inout o, d1, in "self");
+    dump_type(inout o, in a, n.self_ty, wrapping_add(d1, 1));
+    for i in 0..list_len(in a, n.wheres) {
+        let wn = a
+            .wheres
+            .get_or(
+            idx_from_raw[WhereNode](list_at(in a, n.wheres, i)),
+            WhereNode {
+                ty: none(),
+                trait_ref: none(),
+                start: 0,
+                end: 0
+            }
+        );
+        open(inout o, d1);
+        put(inout o, in "where");
+        put_span(inout o, wn.start, wn.end);
+        nl(inout o);
+        dump_type(inout o, in a, wn.ty, wrapping_add(d1, 1));
+        dump_trait_ref(inout o, in a, wn.trait_ref, wrapping_add(d1, 1));
+    }
+    for i in 0..list_len(in a, n.assoc) {
+        let s = a
+            .assoc_binds
+            .get_or(
+            idx_from_raw[AssocBindNode](list_at(in a, n.assoc, i)),
+            AssocBindNode {
+                name: none(),
+                ty: none(),
+                start: 0,
+                end: 0
+            }
+        );
+        open(inout o, d1);
+        put(inout o, in "assoc_type ");
+        put_q(inout o, in a, s.name);
+        put_span(inout o, s.start, s.end);
+        nl(inout o);
+        dump_type(inout o, in a, s.ty, wrapping_add(d1, 1));
+    }
+    dump_fns(inout o, in a, n.methods, d1);
+}
+
+fn u32_of(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => none(),
+    }
+}
+
+// Appends the canonical dump of the module in `a` to `o`.
+pub fn dump_ast(in a: Ast, inout o: ChunkSeq[u8]) {
+    put(inout o, in "module");
+    nl(inout o);
+    for i in 0..a.m_items.len() {
+        dump_item(inout o, in a, u32_of(in a.m_items, i), 1);
+    }
+    for i in 0..a.m_model_uses.len() {
+        let u = a
+            .model_uses
+            .get_or(
+            idx_from_raw[ModelUseNode](u32_of(in a.m_model_uses, i)),
+            ModelUseNode {
+                model: none(),
+                start: 0,
+                end: 0,
+                scope_start: 0,
+                scope_end: 0
+            }
+        );
+        put(inout o, in " model_use ");
+        put_q(inout o, in a, u.model);
+        put_span(inout o, u.start, u.end);
+        put(inout o, in " scope");
+        put_span(inout o, u.scope_start, u.scope_end);
+        nl(inout o);
+    }
+    for i in 0..a.m_bounds.len() {
+        let b = a
+            .bounds
+            .get_or(
+            idx_from_raw[BoundNode](u32_of(in a.m_bounds, i)),
+            BoundNode {
+                param: none(),
+                trait_ref: none(),
+                start: 0,
+                end: 0,
+                owner: none()
+            }
+        );
+        put(inout o, in " bound ");
+        put_q(inout o, in a, b.param);
+        put(inout o, in " owner=");
+        put_q(inout o, in a, b.owner);
+        put_span(inout o, b.start, b.end);
+        nl(inout o);
+        dump_trait_ref(inout o, in a, b.trait_ref, 2);
+    }
+    for i in 0..a.m_uses.len() {
+        let u = a
+            .uses
+            .get_or(
+            idx_from_raw[UseNode](u32_of(in a.m_uses, i)),
+            UseNode {
+                package: none(),
+                supers: 0,
+                path: 0,
+                names: 0,
+                public: false,
+                start: 0,
+                end: 0
+            }
+        );
+        put(inout o, in " use pkg=");
+        put_q(inout o, in a, u.package);
+        put(inout o, in " supers=");
+        put_u64(inout o, widen_u64(u.supers));
+        put(inout o, in " pub=");
+        put_bool(inout o, u.public);
+        put_span(inout o, u.start, u.end);
+        nl(inout o);
+        for j in 0..list_len(in a, u.path) {
+            put(inout o, in "  seg ");
+            put_q(inout o, in a, list_at(in a, u.path, j));
+            nl(inout o);
+        }
+        for j in 0..list_len(in a, u.names) {
+            let un = a
+                .use_names
+                .get_or(
+                idx_from_raw[UseNameNode](list_at(in a, u.names, j)),
+                UseNameNode {
+                    name: none(),
+                    alias: none(),
+                    start: 0,
+                    end: 0
+                }
+            );
+            put(inout o, in "  name ");
+            put_q(inout o, in a, un.name);
+            put(inout o, in " alias=");
+            put_q(inout o, in a, un.alias);
+            put_span(inout o, un.start, un.end);
+            nl(inout o);
+        }
+    }
+    for i in 0..a.m_public.len() {
+        put(inout o, in " public ");
+        put_q(inout o, in a, u32_of(in a.m_public, i));
+        nl(inout o);
+    }
+}
