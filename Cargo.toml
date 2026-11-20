@@ -100,6 +100,7 @@ members = [
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-test",
     "crates/vesper-hybrid",
     "crates/vesper-std-driver",
     "crates/vesper-std-host",
@@ -206,6 +207,7 @@ default-members = [
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-test",
     "crates/vesper-std-driver",
     "crates/vesper-std-host",
     "crates/vesper-tools",
@@ -274,6 +276,7 @@ vesper-diagnostics = { path = "crates/vesper-diagnostics/seed", package = "vespe
 vesper-fmt = { path = "crates/vesper-fmt" }
 vesper-lint = { path = "crates/vesper-lint" }
 vesper-doc = { path = "crates/vesper-doc" }
+vesper-test = { path = "crates/vesper-test" }
 # The compiler links the frozen Rust seed copy, never the port-backed package
 # (seed-copy rule, docs/maintenance/porting-a-crate.md).
 vesper-beacon = { path = "crates/vesper-beacon/seed", package = "vesper-beacon-seed" }

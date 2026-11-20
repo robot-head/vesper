@@ -28,7 +28,31 @@ const IDC_BYTES: u64 = 32;
 const SOURCECFG_D: u32 = 1 << 10;
 const DOMAINCFG_IE: u32 = 1 << 8;
 const DOMAINCFG_DM: u32 = 1 << 2;
-const MSIADDRCFGH_L: u32 = 1 << 31;
+const MSIADDRCFGH_L: u32 = 1 << MSIADDRCFGH_L_SHIFT;
+// `domaincfg` bits 31:24 read as 0x80 (§4.5.1).
+const DOMAINCFG_READ_ONE: u32 = 0x8000_0000;
+// `sourcecfg[i]` Child Index field when D = 1 (§4.5.2).
+const SOURCECFG_CHILD: u32 = 0x3ff;
+// Last `*iselect` of the `eip` and `eie` arrays (eip63, eie63; §3.8).
+const ISEL_EIP63: u32 = 0xbf;
+const ISEL_EIE63: u32 = 0xff;
+// `topei`/`topi`/`claimi`: the identity sits at bit 16 (§3.9, §4.8.1.4).
+const TOP_ID_SHIFT: u32 = 16;
+// `target[i]` fields (§4.5.16): Hart Index 31:18, Guest Index 17:12, EIID
+// 10:0 in MSI mode, IPRIO 7:0 in direct mode.
+const TARGET_HART_SHIFT: u32 = 18;
+const TARGET_HART: u32 = 0xfffc_0000;
+const TARGET_GUEST_SHIFT: u32 = 12;
+const TARGET_GUEST: u32 = 0x3f;
+const TARGET_GUEST_FIELD: u32 = TARGET_GUEST << TARGET_GUEST_SHIFT;
+const TARGET_EIID: u32 = 0x7ff;
+const TARGET_IPRIO: u32 = 0xff;
+// IDC register offsets (§4.8.1).
+const IDC_IDELIVERY: u64 = 0x00;
+const IDC_IFORCE: u64 = 0x04;
+const IDC_ITHRESHOLD: u64 = 0x08;
+const IDC_TOPI: u64 = 0x18;
+const IDC_CLAIMI: u64 = 0x1c;
 
 /// One IMSIC interrupt file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,11 +171,11 @@ impl ImsicFile {
         match isel {
             ISEL_EIDELIVERY => Ok(u64::from(self.delivery)),
             ISEL_EITHRESHOLD => Ok(u64::from(self.threshold)),
-            0x80..=0xbf => {
+            ISEL_EIP0..=ISEL_EIP63 => {
                 let w = self.word(isel, ISEL_EIP0)?;
                 Ok(self.eip.get(w).copied().unwrap_or(0))
             }
-            0xc0..=0xff => {
+            ISEL_EIE0..=ISEL_EIE63 => {
                 let w = self.word(isel, ISEL_EIE0)?;
                 Ok(self.eie.get(w).copied().unwrap_or(0))
             }
@@ -176,13 +200,13 @@ impl ImsicFile {
                 let bits = 32 - self.ids.leading_zeros();
                 self.threshold = (v as u32) & ((1u32 << bits) - 1);
             }
-            0x80..=0xbf => {
+            ISEL_EIP0..=ISEL_EIP63 => {
                 let w = self.word(isel, ISEL_EIP0)?;
                 if let Some(r) = self.eip.get_mut(w) {
                     *r = if w == 0 { v & !1 } else { v };
                 }
             }
-            0xc0..=0xff => {
+            ISEL_EIE0..=ISEL_EIE63 => {
                 let w = self.word(isel, ISEL_EIE0)?;
                 if let Some(r) = self.eie.get_mut(w) {
                     *r = if w == 0 { v & !1 } else { v };
@@ -214,7 +238,7 @@ impl ImsicFile {
     /// bits 10:0, or 0.
     pub fn topei(&self) -> u32 {
         let id = self.top();
-        (id << 16) | id
+        (id << TOP_ID_SHIFT) | id
     }
 
     /// A write to `*topei` (any value): clears the pending bit of the
@@ -222,7 +246,7 @@ impl ImsicFile {
     /// `csrrw rd, *topei, x0` claim idiom).
     pub fn claim(&mut self) -> u32 {
         let v = self.topei();
-        let id = v >> 16;
+        let id = v >> TOP_ID_SHIFT;
         if id != 0 {
             Self::set(&mut self.eip, id, false);
         }
@@ -349,7 +373,7 @@ impl AplicDomain {
     /// The window the registers occupy.
     pub fn contains(&self, addr: u64) -> bool {
         let end = APLIC_IDC + IDC_BYTES * self.idcs.len() as u64;
-        addr >= self.base && addr - self.base < end.max(0x4000)
+        addr >= self.base && addr - self.base < end.max(APLIC_IDC)
     }
 
     /// The source mode in this domain (Inactive when delegated onwards or
@@ -374,7 +398,7 @@ impl AplicDomain {
             return None;
         }
         let cfg = self.sourcecfg[s];
-        (cfg & SOURCECFG_D != 0).then_some(cfg & 0x3ff)
+        (cfg & SOURCECFG_D != 0).then_some(cfg & SOURCECFG_CHILD)
     }
 
     /// Whether `src` belongs to this domain: always in the root, else when
@@ -530,10 +554,10 @@ impl AplicDomain {
                 continue;
             }
             let t = self.target[i];
-            if (t >> 18) as usize != idc {
+            if (t >> TARGET_HART_SHIFT) as usize != idc {
                 continue;
             }
-            let prio = t & 0xff;
+            let prio = t & TARGET_IPRIO;
             if c.threshold != 0 && prio >= c.threshold {
                 continue;
             }
@@ -541,7 +565,7 @@ impl AplicDomain {
                 best = Some((prio, s));
             }
         }
-        best.map_or(0, |(p, s)| (s << 16) | p)
+        best.map_or(0, |(p, s)| (s << TOP_ID_SHIFT) | p)
     }
 
     /// `claimi` read.
@@ -553,7 +577,7 @@ impl AplicDomain {
             }
             return 0;
         }
-        let s = (v >> 16) as usize;
+        let s = (v >> TOP_ID_SHIFT) as usize;
         let mode = self.mode(s as u32);
         if mode.level() {
             // Direct mode: the bit is the rectified input.
@@ -579,12 +603,12 @@ impl AplicDomain {
             for s in 1..=self.sources as usize {
                 if self.pending[s] && self.enabled[s] {
                     let t = self.target[s];
-                    let hart = t >> 18;
-                    let guest = (t >> 12) & 0x3f;
+                    let hart = t >> TARGET_HART_SHIFT;
+                    let guest = (t >> TARGET_GUEST_SHIFT) & TARGET_GUEST;
                     let addr = self.msicfg.address(self.supervisor, hart, guest);
                     self.outbox.push(Msi {
                         addr,
-                        data: t & 0x7ff,
+                        data: t & TARGET_EIID,
                     });
                     self.pending[s] = false;
                 }
@@ -612,7 +636,11 @@ impl AplicDomain {
         let off = self.decode(addr)?;
         let w = |base: u64| (off - base) / 4;
         Ok(match off {
-            DOMAINCFG => 0x8000_0000 | (u32::from(self.ie) << 8) | (u32::from(self.dm) << 2),
+            DOMAINCFG => {
+                DOMAINCFG_READ_ONE
+                    | if self.ie { DOMAINCFG_IE } else { 0 }
+                    | if self.dm { DOMAINCFG_DM } else { 0 }
+            }
             o if (SOURCECFG..SOURCECFG + 4 * u64::from(self.sources)).contains(&o) => {
                 let s = (w(SOURCECFG) + 1) as usize;
                 if self.active_here[s] {
@@ -644,11 +672,11 @@ impl AplicDomain {
             o if o >= APLIC_IDC && self.direct_capable => {
                 let i = ((o - APLIC_IDC) / IDC_BYTES) as usize;
                 match (o - APLIC_IDC) % IDC_BYTES {
-                    0x00 => u32::from(self.idcs[i].delivery),
-                    0x04 => u32::from(self.idcs[i].force),
-                    0x08 => self.idcs[i].threshold,
-                    0x18 => self.topi(i),
-                    0x1c => self.claimi(i),
+                    IDC_IDELIVERY => u32::from(self.idcs[i].delivery),
+                    IDC_IFORCE => u32::from(self.idcs[i].force),
+                    IDC_ITHRESHOLD => self.idcs[i].threshold,
+                    IDC_TOPI => self.topi(i),
+                    IDC_CLAIMI => self.claimi(i),
                     _ => return Err(AiaError::Unmapped { addr }),
                 }
             }
@@ -676,7 +704,7 @@ impl AplicDomain {
                     return Ok(());
                 }
                 self.sourcecfg[s] = if v & SOURCECFG_D != 0 && self.children > 0 {
-                    SOURCECFG_D | (v & 0x3ff)
+                    SOURCECFG_D | (v & SOURCECFG_CHILD)
                 } else {
                     SourceMode::of(v).bits()
                 };
@@ -688,19 +716,21 @@ impl AplicDomain {
                 }
                 let c = &mut self.msicfg;
                 match off {
-                    MMSIADDRCFG => c.m_ppn = (c.m_ppn & !0xffff_ffff) | u64::from(v),
+                    MMSIADDRCFG => c.m_ppn = (c.m_ppn & !u64::from(u32::MAX)) | u64::from(v),
                     MMSIADDRCFGH => {
-                        c.m_ppn = (c.m_ppn & 0xffff_ffff) | (u64::from(v & 0xfff) << 32);
-                        c.lhxw = (v >> 12) & 0xf;
-                        c.hhxw = (v >> 16) & 0x7;
-                        c.lhxs_m = (v >> 20) & 0x7;
-                        c.hhxs = (v >> 24) & 0x1f;
+                        c.m_ppn = (c.m_ppn & u64::from(u32::MAX))
+                            | (u64::from(v & MSIADDRCFGH_PPN) << 32);
+                        c.lhxw = (v >> MSIADDRCFGH_LHXW_SHIFT) & MSIADDRCFGH_LHXW;
+                        c.hhxw = (v >> MSIADDRCFGH_HHXW_SHIFT) & MSIADDRCFGH_HHXW;
+                        c.lhxs_m = (v >> MSIADDRCFGH_LHXS_SHIFT) & MSIADDRCFGH_LHXS;
+                        c.hhxs = (v >> MSIADDRCFGH_HHXS_SHIFT) & MSIADDRCFGH_HHXS;
                         c.locked = v & MSIADDRCFGH_L != 0;
                     }
-                    SMSIADDRCFG => c.s_ppn = (c.s_ppn & !0xffff_ffff) | u64::from(v),
+                    SMSIADDRCFG => c.s_ppn = (c.s_ppn & !u64::from(u32::MAX)) | u64::from(v),
                     _ => {
-                        c.s_ppn = (c.s_ppn & 0xffff_ffff) | (u64::from(v & 0xfff) << 32);
-                        c.lhxs_s = (v >> 20) & 0x7;
+                        c.s_ppn = (c.s_ppn & u64::from(u32::MAX))
+                            | (u64::from(v & MSIADDRCFGH_PPN) << 32);
+                        c.lhxs_s = (v >> MSIADDRCFGH_LHXS_SHIFT) & MSIADDRCFGH_LHXS;
                     }
                 }
             }
@@ -767,11 +797,11 @@ impl AplicDomain {
             }
             GENMSI => {
                 if self.dm {
-                    let hart = v >> 18;
+                    let hart = v >> TARGET_HART_SHIFT;
                     let addr = self.msicfg.address(self.supervisor, hart, 0);
                     self.outbox.push(Msi {
                         addr,
-                        data: v & 0x7ff,
+                        data: v & TARGET_EIID,
                     });
                 }
             }
@@ -781,23 +811,27 @@ impl AplicDomain {
                     return Ok(());
                 }
                 self.target[s] = if self.dm {
-                    let guest = if self.supervisor { v & 0x3f000 } else { 0 };
-                    (v & 0xfffc_0000) | guest | (v & 0x7ff)
+                    let guest = if self.supervisor {
+                        v & TARGET_GUEST_FIELD
+                    } else {
+                        0
+                    };
+                    (v & TARGET_HART) | guest | (v & TARGET_EIID)
                 } else {
-                    let prio = match v & 0xff {
+                    let prio = match v & TARGET_IPRIO {
                         0 => 1,
                         p => p,
                     };
-                    (v & 0xfffc_0000) | prio
+                    (v & TARGET_HART) | prio
                 };
             }
             o if o >= APLIC_IDC && self.direct_capable => {
                 let i = ((o - APLIC_IDC) / IDC_BYTES) as usize;
                 match (o - APLIC_IDC) % IDC_BYTES {
-                    0x00 => self.idcs[i].delivery = v & 1 != 0,
-                    0x04 => self.idcs[i].force = v & 1 != 0,
-                    0x08 => self.idcs[i].threshold = v & ((1 << APLIC_IPRIOLEN) - 1),
-                    0x18 | 0x1c => {}
+                    IDC_IDELIVERY => self.idcs[i].delivery = v & 1 != 0,
+                    IDC_IFORCE => self.idcs[i].force = v & 1 != 0,
+                    IDC_ITHRESHOLD => self.idcs[i].threshold = v & ((1 << APLIC_IPRIOLEN) - 1),
+                    IDC_TOPI | IDC_CLAIMI => {}
                     _ => return Err(AiaError::Unmapped { addr }),
                 }
             }

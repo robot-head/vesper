@@ -20,6 +20,106 @@ use self::{
     MsiCfg
 };
 
+// The constants of src/aia.rs and src/aia/rust.rs, by the same names
+// (RISC-V AIA 1.0 section numbers).
+
+// `*iselect` numbers of the IMSIC indirect registers (§3.8).
+const ISEL_EIDELIVERY: u64 = 112;
+const ISEL_EITHRESHOLD: u64 = 114;
+const ISEL_EIP0: u64 = 128;
+const ISEL_EIP63: u64 = 191;
+const ISEL_EIE0: u64 = 192;
+const ISEL_EIE63: u64 = 255;
+// `eidelivery`: on, and delivery from a PLIC or APLIC (§3.8.1).
+const EIDELIVERY_ON: u64 = 1;
+const EIDELIVERY_EXTERNAL: u64 = 1073741824;
+// IMSIC interrupt-file registers (§3.6): seteipnum_le and seteipnum_be.
+const SETEIPNUM_LE: u64 = 0;
+const SETEIPNUM_BE: u64 = 4;
+// Smallest and largest IMSIC identity count the binding allows.
+const IMSIC_MIN_IDS: u64 = 63;
+const IMSIC_MAX_IDS: u64 = 2047;
+// Largest APLIC source count.
+const APLIC_MAX_SOURCES: u64 = 1023;
+// `topei`/`topi`/`claimi`: the identity sits at bit 16 (§3.9, §4.8.1.4).
+const TOP_ID_SHIFT: u64 = 16;
+// An MSI target address is a page number shifted by the 4 KiB page size.
+const PAGE_SHIFT: u64 = 12;
+
+// APLIC register offsets (§4.5).
+const DOMAINCFG: u64 = 0;
+const SOURCECFG: u64 = 4;
+const MMSIADDRCFG: u64 = 7104;
+const MMSIADDRCFGH: u64 = 7108;
+const SMSIADDRCFG: u64 = 7112;
+const SMSIADDRCFGH: u64 = 7116;
+const SETIP: u64 = 7168;
+const SETIPNUM: u64 = 7388;
+const IN_CLRIP: u64 = 7424;
+const CLRIPNUM: u64 = 7644;
+const SETIE: u64 = 7680;
+const SETIENUM: u64 = 7900;
+const CLRIE: u64 = 7936;
+const CLRIENUM: u64 = 8156;
+const SETIPNUM_LE: u64 = 8192;
+const SETIPNUM_BE: u64 = 8196;
+const GENMSI: u64 = 12288;
+const TARGET: u64 = 12292;
+// First IDC; each is IDC_BYTES long.
+const APLIC_IDC: u64 = 16384;
+const IDC_BYTES: u64 = 32;
+// IDC register offsets (§4.8.1).
+const IDC_IDELIVERY: u64 = 0;
+const IDC_IFORCE: u64 = 4;
+const IDC_ITHRESHOLD: u64 = 8;
+const IDC_TOPI: u64 = 24;
+const IDC_CLAIMI: u64 = 28;
+
+// `domaincfg` bits: 31:24 read as 0x80, IE and DM (§4.5.1).
+const DOMAINCFG_READ_ONE: u64 = 2147483648;
+const DOMAINCFG_IE: u64 = 256;
+const DOMAINCFG_DM: u64 = 4;
+const DOMAINCFG_IE_SHIFT: u64 = 8;
+const DOMAINCFG_DM_SHIFT: u64 = 2;
+// `sourcecfg[i]`: D (delegate), the Child Index when D = 1, and SM (§4.5.2).
+const SOURCECFG_D: u64 = 1024;
+const SOURCECFG_CHILD: u64 = 1023;
+const SOURCECFG_SM: u64 = 7;
+// Source modes (`sourcecfg.SM`); 2 and 3 are reserved.
+const SM_INACTIVE: u64 = 0;
+const SM_DETACHED: u64 = 1;
+const SM_RESERVED_2: u64 = 2;
+const SM_RESERVED_3: u64 = 3;
+const SM_EDGE_RISING: u64 = 4;
+const SM_EDGE_FALLING: u64 = 5;
+const SM_LEVEL_HIGH: u64 = 6;
+const SM_LEVEL_LOW: u64 = 7;
+// `mmsiaddrcfgh`/`smsiaddrcfgh` fields (§4.5.4, §4.5.5): the PPN's bits
+// 43:32, LHXW, HHXW, LHXS and HHXS, and the Lock bit.
+const MSIADDRCFGH_PPN: u64 = 4095;
+const MSIADDRCFGH_LHXW_SHIFT: u64 = 12;
+const MSIADDRCFGH_LHXW: u64 = 15;
+const MSIADDRCFGH_HHXW_SHIFT: u64 = 16;
+const MSIADDRCFGH_HHXW: u64 = 7;
+const MSIADDRCFGH_LHXS_SHIFT: u64 = 20;
+const MSIADDRCFGH_LHXS: u64 = 7;
+const MSIADDRCFGH_HHXS_SHIFT: u64 = 24;
+const MSIADDRCFGH_HHXS: u64 = 31;
+const MSIADDRCFGH_L: u64 = 2147483648;
+const MSIADDRCFGH_L_SHIFT: u64 = 31;
+// `target[i]` fields (§4.5.16): Hart Index 31:18, Guest Index 17:12, EIID
+// 10:0 in MSI mode, IPRIO 7:0 in direct mode.
+const TARGET_HART_SHIFT: u64 = 18;
+const TARGET_HART: u64 = 4294705152;
+const TARGET_GUEST_SHIFT: u64 = 12;
+const TARGET_GUEST: u64 = 63;
+const TARGET_GUEST_FIELD: u64 = 258048;
+const TARGET_EIID: u64 = 2047;
+const TARGET_IPRIO: u64 = 255;
+// The low and high 32-bit halves of a u64.
+const LOW_32_BITS: u64 = 4294967295;
+const HIGH_32_BITS: u64 = 18446744069414584320;
+
 fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
@@ -106,7 +206,7 @@ pub fn m_imsic_empty() -> Imsic {
 // Appends a file with identities 1..=ids (`ImsicFile::new`, or
 // `::with_external_delivery` when `external`).
 pub fn m_imsic_push(inout f: Imsic, ids: u64, external: bool) eff [Fail[AiaFault]] {
-    if ids < 63 || ids > 2047 || (wrapping_add(ids, 1) & 63) != 0 {
+    if ids < IMSIC_MIN_IDS || ids > IMSIC_MAX_IDS || (wrapping_add(ids, 1) & 63) != 0 {
         Fail::raise(AiaFault::BadIdCount(ids));
     }
     let words = wrapping_add(ids, 1) >> 6;
@@ -121,7 +221,7 @@ pub fn m_imsic_push(inout f: Imsic, ids: u64, external: bool) eff [Fail[AiaFault
         ImsicHdr {
             ids: ids,
             delivery: if external {
-                1073741824
+                EIDELIVERY_EXTERNAL
             } else {
                 0
             },
@@ -245,30 +345,30 @@ pub fn m_imsic_seteipnum(inout f: Imsic, i: u64, id: u64) {
 }
 
 pub fn m_imsic_mmio_write32(inout f: Imsic, i: u64, off: u64, v: u64) {
-    if off == 0 {
+    if off == SETEIPNUM_LE {
         m_imsic_seteipnum(inout f, i, v);
-    } else if off == 4 {
+    } else if off == SETEIPNUM_BE {
         m_imsic_seteipnum(inout f, i, swap32(v));
     }
 }
 
 pub fn m_imsic_csr_read(in f: Imsic, i: u64, isel: u64) -> u64 eff [Fail[AiaFault]] {
     let h = m_imsic_hdr(in f, i);
-    if isel == 112 {
+    if isel == ISEL_EIDELIVERY {
         return h.delivery;
     }
-    if isel == 114 {
+    if isel == ISEL_EITHRESHOLD {
         return h.threshold;
     }
-    if isel >= 128 && isel <= 191 {
-        let k = wrapping_sub(isel, 128);
+    if isel >= ISEL_EIP0 && isel <= ISEL_EIP63 {
+        let k = wrapping_sub(isel, ISEL_EIP0);
         if (k & 1) != 0 {
             bad_iselect(isel);
         }
         return eip_word(in f, h, k >> 1);
     }
-    if isel >= 192 && isel <= 255 {
-        let k = wrapping_sub(isel, 192);
+    if isel >= ISEL_EIE0 && isel <= ISEL_EIE63 {
+        let k = wrapping_sub(isel, ISEL_EIE0);
         if (k & 1) != 0 {
             bad_iselect(isel);
         }
@@ -279,23 +379,23 @@ pub fn m_imsic_csr_read(in f: Imsic, i: u64, isel: u64) -> u64 eff [Fail[AiaFaul
 
 pub fn m_imsic_csr_write(inout f: Imsic, i: u64, isel: u64, v: u64) eff [Fail[AiaFault]] {
     let mut h = m_imsic_hdr(in f, i);
-    if isel == 112 {
-        h.delivery = if h.external && v == 1073741824 {
-            1073741824
+    if isel == ISEL_EIDELIVERY {
+        h.delivery = if h.external && v == EIDELIVERY_EXTERNAL {
+            EIDELIVERY_EXTERNAL
         } else {
             v & 1
         };
         put_hdr(inout f, i, h);
         return;
     }
-    if isel == 114 {
+    if isel == ISEL_EITHRESHOLD {
         let bits = wrapping_sub(64, widen_u64(leading_zeros_u64(h.ids)));
-        h.threshold = v & wrapping_sub(wrapping_shl_u64(1, wrapping_u32(bits)), 1) & 4294967295;
+        h.threshold = v & wrapping_sub(wrapping_shl_u64(1, wrapping_u32(bits)), 1) & LOW_32_BITS;
         put_hdr(inout f, i, h);
         return;
     }
-    if isel >= 128 && isel <= 191 {
-        let k = wrapping_sub(isel, 128);
+    if isel >= ISEL_EIP0 && isel <= ISEL_EIP63 {
+        let k = wrapping_sub(isel, ISEL_EIP0);
         if (k & 1) != 0 {
             bad_iselect(isel);
         }
@@ -314,8 +414,8 @@ pub fn m_imsic_csr_write(inout f: Imsic, i: u64, isel: u64, v: u64) eff [Fail[Ai
         }
         return;
     }
-    if isel >= 192 && isel <= 255 {
-        let k = wrapping_sub(isel, 192);
+    if isel >= ISEL_EIE0 && isel <= ISEL_EIE63 {
+        let k = wrapping_sub(isel, ISEL_EIE0);
         if (k & 1) != 0 {
             bad_iselect(isel);
         }
@@ -358,7 +458,7 @@ pub fn m_imsic_top(in f: Imsic, i: u64) -> u64 {
 
 pub fn m_imsic_topei(in f: Imsic, i: u64) -> u64 {
     let id = m_imsic_top(in f, i);
-    (id << 16) | id
+    (id << TOP_ID_SHIFT) | id
 }
 
 pub fn m_imsic_claim(inout f: Imsic, i: u64) -> u64 {
@@ -367,12 +467,12 @@ pub fn m_imsic_claim(inout f: Imsic, i: u64) -> u64 {
     if id != 0 {
         set_eip(inout f, h, id, false);
     }
-    (id << 16) | id
+    (id << TOP_ID_SHIFT) | id
 }
 
 pub fn m_imsic_asserted(in f: Imsic, i: u64) -> bool {
     let h = m_imsic_hdr(in f, i);
-    h.delivery == 1 && top_of(in f, h) != 0
+    h.delivery == EIDELIVERY_ON && top_of(in f, h) != 0
 }
 
 // ---------------------------------------------------------------- MSI addresses
@@ -400,39 +500,46 @@ pub fn m_msi_address(c: MsiCfg, supervisor: bool, hart: u64, guest: u64) -> u64 
     } else {
         0
     };
-    let v = ppn | wrapping_shl_u64(g, wrapping_u32(wrapping_add(c.hhxs, 12))) | wrapping_shl_u64(
-        h,
-        wrapping_u32(lhxs)
-    ) | gu;
-    wrapping_shl_u64(v, 12)
+    let v = ppn | wrapping_shl_u64(
+        g,
+        wrapping_u32(wrapping_add(c.hhxs, PAGE_SHIFT))
+    ) | wrapping_shl_u64(h, wrapping_u32(lhxs)) | gu;
+    wrapping_shl_u64(v, wrapping_u32(PAGE_SHIFT))
 }
 
 fn high_m(c: MsiCfg) -> u64 {
-    (flag(c.locked) << 31) | wrapping_shl_u64(c.hhxs, 24) | wrapping_shl_u64(
-        c.lhxs_m,
-        20
-    ) | wrapping_shl_u64(c.hhxw, 16) | wrapping_shl_u64(c.lhxw, 12) | ((c.m_ppn >> 32) & 4095)
+    wrapping_shl_u64(flag(c.locked), wrapping_u32(MSIADDRCFGH_L_SHIFT)) | wrapping_shl_u64(
+        c.hhxs,
+        wrapping_u32(MSIADDRCFGH_HHXS_SHIFT)
+    ) | wrapping_shl_u64(c.lhxs_m, wrapping_u32(MSIADDRCFGH_LHXS_SHIFT)) | wrapping_shl_u64(
+        c.hhxw,
+        wrapping_u32(MSIADDRCFGH_HHXW_SHIFT)
+    ) | wrapping_shl_u64(c.lhxw, wrapping_u32(MSIADDRCFGH_LHXW_SHIFT)) | (
+        (c.m_ppn >> 32) & MSIADDRCFGH_PPN
+    )
 }
 
 fn high_s(c: MsiCfg) -> u64 {
-    wrapping_shl_u64(c.lhxs_s, 20) | ((c.s_ppn >> 32) & 4095)
+    wrapping_shl_u64(c.lhxs_s, wrapping_u32(MSIADDRCFGH_LHXS_SHIFT)) | (
+        (c.s_ppn >> 32) & MSIADDRCFGH_PPN
+    )
 }
 
 // ---------------------------------------------------------------- APLIC
 
 fn mode_of(sm: u64) -> u64 {
-    let m = sm & 7;
-    if m == 2 || m == 3 {
-        0
+    let m = sm & SOURCECFG_SM;
+    if m == SM_RESERVED_2 || m == SM_RESERVED_3 {
+        SM_INACTIVE
     } else {
         m
     }
 }
 
 fn rectify(mode: u64, raw: bool) -> bool {
-    if mode == 4 || mode == 6 {
+    if mode == SM_EDGE_RISING || mode == SM_LEVEL_HIGH {
         raw
-    } else if mode == 5 || mode == 7 {
+    } else if mode == SM_EDGE_FALLING || mode == SM_LEVEL_LOW {
         !raw
     } else {
         false
@@ -440,7 +547,7 @@ fn rectify(mode: u64, raw: bool) -> bool {
 }
 
 fn is_level(mode: u64) -> bool {
-    mode == 6 || mode == 7
+    mode == SM_LEVEL_HIGH || mode == SM_LEVEL_LOW
 }
 
 fn zero_cfg() -> MsiCfg {
@@ -514,13 +621,13 @@ pub fn m_aplic_push(
     supervisor: bool,
     children: u64
 ) eff [Fail[AiaFault]] {
-    if sources == 0 || sources > 1023 {
+    if sources == 0 || sources > APLIC_MAX_SOURCES {
         Fail::raise(AiaFault::BadSourceCount(sources));
     }
     if idcs == 0 && !msi_capable {
         Fail::raise(AiaFault::NoDeliveryMode);
     }
-    let needed = wrapping_add(16384, wrapping_mul(32, idcs));
+    let needed = wrapping_add(APLIC_IDC, wrapping_mul(IDC_BYTES, idcs));
     if size < needed {
         Fail::raise(
             AiaFault::WindowTooSmall {
@@ -636,7 +743,7 @@ fn idc_word(in s: ChunkSeq[u64], h: AplicHdr, i: u64) -> u64 {
 }
 
 fn contains_h(h: AplicHdr, addr: u64) -> bool {
-    let end = wrapping_add(16384, wrapping_mul(32, h.idcs));
+    let end = wrapping_add(APLIC_IDC, wrapping_mul(IDC_BYTES, h.idcs));
     addr >= h.base && wrapping_sub(addr, h.base) < end
 }
 
@@ -649,7 +756,7 @@ fn mode_h(in a: Aplic, h: AplicHdr, src: u64) -> u64 {
         return 0;
     }
     let cfg = src_word(in a.sourcecfg, h, src);
-    if (cfg & 1024) != 0 {
+    if (cfg & SOURCECFG_D) != 0 {
         0
     } else {
         mode_of(cfg)
@@ -665,8 +772,8 @@ fn delegated_h(in a: Aplic, h: AplicHdr, src: u64) -> Option[u64] {
         return Option::None;
     }
     let cfg = src_word(in a.sourcecfg, h, src);
-    if (cfg & 1024) != 0 {
-        Option::Some(cfg & 1023)
+    if (cfg & SOURCECFG_D) != 0 {
+        Option::Some(cfg & SOURCECFG_CHILD)
     } else {
         Option::None
     }
@@ -686,7 +793,7 @@ pub fn m_aplic_is_delegated_away(in a: Aplic, d: u64, src: u64) -> bool {
         <= h
         .sources
         && src_flag(in a.active_here, h, src)
-        && (src_word(in a.sourcecfg, h, src) & 1024)
+        && (src_word(in a.sourcecfg, h, src) & SOURCECFG_D)
         != 0
 }
 
@@ -709,7 +816,7 @@ pub fn m_aplic_rectified(in a: Aplic, d: u64, src: u64) -> bool {
 
 fn settle(inout a: Aplic, h: AplicHdr, s: u64) {
     let mode = mode_h(in a, h, s);
-    if mode == 0 {
+    if mode == SM_INACTIVE {
         set_src_flag(inout a.pending, h, s, false);
         set_src_flag(inout a.enabled, h, s, false);
         set_src_word(inout a.target, h, s, 0);
@@ -745,7 +852,7 @@ fn live_h(in a: Aplic, h: AplicHdr, src: u64) -> bool {
         return false;
     }
     let cfg = src_word(in a.sourcecfg, h, src);
-    (cfg & 1024) != 0 || mode_of(cfg) != 0
+    (cfg & SOURCECFG_D) != 0 || mode_of(cfg) != 0
 }
 
 // Child `c`, child index `ci` of domain `p`: each source is active in `c`
@@ -790,7 +897,7 @@ pub fn m_aplic_set_wire(inout a: Aplic, d: u64, src: u64, high: bool) {
     let before = rectify(mode, src_flag(in a.raw, h, src));
     set_src_flag(inout a.raw, h, src, high);
     let after = rectify(mode, high);
-    if mode == 4 || mode == 5 {
+    if mode == SM_EDGE_RISING || mode == SM_EDGE_FALLING {
         if !before && after {
             set_src_flag(inout a.pending, h, src, true);
         }
@@ -813,7 +920,7 @@ pub fn m_aplic_set_msi_cfg(inout a: Aplic, d: u64, c: MsiCfg) {
 
 fn set_pending(inout a: Aplic, h: AplicHdr, src: u64) {
     let mode = mode_h(in a, h, src);
-    if mode == 1 || mode == 4 || mode == 5 {
+    if mode == SM_DETACHED || mode == SM_EDGE_RISING || mode == SM_EDGE_FALLING {
         set_src_flag(inout a.pending, h, src, true);
     } else if is_level(mode) {
         if h.dm && rectify(mode, src_flag(in a.raw, h, src)) {
@@ -824,7 +931,7 @@ fn set_pending(inout a: Aplic, h: AplicHdr, src: u64) {
 
 fn clear_pending(inout a: Aplic, h: AplicHdr, src: u64) {
     let mode = mode_h(in a, h, src);
-    if mode == 0 {
+    if mode == SM_INACTIVE {
         return;
     }
     if is_level(mode) && !h.dm {
@@ -880,8 +987,8 @@ fn topi_h(in a: Aplic, h: AplicHdr, idc: u64) -> u64 {
         let at = wrapping_add(h.src_off, s);
         if flag_at(in a.pending, at) && flag_at(in a.enabled, at) {
             let t = word_at(in a.target, at);
-            if (t >> 18) == idc {
-                let prio = t & 255;
+            if (t >> TARGET_HART_SHIFT) == idc {
+                let prio = t & TARGET_IPRIO;
                 if threshold == 0 || prio < threshold {
                     if !found || prio < bp {
                         found = true;
@@ -894,7 +1001,7 @@ fn topi_h(in a: Aplic, h: AplicHdr, idc: u64) -> u64 {
         s = wrapping_add(s, 1);
     }
     if found {
-        (bs << 16) | bp
+        (bs << TOP_ID_SHIFT) | bp
     } else {
         0
     }
@@ -912,7 +1019,7 @@ fn claimi_h(inout a: Aplic, h: AplicHdr, idc: u64) -> u64 {
         }
         return 0;
     }
-    let s = v >> 16;
+    let s = v >> TOP_ID_SHIFT;
     let mode = mode_h(in a, h, s);
     if is_level(mode) {
         let r = rectify(mode, src_flag(in a.raw, h, s));
@@ -959,13 +1066,18 @@ pub fn m_aplic_take_msis(inout a: Aplic, d: u64) -> ChunkSeq[Msi] {
             let at = wrapping_add(h.src_off, s);
             if flag_at(in a.pending, at) && flag_at(in a.enabled, at) {
                 let t = word_at(in a.target, at);
-                let addr = m_msi_address(h.msicfg, h.supervisor, t >> 18, (t >> 12) & 63);
+                let addr = m_msi_address(
+                    h.msicfg,
+                    h.supervisor,
+                    t >> TARGET_HART_SHIFT,
+                    (t >> TARGET_GUEST_SHIFT) & TARGET_GUEST
+                );
                 post(
                     inout a,
                     d,
                     Msi {
                         addr: addr,
-                        data: t & 2047
+                        data: t & TARGET_EIID
                     }
                 );
                 let _ = a.pending.try_set(at, false);
@@ -1030,70 +1142,83 @@ pub fn m_aplic_read32(inout a: Aplic, d: u64, addr: u64) -> u64 eff [Fail[AiaFau
     let h = m_aplic_hdr(in a, d);
     let off = decode(h, addr);
     let cfg_ok = h.root && h.msi_capable;
-    if off == 0 {
-        return 2147483648 | (flag(h.ie) << 8) | (flag(h.dm) << 2);
+    if off == DOMAINCFG {
+        return DOMAINCFG_READ_ONE | (flag(h.ie) << DOMAINCFG_IE_SHIFT) | (
+            flag(h.dm) << DOMAINCFG_DM_SHIFT
+        );
     }
-    if in_words(off, 4, h.sources) {
-        let s = wrapping_add(wrapping_sub(off, 4) >> 2, 1);
+    if in_words(off, SOURCECFG, h.sources) {
+        let s = wrapping_add(wrapping_sub(off, SOURCECFG) >> 2, 1);
         if src_flag(in a.active_here, h, s) {
             return src_word(in a.sourcecfg, h, s);
         }
         return 0;
     }
-    if off >= 7104 && off <= 7116 {
+    if off >= MMSIADDRCFG && off <= SMSIADDRCFGH {
         if !cfg_ok {
             return 0;
         }
-        if off == 7104 {
-            return h.msicfg.m_ppn & 4294967295;
+        if off == MMSIADDRCFG {
+            return h.msicfg.m_ppn & LOW_32_BITS;
         }
-        if off == 7108 {
+        if off == MMSIADDRCFGH {
             return high_m(h.msicfg);
         }
-        if off == 7112 {
-            return h.msicfg.s_ppn & 4294967295;
+        if off == SMSIADDRCFG {
+            return h.msicfg.s_ppn & LOW_32_BITS;
         }
         return high_s(h.msicfg);
     }
     let nw = words(h);
-    if in_words(off, 7168, nw) {
-        return word_bits(in a, h, wrapping_sub(off, 7168) >> 2, 0);
+    if in_words(off, SETIP, nw) {
+        return word_bits(in a, h, wrapping_sub(off, SETIP) >> 2, 0);
     }
-    if in_words(off, 7424, nw) {
-        return word_bits(in a, h, wrapping_sub(off, 7424) >> 2, 1);
+    if in_words(off, IN_CLRIP, nw) {
+        return word_bits(in a, h, wrapping_sub(off, IN_CLRIP) >> 2, 1);
     }
-    if in_words(off, 7680, nw) {
-        return word_bits(in a, h, wrapping_sub(off, 7680) >> 2, 2);
+    if in_words(off, SETIE, nw) {
+        return word_bits(in a, h, wrapping_sub(off, SETIE) >> 2, 2);
     }
-    if off == 7388 || off == 7644 || off == 7900 || off == 8156 || off == 8192 || off == 8196 {
+    if off
+        == SETIPNUM
+        || off
+        == CLRIPNUM
+        || off
+        == SETIENUM
+        || off
+        == CLRIENUM
+        || off
+        == SETIPNUM_LE
+        || off
+        == SETIPNUM_BE {
         return 0;
     }
-    if in_words(off, 7936, nw) {
+    if in_words(off, CLRIE, nw) {
         return 0;
     }
-    if off == 12288 {
+    if off == GENMSI {
         return 0;
     }
-    if in_words(off, 12292, h.sources) {
-        return src_word(in a.target, h, wrapping_add(wrapping_sub(off, 12292) >> 2, 1));
+    if in_words(off, TARGET, h.sources) {
+        return src_word(in a.target, h, wrapping_add(wrapping_sub(off, TARGET) >> 2, 1));
     }
-    if off >= 16384 && h.direct_capable {
-        let rel = wrapping_sub(off, 16384);
+    if off >= APLIC_IDC && h.direct_capable {
+        let rel = wrapping_sub(off, APLIC_IDC);
         let i = rel >> 5;
         let r = rel & 31;
-        if r == 0 {
+        if r == IDC_IDELIVERY {
             return flag(idc_flag(in a.idc_delivery, h, i));
         }
-        if r == 4 {
+        if r == IDC_IFORCE {
             return flag(idc_flag(in a.idc_force, h, i));
         }
-        if r == 8 {
+        if r == IDC_ITHRESHOLD {
             return idc_word(in a.idc_threshold, h, i);
         }
-        if r == 24 {
+        if r == IDC_TOPI {
             return topi_h(in a, h, i);
         }
-        if r == 28 {
+        if r == IDC_CLAIMI {
             return claimi_h(inout a, h, i);
         }
         unmapped(addr);
@@ -1121,10 +1246,10 @@ fn each_bit(inout a: Aplic, h: AplicHdr, w: u64, v: u64, op: u64) {
 pub fn m_aplic_write32(inout a: Aplic, d: u64, addr: u64, v: u64) eff [Fail[AiaFault]] {
     let mut h = m_aplic_hdr(in a, d);
     let off = decode(h, addr);
-    if off == 0 {
-        h.ie = (v & 256) != 0;
+    if off == DOMAINCFG {
+        h.ie = (v & DOMAINCFG_IE) != 0;
         if h.msi_capable && h.direct_capable {
-            h.dm = (v & 4) != 0;
+            h.dm = (v & DOMAINCFG_DM) != 0;
             put_ahdr(inout a, d, h);
             let mut s: u64 = 1;
             loop {
@@ -1139,13 +1264,13 @@ pub fn m_aplic_write32(inout a: Aplic, d: u64, addr: u64, v: u64) eff [Fail[AiaF
         }
         return;
     }
-    if in_words(off, 4, h.sources) {
-        let s = wrapping_add(wrapping_sub(off, 4) >> 2, 1);
+    if in_words(off, SOURCECFG, h.sources) {
+        let s = wrapping_add(wrapping_sub(off, SOURCECFG) >> 2, 1);
         if !src_flag(in a.active_here, h, s) {
             return;
         }
-        let cfg = if (v & 1024) != 0 && h.children > 0 {
-            1024 | (v & 1023)
+        let cfg = if (v & SOURCECFG_D) != 0 && h.children > 0 {
+            SOURCECFG_D | (v & SOURCECFG_CHILD)
         } else {
             mode_of(v)
         };
@@ -1153,143 +1278,143 @@ pub fn m_aplic_write32(inout a: Aplic, d: u64, addr: u64, v: u64) eff [Fail[AiaF
         settle(inout a, h, s);
         return;
     }
-    if off >= 7104 && off <= 7116 {
+    if off >= MMSIADDRCFG && off <= SMSIADDRCFGH {
         if !h.root || !h.msi_capable || h.msicfg.locked {
             return;
         }
         let mut c = h.msicfg;
-        if off == 7104 {
-            c.m_ppn = (c.m_ppn & 18446744069414584320) | v;
-        } else if off == 7108 {
-            c.m_ppn = (c.m_ppn & 4294967295) | ((v & 4095) << 32);
-            c.lhxw = (v >> 12) & 15;
-            c.hhxw = (v >> 16) & 7;
-            c.lhxs_m = (v >> 20) & 7;
-            c.hhxs = (v >> 24) & 31;
-            c.locked = (v & 2147483648) != 0;
-        } else if off == 7112 {
-            c.s_ppn = (c.s_ppn & 18446744069414584320) | v;
+        if off == MMSIADDRCFG {
+            c.m_ppn = (c.m_ppn & HIGH_32_BITS) | v;
+        } else if off == MMSIADDRCFGH {
+            c.m_ppn = (c.m_ppn & LOW_32_BITS) | ((v & MSIADDRCFGH_PPN) << 32);
+            c.lhxw = (v >> MSIADDRCFGH_LHXW_SHIFT) & MSIADDRCFGH_LHXW;
+            c.hhxw = (v >> MSIADDRCFGH_HHXW_SHIFT) & MSIADDRCFGH_HHXW;
+            c.lhxs_m = (v >> MSIADDRCFGH_LHXS_SHIFT) & MSIADDRCFGH_LHXS;
+            c.hhxs = (v >> MSIADDRCFGH_HHXS_SHIFT) & MSIADDRCFGH_HHXS;
+            c.locked = (v & MSIADDRCFGH_L) != 0;
+        } else if off == SMSIADDRCFG {
+            c.s_ppn = (c.s_ppn & HIGH_32_BITS) | v;
         } else {
-            c.s_ppn = (c.s_ppn & 4294967295) | ((v & 4095) << 32);
-            c.lhxs_s = (v >> 20) & 7;
+            c.s_ppn = (c.s_ppn & LOW_32_BITS) | ((v & MSIADDRCFGH_PPN) << 32);
+            c.lhxs_s = (v >> MSIADDRCFGH_LHXS_SHIFT) & MSIADDRCFGH_LHXS;
         }
         h.msicfg = c;
         put_ahdr(inout a, d, h);
         return;
     }
     let nw = words(h);
-    if in_words(off, 7168, nw) {
-        each_bit(inout a, h, wrapping_sub(off, 7168) >> 2, v, 0);
+    if in_words(off, SETIP, nw) {
+        each_bit(inout a, h, wrapping_sub(off, SETIP) >> 2, v, 0);
         return;
     }
-    if off == 7388 || off == 8192 {
+    if off == SETIPNUM || off == SETIPNUM_LE {
         let s = num(h, v);
         if s != 0 {
             set_pending(inout a, h, s);
         }
         return;
     }
-    if off == 8196 {
+    if off == SETIPNUM_BE {
         let s = num(h, swap32(v));
         if s != 0 {
             set_pending(inout a, h, s);
         }
         return;
     }
-    if in_words(off, 7424, nw) {
-        each_bit(inout a, h, wrapping_sub(off, 7424) >> 2, v, 1);
+    if in_words(off, IN_CLRIP, nw) {
+        each_bit(inout a, h, wrapping_sub(off, IN_CLRIP) >> 2, v, 1);
         return;
     }
-    if off == 7644 {
+    if off == CLRIPNUM {
         let s = num(h, v);
         if s != 0 {
             clear_pending(inout a, h, s);
         }
         return;
     }
-    if in_words(off, 7680, nw) {
-        each_bit(inout a, h, wrapping_sub(off, 7680) >> 2, v, 2);
+    if in_words(off, SETIE, nw) {
+        each_bit(inout a, h, wrapping_sub(off, SETIE) >> 2, v, 2);
         return;
     }
-    if off == 7900 {
+    if off == SETIENUM {
         let s = num(h, v);
         if s != 0 {
             set_enable(inout a, h, s, true);
         }
         return;
     }
-    if in_words(off, 7936, nw) {
-        each_bit(inout a, h, wrapping_sub(off, 7936) >> 2, v, 3);
+    if in_words(off, CLRIE, nw) {
+        each_bit(inout a, h, wrapping_sub(off, CLRIE) >> 2, v, 3);
         return;
     }
-    if off == 8156 {
+    if off == CLRIENUM {
         let s = num(h, v);
         if s != 0 {
             set_enable(inout a, h, s, false);
         }
         return;
     }
-    if off == 12288 {
+    if off == GENMSI {
         if h.dm {
-            let addr = m_msi_address(h.msicfg, h.supervisor, v >> 18, 0);
+            let addr = m_msi_address(h.msicfg, h.supervisor, v >> TARGET_HART_SHIFT, 0);
             post(
                 inout a,
                 d,
                 Msi {
                     addr: addr,
-                    data: v & 2047
+                    data: v & TARGET_EIID
                 }
             );
         }
         return;
     }
-    if in_words(off, 12292, h.sources) {
-        let s = wrapping_add(wrapping_sub(off, 12292) >> 2, 1);
-        if mode_h(in a, h, s) == 0 {
+    if in_words(off, TARGET, h.sources) {
+        let s = wrapping_add(wrapping_sub(off, TARGET) >> 2, 1);
+        if mode_h(in a, h, s) == SM_INACTIVE {
             return;
         }
         let t = if h.dm {
             let guest = if h.supervisor {
-                v & 258048
+                v & TARGET_GUEST_FIELD
             } else {
                 0
             };
-            (v & 4294705152) | guest | (v & 2047)
+            (v & TARGET_HART) | guest | (v & TARGET_EIID)
         } else {
-            let p = v & 255;
+            let p = v & TARGET_IPRIO;
             let prio = if p == 0 {
                 1
             } else {
                 p
             };
-            (v & 4294705152) | prio
+            (v & TARGET_HART) | prio
         };
         set_src_word(inout a.target, h, s, t);
         return;
     }
-    if off >= 16384 && h.direct_capable {
-        let rel = wrapping_sub(off, 16384);
+    if off >= APLIC_IDC && h.direct_capable {
+        let rel = wrapping_sub(off, APLIC_IDC);
         let i = rel >> 5;
         let r = rel & 31;
         if i < h.idcs {
             let at = wrapping_add(h.idc_off, i);
-            if r == 0 {
+            if r == IDC_IDELIVERY {
                 let _ = a.idc_delivery.try_set(at, (v & 1) != 0);
                 return;
             }
-            if r == 4 {
+            if r == IDC_IFORCE {
                 let _ = a.idc_force.try_set(at, (v & 1) != 0);
                 return;
             }
-            if r == 8 {
-                let _ = a.idc_threshold.try_set(at, v & 255);
+            if r == IDC_ITHRESHOLD {
+                let _ = a.idc_threshold.try_set(at, v & TARGET_IPRIO);
                 return;
             }
         }
-        if r == 24 || r == 28 {
+        if r == IDC_TOPI || r == IDC_CLAIMI {
             return;
         }
-        if r == 0 || r == 4 || r == 8 {
+        if r == IDC_IDELIVERY || r == IDC_IFORCE || r == IDC_ITHRESHOLD {
             return;
         }
         unmapped(addr);

@@ -43,8 +43,8 @@ fn main() {
 const EDITS: &[(&str, &str)] = &[
     // 0 insn.rs: `lsh` encodes as `rsh`.
     (
-        "        AluOp::Lsh => (96, 0),\n",
-        "        AluOp::Lsh => (112, 0),\n",
+        "        AluOp::Lsh => (OP_LSH, 0),\n",
+        "        AluOp::Lsh => (OP_RSH, 0),\n",
     ),
     // 1 scalar.rs: tnum addition forgets the second operand's unknown bits.
     (

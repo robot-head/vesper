@@ -1,13 +1,28 @@
 use serde::Serialize;
-use std::{fs::OpenOptions, io::Read, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::OpenOptions,
+    io::Read,
+    path::Path,
+};
 use vesper::{
-    ast::{Expr, ExprKind, Function, Item, Literal, Span, Statement},
+    anvil_hash::{FunctionGraph, VerdictCache},
+    anvil_sim::{
+        format_value_literal, run_property_test, run_simpulse_test_on_world, write_vchrono_capsule,
+    },
+    ast::{Expr, ExprKind, Function, Item, Literal, Span, Statement, Type},
     check::{self, World},
     lexer::{self, TokenKind as K},
     native::batch::{BatchLimits, NativeBatch},
     parser,
     runtime::{Runtime, Value},
+    test_attrs::{self, AttrValue, FunctionTestAttrs},
     tooling::doc::sources::{SourceLimits, discover},
+};
+use vesper_test::{
+    BudgetGate, ExpectErrorOutcome, ExpectErrorSpec, FaultProfile, HarnessPlan, ObligationLedger,
+    ObservedDiagnostic, TestAttr, TestCaseAttr, TestMode, TestParam, TestSignature, VerdictKey,
+    VerdictRecord, VerdictStatus, classify, is_cacheable, verify_expect_error,
 };
 
 const MAX_SOURCE_BYTES: usize = 512 * 1024;
@@ -15,13 +30,17 @@ const DEFAULT_FUEL: u64 = 1_000_000;
 const DEFAULT_MAX_MUTANTS: usize = 256;
 const HARD_MAX_MUTANTS: usize = 2048;
 
-pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--filter <PAT>] [--max-mutants <N>] [--fuel <N>] [--json]";
+pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--filter <PAT>] [--max-mutants <N>] [--fuel <N>] [--no-cache] [--json]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestEngine {
     Jit,
     Evaluator,
+    Checker,
+    Crucible,
+    SimPulse,
+    Cache,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +55,14 @@ pub struct UnitTestCaseReport {
     pub engine: TestEngine,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anvil_mode: Option<TestMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_case_pin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vchrono_capsule: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +104,7 @@ struct Options {
     filter: Option<String>,
     max_mutants: usize,
     fuel: u64,
+    no_cache: bool,
     json: bool,
 }
 
@@ -96,11 +124,13 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut filter = None;
     let mut max_mutants = None;
     let mut fuel = DEFAULT_FUEL;
+    let mut no_cache = false;
     let mut json = false;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--mutate" if !mutate => mutate = true,
+            "--no-cache" if !no_cache => no_cache = true,
             "--json" if !json => json = true,
             "--filter" => {
                 if filter.is_some() {
@@ -147,6 +177,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         filter,
         max_mutants: max_mutants.unwrap_or(DEFAULT_MAX_MUTANTS),
         fuel,
+        no_cache,
         json,
     })
 }
@@ -202,31 +233,261 @@ fn is_test_marker(comment_text: &str) -> bool {
         || trimmed.starts_with("@test(")
 }
 
-fn discover_tests(source: &str, items: &[Item]) -> Result<Vec<(String, Span)>, String> {
+struct DiscoveredTest {
+    name: String,
+    span: Span,
+    plan: HarnessPlan,
+    raw_cases: Vec<test_attrs::TestCaseAttr>,
+    func: Function,
+}
+
+fn syntax_attr_to_anvil(
+    func: &Function,
+    parsed: Option<&FunctionTestAttrs>,
+) -> (TestSignature, Vec<test_attrs::TestCaseAttr>) {
+    let mut attr = TestAttr::default();
+    let mut cases = Vec::new();
+    let mut raw_cases = Vec::new();
+    if let Some(pa) = parsed {
+        if let Some(t) = &pa.test {
+            if let Some(code) = &t.expect_error {
+                attr.expect_error = Some(ExpectErrorSpec {
+                    code: code.clone(),
+                    primary: t.primary.clone().or_else(|| t.expected_span.clone()),
+                    related: t.related.clone(),
+                });
+            }
+            attr.cases = t.cases.map(|n| n as u32);
+            attr.sim_schedules = t.sim_schedules.map(|n| n as u32);
+            if let Some(fp) = &t.fault_profile {
+                attr.fault_profile = Some(match fp.as_str() {
+                    "TornWalSector" => FaultProfile::TornWalSector,
+                    "NetPartition" => FaultProfile::NetPartition,
+                    "ClockSkew" => FaultProfile::ClockSkew,
+                    other => FaultProfile::Custom(other.to_string()),
+                });
+            }
+            let gate = BudgetGate {
+                max_stack: t.max_stack,
+                max_cycles: t.max_cycles,
+                zero_alloc: t.zero_alloc.unwrap_or(false),
+                ..Default::default()
+            };
+            if gate.max_stack.is_some() || gate.max_cycles.is_some() || gate.zero_alloc {
+                attr.budget = gate;
+            }
+        }
+        raw_cases = pa.test_cases.clone();
+        for tc in &pa.test_cases {
+            let mut vals = Vec::new();
+            for arg in &tc.args {
+                let s = match &arg.name {
+                    None => attr_value_to_string(&arg.value),
+                    Some(name) => format!("{name} = {}", attr_value_to_string(&arg.value)),
+                };
+                vals.push(s);
+            }
+            cases.push(TestCaseAttr {
+                args: vals,
+                label: None,
+            });
+        }
+    }
+
+    let params: Vec<TestParam> = func
+        .params
+        .iter()
+        .map(|p| {
+            let ty_str = format!("{}", p.ty);
+            let is_capability = matches!(ty_str.as_str(), "SimStorageCtl" | "SimNetCtl")
+                || ty_str.starts_with("Cap[");
+            TestParam {
+                name: p.name.clone(),
+                ty: ty_str,
+                is_capability,
+            }
+        })
+        .collect();
+    let effects: Vec<String> = func
+        .effects
+        .instances
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+
+    let sig = TestSignature {
+        name: func.name.clone(),
+        params,
+        effects,
+        attr,
+        cases,
+    };
+    (sig, raw_cases)
+}
+
+fn attr_value_to_string(v: &AttrValue) -> String {
+    match v {
+        AttrValue::Int(n) => n.to_string(),
+        AttrValue::Float(f) => f.clone(),
+        AttrValue::Bool(b) => b.to_string(),
+        AttrValue::String(s) => format!("{s:?}"),
+        AttrValue::Ident(id) => id.clone(),
+        AttrValue::Raw(raw) => raw.clone(),
+    }
+}
+
+/// The argument rows of a test's `@test_case(...)` pins, or a message naming
+/// the first pin that does not fit the function's parameters.
+fn eval_test_case_args(
+    func: &Function,
+    raw_cases: &[test_attrs::TestCaseAttr],
+) -> Result<Vec<Vec<Value>>, String> {
+    let mut out = Vec::new();
+    for (pin, tc) in raw_cases.iter().enumerate() {
+        let mut row: Vec<Option<Value>> = vec![None; func.params.len()];
+        let mut ok = true;
+        for (idx, arg) in tc.args.iter().enumerate() {
+            let slot = match &arg.name {
+                None => idx,
+                Some(name) => {
+                    if let Some(pos) = func.params.iter().position(|p| p.name == *name) {
+                        pos
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+            };
+            if slot >= row.len() {
+                ok = false;
+                break;
+            }
+            let parsed_val = match &arg.value {
+                AttrValue::Int(n) => {
+                    let unsigned_bits = match &func.params[slot].ty {
+                        Type::Named(t, _) => match t.as_str() {
+                            "u8" => Some(8),
+                            "u16" => Some(16),
+                            "u32" => Some(32),
+                            "u64" | "usize" => Some(64),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(bits) = unsigned_bits {
+                        Value::UInt(*n as u64, bits)
+                    } else {
+                        Value::Int(*n as i64)
+                    }
+                }
+                AttrValue::Bool(b) => Value::Bool(*b),
+                AttrValue::Float(f) => match f.parse::<f64>() {
+                    Ok(v) => Value::Float(v),
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                },
+                _ => {
+                    ok = false;
+                    break;
+                }
+            };
+            row[slot] = Some(parsed_val);
+        }
+        if !ok || row.iter().any(|v| v.is_none()) {
+            let names: Vec<&str> = func.params.iter().map(|p| p.name.as_str()).collect();
+            return Err(format!(
+                "invalid @test_case #{} for '{}': it must give one supported literal for each parameter ({}), by position or by name",
+                pin + 1,
+                func.name,
+                names.join(", ")
+            ));
+        }
+        out.push(row.into_iter().map(|v| v.unwrap()).collect());
+    }
+    Ok(out)
+}
+
+/// The function hash together with everything else that decides a verdict:
+/// the harness plan (mode, case count, gates, `expect_error`), the explicit
+/// `@test_case` rows and the fuel limit. A change to any of them is a new
+/// cache key, so an edited test never reuses an earlier verdict.
+/// The gates a budget-gated plan asks for, for its "not enforced" report.
+fn budget_gate_names(plan: &HarnessPlan) -> String {
+    let mut names = Vec::new();
+    let gate = &plan.budget;
+    if gate.max_stack.is_some() {
+        names.push("max_stack");
+    }
+    if gate.max_cycles.is_some() {
+        names.push("max_cycles");
+    }
+    if gate.zero_alloc {
+        names.push("zero_alloc");
+    }
+    if names.is_empty() {
+        "its budget".into()
+    } else {
+        names.join(", ")
+    }
+}
+
+fn test_fingerprint(fn_hash: &str, test: &DiscoveredTest, fuel: u64) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"vesper-anvil-test-fingerprint-v1\0");
+    hasher.update(fn_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(format!("{:?}", test.plan).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(format!("{:?}", test.raw_cases).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&fuel.to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn discover_tests(source: &str, items: &[Item]) -> Result<Vec<DiscoveredTest>, String> {
     let (tokens, _) = lexer::lex(source);
+    let parsed_attrs = test_attrs::extract_test_attrs(source);
+    let attr_map: BTreeMap<&str, &FunctionTestAttrs> = parsed_attrs
+        .iter()
+        .map(|a| (a.fn_name.as_str(), a))
+        .collect();
+
     let mut tests = Vec::new();
     for item in items {
         let Item::Function(f) = item else {
             continue;
         };
+        let has_real_attr = attr_map
+            .get(f.name.as_str())
+            .is_some_and(|a| a.test.is_some() || !a.test_cases.is_empty());
         let marked = has_preceding_test_comment(source, &tokens, f.span.start);
         let named = f.name.starts_with("test_");
-        if !marked && !named {
+        if !has_real_attr && !marked && !named {
             continue;
         }
         if !f.generics.is_empty() {
             return Err(format!("test function '{}' cannot be generic", f.name));
         }
-        if !f.params.is_empty() {
+        if f.body.is_none() {
+            return Err(format!("test function '{}' must have a body", f.name));
+        }
+        let (sig, raw_cases) = syntax_attr_to_anvil(f, attr_map.get(f.name.as_str()).copied());
+        let plan = classify(&sig);
+        if !f.params.is_empty() && !has_real_attr {
             return Err(format!(
                 "test function '{}' must take zero arguments",
                 f.name
             ));
         }
-        if f.body.is_none() {
-            return Err(format!("test function '{}' must have a body", f.name));
-        }
-        tests.push((f.name.clone(), f.span.clone()));
+        tests.push(DiscoveredTest {
+            name: f.name.clone(),
+            span: f.span.clone(),
+            plan,
+            raw_cases,
+            func: (**f).clone(),
+        });
     }
     Ok(tests)
 }
@@ -286,7 +547,7 @@ fn run_tests_on_world(
     fuel: u64,
     prefer_jit: bool,
 ) -> (bool, Vec<UnitTestCaseReport>) {
-    let mut fallback: std::collections::BTreeMap<&str, String> = Default::default();
+    let mut fallback: BTreeMap<&str, String> = Default::default();
     let mut batch = None;
     if prefer_jit && !selected.is_empty() {
         let names: Vec<&str> = selected.iter().map(|(n, _)| n.as_str()).collect();
@@ -320,28 +581,38 @@ fn run_tests_on_world(
         }
     }
 
+    let ledger = ObligationLedger::new();
     let mut evaluator = None;
     let mut cases = Vec::with_capacity(selected.len());
     let mut all_passed = true;
     for (name, span) in selected {
         let (line, column) = location(source, span.start);
-        let (passed, result, message, engine, fallback_reason) =
-            if let Some(reason) = fallback.get(name.as_str()) {
-                let runtime = evaluator.get_or_insert_with(|| Runtime::new(world));
-                runtime.fuel = fuel;
-                let (passed, result, message) = evaluate_outcome(runtime.run(name, vec![]));
-                (
-                    passed,
-                    result,
-                    message,
-                    TestEngine::Evaluator,
-                    prefer_jit.then(|| reason.clone()),
-                )
-            } else {
-                let b = batch.as_mut().expect("jit batch available");
-                let (passed, result, message) = evaluate_outcome(b.run(name));
-                (passed, result, message, TestEngine::Jit, None)
-            };
+        let ((mut passed, result, mut message, engine, fallback_reason), ledger_report) = ledger
+            .audit_frame(|| {
+                if let Some(reason) = fallback.get(name.as_str()) {
+                    let runtime = evaluator.get_or_insert_with(|| Runtime::new(world));
+                    runtime.fuel = fuel;
+                    let (passed, result, message) = evaluate_outcome(runtime.run(name, vec![]));
+                    (
+                        passed,
+                        result,
+                        message,
+                        TestEngine::Evaluator,
+                        prefer_jit.then(|| reason.clone()),
+                    )
+                } else {
+                    let b = batch.as_mut().expect("jit batch available");
+                    let (passed, result, message) = evaluate_outcome(b.run(name));
+                    (passed, result, message, TestEngine::Jit, None)
+                }
+            });
+        if ledger_report.has_leaks() {
+            passed = false;
+            message = format!(
+                "obligation leak detected ({} leaked obligation(s))",
+                ledger_report.total_leaks()
+            );
+        }
         if !passed {
             all_passed = false;
         }
@@ -354,6 +625,10 @@ fn run_tests_on_world(
             message,
             engine,
             fallback_reason,
+            anvil_mode: None,
+            cached: None,
+            test_case_pin: None,
+            vchrono_capsule: None,
         });
     }
     (all_passed, cases)
@@ -396,7 +671,67 @@ struct FileUnitTests {
     source: String,
     report: UnitTestFileReport,
     selected: Vec<(String, Span)>,
+    /// Property and SimPulse tests that passed on the baseline, replayed
+    /// against every well-typed mutant after the unit tests.
+    replay: Vec<ReplayTest>,
+    /// Every test function of the file, whatever its mode or the filter:
+    /// mutation testing never mutates these.
+    test_names: BTreeSet<String>,
     parsed_items: Vec<Item>,
+}
+
+/// A non-unit test the mutation gate replays against each mutant.
+#[derive(Clone)]
+enum ReplayTest {
+    Property {
+        name: String,
+        cases: usize,
+        explicit: Vec<Vec<Value>>,
+    },
+    SimPulse {
+        name: String,
+        schedules: usize,
+        profile: String,
+        seed: u64,
+    },
+}
+
+impl ReplayTest {
+    /// Runs the test on a mutant's world; `Err` names the test and why it failed.
+    fn run(&self, world: &World, fuel: u64) -> Result<(), (String, String)> {
+        match self {
+            ReplayTest::Property {
+                name,
+                cases,
+                explicit,
+            } => {
+                let outcome = run_property_test(world, name, *cases, explicit, fuel);
+                if outcome.passed {
+                    Ok(())
+                } else {
+                    Err((
+                        name.clone(),
+                        outcome
+                            .failure_message
+                            .unwrap_or_else(|| "property failed".into()),
+                    ))
+                }
+            }
+            ReplayTest::SimPulse {
+                name,
+                schedules,
+                profile,
+                seed,
+            } => {
+                let outcome = run_simpulse_test_on_world(world, name, *schedules, profile, *seed);
+                if outcome.passed {
+                    Ok(())
+                } else {
+                    Err((name.clone(), "SimPulse schedule failed".into()))
+                }
+            }
+        }
+    }
 }
 
 fn collect_files(target: &Path) -> Result<Vec<(String, String)>, String> {
@@ -412,12 +747,21 @@ fn collect_files(target: &Path) -> Result<Vec<(String, String)>, String> {
     }
 }
 
+fn host_target_isa() -> String {
+    format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
 fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> {
     let files = collect_files(Path::new(&opts.path))?;
     let mut results = Vec::new();
     let mut total_discovered = 0usize;
     let mut total_selected = 0usize;
     let mut all_passed = true;
+    let verdict_cache = if !opts.no_cache && !opts.mutate {
+        VerdictCache::open_default().ok()
+    } else {
+        None
+    };
 
     for (display, source) in files {
         let parsed = match parse_module(&source) {
@@ -434,6 +778,8 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    replay: vec![],
+                    test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
                 continue;
@@ -453,27 +799,52 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    replay: vec![],
+                    test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
                 continue;
             }
         };
         total_discovered += discovered.len();
-        let selected: Vec<(String, Span)> = discovered
+        // Negative tests are left out of the positive module whether or not
+        // the filter selects them: their bodies are meant not to check.
+        let expect_error_names: BTreeSet<String> = discovered
+            .iter()
+            .filter(|t| t.plan.primary_mode == TestMode::ExpectError)
+            .map(|t| t.name.clone())
+            .collect();
+        let all_test_names: BTreeSet<String> = discovered.iter().map(|t| t.name.clone()).collect();
+        let selected_tests: Vec<DiscoveredTest> = discovered
             .into_iter()
-            .filter(|(name, _)| {
+            .filter(|t| {
                 opts.filter
                     .as_ref()
-                    .is_none_or(|pat| name.contains(pat.as_str()))
+                    .is_none_or(|pat| t.name.contains(pat.as_str()))
             })
             .collect();
-        total_selected += selected.len();
-        if selected.is_empty() {
+        total_selected += selected_tests.len();
+        if selected_tests.is_empty() {
             continue;
         }
-        let checked = match check_parsed(&parsed) {
-            Ok(ok) => ok,
-            Err(error) => {
+
+        // Filter out ExpectError functions before checking the positive module
+        // so intentional substructural failures never poison sibling tests.
+        let mut positive_module = parsed.module.clone();
+        positive_module.items.retain(|item| match item {
+            Item::Function(f) => !expect_error_names.contains(&f.name),
+            _ => true,
+        });
+        let checked = match check::check(&positive_module) {
+            c if c.diagnostics.is_empty() => c,
+            c => {
+                let d = &c.diagnostics[0];
+                let error = format!(
+                    "{} semantic error(s); first: {} {}",
+                    c.diagnostics.len(),
+                    d.code,
+                    d.message
+                );
                 all_passed = false;
                 results.push(FileUnitTests {
                     display: display.clone(),
@@ -485,26 +856,391 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    replay: vec![],
+                    test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
                 continue;
             }
         };
-        let (passed, cases) =
-            run_tests_on_world(&source, &checked.world, &selected, opts.fuel, !opts.mutate);
-        if !passed {
-            all_passed = false;
+
+        let fn_graph = FunctionGraph::from_module(&parsed.module);
+        let mut case_reports: BTreeMap<String, UnitTestCaseReport> = BTreeMap::new();
+        let mut unit_batch_selected: Vec<(String, Span)> = Vec::new();
+        let mut unit_plans: BTreeMap<String, HarnessPlan> = BTreeMap::new();
+        let mut replay: Vec<ReplayTest> = Vec::new();
+
+        for test in &selected_tests {
+            let (line, column) = location(&source, test.span.start);
+            let fn_hash = fn_graph
+                .transitive_fn_blake3(&test.name)
+                .unwrap_or_default();
+            let cache_key = VerdictKey {
+                fn_blake3: test_fingerprint(&fn_hash, test, opts.fuel),
+                sim_seed: test.plan.seed,
+                target_isa: host_target_isa(),
+                harness_version: vesper_test::HARNESS_VERSION,
+            };
+
+            // Check CAS verdict cache for deterministic non-unit Anvil modes
+            // (unit mode preserves exact JIT/Evaluator engine reporting for existing CLI callers).
+            let use_cache = verdict_cache.is_some()
+                && is_cacheable(&test.plan)
+                && !matches!(test.plan.primary_mode, TestMode::Unit);
+            if use_cache
+                && let Some(cache) = &verdict_cache
+                && let Some(bytes) = cache.get(&cache_key.cache_key_hex())
+                && let Ok(record) = VerdictRecord::from_json(&String::from_utf8_lossy(&bytes))
+            {
+                let passed = record.status == VerdictStatus::Pass;
+                if !passed {
+                    all_passed = false;
+                }
+                case_reports.insert(
+                    test.name.clone(),
+                    UnitTestCaseReport {
+                        name: test.name.clone(),
+                        line,
+                        column,
+                        passed,
+                        result: None,
+                        message: format!("cached: {}", record.message.as_deref().unwrap_or("ok")),
+                        engine: TestEngine::Cache,
+                        fallback_reason: None,
+                        anvil_mode: Some(test.plan.primary_mode),
+                        cached: Some(true),
+                        test_case_pin: None,
+                        vchrono_capsule: record.capsule_path,
+                    },
+                );
+                continue;
+            }
+
+            match test.plan.primary_mode {
+                TestMode::Unit | TestMode::BudgetGate => {
+                    unit_batch_selected.push((test.name.clone(), test.span.clone()));
+                    unit_plans.insert(test.name.clone(), test.plan.clone());
+                }
+                TestMode::ExpectError => {
+                    let diags = checked.world.check_isolated_item(&test.func);
+                    let observed: Vec<ObservedDiagnostic> = diags
+                        .iter()
+                        .map(|d| ObservedDiagnostic {
+                            code: Some(d.code.clone()),
+                            message: d.message.clone(),
+                            primary_text: source
+                                .get(d.span.start..d.span.end)
+                                .unwrap_or("")
+                                .to_string(),
+                            related_texts: d
+                                .related
+                                .iter()
+                                .map(|r| {
+                                    let snippet =
+                                        source.get(r.span.start..r.span.end).unwrap_or("");
+                                    format!("{} {}", r.message, snippet)
+                                })
+                                .collect(),
+                        })
+                        .collect();
+                    let spec = test
+                        .plan
+                        .expect_error
+                        .as_ref()
+                        .expect("ExpectError mode has spec");
+                    let outcome = verify_expect_error(spec, &observed);
+                    let (passed, message) = match outcome {
+                        ExpectErrorOutcome::Matched { .. } => {
+                            (true, format!("matched {}", spec.code))
+                        }
+                        other => (false, format!("{other:?}")),
+                    };
+                    if !passed {
+                        all_passed = false;
+                    }
+                    if let Some(cache) = &verdict_cache
+                        && is_cacheable(&test.plan)
+                    {
+                        let rec = VerdictRecord {
+                            key: cache_key,
+                            test_name: test.name.clone(),
+                            mode: TestMode::ExpectError,
+                            status: if passed {
+                                VerdictStatus::Pass
+                            } else {
+                                VerdictStatus::Fail
+                            },
+                            message: Some(message.clone()),
+                            duration_us: 0,
+                            capsule_path: None,
+                        };
+                        if let Ok(json) = rec.to_json() {
+                            let _ = cache.put(&rec.cache_key_hex(), json.as_bytes());
+                        }
+                    }
+                    case_reports.insert(
+                        test.name.clone(),
+                        UnitTestCaseReport {
+                            name: test.name.clone(),
+                            line,
+                            column,
+                            passed,
+                            result: None,
+                            message,
+                            engine: TestEngine::Checker,
+                            fallback_reason: None,
+                            anvil_mode: Some(TestMode::ExpectError),
+                            cached: Some(false),
+                            test_case_pin: None,
+                            vchrono_capsule: None,
+                        },
+                    );
+                }
+                TestMode::Property => {
+                    let explicit = match eval_test_case_args(&test.func, &test.raw_cases) {
+                        Ok(rows) => rows,
+                        Err(message) => {
+                            all_passed = false;
+                            case_reports.insert(
+                                test.name.clone(),
+                                UnitTestCaseReport {
+                                    name: test.name.clone(),
+                                    line,
+                                    column,
+                                    passed: false,
+                                    result: None,
+                                    message,
+                                    engine: TestEngine::Crucible,
+                                    fallback_reason: None,
+                                    anvil_mode: Some(TestMode::Property),
+                                    cached: Some(false),
+                                    test_case_pin: None,
+                                    vchrono_capsule: None,
+                                },
+                            );
+                            continue;
+                        }
+                    };
+                    let cases_n = if test.plan.property_cases > 0 {
+                        test.plan.property_cases as usize
+                    } else {
+                        vesper_test::DEFAULT_PROPERTY_CASES as usize
+                    };
+                    let outcome = run_property_test(
+                        &checked.world,
+                        &test.name,
+                        cases_n,
+                        &explicit,
+                        opts.fuel,
+                    );
+                    let passed = outcome.passed;
+                    if !passed {
+                        all_passed = false;
+                    } else {
+                        replay.push(ReplayTest::Property {
+                            name: test.name.clone(),
+                            cases: cases_n,
+                            explicit: explicit.clone(),
+                        });
+                    }
+                    let mut capsule = None;
+                    let mut message = if passed {
+                        format!("ok ({} case(s))", outcome.cases_run)
+                    } else {
+                        outcome
+                            .failure_message
+                            .clone()
+                            .unwrap_or_else(|| "property failed".into())
+                    };
+                    if !passed {
+                        let out_dir = Path::new("target").join("anvil");
+                        let tape = outcome.failing_tape.as_deref().unwrap_or(&[]);
+                        if let Ok(path) = write_vchrono_capsule(
+                            &out_dir,
+                            &test.name,
+                            outcome.seed,
+                            tape,
+                            &message,
+                        ) {
+                            capsule = Some(path.display().to_string());
+                        }
+                        if let Some(ce) = &outcome.counterexample {
+                            let rendered: Vec<String> =
+                                ce.iter().map(format_value_literal).collect();
+                            message =
+                                format!("{message}; counterexample=({})", rendered.join(", "));
+                        }
+                    }
+                    if let Some(cache) = &verdict_cache
+                        && is_cacheable(&test.plan)
+                    {
+                        let rec = VerdictRecord {
+                            key: cache_key,
+                            test_name: test.name.clone(),
+                            mode: TestMode::Property,
+                            status: if passed {
+                                VerdictStatus::Pass
+                            } else {
+                                VerdictStatus::Fail
+                            },
+                            message: Some(message.clone()),
+                            duration_us: 0,
+                            capsule_path: capsule.clone(),
+                        };
+                        if let Ok(json) = rec.to_json() {
+                            let _ = cache.put(&rec.cache_key_hex(), json.as_bytes());
+                        }
+                    }
+                    case_reports.insert(
+                        test.name.clone(),
+                        UnitTestCaseReport {
+                            name: test.name.clone(),
+                            line,
+                            column,
+                            passed,
+                            result: None,
+                            message,
+                            engine: TestEngine::Crucible,
+                            fallback_reason: None,
+                            anvil_mode: Some(TestMode::Property),
+                            cached: Some(false),
+                            test_case_pin: outcome.test_case_pin,
+                            vchrono_capsule: capsule,
+                        },
+                    );
+                }
+                TestMode::SimPulse => {
+                    let schedules = if test.plan.sim_schedules > 0 {
+                        test.plan.sim_schedules as usize
+                    } else {
+                        vesper_test::DEFAULT_SIM_SCHEDULES as usize
+                    };
+                    let profile = match &test.plan.fault_profile {
+                        Some(FaultProfile::TornWalSector) => "TornWalSector",
+                        Some(FaultProfile::NetPartition) => "NetPartition",
+                        Some(FaultProfile::ClockSkew) => "ClockSkew",
+                        Some(FaultProfile::Custom(s)) => s.as_str(),
+                        None => "None",
+                    };
+                    let outcome = run_simpulse_test_on_world(
+                        &checked.world,
+                        &test.name,
+                        schedules,
+                        profile,
+                        test.plan.seed,
+                    );
+                    let passed = outcome.passed;
+                    if !passed {
+                        all_passed = false;
+                    } else {
+                        replay.push(ReplayTest::SimPulse {
+                            name: test.name.clone(),
+                            schedules,
+                            profile: profile.to_string(),
+                            seed: test.plan.seed,
+                        });
+                    }
+                    let message = if passed {
+                        format!(
+                            "ok ({} schedule(s), {} DPOR exec(s))",
+                            outcome.schedules_run, outcome.dpor_executions
+                        )
+                    } else {
+                        outcome
+                            .failure_message
+                            .clone()
+                            .unwrap_or_else(|| "SimPulse schedule failed".into())
+                    };
+                    let mut capsule = None;
+                    if !passed {
+                        let out_dir = Path::new("target").join("anvil");
+                        let fail_seed = outcome.failing_seed.unwrap_or(test.plan.seed);
+                        if let Ok(path) =
+                            write_vchrono_capsule(&out_dir, &test.name, fail_seed, &[], &message)
+                        {
+                            capsule = Some(path.display().to_string());
+                        }
+                    }
+                    case_reports.insert(
+                        test.name.clone(),
+                        UnitTestCaseReport {
+                            name: test.name.clone(),
+                            line,
+                            column,
+                            passed,
+                            result: None,
+                            message,
+                            engine: TestEngine::SimPulse,
+                            fallback_reason: None,
+                            anvil_mode: Some(TestMode::SimPulse),
+                            cached: Some(false),
+                            test_case_pin: None,
+                            vchrono_capsule: capsule,
+                        },
+                    );
+                }
+            }
         }
+
+        if !unit_batch_selected.is_empty() {
+            let (unit_passed, unit_cases) = run_tests_on_world(
+                &source,
+                &checked.world,
+                &unit_batch_selected,
+                opts.fuel,
+                !opts.mutate,
+            );
+            if !unit_passed {
+                all_passed = false;
+            }
+            for mut rep in unit_cases {
+                if let Some(plan) = unit_plans.get(&rep.name) {
+                    rep.anvil_mode = Some(plan.primary_mode);
+                    // The harness cannot measure stack, cycles or allocations
+                    // yet, so a gated test is never reported as passing on the
+                    // strength of its ordinary unit run.
+                    if plan.primary_mode == TestMode::BudgetGate && rep.passed {
+                        rep.passed = false;
+                        all_passed = false;
+                        rep.message = format!(
+                            "budget gate not enforced: this harness cannot yet check {} (the unit run passed)",
+                            budget_gate_names(plan)
+                        );
+                    }
+                }
+                case_reports.insert(rep.name.clone(), rep);
+            }
+        }
+
+        // Preserve source declaration order for deterministic reports.
+        let mut ordered_cases = Vec::with_capacity(selected_tests.len());
+        let mut file_passed = true;
+        for test in &selected_tests {
+            if let Some(rep) = case_reports.remove(&test.name) {
+                if !rep.passed {
+                    file_passed = false;
+                }
+                ordered_cases.push(rep);
+            }
+        }
+        let unit_selected_pairs: Vec<(String, Span)> = selected_tests
+            .iter()
+            .filter(|t| matches!(t.plan.primary_mode, TestMode::Unit | TestMode::BudgetGate))
+            .map(|t| (t.name.clone(), t.span.clone()))
+            .collect();
+
         results.push(FileUnitTests {
             display: display.clone(),
             source,
             report: UnitTestFileReport {
                 file: display,
-                passed,
-                tests: cases,
+                passed: file_passed,
+                tests: ordered_cases,
                 error: None,
             },
-            selected,
+            selected: unit_selected_pairs,
+            replay,
+            test_names: all_test_names,
             parsed_items: parsed.module.items,
         });
     }
@@ -742,8 +1478,16 @@ fn collect_mutants_in_fn(
 }
 
 fn collect_file_mutants(unit: &FileUnitTests) -> Vec<MutantCandidate> {
+    // Mutants are replayed against the file's unit and budget-gate tests
+    // (`unit.selected`) and its passing property and SimPulse tests
+    // (`unit.replay`). A file with none of those would report every
+    // well-typed mutant as surviving without running a test, so it gets no
+    // mutants.
+    if unit.selected.is_empty() && unit.replay.is_empty() {
+        return Vec::new();
+    }
     let test_names: std::collections::BTreeSet<&str> =
-        unit.selected.iter().map(|(n, _)| n.as_str()).collect();
+        unit.test_names.iter().map(String::as_str).collect();
     let (tokens, _) = lexer::lex(&unit.source);
     let mut candidates = Vec::new();
     for item in &unit.parsed_items {
@@ -811,7 +1555,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
     let total_candidates = all_candidates.len();
     if total_candidates == 0 {
         return Err(format!(
-            "no mutation sites found outside test functions in {}",
+            "no mutation sites found outside test functions in {} (mutants are replayed against unit, budget-gate, property and SimPulse tests)",
             opts.path
         ));
     }
@@ -851,9 +1595,19 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                 }
             }
             Ok((_, checked)) => {
-                let (passed, cases) =
+                let (unit_passed, cases) =
                     run_tests_on_world(&mutated, &checked.world, &unit.selected, opts.fuel, false);
-                if passed {
+                let mut killer = cases
+                    .into_iter()
+                    .find(|c| !c.passed)
+                    .map(|k| (k.name, k.message));
+                if unit_passed {
+                    killer = unit
+                        .replay
+                        .iter()
+                        .find_map(|t| t.run(&checked.world, opts.fuel).err());
+                }
+                if killer.is_none() {
                     survived += 1;
                     MutantReport {
                         index: idx,
@@ -865,11 +1619,10 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                         replacement: cand.replacement.clone(),
                         status: MutantStatus::Survived,
                         killed_by: None,
-                        detail: Some("all unit tests still passed".into()),
+                        detail: Some("all replayed tests still passed".into()),
                     }
                 } else {
                     killed += 1;
-                    let killer = cases.into_iter().find(|c| !c.passed);
                     MutantReport {
                         index: idx,
                         file: cand.file.clone(),
@@ -879,8 +1632,8 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                         original: cand.original.clone(),
                         replacement: cand.replacement.clone(),
                         status: MutantStatus::Killed,
-                        killed_by: killer.as_ref().map(|k| k.name.clone()),
-                        detail: killer.map(|k| k.message),
+                        killed_by: killer.as_ref().map(|k| k.0.clone()),
+                        detail: killer.map(|k| k.1),
                     }
                 }
             }
@@ -1015,6 +1768,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 let engine = match t.engine {
                     TestEngine::Jit => "jit",
                     TestEngine::Evaluator => "evaluator",
+                    TestEngine::Checker => "checker",
+                    TestEngine::Crucible => "crucible",
+                    TestEngine::SimPulse => "simpulse",
+                    TestEngine::Cache => "cache",
                 };
                 println!(
                     "{}:{}:{}: {} {} ({}) [{}]",
@@ -1026,6 +1783,12 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                     t.message,
                     engine
                 );
+                if let Some(pin) = &t.test_case_pin {
+                    println!("  pin regression: {pin}");
+                }
+                if let Some(capsule) = &t.vchrono_capsule {
+                    println!("  replay capsule: {capsule}");
+                }
             }
         }
         println!(

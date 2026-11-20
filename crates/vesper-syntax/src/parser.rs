@@ -759,11 +759,52 @@ impl Parser<'_> {
             false
         }
     }
+    /// Consumes a balanced `(...)` argument list for `@test(...)` or `@test_case(...)`.
+    fn attr_paren_args(&mut self) {
+        self.expect(K::LParen);
+        let mut depth: usize = 1;
+        while depth > 0 && !self.at(K::Eof) && !self.halted {
+            match self.kind() {
+                K::LParen => {
+                    depth += 1;
+                    self.bump();
+                }
+                K::RParen => {
+                    depth -= 1;
+                    self.bump();
+                }
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+        if depth > 0 && !self.halted {
+            self.error("unterminated attribute argument list");
+        }
+    }
+    fn test_attr(&mut self) -> bool {
+        if self.at(K::At) && self.at_word(1, "test") {
+            self.bump();
+            self.bump();
+            if self.at(K::LParen) {
+                self.attr_paren_args();
+            }
+            true
+        } else if self.at(K::At) && self.at_word(1, "test_case") {
+            self.bump();
+            self.bump();
+            if self.at(K::LParen) {
+                self.attr_paren_args();
+            } else {
+                self.error("@test_case requires an argument list in parentheses");
+            }
+            true
+        } else {
+            false
+        }
+    }
     fn item(&mut self) -> Option<Item> {
-        // `pub` (before or after `@fip`) marks an importable item.
-        let public = self.at_word(0, "pub")
-            || (self.at(K::At) && self.at_word(1, "fip") && self.at_word(2, "pub"));
-        let item = self.declaration()?;
+        let (item, public) = self.declaration()?;
         if public {
             match &item {
                 Item::Adt(a) => self.public_items.push(a.name.clone()),
@@ -774,7 +815,7 @@ impl Parser<'_> {
         }
         Some(item)
     }
-    fn declaration(&mut self) -> Option<Item> {
+    fn declaration(&mut self) -> Option<(Item, bool)> {
         let start = self.start();
         if self.at_word(0, "use") && self.at_word(1, "model") {
             self.use_model(0..self.source.len());
@@ -806,35 +847,51 @@ impl Parser<'_> {
             self.eat(K::Semi);
             return None;
         }
-        let mut fip = self.fip_attr();
-        let public = self.at_word(0, "pub")
-            && (self.at_word(1, "trait")
-                || (self.at_word(1, "const") && self.nth(2) == K::Upper)
-                || self.at_word(1, "model")
-                || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
-                || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
-                    && matches!(self.nth(2), K::Struct | K::Enum | K::Effect))
-                || (!fip
-                    && self.nth(1) == K::At
-                    && self.at_word(2, "fip")
-                    && self.nth(3) == K::Fn));
-        if public {
-            self.bump();
-        }
-        if !fip {
-            fip = self.fip_attr();
+        let mut fip = false;
+        let mut has_test_attr = false;
+        let mut public = false;
+        loop {
+            if self.fip_attr() {
+                fip = true;
+                continue;
+            }
+            if self.test_attr() {
+                has_test_attr = true;
+                continue;
+            }
+            if !public
+                && self.at_word(0, "pub")
+                && (self.at_word(1, "trait")
+                    || (self.at_word(1, "const") && self.nth(2) == K::Upper)
+                    || self.at_word(1, "model")
+                    || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
+                    || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
+                        && matches!(self.nth(2), K::Struct | K::Enum | K::Effect))
+                    || (self.nth(1) == K::At
+                        && (self.at_word(2, "fip")
+                            || self.at_word(2, "test")
+                            || self.at_word(2, "test_case"))))
+            {
+                self.bump();
+                public = true;
+                continue;
+            }
+            break;
         }
         if fip && !self.at(K::Fn) {
             self.error("@fip may only annotate a fn declaration");
         }
+        if has_test_attr && !self.at(K::Fn) {
+            self.error("@test and @test_case may only annotate a fn declaration");
+        }
         if self.at_word(0, "const") && self.nth(1) == K::Upper {
-            return Some(Item::Function(Box::new(self.const_item(start))));
+            return Some((Item::Function(Box::new(self.const_item(start))), public));
         }
         if self.at_word(0, "trait") {
-            return Some(Item::Trait(self.trait_decl(start, public)));
+            return Some((Item::Trait(self.trait_decl(start, public)), public));
         }
         if self.at_word(0, "model") {
-            return Some(Item::Conformance(self.model_decl(start, public)));
+            return Some((Item::Conformance(self.model_decl(start, public)), public));
         }
         let tile_width = if self.at_word(0, "tiled") && self.nth(1) == K::LParen {
             self.bump();
@@ -958,7 +1015,7 @@ impl Parser<'_> {
             }
             K::Fn => {
                 let mut function = self.function(false, fip);
-                if public || fip {
+                if public || fip || has_test_attr {
                     function.span.start = start;
                 }
                 Some(Item::Function(Box::new(function)))
@@ -985,7 +1042,7 @@ impl Parser<'_> {
                         trait_ref,
                     );
                     self.row_names = old_rows;
-                    return Some(Item::Conformance(c));
+                    return Some((Item::Conformance(c), public));
                 }
                 let trait_start = self.start();
                 let ty = self.ty();
@@ -1016,7 +1073,7 @@ impl Parser<'_> {
                         trait_ref,
                     );
                     self.row_names = old_rows;
-                    return Some(Item::Conformance(c));
+                    return Some((Item::Conformance(c), public));
                 }
                 self.expect(K::LBrace);
                 let mut methods = vec![];
@@ -1048,6 +1105,7 @@ impl Parser<'_> {
             }
             _ => None,
         }
+        .map(|item| (item, public))
     }
     fn function_header(&mut self) -> crate::macro_source::FunctionHeader {
         let start = self.start();

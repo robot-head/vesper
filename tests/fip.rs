@@ -1146,3 +1146,83 @@ fn main() -> i64 {
         "NativeBatch preflight should reject Op::Fip"
     );
 }
+
+#[test]
+fn fip_rejects_a_generic_helper_that_takes_a_box() {
+    rejected(
+        r#"
+fn discard[T: mod affine](sink value: T) { let _ = value; }
+@fip fn caller(sink box_value: Box[i64]) {
+    discard[Box[i64]](box_value)
+}
+"#,
+        "E0801",
+        "non-@fip",
+    );
+}
+
+#[test]
+fn projected_sink_cleanup_only_drops_the_transferred_field() {
+    let checked = accepted(
+        r#"
+affine struct Pair { first: Box[i64], second: Box[i64] }
+fn release(sink pair.{first}: Pair) {}
+"#,
+    );
+    let mut program = ir::lower(&checked);
+    fip::elaborate_non_fip_drops(&checked.world, &mut program);
+    let drops: Vec<_> = program.functions["release"]
+        .box_drops_before_term
+        .values()
+        .flatten()
+        .collect();
+    let [fip::FipDrop::Place(place, _)] = drops.as_slice() else {
+        panic!("expected one drop for the projected sink, got {drops:?}");
+    };
+    assert_eq!(place.root, "pair");
+    assert_eq!(place.path, ["first"]);
+}
+
+#[test]
+fn cross_block_box_temporary_is_released_after_the_borrow_and_on_abort() {
+    let checked = accepted(
+        r#"
+fn observe(in value: Box[i64], tag: bool) -> bool { tag }
+fn pick(flag: bool) -> bool {
+    observe(Box::new(42), if flag { true } else { false })
+}
+"#,
+    );
+    let mut program = ir::lower(&checked);
+    fip::elaborate_non_fip_drops(&checked.world, &mut program);
+    let pick = &program.functions["pick"];
+    let (block, instruction, temporary) = pick
+        .blocks
+        .iter()
+        .enumerate()
+        .find_map(|(block, body)| {
+            body.instructions
+                .iter()
+                .enumerate()
+                .find_map(|(index, inst)| {
+                    if let ir::Op::Call { callee, args, .. } = &inst.op
+                        && callee == "observe"
+                    {
+                        Some((block, index, args[0].value))
+                    } else {
+                        None
+                    }
+                })
+        })
+        .expect("call after the branch");
+    assert_ne!(block, 0);
+    assert!(pick.box_drops_after_inst[&block].iter().any(|(at, drop)| {
+        *at == instruction && matches!(drop, fip::FipDrop::Value(id, _) if *id == temporary)
+    }));
+    let abort = fip::fail_exit_drops(&checked.world, pick);
+    assert!(
+        abort[&(block, instruction)]
+            .iter()
+            .any(|drop| { matches!(drop, fip::FipDrop::Value(id, _) if *id == temporary) })
+    );
+}

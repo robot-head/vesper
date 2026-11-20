@@ -76,6 +76,17 @@ release workflow profile, not a full workspace rerun on each native OS. The
 workflow publishes nothing. A planning failure, failed test, or wrong checkout
 fails the corresponding required check.
 
+## Runner disk
+
+BuildBuddy reuses workflow runners between runs, disk included. Tests write
+their scratch roots under `/tmp` (Bazel sets no `TMPDIR` for tests), and the
+job builds the Logos42 checker there. A run that is killed or fails leaves
+those behind, so `Test all targets` starts with `scripts/ci/reclaim-disk.sh`:
+it removes earlier runs' `/tmp` leftovers, runs `bazel clean` if less than
+20 GB is free (that makes the run cold, so it is a last resort), and prints
+disk use. The test step logs free space every 2 minutes, deletes the checker
+and prints disk use again when it ends (#1200).
+
 ## PR test tiers
 
 `Test all targets` builds and lints every target on every run. Its tests come

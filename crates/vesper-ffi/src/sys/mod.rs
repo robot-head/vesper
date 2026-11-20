@@ -332,6 +332,12 @@ pub enum ValueType {
         handle: ExternTypeDescriptor,
         nullable: bool,
     },
+    /// `ForeignVal[NonNull[H]]`: a handle result the library promises is
+    /// never `NULL`. Source code receives `H` itself, with no error arm; a
+    /// `NULL` breaks the promise and traps at the call site.
+    NonNullHandle {
+        handle: ExternTypeDescriptor,
+    },
 }
 /// Whether an `extern type`'s handles must be finalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -516,6 +522,11 @@ pub enum ParameterType {
         handle: ExternTypeDescriptor,
         access: HandleAccess,
     },
+    /// `nocapture in s: CStr`: a borrowed, noncapturing pointer to a
+    /// NUL-terminated byte string, passed as one C pointer. The caller's
+    /// bytes are copied into a fresh buffer with the terminator appended; an
+    /// argument holding a NUL byte is refused before the call.
+    CStr,
 }
 impl ParameterType {
     /// Size, alignment and direction of a single-element pointer parameter.
@@ -582,6 +593,7 @@ pub struct FunctionDescriptor {
     parameters: Vec<ParameterDescriptor>,
     result: ValueType,
     convention: CallingConvention,
+    errno: bool,
 }
 impl FunctionDescriptor {
     pub fn symbol(&self) -> &str {
@@ -592,6 +604,17 @@ impl FunctionDescriptor {
     }
     pub fn result(&self) -> &ValueType {
         &self.result
+    }
+    /// `-> ForeignVal[T] errno`: the thread's OS error code (`errno`, or
+    /// `GetLastError()` on Windows) is read right after the call returns.
+    pub fn reads_errno(&self) -> bool {
+        self.errno
+    }
+    /// Whether any parameter is a `CStr`, so the call may be refused.
+    pub fn takes_cstr(&self) -> bool {
+        self.parameters
+            .iter()
+            .any(|p| matches!(p.ty, ParameterType::CStr))
     }
     pub fn abi(&self) -> AbiSignature {
         let mut parameters = vec![];
@@ -604,9 +627,9 @@ impl FunctionDescriptor {
                     parameters.push(AbiType::Pointer);
                     parameters.push(AbiType::Integer(Scalar::Usize));
                 }
-                ParameterType::Pointer { .. } | ParameterType::Handle { .. } => {
-                    parameters.push(AbiType::Pointer)
-                }
+                ParameterType::Pointer { .. }
+                | ParameterType::Handle { .. }
+                | ParameterType::CStr => parameters.push(AbiType::Pointer),
             }
         }
         AbiSignature {
@@ -622,7 +645,9 @@ fn carrier(t: &ValueType) -> Option<AbiType> {
         ValueType::Scalar(s) => AbiType::Integer(*s),
         ValueType::Bool => AbiType::Integer(Scalar::U8),
         ValueType::Enum(e) => AbiType::Integer(e.scalar()),
-        ValueType::Address { .. } | ValueType::Handle { .. } => AbiType::Pointer,
+        ValueType::Address { .. } | ValueType::Handle { .. } | ValueType::NonNullHandle { .. } => {
+            AbiType::Pointer
+        }
     })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -768,6 +793,10 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                     })?;
                     self.text(handle.name())
                 }
+                ValueType::NonNullHandle { handle } => {
+                    self.text("nonnull-handle")?;
+                    self.text(handle.name())
+                }
             }
         }
     }
@@ -866,9 +895,14 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                     e.text(access.keyword())?;
                     e.text(handle.name())?;
                 }
+                ParameterType::CStr => e.text("nocapture-cstr")?,
             }
         }
         e.value(&f.result)?;
+        // Appended only when declared, so other functions keep their bytes.
+        if f.errno {
+            e.text("errno/after-call")?;
+        }
     }
     // Appended only when present, so descriptors without wire structs keep
     // the exact canonical bytes (and identities) of the earlier schema.

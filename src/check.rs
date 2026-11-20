@@ -402,6 +402,135 @@ impl World {
         }
         Some(ty)
     }
+
+    /// Forks this checked [`World`], registers or replaces `func` in the clone,
+    /// and runs the exact function-checking pass for `func` alone (body, modes,
+    /// linear obligations, effects, and place capabilities) without re-checking
+    /// unrelated sibling items in the module.
+    ///
+    /// Designed for `< 1 ms` in-memory negative tests (`@test(expect_error = ...)`)
+    /// and speculative mutant filtering.
+    pub fn check_isolated_item(&self, func: &Function) -> Vec<Diagnostic> {
+        let mut world = self.clone();
+        let mut func_norm = func.clone();
+        if crate::regions::active(&world) {
+            let labels = func_norm
+                .effects
+                .instances
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| e.name == crate::regions::REGION_EFFECT)
+                .filter_map(|(i, e)| {
+                    Some((e.label.clone()?, function_capability(&func_norm.name, i)))
+                })
+                .collect();
+            for p in &mut func_norm.params {
+                p.ty = crate::regions::normalize(&p.ty, &labels);
+            }
+            func_norm.result = crate::regions::normalize(&func_norm.result, &labels);
+        }
+        world
+            .functions
+            .insert(func_norm.name.clone(), func_norm.clone());
+        world.function_results.remove(&func_norm.name);
+
+        let mut diagnostics;
+        let mut option_tries;
+        let mut iteration = 0usize;
+        loop {
+            iteration += 1;
+            let mut c = Checker {
+                world: &world,
+                diagnostics: vec![],
+                types: BTreeMap::new(),
+                calls: BTreeMap::new(),
+                moves: BTreeMap::new(),
+                results: world.function_results.clone(),
+                handler_effects: world.handler_effects.clone(),
+                observations: vec![],
+                state_guards: vec![],
+                partial_ops: BTreeSet::new(),
+                overflow_ops: BTreeSet::new(),
+                dead: 0,
+                string_capacity: 0,
+                static_text: false,
+                bounds: BTreeMap::new(),
+                generics: vec![],
+                allowed: Effects::default(),
+                caps: vec![],
+                cap_aliases: BTreeMap::new(),
+                loans: vec![],
+                reserved_loans: BTreeSet::new(),
+                handler_frames: vec![],
+                slice_args: BTreeMap::new(),
+                effect_inference: vec![],
+                traits: None,
+                current: String::new(),
+                resolved: BTreeMap::new(),
+                control: vec![],
+                shadowed: vec![],
+                literals: Default::default(),
+                option_tries: BTreeSet::new(),
+            };
+            c.function_with_literal_typing(&func_norm);
+            let Checker {
+                diagnostics: errors,
+                results,
+                handler_effects,
+                option_tries: tries,
+                ..
+            } = c;
+            option_tries = tries;
+            let changed =
+                world.function_results != results || world.handler_effects != handler_effects;
+            world.function_results = results;
+            world.handler_effects = handler_effects;
+            diagnostics = errors;
+            if !changed {
+                break;
+            }
+            if iteration > world.handler_effects.len() * 2 + 4 {
+                diagnostics.push(Diagnostic::new(
+                    "E0408",
+                    "capability and continuation effect inference did not converge; add explicit type/effect annotations",
+                    func_norm.span.clone(),
+                ));
+                break;
+            }
+        }
+
+        if !option_tries.is_empty() {
+            let after = func_norm
+                .span
+                .end
+                .max(world.types.keys().map(|k| k.1).max().unwrap_or(0))
+                + 1;
+            let single = Module {
+                items: vec![Item::Function(Box::new(func_norm))],
+                ..Module::default()
+            };
+            let desugared = try_option::desugar(&single, &option_tries, after);
+            if let Some(Item::Function(desugared_fn)) = desugared.items.into_iter().next() {
+                return self.check_isolated_item(&desugared_fn);
+            }
+        }
+
+        let mut seen = BTreeSet::new();
+        diagnostics
+            .retain(|d| seen.insert((d.code.clone(), d.span.start, d.span.end, d.message.clone())));
+        diagnostics
+    }
+
+    /// Convenience wrapper around [`Self::check_isolated_item`] returning `Ok(())`
+    /// when `func` produces zero diagnostics, or `Err(diagnostics)` otherwise.
+    pub fn check_isolated_module_fn(&self, func: &Function) -> Result<(), Vec<Diagnostic>> {
+        let diagnostics = self.check_isolated_item(func);
+        if diagnostics.is_empty() {
+            Ok(())
+        } else {
+            Err(diagnostics)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -5499,4 +5628,149 @@ fn instantiate_latent_effects(actual: &Type, target: &Type) -> Type {
     }
     collect(actual, target, &mut labels);
     rename_capabilities(actual, &labels)
+}
+
+#[cfg(test)]
+mod isolated_item_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn extract_fn(source: &str, name: &str) -> Function {
+        let parsed = crate::parser::parse(source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "parse errors: {:?}",
+            parsed.diagnostics
+        );
+        parsed
+            .module
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Function(f) if f.name == name => Some(*f),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("function '{name}' not found"))
+    }
+
+    #[test]
+    fn test_attrs_parse_cleanly_in_root_parser() {
+        let src = r#"
+@test(cases = 64)
+@test_case(1, 2)
+@test_case(a = 3, b = 4)
+fn add_ok(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    a + b
+}
+"#;
+        let parsed = crate::parser::parse(src);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let attrs = vesper_syntax::test_attrs::extract_test_attrs(src);
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].fn_name, "add_ok");
+        assert_eq!(attrs[0].test.as_ref().unwrap().cases, Some(64));
+        assert_eq!(attrs[0].test_cases.len(), 2);
+    }
+
+    #[test]
+    fn check_isolated_item_catches_e0302_and_e0301_with_related_spans() {
+        let base_src = r#"
+linear struct Tx { id: i64 }
+copy struct Counter { val: i64 }
+
+fn consume_tx(sink tx: Tx) -> i64 {
+    let Tx { id } = tx;
+    id
+}
+
+fn swap_counters(inout a: Counter, inout b: Counter) -> i64 {
+    let t = a.val;
+    a.val = b.val;
+    b.val = t;
+    a.val
+}
+"#;
+        let base_parsed = crate::parser::parse(base_src);
+        assert!(
+            base_parsed.diagnostics.is_empty(),
+            "{:?}",
+            base_parsed.diagnostics
+        );
+        let base_checked = check(&base_parsed.module);
+        assert!(
+            base_checked.diagnostics.is_empty(),
+            "{:?}",
+            base_checked.diagnostics
+        );
+        let world = &base_checked.world;
+        let orig_fn_count = world.functions.len();
+
+        let neg_e0302_src = r#"
+@test(expect_error = E0302, primary = "tx", related = "linear binding introduced here")
+fn leak_tx() -> i64 {
+    let tx = Tx { id: 7 };
+    0
+}
+"#;
+        let leak_fn = extract_fn(neg_e0302_src, "leak_tx");
+
+        let neg_e0301_src = r#"
+@test(expect_error = E0301, related = "introduced here")
+fn alias_mut() -> i64 {
+    let mut c = Counter { val: 1 };
+    swap_counters(c, c)
+}
+"#;
+        let alias_fn = extract_fn(neg_e0301_src, "alias_mut");
+
+        let ok_src = r#"
+@test
+fn ok_tx() -> i64 {
+    let tx = Tx { id: 9 };
+    consume_tx(tx)
+}
+"#;
+        let ok_fn = extract_fn(ok_src, "ok_tx");
+
+        // Warm up once, then measure isolated checks.
+        let t0 = Instant::now();
+        let e0302_diags = world.check_isolated_item(&leak_fn);
+        let d_e0302 = t0.elapsed();
+
+        let t1 = Instant::now();
+        let e0301_diags = world.check_isolated_item(&alias_fn);
+        let d_e0301 = t1.elapsed();
+
+        assert!(
+            e0302_diags
+                .iter()
+                .any(|d| d.code == "E0302" && !d.related.is_empty()),
+            "expected E0302 with related span, got: {e0302_diags:?}"
+        );
+        assert!(
+            e0301_diags
+                .iter()
+                .any(|d| d.code == "E0301" && !d.related.is_empty()),
+            "expected E0301 with related span, got: {e0301_diags:?}"
+        );
+        assert!(
+            world.check_isolated_module_fn(&ok_fn).is_ok(),
+            "expected ok_tx to pass isolated check"
+        );
+        assert!(
+            world.check_isolated_module_fn(&leak_fn).is_err(),
+            "expected leak_tx to fail isolated check"
+        );
+        // Parent world must remain unmodified.
+        assert_eq!(world.functions.len(), orig_fn_count);
+        assert!(!world.functions.contains_key("leak_tx"));
+        assert!(!world.functions.contains_key("alias_mut"));
+        // Sanity check latency (sub-millisecond in release, very fast in debug).
+        assert!(
+            d_e0302.as_millis() < 50 && d_e0301.as_millis() < 50,
+            "isolated checks unexpectedly slow: e0302={d_e0302:?}, e0301={d_e0301:?}"
+        );
+    }
 }

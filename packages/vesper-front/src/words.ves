@@ -127,6 +127,14 @@ pub fn w_const() -> u8 {
     26
 }
 
+pub fn w_test() -> u8 {
+    27
+}
+
+pub fn w_test_case() -> u8 {
+    28
+}
+
 pub fn w_TiledSeq() -> u8 {
     50
 }
@@ -151,6 +159,8 @@ pub fn keyword(n: u64, w: u64) -> u8 {
 pub fn lower_word(in b: Slice[u8], s: u64, n: u64, w: u64) -> u8 {
     if n <= 8 {
         lower_word_of(w)
+    } else if n == 9 && is(in b, s, in "test_case".as_bytes()) {
+        28
     } else if n == 13 && is(in b, s, in "load_tile_vec".as_bytes()) {
         22
     } else {
@@ -293,6 +303,8 @@ pub fn lower_word_of(w: u64) -> u8 {
         1819242338 => 42,
         // loop
         1886351212 => 18,
+        // test
+        1953719668 => 27,
         // tiled
         431198333300 => 6,
         // where
