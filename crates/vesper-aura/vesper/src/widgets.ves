@@ -34,6 +34,12 @@ use self::util::{
     op
 };
 
+// Recorded event tags (Op in lib.ves, decoded by src/ported/codec.rs);
+// constants, not code functions, so that `record` inlines them (see
+// docs/parallel-results/magic-constants.md).
+const EV_CREATED: u64 = 1;
+const EV_DESTROYED: u64 = 2;
+
 pub fn patch_set_root(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
     -> Option[BackendFault] {
     let has = word(in w, base, 1) == 1;
@@ -94,7 +100,7 @@ pub fn patch_create(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in t
     );
     s.wlive.push(true);
     s.nwidgets = inc(s.nwidgets);
-    record(inout s, lim, op(1, serial, 0, 0, 0))
+    record(inout s, lim, op(EV_CREATED, serial, 0, 0, 0))
 }
 
 pub fn patch_destroy(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
@@ -121,5 +127,5 @@ pub fn patch_destroy(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in 
     }
     s.wlive.try_set(i, false);
     s.nwidgets = dec(s.nwidgets);
-    record(inout s, lim, op(2, serial, 0, 0, 0))
+    record(inout s, lim, op(EV_DESTROYED, serial, 0, 0, 0))
 }

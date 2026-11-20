@@ -7,6 +7,20 @@ use super::huffman;
 /// IDs, indices and lengths alike.
 pub const MAX_INT: u64 = (1 << 62) - 1;
 
+/// RFC 7541 §5.1: each byte after the prefix carries 7 bits and a
+/// continuation flag; past a 56-bit shift the value cannot fit.
+#[cfg(not(feature = "vesper-port"))]
+const CONTINUATION: u8 = 0x80;
+#[cfg(not(feature = "vesper-port"))]
+const PAYLOAD_MASK: u8 = 0x7f;
+#[cfg(not(feature = "vesper-port"))]
+const PAYLOAD_BITS: u32 = 7;
+#[cfg(not(feature = "vesper-port"))]
+const MAX_SHIFT: u32 = 56;
+/// The shortest Huffman code is 5 bits (RFC 7541 Appendix B).
+#[cfg(not(feature = "vesper-port"))]
+const MIN_CODE_BITS: usize = 5;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrefixError {
     /// More bytes are needed (only an error once the input is complete).
@@ -39,18 +53,18 @@ pub fn decode_int(buf: &[u8], bits: u8) -> Result<(u64, usize), PrefixError> {
     for (i, &byte) in buf.iter().enumerate().skip(1) {
         // 62-bit values need at most 9 continuation bytes after an 8-bit
         // prefix; anything longer (including zero-padded) is refused.
-        if shift > 56 {
+        if shift > MAX_SHIFT {
             return Err(PrefixError::IntegerOverflow);
         }
-        let add = u64::from(byte & 0x7f) << shift;
+        let add = u64::from(byte & PAYLOAD_MASK) << shift;
         value = value
             .checked_add(add)
             .filter(|v| *v <= MAX_INT)
             .ok_or(PrefixError::IntegerOverflow)?;
-        if byte & 0x80 == 0 {
+        if byte & CONTINUATION == 0 {
             return Ok((value, i + 1));
         }
-        shift += 7;
+        shift += PAYLOAD_BITS;
     }
     Err(PrefixError::Incomplete)
 }
@@ -67,9 +81,9 @@ pub fn encode_int(out: &mut Vec<u8>, flags: u8, bits: u8, mut value: u64) {
     }
     out.push(flags | mask as u8);
     value -= mask;
-    while value >= 0x80 {
-        out.push(0x80 | (value & 0x7f) as u8);
-        value >>= 7;
+    while value >= u64::from(CONTINUATION) {
+        out.push(CONTINUATION | (value as u8 & PAYLOAD_MASK));
+        value >>= PAYLOAD_BITS;
     }
     out.push(value as u8);
 }
@@ -90,7 +104,10 @@ pub fn decode_string(
     // wire length by the limit either way before touching the bytes.
     let len = usize::try_from(len).map_err(|_| PrefixError::StringTooLong)?;
     let limit = if huff {
-        max_len.saturating_mul(8).div_ceil(5).max(max_len)
+        max_len
+            .saturating_mul(8)
+            .div_ceil(MIN_CODE_BITS)
+            .max(max_len)
     } else {
         max_len
     };

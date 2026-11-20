@@ -1,6 +1,20 @@
 // Sequence, sort, search and text helpers.
 use self::codes::{
-    none_id
+    e_changed,
+    e_click,
+    e_focused,
+    k_button,
+    k_container,
+    k_input,
+    none_id,
+    p_enabled,
+    p_text,
+    p_value,
+    p_visible,
+    p_width,
+    v_bool,
+    v_int,
+    v_text
 };
 use self::{
     Lim,
@@ -12,6 +26,30 @@ use self::{
     TProp,
     TSub
 };
+
+// The White_Space code points (Unicode PropList.txt, as Rust's
+// char::is_whitespace): TAB through CARRIAGE_RETURN and EN_QUAD through
+// HAIR_SPACE are ranges.
+const TAB: u64 = 0x09;
+const CARRIAGE_RETURN: u64 = 0x0d;
+const SPACE: u64 = 0x20;
+const NEXT_LINE: u64 = 0x85;
+const NO_BREAK_SPACE: u64 = 0xa0;
+const OGHAM_SPACE_MARK: u64 = 0x1680;
+const EN_QUAD: u64 = 0x2000;
+const HAIR_SPACE: u64 = 0x200a;
+const LINE_SEPARATOR: u64 = 0x2028;
+const PARAGRAPH_SEPARATOR: u64 = 0x2029;
+const NARROW_NO_BREAK_SPACE: u64 = 0x202f;
+const MEDIUM_MATHEMATICAL_SPACE: u64 = 0x205f;
+const IDEOGRAPHIC_SPACE: u64 = 0x3000;
+// UTF-8 lead bytes: below 0x80 is ASCII, below 0xe0 starts a two-byte
+// sequence, below 0xf0 a three-byte one, and the rest four.
+const UTF8_ASCII_END: u64 = 0x80;
+const UTF8_LEAD_3: u64 = 0xe0;
+const UTF8_LEAD_4: u64 = 0xf0;
+// A Width is an i64 and must not be negative: its bits stay below the sign bit.
+const I64_SIGN: u64 = 0x8000000000000000;
 
 pub fn get_u64(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
@@ -315,35 +353,38 @@ pub fn find_key(in keys: ChunkSeq[u64], in sorted: ChunkSeq[u64], key: u64) -> u
 
 // Whether a Unicode scalar is White_Space (Rust's char::is_whitespace).
 pub fn is_space(c: u64) -> bool {
-    (c >= 9 && c <= 13)
+    if c >= TAB && c <= CARRIAGE_RETURN || c == SPACE {
+        return true;
+    }
+    if c < NEXT_LINE {
+        return false;
+    }
+    c
+        == NEXT_LINE
         || c
-        == 32
+        == NO_BREAK_SPACE
         || c
-        == 133
+        == OGHAM_SPACE_MARK
+        || (c >= EN_QUAD && c <= HAIR_SPACE)
         || c
-        == 160
+        == LINE_SEPARATOR
         || c
-        == 5760
-        || (c >= 8192 && c <= 8202)
+        == PARAGRAPH_SEPARATOR
         || c
-        == 8232
+        == NARROW_NO_BREAK_SPACE
         || c
-        == 8233
+        == MEDIUM_MATHEMATICAL_SPACE
         || c
-        == 8239
-        || c
-        == 8287
-        || c
-        == 12288
+        == IDEOGRAPHIC_SPACE
 }
 
 // The width of the UTF-8 sequence that starts with byte `b`.
 pub fn utf8_width(b: u64) -> u64 {
-    if b < 128 {
+    if b < UTF8_ASCII_END {
         1
-    } else if b < 224 {
+    } else if b < UTF8_LEAD_3 {
         2
-    } else if b < 240 {
+    } else if b < UTF8_LEAD_4 {
         3
     } else {
         4
@@ -388,14 +429,14 @@ pub fn blank_seq(in bytes: ChunkSeq[u8], start: u64, len: u64) -> bool {
 
 // view::property_valid. `payload` is an Int's bits.
 pub fn property_valid(kind: u64, property: u64, tag: u64, payload: u64) -> bool {
-    if property == 0 && tag == 0 {
-        kind != 0
-    } else if property == 1 && tag == 0 {
-        kind == 3
-    } else if (property == 2 || property == 3) && tag == 1 {
+    if property == p_text() && tag == v_text() {
+        kind != k_container()
+    } else if property == p_value() && tag == v_text() {
+        kind == k_input()
+    } else if (property == p_enabled() || property == p_visible()) && tag == v_bool() {
         true
-    } else if property == 4 && tag == 2 {
-        payload < 9223372036854775808
+    } else if property == p_width() && tag == v_int() {
+        payload < I64_SIGN
     } else {
         false
     }
@@ -403,5 +444,11 @@ pub fn property_valid(kind: u64, property: u64, tag: u64, payload: u64) -> bool 
 
 // view::event_valid.
 pub fn event_valid(kind: u64, event: u64) -> bool {
-    (kind == 2 && (event == 0 || event == 2)) || (kind == 3 && (event == 1 || event == 2))
+    if kind == k_button() {
+        event == e_click() || event == e_focused()
+    } else if kind == k_input() {
+        event == e_changed() || event == e_focused()
+    } else {
+        false
+    }
 }

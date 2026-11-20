@@ -41,7 +41,7 @@ vesper_port_object(
 vesper_port_object(
     name = "aura_vesper_divergent_plan",
     edit_src = "vesper/src/plan.ves",
-    edits = {"op(10, node.id, child_id, from, index)": "op(10, node.id, child_id, index, from)"},
+    edits = {"op(op_move_child(), node.id, child_id, from, index)": "op(op_move_child(), node.id, child_id, index, from)"},
     library = "aura",
     package = ":port_package",
     target = VESPER_TARGET,
@@ -68,7 +68,7 @@ vesper_port_object(
 vesper_port_object(
     name = "aura_vesper_divergent_sim",
     edit_src = "vesper/src/sim.ves",
-    edits = {"                if kind == 2 || kind == 3 {\n                    q.items.push(id);": "                if kind == 2 {\n                    q.items.push(id);"},
+    edits = {"                if kind == k_button() || kind == k_input() {\n                    q.items.push(id);": "                if kind == k_button() {\n                    q.items.push(id);"},
     library = "aura",
     package = ":port_package",
     target = VESPER_TARGET,

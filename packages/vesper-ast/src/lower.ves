@@ -903,7 +903,7 @@ fn ident(inout l: L) -> u32 {
 }
 
 fn contextual_name(k: u8) -> bool {
-    k == k_state() || k == k_linear() || k == k_with()
+    k == k_state() || k == k_linear() || k == k_with() || k == k_eff()
 }
 
 fn at_contextual_name(in l: L) -> bool {
@@ -2883,6 +2883,8 @@ fn for_header(in l: L) -> bool {
             == k_true()
             || k
             == k_false()
+            || k
+            == k_eff()
     )
 }
 
@@ -3077,8 +3079,13 @@ fn closure(inout l: L) -> u32 {
     } else {
         infer(inout l)
     };
-    let infer_effects = !at(in l, k_eff());
-    let effs = effects(inout l);
+    // `Parser::closure`: only `eff [` opens a row after a closure head.
+    let infer_effects = !(at(in l, k_eff()) && nth(in l, 1) == k_l_bracket());
+    let effs = if infer_effects {
+        effects_node(inout l, 0, none())
+    } else {
+        effects(inout l)
+    };
     let outer = vals_mark(in l);
     for i in 0..list_len(in l.ast, ps) {
         let pn = match l.ast.params.get(idx_from_raw[ParamNode](list_at(in l.ast, ps, i))) {
@@ -3442,7 +3449,8 @@ fn primary(inout l: L) -> u32 {
             if !eat(inout l, k_colon_colon()) {
                 break;
             }
-            let seg = ident(inout l);
+            // `E::eff()`: contextual names are path segments too.
+            let seg = lower(inout l);
             name = join_names(inout l, name, in "::", seg);
         }
         if at(in l, k_l_brace()) && !l.no_struct {
