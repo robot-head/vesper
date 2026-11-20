@@ -434,6 +434,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let q = self.seq_elem_addr(h2, start2, zero, 1);
                 self.bytes_eq(p, q, len, len2, simd, op == SeqOp::EqIgnoreAsciiCase)
             }
+            SeqOp::BytesCmp => {
+                let (value, ty) = operand(1)?;
+                let (h2, start2, len2) = self.seq_view(value, ty);
+                let q = self.seq_elem_addr(h2, start2, zero, 1);
+                self.bytes_cmp(p, q, len, len2, simd)
+            }
             SeqOp::FindByte | SeqOp::FindEither | SeqOp::FindNotIn => {
                 let byte = |this: &mut Self, i: usize| -> Result<ir::Value, String> {
                     let (v, _) = operand(i)?;
@@ -885,6 +891,97 @@ impl<M: Module> Codegen<'_, '_, M> {
 
         self.b.switch_to_block(done);
         self.b.block_params(done)[0]
+    }
+
+    /// The three-way comparison of `p[..len]` with `q[..len2]` as an `i32`
+    /// word (`-1`, `0` or `1`): 16-byte steps while the lanes agree, then
+    /// bytes up to the first difference, then the lengths.
+    fn bytes_cmp(
+        &mut self,
+        p: ir::Value,
+        q: ir::Value,
+        len: ir::Value,
+        len2: ir::Value,
+        simd: bool,
+    ) -> ir::Value {
+        let zero = self.zero();
+        let scalar = self.b.create_block();
+        let scalar_body = self.b.create_block();
+        let differ = self.b.create_block();
+        let tail = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(scalar, types::I64);
+        self.b.append_block_param(done, types::I64);
+        let n = self.b.ins().umin(len, len2);
+        if simd {
+            let head = self.b.create_block();
+            let body = self.b.create_block();
+            self.b.append_block_param(head, types::I64);
+            self.b.append_block_param(body, types::I64);
+            let end = self.vector_end(n);
+            let carried = self.loop_invariants(head, &[end]);
+            self.jump(head, &[zero.into(), end.into()]);
+
+            self.b.switch_to_block(head);
+            let k = self.b.block_params(head)[0];
+            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, carried[0]);
+            self.vector_head_exit(more, k, n, body, scalar);
+
+            self.b.switch_to_block(body);
+            let k = self.b.block_params(body)[0];
+            let a = self.b.ins().iadd(p, k);
+            let a = self.b.ins().load(types::I8X16, little(), a, 0);
+            let b = self.b.ins().iadd(q, k);
+            let b = self.b.ins().load(types::I8X16, little(), b, 0);
+            let same = self.b.ins().icmp(IntCC::Equal, a, b);
+            let bits = self.b.ins().vhigh_bits(types::I32, same);
+            let all = self.b.ins().icmp_imm(IntCC::Equal, bits, 0xffff);
+            let k2 = self.b.ins().iadd_imm(k, LANES);
+            let mut back: Vec<ir::BlockArg> = vec![k2.into()];
+            back.extend(self.carried(&carried));
+            // A differing step is rescanned byte by byte from its start.
+            self.branch(all, head, &back, scalar, &[k.into()]);
+        } else {
+            self.jump(scalar, &[zero.into()]);
+        }
+
+        self.b.switch_to_block(scalar);
+        let k = self.b.block_params(scalar)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, n);
+        self.branch(more, scalar_body, &[], tail, &[]);
+
+        self.b.switch_to_block(scalar_body);
+        let a = self.b.ins().iadd(p, k);
+        let a = self.b.ins().uload8(types::I64, MemFlags::new(), a, 0);
+        let b = self.b.ins().iadd(q, k);
+        let b = self.b.ins().uload8(types::I64, MemFlags::new(), b, 0);
+        let same = self.b.ins().icmp(IntCC::Equal, a, b);
+        let k2 = self.b.ins().iadd_imm(k, 1);
+        self.b.append_block_param(differ, types::I64);
+        self.b.append_block_param(differ, types::I64);
+        self.branch(same, scalar, &[k2.into()], differ, &[a.into(), b.into()]);
+
+        self.b.switch_to_block(differ);
+        let a = self.b.block_params(differ)[0];
+        let b = self.b.block_params(differ)[1];
+        let r = self.three_way(a, b);
+        self.jump(done, &[r.into()]);
+
+        self.b.switch_to_block(tail);
+        let r = self.three_way(len, len2);
+        self.jump(done, &[r.into()]);
+
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
+    }
+
+    /// `(a > b) - (a < b)` over unsigned words, as an `I64` word.
+    fn three_way(&mut self, a: ir::Value, b: ir::Value) -> ir::Value {
+        let gt = self.b.ins().icmp(IntCC::UnsignedGreaterThan, a, b);
+        let lt = self.b.ins().icmp(IntCC::UnsignedLessThan, a, b);
+        let gt = self.b.ins().uextend(types::I64, gt);
+        let lt = self.b.ins().uextend(types::I64, lt);
+        self.b.ins().isub(gt, lt)
     }
 
     /// Whether some byte of `p[..len]` matches `needle`, and the index of

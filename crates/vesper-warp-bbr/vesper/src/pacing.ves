@@ -7,9 +7,9 @@
 // product is below 2^63 because bytes is a u32, so it is exact in u64.
 pub fn pacing_delay_ns(bytes: u32, rate_bytes_per_sec: u64) -> u64 {
     if rate_bytes_per_sec == 0 {
-        return infinity();
+        return INFINITY;
     }
-    let numerator = wrapping_mul(widen_u64(bytes), 1000000000);
+    let numerator = wrapping_mul(widen_u64(bytes), NANOS_PER_SEC);
     let q = div(numerator, rate_bytes_per_sec);
     if wrapping_mul(q, rate_bytes_per_sec) == numerator {
         q
@@ -133,10 +133,10 @@ pub fn cycle_max_advance(inout f: CycleMax) -> u64 {
 
 // SplitMix64: the next 64-bit output.
 pub fn splitmix_next(inout seed: u64) -> u64 {
-    seed = wrapping_add(seed, 0x9e3779b97f4a7c15);
+    seed = wrapping_add(seed, SPLITMIX_GAMMA);
     let mut z = seed;
-    z = wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9);
-    z = wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb);
+    z = wrapping_mul(z ^ (z >> 30), SPLITMIX_MUL_1);
+    z = wrapping_mul(z ^ (z >> 27), SPLITMIX_MUL_2);
     z ^ (z >> 31)
 }
 

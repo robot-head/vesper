@@ -157,6 +157,9 @@ pub struct Report {
     /// Instructions the copies of each callee added, including the copies
     /// that arrived inside another inlined body.
     pub growth: BTreeMap<String, usize>,
+    /// Uses of a module constant whose function returns one literal,
+    /// replaced by that literal (see [`fold_literal_constants`]).
+    pub constants: usize,
     /// Function -> units of each callee body copied into it (directly or
     /// nested), so inlining that function charges those callees again.
     contents: BTreeMap<String, BTreeMap<String, usize>>,
@@ -187,6 +190,7 @@ pub fn inline(world: &World, program: &mut Program, budget: &Budget) -> Report {
     if budget.small_callee == 0 && budget.single_site_callee == 0 {
         return report;
     }
+    report.constants = fold_literal_constants(world, program);
     let mut graph = petgraph::graphmap::DiGraphMap::<&str, ()>::new();
     let mut sites = BTreeMap::<String, usize>::new();
     for (name, f) in &program.functions {
@@ -278,10 +282,54 @@ pub fn inline(world: &World, program: &mut Program, budget: &Budget) -> Report {
         }
         program.functions.insert(name, caller);
     }
-    if report.sites > 0 {
+    if report.sites > 0 || report.constants > 0 {
         crate::ir::thread_tokens(program);
     }
     report
+}
+
+/// Replaces each call of a module constant whose function only returns a
+/// literal (`const NAME: T = 3;`, manuscript §2.2) with that literal, in
+/// every caller [`caller_eligible`] accepts. A named scalar constant then
+/// costs what the literal did: no call, no inlining budget, and a literal
+/// operand for the passes after this one. Returns the uses replaced.
+fn fold_literal_constants(world: &World, program: &mut Program) -> usize {
+    let literals = program
+        .functions
+        .values()
+        .filter(|f| crate::arrays::is_const_function(&f.name) && f.params.is_empty())
+        .filter_map(|f| match f.blocks.as_slice() {
+            [block] => match (block.instructions.as_slice(), &block.terminator) {
+                ([i], Terminator::Return(v)) if i.dest == *v && !i.fallible => match &i.op {
+                    Op::Constant(literal) => Some((f.name.clone(), literal.clone())),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    if literals.is_empty() {
+        return 0;
+    }
+    let mut folded = 0;
+    for f in program.functions.values_mut() {
+        if !caller_eligible(world, f) {
+            continue;
+        }
+        for i in f.blocks.iter_mut().flat_map(|b| &mut b.instructions) {
+            if let Op::Call { callee, args, .. } = &i.op
+                && args.is_empty()
+                && let Some(literal) = literals.get(callee)
+            {
+                i.op = Op::Constant(literal.clone());
+                i.token = None;
+                i.fallible = false;
+                folded += 1;
+            }
+        }
+    }
+    folded
 }
 
 /// The shared graphs (`ir::nested_name`) the handles in `f` lower: each
