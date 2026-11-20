@@ -111,6 +111,30 @@ use self::shape::{
     normalize as d_normalize
 };
 
+// Q4_K super-blocks (src/formats.rs `QK_K`, `Q4_K_BYTES`) and the scratch
+// `qk::quantize_block` needs (its `S_LEN` bytes and `W_LEN` words).
+const QK_K: u64 = 256;
+const Q4_K_BYTES: u64 = 144;
+const Q4_K_SCRATCH_BYTES: u64 = 320;
+const Q4_K_SCRATCH_WORDS: u64 = 48;
+// E8M0 (OCP MX v1.0) reserves 255 for NaN.
+const E8M0_NAN: u8 = 255;
+// Binary32 -Inf, and the shift from BF16 to binary32 bits.
+const F32_NEG_INFINITY: u32 = 4286578688;
+const BF16_SHIFT: u32 = 16;
+// Tokens per K/V page (src/kv.rs `TOKENS_PER_PAGE`).
+const TOKENS_PER_PAGE: u64 = 16;
+// `open_weights`: the `WeightFile` length that means stat failed, the
+// largest file it maps (src/mmap.rs `MAX_WEIGHT_FILE_BYTES`, 64 GiB) and its
+// result codes (src/mmap.rs `open_code`).
+const NO_LENGTH: u64 = 18446744073709551615;
+const MAX_WEIGHT_FILE_BYTES: u64 = 68719476736;
+const OPEN_MAPPED: u64 = 0;
+const OPEN_EMPTY: u64 = 1;
+const OPEN_NO_STAT: u64 = 2;
+const OPEN_TOO_LARGE: u64 = 3;
+const OPEN_MAP_FAILED: u64 = 4;
+
 // A typed failure; src/port.rs maps it to the crate's `Error` with the
 // message the Rust build uses at that call.
 pub copy enum Fault {
@@ -198,16 +222,16 @@ pub fn make_qkx2_quants(
     )
 }
 
-// One super-block of 256 values: the 144 block bytes.
+// One super-block of `QK_K` values: the `Q4_K_BYTES` block bytes.
 pub fn quantize_q4_k_block(in x: Slice[u32])
     -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    let mut out = ChunkSeq::with_capacity[u8](144);
+    let mut out = ChunkSeq::with_capacity[u8](Q4_K_BYTES);
     let mut s = ChunkSeq::new[u8]();
-    for i in u64_zero()..320 {
+    for i in u64_zero()..Q4_K_SCRATCH_BYTES {
         s.push(0);
     }
     let mut w = ChunkSeq::new[u32]();
-    for i in u64_zero()..48 {
+    for i in u64_zero()..Q4_K_SCRATCH_WORDS {
         w.push(0);
     }
     quantize_block(in x, 0, inout out, inout s.as_slice_mut(), inout w.as_slice_mut());
@@ -217,20 +241,26 @@ pub fn quantize_q4_k_block(in x: Slice[u32])
 // Rows of super-blocks; `Fault::Limit` when a scale exceeds binary16.
 pub fn quantize_q4_k(in data: Slice[u32], cols: u64)
     -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
-    check_rows(in data, cols, 256);
-    let blocks = data.len() / 256;
-    let mut out = ChunkSeq::with_capacity[u8](blocks * 144);
+    check_rows(in data, cols, QK_K);
+    let blocks = data.len() / QK_K;
+    let mut out = ChunkSeq::with_capacity[u8](blocks * Q4_K_BYTES);
     let mut s = ChunkSeq::new[u8]();
-    for i in u64_zero()..320 {
+    for i in u64_zero()..Q4_K_SCRATCH_BYTES {
         s.push(0);
     }
     let mut w = ChunkSeq::new[u32]();
-    for i in u64_zero()..48 {
+    for i in u64_zero()..Q4_K_SCRATCH_WORDS {
         w.push(0);
     }
     for b in 0..blocks {
-        quantize_block(in data, 256 * b, inout out, inout s.as_slice_mut(), inout w.as_slice_mut());
-        if !check_block(in out[144 * b..144 * b + 144]) {
+        quantize_block(
+            in data,
+            QK_K * b,
+            inout out,
+            inout s.as_slice_mut(),
+            inout w.as_slice_mut()
+        );
+        if !check_block(in out[b * Q4_K_BYTES..b * Q4_K_BYTES + Q4_K_BYTES]) {
             Fail::raise(Fault::Limit);
         }
     }
@@ -239,7 +269,7 @@ pub fn quantize_q4_k(in data: Slice[u32], cols: u64)
 
 // MXFP4, Q8_0 and Q4_0 blocks (src/formats.rs, src/quant.rs).
 pub fn check_mxfp4_block(in block: Slice[u8]) -> bool eff [Fail[RuntimeError]] {
-    block[0] != 255
+    block[0] != E8M0_NAN
 }
 
 pub fn dequantize_mxfp4_block(in block: Slice[u8], inout out: Slice[u32]) eff [
@@ -543,7 +573,7 @@ pub fn softmax(inout x: Slice[u32]) eff [Ffi[Libm], Fail[RuntimeError], Fail[Fau
     if n == 0 {
         Fail::raise(Fault::Shape);
     }
-    let mut mx = from_bits_f32(4286578688);
+    let mut mx = from_bits_f32(F32_NEG_INFINITY);
     for i in 0..n {
         let v = f(in x, i);
         if is_nan(v) {
@@ -656,7 +686,7 @@ pub fn attend(
 ) -> u64 eff [Ffi[Libm], Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     let kv_heads = cfg[0];
     let head_dim = cfg[1];
-    let plane = 16 * cfg[5];
+    let plane = TOKENS_PER_PAGE * cfg[5];
     let width: u64 = if words {
         4
     } else {
@@ -664,9 +694,9 @@ pub fn attend(
     };
     let kv_stride = kv_heads * head_dim;
     let group = query_heads / kv_heads;
-    let npages = (tokens + 15) / 16;
+    let npages = (tokens + TOKENS_PER_PAGE - 1) / TOKENS_PER_PAGE;
     let scale = sqrt(nearest_f32(head_dim));
-    let neg_inf = from_bits_f32(4286578688);
+    let neg_inf = from_bits_f32(F32_NEG_INFINITY);
     for h in u64_zero()..query_heads {
         let kv_head = h / group;
         let q0 = h * head_dim;
@@ -801,7 +831,7 @@ fn kv_elem(in storage: Slice[u8], at: u64, i: u64, words: bool)
     } else {
         let lo = widen_u32(storage[at + 2 * i]);
         let hi = widen_u32(storage[at + 2 * i + 1]);
-        from_bits_f32((lo | (hi << 8)) << 16)
+        from_bits_f32((lo | (hi << 8)) << BF16_SHIFT)
     }
 }
 
@@ -873,17 +903,17 @@ pub fn llama_decode(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
 // `MAX_WEIGHT_FILE_BYTES` (64 GiB) and 4 when it cannot be mapped.
 pub fn open_weights() -> u64 eff [Ffi[WeightFile]] {
     let len = WeightFile::vesper_tensor_file_len();
-    if len == 18446744073709551615 {
-        return 2;
+    if len == NO_LENGTH {
+        return OPEN_NO_STAT;
     }
-    if len > 68719476736 {
-        return 3;
+    if len > MAX_WEIGHT_FILE_BYTES {
+        return OPEN_TOO_LARGE;
     }
     if len == 0 {
-        return 1;
+        return OPEN_EMPTY;
     }
     if WeightFile::vesper_tensor_file_map() != 0 {
-        return 4;
+        return OPEN_MAP_FAILED;
     }
-    0
+    OPEN_MAPPED
 }

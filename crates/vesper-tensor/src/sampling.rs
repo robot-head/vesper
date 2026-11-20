@@ -23,6 +23,14 @@
 use crate::ops::{argmax, softmax};
 use crate::Error;
 
+/// The xorshift64* output multiplier (Vigna, "An experimental exploration of
+/// Marsaglia's xorshift generators", 2016), as in `run.c`.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const XORSHIFT64_STAR_MUL: u64 = 0x2545_f491_4f6c_dd1d;
+/// `next_f32` keeps 24 random bits and divides by `2^24`.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_UNIT_SCALE: f32 = 16_777_216.0;
+
 /// `run.c`'s xorshift64* generator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rng(pub u64);
@@ -32,7 +40,7 @@ impl Rng {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
-        (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 32) as u32
+        (self.0.wrapping_mul(XORSHIFT64_STAR_MUL) >> 32) as u32
     }
     #[cfg(vesper_port)]
     pub fn next_u32(&mut self) -> u32 {
@@ -43,7 +51,7 @@ impl Rng {
     /// A float in `[0, 1)` with 24 random bits.
     #[cfg(not(vesper_port))]
     pub fn next_f32(&mut self) -> f32 {
-        (self.next_u32() >> 8) as f32 / 16_777_216.0
+        (self.next_u32() >> 8) as f32 / F32_UNIT_SCALE
     }
     #[cfg(vesper_port)]
     pub fn next_f32(&mut self) -> f32 {

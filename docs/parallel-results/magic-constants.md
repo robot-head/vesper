@@ -47,7 +47,8 @@ included, and many of them are fine as they are.
 | #1199 | eBPF instruction codec: the kernel's `BPF_*` opcode fields (class, op, jmp, source, size, mode, atomic) | decode workload 5.42 M -> 5.32 M Ir per warm call (-1.9%) |
 | #1202 | eBPF interpreter: helper ids, map types, errnos, limits, ring buffer header bits, `xdp_md`/`__sk_buff` offsets, FNV and xorshift64* constants, region kinds (Rust and port) | interp workload 25.63 M Ir per warm call before and after (+0.01%) |
 | #1203 | eBPF BTF, `.BTF.ext`, CO-RE and wire: BTF kinds and `info` fields, header layout, UTF-8 bounds, `line_col`, CO-RE relocation kinds, local tree tags, frame offsets, map types and limits (Rust and port) | warm call Ir: btf 10.574 M -> 10.593 M (+0.18%), ext 934.3 K -> 942.0 K (+0.82%), core 2.7407 M -> 2.7405 M |
-| next | eBPF verifier: register tags, frame and stack layout, stack and packet limits, `xdp_md`/`__sk_buff` context offsets, map types, socket tuple sizes, ASCII (Rust and port). Integer `match` arms stay literal (constants are not patterns yet) | warm call Ir: verify 679.6 K -> 681.4 K (+0.26%), scalar 8.7395 M -> 8.7394 M, concrete 763.7 K -> 766.0 K (+0.30%) |
+| #1204 | eBPF verifier: register tags, frame and stack layout, stack and packet limits, `xdp_md`/`__sk_buff` context offsets, map types, socket tuple sizes, ASCII (Rust and port). Integer `match` arms stay literal (constants are not patterns yet) | warm call Ir: verify 679.6 K -> 681.4 K (+0.26%), scalar 8.7395 M -> 8.7394 M, concrete 763.7 K -> 766.0 K (+0.30%) |
+| next | Tensor: IEEE binary32/binary16/BF16 fields (new `host::ieee`), FP8 and E8M0 codes, GGML `nearest_int` magic, every GGML type id and block size, GGUF value types, host/K/V/shape ceilings, JSON surrogates and control range, UTF-8 (RFC 3629, Unicode Table 3-7), xorshift64* multiplier, FNV-1a, Q4_K scratch layout, `open_weights` codes, ASCII (Rust and port). Port result and tape codes stay documented numbers | whole-benchmark Ir: dequantize Q8_0 2.5038 G -> 2.5024 G, Q4_K 3.9149 G -> 3.9149 G, shape plan 16.550 G -> 16.550 G |
 
 ## Order
 
@@ -99,6 +100,10 @@ literals first (2026-11-20).
 - Constants are not patterns: `match c { JEQ => ... }` is refused
   ("unknown pattern constructor"). The eBPF port's decoders compare with
   `if` chains instead of matching integer literals.
+- An index that starts with an uppercase name parses as type arguments:
+  `b[LO..HI]` and `s[S_PACKED + j]` fail with E0002 ("expected RBracket"),
+  because `name[Upper` reads like `ChunkSeq::new[u8]`. The tensor port
+  writes `b[(LO)..HI]` or `s[j + S_PACKED]`; fmt keeps the parentheses.
 
 - A constant derived from other constants (`GAIN_UNIT - LOSS_THRESH`) is
   not folded by the inliner (its function is not a single literal), so it

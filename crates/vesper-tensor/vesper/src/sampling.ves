@@ -9,6 +9,15 @@ use self::num::{
     u64_zero
 };
 
+// The xorshift64* multiplier and the `2^24` scale of `next_f32`
+// (src/sampling.rs `XORSHIFT64_STAR_MUL`, `F32_UNIT_SCALE`).
+const XORSHIFT64_STAR_MUL: u64 = 2685821657736338717;
+const F32_UNIT_SCALE: f32 = 16777216.0;
+// Binary32 -Inf.
+const F32_NEG_INFINITY: u32 = 4286578688;
+// The low word of a scratch entry (the token).
+const LOW_32: u64 = 4294967295;
+
 fn f(in s: Slice[u32], i: u64) -> f32 eff [Fail[RuntimeError]] {
     from_bits_f32(s[i])
 }
@@ -19,13 +28,13 @@ pub fn rng_next(seed: u64) -> (u64, u32) eff [Fail[ArithOverflow]] {
     s = s ^ (s >> 12);
     s = s ^ (s << 25);
     s = s ^ (s >> 27);
-    (s, wrapping_u32(wrapping_mul(s, 2685821657736338717) >> 32))
+    (s, wrapping_u32(wrapping_mul(s, XORSHIFT64_STAR_MUL) >> 32))
 }
 
 // `Rng::next_f32`: 24 random bits over `2^24`.
 pub fn rng_f32(seed: u64) -> (u64, f32) eff [Fail[ArithOverflow]] {
     let (s, r) = rng_next(seed);
-    (s, nearest_f32(r >> 8) / 16777216.0)
+    (s, nearest_f32(r >> 8) / F32_UNIT_SCALE)
 }
 
 pub fn argmax(in x: Slice[u32]) -> u64 eff [Fail[RuntimeError], Fail[Fault]] {
@@ -33,7 +42,7 @@ pub fn argmax(in x: Slice[u32]) -> u64 eff [Fail[RuntimeError], Fail[Fault]] {
         Fail::raise(Fault::Shape);
     }
     let mut best: u64 = 0;
-    let mut best_v = from_bits_f32(4286578688);
+    let mut best_v = from_bits_f32(F32_NEG_INFINITY);
     for i in 0..x.len() {
         let v = f(in x, i);
         if !is_finite(v) {
@@ -153,10 +162,10 @@ pub fn sample_top_p(in probs: Slice[u32], top_p: f32, coin: f32, inout scratch: 
         let c = scratch[i];
         cdf = cdf + from_bits_f32(~wrapping_u32(c >> 32));
         if r < cdf {
-            return c & 4294967295;
+            return c & LOW_32;
         }
     }
-    scratch[last] & 4294967295
+    scratch[last] & LOW_32
 }
 
 pub fn rms_norm(inout out: Slice[u32], in x: Slice[u32], in weight: Slice[u32], epsilon: f32) eff [

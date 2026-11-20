@@ -21,8 +21,44 @@ use self::num::{
     u64_zero
 };
 
+// Ceilings (src/llama.rs `MAX_DIM`, `MAX_LAYERS`, `MAX_VOCAB`, `MAX_SEQ_LEN`,
+// `MAX_CHECKPOINT_BYTES`, `MAX_TOKEN_LENGTH`).
+const MAX_DIM: u64 = 8192;
+const MAX_LAYERS: u64 = 256;
+const MAX_VOCAB: u64 = 1048576;
+const MAX_SEQ_LEN: u64 = 65536;
+const MAX_CHECKPOINT_BYTES: u64 = 1073741824;
+const MAX_TOKEN_LENGTH: u32 = 1024;
+// The llama2.c header: seven little-endian `i32` fields.
+const HEADER_BYTES: u64 = 28;
+// `i32` fields read as `u32`: values at or above the sign bit are negative.
+const I32_SIGN: u32 = 2147483648;
+const U32_RANGE: u64 = 4294967296;
+// `hex_digit`'s result for a byte that is not a hex digit.
+const NOT_HEX: u64 = 16;
+// ASCII bytes.
+const SPACE: u8 = 32;
+const DIGIT_0: u8 = 48;
+const DIGIT_9: u8 = 57;
+const LESS: u8 = 60;
+const GREATER: u8 = 62;
+const UPPER_A: u8 = 65;
+const UPPER_F: u8 = 70;
+const LOWER_A: u8 = 97;
+const LOWER_F: u8 = 102;
+const LOWER_X: u8 = 120;
+// `is_ascii_graphic` is '!' (33) through '~' (126); `is_ascii_whitespace` is
+// tab, line feed, form feed, carriage return and space.
+const GRAPHIC_FIRST: u64 = 33;
+const GRAPHIC_LAST: u64 = 126;
+const TAB: u64 = 9;
+const LF: u64 = 10;
+const FF: u64 = 12;
+const CR: u64 = 13;
+const SPACE_U64: u64 = 32;
+
 fn max_dim() -> u64 {
-    8192
+    MAX_DIM
 }
 
 // The ceiling of field `f` (`MAX_DIM`, `MAX_LAYERS`, `MAX_VOCAB`,
@@ -32,13 +68,13 @@ fn ceiling(f: u64) -> u64 eff [Fail[ArithOverflow]] {
         return 4 * max_dim();
     }
     if f == 2 {
-        return 256;
+        return MAX_LAYERS;
     }
     if f == 5 {
-        return 1048576;
+        return MAX_VOCAB;
     }
     if f == 6 {
-        return 65536;
+        return MAX_SEQ_LEN;
     }
     max_dim()
 }
@@ -79,7 +115,7 @@ pub fn validate(in dims: Slice[u64], rope_base: u32, rms_epsilon: u32)
 
 // A positive `i32` field read as `u32`: the code of `positive(v, f)`, or 0.
 fn positive(v: u32, f: u64) -> u64 eff [Fail[ArithOverflow]] {
-    if v == 0 || v >= 2147483648 {
+    if v == 0 || v >= I32_SIGN {
         return 1 + f;
     }
     if widen_u64(v) > ceiling(f) {
@@ -108,7 +144,7 @@ fn floats(in b: Slice[u8], at: u64, n: u64) -> u64 eff [Fail[ArithOverflow], Fai
 // the classifier is shared to `out`.
 pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout out: Slice[u64])
     -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    if b.len() > 1073741824 {
+    if b.len() > MAX_CHECKPOINT_BYTES {
         return 34;
     }
     let mut shared = false;
@@ -118,11 +154,12 @@ pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout
         }
         let mut v = b.read_u32_le(4 * f);
         if f == 5 {
-            if v == 2147483648 {
+            if v == I32_SIGN {
                 return 35;
             }
-            if v > 2147483648 {
-                v = wrapping_u32(4294967296 - widen_u64(v));
+            if v > I32_SIGN {
+                // A negative vocabulary size means an unshared classifier.
+                v = wrapping_u32(U32_RANGE - widen_u64(v));
             } else {
                 shared = v > 0;
             }
@@ -151,7 +188,7 @@ pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout
     let layers = out[2];
     let kv_dim = out[4] * (dim / out[3]);
     let vocab = out[5];
-    let mut at: u64 = 28;
+    let mut at: u64 = HEADER_BYTES;
     let embedding = floats(in b, at, vocab * dim);
     if embedding != 0 {
         return embedding;
@@ -203,17 +240,17 @@ pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout
 // `out[0]`, then each entry's score bits, piece offset and length.
 pub fn check_tokenizer(in b: Slice[u8], vocab: u64, inout out: Slice[u64])
     -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    if vocab == 0 || vocab > 1048576 {
+    if vocab == 0 || vocab > MAX_VOCAB {
         return 15;
     }
     if b.len() < 4 {
         return 30;
     }
     let max_len = b.read_u32_le(0);
-    if max_len == 0 || max_len >= 2147483648 {
+    if max_len == 0 || max_len >= I32_SIGN {
         return 37;
     }
-    if max_len > 1024 {
+    if max_len > MAX_TOKEN_LENGTH {
         return 38;
     }
     out.set(0, widen_u64(max_len));
@@ -230,7 +267,7 @@ pub fn check_tokenizer(in b: Slice[u8], vocab: u64, inout out: Slice[u64])
             return 30;
         }
         let len = b.read_u32_le(at + 4);
-        if len == 0 || len >= 2147483648 {
+        if len == 0 || len >= I32_SIGN {
             return 39;
         }
         if len > max_len {
@@ -252,16 +289,16 @@ pub fn check_tokenizer(in b: Slice[u8], vocab: u64, inout out: Slice[u64])
 }
 
 fn hex_digit(c: u8) -> u64 eff [Fail[ArithOverflow]] {
-    if c >= 48 && c <= 57 {
-        return widen_u64(c) - 48;
+    if c >= DIGIT_0 && c <= DIGIT_9 {
+        return widen_u64(c - DIGIT_0);
     }
-    if c >= 65 && c <= 70 {
-        return widen_u64(c) - 55;
+    if c >= UPPER_A && c <= UPPER_F {
+        return widen_u64(c - UPPER_A) + 10;
     }
-    if c >= 97 && c <= 102 {
-        return widen_u64(c) - 87;
+    if c >= LOWER_A && c <= LOWER_F {
+        return widen_u64(c - LOWER_A) + 10;
     }
-    16
+    NOT_HEX
 }
 
 // What `Tokenizer::decode` prints for `piece`: 0 for the piece from `out[1]`
@@ -269,28 +306,28 @@ fn hex_digit(c: u8) -> u64 eff [Fail[ArithOverflow]] {
 pub fn decode_piece(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
     -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let mut start: u64 = 0;
-    if after_bos && piece.len() > 0 && piece[0] == 32 {
+    if after_bos && piece.len() > 0 && piece[0] == SPACE {
         start = 1;
     }
     let n = piece.len() - start;
-    // `<0xHH>`: '<' 60, '0' 48, 'x' 120, '>' 62.
+    // `<0xHH>`.
     if n
         == 6
         && piece[start]
-        == 60
+        == LESS
         && piece[start + 1]
-        == 48
+        == DIGIT_0
         && piece[start + 2]
-        == 120
+        == LOWER_X
         && piece[start + 5]
-        == 62 {
+        == GREATER {
         // `u8::from_str_radix` also takes a leading `+`.
         let lo = hex_digit(piece[start + 4]);
-        if piece[start + 3] == 43 && lo < 16 {
+        if piece[start + 3] == 43 && lo < NOT_HEX {
             return single(lo, inout out);
         }
         let hi = hex_digit(piece[start + 3]);
-        if hi < 16 && lo < 16 {
+        if hi < NOT_HEX && lo < NOT_HEX {
             return single(16 * hi + lo, inout out);
         }
     }
@@ -305,7 +342,17 @@ pub fn decode_piece(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
 // A one-byte piece: printed if graphic or whitespace (`is_ascii_graphic`,
 // `is_ascii_whitespace`: tab, newline, form feed, carriage return, space).
 fn single(b: u64, inout out: Slice[u64]) -> u64 eff [Fail[RuntimeError]] {
-    if (b >= 33 && b <= 126) || b == 9 || b == 10 || b == 12 || b == 13 || b == 32 {
+    if (b >= GRAPHIC_FIRST && b <= GRAPHIC_LAST)
+        || b
+        == TAB
+        || b
+        == LF
+        || b
+        == FF
+        || b
+        == CR
+        || b
+        == SPACE_U64 {
         out.set(1, b);
         return 1;
     }

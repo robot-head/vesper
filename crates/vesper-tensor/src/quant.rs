@@ -18,7 +18,7 @@
 // their helpers unused there.
 #![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 use crate::formats::{self, Fp8, MXFP4_BYTES, Q4_K_BYTES, QK_K};
-use crate::host::decode_fp16;
+use crate::host::{decode_fp16, ieee};
 use crate::mmap::WeightBytes;
 use crate::simd::{self, DotAcc, Kernel};
 use crate::Error;
@@ -31,32 +31,33 @@ pub const Q4_0_BYTES: usize = 18;
 /// signed infinity; NaNs stay NaNs (quiet, top payload bits kept).
 #[cfg(not(vesper_port))]
 pub fn encode_fp16(value: f32) -> u16 {
+    use ieee::*;
     let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exponent = ((bits >> 23) & 0xff) as i32;
-    let mantissa = bits & 0x7f_ffff;
-    if exponent == 0xff {
+    let sign = ((bits >> BF16_SHIFT) & u32::from(F16_SIGN)) as u16;
+    let exponent = ((bits >> F32_MANT_BITS) & F32_EXP_FIELD) as i32;
+    let mantissa = bits & F32_MANT_MASK;
+    if exponent == F32_EXP_FIELD as i32 {
         return if mantissa == 0 {
-            sign | 0x7c00
+            sign | F16_INFINITY
         } else {
-            sign | 0x7e00 | (mantissa >> 13) as u16
+            sign | F16_QUIET_NAN | (mantissa >> F32_TO_F16_SHIFT) as u16
         };
     }
-    let e = exponent - 112; // rebias 127 -> 15
-    if e >= 31 {
-        return sign | 0x7c00;
+    let e = exponent - F32_TO_F16_REBIAS; // rebias 127 -> 15
+    if e >= i32::from(F16_EXP_FIELD) {
+        return sign | F16_INFINITY;
     }
     if e <= 0 {
-        if e < -10 {
+        if e < -(F16_MANT_BITS as i32) {
             return sign; // below half the smallest subnormal: rounds to zero
         }
-        let m = mantissa | 0x80_0000;
-        let shift = (14 - e) as u32;
+        let m = mantissa | F32_IMPLICIT_BIT;
+        let shift = (F32_TO_F16_SHIFT as i32 + 1 - e) as u32;
         return sign | round_shift(m, shift) as u16;
     }
     // Carry out of the mantissa correctly increments the exponent (and can
     // produce infinity).
-    sign | round_shift(((e as u32) << 23) | mantissa, 13) as u16
+    sign | round_shift(((e as u32) << F32_MANT_BITS) | mantissa, F32_TO_F16_SHIFT) as u16
 }
 #[cfg(vesper_port)]
 pub fn encode_fp16(value: f32) -> u16 {
@@ -79,7 +80,7 @@ fn round_shift(value: u32, shift: u32) -> u32 {
 pub fn encode_bf16(value: f32) -> u16 {
     let bits = value.to_bits();
     if value.is_nan() {
-        return ((bits >> 16) as u16) | 0x0040;
+        return ((bits >> ieee::BF16_SHIFT) as u16) | ieee::BF16_QUIET_BIT;
     }
     round_shift_carry(bits)
 }
@@ -88,9 +89,10 @@ pub fn encode_bf16(value: f32) -> u16 {
     crate::port::must(crate::port::binding::encode_bf16(value.to_bits()))
 }
 fn round_shift_carry(bits: u32) -> u16 {
-    let kept = bits >> 16;
-    let rest = bits & 0xffff;
-    let rounded = if rest > 0x8000 || (rest == 0x8000 && kept & 1 == 1) {
+    let kept = bits >> ieee::BF16_SHIFT;
+    let rest = bits & ((1 << ieee::BF16_SHIFT) - 1);
+    let half = 1 << (ieee::BF16_SHIFT - 1);
+    let rounded = if rest > half || (rest == half && kept & 1 == 1) {
         kept + 1
     } else {
         kept

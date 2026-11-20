@@ -32,6 +32,25 @@ pub const QK_K: usize = 256;
 pub const Q4_K_BYTES: usize = 144;
 pub const MXFP4_BLOCK: usize = 32;
 pub const MXFP4_BYTES: usize = 17;
+/// GGML K-quant scales and minimums are 6 bits wide.
+const K_SCALE_MASK: u8 = 0x3f;
+/// The low nibble of a packed 4-bit pair.
+const NIBBLE: u8 = 0x0f;
+/// E8M0 (OCP MX v1.0 §5.4.1) reserves `0xff` for NaN.
+const E8M0_NAN: u8 = 0xff;
+/// `1.5 * 2^23`: adding it to an FP32 in `[-2^22, 2^22]` leaves the value
+/// rounded to an integer in the low mantissa bits (GGML `nearest_int`).
+const ROUND_MAGIC: f32 = 12_582_912.0;
+/// The bias `ROUND_MAGIC` leaves in the low mantissa bits (`2^22`).
+const ROUND_MAGIC_BIAS: i32 = 0x0040_0000;
+/// The largest E8M0 exponent that is not NaN.
+const E8M0_MAX_FINITE: i32 = 254;
+/// FP8 (OCP 8-bit floating point v1.0) sign bit.
+const FP8_SIGN: u8 = 0x80;
+/// FP8 canonical NaN codes (without the sign bit): E4M3 has only S.1111.111,
+/// E5M2's is the quiet NaN S.11111.10.
+const E4M3_NAN: u8 = 0x7f;
+const E5M2_NAN: u8 = 0x7e;
 
 fn half(bytes: &[u8], at: usize) -> f32 {
     decode_fp16(u16::from_le_bytes([bytes[at], bytes[at + 1]]))
@@ -41,10 +60,10 @@ fn half(bytes: &[u8], at: usize) -> f32 {
 #[cfg(not(vesper_port))]
 pub fn q4_k_scale_min(j: usize, scales: &[u8]) -> (u8, u8) {
     if j < 4 {
-        (scales[j] & 63, scales[j + 4] & 63)
+        (scales[j] & K_SCALE_MASK, scales[j + 4] & K_SCALE_MASK)
     } else {
         (
-            (scales[j + 4] & 0x0f) | ((scales[j - 4] >> 6) << 4),
+            (scales[j + 4] & NIBBLE) | ((scales[j - 4] >> 6) << 4),
             (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4),
         )
     }
@@ -68,7 +87,7 @@ pub fn dequantize_q4_k_block(block: &[u8], out: &mut [f32]) {
         let (d2, m2) = (d * f32::from(sc2), dmin * f32::from(m2));
         let q = &qs[32 * j..32 * j + 32];
         for l in 0..32 {
-            out[64 * j + l] = d1 * f32::from(q[l] & 0x0f) - m1;
+            out[64 * j + l] = d1 * f32::from(q[l] & NIBBLE) - m1;
             out[64 * j + 32 + l] = d2 * f32::from(q[l] >> 4) - m2;
         }
     }
@@ -106,8 +125,8 @@ pub fn check_q4_k_block(block: &[u8]) -> Result<(), Error> {
 #[inline]
 #[cfg(not(vesper_port))]
 pub fn nearest_int(v: f32) -> i32 {
-    let bits = (v + 12_582_912.0f32).to_bits() as i32;
-    (bits & 0x007f_ffff) - 0x0040_0000
+    let bits = (v + ROUND_MAGIC).to_bits() as i32;
+    (bits & crate::host::ieee::F32_MANT_MASK as i32) - ROUND_MAGIC_BIAS
 }
 #[cfg(vesper_port)]
 pub fn nearest_int(v: f32) -> i32 {
@@ -323,7 +342,7 @@ pub fn quantize_q4_k_block(x: &[f32; QK_K]) -> [u8; Q4_K_BYTES] {
             packed[j] = ls;
             packed[j + 4] = lm;
         } else {
-            packed[j + 4] = (ls & 0x0f) | ((lm & 0x0f) << 4);
+            packed[j + 4] = (ls & NIBBLE) | ((lm & NIBBLE) << 4);
             packed[j - 4] |= (ls >> 4) << 6;
             packed[j] |= (lm >> 4) << 6;
         }
@@ -384,7 +403,7 @@ pub fn e8m0_half(e: u8) -> f32 {
 
 #[cfg(not(vesper_port))]
 pub fn check_mxfp4_block(block: &[u8]) -> Result<(), Error> {
-    if block[0] == 0xff {
+    if block[0] == E8M0_NAN {
         Err(Error::NonFinite)
     } else {
         Ok(())
@@ -404,7 +423,7 @@ pub fn dequantize_mxfp4_block(block: &[u8], out: &mut [f32]) {
     let d = e8m0_half(block[0]);
     for j in 0..16 {
         let b = block[1 + j];
-        out[j] = d * f32::from(E2M1_DOUBLED[usize::from(b & 0x0f)]);
+        out[j] = d * f32::from(E2M1_DOUBLED[usize::from(b & NIBBLE)]);
         out[j + 16] = d * f32::from(E2M1_DOUBLED[usize::from(b >> 4)]);
     }
 }
@@ -418,14 +437,15 @@ pub fn dequantize_mxfp4_block(block: &[u8], out: &mut [f32]) {
 
 /// `floor(log2(v))` for finite `v > 0`, exact (from the exponent bits).
 fn floor_log2(v: f32) -> i32 {
+    use crate::host::ieee::*;
     let bits = v.to_bits();
-    let exp = ((bits >> 23) & 0xff) as i32;
+    let exp = ((bits >> F32_MANT_BITS) & F32_EXP_FIELD) as i32;
     if exp == 0 {
         // subnormal: value = mantissa * 2^-149
-        let mantissa = bits & 0x7f_ffff;
-        31 - mantissa.leading_zeros() as i32 - 149
+        let mantissa = bits & F32_MANT_MASK;
+        31 - mantissa.leading_zeros() as i32 - F32_SUBNORMAL_EXP
     } else {
-        exp - 127
+        exp - F32_BIAS
     }
 }
 
@@ -444,7 +464,7 @@ pub fn quantize_mxfp4(data: &[f32], cols: usize) -> Result<Vec<u8>, Error> {
     for block in data.as_chunks::<MXFP4_BLOCK>().0.iter() {
         let amax = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         let e = if amax > 0.0 {
-            (floor_log2(amax) - 2 + 127).clamp(0, 254) as u8
+            (floor_log2(amax) - 2 + crate::host::ieee::F32_BIAS).clamp(0, E8M0_MAX_FINITE) as u8
         } else {
             0
         };
@@ -522,10 +542,10 @@ impl Fp8 {
     /// The defining computation behind [`Fp8::decode`].
     #[cfg(not(vesper_port))]
     pub fn decode_exact(self, code: u8) -> f32 {
-        let sign = if code & 0x80 != 0 { -1.0f64 } else { 1.0 };
+        let sign = if code & FP8_SIGN != 0 { -1.0f64 } else { 1.0 };
         let m_bits = self.mantissa_bits();
         let e_bits = 7 - m_bits;
-        let exp = i32::from((code & 0x7f) >> m_bits);
+        let exp = i32::from((code & !FP8_SIGN) >> m_bits);
         let mant = i32::from(code & ((1 << m_bits) - 1));
         let e_max = (1 << e_bits) - 1;
         match self {
@@ -562,11 +582,15 @@ impl Fp8 {
     /// to it (also for E5M2, whose infinities are never produced).
     #[cfg(not(vesper_port))]
     pub fn encode_saturating(self, value: f32) -> u8 {
-        let sign: u8 = if value.is_sign_negative() { 0x80 } else { 0 };
+        let sign: u8 = if value.is_sign_negative() {
+            FP8_SIGN
+        } else {
+            0
+        };
         if value.is_nan() {
             return match self {
-                Self::E4M3 => 0x7f,
-                Self::E5M2 => 0x7e,
+                Self::E4M3 => E4M3_NAN,
+                Self::E5M2 => E5M2_NAN,
             } | sign;
         }
         let a = f64::from(value.abs());

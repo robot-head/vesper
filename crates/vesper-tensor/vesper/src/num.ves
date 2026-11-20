@@ -2,6 +2,57 @@
 // codecs and the float predicates every module shares. An f32 crosses the
 // boundary, and is stored in slices, as its bit pattern (`to_bits_f32`).
 
+// IEEE 754 binary32 and binary16 bit fields (IEEE 754-2019 §3.4); src/host.rs
+// `ieee` names the same values.
+// Binary32 sign bit.
+const F32_SIGN: u32 = 2147483648;
+// Binary32 biased-exponent field, in place (all ones = Inf/NaN).
+const F32_EXP_MASK: u32 = 2139095040;
+// Binary32 trailing significand field (23 bits).
+const F32_MANT_MASK: u32 = 8388607;
+// The implicit leading significand bit of a normal binary32.
+const F32_IMPLICIT_BIT: u32 = 8388608;
+// Width of the binary32 trailing significand.
+const F32_MANT_BITS: u32 = 23;
+// Binary32 exponent field after shifting down.
+const F32_EXP_FIELD: u32 = 255;
+const F32_EXP_FIELD_I: i32 = 255;
+// Binary16 sign bit.
+const F16_SIGN: u16 = 32768;
+// Width of the binary16 trailing significand.
+const F16_MANT_BITS: u16 = 10;
+// Binary16 trailing significand field.
+const F16_MANT_MASK: u16 = 1023;
+// Binary16 exponent field after shifting down (all ones = Inf/NaN).
+const F16_EXP_FIELD: u16 = 31;
+const F16_EXP_FIELD_I: i32 = 31;
+// Binary16 positive infinity.
+const F16_INFINITY: u16 = 31744;
+// Binary16 canonical quiet NaN (infinity plus the quiet bit).
+const F16_QUIET_NAN: u16 = 32256;
+// Binary32 bias minus binary16 bias (127 - 15).
+const F32_TO_F16_REBIAS: i32 = 112;
+const F32_TO_F16_REBIAS_U: u32 = 112;
+// Significand bits dropped going from binary32 to binary16 (23 - 10).
+const F32_TO_F16_SHIFT: u32 = 13;
+// Leading zeros of a 32-bit word whose top set bit is the binary16 implicit
+// bit position (32 - 10 - 1).
+const F16_SUBNORMAL_CLZ: u32 = 21;
+// Biased binary32 exponent of a binary16 subnormal with its top fraction bit
+// moved up to the implicit bit (`F32_TO_F16_REBIAS + 1`).
+const F16_SUBNORMAL_EXP: u32 = 113;
+// The smallest rebiased exponent that does not round to zero (-10).
+const F16_MIN_SUBNORMAL_E: i32 = -10;
+// Shift of a subnormal result with rebiased exponent 0 (`F32_TO_F16_SHIFT + 1`).
+const F16_SUBNORMAL_SHIFT: i32 = 14;
+// BF16 keeps the high half of a binary32.
+const BF16_SHIFT: u32 = 16;
+// The low half BF16 drops, and half of its range.
+const BF16_DROPPED_MASK: u32 = 65535;
+const BF16_HALF: u32 = 32768;
+// BF16 quiet bit (the top trailing significand bit).
+const BF16_QUIET_BIT: u16 = 64;
+
 // The number of leading zero bits of `x`.
 pub fn clz32(x: u32) -> u32 eff [Fail[ArithOverflow]] {
     if x == 0 {
@@ -10,7 +61,7 @@ pub fn clz32(x: u32) -> u32 eff [Fail[ArithOverflow]] {
     let mut n: u32 = 0;
     let mut v = x;
     loop {
-        if v & 2147483648 != 0 {
+        if v & F32_SIGN != 0 {
             break;
         }
         v = v << 1;
@@ -21,7 +72,7 @@ pub fn clz32(x: u32) -> u32 eff [Fail[ArithOverflow]] {
 
 // Whether the f32 with bits `b` is finite.
 pub fn finite_bits(b: u32) -> bool {
-    b & 2139095040 != 2139095040
+    b & F32_EXP_MASK != F32_EXP_MASK
 }
 
 pub fn is_finite(v: f32) -> bool {
@@ -30,25 +81,27 @@ pub fn is_finite(v: f32) -> bool {
 
 pub fn is_nan(v: f32) -> bool {
     let b = to_bits_f32(v);
-    b & 2139095040 == 2139095040 && b & 8388607 != 0
+    b & F32_EXP_MASK == F32_EXP_MASK && b & F32_MANT_MASK != 0
 }
 
 pub fn decode_fp16(bits: u16) -> f32 eff [Fail[ArithOverflow]] {
-    let sign = widen_u32(bits & 32768) << 16;
-    let exponent = widen_u32((bits >> 10) & 31);
-    let fraction = widen_u32(bits & 1023);
+    let sign = widen_u32(bits & F16_SIGN) << BF16_SHIFT;
+    let exponent = widen_u32((bits >> F16_MANT_BITS) & F16_EXP_FIELD);
+    let fraction = widen_u32(bits & F16_MANT_MASK);
     let out = if exponent == 0 {
         if fraction == 0 {
             sign
         } else {
-            let shift = clz32(fraction) - 21;
+            let shift = clz32(fraction) - F16_SUBNORMAL_CLZ;
             let normalized = fraction << shift;
-            sign | ((113 - shift) << 23) | ((normalized & 1023) << 13)
+            sign | ((F16_SUBNORMAL_EXP - shift) << F32_MANT_BITS) | (
+                (normalized & widen_u32(F16_MANT_MASK)) << F32_TO_F16_SHIFT
+            )
         }
-    } else if exponent == 31 {
-        sign | 2139095040 | (fraction << 13)
+    } else if exponent == widen_u32(F16_EXP_FIELD) {
+        sign | F32_EXP_MASK | (fraction << F32_TO_F16_SHIFT)
     } else {
-        sign | ((exponent + 112) << 23) | (fraction << 13)
+        sign | ((exponent + F32_TO_F16_REBIAS_U) << F32_MANT_BITS) | (fraction << F32_TO_F16_SHIFT)
     };
     from_bits_f32(out)
 }
@@ -68,38 +121,41 @@ fn round_shift(value: u32, shift: u32) -> u32 eff [Fail[ArithOverflow]] {
 
 pub fn encode_fp16(value: f32) -> u16 eff [Fail[ArithOverflow]] {
     let bits = to_bits_f32(value);
-    let sign = wrapping_u16((bits >> 16) & 32768);
-    let exponent = wrapping_i32((bits >> 23) & 255);
-    let mantissa = bits & 8388607;
-    if exponent == 255 {
+    let sign = wrapping_u16((bits >> BF16_SHIFT) & widen_u32(F16_SIGN));
+    let exponent = wrapping_i32((bits >> F32_MANT_BITS) & F32_EXP_FIELD);
+    let mantissa = bits & F32_MANT_MASK;
+    if exponent == F32_EXP_FIELD_I {
         if mantissa == 0 {
-            return sign | 31744;
+            return sign | F16_INFINITY;
         }
-        return sign | 32256 | wrapping_u16(mantissa >> 13);
+        return sign | F16_QUIET_NAN | wrapping_u16(mantissa >> F32_TO_F16_SHIFT);
     }
-    let e = exponent - 112;
-    if e >= 31 {
-        return sign | 31744;
+    let e = exponent - F32_TO_F16_REBIAS;
+    if e >= F16_EXP_FIELD_I {
+        return sign | F16_INFINITY;
     }
     if e <= 0 {
-        if e < -10 {
+        // Below half the smallest subnormal: rounds to zero.
+        if e < F16_MIN_SUBNORMAL_E {
             return sign;
         }
-        let m = mantissa | 8388608;
-        let shift = wrapping_u32(14 - e);
+        let m = mantissa | F32_IMPLICIT_BIT;
+        let shift = wrapping_u32(F16_SUBNORMAL_SHIFT - e);
         return sign | wrapping_u16(round_shift(m, shift));
     }
-    sign | wrapping_u16(round_shift((wrapping_u32(e) << 23) | mantissa, 13))
+    sign | wrapping_u16(
+        round_shift((wrapping_u32(e) << F32_MANT_BITS) | mantissa, F32_TO_F16_SHIFT)
+    )
 }
 
 pub fn encode_bf16(value: f32) -> u16 eff [Fail[ArithOverflow]] {
     let bits = to_bits_f32(value);
     if is_nan(value) {
-        return wrapping_u16(bits >> 16) | 64;
+        return wrapping_u16(bits >> BF16_SHIFT) | BF16_QUIET_BIT;
     }
-    let kept = bits >> 16;
-    let rest = bits & 65535;
-    let rounded = if rest > 32768 || (rest == 32768 && kept & 1 == 1) {
+    let kept = bits >> BF16_SHIFT;
+    let rest = bits & BF16_DROPPED_MASK;
+    let rounded = if rest > BF16_HALF || (rest == BF16_HALF && kept & 1 == 1) {
         kept + 1
     } else {
         kept
@@ -108,7 +164,7 @@ pub fn encode_bf16(value: f32) -> u16 eff [Fail[ArithOverflow]] {
 }
 
 pub fn decode_bf16(bits: u16) -> f32 eff [Fail[ArithOverflow]] {
-    from_bits_f32(widen_u32(bits) << 16)
+    from_bits_f32(widen_u32(bits) << BF16_SHIFT)
 }
 
 // A little-endian binary16 at `at` of `b`.
