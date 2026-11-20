@@ -112,11 +112,14 @@ guard: see the PR. The verified pipeline does not reach any changed code
 
 ## Port rewrite (step 5)
 
-No checker port on main holds non-copy values in a collection. Every
-`FlatTable` in `@vesper/check-names-packages` holds copy values and uses
-`get`. The `@vesper/check-fip` bindings the prompt names are on #1228, not
-yet merged. So the measurement above uses the collections driver, and the
-check-fip rewrite is a follow-up once #1228 lands.
+No checker port on main has a position-and-view lookup of non-copy values
+to rewrite. `@vesper/check-names-packages` keeps copy values in its
+`FlatTable`s and uses `get`. `@vesper/check-fip` (#1228, merged during the
+lane) keeps its bindings as copy `BindRow`/`MoveRow` rows in sorted
+sequences with a linear `find`, which matches Rust's `BTreeMap` iteration
+order. Moving those bindings into a `FlatTable` of owning values would
+change the port's data design, which belongs to the check-fip lane. So the
+measurement above uses the collections driver.
 
 ## Compiler gaps
 
@@ -139,5 +142,5 @@ check-fip rewrite is a follow-up once #1228 lands.
 ## What is left
 
 - Gap 1, then re-measure against the bar.
-- The `@vesper/check-fip` bindings rewrite after #1228.
+- A callback rewrite of the first port that keeps non-copy values in a collection.
 - Lent `inout` captures (gap 3).
