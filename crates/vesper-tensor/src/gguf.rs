@@ -33,39 +33,56 @@ pub const MAX_DIMS: u32 = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GgmlType(pub u32);
 impl GgmlType {
+    // Ids from ggml.h `enum ggml_type`.
     pub const F32: Self = Self(0);
     pub const F16: Self = Self(1);
     pub const Q4_0: Self = Self(2);
+    pub const Q4_1: Self = Self(3);
+    pub const Q5_0: Self = Self(6);
+    pub const Q5_1: Self = Self(7);
     pub const Q8_0: Self = Self(8);
+    pub const Q8_1: Self = Self(9);
+    pub const Q2_K: Self = Self(10);
+    pub const Q3_K: Self = Self(11);
     pub const Q4_K: Self = Self(12);
+    pub const Q5_K: Self = Self(13);
+    pub const Q6_K: Self = Self(14);
+    pub const Q8_K: Self = Self(15);
+    pub const I8: Self = Self(24);
+    pub const I16: Self = Self(25);
+    pub const I32: Self = Self(26);
+    pub const I64: Self = Self(27);
+    pub const F64: Self = Self(28);
     pub const BF16: Self = Self(30);
     pub const MXFP4: Self = Self(39);
 
     /// `(elements per block, bytes per block)` for every type this reader
     /// can lay out, whether or not it can compute with it.
     pub fn geometry(self) -> Option<(usize, usize)> {
-        Some(match self.0 {
-            0 => (1, 4),
-            1 => (1, 2),
-            2 => (32, 18),
-            3 => (32, 20),
-            6 => (32, 22),
-            7 => (32, 24),
-            8 => (32, 34),
-            9 => (32, 36),
-            10 => (256, 84),
-            11 => (256, 110),
-            12 => (256, 144),
-            13 => (256, 176),
-            14 => (256, 210),
-            15 => (256, 292),
-            24 => (1, 1),
-            25 => (1, 2),
-            26 => (1, 4),
-            27 => (1, 8),
-            28 => (1, 8),
-            30 => (1, 2),
-            39 => (32, 17),
+        // Block sizes from ggml.c `type_traits` (`blck_size`, `type_size`).
+        const QK: usize = 32;
+        Some(match self {
+            Self::F32 => (1, 4),
+            Self::F16 => (1, 2),
+            Self::Q4_0 => (QK, 18),
+            Self::Q4_1 => (QK, 20),
+            Self::Q5_0 => (QK, 22),
+            Self::Q5_1 => (QK, 24),
+            Self::Q8_0 => (QK, 34),
+            Self::Q8_1 => (QK, 36),
+            Self::Q2_K => (crate::formats::QK_K, 84),
+            Self::Q3_K => (crate::formats::QK_K, 110),
+            Self::Q4_K => (crate::formats::QK_K, 144),
+            Self::Q5_K => (crate::formats::QK_K, 176),
+            Self::Q6_K => (crate::formats::QK_K, 210),
+            Self::Q8_K => (crate::formats::QK_K, 292),
+            Self::I8 => (1, 1),
+            Self::I16 => (1, 2),
+            Self::I32 => (1, 4),
+            Self::I64 => (1, 8),
+            Self::F64 => (1, 8),
+            Self::BF16 => (1, 2),
+            Self::MXFP4 => (QK, 17),
             _ => return None,
         })
     }

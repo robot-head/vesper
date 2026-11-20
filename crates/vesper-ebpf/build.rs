@@ -68,8 +68,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 5 program.rs: a ringbuf of 2048 bytes is accepted.
     (
-        "            if max_entries < 4096 ||",
-        "            if max_entries < 2048 ||",
+        "            if max_entries < RINGBUF_MIN_SIZE ||",
+        "            if max_entries < (RINGBUF_MIN_SIZE >> 1) ||",
     ),
     // 6 callgraph.rs: a path may exceed the stack limit by one frame slot.
     (
@@ -78,8 +78,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 7 wire.rs: the decoder reads the source address from the destination.
     (
-        "        src_ipv4: wrapping_u32(be(in s, 26, 4)),\n",
-        "        src_ipv4: wrapping_u32(be(in s, 30, 4)),\n",
+        "        src_ipv4: wrapping_u32(be(in s, SRC_IPV4, 4)),\n",
+        "        src_ipv4: wrapping_u32(be(in s, DST_IPV4, 4)),\n",
     ),
     // 8 verifier.rs (the exploration): a packet access may end one byte
     // past the range established against data_end (unsound).
@@ -89,8 +89,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 9 btf.rs: an unknown kind 20 is read as a pointer.
     (
-        "        if kind == 0 || kind > 19 {\n",
-        "        if kind == 0 || kind > 20 {\n",
+        "        if kind == 0 || kind > KIND_ENUM64 {\n",
+        "        if kind == 0 || kind > wrapping_add(KIND_ENUM64, 1) {\n",
     ),
     // 10 core.rs: members are not found through anonymous aggregates.
     (
@@ -99,8 +99,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 11 btf_ext.rs: line info keeps 9 bits of the column, not 10.
     (
-        "        out.push(lc & 1023);\n",
-        "        out.push(lc & 511);\n",
+        "        out.push(lc & LINE_COL_MASK);\n",
+        "        out.push(lc & (LINE_COL_MASK >> 1));\n",
     ),
     // 12 interp.rs (the run): the byte just before `data` is readable.
     (

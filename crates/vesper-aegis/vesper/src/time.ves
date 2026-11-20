@@ -2,13 +2,35 @@
 // src/time.rs, strict `YYYY-MM-DDTHH:MM:SS[.fraction]Z` timestamps.
 use self::reader::byte;
 
+// ASCII bytes this module compares against (constants are per module).
+const MINUS: u64 = 45;
+const DOT: u64 = 46;
+const DIGIT_0: u64 = 48;
+const DIGIT_9: u64 = 57;
+const COLON: u64 = 58;
+const UPPER_T: u64 = 84;
+const UPPER_Z: u64 = 90;
+// `YYYY-MM-DDTHH:MM:SSZ`, the shortest form, is 20 bytes.
+const SHORTEST: u64 = 20;
+// A field value no four-digit field reaches.
+const NOT_DIGITS: u64 = 100000;
+// Howard Hinnant's days_from_civil: 400-year eras of 146097 days, and the
+// day number of 1970-01-01 from 0000-03-01.
+const YEARS_PER_ERA: u64 = 400;
+const DAYS_PER_ERA: u64 = 146097;
+const UNIX_EPOCH_DAYS: u64 = 719468;
+const UNIX_EPOCH_YEAR: u64 = 1970;
+const SECONDS_PER_DAY: u64 = 86400;
+const SECONDS_PER_HOUR: u64 = 3600;
+const SECONDS_PER_MINUTE: u64 = 60;
+
 pub fn is_digit(c: u64) -> bool {
-    c >= 48 && c <= 57
+    c >= DIGIT_0 && c <= DIGIT_9
 }
 
 // Marks a field that is not all ASCII digits (no field reaches it).
 pub fn bad() -> u64 {
-    100000
+    NOT_DIGITS
 }
 
 // The decimal number in `s[start..end]`, or bad() if a byte is not an
@@ -20,7 +42,7 @@ pub fn num(in s: Slice[u8], start: u64, end: u64) -> u64 {
         if !is_digit(c) {
             return bad();
         }
-        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, 48));
+        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, DIGIT_0));
     }
     v
 }
@@ -49,31 +71,31 @@ pub fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
     } else {
         year
     };
-    let era = y / 400;
-    let yoe = wrapping_sub(y, wrapping_mul(era, 400));
+    let era = y / YEARS_PER_ERA;
+    let yoe = wrapping_sub(y, wrapping_mul(era, YEARS_PER_ERA));
     let mp = wrapping_add(month, 9) % 12;
     let doy = wrapping_sub(wrapping_add(wrapping_add(wrapping_mul(153, mp), 2) / 5, day), 1);
     let doe = wrapping_add(
         wrapping_sub(wrapping_add(wrapping_mul(yoe, 365), yoe / 4), yoe / 100),
         doy
     );
-    wrapping_sub(wrapping_add(wrapping_mul(era, 146097), doe), 719468)
+    wrapping_sub(wrapping_add(wrapping_mul(era, DAYS_PER_ERA), doe), UNIX_EPOCH_DAYS)
 }
 
 pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
     let n = s.len();
     if n
-        < 20
+        < SHORTEST
         || byte(in s, 4)
-        != 45
+        != MINUS
         || byte(in s, 7)
-        != 45
+        != MINUS
         || byte(in s, 10)
-        != 84
+        != UPPER_T
         || byte(in s, 13)
-        != 58
+        != COLON
         || byte(in s, 16)
-        != 58 {
+        != COLON {
         return Option::None;
     }
     let year = num(in s, 0, 4);
@@ -97,20 +119,20 @@ pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
         return Option::None;
     }
     // "Z", or "." with one or more digits and then "Z".
-    let ok_tail = if n == 20 {
-        byte(in s, 19) == 90
+    let ok_tail = if n == SHORTEST {
+        byte(in s, 19) == UPPER_Z
     } else {
         byte(in s, 19)
-            == 46
+            == DOT
             && byte(in s, wrapping_sub(n, 1))
-            == 90
+            == UPPER_Z
             && n
-            > 21
+            > wrapping_add(SHORTEST, 1)
             && num_ok(in s, 20, wrapping_sub(n, 1))
     };
     if !ok_tail
         || year
-        < 1970
+        < UNIX_EPOCH_YEAR
         || month
         < 1
         || month
@@ -129,8 +151,8 @@ pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
     let days = days_from_civil(year, month, day);
     Option::Some(
         wrapping_add(
-            wrapping_add(wrapping_mul(days, 86400), wrapping_mul(hour, 3600)),
-            wrapping_add(wrapping_mul(minute, 60), second)
+            wrapping_add(wrapping_mul(days, SECONDS_PER_DAY), wrapping_mul(hour, SECONDS_PER_HOUR)),
+            wrapping_add(wrapping_mul(minute, SECONDS_PER_MINUTE), second)
         )
     )
 }

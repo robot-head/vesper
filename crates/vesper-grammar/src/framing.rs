@@ -5,6 +5,13 @@
 use crate::port;
 use crate::{Error, ErrorKind, Result, add, bound, charge};
 
+/// Unsigned LEB128: seven payload bits per byte, bit 8 set while more bytes
+/// follow; a `u64` takes at most ten bytes, the last holding one bit.
+pub(crate) const LEB128_MAX_BYTES: usize = 10;
+pub(crate) const LEB128_PAYLOAD: u8 = 0x7f;
+pub(crate) const LEB128_MORE: u8 = 0x80;
+pub(crate) const LEB128_SHIFT: u32 = 7;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub max_input_bytes: usize,
@@ -17,7 +24,7 @@ impl Default for Limits {
         Self {
             max_input_bytes: 1024 * 1024,
             max_payload_bytes: 1024 * 1024,
-            max_output_bytes: 1024 * 1024 + 10,
+            max_output_bytes: 1024 * 1024 + LEB128_MAX_BYTES,
             max_work: 4 * 1024 * 1024,
         }
     }
@@ -27,38 +34,39 @@ impl Default for Limits {
 /// alone does not assert whole-input canonical uniqueness or exact EOF.
 #[cfg(not(vesper_port))]
 pub fn decode_canonical_u64_leb128(input: &[u8]) -> Result<(u64, usize)> {
-    let mut remaining = 10;
+    let mut remaining = LEB128_MAX_BYTES;
     decode(input, &mut remaining)
 }
 #[cfg(vesper_port)]
 pub fn decode_canonical_u64_leb128(input: &[u8]) -> Result<(u64, usize)> {
-    let p = port::vesper::fr_decode(input, 10).map_err(port::error)?;
+    let p = port::vesper::fr_decode(input, LEB128_MAX_BYTES as u64).map_err(port::error)?;
     Ok((p.a, p.b as usize))
 }
 pub(crate) fn decode(input: &[u8], remaining: &mut usize) -> Result<(u64, usize)> {
     let mut value = 0;
-    for i in 0..10 {
+    const LAST: usize = LEB128_MAX_BYTES - 1;
+    for i in 0..LEB128_MAX_BYTES {
         charge(remaining, 1)?;
         let byte = *input
             .get(i)
             .ok_or(Error::new(ErrorKind::UnexpectedEof, i))?;
-        if i == 9 && byte > 1 {
+        if i == LAST && byte > 1 {
             return Err(Error::new(ErrorKind::Overflow, i));
         }
-        value |= u64::from(byte & 127) << (i * 7);
-        if byte & 128 == 0 {
+        value |= u64::from(byte & LEB128_PAYLOAD) << (i as u32 * LEB128_SHIFT);
+        if byte & LEB128_MORE == 0 {
             if i != 0 && byte == 0 {
                 return Err(Error::new(ErrorKind::NonCanonical, i));
             }
             return Ok((value, i + 1));
         }
     }
-    Err(Error::new(ErrorKind::Overflow, 9))
+    Err(Error::new(ErrorKind::Overflow, LAST))
 }
 pub const fn encoded_u64_len(mut value: u64) -> usize {
     let mut count = 1;
-    while value >= 128 {
-        value >>= 7;
+    while value >= LEB128_MORE as u64 {
+        value >>= LEB128_SHIFT;
         count += 1;
     }
     count
@@ -81,8 +89,13 @@ pub fn encode_u64_into(value: u64, output: &mut [u8], limits: Limits) -> Result<
 }
 fn write_u64(mut value: u64, output: &mut [u8]) {
     for byte in output {
-        *byte = (value as u8 & 127) | if value >= 128 { 128 } else { 0 };
-        value >>= 7;
+        *byte = (value as u8 & LEB128_PAYLOAD)
+            | if value >= u64::from(LEB128_MORE) {
+                LEB128_MORE
+            } else {
+                0
+            };
+        value >>= LEB128_SHIFT;
     }
 }
 
@@ -195,13 +208,15 @@ pub fn parse_frame_exact(input: &[u8], limits: Limits) -> Result<&[u8]> {
 
 /// Largest payload representable in a three-byte unsigned length.
 pub const MAX_U24_PAYLOAD: usize = 0x00ff_ffff;
+/// Bytes in a u24 frame's big-endian length prefix.
+pub(crate) const U24_HEADER_BYTES: usize = 3;
 
 #[cfg(not(vesper_port))]
 fn u24_frame_parts(input: &[u8], limits: Limits) -> Result<(&[u8], usize)> {
     bound(input.len(), limits.max_input_bytes, ErrorKind::InputLimit)?;
     let mut work = limits.max_work;
     let mut len = 0usize;
-    for i in 0..3 {
+    for i in 0..U24_HEADER_BYTES {
         charge(&mut work, 1)?;
         let byte = *input
             .get(i)
@@ -209,9 +224,9 @@ fn u24_frame_parts(input: &[u8], limits: Limits) -> Result<(&[u8], usize)> {
         len = (len << 8) | usize::from(byte);
     }
     bound(len, limits.max_payload_bytes, ErrorKind::PayloadLimit)?;
-    let end = add(3, len)?;
+    let end = add(U24_HEADER_BYTES, len)?;
     let payload = input
-        .get(3..end)
+        .get(U24_HEADER_BYTES..end)
         .ok_or(Error::new(ErrorKind::UnexpectedEof, input.len()))?;
     charge(&mut work, len)?;
     Ok((payload, end))
@@ -250,15 +265,15 @@ pub fn encode_u24_frame_into(payload: &[u8], output: &mut [u8], limits: Limits) 
         limits.max_payload_bytes,
         ErrorKind::PayloadLimit,
     )?;
-    let size = add(3, payload.len())?;
+    let size = add(U24_HEADER_BYTES, payload.len())?;
     bound(size, limits.max_output_bytes, ErrorKind::OutputLimit)?;
     bound(size, limits.max_work, ErrorKind::WorkLimit)?;
     if output.len() < size {
         return Err(Error::new(ErrorKind::OutputTooSmall, 0));
     }
     let length = payload.len() as u32;
-    output[..3].copy_from_slice(&length.to_be_bytes()[1..]);
-    output[3..size].copy_from_slice(payload);
+    output[..U24_HEADER_BYTES].copy_from_slice(&length.to_be_bytes()[1..]);
+    output[U24_HEADER_BYTES..size].copy_from_slice(payload);
     Ok(size)
 }
 #[cfg(vesper_port)]

@@ -19,7 +19,7 @@
 #![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 
 use crate::btf::{
-    BTF_MAGIC, Btf, BtfBuilder, BtfError, BtfType, FUNC_EXTERN, FuncInfo, INT_SIGNED,
+    BTF_MAGIC, BTF_VERSION, Btf, BtfBuilder, BtfError, BtfType, FUNC_EXTERN, FuncInfo, INT_SIGNED,
     VAR_GLOBAL_ALLOCATED, add_func_types,
 };
 use crate::core::{CoreKind, CoreRelo, CoreSpec, LocalMember, LocalType};
@@ -27,8 +27,22 @@ use crate::program::{LineInfo, MapDef, MapKind, Program};
 use std::collections::HashMap;
 
 const EXT_HDR_LEN: u32 = 32;
+/// The header before CO-RE: magic, version, flags, hdr_len, then the
+/// func info and line info (offset, length) pairs.
+const EXT_HDR_MIN_LEN: usize = 24;
+/// Each subsection's (offset, length) pair, from byte 8 of the header.
+const EXT_PARTS_OFF: usize = 8;
+const EXT_PART_SIZE: usize = 8;
+const FUNC_REC_SIZE: u32 = 8;
+/// `bpf_line_info.line_col`: line in the high 22 bits, column in the low 10.
+const LINE_COL_SHIFT: u32 = 10;
+const LINE_COL_MASK: u32 = 0x3ff;
+/// Deepest local type `local_type` follows.
+const MAX_LOCAL_DEPTH: u32 = 16;
 const LINE_REC_SIZE: u32 = 16;
 const CORE_REC_SIZE: u32 = 16;
+/// Largest record size this reader accepts (libbpf's sanity bound).
+const MAX_REC_SIZE: u32 = 256;
 
 fn bad(m: impl Into<String>) -> BtfError {
     BtfError(m.into())
@@ -210,14 +224,14 @@ pub fn build(prog: &Program, section: &str) -> Result<ObjectBtf, BtfError> {
     }
     let mut lines = Vec::new();
     for l in &prog.lines {
-        if l.col >= 1 << 10 || l.line >= 1 << 22 {
+        if l.col > LINE_COL_MASK || l.line >= 1 << (32 - LINE_COL_SHIFT) {
             return Err(bad(format!("line info {}:{} out of range", l.line, l.col)));
         }
         lines.push([
             (l.slot * 8) as u32,
             b.str(&l.file),
             b.str(&l.text),
-            (l.line << 10) | l.col,
+            (l.line << LINE_COL_SHIFT) | l.col,
         ]);
     }
     let sec = b.str(section);
@@ -312,7 +326,7 @@ fn records<'a>(
         return Ok(Vec::new());
     }
     let rec = rd(sub, 0)?;
-    if rec < min_rec || rec % 4 != 0 || rec > 256 {
+    if rec < min_rec || rec % 4 != 0 || rec > MAX_REC_SIZE {
         return Err(bad(format!(".BTF.ext record size {rec}")));
     }
     let mut out = Vec::new();
@@ -401,43 +415,44 @@ pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfE
 
 #[cfg(not(vesper_port))]
 pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfError> {
-    if ext.len() < 8 || u16::from_le_bytes([ext[0], ext[1]]) != BTF_MAGIC || ext[2] != 1 {
+    if ext.len() < 8 || u16::from_le_bytes([ext[0], ext[1]]) != BTF_MAGIC || ext[2] != BTF_VERSION {
         return Err(bad(".BTF.ext: bad header"));
     }
     let hdr = rd(ext, 4)? as usize;
-    if hdr < 24 {
+    if hdr < EXT_HDR_MIN_LEN {
         return Err(bad(".BTF.ext header too short"));
     }
     let part = |i: usize| -> Result<&[u8], BtfError> {
-        if 8 + i * 8 + 8 > hdr {
+        let at = EXT_PARTS_OFF + i * EXT_PART_SIZE;
+        if at + EXT_PART_SIZE > hdr {
             return Ok(&[]);
         }
-        let off = rd(ext, 8 + i * 8)? as usize;
-        let len = rd(ext, 12 + i * 8)? as usize;
+        let off = rd(ext, at)? as usize;
+        let len = rd(ext, at + 4)? as usize;
         let s = hdr.checked_add(off).ok_or_else(|| bad("overflow"))?;
         let e = s.checked_add(len).ok_or_else(|| bad("overflow"))?;
         ext.get(s..e)
             .ok_or_else(|| bad(".BTF.ext subsection out of range"))
     };
     let mut out = ObjectExt::default();
-    for r in records(part(0)?, btf, section, 8)? {
+    for r in records(part(0)?, btf, section, FUNC_REC_SIZE)? {
         let (slot, ty) = (slot_of(rd(r, 0)?)?, rd(r, 4)?);
         let Some(BtfType::Func { name, .. }) = btf.get(ty) else {
             return Err(bad(format!("func info type {ty} is not a FUNC")));
         };
         out.functions.push((btf.name(*name).to_owned(), slot));
     }
-    for r in records(part(1)?, btf, section, 16)? {
+    for r in records(part(1)?, btf, section, LINE_REC_SIZE)? {
         let lc = rd(r, 12)?;
         out.lines.push(LineInfo {
             slot: slot_of(rd(r, 0)?)?,
             file: btf.name(rd(r, 4)?).to_owned(),
             text: btf.name(rd(r, 8)?).to_owned(),
-            line: lc >> 10,
-            col: lc & 0x3ff,
+            line: lc >> LINE_COL_SHIFT,
+            col: lc & LINE_COL_MASK,
         });
     }
-    for r in records(part(2)?, btf, section, 16)? {
+    for r in records(part(2)?, btf, section, CORE_REC_SIZE)? {
         let kind = rd(r, 12)?;
         let kind = CoreKind::from_code(kind)
             .ok_or_else(|| bad(format!("unsupported CO-RE relocation kind {kind}")))?;
@@ -481,7 +496,7 @@ pub fn local_type(btf: &Btf, id: u32) -> Result<LocalType, BtfError> {
 }
 
 fn local_depth(btf: &Btf, id: u32, depth: u32) -> Result<LocalType, BtfError> {
-    if depth > 16 {
+    if depth > MAX_LOCAL_DEPTH {
         return Err(bad("CO-RE local type nests too deeply"));
     }
     let t = btf

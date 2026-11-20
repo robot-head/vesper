@@ -99,12 +99,17 @@ pub enum RegisterHash {
     Sha512,
 }
 
+/// Digest lengths of SHA-256, SHA-384 and SHA-512.
+const SHA256_LEN: usize = 32;
+const SHA384_LEN: usize = 48;
+const SHA512_LEN: usize = 64;
+
 impl RegisterHash {
     pub fn len(self) -> usize {
         match self {
-            RegisterHash::Sha256 => 32,
-            RegisterHash::Sha384 => 48,
-            RegisterHash::Sha512 => 64,
+            RegisterHash::Sha256 => SHA256_LEN,
+            RegisterHash::Sha384 => SHA384_LEN,
+            RegisterHash::Sha512 => SHA512_LEN,
         }
     }
 

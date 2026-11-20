@@ -29,6 +29,12 @@ use std::collections::{BinaryHeap, HashMap};
 use crate::llama::Tokenizer;
 use crate::Error;
 
+/// UTF-8 continuation bytes are `0b10xx_xxxx` (RFC 3629 §3).
+#[cfg_attr(vesper_port, allow(dead_code))]
+const UTF8_CONTINUATION_MASK: u8 = 0xc0;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const UTF8_CONTINUATION: u8 = 0x80;
+
 pub const BOS: u32 = 1;
 pub const EOS: u32 = 2;
 /// Largest prompt accepted by [`Encoder::encode`].
@@ -188,12 +194,14 @@ impl<'t> Encoder<'t> {
         let mut start = 0usize;
         let mut len = 0usize;
         for (i, &b) in text.iter().enumerate() {
-            if b & 0xc0 != 0x80 || len == 0 {
+            if b & UTF8_CONTINUATION_MASK != UTF8_CONTINUATION || len == 0 {
                 start = i;
                 len = 0;
             }
             len += 1;
-            let continues = text.get(i + 1).is_some_and(|next| next & 0xc0 == 0x80);
+            let continues = text
+                .get(i + 1)
+                .is_some_and(|next| next & UTF8_CONTINUATION_MASK == UTF8_CONTINUATION);
             if continues && len < 4 {
                 continue;
             }

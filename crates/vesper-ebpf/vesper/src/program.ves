@@ -2,6 +2,24 @@
 // src/program.rs and `MapDef::validate`. The assembler and the `Program`
 // record stay Rust in this part of the port.
 
+// `enum bpf_map_type` values of the supported kinds.
+const BPF_MAP_TYPE_HASH: u32 = 1;
+const BPF_MAP_TYPE_ARRAY: u32 = 2;
+const BPF_MAP_TYPE_PERCPU_HASH: u32 = 5;
+const BPF_MAP_TYPE_PERCPU_ARRAY: u32 = 6;
+const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
+const BPF_MAP_TYPE_RINGBUF: u32 = 27;
+const BPF_MAP_TYPE_PROG_ARRAY: u32 = 3;
+
+// `BPF_OBJ_NAME_LEN` (15 bytes and a NUL), the smallest ring buffer (one
+// page), `MAX_BPF_STACK` (the key size bound) and the 1 MiB value bound.
+const BPF_OBJ_NAME_LEN: u64 = 16;
+const RINGBUF_MIN_SIZE: u32 = 4096;
+const MAX_BPF_STACK: u32 = 512;
+const MAX_VALUE_SIZE: u32 = 1048576;
+// The first byte that is not ASCII.
+const ASCII_END: u8 = 128;
+
 pub copy enum MapKind {
     Hash,
     Array,
@@ -21,30 +39,30 @@ pub copy enum ProgramType {
 
 pub fn map_kernel_type(k: MapKind) -> u32 {
     match k {
-        MapKind::Hash => 1,
-        MapKind::Array => 2,
-        MapKind::PerCpuHash => 5,
-        MapKind::PerCpuArray => 6,
-        MapKind::LruHash => 9,
-        MapKind::RingBuf => 27,
-        MapKind::ProgArray => 3,
+        MapKind::Hash => BPF_MAP_TYPE_HASH,
+        MapKind::Array => BPF_MAP_TYPE_ARRAY,
+        MapKind::PerCpuHash => BPF_MAP_TYPE_PERCPU_HASH,
+        MapKind::PerCpuArray => BPF_MAP_TYPE_PERCPU_ARRAY,
+        MapKind::LruHash => BPF_MAP_TYPE_LRU_HASH,
+        MapKind::RingBuf => BPF_MAP_TYPE_RINGBUF,
+        MapKind::ProgArray => BPF_MAP_TYPE_PROG_ARRAY,
     }
 }
 
 pub fn map_from_kernel_type(t: u32) -> Option[MapKind] {
-    if t == 1 {
+    if t == BPF_MAP_TYPE_HASH {
         Option::Some(MapKind::Hash)
-    } else if t == 2 {
+    } else if t == BPF_MAP_TYPE_ARRAY {
         Option::Some(MapKind::Array)
-    } else if t == 5 {
+    } else if t == BPF_MAP_TYPE_PERCPU_HASH {
         Option::Some(MapKind::PerCpuHash)
-    } else if t == 6 {
+    } else if t == BPF_MAP_TYPE_PERCPU_ARRAY {
         Option::Some(MapKind::PerCpuArray)
-    } else if t == 9 {
+    } else if t == BPF_MAP_TYPE_LRU_HASH {
         Option::Some(MapKind::LruHash)
-    } else if t == 27 {
+    } else if t == BPF_MAP_TYPE_RINGBUF {
         Option::Some(MapKind::RingBuf)
-    } else if t == 3 {
+    } else if t == BPF_MAP_TYPE_PROG_ARRAY {
         Option::Some(MapKind::ProgArray)
     } else {
         Option::None
@@ -98,7 +116,7 @@ pub fn prog_is_tracing(p: ProgramType) -> bool {
 fn ascii(in name: Str) -> bool {
     for i in 0..name.len() {
         match name.try_byte_at(i) {
-            Option::Some(b) => if b >= 128 {
+            Option::Some(b) => if b >= ASCII_END {
                 return false;
             },
             Option::None => (),
@@ -113,7 +131,7 @@ fn ascii(in name: Str) -> bool {
 // value size, 7 key size, 8 value size.
 pub fn map_validate(in name: Str, kind: MapKind, key_size: u32, value_size: u32, max_entries: u32)
     -> u64 {
-    if name.len() == 0 || name.len() > 15 || !ascii(in name) {
+    if name.len() == 0 || name.len() >= BPF_OBJ_NAME_LEN || !ascii(in name) {
         return 1;
     }
     match kind {
@@ -121,7 +139,7 @@ pub fn map_validate(in name: Str, kind: MapKind, key_size: u32, value_size: u32,
             if key_size != 0 || value_size != 0 {
                 return 2;
             }
-            if max_entries < 4096 || (max_entries & wrapping_sub(max_entries, 1)) != 0 {
+            if max_entries < RINGBUF_MIN_SIZE || (max_entries & wrapping_sub(max_entries, 1)) != 0 {
                 return 3;
             }
             0
@@ -140,10 +158,10 @@ pub fn map_validate(in name: Str, kind: MapKind, key_size: u32, value_size: u32,
             if prog_array && value_size != 4 {
                 return 6;
             }
-            if key_size == 0 || key_size > 512 {
+            if key_size == 0 || key_size > MAX_BPF_STACK {
                 return 7;
             }
-            if value_size > 1048576 {
+            if value_size > MAX_VALUE_SIZE {
                 return 8;
             }
             0

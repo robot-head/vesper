@@ -50,6 +50,9 @@ use crate::linear::{Ledger, Obligation};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
+/// Host mmap replies are whole 4 KiB pages; the mapped set counts pages.
+const PAGE_SIZE: u64 = 4096;
+
 /// A value returned by the untrusted host (VMGEXIT, #VE, RSI host call).
 /// The raw bits are private; validators are the only way out.
 #[derive(Clone, Copy, Debug)]
@@ -167,8 +170,8 @@ impl HostMappingTable {
         let invalid = TeeError::HostMmapInvalid { addr, len };
         if len == 0
             || len != requested_len
-            || !addr.is_multiple_of(4096)
-            || !len.is_multiple_of(4096)
+            || !addr.is_multiple_of(PAGE_SIZE)
+            || !len.is_multiple_of(PAGE_SIZE)
         {
             return Err(invalid);
         }
@@ -176,10 +179,14 @@ impl HostMappingTable {
         if addr < self.window_start || end > self.window_end {
             return Err(invalid);
         }
-        if self.mapped.first_overlap(addr / 4096, end / 4096).is_some() {
+        if self
+            .mapped
+            .first_overlap(addr / PAGE_SIZE, end / PAGE_SIZE)
+            .is_some()
+        {
             return Err(TeeError::HostMmapOverlap { addr, len });
         }
-        self.mapped.insert(addr / 4096, end / 4096);
+        self.mapped.insert(addr / PAGE_SIZE, end / PAGE_SIZE);
         Ok(HostMmapReply { addr, len })
     }
 

@@ -43,6 +43,11 @@ pub const MAX_DIM: usize = 8192;
 pub const MAX_LAYERS: usize = 256;
 pub const MAX_VOCAB: usize = 1 << 20;
 pub const MAX_SEQ_LEN: usize = 65_536;
+/// The longest vocabulary piece a llama2.c `tokenizer.bin` may declare.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MAX_TOKEN_LENGTH: usize = 1024;
+/// The byte budget of each layer's KV pool.
+const KV_POOL_BYTES: usize = 64 << 20;
 pub const MAX_CHECKPOINT_BYTES: usize = 1 << 30;
 
 /// How RoPE pairs the elements of a head.
@@ -1119,7 +1124,7 @@ impl KvCache {
             pages,
             max_sequences,
             max_tokens_per_sequence: config.seq_len,
-            max_bytes: 64 * 1024 * 1024,
+            max_bytes: KV_POOL_BYTES,
         };
         let mut pools = Vec::with_capacity(config.layers);
         for _ in 0..config.layers {
@@ -1266,7 +1271,7 @@ impl Tokenizer {
             return Err(Error::Limit("vocab"));
         }
         let mut r = Reader { bytes, offset: 0 };
-        let max_token_length = positive(r.i32()?, "max_token_length", 1024)?;
+        let max_token_length = positive(r.i32()?, "max_token_length", MAX_TOKEN_LENGTH)?;
         let mut pieces = Vec::with_capacity(vocab);
         let mut scores = Vec::with_capacity(vocab);
         for _ in 0..vocab {

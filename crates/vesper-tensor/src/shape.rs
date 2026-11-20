@@ -122,15 +122,20 @@ impl CheckedShape {
     }
 }
 
+/// Hard ceilings on [`Dimensions`] budgets.
+const CEILING_MAX_NODES: usize = 4096;
+const CEILING_MAX_DEPTH: usize = 128;
+const CEILING_MAX_FACTORS: usize = 128;
+
 impl Dimensions {
     /// Hard ceilings prevent caller budgets from enabling unbounded tree work.
     pub fn new(max_nodes: usize, max_depth: usize, max_factors: usize) -> Result<Self, Error> {
         if max_nodes == 0
-            || max_nodes > 4096
+            || max_nodes > CEILING_MAX_NODES
             || max_depth == 0
-            || max_depth > 128
+            || max_depth > CEILING_MAX_DEPTH
             || max_factors == 0
-            || max_factors > 128
+            || max_factors > CEILING_MAX_FACTORS
         {
             return Err(Error::Limit("dimension configuration"));
         }

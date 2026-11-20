@@ -17,28 +17,74 @@ use self::reader::{
     unsupported
 };
 
+// src/claims.rs: the wire's architecture tags (TDX 1, SNP 2, CCA 3), the
+// known enclave flags (bits 0..3), field sizes, and format code 5.
+const FORMAT_CLAIMS_WIRE: u64 = 5;
+const ARCH_TDX: u64 = 1;
+const ARCH_SNP: u64 = 2;
+const ARCH_CCA: u64 = 3;
+const ENCLAVE_FLAG_DEBUG_DISABLED: u64 = 1;
+const FLAGS_RESERVED: u64 = 4294967288;
+const MEASUREMENT_BYTES: u64 = 48;
+const DIGEST_BYTES: u64 = 32;
+const PREFIX_BYTES: u64 = 8;
+const CHANNEL_BINDING_BYTES: u64 = 48;
+// Claims and policy layouts (see check_policy).
+const CW_ARCH: u64 = 0;
+const CW_TCB_SVN: u64 = 1;
+const CW_FLAGS: u64 = 2;
+const CW_REPLAYED: u64 = 3;
+const CW_HAS_VMPL: u64 = 4;
+const CW_VMPL: u64 = 5;
+const CW_HAS_REPORTED_TCB: u64 = 6;
+const CW_REPORTED_TCB: u64 = 7;
+const CB_MEASUREMENT: u64 = 0;
+const CB_LOOM_LOCK: u64 = 48;
+const CB_OLEAN_MIF: u64 = 80;
+const CB_PREFIX: u64 = 112;
+const CB_CHANNEL_BINDING: u64 = 120;
+const PW_TDX_FLOOR: u64 = 0;
+const PW_SNP_FLOOR: u64 = 1;
+const PW_CCA_FLOOR: u64 = 2;
+const PW_HAS_COMPONENT_FLOORS: u64 = 3;
+const PW_COMPONENT_FLOORS: u64 = 4;
+const PW_MAX_VMPL: u64 = 5;
+const PW_REQUIRE_REPLAY: u64 = 6;
+const PW_NARCHS: u64 = 7;
+const PW_ARCHS: u64 = 8;
+const PB_LOOM_LOCK: u64 = 0;
+const PB_OLEAN_MIF: u64 = 32;
+const PB_MEASUREMENTS: u64 = 64;
+// An unset `snp_vmpl` compares as `u32::MAX`.
+const NO_VMPL: u64 = 4294967295;
+// The SNP TCB_VERSION components the policy floors: bootloader, tee (bytes
+// 0 and 1), snp and microcode (bytes 6 and 7).
+const TCB_COMPONENTS: u64 = 4;
+const TCB_LOW_COMPONENTS: u64 = 2;
+const TCB_HIGH_SKIP: u64 = 4;
+
 // AegisAttestationClaimsWire::decode. Words: tee_arch_tag, tcb_svn,
 // enclave_flags. Bytes: mr_enclave_sha384, loom_lock_blake3,
 // olean_spec_mif, chan_binding_prefix.
 pub fn decode_wire(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
     -> Unit eff [Fail[AErr]] {
-    let mut r = rd(0, b.len(), 5);
+    let mut r = rd(0, b.len(), FORMAT_CLAIMS_WIRE);
     let tag = rd_u16(in b, inout r, 122);
-    if tag < 1 || tag > 3 {
+    if tag < ARCH_TDX || tag > ARCH_CCA {
         unsupported(in r, 122, tag);
     }
     let tcb_svn = rd_u16(in b, inout r, 123);
     let flags = rd_u32(in b, inout r, 124);
-    if flags & 4294967288 != 0 {
+    if flags & FLAGS_RESERVED != 0 {
         unsupported(in r, 124, flags);
     }
     w.push(tag);
     w.push(tcb_svn);
     w.push(flags);
-    arr(in b, inout r, 48, 125, inout d);
-    arr(in b, inout r, 32, 126, inout d);
-    arr(in b, inout r, 32, 127, inout d);
-    arr(in b, inout r, 8, 128, inout d);
+    arr(in b, inout r, MEASUREMENT_BYTES, 125, inout d);
+    arr(in b, inout r, DIGEST_BYTES, 126, inout d);
+    arr(in b, inout r, DIGEST_BYTES, 127, inout d);
+    arr(in b, inout r, PREFIX_BYTES, 128, inout d);
     finish(in r);
 }
 
@@ -107,79 +153,85 @@ pub fn check_policy(
     in pb: Slice[u8],
     in expected: Slice[u8]
 ) -> Unit eff [Fail[PErr]] {
-    let arch = word(in cw, 0);
-    let tcb_svn = word(in cw, 1);
-    let flags = word(in cw, 2);
-    let narchs = word(in pw, 7);
+    let arch = word(in cw, CW_ARCH);
+    let tcb_svn = word(in cw, CW_TCB_SVN);
+    let flags = word(in cw, CW_FLAGS);
+    let narchs = word(in pw, PW_NARCHS);
     let mut allowed = false;
     for i in 0..narchs {
-        if word(in pw, wrapping_add(8, i)) == arch {
+        if word(in pw, wrapping_add(PW_ARCHS, i)) == arch {
             allowed = true;
         }
     }
     if !allowed {
         deny(0, arch, 0, 0);
     }
-    if flags & 1 == 0 {
+    if flags & ENCLAVE_FLAG_DEBUG_DISABLED == 0 {
         deny(1, 0, 0, 0);
     }
-    let floor = if arch == 1 {
-        word(in pw, 0)
-    } else if arch == 2 {
-        word(in pw, 1)
+    let floor = if arch == ARCH_TDX {
+        word(in pw, PW_TDX_FLOOR)
+    } else if arch == ARCH_SNP {
+        word(in pw, PW_SNP_FLOOR)
     } else {
-        word(in pw, 2)
+        word(in pw, PW_CCA_FLOOR)
     };
     if tcb_svn < floor {
         deny(2, tcb_svn, floor, 0);
     }
-    let meas_words = wrapping_add(8, narchs);
+    let meas_words = wrapping_add(PW_ARCHS, narchs);
     let nmeas = wrapping_sub(pw.len(), meas_words);
     let mut found = false;
     for i in 0..nmeas {
         if word(in pw, wrapping_add(meas_words, i))
             == arch
-            && ct_eq(in pb, wrapping_add(64, wrapping_mul(i, 48)), in cb, 0, 48) {
+            && ct_eq(
+            in pb,
+            wrapping_add(PB_MEASUREMENTS, wrapping_mul(i, MEASUREMENT_BYTES)),
+            in cb,
+            CB_MEASUREMENT,
+            MEASUREMENT_BYTES
+        ) {
             found = true;
         }
     }
     if !found {
         deny(4, 0, 0, 0);
     }
-    if !ct_eq(in cb, 48, in pb, 0, 32) {
+    if !ct_eq(in cb, CB_LOOM_LOCK, in pb, PB_LOOM_LOCK, DIGEST_BYTES) {
         deny(5, 0, 0, 0);
     }
-    if !ct_eq(in cb, 80, in pb, 32, 32) {
+    if !ct_eq(in cb, CB_OLEAN_MIF, in pb, PB_OLEAN_MIF, DIGEST_BYTES) {
         deny(6, 0, 0, 0);
     }
-    if !ct_eq(in cb, 120, in expected, 0, 48) || !ct_eq(in cb, 112, in expected, 0, 8) {
+    if !ct_eq(in cb, CB_CHANNEL_BINDING, in expected, 0, CHANNEL_BINDING_BYTES)
+        || !ct_eq(in cb, CB_PREFIX, in expected, 0, PREFIX_BYTES) {
         deny(7, 0, 0, 0);
     }
-    if arch == 2 {
-        let vmpl = if word(in cw, 4) == 1 {
-            word(in cw, 5)
+    if arch == ARCH_SNP {
+        let vmpl = if word(in cw, CW_HAS_VMPL) == 1 {
+            word(in cw, CW_VMPL)
         } else {
-            4294967295
+            NO_VMPL
         };
-        let max_vmpl = word(in pw, 5);
+        let max_vmpl = word(in pw, PW_MAX_VMPL);
         if vmpl > max_vmpl {
             deny(9, vmpl, max_vmpl, 0);
         }
-        if word(in pw, 3) == 1 {
-            let actual = if word(in cw, 6) == 1 {
-                word(in cw, 7)
+        if word(in pw, PW_HAS_COMPONENT_FLOORS) == 1 {
+            let actual = if word(in cw, CW_HAS_REPORTED_TCB) == 1 {
+                word(in cw, CW_REPORTED_TCB)
             } else {
                 0
             };
-            let floors = word(in pw, 4);
+            let floors = word(in pw, PW_COMPONENT_FLOORS);
             // bootloader, tee, snp, microcode: bytes 0, 1, 6 and 7.
             let mut component: u64 = 0;
-            let four: u64 = 4;
-            for c in 0..four {
-                let at = if c < 2 {
+            for c in 0..TCB_COMPONENTS {
+                let at = if c < TCB_LOW_COMPONENTS {
                     c
                 } else {
-                    wrapping_add(c, 4)
+                    wrapping_add(c, TCB_HIGH_SKIP)
                 };
                 let a = byte_of(actual, at);
                 let m = byte_of(floors, at);
@@ -189,7 +241,7 @@ pub fn check_policy(
             }
         }
     }
-    if word(in pw, 6) == 1 && word(in cw, 3) != 1 {
+    if word(in pw, PW_REQUIRE_REPLAY) == 1 && word(in cw, CW_REPLAYED) != 1 {
         deny(8, arch, 0, 0);
     }
 }

@@ -6,35 +6,62 @@ use self::num::{
     is_nan
 };
 
+// Binary64 exponent bias and trailing significand width (IEEE 754-2019).
+const F64_BIAS: i64 = 1023;
+const F64_MANT_BITS: u64 = 52;
+// Binary32 fields (src/host.rs `ieee`).
+const F32_MANT_BITS: u32 = 23;
+const F32_EXP_FIELD: u32 = 255;
+const F32_MANT_MASK: u32 = 8388607;
+const F32_MANT_MASK_I: i32 = 8388607;
+const F32_BIAS: i32 = 127;
+const F32_SUBNORMAL_EXP: i32 = 149;
+// Binary32 bit patterns of +Inf, -Inf and the canonical quiet NaN.
+const F32_INFINITY: u32 = 2139095040;
+const F32_NEG_INFINITY: u32 = 4286578688;
+const F32_QUIET_NAN: u32 = 2143289344;
+// `1.5 * 2^23`, and the `2^22` bias it leaves in the low mantissa bits.
+const ROUND_MAGIC: f32 = 12582912.0;
+const ROUND_MAGIC_BIAS: i32 = 4194304;
+// E8M0 codes 0 and 1 give binary32 subnormals: `2^-128` is bit 21.
+const E8M0_SUBNORMAL_HALF: u32 = 2097152;
+// FP8 (OCP 8-bit floating point v1.0) sign bit, the magnitude bits, and the
+// canonical NaN codes: E4M3 has only S.1111.111, E5M2's is S.11111.10.
+const FP8_SIGN: u8 = 128;
+const FP8_MAGNITUDE: u8 = 127;
+const E4M3_NAN: u8 = 127;
+const E5M2_NAN: u8 = 126;
+
 // `2^k` as an f64, exact for `-1022 <= k <= 1023`.
 pub fn pow2(k: i32) -> f64 eff [Fail[ArithOverflow]] {
-    from_bits_f64(wrapping_u64(widen_i64(k) + 1023) << 52)
+    from_bits_f64(wrapping_u64(widen_i64(k) + F64_BIAS) << F64_MANT_BITS)
 }
 
 // `floor(log2(v))` for finite `v > 0`, exact (from the exponent bits).
 pub fn floor_log2(v: f32) -> i32 eff [Fail[ArithOverflow]] {
     let bits = to_bits_f32(v);
-    let exp = wrapping_i32((bits >> 23) & 255);
+    let exp = wrapping_i32((bits >> F32_MANT_BITS) & F32_EXP_FIELD);
     if exp == 0 {
-        let mantissa = bits & 8388607;
-        31 - wrapping_i32(clz32(mantissa)) - 149
+        // A subnormal is `mantissa * 2^-149`.
+        let mantissa = bits & F32_MANT_MASK;
+        31 - wrapping_i32(clz32(mantissa)) - F32_SUBNORMAL_EXP
     } else {
-        exp - 127
+        exp - F32_BIAS
     }
 }
 
 // GGML `nearest_int`: add `1.5 * 2^23` in FP32 and read the low bits.
 pub fn nearest_int(v: f32) -> i32 eff [Fail[ArithOverflow]] {
-    let bits = wrapping_i32(to_bits_f32(v + 12582912.0));
-    (bits & 8388607) - 4194304
+    let bits = wrapping_i32(to_bits_f32(v + ROUND_MAGIC));
+    (bits & F32_MANT_MASK_I) - ROUND_MAGIC_BIAS
 }
 
 // `2^(e - 128)` exactly (GGML `ggml_e8m0_to_fp32_half`), for `e < 255`.
 pub fn e8m0_half(e: u8) -> f32 eff [Fail[ArithOverflow]] {
     let bits: u32 = if e < 2 {
-        2097152 << widen_u32(e)
+        E8M0_SUBNORMAL_HALF << widen_u32(e)
     } else {
-        widen_u32(e - 1) << 23
+        widen_u32(e - 1) << F32_MANT_BITS
     };
     from_bits_f32(bits)
 }
@@ -66,25 +93,25 @@ pub fn max_finite(e5m2: bool) -> f32 {
 // `Fp8::decode_exact`: NaN codes give the quiet NaN, E5M2 infinity codes
 // give infinities.
 pub fn fp8_decode(e5m2: bool, code: u8) -> f32 eff [Fail[ArithOverflow]] {
-    let neg = code & 128 != 0;
+    let neg = code & FP8_SIGN != 0;
     let m_bits = mantissa_bits(e5m2);
     let e_bits = 7 - m_bits;
     let one: i32 = 1;
-    let exp = widen_i32((code & 127) >> m_bits);
+    let exp = widen_i32((code & FP8_MAGNITUDE) >> m_bits);
     let mant_max = (one << m_bits) - 1;
     let mant = widen_i32(code) & mant_max;
     let e_max = (one << e_bits) - 1;
     if !e5m2 && exp == e_max && mant == mant_max {
-        return from_bits_f32(2143289344);
+        return from_bits_f32(F32_QUIET_NAN);
     }
     if e5m2 && exp == e_max {
         if mant != 0 {
-            return from_bits_f32(2143289344);
+            return from_bits_f32(F32_QUIET_NAN);
         }
         if neg {
-            return from_bits_f32(4286578688);
+            return from_bits_f32(F32_NEG_INFINITY);
         }
-        return from_bits_f32(2139095040);
+        return from_bits_f32(F32_INFINITY);
     }
     let value = if exp == 0 {
         nearest_f64(mant) * pow2(1 - bias(e5m2) - m_bits)
@@ -102,15 +129,15 @@ pub fn fp8_decode(e5m2: bool, code: u8) -> f32 eff [Fail[ArithOverflow]] {
 // NaN code and magnitudes past the largest finite value saturate to it.
 pub fn fp8_encode(e5m2: bool, value: f32) -> u8 eff [Fail[ArithOverflow]] {
     let sign: u8 = if to_bits_f32(value) >> 31 == 1 {
-        128
+        FP8_SIGN
     } else {
         0
     };
     if is_nan(value) {
         if e5m2 {
-            return 126 | sign;
+            return E5M2_NAN | sign;
         }
-        return 127 | sign;
+        return E4M3_NAN | sign;
     }
     let a = widen_f64(abs(value));
     let m_bits = mantissa_bits(e5m2);

@@ -42,6 +42,19 @@ pub const SNP_REPORT_MAX_VERSION: u32 = 6;
 pub const SNP_REPORT_VERSION_MIT_VECTORS: u32 = 5;
 /// First version with the extended TCBs.
 pub const SNP_REPORT_VERSION_ETCB: u32 = 6;
+/// First version with the CPUID family, model and stepping fields.
+pub const SNP_REPORT_VERSION_CPUID: u32 = 3;
+/// `FLAGS` bits 4:0 (`AUTHOR_KEY_EN`, `MASK_CHIP_KEY`, `SIGNING_KEY`); the
+/// rest are reserved. `SIGNING_KEY` is bits 4:2.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SNP_FLAGS_KNOWN: u32 = 0x1F;
+const SNP_FLAGS_SIGNING_KEY_SHIFT: u32 = 2;
+const SNP_FLAGS_SIGNING_KEY_MASK: u32 = 7;
+/// A signature component: a 72-byte little-endian field holding a 48-byte
+/// P-384 scalar, zero-extended.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SIG_COMPONENT_LE_LEN: usize = 72;
+const P384_SCALAR_LEN: usize = 48;
 /// Length of one `ETCB_VERSION` field.
 pub const SNP_ETCB_LEN: usize = 32;
 /// Guest policy bit 16: SMT allowed.
@@ -184,7 +197,7 @@ impl SnpReport {
         let current_tcb = r.u64("current_tcb")?;
         let platform_info = r.u64("platform_info")?;
         let flags = r.u32("flags")?;
-        if flags & !0x1F != 0 {
+        if flags & !SNP_FLAGS_KNOWN != 0 {
             return Err(unsupported("flags", flags.into()));
         }
         r.reserved(4, "reserved0")?;
@@ -197,7 +210,7 @@ impl SnpReport {
         let report_id_ma = r.array("report_id_ma")?;
         let reported_tcb = r.u64("reported_tcb")?;
         let cpuid: [u8; 3] = r.array("cpuid")?;
-        if version == 2 && cpuid != [0; 3] {
+        if version == SNP_REPORT_MIN_VERSION && cpuid != [0; 3] {
             return Err(ParseError::NonZeroReserved {
                 format: Format::SnpReport,
                 field: "reserved1 (v2 cpuid)",
@@ -218,7 +231,7 @@ impl SnpReport {
             (0, 0)
         };
         r.reserved(24, "reserved5")?;
-        let venice = version >= 3 && is_venice_cpuid(cpuid);
+        let venice = version >= SNP_REPORT_VERSION_CPUID && is_venice_cpuid(cpuid);
         let (current_etcb, launch_etcb, committed_etcb) =
             if version >= SNP_REPORT_VERSION_ETCB && venice {
                 (
@@ -232,20 +245,20 @@ impl SnpReport {
             };
         r.reserved(32, "reserved7")?;
         debug_assert_eq!(r.position(), SNP_SIGNED_LEN);
-        let r_le: [u8; 72] = r.array("signature.r")?;
-        let s_le: [u8; 72] = r.array("signature.s")?;
+        let r_le: [u8; SIG_COMPONENT_LE_LEN] = r.array("signature.r")?;
+        let s_le: [u8; SIG_COMPONENT_LE_LEN] = r.array("signature.s")?;
         r.reserved(368, "signature.reserved")?;
         r.finish()?;
         let mut signature_r_s = [0u8; 96];
-        for (dst, src) in [(0usize, &r_le), (48, &s_le)] {
-            if src[48..].iter().any(|&b| b != 0) {
+        for (dst, src) in [(0usize, &r_le), (P384_SCALAR_LEN, &s_le)] {
+            if src[P384_SCALAR_LEN..].iter().any(|&b| b != 0) {
                 return Err(ParseError::NonZeroReserved {
                     format: Format::SnpReport,
                     field: "signature component high bytes",
                 });
             }
-            for i in 0..48 {
-                signature_r_s[dst + i] = src[47 - i];
+            for i in 0..P384_SCALAR_LEN {
+                signature_r_s[dst + i] = src[P384_SCALAR_LEN - 1 - i];
             }
         }
         Ok(SnpReport {
@@ -325,9 +338,12 @@ impl SnpReport {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut o = self.signed_bytes();
-        for half in [&self.signature_r_s[..48], &self.signature_r_s[48..]] {
+        for half in [
+            &self.signature_r_s[..P384_SCALAR_LEN],
+            &self.signature_r_s[P384_SCALAR_LEN..],
+        ] {
             o.extend(half.iter().rev());
-            o.extend_from_slice(&[0; 24]);
+            o.extend_from_slice(&[0; SIG_COMPONENT_LE_LEN - P384_SCALAR_LEN]);
         }
         o.extend_from_slice(&[0; 368]);
         o
@@ -337,12 +353,12 @@ impl SnpReport {
     /// processor (family `1Ah`, model `50h..5Fh` or `C0h..CFh`, as in VirTEE
     /// `sev`'s `Generation::identify_cpu`).
     pub fn is_venice(&self) -> bool {
-        self.version >= 3 && is_venice_cpuid(self.cpuid)
+        self.version >= SNP_REPORT_VERSION_CPUID && is_venice_cpuid(self.cpuid)
     }
 
     /// `SIGNING_KEY` field: 0 = VCEK, 1 = VLEK, 7 = none.
     pub fn signing_key(&self) -> u32 {
-        (self.flags >> 2) & 7
+        (self.flags >> SNP_FLAGS_SIGNING_KEY_SHIFT) & SNP_FLAGS_SIGNING_KEY_MASK
     }
 
     /// The processor family named by the report's CPUID fields (version 3
@@ -352,7 +368,7 @@ impl SnpReport {
     /// and for any other processor.
     pub fn product(&self) -> Option<crate::roots::AmdProduct> {
         use crate::roots::AmdProduct;
-        if self.version < 3 {
+        if self.version < SNP_REPORT_VERSION_CPUID {
             return None;
         }
         let [family, model, _stepping] = self.cpuid;

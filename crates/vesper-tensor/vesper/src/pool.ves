@@ -20,8 +20,18 @@ use self::num::{
     u64_zero
 };
 
+const U64_MAX: u64 = 18446744073709551615;
+// Ceilings on a configuration (src/kv.rs `MAX_PAGES`, `MAX_SEQUENCES`,
+// `MAX_TOKENS_PER_SEQUENCE`, `MAX_STORAGE` (64 MiB) and
+// `MAX_PAGE_REFERENCES`).
+const MAX_PAGES: u64 = 4096;
+const MAX_SEQUENCES: u64 = 1024;
+const MAX_TOKENS_PER_SEQUENCE: u64 = 65536;
+const MAX_STORAGE: u64 = 67108864;
+const MAX_PAGE_REFERENCES: u64 = 65536;
+
 fn max_u64() -> u64 {
-    18446744073709551615
+    U64_MAX
 }
 
 // Whether `a * b` fits in `u64`.
@@ -53,19 +63,19 @@ pub fn kv_layout(in config: Slice[u64], inout out: Slice[u64])
         || pages
         == 0
         || pages
-        > 4096
+        > MAX_PAGES
         || sequences
         == 0
         || sequences
-        > 1024
+        > MAX_SEQUENCES
         || tokens
         == 0
         || tokens
-        > 65536
+        > MAX_TOKENS_PER_SEQUENCE
         || max_bytes
         == 0
         || max_bytes
-        > 67108864 {
+        > MAX_STORAGE {
         return 11;
     }
     // Checked products, as the Rust build's `checked_mul`.
@@ -92,7 +102,7 @@ pub fn kv_layout(in config: Slice[u64], inout out: Slice[u64])
         return 11;
     }
     let refs = (tokens + tpp() - 1) / tpp();
-    if refs * sequences > 65536 {
+    if refs * sequences > MAX_PAGE_REFERENCES {
         return 12;
     }
     out.set(0, token_bytes);

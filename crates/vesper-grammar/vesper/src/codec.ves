@@ -34,6 +34,44 @@ use self::grammar::{
     same
 };
 
+// Rule record tags (module grammar).
+const R_EMPTY: u64 = 0;
+const R_BYTE: u64 = 1;
+const R_LITERAL: u64 = 2;
+const R_ULEB128: u64 = 3;
+const R_BLOB: u64 = 4;
+const R_FRAME: u64 = 5;
+const R_U24_FRAME: u64 = 6;
+const R_SEQUENCE: u64 = 7;
+const R_CHOICE: u64 = 8;
+const R_REPEAT: u64 = 9;
+const R_COUNTED: u64 = 10;
+// Value tags (see above).
+const V_UNIT: u64 = 0;
+const V_NUMBER: u64 = 1;
+const V_BYTES: u64 = 2;
+const V_SEQUENCE: u64 = 3;
+const V_CHOICE: u64 = 4;
+const V_FRAME: u64 = 5;
+const V_REPEAT: u64 = 6;
+// Plan write kinds (see the encoding section), three words per write.
+const W_BYTE: u64 = 0;
+const W_NUMBER: u64 = 1;
+const W_U24: u64 = 2;
+const W_ARENA: u64 = 3;
+const W_LITS: u64 = 4;
+const WRITE_WORDS: u64 = 3;
+// src/grammar/codec.rs: the work one number costs, the encoder's passes
+// over each output byte, and the u24 frame header and payload ceiling.
+const NUMBER_WORK: u64 = 10;
+const COPY_PASSES: u64 = 3;
+const U24_HEADER_BYTES: u64 = 3;
+const MAX_U24_PAYLOAD: u64 = 16777215;
+// Ceiling on `max_depth` (src/grammar.rs `HARD_MAX_DEPTH`).
+const HARD_MAX_DEPTH: u64 = 64;
+// No choice branch selected yet.
+const NO_RULE: u64 = 18446744073709551615;
+
 // Budget plus the reader or planner position.
 pub copy struct Cx {
     work: u64,
@@ -82,7 +120,7 @@ fn new_cx(in glim: Slice[u64], in cl: Slice[u64]) -> Cx eff [Fail[GErr]] {
         metadata: 0,
         visits: 0,
         max_visits: min(sw(in cl, 0), sw(in glim, 7)),
-        max_depth: min(min(sw(in cl, 3), sw(in glim, 4)), 64),
+        max_depth: min(min(sw(in cl, 3), sw(in glim, 4)), HARD_MAX_DEPTH),
         max_metadata: sw(in cl, 1),
         max_output: sw(in cl, 2),
         value_size: sw(in cl, 5),
@@ -199,9 +237,8 @@ fn byte_literal(in input: Slice[u8], inout cx: Cx, byte: u64) -> Unit eff [Fail[
 
 fn u24(in input: Slice[u8], inout cx: Cx) -> u64 eff [Fail[GErr]] {
     let mut value: u64 = 0;
-    let three: u64 = 3;
     let mut w = cx.work;
-    for i in 0..three {
+    for i in 0..U24_HEADER_BYTES {
         charge_or_at(inout w, 1, cx.pos);
         let at = wrapping_add(cx.pos, i);
         if at >= cx.end {
@@ -210,7 +247,7 @@ fn u24(in input: Slice[u8], inout cx: Cx) -> u64 eff [Fail[GErr]] {
         value = (value << 8) | sb(in input, at);
     }
     cx.work = w;
-    cx.pos = wrapping_add(cx.pos, 3);
+    cx.pos = wrapping_add(cx.pos, U24_HEADER_BYTES);
     value
 }
 
@@ -228,12 +265,12 @@ fn node(
     let off = rec(in rules, id);
     let tag = sw(in rules, off);
     let next = wrapping_add(depth, 1);
-    if tag == 0 {
-        out.push(0);
-    } else if tag == 1 {
+    if tag == R_EMPTY {
+        out.push(V_UNIT);
+    } else if tag == R_BYTE {
         byte_literal(in input, inout cx, sw(in rules, wrapping_add(off, 1)));
-        out.push(0);
-    } else if tag == 2 {
+        out.push(V_UNIT);
+    } else if tag == R_LITERAL {
         literal(
             in input,
             in lits,
@@ -241,13 +278,13 @@ fn node(
             sw(in rules, wrapping_add(off, 1)),
             sw(in rules, wrapping_add(off, 2))
         );
-        out.push(0);
-    } else if tag == 3 {
+        out.push(V_UNIT);
+    } else if tag == R_ULEB128 {
         let v = number(in input, inout cx);
-        out.push(1);
+        out.push(V_NUMBER);
         out.push(v);
-    } else if tag == 4 || tag == 5 || tag == 6 {
-        let len = if tag == 6 {
+    } else if tag == R_BLOB || tag == R_FRAME || tag == R_U24_FRAME {
+        let len = if tag == R_U24_FRAME {
             u24(in input, inout cx)
         } else {
             number(in input, inout cx)
@@ -258,15 +295,15 @@ fn node(
         if end > cx.end {
             fail(0, cx.end);
         }
-        if tag == 4 {
+        if tag == R_BLOB {
             work(inout cx, len);
             cx.pos = end;
-            out.push(2);
+            out.push(V_BYTES);
             out.push(start);
             out.push(len);
         } else {
             boxed(inout cx, depth);
-            out.push(5);
+            out.push(V_FRAME);
             let previous = cx.end;
             cx.end = end;
             node(
@@ -284,10 +321,10 @@ fn node(
             }
             cx.end = previous;
         }
-    } else if tag == 7 {
+    } else if tag == R_SEQUENCE {
         let count = sw(in rules, wrapping_add(off, 1));
         values(inout cx, count, depth);
-        out.push(3);
+        out.push(V_SEQUENCE);
         out.push(count);
         for i in 0..count {
             node(
@@ -301,15 +338,15 @@ fn node(
                 next
             );
         }
-    } else if tag == 9 || tag == 10 {
-        let count = if tag == 9 {
+    } else if tag == R_REPEAT || tag == R_COUNTED {
+        let count = if tag == R_REPEAT {
             sw(in rules, wrapping_add(off, 2))
         } else {
             number(in input, inout cx)
         };
         bound(count, cx.max_reps, 10);
         values(inout cx, count, depth);
-        out.push(6);
+        out.push(V_REPEAT);
         out.push(count);
         let child = sw(in rules, wrapping_add(off, 1));
         for i in 0..count {
@@ -321,10 +358,10 @@ fn node(
         }
         let byte = sb(in input, cx.pos);
         let count = sw(in rules, wrapping_add(off, 1));
-        let mut chosen: u64 = 18446744073709551615;
+        let mut chosen: u64 = NO_RULE;
         let mut branch: u64 = 0;
         for i in 0..count {
-            if chosen == 18446744073709551615 {
+            if chosen == NO_RULE {
                 work(inout cx, 1);
                 let at = wrapping_add(wrapping_add(off, 2), wrapping_mul(i, 2));
                 let child = sw(in rules, wrapping_add(at, 1));
@@ -334,11 +371,11 @@ fn node(
                 }
             }
         }
-        if chosen == 18446744073709551615 {
+        if chosen == NO_RULE {
             fail(24, cx.pos);
         }
         boxed(inout cx, depth);
-        out.push(4);
+        out.push(V_CHOICE);
         out.push(branch);
         node(in rules, in lits, in meta, in input, inout cx, inout out, chosen, next);
     }
@@ -378,10 +415,10 @@ fn length(inout cx: Cx, bytes: u64) -> Unit eff [Fail[GErr]] {
 }
 
 fn plan_number(inout cx: Cx, inout writes: ChunkSeq[u64], n: u64) -> Unit eff [Fail[GErr]] {
-    work(inout cx, 10);
+    work(inout cx, NUMBER_WORK);
     let len = leb_len(n);
     length(inout cx, len);
-    push_write(inout cx, inout writes, 1, n, len);
+    push_write(inout cx, inout writes, W_NUMBER, n, len);
 }
 
 fn plan_bytes(inout cx: Cx, inout writes: ChunkSeq[u64], kind: u64, start: u64, len: u64)
@@ -430,31 +467,31 @@ fn plan_node(
     let tag = sw(in rules, off);
     let value = take(in vals, inout cur);
     let next = wrapping_add(depth, 1);
-    if tag == 0 && value == 0 {
+    if tag == R_EMPTY && value == V_UNIT {
         return;
-    } else if tag == 1 && value == 0 {
+    } else if tag == R_BYTE && value == V_UNIT {
         length(inout cx, 1);
-        push_write(inout cx, inout writes, 0, sw(in rules, wrapping_add(off, 1)), 0);
-    } else if tag == 2 && value == 0 {
+        push_write(inout cx, inout writes, W_BYTE, sw(in rules, wrapping_add(off, 1)), 0);
+    } else if tag == R_LITERAL && value == V_UNIT {
         plan_bytes(
             inout cx,
             inout writes,
-            4,
+            W_LITS,
             sw(in rules, wrapping_add(off, 1)),
             sw(in rules, wrapping_add(off, 2))
         );
-    } else if tag == 3 && value == 1 {
+    } else if tag == R_ULEB128 && value == V_NUMBER {
         let n = take(in vals, inout cur);
         plan_number(inout cx, inout writes, n);
-    } else if tag == 4 && value == 2 {
+    } else if tag == R_BLOB && value == V_BYTES {
         let start = take(in vals, inout cur);
         let len = take(in vals, inout cur);
         bound(len, cx.max_frame, 7);
         plan_number(inout cx, inout writes, len);
-        plan_bytes(inout cx, inout writes, 3, start, len);
-    } else if tag == 5 && value == 5 {
+        plan_bytes(inout cx, inout writes, W_ARENA, start, len);
+    } else if tag == R_FRAME && value == V_FRAME {
         children(inout cx, 1, depth);
-        let prefix = push_write(inout cx, inout writes, 1, 0, 0);
+        let prefix = push_write(inout cx, inout writes, W_NUMBER, 0, 0);
         let start = cx.len;
         plan_node(
             in rules,
@@ -467,16 +504,16 @@ fn plan_node(
         );
         let payload = wrapping_sub(cx.len, start);
         bound(payload, cx.max_frame, 7);
-        work(inout cx, 10);
+        work(inout cx, NUMBER_WORK);
         let len = leb_len(payload);
         length(inout cx, len);
-        let at = wrapping_mul(prefix, 3);
+        let at = wrapping_mul(prefix, WRITE_WORDS);
         writes.try_set(wrapping_add(at, 1), payload);
         writes.try_set(wrapping_add(at, 2), len);
-    } else if tag == 6 && value == 5 {
+    } else if tag == R_U24_FRAME && value == V_FRAME {
         children(inout cx, 1, depth);
-        let prefix = push_write(inout cx, inout writes, 2, 0, 0);
-        length(inout cx, 3);
+        let prefix = push_write(inout cx, inout writes, W_U24, 0, 0);
+        length(inout cx, U24_HEADER_BYTES);
         let start = cx.len;
         plan_node(
             in rules,
@@ -489,12 +526,12 @@ fn plan_node(
         );
         let payload = wrapping_sub(cx.len, start);
         bound(payload, cx.max_frame, 7);
-        if payload > 16777215 {
+        if payload > MAX_U24_PAYLOAD {
             fail(2, 0);
         }
-        work(inout cx, 3);
-        writes.try_set(wrapping_add(wrapping_mul(prefix, 3), 1), payload);
-    } else if tag == 7 && value == 3 {
+        work(inout cx, U24_HEADER_BYTES);
+        writes.try_set(wrapping_add(wrapping_mul(prefix, WRITE_WORDS), 1), payload);
+    } else if tag == R_SEQUENCE && value == V_SEQUENCE {
         let count = take(in vals, inout cur);
         if count != sw(in rules, wrapping_add(off, 1)) {
             fail(24, 0);
@@ -511,12 +548,12 @@ fn plan_node(
                 next
             );
         }
-    } else if tag == 8 && value == 4 {
+    } else if tag == R_CHOICE && value == V_CHOICE {
         let branch = take(in vals, inout cur);
         let count = sw(in rules, wrapping_add(off, 1));
-        let mut chosen: u64 = 18446744073709551615;
+        let mut chosen: u64 = NO_RULE;
         for i in 0..count {
-            if chosen == 18446744073709551615 {
+            if chosen == NO_RULE {
                 work(inout cx, 1);
                 let at = wrapping_add(wrapping_add(off, 2), wrapping_mul(i, 2));
                 if sw(in rules, at) == branch {
@@ -524,12 +561,12 @@ fn plan_node(
                 }
             }
         }
-        if chosen == 18446744073709551615 {
+        if chosen == NO_RULE {
             fail(24, 0);
         }
         children(inout cx, 1, depth);
         plan_node(in rules, in vals, inout cx, inout writes, inout cur, chosen, next);
-    } else if tag == 9 && value == 6 {
+    } else if tag == R_REPEAT && value == V_REPEAT {
         let count = take(in vals, inout cur);
         if count != sw(in rules, wrapping_add(off, 2)) {
             fail(24, 0);
@@ -544,7 +581,7 @@ fn plan_node(
             count,
             depth
         );
-    } else if tag == 10 && value == 6 {
+    } else if tag == R_COUNTED && value == V_REPEAT {
         let count = take(in vals, inout cur);
         bound(count, cx.max_reps, 10);
         plan_number(inout cx, inout writes, count);
@@ -606,11 +643,11 @@ pub fn encode_into(
     }
     let len = cx.len;
     metadata(inout cx, len);
-    let copies = add_or(mul_or(len, 3, 2, 0), cx.writes, 2, 0);
+    let copies = add_or(mul_or(len, COPY_PASSES, 2, 0), cx.writes, 2, 0);
     work(inout cx, copies);
     let mut at: u64 = 0;
     for i in 0..cx.writes {
-        let base = wrapping_mul(i, 3);
+        let base = wrapping_mul(i, WRITE_WORDS);
         let kind = match writes.try_get(base) {
             Option::Some(v) => v,
             Option::None => 0,
@@ -623,18 +660,18 @@ pub fn encode_into(
             Option::Some(v) => v,
             Option::None => 0,
         };
-        if kind == 0 {
+        if kind == W_BYTE {
             output.try_set(at, wrapping_u8(a));
             at = wrapping_add(at, 1);
-        } else if kind == 1 {
+        } else if kind == W_NUMBER {
             put_leb(inout output, at, a, b);
             at = wrapping_add(at, b);
-        } else if kind == 2 {
+        } else if kind == W_U24 {
             output.try_set(at, wrapping_u8(a >> 16));
             output.try_set(wrapping_add(at, 1), wrapping_u8(a >> 8));
             output.try_set(wrapping_add(at, 2), wrapping_u8(a));
-            at = wrapping_add(at, 3);
-        } else if kind == 3 {
+            at = wrapping_add(at, U24_HEADER_BYTES);
+        } else if kind == W_ARENA {
             output.try_copy_from(at, in arena[a..wrapping_add(a, b)]);
             at = wrapping_add(at, b);
         } else {

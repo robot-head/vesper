@@ -51,6 +51,82 @@ use self::utf8::{
     valid_up_to
 };
 
+// Ceilings `validate_limits` enforces (src/der.rs `MAX_BYTES`, `MAX_NODES`,
+// `MAX_SCHEMA_NODES`, `MAX_DEPTH`, `MAX_WORK`, `MAX_METADATA_BYTES`,
+// `MAX_INTERMEDIATE_BYTES`).
+const MAX_BYTES: u64 = 16777216;
+const MAX_NODES: u64 = 16384;
+const MAX_SCHEMA_NODES: u64 = 4096;
+const MAX_DEPTH: u64 = 64;
+const MAX_WORK: u64 = 134217728;
+const MAX_METADATA_BYTES: u64 = 4194304;
+const MAX_INTERMEDIATE_BYTES: u64 = 67108864;
+// ITU-T X.690 identifier and length octets (src/der.rs `x690`): the class
+// shift, the constructed bit, the tag number field and its high-tag-number
+// escape, base-128 continuation, the long length form and DER TRUE.
+const CLASS_SHIFT: u64 = 6;
+const CONSTRUCTED: u64 = 32;
+const TAG_NUMBER_MASK: u64 = 31;
+const HIGH_TAG: u64 = 31;
+const MORE: u64 = 128;
+const SEVEN_BITS: u64 = 127;
+const BASE128: u64 = 128;
+const LONG_FORM: u64 = 128;
+const OCTET_RANGE: u64 = 256;
+const TRUE: u64 = 255;
+const MAX_UNUSED_BITS: u64 = 7;
+// INTEGER contents: an octet's sign bit and a redundant negative lead octet.
+const SIGN_BIT: u64 = 128;
+const ALL_ONES: u64 = 255;
+// Limits on a high tag number's octets and a long length's octets (`u64`).
+const MAX_TAG_OCTETS: u64 = 10;
+const MAX_LENGTH_OCTETS: u64 = 8;
+// Universal tag numbers (X.680 §8.6).
+const BOOLEAN: u64 = 1;
+const INTEGER: u64 = 2;
+const BIT_STRING: u64 = 3;
+const OCTET_STRING: u64 = 4;
+const NULL: u64 = 5;
+const OBJECT_IDENTIFIER: u64 = 6;
+const UTF8_STRING: u64 = 12;
+const SEQUENCE: u64 = 16;
+const SET: u64 = 17;
+const PRINTABLE_STRING: u64 = 19;
+const IA5_STRING: u64 = 22;
+// der::Kind indices (see above).
+const K_BOOLEAN: u64 = 0;
+const K_INTEGER: u64 = 1;
+const K_BIT_STRING: u64 = 2;
+const K_OCTET_STRING: u64 = 3;
+const K_NULL: u64 = 4;
+const K_OBJECT_IDENTIFIER: u64 = 5;
+const K_UTF8_STRING: u64 = 6;
+const K_IA5_STRING: u64 = 7;
+const K_PRINTABLE_STRING: u64 = 8;
+const K_SEQUENCE: u64 = 9;
+const K_SET_OF: u64 = 10;
+// ASCII: IA5String is bytes below `ASCII_END`; PrintableString (X.680
+// §41.4) is letters, digits, space and `'()+,-./:=?`.
+const ASCII_END: u64 = 128;
+const SPACE: u64 = 32;
+const APOSTROPHE: u64 = 39;
+const LEFT_PAREN: u64 = 40;
+const RIGHT_PAREN: u64 = 41;
+const PLUS: u64 = 43;
+const COMMA: u64 = 44;
+const MINUS: u64 = 45;
+const DOT: u64 = 46;
+const SLASH: u64 = 47;
+const DIGIT_0: u64 = 48;
+const DIGIT_9: u64 = 57;
+const COLON: u64 = 58;
+const EQUALS: u64 = 61;
+const QUESTION: u64 = 63;
+const UPPER_A: u64 = 65;
+const UPPER_Z: u64 = 90;
+const LOWER_A: u64 = 97;
+const LOWER_Z: u64 = 122;
+
 pub copy struct Meter {
     work: u64,
     nodes: u64,
@@ -73,23 +149,23 @@ fn add(a: u64, b: u64) -> u64 eff [Fail[GErr]] {
 
 fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
     if sw(in lim, 0)
-        > 16777216
+        > MAX_BYTES
         || sw(in lim, 1)
-        > 16777216
+        > MAX_BYTES
         || sw(in lim, 7)
-        > 16777216
+        > MAX_BYTES
         || sw(in lim, 2)
-        > 16384
+        > MAX_NODES
         || sw(in lim, 3)
-        > 4096
+        > MAX_SCHEMA_NODES
         || sw(in lim, 4)
-        > 64
+        > MAX_DEPTH
         || sw(in lim, 5)
-        > 134217728
+        > MAX_WORK
         || sw(in lim, 6)
-        > 4194304
+        > MAX_METADATA_BYTES
         || sw(in lim, 8)
-        > 67108864 {
+        > MAX_INTERMEDIATE_BYTES {
         fail(0, 0);
     }
 }
@@ -221,39 +297,39 @@ pub copy struct Hdr {
 fn header(in input: Slice[u8], start: u64, end: u64, inout m: Meter) -> Hdr eff [Fail[GErr]] {
     let mut pos = start;
     let first = byte(in input, inout pos, end, inout m);
-    let class = first >> 6;
-    let constructed = first & 32 != 0;
-    let mut number = first & 31;
-    if number == 31 {
+    let class = first >> CLASS_SHIFT;
+    let constructed = first & CONSTRUCTED != 0;
+    let mut number = first & TAG_NUMBER_MASK;
+    if number == HIGH_TAG {
         number = 0;
         let mut count: u64 = 0;
         loop {
             let b = byte(in input, inout pos, end, inout m);
             let at = wrapping_sub(pos, 1);
-            if count == 0 && b & 127 == 0 {
+            if count == 0 && b & SEVEN_BITS == 0 {
                 fail(15, at);
             }
-            number = shift_add(number, 128, b & 127, at);
+            number = shift_add(number, BASE128, b & SEVEN_BITS, at);
             count = wrapping_add(count, 1);
-            if b & 128 == 0 {
+            if b & MORE == 0 {
                 break;
             }
-            if count >= 10 {
+            if count >= MAX_TAG_OCTETS {
                 fail(11, at);
             }
         }
-        if number < 31 {
+        if number < HIGH_TAG {
             fail(15, start);
         }
     }
     let length = byte(in input, inout pos, end, inout m);
     let mut len = length;
-    if length >= 128 {
-        let count = length & 127;
+    if length >= LONG_FORM {
+        let count = length & SEVEN_BITS;
         if count == 0 {
             fail(14, wrapping_sub(pos, 1));
         }
-        if count > 8 {
+        if count > MAX_LENGTH_OCTETS {
             fail(11, wrapping_sub(pos, 1));
         }
         len = 0;
@@ -263,9 +339,9 @@ fn header(in input: Slice[u8], start: u64, end: u64, inout m: Meter) -> Hdr eff 
             if i == 0 && b == 0 {
                 fail(16, at);
             }
-            len = shift_add(len, 256, b, at);
+            len = shift_add(len, OCTET_RANGE, b, at);
         }
-        if len < 128 {
+        if len < LONG_FORM {
             fail(16, start);
         }
     }
@@ -280,32 +356,32 @@ fn header(in input: Slice[u8], start: u64, end: u64, inout m: Meter) -> Hdr eff 
     if number == 0 {
         fail(29, start);
     }
-    let kind: u64 = if number == 1 {
-        0
-    } else if number == 2 {
-        1
-    } else if number == 3 {
-        2
-    } else if number == 4 {
-        3
-    } else if number == 5 {
-        4
-    } else if number == 6 {
-        5
-    } else if number == 12 {
-        6
-    } else if number == 19 {
-        8
-    } else if number == 22 {
-        7
-    } else if number == 16 {
-        9
-    } else if number == 17 {
-        10
+    let kind: u64 = if number == BOOLEAN {
+        K_BOOLEAN
+    } else if number == INTEGER {
+        K_INTEGER
+    } else if number == BIT_STRING {
+        K_BIT_STRING
+    } else if number == OCTET_STRING {
+        K_OCTET_STRING
+    } else if number == NULL {
+        K_NULL
+    } else if number == OBJECT_IDENTIFIER {
+        K_OBJECT_IDENTIFIER
+    } else if number == UTF8_STRING {
+        K_UTF8_STRING
+    } else if number == PRINTABLE_STRING {
+        K_PRINTABLE_STRING
+    } else if number == IA5_STRING {
+        K_IA5_STRING
+    } else if number == SEQUENCE {
+        K_SEQUENCE
+    } else if number == SET {
+        K_SET_OF
     } else {
         fail2(31, start, class, number)
     };
-    if constructed != (kind == 9 || kind == 10) {
+    if constructed != (kind == K_SEQUENCE || kind == K_SET_OF) {
         fail(17, start);
     }
     Hdr {
@@ -316,33 +392,33 @@ fn header(in input: Slice[u8], start: u64, end: u64, inout m: Meter) -> Hdr eff 
 }
 
 fn printable(b: u64) -> bool {
-    (b >= 48 && b <= 57)
-        || (b >= 65 && b <= 90)
-        || (b >= 97 && b <= 122)
+    (b >= DIGIT_0 && b <= DIGIT_9)
+        || (b >= UPPER_A && b <= UPPER_Z)
+        || (b >= LOWER_A && b <= LOWER_Z)
         || b
-        == 32
+        == SPACE
         || b
-        == 39
+        == APOSTROPHE
         || b
-        == 40
+        == LEFT_PAREN
         || b
-        == 41
+        == RIGHT_PAREN
         || b
-        == 43
+        == PLUS
         || b
-        == 44
+        == COMMA
         || b
-        == 45
+        == MINUS
         || b
-        == 46
+        == DOT
         || b
-        == 47
+        == SLASH
         || b
-        == 58
+        == COLON
         || b
-        == 61
+        == EQUALS
         || b
-        == 63
+        == QUESTION
 }
 
 // primitive: checks `s[start..end]` as content of `kind`; errors at `offset`.
@@ -355,13 +431,15 @@ fn primitive(kind: u64, in s: Slice[u8], start: u64, end: u64, offset: u64, inou
     let c1 = sb(in s, wrapping_add(start, 1));
     let mut invalid = false;
     if kind == 0 {
-        invalid = len != 1 || !(c0 == 0 || c0 == 255);
+        invalid = len != 1 || !(c0 == 0 || c0 == TRUE);
     } else if kind == 1 {
         invalid = len
             == 0
-            || (len > 1 && ((c0 == 0 && c1 & 128 == 0) || (c0 == 255 && c1 & 128 != 0)));
+            || (
+            len > 1 && ((c0 == 0 && c1 & SIGN_BIT == 0) || (c0 == ALL_ONES && c1 & SIGN_BIT != 0))
+        );
     } else if kind == 2 {
-        if len == 0 || c0 > 7 || (len == 1 && c0 != 0) {
+        if len == 0 || c0 > MAX_UNUSED_BITS || (len == 1 && c0 != 0) {
             invalid = true;
         } else if len > 1 {
             let last = sb(in s, wrapping_sub(end, 1));
@@ -373,7 +451,7 @@ fn primitive(kind: u64, in s: Slice[u8], start: u64, end: u64, offset: u64, inou
         invalid = valid_up_to(in s, start, end) != end;
     } else if kind == 7 {
         for i in start..end {
-            if sb(in s, i) >= 128 {
+            if sb(in s, i) >= ASCII_END {
                 invalid = true;
             }
         }
@@ -392,11 +470,11 @@ fn primitive(kind: u64, in s: Slice[u8], start: u64, end: u64, offset: u64, inou
             for i in start..end {
                 let b = sb(in s, i);
                 let at = wrapping_add(offset, wrapping_sub(i, start));
-                if first && b == 128 {
+                if first && b == MORE {
                     fail(21, at);
                 }
-                value = shift_add(value, 128, b & 127, at);
-                if b & 128 == 0 {
+                value = shift_add(value, BASE128, b & SEVEN_BITS, at);
+                if b & MORE == 0 {
                     value = 0;
                     first = true;
                 } else {
@@ -573,7 +651,7 @@ fn vw(in vals: Slice[u64], id: u64, k: u64) -> u64 {
 }
 
 fn length_octets(len: u64) -> u64 {
-    if len < 128 {
+    if len < LONG_FORM {
         return 1;
     }
     let mut n: u64 = 1;
@@ -719,18 +797,19 @@ pub fn encoding_plan(
 }
 
 fn kind_tag(kind: u64) -> u64 {
-    if kind <= 5 {
+    if kind <= K_OBJECT_IDENTIFIER {
+        // Boolean through ObjectIdentifier are universal tags 1 through 6.
         wrapping_add(kind, 1)
-    } else if kind == 6 {
-        12
-    } else if kind == 7 {
-        22
-    } else if kind == 8 {
-        19
-    } else if kind == 9 {
-        48
+    } else if kind == K_UTF8_STRING {
+        UTF8_STRING
+    } else if kind == K_IA5_STRING {
+        IA5_STRING
+    } else if kind == K_PRINTABLE_STRING {
+        PRINTABLE_STRING
+    } else if kind == K_SEQUENCE {
+        CONSTRUCTED | SEQUENCE
     } else {
-        49
+        CONSTRUCTED | SET
     }
 }
 
@@ -738,12 +817,12 @@ fn kind_tag(kind: u64) -> u64 {
 // the content offset.
 fn put_header(inout out: Slice[u8], at: u64, kind: u64, len: u64) -> u64 {
     out.try_set(at, wrapping_u8(kind_tag(kind)));
-    if len < 128 {
+    if len < LONG_FORM {
         out.try_set(wrapping_add(at, 1), wrapping_u8(len));
         return wrapping_add(at, 2);
     }
     let count = wrapping_sub(length_octets(len), 1);
-    out.try_set(wrapping_add(at, 1), wrapping_u8(128 | count));
+    out.try_set(wrapping_add(at, 1), wrapping_u8(LONG_FORM | count));
     for i in 0..count {
         let shift = wrapping_mul(wrapping_sub(wrapping_sub(count, 1), i), 8);
         out.try_set(wrapping_add(wrapping_add(at, 2), i), wrapping_u8(shr8(len, shift)));
@@ -889,7 +968,7 @@ fn build(
             .try_set(
             start,
             if vw(in vals, vid, 1) != 0 {
-                255
+                wrapping_u8(TRUE)
             } else {
                 0
             }

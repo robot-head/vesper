@@ -24,8 +24,8 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // framing.rs: a two-byte LEB128 value loses its high bits.
     (
         "framing",
-        "value = value | shl(byte & 127, wrapping_mul(i, 7));",
-        "value = value | shl(byte & 127, wrapping_mul(i, 6));",
+        "value = value | shl(byte & LEB128_PAYLOAD, wrapping_mul(i, LEB128_SHIFT));",
+        "value = value | shl(byte & LEB128_PAYLOAD, wrapping_mul(i, 6));",
     ),
     // arrow.rs: checked_sum misses overflow toward a positive sum.
     (
@@ -48,27 +48,23 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // grammar.rs: the hard depth ceiling drops from 64 to 3.
     (
         "grammar",
-        "max_depth: min(sw(in lim, 4), 64),",
+        "max_depth: min(sw(in lim, 4), HARD_MAX_DEPTH),",
         "max_depth: min(sw(in lim, 4), 3),",
     ),
     // grammar/codec.rs: the encoder plans numbers one byte too long at 127.
     (
         "codec",
-        "work(inout cx, 10);\n    let len = leb_len(n);",
-        "work(inout cx, 10);\n    let len = leb_len(wrapping_add(n, 1));",
+        "work(inout cx, NUMBER_WORK);\n    let len = leb_len(n);",
+        "work(inout cx, NUMBER_WORK);\n    let len = leb_len(wrapping_add(n, 1));",
     ),
     // protobuf.rs: negative int32 values are not sign-extended.
-    (
-        "protobuf",
-        "        low | 18446744069414584320",
-        "        low",
-    ),
+    ("protobuf", "        low | HIGH_32_ONES", "        low"),
     // der.rs: SET OF order is checked backwards.
     ("der", "if less(\n", "if !less(\n"),
     // ipc.rs: metadata V4 (version 3) is refused.
     (
         "ipc",
-        "if version != 3 && version != 4 {",
-        "if version != 4 {",
+        "if version != METADATA_V4 && version != METADATA_V5 {",
+        "if version != METADATA_V5 {",
     ),
 ];

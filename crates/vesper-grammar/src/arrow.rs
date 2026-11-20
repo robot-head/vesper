@@ -6,6 +6,12 @@ use crate::port;
 use crate::{Error, ErrorKind, Result, add, bound, charge, mul};
 use core::ops::Range;
 
+/// Bytes in one little-endian Arrow `int64` value.
+const I64_BYTES: usize = 8;
+/// Arrow's recommended buffer alignment (Columnar format, "Buffer
+/// Alignment and Padding").
+const ALIGN_64: usize = 64;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufferDesc {
     pub offset_bytes: i64,
@@ -18,12 +24,12 @@ pub struct FieldNode {
 }
 #[cfg(not(vesper_port))]
 fn pair(bytes: &[u8]) -> Result<(i64, i64)> {
-    if bytes.len() != 16 {
+    if bytes.len() != 2 * I64_BYTES {
         return Err(Error::new(ErrorKind::Descriptor, 0));
     }
     Ok((
-        i64::from_le_bytes(bytes[..8].try_into().expect("eight bytes")),
-        i64::from_le_bytes(bytes[8..].try_into().expect("eight bytes")),
+        i64::from_le_bytes(bytes[..I64_BYTES].try_into().expect("eight bytes")),
+        i64::from_le_bytes(bytes[I64_BYTES..].try_into().expect("eight bytes")),
     ))
 }
 #[cfg(vesper_port)]
@@ -169,7 +175,7 @@ impl<'a> I64Column<'a> {
         if profile == AlignmentProfile::HostAddress64 {
             for range in [&value_range, &bitmap_range] {
                 if !range.is_empty()
-                    && !add(body.as_ptr() as usize, range.start)?.is_multiple_of(64)
+                    && !add(body.as_ptr() as usize, range.start)?.is_multiple_of(ALIGN_64)
                 {
                     return Err(Error::new(ErrorKind::Alignment, range.start));
                 }

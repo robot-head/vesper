@@ -18,11 +18,35 @@ use self::num::{
     u64_zero
 };
 
+// 64-bit FNV-1a for the piece table.
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+// src/tokenizer.rs `MAX_PROMPT_BYTES` and `NEVER_MERGE` (pieces scored at or
+// below it never merge).
+const MAX_PROMPT_BYTES: u64 = 1048576;
+const NEVER_MERGE: f32 = -10000000000.0;
+// ASCII bytes of the `<0xHH>` byte-fallback pieces and the leading space;
+// `HEX_UPPER_BASE + d` is the uppercase hex digit for `10 <= d < 16`.
+const SPACE: u8 = 32;
+const DIGIT_0: u8 = 48;
+const LESS: u8 = 60;
+const GREATER: u8 = 62;
+const LOWER_X: u8 = 120;
+const HEX_UPPER_BASE: u8 = 55;
+const NIBBLE: u8 = 15;
+// UTF-8 continuation bytes are `10xxxxxx` (RFC 3629 §3).
+const UTF8_CONTINUATION_MASK: u8 = 192;
+const UTF8_CONTINUATION: u8 = 128;
+// Binary32 sign bit, for `total_order`.
+const F32_SIGN: u32 = 2147483648;
+// The low word of a node or heap word.
+const LOW_32: u64 = 4294967295;
+
 // The FNV-1a hash of `s[start..start + len]`.
 fn fnv(in s: Slice[u8], start: u64, len: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    let mut h: u64 = 14695981039346656037;
+    let mut h: u64 = FNV_OFFSET;
     for i in u64_zero()..len {
-        h = wrapping_mul(h ^ widen_u64(s[start + i]), 1099511628211);
+        h = wrapping_mul(h ^ widen_u64(s[start + i]), FNV_PRIME);
     }
     h
 }
@@ -99,9 +123,9 @@ pub fn build_table(in bytes: Slice[u8], in offsets: Slice[u64], inout table: Sli
 
 fn hex_digit(d: u8) -> u8 eff [Fail[ArithOverflow]] {
     if d < 10 {
-        48 + d
+        DIGIT_0 + d
     } else {
-        55 + d
+        HEX_UPPER_BASE + d
     }
 }
 
@@ -113,12 +137,12 @@ fn byte_token(
     inout key: Slice[u8],
     b: u8
 ) -> u32 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
-    key.set(0, 60);
-    key.set(1, 48);
-    key.set(2, 120);
+    key.set(0, LESS);
+    key.set(1, DIGIT_0);
+    key.set(2, LOWER_X);
     key.set(3, hex_digit(b >> 4));
-    key.set(4, hex_digit(b & 15));
-    key.set(5, 62);
+    key.set(4, hex_digit(b & NIBBLE));
+    key.set(5, GREATER);
     let e = lookup(in bytes, in offsets, in table, in key, 0, 6);
     if e == 0 {
         Fail::raise(Fault::NoBytePiece);
@@ -128,10 +152,10 @@ fn byte_token(
 
 // `f32::total_cmp` order of f32 bits as an unsigned key.
 fn total_order(b: u32) -> u32 {
-    if b & 2147483648 != 0 {
+    if b & F32_SIGN != 0 {
         ~b
     } else {
-        b | 2147483648
+        b | F32_SIGN
     }
 }
 
@@ -139,15 +163,15 @@ fn total_order(b: u32) -> u32 {
 // node's version in the high half, then `prev` and `next` (`NONE` at the
 // ends). A merged-away node's `prev` is `DEAD`.
 fn none() -> u64 {
-    4294967295
+    LOW_32
 }
 
 fn dead() -> u64 {
-    4294967296
+    LOW_32 + 1
 }
 
 fn token_of(in w: Slice[u64], i: u64) -> u32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
-    wrapping_u32(w[3 * i] & 4294967295)
+    wrapping_u32(w[3 * i] & LOW_32)
 }
 
 fn version_of(in w: Slice[u64], i: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
@@ -264,7 +288,7 @@ fn candidate(
     }
     let id = widen_u64(e - 1);
     let score = scores[id];
-    let never: f32 = -10000000000.0;
+    let never: f32 = NEVER_MERGE;
     if !(from_bits_f32(score) > never) {
         return count;
     }
@@ -289,7 +313,7 @@ pub fn encode(
     inout key: Slice[u8]
 ) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     let len = text.len();
-    if len > 1048576 {
+    if len > MAX_PROMPT_BYTES {
         Fail::raise(Fault::Limit);
     }
     let cap = len + 1;
@@ -297,7 +321,7 @@ pub fn encode(
     // The initial tokens, as nodes.
     let mut n: u64 = 0;
     if len > 0 {
-        key.set(0, 32);
+        key.set(0, SPACE);
         let e = lookup(in bytes, in offsets, in table, in key, 0, 1);
         if e == 0 {
             Fail::raise(Fault::NoSpacePiece);
@@ -309,12 +333,12 @@ pub fn encode(
     let mut unit: u64 = 0;
     for i in u64_zero()..len {
         let b = text[i];
-        if b & 192 != 128 || unit == 0 {
+        if b & UTF8_CONTINUATION_MASK != UTF8_CONTINUATION || unit == 0 {
             start = i;
             unit = 0;
         }
         unit = unit + 1;
-        let continues = i + 1 < len && text[i + 1] & 192 == 128;
+        let continues = i + 1 < len && text[i + 1] & UTF8_CONTINUATION_MASK == UTF8_CONTINUATION;
         if !(continues && unit < 4) {
             let e = lookup(in bytes, in offsets, in table, in text, start, unit);
             if e != 0 {
@@ -374,7 +398,7 @@ pub fn encode(
         let versions = w[heap - 2];
         let id = w[heap - 1];
         let i = pair >> 32;
-        let j = pair & 4294967295;
+        let j = pair & LOW_32;
         let fresh = w[3 * i + 1]
             != dead()
             && w[3 * j + 1]
@@ -386,7 +410,7 @@ pub fn encode(
             >> 32
             && version_of(in w, j)
             == versions
-            & 4294967295;
+            & LOW_32;
         if fresh {
             let merged = ((version_of(in w, i) + 1) << 32) | id;
             w.set(3 * i, merged);

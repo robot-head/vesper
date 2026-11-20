@@ -36,6 +36,46 @@ use self::framing::{
     decode
 };
 
+// Rule record tags (see above).
+const R_EMPTY: u64 = 0;
+const R_BYTE: u64 = 1;
+const R_LITERAL: u64 = 2;
+const R_ULEB128: u64 = 3;
+const R_BLOB: u64 = 4;
+const R_FRAME: u64 = 5;
+const R_U24_FRAME: u64 = 6;
+const R_SEQUENCE: u64 = 7;
+const R_CHOICE: u64 = 8;
+const R_REPEAT: u64 = 9;
+const R_COUNTED: u64 = 10;
+// Metadata rows (src/grammar.rs `PORT_META_WORDS`): FIRST words 0..4, then
+// these; `build` colors a rule VISITING on entry and DONE on exit.
+const META_WORDS: u64 = 7;
+const META_NULLABLE: u64 = 4;
+const META_COLOR: u64 = 5;
+const META_HEIGHT: u64 = 6;
+const VISITING: u64 = 1;
+const DONE: u64 = 2;
+// A byte's FIRST-set word (byte / 64) and bit (byte % 64).
+const SET_WORD_SHIFT: u64 = 6;
+const SET_BIT_MASK: u64 = 63;
+// Ceilings (src/grammar.rs `HARD_MAX_REPETITIONS`, `HARD_MAX_DEPTH`).
+const HARD_MAX_REPETITIONS: u64 = 4096;
+const HARD_MAX_DEPTH: u64 = 64;
+// `isize::MAX` on 64-bit targets: the largest Rust allocation.
+const ISIZE_MAX: u64 = 9223372036854775807;
+// Capture rows (see `cap_set`) and the word a set flag holds.
+const CAPTURE_WORDS: u64 = 10;
+const C_HAS_BRANCH: u64 = 1;
+const C_BRANCH: u64 = 2;
+const C_END: u64 = 4;
+const C_HAS_NUMBER: u64 = 5;
+const C_NUMBER: u64 = 6;
+const C_HAS_PAYLOAD: u64 = 7;
+const C_PAYLOAD_START: u64 = 8;
+const C_PAYLOAD_END: u64 = 9;
+const TRUE_WORD: u64 = 1;
+
 pub fn rule_count(in rules: Slice[u64]) -> u64 {
     sw(in rules, 0)
 }
@@ -46,23 +86,23 @@ pub fn rec(in rules: Slice[u64], id: u64) -> u64 {
 }
 
 pub fn meta_word(in meta: Slice[u64], id: u64, k: u64) -> u64 {
-    sw(in meta, wrapping_add(wrapping_mul(id, 7), k))
+    sw(in meta, wrapping_add(wrapping_mul(id, META_WORDS), k))
 }
 
 fn cm(in meta: ChunkSeq[u64], id: u64, k: u64) -> u64 {
-    match meta.try_get(wrapping_add(wrapping_mul(id, 7), k)) {
+    match meta.try_get(wrapping_add(wrapping_mul(id, META_WORDS), k)) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
 fn cm_set(inout meta: ChunkSeq[u64], id: u64, k: u64, v: u64) {
-    meta.try_set(wrapping_add(wrapping_mul(id, 7), k), v);
+    meta.try_set(wrapping_add(wrapping_mul(id, META_WORDS), k), v);
 }
 
 // Whether `byte` is in the FIRST set of rule `id`.
 pub fn first_has(in meta: Slice[u64], id: u64, byte: u64) -> bool {
-    shr(meta_word(in meta, id, byte >> 6), byte & 63) & 1 != 0
+    shr(meta_word(in meta, id, byte >> SET_WORD_SHIFT), byte & SET_BIT_MASK) & 1 != 0
 }
 
 // Grammar::validate: the metadata vector.
@@ -70,7 +110,7 @@ pub fn validate(in rules: Slice[u64], in lits: Slice[u8], root: u64, in lim: Sli
     -> ChunkSeq[u64] eff [Fail[GErr]] {
     let n = rule_count(in rules);
     let max_reps = sw(in lim, 11);
-    if max_reps > 4096 {
+    if max_reps > HARD_MAX_REPETITIONS {
         fail(19, 0);
     }
     if n == 0 || root >= n {
@@ -89,26 +129,26 @@ pub fn validate(in rules: Slice[u64], in lits: Slice[u8], root: u64, in lim: Sli
         let mut count: u64 = 0;
         let mut first: u64 = 0;
         let mut step: u64 = 1;
-        if tag == 5 || tag == 6 || tag == 10 {
+        if tag == R_FRAME || tag == R_U24_FRAME || tag == R_COUNTED {
             count = 1;
             first = wrapping_add(off, 1);
-        } else if tag == 9 {
+        } else if tag == R_REPEAT {
             if sw(in rules, wrapping_add(off, 2)) > max_reps {
                 fail(10, id);
             }
             count = 1;
             first = wrapping_add(off, 1);
-        } else if tag == 7 {
+        } else if tag == R_SEQUENCE {
             count = sw(in rules, wrapping_add(off, 1));
             first = wrapping_add(off, 2);
-        } else if tag == 8 {
+        } else if tag == R_CHOICE {
             count = sw(in rules, wrapping_add(off, 1));
             if count == 0 {
                 fail(19, id);
             }
             first = wrapping_add(off, 3);
             step = 2;
-        } else if tag == 2 {
+        } else if tag == R_LITERAL {
             let len = sw(in rules, wrapping_add(off, 2));
             bound(len, sw(in lim, 2), 5);
             literals = add_or(literals, len, 2, 0);
@@ -118,7 +158,7 @@ pub fn validate(in rules: Slice[u64], in lits: Slice[u8], root: u64, in lim: Sli
         edges = add_or(edges, count, 2, 0);
         bound(edges, sw(in lim, 1), 10);
         charge_or(inout work, count, 8);
-        if tag == 8 {
+        if tag == R_CHOICE {
             for i in 0..count {
                 let branch_id = sw(
                     in rules,
@@ -142,11 +182,11 @@ pub fn validate(in rules: Slice[u64], in lits: Slice[u8], root: u64, in lim: Sli
     let bytes = mul_or(n, sw(in lim, 12), 2, 0);
     bound(bytes, sw(in lim, 8), 11);
     let mut meta = ChunkSeq::new[u64]();
-    let words = wrapping_mul(n, 7);
+    let words = wrapping_mul(n, META_WORDS);
     for i in 0..words {
         meta.push(0);
     }
-    let max_depth = min(sw(in lim, 4), 64);
+    let max_depth = min(sw(in lim, 4), HARD_MAX_DEPTH);
     for id in 0..n {
         build(in rules, in lits, inout meta, inout work, max_depth, id, 1);
     }
@@ -163,15 +203,15 @@ fn build(
     depth: u64
 ) -> Unit eff [Fail[GErr]] {
     charge_or(inout work, 1, 8);
-    let color = cm(in meta, id, 5);
-    if color == 1 {
+    let color = cm(in meta, id, META_COLOR);
+    if color == VISITING {
         fail(20, id);
     }
     bound(depth, max_depth, 9);
-    if color == 2 {
+    if color == DONE {
         return;
     }
-    cm_set(inout meta, id, 5, 1);
+    cm_set(inout meta, id, META_COLOR, VISITING);
     let off = rec(in rules, id);
     let tag = sw(in rules, off);
     let next = wrapping_add(depth, 1);
@@ -181,12 +221,12 @@ fn build(
     let mut f3: u64 = 0;
     let mut nullable = false;
     let mut height: u64 = 1;
-    if tag == 0 {
+    if tag == R_EMPTY {
         nullable = true;
-    } else if tag == 1 || tag == 2 {
+    } else if tag == R_BYTE || tag == R_LITERAL {
         let mut has = true;
         let mut byte: u64 = 0;
-        if tag == 1 {
+        if tag == R_BYTE {
             byte = sw(in rules, wrapping_add(off, 1));
         } else if sw(in rules, wrapping_add(off, 2)) == 0 {
             has = false;
@@ -194,8 +234,8 @@ fn build(
             byte = sb(in lits, sw(in rules, wrapping_add(off, 1)));
         }
         if has {
-            let bit = shl(1, byte & 63);
-            let w = byte >> 6;
+            let bit = shl(1, byte & SET_BIT_MASK);
+            let w = byte >> SET_WORD_SHIFT;
             if w == 0 {
                 f0 = bit;
             } else if w == 1 {
@@ -208,32 +248,32 @@ fn build(
         } else {
             nullable = true;
         }
-    } else if tag == 3 || tag == 4 {
+    } else if tag == R_ULEB128 || tag == R_BLOB {
         f0 = none();
         f1 = none();
         f2 = none();
         f3 = none();
-    } else if tag == 5 || tag == 6 || tag == 10 {
+    } else if tag == R_FRAME || tag == R_U24_FRAME || tag == R_COUNTED {
         let child = sw(in rules, wrapping_add(off, 1));
         build(in rules, in lits, inout meta, inout work, max_depth, child, next);
         f0 = none();
         f1 = none();
         f2 = none();
         f3 = none();
-        height = wrapping_add(cm(in meta, child, 6), 1);
-    } else if tag == 9 {
+        height = wrapping_add(cm(in meta, child, META_HEIGHT), 1);
+    } else if tag == R_REPEAT {
         let child = sw(in rules, wrapping_add(off, 1));
         let count = sw(in rules, wrapping_add(off, 2));
         build(in rules, in lits, inout meta, inout work, max_depth, child, next);
-        height = wrapping_add(cm(in meta, child, 6), 1);
-        nullable = count == 0 || cm(in meta, child, 4) != 0;
+        height = wrapping_add(cm(in meta, child, META_HEIGHT), 1);
+        nullable = count == 0 || cm(in meta, child, META_NULLABLE) != 0;
         if count != 0 {
             f0 = cm(in meta, child, 0);
             f1 = cm(in meta, child, 1);
             f2 = cm(in meta, child, 2);
             f3 = cm(in meta, child, 3);
         }
-    } else if tag == 7 {
+    } else if tag == R_SEQUENCE {
         nullable = true;
         let count = sw(in rules, wrapping_add(off, 1));
         for i in 0..count {
@@ -245,8 +285,8 @@ fn build(
                 f2 = f2 | cm(in meta, child, 2);
                 f3 = f3 | cm(in meta, child, 3);
             }
-            nullable = nullable && cm(in meta, child, 4) != 0;
-            let h = wrapping_add(cm(in meta, child, 6), 1);
+            nullable = nullable && cm(in meta, child, META_NULLABLE) != 0;
+            let h = wrapping_add(cm(in meta, child, META_HEIGHT), 1);
             if h > height {
                 height = h;
             }
@@ -256,7 +296,7 @@ fn build(
         for i in 0..count {
             let child = sw(in rules, wrapping_add(wrapping_add(off, 3), wrapping_mul(i, 2)));
             build(in rules, in lits, inout meta, inout work, max_depth, child, next);
-            if cm(in meta, child, 4) != 0 {
+            if cm(in meta, child, META_NULLABLE) != 0 {
                 fail(23, id);
             }
             let c0 = cm(in meta, child, 0);
@@ -270,7 +310,7 @@ fn build(
             f1 = f1 | c1;
             f2 = f2 | c2;
             f3 = f3 | c3;
-            let h = wrapping_add(cm(in meta, child, 6), 1);
+            let h = wrapping_add(cm(in meta, child, META_HEIGHT), 1);
             if h > height {
                 height = h;
             }
@@ -284,15 +324,15 @@ fn build(
     cm_set(
         inout meta,
         id,
-        4,
+        META_NULLABLE,
         if nullable {
             1
         } else {
             0
         }
     );
-    cm_set(inout meta, id, 5, 2);
-    cm_set(inout meta, id, 6, height);
+    cm_set(inout meta, id, META_COLOR, DONE);
+    cm_set(inout meta, id, META_HEIGHT, height);
 }
 
 // The state of one parse: position, the end of the current frame, the
@@ -311,7 +351,7 @@ pub copy struct Run {
 // Captures: ten words each (rule, has branch, branch, start, end, has
 // number, number, has payload, payload start, payload end).
 fn cap_set(inout caps: ChunkSeq[u64], event: u64, k: u64, v: u64) {
-    caps.try_set(wrapping_add(wrapping_mul(event, 10), k), v);
+    caps.try_set(wrapping_add(wrapping_mul(event, CAPTURE_WORDS), k), v);
 }
 
 // Grammar::parse_prefix: the captures, then the final position.
@@ -332,7 +372,7 @@ pub fn parse_prefix(
     };
     let capacity = min(min(sw(in lim, 7), sw(in lim, 10)), by_bytes);
     let (lo, hi) = mul_wide(capacity, capture_size);
-    if hi != 0 || lo > 9223372036854775807 {
+    if hi != 0 || lo > ISIZE_MAX {
         fail(12, 0);
     }
     let mut run = Run {
@@ -340,7 +380,7 @@ pub fn parse_prefix(
         end: input.len(),
         work: sw(in lim, 10),
         capacity: capacity,
-        max_depth: min(sw(in lim, 4), 64),
+        max_depth: min(sw(in lim, 4), HARD_MAX_DEPTH),
         max_events: sw(in lim, 7),
         max_frame: sw(in lim, 6),
         max_reps: sw(in lim, 11)
@@ -454,9 +494,9 @@ fn rule(
     let off = rec(in rules, id);
     let tag = sw(in rules, off);
     let next = wrapping_add(depth, 1);
-    if tag == 1 {
+    if tag == R_BYTE {
         byte_literal(in input, inout run, sw(in rules, wrapping_add(off, 1)));
-    } else if tag == 2 {
+    } else if tag == R_LITERAL {
         literal(
             in input,
             in lits,
@@ -464,12 +504,12 @@ fn rule(
             sw(in rules, wrapping_add(off, 1)),
             sw(in rules, wrapping_add(off, 2))
         );
-    } else if tag == 3 {
+    } else if tag == R_ULEB128 {
         let v = number(in input, inout run);
-        cap_set(inout caps, event, 5, 1);
-        cap_set(inout caps, event, 6, v);
-    } else if tag == 4 || tag == 5 || tag == 6 {
-        let len = if tag == 6 {
+        cap_set(inout caps, event, C_HAS_NUMBER, TRUE_WORD);
+        cap_set(inout caps, event, C_NUMBER, v);
+    } else if tag == R_BLOB || tag == R_FRAME || tag == R_U24_FRAME {
+        let len = if tag == R_U24_FRAME {
             u24(in input, inout run)
         } else {
             number(in input, inout run)
@@ -480,10 +520,10 @@ fn rule(
         if end > run.end {
             fail(0, run.end);
         }
-        cap_set(inout caps, event, 7, 1);
-        cap_set(inout caps, event, 8, start);
-        cap_set(inout caps, event, 9, end);
-        if tag == 4 {
+        cap_set(inout caps, event, C_HAS_PAYLOAD, TRUE_WORD);
+        cap_set(inout caps, event, C_PAYLOAD_START, start);
+        cap_set(inout caps, event, C_PAYLOAD_END, end);
+        if tag == R_BLOB {
             let mut w = run.work;
             charge_or(inout w, len, 8);
             run.work = w;
@@ -507,7 +547,7 @@ fn rule(
             }
             run.end = previous;
         }
-    } else if tag == 7 {
+    } else if tag == R_SEQUENCE {
         let count = sw(in rules, wrapping_add(off, 1));
         for i in 0..count {
             rule(
@@ -522,7 +562,7 @@ fn rule(
                 next
             );
         }
-    } else if tag == 9 {
+    } else if tag == R_REPEAT {
         repeat(
             in rules,
             in lits,
@@ -535,10 +575,10 @@ fn rule(
             sw(in rules, wrapping_add(off, 2)),
             depth
         );
-    } else if tag == 10 {
+    } else if tag == R_COUNTED {
         let count = number(in input, inout run);
-        cap_set(inout caps, event, 5, 1);
-        cap_set(inout caps, event, 6, count);
+        cap_set(inout caps, event, C_HAS_NUMBER, TRUE_WORD);
+        cap_set(inout caps, event, C_NUMBER, count);
         repeat(
             in rules,
             in lits,
@@ -551,7 +591,7 @@ fn rule(
             count,
             depth
         );
-    } else if tag == 8 {
+    } else if tag == R_CHOICE {
         if run.pos >= run.end || run.pos >= input.len() {
             fail(0, run.pos);
         }
@@ -575,8 +615,8 @@ fn rule(
         if chosen == none() {
             fail(24, run.pos);
         }
-        cap_set(inout caps, event, 1, 1);
-        cap_set(inout caps, event, 2, branch);
+        cap_set(inout caps, event, C_HAS_BRANCH, TRUE_WORD);
+        cap_set(inout caps, event, C_BRANCH, branch);
         rule(
             in rules,
             in lits,
@@ -589,7 +629,7 @@ fn rule(
             next
         );
     }
-    cap_set(inout caps, event, 4, run.pos);
+    cap_set(inout caps, event, C_END, run.pos);
 }
 
 fn repeat(

@@ -68,6 +68,11 @@ const STACK_SLOTS: usize = (BPF_MAX_STACK_BYTES / 8) as usize;
 
 /// `sizeof(struct xdp_md)`.
 pub const XDP_MD_SIZE: i32 = 24;
+// The `xdp_md` offsets as context offsets, for patterns.
+const XDP_DATA: i32 = xdp_md::DATA as i32;
+const XDP_DATA_END: i32 = xdp_md::DATA_END as i32;
+const XDP_INGRESS_IFINDEX: i32 = xdp_md::INGRESS_IFINDEX as i32;
+const XDP_RX_QUEUE_INDEX: i32 = xdp_md::RX_QUEUE_INDEX as i32;
 
 /// Field offsets in `struct xdp_md` (include/uapi/linux/bpf.h).
 pub mod xdp_md {
@@ -1956,10 +1961,12 @@ impl<'a> Verifier<'a> {
                 }
                 let field = o & !3;
                 match field {
-                    0 if size == Size::W => Ok(Target::CtxData),
-                    4 if size == Size::W => Ok(Target::CtxDataEnd),
+                    XDP_DATA if size == Size::W => Ok(Target::CtxData),
+                    XDP_DATA_END if size == Size::W => Ok(Target::CtxDataEnd),
                     // `__is_valid_xdp_access`: every field is a full u32
-                    12 | 16 if size == Size::W => Ok(Target::Scalar(size)),
+                    XDP_INGRESS_IFINDEX | XDP_RX_QUEUE_INDEX if size == Size::W => {
+                        Ok(Target::Scalar(size))
+                    }
                     _ => Err(err(
                         pc,
                         "mem.ctx_invalid_access",

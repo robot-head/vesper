@@ -32,6 +32,43 @@ use self::common::{
     sw
 };
 
+// Cap'n Proto encoding spec (src/capnp.rs): 8-byte words; a pointer's low
+// two bits are its kind and the next 30 its signed word offset; a struct
+// pointer's data and pointer section sizes are 16-bit word counts; a list
+// pointer's element size code is 3 bits (7 is an inline composite) followed
+// by a 29-bit count.
+const WORD_BYTES: u64 = 8;
+const WORD_MASK: u64 = 7;
+const POINTER_KIND_MASK: u64 = 3;
+const STRUCT_POINTER: u64 = 0;
+const LIST_POINTER: u64 = 1;
+const OFFSET_SHIFT: u64 = 2;
+const OFFSET_MASK: u64 = 1073741823;
+const OFFSET_SIGN: u64 = 536870912;
+const OFFSET_RANGE: u64 = 1073741824;
+const DATA_WORDS_SHIFT: u64 = 32;
+const POINTER_WORDS_SHIFT: u64 = 48;
+const SECTION_MASK: u64 = 65535;
+const ELEMENT_SIZE_SHIFT: u64 = 32;
+const ELEMENT_SIZE_MASK: u64 = 7;
+const INLINE_COMPOSITE: u64 = 7;
+const ELEMENT_COUNT_SHIFT: u64 = 35;
+// Stream framing: a u32 segment count minus one, one u32 size per segment,
+// and padding to a word boundary.
+const TABLE_ENTRY_BYTES: u64 = 4;
+// Packing (src/capnp_packed.rs): tags 0 and 255 start runs of at most
+// `MAX_RUN` further words, after a tag byte and a count byte (and, for a
+// literal run, the tagged word's eight bytes).
+const ZERO_TAG: u64 = 0;
+const LITERAL_TAG: u64 = 255;
+const MAX_RUN: u64 = 255;
+const RUN_HEADER_BYTES: u64 = 2;
+const LITERAL_HEADER_BYTES: u64 = 10;
+// Ceilings (src/capnp_packed.rs `HARD_BYTES`, `HARD_WORDS`, `HARD_WORK`).
+const HARD_BYTES: u64 = 67108864;
+const HARD_WORDS: u64 = 8388608;
+const HARD_WORK: u64 = 536870912;
+
 fn p4(a: u64, b: u64, c: u64, d: u64) -> P4 {
     P4 {
         a: a,
@@ -46,15 +83,15 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> P4 eff [Fail[GEr
     let n = input.len();
     bound(n, sw(in lim, 0), 5);
     bound(1, sw(in lim, 3), 8);
-    if n < 4 {
+    if n < TABLE_ENTRY_BYTES {
         fail(0, n);
     }
     let count = wrapping_add(le32(in input, 0), 1);
     bound(count, sw(in lim, 1), 10);
     bound(add_or(1, count, 2, 0), sw(in lim, 3), 8);
-    let table_end = add_or(4, mul_or(count, 4, 2, 0), 2, 0);
+    let table_end = add_or(TABLE_ENTRY_BYTES, mul_or(count, TABLE_ENTRY_BYTES, 2, 0), 2, 0);
     let pad: u64 = if count & 1 == 0 {
-        4
+        TABLE_ENTRY_BYTES
     } else {
         0
     };
@@ -65,13 +102,16 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> P4 eff [Fail[GEr
     let max_words = sw(in lim, 2);
     let mut words: u64 = 0;
     for i in 0..count {
-        let size = le32(in input, wrapping_add(4, wrapping_mul(i, 4)));
+        let size = le32(
+            in input,
+            wrapping_add(TABLE_ENTRY_BYTES, wrapping_mul(i, TABLE_ENTRY_BYTES))
+        );
         words = add_or(words, size, 2, 0);
         if words > max_words {
             fail(7, 0);
         }
     }
-    let end = add_or(header_end, mul_or(words, 8, 2, 0), 2, 0);
+    let end = add_or(header_end, mul_or(words, WORD_BYTES, 2, 0), 2, 0);
     if end > n {
         fail(0, n);
     }
@@ -81,11 +121,11 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> P4 eff [Fail[GEr
 // local_pointer: (raw, target byte), raw 0 for a null pointer.
 fn local_pointer(in segment: Slice[u8], pointer_word: u64, expected: u64) -> P2 eff [Fail[GErr]] {
     let n = segment.len();
-    if n & 7 != 0 {
+    if n & WORD_MASK != 0 {
         fail(0, 0);
     }
-    let start = mul_or(pointer_word, 8, 1, 0);
-    let end = add_or(start, 8, 1, 0);
+    let start = mul_or(pointer_word, WORD_BYTES, 1, 0);
+    let end = add_or(start, WORD_BYTES, 1, 0);
     if end > n {
         fail(2, 0);
     }
@@ -93,14 +133,14 @@ fn local_pointer(in segment: Slice[u8], pointer_word: u64, expected: u64) -> P2 
     if raw == 0 {
         return pair(0, 0);
     }
-    let kind = raw & 3;
+    let kind = raw & POINTER_KIND_MASK;
     if kind != expected {
         fail2(3, 0, kind, 0);
     }
-    let field = shr(raw, 2) & 1073741823;
-    let negative = field >= 536870912;
+    let field = shr(raw, OFFSET_SHIFT) & OFFSET_MASK;
+    let negative = field >= OFFSET_SIGN;
     let distance = if negative {
-        wrapping_sub(1073741824, field)
+        wrapping_sub(OFFSET_RANGE, field)
     } else {
         field
     };
@@ -113,17 +153,17 @@ fn local_pointer(in segment: Slice[u8], pointer_word: u64, expected: u64) -> P2 
     } else {
         add_or(base, distance, 5, 0)
     };
-    pair(raw, mul_or(target, 8, 1, 0))
+    pair(raw, mul_or(target, WORD_BYTES, 1, 0))
 }
 
 // local_struct_pointer: (present, data start, data end, pointers end).
 pub fn struct_pointer(in segment: Slice[u8], pointer_word: u64) -> P4 eff [Fail[GErr]] {
-    let p = local_pointer(in segment, pointer_word, 0);
+    let p = local_pointer(in segment, pointer_word, STRUCT_POINTER);
     if p.a == 0 {
         return p4(0, 0, 0, 0);
     }
-    let data_bytes = wrapping_mul(shr(p.a, 32) & 65535, 8);
-    let pointer_bytes = wrapping_mul(shr(p.a, 48) & 65535, 8);
+    let data_bytes = wrapping_mul(shr(p.a, DATA_WORDS_SHIFT) & SECTION_MASK, WORD_BYTES);
+    let pointer_bytes = wrapping_mul(shr(p.a, POINTER_WORDS_SHIFT) & SECTION_MASK, WORD_BYTES);
     let data_end = add_or(p.b, data_bytes, 1, 0);
     let pointer_end = add_or(data_end, pointer_bytes, 1, 0);
     if pointer_end > segment.len() {
@@ -135,12 +175,12 @@ pub fn struct_pointer(in segment: Slice[u8], pointer_word: u64) -> P4 eff [Fail[
 // local_list_pointer: (ListKind index + 1, or 0 for null; element count;
 // data start; logical end).
 pub fn list_pointer(in segment: Slice[u8], pointer_word: u64) -> P4 eff [Fail[GErr]] {
-    let p = local_pointer(in segment, pointer_word, 1);
+    let p = local_pointer(in segment, pointer_word, LIST_POINTER);
     if p.a == 0 {
         return p4(0, 0, 0, 0);
     }
-    let kind = shr(p.a, 32) & 7;
-    if kind == 7 {
+    let kind = shr(p.a, ELEMENT_SIZE_SHIFT) & ELEMENT_SIZE_MASK;
+    if kind == INLINE_COMPOSITE {
         fail(4, 0);
     }
     let bits: u64 = if kind == 0 {
@@ -156,7 +196,7 @@ pub fn list_pointer(in segment: Slice[u8], pointer_word: u64) -> P4 eff [Fail[GE
     } else {
         64
     };
-    let count = shr(p.a, 35);
+    let count = shr(p.a, ELEMENT_COUNT_SHIFT);
     let bit_count = wrapping_mul(count, bits);
     let logical = wrapping_add(
         bit_count >> 3,
@@ -175,7 +215,7 @@ pub fn list_pointer(in segment: Slice[u8], pointer_word: u64) -> P4 eff [Fail[GE
                 0
             }
         ),
-        8
+        WORD_BYTES
     );
     let padded_end = add_or(p.b, padded, 1, 0);
     if padded_end > segment.len() {
@@ -189,13 +229,13 @@ pub fn list_pointer(in segment: Slice[u8], pointer_word: u64) -> P4 eff [Fail[GE
 
 fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
     if sw(in lim, 0)
-        > 67108864
+        > HARD_BYTES
         || sw(in lim, 1)
-        > 67108864
+        > HARD_BYTES
         || sw(in lim, 2)
-        > 8388608
+        > HARD_WORDS
         || sw(in lim, 3)
-        > 536870912 {
+        > HARD_WORK {
         fail(0, 0);
     }
 }
@@ -233,19 +273,19 @@ pub fn unpacked_len(in input: Slice[u8], in lim: Slice[u64]) -> u64 eff [Fail[GE
         pos = wrapping_add(pos, 1);
         take(n, inout pos, ones8(tag));
         let mut group: u64 = 1;
-        if tag == 0 || tag == 255 {
+        if tag == ZERO_TAG || tag == LITERAL_TAG {
             take(n, inout pos, 1);
             let additional = sb(in input, wrapping_sub(pos, 1));
             group = wrapping_add(group, additional);
-            if tag == 255 {
-                take(n, inout pos, wrapping_mul(additional, 8));
+            if tag == LITERAL_TAG {
+                take(n, inout pos, wrapping_mul(additional, WORD_BYTES));
             }
         }
         words = add_or(words, group, 5, 0);
         bound(words, max_words, 3);
-        bound(mul_or(words, 8, 5, 0), max_output, 2);
+        bound(mul_or(words, WORD_BYTES, 5, 0), max_output, 2);
     }
-    let size = mul_or(words, 8, 5, 0);
+    let size = mul_or(words, WORD_BYTES, 5, 0);
     work(n, size, 2, in lim);
     size
 }
@@ -265,8 +305,7 @@ pub fn unpack_into(in input: Slice[u8], inout output: Slice[u8], in lim: Slice[u
         }
         let tag = sb(in input, pos);
         pos = wrapping_add(pos, 1);
-        let eight: u64 = 8;
-        for i in 0..eight {
+        for i in 0..WORD_BYTES {
             if shr(tag, i) & 1 == 0 {
                 output.try_set(wrapping_add(written, i), 0);
             } else {
@@ -274,13 +313,13 @@ pub fn unpack_into(in input: Slice[u8], inout output: Slice[u8], in lim: Slice[u
                 pos = wrapping_add(pos, 1);
             }
         }
-        written = wrapping_add(written, 8);
-        if tag == 0 || tag == 255 {
+        written = wrapping_add(written, WORD_BYTES);
+        if tag == ZERO_TAG || tag == LITERAL_TAG {
             let additional = sb(in input, pos);
             pos = wrapping_add(pos, 1);
-            let bytes = wrapping_mul(additional, 8);
+            let bytes = wrapping_mul(additional, WORD_BYTES);
             let stop = wrapping_add(written, bytes);
-            if tag == 0 {
+            if tag == ZERO_TAG {
                 zero_fill(inout output[written..stop]);
             } else {
                 output.try_copy_from(written, in input[pos..wrapping_add(pos, bytes)]);
@@ -300,8 +339,7 @@ fn zero_fill(inout s: Slice[u8]) {
 fn word_tag(in input: Slice[u8], at: u64) -> u64 {
     let w = le64(in input, at);
     let mut tag: u64 = 0;
-    let eight: u64 = 8;
-    for i in 0..eight {
+    for i in 0..WORD_BYTES {
         if shr(w, wrapping_mul(i, 8)) & 255 != 0 {
             tag = tag | shl1(i);
         }
@@ -332,16 +370,16 @@ fn shl1(i: u64) -> u64 {
 // (tag, additional words in its run) of the group at `index`.
 fn group(in input: Slice[u8], index: u64) -> P2 {
     let first = word_tag(in input, index);
-    if first != 0 && first != 255 {
+    if first != ZERO_TAG && first != LITERAL_TAG {
         return pair(first, 0);
     }
     let n = input.len();
     let mut additional: u64 = 0;
     loop {
-        if additional >= 255 {
+        if additional >= MAX_RUN {
             break;
         }
-        let next = wrapping_add(index, wrapping_mul(wrapping_add(additional, 1), 8));
+        let next = wrapping_add(index, wrapping_mul(wrapping_add(additional, 1), WORD_BYTES));
         if next >= n || word_tag(in input, next) != first {
             break;
         }
@@ -353,10 +391,10 @@ fn group(in input: Slice[u8], index: u64) -> P2 {
 pub fn packed_len(in input: Slice[u8], in lim: Slice[u64]) -> u64 eff [Fail[GErr]] {
     let n = input.len();
     input_preflight(n, in lim, 4);
-    if n & 7 != 0 {
+    if n & WORD_MASK != 0 {
         fail(6, n);
     }
-    bound(n >> 3, sw(in lim, 2), 3);
+    bound(n / WORD_BYTES, sw(in lim, 2), 3);
     let max_output = sw(in lim, 1);
     let mut index: u64 = 0;
     let mut size: u64 = 0;
@@ -365,16 +403,16 @@ pub fn packed_len(in input: Slice[u8], in lim: Slice[u64]) -> u64 eff [Fail[GErr
             break;
         }
         let g = group(in input, index);
-        let group_size = if g.a == 0 {
-            2
-        } else if g.a == 255 {
-            add_or(10, mul_or(g.b, 8, 5, 0), 5, 0)
+        let group_size = if g.a == ZERO_TAG {
+            RUN_HEADER_BYTES
+        } else if g.a == LITERAL_TAG {
+            add_or(LITERAL_HEADER_BYTES, mul_or(g.b, WORD_BYTES, 5, 0), 5, 0)
         } else {
             wrapping_add(1, ones8(g.a))
         };
         size = add_or(size, group_size, 5, 0);
         bound(size, max_output, 2);
-        index = wrapping_add(index, wrapping_mul(wrapping_add(g.b, 1), 8));
+        index = wrapping_add(index, wrapping_mul(wrapping_add(g.b, 1), WORD_BYTES));
     }
     work(n, size, 4, in lim);
     size
@@ -396,20 +434,19 @@ pub fn pack_into(in input: Slice[u8], inout output: Slice[u8], in lim: Slice[u64
         let g = group(in input, index);
         output.try_set(written, wrapping_u8(g.a));
         written = wrapping_add(written, 1);
-        let eight: u64 = 8;
-        for i in 0..eight {
+        for i in 0..WORD_BYTES {
             let b = sb(in input, wrapping_add(index, i));
             if b != 0 {
                 output.try_set(written, wrapping_u8(b));
                 written = wrapping_add(written, 1);
             }
         }
-        index = wrapping_add(index, 8);
-        if g.a == 0 || g.a == 255 {
+        index = wrapping_add(index, WORD_BYTES);
+        if g.a == ZERO_TAG || g.a == LITERAL_TAG {
             output.try_set(written, wrapping_u8(g.b));
             written = wrapping_add(written, 1);
-            let bytes = wrapping_mul(g.b, 8);
-            if g.a == 255 {
+            let bytes = wrapping_mul(g.b, WORD_BYTES);
+            if g.a == LITERAL_TAG {
                 output.try_copy_from(written, in input[index..wrapping_add(index, bytes)]);
                 written = wrapping_add(written, bytes);
             }

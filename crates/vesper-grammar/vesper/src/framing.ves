@@ -20,6 +20,19 @@ use self::common::{
     sw
 };
 
+// Unsigned LEB128 (src/framing.rs `LEB128_*`): at most ten bytes for a
+// `u64`, whose last may only hold bit 63; seven payload bits per byte and a
+// continuation bit.
+const LEB128_MAX_BYTES: u64 = 10;
+const LEB128_LAST: u64 = 9;
+const LEB128_PAYLOAD: u64 = 127;
+const LEB128_MORE: u64 = 128;
+const LEB128_SHIFT: u64 = 7;
+// A u24 frame: a three-byte big-endian length, then at most
+// `MAX_U24_PAYLOAD` bytes (src/framing.rs).
+const U24_HEADER_BYTES: u64 = 3;
+const MAX_U24_PAYLOAD: u64 = 16777215;
+
 // Canonical unsigned LEB128 at `s[start..end]` (framing::decode). Every
 // error offset is `base` plus the byte index; the kinds are the caller's
 // codes for UnexpectedEof, NonCanonical, Overflow and WorkLimit. Returns
@@ -38,8 +51,8 @@ pub fn leb_decode(
     let mut value: u64 = 0;
     let mut i: u64 = 0;
     loop {
-        if i == 10 {
-            fail(overflow, wrapping_add(base, 9));
+        if i == LEB128_MAX_BYTES {
+            fail(overflow, wrapping_add(base, LEB128_LAST));
         }
         if work == 0 {
             fail(work_kind, base);
@@ -50,11 +63,11 @@ pub fn leb_decode(
             fail(eof, wrapping_add(base, i));
         }
         let byte = sb(in s, at);
-        if i == 9 && byte > 1 {
+        if i == LEB128_LAST && byte > 1 {
             fail(overflow, wrapping_add(base, i));
         }
-        value = value | shl(byte & 127, wrapping_mul(i, 7));
-        if byte & 128 == 0 {
+        value = value | shl(byte & LEB128_PAYLOAD, wrapping_mul(i, LEB128_SHIFT));
+        if byte & LEB128_MORE == 0 {
             if i != 0 && byte == 0 {
                 fail(noncanonical, wrapping_add(base, i));
             }
@@ -107,8 +120,7 @@ pub fn u24_frame_parts(in input: Slice[u8], in lim: Slice[u64]) -> P2 eff [Fail[
     bound(input.len(), sw(in lim, 0), 5);
     let mut work = sw(in lim, 3);
     let mut len: u64 = 0;
-    let three: u64 = 3;
-    for i in 0..three {
+    for i in 0..U24_HEADER_BYTES {
         charge_or(inout work, 1, 8);
         if i >= input.len() {
             fail(0, i);
@@ -116,22 +128,22 @@ pub fn u24_frame_parts(in input: Slice[u8], in lim: Slice[u64]) -> P2 eff [Fail[
         len = shl(len, 8) | sb(in input, i);
     }
     bound(len, sw(in lim, 1), 7);
-    let end = wrapping_add(3, len);
+    let end = wrapping_add(U24_HEADER_BYTES, len);
     if end > input.len() {
         fail(0, input.len());
     }
     charge_or(inout work, len, 8);
-    pair(3, end)
+    pair(U24_HEADER_BYTES, end)
 }
 
 pub fn encode_u24_frame_into(in payload: Slice[u8], inout output: Slice[u8], in lim: Slice[u64])
     -> u64 eff [Fail[GErr]] {
     let n = payload.len();
-    if n > 16777215 {
+    if n > MAX_U24_PAYLOAD {
         fail(2, 0);
     }
     bound(n, sw(in lim, 1), 7);
-    let size = wrapping_add(3, n);
+    let size = wrapping_add(U24_HEADER_BYTES, n);
     bound(size, sw(in lim, 2), 6);
     bound(size, sw(in lim, 3), 8);
     if output.len() < size {
@@ -140,7 +152,7 @@ pub fn encode_u24_frame_into(in payload: Slice[u8], inout output: Slice[u8], in 
     output.try_set(0, wrapping_u8(n >> 16));
     output.try_set(1, wrapping_u8(n >> 8));
     output.try_set(2, wrapping_u8(n));
-    output.try_copy_from(3, in payload);
+    output.try_copy_from(U24_HEADER_BYTES, in payload);
     size
 }
 

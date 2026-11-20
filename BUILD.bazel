@@ -133,6 +133,20 @@ vesper_crate(
             "tests/self_host_parse.rs",
             "tests/self_host_front_end.rs",
         ]) + ["//crates/vesper-syntax:files"],
+        # Self-hosting SH1 lane 9 (#1152): the Vesper AST against vesper_core::ast
+        # on the same corpus as the front end v2 differential. Anchored globs.
+        "test/self_host_ast": glob([
+            "examples/**/*.ves",
+            "packages/**/*.ves",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "packages/vesper-ast/**",
+            "packages/vesper-front/**",
+            "packages/vesper-std/**",
+            "tests/self_host_parse.rs",
+            "tests/self_host_front_end.rs",
+            "tests/self_host_front_v2.rs",
+        ]) + ["//crates/vesper-syntax:files"],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -441,6 +455,8 @@ vesper_crate(
         "test/self_host_front_end": "long",
         # The front end v2 differential (#1129) takes about 140 s unoptimized.
         "test/self_host_front_v2": "long",
+        # The AST differential (#1152) runs the front end v2 and the lowering.
+        "test/self_host_ast": "long",
         # The Vesper-source checker corpus and JIT checks exceed 300 s on macOS.
         "test/self_host_check": "long",
     },

@@ -23,6 +23,16 @@ use crate::Error;
 /// Largest weight file accepted by [`Mapping::open`] and [`Mapping::read`].
 pub const MAX_WEIGHT_FILE_BYTES: u64 = 64 << 30;
 
+/// The codes the port's `open_weights` returns (vesper/src/lib.ves); any other
+/// code means the file could not be mapped.
+#[cfg(vesper_port)]
+mod open_code {
+    pub const MAPPED: u64 = 0;
+    pub const EMPTY: u64 = 1;
+    pub const NO_STAT: u64 = 2;
+    pub const TOO_LARGE: u64 = 3;
+}
+
 #[derive(Debug)]
 enum Backing {
     Mapped(memmap2::Mmap),
@@ -42,10 +52,10 @@ impl Mapping {
     pub fn open(path: &Path) -> Result<Arc<Self>, Error> {
         let file = File::open(path).map_err(|_| Error::Io("open weight file"))?;
         let backing = match crate::port::files::with_file(file) {
-            (0, Some(map)) => Backing::Mapped(map),
-            (1, _) => Backing::Owned(Vec::new()),
-            (2, _) => return Err(Error::Io("stat weight file")),
-            (3, _) => return Err(Error::Limit("weight file bytes")),
+            (open_code::MAPPED, Some(map)) => Backing::Mapped(map),
+            (open_code::EMPTY, _) => Backing::Owned(Vec::new()),
+            (open_code::NO_STAT, _) => return Err(Error::Io("stat weight file")),
+            (open_code::TOO_LARGE, _) => return Err(Error::Limit("weight file bytes")),
             _ => return Err(Error::Io("map weight file")),
         };
         Ok(Arc::new(Self { backing }))

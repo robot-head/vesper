@@ -21,17 +21,31 @@ use self::common::{
     shr
 };
 
+// Arrow `Message.fbs` `FieldNode`/`Buffer` descriptors are two little-endian
+// i64 words; values are i64s.
+const DESCRIPTOR_BYTES: u64 = 16;
+const I64_BYTES: u64 = 8;
+const I64_SIGN: u64 = 9223372036854775808;
+// AlignmentProfile indices and their alignments (columnar format, "Buffer
+// Alignment and Padding").
+const P_BYTE_COPY: u64 = 0;
+const P_RELATIVE8: u64 = 1;
+const P_HOST_ADDRESS64: u64 = 3;
+const ALIGN_8: u64 = 8;
+const ALIGN_64: u64 = 64;
+const ALIGN_64_MASK: u64 = 63;
+
 // The two little-endian i64 words of a 16-byte descriptor, as bits.
 pub fn wire_pair(in bytes: Slice[u8]) -> P2 eff [Fail[GErr]] {
-    if bytes.len() != 16 {
+    if bytes.len() != DESCRIPTOR_BYTES {
         fail(13, 0);
     }
-    pair(le64(in bytes, 0), le64(in bytes, 8))
+    pair(le64(in bytes, 0), le64(in bytes, I64_BYTES))
 }
 
 // An i64 (as bits) that must be nonnegative.
 pub fn nonnegative(n: u64) -> u64 eff [Fail[GErr]] {
-    if n >= 9223372036854775808 {
+    if n >= I64_SIGN {
         fail(13, 0);
     }
     n
@@ -56,19 +70,19 @@ pub fn checked_buffer_range(total: u64, offset_bytes: u64, byte_length: u64, ali
 }
 
 fn relative(profile: u64) -> u64 {
-    if profile == 0 {
+    if profile == P_BYTE_COPY {
         1
-    } else if profile == 1 {
-        8
+    } else if profile == P_RELATIVE8 {
+        ALIGN_8
     } else {
-        64
+        ALIGN_64
     }
 }
 
 // Whether nonempty `[start, end)` lies at a 64-byte host address, given the
 // body's address `base`.
 fn host_aligned(base: u64, start: u64) -> bool eff [Fail[GErr]] {
-    add_or(base, start, 2, 0) & 63 == 0
+    add_or(base, start, 2, 0) & ALIGN_64_MASK == 0
 }
 
 // I64Column::validate.
@@ -91,7 +105,7 @@ pub fn validate(in body: Slice[u8], r: ArReq) -> ArCol eff [Fail[GErr]] {
     if v.a != v.b && b.a != b.b && v.a < b.b && b.a < v.b {
         fail(18, b.a);
     }
-    if r.profile == 3 {
+    if r.profile == P_HOST_ADDRESS64 {
         if v.a != v.b && !host_aligned(r.body_address, v.a) {
             fail(14, v.a);
         }
@@ -148,7 +162,7 @@ pub fn get(in values: Slice[u8], in validity: Slice[u8], has_validity: bool, row
     if has_validity && shr(sb(in validity, row >> 3), row & 7) & 1 == 0 {
         return pair(1, 0);
     }
-    pair(2, le64(in values, wrapping_mul(row, 8)))
+    pair(2, le64(in values, wrapping_mul(row, I64_BYTES)))
 }
 
 // I64Column::checked_sum: (0, 0) when no row is valid, else (1, sum bits).
@@ -166,10 +180,10 @@ pub fn checked_sum(
         let valid = !has_validity || shr(sb(in validity, row >> 3), row & 7) & 1 != 0;
         if valid {
             any = true;
-            let value = wrapping_i64(le64(in values, wrapping_mul(row, 8)));
+            let value = wrapping_i64(le64(in values, wrapping_mul(row, I64_BYTES)));
             let next = wrapping_add(sum, value);
             if (value >= 0) == (sum >= 0) && (next >= 0) != (sum >= 0) {
-                fail(2, wrapping_mul(row, 8));
+                fail(2, wrapping_mul(row, I64_BYTES));
             }
             sum = next;
         }

@@ -126,7 +126,7 @@ impl WireFrame for EthIpv4TcpWire {
 
     #[cfg(not(vesper_port))]
     fn encode(&self) -> Vec<u8> {
-        let mut b = Vec::with_capacity(54);
+        let mut b = Vec::with_capacity(Self::SIZE);
         b.extend_from_slice(&self.dst_mac);
         b.extend_from_slice(&self.src_mac);
         b.extend_from_slice(&self.ether_type.to_be_bytes());
@@ -224,7 +224,7 @@ impl WireFrame for SynDropAlertWire {
 
     #[cfg(not(vesper_port))]
     fn encode(&self) -> Vec<u8> {
-        let mut b = Vec::with_capacity(16);
+        let mut b = Vec::with_capacity(Self::SIZE);
         b.extend_from_slice(&self.src_ipv4.to_be_bytes());
         b.extend_from_slice(&self.dst_port.to_be_bytes());
         b.extend_from_slice(&self.tcp_flags.to_be_bytes());

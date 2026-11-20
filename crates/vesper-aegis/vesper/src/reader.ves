@@ -119,14 +119,14 @@ pub fn zero(in b: Slice[u8], start: u64, end: u64) -> bool {
     // Eight bytes at a time, then the tail.
     let mut acc: u64 = 0;
     let mut i = start;
-    let words = wrapping_sub(end, start) / 8;
+    let words = wrapping_sub(end, start) / WORD_BYTES;
     for k in 0..words {
         let x = match b.try_read_u64_le(i) {
             Option::Some(v) => v,
             Option::None => 1,
         };
         acc = acc | x;
-        i = wrapping_add(i, 8);
+        i = wrapping_add(i, WORD_BYTES);
     }
     if acc != 0 {
         return false;
@@ -157,15 +157,20 @@ pub fn finish(in r: Rd) -> Unit eff [Fail[AErr]] {
     }
 }
 
-// How a whole-input parse treats bytes after the structure: 0 = none may
-// follow (`parse`), 1 = they must be zero (`parse_padded`), 2 = any may
-// follow (`parse_prefix`).
+// How a whole-input parse treats bytes after the structure: none may
+// follow (`parse`), they must be zero (`parse_padded`), or any may follow
+// (`parse_prefix`, mode 2).
+const TAIL_NONE: u64 = 0;
+const TAIL_ZERO: u64 = 1;
+// `zero` scans eight bytes at a time.
+const WORD_BYTES: u64 = 8;
+
 pub fn tail(in b: Slice[u8], used: u64, mode: u64, format: u64) -> Unit eff [Fail[AErr]] {
     let n = b.len();
-    if mode == 0 && used != n {
+    if mode == TAIL_NONE && used != n {
         raise(k_trailing(), format, 0, wrapping_sub(n, used), 0);
     }
-    if mode == 1 && !zero(in b, used, n) {
+    if mode == TAIL_ZERO && !zero(in b, used, n) {
         raise(k_trailing(), format, 0, wrapping_sub(n, used), 0);
     }
 }
