@@ -172,6 +172,10 @@ fn instance_key(name: &str, vars: &BTreeMap<String, Type>) -> String {
 /// `Type::Named(<function>, [])`. `$` never starts a generic name, so
 /// substitution ignores these entries.
 const FN_ARG: &str = "$fn:";
+/// The most function instances one native entry (or export set) may
+/// monomorphize to. It bounds runaway instantiation; 4096 matches the
+/// checker's `MAX_INSTANCES` (the self-hosted dyn passes need ~1,030).
+pub(crate) const MAX_NATIVE_INSTANCES: usize = 4096;
 /// The function-value parameters of an instance bound to top-level
 /// functions, `param -> function` (empty for other instances; pass
 /// [`EmittedFunction::vars`]).
@@ -767,8 +771,10 @@ fn instances_for_entry(
         if !seen.insert(key.clone()) {
             continue;
         }
-        if seen.len() > 1024 {
-            return Err("native monomorphization exceeds 1024 function instances".into());
+        if seen.len() > MAX_NATIVE_INSTANCES {
+            return Err(format!(
+                "native monomorphization exceeds {MAX_NATIVE_INSTANCES} function instances"
+            ));
         }
         let f = concrete(world, &name, &vars)?;
         if (include_entry && (key == entry || trace_host_direct(world, &f)))

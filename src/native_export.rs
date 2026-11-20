@@ -1234,8 +1234,11 @@ fn compile_exports<M: Module>(
         }
         all.extend(reached);
     }
-    if all.len() > 1024 {
-        return Err("native monomorphization exceeds 1024 function instances".into());
+    if all.len() > crate::native::MAX_NATIVE_INSTANCES {
+        return Err(format!(
+            "native monomorphization exceeds {} function instances",
+            crate::native::MAX_NATIVE_INSTANCES
+        ));
     }
     let mut program = crate::ffi_lowering::drops::lower_world(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);

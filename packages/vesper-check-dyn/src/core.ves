@@ -1,0 +1,1696 @@
+// The state of @vesper/check-dyn and the helpers both passes share: node
+// accessors and constructors over the @vesper/ast arenas, the AST type
+// predicates of `src/dyn_trait.rs` and `src/dyn_fn.rs`, AST types as
+// hash-consed @vesper/check-data ids (equality, `Display`, `Debug`), the
+// type walker of `pact_frontend::walk_function_spans`, `free_names`, and
+// diagnostics.
+//
+// The tree is the @vesper/ast index graph: a node is rewritten in place by
+// overwriting its arena row, so a parent's child index stays valid (Rust
+// rewrites `e.kind` behind a `&mut Expr`). Type, effect and list nodes are
+// never overwritten: the parser may share them, so a rewrite of a type
+// allocates new nodes (copy on write) and repoints the owner.
+
+use @vesper/ast::{
+    Ast,
+    ListRef,
+    ExprNode,
+    PatNode,
+    TypeNode,
+    StmtNode,
+    ArgNode,
+    ClauseNode,
+    ParamNode,
+    EffectsNode,
+    EffectNode,
+    GenericNode,
+    FieldNode,
+    VariantNode,
+    AdtNode,
+    FnNode,
+    EffectDeclNode,
+    ImplNode,
+    TraitNode,
+    AssocDeclNode,
+    TraitRefNode,
+    ConfNode,
+    ItemNode,
+    BoundNode,
+    list_len,
+    list_at,
+    expr_at,
+    pat_at,
+    type_at
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::types::{
+    Types,
+    EffNode,
+    types_new,
+    display
+};
+use @vesper/check-data::diag::{
+    Diags,
+    diags_new
+};
+
+const NONE: u32 = 4294967295;
+
+// Well-known symbols of the AST interner.
+pub copy struct K {
+    empty: u32,
+    dyn_: u32,
+    box_: u32,
+    box_new: u32,
+    fn_: u32,
+    fn_mut: u32,
+    fn_once: u32,
+    call: u32,
+    self_: u32,
+    self_ty: u32,
+    self_field: u32,
+    dollar_self: u32,
+    i64_: u32,
+    bool_: u32,
+    f64_: u32,
+    string_: u32,
+    push: u32
+}
+
+// The state of one run over a module.
+pub struct D {
+    ast: Ast,
+    // check-data names and types, for type equality, Display and Debug.
+    names: Names,
+    types: Types,
+    // AST symbol -> check-data symbol + 1; AST type -> type id + 1.
+    nmap: ChunkSeq[u32],
+    tmap: ChunkSeq[u32],
+    diags: Diags,
+    buf: String,
+    scratch: ChunkSeq[u8],
+    stk: ChunkSeq[u32],
+    k: K,
+    // Shared nodes: `Type::Infer` and the literal types `dyn_fn` infers.
+    t_infer: u32,
+    t_i64: u32,
+    t_bool: u32,
+    t_f64: u32,
+    t_string: u32,
+    // ---- dyn_fn (`Lowering`)
+    base: u64,
+    next_span: u64,
+    o_start: u32,
+    o_end: u32,
+    // (first synthetic span start, origin start, origin end) triples.
+    origins: ChunkSeq[u64],
+    // Hidden traits: name symbol and trait node, in creation order.
+    tr_names: ChunkSeq[u32],
+    tr_nodes: ChunkSeq[u32],
+    // Generated closure ADTs and conformances, in pairs.
+    gen_adts: ChunkSeq[u32],
+    gen_confs: ChunkSeq[u32],
+    generics: ChunkSeq[u32],
+    result: u32,
+    // `Env`: a binding stack; the latest binding of a name wins.
+    env_k: ChunkSeq[u32],
+    env_t: ChunkSeq[u32],
+    // `Decls`: symbol -> function + 1, non-enum ADT + 1, linear flag;
+    // methods as rows chained per method symbol.
+    fn_by: ChunkSeq[u32],
+    adt_by: ChunkSeq[u32],
+    linear: ChunkSeq[u8],
+    m_ty: ChunkSeq[u32],
+    m_fn: ChunkSeq[u32],
+    m_next: ChunkSeq[u32],
+    m_head: ChunkSeq[u32],
+    // ---- dyn_trait (`Lowered`)
+    // symbol -> trait node + 1 (the last declaration wins, as a BTreeMap).
+    trait_by: ChunkSeq[u32],
+    // `checked_objects`: hashes of the Display text of checked traits.
+    checked: ChunkSeq[u64],
+    // `params`: (owner, hidden generic, trait type) rows; `p_live` is 0
+    // for a row a later insert of the same owner replaced.
+    p_owner: ChunkSeq[u32],
+    p_g: ChunkSeq[u32],
+    p_tr: ChunkSeq[u32],
+    p_live: ChunkSeq[u8],
+    // `forwards`: ten words per row (see `push_forward`).
+    fwd: ChunkSeq[u64],
+    // `boxed`: trait name symbols (sorted and deduplicated on output).
+    boxed: ChunkSeq[u32]
+}
+
+fn intern(inout a: Ast, in s: Str) -> u32 {
+    a.names.intern(in s).id()
+}
+
+pub fn d_new(sink ast: Ast, base: u64) -> D {
+    let mut a = ast;
+    let k = K {
+        empty: intern(inout a, in ""),
+        dyn_: intern(inout a, in "dyn"),
+        box_: intern(inout a, in "Box"),
+        box_new: intern(inout a, in "Box::new"),
+        fn_: intern(inout a, in "Fn"),
+        fn_mut: intern(inout a, in "FnMut"),
+        fn_once: intern(inout a, in "FnOnce"),
+        call: intern(inout a, in "call"),
+        self_: intern(inout a, in "self"),
+        self_ty: intern(inout a, in "Self"),
+        self_field: intern(inout a, in "self_"),
+        dollar_self: intern(inout a, in "$self"),
+        i64_: intern(inout a, in "i64"),
+        bool_: intern(inout a, in "bool"),
+        f64_: intern(inout a, in "f64"),
+        string_: intern(inout a, in "String"),
+        push: intern(inout a, in "push")
+    };
+    let mut names = names_new();
+    let types = types_new(inout names);
+    let mut d = D {
+        ast: a,
+        names: names,
+        types: types,
+        nmap: ChunkSeq::new[u32](),
+        tmap: ChunkSeq::new[u32](),
+        diags: diags_new(),
+        buf: String::new(),
+        scratch: ChunkSeq::new[u8](),
+        stk: ChunkSeq::new[u32](),
+        k: k,
+        t_infer: 0,
+        t_i64: 0,
+        t_bool: 0,
+        t_f64: 0,
+        t_string: 0,
+        base: base,
+        next_span: wrapping_add(base, base & 1),
+        o_start: 0,
+        o_end: 0,
+        origins: ChunkSeq::new[u64](),
+        tr_names: ChunkSeq::new[u32](),
+        tr_nodes: ChunkSeq::new[u32](),
+        gen_adts: ChunkSeq::new[u32](),
+        gen_confs: ChunkSeq::new[u32](),
+        generics: ChunkSeq::new[u32](),
+        result: 0,
+        env_k: ChunkSeq::new[u32](),
+        env_t: ChunkSeq::new[u32](),
+        fn_by: ChunkSeq::new[u32](),
+        adt_by: ChunkSeq::new[u32](),
+        linear: ChunkSeq::new[u8](),
+        m_ty: ChunkSeq::new[u32](),
+        m_fn: ChunkSeq::new[u32](),
+        m_next: ChunkSeq::new[u32](),
+        m_head: ChunkSeq::new[u32](),
+        trait_by: ChunkSeq::new[u32](),
+        checked: ChunkSeq::new[u64](),
+        p_owner: ChunkSeq::new[u32](),
+        p_g: ChunkSeq::new[u32](),
+        p_tr: ChunkSeq::new[u32](),
+        p_live: ChunkSeq::new[u8](),
+        fwd: ChunkSeq::new[u64](),
+        boxed: ChunkSeq::new[u32]()
+    };
+    let infer = new_type(inout d, 5, 0, 0, 0, 0);
+    d.t_infer = infer;
+    let i = new_type(inout d, 1, d.k.i64_, 0, 0, 0);
+    d.t_i64 = i;
+    let b = new_type(inout d, 1, d.k.bool_, 0, 0, 0);
+    d.t_bool = b;
+    let f = new_type(inout d, 1, d.k.f64_, 0, 0, 0);
+    d.t_f64 = f;
+    let s = new_type(inout d, 1, d.k.string_, 0, 0, 0);
+    d.t_string = s;
+    d
+}
+
+// ---------------------------------------------------------------- words
+
+pub fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+pub fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE,
+    }
+}
+
+pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// A symbol-indexed table entry (0 = absent).
+pub fn table_get(in t: ChunkSeq[u32], s: u32) -> u32 {
+    if s == NONE {
+        return 0;
+    }
+    match t.try_get(w(s)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn table_set(inout t: ChunkSeq[u32], s: u32, v: u32) {
+    if s == NONE {
+        return;
+    }
+    if t.len() <= w(s) {
+        t.resize(inc(w(s)), 0);
+    }
+    let ok = t.try_set(w(s), v);
+}
+
+pub fn contains(in s: ChunkSeq[u32], x: u32) -> bool {
+    for i in 0..s.len() {
+        if u32_at(in s, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------- nodes
+
+pub fn ll(in d: D, l: u32) -> u64 {
+    list_len(in d.ast, l)
+}
+
+pub fn la(in d: D, l: u32, i: u64) -> u32 {
+    list_at(in d.ast, l, i)
+}
+
+// A new list of `words` (list 0 is the shared empty list).
+pub fn mk_list(inout d: D, in words: ChunkSeq[u32]) -> u32 {
+    let n = words.len();
+    if n == 0 {
+        return 0;
+    }
+    let first = n32(d.ast.pool.len());
+    for i in 0..n {
+        d.ast.pool.push(u32_at(in words, i));
+    }
+    let r = d
+        .ast
+        .lists
+        .alloc(
+        ListRef {
+            first: first,
+            len: n32(n)
+        }
+    );
+    r.raw()
+}
+
+pub fn list1(inout d: D, x: u32) -> u32 {
+    let mut s = ChunkSeq::new[u32]();
+    s.push(x);
+    mk_list(inout d, in s)
+}
+
+// The words of list `l`.
+pub fn list_words(in d: D, l: u32) -> ChunkSeq[u32] {
+    let n = ll(in d, l);
+    let mut s = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        s.push(la(in d, l, i));
+    }
+    s
+}
+
+pub fn ex(in d: D, e: u32) -> ExprNode {
+    expr_at(in d.ast, e)
+}
+
+pub fn set_ex(inout d: D, e: u32, n: ExprNode) {
+    let ok = d.ast.exprs.set(idx_from_raw[ExprNode](e), n);
+}
+
+pub fn new_ex(inout d: D, n: ExprNode) -> u32 {
+    d.ast.exprs.alloc(n).raw()
+}
+
+pub fn exn(kind: u8, start: u32, end: u32, a: u32, b: u32, c: u32) -> ExprNode {
+    ExprNode {
+        kind: kind,
+        start: start,
+        end: end,
+        a: a,
+        b: b,
+        c: c,
+        d: NONE,
+        e: NONE
+    }
+}
+
+pub fn pt(in d: D, p: u32) -> PatNode {
+    pat_at(in d.ast, p)
+}
+
+pub fn new_pat(inout d: D, kind: u8, start: u32, end: u32, a: u32, b: u32, c: u32) -> u32 {
+    d
+        .ast
+        .pats
+        .alloc(
+        PatNode {
+            kind: kind,
+            start: start,
+            end: end,
+            a: a,
+            b: b,
+            c: c
+        }
+    )
+        .raw()
+}
+
+pub fn ty(in d: D, t: u32) -> TypeNode {
+    type_at(in d.ast, t)
+}
+
+pub fn new_type(inout d: D, kind: u8, a: u32, b: u32, c: u32, dd: u32) -> u32 {
+    d
+        .ast
+        .types
+        .alloc(
+        TypeNode {
+            kind: kind,
+            a: a,
+            b: b,
+            c: c,
+            d: dd
+        }
+    )
+        .raw()
+}
+
+pub fn named(inout d: D, name: u32, args: u32) -> u32 {
+    new_type(inout d, 1, name, args, 0, 0)
+}
+
+pub fn stmt_at(in d: D, s: u32) -> StmtNode {
+    d
+        .ast
+        .stmts
+        .get_or(
+        idx_from_raw[StmtNode](s),
+        StmtNode {
+            kind: 0,
+            pat: NONE,
+            ty: NONE,
+            value: NONE,
+            mutable: false
+        }
+    )
+}
+
+pub fn set_stmt(inout d: D, s: u32, n: StmtNode) {
+    let ok = d.ast.stmts.set(idx_from_raw[StmtNode](s), n);
+}
+
+pub fn new_stmt(inout d: D, n: StmtNode) -> u32 {
+    d.ast.stmts.alloc(n).raw()
+}
+
+pub fn arg_at(in d: D, a: u32) -> ArgNode {
+    d
+        .ast
+        .args
+        .get_or(
+        idx_from_raw[ArgNode](a),
+        ArgNode {
+            pass: 0,
+            explicit: false,
+            expr: NONE
+        }
+    )
+}
+
+pub fn clause_at(in d: D, c: u32) -> ClauseNode {
+    d
+        .ast
+        .clauses
+        .get_or(
+        idx_from_raw[ClauseNode](c),
+        ClauseNode {
+            name: NONE,
+            pats: 0,
+            body: NONE
+        }
+    )
+}
+
+pub fn param_at(in d: D, p: u32) -> ParamNode {
+    d
+        .ast
+        .params
+        .get_or(
+        idx_from_raw[ParamNode](p),
+        ParamNode {
+            name: NONE,
+            pass: 0,
+            projections: 0,
+            ty: NONE,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn set_param(inout d: D, p: u32, n: ParamNode) {
+    let ok = d.ast.params.set(idx_from_raw[ParamNode](p), n);
+}
+
+pub fn new_param(inout d: D, n: ParamNode) -> u32 {
+    d.ast.params.alloc(n).raw()
+}
+
+pub fn effects_at(in d: D, e: u32) -> EffectsNode {
+    d
+        .ast
+        .effects
+        .get_or(
+        idx_from_raw[EffectsNode](e),
+        EffectsNode {
+            instances: 0,
+            tail: NONE
+        }
+    )
+}
+
+pub fn new_effects(inout d: D, instances: u32, tail: u32) -> u32 {
+    d
+        .ast
+        .effects
+        .alloc(
+        EffectsNode {
+            instances: instances,
+            tail: tail
+        }
+    )
+        .raw()
+}
+
+pub fn effect_at(in d: D, e: u32) -> EffectNode {
+    d
+        .ast
+        .effect_nodes
+        .get_or(
+        idx_from_raw[EffectNode](e),
+        EffectNode {
+            label: NONE,
+            name: NONE,
+            args: 0
+        }
+    )
+}
+
+pub fn new_effect(inout d: D, label: u32, name: u32, args: u32) -> u32 {
+    d
+        .ast
+        .effect_nodes
+        .alloc(
+        EffectNode {
+            label: label,
+            name: name,
+            args: args
+        }
+    )
+        .raw()
+}
+
+pub fn generic_at(in d: D, g: u32) -> GenericNode {
+    d
+        .ast
+        .generics
+        .get_or(
+        idx_from_raw[GenericNode](g),
+        GenericNode {
+            name: NONE,
+            bound: 0,
+            row: false
+        }
+    )
+}
+
+pub fn new_generic(inout d: D, name: u32, bound: u8) -> u32 {
+    d
+        .ast
+        .generics
+        .alloc(
+        GenericNode {
+            name: name,
+            bound: bound,
+            row: false
+        }
+    )
+        .raw()
+}
+
+pub fn field_at(in d: D, f: u32) -> FieldNode {
+    d
+        .ast
+        .fields
+        .get_or(
+        idx_from_raw[FieldNode](f),
+        FieldNode {
+            name: NONE,
+            ty: NONE,
+            modality: 3,
+            temperature: 0
+        }
+    )
+}
+
+pub fn set_field(inout d: D, f: u32, n: FieldNode) {
+    let ok = d.ast.fields.set(idx_from_raw[FieldNode](f), n);
+}
+
+pub fn variant_at(in d: D, v: u32) -> VariantNode {
+    d
+        .ast
+        .variants
+        .get_or(
+        idx_from_raw[VariantNode](v),
+        VariantNode {
+            name: NONE,
+            fields: 0,
+            named: false
+        }
+    )
+}
+
+pub fn adt_at(in d: D, a: u32) -> AdtNode {
+    d
+        .ast
+        .adts
+        .get_or(
+        idx_from_raw[AdtNode](a),
+        AdtNode {
+            name: NONE,
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn fn_at(in d: D, f: u32) -> FnNode {
+    d
+        .ast
+        .fns
+        .get_or(
+        idx_from_raw[FnNode](f),
+        FnNode {
+            name: NONE,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: NONE,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn set_fn(inout d: D, f: u32, n: FnNode) {
+    let ok = d.ast.fns.set(idx_from_raw[FnNode](f), n);
+}
+
+pub fn effect_decl_at(in d: D, e: u32) -> EffectDeclNode {
+    d
+        .ast
+        .effect_decls
+        .get_or(
+        idx_from_raw[EffectDeclNode](e),
+        EffectDeclNode {
+            name: NONE,
+            linear: false,
+            generics: 0,
+            ops: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn impl_at(in d: D, i: u32) -> ImplNode {
+    d
+        .ast
+        .impls
+        .get_or(
+        idx_from_raw[ImplNode](i),
+        ImplNode {
+            ty: NONE,
+            generics: 0,
+            methods: 0
+        }
+    )
+}
+
+pub fn set_impl(inout d: D, i: u32, n: ImplNode) {
+    let ok = d.ast.impls.set(idx_from_raw[ImplNode](i), n);
+}
+
+pub fn trait_at(in d: D, t: u32) -> TraitNode {
+    d
+        .ast
+        .traits
+        .get_or(
+        idx_from_raw[TraitNode](t),
+        TraitNode {
+            name: NONE,
+            public: false,
+            generics: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn assoc_at(in d: D, a: u32) -> AssocDeclNode {
+    d
+        .ast
+        .assoc_decls
+        .get_or(
+        idx_from_raw[AssocDeclNode](a),
+        AssocDeclNode {
+            name: NONE,
+            bound: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn trait_ref_at(in d: D, t: u32) -> TraitRefNode {
+    d
+        .ast
+        .trait_refs
+        .get_or(
+        idx_from_raw[TraitRefNode](t),
+        TraitRefNode {
+            package: NONE,
+            name: NONE,
+            args: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn set_trait_ref(inout d: D, t: u32, n: TraitRefNode) {
+    let ok = d.ast.trait_refs.set(idx_from_raw[TraitRefNode](t), n);
+}
+
+pub fn conf_at(in d: D, c: u32) -> ConfNode {
+    d
+        .ast
+        .confs
+        .get_or(
+        idx_from_raw[ConfNode](c),
+        ConfNode {
+            model: NONE,
+            public: false,
+            generics: 0,
+            trait_ref: NONE,
+            self_ty: NONE,
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn set_conf(inout d: D, c: u32, n: ConfNode) {
+    let ok = d.ast.confs.set(idx_from_raw[ConfNode](c), n);
+}
+
+pub fn item_at(in d: D, i: u32) -> ItemNode {
+    d
+        .ast
+        .items
+        .get_or(
+        idx_from_raw[ItemNode](i),
+        ItemNode {
+            kind: 0,
+            node: NONE
+        }
+    )
+}
+
+pub fn new_item(inout d: D, kind: u8, node: u32) -> u32 {
+    d
+        .ast
+        .items
+        .alloc(
+        ItemNode {
+            kind: kind,
+            node: node
+        }
+    )
+        .raw()
+}
+
+pub fn new_bound(inout d: D, param: u32, trait_ref: u32, start: u32, end: u32, owner: u32) -> u32 {
+    d
+        .ast
+        .bounds
+        .alloc(
+        BoundNode {
+            param: param,
+            trait_ref: trait_ref,
+            start: start,
+            end: end,
+            owner: owner
+        }
+    )
+        .raw()
+}
+
+// ---------------------------------------------------------------- symbols
+
+pub fn intern_buf(inout d: D) -> u32 {
+    d.ast.names.intern(in d.buf).id()
+}
+
+pub fn intern_str(inout d: D, in s: Str) -> u32 {
+    d.ast.names.intern(in s).id()
+}
+
+// Appends symbol `s` to `d.buf`.
+pub fn buf_sym(inout d: D, s: u32) {
+    if s == NONE {
+        return;
+    }
+    let ok = d.ast.names.resolve_into(symbol_from_id(s), inout d.buf);
+}
+
+pub fn buf_decimal(inout d: D, v: u64) {
+    if v >= 10 {
+        buf_decimal(inout d, v / 10);
+    }
+    d.buf.push_char(wrapping_u32(wrapping_add(v % 10, 48)));
+}
+
+pub fn sym_len(in a: Ast, s: u32) -> u64 {
+    let (x, y) = a.names.span(symbol_from_id(s));
+    wrapping_sub(y, x)
+}
+
+pub fn sym_byte(in a: Ast, s: u32, i: u64) -> u8 {
+    let (x, y) = a.names.span(symbol_from_id(s));
+    match a.names.text_byte(wrapping_add(x, i)) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    }
+}
+
+// Byte order of two symbols' texts (`String`'s `Ord`): -1, 0 or 1.
+pub fn sym_cmp(in a: Ast, x: u32, y: u32) -> i64 {
+    if x == y {
+        return 0;
+    }
+    let (xs, xe) = a.names.span(symbol_from_id(x));
+    let (ys, ye) = a.names.span(symbol_from_id(y));
+    let xn = wrapping_sub(xe, xs);
+    let yn = wrapping_sub(ye, ys);
+    let n = if xn < yn {
+        xn
+    } else {
+        yn
+    };
+    for i in 0..n {
+        let p = match a.names.text_byte(wrapping_add(xs, i)) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        let q = match a.names.text_byte(wrapping_add(ys, i)) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if p < q {
+            return -1;
+        }
+        if p > q {
+            return 1;
+        }
+    }
+    if xn < yn {
+        -1
+    } else if xn > yn {
+        1
+    } else {
+        0
+    }
+}
+
+// Sorts symbols by text and drops repeats (a `BTreeSet<String>`).
+pub fn sort_syms(in a: Ast, inout s: ChunkSeq[u32]) {
+    let n = s.len();
+    for i in 1..n {
+        let x = u32_at(in s, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = u32_at(in s, wrapping_sub(j, 1));
+            if sym_cmp(in a, y, x) <= 0 {
+                break;
+            }
+            let ok = s.try_set(j, y);
+            j = wrapping_sub(j, 1);
+        }
+        let ok = s.try_set(j, x);
+    }
+    let mut out: u64 = 0;
+    for i in 0..n {
+        let x = u32_at(in s, i);
+        if out == 0 || u32_at(in s, wrapping_sub(out, 1)) != x {
+            let ok = s.try_set(out, x);
+            out = inc(out);
+        }
+    }
+    s.truncate(out);
+}
+
+// Whether symbol `s` ends with the bytes of `suffix`.
+pub fn sym_ends_with(in a: Ast, s: u32, in suffix: Str) -> bool {
+    let b = suffix.as_bytes();
+    let n = sym_len(in a, s);
+    if b.len() > n {
+        return false;
+    }
+    let at = wrapping_sub(n, b.len());
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if sym_byte(in a, s, wrapping_add(at, i)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------- types as ids
+
+// The check-data symbol of AST symbol `s`.
+pub fn nsym(inout d: D, s: u32) -> u32 {
+    let m = table_get(in d.nmap, s);
+    if m != 0 {
+        return wrapping_sub(m, 1);
+    }
+    d.buf.clear();
+    buf_sym(inout d, s);
+    let n = d.names.intern(in d.buf.as_bytes());
+    table_set(inout d.nmap, s, wrapping_add(n, 1));
+    n
+}
+
+// The hash-consed id of AST type `t`: equal types have equal ids.
+pub fn tid(inout d: D, t: u32) -> u32 {
+    let m = table_get(in d.tmap, t);
+    if m != 0 {
+        return wrapping_sub(m, 1);
+    }
+    let n = ty(in d, t);
+    let mut id: u32 = d.types.infer;
+    if n.kind == 1 || n.kind == 2 {
+        let len = ll(in d, n.b);
+        let list = if n.kind == 1 {
+            n.b
+        } else {
+            n.a
+        };
+        let len2 = ll(in d, list);
+        let mut args = ChunkSeq::with_capacity[u32](len2);
+        for j in 0..len2 {
+            let x = la(in d, list, j);
+            let y = tid(inout d, x);
+            args.push(y);
+        }
+        if n.kind == 1 {
+            let name = nsym(inout d, n.a);
+            id = d.types.named(name, in args);
+        } else {
+            id = d.types.tuple(in args);
+        }
+    } else if n.kind == 3 {
+        let len = ll(in d, n.a) / 2;
+        let mut items = ChunkSeq::with_capacity[u32](len);
+        let mut passes = ChunkSeq::with_capacity[u8](len);
+        for j in 0..len {
+            let p = la(in d, n.a, wrapping_mul(j, 2));
+            let x = la(in d, n.a, inc(wrapping_mul(j, 2)));
+            passes.push(wrapping_u8(p));
+            let y = tid(inout d, x);
+            items.push(y);
+        }
+        let r = tid(inout d, n.b);
+        let row = rid(inout d, n.c);
+        id = d.types.mk_with(3, wrapping_u8(n.d), 0, in items, in passes, r, row, 0);
+    } else if n.kind == 4 {
+        let row = rid(inout d, n.a);
+        id = d.types.row_type(row);
+    } else if n.kind == 6 {
+        id = d.types.literal(false, 0);
+    }
+    table_set(inout d.tmap, t, wrapping_add(id, 1));
+    id
+}
+
+// The row id of an AST `Effects` node.
+pub fn rid(inout d: D, e: u32) -> u32 {
+    let en = effects_at(in d, e);
+    let n = ll(in d, en.instances);
+    let mut es = ChunkSeq::new[EffNode]();
+    let mut args = ChunkSeq::new[u32]();
+    for j in 0..n {
+        let x = effect_at(in d, la(in d, en.instances, j));
+        let a = n32(args.len());
+        let k = ll(in d, x.args);
+        for q in 0..k {
+            let at = la(in d, x.args, q);
+            let y = tid(inout d, at);
+            args.push(y);
+        }
+        let label = if x.label == NONE {
+            0
+        } else {
+            wrapping_add(nsym(inout d, x.label), 1)
+        };
+        let name = nsym(inout d, x.name);
+        es
+            .push(
+            EffNode {
+                label: label,
+                name: name,
+                a: a,
+                n: n32(k)
+            }
+        );
+    }
+    let tail = if en.tail == NONE {
+        0
+    } else {
+        wrapping_add(nsym(inout d, en.tail), 1)
+    };
+    d.types.mk_row(in es, in args, tail)
+}
+
+pub fn teq(inout d: D, a: u32, b: u32) -> bool {
+    let x = tid(inout d, a);
+    let y = tid(inout d, b);
+    x == y
+}
+
+// `Effect` equality (label, name, arguments).
+pub fn effect_eq(inout d: D, a: u32, b: u32) -> bool {
+    let x = effect_at(in d, a);
+    let y = effect_at(in d, b);
+    if x.label != y.label || x.name != y.name {
+        return false;
+    }
+    let n = ll(in d, x.args);
+    if n != ll(in d, y.args) {
+        return false;
+    }
+    for i in 0..n {
+        if !teq(inout d, la(in d, x.args, i), la(in d, y.args, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `Display` of AST type `t`, appended to `o`.
+pub fn display_into(inout d: D, t: u32, inout o: ChunkSeq[u8]) {
+    let id = tid(inout d, t);
+    display(in d.types, in d.names, id, inout o);
+}
+
+// ---------------------------------------------------------------- type predicates
+
+pub fn is_infer(in d: D, t: u32) -> bool {
+    ty(in d, t).kind == 5
+}
+
+// `Type::name`: the name of a Named type, else NONE ("").
+pub fn type_name(in d: D, t: u32) -> u32 {
+    let n = ty(in d, t);
+    if n.kind == 1 {
+        n.a
+    } else {
+        NONE
+    }
+}
+
+// `dyn_trait::object_trait`: the trait of `dyn Trait[args]`, or NONE.
+pub fn object_trait(in d: D, t: u32) -> u32 {
+    let n = ty(in d, t);
+    if n.kind == 1 && n.a == d.k.dyn_ && ll(in d, n.b) == 1 {
+        la(in d, n.b, 0)
+    } else {
+        NONE
+    }
+}
+
+pub fn is_object(in d: D, t: u32) -> bool {
+    object_trait(in d, t) != NONE
+}
+
+// `dyn_trait::boxed_trait`: the trait of `Box[dyn Trait[args]]`, or NONE.
+pub fn boxed_trait(in d: D, t: u32) -> u32 {
+    let n = ty(in d, t);
+    if n.kind == 1 && n.a == d.k.box_ && ll(in d, n.b) == 1 {
+        object_trait(in d, la(in d, n.b, 0))
+    } else {
+        NONE
+    }
+}
+
+// `dyn_fn::fn_object`: the signature of `dyn Fn(..)`, `dyn FnMut(..)` or
+// `dyn FnOnce(..)` (its kind is `type_name(object_trait(t))`), or NONE.
+pub fn fn_sig(in d: D, t: u32) -> u32 {
+    let tr = object_trait(in d, t);
+    if tr == NONE {
+        return NONE;
+    }
+    let n = ty(in d, tr);
+    if n.kind != 1 || (n.a != d.k.fn_ && n.a != d.k.fn_mut && n.a != d.k.fn_once) {
+        return NONE;
+    }
+    if ll(in d, n.b) != 1 {
+        return NONE;
+    }
+    let sig = la(in d, n.b, 0);
+    if ty(in d, sig).kind == 3 {
+        sig
+    } else {
+        NONE
+    }
+}
+
+pub fn fn_kind(in d: D, t: u32) -> u32 {
+    type_name(in d, object_trait(in d, t))
+}
+
+// `dyn_fn::boxed_fn_object`: the function object a `Box[dyn Fn..]` holds.
+pub fn boxed_fn_sig(in d: D, t: u32) -> u32 {
+    let n = ty(in d, t);
+    if n.kind == 1 && n.a == d.k.box_ && ll(in d, n.b) == 1 {
+        fn_sig(in d, la(in d, n.b, 0))
+    } else {
+        NONE
+    }
+}
+
+pub fn any_fn_sig(in d: D, t: u32) -> u32 {
+    let s = fn_sig(in d, t);
+    if s != NONE {
+        s
+    } else {
+        boxed_fn_sig(in d, t)
+    }
+}
+
+fn effects_mention(in d: D, e: u32, name: u32, bare: bool) -> bool {
+    let en = effects_at(in d, e);
+    for i in 0..ll(in d, en.instances) {
+        let x = effect_at(in d, la(in d, en.instances, i));
+        for j in 0..ll(in d, x.args) {
+            if mentions_name(in d, la(in d, x.args, j), name, bare) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `dyn_trait::mentions` (`name` anywhere), and `mentions_bare_dyn` when
+// `bare` (the name is `dyn`, and `Box[dyn Trait[args]]` counts only for
+// a `dyn` among its trait arguments).
+pub fn mentions_name(in d: D, t: u32, name: u32, bare: bool) -> bool {
+    if bare {
+        let tr = boxed_trait(in d, t);
+        if tr != NONE {
+            let trn = ty(in d, tr);
+            if trn.kind == 1 {
+                for i in 0..ll(in d, trn.b) {
+                    if mentions_name(in d, la(in d, trn.b, i), name, false) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+    }
+    let n = ty(in d, t);
+    if n.kind == 1 {
+        if n.a == name {
+            return true;
+        }
+        for i in 0..ll(in d, n.b) {
+            if mentions_name(in d, la(in d, n.b, i), name, bare) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 2 {
+        for i in 0..ll(in d, n.a) {
+            if mentions_name(in d, la(in d, n.a, i), name, bare) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 3 {
+        let len = ll(in d, n.a) / 2;
+        for i in 0..len {
+            if mentions_name(in d, la(in d, n.a, inc(wrapping_mul(i, 2))), name, bare) {
+                return true;
+            }
+        }
+        mentions_name(in d, n.b, name, bare) || effects_mention(in d, n.c, name, bare)
+    } else if n.kind == 4 {
+        effects_mention(in d, n.a, name, bare)
+    } else {
+        false
+    }
+}
+
+pub fn mentions_dyn(in d: D, t: u32) -> bool {
+    mentions_name(in d, t, d.k.dyn_, false)
+}
+
+pub fn mentions_bare_dyn(in d: D, t: u32) -> bool {
+    mentions_name(in d, t, d.k.dyn_, true)
+}
+
+// `dyn_trait::boxed_traits`: the traits of every boxed object in `t`.
+pub fn boxed_traits(in d: D, t: u32, inout out: ChunkSeq[u32]) {
+    let tr = boxed_trait(in d, t);
+    if tr != NONE {
+        out.push(tr);
+        return;
+    }
+    let n = ty(in d, t);
+    if n.kind == 1 || n.kind == 2 {
+        let list = if n.kind == 1 {
+            n.b
+        } else {
+            n.a
+        };
+        for i in 0..ll(in d, list) {
+            boxed_traits(in d, la(in d, list, i), inout out);
+        }
+    } else if n.kind == 3 {
+        let len = ll(in d, n.a) / 2;
+        for i in 0..len {
+            boxed_traits(in d, la(in d, n.a, inc(wrapping_mul(i, 2))), inout out);
+        }
+        boxed_traits(in d, n.b, inout out);
+        effects_boxed(in d, n.c, inout out);
+    } else if n.kind == 4 {
+        effects_boxed(in d, n.a, inout out);
+    }
+}
+
+fn effects_boxed(in d: D, e: u32, inout out: ChunkSeq[u32]) {
+    let en = effects_at(in d, e);
+    for i in 0..ll(in d, en.instances) {
+        let x = effect_at(in d, la(in d, en.instances, i));
+        for j in 0..ll(in d, x.args) {
+            boxed_traits(in d, la(in d, x.args, j), inout out);
+        }
+    }
+}
+
+// `dyn_fn::mentions_fn_object` (no effect rows).
+pub fn mentions_fn_object(in d: D, t: u32) -> bool {
+    if fn_sig(in d, t) != NONE {
+        return true;
+    }
+    let n = ty(in d, t);
+    if n.kind == 1 || n.kind == 2 {
+        let list = if n.kind == 1 {
+            n.b
+        } else {
+            n.a
+        };
+        for i in 0..ll(in d, list) {
+            if mentions_fn_object(in d, la(in d, list, i)) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 3 {
+        let len = ll(in d, n.a) / 2;
+        for i in 0..len {
+            if mentions_fn_object(in d, la(in d, n.a, inc(wrapping_mul(i, 2)))) {
+                return true;
+            }
+        }
+        mentions_fn_object(in d, n.b)
+    } else {
+        false
+    }
+}
+
+// `dyn_fn::contains_infer`.
+pub fn contains_infer(in d: D, t: u32) -> bool {
+    let n = ty(in d, t);
+    if n.kind == 5 {
+        return true;
+    }
+    if n.kind == 1 || n.kind == 2 {
+        let list = if n.kind == 1 {
+            n.b
+        } else {
+            n.a
+        };
+        for i in 0..ll(in d, list) {
+            if contains_infer(in d, la(in d, list, i)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `dyn_fn::mentions_any`: a bare name of `names` (no effect rows).
+pub fn mentions_any(in d: D, t: u32, in names: ChunkSeq[u32]) -> bool {
+    if names.len() == 0 {
+        return false;
+    }
+    let n = ty(in d, t);
+    if n.kind == 1 {
+        if ll(in d, n.b) == 0 && contains(in names, n.a) {
+            return true;
+        }
+        for i in 0..ll(in d, n.b) {
+            if mentions_any(in d, la(in d, n.b, i), in names) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 2 {
+        for i in 0..ll(in d, n.a) {
+            if mentions_any(in d, la(in d, n.a, i), in names) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 3 {
+        let len = ll(in d, n.a) / 2;
+        for i in 0..len {
+            if mentions_any(in d, la(in d, n.a, inc(wrapping_mul(i, 2))), in names) {
+                return true;
+            }
+        }
+        mentions_any(in d, n.b, in names)
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------- the type walker
+
+fn push3(inout out: ChunkSeq[u32], t: u32, s: u32, e: u32) {
+    out.push(t);
+    out.push(s);
+    out.push(e);
+}
+
+fn effect_types(in d: D, e: u32, s: u32, t: u32, inout out: ChunkSeq[u32]) {
+    let en = effects_at(in d, e);
+    for i in 0..ll(in d, en.instances) {
+        let x = effect_at(in d, la(in d, en.instances, i));
+        for j in 0..ll(in d, x.args) {
+            push3(inout out, la(in d, x.args, j), s, t);
+        }
+    }
+}
+
+// `pact_frontend::walk_function_spans`: every type written in function `f`
+// with the span to report it at, as (type, start, end) triples. With
+// `skip_box`, the type argument of `Box::new[dyn Trait](x)` is left out
+// (`dyn_trait::bare_dyn_type`).
+pub fn fn_types(in d: D, f: u32, skip_box: bool, inout out: ChunkSeq[u32]) {
+    let n = fn_at(in d, f);
+    for i in 0..ll(in d, n.params) {
+        let p = param_at(in d, la(in d, n.params, i));
+        push3(inout out, p.ty, p.start, p.end);
+    }
+    push3(inout out, n.result, n.start, n.end);
+    effect_types(in d, n.effects, n.start, n.end, inout out);
+    if n.body != NONE {
+        expr_types(in d, n.body, skip_box, inout out);
+    }
+}
+
+fn opt_expr_types(in d: D, e: u32, skip_box: bool, inout out: ChunkSeq[u32]) {
+    if e != NONE {
+        expr_types(in d, e, skip_box, inout out);
+    }
+}
+
+fn expr_types(in d: D, e: u32, skip_box: bool, inout out: ChunkSeq[u32]) {
+    let n = ex(in d, e);
+    let k = n.kind;
+    if k == 3 {
+        for i in 0..ll(in d, n.a) {
+            expr_types(in d, la(in d, n.a, i), skip_box, inout out);
+        }
+    } else if k == 4 {
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            expr_types(in d, la(in d, n.b, inc(wrapping_mul(i, 2))), skip_box, inout out);
+        }
+    } else if k == 5 {
+        for i in 0..ll(in d, n.a) {
+            let s = stmt_at(in d, la(in d, n.a, i));
+            if s.kind == 1 {
+                let v = ex(in d, s.value);
+                push3(inout out, s.ty, v.start, v.end);
+            }
+            expr_types(in d, s.value, skip_box, inout out);
+        }
+        opt_expr_types(in d, n.b, skip_box, inout out);
+    } else if k == 6 {
+        expr_types(in d, n.a, skip_box, inout out);
+        let mut skip = false;
+        if skip_box && ll(in d, n.b) == 1 {
+            let c = ex(in d, n.a);
+            if c.kind == 2 && c.a == d.k.box_new {
+                let tr = object_trait(in d, la(in d, n.b, 0));
+                skip = tr != NONE && !mentions_dyn(in d, tr);
+            }
+        }
+        if !skip {
+            for i in 0..ll(in d, n.b) {
+                push3(inout out, la(in d, n.b, i), n.start, n.end);
+            }
+        }
+        for i in 0..ll(in d, n.c) {
+            expr_types(in d, arg_at(in d, la(in d, n.c, i)).expr, skip_box, inout out);
+        }
+    } else if k == 7 || k == 9 {
+        expr_types(in d, n.a, skip_box, inout out);
+    } else if k == 10 {
+        expr_types(in d, n.b, skip_box, inout out);
+    } else if k == 8 {
+        expr_types(in d, n.a, skip_box, inout out);
+        expr_types(in d, n.b, skip_box, inout out);
+    } else if k == 11 || k == 12 {
+        expr_types(in d, n.b, skip_box, inout out);
+        expr_types(in d, n.c, skip_box, inout out);
+    } else if k == 13 {
+        expr_types(in d, n.a, skip_box, inout out);
+        expr_types(in d, n.b, skip_box, inout out);
+        opt_expr_types(in d, n.c, skip_box, inout out);
+    } else if k == 14 {
+        expr_types(in d, n.a, skip_box, inout out);
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            expr_types(in d, la(in d, n.b, inc(wrapping_mul(i, 2))), skip_box, inout out);
+        }
+    } else if k == 17 {
+        expr_types(in d, n.a, skip_box, inout out);
+    } else if k == 18 {
+        expr_types(in d, n.b, skip_box, inout out);
+        expr_types(in d, n.c, skip_box, inout out);
+    } else if k == 19 {
+        expr_types(in d, n.a, skip_box, inout out);
+        expr_types(in d, n.b, skip_box, inout out);
+    } else if k == 20 || k == 21 {
+        opt_expr_types(in d, n.a, skip_box, inout out);
+    } else if k == 15 {
+        for i in 0..ll(in d, n.a) {
+            push3(inout out, param_at(in d, la(in d, n.a, i)).ty, n.start, n.end);
+        }
+        push3(inout out, n.c, n.start, n.end);
+        effect_types(in d, n.d, n.start, n.end, inout out);
+        expr_types(in d, n.e, skip_box, inout out);
+    } else if k == 16 {
+        let hfx = effect_at(in d, n.a);
+        for j in 0..ll(in d, hfx.args) {
+            push3(inout out, la(in d, hfx.args, j), n.start, n.end);
+        }
+        if n.b != NONE {
+            expr_types(in d, n.c, skip_box, inout out);
+        }
+        expr_types(in d, n.d, skip_box, inout out);
+        for i in 0..ll(in d, n.e) {
+            expr_types(in d, clause_at(in d, la(in d, n.e, i)).body, skip_box, inout out);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- patterns and names
+
+// `pattern_names`: the names a pattern binds, appended to `out`.
+pub fn pattern_names(in d: D, p: u32, inout out: ChunkSeq[u32]) {
+    let n = pt(in d, p);
+    if n.kind == 2 {
+        out.push(n.a);
+    } else if n.kind == 4 {
+        for i in 0..ll(in d, n.a) {
+            pattern_names(in d, la(in d, n.a, i), inout out);
+        }
+    } else if n.kind == 5 {
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            pattern_names(in d, la(in d, n.b, inc(wrapping_mul(i, 2))), inout out);
+        }
+    }
+}
+
+// `live` without the names in `bound`.
+pub fn without(in live: ChunkSeq[u32], in bound: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::with_capacity[u32](live.len());
+    for i in 0..live.len() {
+        let x = u32_at(in live, i);
+        if !contains(in bound, x) {
+            out.push(x);
+        }
+    }
+    out
+}
+
+fn mark_bound(inout bound: ChunkSeq[u32], in names: ChunkSeq[u32]) {
+    for i in 0..names.len() {
+        bound.push(u32_at(in names, i));
+    }
+}
+
+fn free_walk(in d: D, e: u32, inout bound: ChunkSeq[u32], inout out: ChunkSeq[u32]) {
+    let n = ex(in d, e);
+    let k = n.kind;
+    if k == 2 {
+        if !contains(in bound, n.a) {
+            out.push(n.a);
+        }
+    } else if k == 3 {
+        for i in 0..ll(in d, n.a) {
+            free_walk(in d, la(in d, n.a, i), inout bound, inout out);
+        }
+    } else if k == 4 {
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            free_walk(in d, la(in d, n.b, inc(wrapping_mul(i, 2))), inout bound, inout out);
+        }
+    } else if k == 5 {
+        let m = bound.len();
+        for i in 0..ll(in d, n.a) {
+            let s = stmt_at(in d, la(in d, n.a, i));
+            free_walk(in d, s.value, inout bound, inout out);
+            if s.kind == 1 {
+                pattern_names(in d, s.pat, inout bound);
+            }
+        }
+        if n.b != NONE {
+            free_walk(in d, n.b, inout bound, inout out);
+        }
+        bound.truncate(m);
+    } else if k == 6 {
+        free_walk(in d, n.a, inout bound, inout out);
+        for i in 0..ll(in d, n.c) {
+            free_walk(in d, arg_at(in d, la(in d, n.c, i)).expr, inout bound, inout out);
+        }
+    } else if k == 7 || k == 9 {
+        free_walk(in d, n.a, inout bound, inout out);
+    } else if k == 10 {
+        free_walk(in d, n.b, inout bound, inout out);
+    } else if k == 8 {
+        free_walk(in d, n.a, inout bound, inout out);
+        free_walk(in d, n.b, inout bound, inout out);
+    } else if k == 11 || k == 12 {
+        free_walk(in d, n.b, inout bound, inout out);
+        free_walk(in d, n.c, inout bound, inout out);
+    } else if k == 13 {
+        free_walk(in d, n.a, inout bound, inout out);
+        free_walk(in d, n.b, inout bound, inout out);
+        if n.c != NONE {
+            free_walk(in d, n.c, inout bound, inout out);
+        }
+    } else if k == 14 {
+        free_walk(in d, n.a, inout bound, inout out);
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            let m = bound.len();
+            pattern_names(in d, la(in d, n.b, wrapping_mul(i, 2)), inout bound);
+            free_walk(in d, la(in d, n.b, inc(wrapping_mul(i, 2))), inout bound, inout out);
+            bound.truncate(m);
+        }
+    } else if k == 15 {
+        let m = bound.len();
+        for i in 0..ll(in d, n.a) {
+            bound.push(param_at(in d, la(in d, n.a, i)).name);
+        }
+        free_walk(in d, n.e, inout bound, inout out);
+        bound.truncate(m);
+    } else if k == 16 {
+        if n.b != NONE {
+            free_walk(in d, n.c, inout bound, inout out);
+        }
+        free_walk(in d, n.d, inout bound, inout out);
+        for i in 0..ll(in d, n.e) {
+            let c = clause_at(in d, la(in d, n.e, i));
+            let m = bound.len();
+            for j in 0..ll(in d, c.pats) {
+                pattern_names(in d, la(in d, c.pats, j), inout bound);
+            }
+            free_walk(in d, c.body, inout bound, inout out);
+            bound.truncate(m);
+        }
+    } else if k == 18 {
+        free_walk(in d, n.b, inout bound, inout out);
+        let m = bound.len();
+        pattern_names(in d, n.a, inout bound);
+        free_walk(in d, n.c, inout bound, inout out);
+        bound.truncate(m);
+    } else if k == 17 {
+        free_walk(in d, n.a, inout bound, inout out);
+    } else if k == 19 {
+        free_walk(in d, n.a, inout bound, inout out);
+        free_walk(in d, n.b, inout bound, inout out);
+    } else if k == 20 || k == 21 {
+        if n.a != NONE {
+            free_walk(in d, n.a, inout bound, inout out);
+        }
+    }
+}
+
+// `check::free_names`, sorted by text.
+pub fn free_names(in d: D, e: u32) -> ChunkSeq[u32] {
+    let mut bound = ChunkSeq::new[u32]();
+    let mut out = ChunkSeq::new[u32]();
+    free_walk(in d, e, inout bound, inout out);
+    sort_syms(in d.ast, inout out);
+    out
+}
+
+// ---------------------------------------------------------------- diagnostics
+
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+pub fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+pub fn put_sym(in a: Ast, inout o: ChunkSeq[u8], s: u32) {
+    if s == NONE {
+        return;
+    }
+    let (x, y) = a.names.span(symbol_from_id(s));
+    for i in x..y {
+        match a.names.text_byte(i) {
+            Option::Some(c) => o.push(c),
+            Option::None => {},
+        }
+    }
+}
+
+// Starts a diagnostic with `code`; returns where its message starts.
+pub fn diag_open(inout d: D, in code: Str) -> (u64, u64) {
+    let a = d.diags.open(in code);
+    (a, d.diags.text.len())
+}
+
+pub fn diag_close(inout d: D, at: (u64, u64), start: u32, end: u32) {
+    let (a, m) = at;
+    d.diags.close(a, m, in "", w(start), w(end));
+}
+
+pub fn dput(inout d: D, in s: Str) {
+    d.diags.text.extend(in s.as_bytes());
+}
+
+pub fn dsym(inout d: D, s: u32) {
+    put_sym(in d.ast, inout d.diags.text, s);
+}
+
+pub fn dtype(inout d: D, t: u32) {
+    let id = tid(inout d, t);
+    display(in d.types, in d.names, id, inout d.diags.text);
+}
+
+pub fn ddec(inout d: D, v: u64) {
+    put_u64(inout d.diags.text, v);
+}
+
+// A diagnostic whose message is one text.
+pub fn diag_text(inout d: D, in code: Str, in msg: Str, start: u32, end: u32) {
+    let at = diag_open(inout d, in code);
+    dput(inout d, in msg);
+    diag_close(inout d, at, start, end);
+}

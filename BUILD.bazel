@@ -161,6 +161,19 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
+        # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
+        # the repository's .ves sources. Anchored globs.
+        "test/self_host_check_dyn": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "tests/dyn_trait.rs",
+            "tests/dyn_box.rs",
+            "tests/dyn_effects.rs",
+            "tests/dyn_fn.rs",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -476,6 +489,8 @@ vesper_crate(
         # The checker data differential (#1176) checks every corpus world.
         "test/self_host_check_data": "long",
         "test/self_host_check_harness": "long",
+        # The dyn differential runs both passes over every .ves source twice.
+        "test/self_host_check_dyn": "long",
     },
 )
 
