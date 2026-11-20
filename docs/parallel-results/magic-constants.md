@@ -40,7 +40,9 @@ included, and many of them are fine as they are.
 | PR | Area | Port speed |
 | --- | --- | --- |
 | #1162 | BBR (Rust + `.ves` port), inliner fold, checker facts | ack path +0.1% Ir |
-| next | warp-tcp: header offsets, option kinds and lengths, RFC 9293/7323/5961 limits (Rust reference + `.ves` port) | codec and transfer Ir identical |
+| #1172 | warp-tcp: header offsets, option kinds and lengths, RFC 9293/7323/5961 limits (Rust reference + `.ves` port) | codec and transfer Ir identical |
+| next | warp-wheel: slot and span limits, lease mixing constants | single-literal constants, folded (no benchmark example) |
+| next | Prism: per-module ASCII constants, RFC 9110 tchar/field-value and RFC 3986 target masks, status codes, host limits | `abba measure 20` 62.87 M -> 62.85 M Ir |
 
 ## Order
 
@@ -74,6 +76,13 @@ then non-zero (`x / MILLIS_PER_SEC` needs no `Fail`), and an initializer
 built from such constants is in range (`const KEEP: u64 = GAIN_UNIT -
 LOSS_THRESH;`). A zero constant still leaves `/` fallible, and `A - B`
 that would underflow is still refused.
+
+## ASCII codes in `.ves` ports
+
+Vesper has no byte literals and module constants are not imported across
+modules, so each module that compares bytes defines the ASCII constants it
+uses (`SLASH: u8 = 47`, `DIGIT_0`, ...). The user chose this over adding byte
+literals first (2026-11-20).
 
 ## Gaps left
 
