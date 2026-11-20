@@ -76,7 +76,7 @@ filegroup(
         target = VESPER_TARGET,
     )
     for module, src, old, new in [
-        ("insn", "insn", "        AluOp::Lsh => (96, 0),\n", "        AluOp::Lsh => (112, 0),\n"),
+        ("insn", "insn", "        AluOp::Lsh => (OP_LSH, 0),\n", "        AluOp::Lsh => (OP_RSH, 0),\n"),
         ("scalar", "scalar", "    let mu = chi | a.mask | b.mask;\n    tn(sv & ~mu, mu)", "    let mu = chi | a.mask;\n    tn(sv & ~mu, mu)"),
         ("interp", "concrete", "        AluOp::Arsh => sar(a, b & 63),\n", "        AluOp::Arsh => shr(a, b & 63),\n"),
         ("verifier", "scalar", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 1));\n", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 2));\n"),

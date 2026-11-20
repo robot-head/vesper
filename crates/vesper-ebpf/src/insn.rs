@@ -18,7 +18,91 @@ pub mod class {
     pub const JMP: u8 = 0x05;
     pub const JMP32: u8 = 0x06;
     pub const ALU64: u8 = 0x07;
+    /// `BPF_CLASS(code)`.
+    pub const MASK: u8 = 0x07;
 }
+
+/// Operation codes (`BPF_OP`, high four bits) of the ALU classes, and of
+/// the `BPF_ATOMIC` `imm` field.
+pub mod op {
+    pub const ADD: u8 = 0x00;
+    pub const SUB: u8 = 0x10;
+    pub const MUL: u8 = 0x20;
+    pub const DIV: u8 = 0x30;
+    pub const OR: u8 = 0x40;
+    pub const AND: u8 = 0x50;
+    pub const LSH: u8 = 0x60;
+    pub const RSH: u8 = 0x70;
+    pub const NEG: u8 = 0x80;
+    pub const MOD: u8 = 0x90;
+    pub const XOR: u8 = 0xa0;
+    pub const MOV: u8 = 0xb0;
+    pub const ARSH: u8 = 0xc0;
+    pub const END: u8 = 0xd0;
+    /// `BPF_OP(code)`.
+    pub const MASK: u8 = 0xf0;
+}
+
+/// Operation codes (`BPF_OP`) of the jump classes.
+pub mod jmp {
+    pub const JA: u8 = 0x00;
+    pub const JEQ: u8 = 0x10;
+    pub const JGT: u8 = 0x20;
+    pub const JGE: u8 = 0x30;
+    pub const JSET: u8 = 0x40;
+    pub const JNE: u8 = 0x50;
+    pub const JSGT: u8 = 0x60;
+    pub const JSGE: u8 = 0x70;
+    pub const CALL: u8 = 0x80;
+    pub const EXIT: u8 = 0x90;
+    pub const JLT: u8 = 0xa0;
+    pub const JLE: u8 = 0xb0;
+    pub const JSLT: u8 = 0xc0;
+    pub const JSLE: u8 = 0xd0;
+}
+
+/// The source bit (`BPF_SRC`): an immediate (`BPF_K`) or a register
+/// (`BPF_X`). On `BPF_END` the same bit selects `BPF_TO_BE`.
+pub mod source {
+    pub const K: u8 = 0x00;
+    pub const X: u8 = 0x08;
+    pub const TO_LE: u8 = 0x00;
+    pub const TO_BE: u8 = 0x08;
+}
+
+/// Access sizes (`BPF_SIZE`) of the load and store classes.
+pub mod size {
+    pub const W: u8 = 0x00;
+    pub const H: u8 = 0x08;
+    pub const B: u8 = 0x10;
+    pub const DW: u8 = 0x18;
+    /// `BPF_SIZE(code)`.
+    pub const MASK: u8 = 0x18;
+}
+
+/// Modes (`BPF_MODE`) of the load and store classes.
+pub mod mode {
+    pub const IMM: u8 = 0x00;
+    pub const ABS: u8 = 0x20;
+    pub const IND: u8 = 0x40;
+    pub const MEM: u8 = 0x60;
+    pub const MEMSX: u8 = 0x80;
+    pub const ATOMIC: u8 = 0xc0;
+    /// `BPF_MODE(code)`.
+    pub const MASK: u8 = 0xe0;
+}
+
+/// `BPF_ATOMIC` `imm` values: an ALU [`op`] code, optionally with
+/// `BPF_FETCH`, or one of the exchanges.
+pub mod atomic {
+    pub const FETCH: i32 = 0x01;
+    pub const XCHG: i32 = 0xe0 | FETCH;
+    pub const CMPXCHG: i32 = 0xf0 | FETCH;
+}
+
+/// Width of a register field (`dst` is the low nibble of byte 1, `src` the
+/// high one).
+const REG_NIBBLE: u8 = 0x0f;
 
 /// `LD_IMM64` source-register pseudo values.
 pub mod pseudo {
@@ -63,7 +147,7 @@ impl RawInsn {
     pub fn to_bytes(self) -> [u8; 8] {
         let mut b = [0u8; 8];
         b[0] = self.code;
-        b[1] = (self.dst & 0x0f) | ((self.src & 0x0f) << 4);
+        b[1] = (self.dst & REG_NIBBLE) | ((self.src & REG_NIBBLE) << 4);
         b[2..4].copy_from_slice(&self.off.to_le_bytes());
         b[4..8].copy_from_slice(&self.imm.to_le_bytes());
         b
@@ -72,7 +156,7 @@ impl RawInsn {
     pub fn from_bytes(b: [u8; 8]) -> Self {
         Self {
             code: b[0],
-            dst: b[1] & 0x0f,
+            dst: b[1] & REG_NIBBLE,
             src: b[1] >> 4,
             off: i16::from_le_bytes([b[2], b[3]]),
             imm: i32::from_le_bytes([b[4], b[5], b[6], b[7]]),
@@ -80,7 +164,7 @@ impl RawInsn {
     }
 
     pub fn class(self) -> u8 {
-        self.code & 0x07
+        self.code & class::MASK
     }
 }
 
@@ -199,22 +283,22 @@ impl AluOp {
     #[cfg(not(vesper_port))]
     fn code(self) -> (u8, i16) {
         match self {
-            AluOp::Add => (0x00, 0),
-            AluOp::Sub => (0x10, 0),
-            AluOp::Mul => (0x20, 0),
-            AluOp::Div => (0x30, 0),
-            AluOp::SDiv => (0x30, 1),
-            AluOp::Or => (0x40, 0),
-            AluOp::And => (0x50, 0),
-            AluOp::Lsh => (0x60, 0),
-            AluOp::Rsh => (0x70, 0),
-            AluOp::Neg => (0x80, 0),
-            AluOp::Mod => (0x90, 0),
-            AluOp::SMod => (0x90, 1),
-            AluOp::Xor => (0xa0, 0),
-            AluOp::Mov => (0xb0, 0),
-            AluOp::MovSx(bits) => (0xb0, bits as i16),
-            AluOp::Arsh => (0xc0, 0),
+            AluOp::Add => (op::ADD, 0),
+            AluOp::Sub => (op::SUB, 0),
+            AluOp::Mul => (op::MUL, 0),
+            AluOp::Div => (op::DIV, 0),
+            AluOp::SDiv => (op::DIV, 1),
+            AluOp::Or => (op::OR, 0),
+            AluOp::And => (op::AND, 0),
+            AluOp::Lsh => (op::LSH, 0),
+            AluOp::Rsh => (op::RSH, 0),
+            AluOp::Neg => (op::NEG, 0),
+            AluOp::Mod => (op::MOD, 0),
+            AluOp::SMod => (op::MOD, 1),
+            AluOp::Xor => (op::XOR, 0),
+            AluOp::Mov => (op::MOV, 0),
+            AluOp::MovSx(bits) => (op::MOV, bits as i16),
+            AluOp::Arsh => (op::ARSH, 0),
         }
     }
 }
@@ -249,34 +333,34 @@ impl JmpOp {
     #[cfg(not(vesper_port))]
     fn code(self) -> u8 {
         match self {
-            JmpOp::Eq => 0x10,
-            JmpOp::Gt => 0x20,
-            JmpOp::Ge => 0x30,
-            JmpOp::Set => 0x40,
-            JmpOp::Ne => 0x50,
-            JmpOp::SGt => 0x60,
-            JmpOp::SGe => 0x70,
-            JmpOp::Lt => 0xa0,
-            JmpOp::Le => 0xb0,
-            JmpOp::SLt => 0xc0,
-            JmpOp::SLe => 0xd0,
+            JmpOp::Eq => jmp::JEQ,
+            JmpOp::Gt => jmp::JGT,
+            JmpOp::Ge => jmp::JGE,
+            JmpOp::Set => jmp::JSET,
+            JmpOp::Ne => jmp::JNE,
+            JmpOp::SGt => jmp::JSGT,
+            JmpOp::SGe => jmp::JSGE,
+            JmpOp::Lt => jmp::JLT,
+            JmpOp::Le => jmp::JLE,
+            JmpOp::SLt => jmp::JSLT,
+            JmpOp::SLe => jmp::JSLE,
         }
     }
 
     #[cfg(not(vesper_port))]
     fn from_code(op: u8) -> Option<JmpOp> {
         Some(match op {
-            0x10 => JmpOp::Eq,
-            0x20 => JmpOp::Gt,
-            0x30 => JmpOp::Ge,
-            0x40 => JmpOp::Set,
-            0x50 => JmpOp::Ne,
-            0x60 => JmpOp::SGt,
-            0x70 => JmpOp::SGe,
-            0xa0 => JmpOp::Lt,
-            0xb0 => JmpOp::Le,
-            0xc0 => JmpOp::SLt,
-            0xd0 => JmpOp::SLe,
+            jmp::JEQ => JmpOp::Eq,
+            jmp::JGT => JmpOp::Gt,
+            jmp::JGE => JmpOp::Ge,
+            jmp::JSET => JmpOp::Set,
+            jmp::JNE => JmpOp::Ne,
+            jmp::JSGT => JmpOp::SGt,
+            jmp::JSGE => JmpOp::SGe,
+            jmp::JLT => JmpOp::Lt,
+            jmp::JLE => JmpOp::Le,
+            jmp::JSLT => JmpOp::SLt,
+            jmp::JSLE => JmpOp::SLe,
             _ => return None,
         })
     }
@@ -339,19 +423,19 @@ impl Size {
     #[cfg(not(vesper_port))]
     fn code(self) -> u8 {
         match self {
-            Size::W => 0x00,
-            Size::H => 0x08,
-            Size::B => 0x10,
-            Size::DW => 0x18,
+            Size::W => size::W,
+            Size::H => size::H,
+            Size::B => size::B,
+            Size::DW => size::DW,
         }
     }
 
     #[cfg(not(vesper_port))]
     fn from_code(c: u8) -> Size {
-        match c & 0x18 {
-            0x00 => Size::W,
-            0x08 => Size::H,
-            0x10 => Size::B,
+        match c & size::MASK {
+            size::W => Size::W,
+            size::H => Size::H,
+            size::B => Size::B,
             _ => Size::DW,
         }
     }
@@ -381,30 +465,32 @@ pub enum AtomicOp {
 impl AtomicOp {
     #[cfg(not(vesper_port))]
     fn imm(self) -> i32 {
-        let f = |b: bool| if b { 0x01 } else { 0 };
+        let f = |b: bool| if b { atomic::FETCH } else { 0 };
         match self {
-            AtomicOp::Add { fetch } => f(fetch),
-            AtomicOp::Or { fetch } => 0x40 | f(fetch),
-            AtomicOp::And { fetch } => 0x50 | f(fetch),
-            AtomicOp::Xor { fetch } => 0xa0 | f(fetch),
-            AtomicOp::Xchg => 0xe1,
-            AtomicOp::CmpXchg => 0xf1,
+            AtomicOp::Add { fetch } => i32::from(op::ADD) | f(fetch),
+            AtomicOp::Or { fetch } => i32::from(op::OR) | f(fetch),
+            AtomicOp::And { fetch } => i32::from(op::AND) | f(fetch),
+            AtomicOp::Xor { fetch } => i32::from(op::XOR) | f(fetch),
+            AtomicOp::Xchg => atomic::XCHG,
+            AtomicOp::CmpXchg => atomic::CMPXCHG,
         }
     }
 
     #[cfg(not(vesper_port))]
     fn from_imm(imm: i32) -> Option<AtomicOp> {
-        Some(match imm {
-            0x00 => AtomicOp::Add { fetch: false },
-            0x01 => AtomicOp::Add { fetch: true },
-            0x40 => AtomicOp::Or { fetch: false },
-            0x41 => AtomicOp::Or { fetch: true },
-            0x50 => AtomicOp::And { fetch: false },
-            0x51 => AtomicOp::And { fetch: true },
-            0xa0 => AtomicOp::Xor { fetch: false },
-            0xa1 => AtomicOp::Xor { fetch: true },
-            0xe1 => AtomicOp::Xchg,
-            0xf1 => AtomicOp::CmpXchg,
+        if imm == atomic::XCHG {
+            return Some(AtomicOp::Xchg);
+        }
+        if imm == atomic::CMPXCHG {
+            return Some(AtomicOp::CmpXchg);
+        }
+        let fetch = imm & atomic::FETCH != 0;
+        let code = u8::try_from(imm & !atomic::FETCH).ok()?;
+        Some(match code {
+            op::ADD => AtomicOp::Add { fetch },
+            op::OR => AtomicOp::Or { fetch },
+            op::AND => AtomicOp::And { fetch },
+            op::XOR => AtomicOp::Xor { fetch },
             _ => return None,
         })
     }
@@ -595,10 +681,10 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
     match r.class() {
         class::ALU | class::ALU64 => {
             let wide = r.class() == class::ALU64;
-            let x = r.code & 0x08 != 0;
+            let x = r.code & source::X != 0;
             let dst = reg(pc, r.dst)?;
-            let opc = r.code & 0xf0;
-            if opc == 0xd0 {
+            let opc = r.code & op::MASK;
+            if opc == op::END {
                 let kind = match (wide, x) {
                     (false, false) => Endian::ToLe,
                     (false, true) => Endian::ToBe,
@@ -616,25 +702,27 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
                 return Ok(Insn::Endian { kind, bits, dst });
             }
             let op = match (opc, r.off) {
-                (0x00, 0) => AluOp::Add,
-                (0x10, 0) => AluOp::Sub,
-                (0x20, 0) => AluOp::Mul,
-                (0x30, 0) => AluOp::Div,
-                (0x30, 1) => AluOp::SDiv,
-                (0x40, 0) => AluOp::Or,
-                (0x50, 0) => AluOp::And,
-                (0x60, 0) => AluOp::Lsh,
-                (0x70, 0) => AluOp::Rsh,
-                (0x80, 0) => AluOp::Neg,
-                (0x90, 0) => AluOp::Mod,
-                (0x90, 1) => AluOp::SMod,
-                (0xa0, 0) => AluOp::Xor,
-                (0xb0, 0) => AluOp::Mov,
-                (0xb0, 8) => AluOp::MovSx(8),
-                (0xb0, 16) => AluOp::MovSx(16),
-                (0xb0, 32) if wide => AluOp::MovSx(32),
-                (0xc0, 0) => AluOp::Arsh,
-                (0x00..=0xc0, _) => return Err(DecodeError::ReservedFieldSet { pc, field: "off" }),
+                (op::ADD, 0) => AluOp::Add,
+                (op::SUB, 0) => AluOp::Sub,
+                (op::MUL, 0) => AluOp::Mul,
+                (op::DIV, 0) => AluOp::Div,
+                (op::DIV, 1) => AluOp::SDiv,
+                (op::OR, 0) => AluOp::Or,
+                (op::AND, 0) => AluOp::And,
+                (op::LSH, 0) => AluOp::Lsh,
+                (op::RSH, 0) => AluOp::Rsh,
+                (op::NEG, 0) => AluOp::Neg,
+                (op::MOD, 0) => AluOp::Mod,
+                (op::MOD, 1) => AluOp::SMod,
+                (op::XOR, 0) => AluOp::Xor,
+                (op::MOV, 0) => AluOp::Mov,
+                (op::MOV, 8) => AluOp::MovSx(8),
+                (op::MOV, 16) => AluOp::MovSx(16),
+                (op::MOV, 32) if wide => AluOp::MovSx(32),
+                (op::ARSH, 0) => AluOp::Arsh,
+                (op::ADD..=op::ARSH, _) => {
+                    return Err(DecodeError::ReservedFieldSet { pc, field: "off" });
+                }
                 _ => return Err(bad),
             };
             let src = if op == AluOp::Neg {
@@ -658,9 +746,9 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
         }
         class::JMP | class::JMP32 => {
             let wide = r.class() == class::JMP;
-            let x = r.code & 0x08 != 0;
-            match r.code & 0xf0 {
-                0x00 => {
+            let x = r.code & source::X != 0;
+            match r.code & op::MASK {
+                jmp::JA => {
                     if x {
                         return Err(bad);
                     }
@@ -675,7 +763,7 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
                         Ok(Insn::Ja { off: r.imm })
                     }
                 }
-                0x80 if wide => {
+                jmp::CALL if wide => {
                     if x {
                         return Err(bad);
                     }
@@ -689,7 +777,7 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
                     };
                     Ok(Insn::Call(t))
                 }
-                0x90 if wide => {
+                jmp::EXIT if wide => {
                     if x {
                         return Err(bad);
                     }
@@ -721,8 +809,8 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
         }
         class::LD => {
             let size = Size::from_code(r.code);
-            match r.code & 0xe0 {
-                0x00 if size == Size::DW => {
+            match r.code & mode::MASK {
+                mode::IMM if size == Size::DW => {
                     let dst = reg(pc, r.dst)?;
                     zero(pc, r.off, "off")?;
                     let Some(&hi) = slots.get(pc + 1) else {
@@ -752,10 +840,10 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
                     };
                     Ok(Insn::LdImm64 { dst, imm })
                 }
-                m @ (0x20 | 0x40) if size != Size::DW => {
+                m @ (mode::ABS | mode::IND) if size != Size::DW => {
                     zero(pc, r.dst, "dst")?;
                     zero(pc, r.off, "off")?;
-                    let indirect = m == 0x40;
+                    let indirect = m == mode::IND;
                     let src = if indirect {
                         reg(pc, r.src)?
                     } else {
@@ -773,9 +861,9 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
             }
         }
         class::LDX => {
-            let sign_extend = match r.code & 0xe0 {
-                0x60 => false,
-                0x80 if Size::from_code(r.code) != Size::DW => true,
+            let sign_extend = match r.code & mode::MASK {
+                mode::MEM => false,
+                mode::MEMSX if Size::from_code(r.code) != Size::DW => true,
                 _ => return Err(bad),
             };
             zero(pc, r.imm, "imm")?;
@@ -788,7 +876,7 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
             })
         }
         class::ST => {
-            if r.code & 0xe0 != 0x60 {
+            if r.code & mode::MASK != mode::MEM {
                 return Err(bad);
             }
             zero(pc, r.src, "src")?;
@@ -801,8 +889,8 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
         }
         class::STX => {
             let size = Size::from_code(r.code);
-            match r.code & 0xe0 {
-                0x60 => {
+            match r.code & mode::MASK {
+                mode::MEM => {
                     zero(pc, r.imm, "imm")?;
                     Ok(Insn::Stx {
                         size,
@@ -811,7 +899,7 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
                         off: r.off,
                     })
                 }
-                0xc0 if matches!(size, Size::W | Size::DW) => {
+                mode::ATOMIC if matches!(size, Size::W | Size::DW) => {
                     let op = AtomicOp::from_imm(r.imm).ok_or(bad)?;
                     Ok(Insn::Atomic {
                         size,
@@ -868,21 +956,21 @@ pub fn encode(insn: &Insn) -> Vec<RawInsn> {
             let cls = if wide { class::ALU64 } else { class::ALU };
             let (opc, off) = op.code();
             match src {
-                Operand::Imm(i) => vec![r(cls | opc, dst, 0, off, i)],
-                Operand::Reg(s) => vec![r(cls | opc | 0x08, dst, s.num(), off, 0)],
+                Operand::Imm(i) => vec![r(cls | opc | source::K, dst, 0, off, i)],
+                Operand::Reg(s) => vec![r(cls | opc | source::X, dst, s.num(), off, 0)],
             }
         }
         Insn::Endian { kind, bits, dst } => {
             let code = match kind {
-                Endian::ToLe => class::ALU | 0xd0,
-                Endian::ToBe => class::ALU | 0xd8,
-                Endian::Swap => class::ALU64 | 0xd0,
+                Endian::ToLe => class::ALU | op::END | source::TO_LE,
+                Endian::ToBe => class::ALU | op::END | source::TO_BE,
+                Endian::Swap => class::ALU64 | op::END,
             };
             vec![r(code, dst, 0, 0, bits as i32)]
         }
         Insn::Ja { off } => match i16::try_from(off) {
-            Ok(o) => vec![RawInsn::new(class::JMP, 0, 0, o, 0)],
-            Err(_) => vec![RawInsn::new(class::JMP32, 0, 0, 0, off)],
+            Ok(o) => vec![RawInsn::new(class::JMP | jmp::JA, 0, 0, o, 0)],
+            Err(_) => vec![RawInsn::new(class::JMP32 | jmp::JA, 0, 0, 0, off)],
         },
         Insn::Jcond {
             wide,
@@ -893,8 +981,8 @@ pub fn encode(insn: &Insn) -> Vec<RawInsn> {
         } => {
             let cls = if wide { class::JMP } else { class::JMP32 };
             match src {
-                Operand::Imm(i) => vec![r(cls | op.code(), dst, 0, off, i)],
-                Operand::Reg(s) => vec![r(cls | op.code() | 0x08, dst, s.num(), off, 0)],
+                Operand::Imm(i) => vec![r(cls | op.code() | source::K, dst, 0, off, i)],
+                Operand::Reg(s) => vec![r(cls | op.code() | source::X, dst, s.num(), off, 0)],
             }
         }
         Insn::Call(t) => {
@@ -903,9 +991,9 @@ pub fn encode(insn: &Insn) -> Vec<RawInsn> {
                 CallTarget::Local(i) => (pseudo::CALL, i),
                 CallTarget::Kfunc(i) => (pseudo::KFUNC_CALL, i),
             };
-            vec![RawInsn::new(class::JMP | 0x80, 0, src, 0, imm)]
+            vec![RawInsn::new(class::JMP | jmp::CALL, 0, src, 0, imm)]
         }
-        Insn::Exit => vec![RawInsn::new(class::JMP | 0x90, 0, 0, 0, 0)],
+        Insn::Exit => vec![RawInsn::new(class::JMP | jmp::EXIT, 0, 0, 0, 0)],
         Insn::LdImm64 { dst, imm } => {
             let (src, lo, hi) = match imm {
                 Imm64::Value(v) => (0, v as u32 as i32, (v >> 32) as u32 as i32),
@@ -917,7 +1005,7 @@ pub fn encode(insn: &Insn) -> Vec<RawInsn> {
                 } => (src, imm_lo, imm_hi),
             };
             vec![
-                r(class::LD | 0x18, dst, src, 0, lo),
+                r(class::LD | mode::IMM | size::DW, dst, src, 0, lo),
                 RawInsn::new(0, 0, 0, 0, hi),
             ]
         }
@@ -928,7 +1016,7 @@ pub fn encode(insn: &Insn) -> Vec<RawInsn> {
             off,
             sign_extend,
         } => {
-            let mode = if sign_extend { 0x80 } else { 0x60 };
+            let mode = if sign_extend { mode::MEMSX } else { mode::MEM };
             vec![r(class::LDX | mode | size.code(), dst, src.num(), off, 0)]
         }
         Insn::St {
@@ -936,13 +1024,19 @@ pub fn encode(insn: &Insn) -> Vec<RawInsn> {
             dst,
             off,
             imm,
-        } => vec![r(class::ST | 0x60 | size.code(), dst, 0, off, imm)],
+        } => vec![r(class::ST | mode::MEM | size.code(), dst, 0, off, imm)],
         Insn::Stx {
             size,
             dst,
             src,
             off,
-        } => vec![r(class::STX | 0x60 | size.code(), dst, src.num(), off, 0)],
+        } => vec![r(
+            class::STX | mode::MEM | size.code(),
+            dst,
+            src.num(),
+            off,
+            0,
+        )],
         Insn::Atomic {
             size,
             op,
@@ -950,7 +1044,7 @@ pub fn encode(insn: &Insn) -> Vec<RawInsn> {
             src,
             off,
         } => vec![r(
-            class::STX | 0xc0 | size.code(),
+            class::STX | mode::ATOMIC | size.code(),
             dst,
             src.num(),
             off,
@@ -962,7 +1056,7 @@ pub fn encode(insn: &Insn) -> Vec<RawInsn> {
             src,
             imm,
         } => {
-            let mode = if indirect { 0x40 } else { 0x20 };
+            let mode = if indirect { mode::IND } else { mode::ABS };
             let s = if indirect { src.num() } else { 0 };
             vec![RawInsn::new(class::LD | mode | size.code(), 0, s, 0, imm)]
         }

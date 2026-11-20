@@ -43,7 +43,8 @@ included, and many of them are fine as they are.
 | #1172 | warp-tcp: header offsets, option kinds and lengths, RFC 9293/7323/5961 limits (Rust reference + `.ves` port) | codec and transfer Ir identical |
 | #1193 | warp-wheel: slot and span limits, lease mixing constants | single-literal constants, folded (no benchmark example) |
 | #1193 | Prism: per-module ASCII constants, RFC 9110 tchar/field-value and RFC 3986 target masks, status codes, host limits | `abba measure 20` 62.87 M -> 62.85 M Ir |
-| next | silicon: the RISC-V AIA register map (APLIC offsets, IDC registers, `target[i]` and `msiaddrcfgh` fields, `sourcecfg.SM` codes, IMSIC iselects) | `abba one port` aia-intc, aplic-direct, imsic Ir unchanged |
+| #1197 | silicon: the RISC-V AIA register map (APLIC offsets, IDC registers, `target[i]` and `msiaddrcfgh` fields, `sourcecfg.SM` codes, IMSIC iselects) | `abba one port` aia-intc, aplic-direct, imsic Ir unchanged |
+| next | eBPF instruction codec: the kernel's `BPF_*` opcode fields (class, op, jmp, source, size, mode, atomic) | decode workload 5.42 M -> 5.32 M Ir per warm call (-1.9%) |
 
 ## Order
 
@@ -86,6 +87,10 @@ uses (`SLASH: u8 = 47`, `DIGIT_0`, ...). The user chose this over adding byte
 literals first (2026-11-20).
 
 ## Gaps left
+
+- Constants are not patterns: `match c { JEQ => ... }` is refused
+  ("unknown pattern constructor"). The eBPF port's decoders compare with
+  `if` chains instead of matching integer literals.
 
 - A constant derived from other constants (`GAIN_UNIT - LOSS_THRESH`) is
   not folded by the inliner (its function is not a single literal), so it
