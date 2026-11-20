@@ -1469,15 +1469,18 @@ fn put_text(inout out: ChunkSeq[u8], in pool: Slice[u8], off: u64, len: u64) {
     out.extend(pool[off..wrapping_add(off, len)]);
 }
 
-// The source text of the line, then its label rows.
+// The source text of the line, then its label rows. Stops (returning
+// true) as soon as the output passes `cap`, so a long line that cannot fit
+// is never staged whole (ariadne's writer refused each write past the cap).
 fn write_line(
     inout out: ChunkSeq[u8],
     in r: Rep,
     in lines: ChunkSeq[u64],
     in pool: Slice[u8],
     idx: u64,
-    is_ellipsis: bool
-) {
+    is_ellipsis: bool,
+    cap: u64
+) -> bool {
     let off = char_off(in lines, idx);
     let len = char_len(in lines, idx);
     // `arrow_len`: a multi-line label resets the fold to the line length.
@@ -1499,6 +1502,9 @@ fn write_line(
     if !is_ellipsis {
         let chars = r.cps.len();
         for col in 0..chars {
+            if out.len() > cap {
+                return true;
+            }
             let c = at(in r.cps, col);
             let color = if r.color && highlight_at(in r, wrapping_add(off, col)) {
                 0
@@ -1523,6 +1529,9 @@ fn write_line(
         let draw = ll_draw(in r, row);
         write_margin(inout out, in r, in lines, idx, false, is_ellipsis, true, row, false, true, true);
         for col in 0..arrow {
+            if out.len() > cap {
+                return true;
+            }
             let w = width_at(in r, col);
             let v = vbar_at(in r, col, row);
             let under = row == 0 && underline_at(in r, wrapping_add(off, col));
@@ -1548,6 +1557,9 @@ fn write_line(
         out.push(10);
         write_margin(inout out, in r, in lines, idx, false, is_ellipsis, true, row, true, true, true);
         for col in 0..arrow {
+            if out.len() > cap {
+                return true;
+            }
             let w = width_at(in r, col);
             let is_hbar = ((col > col_of) != multi) || (draw && col > col_of);
             let mut c: u64 = 32;
@@ -1577,12 +1589,16 @@ fn write_line(
                 put_char(inout out, tail);
             }
         }
+        if out.len() > cap {
+            return true;
+        }
         if draw {
             out.push(32);
             put_text(inout out, in pool, message_off(in r, label), message_len(in r, label));
         }
         out.push(10);
     }
+    out.len() > cap
 }
 
 // One report. Stops (returning true) once the output passes `cap`.
@@ -1683,8 +1699,7 @@ fn write_report(
             }
             if !skip {
                 line_chars(inout r, in t, n, in lines, idx);
-                write_line(inout out, in r, in lines, in pool, idx, is_ellipsis);
-                if out.len() > cap {
+                if write_line(inout out, in r, in lines, in pool, idx, is_ellipsis, cap) {
                     return true;
                 }
             }
