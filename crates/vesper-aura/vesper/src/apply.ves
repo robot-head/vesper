@@ -13,7 +13,19 @@ use self::codes::{
     i_reused,
     i_unmounted,
     max_u64,
-    none_id
+    none_id,
+    op_bind_slot,
+    op_create,
+    op_destroy,
+    op_disconnect,
+    op_insert_child,
+    op_move_child,
+    op_remove_child,
+    op_set_root,
+    op_set_slot,
+    op_subscribe,
+    op_unbind_slot,
+    v_text
 };
 use self::recording::{
     copy_state,
@@ -55,6 +67,10 @@ use self::widgets::{
     patch_destroy,
     patch_set_root
 };
+
+// The words of one encoded patch: the tag, then every identity as a
+// session and a serial (src/ported/codec.rs).
+const PATCH_WORDS: u64 = 10;
 
 pub fn word(in w: Slice[u64], base: u64, k: u64) -> u64 {
     get_u64(in w, add(base, k))
@@ -120,23 +136,23 @@ pub fn push_text(inout s: RState, in text: Slice[u8], tstart: u64, tlen: u64) ->
 pub fn apply_patch(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
     -> Option[BackendFault] {
     let tag = word(in w, base, 0);
-    if tag == 0 {
+    if tag == op_set_root() {
         patch_set_root(inout s, lim, in w, base, in text)
-    } else if tag == 1 {
+    } else if tag == op_create() {
         patch_create(inout s, lim, in w, base, in text)
-    } else if tag == 2 {
+    } else if tag == op_destroy() {
         patch_destroy(inout s, lim, in w, base, in text)
-    } else if tag == 3 {
+    } else if tag == op_bind_slot() {
         patch_bind_slot(inout s, lim, in w, base, in text)
-    } else if tag == 4 {
+    } else if tag == op_set_slot() {
         patch_set_slot(inout s, lim, in w, base, in text)
-    } else if tag == 5 {
+    } else if tag == op_unbind_slot() {
         patch_unbind_slot(inout s, lim, in w, base, in text)
-    } else if tag == 6 {
+    } else if tag == op_subscribe() {
         patch_subscribe(inout s, lim, in w, base, in text)
-    } else if tag == 7 {
+    } else if tag == op_disconnect() {
         patch_disconnect(inout s, lim, in w, base, in text)
-    } else if tag == 8 || tag == 9 || tag == 10 {
+    } else if tag == op_remove_child() || tag == op_insert_child() || tag == op_move_child() {
         patch_children(inout s, lim, in w, base, in text)
     } else {
         invalid(i_limits())
@@ -175,7 +191,7 @@ pub fn validate_final(inout rec: Recorder) -> Option[BackendFault] {
     for i in 0..rec.stage.slots.len() {
         if seq_bool(in rec.stage.slive, i) {
             let v = rslot(in rec.stage.slots, i);
-            if v.tag == 0 {
+            if v.tag == v_text() {
                 if v.tlen > lim.text {
                     return budget(b_text());
                 }
@@ -294,7 +310,7 @@ pub fn do_recorder_apply(
     if base == max_u64() || rec.st.revision != base || next != inc(base) {
         return Option::Some(BackendFault::StaleRevision);
     }
-    let count = w.len() / 10;
+    let count = w.len() / PATCH_WORDS;
     if count > rec.lim.patches {
         return budget(b_patches());
     }
@@ -310,7 +326,7 @@ pub fn do_recorder_apply(
         if has_reject && reject == i {
             return Option::Some(BackendFault::Injected(i));
         }
-        match apply_patch(inout rec.stage, lim, in w, wrapping_mul(i, 10), in text) {
+        match apply_patch(inout rec.stage, lim, in w, wrapping_mul(i, PATCH_WORDS), in text) {
             Option::Some(f) => {
                 return Option::Some(f);
             },

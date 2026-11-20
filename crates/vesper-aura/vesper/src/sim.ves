@@ -3,7 +3,16 @@ use self::codes::{
     b_children,
     b_handler,
     b_slots,
-    none_id
+    e_focused,
+    k_button,
+    k_container,
+    k_input,
+    none_id,
+    p_enabled,
+    p_text,
+    p_visible,
+    v_bool,
+    v_text
 };
 use self::recording::{
     child_count,
@@ -47,6 +56,16 @@ use self::view::{
     validate
 };
 
+// encode_view_tree's ceilings: slot bases and handlers are u32, child
+// counts u16.
+const U32_MAX: u64 = 4294967295;
+const U16_MAX: u64 = 65535;
+// encode_view_tree's layout flags (sim_aura::layout_flags).
+const FLAG_VISIBLE: u64 = 1;
+const FLAG_ENABLED: u64 = 2;
+const FLAG_INTERACTIVE: u64 = 4;
+const FLAG_HAS_ACCESSIBLE_LABEL: u64 = 8;
+
 pub fn query_new() -> Query {
     query_with(tree_new())
 }
@@ -68,24 +87,24 @@ pub fn query_with(sink tree: Tree) -> Query {
     }
 }
 
-// Whether a mounted widget's bool property (2 Enabled, 3 Visible) is false.
+// Whether a mounted widget's bool property (`p_enabled()`, `p_visible()`) is false.
 pub fn flag_off(in s: RState, widget: u64, property: u64) -> bool {
     let k = widget_slot(in s, widget, property);
     if k == none_id() {
         false
     } else {
         let v = rslot(in s.slots, k);
-        v.tag == 1 && v.payload == 0
+        v.tag == v_bool() && v.payload == 0
     }
 }
 
 pub fn mounted_label(in s: RState, widget: u64) -> bool {
-    let k = widget_slot(in s, widget, 0);
+    let k = widget_slot(in s, widget, p_text());
     if k == none_id() {
         false
     } else {
         let v = rslot(in s.slots, k);
-        v.tag == 0 && !blank_seq(in s.text, v.tstart, v.tlen)
+        v.tag == v_text() && !blank_seq(in s.text, v.tstart, v.tlen)
     }
 }
 
@@ -114,9 +133,9 @@ pub fn focus_order(in rec: Recorder, inout q: Query) {
         let i = widget_index(in rec.st, id);
         if i != none_id() && !seq_bool(in seen, i) {
             seen.try_set(i, true);
-            if !flag_off(in rec.st, id, 3) && !flag_off(in rec.st, id, 2) {
+            if !flag_off(in rec.st, id, p_visible()) && !flag_off(in rec.st, id, p_enabled()) {
                 let kind = rwidget(in rec.st.widgets, i).kind;
-                if kind == 2 || kind == 3 {
+                if kind == k_button() || kind == k_input() {
                     q.items.push(id);
                 }
                 let n = child_count(in rec.st, id);
@@ -181,7 +200,7 @@ pub fn do_sim_focus(in rec: Recorder, has_focus: bool, focused: u64, forward: bo
         seq_u64(in q.items, dec(add(at, n)) % n)
     };
     q.target = next;
-    dispatch_if_subscribed(in rec, inout q, next, 2);
+    dispatch_if_subscribed(in rec, inout q, next, e_focused());
     q
 }
 
@@ -221,7 +240,7 @@ pub fn audit_one(
     subscribed: bool,
     target: u64
 ) {
-    if kind == 2 || kind == 3 {
+    if kind == k_button() || kind == k_input() {
         q.interactive = inc(q.interactive);
         if visible && !labelled {
             q.items.push(0);
@@ -262,7 +281,7 @@ pub fn do_sim_audit(in rec: Recorder) -> Query {
             let i = widget_index(in rec.st, id);
             if i != none_id() && !seq_bool(in seen, i) {
                 seen.try_set(i, true);
-                let visible = parent_visible && !flag_off(in rec.st, id, 3);
+                let visible = parent_visible && !flag_off(in rec.st, id, p_visible());
                 let w = rwidget(in rec.st.widgets, i);
                 audit_one(
                     inout q,
@@ -293,7 +312,7 @@ pub fn do_sim_audit(in rec: Recorder) -> Query {
             audit_one(
                 inout q,
                 w.kind,
-                !flag_off(in rec.st, w.serial, 3),
+                !flag_off(in rec.st, w.serial, p_visible()),
                 mounted_label(in rec.st, w.serial),
                 widget_sub_count(in rec.st, w.serial) != 0,
                 w.serial
@@ -319,17 +338,17 @@ pub fn tree_flag_off(in t: Tree, n: TNode, property: u64) -> bool {
         false
     } else {
         let p = tprop(in t.props, k);
-        p.tag == 1 && p.payload == 0
+        p.tag == v_bool() && p.payload == 0
     }
 }
 
 pub fn tree_label(in t: Tree, n: TNode, in text: Slice[u8]) -> bool {
-    let k = tree_prop(in t, n, 0);
+    let k = tree_prop(in t, n, p_text());
     if k == none_id() {
         false
     } else {
         let p = tprop(in t.props, k);
-        p.tag == 0 && !blank_slice(in text, p.tstart, p.tlen)
+        p.tag == v_text() && !blank_slice(in text, p.tstart, p.tlen)
     }
 }
 
@@ -360,7 +379,7 @@ pub fn do_audit_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice[
         } else {
             seq_bool(in flags, parent)
         };
-        let visible = parent_visible && !tree_flag_off(in q.tree, node, 3);
+        let visible = parent_visible && !tree_flag_off(in q.tree, node, p_visible());
         flags.try_set(ti, visible);
         let labelled = tree_label(in q.tree, node, in text);
         audit_one(inout q, node.kind, visible, labelled, node.scount != 0, node.key);
@@ -370,9 +389,9 @@ pub fn do_audit_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice[
 
 // The slot properties of each kind, in slot order (sim_aura::kind_properties).
 pub fn kind_slot_count(kind: u64) -> u64 {
-    if kind == 0 {
+    if kind == k_container() {
         3
-    } else if kind == 3 {
+    } else if kind == k_input() {
         5
     } else {
         4
@@ -380,9 +399,9 @@ pub fn kind_slot_count(kind: u64) -> u64 {
 }
 
 pub fn kind_slot_property(kind: u64, i: u64) -> u64 {
-    if kind == 0 {
+    if kind == k_container() {
         add(i, 2)
-    } else if kind == 3 {
+    } else if kind == k_input() {
         i
     } else if i == 0 {
         0
@@ -409,7 +428,7 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
     for oi in 0..q.tree.order.len() {
         let ti = seq_u64(in q.tree.order, oi);
         let node = tnode(in q.tree.nodes, ti);
-        if slots > 4294967295 {
+        if slots > U32_MAX {
             q.fault = Option::Some(ViewFault::Budget(b_slots()));
             return q;
         }
@@ -429,14 +448,14 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
             );
             slots = inc(slots);
         }
-        if node.ccount > 65535 {
+        if node.ccount > U16_MAX {
             q.fault = Option::Some(ViewFault::Budget(b_children()));
             return q;
         }
         let mut action: u64 = 0;
         for j in 0..node.scount {
             let h = tsub(in q.tree.subs, add(node.sstart, j)).handler;
-            if h > 4294967295 {
+            if h > U32_MAX {
                 q.fault = Option::Some(ViewFault::Budget(b_handler()));
                 return q;
             }
@@ -445,17 +464,17 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
             }
         }
         let mut flags: u64 = 0;
-        if !tree_flag_off(in q.tree, node, 3) {
-            flags = flags | 1;
+        if !tree_flag_off(in q.tree, node, p_visible()) {
+            flags = flags | FLAG_VISIBLE;
         }
-        if !tree_flag_off(in q.tree, node, 2) {
-            flags = flags | 2;
+        if !tree_flag_off(in q.tree, node, p_enabled()) {
+            flags = flags | FLAG_ENABLED;
         }
-        if node.kind == 2 || node.kind == 3 {
-            flags = flags | 4;
+        if node.kind == k_button() || node.kind == k_input() {
+            flags = flags | FLAG_INTERACTIVE;
         }
         if tree_label(in q.tree, node, in text) {
-            flags = flags | 8;
+            flags = flags | FLAG_HAS_ACCESSIBLE_LABEL;
         }
         q.items.push(node.kind);
         q.items.push(node.ccount);
