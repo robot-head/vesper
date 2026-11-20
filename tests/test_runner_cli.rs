@@ -764,8 +764,8 @@ fn standard_library_core_and_byte_source_unit_tests_pass() {
 fn standard_library_collection_source_unit_tests_pass() {
     check_source_unit_tests(&[
         ("packages/vesper-std/arena/src/lib.ves", 23),
-        ("packages/vesper-std/collections/src/flat_table.ves", 10),
-        ("packages/vesper-std/collections/src/radix_seq.ves", 13),
+        ("packages/vesper-std/collections/src/flat_table.ves", 15),
+        ("packages/vesper-std/collections/src/radix_seq.ves", 16),
         ("packages/vesper-std/graph/src/util.ves", 9),
         ("packages/vesper-std/hash/src/fast.ves", 23),
         ("packages/vesper-std/intern/src/lib.ves", 33),
@@ -777,16 +777,16 @@ fn standard_library_collection_source_unit_tests_pass() {
 fn frontend_source_unit_tests_pass() {
     check_source_unit_tests(&[
         ("packages/vesper-ast/src/text.ves", 29),
-        ("packages/vesper-front/src/util.ves", 24),
+        ("packages/vesper-front/src/util.ves", 36),
     ]);
 }
 
 #[test]
 fn ported_crate_source_unit_tests_pass() {
     check_source_unit_tests(&[
-        ("crates/vesper-crucible/vesper/src/lib.ves", 26),
-        ("crates/vesper-lean-syntax/vesper/src/lib.ves", 34),
-        ("crates/vesper-simpulse/vesper/src/lib.ves", 15),
+        ("crates/vesper-crucible/vesper/src/lib.ves", 40),
+        ("crates/vesper-lean-syntax/vesper/src/lib.ves", 158),
+        ("crates/vesper-simpulse/vesper/src/lib.ves", 25),
     ]);
 }
 

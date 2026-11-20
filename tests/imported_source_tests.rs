@@ -22,7 +22,7 @@ fn run_suites(suites: &[(&str, u64)]) {
 #[test]
 fn standard_library_packages() {
     run_suites(&[
-        ("packages/vesper-std/collections", 52),
+        ("packages/vesper-std/collections", 65),
         ("packages/vesper-std/fmt", 90),
         ("packages/vesper-std/graph", 79),
         ("packages/vesper-std/hash", 45),
@@ -33,18 +33,18 @@ fn standard_library_packages() {
 
 #[test]
 fn front_end() {
-    run_suites(&[("packages/vesper-front/src/lib.ves", 27)]);
+    run_suites(&[("packages/vesper-front/src/lib.ves", 36)]);
 }
 
 #[test]
 fn ast_lowering() {
-    run_suites(&[("packages/vesper-ast/src/lib.ves", 11)]);
+    run_suites(&[("packages/vesper-ast/src/lib.ves", 15)]);
 }
 
 #[test]
 fn ported_crate_packages() {
     run_suites(&[
-        ("crates/vesper-semver/vesper", 22),
+        ("crates/vesper-semver/vesper", 77),
         ("crates/vesper-prism-h3/vesper", 22),
     ]);
 }

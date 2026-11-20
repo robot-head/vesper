@@ -284,6 +284,54 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
 }
 
 test {
+    // @case empty(0, 8)
+    // @case at_threshold(7, 8)
+    // @case exceeds_threshold(8, 16)
+    fn test_slot_capacity(count: u64, capacity: u64) -> bool {
+        let mut table = flat_table_new[u64, u64]();
+        for i in 0..count {
+            let value = i;
+            table.insert(i, value);
+        }
+        table.slots.len() == capacity && table.mask == wrapping_sub(capacity, 1)
+    }
+
+    fn test_slot_search_wraps_past_occupied_slots() -> bool {
+        let mut table = flat_table_new[u64, u64]();
+        table.slots.try_set(7, 1);
+        table.slots.try_set(0, 2);
+        table.slot_of(7, 2) == 0 && table.slot_of(7, 3) == 1
+    }
+
+    fn test_rebuild_at_half_live_capacity_clears_tombstones() -> bool {
+        let mut table = flat_table_new[u64, u64]();
+        let count: u64 = 7;
+        for i in 0..count {
+            let value = i;
+            table.insert(i, value);
+        }
+        for i in 0..4 {
+            table.remove(i);
+        }
+        table.insert(7, 7);
+        if table.slots.len() != 8 || table.tombs != 0 || table.len() != 4 {
+            return false;
+        }
+        let start: u64 = 4;
+        for i in start..8 {
+            if table.get(i) != Option::Some(i) {
+                return false;
+            }
+        }
+        let mut occupied: u64 = 0;
+        for i in 0..8 {
+            if table.slots.try_get(i) != Option::Some(0) {
+                occupied = wrapping_add(occupied, 1);
+            }
+        }
+        occupied == 4
+    }
+
     // @case empty(0)
     // @case one(1)
     // @case at_load_threshold(7)
