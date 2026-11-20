@@ -1,0 +1,936 @@
+// `Renamer` of src/packages.rs: renames a module's references to their
+// internal names and shifts its spans to the module's base offset, in
+// place in the module's `@vesper/ast` arenas. Names are compared as global
+// symbols (`tr`); a renamed name is interned back into the AST (`back`).
+//
+// Diagnostics carry file-local spans (the node's span before it shifts),
+// as in Rust.
+
+use @vesper/ast::{
+    Ast,
+    AdtNode,
+    ArgNode,
+    AssocBindNode,
+    AssocDeclNode,
+    ClauseNode,
+    ConfNode,
+    EffectDeclNode,
+    EffectNode,
+    EffectsNode,
+    ExprNode,
+    FieldNode,
+    FnNode,
+    GenericNode,
+    ImplNode,
+    ParamNode,
+    PatNode,
+    StmtNode,
+    TraitNode,
+    TraitRefNode,
+    TypeNode,
+    VariantNode,
+    WhereNode,
+    expr_at,
+    list_at,
+    list_len,
+    none as ast_none,
+    pat_at,
+    type_at
+};
+use @vesper-std/collections::flat_table::{
+    FlatTable
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use self::state::{
+    St,
+    at32,
+    emit,
+    err,
+    hi,
+    inc,
+    kind_has,
+    kind_type,
+    kind_value,
+    lo,
+    n32,
+    none,
+    pair,
+    push_sym,
+    sym_len,
+    sym_path_split,
+    sym_slice,
+    sym_starts,
+    w
+};
+use self::load::{
+    adt_at,
+    back,
+    effect_decl_at,
+    fn_at,
+    tr
+};
+use self::resolve::{
+    qualified,
+    unknown_import
+};
+
+fn file(in s: St) -> u32 {
+    at32(in s.mod_file, w(s.cur))
+}
+
+fn sh(in s: St, x: u32) -> u32 {
+    wrapping_add(x, s.shift)
+}
+
+// Marks node `k` renamed; whether it already was.
+fn revisit(inout seen: FlatTable[u32, u8], k: u32) -> bool {
+    match seen.insert(k, 1) {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+fn has(in stack: ChunkSeq[u32], x: u32) -> bool {
+    let mut i = stack.len();
+    loop {
+        if i == 0 {
+            break false;
+        }
+        i = wrapping_sub(i, 1);
+        if at32(in stack, i) == x {
+            break true;
+        }
+    }
+}
+
+// `is_qualified`: `self::..`, `super::..` or `@scope/name::..`.
+fn is_qualified(in s: St, n: u32) -> bool {
+    sym_starts(in s, n, in "self::")
+        || sym_starts(in s, n, in "super::")
+        || sym_starts(in s, n, in "@")
+}
+
+// `Renamer::resolve`: a free name in namespace `ns`: an imported or own
+// item, else left for the checker (`none()`). A variant of an enum the
+// module does not see, or a root module item reached without an import,
+// is reported.
+fn resolve(inout s: St, n: u32, start: u32, end: u32, ns: u8) -> u32 {
+    match s.names.get(n) {
+        Option::Some(v) => {
+            if kind_has(wrapping_u8(v >> 32), ns) {
+                return lo(v);
+            }
+        },
+        Option::None => {},
+    }
+    match s.var_owner.get(n) {
+        Option::Some(owner) => {
+            if !s.targets.contains_key(owner) {
+                err(inout s, unknown_import(), start, end);
+                let shown = match s.var_shown.get(n) {
+                    Option::Some(x) => x,
+                    Option::None => s.s_empty,
+                };
+                let mut msg = String::new();
+                msg.push_str(in "variant '");
+                push_sym(in s, n, inout msg);
+                msg.push_str(in "' belongs to enum ");
+                push_sym(in s, shown, inout msg);
+                msg.push_str(in ", which is not declared or imported in this module");
+                s.err_msg.push_str(in msg);
+                s.err_help.push_str(in "import the enum to use its variants");
+                s.err_has_help = true;
+                emit(inout s, file(in s));
+                return none();
+            }
+        },
+        Option::None => {},
+    }
+    if !s.is_root {
+        match s.hidden.get(n) {
+            Option::Some(k) => {
+                if kind_has(k, ns) {
+                    err(inout s, unknown_import(), start, end);
+                    let mut msg = String::new();
+                    msg.push_str(in "'");
+                    push_sym(in s, n, inout msg);
+                    msg.push_str(in "' is not declared or imported in this module");
+                    s.err_msg.push_str(in msg);
+                    let mut help = String::new();
+                    help.push_str(in "items of other modules need an import such as `use self::");
+                    push_sym(in s, n, inout help);
+                    help.push_str(in ";` or a path such as `self::");
+                    push_sym(in s, n, inout help);
+                    help.push_str(in "`");
+                    s.err_help.push_str(in help);
+                    s.err_has_help = true;
+                    emit(inout s, file(in s));
+                }
+            },
+            Option::None => {},
+        }
+    }
+    none()
+}
+
+// `Renamer::type_name`: a path name `Head::rest` or a plain type or
+// effect name. Returns the new name (or `n`).
+fn type_name(inout s: St, n: u32, start: u32, end: u32) -> u32 {
+    if is_qualified(in s, n) {
+        let q = qualified(inout s, s.cur, n, start, end);
+        if q == none() {
+            emit(inout s, file(in s));
+            return n;
+        }
+        return q;
+    }
+    let len = sym_len(in s, n);
+    let cut = sym_path_split(in s, n);
+    let head = if cut >= len {
+        n
+    } else {
+        sym_slice(inout s, n, 0, cut)
+    };
+    if has(in s.types, head) {
+        return n;
+    }
+    let t = resolve(inout s, head, start, end, kind_type());
+    if t == none() {
+        return n;
+    }
+    if cut >= len {
+        return t;
+    }
+    let mut out = String::new();
+    push_sym(in s, t, inout out);
+    out.push_str(in "::");
+    let rest = sym_slice(inout s, n, wrapping_add(cut, 2), len);
+    push_sym(in s, rest, inout out);
+    s.g.intern(in out).id()
+}
+
+fn value_name(inout s: St, n: u32, start: u32, end: u32) -> u32 {
+    if sym_path_split(in s, n) < sym_len(in s, n) {
+        return type_name(inout s, n, start, end);
+    }
+    if has(in s.values, n) {
+        return n;
+    }
+    let t = resolve(inout s, n, start, end, kind_value());
+    if t == none() {
+        n
+    } else {
+        t
+    }
+}
+
+// Renames AST name `sym` through `f`'s result: the AST symbol to store.
+fn store(inout s: St, inout a: Ast, old: u32, new_g: u32, old_g: u32) -> u32 {
+    if new_g == old_g {
+        old
+    } else {
+        back(inout s, inout a, new_g)
+    }
+}
+
+// ---------------------------------------------------------------- types
+
+fn ty(inout s: St, inout a: Ast, t: u32, start: u32, end: u32) {
+    if t == ast_none() {
+        return;
+    }
+    let mut n = type_at(in a, t);
+    if n.kind == 1 {
+        let g = tr(inout s, in a, n.a);
+        if list_len(in a, n.b) == 0 && has(in s.types, g) {
+            return;
+        }
+        let x = type_name(inout s, g, start, end);
+        if x != g {
+            n.a = back(inout s, inout a, x);
+            a.types.set(idx_from_raw[TypeNode](t), n);
+        }
+        for i in 0..list_len(in a, n.b) {
+            let c = list_at(in a, n.b, i);
+            ty(inout s, inout a, c, start, end);
+        }
+    } else if n.kind == 2 {
+        for i in 0..list_len(in a, n.a) {
+            let c = list_at(in a, n.a, i);
+            ty(inout s, inout a, c, start, end);
+        }
+    } else if n.kind == 3 {
+        let np = list_len(in a, n.a);
+        let mut i: u64 = 0;
+        loop {
+            if inc(i) >= wrapping_add(np, 1) {
+                break;
+            }
+            let c = list_at(in a, n.a, inc(i));
+            ty(inout s, inout a, c, start, end);
+            i = wrapping_add(i, 2);
+        }
+        ty(inout s, inout a, n.b, start, end);
+        effects(inout s, inout a, n.c, start, end);
+    } else if n.kind == 4 {
+        effects(inout s, inout a, n.a, start, end);
+    }
+}
+
+fn effects_at(in a: Ast, e: u32) -> EffectsNode {
+    a
+        .effects
+        .get_or(
+        idx_from_raw[EffectsNode](e),
+        EffectsNode {
+            instances: 0,
+            tail: ast_none()
+        }
+    )
+}
+
+fn effect_at(in a: Ast, e: u32) -> EffectNode {
+    a
+        .effect_nodes
+        .get_or(
+        idx_from_raw[EffectNode](e),
+        EffectNode {
+            label: ast_none(),
+            name: ast_none(),
+            args: 0
+        }
+    )
+}
+
+fn effects(inout s: St, inout a: Ast, e: u32, start: u32, end: u32) {
+    if e == ast_none() {
+        return;
+    }
+    let row = effects_at(in a, e);
+    for i in 0..list_len(in a, row.instances) {
+        let x = list_at(in a, row.instances, i);
+        one_effect(inout s, inout a, x, start, end);
+    }
+}
+
+fn one_effect(inout s: St, inout a: Ast, e: u32, start: u32, end: u32) {
+    if e == ast_none() {
+        return;
+    }
+    let mut n = effect_at(in a, e);
+    let g = tr(inout s, in a, n.name);
+    if !has(in s.types, g) {
+        let x = type_name(inout s, g, start, end);
+        if x != g {
+            n.name = back(inout s, inout a, x);
+            a.effect_nodes.set(idx_from_raw[EffectNode](e), n);
+        }
+    }
+    for i in 0..list_len(in a, n.args) {
+        let c = list_at(in a, n.args, i);
+        ty(inout s, inout a, c, start, end);
+    }
+}
+
+// Capability labels of an effect row are value names.
+fn labels(inout s: St, in a: Ast, e: u32) {
+    if e == ast_none() {
+        return;
+    }
+    let row = effects_at(in a, e);
+    for i in 0..list_len(in a, row.instances) {
+        let n = effect_at(in a, list_at(in a, row.instances, i));
+        if n.label != ast_none() {
+            let g = tr(inout s, in a, n.label);
+            s.values.push(g);
+        }
+    }
+}
+
+fn generic_name(in a: Ast, g: u32) -> u32 {
+    match a.generics.get(idx_from_raw[GenericNode](g)) {
+        Option::Some(x) => x.name,
+        Option::None => ast_none(),
+    }
+}
+
+fn generics(inout s: St, in a: Ast, list: u32) {
+    for i in 0..list_len(in a, list) {
+        let g = tr(inout s, in a, generic_name(in a, list_at(in a, list, i)));
+        s.types.push(g);
+    }
+}
+
+// ---------------------------------------------------------------- patterns
+
+fn pattern(inout s: St, inout a: Ast, p: u32) {
+    if p == ast_none() {
+        return;
+    }
+    let mut n = pat_at(in a, p);
+    if revisit(inout s.seen_pat, p) {
+        n.start = wrapping_sub(n.start, s.shift);
+        n.end = wrapping_sub(n.end, s.shift);
+    }
+    if n.kind == 2 {
+        let g = tr(inout s, in a, n.a);
+        s.values.push(g);
+    } else if n.kind == 4 {
+        for i in 0..list_len(in a, n.a) {
+            let c = list_at(in a, n.a, i);
+            pattern(inout s, inout a, c);
+        }
+    } else if n.kind == 5 {
+        let g = tr(inout s, in a, n.a);
+        let x = type_name(inout s, g, n.start, n.end);
+        if x != g {
+            n.a = back(inout s, inout a, x);
+        }
+        let nf = list_len(in a, n.b);
+        let mut i: u64 = 0;
+        loop {
+            if inc(i) >= wrapping_add(nf, 1) {
+                break;
+            }
+            let c = list_at(in a, n.b, inc(i));
+            pattern(inout s, inout a, c);
+            i = wrapping_add(i, 2);
+        }
+    }
+    n.start = sh(in s, n.start);
+    n.end = sh(in s, n.end);
+    a.pats.set(idx_from_raw[PatNode](p), n);
+}
+
+fn clause(inout s: St, inout a: Ast, c: u32) {
+    let n = a
+        .clauses
+        .get_or(
+        idx_from_raw[ClauseNode](c),
+        ClauseNode {
+            name: ast_none(),
+            pats: 0,
+            body: ast_none()
+        }
+    );
+    let mark = s.values.len();
+    for i in 0..list_len(in a, n.pats) {
+        let x = list_at(in a, n.pats, i);
+        pattern(inout s, inout a, x);
+    }
+    expr(inout s, inout a, n.body);
+    s.values.truncate(mark);
+}
+
+fn param(inout s: St, inout a: Ast, p: u32) {
+    let mut n = a
+        .params
+        .get_or(
+        idx_from_raw[ParamNode](p),
+        ParamNode {
+            name: ast_none(),
+            pass: 0,
+            projections: 0,
+            ty: ast_none(),
+            start: 0,
+            end: 0
+        }
+    );
+    if revisit(inout s.seen_param, p) {
+        n.start = wrapping_sub(n.start, s.shift);
+        n.end = wrapping_sub(n.end, s.shift);
+    }
+    ty(inout s, inout a, n.ty, n.start, n.end);
+    let g = tr(inout s, in a, n.name);
+    s.values.push(g);
+    n.start = sh(in s, n.start);
+    n.end = sh(in s, n.end);
+    a.params.set(idx_from_raw[ParamNode](p), n);
+}
+
+// ---------------------------------------------------------------- exprs
+
+fn stmt(inout s: St, inout a: Ast, st: u32) {
+    let n = a
+        .stmts
+        .get_or(
+        idx_from_raw[StmtNode](st),
+        StmtNode {
+            kind: 0,
+            pat: ast_none(),
+            ty: ast_none(),
+            value: ast_none(),
+            mutable: false
+        }
+    );
+    if n.kind == 1 {
+        expr(inout s, inout a, n.value);
+        let pn = pat_at(in a, n.pat);
+        ty(inout s, inout a, n.ty, pn.start, pn.end);
+        pattern(inout s, inout a, n.pat);
+    } else if n.kind == 2 {
+        expr(inout s, inout a, n.value);
+    }
+}
+
+fn exprs(inout s: St, inout a: Ast, list: u32) {
+    for i in 0..list_len(in a, list) {
+        let x = list_at(in a, list, i);
+        expr(inout s, inout a, x);
+    }
+}
+
+// The second word of each pair of a list of pairs.
+fn pair_exprs(inout s: St, inout a: Ast, list: u32) {
+    let n = list_len(in a, list);
+    let mut i: u64 = 0;
+    loop {
+        if inc(i) >= wrapping_add(n, 1) {
+            break;
+        }
+        let x = list_at(in a, list, inc(i));
+        expr(inout s, inout a, x);
+        i = wrapping_add(i, 2);
+    }
+}
+
+fn expr(inout s: St, inout a: Ast, e: u32) {
+    if e == ast_none() {
+        return;
+    }
+    let mut n = expr_at(in a, e);
+    if revisit(inout s.seen_expr, e) {
+        n.start = wrapping_sub(n.start, s.shift);
+        n.end = wrapping_sub(n.end, s.shift);
+    }
+    let k = n.kind;
+    if k == 2 {
+        let g = tr(inout s, in a, n.a);
+        let x = value_name(inout s, g, n.start, n.end);
+        if x != g {
+            n.a = back(inout s, inout a, x);
+        }
+    } else if k == 3 {
+        exprs(inout s, inout a, n.a);
+    } else if k == 4 {
+        let g = tr(inout s, in a, n.a);
+        let x = type_name(inout s, g, n.start, n.end);
+        if x != g {
+            n.a = back(inout s, inout a, x);
+        }
+        pair_exprs(inout s, inout a, n.b);
+    } else if k == 5 {
+        let mark = s.values.len();
+        for i in 0..list_len(in a, n.a) {
+            let x = list_at(in a, n.a, i);
+            stmt(inout s, inout a, x);
+        }
+        expr(inout s, inout a, n.b);
+        s.values.truncate(mark);
+    } else if k == 6 {
+        expr(inout s, inout a, n.a);
+        for i in 0..list_len(in a, n.b) {
+            let x = list_at(in a, n.b, i);
+            ty(inout s, inout a, x, n.start, n.end);
+        }
+        for i in 0..list_len(in a, n.c) {
+            let x = list_at(in a, n.c, i);
+            let arg = a
+                .args
+                .get_or(
+                idx_from_raw[ArgNode](x),
+                ArgNode {
+                    pass: 0,
+                    explicit: false,
+                    expr: ast_none()
+                }
+            );
+            expr(inout s, inout a, arg.expr);
+        }
+    } else if k == 7 || k == 9 {
+        expr(inout s, inout a, n.a);
+    } else if k == 10 {
+        expr(inout s, inout a, n.b);
+    } else if k == 8 {
+        expr(inout s, inout a, n.a);
+        expr(inout s, inout a, n.b);
+    } else if k == 11 || k == 12 {
+        expr(inout s, inout a, n.b);
+        expr(inout s, inout a, n.c);
+    } else if k == 13 {
+        expr(inout s, inout a, n.a);
+        expr(inout s, inout a, n.b);
+        expr(inout s, inout a, n.c);
+    } else if k == 14 {
+        expr(inout s, inout a, n.a);
+        let na = list_len(in a, n.b);
+        let mut i: u64 = 0;
+        loop {
+            if inc(i) >= wrapping_add(na, 1) {
+                break;
+            }
+            let mark = s.values.len();
+            let p = list_at(in a, n.b, i);
+            pattern(inout s, inout a, p);
+            let x = list_at(in a, n.b, inc(i));
+            expr(inout s, inout a, x);
+            s.values.truncate(mark);
+            i = wrapping_add(i, 2);
+        }
+    } else if k == 15 {
+        let mark = s.values.len();
+        for i in 0..list_len(in a, n.a) {
+            let p = list_at(in a, n.a, i);
+            param(inout s, inout a, p);
+        }
+        ty(inout s, inout a, n.c, n.start, n.end);
+        effects(inout s, inout a, n.d, n.start, n.end);
+        labels(inout s, in a, n.d);
+        expr(inout s, inout a, n.e);
+        s.values.truncate(mark);
+    } else if k == 16 {
+        one_effect(inout s, inout a, n.a, n.start, n.end);
+        let mark = s.values.len();
+        let label = effect_at(in a, n.a).label;
+        if label != ast_none() {
+            let g = tr(inout s, in a, label);
+            s.values.push(g);
+        }
+        if n.b != ast_none() {
+            expr(inout s, inout a, n.c);
+            let state_mark = s.values.len();
+            pattern(inout s, inout a, n.b);
+            s.values.truncate(state_mark);
+        }
+        expr(inout s, inout a, n.d);
+        for i in 0..list_len(in a, n.e) {
+            let c = list_at(in a, n.e, i);
+            clause(inout s, inout a, c);
+        }
+        s.values.truncate(mark);
+    } else if k == 17 {
+        expr(inout s, inout a, n.a);
+    } else if k == 18 {
+        expr(inout s, inout a, n.b);
+        let mark = s.values.len();
+        pattern(inout s, inout a, n.a);
+        expr(inout s, inout a, n.c);
+        s.values.truncate(mark);
+    } else if k == 19 {
+        expr(inout s, inout a, n.a);
+        expr(inout s, inout a, n.b);
+    } else if k == 20 || k == 21 {
+        expr(inout s, inout a, n.a);
+    }
+    n.start = sh(in s, n.start);
+    n.end = sh(in s, n.end);
+    a.exprs.set(idx_from_raw[ExprNode](e), n);
+}
+
+// ---------------------------------------------------------------- items
+
+// `Renamer::function`; `name` is the new name (or `none()` to keep it).
+fn function(inout s: St, inout a: Ast, f: u32, outer: u32, name: u32) {
+    let mut n = fn_at(in a, f);
+    let tmark = s.types.len();
+    let vmark = s.values.len();
+    generics(inout s, in a, outer);
+    generics(inout s, in a, n.generics);
+    for i in 0..list_len(in a, n.params) {
+        let p = list_at(in a, n.params, i);
+        param(inout s, inout a, p);
+    }
+    ty(inout s, inout a, n.result, n.start, n.end);
+    effects(inout s, inout a, n.effects, n.start, n.end);
+    labels(inout s, in a, n.effects);
+    expr(inout s, inout a, n.body);
+    s.types.truncate(tmark);
+    s.values.truncate(vmark);
+    if name != none() {
+        n.name = name;
+    }
+    n.start = sh(in s, n.start);
+    n.end = sh(in s, n.end);
+    a.fns.set(idx_from_raw[FnNode](f), n);
+}
+
+fn fns(inout s: St, inout a: Ast, list: u32, outer: u32) {
+    for i in 0..list_len(in a, list) {
+        let f = list_at(in a, list, i);
+        function(inout s, inout a, f, outer, none());
+    }
+}
+
+pub fn trait_ref(inout s: St, inout a: Ast, t: u32) {
+    if t == ast_none() {
+        return;
+    }
+    let mut n = a
+        .trait_refs
+        .get_or(
+        idx_from_raw[TraitRefNode](t),
+        TraitRefNode {
+            package: ast_none(),
+            name: ast_none(),
+            args: 0,
+            start: 0,
+            end: 0
+        }
+    );
+    if revisit(inout s.seen_tref, t) {
+        n.start = wrapping_sub(n.start, s.shift);
+        n.end = wrapping_sub(n.end, s.shift);
+    }
+    for i in 0..list_len(in a, n.args) {
+        let x = list_at(in a, n.args, i);
+        ty(inout s, inout a, x, n.start, n.end);
+    }
+    n.start = sh(in s, n.start);
+    n.end = sh(in s, n.end);
+    a.trait_refs.set(idx_from_raw[TraitRefNode](t), n);
+}
+
+// The AST symbol of an item's new name: its bound name, else unchanged.
+fn own_name(inout s: St, inout a: Ast, sym: u32) -> u32 {
+    let g = tr(inout s, in a, sym);
+    match s.names.get(g) {
+        Option::Some(v) => {
+            if lo(v) == g {
+                sym
+            } else {
+                back(inout s, inout a, lo(v))
+            }
+        },
+        Option::None => sym,
+    }
+}
+
+pub fn item(inout s: St, inout a: Ast, kind: u8, node: u32) {
+    if kind == 1 {
+        let mut x = adt_at(in a, node);
+        let old = x.name;
+        x.name = own_name(inout s, inout a, old);
+        let mark = s.types.len();
+        generics(inout s, in a, x.generics);
+        for i in 0..list_len(in a, x.variants) {
+            let vi = list_at(in a, x.variants, i);
+            let mut v = a
+                .variants
+                .get_or(
+                idx_from_raw[VariantNode](vi),
+                VariantNode {
+                    name: ast_none(),
+                    fields: 0,
+                    named: false
+                }
+            );
+            if !x.is_enum && v.name == old && x.name != old {
+                v.name = x.name;
+                a.variants.set(idx_from_raw[VariantNode](vi), v);
+            }
+            for j in 0..list_len(in a, v.fields) {
+                let fi = list_at(in a, v.fields, j);
+                let f = a
+                    .fields
+                    .get_or(
+                    idx_from_raw[FieldNode](fi),
+                    FieldNode {
+                        name: ast_none(),
+                        ty: ast_none(),
+                        modality: 3,
+                        temperature: 0
+                    }
+                );
+                ty(inout s, inout a, f.ty, x.start, x.end);
+            }
+        }
+        s.types.truncate(mark);
+        x.start = sh(in s, x.start);
+        x.end = sh(in s, x.end);
+        a.adts.set(idx_from_raw[AdtNode](node), x);
+    } else if kind == 2 {
+        let f = fn_at(in a, node);
+        let name = own_name(inout s, inout a, f.name);
+        function(inout s, inout a, node, 0, name);
+    } else if kind == 3 {
+        let mut x = effect_decl_at(in a, node);
+        x.name = own_name(inout s, inout a, x.name);
+        let mark = s.types.len();
+        generics(inout s, in a, x.generics);
+        fns(inout s, inout a, x.ops, 0);
+        s.types.truncate(mark);
+        x.start = sh(in s, x.start);
+        x.end = sh(in s, x.end);
+        a.effect_decls.set(idx_from_raw[EffectDeclNode](node), x);
+    } else if kind == 4 {
+        let x = a
+            .impls
+            .get_or(
+            idx_from_raw[ImplNode](node),
+            ImplNode {
+                ty: ast_none(),
+                generics: 0,
+                methods: 0
+            }
+        );
+        let mark = s.types.len();
+        generics(inout s, in a, x.generics);
+        let mut start: u32 = 0;
+        let mut end: u32 = 0;
+        if list_len(in a, x.methods) > 0 {
+            let m = fn_at(in a, list_at(in a, x.methods, 0));
+            start = m.start;
+            end = m.end;
+        }
+        ty(inout s, inout a, x.ty, start, end);
+        fns(inout s, inout a, x.methods, x.generics);
+        s.types.truncate(mark);
+    } else if kind == 5 {
+        let mut x = a
+            .traits
+            .get_or(
+            idx_from_raw[TraitNode](node),
+            TraitNode {
+                name: ast_none(),
+                public: false,
+                generics: 0,
+                assoc: 0,
+                methods: 0,
+                start: 0,
+                end: 0
+            }
+        );
+        let mark = s.types.len();
+        s.types.push(s.s_self_ty);
+        generics(inout s, in a, x.generics);
+        for i in 0..list_len(in a, x.assoc) {
+            let d = assoc_decl_at(in a, list_at(in a, x.assoc, i));
+            let g = tr(inout s, in a, d.name);
+            s.types.push(g);
+        }
+        fns(inout s, inout a, x.methods, 0);
+        for i in 0..list_len(in a, x.assoc) {
+            let di = list_at(in a, x.assoc, i);
+            let mut d = assoc_decl_at(in a, di);
+            d.start = sh(in s, d.start);
+            d.end = sh(in s, d.end);
+            a.assoc_decls.set(idx_from_raw[AssocDeclNode](di), d);
+        }
+        s.types.truncate(mark);
+        x.start = sh(in s, x.start);
+        x.end = sh(in s, x.end);
+        a.traits.set(idx_from_raw[TraitNode](node), x);
+    } else if kind == 6 {
+        let mut x = conf_at(in a, node);
+        let mark = s.types.len();
+        s.types.push(s.s_self_ty);
+        generics(inout s, in a, x.generics);
+        trait_ref(inout s, inout a, x.trait_ref);
+        ty(inout s, inout a, x.self_ty, x.start, x.end);
+        for i in 0..list_len(in a, x.wheres) {
+            let wi = list_at(in a, x.wheres, i);
+            let mut wn = a
+                .wheres
+                .get_or(
+                idx_from_raw[WhereNode](wi),
+                WhereNode {
+                    ty: ast_none(),
+                    trait_ref: ast_none(),
+                    start: 0,
+                    end: 0
+                }
+            );
+            ty(inout s, inout a, wn.ty, x.start, x.end);
+            trait_ref(inout s, inout a, wn.trait_ref);
+            wn.start = sh(in s, wn.start);
+            wn.end = sh(in s, wn.end);
+            a.wheres.set(idx_from_raw[WhereNode](wi), wn);
+        }
+        for i in 0..list_len(in a, x.assoc) {
+            let bi = list_at(in a, x.assoc, i);
+            let mut b = a
+                .assoc_binds
+                .get_or(
+                idx_from_raw[AssocBindNode](bi),
+                AssocBindNode {
+                    name: ast_none(),
+                    ty: ast_none(),
+                    start: 0,
+                    end: 0
+                }
+            );
+            ty(inout s, inout a, b.ty, x.start, x.end);
+            b.start = sh(in s, b.start);
+            b.end = sh(in s, b.end);
+            a.assoc_binds.set(idx_from_raw[AssocBindNode](bi), b);
+        }
+        fns(inout s, inout a, x.methods, 0);
+        s.types.truncate(mark);
+        x.start = sh(in s, x.start);
+        x.end = sh(in s, x.end);
+        a.confs.set(idx_from_raw[ConfNode](node), x);
+    }
+}
+
+pub fn assoc_decl_at(in a: Ast, i: u32) -> AssocDeclNode {
+    a
+        .assoc_decls
+        .get_or(
+        idx_from_raw[AssocDeclNode](i),
+        AssocDeclNode {
+            name: ast_none(),
+            bound: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn conf_at(in a: Ast, i: u32) -> ConfNode {
+    a
+        .confs
+        .get_or(
+        idx_from_raw[ConfNode](i),
+        ConfNode {
+            model: ast_none(),
+            public: false,
+            generics: 0,
+            trait_ref: ast_none(),
+            self_ty: ast_none(),
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+// `Renamer::owner`: the owner of a trait bound, `f`, `Type::method` or
+// `Type`, through the module's bound names (any namespace).
+pub fn owner(inout s: St, o: u32) -> u32 {
+    let len = sym_len(in s, o);
+    let cut = sym_path_split(in s, o);
+    let head = if cut >= len {
+        o
+    } else {
+        sym_slice(inout s, o, 0, cut)
+    };
+    let t = match s.names.get(head) {
+        Option::Some(v) => lo(v),
+        Option::None => {
+            return o;
+        },
+    };
+    if cut >= len {
+        return t;
+    }
+    let mut out = String::new();
+    push_sym(in s, t, inout out);
+    out.push_str(in "::");
+    let rest = sym_slice(inout s, o, wrapping_add(cut, 2), len);
+    push_sym(in s, rest, inout out);
+    s.g.intern(in out).id()
+}

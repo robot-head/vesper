@@ -1,0 +1,396 @@
+// The input decoder and the per-module tables (`Resolver::new`).
+//
+// The Rust side (tests/self_host_check_names_packages.rs) does the
+// loader's I/O and manifest checks (`Loader::package`) and passes the
+// package graph, in little-endian words (`str` is a byte length, then the
+// bytes padded to a multiple of eight):
+//
+//   packages   count; per package its name (str), its dependencies (count,
+//              then per dependency its name (str) and package index) and
+//              its optional dependencies' names (count, then str each)
+//   files      count; per file its display path (str) and base offset
+//   modules    count; per module its package, its path (count, then str
+//              each segment), its file and its source text (str)
+//
+// Package 0 is the root package.
+
+use @vesper/ast::{
+    Ast,
+    AdtNode,
+    EffectDeclNode,
+    FnNode,
+    ItemNode,
+    UseNameNode,
+    UseNode,
+    VariantNode,
+    list_at,
+    list_len,
+    none as ast_none
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use self::state::{
+    St,
+    at32,
+    find_module,
+    inc,
+    kind_both,
+    kind_type,
+    kind_value,
+    mod_hash,
+    n32,
+    none,
+    pair,
+    w
+};
+
+fn rd(in b: Slice[u8], inout pos: u64) -> u64 {
+    let v = match b.try_read_u64_le(pos) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    pos = wrapping_add(pos, 8);
+    v
+}
+
+// A string's byte range; `pos` moves past its padding.
+fn rd_str(in b: Slice[u8], inout pos: u64) -> (u64, u64) {
+    let n = rd(in b, inout pos);
+    let a = pos;
+    pos = wrapping_add(pos, wrapping_add(n, 7) & 18446744073709551608);
+    (a, wrapping_add(a, n))
+}
+
+fn rd_sym(inout s: St, in input: Str, inout pos: u64) -> u32 {
+    let (a, z) = rd_str(in input.as_bytes(), inout pos);
+    s.g.intern(in input[a..z]).id()
+}
+
+pub fn decode(inout s: St, in input: Str) {
+    let mut pos: u64 = 0;
+    let npkg = rd(in input.as_bytes(), inout pos);
+    for p in 0..npkg {
+        let name = rd_sym(inout s, in input, inout pos);
+        s.pkg_name.push(name);
+        let nd = rd(in input.as_bytes(), inout pos);
+        s.pkg_dep_first.push(n32(s.dep_name.len()));
+        s.pkg_dep_len.push(n32(nd));
+        for i in 0..nd {
+            let d = rd_sym(inout s, in input, inout pos);
+            s.dep_name.push(d);
+            s.dep_target.push(n32(rd(in input.as_bytes(), inout pos)));
+        }
+        let no = rd(in input.as_bytes(), inout pos);
+        s.pkg_opt_first.push(n32(s.opt_name.len()));
+        s.pkg_opt_len.push(n32(no));
+        for i in 0..no {
+            let d = rd_sym(inout s, in input, inout pos);
+            s.opt_name.push(d);
+        }
+    }
+    let nfiles = rd(in input.as_bytes(), inout pos);
+    for f in 0..nfiles {
+        let d = rd_sym(inout s, in input, inout pos);
+        s.file_display.push(d);
+        s.file_base.push(rd(in input.as_bytes(), inout pos));
+    }
+    let nmods = rd(in input.as_bytes(), inout pos);
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for m in 0..nmods {
+        let pkg = n32(rd(in input.as_bytes(), inout pos));
+        s.mod_pkg.push(pkg);
+        let ns = rd(in input.as_bytes(), inout pos);
+        s.mod_seg_first.push(n32(s.seg.len()));
+        s.mod_seg_len.push(n32(ns));
+        path.clear();
+        for i in 0..ns {
+            let x = rd_sym(inout s, in input, inout pos);
+            s.seg.push(x);
+            path.push(x);
+        }
+        s.mod_file.push(n32(rd(in input.as_bytes(), inout pos)));
+        let (a, z) = rd_str(in input.as_bytes(), inout pos);
+        s.mod_text_start.push(a);
+        s.mod_text_end.push(z);
+        let h = mod_hash(pkg, in path);
+        match s.mod_index.insert(h, n32(m)) {
+            Option::Some(other) => {
+                s.mod_collide = true;
+                // Keep the first module at this hash.
+                s.mod_index.insert(h, other);
+            },
+            Option::None => {},
+        }
+        if pkg == 0 && ns == 0 {
+            s.root_mod = n32(m);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- AST symbols
+
+// The global symbol of AST symbol `sym` of the module being read.
+pub fn tr(inout s: St, in a: Ast, sym: u32) -> u32 {
+    if sym == ast_none() {
+        return none();
+    }
+    let i = w(sym);
+    let cached = at32(in s.symmap, i);
+    if cached != none() && cached != 0 {
+        return wrapping_sub(cached, 1);
+    }
+    s.buf.clear();
+    a.names.resolve_into(symbol_from_id(sym), inout s.buf);
+    let g = s.g.intern(in s.buf).id();
+    if i >= s.symmap.len() {
+        s.symmap.resize(inc(i), 0);
+    }
+    s.symmap.try_set(i, wrapping_add(g, 1));
+    g
+}
+
+// The AST symbol of global symbol `g` (interned into the module's AST).
+pub fn back(inout s: St, inout a: Ast, g: u32) -> u32 {
+    match s.back.get(g) {
+        Option::Some(x) => {
+            return x;
+        },
+        Option::None => {},
+    }
+    s.buf.clear();
+    s.g.resolve_into(symbol_from_id(g), inout s.buf);
+    let x = a.names.intern(in s.buf).id();
+    s.back.insert(g, x);
+    let i = w(x);
+    if i >= s.symmap.len() {
+        s.symmap.resize(inc(i), 0);
+    }
+    s.symmap.try_set(i, wrapping_add(g, 1));
+    x
+}
+
+// Starts reading module `m`'s AST: the symbol maps are per AST.
+pub fn begin_module(inout s: St) {
+    s.symmap.clear();
+    s.back.clear();
+    s.seen_expr.clear();
+    s.seen_pat.clear();
+    s.seen_param.clear();
+    s.seen_tref.clear();
+}
+
+pub fn item_at(in a: Ast, i: u32) -> ItemNode {
+    a
+        .items
+        .get_or(
+        idx_from_raw[ItemNode](i),
+        ItemNode {
+            kind: 0,
+            node: 0
+        }
+    )
+}
+
+pub fn adt_at(in a: Ast, i: u32) -> AdtNode {
+    a
+        .adts
+        .get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: ast_none(),
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn fn_at(in a: Ast, i: u32) -> FnNode {
+    a
+        .fns
+        .get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: ast_none(),
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: ast_none(),
+            effects: ast_none(),
+            body: ast_none(),
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
+    a
+        .effect_decls
+        .get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode {
+            name: ast_none(),
+            linear: false,
+            generics: 0,
+            ops: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn use_at(in a: Ast, i: u32) -> UseNode {
+    a
+        .uses
+        .get_or(
+        idx_from_raw[UseNode](i),
+        UseNode {
+            package: ast_none(),
+            supers: 0,
+            path: 0,
+            names: 0,
+            public: false,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn use_name_at(in a: Ast, i: u32) -> UseNameNode {
+    a
+        .use_names
+        .get_or(
+        idx_from_raw[UseNameNode](i),
+        UseNameNode {
+            name: ast_none(),
+            alias: ast_none(),
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn variant_name(in a: Ast, v: u32) -> u32 {
+    match a.variants.get(idx_from_raw[VariantNode](v)) {
+        Option::Some(x) => x.name,
+        Option::None => ast_none(),
+    }
+}
+
+// `Kind::of`: an item's name and kind, or (none, 0).
+pub fn item_name(in a: Ast, it: ItemNode) -> (u32, u8) {
+    if it.kind == 1 {
+        (adt_at(in a, it.node).name, kind_both())
+    } else if it.kind == 2 {
+        (fn_at(in a, it.node).name, kind_value())
+    } else if it.kind == 3 {
+        (effect_decl_at(in a, it.node).name, kind_type())
+    } else {
+        (ast_none(), 0)
+    }
+}
+
+// `Resolver::new` for module `m`: its item kinds and `pub` names, its
+// imports and its enums.
+pub fn collect(inout s: St, in a: Ast, m: u32) {
+    s.mod_items_first.push(n32(s.item_list.len()));
+    let first = s.item_list.len();
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, at32(in a.m_items, i));
+        let (name, kind) = item_name(in a, it);
+        if kind != 0 {
+            let g = tr(inout s, in a, name);
+            s.item_kind.insert(pair(m, g), kind);
+            s.item_list.push(g);
+        }
+        if it.kind == 1 {
+            let x = adt_at(in a, it.node);
+            if x.is_enum {
+                let g = tr(inout s, in a, x.name);
+                s.enum_mod.push(m);
+                s.enum_name.push(g);
+                s.enum_var_first.push(n32(s.enum_vars.len()));
+                let nv = list_len(in a, x.variants);
+                s.enum_var_len.push(n32(nv));
+                for k in 0..nv {
+                    let vn = tr(inout s, in a, variant_name(in a, list_at(in a, x.variants, k)));
+                    s.enum_vars.push(vn);
+                }
+            }
+        }
+    }
+    s.mod_items_len.push(n32(wrapping_sub(s.item_list.len(), first)));
+    for i in 0..a.m_public.len() {
+        let g = tr(inout s, in a, at32(in a.m_public, i));
+        s.public.insert(pair(m, g), 1);
+    }
+    s.mod_use_first.push(n32(s.use_package.len()));
+    s.mod_use_len.push(n32(a.m_uses.len()));
+    for i in 0..a.m_uses.len() {
+        let u = use_at(in a, at32(in a.m_uses, i));
+        let pk = tr(inout s, in a, u.package);
+        s.use_package.push(pk);
+        s.use_supers.push(u.supers);
+        s.use_path_first.push(n32(s.seg.len()));
+        let np = list_len(in a, u.path);
+        s.use_path_len.push(n32(np));
+        for k in 0..np {
+            let x = tr(inout s, in a, list_at(in a, u.path, k));
+            s.seg.push(x);
+        }
+        s.use_names_first.push(n32(s.un_name.len()));
+        let nn = list_len(in a, u.names);
+        s.use_names_len.push(n32(nn));
+        for k in 0..nn {
+            let n = use_name_at(in a, list_at(in a, u.names, k));
+            let x = tr(inout s, in a, n.name);
+            let y = tr(inout s, in a, n.alias);
+            s.un_name.push(x);
+            s.un_alias.push(y);
+            s.un_start.push(n.start);
+            s.un_end.push(n.end);
+        }
+        s
+            .use_public
+            .push(
+            if u.public {
+                1
+            } else {
+                0
+            }
+        );
+        s.use_start.push(u.start);
+        s.use_end.push(u.end);
+    }
+}
+
+// Parses every module and collects its tables.
+pub fn collect_all(inout s: St, in input: Str) {
+    for m in 0..s.mod_pkg.len() {
+        let a = s.mod_text_start.try_get(m);
+        let z = s.mod_text_end.try_get(m);
+        let (x, y) = match a {
+            Option::Some(p) => match z {
+                Option::Some(q) => (p, q),
+                Option::None => (0, 0),
+            },
+            Option::None => (0, 0),
+        };
+        let l = lower_source(in input[x..y]);
+        begin_module(inout s);
+        collect(inout s, in l.ast, n32(m));
+    }
+}

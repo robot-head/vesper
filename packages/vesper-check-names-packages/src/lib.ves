@@ -1,0 +1,579 @@
+// @vesper/check-names-packages: the package assembler of src/packages.rs
+// (`Loader::assemble`, `Resolver`, `Renamer`) in Vesper (self-hosting wave
+// SH2 lane 6, #1178). Rust stays the default; nothing here replaces Rust
+// code.
+//
+// Given the package graph the Rust loader read (load.ves describes the
+// input), it parses every module with @vesper/ast, builds each module's
+// table of names, resolves `use` imports and `pub use` re-exports across
+// packages, renames every item and reference to its internal name
+// (`demo__geometry__shapes__area`), shifts every span to its file's offset
+// in the virtual concatenation, and reports E0111-E0113 as Rust does.
+//
+// The design is the census's: names are interned symbols, tables are flat
+// rows and `FlatTable`s keyed by packed pairs of `u32`, never `String`
+// maps. A module's AST cannot be kept in a sequence yet (a struct that
+// owns sequences is not a `ChunkSeq` element, SH2 lane 1), so each module
+// is parsed twice: once for its tables, once to rename it.
+
+use @vesper/ast::{
+    Ast,
+    BoundNode,
+    GenericNode,
+    ImplNode,
+    ItemNode,
+    ModelUseNode,
+    TraitNode,
+    VariantNode,
+    list_at,
+    list_len,
+    none as ast_none,
+    type_name as ast_type_name
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper/ast::dump::{
+    dump_ast
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper/check-data::{
+    pack_text
+};
+use self::state::{
+    St,
+    at32,
+    at64,
+    emit,
+    err,
+    hi,
+    inc,
+    kind_has,
+    lo,
+    n32,
+    none,
+    pair,
+    push_sym,
+    put,
+    put_sym,
+    st_new,
+    w
+};
+use self::load::{
+    adt_at,
+    back,
+    begin_module,
+    collect_all,
+    decode,
+    effect_decl_at,
+    fn_at,
+    item_at,
+    item_name,
+    tr,
+    variant_name
+};
+use self::resolve::{
+    ambiguous,
+    local_of,
+    lookup,
+    name_of,
+    no_key,
+    overrides,
+    reexports,
+    shown,
+    use_module
+};
+use self::rename::{
+    assoc_decl_at,
+    conf_at,
+    item,
+    owner,
+    trait_ref
+};
+
+fn text_range(in s: St, m: u64) -> (u64, u64) {
+    let a = match s.mod_text_start.try_get(m) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    let z = match s.mod_text_end.try_get(m) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    (a, z)
+}
+
+// Root-module names other modules must not reach unimported, and the
+// owning enum of every variant (first declaration wins).
+fn hidden_and_variants(inout s: St) {
+    let r = s.root_mod;
+    if r != none() {
+        let f = w(at32(in s.mod_items_first, w(r)));
+        let n = w(at32(in s.mod_items_len, w(r)));
+        for i in 0..n {
+            let x = at32(in s.item_list, wrapping_add(f, i));
+            match s.item_kind.get(pair(r, x)) {
+                Option::Some(k) => {
+                    s.hidden.insert(x, k);
+                },
+                Option::None => {},
+            }
+        }
+        for i in 0..s.root_reexports.len() {
+            let x = at32(in s.root_reexports, i);
+            match s.reexp_kind.get(pair(r, x)) {
+                Option::Some(k) => {
+                    s.hidden.insert(x, k);
+                },
+                Option::None => {},
+            }
+        }
+    }
+    for e in 0..s.enum_mod.len() {
+        let key = pair(at32(in s.enum_mod, e), at32(in s.enum_name, e));
+        let owner_name = name_of(inout s, key);
+        let owner_shown = shown(inout s, key);
+        let f = w(at32(in s.enum_var_first, e));
+        let n = w(at32(in s.enum_var_len, e));
+        for i in 0..n {
+            let v = at32(in s.enum_vars, wrapping_add(f, i));
+            if !s.var_owner.contains_key(v) {
+                s.var_owner.insert(v, owner_name);
+                s.var_shown.insert(v, owner_shown);
+            }
+        }
+    }
+}
+
+// The names module `m` binds: its own items, then its imports (reported
+// when they do not resolve or clash). Returns the targets of its `pub use`
+// names in `exported`.
+fn bind(inout s: St, m: u32, inout exported: ChunkSeq[u32]) {
+    s.names.clear();
+    s.targets.clear();
+    let file = at32(in s.mod_file, w(m));
+    let f = w(at32(in s.mod_items_first, w(m)));
+    let n = w(at32(in s.mod_items_len, w(m)));
+    for i in 0..n {
+        let x = at32(in s.item_list, wrapping_add(f, i));
+        let key = pair(m, x);
+        let mangled = name_of(inout s, key);
+        if mangled != x && !s.renamed.contains_key(key) {
+            let sh = shown(inout s, key);
+            s.qualified.insert(mangled, sh);
+        }
+        let kind = match s.item_kind.get(key) {
+            Option::Some(k) => k,
+            Option::None => 0,
+        };
+        s.names.insert(x, w(mangled) | wrapping_shl_u64(widen_u64(kind), 32));
+        s.targets.insert(mangled, 1);
+    }
+    let uf = w(at32(in s.mod_use_first, w(m)));
+    let un = w(at32(in s.mod_use_len, w(m)));
+    let mut module_shown = String::new();
+    for ui in 0..un {
+        let u = wrapping_add(uf, ui);
+        let tm = use_module(inout s, m, n32(u), inout module_shown);
+        if tm == none() {
+            emit(inout s, file);
+            continue;
+        }
+        let same = tm == m;
+        let public = match s.use_public.try_get(u) {
+            Option::Some(x) => x != 0,
+            Option::None => false,
+        };
+        let nf = w(at32(in s.use_names_first, u));
+        let nn = w(at32(in s.use_names_len, u));
+        for k in 0..nn {
+            let ni = wrapping_add(nf, k);
+            let start = at32(in s.un_start, ni);
+            let end = at32(in s.un_end, ni);
+            let (key, kind) = lookup(
+                inout s,
+                tm,
+                at32(in s.un_name, ni),
+                same,
+                in module_shown,
+                start,
+                end
+            );
+            if key == no_key() {
+                emit(inout s, file);
+                continue;
+            }
+            let target = name_of(inout s, key);
+            let local = local_of(in s, ni);
+            if s.item_kind.contains_key(pair(m, local)) {
+                err(inout s, ambiguous(), start, end);
+                let mut msg = String::new();
+                msg.push_str(in "'");
+                push_sym(in s, local, inout msg);
+                msg.push_str(in "' is both declared in this module and imported");
+                s.err_msg.push_str(in msg);
+                emit(inout s, file);
+                continue;
+            }
+            let clash = match s.names.get(local) {
+                Option::Some(v) => lo(v) != target,
+                Option::None => false,
+            };
+            if clash {
+                err(inout s, ambiguous(), start, end);
+                let mut msg = String::new();
+                msg.push_str(in "'");
+                push_sym(in s, local, inout msg);
+                msg.push_str(in "' is imported twice from different items");
+                s.err_msg.push_str(in msg);
+                emit(inout s, file);
+            } else {
+                if public {
+                    exported.push(target);
+                }
+                s.names.insert(local, w(target) | wrapping_shl_u64(widen_u64(kind), 32));
+                s.targets.insert(target, 1);
+            }
+        }
+    }
+}
+
+fn generic_names(inout s: St, in a: Ast, list: u32) {
+    for i in 0..list_len(in a, list) {
+        let gi = list_at(in a, list, i);
+        let name = match a.generics.get(idx_from_raw[GenericNode](gi)) {
+            Option::Some(x) => x.name,
+            Option::None => ast_none(),
+        };
+        let g = tr(inout s, in a, name);
+        s.scope_pool.push(g);
+    }
+}
+
+fn scope_put(inout s: St, owner_name: u32, first: u64) {
+    let len = wrapping_sub(s.scope_pool.len(), first);
+    s.scopes.insert(owner_name, first | wrapping_shl_u64(len, 32));
+}
+
+// `generic_scopes`: the generic parameters in scope for each trait-bound
+// owner (`f`, `Type::method` or `Type`), from the items as parsed.
+fn generic_scopes(inout s: St, inout a: Ast) {
+    s.scopes.clear();
+    s.scope_pool.clear();
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, at32(in a.m_items, i));
+        if it.kind == 1 {
+            let x = adt_at(in a, it.node);
+            let first = s.scope_pool.len();
+            generic_names(inout s, in a, x.generics);
+            let g = tr(inout s, in a, x.name);
+            scope_put(inout s, g, first);
+        } else if it.kind == 2 {
+            let x = fn_at(in a, it.node);
+            let first = s.scope_pool.len();
+            generic_names(inout s, in a, x.generics);
+            let g = tr(inout s, in a, x.name);
+            scope_put(inout s, g, first);
+        } else if it.kind == 4 {
+            let x = a
+                .impls
+                .get_or(
+                idx_from_raw[ImplNode](it.node),
+                ImplNode {
+                    ty: ast_none(),
+                    generics: 0,
+                    methods: 0
+                }
+            );
+            let tn = ast_type_name(in a, x.ty);
+            let tg = if tn == ast_none() {
+                s.s_empty
+            } else {
+                tr(inout s, in a, tn)
+            };
+            for k in 0..list_len(in a, x.methods) {
+                let f = fn_at(in a, list_at(in a, x.methods, k));
+                let first = s.scope_pool.len();
+                generic_names(inout s, in a, x.generics);
+                generic_names(inout s, in a, f.generics);
+                let mut key = String::new();
+                push_sym(in s, tg, inout key);
+                key.push_str(in "::");
+                let fg = tr(inout s, in a, f.name);
+                push_sym(in s, fg, inout key);
+                let kg = s.g.intern(in key).id();
+                scope_put(inout s, kg, first);
+            }
+        }
+    }
+}
+
+// `global_names`: enum variants, effect operations, traits and models,
+// with their file-local spans, appended as (name, start, end) triples.
+fn global_names(inout s: St, in a: Ast, it: ItemNode, inout out: ChunkSeq[u32]) {
+    out.clear();
+    if it.kind == 1 {
+        let x = adt_at(in a, it.node);
+        if x.is_enum {
+            for i in 0..list_len(in a, x.variants) {
+                let g = tr(inout s, in a, variant_name(in a, list_at(in a, x.variants, i)));
+                out.push(g);
+                out.push(x.start);
+                out.push(x.end);
+            }
+        }
+    } else if it.kind == 3 {
+        let x = effect_decl_at(in a, it.node);
+        for i in 0..list_len(in a, x.ops) {
+            let f = fn_at(in a, list_at(in a, x.ops, i));
+            let g = tr(inout s, in a, f.name);
+            out.push(g);
+            out.push(f.start);
+            out.push(f.end);
+        }
+    } else if it.kind == 5 {
+        let x = a
+            .traits
+            .get_or(
+            idx_from_raw[TraitNode](it.node),
+            TraitNode {
+                name: ast_none(),
+                public: false,
+                generics: 0,
+                assoc: 0,
+                methods: 0,
+                start: 0,
+                end: 0
+            }
+        );
+        let g = tr(inout s, in a, x.name);
+        out.push(g);
+        out.push(x.start);
+        out.push(x.end);
+    } else if it.kind == 6 {
+        let x = conf_at(in a, it.node);
+        if x.model != ast_none() {
+            let g = tr(inout s, in a, x.model);
+            out.push(g);
+            out.push(x.start);
+            out.push(x.end);
+        }
+    }
+}
+
+fn check_globals(inout s: St, in found: ChunkSeq[u32]) {
+    let file = at32(in s.mod_file, w(s.cur));
+    let mut i: u64 = 0;
+    loop {
+        if i >= found.len() {
+            break;
+        }
+        let name = at32(in found, i);
+        let start = at32(in found, inc(i));
+        let end = at32(in found, wrapping_add(i, 2));
+        match s.globals.get(name) {
+            Option::Some(other) => {
+                if other != file {
+                    err(inout s, ambiguous(), start, end);
+                    let mut msg = String::new();
+                    msg.push_str(in "'");
+                    push_sym(in s, name, inout msg);
+                    msg.push_str(in "' is also declared in ");
+                    push_sym(in s, at32(in s.file_display, w(other)), inout msg);
+                    msg
+                        .push_str(
+                        in "; enum variants, effect operations, traits and models share one namespace"
+                    );
+                    s.err_msg.push_str(in msg);
+                    emit(inout s, file);
+                }
+            },
+            Option::None => {
+                s.globals.insert(name, file);
+            },
+        }
+        i = wrapping_add(i, 3);
+    }
+}
+
+// Binds, renames and (when `dump`) dumps module `m`.
+fn assemble_module(inout s: St, in input: Str, m: u32, dump: bool) {
+    let mut exported: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    bind(inout s, m, inout exported);
+    s.cur = m;
+    s.cur_pkg = at32(in s.mod_pkg, w(m));
+    s.is_root = m == s.root_mod;
+    let file = at32(in s.mod_file, w(m));
+    s
+        .shift = n32(
+        match s.file_base.try_get(w(file)) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        }
+    );
+    s.values.clear();
+    s.types.clear();
+    let (x, y) = text_range(in s, w(m));
+    let mut l = lower_source(in input[x..y]);
+    begin_module(inout s);
+    generic_scopes(inout s, inout l.ast);
+    let mut found: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..l.ast.m_items.len() {
+        let it = item_at(in l.ast, at32(in l.ast.m_items, i));
+        global_names(inout s, in l.ast, it, inout found);
+        item(inout s, inout l.ast, it.kind, it.node);
+        check_globals(inout s, in found);
+    }
+    for i in 0..l.ast.m_bounds.len() {
+        let bi = at32(in l.ast.m_bounds, i);
+        let mut b = l
+            .ast
+            .bounds
+            .get_or(
+            idx_from_raw[BoundNode](bi),
+            BoundNode {
+                param: ast_none(),
+                trait_ref: ast_none(),
+                start: 0,
+                end: 0,
+                owner: ast_none()
+            }
+        );
+        let mark = s.types.len();
+        let og = tr(inout s, in l.ast, b.owner);
+        match s.scopes.get(og) {
+            Option::Some(r) => {
+                let first = r & 4294967295;
+                let len = r >> 32;
+                for k in 0..len {
+                    let g = at32(in s.scope_pool, wrapping_add(first, k));
+                    s.types.push(g);
+                }
+            },
+            Option::None => {},
+        }
+        let no = owner(inout s, og);
+        if no != og {
+            b.owner = back(inout s, inout l.ast, no);
+        }
+        trait_ref(inout s, inout l.ast, b.trait_ref);
+        s.types.truncate(mark);
+        b.start = wrapping_add(b.start, s.shift);
+        b.end = wrapping_add(b.end, s.shift);
+        l.ast.bounds.set(idx_from_raw[BoundNode](bi), b);
+    }
+    for i in 0..l.ast.m_model_uses.len() {
+        let ui = at32(in l.ast.m_model_uses, i);
+        let mut u = l
+            .ast
+            .model_uses
+            .get_or(
+            idx_from_raw[ModelUseNode](ui),
+            ModelUseNode {
+                model: ast_none(),
+                start: 0,
+                end: 0,
+                scope_start: 0,
+                scope_end: 0
+            }
+        );
+        u.start = wrapping_add(u.start, s.shift);
+        u.end = wrapping_add(u.end, s.shift);
+        u.scope_start = wrapping_add(u.scope_start, s.shift);
+        u.scope_end = wrapping_add(u.scope_end, s.shift);
+        l.ast.model_uses.set(idx_from_raw[ModelUseNode](ui), u);
+    }
+    for i in 0..l.ast.m_public.len() {
+        let g = tr(inout s, in l.ast, at32(in l.ast.m_public, i));
+        match s.names.get(g) {
+            Option::Some(v) => s.public_out.push(lo(v)),
+            Option::None => {},
+        }
+    }
+    if s.is_root {
+        s.public_out.extend(in exported.as_slice());
+    }
+    // The assembled module has no imports; its public names are listed
+    // once for the whole program.
+    if dump {
+        l.ast.m_uses.clear();
+        l.ast.m_public.clear();
+        dump_ast(in l.ast, inout s.dumps);
+    }
+}
+
+// The whole assembly of the input; `dump` writes each module's dump.
+fn run(in input: Str, dump: bool) -> St {
+    let mut s = st_new();
+    decode(inout s, in input);
+    collect_all(inout s, in input);
+    reexports(inout s);
+    overrides(inout s);
+    hidden_and_variants(inout s);
+    for m in 0..s.mod_pkg.len() {
+        assemble_module(inout s, in input, n32(m), dump);
+    }
+    s
+}
+
+// The assembly without the text: the diagnostics' bytes plus the public
+// and qualified names, for the timings (Rust builds no text either).
+pub fn assemble_only(in input: Str) -> u64 {
+    let s = run(in input, false);
+    wrapping_add(wrapping_add(s.diags.len(), s.public_out.len()), s.qualified.len())
+}
+
+// The assembled program as text, for the differential test:
+//   diag <file> <code> <start>..<end> <message>[ help: <help>]
+//   qualified <internal name> <display name>     (any order)
+//   public <name>
+// then every module's dump (@vesper/ast dump.ves) with its imports and
+// public names removed. Packed by `pack_text`.
+pub fn assemble_text(in input: Str) -> ChunkSeq[u64] {
+    let s = run(in input, true);
+    let mut o = ChunkSeq::new[u8]();
+    o.extend(in s.diags.as_slice());
+    for i in 0..s.qualified.len() {
+        match s.qualified.entry_at(i) {
+            Option::Some((k, v)) => {
+                put(inout o, in "qualified ");
+                put_sym(inout o, in s, k);
+                o.push(32);
+                put_sym(inout o, in s, v);
+                o.push(10);
+            },
+            Option::None => {},
+        }
+    }
+    for i in 0..s.public_out.len() {
+        put(inout o, in "public ");
+        put_sym(inout o, in s, at32(in s.public_out, i));
+        o.push(10);
+    }
+    o.extend(in s.dumps.as_slice());
+    pack_text(in o)
+}
+
+// The number of modules the input names, for a quick check of the decoder.
+pub fn module_count(in input: Str) -> u64 {
+    let mut s = st_new();
+    decode(inout s, in input);
+    s.mod_pkg.len()
+}
+
+// Decodes the input and parses every module once (no tables, no renaming):
+// the parse cost inside `assemble_text`, which parses each module twice,
+// for the timings. Returns the number of items parsed.
+pub fn parse_modules(in input: Str) -> u64 {
+    let mut s = st_new();
+    decode(inout s, in input);
+    let mut n: u64 = 0;
+    for m in 0..s.mod_pkg.len() {
+        let (x, y) = text_range(in s, m);
+        let l = lower_source(in input[x..y]);
+        n = wrapping_add(n, l.ast.m_items.len());
+    }
+    n
+}
