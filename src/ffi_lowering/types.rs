@@ -113,6 +113,23 @@ fn field_integer(i: &vesper_ffi::Integer) -> Result<&'static str, String> {
     Ok(name)
 }
 
+/// The source result of `f` around `value`, its `ForeignVal` mapping: with
+/// `errno`, the pair `(value, os_error)`; with a `CStr` parameter, `Ok` of
+/// that, or `Err(ForeignInvalid { raw })` when an argument held a NUL byte
+/// at offset `raw` and the call was not made.
+pub(super) fn wrap_result(f: &FunctionDescriptor, value: Type) -> Type {
+    let value = if f.reads_errno() {
+        Type::Tuple(vec![value, Type::named("u32")])
+    } else {
+        value
+    };
+    if f.takes_cstr() {
+        Type::Named("Result".into(), vec![value, Type::named(INVALID_TYPE)])
+    } else {
+        value
+    }
+}
+
 pub(super) struct Generated {
     /// Source struct declarations by name (wire structs of every import).
     structs: BTreeMap<String, Result<Adt, String>>,
@@ -303,7 +320,7 @@ impl Generated {
                         ValueType::Bool => Type::named("bool"),
                         ValueType::Enum(e) => Type::named(e.name()),
                         ValueType::Unit => return Err("Unit parameter".into()),
-                        ValueType::Handle { .. } => {
+                        ValueType::Handle { .. } | ValueType::NonNullHandle { .. } => {
                             return Err("a handle parameter needs a mode".into());
                         }
                         ValueType::Address { .. } => {
@@ -356,6 +373,14 @@ impl Generated {
                     },
                     ParamKind::Value(Type::named(handle.name())),
                 ),
+                // A C string is the caller's bytes, copied and terminated.
+                ParameterType::CStr => (
+                    Pass::In,
+                    ParamKind::Value(Type::Named(
+                        crate::seq::SLICE_TYPE.into(),
+                        vec![Type::named("u8")],
+                    )),
+                ),
             };
             params.push(ParamShape {
                 name: p.name().to_owned(),
@@ -385,8 +410,12 @@ impl Generated {
                 handle,
                 nullable: false,
             } => Type::Named("Result".into(), vec![Type::named(handle.name()), invalid()]),
+            ValueType::NonNullHandle { handle } => Type::named(handle.name()),
         };
-        Ok(OpShape { params, result })
+        Ok(OpShape {
+            params,
+            result: wrap_result(f, result),
+        })
     }
     /// Whether `name` is a generated extern-type handle.
     pub fn is_handle(&self, name: &str) -> bool {

@@ -6,6 +6,10 @@
 //!   dependency carries its own imports to libraries and executables.
 //! * `bool` parameters and results cross as one byte (this already worked
 //!   on main; the test keeps it working).
+//! * `nocapture in s: CStr` passes a terminated copy of a `Slice[u8]` and
+//!   refuses one holding a NUL; `-> ForeignVal[T] errno` pairs the result
+//!   with the OS error code; `ForeignVal[NonNull[H]]` has no error arm.
+//! * `vesper run` reaches the standard I/O host through the evaluator.
 use std::{fs, path::PathBuf, process::Command};
 use vesper::ffi_lowering::{self, Handler, Imports};
 
@@ -223,7 +227,7 @@ fn run(c: &mut Command) -> String {
 }
 
 #[test]
-fn cli_checks_and_jits_an_executable_over_std_fs() {
+fn cli_checks_jits_and_runs_an_executable_over_std_fs() {
     if !host_jit() {
         return;
     }
@@ -235,10 +239,9 @@ fn cli_checks_and_jits_an_executable_over_std_fs() {
         let out = run(vesper().arg("jit").arg(&tool).args(opt));
         assert_eq!(out.trim(), "4", "{opt:?}");
     }
-    // The evaluator has no host yet: a clear refusal.
-    let out = vesper().arg("run").arg(&tool).output().unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("use `vesper jit`"));
+    // The evaluator reaches the same host through `EvalHost`.
+    let out = run(vesper().arg("run").arg(&tool));
+    assert_eq!(out.trim(), "4");
 }
 
 #[test]
@@ -404,4 +407,242 @@ fn static_libraries_link_their_archive() {
     // would give 9 (or fail to load).
     let status = Command::new(&exe).status().unwrap();
     assert_eq!(status.code(), Some(7));
+}
+
+// ---------------------------------------------------------------------------
+// Part 2: C strings, OS error codes and non-NULL handle results.
+
+static PROBE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `len * 1000 + sum of bytes` of a NUL-terminated string.
+extern "C" fn probe_len(s: *const std::ffi::c_char, scale: u32) -> u64 {
+    PROBE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // SAFETY: the lowering passes a NUL-terminated buffer it owns.
+    let bytes = unsafe { std::ffi::CStr::from_ptr(s) }.to_bytes();
+    let sum: u64 = bytes.iter().map(|&b| u64::from(b)).sum();
+    (bytes.len() as u64 * 1000 + sum) * u64::from(scale)
+}
+
+/// Looks `path` up and returns the OS error code it left (0 when found).
+extern "C" fn probe_stat(path: *const std::ffi::c_char) -> u32 {
+    // SAFETY: as above.
+    let path = unsafe { std::ffi::CStr::from_ptr(path) }.to_str().unwrap();
+    match fs::metadata(path) {
+        Ok(_) => 0,
+        Err(e) => e.raw_os_error().unwrap_or(0) as u32,
+    }
+}
+
+const CSTR_LIBRARY: &str = "    fn probe_len(nocapture in s: CStr, scale: u32) -> ForeignVal[u64];\n    \
+     fn probe_stat(nocapture in path: CStr) -> ForeignVal[u32] errno;";
+
+fn cstr_symbols() -> Vec<(&'static str, *const u8)> {
+    vec![
+        ("probe_len", probe_len as *const u8),
+        ("probe_stat", probe_stat as *const u8),
+    ]
+}
+
+/// `nocapture in s: CStr` takes a `Slice[u8]`: C receives a terminated
+/// copy, and an argument holding a NUL byte is refused without a call.
+#[test]
+fn cstr_arguments_are_terminated_copies() {
+    let imports = imports(CSTR_LIBRARY).unwrap();
+    let src = "fn bytes(nul: bool) -> ChunkSeq[u8] {\n    let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();\n    \
+               p.push(104);\n    p.push(105);\n    if nul { p.push(0); }\n    p.push(33);\n    p\n}\n\n\
+               pub fn whole() -> u64 eff [Ffi[Probe]] {\n    let p = bytes(false);\n    \
+               match Probe::probe_len(in p.as_slice(), 2) {\n        Result::Ok(n) => n,\n        Result::Err(e) => wrapping_add(1000000, e.raw),\n    }\n}\n\n\
+               fn sub() -> u64 eff [Ffi[Probe], Fail[RuntimeError]] {\n    let p = bytes(false);\n    \
+               match Probe::probe_len(in p[1..3], 1) {\n        Result::Ok(n) => n,\n        Result::Err(e) => wrapping_add(1000000, e.raw),\n    }\n}\n\n\
+               pub fn part() -> u64 eff [Ffi[Probe]] {\n    handle Fail[RuntimeError] in {\n        sub()\n    } with {\n        \
+               return v => v,\n        raise(_, _) => 5,\n    }\n}\n\n\
+               pub fn empty() -> u64 eff [Ffi[Probe]] {\n    let p: ChunkSeq[u8] = ChunkSeq::new[u8]();\n    \
+               match Probe::probe_len(in p.as_slice(), 1) {\n        Result::Ok(n) => wrapping_add(n, 7),\n        Result::Err(e) => wrapping_add(1000000, e.raw),\n    }\n}\n\n\
+               pub fn refused() -> u64 eff [Ffi[Probe]] {\n    let p = bytes(true);\n    \
+               match Probe::probe_len(in p.as_slice(), 1) {\n        Result::Ok(n) => n,\n        Result::Err(e) => wrapping_add(1000000, e.raw),\n    }\n}\n";
+    let checked = ffi_lowering::check_source(src, &imports).unwrap_or_else(|e| panic!("{e}"));
+    for optimize in [true, false] {
+        let run = |entry: &str| {
+            checked
+                .jit_with_options(entry, &cstr_symbols(), optimize)
+                .unwrap()
+                .to_string()
+        };
+        // "hi!" = 3 bytes summing to 104 + 105 + 33 = 242.
+        assert_eq!(run("whole"), "6484");
+        // "i!" = 2 bytes, 138.
+        assert_eq!(run("part"), "2138");
+        assert_eq!(run("empty"), "7");
+        let before = PROBE_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        // The NUL is at offset 2; C is not called.
+        assert_eq!(run("refused"), "1000002");
+        assert_eq!(
+            PROBE_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            before
+        );
+    }
+    // The evaluator's host marshals the same way.
+    let host = ffi_lowering::EvalHost::new(&imports, &cstr_symbols()).unwrap();
+    let eval = |entry: &str| {
+        checked
+            .evaluate(entry, |call| host.call(call))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(eval("whole"), "6484");
+    assert_eq!(eval("part"), "2138");
+    assert_eq!(eval("empty"), "7");
+    assert_eq!(eval("refused"), "1000002");
+}
+
+/// `-> ForeignVal[T] errno` pairs the result with the OS error code the
+/// call left (`errno`, or `GetLastError()` on Windows).
+#[test]
+fn errno_is_read_after_the_call() {
+    if !host_jit() {
+        return;
+    }
+    let imports = imports(CSTR_LIBRARY).unwrap();
+    let src = "pub fn main() -> u64 eff [Ffi[Probe]] {\n    let path = \"vesper-no-such-dir/x\".as_bytes();\n    \
+               match Probe::probe_stat(in path) {\n        Result::Ok(pair) => {\n            let (seen, code) = pair;\n            \
+               if seen != 0 && seen == code { widen_u64(code) } else { wrapping_add(1000, widen_u64(code)) }\n        }\n        \
+               Result::Err(_) => 99999,\n    }\n}\n";
+    let checked = ffi_lowering::check_source(src, &imports).unwrap_or_else(|e| panic!("{e}"));
+    for optimize in [true, false] {
+        let v = checked
+            .jit_with_options("main", &cstr_symbols(), optimize)
+            .unwrap()
+            .to_string();
+        let code: u64 = v.parse().unwrap();
+        // ENOENT (2) on Unix; ERROR_PATH_NOT_FOUND (3) on Windows.
+        assert!(code == 2 || code == 3, "{v}");
+    }
+    let host = ffi_lowering::EvalHost::new(&imports, &cstr_symbols()).unwrap();
+    let v = checked
+        .evaluate("main", |call| host.call(call))
+        .unwrap()
+        .to_string();
+    assert!(v == "2" || v == "3", "{v}");
+}
+
+/// A C string goes to libc directly: `access(2)` of a missing path, linked
+/// into an executable, fails with `ENOENT`.
+#[test]
+fn an_executable_passes_a_path_to_libc() {
+    if cfg!(windows) || !host_jit() {
+        return;
+    }
+    let t = Temp::new("libc");
+    t.write(
+        "app/Loom.toml",
+        "[package]\nname = \"@t/app\"\nversion = \"0.1.0\"\nedition = \"2026\"\ncapability_ceiling = [\"Ffi[LibC]\"]\nvsys = [\"sys/libc.vsys\"]\n",
+    );
+    t.write(
+        "app/sys/libc.vsys",
+        "sys library LibC (target = \"@TARGET@\", abi = \"@ABI@\", link = \"dynamic\", name = \"c\", \
+         artifact = \"blake3:0000000000000000000000000000000000000000000000000000000000000000\") {\n    \
+         fn access(nocapture in path: CStr, mode: i32) -> ForeignVal[i32] errno;\n}\n",
+    );
+    t.write(
+        "app/src/main.ves",
+        "pub fn main() -> u64 eff [Ffi[LibC]] {\n    let path = \"vesper-no-such-dir/x\".as_bytes();\n    \
+         match LibC::access(in path, 0) {\n        Result::Ok(pair) => {\n            let (r, code) = pair;\n            \
+         if r == -1 { widen_u64(code) } else { 100 }\n        }\n        Result::Err(_) => 101,\n    }\n}\n",
+    );
+    let exe = t.0.join("libc.bin");
+    run(vesper()
+        .arg("build")
+        .arg(t.0.join("app"))
+        .arg("-o")
+        .arg(&exe));
+    let status = Command::new(&exe).current_dir(&t.0).status().unwrap();
+    assert_eq!(status.code(), Some(2));
+}
+
+/// The opaque word of a handle the library promises is not NULL.
+extern "C" fn probe_make(v: u64) -> u64 {
+    v
+}
+extern "C" fn probe_get(h: u64) -> u64 {
+    h
+}
+
+const HANDLE_LIBRARY: &str = "    affine extern type Cell;\n    \
+     fn probe_make(v: u64) -> ForeignVal[NonNull[Cell]];\n    \
+     fn probe_get(in c: Cell) -> ForeignVal[u64];";
+
+/// `ForeignVal[NonNull[H]]` gives source code `H` itself, with no error arm.
+#[test]
+fn non_null_handle_results_have_no_error_arm() {
+    let imports = imports(HANDLE_LIBRARY).unwrap();
+    let src = "pub fn main() -> u64 eff [Ffi[Probe]] {\n    let c = Probe::probe_make(41);\n    \
+               wrapping_add(Probe::probe_get(in c), 1)\n}\n";
+    let checked = ffi_lowering::check_source(src, &imports).unwrap_or_else(|e| panic!("{e}"));
+    let symbols = [
+        ("probe_make", probe_make as *const u8),
+        ("probe_get", probe_get as *const u8),
+    ];
+    for optimize in [true, false] {
+        let v = checked
+            .jit_with_options("main", &symbols, optimize)
+            .unwrap();
+        assert_eq!(v.to_string(), "42");
+    }
+    let host = ffi_lowering::EvalHost::new(&imports, &symbols).unwrap();
+    let v = checked.evaluate("main", |call| host.call(call)).unwrap();
+    assert_eq!(v.to_string(), "42");
+    // Matching it as a `Result` is a type error now.
+    let src = "pub fn main() -> u64 eff [Ffi[Probe]] {\n    match Probe::probe_make(41) {\n        \
+               Result::Ok(c) => Probe::probe_get(in c),\n        Result::Err(_) => 0,\n    }\n}\n";
+    assert!(ffi_lowering::check_source(src, &imports).is_err());
+}
+
+/// A library that breaks the promise and returns NULL traps the program.
+#[test]
+fn a_null_non_null_handle_traps() {
+    if cfg!(windows) || !host_jit() {
+        return;
+    }
+    let t = Temp::new("nonnull");
+    t.write(
+        "app/Loom.toml",
+        "[package]\nname = \"@t/app\"\nversion = \"0.1.0\"\nedition = \"2026\"\ncapability_ceiling = [\"Ffi[Probe]\"]\nvsys = [\"sys/probe.vsys\"]\n",
+    );
+    t.write(
+        "app/sys/probe.vsys",
+        &format!(
+            "sys library Probe (target = \"@TARGET@\", abi = \"@ABI@\", link = \"static\", name = \"probe\", \
+             artifact = \"blake3:0000000000000000000000000000000000000000000000000000000000000000\") {{\n{HANDLE_LIBRARY}\n}}\n"
+        ),
+    );
+    t.write(
+        "app/src/main.ves",
+        "fn get(v: u64) -> u64 eff [Ffi[Probe]] {\n    let c = Probe::probe_make(v);\n    Probe::probe_get(in c)\n}\n\n\
+         pub fn main() -> u64 eff [Ffi[Probe]] {\n    let a = get(5);\n    let b = get(0);\n    wrapping_add(a, b)\n}\n",
+    );
+    t.write(
+        "c/probe.c",
+        "#include <stdint.h>\nvoid *probe_make(uint64_t v) { return (void *)(uintptr_t)v; }\n\
+         uint64_t probe_get(void *h) { return (uint64_t)(uintptr_t)h; }\n",
+    );
+    let c = t.0.join("c");
+    run(Command::new("cc")
+        .current_dir(&c)
+        .args(["-c", "probe.c", "-o", "probe.o"]));
+    run(Command::new("ar")
+        .current_dir(&c)
+        .args(["rcs", "libprobe.a", "probe.o"]));
+    let exe = t.0.join("nonnull.bin");
+    run(vesper()
+        .arg("build")
+        .arg(t.0.join("app"))
+        .arg("-o")
+        .arg(&exe)
+        .arg("--link-search")
+        .arg(&c));
+    let status = Command::new(&exe).status().unwrap();
+    assert!(
+        !status.success() && status.code().is_none_or(|c| c != 5),
+        "{status:?}"
+    );
 }
