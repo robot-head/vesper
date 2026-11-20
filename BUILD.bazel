@@ -134,6 +134,8 @@ vesper_crate(
         "test/std_env": [":files"],
         "test/std_fs": [":files"],
         "test/std_process": [":files"],
+        # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
+        "test/vsys_packages": [":files"],
         # @vesper-std graph, intern, arena and hash (#1127) as a driver's dependencies.
         "test/std_arena": [":files"],
         "test/std_graph": [":files"],

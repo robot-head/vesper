@@ -40,6 +40,7 @@ fn manifest(
             license: Some("Apache-2.0".into()),
             capability_ceiling: caps.iter().map(|s| (*s).to_owned()).collect(),
             forbid_unsafe_ffi: true,
+            vsys: vec![],
         },
         features: BTreeMap::new(),
         dependencies: dep_map,

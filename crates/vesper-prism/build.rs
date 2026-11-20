@@ -41,8 +41,8 @@ const DIVERGENT: [(&str, &str, &str); 5] = [
     // tests/responses.rs: 205 Reset Content may carry a body.
     (
         "response",
-        "status == 204 || status == 205 || status == 304",
-        "status == 204 || status == 304",
+        "status == NO_CONTENT || status == RESET_CONTENT || status == NOT_MODIFIED",
+        "status == NO_CONTENT || status == NOT_MODIFIED",
     ),
     // tests/routing.rs: `+` in a query stays a plus.
     (

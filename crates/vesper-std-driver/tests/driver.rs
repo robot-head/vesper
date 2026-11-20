@@ -121,29 +121,3 @@ fn driver_walks_reads_spawns_and_writes_atomically() {
     assert_eq!(vesper_std_driver::driver::run(), 1_000_001);
     let _ = std::fs::remove_dir_all(&tmp);
 }
-
-#[test]
-fn driver_vsys_copies_match_the_packages() {
-    let lib =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("vesper/src/lib.ves"))
-            .unwrap()
-            .replace("\r\n", "\n");
-    for name in ["fs", "process", "env"] {
-        let vsys =
-            std::fs::read_to_string(repo().join(format!("packages/vesper-std/{name}/{name}.vsys")))
-                .unwrap()
-                .replace("\r\n", "\n");
-        let mut block = format!("// @export vsys direct rust=crate::{name}\n");
-        for line in vsys.lines().filter(|l| !l.starts_with("//")) {
-            if line.is_empty() {
-                block.push_str("// |\n");
-            } else {
-                block.push_str(&format!("// | {line}\n"));
-            }
-        }
-        assert!(
-            lib.contains(&block),
-            "vesper/src/lib.ves lacks the current {name}.vsys"
-        );
-    }
-}

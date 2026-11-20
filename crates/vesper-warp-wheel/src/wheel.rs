@@ -57,6 +57,10 @@ pub const MAX_TIME_NS: u64 = u64::MAX - 1;
 
 /// Largest supported entry capacity (`u32::MAX` is the list terminator).
 pub const MAX_CAPACITY: u32 = u32::MAX - 1;
+/// Largest `slot_bits` (64 slots per level).
+pub const MAX_SLOT_BITS: u8 = 6;
+/// Largest `levels * slot_bits`: the wheel spans less than 2^63 ticks.
+pub const MAX_SPAN_BITS: u32 = 63;
 
 static NEXT_WHEEL_ID: AtomicU64 = AtomicU64::new(1);
 static LEAKED_ENTRIES: AtomicU64 = AtomicU64::new(0);

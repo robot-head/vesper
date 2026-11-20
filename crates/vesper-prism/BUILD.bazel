@@ -41,7 +41,7 @@ LIBRARIES = [
 DIVERGENT = {
     "connection": {"let reserve = if index == 0 {": "let reserve = if index < 64 {"},
     "decoder": {"if length > limits.max_body_bytes {": "if length > wrapping_add(limits.max_body_bytes, 1) {"},
-    "response": {"status == 204 || status == 205 || status == 304": "status == 204 || status == 304"},
+    "response": {"status == NO_CONTENT || status == RESET_CONTENT || status == NOT_MODIFIED": "status == NO_CONTENT || status == NOT_MODIFIED"},
     "router": {"let child = static_child(in r, node, in segments, lo, hi);": "let child = if current.param_child == none() {\n        static_child(in r, node, in segments, lo, hi)\n    } else {\n        none()\n    };"},
     "target": {"if plus_is_space && b == 43 {": "if plus_is_space && b == 44 {"},
 }
