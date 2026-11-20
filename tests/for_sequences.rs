@@ -284,6 +284,13 @@ fn rejected_loops() {
             "non-copy",
         ),
         ("fn f() -> u64 { for z in 5 { } 0 }", "E0213", "iterates"),
+        // Calls are not static-text literals: an array of `Str` results is
+        // not iterable (its elements would not be evaluated before the loop).
+        (
+            "fn name() -> Str { \"a\" }\nfn f() -> u64 { for s in [name(), name()] { } 0 }",
+            "E0213",
+            "non-copy",
+        ),
         (
             "fn f() -> u64 { let mut q: ChunkSeq[Option[u64]] = ChunkSeq::new(); q.push(Option::None); for Option::Some(x) in q { } 0 }",
             "E0210",

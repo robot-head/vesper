@@ -200,6 +200,17 @@ fn views_of_changing_or_moved_sources_are_refused() {
             "E1531",
             "while the view 'v'",
         ),
+        // A shadow in a nested block does not end the outer view's loan.
+        (
+            "fn take(sink s: String) -> u64 { s.len() }\nfn f() -> u64 { let s = String::new(); let v = s.as_bytes(); { let v = 0; take(s); }; v.len() }",
+            "E1531",
+            "while the view 'v'",
+        ),
+        (
+            "fn take(sink s: String) -> u64 { s.len() }\nfn f() -> u64 { let s = String::new(); let v = s.as_bytes(); let mut n = 0; for v in 0..1 { n = take(s); } wrapping_add(n, v.len()) }",
+            "E1531",
+            "while the view 'v'",
+        ),
         (
             "fn f() -> u64 { let mut s = String::new(); let v = s.as_bytes(); v.len() }",
             "E1531",

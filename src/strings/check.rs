@@ -268,7 +268,18 @@ impl Checker<'_> {
     ) -> bool {
         let mut ok = true;
         for (source, view, at) in self.view_sources.clone() {
-            let live = env.bindings.get(&view).is_some_and(|b| b.span == at);
+            // The view is live while its binding is in scope, also while a
+            // nested block, loop or match arm shadows it (it comes back
+            // when the shadow ends): conservatively, a later binding of
+            // the same name keeps the loan.
+            let live = env
+                .bindings
+                .get(&view)
+                .is_some_and(|b| b.span == at || b.span.start > at.start)
+                || self
+                    .shadowed
+                    .iter()
+                    .any(|frame| frame.get(&view).is_some_and(|b| b.span == at));
             if live && source.overlaps(p) {
                 ok = false;
                 self.error(

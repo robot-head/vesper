@@ -37,7 +37,7 @@ pub(super) const HIDDEN_PREFIX: &str = "$for";
 /// How a `for` over a sequence is rewritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Plan {
-    /// An array literal of `n` static texts: the index selects the text.
+    /// An array literal of `n` string literals: the index selects one.
     StaticText(usize),
     /// A fixed array, read by index. `place` is false for a temporary,
     /// bound with the annotation `ty` when its literals need one.
@@ -74,7 +74,11 @@ impl Checker<'_> {
     ) -> Option<(Type, Plan)> {
         if let ExprKind::Tuple(items) = &iter.kind
             && !items.is_empty()
-            && items.iter().all(|e| self.static_text_source(e))
+            // Literals only: the rewrite selects an element per iteration,
+            // which would delay (and skip) the effects of a call.
+            && items
+                .iter()
+                .all(|e| matches!(e.kind, ExprKind::Literal(Literal::String(_))))
         {
             for item in items {
                 self.expr(item, env, Usage::Own);
