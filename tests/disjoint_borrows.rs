@@ -231,7 +231,10 @@ fn body() -> u64 eff [Fail[RuntimeError]] {{
     let a = 5 + 10 + 200;
     let b = 1;
     let w = 2 + 30 + 100;
-    assert_eq!(differential("distinct", &source), a + b * 1000 + w * 100_000);
+    assert_eq!(
+        differential("distinct", &source),
+        a + b * 1000 + w * 100_000
+    );
 }
 
 /// Repro (G2): `f(inout xs[i], in xs[j])` where `i != j` is not provable

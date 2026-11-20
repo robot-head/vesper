@@ -906,8 +906,7 @@ pub(crate) fn check_core(
         .max()
         .unwrap_or(0)
         + 1;
-    if let Some(rewritten) =
-        crate::seq::element_paths::desugar(module, &world, &world.types, after)
+    if let Some(rewritten) = crate::seq::element_paths::desugar(module, &world, &world.types, after)
     {
         return check_core(&rewritten, traits);
     }
@@ -3461,7 +3460,9 @@ impl Checker<'_> {
                                     (old.display(), p.display())
                                 };
                                 if let Some(d) = self.diagnostics.last_mut() {
-                                    d.help = Some(format!("An 'in' borrow of '{whole}' reaches every field, including '{part}', so the callee could read it while it is written. Pass the fields the callee reads instead of '{whole}'."));
+                                    d.help = Some(format!(
+                                        "An 'in' borrow of '{whole}' reaches every field, including '{part}', so the callee could read it while it is written. Pass the fields the callee reads instead of '{whole}'."
+                                    ));
                                 }
                             } else {
                                 self.help("Overlapping argument places are allowed only when both arguments use shared in passing.");

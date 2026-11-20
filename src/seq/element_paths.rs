@@ -531,8 +531,8 @@ impl Rewriter<'_> {
         Expr {
             span: at.start..at.end.saturating_sub(1).max(at.start + 1),
             kind: ExprKind::Call {
-            callee: Box::new(callee),
-            types: vec![],
+                callee: Box::new(callee),
+                types: vec![],
                 args: vec![Arg {
                     pass: Pass::In,
                     explicit: false,
@@ -607,7 +607,8 @@ impl Rewriter<'_> {
     /// `{ let a = i; let b = j; if a == b { if a >= base.len() { raise } } else { swap(inout base[a], inout base[b]) } }`.
     fn seq_swap(&mut self, e: &mut Expr) {
         let at = e.span.clone();
-        let ExprKind::Call { callee, args, .. } = std::mem::replace(&mut e.kind, ExprKind::Tuple(vec![]))
+        let ExprKind::Call { callee, args, .. } =
+            std::mem::replace(&mut e.kind, ExprKind::Tuple(vec![]))
         else {
             unreachable!()
         };
