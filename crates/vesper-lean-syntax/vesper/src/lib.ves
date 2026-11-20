@@ -706,29 +706,18 @@ fn app(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
     term(inout p, in s, in pool, inout at);
     if p.err != 0 {
         at = wrapping_add(function, size);
-        let first = args_error(in s, in pool, inout at, n);
-        if first != 0 {
-            p.err = first;
+        let mut scratch = P {
+            out: String::new(),
+            err: 0
+        };
+        args(inout scratch, in s, in pool, inout at, n);
+        if scratch.err != 0 {
+            p.err = scratch.err;
         }
         return;
     }
     args(inout p, in s, in pool, inout at, n);
     p.out.push_str(")");
-}
-
-// The first error of the arguments, printed into a scratch state.
-fn args_error(in s: Slice[u64], in pool: Str, inout at: u64, n: u64) -> u64 {
-    let mut scratch = P {
-        out: String::new(),
-        err: 0
-    };
-    args(inout scratch, in s, in pool, inout at, n);
-    let P {
-        out,
-        err
-    }
-    = scratch;
-    err
 }
 
 fn args(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, n: u64) {
@@ -1262,9 +1251,6 @@ pub fn render_term(in s: Slice[u64], in pool: Str) -> String eff [Fail[LeanError
     let mut at: u64 = 0;
     term(inout p, in s, in pool, inout at);
     if p.err != 0 {
-        // Free the partial output first: raising does not drop it (see the
-        // report's compiler gaps).
-        p.out = String::new();
         Fail::raise(code_error(p.err));
     }
     p.out
@@ -1297,7 +1283,6 @@ pub fn render_module(in s: Slice[u64], in pool: Str) -> String eff [Fail[LeanErr
     for i in 0..n {
         declaration(inout p, in s, in pool, inout at, 0);
         if p.err != 0 {
-            p.out = String::new();
             Fail::raise(code_error(p.err));
         }
         end_line(inout p);
@@ -1726,14 +1711,7 @@ pub fn free_references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
     let mut at: u64 = 0;
     ref_binders(inout r, in s, in pool, inout at);
     ref_term(inout r, in s, in pool, inout at);
-    // Destructure, so the scope is dropped (returning `r.found` leaks it).
-    let R {
-        found,
-        scope,
-        all
-    }
-    = r;
-    found
+    r.found
 }
 
 // `Term::references`: every `Ref` name, binders included.
@@ -1745,12 +1723,5 @@ pub fn references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
     };
     let mut at: u64 = 0;
     ref_term(inout r, in s, in pool, inout at);
-    // Destructure, so the scope is dropped (returning `r.found` leaks it).
-    let R {
-        found,
-        scope,
-        all
-    }
-    = r;
-    found
+    r.found
 }
