@@ -3895,6 +3895,26 @@ impl Checker<'_> {
                 let ExprKind::Name(name) = &callee.kind else {
                     return None;
                 };
+                // A module constant whose initializer is an integer literal
+                // (manuscript §2.2) has that value.
+                if args.is_empty()
+                    && crate::arrays::is_const_function(name)
+                    && !env.bindings.contains_key(name)
+                {
+                    let mut body = self.world.functions.get(name)?.body.as_ref()?;
+                    while let ExprKind::Block {
+                        statements,
+                        tail: Some(tail),
+                    } = &body.kind
+                        && statements.is_empty()
+                    {
+                        body = tail;
+                    }
+                    return match body.kind {
+                        ExprKind::Literal(Literal::Int(n)) => Some(n),
+                        _ => None,
+                    };
+                }
                 let op = crate::numeric::wrapping_intrinsic(name)?;
                 if env.bindings.contains_key(name) || args.len() != 2 {
                     return None;

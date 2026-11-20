@@ -59,11 +59,21 @@ The fold runs only where the inliner runs (optimized native code), so the
 verified backend, the Stage 1 lock corpus and `vesper build` executables
 see what they saw before.
 
-## Gaps found
+## Constants as known values
 
-- A constant's initializer must be a literal tree: `GAIN_UNIT - LOSS_THRESH`
-  is refused (`E0401`), because `-` on `u64` may raise. Derived constants
-  are written as their literal value with a comment.
-- A constant used as a divisor (`x / MILLIS_PER_SEC`) is not known to be
-  non-zero at check time, so `/` needs `Fail` there. The BBR port uses its
-  `div` helper instead.
+The checker now treats a use of a constant whose initializer is an integer
+literal as that integer (`Checker::integer_fact`). A constant divisor is
+then non-zero (`x / MILLIS_PER_SEC` needs no `Fail`), and an initializer
+built from such constants is in range (`const KEEP: u64 = GAIN_UNIT -
+LOSS_THRESH;`). A zero constant still leaves `/` fallible, and `A - B`
+that would underflow is still refused.
+
+## Gaps left
+
+- A constant derived from other constants (`GAIN_UNIT - LOSS_THRESH`) is
+  not folded by the inliner (its function is not a single literal), so it
+  stays a small call. The BBR port writes such values as literals with a
+  comment until the fold covers them.
+- The 0.1% left in the BBR port is one function, `vesper_function_3`
+  (+403 k Ir over 200 000 steps); every other hot function has the same
+  count as before.
