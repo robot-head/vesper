@@ -1044,7 +1044,8 @@ impl Flow<'_> {
         // A lent closure's body (§4.2) borrows its captures `in`.
         let lent = self.world.lent_closures.get(&f.name);
         for p in &f.params {
-            let borrowed = p.pass == Pass::Sink && lent.is_some_and(|names| names.contains(&p.name));
+            let borrowed =
+                p.pass == Pass::Sink && lent.is_some_and(|names| names.contains(&p.name));
             initial.slots.insert(
                 p.name.clone(),
                 SlotState {

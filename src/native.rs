@@ -2574,10 +2574,31 @@ impl<M: Module> Codegen<'_, '_, M> {
             free.remove(&p.name);
         }
         let mut captures = vec![];
+        // A lent closure (§4.2) borrows its aggregate captures for the
+        // call: the slot keeps the caller's address, not a copy.
+        let lent = self
+            .world
+            .lent_closures
+            .get(&crate::ir::nested_name("closure", &body.span))
+            .cloned()
+            .unwrap_or_default();
         for name in free {
             if let Some(var) = self.vars.get(&name).copied() {
                 let ty = self.local_types[&name].clone();
                 let layout = Layout::of(self.world, &ty)?;
+                if lent.contains(&name) && layout.aggregate() {
+                    let pointer_type = self.m.target_config().pointer_type();
+                    let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+                        ir::StackSlotKind::ExplicitSlot,
+                        pointer_type.bytes(),
+                        3,
+                    ));
+                    let pointer = self.b.ins().stack_addr(pointer_type, slot, 0);
+                    let value = self.use_var(var);
+                    self.b.ins().store(ir::MemFlags::new(), value, pointer, 0);
+                    captures.push((name, ty, slot, self.info(value)));
+                    continue;
+                }
                 let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     layout.size,
@@ -2717,6 +2738,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         let generic_scope = self.generic_vars.clone();
         let caps_scope = self.capabilities.clone();
         let mut branches = 0;
+        // A tag known to name one closure needs no test (a lent closure,
+        // §4.2, is always called this way).
+        let single = !targets.is_empty()
+            && descriptors
+                .iter()
+                .enumerate()
+                .filter(|(index, c)| {
+                    targets.contains(&(index + 1)) && Self::callable_shape(&c.ty, ty)
+                })
+                .count()
+                == 1;
         for (index, closure) in descriptors.into_iter().enumerate() {
             if !targets.is_empty() && !targets.contains(&(index + 1)) {
                 continue;
@@ -2726,8 +2758,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             let yes = self.b.create_block();
             let no = self.b.create_block();
-            let condition = self.b.ins().icmp_imm(IntCC::Equal, tag, (index + 1) as i64);
-            self.branch(condition, yes, &[], no, &[]);
+            if single {
+                self.jump(yes, &[]);
+            } else {
+                let condition = self.b.ins().icmp_imm(IntCC::Equal, tag, (index + 1) as i64);
+                self.branch(condition, yes, &[], no, &[]);
+            }
             self.b.switch_to_block(yes);
             self.inline_depth += 1;
             let value = match &closure.target {
@@ -2882,20 +2918,29 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut caps = self.capabilities.clone();
         caps.extend(closure.capabilities.clone());
         self.capabilities = caps;
+        let lent = self
+            .world
+            .lent_closures
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
         for (name, ty, slot, info) in &closure.captures {
-            let ptr = self
-                .b
-                .ins()
-                .stack_addr(self.m.target_config().pointer_type(), *slot, 0);
+            let pointer_type = self.m.target_config().pointer_type();
+            let ptr = self.b.ins().stack_addr(pointer_type, *slot, 0);
             self.write_info(ptr, info.clone());
-            let value = self.load(ptr, ty)?;
             let layout = Layout::of(self.world, ty)?;
-            let value = if layout.aggregate() {
+            let value = if lent.contains(name) && layout.aggregate() {
+                // Borrowed in place (`closure_tag`): read-only, no copy.
+                let value = self.b.ins().load(pointer_type, ir::MemFlags::new(), ptr, 0);
+                self.write_info(value, info.clone());
+                value
+            } else if layout.aggregate() {
+                let value = self.load(ptr, ty)?;
                 let copy = self.alloc(layout.size);
                 self.copy_bytes(value, copy, layout.size);
                 copy
             } else {
-                value
+                self.load(ptr, ty)?
             };
             let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
             self.def_var(variable, value);

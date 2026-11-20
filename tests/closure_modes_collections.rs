@@ -306,8 +306,14 @@ fn main() -> u64 {
 fn callbacks_agree_with_element_views_and_do_not_leak() {
     let dir = driver(DRIVER);
     let c = load(&dir.0);
-    let want = Runtime::new(&c.world).run("views", vec![]).unwrap().to_string();
-    let got = Runtime::new(&c.world).run("callbacks", vec![]).unwrap().to_string();
+    let want = Runtime::new(&c.world)
+        .run("views", vec![])
+        .unwrap()
+        .to_string();
+    let got = Runtime::new(&c.world)
+        .run("callbacks", vec![])
+        .unwrap()
+        .to_string();
     assert_eq!(got, want, "evaluator");
     for optimize in [true, false] {
         for entry in ["views", "callbacks"] {

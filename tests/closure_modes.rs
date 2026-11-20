@@ -117,7 +117,6 @@ fn differential(name: &str, source: &str) -> u64 {
     expected
 }
 
-
 fn refused(source: &str, code: &str) {
     let c = checked(source);
     assert!(
@@ -217,7 +216,10 @@ fn main() -> u64 {{
     // probe: 5 * (41 + 3); with_ref over indexes 0, 1, 2, 0, 1: 2 * (44 +
     // 9); bump: 3 slots; r: slots[2] = 1; missing: slots[3] raises, 500;
     // key 3 + n 9.
-    assert_eq!(differential("borrow", &source), 220 + 106 + 3 + 1 + 500 + 12);
+    assert_eq!(
+        differential("borrow", &source),
+        220 + 106 + 3 + 1 + 500 + 12
+    );
 }
 
 /// A lent function parameter may be lent again: passed on, or used by a
