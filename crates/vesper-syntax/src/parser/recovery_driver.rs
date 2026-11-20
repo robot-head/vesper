@@ -51,7 +51,7 @@ fn lex(source: &str, limits: Limits, work: &mut Work) -> Result<lexer::Lexed, Er
     Ok(lexed)
 }
 fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a> {
-    let item_names = super::contextual_item_names(&tokens, source);
+    let item_names = super::contextual_item_names(&tokens, source, false);
     Parser {
         source,
         tokens,
@@ -71,6 +71,7 @@ fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a>
         halted: false,
         halt_kind: None,
         expr_heights: Default::default(),
+        expansion: 0,
         editor: true,
         site_limit: limits.max_sites,
         site_exhausted: false,
@@ -92,6 +93,10 @@ fn word(source: &str, tokens: &[Token], i: usize, text: &str) -> bool {
         .get(i)
         .is_some_and(|t| t.kind == K::Lower && source.get(t.span.clone()) == Some(text))
 }
+fn at_test_block(source: &str, tokens: &[Token], at: usize) -> bool {
+    word(source, tokens, at, "test") && token_kind(tokens, next(tokens, at + 1)) == K::LBrace
+}
+
 fn prefix(source: &str, tokens: &[Token], at: usize) -> Option<(DK, Option<Span>)> {
     let mut i = at;
     if word(source, tokens, i, "tiled") && token_kind(tokens, next(tokens, i + 1)) == K::LParen {
@@ -486,15 +491,16 @@ pub fn parse_recovery(source: &str, limits: Limits) -> Result<RecoverySyntax, Er
         }
         let owner = declarations.len();
         let (kind, name) = prefix(source, tokens, start).unwrap_or((DK::Other, None));
+        let test_block = at_test_block(source, tokens, start);
         let ext = extent(source, tokens, start, kind, opaque, limits, &mut work)?;
         let end = ext.end.max(start + 1).min(tokens.len() - 1);
         let span = tokens[start].span.start..tokens[end - 1].span.end;
         let lexical = span.end > opaque;
         let opaque_item = lexical
             || !ext.macros.is_empty()
-            || kind == DK::Other
+            || (kind == DK::Other && !test_block)
             || (ext.uncertain && kind != DK::Function)
-            || (name.is_none() && !matches!(kind, DK::Impl | DK::Use));
+            || (name.is_none() && !matches!(kind, DK::Impl | DK::Use) && !test_block);
         let mut status = DS::Recovered;
         let mut header_span = span.start..ext.body.as_ref().map_or(span.end, |b| b.start);
         let mut body_green_span = None;
@@ -753,7 +759,9 @@ pub fn parse_complete_items(
                 return Err(Error::InvalidInventory);
             }
             out.items.push(item);
-        } else if parsed.model_uses.is_empty() {
+        } else if parsed.model_uses.is_empty()
+            && !at_test_block(snapshot.source(), &lexed.tokens, start)
+        {
             return Err(Error::Unsupported);
         }
         out.model_uses.extend(parsed.model_uses);

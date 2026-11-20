@@ -16,6 +16,14 @@ const WRPKRU: [u8; 10] = [0x89, 0xf8, 0x31, 0xc9, 0x31, 0xd2, 0x0f, 0x01, 0xef, 
 const RDPKRU_SYMBOL: &str = "vesper_bridge_rdpkru";
 const WRPKRU_SYMBOL: &str = "vesper_bridge_wrpkru";
 
+/// The `Ok` payload type of a `Result`.
+fn result_ok(ty: &Type) -> Result<Type, String> {
+    match ty {
+        Type::Named(n, args) if n == "Result" && args.len() == 2 => Ok(args[0].clone()),
+        other => Err(format!("a CStr call's result {other} is not a Result")),
+    }
+}
+
 /// Native source memory or a by-value scalar.
 #[derive(Clone, Copy)]
 enum Source {
@@ -112,27 +120,23 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut c_args = vec![];
         let mut copies = vec![];
         let mut restores = vec![];
+        // Per `CStr` argument: its malloc'd buffer, and the offset of its
+        // first NUL byte (or -1).
+        let mut strings: Vec<(ir::Value, ir::Value)> = vec![];
         for ((arg, param), descriptor) in args.iter().zip(&signature.params).zip(descriptors) {
+            if let ParameterType::CStr = descriptor.ty() {
+                let (data, len) = self.foreign_view(&arg.expr, 1)?;
+                strings.push(self.foreign_cstr(data, len)?);
+                c_args.push(strings.last().expect("just pushed").0);
+                continue;
+            }
             if let ParameterType::Slice { element, .. } = descriptor.ty()
                 && crate::seq::is_slice_type(&param.ty)
             {
                 // A source `Slice[T]` whose packed stride is T's C size: lent
                 // to C in place as (data + start * stride, len), no copy.
-                let view = self.expr(&arg.expr)?;
-                let handle = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 0);
-                let start = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 8);
-                let len = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 16);
-                let data = self
-                    .b
-                    .ins()
-                    .load(types::I64, ir::MemFlags::new(), handle, 16);
-                let offset = self.b.ins().imul_imm(start, element.size() as i64);
-                let lent = self.b.ins().iadd(data, offset);
-                // A never-grown sequence has no buffer (data 0); a
-                // non-nullable CSlice still needs a valid aligned pointer.
-                let dummy = self.alloc(8);
-                let empty = self.b.ins().icmp_imm(IntCC::Equal, data, 0);
-                c_args.push(self.b.ins().select(empty, dummy, lent));
+                let (lent, len) = self.foreign_view(&arg.expr, element.size())?;
+                c_args.push(lent);
                 c_args.push(len);
                 continue;
             }
@@ -155,6 +159,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 // The handle struct's one field is the C handle word, for
                 // every mode: C never replaces the handle itself.
                 ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
+                ParameterType::CStr => unreachable!("C strings are lowered above"),
                 ParameterType::Pointer {
                     pointee,
                     access,
@@ -220,6 +225,43 @@ impl<M: Module> Codegen<'_, '_, M> {
             .declare_function(plan.function.symbol(), Linkage::Import, &sig)
             .map_err(|e| format!("foreign symbol '{}': {e}", plan.function.symbol()))?;
         let callee = self.m.declare_func_in_func(callee, self.b.func);
+        // A `CStr` argument holding a NUL byte refuses the whole call:
+        // `Err(ForeignInvalid { raw: offset })` of the first such argument.
+        let refusal = if strings.is_empty() {
+            None
+        } else {
+            let layout = Layout::of(self.world, &signature.result)?;
+            let slot = self.alloc(layout.size);
+            let mut offset = self.b.ins().iconst(types::I64, -1);
+            for (_, at) in strings.iter().rev() {
+                let found = self
+                    .b
+                    .ins()
+                    .icmp_imm(IntCC::SignedGreaterThanOrEqual, *at, 0);
+                offset = self.b.ins().select(found, *at, offset);
+            }
+            let refused = self
+                .b
+                .ins()
+                .icmp_imm(IntCC::SignedGreaterThanOrEqual, offset, 0);
+            let call_block = self.b.create_block();
+            let refuse_block = self.b.create_block();
+            let join = self.b.create_block();
+            self.branch(refused, refuse_block, &[], call_block, &[]);
+            self.b.switch_to_block(refuse_block);
+            self.b.seal_block(refuse_block);
+            let (err, err_fields) = layout.variant("Err").ok_or("Result lacks Err")?;
+            let err_offset = err_fields.first().ok_or("Err lacks a payload")?.offset;
+            let tag = self.b.ins().iconst(types::I64, err as i64);
+            self.b.ins().store(ir::MemFlags::new(), tag, slot, 0);
+            self.b
+                .ins()
+                .store(ir::MemFlags::new(), offset, slot, err_offset);
+            self.jump(join, &[]);
+            self.b.switch_to_block(call_block);
+            self.b.seal_block(call_block);
+            Some((layout, slot, join))
+        };
         let saved = if plan.handler == Handler::IsolatedMpk {
             Some(self.foreign_isolate(&plan.library)?)
         } else {
@@ -231,6 +273,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             let wrpkru = self.foreign_helper(WRPKRU_SYMBOL, &[types::I32], None, &WRPKRU)?;
             self.b.ins().call(wrpkru, &[saved]);
         }
+        let os_error = if plan.function.reads_errno() {
+            Some(self.foreign_os_error()?)
+        } else {
+            None
+        };
         for copy in copies {
             self.foreign_copy_back(copy)?;
         }
@@ -243,7 +290,145 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .store(ir::MemFlags::new(), value, destination, 0);
             }
         }
-        self.foreign_result(plan.function.result(), raw, &signature.result)
+        // The source result, from the inside out: the `ForeignVal` mapping,
+        // the `(value, os_error)` pair, then `Ok` of a call that was made.
+        let mut ty = signature.result.clone();
+        if refusal.is_some() {
+            ty = result_ok(&ty)?;
+        }
+        let value_ty = match (&ty, os_error) {
+            (Type::Tuple(ts), Some(_)) if ts.len() == 2 => ts[0].clone(),
+            (_, Some(_)) => return Err("errno result is not a pair".into()),
+            (t, None) => t.clone(),
+        };
+        let mut value = self.foreign_result(plan.function.result(), raw, &value_ty)?;
+        if let Some(code) = os_error {
+            let layout = Layout::of(self.world, &ty)?;
+            let LayoutKind::Product(fields) = &layout.kind else {
+                return Err("errno result is not a pair".into());
+            };
+            let (first, second) = (fields[0].offset, fields[1].offset);
+            let pair = self.alloc(layout.size);
+            let at = self.offset(pair, first);
+            self.store(at, value, &value_ty)?;
+            let at = self.offset(pair, second);
+            self.store(at, code, &Type::named("u32"))?;
+            value = pair;
+        }
+        if let Some((layout, slot, join)) = refusal {
+            let (ok, ok_fields) = layout.variant("Ok").ok_or("Result lacks Ok")?;
+            let ok_offset = ok_fields.first().ok_or("Ok lacks a payload")?.offset;
+            let tag = self.b.ins().iconst(types::I64, ok as i64);
+            self.b.ins().store(ir::MemFlags::new(), tag, slot, 0);
+            let at = self.offset(slot, ok_offset);
+            self.store(at, value, &ty)?;
+            self.jump(join, &[]);
+            self.b.switch_to_block(join);
+            self.b.seal_block(join);
+            value = slot;
+        }
+        for (buffer, _) in strings {
+            let free = self.foreign_libc("free", 1, false)?;
+            self.b.ins().call(free, &[buffer]);
+        }
+        Ok(value)
+    }
+    /// The `(data + start * stride, len)` of a source `Slice` argument. A
+    /// never-grown sequence has no buffer (data 0); C still gets a valid,
+    /// aligned pointer.
+    fn foreign_view(
+        &mut self,
+        expr: &Expr,
+        stride: usize,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let view = self.expr(expr)?;
+        let handle = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 0);
+        let start = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 8);
+        let len = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 16);
+        let data = self
+            .b
+            .ins()
+            .load(types::I64, ir::MemFlags::new(), handle, 16);
+        let offset = self.b.ins().imul_imm(start, stride as i64);
+        let lent = self.b.ins().iadd(data, offset);
+        let dummy = self.alloc(8);
+        let empty = self.b.ins().icmp_imm(IntCC::Equal, data, 0);
+        Ok((self.b.ins().select(empty, dummy, lent), len))
+    }
+    /// A NUL-terminated `malloc` copy of `len` bytes at `data`, and the
+    /// offset of the first NUL byte among them (-1 when there is none).
+    fn foreign_cstr(
+        &mut self,
+        data: ir::Value,
+        len: ir::Value,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let malloc = self.foreign_libc("malloc", 1, true)?;
+        let memcpy = self.foreign_libc("memcpy", 3, true)?;
+        let memchr = self.foreign_libc("memchr", 3, true)?;
+        let size = self.b.ins().iadd_imm(len, 1);
+        let call = self.b.ins().call(malloc, &[size]);
+        let buffer = self.b.inst_results(call)[0];
+        self.b
+            .ins()
+            .trapz(buffer, ir::TrapCode::unwrap_user(ffi::CSTR_ALLOC_TRAP));
+        self.b.ins().call(memcpy, &[buffer, data, len]);
+        let end = self.b.ins().iadd(buffer, len);
+        let nul = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().store(ir::MemFlags::new(), nul, end, 0);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let call = self.b.ins().call(memchr, &[data, zero, len]);
+        let found = self.b.inst_results(call)[0];
+        let missing = self.b.ins().icmp_imm(IntCC::Equal, found, 0);
+        let at = self.b.ins().isub(found, data);
+        let none = self.b.ins().iconst(types::I64, -1);
+        Ok((buffer, self.b.ins().select(missing, none, at)))
+    }
+    /// A C library function of 64-bit word parameters (and result), as the
+    /// sequence runtime declares it.
+    fn foreign_libc(
+        &mut self,
+        name: &str,
+        params: usize,
+        returns: bool,
+    ) -> Result<ir::FuncRef, String> {
+        let mut sig = self.m.make_signature();
+        for _ in 0..params {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        if returns {
+            sig.returns.push(AbiParam::new(types::I64));
+        }
+        let id = self
+            .m
+            .declare_function(name, Linkage::Import, &sig)
+            .map_err(|e| format!("C library function '{name}': {e}"))?;
+        Ok(self.m.declare_func_in_func(id, self.b.func))
+    }
+    /// The calling thread's OS error code as a 64-bit word: `errno` on
+    /// Unix targets, `GetLastError()` on Windows.
+    fn foreign_os_error(&mut self) -> Result<ir::Value, String> {
+        let (symbol, location) = ffi::os_error_symbol(self.m.isa().triple())?;
+        let mut sig = self.m.make_signature();
+        sig.returns.push(AbiParam::new(if location {
+            types::I64
+        } else {
+            types::I32
+        }));
+        let id = self
+            .m
+            .declare_function(symbol, Linkage::Import, &sig)
+            .map_err(|e| format!("OS error symbol '{symbol}': {e}"))?;
+        let callee = self.m.declare_func_in_func(id, self.b.func);
+        let call = self.b.ins().call(callee, &[]);
+        let result = self.b.inst_results(call)[0];
+        let code = if location {
+            self.b
+                .ins()
+                .load(types::I32, ir::MemFlags::new(), result, 0)
+        } else {
+            result
+        };
+        Ok(self.b.ins().uextend(types::I64, code))
     }
     fn foreign_guard(
         &mut self,
@@ -306,7 +491,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
                 Ok(self.foreign_narrow(value, e.scalar().bits()))
             }
-            ValueType::Unit | ValueType::Address { .. } | ValueType::Handle { .. } => {
+            ValueType::Unit
+            | ValueType::Address { .. }
+            | ValueType::Handle { .. }
+            | ValueType::NonNullHandle { .. } => {
                 Err("foreign parameter type has no native lowering".into())
             }
         }
@@ -673,6 +861,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.foreign_validated(ty, valid, index, word)
             }
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
+            // The library promised a handle: `NULL` breaks the promise.
+            ValueType::NonNullHandle { .. } => {
+                let word = raw()?;
+                self.b
+                    .ins()
+                    .trapz(word, ir::TrapCode::unwrap_user(ffi::NULL_HANDLE_TRAP));
+                let layout = Layout::of(self.world, ty)?;
+                if !layout.aggregate() {
+                    return Ok(word);
+                }
+                let ptr = self.alloc(layout.size);
+                self.b.ins().store(ir::MemFlags::new(), word, ptr, 0);
+                Ok(ptr)
+            }
             ValueType::Handle { nullable, .. } => {
                 let word = raw()?;
                 let present = self.b.ins().icmp_imm(IntCC::NotEqual, word, 0);

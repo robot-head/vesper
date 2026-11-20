@@ -19,6 +19,7 @@ mod tool_commands;
 mod top_commands;
 mod trace_commands;
 mod verify_commands;
+mod vsys_commands;
 use std::{
     env, fs, io,
     path::PathBuf,
@@ -29,7 +30,7 @@ use vesper::{
     runtime::Runtime,
 };
 
-const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; check/run/jit/build/emit also take a package directory with a Loom.toml; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run doctests in one shared JIT module, else the evaluator (test --doc)\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>), or a C-ABI library (--lib)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --lib          build: a C-ABI library object (--lib-name, --interface, --rust-binding, --rust-types, --instance f[T])\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
+const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; check/run/jit/build/emit also take a package directory with a Loom.toml; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run unit tests, or run doctests with --doc\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>), or a C-ABI library (--lib)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --include-tests  check/run/jit: enable test-only declarations\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --link-search <dir>  build: a directory the linker searches for .vsys libraries (repeatable)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --lib          build: a C-ABI library object (--lib-name, --interface, --rust-binding, --rust-types, --instance f[T])\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
 /// Stack for the CLI thread. The checker, parser and lowering recurse over
 /// expression depth (bounded by their own budgets), and debug builds use large
 /// frames. Windows gives the main thread only 1 MiB, which a 25-deep generic
@@ -184,11 +185,13 @@ fn cli() -> Result<(), String> {
     let mut output = None;
     let mut format = "ir".to_string();
     let mut entry = "main".to_string();
+    let mut include_tests = false;
     let mut fuel = 10_000_000;
     let mut json = false;
     let mut opt = true;
     let mut target = None;
     let mut linker = String::from("cc");
+    let mut link_search: Vec<PathBuf> = vec![];
     let mut package = None;
     let mut verifiers = std::collections::BTreeSet::new();
     let mut verifier_policy: Option<PathBuf> = None;
@@ -208,6 +211,7 @@ fn cli() -> Result<(), String> {
             "-o" => output = Some(PathBuf::from(args.next().ok_or("-o requires a path")?)),
             "--emit" => format = args.next().ok_or("--emit requires a format")?,
             "--entry" => entry = args.next().ok_or("--entry requires a name")?,
+            "--include-tests" => include_tests = true,
             "--fuel" => {
                 fuel = args
                     .next()
@@ -226,6 +230,9 @@ fn cli() -> Result<(), String> {
             "--codegen" => codegen = Some(args.next().ok_or("--codegen requires a backend")?),
             "--target" => target = Some(args.next().ok_or("--target requires a target triple")?),
             "--linker" => linker = args.next().ok_or("--linker requires a path")?,
+            "--link-search" => link_search.push(PathBuf::from(
+                args.next().ok_or("--link-search requires a directory")?,
+            )),
             "--package" => {
                 package = Some(
                     args.next()
@@ -244,6 +251,9 @@ fn cli() -> Result<(), String> {
                 }
             }
         }
+    }
+    if include_tests && !matches!(command.as_str(), "check" | "run" | "jit") {
+        return Err("--include-tests requires check, run, or jit".into());
     }
     if target.is_some()
         && !(command == "build"
@@ -278,7 +288,12 @@ fn cli() -> Result<(), String> {
         if target.as_deref() == Some("bpf") {
             return Err("--target bpf takes one source file, not a package".into());
         }
-        let assembled = vesper::packages::load(std::path::Path::new(&input))?;
+        let path = std::path::Path::new(&input);
+        let assembled = if include_tests {
+            vesper::packages::load_for_tests(path)?
+        } else {
+            vesper::packages::load(path)?
+        };
         if !assembled.ok() {
             package_diagnostics(&assembled, &assembled.diagnostics, json);
             return Err(format!(
@@ -307,6 +322,7 @@ fn cli() -> Result<(), String> {
             green: parser::parse("").green,
             diagnostics: vec![],
         },
+        None if include_tests => parser::parse_for_tests(&source),
         None => parser::parse(&source),
     };
     if command == "emit" && format == "cst" {
@@ -319,10 +335,34 @@ fn cli() -> Result<(), String> {
         diagnostics(&input, &source, &parsed.diagnostics, json);
         return Err(format!("{} syntax error(s)", parsed.diagnostics.len()));
     }
+    // `.vsys` libraries the loaded packages carry (`[package] vsys`).
+    let package_vsys = loaded.as_ref().map_or(&[][..], |p| &p.vsys[..]);
+    if !package_vsys.is_empty() && !(lib.enabled || lib.any_option()) {
+        // Programs over package-carried imports check and run only through
+        // the Bridge lowering (#1150).
+        let p = loaded.as_ref().expect("package_vsys comes from a package");
+        return vsys_commands::run(vsys_commands::Command {
+            command: &command,
+            format: &format,
+            package: p,
+            module: &parsed.module,
+            entry: &entry,
+            output,
+            target: target.as_deref(),
+            optimize: opt,
+            linker: &linker,
+            link_search: &link_search,
+            json,
+            exclusive: !verifiers.is_empty()
+                || verifier_policy.is_some()
+                || tee_measure
+                || codegen.is_some(),
+        });
+    }
     let mut checked = check::check(&parsed.module);
     // A library with `.vsys` imports checks only through the Bridge
     // lowering, which the export path below runs.
-    if !checked.diagnostics.is_empty() && !lib.needs_module(&source) {
+    if !checked.diagnostics.is_empty() && !lib.needs_module(&source, !package_vsys.is_empty()) {
         match &loaded {
             Some(p) => {
                 let localized: Vec<_> = checked
@@ -362,7 +402,7 @@ fn cli() -> Result<(), String> {
             Some(p) => export_directives_source(p)?,
             None => source.clone(),
         };
-        let foreign = loaded.is_some() && lib.needs_module(&source);
+        let foreign = loaded.is_some() && lib.needs_module(&source, !package_vsys.is_empty());
         let module = foreign.then(|| parsed.module.clone());
         let built = lib.build(
             &command,
@@ -370,6 +410,7 @@ fn cli() -> Result<(), String> {
             &public,
             &input,
             &directives_source,
+            package_vsys,
             output,
             target.as_deref(),
             opt,
@@ -744,7 +785,9 @@ fn foreign_package_diagnostics(
     directives_source: &str,
     target: Option<&str>,
 ) -> Option<Vec<vesper::packages::PackageDiagnostic>> {
-    let directives = vesper::native::export::Directives::parse(directives_source, target).ok()?;
+    let mut directives =
+        vesper::native::export::Directives::parse(directives_source, target).ok()?;
+    directives.add_packages(&p.vsys, target).ok()?;
     let mut imports = vesper::ffi_lowering::Imports::new();
     for v in &directives.vsys {
         imports.add(&v.source, v.handler).ok()?;

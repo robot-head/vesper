@@ -25,12 +25,22 @@ pub const HUGE_PAGE: usize = 2 << 20;
 #[cfg(all(windows, not(miri)))]
 const COMMIT_STEP: usize = 64 * 1024;
 
+pub(crate) struct Reserved {
+    pub base: NonNull<u8>,
+    pub mapping_len: usize,
+    pub kind: VirtualBackingKind,
+    pub huge: HugePageStatus,
+    pub guard_page: bool,
+}
+
 pub(crate) struct Reservation {
     base: NonNull<u8>,
     len: usize,
+    mapping_len: usize,
     committed: usize,
     kind: VirtualBackingKind,
     huge: HugePageStatus,
+    guard_page: bool,
 }
 
 // SAFETY: a reservation uniquely owns its address range; access to the bytes
@@ -40,20 +50,25 @@ unsafe impl Send for Reservation {}
 unsafe impl Sync for Reservation {}
 
 impl Reservation {
-    /// Reserves `len` bytes (a nonzero multiple of [`VIRTUAL_PAGE`]).
-    pub fn new(len: usize, huge_hint: bool) -> Result<Self, VirtualArenaError> {
+    /// Reserves `len` usable bytes (a nonzero multiple of [`VIRTUAL_PAGE`]).
+    /// When `guard_page` is `true`, reserves an additional OS page at the end
+    /// of the mapping and marks it inaccessible (`PROT_NONE` / `PAGE_NOACCESS`)
+    /// so out-of-bounds writes trap immediately.
+    pub fn new(len: usize, huge_hint: bool, guard_page: bool) -> Result<Self, VirtualArenaError> {
         debug_assert!(len > 0 && len.is_multiple_of(VIRTUAL_PAGE));
-        let (base, kind, huge) = imp::reserve(len, huge_hint)?;
-        let committed = match kind {
+        let reserved = imp::reserve(len, huge_hint, guard_page)?;
+        let committed = match reserved.kind {
             VirtualBackingKind::GlobalAllocator => len,
             _ => 0,
         };
         Ok(Self {
-            base,
+            base: reserved.base,
             len,
+            mapping_len: reserved.mapping_len,
             committed,
-            kind,
-            huge,
+            kind: reserved.kind,
+            huge: reserved.huge,
+            guard_page: reserved.guard_page,
         })
     }
 
@@ -71,6 +86,11 @@ impl Reservation {
 
     pub fn huge(&self) -> HugePageStatus {
         self.huge
+    }
+
+    /// Whether a trailing OS guard page is active at the end of the mapping.
+    pub fn has_guard_page(&self) -> bool {
+        self.guard_page
     }
 
     /// Usable (Windows: committed; Unix: touched high-water) prefix length.
@@ -141,7 +161,7 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         // SAFETY: exactly the range from `reserve`; `&mut self` ends every
         // borrow of it.
-        unsafe { imp::unreserve(self.base, self.len, self.kind) }
+        unsafe { imp::unreserve(self.base, self.mapping_len, self.kind) }
     }
 }
 
@@ -172,8 +192,16 @@ fn smaps_anon_huge(addr: usize, len: usize) -> Option<usize> {
 
 #[cfg(all(unix, not(miri)))]
 mod imp {
-    use super::{HUGE_PAGE, HugePageStatus, VirtualArenaError, VirtualBackingKind};
+    use super::{
+        HUGE_PAGE, HugePageStatus, Reserved, VIRTUAL_PAGE, VirtualArenaError, VirtualBackingKind,
+    };
     use std::ptr::NonNull;
+
+    fn page_size() -> usize {
+        // SAFETY: sysconf has no preconditions.
+        let n = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if n <= 0 { VIRTUAL_PAGE } else { n as usize }
+    }
 
     fn map(len: usize) -> Option<NonNull<u8>> {
         #[cfg(target_os = "linux")]
@@ -201,48 +229,89 @@ mod imp {
     pub fn reserve(
         len: usize,
         huge_hint: bool,
-    ) -> Result<(NonNull<u8>, VirtualBackingKind, HugePageStatus), VirtualArenaError> {
-        if !huge_hint {
-            let p = map(len).ok_or(VirtualArenaError::ReserveFailed)?;
-            return Ok((p, VirtualBackingKind::Mmap, HugePageStatus::NotRequested));
-        }
-        // Over-reserve by one huge page, then trim both ends so the base is
-        // 2 MiB aligned.
-        let padded = len
-            .checked_add(HUGE_PAGE)
-            .ok_or(VirtualArenaError::SizeOverflow)?;
-        let raw = map(padded).ok_or(VirtualArenaError::ReserveFailed)?;
-        let raw_addr = raw.as_ptr() as usize;
-        let aligned = raw_addr.next_multiple_of(HUGE_PAGE);
-        let head = aligned - raw_addr;
-        let tail = padded - head - len;
-        // SAFETY: both trimmed pieces lie inside the mapping just created and
-        // nothing refers to them.
-        unsafe {
-            if head > 0 {
-                libc::munmap(raw.as_ptr().cast(), head);
-            }
-            if tail > 0 {
-                libc::munmap(raw.as_ptr().add(head + len).cast(), tail);
-            }
-        }
-        // SAFETY: `head < padded`, so the pointer stays inside the mapping.
-        let base = unsafe { NonNull::new_unchecked(raw.as_ptr().add(head)) };
-        #[cfg(target_os = "linux")]
-        let huge = {
-            // SAFETY: advisory call over our own mapping.
-            let rc = unsafe { libc::madvise(base.as_ptr().cast(), len, libc::MADV_HUGEPAGE) };
-            if rc == 0 {
-                HugePageStatus::Advised
-            } else {
-                HugePageStatus::Refused {
-                    errno: std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+        guard_page: bool,
+    ) -> Result<Reserved, VirtualArenaError> {
+        let (guard_offset, guard_len, mapping_len) = if guard_page {
+            let page = page_size().max(VIRTUAL_PAGE);
+            let guard_offset = len
+                .checked_next_multiple_of(page)
+                .ok_or(VirtualArenaError::SizeOverflow)?;
+            let mapping_len = guard_offset
+                .checked_add(page)
+                .filter(|n| *n <= isize::MAX as usize)
+                .ok_or(VirtualArenaError::SizeOverflow)?;
+            (guard_offset, page, mapping_len)
+        } else {
+            (len, 0, len)
+        };
+
+        let (base, huge) = if !huge_hint {
+            let p = map(mapping_len).ok_or(VirtualArenaError::ReserveFailed)?;
+            (p, HugePageStatus::NotRequested)
+        } else {
+            // Over-reserve by one huge page, then trim both ends so the base is
+            // 2 MiB aligned.
+            let padded = mapping_len
+                .checked_add(HUGE_PAGE)
+                .ok_or(VirtualArenaError::SizeOverflow)?;
+            let raw = map(padded).ok_or(VirtualArenaError::ReserveFailed)?;
+            let raw_addr = raw.as_ptr() as usize;
+            let aligned = raw_addr.next_multiple_of(HUGE_PAGE);
+            let head = aligned - raw_addr;
+            let tail = padded - head - mapping_len;
+            // SAFETY: both trimmed pieces lie inside the mapping just created and
+            // nothing refers to them.
+            unsafe {
+                if head > 0 {
+                    libc::munmap(raw.as_ptr().cast(), head);
+                }
+                if tail > 0 {
+                    libc::munmap(raw.as_ptr().add(head + mapping_len).cast(), tail);
                 }
             }
+            // SAFETY: `head < padded`, so the pointer stays inside the mapping.
+            let base = unsafe { NonNull::new_unchecked(raw.as_ptr().add(head)) };
+            #[cfg(target_os = "linux")]
+            let huge = {
+                // SAFETY: advisory call over the usable prefix of our own mapping.
+                let rc = unsafe { libc::madvise(base.as_ptr().cast(), len, libc::MADV_HUGEPAGE) };
+                if rc == 0 {
+                    HugePageStatus::Advised
+                } else {
+                    HugePageStatus::Refused {
+                        errno: std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+                    }
+                }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let huge = HugePageStatus::AlignedOnly;
+            (base, huge)
         };
-        #[cfg(not(target_os = "linux"))]
-        let huge = HugePageStatus::AlignedOnly;
-        Ok((base, VirtualBackingKind::Mmap, huge))
+
+        if guard_page {
+            // SAFETY: `[guard_offset, guard_offset + guard_len)` is the
+            // host-page-aligned trailing page inside our owned mapping.
+            let rc = unsafe {
+                libc::mprotect(
+                    base.as_ptr().add(guard_offset).cast(),
+                    guard_len,
+                    libc::PROT_NONE,
+                )
+            };
+            if rc != 0 {
+                // SAFETY: unmapping the mapping we just created.
+                unsafe { libc::munmap(base.as_ptr().cast(), mapping_len) };
+                return Err(VirtualArenaError::ReserveFailed);
+            }
+        }
+
+        Ok(Reserved {
+            base,
+            mapping_len,
+            kind: VirtualBackingKind::Mmap,
+            huge,
+            guard_page,
+        })
     }
 
     /// # Safety
@@ -273,7 +342,7 @@ mod imp {
 
 #[cfg(all(windows, not(miri)))]
 mod imp {
-    use super::{HugePageStatus, VirtualArenaError, VirtualBackingKind};
+    use super::{HugePageStatus, Reserved, VIRTUAL_PAGE, VirtualArenaError, VirtualBackingKind};
     use std::ffi::c_void;
     use std::ptr::NonNull;
 
@@ -292,16 +361,56 @@ mod imp {
             allocation_type: u32,
             protect: u32,
         ) -> *mut c_void;
+        fn VirtualProtect(
+            address: *mut c_void,
+            size: usize,
+            new_protect: u32,
+            old_protect: *mut u32,
+        ) -> i32;
         fn VirtualFree(address: *mut c_void, size: usize, free_type: u32) -> i32;
     }
 
     pub fn reserve(
         len: usize,
         huge_hint: bool,
-    ) -> Result<(NonNull<u8>, VirtualBackingKind, HugePageStatus), VirtualArenaError> {
+        guard_page: bool,
+    ) -> Result<Reserved, VirtualArenaError> {
+        let mapping_len = if guard_page {
+            len.checked_add(VIRTUAL_PAGE)
+                .filter(|n| *n <= isize::MAX as usize)
+                .ok_or(VirtualArenaError::SizeOverflow)?
+        } else {
+            len
+        };
         // SAFETY: reserves fresh address space at a system-chosen address.
-        let p = unsafe { VirtualAlloc(std::ptr::null_mut(), len, MEM_RESERVE, PAGE_NOACCESS) };
-        let p = NonNull::new(p.cast()).ok_or(VirtualArenaError::ReserveFailed)?;
+        let p = unsafe {
+            VirtualAlloc(
+                std::ptr::null_mut(),
+                mapping_len,
+                MEM_RESERVE,
+                PAGE_NOACCESS,
+            )
+        };
+        let p = NonNull::new(p.cast::<u8>()).ok_or(VirtualArenaError::ReserveFailed)?;
+        if guard_page {
+            // SAFETY: `[len, len + VIRTUAL_PAGE)` is the trailing guard page
+            // inside our owned reservation. Commit and explicitly mark it
+            // `PAGE_NOACCESS` via `VirtualProtect` so out-of-bounds writes trap.
+            let guard_ptr = unsafe { p.as_ptr().add(len).cast::<c_void>() };
+            let committed =
+                unsafe { VirtualAlloc(guard_ptr, VIRTUAL_PAGE, MEM_COMMIT, PAGE_NOACCESS) };
+            let mut old_protect: u32 = 0;
+            let protected = if !committed.is_null() {
+                unsafe { VirtualProtect(guard_ptr, VIRTUAL_PAGE, PAGE_NOACCESS, &mut old_protect) }
+            } else {
+                0
+            };
+            if committed.is_null() || protected == 0 {
+                // SAFETY: releasing the reservation we just created.
+                unsafe { VirtualFree(p.as_ptr().cast(), 0, MEM_RELEASE) };
+                return Err(VirtualArenaError::ReserveFailed);
+            }
+        }
         // Large pages need SeLockMemoryPrivilege and are committed eagerly
         // (MEM_LARGE_PAGES), which defeats lazy reservation: not attempted.
         let huge = if huge_hint {
@@ -309,7 +418,13 @@ mod imp {
         } else {
             HugePageStatus::NotRequested
         };
-        Ok((p, VirtualBackingKind::VirtualAlloc, huge))
+        Ok(Reserved {
+            base: p,
+            mapping_len,
+            kind: VirtualBackingKind::VirtualAlloc,
+            huge,
+            guard_page,
+        })
     }
 
     /// # Safety
@@ -342,14 +457,15 @@ mod imp {
 #[cfg(not(any(all(unix, not(miri)), all(windows, not(miri)))))]
 mod imp {
     use super::super::VIRTUAL_PAGE;
-    use super::{HugePageStatus, VirtualArenaError, VirtualBackingKind};
+    use super::{HugePageStatus, Reserved, VirtualArenaError, VirtualBackingKind};
     use std::alloc::{self, Layout};
     use std::ptr::NonNull;
 
     pub fn reserve(
         len: usize,
         huge_hint: bool,
-    ) -> Result<(NonNull<u8>, VirtualBackingKind, HugePageStatus), VirtualArenaError> {
+        _guard_page: bool,
+    ) -> Result<Reserved, VirtualArenaError> {
         let layout = Layout::from_size_align(len, VIRTUAL_PAGE)
             .map_err(|_| VirtualArenaError::SizeOverflow)?;
         // SAFETY: nonzero size.
@@ -360,7 +476,13 @@ mod imp {
         } else {
             HugePageStatus::NotRequested
         };
-        Ok((p, VirtualBackingKind::GlobalAllocator, huge))
+        Ok(Reserved {
+            base: p,
+            mapping_len: len,
+            kind: VirtualBackingKind::GlobalAllocator,
+            huge,
+            guard_page: false,
+        })
     }
 
     /// # Safety

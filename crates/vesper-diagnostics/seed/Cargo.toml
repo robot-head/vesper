@@ -1,0 +1,50 @@
+[package]
+name = "vesper-diagnostics-seed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Frozen Rust seed copy of vesper-diagnostics for the compiler's own dependency closure"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; self-hosting SH1 lane 1,
+# #1128): the compiler links this package, the Rust build of ../src, under
+# the library name `vesper_diagnostics`. Crates inside
+# `cargo tree -p vesper -e normal,build` depend on it with
+# `vesper-diagnostics = { path = ".../seed", package = "vesper-diagnostics-seed" }`;
+# every other crate uses the port-backed package `vesper-diagnostics`. The
+# Rust code takes bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_diagnostics"
+path = "../src/lib.rs"
+
+[[test]]
+name = "render"
+path = "../tests/render.rs"
+
+[[test]]
+name = "port_tables"
+path = "../tests/port_tables.rs"
+
+[[example]]
+name = "width_table"
+path = "../examples/width_table.rs"
+
+[[example]]
+name = "causal_diagnostics"
+path = "../examples/causal_diagnostics.rs"
+
+[dependencies]
+vesper-core = { path = "../../vesper-core" }
+vesper-span = { path = "../../vesper-span/seed", package = "vesper-span-seed" }
+serde_json = "1"
+ariadne = "0.5"
+
+[dev-dependencies]
+unicode-width = "=0.1.14"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

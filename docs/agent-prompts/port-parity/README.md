@@ -27,7 +27,8 @@ evidence, and the owner decides.
 
 "Parity" for the report: every port test passes on all four platforms, the
 divergence tests pass, and the ABBA 95% median interval of the Vesper/Rust
-ratio includes 1.0x or lies below 1.05x on the cloud x86-64 setup.
+ratio has an upper bound of at most 1.05x on the cloud x86-64 setup. Treat an
+interval that crosses 1.05x as inconclusive and collect more measurements.
 
 ## Where the ports stand
 
@@ -90,8 +91,9 @@ Claims are #949-#956 (lane n is issue 948+n).
   test (`port_live_allocations()`) passes with the Vesper build after each
   rewrite. A rewrite that changes behaviour is a bug, not a speedup.
 - **Measure before and after, same machine, same run.** Use the port's ABBA
-  benchmark (both builds in one process). Report the median Vesper/Rust ratio
-  with its 95% interval, the epochs, and the setup (CPU, OS, Rust version,
+  benchmark. Aura and Quarry can use their existing two-process drivers,
+  which alternate the two executables in ABBA order. Report the median
+  Vesper/Rust ratio with its 95% interval, the epochs, and the setup (CPU, OS, Rust version,
   `optimize = true`). Where wall clock is noisy, add instruction counts
   (callgrind or `perf stat`). Give the ratio after each lever, not only the
   total, so lane 8 can tell which compiler work paid off. Report only what you

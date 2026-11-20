@@ -148,6 +148,11 @@ pub enum SeqOp {
     /// `s.eq(in other)` on a byte sequence or slice: whether `other` has the
     /// same length and the same bytes. Total.
     BytesEq,
+    /// `s.cmp(in other)` on a byte sequence or slice: the three-way
+    /// lexicographic comparison of the bytes, as an `i32` that is `-1`, `0`
+    /// or `1` (a proper prefix orders first), like C `memcmp` followed by a
+    /// length comparison. Total.
+    BytesCmp,
     /// `s.find_byte(b)` on a byte sequence or slice: the index of the first
     /// byte equal to `b`, as an `Option[u64]`. Total.
     FindByte,
@@ -329,6 +334,7 @@ impl SeqOp {
             self,
             Self::SumBe16
                 | Self::BytesEq
+                | Self::BytesCmp
                 | Self::FindByte
                 | Self::FindEither
                 | Self::FindNotIn
@@ -433,6 +439,7 @@ impl SeqOp {
             Self::Wide(wide) => wide.name(),
             Self::SumBe16 => "sum_be16",
             Self::BytesEq => "eq",
+            Self::BytesCmp => "cmp",
             Self::FindByte => "find_byte",
             Self::CopyWithin { total: false } => "copy_within",
             Self::CopyWithin { total: true } => "try_copy_within",
@@ -656,6 +663,7 @@ fn shared_method(method: &str) -> Option<SeqOp> {
         "try_fill" => SeqOp::FillRange { total: true },
         "sum_be16" => SeqOp::SumBe16,
         "eq" => SeqOp::BytesEq,
+        "cmp" => SeqOp::BytesCmp,
         "find_byte" => SeqOp::FindByte,
         "find_either" => SeqOp::FindEither,
         "find_not_in" => SeqOp::FindNotIn,

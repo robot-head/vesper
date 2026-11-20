@@ -5,6 +5,8 @@
 
 use self::{
     P,
+    Tokens,
+    Diags,
     Tree
 };
 use self::util::{
@@ -13,6 +15,9 @@ use self::util::{
     w32,
     u8_at,
     u32_at
+};
+use self::lex::{
+    token_end
 };
 
 pub fn tree_new() -> Tree {
@@ -27,12 +32,17 @@ pub fn tree_new() -> Tree {
 }
 
 pub fn build_tree(inout tree: Tree, in p: P) {
+    build_events(inout tree, in p.t, in p.ev);
+}
+
+// The tree of the builder events `ev` over the tokens `t`.
+pub fn build_events(inout tree: Tree, in t: Tokens, in ev: ChunkSeq[u32]) {
     let mut open = ChunkSeq::new[u32]();
     let mut offset: u64 = 0;
-    tree.node_kind.reserve(p.ev.len() >> 2);
-    tree.leaf_token.reserve(p.t.kind.len());
-    for i in 0..p.ev.len() {
-        let e = u32_at(in p.ev, i);
+    tree.node_kind.reserve(ev.len() >> 2);
+    tree.leaf_token.reserve(t.kind.len());
+    for i in 0..ev.len() {
+        let e = u32_at(in ev, i);
         if e == 4294967295 {
             let last = wrapping_sub(open.len(), 1);
             let node = w32(in open, last);
@@ -52,8 +62,7 @@ pub fn build_tree(inout tree: Tree, in p: P) {
             tree.node_end.push(narrow(offset));
             open.push(node);
         } else {
-            let t = widen_u64(e);
-            offset = add(offset, wrapping_sub(w32(in p.t.end, t), w32(in p.t.start, t)));
+            offset = token_end(in t, widen_u64(e));
             tree.leaf_token.push(e);
             tree.leaf_parent.push(u32_at(in open, wrapping_sub(open.len(), 1)));
         }
@@ -61,18 +70,25 @@ pub fn build_tree(inout tree: Tree, in p: P) {
 }
 
 pub fn report(in tree: Tree, in p: P) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    report_into(inout out, in tree, in p.t, in p.d);
+    out
+}
+
+// Appends the rows of `parse_tables` (lib.ves) for `tree` over `t`, and `d`.
+pub fn report_into(inout out: ChunkSeq[u64], in tree: Tree, in t: Tokens, in d: Diags) {
     let leaves = tree.leaf_token.len();
     let nodes = tree.node_kind.len();
-    let diags = p.d.code.len();
-    let mut out = ChunkSeq::with_capacity[u64](add(add(3, leaves << 2), nodes << 2));
+    let diags = d.code.len();
+    out.reserve(add(add(3, leaves << 2), nodes << 2));
     out.push(leaves);
     out.push(nodes);
     out.push(diags);
     for i in 0..leaves {
-        let t = w32(in tree.leaf_token, i);
-        out.push(widen_u64(u8_at(in p.t.kind, t)));
-        out.push(w32(in p.t.start, t));
-        out.push(w32(in p.t.end, t));
+        let k = w32(in tree.leaf_token, i);
+        out.push(widen_u64(u8_at(in t.kind, k)));
+        out.push(w32(in t.start, k));
+        out.push(token_end(in t, k));
         out.push(w32(in tree.leaf_parent, i));
     }
     for i in 0..nodes {
@@ -90,19 +106,18 @@ pub fn report(in tree: Tree, in p: P) -> ChunkSeq[u64] {
         out.push(w32(in tree.node_end, i));
     }
     for i in 0..diags {
-        out.push(widen_u64(u8_at(in p.d.code, i)));
-        out.push(w32(in p.d.start, i));
-        out.push(w32(in p.d.end, i));
-        let from = w32(in p.d.at, i);
+        out.push(widen_u64(u8_at(in d.code, i)));
+        out.push(w32(in d.start, i));
+        out.push(w32(in d.end, i));
+        let from = w32(in d.at, i);
         let to = if add(i, 1) < diags {
-            w32(in p.d.at, add(i, 1))
+            w32(in d.at, add(i, 1))
         } else {
-            p.d.text.len()
+            d.text.len()
         };
         out.push(wrapping_sub(to, from));
         for j in from..to {
-            out.push(widen_u64(u8_at(in p.d.text, j)));
+            out.push(widen_u64(u8_at(in d.text, j)));
         }
     }
-    out
 }

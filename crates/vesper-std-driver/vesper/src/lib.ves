@@ -1,69 +1,6 @@
-// @export vsys direct rust=crate::fs
-// | sys library StdFs (
-// |     target = "@TARGET@", abi = "@ABI@",
-// |     link = "static", name = "vesper_std_host",
-// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
-// | ) {
-// |     linear extern type FsFile;
-// |     linear extern type FsDir;
-// |     wire struct FsMeta { size: u64, mtime_s: i64, mtime_ns: u32, kind: u32 }
-// |     fn vstd_fs_open(nocapture in path: CSlice[u8], mode: u32, nocapture inout err: u64) -> ForeignVal[Option[FsFile]];
-// |     fn vstd_fs_file_len(in f: FsFile) -> ForeignVal[u64];
-// |     fn vstd_fs_read(inout f: FsFile, nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
-// |     fn vstd_fs_write(inout f: FsFile, nocapture in buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_fs_sync(inout f: FsFile, nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_fs_close(sink f: FsFile) -> ForeignVal[Unit];
-// |     fn vstd_fs_rename(nocapture in from: CSlice[u8], nocapture in to: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_fs_remove_file(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_fs_remove_dir(nocapture in path: CSlice[u8], recursive: bool, nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_fs_create_dir(nocapture in path: CSlice[u8], recursive: bool, nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_fs_metadata(nocapture in path: CSlice[u8], follow: bool, nocapture inout meta: FsMeta, nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_fs_sync_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_fs_unique() -> ForeignVal[u64];
-// |     fn vstd_fs_parent_len(nocapture in path: CSlice[u8]) -> ForeignVal[u64];
-// |     fn vstd_fs_read_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[FsDir]];
-// |     fn vstd_fs_dir_next(inout d: FsDir, nocapture inout name: CSlice[u8], nocapture inout kind: u32) -> ForeignVal[i64];
-// |     fn vstd_fs_dir_close(sink d: FsDir) -> ForeignVal[Unit];
-// | }
-// @export vsys direct rust=crate::process
-// | sys library StdProcess (
-// |     target = "@TARGET@", abi = "@ABI@",
-// |     link = "static", name = "vesper_std_host",
-// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
-// | ) {
-// |     linear extern type ProcCommand;
-// |     linear extern type ProcChild;
-// |     wire struct ProcStatus { code: i64, signal: u32, exited: u32 }
-// |     fn vstd_proc_command(nocapture in program: CSlice[u8]) -> ForeignVal[ProcCommand];
-// |     fn vstd_proc_arg(inout c: ProcCommand, nocapture in arg: CSlice[u8]) -> ForeignVal[Unit];
-// |     fn vstd_proc_env(inout c: ProcCommand, nocapture in key: CSlice[u8], nocapture in value: CSlice[u8]) -> ForeignVal[Unit];
-// |     fn vstd_proc_env_remove(inout c: ProcCommand, nocapture in key: CSlice[u8]) -> ForeignVal[Unit];
-// |     fn vstd_proc_env_clear(inout c: ProcCommand) -> ForeignVal[Unit];
-// |     fn vstd_proc_cwd(inout c: ProcCommand, nocapture in dir: CSlice[u8]) -> ForeignVal[Unit];
-// |     fn vstd_proc_stdio(inout c: ProcCommand, which: u32, mode: u32) -> ForeignVal[Unit];
-// |     fn vstd_proc_spawn(sink c: ProcCommand, nocapture inout err: u64) -> ForeignVal[Option[ProcChild]];
-// |     fn vstd_proc_command_free(sink c: ProcCommand) -> ForeignVal[Unit];
-// |     fn vstd_proc_wait(inout ch: ProcChild, nocapture inout status: ProcStatus, nocapture inout err: u64) -> ForeignVal[u32];
-// |     fn vstd_proc_output(in ch: ProcChild, which: u32, nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
-// |     fn vstd_proc_child_id(in ch: ProcChild) -> ForeignVal[u64];
-// |     fn vstd_proc_free(sink ch: ProcChild) -> ForeignVal[Unit];
-// |     fn vstd_proc_exit(code: i64) -> ForeignVal[Unit];
-// |     fn vstd_proc_id() -> ForeignVal[u64];
-// | }
-// @export vsys direct rust=crate::env
-// | sys library StdEnv (
-// |     target = "@TARGET@", abi = "@ABI@",
-// |     link = "static", name = "vesper_std_host",
-// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
-// | ) {
-// |     fn vstd_env_arg_count() -> ForeignVal[u64];
-// |     fn vstd_env_arg(index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
-// |     fn vstd_env_var(nocapture in key: CSlice[u8], nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
-// |     fn vstd_env_var_count() -> ForeignVal[u64];
-// |     fn vstd_env_var_at(index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
-// |     fn vstd_env_current_dir(nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[i64];
-// |     fn vstd_env_os() -> ForeignVal[u32];
-// | }
+// @export vsys StdFs rust=crate::fs
+// @export vsys StdProcess rust=crate::process
+// @export vsys StdEnv rust=crate::env
 //
 // The sample driver of self-hosting SH0 lane 3 (#1125): the I/O a Vesper
 // compiler driver does, through @vesper-std/fs, process and env. It reads
@@ -77,9 +14,10 @@
 //     bytes <total size>
 //     cc <exit code> <first line of stdout>      (or: cc error <kind>)
 //
-// The three `.vsys` libraries above are copies of
-// packages/vesper-std/{fs,process,env}/*.vsys (tests/driver.rs checks that
-// they stay equal); this crate provides their symbols.
+// The three `.vsys` libraries come from the packages' manifests
+// (`[package] vsys` in packages/vesper-std/{fs,process,env}/Loom.toml); the
+// directives above only name the Rust modules of this crate that provide
+// their symbols.
 use @vesper-std/fs::{
     IoError,
     read_path,

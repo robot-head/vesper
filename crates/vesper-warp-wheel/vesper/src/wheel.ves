@@ -36,11 +36,11 @@ fn config_error(config: WheelConfig) -> Option[WheelConfigError] {
     if config.tick_ns == 0 {
         return Option::Some(WheelConfigError::ZeroTick);
     }
-    if config.slot_bits < 1 || config.slot_bits > 6 {
+    if config.slot_bits < 1 || config.slot_bits > MAX_SLOT_BITS {
         return Option::Some(WheelConfigError::SlotBits(config.slot_bits));
     }
     let span = wrapping_mul(widen_u64(config.levels), widen_u64(config.slot_bits));
-    if config.levels == 0 || span > 63 {
+    if config.levels == 0 || span > MAX_SPAN_BITS {
         return Option::Some(WheelConfigError::Levels(config.levels));
     }
     if config.capacity == 0 || config.capacity > max_capacity() {

@@ -5568,7 +5568,7 @@ dependencies = [
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
- "vesper-diagnostics",
+ "vesper-diagnostics-seed",
  "vesper-doc",
  "vesper-ebpf-seed",
  "vesper-ffi",
@@ -5598,6 +5598,7 @@ dependencies = [
  "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
+ "vesper-test",
  "vesper-vault",
  "wasm-encoder 0.261.0",
  "wasmtime",
@@ -5848,6 +5849,22 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "serde_json",
+ "unicode-width 0.1.14",
+ "vesper-bench",
+ "vesper-core",
+ "vesper-diagnostics-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-span-seed",
+]
+
+[[package]]
+name = "vesper-diagnostics-seed"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "serde_json",
+ "unicode-width 0.1.14",
  "vesper-core",
  "vesper-span-seed",
 ]
@@ -6052,7 +6069,7 @@ dependencies = [
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
- "vesper-diagnostics",
+ "vesper-diagnostics-seed",
  "vesper-doc",
  "vesper-ebpf-seed",
  "vesper-ffi",
@@ -6083,8 +6100,10 @@ dependencies = [
  "vesper-silicon-seed",
  "vesper-simd",
  "vesper-span-seed",
+ "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
+ "vesper-test",
  "vesper-vault",
  "wasm-encoder 0.261.0",
  "wit-component",
@@ -6674,6 +6693,16 @@ name = "vesper-tensor-seed"
 version = "0.1.0"
 dependencies = [
  "memmap2",
+]
+
+[[package]]
+name = "vesper-test"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "vesper-vault",
 ]
 
 [[package]]

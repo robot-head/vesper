@@ -5,374 +5,376 @@
 // lines; the Rust test compares it with the hash of the checked-in trace.
 // The random operation choices depend on earlier results (`nth` key
 // removals), so a wrong result changes the rest of the trace too.
-use @vesper-std/collections::btree::{
-    CacheBTree,
-    btree_new
-};
-use @vesper-std/collections::radix_seq::{
-    RadixSeq,
-    SeqSnapshot,
-    radix_seq_new,
-    snapshot_len
-};
-use @vesper-std/fmt::{
-    write_u64,
-    write_hex_u64,
-    fnv1a64
-};
-
-copy struct Rng {
-    bits: u64
-}
-
-fn rem(v: u64, d: u64) -> u64 {
-    if d == 0 {
-        return 0;
-    }
-    handle Fail[RuntimeError] in {
-        v % d
-    } with {
-        return r => r,
-        raise(e, k) => 0,
-    }
-}
-
-// splitmix64, as in the Rust generator.
-fn next(inout r: Rng) -> u64 {
-    r.bits = wrapping_add(r.bits, 0x9e3779b97f4a7c15);
-    let mut z = r.bits;
-    z = wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9);
-    z = wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb);
-    z ^ (z >> 31)
-}
-
-fn below(inout r: Rng, n: u64) -> u64 {
-    let x = next(inout r);
-    rem(x, n)
-}
-
-fn larger(a: u64, b: u64) -> u64 {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
-
-// Up to 8 ASCII bytes packed little-endian into `w` (stops at a 0 byte).
-fn word(inout out: ChunkSeq[u8], w: u64) {
-    let mut x = w;
-    loop {
-        if x == 0 {
-            break;
-        }
-        out.push(wrapping_u8(x));
-        x = x >> 8;
-    }
-}
-
-// Fold the line (plus a newline) into the running hash and clear it.
-fn end_line(inout line: ChunkSeq[u8], inout h: u64) {
-    line.push(10);
-    let n = line.len();
-    let mut i: u64 = 0;
-    loop {
-        if i >= n {
-            break;
-        }
-        let b = match line.try_get(i) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
-        i = wrapping_add(i, 1);
-    }
-    line.clear();
-}
-
-fn write_opt(inout out: ChunkSeq[u8], o: Option[u64]) {
-    match o {
-        Option::Some(v) => write_u64(inout out, v),
-        Option::None => word(inout out, 1701736302),
-    }
-}
-
-fn write_entry(inout out: ChunkSeq[u8], o: Option[(u64, u64)]) {
-    match o {
-        Option::Some((k, v)) => {
-            write_u64(inout out, k);
-            out.push(61);
-            write_u64(inout out, v);
-        },
-        Option::None => word(inout out, 1701736302),
-    }
-}
-
-// `insert`/`remove`/`get` line prefixes and the ` => ` separator.
-fn arrow(inout out: ChunkSeq[u8]) {
-    word(inout out, 540949792);
-}
-
-// The `cache_btree_*` trace. `mode` 0 draws random keys, 1 ascending and 2
-// descending keys.
-pub fn map_trace(seed: u64, ops: u64, space: u64, mode: u64) -> u64 {
-    let mut rng = Rng {
-        bits: seed
+test {
+    use @vesper-std/collections::btree::{
+        CacheBTree,
+        btree_new
     };
-    let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut h: u64 = 14695981039346656037;
-    let mut seq: u64 = 0;
-    let mut keys: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut vals: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let half = ops / 2;
-    for _ in 0..ops {
-        let roll = below(inout rng, 100);
-        let removing = mode != 0 && seq >= half;
-        if removing && roll < 70 {
-            let r = below(inout rng, larger(t.len(), 1));
-            let k = match t.nth(r) {
-                Option::Some((x, _)) => x,
+    use @vesper-std/collections::radix_seq::{
+        RadixSeq,
+        SeqSnapshot,
+        radix_seq_new,
+        snapshot_len
+    };
+    use @vesper-std/fmt::{
+        write_u64,
+        write_hex_u64,
+        fnv1a64
+    };
+
+    copy struct Rng {
+        bits: u64
+    }
+
+    fn rem(v: u64, d: u64) -> u64 {
+        if d == 0 {
+            return 0;
+        }
+        handle Fail[RuntimeError] in {
+            v % d
+        } with {
+            return r => r,
+            raise(e, k) => 0,
+        }
+    }
+
+    // splitmix64, as in the Rust generator.
+    fn next(inout r: Rng) -> u64 {
+        r.bits = wrapping_add(r.bits, 0x9e3779b97f4a7c15);
+        let mut z = r.bits;
+        z = wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9);
+        z = wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+
+    fn below(inout r: Rng, n: u64) -> u64 {
+        let x = next(inout r);
+        rem(x, n)
+    }
+
+    fn larger(a: u64, b: u64) -> u64 {
+        if a > b {
+            a
+        } else {
+            b
+        }
+    }
+
+    // Up to 8 ASCII bytes packed little-endian into `w` (stops at a 0 byte).
+    fn word(inout out: ChunkSeq[u8], w: u64) {
+        let mut x = w;
+        loop {
+            if x == 0 {
+                break;
+            }
+            out.push(wrapping_u8(x));
+            x = x >> 8;
+        }
+    }
+
+    // Fold the line (plus a newline) into the running hash and clear it.
+    fn end_line(inout line: ChunkSeq[u8], inout h: u64) {
+        line.push(10);
+        let n = line.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let b = match line.try_get(i) {
+                Option::Some(x) => x,
                 Option::None => 0,
             };
-            word(inout line, 9118758604727666);
-            write_u64(inout line, k);
-            arrow(inout line);
-            write_opt(inout line, t.remove(k));
-        } else if roll < 45 || (mode != 0 && !removing) {
-            let k = if mode == 0 {
-                below(inout rng, space)
-            } else if mode == 1 {
-                seq = wrapping_add(seq, 1);
-                wrapping_mul(seq, 3)
-            } else {
-                seq = wrapping_add(seq, 1);
-                wrapping_sub(1000000, wrapping_mul(seq, 3))
-            };
-            let v = below(inout rng, 4294967296);
-            word(inout line, 9135233931898473);
-            write_u64(inout line, k);
-            line.push(32);
-            write_u64(inout line, v);
-            arrow(inout line);
-            write_opt(inout line, t.insert(k, v));
-        } else if roll < 75 {
-            let k = if mode == 0 {
-                below(inout rng, space)
-            } else {
-                below(inout rng, wrapping_add(wrapping_mul(seq, 3), 1))
-            };
-            word(inout line, 9118758604727666);
-            write_u64(inout line, k);
-            arrow(inout line);
-            write_opt(inout line, t.remove(k));
-        } else if roll < 90 {
-            let k = below(inout rng, larger(space, wrapping_add(wrapping_mul(seq, 3), 1)));
-            word(inout line, 544499047);
-            write_u64(inout line, k);
-            arrow(inout line);
-            write_opt(inout line, t.get(k));
-        } else if roll < 97 {
-            let m = larger(space, wrapping_add(wrapping_mul(seq, 3), 1));
-            let a = below(inout rng, m);
-            let b = wrapping_add(a, below(inout rng, wrapping_add(m / 8, 2)));
-            keys.clear();
-            vals.clear();
-            let n = t.range_into(a, b, 8, inout keys, inout vals);
-            word(inout line, 35619899072882);
-            write_u64(inout line, a);
-            line.push(32);
-            write_u64(inout line, b);
-            word(inout line, 14368);
-            arrow(inout line);
-            for i in 0..n {
-                if i > 0 {
-                    line.push(44);
-                }
-                let k = match keys.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                };
-                let v = match vals.try_get(i) {
-                    Option::Some(x) => x,
-                    Option::None => 0,
-                };
-                write_u64(inout line, k);
-                line.push(61);
-                write_u64(inout line, v);
-            }
-        } else {
-            word(inout line, 126875187113826);
-            arrow(inout line);
-            write_u64(inout line, t.len());
-            line.push(32);
-            write_entry(inout line, t.first());
-            line.push(32);
-            write_entry(inout line, t.last());
+            h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+            i = wrapping_add(i, 1);
         }
-        end_line(inout line, inout h);
+        line.clear();
     }
-    word(inout line, 7234924);
-    arrow(inout line);
-    write_u64(inout line, t.len());
-    end_line(inout line, inout h);
-    // FNV-1a of every entry as `k=v`, joined with `,`, ascending.
-    let mut all: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut c = t.cursor_first();
-    let mut first = true;
-    loop {
-        match t.entry(c) {
+
+    fn write_opt(inout out: ChunkSeq[u8], o: Option[u64]) {
+        match o {
+            Option::Some(v) => write_u64(inout out, v),
+            Option::None => word(inout out, 1701736302),
+        }
+    }
+
+    fn write_entry(inout out: ChunkSeq[u8], o: Option[(u64, u64)]) {
+        match o {
             Option::Some((k, v)) => {
-                if !first {
-                    all.push(44);
-                }
-                first = false;
-                write_u64(inout all, k);
-                all.push(61);
-                write_u64(inout all, v);
+                write_u64(inout out, k);
+                out.push(61);
+                write_u64(inout out, v);
             },
-            Option::None => {
-                break;
-            },
+            Option::None => word(inout out, 1701736302),
         }
-        c = t.advance(c);
     }
-    word(inout line, 1752392040);
-    arrow(inout line);
-    write_hex_u64(inout line, fnv1a64(in all.as_slice()), 16);
-    end_line(inout line, inout h);
-    h
-}
 
-// `LEN HASH`: the length and FNV-1a 64 of the `{:?}` text `[a, b, ...]`.
-fn summary(inout line: ChunkSeq[u8], in s: RadixSeq[u64], snap: SeqSnapshot) {
-    let n = snapshot_len(snap);
-    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    text.push(91);
-    for i in 0..n {
-        if i > 0 {
-            word(inout text, 8236);
-        }
-        let v = match s.snapshot_get(snap, i) {
-            Option::Some(x) => x,
-            Option::None => 0,
+    // `insert`/`remove`/`get` line prefixes and the ` => ` separator.
+    fn arrow(inout out: ChunkSeq[u8]) {
+        word(inout out, 540949792);
+    }
+
+    // The `cache_btree_*` trace. `mode` 0 draws random keys, 1 ascending and 2
+    // descending keys.
+    pub fn map_trace(seed: u64, ops: u64, space: u64, mode: u64) -> u64 {
+        let mut rng = Rng {
+            bits: seed
         };
-        write_u64(inout text, v);
-    }
-    text.push(93);
-    write_u64(inout line, n);
-    line.push(32);
-    write_hex_u64(inout line, fnv1a64(in text.as_slice()), 16);
-}
-
-fn snap_name(inout line: ChunkSeq[u8], i: u64) {
-    line.push(115);
-    write_u64(inout line, i);
-}
-
-// The `chunk_seq_*` trace, with `RadixSeq` as the transient sequence.
-pub fn seq_trace(seed: u64, ops: u64) -> u64 {
-    let mut rng = Rng {
-        bits: seed
-    };
-    let mut cur: RadixSeq[u64] = radix_seq_new[u64]();
-    let mut snaps: ChunkSeq[SeqSnapshot] = ChunkSeq::new[SeqSnapshot]();
-    let mut present: ChunkSeq[bool] = ChunkSeq::new[bool]();
-    let empty = cur.freeze();
-    for _ in 0..4 {
-        snaps.push(empty);
-        present.push(false);
-    }
-    let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
-    let mut h: u64 = 14695981039346656037;
-    for _ in 0..ops {
-        let roll = below(inout rng, 100);
-        let len = cur.len();
-        if roll < 45 {
-            let burst: u64 = if below(inout rng, 10) == 0 {
-                40
-            } else {
-                1
-            };
-            for _ in 0..burst {
-                let v = below(inout rng, 4294967296);
-                cur.push(v);
-                word(inout line, 139191350640);
-                write_u64(inout line, v);
+        let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
+        let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut h: u64 = 14695981039346656037;
+        let mut seq: u64 = 0;
+        let mut keys: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut vals: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let half = ops / 2;
+        for _ in 0..ops {
+            let roll = below(inout rng, 100);
+            let removing = mode != 0 && seq >= half;
+            if removing && roll < 70 {
+                let r = below(inout rng, larger(t.len(), 1));
+                let k = match t.nth(r) {
+                    Option::Some((x, _)) => x,
+                    Option::None => 0,
+                };
+                word(inout line, 9118758604727666);
+                write_u64(inout line, k);
                 arrow(inout line);
-                write_u64(inout line, cur.len());
-                end_line(inout line, inout h);
-            }
-        } else {
-            if roll < 60 {
-                word(inout line, 7368560);
-                arrow(inout line);
-                write_opt(inout line, cur.pop());
-            } else if roll < 75 {
-                let i = below(inout rng, wrapping_add(len, 2));
+                write_opt(inout line, t.remove(k));
+            } else if roll < 45 || (mode != 0 && !removing) {
+                let k = if mode == 0 {
+                    below(inout rng, space)
+                } else if mode == 1 {
+                    seq = wrapping_add(seq, 1);
+                    wrapping_mul(seq, 3)
+                } else {
+                    seq = wrapping_add(seq, 1);
+                    wrapping_sub(1000000, wrapping_mul(seq, 3))
+                };
                 let v = below(inout rng, 4294967296);
-                word(inout line, 544499059);
-                write_u64(inout line, i);
+                word(inout line, 9135233931898473);
+                write_u64(inout line, k);
                 line.push(32);
                 write_u64(inout line, v);
                 arrow(inout line);
-                if cur.set(i, v) {
-                    word(inout line, 27503);
+                write_opt(inout line, t.insert(k, v));
+            } else if roll < 75 {
+                let k = if mode == 0 {
+                    below(inout rng, space)
                 } else {
-                    word(inout line, 6451055);
-                }
-            } else if roll < 88 {
-                let i = below(inout rng, wrapping_add(len, 2));
-                word(inout line, 544499047);
-                write_u64(inout line, i);
+                    below(inout rng, wrapping_add(wrapping_mul(seq, 3), 1))
+                };
+                word(inout line, 9118758604727666);
+                write_u64(inout line, k);
                 arrow(inout line);
-                write_opt(inout line, cur.get(i));
-            } else {
-                let which = below(inout rng, 4);
-                let known = match present.try_get(which) {
-                    Option::Some(b) => b,
-                    Option::None => false,
-                };
-                let s = match snaps.try_get(which) {
-                    Option::Some(x) => x,
-                    Option::None => empty,
-                };
-                if roll < 93 {
-                    let frozen = cur.freeze();
-                    snaps.try_set(which, frozen);
-                    present.try_set(which, true);
-                    word(inout line, 9118775616303718);
-                    snap_name(inout line, which);
-                    arrow(inout line);
-                    write_u64(inout line, cur.len());
-                } else if roll < 96 {
-                    word(inout line, 139441825908);
-                    snap_name(inout line, which);
-                    arrow(inout line);
-                    if known {
-                        cur.thaw(s);
-                        write_u64(inout line, cur.len());
-                    } else {
-                        word(inout line, 29113321788762477);
+                write_opt(inout line, t.remove(k));
+            } else if roll < 90 {
+                let k = below(inout rng, larger(space, wrapping_add(wrapping_mul(seq, 3), 1)));
+                word(inout line, 544499047);
+                write_u64(inout line, k);
+                arrow(inout line);
+                write_opt(inout line, t.get(k));
+            } else if roll < 97 {
+                let m = larger(space, wrapping_add(wrapping_mul(seq, 3), 1));
+                let a = below(inout rng, m);
+                let b = wrapping_add(a, below(inout rng, wrapping_add(m / 8, 2)));
+                keys.clear();
+                vals.clear();
+                let n = t.range_into(a, b, 8, inout keys, inout vals);
+                word(inout line, 35619899072882);
+                write_u64(inout line, a);
+                line.push(32);
+                write_u64(inout line, b);
+                word(inout line, 14368);
+                arrow(inout line);
+                for i in 0..n {
+                    if i > 0 {
+                        line.push(44);
                     }
-                } else {
-                    word(inout line, 139324386931);
-                    snap_name(inout line, which);
-                    arrow(inout line);
-                    if known {
-                        summary(inout line, in cur, s);
-                    } else {
-                        word(inout line, 29113321788762477);
-                    }
+                    let k = match keys.try_get(i) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
+                    };
+                    let v = match vals.try_get(i) {
+                        Option::Some(x) => x,
+                        Option::None => 0,
+                    };
+                    write_u64(inout line, k);
+                    line.push(61);
+                    write_u64(inout line, v);
                 }
+            } else {
+                word(inout line, 126875187113826);
+                arrow(inout line);
+                write_u64(inout line, t.len());
+                line.push(32);
+                write_entry(inout line, t.first());
+                line.push(32);
+                write_entry(inout line, t.last());
             }
             end_line(inout line, inout h);
         }
+        word(inout line, 7234924);
+        arrow(inout line);
+        write_u64(inout line, t.len());
+        end_line(inout line, inout h);
+        // FNV-1a of every entry as `k=v`, joined with `,`, ascending.
+        let mut all: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut c = t.cursor_first();
+        let mut first = true;
+        loop {
+            match t.entry(c) {
+                Option::Some((k, v)) => {
+                    if !first {
+                        all.push(44);
+                    }
+                    first = false;
+                    write_u64(inout all, k);
+                    all.push(61);
+                    write_u64(inout all, v);
+                },
+                Option::None => {
+                    break;
+                },
+            }
+            c = t.advance(c);
+        }
+        word(inout line, 1752392040);
+        arrow(inout line);
+        write_hex_u64(inout line, fnv1a64(in all.as_slice()), 16);
+        end_line(inout line, inout h);
+        h
     }
-    word(inout line, 7105633);
-    arrow(inout line);
-    let now = cur.freeze();
-    summary(inout line, in cur, now);
-    end_line(inout line, inout h);
-    h
+
+    // `LEN HASH`: the length and FNV-1a 64 of the `{:?}` text `[a, b, ...]`.
+    fn summary(inout line: ChunkSeq[u8], in s: RadixSeq[u64], snap: SeqSnapshot) {
+        let n = snapshot_len(snap);
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        text.push(91);
+        for i in 0..n {
+            if i > 0 {
+                word(inout text, 8236);
+            }
+            let v = match s.snapshot_get(snap, i) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            write_u64(inout text, v);
+        }
+        text.push(93);
+        write_u64(inout line, n);
+        line.push(32);
+        write_hex_u64(inout line, fnv1a64(in text.as_slice()), 16);
+    }
+
+    fn snap_name(inout line: ChunkSeq[u8], i: u64) {
+        line.push(115);
+        write_u64(inout line, i);
+    }
+
+    // The `chunk_seq_*` trace, with `RadixSeq` as the transient sequence.
+    pub fn seq_trace(seed: u64, ops: u64) -> u64 {
+        let mut rng = Rng {
+            bits: seed
+        };
+        let mut cur: RadixSeq[u64] = radix_seq_new[u64]();
+        let mut snaps: ChunkSeq[SeqSnapshot] = ChunkSeq::new[SeqSnapshot]();
+        let mut present: ChunkSeq[bool] = ChunkSeq::new[bool]();
+        let empty = cur.freeze();
+        for _ in 0..4 {
+            snaps.push(empty);
+            present.push(false);
+        }
+        let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut h: u64 = 14695981039346656037;
+        for _ in 0..ops {
+            let roll = below(inout rng, 100);
+            let len = cur.len();
+            if roll < 45 {
+                let burst: u64 = if below(inout rng, 10) == 0 {
+                    40
+                } else {
+                    1
+                };
+                for _ in 0..burst {
+                    let v = below(inout rng, 4294967296);
+                    cur.push(v);
+                    word(inout line, 139191350640);
+                    write_u64(inout line, v);
+                    arrow(inout line);
+                    write_u64(inout line, cur.len());
+                    end_line(inout line, inout h);
+                }
+            } else {
+                if roll < 60 {
+                    word(inout line, 7368560);
+                    arrow(inout line);
+                    write_opt(inout line, cur.pop());
+                } else if roll < 75 {
+                    let i = below(inout rng, wrapping_add(len, 2));
+                    let v = below(inout rng, 4294967296);
+                    word(inout line, 544499059);
+                    write_u64(inout line, i);
+                    line.push(32);
+                    write_u64(inout line, v);
+                    arrow(inout line);
+                    if cur.set(i, v) {
+                        word(inout line, 27503);
+                    } else {
+                        word(inout line, 6451055);
+                    }
+                } else if roll < 88 {
+                    let i = below(inout rng, wrapping_add(len, 2));
+                    word(inout line, 544499047);
+                    write_u64(inout line, i);
+                    arrow(inout line);
+                    write_opt(inout line, cur.get(i));
+                } else {
+                    let which = below(inout rng, 4);
+                    let known = match present.try_get(which) {
+                        Option::Some(b) => b,
+                        Option::None => false,
+                    };
+                    let s = match snaps.try_get(which) {
+                        Option::Some(x) => x,
+                        Option::None => empty,
+                    };
+                    if roll < 93 {
+                        let frozen = cur.freeze();
+                        snaps.try_set(which, frozen);
+                        present.try_set(which, true);
+                        word(inout line, 9118775616303718);
+                        snap_name(inout line, which);
+                        arrow(inout line);
+                        write_u64(inout line, cur.len());
+                    } else if roll < 96 {
+                        word(inout line, 139441825908);
+                        snap_name(inout line, which);
+                        arrow(inout line);
+                        if known {
+                            cur.thaw(s);
+                            write_u64(inout line, cur.len());
+                        } else {
+                            word(inout line, 29113321788762477);
+                        }
+                    } else {
+                        word(inout line, 139324386931);
+                        snap_name(inout line, which);
+                        arrow(inout line);
+                        if known {
+                            summary(inout line, in cur, s);
+                        } else {
+                            word(inout line, 29113321788762477);
+                        }
+                    }
+                }
+                end_line(inout line, inout h);
+            }
+        }
+        word(inout line, 7105633);
+        arrow(inout line);
+        let now = cur.freeze();
+        summary(inout line, in cur, now);
+        end_line(inout line, inout h);
+        h
+    }
 }

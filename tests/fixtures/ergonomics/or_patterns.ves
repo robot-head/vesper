@@ -1,0 +1,47 @@
+// Or-patterns in `match` arms (SH1 lane 5, #1148): literal alternatives,
+// constructor alternatives that bind the same names, and nested tuples.
+enum Tok {
+    Ident(u64),
+    Keyword(u64),
+    Punct(u8),
+    Eof,
+}
+
+fn class(k: u8) -> u64 {
+    match k {
+        0 | 9 | 10 | 13 | 32 => 1,
+        40 | 41 | 91 | 93 | 123 | 125 => 2,
+        _ => 3,
+    }
+}
+
+fn weight(sink t: Tok) -> u64 {
+    match t {
+        Tok::Ident(n) | Tok::Keyword(n) => wrapping_add(n, 100),
+        Tok::Punct(_) | Tok::Eof => 7,
+    }
+}
+
+fn pair(a: u8, b: u8) -> u64 {
+    match (a, b) {
+        (0, _) | (_, 0) => 0,
+        (1, x) | (x, 1) => widen_u64(x),
+        _ => 99,
+    }
+}
+
+fn main() -> u64 {
+    let mut h: u64 = 0;
+    for k in 0..130 {
+        h = wrapping_add(wrapping_mul(h, 3), class(wrapping_u8(k)));
+    }
+    h = wrapping_add(h, weight(Tok::Ident(5)));
+    h = wrapping_add(wrapping_mul(h, 7), weight(Tok::Keyword(6)));
+    h = wrapping_add(wrapping_mul(h, 7), weight(Tok::Punct(1)));
+    h = wrapping_add(wrapping_mul(h, 7), weight(Tok::Eof));
+    h = wrapping_add(wrapping_mul(h, 11), pair(0, 5));
+    h = wrapping_add(wrapping_mul(h, 11), pair(1, 5));
+    h = wrapping_add(wrapping_mul(h, 11), pair(5, 1));
+    h = wrapping_add(wrapping_mul(h, 11), pair(5, 5));
+    h
+}

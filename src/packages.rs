@@ -169,10 +169,67 @@ pub struct Assembled {
     pub root_module: Option<usize>,
     /// Every file of the root package (dependencies excluded).
     pub root_package_files: Vec<usize>,
+    /// The `.vsys` libraries every loaded package names in its manifest
+    /// (`[package] vsys`, manuscript §16.3), in load order.
+    pub vsys: Vec<PackageVsys>,
+}
+
+/// One `.vsys` library a package's manifest names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageVsys {
+    /// The package that carries it.
+    pub package: String,
+    /// The file, for messages (lexical, relative to the CLI input).
+    pub display: String,
+    /// The `.vsys` text as written: `@TARGET@` and `@ABI@` still stand for
+    /// the object target ([`PackageVsys::source_for`]).
+    pub text: String,
+}
+
+impl PackageVsys {
+    /// The `.vsys` source for an object of `target` (the host when `None`):
+    /// `@TARGET@` and `@ABI@` replaced by its triple and calling convention.
+    pub fn source_for(&self, target: Option<&str>) -> Result<String, String> {
+        let (triple, abi) = vsys_target(target)?;
+        Ok(self.text.replace("@TARGET@", triple).replace("@ABI@", abi))
+    }
+}
+
+/// The `.vsys` triple and calling convention of an object target (the host
+/// when `None`), which `@TARGET@` and `@ABI@` stand for.
+pub fn vsys_target(target: Option<&str>) -> Result<(&'static str, &'static str), String> {
+    let triple: target_lexicon::Triple = match target {
+        Some(t) => t.parse().map_err(|e| format!("invalid target: {e}"))?,
+        None => target_lexicon::Triple::host(),
+    };
+    use target_lexicon::{Architecture as A, OperatingSystem as O};
+    Ok(match (triple.architecture, triple.operating_system) {
+        (A::X86_64, O::Linux) => ("x86_64-unknown-linux-gnu", "sysv64"),
+        (A::Aarch64(_), O::Linux) => ("aarch64-unknown-linux-gnu", "aapcs64"),
+        (A::Aarch64(_), O::Darwin(_) | O::MacOSX(_)) => ("aarch64-apple-darwin", "darwin64"),
+        (A::X86_64, O::Windows) => ("x86_64-pc-windows-msvc", "win64"),
+        _ => return Err(format!(".vsys libraries have no target for {triple}")),
+    })
 }
 impl Assembled {
     pub fn ok(&self) -> bool {
         self.diagnostics.is_empty() && self.manifest_errors.is_empty()
+    }
+
+    /// The Bridge imports of every package in the graph ([`Self::vsys`]) for
+    /// an object of `target` (the host when `None`), each with the `direct`
+    /// handler, for [`crate::ffi_lowering::check_module`].
+    pub fn imports(&self, target: Option<&str>) -> Result<crate::ffi_lowering::Imports, String> {
+        let mut imports = crate::ffi_lowering::Imports::new();
+        for v in &self.vsys {
+            let source = v
+                .source_for(target)
+                .map_err(|e| format!("{}: {e}", v.display))?;
+            imports
+                .add(&source, crate::ffi_lowering::Handler::Direct)
+                .map_err(|e| format!("{}: {e}", v.display))?;
+        }
+        Ok(imports)
     }
 }
 
@@ -203,8 +260,18 @@ pub fn is_package(path: &Path) -> bool {
 /// them into one module. `Err` is an I/O failure; language and manifest
 /// errors are reported in [`Assembled`].
 pub fn load(dir: &Path) -> Result<Assembled, String> {
+    load_with_tests(dir, false)
+}
+
+/// Include test-only declarations in the root package. Dependencies are
+/// loaded in ordinary mode.
+pub fn load_for_tests(dir: &Path) -> Result<Assembled, String> {
+    load_with_tests(dir, true)
+}
+
+fn load_with_tests(dir: &Path, include_tests: bool) -> Result<Assembled, String> {
     let mut loader = Loader::default();
-    let root = loader.package(dir, dir.to_path_buf(), &mut vec![])?;
+    let root = loader.package(dir, dir.to_path_buf(), &mut vec![], include_tests)?;
     let package = root
         .map(|i| loader.packages[i].name.as_str().to_owned())
         .unwrap_or_default();
@@ -220,6 +287,7 @@ pub fn load(dir: &Path) -> Result<Assembled, String> {
             package,
             root_module,
             root_package_files,
+            vsys: loader.vsys,
         });
     }
     let module = loader.assemble(root.unwrap_or_default());
@@ -231,6 +299,7 @@ pub fn load(dir: &Path) -> Result<Assembled, String> {
         package,
         root_module,
         root_package_files,
+        vsys: loader.vsys,
     })
 }
 
@@ -242,6 +311,7 @@ struct Loader {
     sources: SourceMap,
     diagnostics: Vec<PackageDiagnostic>,
     manifest_errors: Vec<(String, Diagnostic)>,
+    vsys: Vec<PackageVsys>,
 }
 
 fn manifest_error(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -357,6 +427,7 @@ impl Loader {
         dir: &Path,
         shown: PathBuf,
         stack: &mut Vec<(PathBuf, String)>,
+        include_tests: bool,
     ) -> Result<Option<usize>, String> {
         let canonical = fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         if let Some(i) = stack.iter().position(|(p, _)| *p == canonical) {
@@ -446,7 +517,12 @@ impl Loader {
                 ));
                 continue;
             }
-            let parsed = crate::parser::parse(&self.sources.files[file].text);
+            let source = &self.sources.files[file].text;
+            let parsed = if include_tests {
+                crate::parser::parse_for_tests(source)
+            } else {
+                crate::parser::parse(source)
+            };
             for d in parsed.diagnostics {
                 self.diagnostics.push(PackageDiagnostic {
                     file: Some(file),
@@ -471,6 +547,7 @@ impl Loader {
                 ),
             ));
         }
+        self.package_vsys(dir, &shown, &manifest_shown, &manifest)?;
         let index = self.packages.len();
         self.packages.push(Package {
             name: name.clone(),
@@ -508,7 +585,8 @@ impl Loader {
                 ));
                 continue;
             }
-            let Some(dep_index) = self.package(&dep_dir, normalize(&shown.join(path)), stack)?
+            let Some(dep_index) =
+                self.package(&dep_dir, normalize(&shown.join(path)), stack, false)?
             else {
                 continue;
             };
@@ -548,6 +626,58 @@ impl Loader {
         }
         stack.pop();
         Ok(Some(index))
+    }
+
+    /// Read the `.vsys` files `[package] vsys` names: relative paths inside
+    /// the package directory, each read once.
+    fn package_vsys(
+        &mut self,
+        dir: &Path,
+        shown: &Path,
+        manifest_shown: &str,
+        manifest: &Manifest,
+    ) -> Result<(), String> {
+        let mut seen = BTreeSet::new();
+        for path in &manifest.package.vsys {
+            let bad = |why: &str| {
+                manifest_error(INVALID_PACKAGE, format!("package.vsys '{path}': {why}"))
+            };
+            let relative = Path::new(path);
+            if !path.ends_with(".vsys") {
+                self.manifest_errors
+                    .push((manifest_shown.into(), bad("expected a .vsys file")));
+                continue;
+            }
+            if path.contains('\\')
+                || !relative
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+            {
+                self.manifest_errors.push((
+                    manifest_shown.into(),
+                    bad("expected a relative path inside the package, with `/` separators and no `..`"),
+                ));
+                continue;
+            }
+            if !seen.insert(normalize(relative)) {
+                self.manifest_errors
+                    .push((manifest_shown.into(), bad("named twice")));
+                continue;
+            }
+            let file = dir.join(relative);
+            if !file.is_file() {
+                self.manifest_errors
+                    .push((manifest_shown.into(), bad("no such file")));
+                continue;
+            }
+            let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+            self.vsys.push(PackageVsys {
+                package: manifest.package.name.as_str().to_owned(),
+                display: display(&normalize(&shown.join(relative))),
+                text,
+            });
+        }
+        Ok(())
     }
 
     fn add_file(&mut self, display: String, text: String) -> usize {

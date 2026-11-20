@@ -76,11 +76,11 @@ filegroup(
         target = VESPER_TARGET,
     )
     for module, src, old, new in [
-        ("insn", "insn", "        AluOp::Lsh => (96, 0),\n", "        AluOp::Lsh => (112, 0),\n"),
+        ("insn", "insn", "        AluOp::Lsh => (OP_LSH, 0),\n", "        AluOp::Lsh => (OP_RSH, 0),\n"),
         ("scalar", "scalar", "    let mu = chi | a.mask | b.mask;\n    tn(sv & ~mu, mu)", "    let mu = chi | a.mask;\n    tn(sv & ~mu, mu)"),
         ("interp", "concrete", "        AluOp::Arsh => sar(a, b & 63),\n", "        AluOp::Arsh => shr(a, b & 63),\n"),
         ("verifier", "scalar", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 1));\n", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 2));\n"),
-        ("helpers", "helpers", "        ProgramType::SchedCls => id == 84 || id == 86,\n", "        ProgramType::SchedCls => id == 44 || id == 84 || id == 86,\n"),
+        ("helpers", "helpers", "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n", "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n"),
         ("program", "program", "            if max_entries < 4096 ||", "            if max_entries < 2048 ||"),
         ("callgraph", "callgraph", "        if bytes > lim {\n", "        if bytes > wrapping_add(lim, 8) {\n"),
         ("wire", "wire", "        src_ipv4: wrapping_u32(be(in s, 26, 4)),\n", "        src_ipv4: wrapping_u32(be(in s, 30, 4)),\n"),
@@ -88,7 +88,7 @@ filegroup(
         ("btf", "btf", "        if kind == 0 || kind > 19 {\n", "        if kind == 0 || kind > 20 {\n"),
         ("core", "core", "        if slen(in strs, mname) == 0 {\n", "        if slen(in strs, mname) == 99 {\n"),
         ("btf_ext", "btf_ext", "        out.push(lc & 1023);\n", "        out.push(lc & 511);\n"),
-        ("interp_run", "interp", "    if kind == 1 && at < i.data_off {\n", "    if kind == 1 && wrapping_add(at, 1) < i.data_off {\n"),
+        ("interp_run", "interp", "    if kind == KIND_PACKET && at < i.data_off {\n", "    if kind == KIND_PACKET && wrapping_add(at, 1) < i.data_off {\n"),
     ]
 ]
 

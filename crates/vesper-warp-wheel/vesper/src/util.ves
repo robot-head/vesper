@@ -7,6 +7,10 @@ fn nil() -> u64 {
     4294967295
 }
 
+// The same limits as `wheel.rs`.
+const MAX_SLOT_BITS: u8 = 6;
+const MAX_SPAN_BITS: u64 = 63;
+
 fn u64_max() -> u64 {
     18446744073709551615
 }

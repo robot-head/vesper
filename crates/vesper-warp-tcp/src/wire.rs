@@ -20,6 +20,12 @@ pub const IPPROTO_TCP: u8 = 6;
 pub const MAX_SACK_BLOCKS: usize = 4;
 /// Largest permitted window shift (RFC 7323 §2.3).
 pub const MAX_WINDOW_SCALE: u8 = 14;
+/// Largest window the 16-bit window field carries unscaled (RFC 9293 §3.1).
+pub const MAX_UNSCALED_WINDOW: u64 = 65_535;
+/// Default send MSS without an MSS option over IPv4 (RFC 9293 §3.7.1).
+pub const DEFAULT_IPV4_MSS: u16 = 536;
+/// Default send MSS without an MSS option over IPv6 (RFC 9293 §3.7.1).
+pub const DEFAULT_IPV6_MSS: u16 = 1220;
 
 /// Byte offsets of the fixed header fields, cross-checked against a
 /// `vesper-ffi` wire layout in the tests.
@@ -42,6 +48,42 @@ pub mod offsets {
     pub const CHECKSUM: usize = 16;
     /// Urgent pointer, u16 big-endian.
     pub const URGENT: usize = 18;
+}
+
+/// Option kinds and lengths (RFC 9293 §3.2, RFC 7323 §2.2 and §3.2, RFC
+/// 2018 §2 and §3), and the padded sizes this crate encodes them in.
+pub mod options {
+    /// End of option list; the rest is padding.
+    pub const END: u8 = 0;
+    /// No-operation, used to pad options to a 4-byte boundary.
+    pub const NOP: u8 = 1;
+    /// Maximum segment size.
+    pub const MSS: u8 = 2;
+    /// Length of the MSS option.
+    pub const MSS_LEN: u8 = 4;
+    /// Window scale.
+    pub const WINDOW_SCALE: u8 = 3;
+    /// Length of the window scale option.
+    pub const WINDOW_SCALE_LEN: u8 = 3;
+    /// SACK permitted.
+    pub const SACK_PERMITTED: u8 = 4;
+    /// Length of the SACK-permitted option.
+    pub const SACK_PERMITTED_LEN: u8 = 2;
+    /// SACK blocks.
+    pub const SACK: u8 = 5;
+    /// Timestamps.
+    pub const TIMESTAMPS: u8 = 8;
+    /// Length of the timestamps option.
+    pub const TIMESTAMPS_LEN: u8 = 10;
+    /// Kind and length bytes before an option's body.
+    pub const KIND_AND_LEN: usize = 2;
+    /// Bytes of one SACK block (two sequence numbers).
+    pub const SACK_BLOCK_LEN: usize = 8;
+    /// Every option but the timestamps is encoded in one 4-byte word,
+    /// NOP-padded.
+    pub const PADDED_LEN: usize = 4;
+    /// The timestamps option, NOP NOP-padded: 12 bytes.
+    pub const PADDED_TIMESTAMPS_LEN: usize = 12;
 }
 
 /// TCP control bits (RFC 9293 §3.1, RFC 3168 for CWR/ECE).

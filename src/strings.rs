@@ -451,6 +451,114 @@ pub fn lean_refusal(op: StrOp) -> String {
     )
 }
 
+/// Static text: a string literal, a call of a `-> Str` function, or an
+/// `if`, `match` or block whose every result is static text. Spans of the
+/// results of `e` that are not static are pushed on `bad`; the `return`
+/// values inside `e` (outside closures) are checked the same way.
+fn static_result(e: &Expr, world: &crate::check::World, bad: &mut Vec<Span>) {
+    static_tail(e, world, bad);
+    returns(e, world, bad);
+}
+fn static_tail(e: &Expr, world: &crate::check::World, bad: &mut Vec<Span>) {
+    match &e.kind {
+        ExprKind::Literal(Literal::String(_)) => {}
+        ExprKind::Block { tail, .. } => {
+            if let Some(t) = tail {
+                static_tail(t, world, bad);
+            }
+        }
+        ExprKind::If {
+            then, otherwise, ..
+        } => {
+            static_tail(then, world, bad);
+            if let Some(o) = otherwise {
+                static_tail(o, world, bad);
+            }
+        }
+        ExprKind::Match { arms, .. } => {
+            let mut last = None;
+            for (_, body) in arms {
+                // Or-pattern alternatives share their body.
+                if last != Some(&body.span) {
+                    static_tail(body, world, bad);
+                }
+                last = Some(&body.span);
+            }
+        }
+        ExprKind::Call { callee, .. }
+            if matches!(&callee.kind, ExprKind::Name(n)
+                if world.functions.get(n).is_some_and(|f| is_str_type(&f.result))) => {}
+        // Diverging tails carry no value; `return v` is checked by `returns`.
+        ExprKind::Return(_) | ExprKind::Break(_) | ExprKind::Continue => {}
+        _ => bad.push(e.span.clone()),
+    }
+}
+fn returns(e: &Expr, world: &crate::check::World, bad: &mut Vec<Span>) {
+    let mut each = |c: &Expr| returns(c, world, bad);
+    match &e.kind {
+        ExprKind::Return(Some(v)) => {
+            static_tail(v, world, bad);
+            returns(v, world, bad);
+        }
+        ExprKind::Closure { .. } | ExprKind::Literal(_) | ExprKind::Name(_) => {}
+        ExprKind::Tuple(es) => es.iter().for_each(each),
+        ExprKind::Struct { fields, .. } => fields.iter().for_each(|(_, e)| each(e)),
+        ExprKind::Block { statements, tail } => {
+            for st in statements {
+                match st {
+                    Statement::Let { value, .. } | Statement::Expr(value) => each(value),
+                }
+            }
+            if let Some(t) = tail {
+                each(t);
+            }
+        }
+        ExprKind::Call { callee, args, .. } => {
+            each(callee);
+            args.iter().for_each(|a| each(&a.expr));
+        }
+        ExprKind::Field(b, _) | ExprKind::Try(b) | ExprKind::Unary(_, b) => each(b),
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+            each(a);
+            each(b);
+        }
+        ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            each(condition);
+            each(then);
+            if let Some(o) = otherwise {
+                each(o);
+            }
+        }
+        ExprKind::Match { value, arms } => {
+            each(value);
+            arms.iter().for_each(|(_, b)| each(b));
+        }
+        ExprKind::Handle {
+            state,
+            body,
+            ret,
+            ops,
+            ..
+        } => {
+            if let Some((_, s)) = state {
+                each(s);
+            }
+            each(body);
+            each(&ret.body);
+            ops.iter().for_each(|c| each(&c.body));
+        }
+        kind => {
+            for c in kind.control_children().unwrap_or_default() {
+                each(c);
+            }
+        }
+    }
+}
+
 /// Where `Str` may appear: only as the whole type of an `in` parameter.
 pub(crate) fn check_world(world: &crate::check::World) -> Vec<Diagnostic> {
     let mut diagnostics = vec![];
@@ -472,7 +580,26 @@ pub(crate) fn check_world(world: &crate::check::World) -> Vec<Diagnostic> {
                 ));
             }
         }
-        if mentions_str(&f.result) {
+        if is_str_type(&f.result) {
+            // A `-> Str` function returns static text only.
+            if let Some(body) = &f.body {
+                let mut bad = vec![];
+                static_result(body, world, &mut bad);
+                for span in bad {
+                    diagnostics.push(
+                        Diagnostic::new(
+                            "E1530",
+                            format!(
+                                "the result of '{}' is a Str, so every value it returns must be a string literal or a call of a function returning Str",
+                                f.name
+                            ),
+                            span,
+                        )
+                        .with_help("return an owned String for text built at run time"),
+                    );
+                }
+            }
+        } else if mentions_str(&f.result) {
             diagnostics.push(second_class(
                 &format!("the result of '{}'", f.name),
                 &f.span,

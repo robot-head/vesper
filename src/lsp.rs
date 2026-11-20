@@ -14,6 +14,7 @@
 //! traversals poll the request's token so they stop early. Proof audits run
 //! on worker threads.
 pub mod actions;
+pub mod anvil_actions;
 mod lens;
 #[cfg(test)]
 mod lens_tests;

@@ -1,57 +1,59 @@
 // Unit tests for @vesper-std/fmt::text (formatting into `String`, parsing
 // from `Str`).
-use @vesper-std/fmt::text::{
-    push_u64_radix,
-    push_u64,
-    push_i64,
-    push_hex_u64,
-    push_bool,
-    u64_to_string,
-    i64_to_string,
-    parse_u64_radix_str,
-    parse_u64_str,
-    parse_i64_str
-};
-use self::support::{
-    check,
-    parsed_u64,
-    parsed_i64,
-    parse_error,
-    parse_error_i64
-};
+test {
+    use @vesper-std/fmt::text::{
+        push_u64_radix,
+        push_u64,
+        push_i64,
+        push_hex_u64,
+        push_bool,
+        u64_to_string,
+        i64_to_string,
+        parse_u64_radix_str,
+        parse_u64_str,
+        parse_i64_str
+    };
+    use self::support::{
+        check,
+        parsed_u64,
+        parsed_i64,
+        parse_error,
+        parse_error_i64
+    };
 
-pub fn test_fmt_string() -> u64 {
-    let mut r: u64 = 0;
-    let a = u64_to_string(123);
-    r = check(a == "123", 1, r);
-    let b = u64_to_string(18446744073709551615);
-    r = check(b == "18446744073709551615", 2, r);
-    let c = i64_to_string(-9223372036854775808);
-    r = check(c == "-9223372036854775808", 3, r);
-    let mut s = String::new();
-    s.push_str("x=");
-    push_i64(inout s, -42);
-    s.push_str(", ");
-    push_hex_u64(inout s, 255, 4);
-    s.push_char(32);
-    push_bool(inout s, true);
-    s.push_char(32);
-    push_u64_radix(inout s, 1295, 36, 1);
-    s.push_char(32);
-    push_u64(inout s, 0);
-    r = check(s == "x=-42, 00ff true zz 0", 4, r);
-    r = check(s.char_count() == s.len(), 5, r);
-    r = check(parsed_u64(parse_u64_str("123"), 123), 6, r);
-    r = check(parsed_u64(parse_u64_str(b), 18446744073709551615), 7, r);
-    r = check(parse_error(parse_u64_str("18446744073709551616")) == 3, 8, r);
-    r = check(parse_error(parse_u64_str("")) == 1, 9, r);
-    r = check(parse_error(parse_u64_str("1x")) == 2, 10, r);
-    r = check(parsed_u64(parse_u64_radix_str("FF", 16), 255), 11, r);
-    r = check(parsed_i64(parse_i64_str(c), -9223372036854775808), 12, r);
-    r = check(parsed_i64(parse_i64_str("+7"), 7), 13, r);
-    r = check(parse_error_i64(parse_i64_str("-")) == 1, 14, r);
-    // A view of a longer string parses on its own.
-    r = check(parsed_u64(parse_u64_str(s[2..5]), 0) == false, 15, r);
-    r = check(parsed_u64(parse_u64_str(s[7..9]), 0), 16, r);
-    r
+    pub fn test_fmt_string() -> u64 {
+        let mut r: u64 = 0;
+        let a = u64_to_string(123);
+        r = check(a == "123", 1, r);
+        let b = u64_to_string(18446744073709551615);
+        r = check(b == "18446744073709551615", 2, r);
+        let c = i64_to_string(-9223372036854775808);
+        r = check(c == "-9223372036854775808", 3, r);
+        let mut s = String::new();
+        s.push_str("x=");
+        push_i64(inout s, -42);
+        s.push_str(", ");
+        push_hex_u64(inout s, 255, 4);
+        s.push_char(32);
+        push_bool(inout s, true);
+        s.push_char(32);
+        push_u64_radix(inout s, 1295, 36, 1);
+        s.push_char(32);
+        push_u64(inout s, 0);
+        r = check(s == "x=-42, 00ff true zz 0", 4, r);
+        r = check(s.char_count() == s.len(), 5, r);
+        r = check(parsed_u64(parse_u64_str("123"), 123), 6, r);
+        r = check(parsed_u64(parse_u64_str(b), 18446744073709551615), 7, r);
+        r = check(parse_error(parse_u64_str("18446744073709551616")) == 3, 8, r);
+        r = check(parse_error(parse_u64_str("")) == 1, 9, r);
+        r = check(parse_error(parse_u64_str("1x")) == 2, 10, r);
+        r = check(parsed_u64(parse_u64_radix_str("FF", 16), 255), 11, r);
+        r = check(parsed_i64(parse_i64_str(c), -9223372036854775808), 12, r);
+        r = check(parsed_i64(parse_i64_str("+7"), 7), 13, r);
+        r = check(parse_error_i64(parse_i64_str("-")) == 1, 14, r);
+        // A view of a longer string parses on its own.
+        r = check(parsed_u64(parse_u64_str(s[2..5]), 0) == false, 15, r);
+        r = check(parsed_u64(parse_u64_str(s[7..9]), 0), 16, r);
+        r
+    }
 }
