@@ -34,24 +34,22 @@ fn runs(value: impl Fn(char) -> u64, skip: u64) -> Vec<(u32, u32, u64)> {
 }
 
 fn table(name: &str, rows: &[(u32, u32, u64)], with_value: bool) -> String {
-    let column = |f: &dyn Fn(&(u32, u32, u64)) -> u64| {
-        rows.iter()
-            .map(|r| f(r).to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+    // `vesper fmt`'s layout: one line when it fits in 100 columns, else one
+    // element per line.
+    let array = |suffix: &str, f: &dyn Fn(&(u32, u32, u64)) -> u64| {
+        let items: Vec<String> = rows.iter().map(|r| f(r).to_string()).collect();
+        let head = format!("const {name}_{suffix}: [u64; {}] = [", rows.len());
+        let line = format!("{head}{}];\n", items.join(", "));
+        if line.len() <= 101 {
+            line
+        } else {
+            format!("{head}\n    {}\n];\n", items.join(",\n    "))
+        }
     };
-    let n = rows.len();
-    let mut s = String::new();
-    s += &format!(
-        "const {name}_LO: [u64; {n}] = [{}];\n",
-        column(&|r| r.0 as u64)
-    );
-    s += &format!(
-        "const {name}_HI: [u64; {n}] = [{}];\n",
-        column(&|r| r.1 as u64)
-    );
+    let mut s = array("LO", &|r| r.0 as u64);
+    s += &array("HI", &|r| r.1 as u64);
     if with_value {
-        s += &format!("const {name}_W: [u64; {n}] = [{}];\n", column(&|r| r.2));
+        s += &array("W", &|r| r.2);
     }
     s
 }
@@ -67,21 +65,33 @@ fn width_run(c: u64) -> u64 {
             break;
         }
         let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
-        let first = if mid < {W} { WIDTH_LO[mid] } else { 0 };
+        let first = if mid < {W} {
+            WIDTH_LO[mid]
+        } else {
+            0
+        };
         if first <= c {
             lo = wrapping_add(mid, 1);
         } else {
             hi = mid;
         }
     }
-    if lo == 0 { {W} } else { wrapping_sub(lo, 1) }
+    if lo == 0 {
+        {W}
+    } else {
+        wrapping_sub(lo, 1)
+    }
 }
 
 // `UnicodeWidthChar::width(c).unwrap_or(1)` for the char `c`.
 pub fn char_width(c: u64) -> u64 {
     let i = width_run(c);
     if i < {W} {
-        if c <= WIDTH_HI[i] { WIDTH_W[i] } else { 1 }
+        if c <= WIDTH_HI[i] {
+            WIDTH_W[i]
+        } else {
+            1
+        }
     } else {
         1
     }
@@ -94,8 +104,16 @@ pub fn is_space(c: u64) -> bool {
         if i >= {S} {
             break;
         }
-        let lo = if i < {S} { SPACE_LO[i] } else { 0 };
-        let hi = if i < {S} { SPACE_HI[i] } else { 0 };
+        let lo = if i < {S} {
+            SPACE_LO[i]
+        } else {
+            0
+        };
+        let hi = if i < {S} {
+            SPACE_HI[i]
+        } else {
+            0
+        };
         if c < lo {
             return false;
         }
