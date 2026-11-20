@@ -772,14 +772,22 @@ impl From<&DiscoveredTest> for UnitEntry {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnitExecution {
+    Standard,
+    MutationBaseline,
+    Mutant,
+}
+
 fn run_tests_on_world(
     source: &str,
     world: &World,
     selected: &[UnitEntry],
     fuel: u64,
-    prefer_jit: bool,
+    execution: UnitExecution,
     foreign: Option<(&ForeignChecked, &EvalHost)>,
 ) -> (bool, Vec<UnitTestCaseReport>) {
+    let prefer_jit = execution == UnitExecution::Standard;
     let mut fallback: BTreeMap<&str, String> = Default::default();
     let mut batch = None;
     if foreign.is_none() && prefer_jit && !selected.is_empty() {
@@ -871,6 +879,9 @@ fn run_tests_on_world(
             test_case_pin: None,
             vchrono_capsule: None,
         });
+        if !passed && execution == UnitExecution::Mutant {
+            break;
+        }
     }
     (all_passed, cases)
 }
@@ -1774,7 +1785,11 @@ impl TestExecution<'_> {
                 world,
                 &unit_batch_selected,
                 opts.fuel,
-                !opts.mutate,
+                if opts.mutate {
+                    UnitExecution::MutationBaseline
+                } else {
+                    UnitExecution::Standard
+                },
                 foreign,
             );
             for mut rep in unit_cases {
@@ -2221,7 +2236,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                         checked.world(),
                         &unit.selected,
                         opts.fuel,
-                        false,
+                        UnitExecution::Mutant,
                         checked.foreign(host.as_ref()),
                     );
                     cases
@@ -2432,5 +2447,32 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         Err(format!(
             "{failed_tests} test(s) failed ({file_errors} file error(s))"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutant_replay_stops_after_the_first_failure() {
+        let source = "fn first() -> bool { false } fn second() -> bool { true }";
+        let checked = check::check(&parser::parse(source).module);
+        assert!(checked.diagnostics.is_empty());
+        let selected = ["first", "second"].map(|name| UnitEntry {
+            name: name.into(),
+            entry: name.into(),
+            span: 0..0,
+        });
+        for (execution, expected_count) in [
+            (UnitExecution::MutationBaseline, 2),
+            (UnitExecution::Mutant, 1),
+        ] {
+            let (passed, reports) =
+                run_tests_on_world(source, &checked.world, &selected, 10_000, execution, None);
+            assert!(!passed);
+            assert_eq!(reports.len(), expected_count);
+            assert_eq!(reports[0].name, "first");
+        }
     }
 }
