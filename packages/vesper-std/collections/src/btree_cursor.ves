@@ -16,7 +16,7 @@ fn at[T: mod copy](in s: Slice[T], i: u64, fallback: T) -> T {
     }
 }
 
-impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
+impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
     // `c` moved forward past empty leaves to a real entry, or to the end.
     fn settle(in self, c: BTreeCursor) -> BTreeCursor {
         let mut leaf = c.leaf;
@@ -83,19 +83,14 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
         )
     }
 
-    // The entry at `c`, or `None` at the end.
-    pub fn entry(in self, c: BTreeCursor) -> Option[(K, V)] {
+    // The key and value position (in `vals`) at `c`, or `None` at the end.
+    pub fn entry_position(in self, c: BTreeCursor) -> Option[(K, u64)] {
         if c.leaf == none_id() {
             return Option::None;
         }
         let i = wrapping_add(wrapping_mul(c.leaf, 16), c.pos);
         match self.lkeys.try_get(i) {
-            Option::Some(k) => {
-                match self.lvals.try_get(i) {
-                    Option::Some(v) => Option::Some((k, v)),
-                    Option::None => Option::None,
-                }
-            },
+            Option::Some(k) => Option::Some((k, at(in self.lvids.as_slice(), i, none_id()))),
             Option::None => Option::None,
         }
     }
@@ -112,6 +107,22 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
                 pos: wrapping_add(c.pos, 1)
             }
         )
+    }
+
+}
+
+impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
+    // The entry at `c`, or `None` at the end.
+    pub fn entry(in self, c: BTreeCursor) -> Option[(K, V)] {
+        match self.entry_position(c) {
+            Option::Some((k, id)) => {
+                match self.vals.try_get(id) {
+                    Option::Some(v) => Option::Some((k, v)),
+                    Option::None => Option::None,
+                }
+            },
+            Option::None => Option::None,
+        }
     }
 
     // The smallest entry.
