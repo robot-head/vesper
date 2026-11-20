@@ -56,8 +56,8 @@ const EDITS: &[(&str, &str, &str)] = &[
     // d3d12: NON_PIXEL_SHADING also covers pixel shading.
     (
         "d3d12",
-        "bits = bits | 0x8 | 0x80;",
-        "bits = bits | 0x8 | 0x10 | 0x80;",
+        "bits = bits | SYNC_VERTEX_SHADING | SYNC_COMPUTE_SHADING;",
+        "bits = bits | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_COMPUTE_SHADING;",
     ),
     // graph: overlapping uses with different explicit layouts are accepted.
     (

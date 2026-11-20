@@ -9,6 +9,15 @@ use crate::lifecycle::{
 use crate::{Command, PassId, Plan, QueueKind};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+// Ceilings on `Limits` (each limit but `max_scratch` and `max_drain_polls`
+// must also be nonzero).
+const MAX_QUEUES: usize = 64;
+const MAX_INFLIGHT: usize = 4096;
+const MAX_COMMANDS: usize = 1_000_000;
+const MAX_SCRATCH: usize = 4096;
+const MAX_POLL_EVENTS: usize = 65_536;
+const MAX_DRAIN_POLLS: usize = 65_536;
+
 fn fence_add(base: u64, increment: u64) -> Result<u64, LifecycleError> {
     base.checked_add(increment)
         .filter(|value| *value <= MAX_FENCE_VALUE)
@@ -17,15 +26,15 @@ fn fence_add(base: u64, increment: u64) -> Result<u64, LifecycleError> {
 
 fn validate_limits(limits: Limits) -> Result<(), LifecycleError> {
     if limits.max_queues == 0
-        || limits.max_queues > 64
+        || limits.max_queues > MAX_QUEUES
         || limits.max_inflight == 0
-        || limits.max_inflight > 4096
+        || limits.max_inflight > MAX_INFLIGHT
         || limits.max_commands == 0
-        || limits.max_commands > 1_000_000
-        || limits.max_scratch > 4096
+        || limits.max_commands > MAX_COMMANDS
+        || limits.max_scratch > MAX_SCRATCH
         || limits.max_poll_events == 0
-        || limits.max_poll_events > 65_536
-        || limits.max_drain_polls > 65_536
+        || limits.max_poll_events > MAX_POLL_EVENTS
+        || limits.max_drain_polls > MAX_DRAIN_POLLS
     {
         return Err(LifecycleError::Limit("invalid lifecycle limits"));
     }

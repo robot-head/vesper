@@ -77,18 +77,23 @@ struct Recorder {
     poll_head: u64
 }
 
+// Ceilings on the recorder's bounds.
+const MAX_HISTORY: u64 = 65536;
+const MAX_PENDING: u64 = 4096;
+const MAX_WORK_PER_POLL: u64 = 1000000;
+
 pub fn recorder_bounds_ok(history_limit: u64, pending_limit: u64, work_per_poll: u64) -> bool {
     !(
         history_limit
             == 0
             || history_limit
-            > 65536
+            > MAX_HISTORY
             || pending_limit
             == 0
             || pending_limit
-            > 4096
+            > MAX_PENDING
             || work_per_poll
-            > 1000000
+            > MAX_WORK_PER_POLL
     )
 }
 

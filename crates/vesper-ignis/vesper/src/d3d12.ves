@@ -15,20 +15,51 @@
 // ---------------------------------------------------------------------------
 // D3D12 enhanced-barrier vocabulary (src/d3d12.rs)
 //
-// Sync bits: ALL 0x1, DRAW 0x2, INDEX_INPUT 0x4, VERTEX_SHADING 0x8,
-// PIXEL_SHADING 0x10, DEPTH_STENCIL 0x20, RENDER_TARGET 0x40,
-// COMPUTE_SHADING 0x80, RAYTRACING 0x100, COPY 0x200, RESOLVE 0x400,
-// EXECUTE_INDIRECT 0x800, ALL_SHADING 0x1000, NON_PIXEL_SHADING 0x2000,
-// EMIT_RTAS_POSTBUILD_INFO 0x4000, CLEAR_UAV 0x8000, BUILD_RTAS 0x800000,
-// COPY_RTAS 0x1000000, SPLIT 0x80000000.
-//
-// Access bits: COMMON 0, VERTEX_BUFFER 0x1, CONSTANT_BUFFER 0x2,
-// INDEX_BUFFER 0x4, RENDER_TARGET 0x8, UNORDERED_ACCESS 0x10,
-// DEPTH_STENCIL_WRITE 0x20, DEPTH_STENCIL_READ 0x40, SHADER_RESOURCE 0x80,
-// STREAM_OUTPUT 0x100, INDIRECT_ARGUMENT 0x200, COPY_DEST 0x400,
-// COPY_SOURCE 0x800, RESOLVE_DEST 0x1000, RESOLVE_SOURCE 0x2000,
-// RTAS_READ 0x4000, RTAS_WRITE 0x8000, SHADING_RATE_SOURCE 0x10000,
-// NO_ACCESS 0x80000000.
+// `D3D12_BARRIER_SYNC` bits (RTAS = raytracing acceleration structure,
+// UAV = unordered access view).
+const SYNC_ALL: u32 = 0x1;
+const SYNC_DRAW: u32 = 0x2;
+const SYNC_INDEX_INPUT: u32 = 0x4;
+const SYNC_VERTEX_SHADING: u32 = 0x8;
+const SYNC_PIXEL_SHADING: u32 = 0x10;
+const SYNC_DEPTH_STENCIL: u32 = 0x20;
+const SYNC_RENDER_TARGET: u32 = 0x40;
+const SYNC_COMPUTE_SHADING: u32 = 0x80;
+const SYNC_RAYTRACING: u32 = 0x100;
+const SYNC_COPY: u32 = 0x200;
+const SYNC_RESOLVE: u32 = 0x400;
+const SYNC_EXECUTE_INDIRECT: u32 = 0x800;
+const SYNC_ALL_SHADING: u32 = 0x1000;
+const SYNC_NON_PIXEL_SHADING: u32 = 0x2000;
+const SYNC_EMIT_RTAS_POSTBUILD_INFO: u32 = 0x4000;
+const SYNC_CLEAR_UAV: u32 = 0x8000;
+const SYNC_BUILD_RTAS: u32 = 0x800000;
+const SYNC_COPY_RTAS: u32 = 0x1000000;
+const SYNC_SPLIT: u32 = 0x80000000;
+// Every sync bit but SPLIT.
+const SYNC_SCOPES: u32 = 0x7fffffff;
+// ALL through CLEAR_UAV, the low sixteen scopes.
+const SYNC_ALL_THROUGH_CLEAR_UAV: u32 = 0xffff;
+
+// `D3D12_BARRIER_ACCESS` bits (COMMON is 0).
+const ACCESS_VERTEX_BUFFER: u32 = 0x1;
+const ACCESS_CONSTANT_BUFFER: u32 = 0x2;
+const ACCESS_INDEX_BUFFER: u32 = 0x4;
+const ACCESS_RENDER_TARGET: u32 = 0x8;
+const ACCESS_UNORDERED_ACCESS: u32 = 0x10;
+const ACCESS_DEPTH_STENCIL_WRITE: u32 = 0x20;
+const ACCESS_DEPTH_STENCIL_READ: u32 = 0x40;
+const ACCESS_SHADER_RESOURCE: u32 = 0x80;
+const ACCESS_STREAM_OUTPUT: u32 = 0x100;
+const ACCESS_INDIRECT_ARGUMENT: u32 = 0x200;
+const ACCESS_COPY_DEST: u32 = 0x400;
+const ACCESS_COPY_SOURCE: u32 = 0x800;
+const ACCESS_RESOLVE_DEST: u32 = 0x1000;
+const ACCESS_RESOLVE_SOURCE: u32 = 0x2000;
+const ACCESS_RTAS_READ: u32 = 0x4000;
+const ACCESS_RTAS_WRITE: u32 = 0x8000;
+const ACCESS_SHADING_RATE_SOURCE: u32 = 0x10000;
+const ACCESS_NO_ACCESS: u32 = 0x80000000;
 
 // `D3D12_BARRIER_LAYOUT` for textures, in the Rust enum's order.
 copy enum Layout {
@@ -67,31 +98,31 @@ copy enum QueueKind {
 
 // Sync scopes the `ALL` table supersedes.
 fn all_sync_supersedes() -> u32 {
-    0x8ffe
+    SYNC_DRAW | SYNC_INDEX_INPUT | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_DEPTH_STENCIL | SYNC_RENDER_TARGET | SYNC_COMPUTE_SHADING | SYNC_RAYTRACING | SYNC_COPY | SYNC_RESOLVE | SYNC_EXECUTE_INDIRECT | SYNC_CLEAR_UAV
 }
 
 fn split_bit() -> u32 {
-    0x80000000
+    SYNC_SPLIT
 }
 
 fn no_access() -> u32 {
-    0x80000000
+    ACCESS_NO_ACCESS
 }
 
 // Aggregate scopes expanded to the scopes they supersede.
 pub fn sync_expanded(sync: u32) -> u32 {
-    let mut bits = sync & 0x7fffffff;
-    if (bits & 0x1) != 0 {
-        bits = bits | all_sync_supersedes() | 0x1000 | 0x2000;
+    let mut bits = sync & SYNC_SCOPES;
+    if (bits & SYNC_ALL) != 0 {
+        bits = bits | all_sync_supersedes() | SYNC_ALL_SHADING | SYNC_NON_PIXEL_SHADING;
     }
-    if (bits & 0x2) != 0 {
-        bits = bits | 0x4 | 0x8 | 0x10 | 0x20 | 0x40;
+    if (bits & SYNC_DRAW) != 0 {
+        bits = bits | SYNC_INDEX_INPUT | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_DEPTH_STENCIL | SYNC_RENDER_TARGET;
     }
-    if (bits & 0x1000) != 0 {
-        bits = bits | 0x8 | 0x10 | 0x80;
+    if (bits & SYNC_ALL_SHADING) != 0 {
+        bits = bits | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_COMPUTE_SHADING;
     }
-    if (bits & 0x2000) != 0 {
-        bits = bits | 0x8 | 0x80;
+    if (bits & SYNC_NON_PIXEL_SHADING) != 0 {
+        bits = bits | SYNC_VERTEX_SHADING | SYNC_COMPUTE_SHADING;
     }
     bits
 }
@@ -125,17 +156,18 @@ fn access_union(a: u32, b: u32) -> u32 {
 }
 
 fn write_access() -> u32 {
-    0x8 | 0x10 | 0x20 | 0x100 | 0x400 | 0x1000 | 0x8000
+    ACCESS_RENDER_TARGET | ACCESS_UNORDERED_ACCESS | ACCESS_DEPTH_STENCIL_WRITE | ACCESS_STREAM_OUTPUT | ACCESS_COPY_DEST | ACCESS_RESOLVE_DEST | ACCESS_RTAS_WRITE
 }
 
 fn buffer_only_access() -> u32 {
-    0x1 | 0x2 | 0x4 | 0x100 | 0x200 | 0x4000 | 0x8000
+    ACCESS_VERTEX_BUFFER | ACCESS_CONSTANT_BUFFER | ACCESS_INDEX_BUFFER | ACCESS_STREAM_OUTPUT | ACCESS_INDIRECT_ARGUMENT | ACCESS_RTAS_READ | ACCESS_RTAS_WRITE
 }
 
 fn texture_only_access() -> u32 {
-    0x8 | 0x20 | 0x40 | 0x1000 | 0x2000 | 0x10000
+    ACCESS_RENDER_TARGET | ACCESS_DEPTH_STENCIL_WRITE | ACCESS_DEPTH_STENCIL_READ | ACCESS_RESOLVE_DEST | ACCESS_RESOLVE_SOURCE | ACCESS_SHADING_RATE_SOURCE
 }
 
+// Every access bit, VERTEX_BUFFER through SHADING_RATE_SOURCE.
 fn known_access() -> u32 {
     0x1ffff
 }
@@ -150,40 +182,40 @@ fn access_contains(have: u32, need: u32) -> bool {
 
 // Sync scopes compatible with one access bit.
 fn compatible_sync(bit: u32) -> u32 {
-    let shading: u32 = 0x8 | 0x10 | 0x80 | 0x2 | 0x1000;
-    let rtas: u32 = 0x800000 | 0x1000000;
-    let listed: u32 = if bit == 0x1 {
-        0x8 | 0x2 | 0x1000
-    } else if bit == 0x2 {
+    let shading: u32 = SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_COMPUTE_SHADING | SYNC_DRAW | SYNC_ALL_SHADING;
+    let rtas: u32 = SYNC_BUILD_RTAS | SYNC_COPY_RTAS;
+    let listed: u32 = if bit == ACCESS_VERTEX_BUFFER {
+        SYNC_VERTEX_SHADING | SYNC_DRAW | SYNC_ALL_SHADING
+    } else if bit == ACCESS_CONSTANT_BUFFER {
         shading
-    } else if bit == 0x4 {
-        0x4 | 0x2
-    } else if bit == 0x8 {
-        0x2 | 0x40
-    } else if bit == 0x10 {
-        shading | 0x8000 | 0x4000 | 0x100
-    } else if bit == 0x20 || bit == 0x40 {
-        0x2 | 0x20
-    } else if bit == 0x80 {
-        shading | 0x800000 | 0x100
-    } else if bit == 0x100 {
-        0x8 | 0x2 | 0x1000
-    } else if bit == 0x200 {
-        0x800
-    } else if bit == 0x400 || bit == 0x800 {
-        0x200
-    } else if bit == 0x1000 || bit == 0x2000 {
-        0x400
-    } else if bit == 0x4000 {
-        0x80 | 0x100 | 0x1000 | rtas | 0x4000
-    } else if bit == 0x8000 {
-        0x80 | 0x100 | 0x1000 | rtas
-    } else if bit == 0x10000 {
-        0x10 | 0x1000
+    } else if bit == ACCESS_INDEX_BUFFER {
+        SYNC_INDEX_INPUT | SYNC_DRAW
+    } else if bit == ACCESS_RENDER_TARGET {
+        SYNC_DRAW | SYNC_RENDER_TARGET
+    } else if bit == ACCESS_UNORDERED_ACCESS {
+        shading | SYNC_CLEAR_UAV | SYNC_EMIT_RTAS_POSTBUILD_INFO | SYNC_RAYTRACING
+    } else if bit == ACCESS_DEPTH_STENCIL_WRITE || bit == ACCESS_DEPTH_STENCIL_READ {
+        SYNC_DRAW | SYNC_DEPTH_STENCIL
+    } else if bit == ACCESS_SHADER_RESOURCE {
+        shading | SYNC_BUILD_RTAS | SYNC_RAYTRACING
+    } else if bit == ACCESS_STREAM_OUTPUT {
+        SYNC_VERTEX_SHADING | SYNC_DRAW | SYNC_ALL_SHADING
+    } else if bit == ACCESS_INDIRECT_ARGUMENT {
+        SYNC_EXECUTE_INDIRECT
+    } else if bit == ACCESS_COPY_DEST || bit == ACCESS_COPY_SOURCE {
+        SYNC_COPY
+    } else if bit == ACCESS_RESOLVE_DEST || bit == ACCESS_RESOLVE_SOURCE {
+        SYNC_RESOLVE
+    } else if bit == ACCESS_RTAS_READ {
+        SYNC_COMPUTE_SHADING | SYNC_RAYTRACING | SYNC_ALL_SHADING | rtas | SYNC_EMIT_RTAS_POSTBUILD_INFO
+    } else if bit == ACCESS_RTAS_WRITE {
+        SYNC_COMPUTE_SHADING | SYNC_RAYTRACING | SYNC_ALL_SHADING | rtas
+    } else if bit == ACCESS_SHADING_RATE_SOURCE {
+        SYNC_PIXEL_SHADING | SYNC_ALL_SHADING
     } else {
         0
     };
-    0x1 | listed
+    SYNC_ALL | listed
 }
 
 // Access bits for which none of `sync`'s scopes is listed as compatible.
@@ -235,10 +267,10 @@ pub fn layout_raw(layout: Layout) -> u32 {
 
 // Accesses the specification lists as compatible with a layout.
 pub fn layout_compatible_access(layout: Layout) -> u32 {
-    let srv: u32 = 0x80;
-    let src: u32 = 0x800;
-    let dst: u32 = 0x400;
-    let uav: u32 = 0x10;
+    let srv: u32 = ACCESS_SHADER_RESOURCE;
+    let src: u32 = ACCESS_COPY_SOURCE;
+    let dst: u32 = ACCESS_COPY_DEST;
+    let uav: u32 = ACCESS_UNORDERED_ACCESS;
     match layout {
         Layout::Undefined => 0,
         Layout::Common => srv | src | dst,
@@ -246,13 +278,13 @@ pub fn layout_compatible_access(layout: Layout) -> u32 {
         Layout::ComputeQueueCommon => srv | src | dst | uav,
         Layout::GenericRead => srv | src,
         Layout::ComputeQueueGenericRead => srv | src,
-        Layout::DirectQueueGenericRead => srv | src | 0x40 | 0x10000 | 0x2000,
-        Layout::RenderTarget => 0x8,
+        Layout::DirectQueueGenericRead => srv | src | ACCESS_DEPTH_STENCIL_READ | ACCESS_SHADING_RATE_SOURCE | ACCESS_RESOLVE_SOURCE,
+        Layout::RenderTarget => ACCESS_RENDER_TARGET,
         Layout::UnorderedAccess => uav,
         Layout::DirectQueueUnorderedAccess => uav,
         Layout::ComputeQueueUnorderedAccess => uav,
-        Layout::DepthStencilWrite => 0x40 | 0x20,
-        Layout::DepthStencilRead => 0x40,
+        Layout::DepthStencilWrite => ACCESS_DEPTH_STENCIL_READ | ACCESS_DEPTH_STENCIL_WRITE,
+        Layout::DepthStencilRead => ACCESS_DEPTH_STENCIL_READ,
         Layout::ShaderResource => srv,
         Layout::DirectQueueShaderResource => srv,
         Layout::ComputeQueueShaderResource => srv,
@@ -262,9 +294,9 @@ pub fn layout_compatible_access(layout: Layout) -> u32 {
         Layout::CopyDest => dst,
         Layout::DirectQueueCopyDest => dst,
         Layout::ComputeQueueCopyDest => dst,
-        Layout::ResolveSource => 0x2000,
-        Layout::ResolveDest => 0x1000,
-        Layout::ShadingRateSource => 0x10000,
+        Layout::ResolveSource => ACCESS_RESOLVE_SOURCE,
+        Layout::ResolveDest => ACCESS_RESOLVE_DEST,
+        Layout::ShadingRateSource => ACCESS_SHADING_RATE_SOURCE,
     }
 }
 
@@ -313,16 +345,16 @@ pub fn queue_can_transition(kind: QueueKind, before: Layout, after: Layout) -> b
 pub fn queue_supported_access(kind: QueueKind) -> u32 {
     match kind {
         QueueKind::Direct => known_access(),
-        QueueKind::Compute => 0x2 | 0x10 | 0x80 | 0x200 | 0x400 | 0x800 | 0x4000 | 0x8000,
-        QueueKind::Copy => 0x400 | 0x800,
+        QueueKind::Compute => ACCESS_CONSTANT_BUFFER | ACCESS_UNORDERED_ACCESS | ACCESS_SHADER_RESOURCE | ACCESS_INDIRECT_ARGUMENT | ACCESS_COPY_DEST | ACCESS_COPY_SOURCE | ACCESS_RTAS_READ | ACCESS_RTAS_WRITE,
+        QueueKind::Copy => ACCESS_COPY_DEST | ACCESS_COPY_SOURCE,
     }
 }
 
 pub fn queue_supported_sync(kind: QueueKind) -> u32 {
     match kind {
-        QueueKind::Direct => 0xffff | 0x1800000,
-        QueueKind::Compute => 0x1 | 0x80 | 0x1000 | 0x2000 | 0x100 | 0x200 | 0x800 | 0x8000 | 0x4000 | 0x800000 | 0x1000000,
-        QueueKind::Copy => 0x1 | 0x200,
+        QueueKind::Direct => SYNC_ALL_THROUGH_CLEAR_UAV | SYNC_BUILD_RTAS | SYNC_COPY_RTAS,
+        QueueKind::Compute => SYNC_ALL | SYNC_COMPUTE_SHADING | SYNC_ALL_SHADING | SYNC_NON_PIXEL_SHADING | SYNC_RAYTRACING | SYNC_COPY | SYNC_EXECUTE_INDIRECT | SYNC_CLEAR_UAV | SYNC_EMIT_RTAS_POSTBUILD_INFO | SYNC_BUILD_RTAS | SYNC_COPY_RTAS,
+        QueueKind::Copy => SYNC_ALL | SYNC_COPY,
     }
 }
 

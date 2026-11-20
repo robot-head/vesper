@@ -7,6 +7,9 @@ use crate::graph::{
     next_graph_id,
 };
 
+/// Subresources one texture may have.
+const MAX_SUBRESOURCES: u32 = 1 << 20;
+
 impl ByteRange {
     pub(crate) fn resolve(self, len: u64) -> Option<(u64, u64)> {
         if self.offset >= len {
@@ -204,7 +207,7 @@ impl RenderGraph {
         else {
             return invalid("subresource count overflows u32");
         };
-        if count > 1 << 20 {
+        if count > MAX_SUBRESOURCES {
             return invalid("more than 2^20 subresources");
         }
         if desc.final_layout == Some(Layout::Undefined) {

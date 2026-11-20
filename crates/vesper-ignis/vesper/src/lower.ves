@@ -1,27 +1,55 @@
 // ---------------------------------------------------------------------------
 // Multi-backend barrier lowering (src/multi_backend.rs)
 //
-// Vulkan `VkPipelineStageFlagBits2`: DRAW_INDIRECT 1<<1, VERTEX_INPUT 1<<2,
-// VERTEX_SHADER 1<<3, FRAGMENT_SHADER 1<<7, EARLY_FRAGMENT_TESTS 1<<8,
-// LATE_FRAGMENT_TESTS 1<<9, COLOR_ATTACHMENT_OUTPUT 1<<10,
-// COMPUTE_SHADER 1<<11, ALL_TRANSFER 1<<12, ALL_GRAPHICS 1<<15,
-// ALL_COMMANDS 1<<16, RAY_TRACING_SHADER 1<<21,
-// FRAGMENT_SHADING_RATE_ATTACHMENT 1<<22, TRANSFORM_FEEDBACK 1<<24,
-// ACCELERATION_STRUCTURE_BUILD 1<<25, ACCELERATION_STRUCTURE_COPY 1<<28,
-// RESOLVE 1<<33, CLEAR 1<<35, VERTEX_ATTRIBUTE_INPUT 1<<37,
-// PRE_RASTERIZATION_SHADERS 1<<38.
-//
-// Vulkan `VkAccessFlagBits2`: INDIRECT_COMMAND_READ 1<<0, INDEX_READ 1<<1,
-// VERTEX_ATTRIBUTE_READ 1<<2, UNIFORM_READ 1<<3, SHADER_READ 1<<5,
-// SHADER_WRITE 1<<6, COLOR_ATTACHMENT_READ 1<<7, COLOR_ATTACHMENT_WRITE 1<<8,
-// DEPTH_STENCIL_ATTACHMENT_READ 1<<9, DEPTH_STENCIL_ATTACHMENT_WRITE 1<<10,
-// TRANSFER_READ 1<<11, TRANSFER_WRITE 1<<12, MEMORY_READ 1<<15,
-// MEMORY_WRITE 1<<16, ACCELERATION_STRUCTURE_READ 1<<21,
-// ACCELERATION_STRUCTURE_WRITE 1<<22,
-// FRAGMENT_SHADING_RATE_ATTACHMENT_READ 1<<23, TRANSFORM_FEEDBACK_WRITE 1<<25.
-//
-// Metal 4 `MTLStages`: VERTEX 1<<0, FRAGMENT 1<<1, TILE 1<<2,
-// DISPATCH 1<<27, BLIT 1<<28, ACCELERATION_STRUCTURE 1<<29.
+// Vulkan `VkPipelineStageFlagBits2`.
+const VK_STAGE_DRAW_INDIRECT: u64 = 0x2;
+const VK_STAGE_VERTEX_INPUT: u64 = 0x4;
+const VK_STAGE_VERTEX_SHADER: u64 = 0x8;
+const VK_STAGE_FRAGMENT_SHADER: u64 = 0x80;
+const VK_STAGE_EARLY_FRAGMENT_TESTS: u64 = 0x100;
+const VK_STAGE_LATE_FRAGMENT_TESTS: u64 = 0x200;
+const VK_STAGE_COLOR_ATTACHMENT_OUTPUT: u64 = 0x400;
+const VK_STAGE_COMPUTE_SHADER: u64 = 0x800;
+const VK_STAGE_ALL_TRANSFER: u64 = 0x1000;
+const VK_STAGE_ALL_GRAPHICS: u64 = 0x8000;
+const VK_STAGE_ALL_COMMANDS: u64 = 0x10000;
+const VK_STAGE_RAY_TRACING_SHADER: u64 = 0x200000;
+const VK_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT: u64 = 0x400000;
+const VK_STAGE_TRANSFORM_FEEDBACK: u64 = 0x1000000;
+const VK_STAGE_ACCELERATION_STRUCTURE_BUILD: u64 = 0x2000000;
+const VK_STAGE_ACCELERATION_STRUCTURE_COPY: u64 = 0x10000000;
+const VK_STAGE_RESOLVE: u64 = 0x200000000;
+const VK_STAGE_CLEAR: u64 = 0x800000000;
+const VK_STAGE_VERTEX_ATTRIBUTE_INPUT: u64 = 0x2000000000;
+const VK_STAGE_PRE_RASTERIZATION_SHADERS: u64 = 0x4000000000;
+
+// Vulkan `VkAccessFlagBits2`.
+const VK_ACCESS_INDIRECT_COMMAND_READ: u64 = 0x1;
+const VK_ACCESS_INDEX_READ: u64 = 0x2;
+const VK_ACCESS_VERTEX_ATTRIBUTE_READ: u64 = 0x4;
+const VK_ACCESS_UNIFORM_READ: u64 = 0x8;
+const VK_ACCESS_SHADER_READ: u64 = 0x20;
+const VK_ACCESS_SHADER_WRITE: u64 = 0x40;
+const VK_ACCESS_COLOR_ATTACHMENT_READ: u64 = 0x80;
+const VK_ACCESS_COLOR_ATTACHMENT_WRITE: u64 = 0x100;
+const VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ: u64 = 0x200;
+const VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE: u64 = 0x400;
+const VK_ACCESS_TRANSFER_READ: u64 = 0x800;
+const VK_ACCESS_TRANSFER_WRITE: u64 = 0x1000;
+const VK_ACCESS_MEMORY_READ: u64 = 0x8000;
+const VK_ACCESS_MEMORY_WRITE: u64 = 0x10000;
+const VK_ACCESS_ACCELERATION_STRUCTURE_READ: u64 = 0x200000;
+const VK_ACCESS_ACCELERATION_STRUCTURE_WRITE: u64 = 0x400000;
+const VK_ACCESS_FRAGMENT_SHADING_RATE_ATTACHMENT_READ: u64 = 0x800000;
+const VK_ACCESS_TRANSFORM_FEEDBACK_WRITE: u64 = 0x2000000;
+
+// Metal 4 `MTLStages`.
+const MTL_STAGE_VERTEX: u32 = 0x1;
+const MTL_STAGE_FRAGMENT: u32 = 0x2;
+const MTL_STAGE_TILE: u32 = 0x4;
+const MTL_STAGE_DISPATCH: u32 = 0x8000000;
+const MTL_STAGE_BLIT: u32 = 0x10000000;
+const MTL_STAGE_ACCELERATION_STRUCTURE: u32 = 0x20000000;
 
 copy enum GpuApiTarget {
     D3D12Agility1620,
@@ -40,65 +68,65 @@ copy enum AccessBits {
 }
 
 fn vk_stage_bits_lossy(sync: u32) -> u64 {
-    let bits = sync & 0x7fffffff;
+    let bits = sync & SYNC_SCOPES;
     let mut out: u64 = 0;
-    if (bits & 0x1) != 0 {
-        out = out | 0x10000;
+    if (bits & SYNC_ALL) != 0 {
+        out = out | VK_STAGE_ALL_COMMANDS;
     }
-    if (bits & 0x2) != 0 {
-        out = out | 0x8000;
+    if (bits & SYNC_DRAW) != 0 {
+        out = out | VK_STAGE_ALL_GRAPHICS;
     }
-    if (bits & 0x4) != 0 {
-        out = out | 0x4;
+    if (bits & SYNC_INDEX_INPUT) != 0 {
+        out = out | VK_STAGE_VERTEX_INPUT;
     }
-    if (bits & 0x8) != 0 {
-        out = out | 0x8 | 0x2000000000;
+    if (bits & SYNC_VERTEX_SHADING) != 0 {
+        out = out | VK_STAGE_VERTEX_SHADER | VK_STAGE_VERTEX_ATTRIBUTE_INPUT;
     }
-    if (bits & 0x10) != 0 {
-        out = out | 0x80;
+    if (bits & SYNC_PIXEL_SHADING) != 0 {
+        out = out | VK_STAGE_FRAGMENT_SHADER;
     }
-    if (bits & 0x20) != 0 {
-        out = out | 0x100 | 0x200;
+    if (bits & SYNC_DEPTH_STENCIL) != 0 {
+        out = out | VK_STAGE_EARLY_FRAGMENT_TESTS | VK_STAGE_LATE_FRAGMENT_TESTS;
     }
-    if (bits & 0x40) != 0 {
-        out = out | 0x400;
+    if (bits & SYNC_RENDER_TARGET) != 0 {
+        out = out | VK_STAGE_COLOR_ATTACHMENT_OUTPUT;
     }
-    if (bits & 0x80) != 0 {
-        out = out | 0x800;
+    if (bits & SYNC_COMPUTE_SHADING) != 0 {
+        out = out | VK_STAGE_COMPUTE_SHADER;
     }
-    if (bits & 0x100) != 0 {
-        out = out | 0x200000;
+    if (bits & SYNC_RAYTRACING) != 0 {
+        out = out | VK_STAGE_RAY_TRACING_SHADER;
     }
-    if (bits & 0x800000) != 0 {
-        out = out | 0x2000000;
+    if (bits & SYNC_BUILD_RTAS) != 0 {
+        out = out | VK_STAGE_ACCELERATION_STRUCTURE_BUILD;
     }
-    if (bits & (0x1000000 | 0x4000)) != 0 {
-        out = out | 0x10000000;
+    if (bits & (SYNC_COPY_RTAS | SYNC_EMIT_RTAS_POSTBUILD_INFO)) != 0 {
+        out = out | VK_STAGE_ACCELERATION_STRUCTURE_COPY;
     }
-    if (bits & 0x200) != 0 {
-        out = out | 0x1000;
+    if (bits & SYNC_COPY) != 0 {
+        out = out | VK_STAGE_ALL_TRANSFER;
     }
-    if (bits & 0x400) != 0 {
-        out = out | 0x200000000;
+    if (bits & SYNC_RESOLVE) != 0 {
+        out = out | VK_STAGE_RESOLVE;
     }
-    if (bits & 0x800) != 0 {
-        out = out | 0x2;
+    if (bits & SYNC_EXECUTE_INDIRECT) != 0 {
+        out = out | VK_STAGE_DRAW_INDIRECT;
     }
-    if (bits & 0x1000) != 0 {
-        out = out | 0x4000000000 | 0x2000000000 | 0x80 | 0x800;
+    if (bits & SYNC_ALL_SHADING) != 0 {
+        out = out | VK_STAGE_PRE_RASTERIZATION_SHADERS | VK_STAGE_VERTEX_ATTRIBUTE_INPUT | VK_STAGE_FRAGMENT_SHADER | VK_STAGE_COMPUTE_SHADER;
     }
-    if (bits & 0x2000) != 0 {
-        out = out | 0x4000000000 | 0x2000000000 | 0x800;
+    if (bits & SYNC_NON_PIXEL_SHADING) != 0 {
+        out = out | VK_STAGE_PRE_RASTERIZATION_SHADERS | VK_STAGE_VERTEX_ATTRIBUTE_INPUT | VK_STAGE_COMPUTE_SHADER;
     }
-    if (bits & 0x8000) != 0 {
-        out = out | 0x800000000;
+    if (bits & SYNC_CLEAR_UAV) != 0 {
+        out = out | VK_STAGE_CLEAR;
     }
     out
 }
 
 // Every sync bit the Vulkan mapping knows.
 fn mapped_sync() -> u32 {
-    0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800 | 0x1000 | 0x2000 | 0x4000 | 0x8000 | 0x800000 | 0x1000000
+    SYNC_ALL | SYNC_DRAW | SYNC_INDEX_INPUT | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_DEPTH_STENCIL | SYNC_RENDER_TARGET | SYNC_COMPUTE_SHADING | SYNC_RAYTRACING | SYNC_COPY | SYNC_RESOLVE | SYNC_EXECUTE_INDIRECT | SYNC_ALL_SHADING | SYNC_NON_PIXEL_SHADING | SYNC_EMIT_RTAS_POSTBUILD_INFO | SYNC_CLEAR_UAV | SYNC_BUILD_RTAS | SYNC_COPY_RTAS
 }
 
 pub fn vk_stage_bits(sync: u32) -> u64 {
@@ -106,7 +134,7 @@ pub fn vk_stage_bits(sync: u32) -> u64 {
 }
 
 pub fn try_vk_stage_bits(sync: u32) -> StageBits {
-    let rest = (sync & 0x7fffffff) & ~mapped_sync();
+    let rest = (sync & SYNC_SCOPES) & ~mapped_sync();
     if rest != 0 {
         StageBits::Unmapped(rest)
     } else {
@@ -119,53 +147,53 @@ fn vk_access_bits_lossy(access: u32) -> u64 {
         return 0;
     }
     if access == 0 {
-        return 0x8000 | 0x10000;
+        return VK_ACCESS_MEMORY_READ | VK_ACCESS_MEMORY_WRITE;
     }
     let mut out: u64 = 0;
-    if (access & 0x200) != 0 {
-        out = out | 0x1;
+    if (access & ACCESS_INDIRECT_ARGUMENT) != 0 {
+        out = out | VK_ACCESS_INDIRECT_COMMAND_READ;
     }
-    if (access & 0x4) != 0 {
-        out = out | 0x2;
+    if (access & ACCESS_INDEX_BUFFER) != 0 {
+        out = out | VK_ACCESS_INDEX_READ;
     }
-    if (access & 0x1) != 0 {
-        out = out | 0x4;
+    if (access & ACCESS_VERTEX_BUFFER) != 0 {
+        out = out | VK_ACCESS_VERTEX_ATTRIBUTE_READ;
     }
-    if (access & 0x2) != 0 {
-        out = out | 0x8;
+    if (access & ACCESS_CONSTANT_BUFFER) != 0 {
+        out = out | VK_ACCESS_UNIFORM_READ;
     }
-    if (access & 0x80) != 0 {
-        out = out | 0x20;
+    if (access & ACCESS_SHADER_RESOURCE) != 0 {
+        out = out | VK_ACCESS_SHADER_READ;
     }
-    if (access & 0x10) != 0 {
-        out = out | 0x20 | 0x40;
+    if (access & ACCESS_UNORDERED_ACCESS) != 0 {
+        out = out | VK_ACCESS_SHADER_READ | VK_ACCESS_SHADER_WRITE;
     }
-    if (access & 0x8) != 0 {
-        out = out | 0x80 | 0x100;
+    if (access & ACCESS_RENDER_TARGET) != 0 {
+        out = out | VK_ACCESS_COLOR_ATTACHMENT_READ | VK_ACCESS_COLOR_ATTACHMENT_WRITE;
     }
-    if (access & 0x40) != 0 {
-        out = out | 0x200;
+    if (access & ACCESS_DEPTH_STENCIL_READ) != 0 {
+        out = out | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ;
     }
-    if (access & 0x20) != 0 {
-        out = out | 0x200 | 0x400;
+    if (access & ACCESS_DEPTH_STENCIL_WRITE) != 0 {
+        out = out | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE;
     }
-    if (access & 0x100) != 0 {
-        out = out | 0x2000000;
+    if (access & ACCESS_STREAM_OUTPUT) != 0 {
+        out = out | VK_ACCESS_TRANSFORM_FEEDBACK_WRITE;
     }
-    if (access & (0x800 | 0x2000)) != 0 {
-        out = out | 0x800;
+    if (access & (ACCESS_COPY_SOURCE | ACCESS_RESOLVE_SOURCE)) != 0 {
+        out = out | VK_ACCESS_TRANSFER_READ;
     }
-    if (access & (0x400 | 0x1000)) != 0 {
-        out = out | 0x1000;
+    if (access & (ACCESS_COPY_DEST | ACCESS_RESOLVE_DEST)) != 0 {
+        out = out | VK_ACCESS_TRANSFER_WRITE;
     }
-    if (access & 0x4000) != 0 {
-        out = out | 0x200000;
+    if (access & ACCESS_RTAS_READ) != 0 {
+        out = out | VK_ACCESS_ACCELERATION_STRUCTURE_READ;
     }
-    if (access & 0x8000) != 0 {
-        out = out | 0x400000;
+    if (access & ACCESS_RTAS_WRITE) != 0 {
+        out = out | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE;
     }
-    if (access & 0x10000) != 0 {
-        out = out | 0x800000;
+    if (access & ACCESS_SHADING_RATE_SOURCE) != 0 {
+        out = out | VK_ACCESS_FRAGMENT_SHADING_RATE_ATTACHMENT_READ;
     }
     out
 }
@@ -190,85 +218,85 @@ pub fn try_vk_access_bits(access: u32) -> AccessBits {
 // clears) is a transfer write (`vk_access_bits_for_sync`).
 pub fn vk_access_bits_for_sync(access: u32, sync: u32) -> u64 {
     let base = vk_access_bits(access);
-    if (access & 0x10) == 0 || access == 0 || access == no_access() {
+    if (access & ACCESS_UNORDERED_ACCESS) == 0 || access == 0 || access == no_access() {
         return base;
     }
-    let sync_bits = sync & 0x7fffffff;
-    if (sync_bits & (0x4000 | 0x8000)) == 0 {
+    let sync_bits = sync & SYNC_SCOPES;
+    if (sync_bits & (SYNC_EMIT_RTAS_POSTBUILD_INFO | SYNC_CLEAR_UAV)) == 0 {
         return base;
     }
-    let shader_or_all: u32 = 0x1 | 0x2 | 0x8 | 0x10 | 0x80 | 0x100 | 0x1000 | 0x2000;
+    let shader_or_all: u32 = SYNC_ALL | SYNC_DRAW | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_COMPUTE_SHADING | SYNC_RAYTRACING | SYNC_ALL_SHADING | SYNC_NON_PIXEL_SHADING;
     let mut adjusted = base;
     if (sync_bits & shader_or_all) == 0 {
-        let remaining = access & ~0x10;
+        let remaining = access & ~ACCESS_UNORDERED_ACCESS;
         adjusted = if remaining == 0 {
             0
         } else {
             vk_access_bits_lossy(remaining)
         };
     }
-    adjusted | 0x1000
+    adjusted | VK_ACCESS_TRANSFER_WRITE
 }
 
 fn vk_stage_bits_for_access(sync: u32, access: u32) -> u64 {
     let mut out = vk_stage_bits(sync);
     if out != 0 {
-        if (access & 0x100) != 0 {
-            out = out | 0x1000000;
+        if (access & ACCESS_STREAM_OUTPUT) != 0 {
+            out = out | VK_STAGE_TRANSFORM_FEEDBACK;
         }
-        if (access & 0x10000) != 0 {
-            out = out | 0x400000;
+        if (access & ACCESS_SHADING_RATE_SOURCE) != 0 {
+            out = out | VK_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT;
         }
     }
     out
 }
 
 pub fn mtl4_stage_bits(sync: u32) -> u32 {
-    let bits = sync & 0x7fffffff;
+    let bits = sync & SYNC_SCOPES;
     if bits == 0 {
         return 0;
     }
-    let vertex: u32 = 0x1;
-    let fragment: u32 = 0x2;
-    let tile: u32 = 0x4;
-    let dispatch: u32 = 0x8000000;
-    let blit: u32 = 0x10000000;
-    let accel: u32 = 0x20000000;
+    let vertex = MTL_STAGE_VERTEX;
+    let fragment = MTL_STAGE_FRAGMENT;
+    let tile = MTL_STAGE_TILE;
+    let dispatch = MTL_STAGE_DISPATCH;
+    let blit = MTL_STAGE_BLIT;
+    let accel = MTL_STAGE_ACCELERATION_STRUCTURE;
     let mut out: u32 = 0;
-    if (bits & 0x1) != 0 {
+    if (bits & SYNC_ALL) != 0 {
         out = out | vertex | fragment | tile | dispatch | blit | accel;
     }
-    if (bits & 0x2) != 0 {
+    if (bits & SYNC_DRAW) != 0 {
         out = out | vertex | fragment | tile;
     }
-    if (bits & (0x4 | 0x8)) != 0 {
+    if (bits & (SYNC_INDEX_INPUT | SYNC_VERTEX_SHADING)) != 0 {
         out = out | vertex;
     }
-    if (bits & (0x10 | 0x20 | 0x40)) != 0 {
+    if (bits & (SYNC_PIXEL_SHADING | SYNC_DEPTH_STENCIL | SYNC_RENDER_TARGET)) != 0 {
         out = out | fragment;
     }
-    if (bits & 0x400) != 0 {
+    if (bits & SYNC_RESOLVE) != 0 {
         out = out | fragment | blit;
     }
-    if (bits & 0x800) != 0 {
+    if (bits & SYNC_EXECUTE_INDIRECT) != 0 {
         out = out | vertex | dispatch;
     }
-    if (bits & (0x80 | 0x100)) != 0 {
+    if (bits & (SYNC_COMPUTE_SHADING | SYNC_RAYTRACING)) != 0 {
         out = out | dispatch;
     }
-    if (bits & 0x8000) != 0 {
+    if (bits & SYNC_CLEAR_UAV) != 0 {
         out = out | dispatch | blit;
     }
-    if (bits & 0x200) != 0 {
+    if (bits & SYNC_COPY) != 0 {
         out = out | blit;
     }
-    if (bits & (0x800000 | 0x1000000 | 0x4000)) != 0 {
+    if (bits & (SYNC_BUILD_RTAS | SYNC_COPY_RTAS | SYNC_EMIT_RTAS_POSTBUILD_INFO)) != 0 {
         out = out | accel;
     }
-    if (bits & 0x1000) != 0 {
+    if (bits & SYNC_ALL_SHADING) != 0 {
         out = out | vertex | fragment | tile | dispatch;
     }
-    if (bits & 0x2000) != 0 {
+    if (bits & SYNC_NON_PIXEL_SHADING) != 0 {
         out = out | vertex | dispatch;
     }
     out
@@ -342,7 +370,7 @@ pub fn lower_barrier(
                 let before = if has_producer {
                     producer_sync
                 } else {
-                    0x1
+                    SYNC_ALL
                 };
                 let dst = vk_stage_bits_for_access(b.sync_after, b.access_after);
                 Native::SplitEventWait {
@@ -356,7 +384,7 @@ pub fn lower_barrier(
                     if has_producer {
                         producer_sync
                     } else {
-                        0x1
+                        SYNC_ALL
                     }
                 } else {
                     b.sync_before
@@ -388,7 +416,7 @@ pub fn lower_barrier(
                 if has_producer {
                     producer_sync
                 } else {
-                    0x80
+                    SYNC_COMPUTE_SHADING
                 }
             } else {
                 b.sync_before
@@ -464,7 +492,7 @@ fn same_split(a: ActiveSplit, kb: KeyedBarrier) -> bool {
 }
 
 fn next_id(id: u32) -> u32 {
-    if id == 0xffffffff {
+    if id == none32() {
         id
     } else {
         wrapping_add(id, 1)
