@@ -236,7 +236,6 @@ pub fn set32(inout t: ChunkSeq[u32], i: u32, v: u32) {
     let ok = t.try_set(widen_u64(i), v);
 }
 
-
 pub fn set8(inout t: ChunkSeq[u8], i: u32, v: u8) {
     if widen_u64(i) >= t.len() {
         t.resize(inc(widen_u64(i)), 0);
@@ -245,8 +244,6 @@ pub fn set8(inout t: ChunkSeq[u8], i: u32, v: u8) {
 }
 
 // The `AdtKinds` row of a name, or NONE.
-
-
 
 // ----- AST access -------------------------------------------------------------------
 
@@ -258,11 +255,6 @@ pub fn nm(in st: St, s: u32) -> u32 {
         u32_at(in st.amap, widen_u64(s))
     }
 }
-
-
-
-
-
 
 pub fn paramn(in a: Ast, i: u32) -> ParamNode {
     a
@@ -536,7 +528,30 @@ pub fn targs(in a: Ast, t: u32) -> u32 {
 
 // `RESERVED`.
 pub fn is_reserved(in st: St, n: u32) -> bool {
-    n == st.s_tensor || n == st.s_kv || n == st.s_lease || n == st.s_seq || n == st.s_kverr || n == st.s_dims || n == st.s_f32 || n == st.s_bf16
+    n
+        == st
+        .s_tensor
+        || n
+        == st
+        .s_kv
+        || n
+        == st
+        .s_lease
+        || n
+        == st
+        .s_seq
+        || n
+        == st
+        .s_kverr
+        || n
+        == st
+        .s_dims
+        || n
+        == st
+        .s_f32
+        || n
+        == st
+        .s_bf16
 }
 
 // `wire_integer(n).is_some()`: `[ui](16|32|64)(le|be)`.
@@ -556,7 +571,17 @@ pub fn is_wire_integer(in st: St, n: u32) -> bool {
 }
 
 fn reserved_or_wire(in st: St, n: u32) -> bool {
-    is_reserved(in st, n) || n == st.s_shape || n == st.s_bytes || n == st.s_pad || is_wire_integer(in st, n)
+    is_reserved(in st, n)
+        || n
+        == st
+        .s_shape
+        || n
+        == st
+        .s_bytes
+        || n
+        == st
+        .s_pad
+        || is_wire_integer(in st, n)
 }
 
 // `path_mentions`.
@@ -699,7 +724,9 @@ pub fn expr_mentions(inout st: St, in a: Ast, e: u32) -> bool {
         for i in 0..list_len(in a, n.a) {
             let s = stmtn(in a, list_at(in a, n.a, i));
             if s.kind == 1 {
-                if type_mentions(in st, in a, s.ty) || pattern_mentions(inout st, in a, s.pat) || expr_mentions(inout st, in a, s.value) {
+                if type_mentions(in st, in a, s.ty)
+                    || pattern_mentions(inout st, in a, s.pat)
+                    || expr_mentions(inout st, in a, s.value) {
                     return true;
                 }
             } else if expr_mentions(inout st, in a, s.value) {
@@ -737,7 +764,9 @@ pub fn expr_mentions(inout st: St, in a: Ast, e: u32) -> bool {
         return expr_mentions(inout st, in a, n.b) || expr_mentions(inout st, in a, n.c);
     }
     if k == 13 {
-        return expr_mentions(inout st, in a, n.a) || expr_mentions(inout st, in a, n.b) || opt_mentions(inout st, in a, n.c);
+        return expr_mentions(inout st, in a, n.a)
+            || expr_mentions(inout st, in a, n.b)
+            || opt_mentions(inout st, in a, n.c);
     }
     if k == 14 {
         if expr_mentions(inout st, in a, n.a) {
@@ -745,14 +774,17 @@ pub fn expr_mentions(inout st: St, in a: Ast, e: u32) -> bool {
         }
         let m = list_len(in a, n.b) >> 1;
         for i in 0..m {
-            if pattern_mentions(inout st, in a, list_at(in a, n.b, wrapping_mul(i, 2))) || expr_mentions(inout st, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2)))) {
+            if pattern_mentions(inout st, in a, list_at(in a, n.b, wrapping_mul(i, 2)))
+                || expr_mentions(inout st, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2)))) {
                 return true;
             }
         }
         return false;
     }
     if k == 18 {
-        return expr_mentions(inout st, in a, n.b) || pattern_mentions(inout st, in a, n.a) || expr_mentions(inout st, in a, n.c);
+        return expr_mentions(inout st, in a, n.b)
+            || pattern_mentions(inout st, in a, n.a)
+            || expr_mentions(inout st, in a, n.c);
     }
     if k == 20 || k == 21 {
         return opt_mentions(inout st, in a, n.a);
@@ -763,13 +795,18 @@ pub fn expr_mentions(inout st: St, in a: Ast, e: u32) -> bool {
                 return true;
             }
         }
-        return type_mentions(in st, in a, n.c) || row_mentions(in st, in a, n.d) || expr_mentions(inout st, in a, n.e);
+        return type_mentions(in st, in a, n.c)
+            || row_mentions(in st, in a, n.d)
+            || expr_mentions(inout st, in a, n.e);
     }
     if k == 16 {
         if effect_mentions(in st, in a, n.a) {
             return true;
         }
-        if n.b != NONE && (pattern_mentions(inout st, in a, n.b) || expr_mentions(inout st, in a, n.c)) {
+        if n
+            .b
+            != NONE
+            && (pattern_mentions(inout st, in a, n.b) || expr_mentions(inout st, in a, n.c)) {
             return true;
         }
         if expr_mentions(inout st, in a, n.d) {
@@ -879,7 +916,13 @@ fn wire_only(in st: St, in a: Ast, t: u32) -> bool {
         return false;
     }
     let name = nm(in st, n.a);
-    (list_len(in a, n.b) == 0 && is_wire_integer(in st, name)) || name == st.s_bytes || name == st.s_pad
+    (list_len(in a, n.b) == 0 && is_wire_integer(in st, name))
+        || name
+        == st
+        .s_bytes
+        || name
+        == st
+        .s_pad
 }
 
 // `wire_struct_names`.
@@ -1007,7 +1050,10 @@ pub fn collect_kinds(in st: St, inout cx: Cx, in a: Ast, t: u32) {
             for i in 0..argc {
                 let mut k: u8 = 9;
                 if row != NONE && i < widen_u64(u32_at(in cx.ak_n, widen_u64(row))) {
-                    k = u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i));
+                    k = u8_at(
+                        in cx.ak_k,
+                        wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i)
+                    );
                 }
                 let x = list_at(in a, args, i);
                 if k == KD_DIM {
@@ -1059,7 +1105,8 @@ pub fn collect_row_kinds(in st: St, inout cx: Cx, in a: Ast, r: u32) {
 // `resolve_kinds` of the generics `names` (in order) from `cx.us_*`: the
 // kinds, or NONE in the first slot's place with `err` set (the returned
 // list is then empty).
-pub fn resolve_kinds(inout st: St, in cx: Cx, in names: ChunkSeq[u32], inout out: ChunkSeq[u8]) -> bool {
+pub fn resolve_kinds(inout st: St, in cx: Cx, in names: ChunkSeq[u32], inout out: ChunkSeq[u8])
+    -> bool {
     out.clear();
     for i in 0..names.len() {
         let g = u32_at(in names, i);
@@ -1098,7 +1145,8 @@ fn kinds_equal(in cx: Cx, row: u32, in ks: ChunkSeq[u8]) -> bool {
         return false;
     }
     for i in 0..ks.len() {
-        if u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i)) != u8_at(in ks, i) {
+        if u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i))
+            != u8_at(in ks, i) {
             return false;
         }
     }
@@ -1131,7 +1179,12 @@ pub fn adt_kinds(inout st: St, inout cx: Cx, in a: Ast) {
             for v in 0..list_len(in a, x.variants) {
                 let vn = variantn(in a, list_at(in a, x.variants, v));
                 for f in 0..list_len(in a, vn.fields) {
-                    collect_kinds(in st, inout cx, in a, fieldn(in a, list_at(in a, vn.fields, f)).ty);
+                    collect_kinds(
+                        in st,
+                        inout cx,
+                        in a,
+                        fieldn(in a, list_at(in a, vn.fields, f)).ty
+                    );
                 }
             }
             if !resolve_kinds(inout st, in cx, in names, inout ks) {
@@ -1465,7 +1518,10 @@ pub fn scope_dtype(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
     let mut m = ChunkSeq::new[u8]();
     m.push(39);
     display_type(in st, in a, inout m, t);
-    put(inout m, in "' is not a tensor dtype: use F32, Bf16, a quantized block wire struct or a dtype parameter");
+    put(
+        inout m,
+        in "' is not a tensor dtype: use F32, Bf16, a quantized block wire struct or a dtype parameter"
+    );
     st.err = m;
     NONE
 }
@@ -1582,7 +1638,10 @@ pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
             for i in 0..argc {
                 let mut k = KD_TYPE;
                 if row != NONE {
-                    k = u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i));
+                    k = u8_at(
+                        in cx.ak_k,
+                        wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i)
+                    );
                 }
                 let x = list_at(in a, args, i);
                 if k == KD_DIM {
@@ -1611,7 +1670,12 @@ pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
             return mk_ty(inout st, T_ADT, name, 0, in items);
         }
         if is_wire_integer(in st, name) || name == st.s_bytes || name == st.s_pad {
-            return err_named(inout st, in "'", name, in "' is only valid as a wire struct field type");
+            return err_named(
+                inout st,
+                in "'",
+                name,
+                in "' is only valid as a wire struct field type"
+            );
         }
         for i in 0..argc {
             let y = scope_ty(inout st, in cx, in a, list_at(in a, args, i));
@@ -1619,7 +1683,12 @@ pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
                 return NONE;
             }
             if has_tensor(in st, y) {
-                return err_named(inout st, in "a tensor type cannot instantiate the parameters of '", name, in "'");
+                return err_named(
+                    inout st,
+                    in "a tensor type cannot instantiate the parameters of '",
+                    name,
+                    in "'"
+                );
             }
         }
         return ty_named(inout st, T_BASE, name);

@@ -195,8 +195,6 @@ pub fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
 }
 
-
-
 // Clears the error text.
 
 pub fn fail(inout st: St, in s: Str) -> u32 {
@@ -350,7 +348,6 @@ pub fn dim_exp_at(in st: St, d: u32, i: u64) -> u32 {
     u32_at(in st.ditems, wrapping_add(widen_u64(x.a), inc(wrapping_mul(i, 2))))
 }
 
-
 fn dim_hash(coeff: u64, in items: ChunkSeq[u32]) -> u64 {
     let mut h = fold(14695981039346656037, coeff);
     for i in 0..items.len() {
@@ -447,7 +444,6 @@ pub fn dim_var(inout st: St, v: u32) -> u32 {
 }
 
 // `Dim::as_const`: the constant, or NONE64 (u64::MAX).
-
 
 // `Dim::as_var`: the variable when the dimension is exactly it, else NONE.
 pub fn dim_as_var(in st: St, d: u32) -> u32 {
@@ -691,11 +687,6 @@ pub fn put_shape(in st: St, inout o: ChunkSeq[u8], in items: ChunkSeq[u32]) {
 // A `DType` is one word: 0 F32, 1 Bf16, 2 + 2 * name a block, 3 + 2 * name a
 // dtype variable.
 
-
-
-
-
-
 pub fn put_dtype(in st: St, inout o: ChunkSeq[u8], d: u32) {
     if d == 0 {
         put(inout o, in "F32");
@@ -720,8 +711,6 @@ pub fn ty_node(in st: St, t: u32) -> TyN {
         },
     }
 }
-
-
 
 // Item `i` of a type (a shape dim, tuple element or parameter; for an Adt
 // the tag of argument `i / 2` or its id).
@@ -961,10 +950,14 @@ pub fn diag_s(inout st: St, code: u32, start: u64, end: u64, in m: Str) {
     diag(inout st, code, start, end, in t);
 }
 
-
 // Whether diagnostics `i` and `j` have the same code, span and message.
 pub fn diag_same(in st: St, i: u64, j: u64) -> bool {
-    if u32_at(in st.dcode, i) != u32_at(in st.dcode, j) || u64_at(in st.dstart, i) != u64_at(in st.dstart, j) || u64_at(in st.dend, i) != u64_at(in st.dend, j) {
+    if u32_at(in st.dcode, i)
+        != u32_at(in st.dcode, j)
+        || u64_at(in st.dstart, i)
+        != u64_at(in st.dstart, j)
+        || u64_at(in st.dend, i)
+        != u64_at(in st.dend, j) {
         return false;
     }
     let a = u64_at(in st.dma, i);
@@ -1030,7 +1023,10 @@ pub fn err_contains(in st: St, in s: Str) -> bool {
 // `types::error_code` of `err`: 762 for dimension range and rank errors,
 // else 761.
 pub fn err_code(in st: St) -> u32 {
-    if err_contains(in st, in "dimension exceeds 1099511627776") || err_contains(in st, in "dimensions must be positive") || err_contains(in st, in "dimension has more than 16 factors") || err_contains(in st, in "exceeds the supported rank") {
+    if err_contains(in st, in "dimension exceeds 1099511627776")
+        || err_contains(in st, in "dimensions must be positive")
+        || err_contains(in st, in "dimension has more than 16 factors")
+        || err_contains(in st, in "exceeds the supported rank") {
         762
     } else {
         761

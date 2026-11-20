@@ -56,7 +56,6 @@ use self::infer::{
 
 const NONE: u32 = 4294967295;
 
-
 // Reads a length-prefixed byte string into `out`.
 fn read_bytes(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u8]) {
     let n = r.word(in b);
@@ -158,7 +157,10 @@ fn report(in st: St, in cx: Cx, inout o: ChunkSeq[u8]) {
         st.names.write(n, inout o);
         for k in 0..widen_u64(u32_at(in cx.ak_n, widen_u64(row))) {
             o.push(32);
-            put_kind(inout o, u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), k)));
+            put_kind(
+                inout o,
+                u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), k))
+            );
         }
         o.push(10);
     }
