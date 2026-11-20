@@ -82,6 +82,7 @@ pub(crate) fn desugar(
         methods,
         bounds: BTreeMap::new(),
         next: after,
+        pass: after,
         count: 0,
         changed: false,
     };
@@ -130,21 +131,31 @@ pub(crate) fn desugar_function(
 
 /// For each method name, whether some declaration of it takes its receiver
 /// `inout`.
-fn receiver_passes(module: &Module) -> BTreeMap<String, Pass> {
-    let mut out: BTreeMap<String, Pass> = BTreeMap::new();
-    let mut note = |f: &Function| {
+/// Keyed by the receiver's type name and the method name; the empty type
+/// name collects every declaration of the method (trait and conformance
+/// methods, and the fallback for a receiver of unknown type).
+fn receiver_passes(module: &Module) -> BTreeMap<(String, String), Pass> {
+    let mut out: BTreeMap<(String, String), Pass> = BTreeMap::new();
+    let mut note = |ty: &str, f: &Function| {
         if let Some(p) = f.params.first().filter(|p| p.name == "self") {
-            let entry = out.entry(f.name.clone()).or_insert(Pass::In);
-            if p.pass == Pass::Inout {
-                *entry = Pass::Inout;
+            for key in [ty, ""] {
+                let entry = out
+                    .entry((key.to_string(), f.name.clone()))
+                    .or_insert(Pass::In);
+                if p.pass == Pass::Inout {
+                    *entry = Pass::Inout;
+                }
             }
         }
     };
     for item in &module.items {
         match item {
-            Item::Impl { methods, .. } => methods.iter().for_each(&mut note),
-            Item::Trait(t) => t.methods.iter().for_each(&mut note),
-            Item::Conformance(c) => c.methods.iter().for_each(&mut note),
+            Item::Impl { ty, methods, .. } => {
+                let name = ty.name();
+                methods.iter().for_each(|f| note(name, f));
+            }
+            Item::Trait(t) => t.methods.iter().for_each(|f| note("", f)),
+            Item::Conformance(c) => c.methods.iter().for_each(|f| note("", f)),
             _ => {}
         }
     }
@@ -165,9 +176,12 @@ struct Site {
 struct Rewriter<'a> {
     world: &'a World,
     types: &'a TypeMap,
-    methods: BTreeMap<String, Pass>,
+    methods: BTreeMap<(String, String), Pass>,
     bounds: BTreeMap<String, Mode>,
     next: usize,
+    /// Names stay unique across the passes of nested paths: `after`
+    /// differs in every pass.
+    pass: usize,
     count: usize,
     changed: bool,
 }
@@ -189,7 +203,7 @@ impl Rewriter<'_> {
     }
     fn fresh_name(&mut self, prefix: &str) -> String {
         self.count += 1;
-        format!("{prefix}{}", self.count)
+        format!("{prefix}{}x{}", self.pass, self.count)
     }
 
     /// Whether `base` is a sequence or slice place.
@@ -231,7 +245,15 @@ impl Rewriter<'_> {
         {
             return op.receiver_pass();
         }
-        self.methods.get(m).copied().unwrap_or(Pass::In)
+        // The receiver's own type selects the declaration; an unknown type
+        // takes `inout` if any declaration of `m` does.
+        let own = self
+            .ty(receiver)
+            .map(|t| (t.name().to_string(), m.to_string()))
+            .and_then(|k| self.methods.get(&k));
+        own.or_else(|| self.methods.get(&(String::new(), m.to_string())))
+            .copied()
+            .unwrap_or(Pass::In)
     }
 
     /// Whether `e`, an operand of an anchor that views elements of the
@@ -441,7 +463,9 @@ impl Rewriter<'_> {
             let Some((base, mut index)) = replace_bottom(e, &span, &name, fresh) else {
                 continue;
             };
-            if !matches!(index.kind, ExprKind::Literal(_) | ExprKind::Name(_)) {
+            // Every index but a literal is bound first, so an operand
+            // evaluated before the view cannot change which element it names.
+            if !matches!(index.kind, ExprKind::Literal(_)) {
                 let bound = self.fresh_name(OPERAND_PREFIX);
                 lets.push(self.let_statement(&bound, Type::named(INDEX_TYPE), index));
                 index = self.fresh(ExprKind::Name(bound));
@@ -690,7 +714,7 @@ impl Rewriter<'_> {
                 groups.entry(p.display()).or_default().push(i);
             }
         }
-        let mut statements = vec![];
+        let mut bound: Vec<(usize, Statement)> = vec![];
         let mut checks: Vec<Expr> = vec![];
         let mut changed = false;
         for members in groups.into_values() {
@@ -740,7 +764,7 @@ impl Rewriter<'_> {
                         span,
                     },
                 );
-                statements.push(self.let_statement(&name, Type::named(INDEX_TYPE), value));
+                bound.push((i, self.let_statement(&name, Type::named(INDEX_TYPE), value)));
                 names.push(name);
             }
             for x in 0..names.len() {
@@ -758,6 +782,9 @@ impl Rewriter<'_> {
         if !changed {
             return false;
         }
+        // The indices are evaluated in argument order, whatever their groups.
+        bound.sort_by_key(|(i, _)| *i);
+        let mut statements: Vec<Statement> = bound.into_iter().map(|(_, s)| s).collect();
         let mut condition = checks.remove(0);
         for c in checks {
             condition = self.fresh(ExprKind::Binary(

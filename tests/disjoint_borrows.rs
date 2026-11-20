@@ -438,3 +438,64 @@ fn body() -> u64 eff [Fail[RuntimeError]] {{
         t + (50 + slots[0]) * 1000
     );
 }
+
+/// Review findings on #1257: names stay unique across the passes of nested
+/// paths, a named index is read before a value operand that writes it,
+/// a receiver's own type selects its method's pass, and the indices of two
+/// groups are evaluated in argument order.
+#[test]
+fn nested_paths_snapshots_receivers_and_order() {
+    let source = handled(
+        "struct Child { n: u64, other: u64 }
+struct Node { n: u64, children: ChunkSeq[Child] }
+struct A { k: u64 }
+struct B { k: u64 }
+struct H { a: A, b: B, s: ChunkSeq[u32] }
+impl A { fn value(in self) -> u64 { self.k } }
+impl B { fn value(inout self) -> u64 { self.k = wrapping_add(self.k, 1); self.k } }
+fn f(in n: u64, inout other: u64) { other = wrapping_add(other, n); }
+fn next(inout n: u64) -> u64 { let v = n & 1; n = wrapping_add(n, 1); v }
+fn four(inout a: u64, inout b: u64, inout c: u64, inout d: u64) { a = wrapping_add(a, 1); b = wrapping_add(b, 10); c = wrapping_add(c, 100); d = wrapping_add(d, 1000); }
+fn read(in hs: ChunkSeq[H]) -> u64 eff [Fail[RuntimeError]] { hs[0].a.value() }
+fn body() -> u64 eff [Fail[RuntimeError]] {
+    let mut xs = ChunkSeq::new[Node]();
+    xs.push(Node { n: 5, children: ChunkSeq::new[Child]() });
+    let mut ys = ChunkSeq::new[Node]();
+    let mut cs = ChunkSeq::new[Child]();
+    cs.push(Child { n: 70, other: 1 });
+    ys.push(Node { n: 9, children: cs });
+    f(in xs[0].n, inout ys[0].children[0].other);
+    let mut i: u64 = 0;
+    xs[i].n = { i = 1; 40 };
+    let mut hs = ChunkSeq::new[H]();
+    hs.push(H { a: A { k: 3 }, b: B { k: 0 }, s: ChunkSeq::new[u32]() });
+    let r = read(in hs);
+    let mut zs = ChunkSeq::new[u64]();
+    zs.push(0); zs.push(0);
+    let mut ws = ChunkSeq::new[u64]();
+    ws.push(0); ws.push(0);
+    let mut n: u64 = 0;
+    four(inout zs[next(inout n)], inout ws[next(inout n)], inout zs[next(inout n)], inout ws[next(inout n)]);
+    let other = ys[0].children[0].other;
+    let order = wrapping_add(wrapping_add(zs[0], wrapping_mul(zs[1], 10000)), wrapping_mul(wrapping_add(ws[0], wrapping_mul(ws[1], 10000)), 100000000));
+    wrapping_add(wrapping_add(other, wrapping_mul(xs[0].n, 100)), wrapping_add(wrapping_mul(r, 10000), wrapping_mul(order, 100000)))
+}",
+    );
+    // Indices in argument order are 0, 1, 0, 1: both `zs` indices are 0, so
+    // the call raises IndexOutOfBounds (999).
+    assert_eq!(differential("nested_order", &source), 999);
+    let fixed = source.replace(
+        "let v = n & 1; n = wrapping_add(n, 1); v",
+        "let v = (n >> 1) & 1; n = wrapping_add(n, 1); v",
+    );
+    // other = 1 + 5; xs[0].n = 40 (the index was read before the value set
+    // i = 1); r = 3 (A::value takes `in self`, so `in hs` is enough).
+    // Indices 0, 0, 1, 1 in argument order: zs[0] += 1, ws[0] += 10,
+    // zs[1] += 100, ws[1] += 1000. Sorted by sequence name instead, `ws`
+    // would take 0, 0 and raise.
+    let order: u64 = 1 + 100 * 10000 + (10 + 1000 * 10000) * 100_000_000;
+    assert_eq!(
+        differential("nested_order_fixed", &fixed),
+        6 + 40 * 100 + 3 * 10000 + order.wrapping_mul(100_000)
+    );
+}
