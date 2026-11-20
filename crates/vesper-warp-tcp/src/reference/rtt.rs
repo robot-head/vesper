@@ -3,6 +3,10 @@
 
 use crate::rtt::{RtoConfig, RttEstimator};
 
+/// Cap on the RTO backoff shift (RFC 6298 §5.5 doubling; the maximum RTO
+/// bounds the value long before).
+const MAX_BACKOFF_SHIFT: u32 = 32;
+
 impl RttEstimator {
     /// A fresh estimator.
     #[must_use]
@@ -39,7 +43,7 @@ impl RttEstimator {
 
     /// Double the RTO (RFC 6298 §5.5), bounded by the maximum.
     pub fn backoff(&mut self) {
-        if self.backoff_shift < 32 {
+        if self.backoff_shift < MAX_BACKOFF_SHIFT {
             self.backoff_shift += 1;
         }
     }

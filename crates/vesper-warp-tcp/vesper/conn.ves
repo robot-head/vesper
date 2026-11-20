@@ -215,6 +215,20 @@ struct Tcb {
     edt_armed_rto: bool
 }
 
+// Limits and clocks, as in `reference/conn.rs`.
+// Largest receive buffer a configuration may ask for, 2^30.
+const MAX_RECV_BUFFER: u32 = 1073741824;
+// Stream offsets stay below 2^62.
+const MAX_STREAM_OFFSET: u64 = 4611686018427387904;
+// At most one challenge ACK per window (RFC 5961 §7), 1 s.
+const CHALLENGE_ACK_WINDOW_NS: u64 = 1000000000;
+// Cap on the persist timer's exponential backoff shift.
+const MAX_PERSIST_BACKOFF_SHIFT: u32 = 16;
+// RFC 9293 §3.4.1 ISN clock: one tick per 4 µs.
+const ISN_TICK_NS: u64 = 4000;
+// Timestamp clock tick (1 ms, within RFC 7323 §5.4's 1 ms to 1 s range).
+const TS_TICK_NS: u64 = 1000000;
+
 fn dup_thresh() -> u32 {
     3
 }
@@ -401,12 +415,12 @@ fn cc_event(inout t: Tcb, event: CongestionEvent, now: u64) {
 
 pub fn config_validate(cfg: Config) -> Result[Unit, TcpFail] {
     let ws_bad = match cfg.window_scale {
-        Option::Some(s) => s > 14,
+        Option::Some(s) => s > MAX_WINDOW_SCALE,
         Option::None => false,
     };
     if cfg.mss < min_send_mss() {
         Result::Err(TcpFail::InvalidConfig(0))
-    } else if cfg.recv_buffer == 0 || cfg.recv_buffer > 1073741824 {
+    } else if cfg.recv_buffer == 0 || cfg.recv_buffer > MAX_RECV_BUFFER {
         Result::Err(TcpFail::InvalidConfig(1))
     } else if ws_bad {
         Result::Err(TcpFail::InvalidConfig(2))
@@ -445,8 +459,8 @@ pub fn tcb_new(cfg: Config) -> Tcb {
         ws_ok: false,
         sack_ok: false,
         ts_ok: false,
-        peer_mss: 536,
-        smss: 536,
+        peer_mss: DEFAULT_IPV4_MSS,
+        smss: widen_u32(DEFAULT_IPV4_MSS),
         need_syn: false,
         write_end: 0,
         fin_requested: false,

@@ -79,18 +79,20 @@ struct Front {
     counts: native::WordFunction,
     lex: native::WordFunction,
     lex_raw: native::WordFunction,
+    editor: native::WordFunction,
 }
 
 fn front() -> Front {
     let assembled = packages::load(&root().join("packages/vesper-front")).unwrap();
-    assert!(assembled.ok());
+    assert!(assembled.ok(), "{:#?}", assembled.diagnostics);
     let checked = check::check(&assembled.module);
-    assert!(checked.diagnostics.is_empty());
+    assert!(checked.diagnostics.is_empty(), "{:#?}", checked.diagnostics);
     let compile = |entry| native::WordFunction::compile(&checked.world, entry, true).unwrap();
     Front {
         counts: compile("parse_counts"),
         lex: compile("lex_count"),
         lex_raw: compile("lex_raw_count"),
+        editor: compile("parse_editor_count"),
     }
 }
 
@@ -302,5 +304,102 @@ fn memory_per_node() {
         per(token_table as f64),
         per(tree as f64),
         per(working as f64)
+    );
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn lex_abba_against_logos() {
+    let corpus = corpus();
+    let f = front();
+    let tokens = run_vesper_lex(&f, &corpus);
+    if std::env::var_os("VESPER_FRONT_BENCH_EXPERIMENT").is_none() {
+        assert_eq!(tokens as usize, run_rust_lex(&corpus), "token counts");
+    }
+    let rounds = 15;
+    let (mut rl, mut vl, mut vr) = (vec![], vec![], vec![]);
+    for _ in 0..rounds {
+        rl.push(time(|| {
+            std::hint::black_box(run_rust_lex(&corpus));
+        }));
+        vl.push(time(|| {
+            std::hint::black_box(run_vesper_lex(&f, &corpus));
+        }));
+        vr.push(time(|| {
+            std::hint::black_box(run_vesper_lex_raw(&f, &corpus));
+        }));
+        vl.push(time(|| {
+            std::hint::black_box(run_vesper_lex(&f, &corpus));
+        }));
+        rl.push(time(|| {
+            std::hint::black_box(run_rust_lex(&corpus));
+        }));
+    }
+    let (rl, vl, vr) = (median(rl), median(vl), median(vr));
+    println!(
+        "lex rust {rl:?}; vesper {vl:?} ({:.2}x); raw {vr:?} ({:.2}x); {tokens} tokens",
+        vl.as_secs_f64() / rl.as_secs_f64(),
+        vr.as_secs_f64() / rl.as_secs_f64()
+    );
+}
+
+#[test]
+#[ignore = "benchmark"]
+fn lex_once_for_callgrind() {
+    let corpus = corpus();
+    let f = front();
+    let c = run_rust_lex(&corpus);
+    let d = run_vesper_lex(&f, &corpus);
+    let e = run_vesper_lex_raw(&f, &corpus);
+    println!("{c} {d} {e}");
+}
+
+#[inline(never)]
+fn run_rust_editor(corpus: &[String]) -> usize {
+    corpus
+        .iter()
+        .map(|s| {
+            vesper_syntax::parser::parse_recovery(s, vesper_syntax::recovery::Limits::default())
+                .map_or(0, |r| r.declarations().len())
+        })
+        .sum()
+}
+
+#[inline(never)]
+fn run_vesper_editor(f: &Front, corpus: &[String]) -> u64 {
+    corpus.iter().map(|s| call(&f.editor, s)).sum()
+}
+
+/// Editor mode (`parse_recovery`, default limits) in ABBA order over the
+/// corpus files within its 128 KiB source budget.
+#[test]
+#[ignore = "benchmark"]
+fn editor_abba_against_parse_recovery() {
+    let corpus: Vec<String> = corpus()
+        .into_iter()
+        .filter(|s| s.len() <= 128 * 1024)
+        .collect();
+    let f = front();
+    let rounds = 9;
+    let (mut r, mut v) = (vec![], vec![]);
+    for _ in 0..rounds {
+        r.push(time(|| {
+            std::hint::black_box(run_rust_editor(&corpus));
+        }));
+        v.push(time(|| {
+            std::hint::black_box(run_vesper_editor(&f, &corpus));
+        }));
+        v.push(time(|| {
+            std::hint::black_box(run_vesper_editor(&f, &corpus));
+        }));
+        r.push(time(|| {
+            std::hint::black_box(run_rust_editor(&corpus));
+        }));
+    }
+    let (r, v) = (median(r), median(v));
+    println!(
+        "editor rust {r:?}; vesper {v:?} ({:.2}x); {} files",
+        v.as_secs_f64() / r.as_secs_f64(),
+        corpus.len()
     );
 }
