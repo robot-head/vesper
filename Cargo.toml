@@ -252,6 +252,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The host shim of @vesper-std/fs, process and env (#1125). `vesper jit`
+# binds the packages' `.vsys` imports to it (#1150), and tests/std_fs.rs,
+# std_process.rs and std_env.rs bind it into the JIT. It has no dependencies.
+vesper-std-host = { path = "crates/vesper-std-host" }
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
 vesper-forge = { path = "crates/vesper-forge", default-features = false }
@@ -335,9 +339,6 @@ wit-parser = "=0.261.0"
 vesper-aegis = { path = "crates/vesper-aegis/seed", package = "vesper-aegis-seed" }
 vesper-bench = { path = "crates/vesper-bench/seed", package = "vesper-bench-seed" }
 vesper-nexus = { path = "crates/vesper-nexus" }
-# The host shim of @vesper-std/fs, process and env (#1125), bound into the
-# JIT by tests/std_fs.rs, std_process.rs and std_env.rs.
-vesper-std-host = { path = "crates/vesper-std-host" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 
