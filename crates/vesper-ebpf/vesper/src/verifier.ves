@@ -80,6 +80,83 @@ use self::callgraph::{
     check_stack
 };
 
+// Register and slot tags (see above).
+const T_NOT_INIT: u64 = 0;
+const T_SCALAR: u64 = 1;
+const T_CTX: u64 = 2;
+const T_FUNC: u64 = 3;
+const T_PACKET: u64 = 4;
+const T_PACKET_END: u64 = 5;
+const T_STACK: u64 = 6;
+const T_MAP_PTR: u64 = 7;
+const T_MAP_VALUE: u64 = 8;
+const T_MAP_VALUE_OR_NULL: u64 = 9;
+const T_MEM: u64 = 10;
+const T_MEM_OR_NULL: u64 = 11;
+const T_RDONLY_MEM: u64 = 12;
+const T_SOCKET: u64 = 13;
+const T_SOCKET_OR_NULL: u64 = 14;
+const S_BYTES: u64 = 16;
+const S_ITER: u64 = 17;
+const S_IRQ: u64 = 18;
+
+// State layout: `rs` holds FRAME_RS entries per frame (MAX_BPF_REG
+// registers, STACK_SLOTS slots, the callback argument at CBARG); `ws` has a
+// WS_HEADER-word header, then FRAME_WS words per frame.
+const MAX_BPF_REG: u64 = 11;
+const STACK_SLOTS: u64 = 64;
+const CBARG: u64 = 75;
+const FRAME_RS: u64 = 76;
+const WS_HEADER: u64 = 8;
+const FRAME_WS: u64 = 17;
+// A Bytes slot mask with all eight bytes initialised.
+const ALL_BYTES: u64 = 255;
+
+// Limits (src/verifier.rs): BPF_MAX_STACK_BYTES, MAX_CALL_FRAMES,
+// MAX_PACKET_OFF (0xffff) and MAX_VAR_OFF (1 << 29).
+const STACK_LIMIT: u32 = 512;
+const STACK_BYTES_I: i64 = 512;
+const NEG_STACK_BYTES: i64 = -512;
+const MAX_CALL_FRAMES: u64 = 8;
+const MAX_PACKET_OFF: u64 = 65535;
+const MAX_PACKET_OFF_I: i64 = 65535;
+const MAX_VAR_OFF: u64 = 536870912;
+const U32_MAX: u64 = 4294967295;
+const I16_MAX: u64 = 32767;
+
+// Contexts: `sizeof(struct xdp_md)`, `sizeof(struct __sk_buff)` and its
+// field offsets (src/verifier.rs `skb`).
+const XDP_MD_SIZE: i64 = 24;
+const SK_BUFF_SIZE: i64 = 192;
+const SKB_LEN: i64 = 0;
+const SKB_PKT_TYPE: i64 = 4;
+const SKB_MARK: i64 = 8;
+const SKB_QUEUE_MAPPING: i64 = 12;
+const SKB_PROTOCOL: i64 = 16;
+const SKB_VLAN_TCI: i64 = 24;
+const SKB_VLAN_PROTO: i64 = 28;
+const SKB_PRIORITY: i64 = 32;
+const SKB_INGRESS_IFINDEX: i64 = 36;
+const SKB_IFINDEX: i64 = 40;
+const SKB_TC_INDEX: i64 = 44;
+const SKB_CB: i64 = 48;
+const SKB_HASH: i64 = 68;
+const SKB_TC_CLASSID: i64 = 72;
+const SKB_DATA: i64 = 76;
+const SKB_DATA_END: i64 = 80;
+
+// Helpers, map types and socket tuples (`bpf_sock_tuple` ipv4 and ipv6).
+const LOOP: i32 = 181;
+const BPF_MAP_TYPE_PROG_ARRAY: u64 = 3;
+const BPF_MAP_TYPE_RINGBUF: u64 = 27;
+const SOCK_TUPLE_IPV4: u64 = 12;
+const SOCK_TUPLE_IPV6: u64 = 36;
+
+// Message text.
+const ASCII_MINUS: u8 = 45;
+const ASCII_0: u64 = 48;
+const ASCII_R: u8 = 114;
+
 pub copy struct R {
     tag: u64,
     x: u64,
@@ -234,7 +311,7 @@ fn dec(inout m: ChunkSeq[u8], x: u64) {
             y = wrapping_sub(y, p);
             d = wrapping_add(d, 1);
         }
-        m.push(wrapping_u8(wrapping_add(48, d)));
+        m.push(wrapping_u8(wrapping_add(ASCII_0, d)));
         if p == 1 {
             break;
         }
@@ -256,7 +333,7 @@ fn tenth(p: u64) -> u64 {
 
 fn idec(inout m: ChunkSeq[u8], x: i64) {
     if x < 0 {
-        m.push(45);
+        m.push(ASCII_MINUS);
         dec(inout m, wrapping_sub(0, bits(x)));
     } else {
         dec(inout m, bits(x));
@@ -284,7 +361,7 @@ fn fail(inout v: V, pc: u64, rule: Str, msg: Str) -> Never eff [Fail[VErr]] {
 }
 
 fn reg_name(inout m: ChunkSeq[u8], r: u64) {
-    m.push(114);
+    m.push(ASCII_R);
     dec(inout m, r);
 }
 
@@ -404,11 +481,11 @@ fn zs() -> Scalar {
 }
 
 fn r_none() -> R {
-    mk(0, 0, 0, 0, 0, zs())
+    mk(T_NOT_INIT, 0, 0, 0, 0, zs())
 }
 
 fn r_scalar(s: Scalar) -> R {
-    mk(1, 0, 0, 0, 0, s)
+    mk(T_SCALAR, 0, 0, 0, 0, s)
 }
 
 fn r_unknown() -> R {
@@ -420,15 +497,15 @@ fn r_tag(t: u64) -> R {
 }
 
 fn r_bytes(mask: u64) -> R {
-    mk(16, mask, 0, 0, 0, zs())
+    mk(S_BYTES, mask, 0, 0, 0, zs())
 }
 
 fn is_pointer(r: R) -> bool {
-    r.tag != 0 && r.tag != 1
+    r.tag != T_NOT_INIT && r.tag != T_SCALAR
 }
 
 fn is_or_null(r: R) -> bool {
-    r.tag == 9 || r.tag == 11 || r.tag == 14
+    r.tag == T_MAP_VALUE_OR_NULL || r.tag == T_MEM_OR_NULL || r.tag == T_SOCKET_OR_NULL
 }
 
 fn null_id(r: R) -> u64 {
@@ -440,11 +517,11 @@ fn null_id(r: R) -> u64 {
 }
 
 fn has_ref(r: R) -> bool {
-    r.tag == 10 || r.tag == 11 || r.tag == 13 || r.tag == 14
+    r.tag == T_MEM || r.tag == T_MEM_OR_NULL || r.tag == T_SOCKET || r.tag == T_SOCKET_OR_NULL
 }
 
 fn is_kfunc_object(s: R) -> bool {
-    s.tag == 17 || s.tag == 18
+    s.tag == S_ITER || s.tag == S_IRQ
 }
 
 fn scalar_eq(a: Scalar, b: Scalar) -> bool {
@@ -487,7 +564,7 @@ fn is_const(s: Scalar) -> bool {
 }
 
 fn byte_mask(first: u64, n: u64) -> u64 {
-    shl(wrapping_sub(shl(1, n), 1), first) & 255
+    shl(wrapping_sub(shl(1, n), 1), first) & ALL_BYTES
 }
 
 fn bit(i: u64) -> u64 {
@@ -550,19 +627,19 @@ fn s_frames(in ws: Slice[u64]) -> u64 {
 }
 
 fn s_meta(f: u64) -> u64 {
-    wrapping_add(8, wrapping_mul(f, 17))
+    wrapping_add(WS_HEADER, wrapping_mul(f, FRAME_WS))
 }
 
 fn s_reg(f: u64, r: u64) -> u64 {
-    wrapping_add(wrapping_mul(f, 76), r)
+    wrapping_add(wrapping_mul(f, FRAME_RS), r)
 }
 
 fn s_slot(f: u64, k: u64) -> u64 {
-    wrapping_add(wrapping_mul(f, 76), wrapping_add(11, k))
+    wrapping_add(wrapping_mul(f, FRAME_RS), wrapping_add(MAX_BPF_REG, k))
 }
 
 fn s_cbarg(f: u64) -> u64 {
-    wrapping_add(wrapping_mul(f, 76), 75)
+    wrapping_add(wrapping_mul(f, FRAME_RS), CBARG)
 }
 
 fn s_tail(in ws: Slice[u64]) -> u64 {
@@ -693,7 +770,7 @@ fn set_narrowed(inout st: St, r: u64, val: Scalar) {
         for i in 0..eleven {
             if ww(in st, link_at(f, i)) == id {
                 let old = rr(in st, s_reg(f, i));
-                if old.tag == 1 {
+                if old.tag == T_SCALAR {
                     let m = match scalar_meet(old.var, val) {
                         Option::Some(s) => s,
                         Option::None => val,
@@ -782,18 +859,18 @@ fn push_frame(inout st: St, subprog: u64, return_pc: u64) {
     let eleven: u64 = 11;
     for i in 0..eleven {
         if i == 10 {
-            st.rs.push(mk(6, frame_no, 0, 0, 0, zs()));
+            st.rs.push(mk(T_STACK, frame_no, 0, 0, 0, zs()));
         } else {
             st.rs.push(r_none());
         }
     }
-    let slots: u64 = 64;
+    let slots: u64 = STACK_SLOTS;
     for k in 0..slots {
         st.rs.push(r_bytes(0));
     }
     st.rs.push(r_none());
     let at = s_tail(in st.ws.as_slice());
-    insert_words(inout st, at, 17);
+    insert_words(inout st, at, FRAME_WS);
     setw(inout st, at, subprog);
     setw(inout st, wrapping_add(at, 1), return_pc);
     setw(inout st, 0, wrapping_add(frame_no, 1));
@@ -801,8 +878,8 @@ fn push_frame(inout st: St, subprog: u64, return_pc: u64) {
 
 fn pop_frame(inout st: St) {
     let f = curf(in st);
-    remove_words(inout st, s_meta(f), 17);
-    st.rs.truncate(wrapping_mul(f, 76));
+    remove_words(inout st, s_meta(f), FRAME_WS);
+    st.rs.truncate(wrapping_mul(f, FRAME_RS));
     setw(inout st, 0, f);
 }
 
@@ -838,16 +915,16 @@ fn new_st() -> St {
 fn for_each_value(inout st: St, mode: u64, a: u64, b: u64) {
     let nf = nframes(in st);
     for f in 0..nf {
-        let base = wrapping_mul(f, 76);
-        let n: u64 = 75;
+        let base = wrapping_mul(f, FRAME_RS);
+        let n: u64 = CBARG;
         for i in 0..n {
             let at = wrapping_add(base, i);
             let r = rr(in st, at);
-            if i < 11 || r.tag < 16 {
+            if i < MAX_BPF_REG || r.tag < S_BYTES {
                 let nr = value_change(r, mode, a, b);
-                if i >= 11 && nr.tag == 0 {
+                if i >= MAX_BPF_REG && nr.tag == T_NOT_INIT {
                     // an invalidated spill reads back as unknown bytes
-                    setr(inout st, at, r_bytes(255));
+                    setr(inout st, at, r_bytes(ALL_BYTES));
                 } else {
                     setr(inout st, at, nr);
                 }
@@ -864,7 +941,7 @@ fn value_change(r: R, mode: u64, a: u64, b: u64) -> R {
         return r;
     }
     if mode == 1 {
-        if r.tag == 4 || r.tag == 5 {
+        if r.tag == T_PACKET || r.tag == T_PACKET_END {
             return r_none();
         }
         return r;
@@ -873,13 +950,13 @@ fn value_change(r: R, mode: u64, a: u64, b: u64) -> R {
         if b == 1 {
             return r_scalar(scalar_konst(0));
         }
-        if r.tag == 9 {
-            return mk(8, r.x, 0, 0, 0, zs());
+        if r.tag == T_MAP_VALUE_OR_NULL {
+            return mk(T_MAP_VALUE, r.x, 0, 0, 0, zs());
         }
-        if r.tag == 11 {
-            return mk(10, r.x, 0, r.z, 0, zs());
+        if r.tag == T_MEM_OR_NULL {
+            return mk(T_MEM, r.x, 0, r.z, 0, zs());
         }
-        return mk(13, 0, 0, r.z, 0, zs());
+        return mk(T_SOCKET, 0, 0, r.z, 0, zs());
     }
     r
 }
@@ -924,10 +1001,10 @@ fn ids_check(inout ids: Ids, old: u64, cur: u64) -> bool {
 fn reg_includes(o: R, c: R, in ows: Slice[u64], in cws: Slice[u64], inout ids: Ids) -> bool {
     match o.tag {
         0 => true,
-        1 => c.tag == 1 && scalar_includes(o.var, c.var),
-        2 => c.tag == 2,
-        5 => c.tag == 5,
-        3 => c.tag == 3 && o.x == c.x,
+        1 => c.tag == T_SCALAR && scalar_includes(o.var, c.var),
+        2 => c.tag == T_CTX,
+        5 => c.tag == T_PACKET_END,
+        3 => c.tag == T_FUNC && o.x == c.x,
         4 => c
             .tag
             == 4
@@ -940,11 +1017,11 @@ fn reg_includes(o: R, c: R, in ows: Slice[u64], in cws: Slice[u64], inout ids: I
             && ids_check(inout ids, o.x, c.x)
             && s_range(in ows, o.x)
             <= s_range(in cws, c.x),
-        6 => c.tag == 6 && o.x == c.x && o.off == c.off,
-        7 => c.tag == 7 && o.x == c.x,
-        8 => c.tag == 8 && o.x == c.x && o.off == c.off && scalar_includes(o.var, c.var),
-        9 => c.tag == 9 && o.x == c.x && ids_check(inout ids, o.y, c.y),
-        10 => c.tag == 10 && o.x == c.x && o.off == c.off && ids_check(inout ids, o.z, c.z),
+        6 => c.tag == T_STACK && o.x == c.x && o.off == c.off,
+        7 => c.tag == T_MAP_PTR && o.x == c.x,
+        8 => c.tag == T_MAP_VALUE && o.x == c.x && o.off == c.off && scalar_includes(o.var, c.var),
+        9 => c.tag == T_MAP_VALUE_OR_NULL && o.x == c.x && ids_check(inout ids, o.y, c.y),
+        10 => c.tag == T_MEM && o.x == c.x && o.off == c.off && ids_check(inout ids, o.z, c.z),
         11 => c
             .tag
             == 11
@@ -954,33 +1031,48 @@ fn reg_includes(o: R, c: R, in ows: Slice[u64], in cws: Slice[u64], inout ids: I
             .x
             && ids_check(inout ids, o.y, c.y)
             && ids_check(inout ids, o.z, c.z),
-        13 => c.tag == 13 && ids_check(inout ids, o.z, c.z),
-        12 => c.tag == 12 && o.x == c.x && o.off == c.off && ids_check(inout ids, o.y, c.y),
-        14 => c.tag == 14 && ids_check(inout ids, o.y, c.y) && ids_check(inout ids, o.z, c.z),
+        13 => c.tag == T_SOCKET && ids_check(inout ids, o.z, c.z),
+        12 => c
+            .tag
+            == T_RDONLY_MEM
+            && o
+            .x
+            == c
+            .x
+            && o
+            .off
+            == c
+            .off
+            && ids_check(inout ids, o.y, c.y),
+        14 => c
+            .tag
+            == T_SOCKET_OR_NULL
+            && ids_check(inout ids, o.y, c.y)
+            && ids_check(inout ids, o.z, c.z),
         _ => false,
     }
 }
 
 fn slot_includes(so: R, sc: R, in ows: Slice[u64], in cws: Slice[u64], inout ids: Ids) -> bool {
-    if so.tag == 17 && sc.tag == 17 {
+    if so.tag == S_ITER && sc.tag == S_ITER {
         return so.y == sc.y && ids_check(inout ids, so.x, sc.x);
     }
-    if so.tag == 18 && sc.tag == 18 {
+    if so.tag == S_IRQ && sc.tag == S_IRQ {
         return ids_check(inout ids, so.x, sc.x);
     }
     if is_kfunc_object(so) || is_kfunc_object(sc) {
         return false;
     }
-    if so.tag == 16 {
+    if so.tag == S_BYTES {
         if so.x == 0 {
             return true;
         }
-        if sc.tag == 16 {
+        if sc.tag == S_BYTES {
             return so.x & ~sc.x == 0;
         }
-        return sc.tag == 1;
+        return sc.tag == T_SCALAR;
     }
-    if sc.tag == 16 {
+    if sc.tag == S_BYTES {
         return false;
     }
     reg_includes(so, sc, in ows, in cws, inout ids)
@@ -1013,7 +1105,7 @@ fn state_includes(
     }
     ids_reset(inout ids);
     let eleven: u64 = 11;
-    let slots: u64 = 64;
+    let slots: u64 = STACK_SLOTS;
     for f in 0..nf {
         let m = s_meta(f);
         if gw(in ows, m)
@@ -1132,12 +1224,12 @@ fn iter_depths_differ(in ors: Slice[R], in ows: Slice[u64], in crs: Slice[R], in
     } else {
         b
     };
-    let slots: u64 = 64;
+    let slots: u64 = STACK_SLOTS;
     for f in 0..nf {
         for k in 0..slots {
             let x = gr(in ors, s_slot(f, k));
             let y = gr(in crs, s_slot(f, k));
-            if x.tag == 17 && y.tag == 17 && x.z != y.z {
+            if x.tag == S_ITER && y.tag == S_ITER && x.z != y.z {
                 return true;
             }
         }
@@ -1153,7 +1245,7 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
     }
     let mut changed = false;
     let eleven: u64 = 11;
-    let slots: u64 = 64;
+    let slots: u64 = STACK_SLOTS;
     for f in 0..nf {
         if gw(in pws, subprog_at(f)) != ww(in cur, subprog_at(f)) {
             return changed;
@@ -1161,7 +1253,14 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
         for i in 0..eleven {
             let a = gr(in prs, s_reg(f, i));
             let b = rr(in cur, s_reg(f, i));
-            if a.tag == 1 && b.tag == 1 && !scalar_eq(a.var, b.var) && !is_unknown(b.var) {
+            if a
+                .tag
+                == T_SCALAR
+                && b
+                .tag
+                == T_SCALAR
+                && !scalar_eq(a.var, b.var)
+                && !is_unknown(b.var) {
                 setr(inout cur, s_reg(f, i), r_unknown());
                 setw(inout cur, link_at(f, i), 0);
                 let w = ww(in cur, wide_regs_at(f));
@@ -1172,7 +1271,14 @@ fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
         for k in 0..slots {
             let a = gr(in prs, s_slot(f, k));
             let b = rr(in cur, s_slot(f, k));
-            if a.tag == 1 && b.tag == 1 && !scalar_eq(a.var, b.var) && !is_unknown(b.var) {
+            if a
+                .tag
+                == T_SCALAR
+                && b
+                .tag
+                == T_SCALAR
+                && !scalar_eq(a.var, b.var)
+                && !is_unknown(b.var) {
                 setr(inout cur, s_slot(f, k), r_unknown());
                 let w = ww(in cur, wide_slots_at(f));
                 setw(inout cur, wide_slots_at(f), w | bit(k));
@@ -1507,7 +1613,7 @@ fn check_cfg(inout v: V) eff [Fail[VErr]] {
 
 fn read(inout v: V, in st: St, pc: u64, r: u64) -> R eff [Fail[VErr]] {
     let val = reg(in st, r);
-    if val.tag == 0 {
+    if val.tag == T_NOT_INIT {
         begin(inout v, "reg.uninit_read");
         reg_name(inout v.msg, r);
         lit(inout v.msg, " !read_ok");
@@ -1537,8 +1643,8 @@ fn operand(inout v: V, in st: St, pc: u64, wide: bool, src: Operand) -> R eff [F
 }
 
 fn taint_slot(inout st: St, p: R, off: i16, size: Size, t: bool) {
-    if p.tag == 6 {
-        let at = shr(bits(wrapping_add(wrapping_add(p.off, widen_i64(off)), 512)), 3);
+    if p.tag == T_STACK {
+        let at = shr(bits(wrapping_add(wrapping_add(p.off, widen_i64(off)), STACK_BYTES_I)), 3);
         let f = p.x;
         let w = ww(in st, wide_slots_at(f));
         if t {
@@ -1628,7 +1734,7 @@ fn alu(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64, src: 
         }
     }
     alu_inner(inout v, inout st, pc, wide, op, dst, src);
-    if t && reg(in st, dst).tag == 1 {
+    if t && reg(in st, dst).tag == T_SCALAR {
         set_taint(inout st, dst, true);
     }
 }
@@ -1653,7 +1759,7 @@ fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64,
     match op {
         AluOp::Mov => {
             let val = operand(inout v, in st, pc, wide, src);
-            let res = if val.tag == 1 {
+            let res = if val.tag == T_SCALAR {
                 if wide {
                     r_scalar(val.var)
                 } else {
@@ -1669,7 +1775,7 @@ fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64,
                 raise_at(pc)
             };
             let linked = match src {
-                Operand::Reg(r) => wide && widen_u64(r) != dst && res.tag == 1,
+                Operand::Reg(r) => wide && widen_u64(r) != dst && res.tag == T_SCALAR,
                 Operand::Imm(i) => false,
             };
             if linked {
@@ -1685,7 +1791,7 @@ fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64,
         },
         AluOp::MovSx(from) => {
             let val = operand(inout v, in st, pc, wide, src);
-            if val.tag != 1 {
+            if val.tag != T_SCALAR {
                 fail(inout v, pc, "alu.pointer_arith", "sign-extending move of pointer");
             }
             let f = widen_u32(from);
@@ -1699,7 +1805,7 @@ fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64,
         },
         AluOp::Neg => {
             let val = read(inout v, in st, pc, dst);
-            if val.tag != 1 {
+            if val.tag != T_SCALAR {
                 fail(inout v, pc, "alu.pointer_arith", "negation of pointer");
             }
             let r = if is_const(val.var) {
@@ -1728,7 +1834,7 @@ fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64,
         },
         Operand::Reg(r) => {},
     }
-    if d.tag == 1 && s.tag == 1 {
+    if d.tag == T_SCALAR && s.tag == T_SCALAR {
         let a = if wide {
             d.var
         } else {
@@ -1749,7 +1855,7 @@ fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64,
         set(inout st, dst, r_scalar(finish(wide, r)));
         return;
     }
-    if is_pointer(d) && s.tag == 1 {
+    if is_pointer(d) && s.tag == T_SCALAR {
         if !wide {
             fail(inout v, pc, "alu.pointer_arith", "32-bit pointer arithmetic");
         }
@@ -1769,12 +1875,12 @@ fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64,
         set(inout st, dst, r);
         return;
     }
-    if d.tag == 1 && is_pointer(s) && is_add(op) && wide {
+    if d.tag == T_SCALAR && is_pointer(s) && is_add(op) && wide {
         let r = ptr_add(inout v, inout st, pc, s, d.var, false);
         set(inout st, dst, r);
         return;
     }
-    if d.tag == 4 && s.tag == 4 && is_sub(op) && wide {
+    if d.tag == T_PACKET && s.tag == T_PACKET && is_sub(op) && wide {
         set(inout st, dst, r_unknown());
         return;
     }
@@ -1805,7 +1911,7 @@ fn add_off(off: i64, c: i64, neg: bool) -> Option[i64] {
             } else {
                 bits(r)
             };
-            if mag < 536870912 {
+            if mag < MAX_VAR_OFF {
                 Option::Some(r)
             } else {
                 Option::None
@@ -1836,7 +1942,7 @@ fn ptr_add(inout v: V, inout st: St, pc: u64, p: R, b: Scalar, neg: bool) -> R e
                 );
             }
             let o = offset_or_fail(inout v, pc, p.off, c, neg);
-            mk(6, p.x, 0, 0, o, zs())
+            mk(T_STACK, p.x, 0, 0, o, zs())
         },
         10 => {
             if !known {
@@ -1848,12 +1954,12 @@ fn ptr_add(inout v: V, inout st: St, pc: u64, p: R, b: Scalar, neg: bool) -> R e
                 );
             }
             let o = offset_or_fail(inout v, pc, p.off, c, neg);
-            mk(10, p.x, 0, p.z, o, zs())
+            mk(T_MEM, p.x, 0, p.z, o, zs())
         },
         4 => {
             if known {
                 let o = offset_or_fail(inout v, pc, p.off, c, neg);
-                return mk(4, p.x, 0, 0, o, p.var);
+                return mk(T_PACKET, p.x, 0, 0, o, p.var);
             }
             if neg {
                 fail(
@@ -1863,7 +1969,7 @@ fn ptr_add(inout v: V, inout st: St, pc: u64, p: R, b: Scalar, neg: bool) -> R e
                     "subtracting a variable from a packet pointer"
                 );
             }
-            if b.umax > 65535 || b.smin < 0 {
+            if b.umax > MAX_PACKET_OFF || b.smin < 0 {
                 begin(inout v, "alu.packet_var_too_large");
                 lit(inout v.msg, "variable packet offset up to ");
                 dec(inout v.msg, b.umax);
@@ -1871,7 +1977,7 @@ fn ptr_add(inout v: V, inout st: St, pc: u64, p: R, b: Scalar, neg: bool) -> R e
                 raise_at(pc);
             }
             let nvar = scalar_add(p.var, b);
-            if nvar.umax > 65535 {
+            if nvar.umax > MAX_PACKET_OFF {
                 fail(
                     inout v,
                     pc,
@@ -1880,14 +1986,14 @@ fn ptr_add(inout v: V, inout st: St, pc: u64, p: R, b: Scalar, neg: bool) -> R e
                 );
             }
             let id = fresh_id(inout st);
-            mk(4, id, 0, 0, p.off, nvar)
+            mk(T_PACKET, id, 0, 0, p.off, nvar)
         },
         8 => {
             if known {
                 let o = offset_or_fail(inout v, pc, p.off, c, neg);
-                return mk(8, p.x, 0, 0, o, p.var);
+                return mk(T_MAP_VALUE, p.x, 0, 0, o, p.var);
             }
-            if neg || b.umax >= 536870912 || b.smin < 0 {
+            if neg || b.umax >= MAX_VAR_OFF || b.smin < 0 {
                 fail(
                     inout v,
                     pc,
@@ -1895,7 +2001,7 @@ fn ptr_add(inout v: V, inout st: St, pc: u64, p: R, b: Scalar, neg: bool) -> R e
                     "unbounded or negative variable map value offset"
                 );
             }
-            mk(8, p.x, 0, 0, p.off, scalar_add(p.var, b))
+            mk(T_MAP_VALUE, p.x, 0, 0, p.off, scalar_add(p.var, b))
         },
         _ => {
             if is_or_null(p) {
@@ -1957,7 +2063,7 @@ fn access(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size, write: boo
             if write {
                 fail(inout v, pc, "mem.ctx_write", "cannot write into xdp_md");
             }
-            if o16 < 0 || o16 >= 24 || bits(o16) & wrapping_sub(n, 1) != 0 {
+            if o16 < 0 || o16 >= XDP_MD_SIZE || bits(o16) & wrapping_sub(n, 1) != 0 {
                 bad_xdp(inout v, pc, o16, n);
             }
             let field = o16 & ~3;
@@ -1992,7 +2098,7 @@ fn access(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size, write: boo
         },
         6 => {
             let total = wrapping_add(p.off, o16);
-            if total < -512 || wrapping_add(total, ni) > 0 {
+            if total < NEG_STACK_BYTES || wrapping_add(total, ni) > 0 {
                 begin(inout v, "mem.stack_out_of_bounds");
                 lit(inout v.msg, "invalid stack off=");
                 idec(inout v.msg, total);
@@ -2009,10 +2115,10 @@ fn access(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size, write: boo
                 raise_at(pc);
             }
             let sp = frame_subprog(in st, p.x);
-            bump_depth(inout v, sp, wrapping_sub(0, bits(total)) & 4294967295);
+            bump_depth(inout v, sp, wrapping_sub(0, bits(total)) & U32_MAX);
             Target::Stack {
                 frame: p.x,
-                at: bits(wrapping_add(total, 512))
+                at: bits(wrapping_add(total, STACK_BYTES_I))
             }
         },
         8 => {
@@ -2087,7 +2193,7 @@ fn access(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size, write: boo
 
 fn load(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size) -> R eff [Fail[VErr]] {
     match access(inout v, in st, pc, p, off, size, false) {
-        Target::CtxData => mk(4, 0, 0, 0, 0, scalar_konst(0)),
+        Target::CtxData => mk(T_PACKET, 0, 0, 0, 0, scalar_konst(0)),
         Target::CtxDataEnd => r_tag(5),
         Target::Scalar(sz) => r_scalar(
             scalar_unknown_bits(wrapping_u32(wrapping_mul(size_bytes(sz), 8)))
@@ -2101,16 +2207,16 @@ fn load(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size) -> R eff [Fa
             let n = size_bytes(size);
             let first = (at & 7);
             let nbits = wrapping_u32(wrapping_mul(n, 8));
-            if slot.tag < 16 {
+            if slot.tag < S_BYTES {
                 if n == 8 {
                     return slot;
                 }
-                if slot.tag == 1 {
+                if slot.tag == T_SCALAR {
                     return r_scalar(scalar_unknown_bits(nbits));
                 }
                 fail(inout v, pc, "mem.pointer_partial_fill", "partial read of a spilled pointer");
             }
-            if slot.tag != 16 {
+            if slot.tag != S_BYTES {
                 fail(
                     inout v,
                     pc,
@@ -2122,7 +2228,7 @@ fn load(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size) -> R eff [Fa
             if slot.x & need != need {
                 begin(inout v, "mem.uninit_stack_read");
                 lit(inout v.msg, "invalid read from stack off=");
-                idec(inout v.msg, wrapping_sub(signed(at), 512));
+                idec(inout v.msg, wrapping_sub(signed(at), STACK_BYTES_I));
                 lit(inout v.msg, " size=");
                 dec(inout v.msg, n);
                 raise_at(pc);
@@ -2156,7 +2262,7 @@ fn store(inout v: V, inout st: St, pc: u64, p: R, off: i16, size: Size, val: R) 
                 if is_pointer(val) {
                     fail(inout v, pc, "mem.pointer_partial_spill", "partial spill of a pointer");
                 }
-                let mask = if slot.tag == 16 {
+                let mask = if slot.tag == S_BYTES {
                     slot.x
                 } else {
                     255
@@ -2236,7 +2342,7 @@ fn atomic(
         fail(inout v, pc, "atomic.invalid_target", "BPF_ATOMIC needs a 4- or 8-byte operand");
     }
     let n = size_bytes(size);
-    if p.tag == 8 {
+    if p.tag == T_MAP_VALUE {
         // atomics are always strictly aligned (`check_ptr_alignment`)
         let low = (p.var.var.value | p.var.var.mask) & wrapping_sub(n, 1);
         let at = bits(wrapping_add(p.off, widen_i64(off)));
@@ -2246,7 +2352,7 @@ fn atomic(
             dec(inout v.msg, n);
             raise_at(pc);
         }
-    } else if p.tag != 6 {
+    } else if p.tag != T_STACK {
         null_name_fail(
             inout v,
             pc,
@@ -2269,7 +2375,7 @@ fn atomic(
         => {
             // the spill (if any) is now an unknown value
             let k = s_slot(frame, shr(at, 3));
-            if rr(in st, k).tag < 16 {
+            if rr(in st, k).tag < S_BYTES {
                 setr(inout st, k, r_bytes(0));
             }
         },
@@ -2297,7 +2403,7 @@ fn what_fail(inout v: V, pc: u64, rule: Str, what: Str, msg: Str) -> Never eff [
 
 fn indirect_bounds(inout v: V, pc: u64, what: Str, lo: i64, n: u64) eff [Fail[VErr]] {
     let hi = wrapping_add(lo, signed(n));
-    if lo < -512 || hi > 0 {
+    if lo < NEG_STACK_BYTES || hi > 0 {
         begin(inout v, "mem.stack_out_of_bounds");
         lit(inout v.msg, what);
         lit(inout v.msg, ": invalid indirect stack access off=");
@@ -2313,19 +2419,19 @@ fn check_mem_read(inout v: V, in st: St, pc: u64, p: R, n: u64, what: Str) eff [
     if n == 0 {
         what_fail(inout v, pc, "call.arg_type", what, ": zero-sized memory");
     }
-    if p.tag == 6 {
+    if p.tag == T_STACK {
         let lo = p.off;
         indirect_bounds(inout v, pc, what, lo, n);
         let sp = frame_subprog(in st, p.x);
         bump_depth(inout v, sp, wrapping_sub(0, bits(lo)));
         for i in 0..n {
             let b = wrapping_add(lo, signed(i));
-            let at = bits(wrapping_add(b, 512));
+            let at = bits(wrapping_add(b, STACK_BYTES_I));
             let slot = rr(in st, s_slot(p.x, shr(at, 3)));
-            let ok = if slot.tag == 16 {
+            let ok = if slot.tag == S_BYTES {
                 slot.x & bit((at & 7)) != 0
             } else {
-                slot.tag == 1
+                slot.tag == T_SCALAR
             };
             if !ok {
                 begin(inout v, "mem.uninit_stack_read");
@@ -2337,9 +2443,9 @@ fn check_mem_read(inout v: V, in st: St, pc: u64, p: R, n: u64, what: Str) eff [
         }
         return;
     }
-    if p.tag == 4 || p.tag == 8 || p.tag == 10 || p.tag == 12 {
+    if p.tag == T_PACKET || p.tag == T_MAP_VALUE || p.tag == T_MEM || p.tag == T_RDONLY_MEM {
         // check the first and last byte with the ordinary rules
-        if wrapping_sub(n, 1) > 32767 {
+        if wrapping_sub(n, 1) > I16_MAX {
             fail(inout v, pc, "call.arg_type", "size too large");
         }
         let last = wrapping_i16(wrapping_sub(n, 1));
@@ -2359,19 +2465,19 @@ fn check_mem_write(inout v: V, inout st: St, pc: u64, p: R, n: u64, what: Str) e
     if n == 0 {
         what_fail(inout v, pc, "call.arg_type", what, ": zero-sized memory");
     }
-    if p.tag == 6 {
+    if p.tag == T_STACK {
         let lo = p.off;
         indirect_bounds(inout v, pc, what, lo, n);
         let sp = frame_subprog(in st, p.x);
         bump_depth(inout v, sp, wrapping_sub(0, bits(lo)));
         for i in 0..n {
             let b = wrapping_add(lo, signed(i));
-            let at = bits(wrapping_add(b, 512));
+            let at = bits(wrapping_add(b, STACK_BYTES_I));
             let k = s_slot(p.x, shr(at, 3));
             let slot = rr(in st, k);
-            let mask = if slot.tag == 16 {
+            let mask = if slot.tag == S_BYTES {
                 slot.x | bit((at & 7))
-            } else if slot.tag < 16 {
+            } else if slot.tag < S_BYTES {
                 // an overwritten spill becomes unknown bytes
                 255
             } else {
@@ -2387,8 +2493,8 @@ fn check_mem_write(inout v: V, inout st: St, pc: u64, p: R, n: u64, what: Str) e
         }
         return;
     }
-    if p.tag == 8 || p.tag == 10 {
-        if wrapping_sub(n, 1) > 32767 {
+    if p.tag == T_MAP_VALUE || p.tag == T_MEM {
+        if wrapping_sub(n, 1) > I16_MAX {
             fail(inout v, pc, "call.arg_type", "size too large");
         }
         let last = wrapping_i16(wrapping_sub(n, 1));
@@ -2408,7 +2514,7 @@ fn check_mem_write(inout v: V, inout st: St, pc: u64, p: R, n: u64, what: Str) e
 
 fn arg(inout v: V, in st: St, pc: u64, i: u64) -> R eff [Fail[VErr]] {
     let val = reg(in st, i);
-    if val.tag == 0 {
+    if val.tag == T_NOT_INIT {
         begin(inout v, "reg.uninit_read");
         lit(inout v.msg, "helper argument ");
         reg_name(inout v.msg, i);
@@ -2428,7 +2534,7 @@ fn arg_fail(inout v: V, pc: u64, i: u64, msg: Str, got: R) -> Never eff [Fail[VE
 
 fn map_arg(inout v: V, in st: St, pc: u64, i: u64) -> u64 eff [Fail[VErr]] {
     let a = arg(inout v, in st, pc, i);
-    if a.tag != 7 {
+    if a.tag != T_MAP_PTR {
         arg_fail(inout v, pc, i, ": expected map pointer, got ", a);
     }
     a.x
@@ -2436,7 +2542,7 @@ fn map_arg(inout v: V, in st: St, pc: u64, i: u64) -> u64 eff [Fail[VErr]] {
 
 fn scalar_arg(inout v: V, in st: St, pc: u64, i: u64) -> Scalar eff [Fail[VErr]] {
     let a = arg(inout v, in st, pc, i);
-    if a.tag != 1 {
+    if a.tag != T_SCALAR {
         arg_fail(inout v, pc, i, ": expected scalar, got ", a);
     }
     a.var
@@ -2481,11 +2587,45 @@ fn in_list(o: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i6
 }
 
 fn skb_read(o: i64) -> bool {
-    in_list(o, 0, 4, 8, 12, 16, 24, 28, 32, 36) || in_list(o, 40, 44, 48, 52, 56, 60, 64, 68, 72)
+    in_list(
+        o,
+        SKB_LEN,
+        SKB_PKT_TYPE,
+        SKB_MARK,
+        SKB_QUEUE_MAPPING,
+        SKB_PROTOCOL,
+        SKB_VLAN_TCI,
+        SKB_VLAN_PROTO,
+        SKB_PRIORITY,
+        SKB_INGRESS_IFINDEX
+    )
+        || in_list(
+        o,
+        SKB_IFINDEX,
+        SKB_TC_INDEX,
+        SKB_CB,
+        wrapping_add(SKB_CB, 4),
+        wrapping_add(SKB_CB, 8),
+        wrapping_add(SKB_CB, 12),
+        wrapping_add(SKB_CB, 16),
+        SKB_HASH,
+        SKB_TC_CLASSID
+    )
 }
 
 fn skb_write(o: i64) -> bool {
-    in_list(o, 8, 32, 44, 48, 52, 56, 60, 64, 72)
+    in_list(
+        o,
+        SKB_MARK,
+        SKB_PRIORITY,
+        SKB_TC_INDEX,
+        SKB_CB,
+        wrapping_add(SKB_CB, 4),
+        wrapping_add(SKB_CB, 8),
+        wrapping_add(SKB_CB, 12),
+        wrapping_add(SKB_CB, 16),
+        SKB_TC_CLASSID
+    )
 }
 
 fn ctx_bad(inout v: V, pc: u64, o: i64, n: u64, why: Str) -> Never eff [Fail[VErr]] {
@@ -2509,7 +2649,7 @@ fn ctx_access(inout v: V, pc: u64, o: i64, size: Size, write: bool) -> Target ef
     }
     match v.ptype {
         ProgramType::SchedCls => {
-            if o >= 192 || !is_w(size) {
+            if o >= SK_BUFF_SIZE || !is_w(size) {
                 ctx_bad(inout v, pc, o, n, "only u32 fields of __sk_buff are supported");
             }
             if write {
@@ -2522,10 +2662,10 @@ fn ctx_access(inout v: V, pc: u64, o: i64, size: Size, write: bool) -> Target ef
                 }
                 return Target::Scalar(size);
             }
-            if o == 76 {
+            if o == SKB_DATA {
                 return Target::CtxData;
             }
-            if o == 80 {
+            if o == SKB_DATA_END {
                 return Target::CtxDataEnd;
             }
             if skb_read(o) {
@@ -2579,7 +2719,7 @@ fn kfunc_region(in st: St, from: u64) -> u64 {
     let nf = nframes(in st);
     let mut irq = false;
     let mut iter = false;
-    let slots: u64 = 64;
+    let slots: u64 = STACK_SLOTS;
     for f in from..nf {
         for k in 0..slots {
             let t = rr(in st, s_slot(f, k)).tag;
@@ -2651,12 +2791,12 @@ fn enter_callback(
 fn bpf_loop(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step eff [Fail[VErr]] {
     let a = scalar_arg(inout v, in st, pc, 1);
     let cb = arg(inout v, in st, pc, 2);
-    if cb.tag != 3 {
+    if cb.tag != T_FUNC {
         arg_fail(inout v, pc, 2, ": expected a callback (BPF_PSEUDO_FUNC), got ", cb);
     }
     let entry = cb.x;
     let a3 = arg(inout v, in st, pc, 3);
-    let ok3 = a3.tag == 6 || (a3.tag == 1 && is_const(a3.var) && a3.var.umin == 0);
+    let ok3 = a3.tag == T_STACK || (a3.tag == T_SCALAR && is_const(a3.var) && a3.var.umin == 0);
     if !ok3 {
         arg_fail(inout v, pc, 3, ": expected a stack pointer or NULL, got ", a3);
     }
@@ -2685,14 +2825,22 @@ fn bpf_loop(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step
 fn kfunc_slot(inout v: V, in st: St, pc: u64, what: Str, creates: bool)
     -> (u64, u64) eff [Fail[VErr]] {
     let a = arg(inout v, in st, pc, 1);
-    if a.tag != 6 {
+    if a.tag != T_STACK {
         begin(inout v, "kfunc.arg_type");
         lit(inout v.msg, what);
         lit(inout v.msg, ": arg #0 must be a pointer to the stack");
         raise_at(pc);
     }
     let off = a.off;
-    if wrapping_add(a.x, 1) != nframes(in st) || bits(off) & 7 != 0 || off < -512 || off > -8 {
+    if wrapping_add(a.x, 1)
+        != nframes(in st)
+        || bits(off)
+        & 7
+        != 0
+        || off
+        < NEG_STACK_BYTES
+        || off
+        > -8 {
         begin(inout v, "kfunc.arg_type");
         lit(inout v.msg, what);
         lit(inout v.msg, ": arg #0 must be an aligned 8-byte slot of the current frame, got fp");
@@ -2701,7 +2849,7 @@ fn kfunc_slot(inout v: V, in st: St, pc: u64, what: Str, creates: bool)
     }
     let sp = frame_subprog(in st, a.x);
     bump_depth(inout v, sp, wrapping_sub(0, bits(off)));
-    let at = shr(bits(wrapping_add(off, 512)), 3);
+    let at = shr(bits(wrapping_add(off, STACK_BYTES_I)), 3);
     if creates && is_kfunc_object(rr(in st, s_slot(a.x, at))) {
         begin(inout v, "kfunc.slot_in_use");
         lit(inout v.msg, what);
@@ -2735,7 +2883,7 @@ fn kfunc(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step ef
     match code {
         0 => {
             let p = ww(in st, 2);
-            if p == 4294967295 {
+            if p == U32_MAX {
                 fail(inout v, pc, "kfunc.unbalanced", "bpf_preempt_disable nesting overflow");
             }
             setw(inout st, 2, wrapping_add(p, 1));
@@ -2777,7 +2925,7 @@ fn kfunc(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step ef
         4 => {
             let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_local_irq_save", true);
             let id = fresh_id(inout st);
-            setr(inout st, s_slot(frame, at), mk(18, id, 0, 0, 0, zs()));
+            setr(inout st, s_slot(frame, at), mk(S_IRQ, id, 0, 0, 0, zs()));
             st.ws.push(id);
             let cnt = ww(in st, 7);
             setw(inout st, 7, wrapping_add(cnt, 1));
@@ -2785,7 +2933,7 @@ fn kfunc(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step ef
         5 => {
             let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_local_irq_restore", false);
             let slot = rr(in st, s_slot(frame, at));
-            if slot.tag != 18 {
+            if slot.tag != S_IRQ {
                 fail(
                     inout v,
                     pc,
@@ -2811,38 +2959,38 @@ fn kfunc(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step ef
             let a = scalar_arg(inout v, in st, pc, 2);
             let b = scalar_arg(inout v, in st, pc, 3);
             let id = fresh_id(inout st);
-            setr(inout st, s_slot(frame, at), mk(17, id, 0, 0, 0, zs()));
+            setr(inout st, s_slot(frame, at), mk(S_ITER, id, 0, 0, 0, zs()));
             // 0, -EINVAL or -E2BIG; the iterator is usable either way
             ret = r_unknown();
         },
         7 => {
             let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_iter_num_next", false);
             let slot = rr(in st, s_slot(frame, at));
-            if slot.tag != 17 {
+            if slot.tag != S_ITER {
                 fail(inout v, pc, "kfunc.arg_type", "expected an initialized iter_num as arg #0");
             }
             // NULL and the iterator drained, or (while active) the current
             // value; a drained iterator stays drained
             copy_state(inout alt, in st);
-            setr(inout alt, s_slot(frame, at), mk(17, slot.x, 1, slot.z, 0, zs()));
+            setr(inout alt, s_slot(frame, at), mk(S_ITER, slot.x, 1, slot.z, 0, zs()));
             clobber_call(inout alt, r_scalar(scalar_konst(0)));
             if slot.y == 1 {
                 copy_state(inout st, in alt);
                 return Step::Next(next);
             }
-            let depth = if slot.z >= 4294967295 {
-                4294967295
+            let depth = if slot.z >= U32_MAX {
+                U32_MAX
             } else {
                 wrapping_add(slot.z, 1)
             };
-            setr(inout st, s_slot(frame, at), mk(17, slot.x, 0, depth, 0, zs()));
-            clobber_call(inout st, mk(12, 4, slot.x, 0, 0, zs()));
+            setr(inout st, s_slot(frame, at), mk(S_ITER, slot.x, 0, depth, 0, zs()));
+            clobber_call(inout st, mk(T_RDONLY_MEM, 4, slot.x, 0, 0, zs()));
             return Step::Fork(next, next);
         },
         8 => {
             let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_iter_num_destroy", false);
             let slot = rr(in st, s_slot(frame, at));
-            if slot.tag != 17 {
+            if slot.tag != S_ITER {
                 fail(inout v, pc, "kfunc.arg_type", "expected an initialized iter_num as arg #0");
             }
             let id = slot.x;
@@ -2850,18 +2998,18 @@ fn kfunc(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step ef
             // pointers into the destroyed iterator's state die with it
             let nf = nframes(in st);
             let eleven: u64 = 11;
-            let slots: u64 = 64;
+            let slots: u64 = STACK_SLOTS;
             for f in 0..nf {
                 for i in 0..eleven {
                     let r = rr(in st, s_reg(f, i));
-                    if r.tag == 12 && r.y == id {
+                    if r.tag == T_RDONLY_MEM && r.y == id {
                         setr(inout st, s_reg(f, i), r_none());
                         setw(inout st, link_at(f, i), 0);
                     }
                 }
                 for j in 0..slots {
                     let s = rr(in st, s_slot(f, j));
-                    if s.tag == 12 && s.y == id {
+                    if s.tag == T_RDONLY_MEM && s.y == id {
                         setr(inout st, s_slot(f, j), r_bytes(0));
                     }
                 }
@@ -2886,7 +3034,7 @@ fn map_kind_fail(inout v: V, pc: u64, msg: Str) -> Never eff [Fail[VErr]] {
 }
 
 fn ctx_arg(inout v: V, in st: St, pc: u64, msg: Str) eff [Fail[VErr]] {
-    if arg(inout v, in st, pc, 1).tag != 2 {
+    if arg(inout v, in st, pc, 1).tag != T_CTX {
         fail(inout v, pc, "call.arg_type", msg);
     }
 }
@@ -2900,7 +3048,7 @@ fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
             let size1 = map_word(in v, map, 1);
             check_mem_read(inout v, in st, pc, key, size1, "map key");
             let nid = fresh_id(inout st);
-            ret = mk(9, map, nid, 0, 0, zs());
+            ret = mk(T_MAP_VALUE_OR_NULL, map, nid, 0, 0, zs());
         },
         2 => {
             let map = helper_map(inout v, in st, pc, id);
@@ -2927,7 +3075,7 @@ fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
         15 => {},
         16 => {
             let size = const_arg(inout v, in st, pc, 2);
-            if size > 4294967295 {
+            if size > U32_MAX {
                 fail(inout v, pc, "call.arg_type", "comm buffer size too large");
             }
             let buf = arg(inout v, in st, pc, 1);
@@ -2988,7 +3136,7 @@ fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
         },
         131 => {
             let map = map_arg(inout v, in st, pc, 1);
-            if map_word(in v, map, 0) != 27 {
+            if map_word(in v, map, 0) != BPF_MAP_TYPE_RINGBUF {
                 map_kind_fail(inout v, pc, "bpf_ringbuf_reserve needs a ringbuf map");
             }
             let size = const_arg(inout v, in st, pc, 2);
@@ -3005,7 +3153,7 @@ fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
             let cf = curf(in st);
             push_ref(inout st, ref_id, 0, pc, cf);
             let nid = fresh_id(inout st);
-            ret = mk(11, size & 4294967295, nid, ref_id, 0, zs());
+            ret = mk(T_MEM_OR_NULL, size & U32_MAX, nid, ref_id, 0, zs());
         },
         132 => {
             ret = ringbuf_release(inout v, inout st, pc);
@@ -3015,12 +3163,12 @@ fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
         },
         130 => {
             let map = map_arg(inout v, in st, pc, 1);
-            if map_word(in v, map, 0) != 27 {
+            if map_word(in v, map, 0) != BPF_MAP_TYPE_RINGBUF {
                 map_kind_fail(inout v, pc, "bpf_ringbuf_output needs a ringbuf map");
             }
             let size = const_arg(inout v, in st, pc, 3);
             let data = arg(inout v, in st, pc, 2);
-            if size > 4294967295 {
+            if size > U32_MAX {
                 fail(inout v, pc, "call.arg_type", "ringbuf output size too large");
             }
             check_mem_read(inout v, in st, pc, data, size, "ringbuf output data");
@@ -3029,7 +3177,7 @@ fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
         84 => {
             ctx_arg(inout v, in st, pc, "r1 must be the xdp_md context");
             let size = const_arg(inout v, in st, pc, 3);
-            if size != 12 && size != 36 {
+            if size != SOCK_TUPLE_IPV4 && size != SOCK_TUPLE_IPV6 {
                 begin(inout v, "call.arg_type");
                 lit(inout v.msg, "invalid tuple size ");
                 dec(inout v.msg, size);
@@ -3045,11 +3193,11 @@ fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
             let cf = curf(in st);
             push_ref(inout st, ref_id, 1, pc, cf);
             let nid = fresh_id(inout st);
-            ret = mk(14, 0, nid, ref_id, 0, zs());
+            ret = mk(T_SOCKET_OR_NULL, 0, nid, ref_id, 0, zs());
         },
         86 => {
             let p = arg(inout v, in st, pc, 1);
-            if p.tag != 13 {
+            if p.tag != T_SOCKET {
                 null_name_fail(
                     inout v,
                     pc,
@@ -3078,7 +3226,7 @@ fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
 fn helper_map(inout v: V, in st: St, pc: u64, id: i32) -> u64 eff [Fail[VErr]] {
     let map = map_arg(inout v, in st, pc, 1);
     let t = map_word(in v, map, 0);
-    if t == 27 {
+    if t == BPF_MAP_TYPE_RINGBUF {
         begin(inout v, "call.arg_type");
         lit(inout v.msg, "helper ");
         idec(inout v.msg, widen_i64(id));
@@ -3086,7 +3234,7 @@ fn helper_map(inout v: V, in st: St, pc: u64, id: i32) -> u64 eff [Fail[VErr]] {
         map_name(inout v, map);
         raise_at(pc);
     }
-    if t == 3 {
+    if t == BPF_MAP_TYPE_PROG_ARRAY {
         begin(inout v, "call.arg_type");
         lit(inout v.msg, "program array ");
         map_name(inout v, map);
@@ -3098,7 +3246,7 @@ fn helper_map(inout v: V, in st: St, pc: u64, id: i32) -> u64 eff [Fail[VErr]] {
 
 fn ringbuf_release(inout v: V, inout st: St, pc: u64) -> R eff [Fail[VErr]] {
     let p = arg(inout v, in st, pc, 1);
-    if p.tag != 10 {
+    if p.tag != T_MEM {
         null_name_fail(
             inout v,
             pc,
@@ -3125,14 +3273,14 @@ fn ringbuf_release(inout v: V, inout st: St, pc: u64) -> R eff [Fail[VErr]] {
 // Exit and branches.
 
 fn points_into(r: R, dying: u64) -> bool {
-    r.tag == 6 && r.x == dying
+    r.tag == T_STACK && r.x == dying
 }
 
 fn exit(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr]] {
     let r0 = read(inout v, in st, pc, 0);
     let depth = curf(in st);
     if depth == 0 {
-        if r0.tag != 1 {
+        if r0.tag != T_SCALAR {
             null_name_fail(
                 inout v,
                 pc,
@@ -3203,7 +3351,7 @@ fn exit(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
         fail(inout v, pc, "exit.stack_ptr_escape", "returning a pointer to the callee stack");
     }
     let eleven: u64 = 11;
-    let slots: u64 = 64;
+    let slots: u64 = STACK_SLOTS;
     for f in 0..depth {
         let mut bad = false;
         for i in 0..eleven {
@@ -3243,10 +3391,10 @@ fn exit(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                 "a widened loop scalar is a callback's return value"
             );
         }
-        if !(r0.tag == 1 && r0.var.umax <= 1) {
+        if !(r0.tag == T_SCALAR && r0.var.umax <= 1) {
             begin(inout v, "exit.callback_ret");
             lit(inout v.msg, "bpf_loop callback must return 0 or 1, R0 is ");
-            if r0.tag == 1 {
+            if r0.tag == T_SCALAR {
                 lit(inout v.msg, "in [");
                 dec(inout v.msg, r0.var.umin);
                 lit(inout v.msg, ", ");
@@ -3334,7 +3482,7 @@ fn is_eq(op: JmpOp) -> bool {
 }
 
 fn is_zero(r: R) -> bool {
-    r.tag == 1 && is_const(r.var) && r.var.umin == 0
+    r.tag == T_SCALAR && is_const(r.var) && r.var.umin == 0
 }
 
 fn cond(
@@ -3356,7 +3504,7 @@ fn cond(
         Operand::Imm(i) => (false, 0),
     };
     let taint = tainted(in st, dst) || (has_src && tainted(in st, sr));
-    if a.tag == 1 && b.tag == 1 {
+    if a.tag == T_SCALAR && b.tag == T_SCALAR {
         let t = refine_jmp(op, wide, a.var, b.var, true);
         let f = refine_jmp(op, wide, a.var, b.var, false);
         let ht = match t {
@@ -3396,15 +3544,15 @@ fn cond(
         }
     }
     // (p, 0) or (0, p) with p maybe-null, Eq/Ne
-    let null_p = if is_or_null(a) && b.tag == 1 {
+    let null_p = if is_or_null(a) && b.tag == T_SCALAR {
         is_zero(b) && is_eq_ne(op)
-    } else if a.tag == 1 && is_or_null(b) {
+    } else if a.tag == T_SCALAR && is_or_null(b) {
         is_zero(a) && is_eq_ne(op)
     } else {
         false
     };
     if null_p {
-        let p = if a.tag == 1 {
+        let p = if a.tag == T_SCALAR {
             b
         } else {
             a
@@ -3419,23 +3567,25 @@ fn cond(
         return Step::Fork(target, fall);
     }
     // a pointer known to be non-NULL compared with 0: the branch is decided
-    let rdonly = (a.tag == 12 && is_zero(b)) || (a.tag == 1 && is_zero(a) && b.tag == 12);
+    let rdonly = (a.tag == T_RDONLY_MEM && is_zero(b))
+        || (a.tag == T_SCALAR && is_zero(a) && b.tag == T_RDONLY_MEM);
     if rdonly && wide && is_eq_ne(op) {
         if is_eq(op) {
             return Step::Next(fall);
         }
         return Step::Jump(target);
     }
-    if (a.tag == 4 && b.tag == 5) || (a.tag == 5 && b.tag == 4) {
+    if (a.tag == T_PACKET && b.tag == T_PACKET_END)
+        || (a.tag == T_PACKET_END && b.tag == T_PACKET) {
         if !wide {
             fail(inout v, pc, "jmp.pointer_compare", "32-bit packet pointer comparison");
         }
-        let p = if a.tag == 4 {
+        let p = if a.tag == T_PACKET {
             a
         } else {
             b
         };
-        let o = if a.tag == 5 {
+        let o = if a.tag == T_PACKET_END {
             swap_op(op)
         } else {
             op
@@ -3448,13 +3598,13 @@ fn cond(
             >= 0
             && p
             .off
-            <= 65535
+            <= MAX_PACKET_OFF_I
             && p
             .var
             .umax
-            <= 65535
+            <= MAX_PACKET_OFF
             && wrapping_add(p.var.umax, bits(p.off))
-            <= 65535;
+            <= MAX_PACKET_OFF;
         let kind = match o {
             JmpOp::Gt => 1,
             JmpOp::Ge => 1,
@@ -3516,7 +3666,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             let d = widen_u64(dst);
             write_check(inout v, pc, d);
             let s = read(inout v, in st, pc, d);
-            if s.tag != 1 {
+            if s.tag != T_SCALAR {
                 begin(inout v, "alu.pointer_arith");
                 lit(inout v.msg, "byte swap on pointer ");
                 reg_name(inout v.msg, d);
@@ -3565,7 +3715,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                     }
                     raise_at(pc);
                 }
-                if id == 181 {
+                if id == LOOP {
                     return bpf_loop(inout v, inout st, inout alt, pc, next);
                 }
                 helper(inout v, inout st, pc, id);
@@ -3574,7 +3724,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             CallTarget::Local(off) => {
                 let t = target(inout v, pc, widen_i64(off));
                 let nf = nframes(in st);
-                if nf >= 8 {
+                if nf >= MAX_CALL_FRAMES {
                     fail(inout v, pc, "call.depth", "the call stack of 8 frames is too deep");
                 }
                 let sp = subprog_of(in v, t);
@@ -3614,7 +3764,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                         idec(inout v.msg, widen_i64(i));
                         raise_at(pc);
                     }
-                    mk(7, widen_u64(wrapping_u32(i)), 0, 0, 0, zs())
+                    mk(T_MAP_PTR, widen_u64(wrapping_u32(i)), 0, 0, 0, zs())
                 },
                 Imm64::Pseudo {
                     src,
@@ -3630,7 +3780,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                         raise_at(pc);
                     }
                     let e = wrapping_add(wrapping_add(signed(pc), 1), widen_i64(imm_lo));
-                    mk(3, bits(e) & 4294967295, 0, 0, 0, zs())
+                    mk(T_FUNC, bits(e) & U32_MAX, 0, 0, 0, zs())
                 },
             };
             set(inout st, d, val);
@@ -3648,13 +3798,13 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
             write_check(inout v, pc, d);
             let p = read(inout v, in st, pc, widen_u64(src));
             let mut val = load(inout v, in st, pc, p, off, size);
-            if p.tag == 2 && val.tag == 4 {
+            if p.tag == T_CTX && val.tag == T_PACKET {
                 // like the kernel, a fresh `ctx->data` has no range yet
                 let id = fresh_id(inout st);
-                val = mk(4, id, 0, 0, val.off, val.var);
+                val = mk(T_PACKET, id, 0, 0, val.off, val.var);
             }
             if sign_extend {
-                if val.tag != 1 {
+                if val.tag != T_SCALAR {
                     fail(
                         inout v,
                         pc,
@@ -3667,8 +3817,11 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                 );
             }
             set(inout st, d, val);
-            if p.tag == 6 {
-                let at = shr(bits(wrapping_add(wrapping_add(p.off, widen_i64(off)), 512)), 3);
+            if p.tag == T_STACK {
+                let at = shr(
+                    bits(wrapping_add(wrapping_add(p.off, widen_i64(off)), STACK_BYTES_I)),
+                    3
+                );
                 let t = ww(in st, wide_slots_at(p.x)) & bit(at) != 0;
                 set_taint(inout st, d, t);
             }
@@ -3686,7 +3839,7 @@ fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr
                 ProgramType::SchedCls => true,
                 _ => false,
             };
-            if p.tag == 2 && skb {
+            if p.tag == T_CTX && skb {
                 fail(
                     inout v,
                     pc,
@@ -3768,7 +3921,7 @@ fn finish_path(inout v: V, start: u64) {
 
 fn rec_rs_end(in v: V, rid: u64) -> u64 {
     let nf = sq(in v.pws, sq(in v.rec_ws, rid));
-    wrapping_add(sq(in v.rec_rs, rid), wrapping_mul(nf, 76))
+    wrapping_add(sq(in v.rec_rs, rid), wrapping_mul(nf, FRAME_RS))
 }
 
 fn rec_ws_end(in v: V, rid: u64) -> u64 {
@@ -3836,23 +3989,23 @@ fn bounded_iteration(in v: V, pc: u64, rid: u64, in st: St) -> bool {
             == 0
             && r1
             .off
-            >= -512
+            >= NEG_STACK_BYTES
             && r1
             .off
             < 0
     ) {
         return false;
     }
-    let at = shr(bits(wrapping_add(r1.off, 512)), 3);
+    let at = shr(bits(wrapping_add(r1.off, STACK_BYTES_I)), 3);
     let s = rr(in st, s_slot(f, at));
-    if !(s.tag == 17 && s.y == 0) {
+    if !(s.tag == S_ITER && s.y == 0) {
         return false;
     }
     let base = sq(in v.rec_rs, rid);
     let onf = sq(in v.pws, sq(in v.rec_ws, rid));
     let of = wrapping_sub(onf, 1);
     match v.prs.try_get(wrapping_add(base, s_slot(of, at))) {
-        Option::Some(o) => o.tag == 17 && o.x == s.x,
+        Option::Some(o) => o.tag == S_ITER && o.x == s.x,
         Option::None => false,
     }
 }
@@ -3977,23 +4130,23 @@ fn path_text(inout m: ChunkSeq[u8], in res: ChunkSeq[u64], extra: u64) {
 fn pack_regs(inout out: ChunkSeq[R], in st: St) {
     let nf = nframes(in st);
     for f in 0..nf {
-        let base = wrapping_mul(f, 76);
-        let lo = wrapping_add(base, 11);
+        let base = wrapping_mul(f, FRAME_RS);
+        let lo = wrapping_add(base, MAX_BPF_REG);
         let mut e: u64 = 0;
         loop {
-            if e == 64 {
+            if e == STACK_SLOTS {
                 break;
             }
             let x = rr(in st, wrapping_add(lo, e));
-            if x.tag != 16 || x.x != 0 {
+            if x.tag != S_BYTES || x.x != 0 {
                 break;
             }
             e = wrapping_add(e, 1);
         }
         out.push(mk(e, 0, 0, 0, 0, zs()));
         out.extend(in st.rs[base..lo]);
-        out.push(rr(in st, wrapping_add(base, 75)));
-        out.extend(in st.rs[wrapping_add(lo, e)..wrapping_add(lo, 64)]);
+        out.push(rr(in st, wrapping_add(base, CBARG)));
+        out.extend(in st.rs[wrapping_add(lo, e)..wrapping_add(lo, STACK_SLOTS)]);
     }
 }
 
@@ -4006,13 +4159,13 @@ fn unpack_regs(inout st: St, in src: ChunkSeq[R], at: u64) {
     for f in 0..nf {
         let e = gr(in src.as_slice(), i).tag;
         let regs = wrapping_add(i, 1);
-        st.rs.extend(in src[regs..wrapping_add(regs, 11)]);
-        let cb = gr(in src.as_slice(), wrapping_add(regs, 11));
+        st.rs.extend(in src[regs..wrapping_add(regs, MAX_BPF_REG)]);
+        let cb = gr(in src.as_slice(), wrapping_add(regs, MAX_BPF_REG));
         for j in 0..e {
             st.rs.push(r_bytes(0));
         }
-        let lo = wrapping_add(regs, 12);
-        let kept = wrapping_sub(64, e);
+        let lo = wrapping_add(regs, wrapping_add(MAX_BPF_REG, 1));
+        let kept = wrapping_sub(STACK_SLOTS, e);
         st.rs.extend(in src[lo..wrapping_add(lo, kept)]);
         st.rs.push(cb);
         i = wrapping_add(lo, kept);
@@ -4127,8 +4280,8 @@ fn run(inout v: V) -> u64 eff [Fail[VErr]] {
         in calls.as_slice(),
         in none_indirect.as_slice(),
         0,
-        512,
-        8
+        STACK_LIMIT,
+        MAX_CALL_FRAMES
     );
     let kind = sq(in res, 0);
     if kind == 1 {

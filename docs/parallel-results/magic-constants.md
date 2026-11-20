@@ -46,7 +46,8 @@ included, and many of them are fine as they are.
 | #1197 | silicon: the RISC-V AIA register map (APLIC offsets, IDC registers, `target[i]` and `msiaddrcfgh` fields, `sourcecfg.SM` codes, IMSIC iselects) | `abba one port` aia-intc, aplic-direct, imsic Ir unchanged |
 | #1199 | eBPF instruction codec: the kernel's `BPF_*` opcode fields (class, op, jmp, source, size, mode, atomic) | decode workload 5.42 M -> 5.32 M Ir per warm call (-1.9%) |
 | #1202 | eBPF interpreter: helper ids, map types, errnos, limits, ring buffer header bits, `xdp_md`/`__sk_buff` offsets, FNV and xorshift64* constants, region kinds (Rust and port) | interp workload 25.63 M Ir per warm call before and after (+0.01%) |
-| next | eBPF BTF, `.BTF.ext`, CO-RE and wire: BTF kinds and `info` fields, header layout, UTF-8 bounds, `line_col`, CO-RE relocation kinds, local tree tags, frame offsets, map types and limits (Rust and port) | warm call Ir: btf 10.574 M -> 10.593 M (+0.18%), ext 934.3 K -> 942.0 K (+0.82%), core 2.7407 M -> 2.7405 M |
+| #1203 | eBPF BTF, `.BTF.ext`, CO-RE and wire: BTF kinds and `info` fields, header layout, UTF-8 bounds, `line_col`, CO-RE relocation kinds, local tree tags, frame offsets, map types and limits (Rust and port) | warm call Ir: btf 10.574 M -> 10.593 M (+0.18%), ext 934.3 K -> 942.0 K (+0.82%), core 2.7407 M -> 2.7405 M |
+| next | eBPF verifier: register tags, frame and stack layout, stack and packet limits, `xdp_md`/`__sk_buff` context offsets, map types, socket tuple sizes, ASCII (Rust and port). Integer `match` arms stay literal (constants are not patterns yet) | warm call Ir: verify 679.6 K -> 681.4 K (+0.26%), scalar 8.7395 M -> 8.7394 M, concrete 763.7 K -> 766.0 K (+0.30%) |
 
 ## Order
 
