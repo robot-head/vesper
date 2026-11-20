@@ -610,10 +610,7 @@ impl Checker<'_> {
                 PatternKind::Constructor { name, fields, .. } => match name.as_str() {
                     "Option::Some" | "Some" => {
                         fields.len() == 1
-                            && matches!(
-                                fields[0].1.kind,
-                                PatternKind::Bind(_) | PatternKind::Wild
-                            )
+                            && matches!(fields[0].1.kind, PatternKind::Bind(_) | PatternKind::Wild)
                     }
                     "Option::None" | "None" => fields.is_empty(),
                     _ => false,

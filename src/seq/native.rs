@@ -497,7 +497,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.seq_load_elem(addr, elem)
     }
 
-    pub(super) fn seq_load_elem(&mut self, addr: ir::Value, elem: &Type) -> Result<ir::Value, String> {
+    pub(super) fn seq_load_elem(
+        &mut self,
+        addr: ir::Value,
+        elem: &Type,
+    ) -> Result<ir::Value, String> {
         let layout = Layout::of(self.world, elem)?;
         if layout.aggregate() {
             // The copy writes every word.
@@ -1622,7 +1626,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         let address = self.b.declare_var(self.b.func.dfg.value_type(addr));
         self.b.def_var(address, addr);
         let var = self.vars[n];
-        self.narrow_homes.insert(var.as_u32(), (address, elem.clone()));
+        self.narrow_homes
+            .insert(var.as_u32(), (address, elem.clone()));
         Ok(())
     }
 
@@ -1643,7 +1648,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             .find(|i| i.dest == value)
             .is_some_and(|i| {
                 matches!(i.op, crate::ir::Op::Seq { .. })
-                    && self.world.element_views.contains_key(&(i.span.start, i.span.end))
+                    && self
+                        .world
+                        .element_views
+                        .contains_key(&(i.span.start, i.span.end))
             });
         if view {
             return Err("native element view match was not lowered in place".into());
