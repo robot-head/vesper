@@ -80,7 +80,7 @@ filegroup(
         ("scalar", "scalar", "    let mu = chi | a.mask | b.mask;\n    tn(sv & ~mu, mu)", "    let mu = chi | a.mask;\n    tn(sv & ~mu, mu)"),
         ("interp", "concrete", "        AluOp::Arsh => sar(a, b & 63),\n", "        AluOp::Arsh => shr(a, b & 63),\n"),
         ("verifier", "scalar", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 1));\n", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 2));\n"),
-        ("helpers", "helpers", "        ProgramType::SchedCls => id == 84 || id == 86,\n", "        ProgramType::SchedCls => id == 44 || id == 84 || id == 86,\n"),
+        ("helpers", "helpers", "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n", "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n"),
         ("program", "program", "            if max_entries < 4096 ||", "            if max_entries < 2048 ||"),
         ("callgraph", "callgraph", "        if bytes > lim {\n", "        if bytes > wrapping_add(lim, 8) {\n"),
         ("wire", "wire", "        src_ipv4: wrapping_u32(be(in s, 26, 4)),\n", "        src_ipv4: wrapping_u32(be(in s, 30, 4)),\n"),

@@ -63,8 +63,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 4 helpers.rs: tc programs may call bpf_xdp_adjust_head.
     (
-        "        ProgramType::SchedCls => id == 84 || id == 86,\n",
-        "        ProgramType::SchedCls => id == 44 || id == 84 || id == 86,\n",
+        "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n",
+        "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n",
     ),
     // 5 program.rs: a ringbuf of 2048 bytes is accepted.
     (
