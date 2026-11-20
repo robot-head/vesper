@@ -27,9 +27,18 @@ use @vesper-std/sort::unstable::{
     sort
 };
 
-fn leaf_bit() -> u64 {
-    0x100000000
-}
+// A child word: a node index, or a leaf index with bit 32 set. Keys are
+// 64-bit Morton codes (equal keys break ties by index, past bit 64); a box
+// is six floats (min then max); a quantised axis has 21 bits.
+const LEAF_BIT: u64 = 0x100000000;
+const INDEX_MASK: u64 = 0xffffffff;
+const KEY_BITS: i64 = 64;
+const BOX_FLOATS: u64 = 6;
+const MORTON64_AXIS_MAX: u32 = 0x1fffff;
+const MORTON64_AXIS_MAX_F: f32 = 2097151.0;
+// IEEE 754 binary32 +-infinity.
+const F32_INFINITY_BITS: u32 = 0x7f800000;
+const F32_NEG_INFINITY_BITS: u32 = 0xff800000;
 
 fn raise_lbvh(e: LbvhError) eff [Fail[LbvhError]] {
     Fail::raise(e);
@@ -44,7 +53,7 @@ fn delta(in codes: Slice[u64], n: u64, i: u64, j: i64) -> i64 {
     let a = g64(in codes, i);
     let b = g64(in codes, uj);
     if a == b {
-        wrapping_add(64, widen_i64(leading_zeros_u32(wrapping_u32(i) ^ wrapping_u32(uj))))
+        wrapping_add(KEY_BITS, widen_i64(leading_zeros_u32(wrapping_u32(i) ^ wrapping_u32(uj))))
     } else {
         widen_i64(leading_zeros_u64(a ^ b))
     }
@@ -116,21 +125,21 @@ fn internal(in codes: Slice[u64], n: u64, i: u64) -> (u64, u64) {
     let g = wrapping_u64(gamma);
     let mut left = g;
     if min_i64(ii, j) == gamma {
-        left = leaf_bit() | g;
+        left = LEAF_BIT | g;
     }
     let mut right = inc(g);
     if max_i64(ii, j) == wrapping_add(gamma, 1) {
-        right = leaf_bit() | inc(g);
+        right = LEAF_BIT | inc(g);
     }
     (left, right)
 }
 
 // Box `c` (a child word) from the leaf or node bounds.
 fn bounds_lane(in leaf: Slice[u32], in node_box: Slice[u32], c: u64, lane: u64) -> f32 {
-    if (c & leaf_bit()) != 0 {
-        gf(in leaf, wrapping_add(wrapping_mul(c & 0xffffffff, 6), lane))
+    if (c & LEAF_BIT) != 0 {
+        gf(in leaf, wrapping_add(wrapping_mul(c & INDEX_MASK, BOX_FLOATS), lane))
     } else {
-        gf(in node_box, wrapping_add(wrapping_mul(c, 6), lane))
+        gf(in node_box, wrapping_add(wrapping_mul(c, BOX_FLOATS), lane))
     }
 }
 
@@ -162,8 +171,8 @@ pub fn build(
         return ();
     }
     // Centroid bounds.
-    let inf = from_bits_f32(0x7f800000);
-    let ninf = from_bits_f32(0xff800000);
+    let inf = from_bits_f32(F32_INFINITY_BITS);
+    let ninf = from_bits_f32(F32_NEG_INFINITY_BITS);
     let mut lo0 = inf;
     let mut lo1 = inf;
     let mut lo2 = inf;
@@ -244,7 +253,7 @@ pub fn build(
         }
         sp = dec(sp);
         let c = g64(in stack, sp);
-        if (c & leaf_bit()) == 0 {
+        if (c & LEAF_BIT) == 0 {
             order.try_set(count, wrapping_u32(c));
             count = inc(count);
             stack.try_set(sp, g64(in left, c));
@@ -283,9 +292,9 @@ pub fn build(
 fn quantize(c: f32, lo: f32, extent: f32) -> u32 {
     if extent > 0.0 {
         let t = (c - lo) / extent;
-        let q = saturating_u32(t * 2097151.0);
-        if q > 0x1fffff {
-            return 0x1fffff;
+        let q = saturating_u32(t * MORTON64_AXIS_MAX_F);
+        if q > MORTON64_AXIS_MAX {
+            return MORTON64_AXIS_MAX;
         }
         return q;
     }
@@ -322,8 +331,8 @@ pub fn pairs(
             }
             sp = dec(sp);
             let c = g64(in stack, sp);
-            if (c & leaf_bit()) != 0 {
-                let q = c & 0xffffffff;
+            if (c & LEAF_BIT) != 0 {
+                let q = c & INDEX_MASK;
                 if q > p && boxes_overlap(in leaf, p, in leaf, q) {
                     if len == max_pairs {
                         return inc(max_pairs);

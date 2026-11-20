@@ -3,6 +3,9 @@
 // caller reaches, so the exported functions raise only their crate's own
 // errors. Sorting comes from @vesper-std/sort.
 
+// IEEE 754 binary32's exponent field.
+const F32_EXP_MASK: u32 = 0x7f800000;
+
 pub fn g32(in s: Slice[u32], i: u64) -> u32 {
     match s.try_get(i) {
         Option::Some(x) => x,
@@ -38,7 +41,7 @@ pub fn gf(in s: Slice[u32], i: u64) -> f32 {
 }
 
 pub fn f32_finite(x: f32) -> bool {
-    (to_bits_f32(x) & 0x7f800000) != 0x7f800000
+    (to_bits_f32(x) & F32_EXP_MASK) != F32_EXP_MASK
 }
 
 // Whether box `i` of `boxes` (six f32 lanes each: min x, y, z, max x, y,

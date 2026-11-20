@@ -10,6 +10,21 @@ pub const AXIS_MAX: u16 = 1023;
 /// Mask of the 30 bits a code can use.
 pub const CODE_MASK: u32 = (1 << 30) - 1;
 
+// The magic-bits interleave: an axis value is spread so that two zero
+// bits follow each of its bits, by shifting and masking with the pattern
+// each step leaves (named by the shift); compacting runs the steps
+// backwards. Bit 3i of SPREAD_MASK_2 is set for i < 10.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const AXIS_MASK: u32 = AXIS_MAX as u32;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD_MASK_16: u32 = 0x0300_00ff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD_MASK_8: u32 = 0x0300_f00f;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD_MASK_4: u32 = 0x030c_30c3;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD_MASK_2: u32 = 0x0924_9249;
+
 /// Typed rejection of out-of-range Morton inputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MortonError {
@@ -43,11 +58,11 @@ pub fn spread(v: u32) -> u32 {
 #[cfg(not(vesper_port))]
 #[inline]
 pub const fn spread(v: u32) -> u32 {
-    let mut x = v & 0x0000_03ff;
-    x = (x | (x << 16)) & 0x0300_00ff;
-    x = (x | (x << 8)) & 0x0300_f00f;
-    x = (x | (x << 4)) & 0x030c_30c3;
-    x = (x | (x << 2)) & 0x0924_9249;
+    let mut x = v & AXIS_MASK;
+    x = (x | (x << 16)) & SPREAD_MASK_16;
+    x = (x | (x << 8)) & SPREAD_MASK_8;
+    x = (x | (x << 4)) & SPREAD_MASK_4;
+    x = (x | (x << 2)) & SPREAD_MASK_2;
     x
 }
 
@@ -62,11 +77,11 @@ pub fn compact(v: u32) -> u32 {
 #[cfg(not(vesper_port))]
 #[inline]
 pub const fn compact(v: u32) -> u32 {
-    let mut x = v & 0x0924_9249;
-    x = (x | (x >> 2)) & 0x030c_30c3;
-    x = (x | (x >> 4)) & 0x0300_f00f;
-    x = (x | (x >> 8)) & 0x0300_00ff;
-    x = (x | (x >> 16)) & 0x0000_03ff;
+    let mut x = v & SPREAD_MASK_2;
+    x = (x | (x >> 2)) & SPREAD_MASK_4;
+    x = (x | (x >> 4)) & SPREAD_MASK_8;
+    x = (x | (x >> 8)) & SPREAD_MASK_16;
+    x = (x | (x >> 16)) & AXIS_MASK;
     x
 }
 
@@ -175,7 +190,7 @@ pub fn decode_fast(code: u32) -> Result<(u16, u16, u16), MortonError> {
 pub mod arch {
     use std::arch::x86_64::{_pdep_u32, _pext_u32};
 
-    const X_MASK: u32 = 0x0924_9249;
+    use super::{AXIS_MASK, SPREAD_MASK_2 as X_MASK};
 
     /// Whether the running CPU supports BMI2.
     pub fn bmi2_available() -> bool {
@@ -184,9 +199,9 @@ pub mod arch {
 
     #[target_feature(enable = "bmi2")]
     fn encode_impl(x: u16, y: u16, z: u16) -> u32 {
-        _pdep_u32(u32::from(x) & 0x3ff, X_MASK)
-            | _pdep_u32(u32::from(y) & 0x3ff, X_MASK << 1)
-            | _pdep_u32(u32::from(z) & 0x3ff, X_MASK << 2)
+        _pdep_u32(u32::from(x) & AXIS_MASK, X_MASK)
+            | _pdep_u32(u32::from(y) & AXIS_MASK, X_MASK << 1)
+            | _pdep_u32(u32::from(z) & AXIS_MASK, X_MASK << 2)
     }
 
     #[target_feature(enable = "bmi2")]
