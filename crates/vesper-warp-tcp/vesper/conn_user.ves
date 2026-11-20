@@ -107,7 +107,7 @@ pub fn tcb_write(inout t: Tcb, n: u64) -> Result[Unit, TcpFail] {
         == State::CloseWait;
     if open && !t.fin_requested {
         let v = wrapping_add(t.write_end, n);
-        if v < t.write_end || v >= 4611686018427387904 {
+        if v < t.write_end || v >= MAX_STREAM_OFFSET {
             Result::Err(TcpFail::Overflow)
         } else {
             t.write_end = v;

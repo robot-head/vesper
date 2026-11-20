@@ -4,8 +4,9 @@
 
 use crate::seq::Seq;
 use crate::wire::{
-    Flags, HEADER_LEN, HeaderFields, IPPROTO_TCP, IpPair, MAX_OPTIONS_LEN, MAX_SACK_BLOCKS,
-    SackBlock, Segment, TcpOptions, Timestamps, WireError, offsets,
+    DEFAULT_IPV4_MSS, DEFAULT_IPV6_MSS, Flags, HEADER_LEN, HeaderFields, IPPROTO_TCP, IpPair,
+    MAX_OPTIONS_LEN, MAX_SACK_BLOCKS, SackBlock, Segment, TcpOptions, Timestamps, WireError,
+    offsets, options as opt,
 };
 
 impl Flags {
@@ -27,19 +28,20 @@ impl TcpOptions {
     pub fn encoded_len(&self) -> usize {
         let mut n = 0;
         if self.mss.is_some() {
-            n += 4;
+            n += opt::PADDED_LEN;
         }
         if self.window_scale.is_some() {
-            n += 4; // NOP + 3
+            n += opt::PADDED_LEN; // NOP + 3
         }
         if self.sack_permitted {
-            n += 4; // NOP NOP + 2 (or packed with timestamps below)
+            n += opt::PADDED_LEN; // NOP NOP + 2
         }
         if self.timestamps.is_some() {
-            n += 12; // NOP NOP + 10
+            n += opt::PADDED_TIMESTAMPS_LEN; // NOP NOP + 10
         }
         if self.sack_len > 0 {
-            n += 4 + 8 * usize::from(self.sack_len).min(MAX_SACK_BLOCKS);
+            n += opt::PADDED_LEN
+                + opt::SACK_BLOCK_LEN * usize::from(self.sack_len).min(MAX_SACK_BLOCKS);
         }
         n
     }
@@ -56,36 +58,50 @@ impl TcpOptions {
         }
         let mut i = 0;
         if let Some(mss) = self.mss {
-            out[i..i + 4].copy_from_slice(&[2, 4, (mss >> 8) as u8, mss as u8]);
-            i += 4;
+            let [hi, lo] = mss.to_be_bytes();
+            out[i..i + 4].copy_from_slice(&[opt::MSS, opt::MSS_LEN, hi, lo]);
+            i += opt::PADDED_LEN;
         }
         if let Some(ws) = self.window_scale {
-            out[i..i + 4].copy_from_slice(&[1, 3, 3, ws]);
-            i += 4;
+            out[i..i + 4].copy_from_slice(&[
+                opt::NOP,
+                opt::WINDOW_SCALE,
+                opt::WINDOW_SCALE_LEN,
+                ws,
+            ]);
+            i += opt::PADDED_LEN;
         }
         if self.sack_permitted {
-            out[i..i + 4].copy_from_slice(&[1, 1, 4, 2]);
-            i += 4;
+            out[i..i + 4].copy_from_slice(&[
+                opt::NOP,
+                opt::NOP,
+                opt::SACK_PERMITTED,
+                opt::SACK_PERMITTED_LEN,
+            ]);
+            i += opt::PADDED_LEN;
         }
         if let Some(ts) = self.timestamps {
-            out[i..i + 2].copy_from_slice(&[1, 1]);
-            out[i + 2] = 8;
-            out[i + 3] = 10;
+            out[i..i + 4].copy_from_slice(&[
+                opt::NOP,
+                opt::NOP,
+                opt::TIMESTAMPS,
+                opt::TIMESTAMPS_LEN,
+            ]);
             out[i + 4..i + 8].copy_from_slice(&ts.val.to_be_bytes());
             out[i + 8..i + 12].copy_from_slice(&ts.ecr.to_be_bytes());
-            i += 12;
+            i += opt::PADDED_TIMESTAMPS_LEN;
         }
         if self.sack_len > 0 {
             let blocks = self.sack();
-            out[i] = 1;
-            out[i + 1] = 1;
-            out[i + 2] = 5;
-            out[i + 3] = (2 + 8 * blocks.len()) as u8;
-            i += 4;
+            out[i] = opt::NOP;
+            out[i + 1] = opt::NOP;
+            out[i + 2] = opt::SACK;
+            out[i + 3] = (opt::KIND_AND_LEN + opt::SACK_BLOCK_LEN * blocks.len()) as u8;
+            i += opt::PADDED_LEN;
             for b in blocks {
                 out[i..i + 4].copy_from_slice(&b.left.0.to_be_bytes());
                 out[i + 4..i + 8].copy_from_slice(&b.right.0.to_be_bytes());
-                i += 8;
+                i += opt::SACK_BLOCK_LEN;
             }
         }
         debug_assert_eq!(i, len);
@@ -100,8 +116,8 @@ impl TcpOptions {
         while i < bytes.len() {
             let kind = bytes[i];
             match kind {
-                0 => break, // End of option list; the rest is padding.
-                1 => {
+                opt::END => break,
+                opt::NOP => {
                     i += 1;
                     continue;
                 }
@@ -111,35 +127,44 @@ impl TcpOptions {
                 return Err(WireError::MalformedOption { kind });
             };
             let len = usize::from(len);
-            if len < 2 || i + len > bytes.len() {
+            if len < opt::KIND_AND_LEN || i + len > bytes.len() {
                 return Err(WireError::MalformedOption { kind });
             }
-            let body = &bytes[i + 2..i + len];
+            let body = &bytes[i + opt::KIND_AND_LEN..i + len];
             match kind {
-                2 => {
-                    if len != 4 || opts.mss.is_some() {
+                opt::MSS => {
+                    if len != usize::from(opt::MSS_LEN) || opts.mss.is_some() {
                         return Err(WireError::MalformedOption { kind });
                     }
                     opts.mss = Some(u16::from_be_bytes([body[0], body[1]]));
                 }
-                3 => {
-                    if len != 3 || opts.window_scale.is_some() {
+                opt::WINDOW_SCALE => {
+                    if len != usize::from(opt::WINDOW_SCALE_LEN) || opts.window_scale.is_some() {
                         return Err(WireError::MalformedOption { kind });
                     }
                     opts.window_scale = Some(body[0]);
                 }
-                4 => {
-                    if len != 2 || opts.sack_permitted {
+                opt::SACK_PERMITTED => {
+                    if len != usize::from(opt::SACK_PERMITTED_LEN) || opts.sack_permitted {
                         return Err(WireError::MalformedOption { kind });
                     }
                     opts.sack_permitted = true;
                 }
-                5 => {
-                    let n = (len - 2) / 8;
-                    if (len - 2) % 8 != 0 || n == 0 || n > MAX_SACK_BLOCKS || opts.sack_len != 0 {
+                opt::SACK => {
+                    let n = (len - opt::KIND_AND_LEN) / opt::SACK_BLOCK_LEN;
+                    if !(len - opt::KIND_AND_LEN).is_multiple_of(opt::SACK_BLOCK_LEN)
+                        || n == 0
+                        || n > MAX_SACK_BLOCKS
+                        || opts.sack_len != 0
+                    {
                         return Err(WireError::MalformedOption { kind });
                     }
-                    for (k, chunk) in body.as_chunks::<8>().0.iter().enumerate() {
+                    for (k, chunk) in body
+                        .as_chunks::<{ opt::SACK_BLOCK_LEN }>()
+                        .0
+                        .iter()
+                        .enumerate()
+                    {
                         opts.sack_blocks[k] = SackBlock {
                             left: Seq(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
                             right: Seq(u32::from_be_bytes([
@@ -149,8 +174,8 @@ impl TcpOptions {
                     }
                     opts.sack_len = n as u8;
                 }
-                8 => {
-                    if len != 10 || opts.timestamps.is_some() {
+                opt::TIMESTAMPS => {
+                    if len != usize::from(opt::TIMESTAMPS_LEN) || opts.timestamps.is_some() {
                         return Err(WireError::MalformedOption { kind });
                     }
                     opts.timestamps = Some(Timestamps {
@@ -245,8 +270,8 @@ impl IpPair {
     #[must_use]
     pub const fn default_mss(self) -> u16 {
         match self {
-            IpPair::V4 { .. } => 536,
-            IpPair::V6 { .. } => 1220,
+            IpPair::V4 { .. } => DEFAULT_IPV4_MSS,
+            IpPair::V6 { .. } => DEFAULT_IPV6_MSS,
         }
     }
 }

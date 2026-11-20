@@ -144,253 +144,202 @@ pub fn is_primitive_word(w: u8) -> bool {
     w >= 30 && w <= 42
 }
 
-// The kind of the lower-case identifier `b[s..s + n]`: a keyword or Lower (4).
-pub fn keyword(in b: Slice[u8], s: u64, n: u64) -> u8 {
-    if n == 2 {
-        if is(in b, s, in "fn".as_bytes()) {
-            return 12;
-        }
-        if is(in b, s, in "in".as_bytes()) {
-            return 19;
-        }
-        if is(in b, s, in "if".as_bytes()) {
-            return 28;
-        }
-        4
-    } else if n == 3 {
-        if is(in b, s, in "let".as_bytes()) {
-            return 13;
-        }
-        if is(in b, s, in "mod".as_bytes()) {
-            return 17;
-        }
-        if is(in b, s, in "eff".as_bytes()) {
-            return 18;
-        }
-        4
-    } else if n == 4 {
-        if is(in b, s, in "enum".as_bytes()) {
-            return 9;
-        }
-        if is(in b, s, in "impl".as_bytes()) {
-            return 11;
-        }
-        if is(in b, s, in "copy".as_bytes()) {
-            return 14;
-        }
-        if is(in b, s, in "sink".as_bytes()) {
-            return 21;
-        }
-        if is(in b, s, in "self".as_bytes()) {
-            return 22;
-        }
-        if is(in b, s, in "with".as_bytes()) {
-            return 25;
-        }
-        if is(in b, s, in "else".as_bytes()) {
-            return 29;
-        }
-        if is(in b, s, in "true".as_bytes()) {
-            return 30;
-        }
-        4
-    } else if n == 5 {
-        if is(in b, s, in "inout".as_bytes()) {
-            return 20;
-        }
-        if is(in b, s, in "state".as_bytes()) {
-            return 24;
-        }
-        if is(in b, s, in "match".as_bytes()) {
-            return 27;
-        }
-        if is(in b, s, in "false".as_bytes()) {
-            return 31;
-        }
-        4
-    } else if n == 6 {
-        if is(in b, s, in "struct".as_bytes()) {
-            return 8;
-        }
-        if is(in b, s, in "effect".as_bytes()) {
-            return 10;
-        }
-        if is(in b, s, in "affine".as_bytes()) {
-            return 15;
-        }
-        if is(in b, s, in "linear".as_bytes()) {
-            return 16;
-        }
-        if is(in b, s, in "handle".as_bytes()) {
-            return 23;
-        }
-        if is(in b, s, in "return".as_bytes()) {
-            return 26;
-        }
-        4
+// The kind of the lower-case identifier `b[s..s + n]` whose first bytes
+// are the word `w` (`word_at`): a keyword or Lower (4).
+pub fn keyword(n: u64, w: u64) -> u8 {
+    if n <= 6 {
+        keyword_word(w)
     } else {
         4
     }
 }
 
-// The contextual word of a Lower token.
-pub fn lower_word(in b: Slice[u8], s: u64, n: u64) -> u8 {
-    if n == 1 {
-        if is(in b, s, in "_".as_bytes()) {
-            return 21;
-        }
-        0
-    } else if n == 2 {
-        if is(in b, s, in "as".as_bytes()) {
-            return 10;
-        }
-        if is(in b, s, in "u8".as_bytes()) {
-            return 30;
-        }
-        if is(in b, s, in "i8".as_bytes()) {
-            return 35;
-        }
-        0
-    } else if n == 3 {
-        if is(in b, s, in "use".as_bytes()) {
-            return 1;
-        }
-        if is(in b, s, in "pub".as_bytes()) {
-            return 3;
-        }
-        if is(in b, s, in "fip".as_bytes()) {
-            return 4;
-        }
-        if is(in b, s, in "for".as_bytes()) {
-            return 8;
-        }
-        if is(in b, s, in "dim".as_bytes()) {
-            return 12;
-        }
-        if is(in b, s, in "dyn".as_bytes()) {
-            return 13;
-        }
-        if is(in b, s, in "hot".as_bytes()) {
-            return 14;
-        }
-        if is(in b, s, in "mut".as_bytes()) {
-            return 16;
-        }
-        if is(in b, s, in "u16".as_bytes()) {
-            return 31;
-        }
-        if is(in b, s, in "u32".as_bytes()) {
-            return 32;
-        }
-        if is(in b, s, in "u64".as_bytes()) {
-            return 33;
-        }
-        if is(in b, s, in "i16".as_bytes()) {
-            return 36;
-        }
-        if is(in b, s, in "i32".as_bytes()) {
-            return 37;
-        }
-        if is(in b, s, in "i64".as_bytes()) {
-            return 38;
-        }
-        if is(in b, s, in "f32".as_bytes()) {
-            return 40;
-        }
-        if is(in b, s, in "f64".as_bytes()) {
-            return 41;
-        }
-        0
-    } else if n == 4 {
-        if is(in b, s, in "wire".as_bytes()) {
-            return 7;
-        }
-        if is(in b, s, in "type".as_bytes()) {
-            return 11;
-        }
-        if is(in b, s, in "cold".as_bytes()) {
-            return 15;
-        }
-        if is(in b, s, in "loop".as_bytes()) {
-            return 18;
-        }
-        if is(in b, s, in "bool".as_bytes()) {
-            return 42;
-        }
-        if is(in b, s, in "test".as_bytes()) {
-            return 27;
-        }
-        0
-    } else if n == 5 {
-        if is(in b, s, in "model".as_bytes()) {
-            return 2;
-        }
-        if is(in b, s, in "trait".as_bytes()) {
-            return 5;
-        }
-        if is(in b, s, in "tiled".as_bytes()) {
-            return 6;
-        }
-        if is(in b, s, in "where".as_bytes()) {
-            return 9;
-        }
-        if is(in b, s, in "break".as_bytes()) {
-            return 19;
-        }
-        if is(in b, s, in "usize".as_bytes()) {
-            return 34;
-        }
-        if is(in b, s, in "isize".as_bytes()) {
-            return 39;
-        }
-        if is(in b, s, in "super".as_bytes()) {
-            return 25;
-        }
-        if is(in b, s, in "const".as_bytes()) {
-            return 26;
-        }
-        0
-    } else if n == 6 {
-        if is(in b, s, in "region".as_bytes()) {
-            return 17;
-        }
-        0
-    } else if n == 7 {
-        if is(in b, s, in "col_get".as_bytes()) {
-            return 23;
-        }
-        if is(in b, s, in "col_set".as_bytes()) {
-            return 24;
-        }
-        0
-    } else if n == 8 {
-        if is(in b, s, in "continue".as_bytes()) {
-            return 20;
-        }
-        0
-    } else if n == 9 {
-        if is(in b, s, in "test_case".as_bytes()) {
-            return 28;
-        }
-        0
-    } else if n == 13 {
-        if is(in b, s, in "load_tile_vec".as_bytes()) {
-            return 22;
-        }
-        0
+// The contextual word of the Lower token `b[s..s + n]` whose first bytes
+// are the word `w`.
+pub fn lower_word(in b: Slice[u8], s: u64, n: u64, w: u64) -> u8 {
+    if n <= 8 {
+        lower_word_of(w)
+    } else if n == 9 && is(in b, s, in "test_case".as_bytes()) {
+        28
+    } else if n == 13 && is(in b, s, in "load_tile_vec".as_bytes()) {
+        22
     } else {
         0
     }
 }
 
-// The contextual word of an Upper token.
-pub fn upper_word(in b: Slice[u8], s: u64, n: u64) -> u8 {
+// The contextual word of the Upper token `b[s..s + n]` whose first bytes
+// are the word `w`.
+pub fn upper_word(n: u64, w: u64) -> u8 {
     if n == 8 {
-        if is(in b, s, in "TiledSeq".as_bytes()) {
-            return 50;
-        }
-        0
+        upper_word_of(w)
     } else {
         0
+    }
+}
+
+// Keywords by a perfect hash of their word: slot `(w * 16476191191221802671) >> 59` holds
+// the keyword's word (bits 0-55) and kind (bits 56-63), or 0.
+const KEYWORDS: [u64; 32] = [
+    // copy
+    1008806318568402787,
+    // handle
+    1657436179088171368,
+    // inout
+    1441152380945002089,
+    0,
+    0,
+    // eff
+    1297036692689413733,
+    // match
+    1945555487369224557,
+    // true
+    2161727822840033908,
+    0,
+    0,
+    0,
+    // impl
+    792633536236514665,
+    // if
+    2017612633062008425,
+    // state
+    1729382692654511219,
+    // let
+    936748722500691308,
+    // effect
+    720703910631073381,
+    // affine
+    1080975435458045537,
+    // else
+    2089670228801973349,
+    0,
+    // in
+    1369094286720659049,
+    // with
+    1801439852700658039,
+    // return
+    1873618882862015858,
+    // sink
+    1513209476598884723,
+    // self
+    1585267070552794483,
+    0,
+    // linear
+    1153047267245975916,
+    // mod
+    1224979098651357037,
+    0,
+    // false
+    2233785850903945574,
+    // struct
+    576588722824442995,
+    // fn
+    864691128455163494,
+    // enum
+    648518348177763941,
+];
+
+// The kind of a lower-case identifier of at most six bytes whose bytes
+// are the little-endian word `w` (`word_at`): a keyword or Lower (4).
+pub fn keyword_word(w: u64) -> u8 {
+    let e = KEYWORDS[(wrapping_mul(w, 16476191191221802671) >> 59) & 31];
+    if (e & 72057594037927935) == w {
+        wrapping_u8(e >> 56)
+    } else {
+        4
+    }
+}
+
+// The contextual word of a Lower token of at most eight bytes, by word.
+pub fn lower_word_of(w: u64) -> u8 {
+    match w {
+        // _
+        95 => 21,
+        // i8
+        14441 => 35,
+        // u8
+        14453 => 30,
+        // as
+        29537 => 10,
+        // f32
+        3289958 => 40,
+        // i32
+        3289961 => 37,
+        // u32
+        3289973 => 32,
+        // f64
+        3421798 => 41,
+        // i64
+        3421801 => 38,
+        // u64
+        3421813 => 33,
+        // i16
+        3551593 => 36,
+        // u16
+        3551605 => 31,
+        // pub
+        6452592 => 3,
+        // use
+        6648693 => 1,
+        // dim
+        7170404 => 12,
+        // dyn
+        7240036 => 13,
+        // fip
+        7367014 => 4,
+        // for
+        7499622 => 8,
+        // hot
+        7630696 => 14,
+        // mut
+        7632237 => 16,
+        // cold
+        1684828003 => 15,
+        // type
+        1701869940 => 11,
+        // wire
+        1701996919 => 7,
+        // bool
+        1819242338 => 42,
+        // loop
+        1886351212 => 18,
+        // test
+        1953719668 => 27,
+        // tiled
+        431198333300 => 6,
+        // where
+        435710945399 => 9,
+        // isize
+        435845428073 => 39,
+        // usize
+        435845428085 => 34,
+        // break
+        461195539042 => 19,
+        // model
+        465557548909 => 2,
+        // super
+        491328140659 => 25,
+        // trait
+        499984200308 => 5,
+        // const
+        500152823651 => 26,
+        // region
+        121424788809074 => 17,
+        // col_get
+        32762591955414883 => 23,
+        // col_set
+        32762643495022435 => 24,
+        // continue
+        7310870969309884259 => 20,
+        _ => 0,
+    }
+}
+
+// The contextual word of an Upper token of at most eight bytes, by word.
+pub fn upper_word_of(w: u64) -> u8 {
+    match w {
+        // TiledSeq
+        8171028789597071700 => 50,
+        _ => 0,
     }
 }

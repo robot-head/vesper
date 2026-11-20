@@ -52,7 +52,7 @@ fn check_view(s: SentSeg, send_base: u64, send_len: u64, out_len: u64) -> Option
             );
         }
     }
-    if out_len < wrapping_add(60, wrapping_sub(de, ds)) {
+    if out_len < wrapping_add(MAX_HEADER_LEN, wrapping_sub(de, ds)) {
         return Option::Some(TcpFail::BufferTooSmall);
     }
     Option::None
@@ -96,8 +96,8 @@ fn fill_sack(in t: Tcb, inout o: Opts, room: u64) {
     if !t.sack_ok || t.ooo.len() == 0 {
         return;
     }
-    let space = min64(sat_sub64(40, opts_encoded_len(o)), room);
-    if space < 12 {
+    let space = min64(sat_sub64(MAX_OPTIONS_LEN, opts_encoded_len(o)), room);
+    if space < SACK_ONE_BLOCK_LEN {
         return;
     }
     let max_blocks = min64(wrapping_sub(space, 4) / 8, 4);
@@ -151,12 +151,12 @@ fn advertised_window(inout t: Tcb, syn: bool) -> u16 {
     };
     let wnd = sat_sub64(adv_right, t.rcv_nxt);
     if syn {
-        let w = min64(wnd, 65535);
+        let w = min64(wnd, MAX_UNSCALED_WINDOW);
         t.rcv_adv_right = max64(t.rcv_adv_right, wrapping_add(t.rcv_nxt, w));
         return wrapping_u16(w);
     }
     let shift = widen_u64(t.rcv_wscale);
-    let scaled = min64(shr64(wnd, shift), 65535);
+    let scaled = min64(shr64(wnd, shift), MAX_UNSCALED_WINDOW);
     t.rcv_adv_right = max64(t.rcv_adv_right, wrapping_add(t.rcv_nxt, shl64(scaled, shift)));
     wrapping_u16(scaled)
 }
@@ -176,7 +176,7 @@ fn emit_ack(inout t: Tcb, now: u64, inout out: Slice[u8]) -> Result[Tx, TcpFail]
         },
     };
     let mut o = base_options(in t, now, false);
-    fill_sack(in t, inout o, 40);
+    fill_sack(in t, inout o, MAX_OPTIONS_LEN);
     let window = advertised_window(inout t, false);
     let h = Hdr {
         src_port: t.cfg.local_port,
