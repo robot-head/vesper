@@ -1,10 +1,11 @@
 use serde::Serialize;
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
     fs::OpenOptions,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use vesper::{
     anvil_hash::{FunctionGraph, VerdictCache},
@@ -13,8 +14,10 @@ use vesper::{
     },
     ast::{Diagnostic, Expr, ExprKind, Function, Item, Literal, Module, Span, Statement, Type},
     check::{self, World},
+    ffi_lowering::{self, EvalHost, FfiError, ForeignChecked, Imports},
     lexer::{self, Token, TokenKind as K},
     native::batch::{BatchLimits, NativeBatch},
+    packages::{self, Assembled, SourceMap},
     parser,
     runtime::{Runtime, Value},
     test_attrs::{self, AttrValue, FunctionTestAttrs},
@@ -107,6 +110,14 @@ struct Options {
     fuel: u64,
     no_cache: bool,
     json: bool,
+}
+
+impl Options {
+    fn selects(&self, test: &DiscoveredTest) -> bool {
+        self.filter
+            .as_ref()
+            .is_none_or(|pat| test.name.contains(pat.as_str()))
+    }
 }
 
 fn parse_u64(text: &str, flag: &str) -> Result<u64, String> {
@@ -270,7 +281,7 @@ impl TestCase {
     }
 }
 
-fn prepare_tests(source: &str) -> Result<(parser::Parse, Vec<TestCase>), String> {
+fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), String> {
     let parsed = parser::parse_for_tests(source);
     if let Some(d) = parsed.diagnostics.first() {
         return Err(test_diagnostic(
@@ -282,7 +293,7 @@ fn prepare_tests(source: &str) -> Result<(parser::Parse, Vec<TestCase>), String>
         ));
     }
     let (tokens, _) = lexer::lex(source);
-    let names: BTreeSet<&str> = parsed
+    let mut names: BTreeSet<&str> = parsed
         .module
         .items
         .iter()
@@ -291,6 +302,13 @@ fn prepare_tests(source: &str) -> Result<(parser::Parse, Vec<TestCase>), String>
             _ => None,
         })
         .collect();
+    names.extend(
+        parsed
+            .module
+            .uses
+            .iter()
+            .flat_map(|import| import.names.iter().map(|name| name.local())),
+    );
     let mut tests = Vec::new();
     let mut expanded = None;
     let mut next_entry = 0;
@@ -397,6 +415,7 @@ fn prepare_tests(source: &str) -> Result<(parser::Parse, Vec<TestCase>), String>
         f.result = target.result.clone();
         f.effects = target.effects.clone();
     }
+    *source = expanded;
     Ok((lowered, tests))
 }
 
@@ -759,10 +778,11 @@ fn run_tests_on_world(
     selected: &[UnitEntry],
     fuel: u64,
     prefer_jit: bool,
+    foreign: Option<(&ForeignChecked, &EvalHost)>,
 ) -> (bool, Vec<UnitTestCaseReport>) {
     let mut fallback: BTreeMap<&str, String> = Default::default();
     let mut batch = None;
-    if prefer_jit && !selected.is_empty() {
+    if foreign.is_none() && prefer_jit && !selected.is_empty() {
         let names: Vec<&str> = selected.iter().map(|test| test.entry.as_str()).collect();
         match NativeBatch::compile(world, &names, BatchLimits::default()) {
             Ok(b) => batch = Some(b),
@@ -788,7 +808,7 @@ fn run_tests_on_world(
                 }
             }
         }
-    } else {
+    } else if foreign.is_none() {
         for test in selected {
             fallback.insert(test.entry.as_str(), "mutation gate uses evaluator".into());
         }
@@ -803,7 +823,14 @@ fn run_tests_on_world(
         let (line, column) = location(source, test.span.start);
         let ((mut passed, result, mut message, engine, fallback_reason), ledger_report) = ledger
             .audit_frame(|| {
-                if let Some(reason) = fallback.get(entry) {
+                if let Some((checked, host)) = foreign {
+                    let (passed, result, message) = evaluate_outcome(
+                        checked
+                            .evaluate_with_fuel(entry, Some(fuel), |call| host.call(call))
+                            .map_err(|error| error.to_string()),
+                    );
+                    (passed, result, message, TestEngine::Evaluator, None)
+                } else if let Some(reason) = fallback.get(entry) {
                     let runtime = evaluator.get_or_insert_with(|| Runtime::new(world));
                     runtime.fuel = fuel;
                     let (passed, result, message) = evaluate_outcome(runtime.run(entry, vec![]));
@@ -856,11 +883,20 @@ fn without_negative_tests(mut module: Module, negative: &BTreeSet<String>) -> Mo
     module
 }
 
+fn checked_module(module: &Module, negative: BTreeSet<String>) -> Cow<'_, Module> {
+    // Intentional checker failures never poison other tests in the module.
+    if negative.is_empty() {
+        Cow::Borrowed(module)
+    } else {
+        Cow::Owned(without_negative_tests(module.clone(), &negative))
+    }
+}
+
 fn checked_for_mutation(
     source: &str,
     negative: &BTreeSet<String>,
 ) -> Result<check::Checked, String> {
-    let (parsed, cases) = prepare_tests(source)?;
+    let (parsed, cases) = prepare_tests(&mut source.to_owned())?;
     let world = check::check(&without_negative_tests(parsed.module, negative));
     if let Some(diagnostic) = world.diagnostics.first() {
         return Err(test_diagnostic(
@@ -888,16 +924,37 @@ struct FileUnitTests {
     expect_error_names: BTreeSet<String>,
 }
 
+impl FileUnitTests {
+    fn failed(display: String, source: String, error: String) -> Self {
+        Self {
+            display: display.clone(),
+            source,
+            report: UnitTestFileReport {
+                file: display,
+                passed: false,
+                tests: vec![],
+                error: Some(error),
+            },
+            selected: vec![],
+            replay: vec![],
+            test_names: BTreeSet::new(),
+            expect_error_names: BTreeSet::new(),
+        }
+    }
+}
+
 /// A non-unit test the mutation gate replays against each mutant.
 #[derive(Clone)]
 enum ReplayTest {
     Property {
         name: String,
+        entry: String,
         cases: usize,
         explicit: Vec<Vec<Value>>,
     },
     SimPulse {
         name: String,
+        entry: String,
         schedules: usize,
         profile: String,
         seed: u64,
@@ -910,10 +967,11 @@ impl ReplayTest {
         match self {
             ReplayTest::Property {
                 name,
+                entry,
                 cases,
                 explicit,
             } => {
-                let outcome = run_property_test(world, name, *cases, explicit, fuel);
+                let outcome = run_property_test(world, entry, *cases, explicit, fuel);
                 if outcome.passed {
                     Ok(())
                 } else {
@@ -927,11 +985,12 @@ impl ReplayTest {
             }
             ReplayTest::SimPulse {
                 name,
+                entry,
                 schedules,
                 profile,
                 seed,
             } => {
-                let outcome = run_simpulse_test_on_world(world, name, *schedules, profile, *seed);
+                let outcome = run_simpulse_test_on_world(world, entry, *schedules, profile, *seed);
                 if outcome.passed {
                     Ok(())
                 } else {
@@ -955,12 +1014,318 @@ fn collect_files(target: &Path) -> Result<Vec<(String, String)>, String> {
     }
 }
 
+struct PackageTarget {
+    root: PathBuf,
+    file: Option<PathBuf>,
+}
+
+impl PackageTarget {
+    fn discover(target: &Path) -> Result<Option<Self>, String> {
+        let directory = target.is_dir();
+        let start = if directory {
+            target
+        } else {
+            target
+                .parent()
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+        };
+        let start = start
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", start.display()))?;
+        let Some(root) = start
+            .ancestors()
+            .take(SourceLimits::default().max_ancestors)
+            .find(|dir| packages::is_package(dir))
+        else {
+            return Ok(None);
+        };
+        let src = root.join("src");
+        if !src.is_dir() || (start != root && !start.starts_with(&src)) {
+            return Ok(None);
+        }
+        let file = if directory {
+            None
+        } else if start.starts_with(&src) && target.extension().is_some_and(|ext| ext == "ves") {
+            target.file_name().map(|name| start.join(name))
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            root: root.to_owned(),
+            file,
+        }))
+    }
+}
+
+struct TestSource {
+    display: String,
+    source: String,
+    id: Option<usize>,
+    cases: Vec<TestCase>,
+    tests: Vec<DiscoveredTest>,
+}
+
+impl TestSource {
+    fn prepare(display: String, source: &mut String) -> Result<(parser::Parse, Self), String> {
+        let original = source.clone();
+        let (parsed, cases) = prepare_tests(source)?;
+        let tests = discover_tests(&original, &parsed.module.items, &cases)?;
+        Ok((
+            parsed,
+            Self {
+                display,
+                source: original,
+                id: None,
+                cases,
+                tests,
+            },
+        ))
+    }
+}
+
+struct TestProgram {
+    module: Module,
+    files: Vec<TestSource>,
+    sources: Option<SourceMap>,
+    imports: Option<Imports>,
+}
+
+enum TestWorld {
+    Ordinary(World),
+    Foreign(ForeignChecked),
+}
+
+impl TestWorld {
+    fn world(&self) -> &World {
+        match self {
+            Self::Ordinary(world) => world,
+            Self::Foreign(checked) => checked.world(),
+        }
+    }
+
+    fn foreign<'a>(
+        &'a self,
+        host: Option<&'a EvalHost>,
+    ) -> Option<(&'a ForeignChecked, &'a EvalHost)> {
+        match self {
+            Self::Ordinary(_) => None,
+            Self::Foreign(checked) => host.map(|host| (checked, host)),
+        }
+    }
+}
+
+fn bridge_diagnostics(mut error: FfiError) -> Vec<Diagnostic> {
+    if let Some(span) = error.span {
+        error.diagnostics.push(Diagnostic::new(
+            "bridge",
+            format!("{:?}: {}", error.kind, error.message),
+            span,
+        ));
+    }
+    error.diagnostics
+}
+
+fn test_host(imports: &Imports) -> Result<EvalHost, String> {
+    crate::vsys_commands::eval_host(imports, "test")
+}
+
+impl TestProgram {
+    fn standalone(display: String, source: String) -> Result<Self, Box<FileUnitTests>> {
+        let mut expanded = source.clone();
+        match TestSource::prepare(display.clone(), &mut expanded) {
+            Ok((parsed, file)) => Ok(Self {
+                module: parsed.module,
+                files: vec![file],
+                sources: None,
+                imports: None,
+            }),
+            Err(error) => Err(Box::new(FileUnitTests::failed(display, source, error))),
+        }
+    }
+
+    fn negative_names(&self) -> BTreeSet<String> {
+        self.files
+            .iter()
+            .flat_map(|file| &file.tests)
+            .filter(|test| test.plan.primary_mode == TestMode::ExpectError)
+            .map(|test| test.func.name.clone())
+            .collect()
+    }
+
+    fn check(&self, module: &Module) -> Result<TestWorld, Box<FileUnitTests>> {
+        if let Some(imports) = &self.imports {
+            return ffi_lowering::check_module(module, imports)
+                .map(TestWorld::Foreign)
+                .map_err(|error| {
+                    let message = error.to_string();
+                    let diagnostics = bridge_diagnostics(error);
+                    Box::new(if diagnostics.is_empty() {
+                        FileUnitTests::failed(
+                            self.files
+                                .first()
+                                .map_or("<package>", |f| &f.display)
+                                .into(),
+                            String::new(),
+                            message,
+                        )
+                    } else {
+                        self.semantic_error(&diagnostics)
+                    })
+                });
+        }
+        let checked = check::check(module);
+        if checked.diagnostics.is_empty() {
+            Ok(TestWorld::Ordinary(checked.world))
+        } else {
+            Err(Box::new(self.semantic_error(&checked.diagnostics)))
+        }
+    }
+
+    fn package(target: &PackageTarget, replacement: Option<(&Path, &str)>) -> Result<Self, String> {
+        let mut files = Vec::new();
+        let mut found = target.file.is_none();
+        let assembled = packages::load_with_root_parser(&target.root, &mut |path| {
+            let mut source = match replacement {
+                Some((replaced, text)) if path == replaced => text.to_owned(),
+                _ => read_source(path)?,
+            };
+            if target.file.as_deref().is_some_and(|file| file != path) {
+                files.push(None);
+                let parsed = parser::parse(&source);
+                return Ok((source, parsed));
+            }
+            found = true;
+            let display = path
+                .strip_prefix(&target.root)
+                .unwrap_or(path)
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            let (parsed, tested) = TestSource::prepare(display, &mut source)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            files.push(Some(tested));
+            Ok((source, parsed))
+        })?;
+        if let Some((path, d)) = assembled.manifest_errors.first() {
+            return Err(format!("{path}: {} {}", d.code, d.message));
+        }
+        let imports = (!assembled.vsys.is_empty())
+            .then(|| assembled.imports(None))
+            .transpose()?;
+        let Assembled {
+            module,
+            sources,
+            diagnostics,
+            root_package_files,
+            ..
+        } = assembled;
+        if let Some(d) = diagnostics.first() {
+            let diagnostic = &d.diagnostic;
+            if let Some(index) = d.file {
+                let file = &sources.files[index];
+                let tests = root_package_files
+                    .iter()
+                    .position(|&id| id == index)
+                    .and_then(|i| files[i].as_ref());
+                return Err(format!(
+                    "{}: {}",
+                    file.display,
+                    test_diagnostic(
+                        &file.text,
+                        tests.map_or(&[], |f| f.cases.as_slice()),
+                        diagnostic,
+                        "package",
+                        diagnostics.len()
+                    )
+                ));
+            }
+            return Err(format!("{} {}", diagnostic.code, diagnostic.message));
+        }
+        if !found {
+            return Err(format!(
+                "{} is not a source module in {}",
+                target.file.as_ref().unwrap().display(),
+                target.root.display()
+            ));
+        }
+        let functions: BTreeMap<_, _> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(f) => Some((f.span.start, f.as_ref())),
+                _ => None,
+            })
+            .collect();
+        let mut prepared = Vec::new();
+        for (file, id) in files.into_iter().zip(root_package_files) {
+            let Some(mut file) = file else {
+                continue;
+            };
+            file.id = Some(id);
+            let base = sources.files[id].base;
+            for test in &mut file.tests {
+                let offset = base + test.func.span.start;
+                let function = functions.get(&offset).ok_or_else(|| {
+                    format!("{}: could not resolve test '{}'", file.display, test.name)
+                })?;
+                test.func = (**function).clone();
+            }
+            prepared.push(file);
+        }
+        Ok(Self {
+            module,
+            files: prepared,
+            sources: Some(sources),
+            imports,
+        })
+    }
+
+    fn semantic_error(&self, diagnostics: &[Diagnostic]) -> FileUnitTests {
+        let first = &diagnostics[0];
+        let localized = self.sources.as_ref().map(|sources| sources.localize(first));
+        let id = localized.as_ref().and_then(|d| d.file);
+        let file = id.and_then(|i| self.sources.as_ref()?.files.get(i));
+        let source = match id {
+            Some(id) => self.files.iter().find(|f| f.id == Some(id)),
+            None => self.files.first(),
+        };
+        let text = source.map_or_else(|| file.map_or("", |f| f.text.as_str()), |f| &f.source);
+        let error = test_diagnostic(
+            text,
+            source.map_or(&[], |f| f.cases.as_slice()),
+            localized.as_ref().map_or(first, |d| &d.diagnostic),
+            "semantic",
+            diagnostics.len(),
+        );
+        let display = source.map_or_else(
+            || file.map_or("<package>", |f| f.display.as_str()),
+            |f| f.display.as_str(),
+        );
+        FileUnitTests::failed(display.to_owned(), text.to_owned(), error)
+    }
+}
+
 fn host_target_isa() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
 }
 
 fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> {
-    let files = collect_files(Path::new(&opts.path))?;
+    let target = Path::new(&opts.path);
+    let package = PackageTarget::discover(target)?
+        .map(|package| TestProgram::package(&package, None))
+        .transpose()?;
+    let standalone = if package.is_none() {
+        collect_files(target)?
+    } else {
+        Vec::new()
+    };
+    let programs = package.into_iter().map(Ok).chain(
+        standalone
+            .into_iter()
+            .map(|(display, source)| TestProgram::standalone(display, source)),
+    );
     let mut results = Vec::new();
     let mut total_discovered = 0usize;
     let mut total_selected = 0usize;
@@ -971,100 +1336,119 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
         None
     };
 
-    for (display, source) in files {
-        let (parsed, cases) = match prepare_tests(&source) {
-            Ok(ok) => ok,
-            Err(error) => {
+    for program in programs {
+        let program = match program {
+            Ok(program) => program,
+            Err(file) => {
                 all_passed = false;
-                results.push(FileUnitTests {
-                    display: display.clone(),
-                    source,
-                    report: UnitTestFileReport {
-                        file: display,
-                        passed: false,
-                        tests: vec![],
-                        error: Some(error),
-                    },
-                    selected: vec![],
-                    replay: vec![],
-                    test_names: BTreeSet::new(),
-                    expect_error_names: BTreeSet::new(),
-                });
+                results.push(*file);
                 continue;
             }
         };
-        let discovered = match discover_tests(&source, &parsed.module.items, &cases) {
-            Ok(list) => list,
-            Err(error) => {
+        total_discovered += program
+            .files
+            .iter()
+            .map(|file| file.tests.len())
+            .sum::<usize>();
+        let selected_count = program
+            .files
+            .iter()
+            .flat_map(|file| &file.tests)
+            .filter(|test| opts.selects(test))
+            .count();
+        total_selected += selected_count;
+        if selected_count == 0 {
+            continue;
+        }
+
+        let module = checked_module(&program.module, program.negative_names());
+        let checked = match program.check(&module) {
+            Ok(checked) => checked,
+            Err(file) => {
                 all_passed = false;
-                results.push(FileUnitTests {
-                    display: display.clone(),
-                    source,
-                    report: UnitTestFileReport {
-                        file: display,
-                        passed: false,
-                        tests: vec![],
-                        error: Some(error),
-                    },
-                    selected: vec![],
-                    replay: vec![],
-                    test_names: BTreeSet::new(),
-                    expect_error_names: BTreeSet::new(),
-                });
+                results.push(*file);
                 continue;
             }
         };
-        total_discovered += discovered.len();
-        // Negative tests are left out of the positive module whether or not
-        // the filter selects them: their bodies are meant not to check.
-        let expect_error_names: BTreeSet<String> = discovered
+        let host = program.imports.as_ref().map(test_host).transpose()?;
+        let fn_graph = FunctionGraph::from_module(&program.module);
+        let combined = program.sources.as_ref().map(SourceMap::combined);
+        let package_hash = combined.as_ref().map(|text| blake3::hash(text.as_bytes()));
+        let execution = TestExecution {
+            opts,
+            world: checked.world(),
+            foreign: checked.foreign(host.as_ref()),
+            bridge_module: program.imports.as_ref().map(|imports| (&*module, imports)),
+            fn_graph: &fn_graph,
+            combined: combined.as_deref(),
+            package_hash,
+            // Host I/O is external to the source fingerprint and can change between runs.
+            verdict_cache: verdict_cache.as_ref().filter(|_| program.imports.is_none()),
+        };
+        for file in program.files {
+            if let Some(result) = execution.run_file(file) {
+                all_passed &= result.report.passed;
+                results.push(result);
+            }
+        }
+    }
+
+    if total_discovered == 0 && all_passed {
+        return Err(format!("no Vesper unit tests found in {}", opts.path));
+    }
+    if total_selected == 0 && opts.filter.is_some() && all_passed {
+        return Err(format!(
+            "no Vesper unit tests matched filter '{}'",
+            opts.filter.as_deref().unwrap_or_default()
+        ));
+    }
+    Ok((all_passed, results))
+}
+
+struct TestExecution<'a> {
+    opts: &'a Options,
+    world: &'a World,
+    foreign: Option<(&'a ForeignChecked, &'a EvalHost)>,
+    bridge_module: Option<(&'a Module, &'a Imports)>,
+    fn_graph: &'a FunctionGraph,
+    combined: Option<&'a str>,
+    package_hash: Option<blake3::Hash>,
+    verdict_cache: Option<&'a VerdictCache>,
+}
+
+impl TestExecution<'_> {
+    fn run_file(&self, file: TestSource) -> Option<FileUnitTests> {
+        let Self {
+            opts,
+            world,
+            foreign,
+            bridge_module,
+            fn_graph,
+            combined,
+            package_hash,
+            verdict_cache,
+        } = *self;
+        let TestSource {
+            display,
+            source,
+            tests,
+            ..
+        } = file;
+        let expect_error_names = tests
             .iter()
             .filter(|t| t.plan.primary_mode == TestMode::ExpectError)
             .map(|t| t.func.name.clone())
             .collect();
-        let all_test_names: BTreeSet<String> =
-            discovered.iter().map(|t| t.func.name.clone()).collect();
-        let selected_tests: Vec<DiscoveredTest> = discovered
+        let all_test_names = tests.iter().map(|t| t.name.clone()).collect();
+        let selected_tests: Vec<_> = tests
             .into_iter()
-            .filter(|t| {
-                opts.filter
-                    .as_ref()
-                    .is_none_or(|pat| t.name.contains(pat.as_str()))
-            })
+            .filter(|test| opts.selects(test))
             .collect();
-        total_selected += selected_tests.len();
         if selected_tests.is_empty() {
-            continue;
+            return None;
         }
+        let diagnostic_source = combined.unwrap_or(&source);
 
-        // Filter out ExpectError functions before checking the positive module
-        // so intentional substructural failures never poison sibling tests.
-        let positive_module = without_negative_tests(parsed.module.clone(), &expect_error_names);
-        let checked = match check::check(&positive_module) {
-            c if c.diagnostics.is_empty() => c,
-            c => {
-                let d = &c.diagnostics[0];
-                let error = test_diagnostic(&source, &cases, d, "semantic", c.diagnostics.len());
-                all_passed = false;
-                results.push(FileUnitTests {
-                    display: display.clone(),
-                    source,
-                    report: UnitTestFileReport {
-                        file: display,
-                        passed: false,
-                        tests: vec![],
-                        error: Some(error),
-                    },
-                    selected: vec![],
-                    replay: vec![],
-                    test_names: BTreeSet::new(),
-                    expect_error_names: BTreeSet::new(),
-                });
-                continue;
-            }
-        };
-
-        let fn_graph = FunctionGraph::from_module(&parsed.module);
         let mut case_reports: BTreeMap<String, UnitTestCaseReport> = BTreeMap::new();
         let mut unit_batch_selected = Vec::new();
         let mut unit_plans: BTreeMap<String, HarnessPlan> = BTreeMap::new();
@@ -1072,9 +1456,12 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
 
         for test in &selected_tests {
             let (line, column) = location(&source, test.span.start);
-            let fn_hash = fn_graph
+            let mut fn_hash = fn_graph
                 .transitive_fn_blake3(&test.func.name)
                 .unwrap_or_default();
+            if let Some(hash) = package_hash {
+                fn_hash.push_str(&hash.to_hex());
+            }
             let cache_key = VerdictKey {
                 fn_blake3: test_fingerprint(&fn_hash, test, opts.fuel),
                 sim_seed: test.plan.seed,
@@ -1088,14 +1475,12 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 && is_cacheable(&test.plan)
                 && !matches!(test.plan.primary_mode, TestMode::Unit);
             if use_cache
-                && let Some(cache) = &verdict_cache
+                && let Some(cache) = verdict_cache
                 && let Some(bytes) = cache.get(&cache_key.cache_key_hex())
                 && let Ok(record) = VerdictRecord::from_json(&String::from_utf8_lossy(&bytes))
             {
                 let passed = record.status == VerdictStatus::Pass;
-                if !passed {
-                    all_passed = false;
-                }
+
                 case_reports.insert(
                     test.name.clone(),
                     UnitTestCaseReport {
@@ -1122,13 +1507,23 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     unit_plans.insert(test.name.clone(), test.plan.clone());
                 }
                 TestMode::ExpectError => {
-                    let diags = checked.world.check_isolated_item(&test.func);
+                    let diags = if let Some((module, imports)) = bridge_module {
+                        let mut module = module.clone();
+                        module
+                            .items
+                            .push(Item::Function(Box::new(test.func.clone())));
+                        ffi_lowering::check_module(&module, imports)
+                            .err()
+                            .map_or_else(Vec::new, bridge_diagnostics)
+                    } else {
+                        world.check_isolated_item(&test.func)
+                    };
                     let observed: Vec<ObservedDiagnostic> = diags
                         .iter()
                         .map(|d| ObservedDiagnostic {
                             code: Some(d.code.clone()),
                             message: d.message.clone(),
-                            primary_text: source
+                            primary_text: diagnostic_source
                                 .get(d.span.start..d.span.end)
                                 .unwrap_or("")
                                 .to_string(),
@@ -1136,8 +1531,9 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                                 .related
                                 .iter()
                                 .map(|r| {
-                                    let snippet =
-                                        source.get(r.span.start..r.span.end).unwrap_or("");
+                                    let snippet = diagnostic_source
+                                        .get(r.span.start..r.span.end)
+                                        .unwrap_or("");
                                     format!("{} {}", r.message, snippet)
                                 })
                                 .collect(),
@@ -1155,10 +1551,8 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         }
                         other => (false, format!("{other:?}")),
                     };
-                    if !passed {
-                        all_passed = false;
-                    }
-                    if let Some(cache) = &verdict_cache
+
+                    if let Some(cache) = verdict_cache
                         && is_cacheable(&test.plan)
                     {
                         let rec = VerdictRecord {
@@ -1200,7 +1594,6 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     let explicit = match eval_test_case_args(&test.func, &test.raw_cases) {
                         Ok(rows) => rows,
                         Err(message) => {
-                            all_passed = false;
                             case_reports.insert(
                                 test.name.clone(),
                                 UnitTestCaseReport {
@@ -1226,19 +1619,13 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     } else {
                         vesper_test::DEFAULT_PROPERTY_CASES as usize
                     };
-                    let outcome = run_property_test(
-                        &checked.world,
-                        &test.name,
-                        cases_n,
-                        &explicit,
-                        opts.fuel,
-                    );
+                    let outcome =
+                        run_property_test(world, &test.func.name, cases_n, &explicit, opts.fuel);
                     let passed = outcome.passed;
-                    if !passed {
-                        all_passed = false;
-                    } else {
+                    if passed {
                         replay.push(ReplayTest::Property {
                             name: test.name.clone(),
+                            entry: test.func.name.clone(),
                             cases: cases_n,
                             explicit: explicit.clone(),
                         });
@@ -1271,7 +1658,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                                 format!("{message}; counterexample=({})", rendered.join(", "));
                         }
                     }
-                    if let Some(cache) = &verdict_cache
+                    if let Some(cache) = verdict_cache
                         && is_cacheable(&test.plan)
                     {
                         let rec = VerdictRecord {
@@ -1323,18 +1710,17 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         None => "None",
                     };
                     let outcome = run_simpulse_test_on_world(
-                        &checked.world,
-                        &test.name,
+                        world,
+                        &test.func.name,
                         schedules,
                         profile,
                         test.plan.seed,
                     );
                     let passed = outcome.passed;
-                    if !passed {
-                        all_passed = false;
-                    } else {
+                    if passed {
                         replay.push(ReplayTest::SimPulse {
                             name: test.name.clone(),
+                            entry: test.func.name.clone(),
                             schedules,
                             profile: profile.to_string(),
                             seed: test.plan.seed,
@@ -1383,16 +1769,14 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
         }
 
         if !unit_batch_selected.is_empty() {
-            let (unit_passed, unit_cases) = run_tests_on_world(
+            let (_, unit_cases) = run_tests_on_world(
                 &source,
-                &checked.world,
+                world,
                 &unit_batch_selected,
                 opts.fuel,
                 !opts.mutate,
+                foreign,
             );
-            if !unit_passed {
-                all_passed = false;
-            }
             for mut rep in unit_cases {
                 if let Some(plan) = unit_plans.get(&rep.name) {
                     rep.anvil_mode = Some(plan.primary_mode);
@@ -1401,7 +1785,6 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     // strength of its ordinary unit run.
                     if plan.primary_mode == TestMode::BudgetGate && rep.passed {
                         rep.passed = false;
-                        all_passed = false;
                         rep.message = format!(
                             "budget gate not enforced: this harness cannot yet check {} (the unit run passed)",
                             budget_gate_names(plan)
@@ -1429,7 +1812,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
             .map(UnitEntry::from)
             .collect();
 
-        results.push(FileUnitTests {
+        Some(FileUnitTests {
             display: display.clone(),
             source,
             report: UnitTestFileReport {
@@ -1442,19 +1825,8 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
             replay,
             test_names: all_test_names,
             expect_error_names,
-        });
+        })
     }
-
-    if total_discovered == 0 && all_passed {
-        return Err(format!("no Vesper unit tests found in {}", opts.path));
-    }
-    if total_selected == 0 && opts.filter.is_some() && all_passed {
-        return Err(format!(
-            "no Vesper unit tests matched filter '{}'",
-            opts.filter.as_deref().unwrap_or_default()
-        ));
-    }
-    Ok((all_passed, results))
 }
 
 #[derive(Clone)]
@@ -1677,40 +2049,34 @@ fn collect_mutants_in_fn(
     }
 }
 
-fn collect_file_mutants(unit: &FileUnitTests) -> Vec<MutantCandidate> {
-    // Mutants are replayed against the file's unit and budget-gate tests
-    // (`unit.selected`) and its passing property and SimPulse tests
-    // (`unit.replay`). A file with none of those would report every
-    // well-typed mutant as surviving without running a test, so it gets no
-    // mutants.
-    if unit.selected.is_empty() && unit.replay.is_empty() {
-        return Vec::new();
-    }
-    let test_names: std::collections::BTreeSet<&str> =
-        unit.test_names.iter().map(String::as_str).collect();
-    let (tokens, _) = lexer::lex(&unit.source);
+fn collect_source_mutants(
+    display: &str,
+    source: &str,
+    test_names: &BTreeSet<&str>,
+) -> Vec<MutantCandidate> {
+    let (tokens, _) = lexer::lex(source);
     let mut candidates = Vec::new();
-    for item in &parser::parse(&unit.source).module.items {
+    for item in &parser::parse(source).module.items {
         match item {
             Item::Function(f) => {
                 if !test_names.contains(f.name.as_str())
                     && !f.name.starts_with("test_")
                     && !preceding_comments(&tokens, f.span.start).any(|comment| {
-                        let text = &unit.source[comment.span.clone()];
+                        let text = &source[comment.span.clone()];
                         is_test_marker(text) || case_marker(text).is_some()
                     })
                 {
-                    collect_mutants_in_fn(&unit.display, &unit.source, &tokens, f, &mut candidates);
+                    collect_mutants_in_fn(display, source, &tokens, f, &mut candidates);
                 }
             }
             Item::Impl { methods, .. } => {
                 for m in methods {
-                    collect_mutants_in_fn(&unit.display, &unit.source, &tokens, m, &mut candidates);
+                    collect_mutants_in_fn(display, source, &tokens, m, &mut candidates);
                 }
             }
             Item::Conformance(c) => {
                 for m in &c.methods {
-                    collect_mutants_in_fn(&unit.display, &unit.source, &tokens, m, &mut candidates);
+                    collect_mutants_in_fn(display, source, &tokens, m, &mut candidates);
                 }
             }
             Item::Adt(_) | Item::Effect(_) | Item::Trait(_) => {}
@@ -1749,13 +2115,42 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
         return Err("baseline unit tests failed before mutation testing".into());
     }
 
+    let package = PackageTarget::discover(Path::new(&opts.path))?;
+    let package_program = package
+        .as_ref()
+        .map(|target| TestProgram::package(target, None))
+        .transpose()?;
+    let host = package_program
+        .as_ref()
+        .and_then(|program| program.imports.as_ref())
+        .map(test_host)
+        .transpose()?;
     let mut all_candidates = Vec::new();
-    let mut file_indices = Vec::new();
-    for (file_idx, file) in files.iter().enumerate() {
-        let mut cands = collect_file_mutants(file);
-        for c in cands.drain(..) {
-            file_indices.push(file_idx);
-            all_candidates.push(c);
+    if let Some(program) = &package_program {
+        if files
+            .iter()
+            .any(|f| !f.selected.is_empty() || !f.replay.is_empty())
+        {
+            for (index, file) in program.files.iter().enumerate() {
+                let names = file.tests.iter().map(|test| test.name.as_str()).collect();
+                all_candidates.extend(
+                    collect_source_mutants(&file.display, &file.source, &names)
+                        .into_iter()
+                        .map(|candidate| (index, candidate)),
+                );
+            }
+        }
+    } else {
+        for (index, file) in files.iter().enumerate() {
+            if file.selected.is_empty() && file.replay.is_empty() {
+                continue;
+            }
+            let names = file.test_names.iter().map(String::as_str).collect();
+            all_candidates.extend(
+                collect_source_mutants(&file.display, &file.source, &names)
+                    .into_iter()
+                    .map(|candidate| (index, candidate)),
+            );
         }
     }
     let total_candidates = all_candidates.len();
@@ -1773,18 +2168,32 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
     let mut survived = 0usize;
     let mut ill_typed = 0usize;
 
-    for idx in 0..limit {
-        let cand = &all_candidates[idx];
-        let unit = &files[file_indices[idx]];
-        let (line, column) = location(&unit.source, cand.start);
-        let mut mutated = String::with_capacity(
-            unit.source.len() - (cand.end - cand.start) + cand.replacement.len(),
-        );
-        mutated.push_str(&unit.source[..cand.start]);
+    for (idx, (file_index, cand)) in all_candidates.iter().take(limit).enumerate() {
+        let file_index = *file_index;
+        let source = match &package_program {
+            Some(program) => &program.files[file_index].source,
+            None => &files[file_index].source,
+        };
+        let (line, column) = location(source, cand.start);
+        let mut mutated =
+            String::with_capacity(source.len() - (cand.end - cand.start) + cand.replacement.len());
+        mutated.push_str(&source[..cand.start]);
         mutated.push_str(&cand.replacement);
-        mutated.push_str(&unit.source[cand.end..]);
+        mutated.push_str(&source[cand.end..]);
 
-        let report = match checked_for_mutation(&mutated, &unit.expect_error_names) {
+        let checked = if let Some(target) = &package {
+            let path = target.root.join(&cand.file);
+            TestProgram::package(target, Some((&path, &mutated))).and_then(|program| {
+                program
+                    .check(&checked_module(&program.module, program.negative_names()))
+                    .map_err(|file| file.report.error.unwrap())
+            })
+        } else {
+            checked_for_mutation(&mutated, &files[file_index].expect_error_names)
+                .map(|checked| TestWorld::Ordinary(checked.world))
+        };
+
+        let report = match checked {
             Err(err) => {
                 ill_typed += 1;
                 MutantReport {
@@ -1801,18 +2210,30 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                 }
             }
             Ok(checked) => {
-                let (unit_passed, cases) =
-                    run_tests_on_world(&mutated, &checked.world, &unit.selected, opts.fuel, false);
-                let mut killer = cases
-                    .into_iter()
-                    .find(|c| !c.passed)
-                    .map(|k| (k.name, k.message));
-                if unit_passed {
-                    killer = unit
-                        .replay
-                        .iter()
-                        .find_map(|t| t.run(&checked.world, opts.fuel).err());
-                }
+                let suites = if package.is_some() {
+                    files.as_slice()
+                } else {
+                    std::slice::from_ref(&files[file_index])
+                };
+                let killer = suites.iter().find_map(|unit| {
+                    let (_, cases) = run_tests_on_world(
+                        &unit.source,
+                        checked.world(),
+                        &unit.selected,
+                        opts.fuel,
+                        false,
+                        checked.foreign(host.as_ref()),
+                    );
+                    cases
+                        .into_iter()
+                        .find(|case| !case.passed)
+                        .map(|case| (case.name, case.message))
+                        .or_else(|| {
+                            unit.replay
+                                .iter()
+                                .find_map(|test| test.run(checked.world(), opts.fuel).err())
+                        })
+                });
                 if killer.is_none() {
                     survived += 1;
                     MutantReport {

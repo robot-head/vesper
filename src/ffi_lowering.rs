@@ -685,11 +685,21 @@ impl ForeignChecked {
     /// machine), with `host` standing in for every foreign call: it gets the
     /// library, the `.vsys` symbol and the arguments, may update `inout`
     /// arguments and slices, and returns the call's source value (a handle
-    /// from [`handle_value`], `Unit` as an empty tuple). The entry's row may
-    /// hold only `Ffi[..]` capabilities.
+    /// from [`handle_value`], `Unit` as an empty tuple). Only `Ffi[..]`
+    /// capabilities are supplied by the host.
     pub fn evaluate(
         &self,
         entry: &str,
+        host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
+    ) -> Result<crate::runtime::Value, FfiError> {
+        self.evaluate_with_fuel(entry, None, host)
+    }
+
+    /// Like [`Self::evaluate`], with an optional evaluator step limit.
+    pub fn evaluate_with_fuel(
+        &self,
+        entry: &str,
+        fuel: Option<u64>,
         mut host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
     ) -> Result<crate::runtime::Value, FfiError> {
         let fail = |m: String| FfiError::new(FfiErrorKind::Codegen, m, None);
@@ -701,8 +711,12 @@ impl ForeignChecked {
                 effect.linear = true;
             }
         }
-        let mut state = crate::runtime::Runtime::new(&world)
-            .begin_external(entry, vec![])
+        let mut runtime = crate::runtime::Runtime::new(&world);
+        if let Some(fuel) = fuel {
+            runtime.fuel = fuel;
+        }
+        let mut state = runtime
+            .begin_external_for(entry, vec![], is_foreign_effect)
             .map_err(fail)?;
         loop {
             match state {

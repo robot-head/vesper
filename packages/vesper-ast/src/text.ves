@@ -503,3 +503,65 @@ pub fn parse_float(in src: ChunkSeq[u8], start: u64, end: u64) -> u64 {
     trim(inout m);
     round_bits(in m, wrapping_neg_i64(k), d.len() != 0)
 }
+
+test {
+    // @case empty(in "\"\"", in "")
+    // @case ascii_run(in "\"abc\"", in "abc")
+    // @case utf8_run(in "\"é水\"", in "é水")
+    // @case simple_escapes(in "\"a\\n\\t\\r\\b\\f\\/\\\\\\\"z\"", in "a\n\t\r\b\f/\\\"z")
+    // @case bmp_escape(in "\"x\\u4E2Dy\"", in "x中y")
+    // @case surrogate_pair(in "\"\\uD83D\\uDE00\"", in "😀")
+    // @case invalid_escape_clears_prefix(in "\"abc\\q\"", in "")
+    // @case truncated_hex_clears_prefix(in "\"abc\\u12\"", in "")
+    // @case invalid_hex_clears_prefix(in "\"abc\\u00x1\"", in "")
+    // @case isolated_high_surrogate(in "\"abc\\uD83D\"", in "")
+    // @case isolated_low_surrogate(in "\"abc\\uDE00\"", in "")
+    // @case invalid_second_surrogate(in "\"abc\\uD83D\\u0041\"", in "")
+    // @case raw_control_character(in "\"a\nb\"", in "")
+    fn test_decode_string(in token: Str, in expected: Str) -> bool {
+        let mut source = String::new();
+        source.push_str(in "prefix");
+        let start = source.len();
+        source.push_str(in token);
+        let end = source.len();
+        source.push_str(in "suffix");
+        let mut out = String::new();
+        decode_string(in source, start, end, inout out);
+        let bytes = expected.as_bytes();
+        if out.len() != bytes.len() {
+            return false;
+        }
+        for i in 0..out.len() {
+            if out.try_byte_at(i) != bytes.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case zero(in "0.0", 0x0000000000000000)
+    // @case exact_binary_fraction(in "0.125", 0x3fc0000000000000)
+    // @case inexact_tenth(in "0.1", 0x3fb999999999999a)
+    // @case uppercase_exponent(in "1E+3", 0x408f400000000000)
+    // @case negative_exponent(in "125e-3", 0x3fc0000000000000)
+    // @case leading_zeros(in "000.00125", 0x3f547ae147ae147b)
+    // @case fractional_half_even_down(in "1.00000000000000011102230246251565404236316680908203125", 0x3ff0000000000000)
+    // @case fractional_above_half(in "1.00000000000000011102230246251565404236316680908203126", 0x3ff0000000000001)
+    // @case integer_half_even_up(in "9007199254740995e0", 0x4340000000000002)
+    // @case largest_finite(in "1.7976931348623157e308", 0x7fefffffffffffff)
+    // @case overflow(in "1.7976931348623159e308", 0x7ff0000000000000)
+    // @case min_normal(in "2.2250738585072014e-308", 0x0010000000000000)
+    // @case largest_subnormal(in "2.225073858507201e-308", 0x000fffffffffffff)
+    // @case smallest_subnormal(in "4.9406564584124654e-324", 0x0000000000000001)
+    // @case underflow(in "2e-324", 0x0000000000000000)
+    // @case huge_exponent(in "1e9999999999", 0x7ff0000000000000)
+    fn test_parse_float(in token: Str, expected_bits: u64) -> bool {
+        let mut source = ChunkSeq::new[u8]();
+        source.extend(in "prefix".as_bytes());
+        let start = source.len();
+        source.extend(in token.as_bytes());
+        let end = source.len();
+        source.extend(in "suffix".as_bytes());
+        parse_float(in source, start, end) == expected_bits
+    }
+}

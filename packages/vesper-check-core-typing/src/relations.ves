@@ -1,0 +1,527 @@
+// The type relations of src/check.rs: `compatible`, `effects_include`,
+// `refine_annotation`, `unresolved`, `union_effects`, `join_types` and
+// `infer`. Types are ids of the check-data arena, so the clones Rust makes
+// are copies and `==` on types and rows is one compare.
+
+use @vesper/check-data::util::{
+    add,
+    n32,
+    u32_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::types::{
+    EffNode,
+    RowNode,
+    TypeNode,
+    Types,
+    Vars
+};
+use @vesper/check-data::world::{
+    Known
+};
+use self::ints::{
+    Lit,
+    above_i64,
+    default_fits,
+    fits,
+    lit_max,
+    lit_min
+};
+
+const NONE32: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+const K_INFER: u8 = 5;
+
+pub fn lit_of(n: TypeNode) -> Lit {
+    Lit {
+        neg: n.mode == 1,
+        mag: wrapping_u64(n.lit)
+    }
+}
+
+pub fn mk_lit(inout t: Types, v: Lit) -> u32 {
+    t.literal(v.neg, v.mag)
+}
+
+// Item `i` of the arena's shared item list (arguments and parameters).
+pub fn item(in t: Types, i: u64) -> u32 {
+    u32_at(in t.items, i)
+}
+
+fn is_never(in t: Types, k: Known, ty: u32) -> bool {
+    t.name(ty) == k.never
+}
+
+// `check::compatible`.
+pub fn compatible(in t: Types, k: Known, a: u32, b: u32) -> bool {
+    if a == t.infer || b == t.infer || is_never(in t, k, b) {
+        return true;
+    }
+    let x = t.node(a);
+    let y = t.node(b);
+    if x.kind == K_LIT && y.kind == K_LIT {
+        return true;
+    }
+    if x.kind == K_LIT {
+        return fits_type(in t, k, b, lit_of(x));
+    }
+    if y.kind == K_LIT {
+        return fits_type(in t, k, a, lit_of(y));
+    }
+    if x.kind == K_NAMED && y.kind == K_NAMED {
+        if x.name != y.name || x.n != y.n {
+            return false;
+        }
+        return all_compatible(in t, k, x, y);
+    }
+    if x.kind == K_TUPLE && y.kind == K_TUPLE {
+        if x.n != y.n {
+            return false;
+        }
+        return all_compatible(in t, k, x, y);
+    }
+    if x.kind == K_NAMED && y.kind == K_TUPLE {
+        return x.name == k.unit && y.n == 0;
+    }
+    if x.kind == K_TUPLE && y.kind == K_NAMED {
+        return y.name == k.unit && x.n == 0;
+    }
+    if x.kind == K_ROW && y.kind == K_ROW {
+        return a == b;
+    }
+    if x.kind == K_FN && y.kind == K_FN {
+        if !effects_include(in t, k, x.r2, y.r2) || y.mode > x.mode || x.n != y.n {
+            return false;
+        }
+        for i in 0..w(x.n) {
+            let pa = u8_at(in t.passes, add(w(x.a), i));
+            let pb = u8_at(in t.passes, add(w(y.a), i));
+            if pa != pb {
+                return false;
+            }
+            // Parameters are contravariant.
+            if !compatible(in t, k, item(in t, add(w(y.a), i)), item(in t, add(w(x.a), i))) {
+                return false;
+            }
+        }
+        return compatible(in t, k, x.r, y.r);
+    }
+    false
+}
+
+fn all_compatible(in t: Types, k: Known, x: TypeNode, y: TypeNode) -> bool {
+    for i in 0..w(x.n) {
+        if !compatible(in t, k, item(in t, add(w(x.a), i)), item(in t, add(w(y.a), i))) {
+            return false;
+        }
+    }
+    true
+}
+
+// `IntegerKind::from_type(t).is_some_and(|k| k.fits(n))` for a non-literal `t`.
+fn fits_type(in t: Types, k: Known, ty: u32, v: Lit) -> bool {
+    let n = t.node(ty);
+    if n.kind != K_NAMED {
+        return false;
+    }
+    fits(k, n.name, v)
+}
+
+// `check::effects_include(expected, actual)` on rows.
+pub fn effects_include(in t: Types, k: Known, expected: u32, actual: u32) -> bool {
+    let er = t.row(expected);
+    let ar = t.row(actual);
+    if ar.tail != 0 && er.tail == 0 {
+        return false;
+    }
+    if er.tail != 0 {
+        return true;
+    }
+    for i in 0..w(ar.n) {
+        let e = t.effect_at(add(w(ar.a), i));
+        let mut found = false;
+        for j in 0..w(er.n) {
+            let x = t.effect_at(add(w(er.a), j));
+            if x.name == e.name && (x.label == 0 || x.label == e.label) && x.n == e.n {
+                let mut all = true;
+                for q in 0..w(x.n) {
+                    if !compatible(
+                        in t,
+                        k,
+                        item(in t, add(w(x.a), q)),
+                        item(in t, add(w(e.a), q))
+                    ) {
+                        all = false;
+                        break;
+                    }
+                }
+                if all {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+// `check::unresolved`.
+pub fn unresolved(in t: Types, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_INFER {
+        return true;
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+        for i in 0..w(n.n) {
+            if unresolved(in t, item(in t, add(w(n.a), i))) {
+                return true;
+            }
+        }
+        if n.kind == K_FN {
+            return unresolved(in t, n.r);
+        }
+    }
+    false
+}
+
+// ----- rows under construction --------------------------------------------
+
+// A row being built: effect instances whose arguments index `args`.
+pub struct RowBuf {
+    es: ChunkSeq[EffNode],
+    args: ChunkSeq[u32],
+    tail: u32,
+}
+
+pub fn row_buf(in t: Types, r: u32) -> RowBuf {
+    let mut b = RowBuf {
+        es: ChunkSeq::new[EffNode](),
+        args: ChunkSeq::new[u32](),
+        tail: t.row(r).tail
+    };
+    let row = t.row(r);
+    for i in 0..w(row.n) {
+        b.push(in t, t.effect_at(add(w(row.a), i)));
+    }
+    b
+}
+
+impl RowBuf {
+    // Appends arena instance `e` (its arguments copied).
+    pub fn push(inout self, in t: Types, e: EffNode) {
+        let a = n32(self.args.len());
+        for j in 0..w(e.n) {
+            self.args.push(item(in t, add(w(e.a), j)));
+        }
+        self
+            .es
+            .push(
+            EffNode {
+                label: e.label,
+                name: e.name,
+                a: a,
+                n: e.n
+            }
+        );
+    }
+
+    // `instances.contains(e)` for arena instance `e`.
+    pub fn contains(in self, in t: Types, e: EffNode) -> bool {
+        for i in 0..self.es.len() {
+            let x = match self.es.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => return false,
+            };
+            if x.label == e.label && x.name == e.name && x.n == e.n {
+                let mut same = true;
+                for j in 0..w(e.n) {
+                    if u32_at(in self.args, add(w(x.a), j)) != item(in t, add(w(e.a), j)) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // Whether an instance has the name of arena instance `e`.
+    pub fn has_name(in self, e: EffNode) -> bool {
+        for i in 0..self.es.len() {
+            match self.es.try_get(i) {
+                Option::Some(x) => {
+                    if x.name == e.name {
+                        return true;
+                    }
+                },
+                Option::None => return false,
+            }
+        }
+        false
+    }
+
+    pub fn finish(in self, inout t: Types) -> u32 {
+        t.mk_row(in self.es, in self.args, self.tail)
+    }
+}
+
+// `check::union_effects(into, from)`: the new row.
+pub fn union_rows(inout t: Types, into: u32, from: u32) -> u32 {
+    let mut b = row_buf(in t, into);
+    let f = t.row(from);
+    for i in 0..w(f.n) {
+        let e = t.effect_at(add(w(f.a), i));
+        if !b.contains(in t, e) {
+            b.push(in t, e);
+        }
+    }
+    if b.tail == 0 {
+        b.tail = f.tail;
+    }
+    b.finish(inout t)
+}
+
+fn mk_fn(inout t: Types, like: u32, result: u32, row: u32, mode: u8) -> u32 {
+    let n = t.node(like);
+    let mut params: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+    let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
+    for i in 0..w(n.n) {
+        params.push(item(in t, add(w(n.a), i)));
+        passes.push(u8_at(in t.passes, add(w(n.a), i)));
+    }
+    t.mk_with(K_FN, mode, 0, in params, in passes, result, row, 0)
+}
+
+// `check::refine_annotation(expected, actual)`.
+pub fn refine_annotation(inout t: Types, expected: u32, actual: u32) -> u32 {
+    let x = t.node(expected);
+    let y = t.node(actual);
+    if (x.kind == K_NAMED && y.kind == K_NAMED && x.name == y.name)
+        || (x.kind == K_TUPLE && y.kind == K_TUPLE) {
+        // `zip`: the shorter list wins.
+        let mut m = w(x.n);
+        if w(y.n) < m {
+            m = w(y.n);
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](m);
+        for i in 0..m {
+            let ea = item(in t, add(w(x.a), i));
+            let aa = item(in t, add(w(y.a), i));
+            let r = refine_annotation(inout t, ea, aa);
+            args.push(r);
+        }
+        if x.kind == K_NAMED {
+            return t.named(x.name, in args);
+        }
+        return t.tuple(in args);
+    }
+    if x.kind == K_FN && y.kind == K_FN {
+        let mut row = row_buf(in t, y.r2);
+        let er = t.row(x.r2);
+        for i in 0..w(er.n) {
+            let e = t.effect_at(add(w(er.a), i));
+            if !row.has_name(e) {
+                row.push(in t, e);
+            }
+        }
+        if row.tail == 0 {
+            row.tail = er.tail;
+        }
+        let r = row.finish(inout t);
+        let result = refine_annotation(inout t, x.r, y.r);
+        return mk_fn(inout t, expected, result, r, x.mode);
+    }
+    expected
+}
+
+// `check::join_types(a, b)`; adds the `E0200` diagnostics it raises to
+// `errors`.
+pub fn join_types(inout t: Types, k: Known, a: u32, b: u32, inout errors: u64) -> u32 {
+    if is_never(in t, k, a) || a == t.infer {
+        return b;
+    }
+    if is_never(in t, k, b) || b == t.infer {
+        return a;
+    }
+    let x = t.node(a);
+    let y = t.node(b);
+    if x.kind == K_LIT && y.kind == K_LIT {
+        let lx = lit_of(x);
+        let ly = lit_of(y);
+        let hi = lit_max(lx, ly);
+        let mut n = hi;
+        if !above_i64(hi) && lit_min(lx, ly).neg {
+            n = lit_min(lx, ly);
+        }
+        if !default_fits(k, n, lx) || !default_fits(k, n, ly) {
+            errors = wrapping_add(errors, 1);
+        }
+        return mk_lit(inout t, n);
+    }
+    if x.kind == K_LIT {
+        return b;
+    }
+    if y.kind == K_LIT {
+        return a;
+    }
+    if (x.kind == K_NAMED && y.kind == K_NAMED && x.name == y.name && x.n == y.n)
+        || (x.kind == K_TUPLE && y.kind == K_TUPLE && x.n == y.n) {
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(x.n));
+        for i in 0..w(x.n) {
+            let ea = item(in t, add(w(x.a), i));
+            let eb = item(in t, add(w(y.a), i));
+            let j = join_types(inout t, k, ea, eb, inout errors);
+            args.push(j);
+        }
+        if x.kind == K_NAMED {
+            return t.named(x.name, in args);
+        }
+        return t.tuple(in args);
+    }
+    if x.kind == K_FN && y.kind == K_FN {
+        let row = union_rows(inout t, x.r2, y.r2);
+        let result = join_types(inout t, k, x.r, y.r, inout errors);
+        let mut mode = x.mode;
+        if y.mode > mode {
+            mode = y.mode;
+        }
+        return mk_fn(inout t, a, result, row, mode);
+    }
+    a
+}
+
+// ----- infer ---------------------------------------------------------------
+
+fn is_generic(in generics: ChunkSeq[u32], name: u32) -> bool {
+    for i in 0..generics.len() {
+        if u32_at(in generics, i) == name {
+            return true;
+        }
+    }
+    false
+}
+
+// `check::infer(expected, actual, generics, vars)`: `generics` are the
+// generic name symbols, `vars` the inferred bindings (NONE32 = absent).
+pub fn infer(
+    inout t: Types,
+    k: Known,
+    expected: u32,
+    actual: u32,
+    in generics: ChunkSeq[u32],
+    inout vars: Vars
+) {
+    let x = t.node(expected);
+    let y = t.node(actual);
+    if x.kind == K_NAMED && x.n == 0 && is_generic(in generics, x.name) {
+        let cur = vars.get(x.name);
+        if cur == NONE32 || cur == t.infer {
+            vars.set(x.name, actual);
+            return;
+        }
+        let c = t.node(cur);
+        if c.kind == K_LIT {
+            if y.kind == K_LIT {
+                let prev = lit_of(c);
+                let next = lit_of(y);
+                let mut rep = lit_max(prev, next);
+                if !above_i64(next) && !above_i64(prev) && (prev.neg || next.neg) {
+                    rep = lit_min(prev, next);
+                }
+                let l = mk_lit(inout t, rep);
+                vars.set(x.name, l);
+            } else if compatible(in t, k, cur, actual) {
+                vars.set(x.name, actual);
+            }
+            return;
+        }
+        if compatible(in t, k, cur, actual) {
+            let r = refine_annotation(inout t, cur, actual);
+            vars.set(x.name, r);
+        }
+        return;
+    }
+    if (x.kind == K_NAMED && y.kind == K_NAMED) || (x.kind == K_TUPLE && y.kind == K_TUPLE) {
+        let mut m = w(x.n);
+        if w(y.n) < m {
+            m = w(y.n);
+        }
+        for i in 0..m {
+            let ea = item(in t, add(w(x.a), i));
+            let aa = item(in t, add(w(y.a), i));
+            infer(inout t, k, ea, aa, in generics, inout vars);
+        }
+        return;
+    }
+    if x.kind == K_FN && y.kind == K_FN {
+        let mut m = w(x.n);
+        if w(y.n) < m {
+            m = w(y.n);
+        }
+        for i in 0..m {
+            let ea = item(in t, add(w(x.a), i));
+            let aa = item(in t, add(w(y.a), i));
+            infer(inout t, k, ea, aa, in generics, inout vars);
+        }
+        infer(inout t, k, x.r, y.r, in generics, inout vars);
+        let ae = t.row(x.r2);
+        if ae.tail == 0 {
+            return;
+        }
+        let row = wrapping_sub(ae.tail, 1);
+        let be = t.row(y.r2);
+        // The instances of `be` no instance of `ae` names (name and label).
+        let mut rem = RowBuf {
+            es: ChunkSeq::new[EffNode](),
+            args: ChunkSeq::new[u32](),
+            tail: be.tail
+        };
+        for i in 0..w(be.n) {
+            let e = t.effect_at(add(w(be.a), i));
+            let mut named = false;
+            for j in 0..w(ae.n) {
+                let q = t.effect_at(add(w(ae.a), j));
+                if q.name == e.name && q.label == e.label {
+                    named = true;
+                    break;
+                }
+            }
+            if !named {
+                rem.push(in t, e);
+            }
+        }
+        let prev = vars.get(row);
+        if prev != NONE32 && t.kind(prev) == K_ROW {
+            let mut p = row_buf(in t, t.node(prev).r2);
+            let rr = rem.finish(inout t);
+            let rn = t.row(rr);
+            for i in 0..w(rn.n) {
+                let e = t.effect_at(add(w(rn.a), i));
+                if !p.contains(in t, e) {
+                    p.push(in t, e);
+                }
+            }
+            if p.tail == 0 {
+                p.tail = rn.tail;
+            }
+            let pr = p.finish(inout t);
+            let ty = t.row_type(pr);
+            vars.set(row, ty);
+        } else {
+            let rr = rem.finish(inout t);
+            let ty = t.row_type(rr);
+            vars.set(row, ty);
+        }
+    }
+}

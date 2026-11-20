@@ -1010,3 +1010,152 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
     }
     next
 }
+
+test {
+    // @case seed_zero(0)
+    // @case seed_nonzero(42)
+    // @case seed_max(18446744073709551615)
+    fn test_spawn_yield_finish(seed: u64) -> bool {
+        let mut kernel = kernel_new(seed);
+        let empty = kernel_next_task(inout kernel);
+        if !kernel_is_complete(in kernel) || empty.code != 0 || empty.task != 0 {
+            return false;
+        }
+        let spawn = kernel_spawn(inout kernel);
+        let dispatch = kernel_next_task(inout kernel);
+        let busy = kernel_next_task(inout kernel);
+        let started = spawn.code == 0 && spawn.value == 1;
+        let dispatched = dispatch.code == 0 && dispatch.task == 1 && dispatch.wk == 0;
+        let blocked = busy.code == 4 && busy.task == 1;
+        let running = kernel_task_state(in kernel, 1);
+        if !started
+            || !dispatched
+            || !blocked
+            || running
+            .kind
+            != 1
+            || kernel_is_complete(in kernel) {
+            return false;
+        }
+        let yielded = kernel_yield_task(inout kernel, 1, true);
+        let ready = kernel_task_state(in kernel, 1);
+        let wake = kernel_next_task(inout kernel);
+        let finished = kernel_finish(inout kernel, 1, true);
+        let finished_state = kernel_task_state(in kernel, 1);
+        let resumed = yielded.code == 0 && ready.kind == 0;
+        let woke = wake.code == 0 && wake.task == 1 && wake.wk == 1;
+        let done = finished.code == 0 && finished_state.kind == 4;
+        resumed && woke && done && kernel_now_ns(in kernel) == 0 && kernel_is_complete(in kernel)
+    }
+
+    // @case zero_delay(0)
+    // @case positive_delay(17)
+    // @case maximum_deadline(18446744073709551615)
+    fn test_timer(delay: u64) -> bool {
+        let mut kernel = kernel_new(0);
+        let task = kernel_spawn(inout kernel).value;
+        kernel_next_task(inout kernel);
+        let sleep = kernel_sleep(inout kernel, task, true, delay);
+        let sleeping = kernel_task_state(in kernel, task);
+        let sleep_started = sleep.code == 0 && sleep.value == 1 && sleeping.kind == 2;
+        let timer_matches = sleeping.completion == sleep.value && sleeping.deadline == delay;
+        let pending = kernel_pending_count(in kernel) == 1 && kernel_now_ns(in kernel) == 0;
+        if !sleep_started || !timer_matches || !pending {
+            return false;
+        }
+        let wake = kernel_next_task(inout kernel);
+        let resumed = wake.code == 0 && wake.task == task;
+        let timer_finished = wake.wk == 2 && wake.wc == sleep.value;
+        let advanced = kernel_pending_count(in kernel) == 0 && kernel_now_ns(in kernel) == delay;
+        resumed && timer_finished && advanced
+    }
+
+    // @case external_success(false, 0, 27, false)
+    // @case scheduled_success(true, 0, 27, false)
+    // @case external_error(false, 1, 5, false)
+    // @case scheduled_cancelled(true, 2, 0, true)
+    fn test_io(scheduled: bool, result: u64, payload: u64, cancel: bool) -> bool {
+        let mut kernel = kernel_new(0);
+        let task = kernel_spawn(inout kernel).value;
+        kernel_next_task(inout kernel);
+        let wait = if scheduled {
+            kernel_schedule_io(inout kernel, task, true, 13, result, payload)
+        } else {
+            kernel_park_io(inout kernel, task, true)
+        };
+        let state = kernel_task_state(in kernel, task);
+        let parked = wait.code == 0 && wait.value == 1 && state.kind == 3;
+        let queued = state.completion == wait.value && kernel_pending_count(in kernel) == 1;
+        if !parked || !queued || kernel_cancel_requested(in kernel, task) != 0 {
+            return false;
+        }
+        if cancel {
+            let first = kernel_request_cancel(inout kernel, task);
+            let second = kernel_request_cancel(inout kernel, task);
+            let accepted = first.code == 0 && first.value == 1;
+            let idempotent = second.code == 0 && second.value == 0;
+            if !accepted || !idempotent || kernel_cancel_requested(in kernel, task) != 1 {
+                return false;
+            }
+        }
+        if !scheduled {
+            let idle = kernel_next_task(inout kernel);
+            let completion = kernel_complete_io(inout kernel, wait.value, result, payload);
+            if idle.code != 0 || idle.task != 0 || completion.code != 0 {
+                return false;
+            }
+        }
+        let wake = kernel_next_task(inout kernel);
+        let duplicate = kernel_complete_io(inout kernel, wait.value, result, payload);
+        let expected_time: u64 = if scheduled {
+            13
+        } else {
+            0
+        };
+        let resumed = wake.code == 0 && wake.task == task && wake.wk == 3 && wake.wc == wait.value;
+        let result_matches = wake.wrk == result && wake.wrv == payload && wake.cancel == cancel;
+        let consumed = duplicate.code == 2 && duplicate.value == wait.value;
+        let drained = kernel_pending_count(in kernel) == 0;
+        resumed
+            && result_matches
+            && consumed
+            && drained
+            && kernel_now_ns(in kernel)
+            == expected_time
+    }
+
+    // @case foreign(1, false, 6)
+    // @case wrong_task(2, true, 5)
+    fn test_bad_token(task: u64, owned: bool, expected: u64) -> bool {
+        let mut kernel = kernel_new(0);
+        kernel_spawn(inout kernel);
+        kernel_next_task(inout kernel);
+        let refused = kernel_finish(inout kernel, task, owned);
+        let state = kernel_task_state(in kernel, 1);
+        let accepted = kernel_finish(inout kernel, 1, true);
+        let still_running = refused.code == expected && refused.value == task && state.kind == 1;
+        still_running && accepted.code == 0 && kernel_is_complete(in kernel)
+    }
+
+    // @case matching(true, 1, 0, 0)
+    // @case mismatched_event(true, 2, 10, 1)
+    // @case exhausted_journal(false, 0, 10, 0)
+    fn test_replay_spawn(has_event: bool, expected_task: u64, code: u64, unconsumed: u64) -> bool {
+        let mut journal = ChunkSeq::new[Ev]();
+        if has_event {
+            journal.push(ev(0, expected_task, 0, 0, 0));
+        }
+        let mut kernel = kernel_replay(0, in journal.as_slice());
+        let spawn = kernel_spawn(inout kernel);
+        if spawn.code != code || kernel_unconsumed(in kernel) != unconsumed {
+            return false;
+        }
+        let state = kernel_task_state(in kernel, 1);
+        if code == 0 {
+            spawn.value == 1 && state.kind == 0
+        } else {
+            let rejected = spawn.value == 0 && state.kind == 5;
+            rejected && kernel_mismatch(in kernel) == ev(0, 1, 0, 0, 0)
+        }
+    }
+}

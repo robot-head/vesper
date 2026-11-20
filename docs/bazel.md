@@ -154,7 +154,7 @@ would conflict constantly. Bazel regenerates it locally.
 
 ## Test throughput and cache keys
 
-`Test all targets` uses `--config=ci_tests`: local tests share a six-CPU,
+`Test all targets` and the Lean replay step use `--config=ci_tests`. Local tests share a six-CPU,
 18,432 MiB scheduling budget on the 8 CPU / 22GB VM. The remaining capacity is
 for Bazel, downloads and other workflow processes. `--local_test_jobs=0` lets
 Bazel use test resource estimates; a positive test-count limit bypasses those

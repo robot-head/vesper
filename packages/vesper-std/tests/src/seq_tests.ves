@@ -19,7 +19,7 @@ test {
         some_u64
     };
 
-    pub fn test_sets() -> u64 {
+    pub fn check_sets() -> u64 {
         let mut r: u64 = 0;
         let mut s: OrderedSet[u64] = ordered_set_new[u64]();
         r = check(s.is_empty() && is_none(s.first()) && is_none(s.last()), 1, r);
@@ -47,7 +47,7 @@ test {
     }
 
     // `n` elements; past 1024 the tree has a second internal level.
-    pub fn test_radix_seq(n: u64) -> u64 {
+    pub fn check_radix_seq(n: u64) -> u64 {
         let mut r: u64 = 0;
         let mut s: RadixSeq[u64] = radix_seq_new[u64]();
         r = check(s.is_empty() && s.len() == 0 && is_none(s.pop()) && is_none(s.get(0)), 1, r);
@@ -77,7 +77,7 @@ test {
         r
     }
 
-    pub fn test_version() -> u64 {
+    pub fn check_version() -> u64 {
         check(version() == 1, 1, 0)
     }
 }

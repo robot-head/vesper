@@ -41,7 +41,7 @@ test {
         some_pair
     };
 
-    pub fn test_core_ordering() -> u64 {
+    pub fn check_core_ordering() -> u64 {
         let mut r: u64 = 0;
         r = check(min(3, 5) == 3 && min(5, 3) == 3, 1, r);
         r = check(max(3, 5) == 5 && max(5, 3) == 5, 2, r);
@@ -60,7 +60,7 @@ test {
         r
     }
 
-    pub fn test_core_option() -> u64 {
+    pub fn check_core_option() -> u64 {
         let mut r: u64 = 0;
         let some: Option[u64] = Option::Some(4);
         let none: Option[u64] = Option::None;
@@ -197,7 +197,7 @@ test {
         r
     }
 
-    pub fn test_core_result() -> u64 {
+    pub fn check_core_result() -> u64 {
         let mut r: u64 = 0;
         let good: Result[u64, u64] = Result::Ok(6);
         let bad: Result[u64, u64] = Result::Err(3);

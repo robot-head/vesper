@@ -78,3 +78,85 @@ pub fn or[T: mod copy, E: mod copy](r: Result[T, E], other: Result[T, E]) -> Res
         Result::Err(_) => other,
     }
 }
+
+test {
+    // @case success(Result::Ok(0), true, Option::Some(0), Option::None)
+    // @case error(Result::Err(7), false, Option::None, Option::Some(7))
+    fn test_result_projection(
+        input: Result[u64, u8],
+        success: bool,
+        value: Option[u64],
+        error: Option[u8]
+    ) -> bool {
+        is_ok(input)
+            == success
+            && is_err(input)
+            != success
+            && ok(input)
+            == value
+            && err(input)
+            == error
+    }
+
+    // @case success(Result::Ok(4), 4, 4)
+    // @case error(Result::Err(7), 99, 8)
+    fn test_result_fallback(input: Result[u64, u8], eager: u64, lazy: u64) -> bool {
+        unwrap_or(input, 99)
+            == eager
+            && unwrap_or_else(
+            input,
+            | x: u8 | -> u64 {
+                wrapping_add(widen_u64(x), 1)
+            }
+        )
+            == lazy
+    }
+
+    // @case success(Result::Ok(4), Result::Ok(5), Result::Ok(4))
+    // @case error(Result::Err(7), Result::Err(7), Result::Err(9))
+    fn test_result_mapping(
+        input: Result[u64, u8],
+        mapped: Result[u32, u8],
+        mapped_error: Result[u64, u16]
+    ) -> bool {
+        let value = map(
+            input,
+            | x: u64 | -> u32 {
+                wrapping_add(wrapping_u32(x), 1)
+            }
+        );
+        let error = map_err(
+            input,
+            | x: u8 | -> u16 {
+                wrapping_add(wrapping_u16(x), 2)
+            }
+        );
+        value == mapped && error == mapped_error
+    }
+
+    // @case maps_success(Result::Ok(8), Result::Ok(4))
+    // @case callback_error(Result::Ok(7), Result::Err(2))
+    // @case original_error(Result::Err(9), Result::Err(9))
+    fn test_result_and_then(input: Result[u64, u8], expected: Result[u32, u8]) -> bool {
+        and_then(
+            input,
+            | x: u64 | -> Result[u32, u8] {
+                if (x & 1) == 0 {
+                    Result::Ok(wrapping_u32(x >> 1))
+                } else {
+                    Result::Err(2)
+                }
+            }
+        )
+            == expected
+    }
+
+    // @case first_success(Result::Ok(4), Result::Ok(9), Result::Ok(4))
+    // @case first_success_second_error(Result::Ok(4), Result::Err(7), Result::Ok(4))
+    // @case fallback_success(Result::Err(7), Result::Ok(9), Result::Ok(9))
+    // @case fallback_error(Result::Err(7), Result::Err(8), Result::Err(8))
+    fn test_result_or(first: Result[u64, u8], fallback: Result[u64, u8], expected: Result[u64, u8])
+        -> bool {
+        or(first, fallback) == expected
+    }
+}

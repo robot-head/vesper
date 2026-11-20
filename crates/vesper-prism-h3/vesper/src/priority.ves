@@ -19,6 +19,56 @@ use self::varint::{
     put_record
 };
 
+// RFC 9218 §4.1: urgency is 0..=7, default 3.
+const DEFAULT_URGENCY: u8 = 3;
+const MAX_URGENCY: u64 = 7;
+const URGENCY_LEVELS: u64 = 8;
+// Bare item kinds.
+const ITEM_INTEGER: u64 = 0;
+const ITEM_BOOLEAN: u64 = 1;
+const ITEM_OTHER: u64 = 2;
+// RFC 8941 §3.3.1/§3.3.2: integers have at most 15 digits, decimals at
+// most 12 integer and 3 fractional digits.
+const MAX_INTEGER_DIGITS: u64 = 15;
+const MAX_DECIMAL_INT_DIGITS: u64 = 12;
+const MAX_DECIMAL_FRAC_DIGITS: u64 = 3;
+const DECIMAL_BASE: u64 = 10;
+// Each `schedule` input stream is (stream id, urgency, incremental).
+const STREAM_WORDS: u64 = 3;
+const ASCII_TAB: u8 = 0x09;
+const ASCII_SPACE: u8 = 0x20;
+const ASCII_BANG: u8 = 0x21;
+const ASCII_QUOTE: u8 = 0x22;
+const ASCII_HASH: u8 = 0x23;
+const ASCII_APOSTROPHE: u8 = 0x27;
+const ASCII_LPAREN: u8 = 0x28;
+const ASCII_RPAREN: u8 = 0x29;
+const ASCII_STAR: u8 = 0x2a;
+const ASCII_PLUS: u8 = 0x2b;
+const ASCII_COMMA: u8 = 0x2c;
+const ASCII_MINUS: u8 = 0x2d;
+const ASCII_DOT: u8 = 0x2e;
+const ASCII_SLASH: u8 = 0x2f;
+const ASCII_ZERO: u8 = 0x30;
+const ASCII_ONE: u8 = 0x31;
+const ASCII_NINE: u8 = 0x39;
+const ASCII_COLON: u8 = 0x3a;
+const ASCII_SEMICOLON: u8 = 0x3b;
+const ASCII_EQUALS: u8 = 0x3d;
+const ASCII_QUESTION: u8 = 0x3f;
+const ASCII_UPPER_A: u8 = 0x41;
+const ASCII_UPPER_Z: u8 = 0x5a;
+const ASCII_BACKSLASH: u8 = 0x5c;
+const ASCII_CARET: u8 = 0x5e;
+const ASCII_UNDERSCORE: u8 = 0x5f;
+const ASCII_BACKTICK: u8 = 0x60;
+const ASCII_LOWER_A: u8 = 0x61;
+const ASCII_LOWER_I: u8 = 0x69;
+const ASCII_LOWER_U: u8 = 0x75;
+const ASCII_LOWER_Z: u8 = 0x7a;
+const ASCII_PIPE: u8 = 0x7c;
+const ASCII_TILDE: u8 = 0x7e;
+
 pub fn priority_update_request() -> u64 {
     984832
 }
@@ -29,7 +79,7 @@ pub fn priority_update_push() -> u64 {
 
 pub fn priority_default() -> Priority {
     Priority {
-        urgency: 3,
+        urgency: DEFAULT_URGENCY,
         incremental: false
     }
 }
@@ -45,7 +95,7 @@ copy struct Item {
 
 fn other() -> Item {
     Item {
-        kind: 2,
+        kind: ITEM_OTHER,
         neg: false,
         mag: 0,
         flag: false
@@ -54,7 +104,7 @@ fn other() -> Item {
 
 fn boolean(b: bool) -> Item {
     Item {
-        kind: 1,
+        kind: ITEM_BOOLEAN,
         neg: false,
         mag: 0,
         flag: b
@@ -62,15 +112,15 @@ fn boolean(b: bool) -> Item {
 }
 
 fn is_digit(c: u8) -> bool {
-    c >= 48 && c <= 57
+    c >= ASCII_ZERO && c <= ASCII_NINE
 }
 
 fn is_lower(c: u8) -> bool {
-    c >= 97 && c <= 122
+    c >= ASCII_LOWER_A && c <= ASCII_LOWER_Z
 }
 
 fn is_alpha(c: u8) -> bool {
-    is_lower(c) || (c >= 65 && c <= 90)
+    is_lower(c) || (c >= ASCII_UPPER_A && c <= ASCII_UPPER_Z)
 }
 
 fn is_alnum(c: u8) -> bool {
@@ -79,41 +129,41 @@ fn is_alnum(c: u8) -> bool {
 
 // `_-.*` after a key's first character.
 fn key_extra(c: u8) -> bool {
-    c == 95 || c == 45 || c == 46 || c == 42
+    c == ASCII_UNDERSCORE || c == ASCII_MINUS || c == ASCII_DOT || c == ASCII_STAR
 }
 
 // `!#$%&'*+-.^_`|~:/` in a token.
 fn token_extra(c: u8) -> bool {
     c
-        == 33
-        || (c >= 35 && c <= 39)
+        == ASCII_BANG
+        || (c >= ASCII_HASH && c <= ASCII_APOSTROPHE)
         || c
-        == 42
+        == ASCII_STAR
         || c
-        == 43
+        == ASCII_PLUS
         || c
-        == 45
+        == ASCII_MINUS
         || c
-        == 46
+        == ASCII_DOT
         || c
-        == 94
+        == ASCII_CARET
         || c
-        == 95
+        == ASCII_UNDERSCORE
         || c
-        == 96
+        == ASCII_BACKTICK
         || c
-        == 124
+        == ASCII_PIPE
         || c
-        == 126
+        == ASCII_TILDE
         || c
-        == 58
+        == ASCII_COLON
         || c
-        == 47
+        == ASCII_SLASH
 }
 
 // `+/=` in a byte sequence.
 fn b64_extra(c: u8) -> bool {
-    c == 43 || c == 47 || c == 61
+    c == ASCII_PLUS || c == ASCII_SLASH || c == ASCII_EQUALS
 }
 
 fn at_is(in v: Slice[u8], at: u64, c: u8) -> bool {
@@ -133,7 +183,7 @@ fn digit_at(in v: Slice[u8], at: u64) -> bool {
 fn ows(in v: Slice[u8], at: u64) -> u64 {
     let mut i = at;
     loop {
-        if at_is(in v, i, 32) || at_is(in v, i, 9) {
+        if at_is(in v, i, ASCII_SPACE) || at_is(in v, i, ASCII_TAB) {
             i = inc(i);
         } else {
             return i;
@@ -144,7 +194,7 @@ fn ows(in v: Slice[u8], at: u64) -> u64 {
 fn sp(in v: Slice[u8], at: u64) -> u64 {
     let mut i = at;
     loop {
-        if at_is(in v, i, 32) {
+        if at_is(in v, i, ASCII_SPACE) {
             i = inc(i);
         } else {
             return i;
@@ -156,7 +206,7 @@ fn sp(in v: Slice[u8], at: u64) -> u64 {
 fn key(in v: Slice[u8], at: u64) -> Option[u64] {
     match v.try_get(at) {
         Option::Some(c) => {
-            if !(is_lower(c) || c == 42) {
+            if !(is_lower(c) || c == ASCII_STAR) {
                 return Option::None;
             }
         }
@@ -192,7 +242,7 @@ fn parsed(item: Item, end: u64) -> Option[Parsed] {
 }
 
 fn number(in v: Slice[u8], at: u64) -> Option[Parsed] {
-    let neg = at_is(in v, at, 45);
+    let neg = at_is(in v, at, ASCII_MINUS);
     let digits = if neg {
         inc(at)
     } else {
@@ -206,7 +256,10 @@ fn number(in v: Slice[u8], at: u64) -> Option[Parsed] {
                 if !is_digit(c) {
                     break;
                 }
-                mag = wrapping_add(wrapping_mul(mag, 10), widen_u64(wrapping_sub(c, 48)));
+                mag = wrapping_add(
+                    wrapping_mul(mag, DECIMAL_BASE),
+                    widen_u64(wrapping_sub(c, ASCII_ZERO))
+                );
                 i = inc(i);
             }
             Option::None => break,
@@ -216,8 +269,8 @@ fn number(in v: Slice[u8], at: u64) -> Option[Parsed] {
     if int_digits == 0 {
         return Option::None;
     }
-    if at_is(in v, i, 46) {
-        if int_digits > 12 {
+    if at_is(in v, i, ASCII_DOT) {
+        if int_digits > MAX_DECIMAL_INT_DIGITS {
             return Option::None;
         }
         let frac = inc(i);
@@ -229,17 +282,17 @@ fn number(in v: Slice[u8], at: u64) -> Option[Parsed] {
                 break;
             }
         }
-        if j == frac || wrapping_sub(j, frac) > 3 {
+        if j == frac || wrapping_sub(j, frac) > MAX_DECIMAL_FRAC_DIGITS {
             return Option::None;
         }
         return parsed(other(), j);
     }
-    if int_digits > 15 {
+    if int_digits > MAX_INTEGER_DIGITS {
         return Option::None;
     }
     parsed(
         Item {
-            kind: 0,
+            kind: ITEM_INTEGER,
             neg: neg,
             mag: mag,
             flag: false
@@ -256,19 +309,19 @@ fn string(in v: Slice[u8], at: u64) -> Option[Parsed] {
             Option::None => return Option::None,
         };
         i = inc(i);
-        if c == 92 {
+        if c == ASCII_BACKSLASH {
             match v.try_get(i) {
                 Option::Some(e) => {
-                    if e != 34 && e != 92 {
+                    if e != ASCII_QUOTE && e != ASCII_BACKSLASH {
                         return Option::None;
                     }
                 }
                 Option::None => return Option::None,
             }
             i = inc(i);
-        } else if c == 34 {
+        } else if c == ASCII_QUOTE {
             return parsed(other(), i);
-        } else if c < 32 || c > 126 {
+        } else if c < ASCII_SPACE || c > ASCII_TILDE {
             return Option::None;
         }
     }
@@ -282,7 +335,7 @@ fn byte_sequence(in v: Slice[u8], at: u64) -> Option[Parsed] {
             Option::None => return Option::None,
         };
         i = inc(i);
-        if c == 58 {
+        if c == ASCII_COLON {
             return parsed(other(), i);
         }
         if !(is_alnum(c) || b64_extra(c)) {
@@ -313,19 +366,19 @@ fn bare_item(in v: Slice[u8], at: u64) -> Option[Parsed] {
         Option::Some(c) => c,
         Option::None => return Option::None,
     };
-    if c == 45 || is_digit(c) {
+    if c == ASCII_MINUS || is_digit(c) {
         return number(in v, at);
     }
-    if c == 34 {
+    if c == ASCII_QUOTE {
         return string(in v, at);
     }
-    if c == 63 {
+    if c == ASCII_QUESTION {
         let i = inc(at);
         let b = match v.try_get(i) {
             Option::Some(d) => {
-                if d == 48 {
+                if d == ASCII_ZERO {
                     false
-                } else if d == 49 {
+                } else if d == ASCII_ONE {
                     true
                 } else {
                     return Option::None;
@@ -335,10 +388,10 @@ fn bare_item(in v: Slice[u8], at: u64) -> Option[Parsed] {
         };
         return parsed(boolean(b), inc(i));
     }
-    if c == 58 {
+    if c == ASCII_COLON {
         return byte_sequence(in v, at);
     }
-    if is_alpha(c) || c == 42 {
+    if is_alpha(c) || c == ASCII_STAR {
         return token(in v, at);
     }
     Option::None
@@ -348,7 +401,7 @@ fn bare_item(in v: Slice[u8], at: u64) -> Option[Parsed] {
 fn parameters(in v: Slice[u8], at: u64) -> Option[u64] {
     let mut i = at;
     loop {
-        if !at_is(in v, i, 59) {
+        if !at_is(in v, i, ASCII_SEMICOLON) {
             return Option::Some(i);
         }
         i = sp(in v, inc(i));
@@ -356,7 +409,7 @@ fn parameters(in v: Slice[u8], at: u64) -> Option[u64] {
             Option::Some(e) => e,
             Option::None => return Option::None,
         };
-        if at_is(in v, i, 61) {
+        if at_is(in v, i, ASCII_EQUALS) {
             i = match bare_item(in v, inc(i)) {
                 Option::Some(p) => p.end,
                 Option::None => return Option::None,
@@ -367,11 +420,11 @@ fn parameters(in v: Slice[u8], at: u64) -> Option[u64] {
 
 // An item or an inner list, with its parameters.
 fn member_value(in v: Slice[u8], at: u64) -> Option[Parsed] {
-    if at_is(in v, at, 40) {
+    if at_is(in v, at, ASCII_LPAREN) {
         let mut i = inc(at);
         loop {
             i = sp(in v, i);
-            if at_is(in v, i, 41) {
+            if at_is(in v, i, ASCII_RPAREN) {
                 return match parameters(in v, inc(i)) {
                     Option::Some(e) => parsed(other(), e),
                     Option::None => Option::None,
@@ -385,7 +438,7 @@ fn member_value(in v: Slice[u8], at: u64) -> Option[Parsed] {
                 Option::Some(e) => e,
                 Option::None => return Option::None,
             };
-            if !(at_is(in v, i, 32) || at_is(in v, i, 41)) {
+            if !(at_is(in v, i, ASCII_SPACE) || at_is(in v, i, ASCII_RPAREN)) {
                 return Option::None;
             }
         }
@@ -406,8 +459,8 @@ fn apply(in v: Slice[u8], lo: u64, hi: u64, item: Item, p: Priority) -> Priority
         return p;
     }
     let k = byte(in v, lo);
-    if k == 117 {
-        if item.kind == 0 && item.mag <= 7 && (!item.neg || item.mag == 0) {
+    if k == ASCII_LOWER_U {
+        if item.kind == ITEM_INTEGER && item.mag <= MAX_URGENCY && (!item.neg || item.mag == 0) {
             return Priority {
                 urgency: wrapping_u8(item.mag),
                 incremental: p.incremental
@@ -415,7 +468,7 @@ fn apply(in v: Slice[u8], lo: u64, hi: u64, item: Item, p: Priority) -> Priority
         }
         return p;
     }
-    if k == 105 && item.kind == 1 {
+    if k == ASCII_LOWER_I && item.kind == ITEM_BOOLEAN {
         return Priority {
             urgency: p.urgency,
             incremental: item.flag
@@ -439,7 +492,7 @@ fn dictionary(in v: Slice[u8]) -> Option[Priority] {
         };
         let k_lo = at;
         at = k_end;
-        let item = if at_is(in v, at, 61) {
+        let item = if at_is(in v, at, ASCII_EQUALS) {
             match member_value(in v, inc(at)) {
                 Option::Some(m) => {
                     at = m.end;
@@ -461,7 +514,7 @@ fn dictionary(in v: Slice[u8]) -> Option[Priority] {
         if at >= v.len() {
             return Option::Some(p);
         }
-        if !at_is(in v, at, 44) {
+        if !at_is(in v, at, ASCII_COMMA) {
             return Option::None;
         }
         at = ows(in v, inc(at));
@@ -482,17 +535,17 @@ pub fn priority_parse_value(in v: Slice[u8]) -> Priority {
 // `Priority::serialize`, appended to `out`.
 pub fn priority_serialize_to(p: Priority, inout out: ChunkSeq[u8]) {
     let start = out.len();
-    if p.urgency != 3 {
-        out.push(117);
-        out.push(61);
-        out.push(wrapping_add(48, p.urgency));
+    if p.urgency != DEFAULT_URGENCY {
+        out.push(ASCII_LOWER_U);
+        out.push(ASCII_EQUALS);
+        out.push(wrapping_add(ASCII_ZERO, p.urgency));
     }
     if p.incremental {
         if out.len() != start {
-            out.push(44);
-            out.push(32);
+            out.push(ASCII_COMMA);
+            out.push(ASCII_SPACE);
         }
-        out.push(105);
+        out.push(ASCII_LOWER_I);
     }
 }
 
@@ -504,7 +557,7 @@ pub fn priority_update_parse(ty: u64, in payload: Slice[u8]) -> Result[PriorityU
     let n_used = n.used;
     for i in n_used..payload.len() {
         let c = byte(in payload, i);
-        if c < 32 || c > 126 {
+        if c < ASCII_SPACE || c > ASCII_TILDE {
             return Result::Err(FrameError::Malformed);
         }
     }
@@ -533,17 +586,17 @@ pub fn priority_update_write(u: PriorityUpdate, inout out: ChunkSeq[u8]) -> bool
 // Writes the groups to `out` as a group length followed by its ids.
 pub fn schedule_into(in streams: Slice[u64], rotate: u64, inout out: ChunkSeq[u64]) {
     out.clear();
-    let n = streams.len() / 3;
+    let n = streams.len() / STREAM_WORDS;
     let mut fixed = ChunkSeq::new[u64]();
     let mut incr = ChunkSeq::new[u64]();
-    for u in 0..urgencies() {
+    for u in 0..URGENCY_LEVELS {
         fixed.clear();
         incr.clear();
         for s in 0..n {
-            let at = wrapping_mul(s, 3);
+            let at = wrapping_mul(s, STREAM_WORDS);
             let urgency = word(in streams, inc(at));
-            let clamped = if urgency > 7 {
-                7
+            let clamped = if urgency > MAX_URGENCY {
+                MAX_URGENCY
             } else {
                 urgency
             };
@@ -575,10 +628,6 @@ pub fn schedule_into(in streams: Slice[u64], rotate: u64, inout out: ChunkSeq[u6
             }
         }
     }
-}
-
-fn urgencies() -> u64 {
-    8
 }
 
 // Inserts `v` keeping `s` ascending (after equal values, as a stable sort).

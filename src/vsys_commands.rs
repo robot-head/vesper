@@ -89,8 +89,7 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
         "build" => build(&c, &checked),
         "run" => {
             // The evaluator reaches the same host functions as `jit`.
-            let symbols = host_symbols(&imports, "run")?;
-            let host = ffi_lowering::EvalHost::new(&imports, &symbols)?;
+            let host = eval_host(&imports, "run")?;
             let value = checked
                 .evaluate(c.entry, |call| host.call(call))
                 .map_err(|e| e.to_string())?;
@@ -102,6 +101,15 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
             c.command, c.format
         )),
     }
+}
+
+/// Bind the CLI's built-in foreign functions to evaluator calls.
+pub(crate) fn eval_host(
+    imports: &Imports,
+    command: &str,
+) -> Result<ffi_lowering::EvalHost, String> {
+    let symbols = host_symbols(imports, command)?;
+    ffi_lowering::EvalHost::new(imports, &symbols)
 }
 
 /// The host functions the CLI provides for `imports`: every function of a
