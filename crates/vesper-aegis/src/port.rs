@@ -7,6 +7,12 @@
 use crate::error::{AegisVerifyError, Format, ParseError};
 pub(crate) use crate::port_binding as vesper;
 
+/// The tail rule a whole-input parse passes to the port (`reader::tail`):
+/// nothing may follow, the rest must be zero, or anything may follow.
+pub(crate) const TAIL_EXACT: u64 = 0;
+pub(crate) const TAIL_PADDED: u64 = 1;
+pub(crate) const TAIL_PREFIX: u64 = 2;
+
 /// `Format` in declaration order: the port raises the index.
 const FORMATS: [Format; 6] = [
     Format::TdxQuoteV4,

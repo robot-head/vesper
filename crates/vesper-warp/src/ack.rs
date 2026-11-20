@@ -20,6 +20,8 @@ pub const DEFAULT_MAX_RANGES: usize = 32;
 pub const DEFAULT_ACK_DELAY_EXPONENT: u8 = 3;
 /// RFC 9000 §13.2.2: acknowledge at least every second ack-eliciting packet.
 pub const ACK_ELICITING_THRESHOLD: u32 = 2;
+/// Largest valid ack_delay_exponent (RFC 9000 §18.2).
+pub const MAX_ACK_DELAY_EXPONENT: u8 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AckError {

@@ -15,6 +15,13 @@ pub const TOKENS_PER_PAGE: usize = 16;
 const MAX_STORAGE: usize = 64 * 1024 * 1024;
 #[cfg_attr(vesper_port, allow(dead_code))]
 const MAX_PAGE_REFERENCES: usize = 65_536;
+/// Ceilings on a [`KvConfig`]; a configuration above them is invalid.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MAX_PAGES: usize = 4096;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MAX_SEQUENCES: usize = 1024;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MAX_TOKENS_PER_SEQUENCE: usize = 65_536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvError {
@@ -206,11 +213,11 @@ impl KvPool {
         if config.heads == 0
             || config.head_dim == 0
             || config.pages == 0
-            || config.pages > 4096
+            || config.pages > MAX_PAGES
             || config.max_sequences == 0
-            || config.max_sequences > 1024
+            || config.max_sequences > MAX_SEQUENCES
             || config.max_tokens_per_sequence == 0
-            || config.max_tokens_per_sequence > 65_536
+            || config.max_tokens_per_sequence > MAX_TOKENS_PER_SEQUENCE
             || config.max_bytes == 0
             || config.max_bytes > MAX_STORAGE
         {

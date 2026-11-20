@@ -28,15 +28,25 @@ use self::{
 };
 use self::term::{
     add,
+    b_var,
+    d_node,
     dec,
     fa,
     fb,
     fc,
     flags,
+    g_cap,
+    g_impl,
+    g_mode,
+    g_row,
     inc,
     is_inf,
+    k_list,
     kid,
+    l_cap,
+    l_eff,
     label_key,
+    m_var,
     mk,
     mk1,
     mk2,
@@ -45,7 +55,13 @@ use self::term::{
     none,
     refs,
     setw,
+    st_conf,
+    st_pconf,
     sw,
+    t_ctor,
+    t_proj,
+    t_ref,
+    t_var,
     tg,
     var_arg,
     vidx,
@@ -53,6 +69,11 @@ use self::term::{
     vkind,
     vph
 };
+
+// Fibonacci hashing: 2^64 / φ, rounded to odd.
+const GOLDEN_GAMMA: u64 = 11400714819323198485;
+// The binder slot is taken from the top 24 bits of the product.
+const SLOT_SHIFT: u64 = 40;
 
 pub fn op_mask(op: u64) -> u64 {
     if op == 1 || op == 5 {
@@ -88,7 +109,7 @@ pub fn cn_begin(inout s: S) {
 }
 
 fn cn_slot(in s: S, i: u64) -> u64 {
-    let mut at = wrapping_mul(i, 11400714819323198485) >> 40;
+    let mut at = wrapping_mul(i, GOLDEN_GAMMA) >> SLOT_SHIFT;
     at = at & s.cn_mask;
     loop {
         if sw(in s.cn_stamp, at) != s.cn_gen {
@@ -298,16 +319,16 @@ fn fold_row(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> u64 {
         }
         let l = kid(in s, n, i);
         let la = fa(in s, l);
-        if tg(in s, l) == 11 {
+        if tg(in s, l) == l_eff() {
             let inner = s.tmp.len();
             if !fold_kids(inout s, in cx, op, l) {
                 return 0;
             }
-            let x = mkl(inout s, 11, la, 0, 0, inner);
+            let x = mkl(inout s, l_eff(), la, 0, 0, inner);
             s.tmp.push(x);
         } else {
             let v = fold_cap(inout s, in cx, op, la);
-            let x = mk1(inout s, 12, v);
+            let x = mk1(inout s, l_cap(), v);
             s.tmp.push(x);
         }
         i = inc(i);
@@ -336,7 +357,7 @@ fn fold_row(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> u64 {
         s.ferr = d;
         return 0;
     }
-    mkl(inout s, 6, tail, 0, 0, from)
+    mkl(inout s, g_row(), tail, 0, 0, from)
 }
 
 // Folds node n. After an error (s.ferr set) the result is meaningless.
@@ -351,31 +372,31 @@ pub fn fold(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> u64 {
     let na = fa(in s, n);
     let nb = fb(in s, n);
     let nc = fc(in s, n);
-    if tag == 1 {
+    if tag == t_ctor() {
         let from = s.tmp.len();
         if !fold_kids(inout s, in cx, op, n) {
             return 0;
         }
-        mkl(inout s, 1, na, 0, 0, from)
-    } else if tag == 2 {
+        mkl(inout s, t_ctor(), na, 0, 0, from)
+    } else if tag == t_var() {
         fvar(inout s, in cx, op, na, 0)
-    } else if tag == 3 {
+    } else if tag == t_proj() {
         let t = fold(inout s, in cx, op, na);
         let b = fold(inout s, in cx, op, nb);
         if s.ferr != none() {
             return 0;
         }
-        mk(inout s, 3, t, b, nc)
-    } else if tag == 5 {
+        mk(inout s, t_proj(), t, b, nc)
+    } else if tag == m_var() {
         fvar(inout s, in cx, op, na, 1)
-    } else if tag == 6 {
+    } else if tag == g_row() {
         fold_row(inout s, in cx, op, n)
-    } else if tag == 9 {
+    } else if tag == b_var() {
         fvar(inout s, in cx, op, na, 3)
-    } else if tag == 10 {
+    } else if tag == g_cap() {
         let v = fold_cap(inout s, in cx, op, na);
-        mk1(inout s, 10, v)
-    } else if tag == 13 {
+        mk1(inout s, g_cap(), v)
+    } else if tag == t_ref() {
         let st = fold(inout s, in cx, op, nb);
         if s.ferr != none() {
             return 0;
@@ -384,15 +405,15 @@ pub fn fold(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> u64 {
         if !fold_kids(inout s, in cx, op, n) {
             return 0;
         }
-        mkl(inout s, 13, na, st, 0, from)
-    } else if tag >= 14 && tag <= 16 {
+        mkl(inout s, t_ref(), na, st, 0, from)
+    } else if tag >= g_impl() && tag <= g_mode() {
         let x = fold(inout s, in cx, op, na);
         let y = fold(inout s, in cx, op, nb);
         if s.ferr != none() {
             return 0;
         }
         mk2(inout s, tag, x, y)
-    } else if tag == 17 {
+    } else if tag == d_node() {
         // Derivation::fold: the step's arguments, the goal, the children.
         let st = fold(inout s, in cx, op, nb);
         let g = fold(inout s, in cx, op, na);
@@ -403,8 +424,8 @@ pub fn fold(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> u64 {
         if !fold_kids(inout s, in cx, op, n) {
             return 0;
         }
-        mkl(inout s, 17, g, st, 0, from)
-    } else if tag == 18 || tag == 21 || tag == 27 {
+        mkl(inout s, d_node(), g, st, 0, from)
+    } else if tag == st_conf() || tag == st_pconf() || tag == k_list() {
         let from = s.tmp.len();
         if !fold_kids(inout s, in cx, op, n) {
             return 0;
@@ -461,10 +482,12 @@ pub fn occurs(in s: S, n: u64, x: u64) -> bool {
     }
     let tag = tg(in s, n);
     let v = vinf(x);
-    if (tag == 2 || tag == 5 || tag == 9 || tag == 10 || tag == 12) && fa(in s, n) == v {
+    if (tag == t_var() || tag == m_var() || tag == b_var() || tag == g_cap() || tag == l_cap())
+        && fa(in s, n)
+        == v {
         return true;
     }
-    if tag == 6 && fa(in s, n) == v {
+    if tag == g_row() && fa(in s, n) == v {
         return true;
     }
     let r = refs(tag);

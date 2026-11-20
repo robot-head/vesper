@@ -1,6 +1,11 @@
 // ---------------------------------------------------------------------------
 // Graph declarations (src/graph.rs)
 
+// Queue ids are u16.
+const MAX_QUEUE_INDEX: u64 = 65535;
+// Subresources one texture may have (2^20).
+const MAX_SUBRESOURCES: u64 = 1048576;
+
 fn none32() -> u32 {
     0xffffffff
 }
@@ -170,7 +175,7 @@ pub fn graph_new() -> Graph {
 
 pub fn graph_add_queue(inout g: Graph, kind: QueueKind) -> QueueOutcome {
     let n = g.queues.len();
-    if n > 65535 {
+    if n > MAX_QUEUE_INDEX {
         QueueOutcome::TooManyQueues
     } else {
         g.queues.push(kind);
@@ -247,7 +252,7 @@ pub fn graph_add_texture(
         let count = wrapping_mul(ms, widen_u64(planes));
         if ms > 0xffffffff || count > 0xffffffff {
             ResourceOutcome::CountOverflow
-        } else if count > 1048576 {
+        } else if count > MAX_SUBRESOURCES {
             ResourceOutcome::TooManySubresources
         } else if has_final && final_layout == Layout::Undefined {
             ResourceOutcome::FinalUndefined

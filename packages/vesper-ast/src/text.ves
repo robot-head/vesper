@@ -1,0 +1,567 @@
+// Literal text: the values `vesper_syntax::parser` gives Float and String
+// tokens. A Float is `str::parse::<f64>` (correctly rounded, ties to even,
+// overflow to infinity), computed exactly over a small big-integer type; a
+// String is `serde_json::from_str` of the token (JSON escapes, surrogate
+// pairs), or the empty string when that fails.
+
+// ---------------------------------------------------------------- strings
+
+fn tb(in s: String, i: u64) -> u8 {
+    match s.try_byte_at(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn hex_digit(c: u8) -> u64 {
+    if c >= 48 && c <= 57 {
+        widen_u64(wrapping_sub(c, 48))
+    } else if c >= 97 && c <= 102 {
+        widen_u64(wrapping_sub(c, 87))
+    } else if c >= 65 && c <= 70 {
+        widen_u64(wrapping_sub(c, 55))
+    } else {
+        16
+    }
+}
+
+// Four hex digits at `at` before `end`, or 65536.
+fn hex4(in s: String, at: u64, end: u64) -> u64 {
+    if wrapping_add(at, 4) > end {
+        return 65536;
+    }
+    let mut v: u64 = 0;
+    for j in at..wrapping_add(at, 4) {
+        let d = hex_digit(tb(in s, j));
+        if d == 16 {
+            return 65536;
+        }
+        v = wrapping_add(wrapping_shl_u64(v, 4), d);
+    }
+    v
+}
+
+fn push_cp(inout out: String, cp: u64) {
+    let ok = out.push_char(wrapping_u32(cp));
+    if !ok {
+        out.clear();
+    }
+}
+
+// Appends the JSON value of String token `start..end` of `s` to `out` (which
+// the caller cleared); leaves `out` empty for an invalid string.
+pub fn decode_string(in s: String, start: u64, end: u64, inout out: String) {
+    let stop = wrapping_sub(end, 1);
+    let mut j = wrapping_add(start, 1);
+    let mut run = j;
+    loop {
+        if j >= stop {
+            if run < stop {
+                out.push_str(in s[run..stop]);
+            }
+            return;
+        }
+        let c = tb(in s, j);
+        if c < 32 {
+            out.clear();
+            return;
+        }
+        if c == 92 {
+            if run < j {
+                out.push_str(in s[run..j]);
+            }
+            let d = tb(in s, wrapping_add(j, 1));
+            let simple: u64 = if d == 34 {
+                34
+            } else if d == 92 {
+                92
+            } else if d == 47 {
+                47
+            } else if d == 98 {
+                8
+            } else if d == 102 {
+                12
+            } else if d == 110 {
+                10
+            } else if d == 114 {
+                13
+            } else if d == 116 {
+                9
+            } else {
+                0
+            };
+            if simple != 0 {
+                push_cp(inout out, simple);
+                j = wrapping_add(j, 2);
+            } else if d == 117 {
+                let v = hex4(in s, wrapping_add(j, 2), stop);
+                if v == 65536 {
+                    out.clear();
+                    return;
+                }
+                j = wrapping_add(j, 6);
+                if v >= 55296 && v <= 56319 {
+                    if tb(in s, j) != 92 || tb(in s, wrapping_add(j, 1)) != 117 {
+                        out.clear();
+                        return;
+                    }
+                    let lo = hex4(in s, wrapping_add(j, 2), stop);
+                    if lo < 56320 || lo > 57343 {
+                        out.clear();
+                        return;
+                    }
+                    j = wrapping_add(j, 6);
+                    let cp = wrapping_add(
+                        65536,
+                        wrapping_add(
+                            wrapping_shl_u64(wrapping_sub(v, 55296), 10),
+                            wrapping_sub(lo, 56320)
+                        )
+                    );
+                    push_cp(inout out, cp);
+                } else if v >= 56320 && v <= 57343 {
+                    out.clear();
+                    return;
+                } else {
+                    push_cp(inout out, v);
+                }
+            } else {
+                out.clear();
+                return;
+            }
+            run = j;
+        } else {
+            j = wrapping_add(j, 1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- big integers
+
+// Little-endian 32-bit limbs, one per word, without high zero limbs.
+
+fn limb(in a: ChunkSeq[u64], i: u64) -> u64 {
+    match a.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn trim(inout a: ChunkSeq[u64]) {
+    loop {
+        let n = a.len();
+        if n == 0 || limb(in a, wrapping_sub(n, 1)) != 0 {
+            return;
+        }
+        a.truncate(wrapping_sub(n, 1));
+    }
+}
+
+fn mul_add_small(inout a: ChunkSeq[u64], m: u64, add: u64) {
+    let mut carry = add;
+    for i in 0..a.len() {
+        let v = wrapping_add(wrapping_mul(limb(in a, i), m), carry);
+        a.try_set(i, v & 4294967295);
+        carry = v >> 32;
+    }
+    if carry != 0 {
+        a.push(carry);
+    }
+}
+
+fn bitlen(in a: ChunkSeq[u64]) -> u64 {
+    let n = a.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut top = limb(in a, wrapping_sub(n, 1));
+    let mut bits: u64 = 0;
+    loop {
+        if top == 0 {
+            break;
+        }
+        top = top >> 1;
+        bits = wrapping_add(bits, 1);
+    }
+    wrapping_add(wrapping_mul(wrapping_sub(n, 1), 32), bits)
+}
+
+fn bit(in a: ChunkSeq[u64], k: u64) -> bool {
+    (limb(in a, k >> 5) >> (k & 31)) & 1 == 1
+}
+
+// Whether any bit below `k` is set.
+fn any_below(in a: ChunkSeq[u64], k: u64) -> bool {
+    let whole = k >> 5;
+    for i in 0..whole {
+        if limb(in a, i) != 0 {
+            return true;
+        }
+    }
+    let part = k & 31;
+    if part == 0 {
+        return false;
+    }
+    limb(in a, whole) & wrapping_sub(wrapping_shl_u64(1, wrapping_u32(part)), 1) != 0
+}
+
+// Bits `k..k + 64` of `a`.
+fn bits_at(in a: ChunkSeq[u64], k: u64) -> u64 {
+    let i = k >> 5;
+    let s = k & 31;
+    let w = limb(in a, i) | wrapping_shl_u64(limb(in a, wrapping_add(i, 1)), 32);
+    let lo = w >> s;
+    if s == 0 {
+        lo
+    } else {
+        lo | wrapping_shl_u64(limb(in a, wrapping_add(i, 2)), wrapping_u32(wrapping_sub(64, s)))
+    }
+}
+
+fn shl(inout a: ChunkSeq[u64], k: u64) {
+    if a.len() == 0 || k == 0 {
+        return;
+    }
+    let words = k >> 5;
+    let s = k & 31;
+    let n = a.len();
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(wrapping_add(n, words), 1));
+    for i in 0..words {
+        out.push(0);
+    }
+    let mut carry: u64 = 0;
+    for i in 0..n {
+        let v = wrapping_shl_u64(limb(in a, i), wrapping_u32(s)) | carry;
+        out.push(v & 4294967295);
+        carry = v >> 32;
+    }
+    out.push(carry);
+    a.clear();
+    for i in 0..out.len() {
+        a.push(limb(in out, i));
+    }
+    trim(inout a);
+}
+
+fn shr1(inout a: ChunkSeq[u64]) {
+    let n = a.len();
+    for i in 0..n {
+        let v = (limb(in a, i) >> 1) | ((limb(in a, wrapping_add(i, 1)) & 1) << 31);
+        a.try_set(i, v);
+    }
+    trim(inout a);
+}
+
+// -1, 0 or 1 as `a` is below, equal to or above `b`.
+fn cmp(in a: ChunkSeq[u64], in b: ChunkSeq[u64]) -> i64 {
+    if a.len() != b.len() {
+        return if a.len() < b.len() {
+            -1
+        } else {
+            1
+        };
+    }
+    let mut i = a.len();
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        i = wrapping_sub(i, 1);
+        let x = limb(in a, i);
+        let y = limb(in b, i);
+        if x != y {
+            return if x < y {
+                -1
+            } else {
+                1
+            };
+        }
+    }
+    0
+}
+
+// `a -= b` for `a >= b`.
+fn sub(inout a: ChunkSeq[u64], in b: ChunkSeq[u64]) {
+    let mut borrow: u64 = 0;
+    for i in 0..a.len() {
+        let x = limb(in a, i);
+        let y = wrapping_add(limb(in b, i), borrow);
+        if x >= y {
+            a.try_set(i, wrapping_sub(x, y));
+            borrow = 0;
+        } else {
+            a.try_set(i, wrapping_sub(wrapping_add(x, 4294967296), y));
+            borrow = 1;
+        }
+    }
+    trim(inout a);
+}
+
+fn copy_of(in a: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::with_capacity[u64](a.len());
+    for i in 0..a.len() {
+        out.push(limb(in a, i));
+    }
+    out
+}
+
+// ---------------------------------------------------------------- floats
+
+fn inf_bits() -> u64 {
+    9218868437227405312
+}
+
+// The f64 nearest `m * 2^x` (ties to even), `sticky` meaning the true value
+// is slightly above `m * 2^x` (below the next integer multiple).
+fn round_bits(in m: ChunkSeq[u64], x: i64, sticky: bool) -> u64 {
+    let len = bitlen(in m);
+    if len == 0 {
+        return 0;
+    }
+    let lead = wrapping_add(wrapping_sub(wrapping_i64(len), 1), x);
+    if lead > 1023 {
+        return inf_bits();
+    }
+    let mut low = wrapping_sub(lead, 52);
+    if low < -1074 {
+        low = -1074;
+    }
+    let shift = wrapping_sub(low, x);
+    let mut kept: u64 = 0;
+    if shift <= 0 {
+        kept = wrapping_shl_u64(
+            bits_at(in m, 0),
+            wrapping_u32(wrapping_u64(wrapping_neg_i64(shift)))
+        );
+    } else {
+        let sh = wrapping_u64(shift);
+        kept = bits_at(in m, sh) & 18014398509481983;
+        let half = bit(in m, wrapping_sub(sh, 1));
+        let rest = sticky || any_below(in m, wrapping_sub(sh, 1));
+        if half && (rest || kept & 1 == 1) {
+            kept = wrapping_add(kept, 1);
+        }
+        if kept == 9007199254740992 {
+            kept = 4503599627370496;
+            low = wrapping_add(low, 1);
+        }
+    }
+    if wrapping_add(low, 52) > 1023 {
+        return inf_bits();
+    }
+    if kept < 4503599627370496 {
+        return kept;
+    }
+    let biased = wrapping_u64(wrapping_add(low, 1075));
+    wrapping_shl_u64(biased, 52) | (kept & 4503599627370495)
+}
+
+fn digit(in src: ChunkSeq[u8], i: u64) -> u64 {
+    match src.try_get(i) {
+        Option::Some(c) => if c >= 48 && c <= 57 {
+            widen_u64(wrapping_sub(c, 48))
+        } else {
+            10
+        },
+        Option::None => 10,
+    }
+}
+
+// The f64 bit pattern of Float token `start..end` of `src`
+// (`[0-9]+.[0-9]+([eE][+-]?[0-9]+)?` or `[0-9]+[eE][+-]?[0-9]+`).
+pub fn parse_float(in src: ChunkSeq[u8], start: u64, end: u64) -> u64 {
+    let mut d = ChunkSeq::new[u64]();
+    let mut nd: i64 = 0;
+    let mut exp: i64 = 0;
+    let mut dropped_nonzero = false;
+    let mut i = start;
+    let mut frac = false;
+    loop {
+        if i >= end {
+            break;
+        }
+        let c = match src.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c == 46 {
+            frac = true;
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        let v = digit(in src, i);
+        if v == 10 {
+            break;
+        }
+        if nd == 0 && v == 0 {
+            // A leading zero.
+            if frac {
+                exp = wrapping_sub(exp, 1);
+            }
+        } else if nd < 800 {
+            mul_add_small(inout d, 10, v);
+            if d.len() == 0 && v != 0 {
+                d.push(v);
+            }
+            nd = wrapping_add(nd, 1);
+            if frac {
+                exp = wrapping_sub(exp, 1);
+            }
+        } else {
+            if v != 0 {
+                dropped_nonzero = true;
+            }
+            if !frac {
+                exp = wrapping_add(exp, 1);
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    // The exponent part.
+    if i < end {
+        i = wrapping_add(i, 1);
+        let mut neg = false;
+        let c = match src.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c == 43 || c == 45 {
+            neg = c == 45;
+            i = wrapping_add(i, 1);
+        }
+        let mut e: i64 = 0;
+        loop {
+            if i >= end {
+                break;
+            }
+            let v = digit(in src, i);
+            if v == 10 {
+                break;
+            }
+            if e < 100000000 {
+                e = wrapping_add(wrapping_mul(e, 10), wrapping_i64(v));
+            }
+            i = wrapping_add(i, 1);
+        }
+        exp = if neg {
+            wrapping_sub(exp, e)
+        } else {
+            wrapping_add(exp, e)
+        };
+    }
+    if nd == 0 {
+        return 0;
+    }
+    if dropped_nonzero {
+        mul_add_small(inout d, 10, 1);
+        nd = wrapping_add(nd, 1);
+        exp = wrapping_sub(exp, 1);
+    }
+    let top = wrapping_add(nd, exp);
+    if top > 310 {
+        return inf_bits();
+    }
+    if top < -326 {
+        return 0;
+    }
+    if exp >= 0 {
+        for k in 0..wrapping_u64(exp) {
+            mul_add_small(inout d, 10, 0);
+        }
+        return round_bits(in d, 0, false);
+    }
+    let mut q = ChunkSeq::new[u64]();
+    q.push(1);
+    for k in 0..wrapping_u64(wrapping_neg_i64(exp)) {
+        mul_add_small(inout q, 10, 0);
+    }
+    let k = wrapping_sub(wrapping_add(55, wrapping_i64(bitlen(in q))), wrapping_i64(bitlen(in d)));
+    if k >= 0 {
+        shl(inout d, wrapping_u64(k));
+    } else {
+        shl(inout q, wrapping_u64(wrapping_neg_i64(k)));
+    }
+    // Restoring division: quotient bits 56 down to 0.
+    let mut s = copy_of(in q);
+    shl(inout s, 56);
+    let mut quotient: u64 = 0;
+    let mut b: u64 = 57;
+    loop {
+        if b == 0 {
+            break;
+        }
+        b = wrapping_sub(b, 1);
+        if cmp(in d, in s) >= 0 {
+            sub(inout d, in s);
+            quotient = quotient | wrapping_shl_u64(1, wrapping_u32(b));
+        }
+        shr1(inout s);
+    }
+    let mut m = ChunkSeq::new[u64]();
+    m.push(quotient & 4294967295);
+    m.push(quotient >> 32);
+    trim(inout m);
+    round_bits(in m, wrapping_neg_i64(k), d.len() != 0)
+}
+
+test {
+    // @case empty(in "\"\"", in "")
+    // @case ascii_run(in "\"abc\"", in "abc")
+    // @case utf8_run(in "\"é水\"", in "é水")
+    // @case simple_escapes(in "\"a\\n\\t\\r\\b\\f\\/\\\\\\\"z\"", in "a\n\t\r\b\f/\\\"z")
+    // @case bmp_escape(in "\"x\\u4E2Dy\"", in "x中y")
+    // @case surrogate_pair(in "\"\\uD83D\\uDE00\"", in "😀")
+    // @case invalid_escape_clears_prefix(in "\"abc\\q\"", in "")
+    // @case truncated_hex_clears_prefix(in "\"abc\\u12\"", in "")
+    // @case invalid_hex_clears_prefix(in "\"abc\\u00x1\"", in "")
+    // @case isolated_high_surrogate(in "\"abc\\uD83D\"", in "")
+    // @case isolated_low_surrogate(in "\"abc\\uDE00\"", in "")
+    // @case invalid_second_surrogate(in "\"abc\\uD83D\\u0041\"", in "")
+    // @case raw_control_character(in "\"a\nb\"", in "")
+    fn test_decode_string(in token: Str, in expected: Str) -> bool {
+        let mut source = String::new();
+        source.push_str(in "prefix");
+        let start = source.len();
+        source.push_str(in token);
+        let end = source.len();
+        source.push_str(in "suffix");
+        let mut out = String::new();
+        decode_string(in source, start, end, inout out);
+        let bytes = expected.as_bytes();
+        if out.len() != bytes.len() {
+            return false;
+        }
+        for i in 0..out.len() {
+            if out.try_byte_at(i) != bytes.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case zero(in "0.0", 0x0000000000000000)
+    // @case exact_binary_fraction(in "0.125", 0x3fc0000000000000)
+    // @case inexact_tenth(in "0.1", 0x3fb999999999999a)
+    // @case uppercase_exponent(in "1E+3", 0x408f400000000000)
+    // @case negative_exponent(in "125e-3", 0x3fc0000000000000)
+    // @case leading_zeros(in "000.00125", 0x3f547ae147ae147b)
+    // @case fractional_half_even_down(in "1.00000000000000011102230246251565404236316680908203125", 0x3ff0000000000000)
+    // @case fractional_above_half(in "1.00000000000000011102230246251565404236316680908203126", 0x3ff0000000000001)
+    // @case integer_half_even_up(in "9007199254740995e0", 0x4340000000000002)
+    // @case largest_finite(in "1.7976931348623157e308", 0x7fefffffffffffff)
+    // @case overflow(in "1.7976931348623159e308", 0x7ff0000000000000)
+    // @case min_normal(in "2.2250738585072014e-308", 0x0010000000000000)
+    // @case largest_subnormal(in "2.225073858507201e-308", 0x000fffffffffffff)
+    // @case smallest_subnormal(in "4.9406564584124654e-324", 0x0000000000000001)
+    // @case underflow(in "2e-324", 0x0000000000000000)
+    // @case huge_exponent(in "1e9999999999", 0x7ff0000000000000)
+    fn test_parse_float(in token: Str, expected_bits: u64) -> bool {
+        let mut source = ChunkSeq::new[u8]();
+        source.extend(in "prefix".as_bytes());
+        let start = source.len();
+        source.extend(in token.as_bytes());
+        let end = source.len();
+        source.extend(in "suffix".as_bytes());
+        parse_float(in source, start, end) == expected_bits
+    }
+}

@@ -1,0 +1,72 @@
+# The frozen Rust seed copy of vesper-highlight (package
+# vesper-highlight-seed, library vesper_highlight) that the compiler links:
+# ../src built without the port, so cfg(vesper_port) is off. Written by hand
+# because its sources live in the parent package; see "Crates the compiler
+# links" in docs/maintenance/porting-a-crate.md (self-hosting SH1 lane 11,
+# #1154).
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+load("@vesper_cargo//:packages.bzl", "PACKAGES")
+
+# The seed's dependencies and features (`shot`, which the compiler enables)
+# from its Cargo metadata, as vesper_crate derives them.
+_DATA = PACKAGES["crates/vesper-highlight/seed"].crate_data()
+
+_NORMAL = all_crate_deps(_DATA, platforms = _DATA["platforms"], normal = True)
+
+_FEATURES = _DATA.get("crate_features", [])
+
+_ENV = {
+    "CARGO_PKG_NAME": "vesper-highlight-seed",
+    "CARGO_PKG_VERSION": "0.1.0",
+}
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-highlight:rust_srcs"],
+    # src/brand.rs checks the mark against website/brand at compile time.
+    compile_data = ["//:website"],
+    crate_features = _FEATURES,
+    crate_name = "vesper_highlight",
+    crate_root = "//crates/vesper-highlight:src/lib.rs",
+    edition = "2024",
+    rustc_env = _ENV,
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+    deps = _NORMAL,
+)
+
+rust_test(
+    name = "seed_unit_test",
+    crate = ":seed",
+    crate_features = _FEATURES,
+    edition = "2024",
+)
+
+[
+    rust_test(
+        name = "seed_test_" + t,
+        srcs = ["//crates/vesper-highlight:tests/%s.rs" % t],
+        compile_data = ["//:website"],
+        crate_features = _FEATURES,
+        crate_root = "//crates/vesper-highlight:tests/%s.rs" % t,
+        edition = "2024",
+        rustc_env = _ENV,
+        deps = [":seed"] + _NORMAL,
+    )
+    for t in [
+        "chroma",
+        "html_line_endings",
+    ]
+]
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)

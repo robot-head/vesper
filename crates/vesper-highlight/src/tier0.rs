@@ -134,6 +134,11 @@ pub fn highlight_tier0_with_limit(
             limit,
         });
     }
+    #[cfg(vesper_port)]
+    if let Some(spans) = crate::port::cst(src) {
+        verify_lossless_spans(src.len(), &spans)?;
+        return Ok(spans);
+    }
     let limits = ParseLimits {
         max_source_bytes: limit.max(1),
         // Token exhaustion keeps a flat, still lossless CST.
@@ -223,6 +228,11 @@ pub fn highlight_tier0_tokens_with_limit(
     };
     if src.len() > limit {
         return Err(too_large);
+    }
+    #[cfg(vesper_port)]
+    if let Some(spans) = crate::port::tokens(src) {
+        verify_lossless_spans(src.len(), &spans)?;
+        return Ok(spans);
     }
     let lexed = vesper_syntax::lexer::lex_with_limits(
         src,

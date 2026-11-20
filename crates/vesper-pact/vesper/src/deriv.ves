@@ -7,14 +7,22 @@ use self::{
     S
 };
 use self::term::{
-    arg_kind,
     add,
+    arg_kind,
+    b_canon,
+    b_named,
     dec,
     fa,
     fb,
     fc,
+    g_impl,
+    g_mode,
+    g_peq,
+    g_row,
     inc,
+    k_list,
     kid,
+    l_eff,
     mk,
     mk0,
     mk1,
@@ -23,8 +31,21 @@ use self::term::{
     nlen,
     none,
     push_kids,
+    st_alias,
+    st_assume,
+    st_cohyp,
+    st_conf,
+    st_mode,
+    st_norm,
+    st_passume,
+    st_pconf,
+    st_rigid,
     sub,
     sw,
+    t_ctor,
+    t_proj,
+    t_ref,
+    t_var,
     tg,
     vkind
 };
@@ -59,6 +80,9 @@ use self::mode::{
     decide,
     mode_atoms
 };
+
+// ASCII bytes.
+const BACKTICK: u8 = 96;
 
 fn begin_fail(inout s: S) {
     s.de_failed = true;
@@ -127,7 +151,7 @@ fn kinds_match(in s: S, ci: u64, step: u64) -> bool {
 fn args_list(inout s: S, step: u64) -> u64 {
     let from = s.tmp.len();
     push_kids(inout s, step);
-    mkl(inout s, 27, 0, 0, 0, from)
+    mkl(inout s, k_list(), 0, 0, 0, from)
 }
 
 // The where-clause children d[from .. from + n] against ci's clauses.
@@ -153,7 +177,7 @@ fn where_children(inout s: S, ci: u64, args: u64, d: u64) -> bool {
             r_goal(inout s, cg);
             lit(inout s, "`, expected `");
             r_goal(inout s, expected);
-            byte(inout s, 96);
+            byte(inout s, BACKTICK);
             return false;
         }
         i = inc(i);
@@ -162,16 +186,16 @@ fn where_children(inout s: S, ci: u64, args: u64, d: u64) -> bool {
 
 fn expected_brand(inout s: S, source: u64) -> u64 {
     if (source & 1) == 0 {
-        mk0(inout s, 7)
+        mk0(inout s, b_canon())
     } else {
-        mk1(inout s, 8, source >> 1)
+        mk1(inout s, b_named(), source >> 1)
     }
 }
 
 fn single_trait_child(inout s: S, d: u64, p: u64) -> bool {
     let tr = fa(in s, p);
     let b = fb(in s, p);
-    let expected = mk2(inout s, 14, tr, b);
+    let expected = mk2(inout s, g_impl(), tr, b);
     if nlen(in s, d) == 1 && fa(in s, kid(in s, d, 0)) == expected {
         return true;
     }
@@ -199,10 +223,10 @@ fn rp_args(inout s: S, n: u64) -> u64 {
 
 fn rp_arg(inout s: S, a: u64) -> u64 {
     let t = tg(in s, a);
-    if t <= 3 {
+    if t <= t_proj() {
         return rp_ty(inout s, a);
     }
-    if t == 6 {
+    if t == g_row() {
         let from = s.tmp.len();
         let len = nlen(in s, a);
         let mut i: u64 = 0;
@@ -211,10 +235,10 @@ fn rp_arg(inout s: S, a: u64) -> u64 {
                 break;
             }
             let l = kid(in s, a, i);
-            if tg(in s, l) == 11 {
+            if tg(in s, l) == l_eff() {
                 let f2 = rp_args(inout s, l);
                 let e = fa(in s, l);
-                let x = mkl(inout s, 11, e, 0, 0, f2);
+                let x = mkl(inout s, l_eff(), e, 0, 0, f2);
                 s.tmp.push(x);
             } else {
                 s.tmp.push(l);
@@ -222,7 +246,7 @@ fn rp_arg(inout s: S, a: u64) -> u64 {
             i = inc(i);
         }
         let tail = fa(in s, a);
-        return mkl(inout s, 6, tail, 0, 0, from);
+        return mkl(inout s, g_row(), tail, 0, 0, from);
     }
     a
 }
@@ -232,26 +256,26 @@ fn rp_tref(inout s: S, tr: u64) -> u64 {
     let st2 = rp_ty(inout s, st);
     let from = rp_args(inout s, tr);
     let t = fa(in s, tr);
-    mkl(inout s, 13, t, st2, 0, from)
+    mkl(inout s, t_ref(), t, st2, 0, from)
 }
 
 fn rp_ty(inout s: S, t: u64) -> u64 {
     let tag = tg(in s, t);
-    if tag == 1 {
+    if tag == t_ctor() {
         let from = rp_args(inout s, t);
         let c = fa(in s, t);
-        return mkl(inout s, 1, c, 0, 0, from);
+        return mkl(inout s, t_ctor(), c, 0, 0, from);
     }
-    if tag == 3 {
+    if tag == t_proj() {
         let tr = fa(in s, t);
         let tr2 = rp_tref(inout s, tr);
         let b = fb(in s, t);
         let assoc = fc(in s, t);
-        let inner = mk(inout s, 3, tr2, b, assoc);
+        let inner = mk(inout s, t_proj(), tr2, b, assoc);
         if s.rp_next < s.rp_end {
             let nd = kid(in s, s.rp_d, s.rp_next);
             let g = fa(in s, nd);
-            if tg(in s, g) == 15 && fa(in s, g) == inner {
+            if tg(in s, g) == g_peq() && fa(in s, g) == inner {
                 s.rp_next = inc(s.rp_next);
                 return fb(in s, g);
             }
@@ -266,20 +290,20 @@ fn rp_goal(inout s: S, g: u64) -> u64 {
     let t = tg(in s, g);
     let a = fa(in s, g);
     let b = fb(in s, g);
-    if t == 14 {
+    if t == g_impl() {
         let tr = rp_tref(inout s, a);
-        mk2(inout s, 14, tr, b)
-    } else if t == 15 {
+        mk2(inout s, g_impl(), tr, b)
+    } else if t == g_peq() {
         let tr = fa(in s, a);
         let tr2 = rp_tref(inout s, tr);
         let pb = fb(in s, a);
         let assoc = fc(in s, a);
-        let p = mk(inout s, 3, tr2, pb, assoc);
+        let p = mk(inout s, t_proj(), tr2, pb, assoc);
         let ty = rp_ty(inout s, b);
-        mk2(inout s, 15, p, ty)
+        mk2(inout s, g_peq(), p, ty)
     } else {
         let ty = rp_ty(inout s, a);
-        mk2(inout s, 16, ty, b)
+        mk2(inout s, g_mode(), ty, b)
     }
 }
 
@@ -307,7 +331,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
     let g = fa(in s, d);
     let stt = tg(in s, st);
     let gt = tg(in s, g);
-    if stt == 18 && gt == 14 {
+    if stt == st_conf() && gt == g_impl() {
         let source = fa(in s, st);
         let ci = conformance(in s, source);
         if ci == none() {
@@ -347,7 +371,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         }
         return where_children(inout s, ci, args, d);
     }
-    if (stt == 19 && gt == 14) || (stt == 22 && gt == 15) {
+    if (stt == st_assume() && gt == g_impl()) || (stt == st_passume() && gt == g_peq()) {
         let index = fa(in s, st);
         let asm = fb(in s, env);
         if index >= nlen(in s, asm) || kid(in s, asm, index) != g {
@@ -362,10 +386,10 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         }
         return true;
     }
-    if stt == 20 && gt == 14 {
+    if stt == st_alias() && gt == g_impl() {
         let tr = fa(in s, g);
         let p = fb(in s, tr);
-        if tg(in s, p) != 3 {
+        if tg(in s, p) != t_proj() {
             return fail(inout s, "alias bound on a non-projection self type");
         }
         let ptr = fa(in s, p);
@@ -380,7 +404,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         let pst = fb(in s, ptr);
         s.tmp.push(pst);
         push_kids(inout s, ptr);
-        let binder = mkl(inout s, 27, 0, 0, 0, from);
+        let binder = mkl(inout s, k_list(), 0, 0, 0, from);
         let bargs = sw(in s.bd_args, bi);
         let args = inst(inout s, bargs, binder);
         if args == 0 {
@@ -394,7 +418,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         }
         return single_trait_child(inout s, d, p);
     }
-    if stt == 21 && gt == 15 {
+    if stt == st_pconf() && gt == g_peq() {
         let source = fa(in s, st);
         let ci = conformance(in s, source);
         if ci == none() {
@@ -451,12 +475,12 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
             r_ty(inout s, replayed);
             lit(inout s, "` does not match `");
             r_ty(inout s, ty);
-            byte(inout s, 96);
+            byte(inout s, BACKTICK);
             return false;
         }
         return true;
     }
-    if stt == 23 && gt == 15 {
+    if stt == st_rigid() && gt == g_peq() {
         let p = fa(in s, g);
         let ty = fb(in s, g);
         if ty != p {
@@ -464,12 +488,12 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         }
         let pst = fb(in s, fa(in s, p));
         let pt = tg(in s, pst);
-        if !((pt == 2 && vkind(fa(in s, pst)) == 1) || pt == 3) {
+        if !((pt == t_var() && vkind(fa(in s, pst)) == 1) || pt == t_proj()) {
             return fail(inout s, "rigid projection needs a rigid self type");
         }
         return single_trait_child(inout s, d, p);
     }
-    if stt == 24 && gt == 16 {
+    if stt == st_mode() && gt == g_mode() {
         let from = s.atoms.len();
         let ty = fa(in s, g);
         mode_atoms(inout s, env, ty);
@@ -484,7 +508,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
         }
         return true;
     }
-    if stt == 25 {
+    if stt == st_norm() {
         let n = nlen(in s, d);
         if n == 0 {
             return fail(inout s, "normalization without a normalized goal");
@@ -502,12 +526,12 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
             r_goal(inout s, lg);
             lit(inout s, "` expected `");
             r_goal(inout s, replayed);
-            byte(inout s, 96);
+            byte(inout s, BACKTICK);
             return false;
         }
         return true;
     }
-    if stt == 26 {
+    if stt == st_cohyp() {
         if nlen(in s, d) != 0 {
             return fail(inout s, "coinductive hypothesis has children");
         }
@@ -539,12 +563,12 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
             } else {
                 sw(in s.anc, j)
             };
-            let ok = tg(in s, a) == 14 && sw(in s.tr_coind, fa(in s, fa(in s, a))) != 0;
+            let ok = tg(in s, a) == g_impl() && sw(in s.tr_coind, fa(in s, fa(in s, a))) != 0;
             if !ok {
                 begin_fail(inout s);
                 lit(inout s, "cycle passes through non-coinductive goal `");
                 r_goal(inout s, a);
-                byte(inout s, 96);
+                byte(inout s, BACKTICK);
                 return false;
             }
             j = inc(j);
@@ -556,7 +580,7 @@ fn node(inout s: S, env: u64, d: u64) -> bool {
     d_step(inout s, st);
     lit(inout s, " cannot prove `");
     r_goal(inout s, g);
-    byte(inout s, 96);
+    byte(inout s, BACKTICK);
     false
 }
 
@@ -564,7 +588,7 @@ fn check(inout s: S, env: u64, d: u64) -> bool {
     if !node(inout s, env, d) {
         return false;
     }
-    if tg(in s, fb(in s, d)) == 26 {
+    if tg(in s, fb(in s, d)) == st_cohyp() {
         return true;
     }
     let g = fa(in s, d);
@@ -600,7 +624,7 @@ fn validate_nodes(inout s: S, env: u64, binders: u64, d: u64) -> bool {
     v_goal(inout s, g, 7, 0, 0);
     let st = fb(in s, d);
     let stt = tg(in s, st);
-    if stt == 18 || stt == 21 {
+    if stt == st_conf() || stt == st_pconf() {
         let n = nlen(in s, st);
         let mut i: u64 = 0;
         loop {

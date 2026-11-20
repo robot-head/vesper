@@ -502,13 +502,23 @@ pub unsafe fn string_take(rt: SeqRuntime, words: &[u64]) -> String {
 
 /// Borrow the bytes of a live Vesper string value (its three words).
 ///
+/// The bytes are not validated again (#1147): a Vesper `String` or `Str`
+/// holds UTF-8 by construction, since bytes enter one only as a whole
+/// encoded char, another string or a literal (§13). Debug builds still
+/// check.
+///
 /// # Safety
-/// `words` must be a live Vesper string that stays alive and unchanged
-/// while the result is borrowed.
+/// `words` must be a live Vesper string (so its bytes are UTF-8) that stays
+/// alive and unchanged while the result is borrowed.
 pub unsafe fn str_view(words: &[u64]) -> &str {
     // SAFETY: forwarded from the caller.
     let bytes = unsafe { string_bytes(words) };
-    core::str::from_utf8(bytes).expect("a Vesper string holds UTF-8")
+    debug_assert!(
+        core::str::from_utf8(bytes).is_ok(),
+        "a Vesper string holds UTF-8"
+    );
+    // SAFETY: a live Vesper string holds UTF-8 (the caller's contract).
+    unsafe { core::str::from_utf8_unchecked(bytes) }
 }
 
 /// The bytes of a string value `{len, cap, data}`.

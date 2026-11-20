@@ -51,8 +51,14 @@ pub fn vheap(v: Val) -> u64 {
     }
 }
 
+// IEEE 754 binary64 fields, and the sign bit of a 64-bit word.
+const F64_MANT_BITS: u64 = 52;
+const F64_EXP_MASK: u64 = 2047;
+const SIGN_SHIFT: u64 = 63;
+const SIGN_BIT: u64 = 0x8000000000000000;
+
 pub fn finite(bits: u64) -> bool {
-    ((bits >> 52) & 2047) != 2047
+    ((bits >> F64_MANT_BITS) & F64_EXP_MASK) != F64_EXP_MASK
 }
 
 // `Value::valid` for a column or parameter type and nullability.
@@ -76,15 +82,15 @@ pub fn size_vec(in q: Q) -> u64 {
 
 // A total order key for a finite f64 (-0.0 equals 0.0).
 pub fn f64_key(bits: u64) -> u64 {
-    let b = if bits == 9223372036854775808 {
+    let b = if bits == SIGN_BIT {
         0
     } else {
         bits
     };
-    if (b >> 63) == 1 {
+    if (b >> SIGN_SHIFT) == 1 {
         ~b
     } else {
-        b | 9223372036854775808
+        b | SIGN_BIT
     }
 }
 
@@ -96,7 +102,7 @@ pub fn compare_vals(in q: Q, x: Val, y: Val) -> u64 {
     }
     let (a, b) = if x.t == 2 {
         // Signed: flip the sign bit so unsigned order is signed order.
-        (x.a ^ 9223372036854775808, y.a ^ 9223372036854775808)
+        (x.a ^ SIGN_BIT, y.a ^ SIGN_BIT)
     } else if x.t == 3 {
         (f64_key(x.a), f64_key(y.a))
     } else {

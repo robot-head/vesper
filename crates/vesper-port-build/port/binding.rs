@@ -14,7 +14,7 @@ unsafe extern "C" {
 
 /// Calls `rect_perimeter` of the Vesper library `port_build` (`vesper_port_build_rect_perimeter`).
 pub fn rect_perimeter(w: i64, h: i64) -> Result<i64, vesper_port_abi::ArithOverflow> {
-    let mut fail = vec![0u64; 2];
+    let mut fail = [0u64; 2];
     // SAFETY: `vesper_port_build_rect_perimeter` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     let raw = unsafe { vesper_port_build_rect_perimeter(w as i64, h as i64, fail.as_mut_ptr()) };
@@ -27,7 +27,7 @@ pub fn rect_perimeter(w: i64, h: i64) -> Result<i64, vesper_port_abi::ArithOverf
 
 /// Calls `square_plus_triple` of the Vesper library `port_build` (`vesper_port_build_square_plus_triple`).
 pub fn square_plus_triple(x: i64) -> Result<i64, vesper_port_abi::ArithOverflow> {
-    let mut fail = vec![0u64; 2];
+    let mut fail = [0u64; 2];
     // SAFETY: `vesper_port_build_square_plus_triple` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     let raw = unsafe { vesper_port_build_square_plus_triple(x as i64, fail.as_mut_ptr()) };

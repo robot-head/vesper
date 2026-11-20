@@ -4,9 +4,49 @@ version = "0.1.0"
 edition = "2024"
 description = "Bounded lossless-CST canonical source formatting"
 license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+# The compiler and every crate inside `cargo tree -p vesper -e normal,build`
+# use the frozen Rust seed copy, crates/vesper-fmt/seed (package
+# vesper-fmt-seed, same library name), instead of this package; see "Crates
+# the compiler links" in docs/maintenance/porting-a-crate.md.
+#
+# This package builds the same Rust by default. Under `vesper-port`,
+# build.rs links the Vesper port in vesper/ and sets cfg(vesper_port), and
+# `format_source` forwards to it (self-hosting SH1 lane 11, #1154). Rust
+# stays the default until the port matches it in function and performance
+# (docs/parallel-results/self-host-fmt-highlight.md).
+
+[features]
+vesper-port = ["dep:vesper-port-abi"]
+# Deliberately wrong Vesper builds, one edit per ported area: the port test
+# runs must fail (port/test-port.sh asserts which tests do).
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 blake3 = "1.8"
 # The frozen Rust seed copy (seed-copy rule, #1128).
 vesper-lean-syntax = { path = "../vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
 vesper-syntax = { path = "../vesper-syntax" }
+
+[dev-dependencies]
+# The frozen Rust build, the reference of tests/differential.rs and
+# examples/abba.rs.
+fmt-seed = { package = "vesper-fmt-seed", path = "seed" }
+vesper-bench = { path = "../vesper-bench" }
+
+[build-dependencies]
+# Not optional: a package whose build script runs the harness is
+# port-backed for the seed-copy guard (crates/vesper-port-harness/tests/
+# closure_guard.rs), whichever build it selects.
+vesper-port-harness = { path = "../vesper-port-harness" }
+
+[lints.rust]
+# cfg(vesper_port) is set by build.rs under `vesper-port`; the seed package
+# has no build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }
+
+[[example]]
+name = "abba"
+required-features = ["vesper-port"]

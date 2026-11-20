@@ -153,6 +153,12 @@ impl DefinitionRegistry {
         Ok(())
     }
 
+    /// Every package, in id order.
+    #[cfg_attr(not(vesper_port), allow(dead_code))]
+    pub(crate) fn packages(&self) -> impl Iterator<Item = &PackageInfo> {
+        self.packages.values()
+    }
+
     pub fn package(&self, id: PackageId) -> Option<&PackageInfo> {
         self.packages.get(&id)
     }

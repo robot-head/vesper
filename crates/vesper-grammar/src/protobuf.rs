@@ -82,10 +82,10 @@ impl Kind {
     }
     fn wire(self) -> u8 {
         match self {
-            Self::Fixed64 | Self::Sfixed64 => 1,
-            Self::String | Self::Bytes | Self::Message(_) => 2,
-            Self::Fixed32 | Self::Sfixed32 => 5,
-            _ => 0,
+            Self::Fixed64 | Self::Sfixed64 => WIRE_I64,
+            Self::String | Self::Bytes | Self::Message(_) => WIRE_LEN,
+            Self::Fixed32 | Self::Sfixed32 => WIRE_I32,
+            _ => WIRE_VARINT,
         }
     }
 }
@@ -181,25 +181,40 @@ fn bound(n: usize, max: usize, kind: ErrorKind) -> Result<()> {
         Ok(())
     }
 }
+/// Field numbers are 1 to 2^29 - 1, without the range reserved for the
+/// protobuf implementation (protobuf language guide, "Assigning Field
+/// Numbers").
+const FIELD_NUMBER_END: u32 = 1 << 29;
+const RESERVED_FIELD_NUMBERS: core::ops::RangeInclusive<u32> = 19_000..=19_999;
+/// A tag is `(field_number << TAG_TYPE_BITS) | wire_type` (encoding guide).
+const TAG_TYPE_BITS: u32 = 3;
+/// Wire types: VARINT 0, I64 1, LEN 2, I32 5.
+const WIRE_VARINT: u8 = 0;
+const WIRE_I64: u8 = 1;
+const WIRE_LEN: u8 = 2;
+const WIRE_I32: u8 = 5;
+/// Work charged per nesting level of each decoded node, so deep messages
+/// pay for their depth.
+const NODE_DEPTH_WORK: usize = 64;
 fn field_number(n: u32) -> bool {
-    n != 0 && n < (1 << 29) && !(19_000..=19_999).contains(&n)
+    n != 0 && n < FIELD_NUMBER_END && !RESERVED_FIELD_NUMBERS.contains(&n)
 }
 fn var_len(n: u64) -> usize {
     crate::framing::encoded_u64_len(n)
 }
 fn tag(field: FieldSchema) -> u64 {
-    (u64::from(field.number) << 3)
+    (u64::from(field.number) << TAG_TYPE_BITS)
         | u64::from(if field.repeated && field.kind.numeric() {
-            2
+            WIRE_LEN
         } else {
             field.kind.wire()
         })
 }
 fn zig32(n: i32) -> u64 {
-    u64::from(((n as u32) << 1) ^ ((n >> 31) as u32))
+    u64::from(((n as u32) << 1) ^ ((n >> (i32::BITS - 1)) as u32))
 }
 fn zig64(n: i64) -> u64 {
-    ((n as u64) << 1) ^ ((n >> 63) as u64)
+    ((n as u64) << 1) ^ ((n >> (i64::BITS - 1)) as u64)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -471,7 +486,7 @@ impl Budget {
         bound(depth, self.limits.max_depth, ErrorKind::DepthLimit)?;
         self.nodes = add(self.nodes, 1)?;
         bound(self.nodes, self.limits.max_nodes, ErrorKind::NodeLimit)?;
-        self.work(mul(64, depth)?)
+        self.work(mul(NODE_DEPTH_WORK, depth)?)
     }
     fn reserve(&mut self, fields: &mut Vec<FieldValue<'_>>) -> Result<()> {
         if fields.len() == fields.capacity() {
@@ -905,9 +920,15 @@ impl Writer<'_, '_, '_> {
     }
     fn var(&mut self, mut n: u64) {
         loop {
-            self.output[self.pos] = (n as u8 & 127) | if n >= 128 { 128 } else { 0 };
+            use crate::framing::{LEB128_MORE, LEB128_PAYLOAD, LEB128_SHIFT};
+            self.output[self.pos] = (n as u8 & LEB128_PAYLOAD)
+                | if n >= u64::from(LEB128_MORE) {
+                    LEB128_MORE
+                } else {
+                    0
+                };
             self.pos += 1;
-            n >>= 7;
+            n >>= LEB128_SHIFT;
             if n == 0 {
                 break;
             }

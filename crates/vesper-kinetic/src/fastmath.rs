@@ -58,6 +58,80 @@ pub const SYMBOLS: &[&str] = &[
     "vesper_fastmath_logf",
 ];
 
+// IEEE 754 binary64 fields and fdlibm's high-word thresholds; the same
+// names as vesper/src/fastmath.ves. The high word has 20 fraction bits.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_EXP_BIAS: i32 = 1023;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_MANT_BITS: u32 = 52;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_EXP_FIELD: u32 = 0x7ff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LOW_WORD_MASK: u64 = 0xffff_ffff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HIGH_MANT_BITS: u32 = 20;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HIGH_MANT_MASK: i32 = 0x000f_ffff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HIGH_ABS_MASK: u32 = 0x7fff_ffff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HIGH_ONE: i32 = 0x3ff0_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HIGH_MIN_NORMAL: i32 = 0x0010_0000;
+/// `pow2` and the scaling at the ends of `exp`'s range: the least k scaled
+/// in one step, the k that overflows 2^k, and the split of a subnormal
+/// scale into two factors.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const POW2_NORMAL_MIN: i32 = -1021;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const POW2_OVERFLOW: i32 = 1024;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const POW2_SUBNORMAL_SPLIT: i32 = 1000;
+/// 2^-28, below which `e^x = 1 + x` to within half an ULP.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const EXP_TINY: f64 = 3.725_290_298_461_914e-9;
+/// fdlibm e_log.c: two54's exponent, the offset that picks k so that
+/// `x/2^k` is near sqrt(2), the thresholds of the t1/t2 split, and 1/3.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const TWO54_EXP: i32 = 54;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LOG_SQRT2_ROUND: i32 = 0x95f64;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LOG_T1_SPLIT: i32 = 0x6147a;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LOG_T2_SPLIT: i32 = 0x6b851;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ONE_THIRD: f64 = 0.333_333_333_333_333_33;
+/// fdlibm e_rem_pio2.c: the exponent losses after which the next, longer
+/// split of pi/2 is used.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const PIO2_2_LOSS: i32 = 16;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const PIO2_3_LOSS: i32 = 49;
+/// pi/4 and 2^-27 (below which `sin x = x` and `cos x = 1`), as a double
+/// and as a high word.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const PI_O_4: f64 = 0.785_398_163_397_448_3;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const TWO_M27: f64 = 7.450_580_596_923_828e-9;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const TWO_M27_HIGH: u32 = 0x3e40_0000;
+/// fdlibm s_atan.c: the high words of 2^66, 0.4375, 0.6875, 1.1875 and
+/// 2.4375 that pick the reduction.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN_HUGE_HIGH: u32 = 0x4410_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN_SMALL_HIGH: u32 = 0x3fdc_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN_ID1_HIGH: u32 = 0x3fe6_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN_ID2_HIGH: u32 = 0x3ff3_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN_ID3_HIGH: u32 = 0x4003_8000;
+/// e_atan2.c: an exponent gap above which |y/x| is huge (or tiny).
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN2_EXP_GAP: i32 = 60;
+
 #[inline]
 fn high(x: f64) -> u32 {
     (x.to_bits() >> 32) as u32
@@ -65,13 +139,13 @@ fn high(x: f64) -> u32 {
 
 #[inline]
 fn with_high(x: f64, hi: u32) -> f64 {
-    f64::from_bits((u64::from(hi) << 32) | (x.to_bits() & 0xffff_ffff))
+    f64::from_bits((u64::from(hi) << 32) | (x.to_bits() & LOW_WORD_MASK))
 }
 
 /// `2^k` for `-1022 <= k <= 1023`.
 #[inline]
 fn pow2(k: i32) -> f64 {
-    f64::from_bits(((k + 1023) as u64) << 52)
+    f64::from_bits(((k + F64_EXP_BIAS) as u64) << F64_MANT_BITS)
 }
 
 /// Round to the nearest integer, ties to even, for `|x| < 2^51`: the
@@ -113,7 +187,7 @@ pub fn exp(x: f64) -> f64 {
             return 0.0;
         }
         let ax = x.abs();
-        if ax < 3.725_290_298_461_914e-9 {
+        if ax < EXP_TINY {
             // |x| < 2^-28: e^x = 1 + x to within half an ULP.
             return 1.0 + x;
         }
@@ -130,15 +204,15 @@ pub fn exp(x: f64) -> f64 {
         let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
         if k == 0 {
             y
-        } else if k >= -1021 {
-            if k == 1024 {
-                y * 2.0 * pow2(1023)
+        } else if k >= POW2_NORMAL_MIN {
+            if k == POW2_OVERFLOW {
+                y * 2.0 * pow2(F64_EXP_BIAS)
             } else {
                 y * pow2(k)
             }
         } else {
             // Subnormal result: scale in two steps.
-            y * pow2(k + 1000) * pow2(-1000)
+            y * pow2(k + POW2_SUBNORMAL_SPLIT) * pow2(-POW2_SUBNORMAL_SPLIT)
         }
     }
 }
@@ -177,21 +251,21 @@ pub fn log(x: f64) -> f64 {
         let mut x = x;
         let mut k: i32 = 0;
         let mut hx = high(x) as i32;
-        if hx < 0x0010_0000 {
+        if hx < HIGH_MIN_NORMAL {
             // Subnormal: scale up by 2^54.
-            k -= 54;
+            k -= TWO54_EXP;
             x *= TWO54;
             hx = high(x) as i32;
         }
-        k += (hx >> 20) - 1023;
-        hx &= 0x000f_ffff;
-        let i = (hx + 0x95f64) & 0x10_0000;
+        k += (hx >> HIGH_MANT_BITS) - F64_EXP_BIAS;
+        hx &= HIGH_MANT_MASK;
+        let i = (hx + LOG_SQRT2_ROUND) & HIGH_MIN_NORMAL;
         // Normalise x or x/2 into [sqrt(2)/2, sqrt(2)).
-        x = with_high(x, (hx | (i ^ 0x3ff0_0000)) as u32);
-        k += i >> 20;
+        x = with_high(x, (hx | (i ^ HIGH_ONE)) as u32);
+        k += i >> HIGH_MANT_BITS;
         let f = x - 1.0;
         let dk = f64::from(k);
-        if (0x000f_ffff & (2 + hx)) < 3 {
+        if (HIGH_MANT_MASK & (2 + hx)) < 3 {
             // -2^-20 <= f < 2^-20.
             if f == 0.0 {
                 return if k == 0 {
@@ -200,7 +274,7 @@ pub fn log(x: f64) -> f64 {
                     dk * LN2_HI + dk * LN2_LO
                 };
             }
-            let r = f * f * (0.5 - 0.333_333_333_333_333_33 * f);
+            let r = f * f * (0.5 - ONE_THIRD * f);
             return if k == 0 {
                 f - r
             } else {
@@ -209,9 +283,9 @@ pub fn log(x: f64) -> f64 {
         }
         let s = f / (2.0 + f);
         let z = s * s;
-        let mut i = hx - 0x6147a;
+        let mut i = hx - LOG_T1_SPLIT;
         let w = z * z;
-        let j = 0x6b851 - hx;
+        let j = LOG_T2_SPLIT - hx;
         let t1 = w * (LG2 + w * (LG4 + w * LG6));
         let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
         i |= j;
@@ -284,17 +358,17 @@ fn rem_pio2_medium(x: f64) -> (i32, f64, f64) {
     let n = fnum as i32;
     let mut r = x - fnum * PIO2_1;
     let mut w = fnum * PIO2_1T;
-    let j = ((high(x) >> 20) & 0x7ff) as i32;
+    let j = ((high(x) >> HIGH_MANT_BITS) & F64_EXP_FIELD) as i32;
     let mut y0 = r - w;
-    let exp_of = |v: f64| ((high(v) >> 20) & 0x7ff) as i32;
-    if j - exp_of(y0) > 16 {
+    let exp_of = |v: f64| ((high(v) >> HIGH_MANT_BITS) & F64_EXP_FIELD) as i32;
+    if j - exp_of(y0) > PIO2_2_LOSS {
         // Second iteration, good to 118 bits.
         let t = r;
         w = fnum * PIO2_2;
         r = t - w;
         w = fnum * PIO2_2T - ((t - r) - w);
         y0 = r - w;
-        if j - exp_of(y0) > 49 {
+        if j - exp_of(y0) > PIO2_3_LOSS {
             // Third iteration, 151 bits.
             let t = r;
             w = fnum * PIO2_3;
@@ -324,8 +398,8 @@ pub fn sin(x: f64) -> f64 {
             return x - x;
         }
         let ax = x.abs();
-        if ax <= 0.785_398_163_397_448_3 {
-            if ax < 7.450_580_596_923_828e-9 {
+        if ax <= PI_O_4 {
+            if ax < TWO_M27 {
                 // |x| < 2^-27: sin x = x to within half an ULP.
                 return x;
             }
@@ -358,8 +432,8 @@ pub fn cos(x: f64) -> f64 {
             return x - x;
         }
         let ax = x.abs();
-        if ax <= 0.785_398_163_397_448_3 {
-            if ax < 7.450_580_596_923_828e-9 {
+        if ax <= PI_O_4 {
+            if ax < TWO_M27 {
                 return 1.0;
             }
             return k_cos(x, 0.0);
@@ -408,9 +482,9 @@ const AT: [f64; 11] = [
 /// fdlibm `atan` (binary64).
 fn atan(x: f64) -> f64 {
     let hx = high(x);
-    let ix = hx & 0x7fff_ffff;
+    let ix = hx & HIGH_ABS_MASK;
     let negative = hx >> 31 == 1;
-    if ix >= 0x4410_0000 {
+    if ix >= ATAN_HUGE_HIGH {
         // |x| >= 2^66.
         if x.is_nan() {
             return x + x;
@@ -418,22 +492,22 @@ fn atan(x: f64) -> f64 {
         let z = ATAN_HI[3] + ATAN_LO[3];
         return if negative { -z } else { z };
     }
-    let (id, x) = if ix < 0x3fdc_0000 {
+    let (id, x) = if ix < ATAN_SMALL_HIGH {
         // |x| < 0.4375.
-        if ix < 0x3e40_0000 {
+        if ix < TWO_M27_HIGH {
             // |x| < 2^-27.
             return x;
         }
         (None, x)
     } else {
         let x = x.abs();
-        if ix < 0x3ff3_0000 {
-            if ix < 0x3fe6_0000 {
+        if ix < ATAN_ID2_HIGH {
+            if ix < ATAN_ID1_HIGH {
                 (Some(0), (2.0 * x - 1.0) / (2.0 + x))
             } else {
                 (Some(1), (x - 1.0) / (x + 1.0))
             }
-        } else if ix < 0x4003_8000 {
+        } else if ix < ATAN_ID3_HIGH {
             (Some(2), (x - 1.5) / (1.0 + 1.5 * x))
         } else {
             (Some(3), -1.0 / x)
@@ -504,11 +578,12 @@ pub fn atan2(y: f64, x: f64) -> f64 {
         if y.is_infinite() {
             return if y_neg { -PI_O_2 } else { PI_O_2 };
         }
-        let k = ((high(y) & 0x7fff_ffff) as i32 - (high(x) & 0x7fff_ffff) as i32) >> 20;
-        let (z, m) = if k > 60 {
+        let k =
+            ((high(y) & HIGH_ABS_MASK) as i32 - (high(x) & HIGH_ABS_MASK) as i32) >> HIGH_MANT_BITS;
+        let (z, m) = if k > ATAN2_EXP_GAP {
             // |y/x| > 2^60.
             (PI_O_2 + 0.5 * PI_LO, m & 1)
-        } else if x_neg && k < -60 {
+        } else if x_neg && k < -ATAN2_EXP_GAP {
             // |y|/x < -2^-60.
             (0.0, m)
         } else {

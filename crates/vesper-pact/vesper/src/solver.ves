@@ -28,16 +28,39 @@ use self::{
     S
 };
 use self::term::{
-    arg_kind,
     add,
+    am_mode,
+    am_multi,
+    am_noninj,
+    am_scoped,
+    am_self,
+    am_stalled,
+    arg_kind,
+    b_canon,
+    b_named,
+    b_var,
+    c_nested,
+    c_value,
+    ce_head,
+    ce_nosol,
+    cf_node,
+    d_node,
     dec,
+    f_node,
     fa,
     fb,
     fc,
     flags,
+    g_impl,
+    g_mode,
+    g_peq,
+    g_row,
     inc,
     is_inf,
+    k_list,
+    k_slist,
     kid,
+    l_eff,
     mk,
     mk0,
     mk1,
@@ -46,10 +69,36 @@ use self::term::{
     nlen,
     none,
     push_kids,
+    q_ambig,
+    q_nosol,
+    q_over,
+    q_proven,
+    q_unsup,
+    r_cands,
+    r_indcyc,
+    r_mode,
+    r_modelmis,
+    r_nocand,
     setw,
+    st_alias,
+    st_assume,
+    st_cohyp,
+    st_conf,
+    st_mode,
+    st_norm,
+    st_passume,
+    st_pconf,
+    st_rigid,
     sub,
     sw,
+    t_ctor,
+    t_proj,
+    t_ref,
+    t_var,
     tg,
+    un_dup,
+    un_internal,
+    un_mixed,
     var_arg,
     vidx,
     vinf,
@@ -76,23 +125,30 @@ use self::mode::{
     mode_atoms
 };
 
+// Fibonacci hashing: 2^64 / φ, rounded to odd.
+const GOLDEN_GAMMA: u64 = 11400714819323198485;
+// SplitMix64's first finalizer multiplier.
+const MIX_MUL: u64 = 13787848793156543929;
+// The cache slot is taken from the high half of the hash.
+const HALF_BITS: u64 = 32;
+
 fn src(v: u64, x: u64) -> u64 {
     (v << 32) | x
 }
 
 fn dup_err(inout s: S) -> u64 {
     let k = s.dkey;
-    let r = mk1(inout s, 40, k);
-    mk1(inout s, 32, r)
+    let r = mk1(inout s, un_dup(), k);
+    mk1(inout s, q_unsup(), r)
 }
 
 // `unify_err`.
 fn unify_err(inout s: S, e: u64) -> u64 {
     if e == 1 {
-        mk0(inout s, 52)
+        mk0(inout s, ce_head())
     } else if e == 2 {
-        let a = mk0(inout s, 38);
-        mk1(inout s, 30, a)
+        let a = mk0(inout s, am_noninj());
+        mk1(inout s, q_ambig(), a)
     } else {
         dup_err(inout s)
     }
@@ -100,10 +156,10 @@ fn unify_err(inout s: S, e: u64) -> u64 {
 
 // `From<NestedErr> for CandErr`.
 fn nested_to_cand(inout s: S, e: u64) -> u64 {
-    if tg(in s, e) == 31 {
+    if tg(in s, e) == q_nosol() {
         let f = fa(in s, e);
-        let c = mk1(inout s, 50, f);
-        mk1(inout s, 53, c)
+        let c = mk1(inout s, c_nested(), f);
+        mk1(inout s, ce_nosol(), c)
     } else {
         e
     }
@@ -111,7 +167,7 @@ fn nested_to_cand(inout s: S, e: u64) -> u64 {
 
 fn is_err(in s: S, n: u64) -> bool {
     let t = tg(in s, n);
-    t >= 29 && t <= 33 || t == 52 || t == 53
+    t >= q_proven() && t <= q_over() || t == ce_head() || t == ce_nosol()
 }
 
 fn bump(inout s: S) -> bool {
@@ -120,16 +176,16 @@ fn bump(inout s: S) -> bool {
 }
 
 fn overflow(inout s: S, k: u64) -> u64 {
-    mk1(inout s, 33, k)
+    mk1(inout s, q_over(), k)
 }
 
 // The candidate's goal: the builder with its brand resolved in cx.
 fn goal_of(inout s: S, in cx: ChunkSeq[u64], g: u64) -> u64 {
-    if tg(in s, g) == 14 {
+    if tg(in s, g) == g_impl() {
         let tr = fa(in s, g);
         let b = fb(in s, g);
         let rb = resolve(inout s, in cx, b);
-        mk2(inout s, 14, tr, rb)
+        mk2(inout s, g_impl(), tr, rb)
     } else {
         let p = fa(in s, g);
         let ty = fb(in s, g);
@@ -137,8 +193,8 @@ fn goal_of(inout s: S, in cx: ChunkSeq[u64], g: u64) -> u64 {
         let b = fb(in s, p);
         let assoc = fc(in s, p);
         let rb = resolve(inout s, in cx, b);
-        let np = mk(inout s, 3, tr, rb, assoc);
-        mk2(inout s, 15, np, ty)
+        let np = mk(inout s, t_proj(), tr, rb, assoc);
+        mk2(inout s, g_peq(), np, ty)
     }
 }
 
@@ -177,7 +233,7 @@ pub fn make_response(inout s: S, in cx: ChunkSeq[u64], vars: u64, d: u64) -> u64
         s.tmp.truncate(base);
         return dup_err(inout s);
     }
-    let values = mkl(inout s, 27, 0, 0, 0, base);
+    let values = mkl(inout s, k_list(), 0, 0, 0, base);
     let from = s.tmp.len();
     let nb = s.cn_binders.len();
     let mut j: u64 = 0;
@@ -189,8 +245,8 @@ pub fn make_response(inout s: S, in cx: ChunkSeq[u64], vars: u64, d: u64) -> u64
         s.tmp.push(k);
         j = inc(j);
     }
-    let binders = mkl(inout s, 28, 0, 0, 0, from);
-    mk(inout s, 29, binders, values, der)
+    let binders = mkl(inout s, k_slist(), 0, 0, 0, from);
+    mk(inout s, q_proven(), binders, values, der)
 }
 
 // ---------------------------------------------------------------------------
@@ -218,10 +274,10 @@ fn norm_arg(inout s: S, inout cx: ChunkSeq[u64], a: u64, inout out: ChunkSeq[u64
         return a;
     }
     let t = tg(in s, a);
-    if t <= 3 {
+    if t <= t_proj() {
         return norm_ty(inout s, inout cx, a, inout out);
     }
-    if t == 6 {
+    if t == g_row() {
         let from = s.tmp.len();
         let len = nlen(in s, a);
         let mut i: u64 = 0;
@@ -230,10 +286,10 @@ fn norm_arg(inout s: S, inout cx: ChunkSeq[u64], a: u64, inout out: ChunkSeq[u64
                 break;
             }
             let l = kid(in s, a, i);
-            if tg(in s, l) == 11 {
+            if tg(in s, l) == l_eff() {
                 let f2 = norm_args(inout s, inout cx, l, inout out);
                 let e = fa(in s, l);
-                let x = mkl(inout s, 11, e, 0, 0, f2);
+                let x = mkl(inout s, l_eff(), e, 0, 0, f2);
                 s.tmp.push(x);
             } else {
                 s.tmp.push(l);
@@ -241,7 +297,7 @@ fn norm_arg(inout s: S, inout cx: ChunkSeq[u64], a: u64, inout out: ChunkSeq[u64
             i = inc(i);
         }
         let tail = fa(in s, a);
-        return mkl(inout s, 6, tail, 0, 0, from);
+        return mkl(inout s, g_row(), tail, 0, 0, from);
     }
     a
 }
@@ -254,7 +310,7 @@ fn norm_tref(inout s: S, inout cx: ChunkSeq[u64], tr: u64, inout out: ChunkSeq[u
     let st2 = norm_ty(inout s, inout cx, st, inout out);
     let from = norm_args(inout s, inout cx, tr, inout out);
     let t = fa(in s, tr);
-    mkl(inout s, 13, t, st2, 0, from)
+    mkl(inout s, t_ref(), t, st2, 0, from)
 }
 
 pub fn norm_ty(inout s: S, inout cx: ChunkSeq[u64], t: u64, inout out: ChunkSeq[u64]) -> u64 {
@@ -262,20 +318,20 @@ pub fn norm_ty(inout s: S, inout cx: ChunkSeq[u64], t: u64, inout out: ChunkSeq[
         return t;
     }
     let tag = tg(in s, t);
-    if tag == 1 {
+    if tag == t_ctor() {
         let from = norm_args(inout s, inout cx, t, inout out);
         let c = fa(in s, t);
-        return mkl(inout s, 1, c, 0, 0, from);
+        return mkl(inout s, t_ctor(), c, 0, 0, from);
     }
-    if tag == 3 {
+    if tag == t_proj() {
         let tr = fa(in s, t);
         let tr2 = norm_tref(inout s, inout cx, tr, inout out);
         let b = fb(in s, t);
         let assoc = fc(in s, t);
-        let inner = mk(inout s, 3, tr2, b, assoc);
+        let inner = mk(inout s, t_proj(), tr2, b, assoc);
         let v = new_var(inout cx, 0);
-        let tv = mk1(inout s, 2, v);
-        let g = mk2(inout s, 15, inner, tv);
+        let tv = mk1(inout s, t_var(), v);
+        let g = mk2(inout s, g_peq(), inner, tv);
         out.push(g);
         return tv;
     }
@@ -294,20 +350,20 @@ fn norm_goal(inout s: S, inout cx: ChunkSeq[u64], g: u64, inout out: ChunkSeq[u6
     let t = tg(in s, g);
     let a = fa(in s, g);
     let b = fb(in s, g);
-    if t == 14 {
+    if t == g_impl() {
         let tr = norm_tref(inout s, inout cx, a, inout out);
-        mk2(inout s, 14, tr, b)
-    } else if t == 15 {
+        mk2(inout s, g_impl(), tr, b)
+    } else if t == g_peq() {
         let tr = fa(in s, a);
         let tr2 = norm_tref(inout s, inout cx, tr, inout out);
         let pb = fb(in s, a);
         let assoc = fc(in s, a);
-        let p = mk(inout s, 3, tr2, pb, assoc);
+        let p = mk(inout s, t_proj(), tr2, pb, assoc);
         let ty = norm_ty(inout s, inout cx, b, inout out);
-        mk2(inout s, 15, p, ty)
+        mk2(inout s, g_peq(), p, ty)
     } else {
         let ty = norm_ty(inout s, inout cx, a, inout out);
-        mk2(inout s, 16, ty, b)
+        mk2(inout s, g_mode(), ty, b)
     }
 }
 
@@ -362,10 +418,10 @@ pub fn drive(inout s: S, env: u64, inout cx: ChunkSeq[u64], goals: u64) -> u64 {
             let g = sw(in obl, idx);
             let r = solve_nested(inout s, env, inout cx, g);
             let t = tg(in s, r);
-            if t == 17 {
+            if t == d_node() {
                 setw(inout proofs, idx, r);
                 progress = true;
-            } else if t == 30 {
+            } else if t == q_ambig() {
                 if first == none() {
                     first = fa(in s, r);
                 }
@@ -384,14 +440,14 @@ pub fn drive(inout s: S, env: u64, inout cx: ChunkSeq[u64], goals: u64) -> u64 {
             if g == 0 {
                 return dup_err(inout s);
             }
-            let amb = if tg(in s, first) == 39 {
+            let amb = if tg(in s, first) == am_stalled() {
                 first
             } else if still.len() == 1 {
                 first
             } else {
-                mk1(inout s, 39, g)
+                mk1(inout s, am_stalled(), g)
             };
-            return mk1(inout s, 30, amb);
+            return mk1(inout s, q_ambig(), amb);
         }
         pending = still;
     }
@@ -420,13 +476,13 @@ pub fn drive(inout s: S, env: u64, inout cx: ChunkSeq[u64], goals: u64) -> u64 {
                 q = inc(q);
             }
             s.tmp.push(mp);
-            let step = mk0(inout s, 25);
-            let d = mkl(inout s, 17, orig, step, 0, f2);
+            let step = mk0(inout s, st_norm());
+            let d = mkl(inout s, d_node(), orig, step, 0, f2);
             s.tmp.push(d);
         }
         r = add(r, 3);
     }
-    mkl(inout s, 27, 0, 0, 0, from)
+    mkl(inout s, k_list(), 0, 0, 0, from)
 }
 
 // Canonicalizes a goal of cx, answers it through the table, and applies
@@ -452,7 +508,7 @@ fn solve_nested(inout s: S, env: u64, inout cx: ChunkSeq[u64], goal: u64) -> u64
         s.tmp.push(k);
         i = inc(i);
     }
-    let binders = mkl(inout s, 28, 0, 0, 0, from);
+    let binders = mkl(inout s, k_slist(), 0, 0, 0, from);
     let from2 = s.tmp.len();
     i = 0;
     loop {
@@ -463,9 +519,9 @@ fn solve_nested(inout s: S, env: u64, inout cx: ChunkSeq[u64], goal: u64) -> u64
         s.tmp.push(o);
         i = inc(i);
     }
-    let origins = mkl(inout s, 28, 0, 0, 0, from2);
+    let origins = mkl(inout s, k_slist(), 0, 0, 0, from2);
     let result = solve_key(inout s, env, canon, binders);
-    if tg(in s, result) != 29 {
+    if tg(in s, result) != q_proven() {
         return result;
     }
     let rb = fa(in s, result);
@@ -494,8 +550,8 @@ fn solve_nested(inout s: S, env: u64, inout cx: ChunkSeq[u64], goal: u64) -> u64
             if e == 3 {
                 return dup_err(inout s);
             }
-            let r = mk2(inout s, 42, 0, goal);
-            return mk1(inout s, 32, r);
+            let r = mk2(inout s, un_internal(), 0, goal);
+            return mk1(inout s, q_unsup(), r);
         }
         j = inc(j);
     }
@@ -515,15 +571,15 @@ fn solve_nested(inout s: S, env: u64, inout cx: ChunkSeq[u64], goal: u64) -> u64
 fn same_answer(in s: S, a: u64, b: u64) -> bool {
     let ta = tg(in s, a);
     let tb = tg(in s, b);
-    if ta == 29 && tb == 29 {
+    if ta == q_proven() && tb == q_proven() {
         return fa(in s, a) == fa(in s, b) && fb(in s, a) == fb(in s, b);
     }
     ta == tb
 }
 
 fn ck_slot(in s: S, env: u64, goal: u64) -> u64 {
-    let h = wrapping_mul(wrapping_mul(env, 11400714819323198485) ^ goal, 13787848793156543929);
-    let mut at = (h >> 32) & s.ck_mask;
+    let h = wrapping_mul(wrapping_mul(env, GOLDEN_GAMMA) ^ goal, MIX_MUL);
+    let mut at = (h >> HALF_BITS) & s.ck_mask;
     loop {
         let g = sw(in s.ck_goal, at);
         if g == 0 {
@@ -599,8 +655,8 @@ fn ck_insert(inout s: S, env: u64, goal: u64, v: u64) {
 }
 
 fn cohyp_leaf(inout s: S, goal: u64) -> u64 {
-    let st = mk0(inout s, 26);
-    mk2(inout s, 17, goal, st)
+    let st = mk0(inout s, st_cohyp());
+    mk2(inout s, d_node(), goal, st)
 }
 
 pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
@@ -640,8 +696,8 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
                 s.st_indcyc = inc(s.st_indcyc);
             }
             if sw(in s.sk_uco, i) != 0 && sw(in s.sk_uind, i) != 0 {
-                let r = mk1(inout s, 41, goal);
-                return mk1(inout s, 32, r);
+                let r = mk1(inout s, un_mixed(), goal);
+                return mk1(inout s, q_unsup(), r);
             }
             return if co {
                 sw(in s.sk_pco, i)
@@ -655,7 +711,7 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
         return overflow(inout s, 0);
     }
     let mut coinductive = false;
-    if tg(in s, goal) == 14 {
+    if tg(in s, goal) == g_impl() {
         let tr = fa(in s, goal);
         coinductive = sw(in s.tr_coind, fa(in s, tr)) != 0;
     }
@@ -672,12 +728,12 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
         s.tmp.push(v);
         b = inc(b);
     }
-    let ids = mkl(inout s, 27, 0, 0, 0, from);
+    let ids = mkl(inout s, k_list(), 0, 0, 0, from);
     let leaf = cohyp_leaf(inout s, goal);
-    let identity = mk(inout s, 29, binders, ids, leaf);
-    let ic = mk0(inout s, 48);
-    let fl = mk2(inout s, 43, goal, ic);
-    let ind = mk1(inout s, 31, fl);
+    let identity = mk(inout s, q_proven(), binders, ids, leaf);
+    let ic = mk0(inout s, r_indcyc());
+    let fl = mk2(inout s, f_node(), goal, ic);
+    let ind = mk1(inout s, q_nosol(), fl);
     s.sk_env.push(env);
     s.sk_goal.push(goal);
     s
@@ -704,10 +760,10 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
         let r = evaluate(inout s, env, goal, binders);
         let uco = sw(in s.sk_uco, index) != 0;
         let uind = sw(in s.sk_uind, index) != 0;
-        let mixed = tg(in s, r) == 32 && tg(in s, fa(in s, r)) == 41;
+        let mixed = tg(in s, r) == q_unsup() && tg(in s, fa(in s, r)) == un_mixed();
         if mixed || (uco && uind) {
-            let m = mk1(inout s, 41, goal);
-            result = mk1(inout s, 32, m);
+            let m = mk1(inout s, un_mixed(), goal);
+            result = mk1(inout s, q_unsup(), m);
             break;
         }
         let stable = (!uco || same_answer(in s, r, sw(in s.sk_pco, index)))
@@ -723,11 +779,11 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
         }
         s.st_reruns = inc(s.st_reruns);
         if uco {
-            let p = if tg(in s, r) == 29 {
+            let p = if tg(in s, r) == q_proven() {
                 let rb = fa(in s, r);
                 let rv = fb(in s, r);
                 let lf = cohyp_leaf(inout s, goal);
-                mk(inout s, 29, rb, rv, lf)
+                mk(inout s, q_proven(), rb, rv, lf)
             } else {
                 r
             };
@@ -753,7 +809,7 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
                 setw(inout s.sk_min, p, min);
             }
         }
-    } else if tg(in s, result) != 33 {
+    } else if tg(in s, result) != q_over() {
         ck_insert(inout s, env, goal, result);
     }
     result
@@ -771,11 +827,11 @@ fn evaluate(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
     let vars = fresh_args(inout s, inout cx, binders);
     let t = tg(in s, goal);
     let base = s.ph_src.len();
-    let st = if t == 14 {
+    let st = if t == g_impl() {
         let tr = fa(in s, goal);
         let b = fb(in s, goal);
         implements(inout s, env, in cx, tr, b, vars)
-    } else if t == 15 {
+    } else if t == g_peq() {
         let p = fa(in s, goal);
         let ty = fb(in s, goal);
         projection_eq(inout s, env, in cx, p, ty, vars)
@@ -787,16 +843,16 @@ fn evaluate(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
     if st != 0 {
         truncate_phase(inout s, base);
         let tag = tg(in s, st);
-        if tag == 30 || tag == 32 || tag == 33 {
+        if tag == q_ambig() || tag == q_unsup() || tag == q_over() {
             return st;
         }
-        let reason = if tag == 47 {
+        let reason = if tag == r_modelmis() {
             st
         } else {
-            mk0(inout s, 44)
+            mk0(inout s, r_nocand())
         };
-        let f = mk2(inout s, 43, goal, reason);
-        return mk1(inout s, 31, f);
+        let f = mk2(inout s, f_node(), goal, reason);
+        return mk1(inout s, q_nosol(), f);
     }
     let r = combine(inout s, goal, base);
     truncate_phase(inout s, base);
@@ -822,7 +878,7 @@ fn applies_from(in s: S, base: u64, nosol_counts: bool) -> bool {
             return false;
         }
         let t = tg(in s, sw(in s.ph_val, i));
-        if t != 52 && (t != 53 || nosol_counts) {
+        if t != ce_head() && (t != ce_nosol() || nosol_counts) {
             return true;
         }
         i = inc(i);
@@ -831,7 +887,7 @@ fn applies_from(in s: S, base: u64, nosol_counts: bool) -> bool {
 
 fn is_unresolved_infer(inout s: S, in cx: ChunkSeq[u64], t: u64) -> bool {
     let r = resolve(inout s, in cx, t);
-    r != 0 && tg(in s, r) == 2 && is_inf(fa(in s, r))
+    r != 0 && tg(in s, r) == t_var() && is_inf(fa(in s, r))
 }
 
 // How a brand is resolved, binding implicit brands: b_canon, b_named or
@@ -839,7 +895,7 @@ fn is_unresolved_infer(inout s: S, in cx: ChunkSeq[u64], t: u64) -> bool {
 fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64) -> u64 {
     let rb = resolve(inout s, in cx, brand);
     let t = tg(in s, rb);
-    if t == 7 || t == 8 {
+    if t == b_canon() || t == b_named() {
         return rb;
     }
     let v = fa(in s, rb);
@@ -847,8 +903,8 @@ fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64
         return rb;
     }
     if vkind(v) == 0 {
-        let r = mk2(inout s, 42, 1, none());
-        return mk1(inout s, 32, r);
+        let r = mk2(inout s, un_internal(), 1, none());
+        return mk1(inout s, q_unsup(), r);
     }
     let scopes = fc(in s, env);
     let ns = nlen(in s, scopes);
@@ -929,19 +985,19 @@ fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64
             if distinct == 1 {
                 let m = sw(in s.tmp, from);
                 s.tmp.truncate(from);
-                let named = mk1(inout s, 8, m);
+                let named = mk1(inout s, b_named(), m);
                 let u = unify_brand(inout s, inout cx, rb, named);
                 if u != 0 {
                     return unify_err(inout s, u);
                 }
                 return named;
             }
-            let l = mkl(inout s, 28, 0, 0, 0, from);
-            let am = mk1(inout s, 36, l);
-            return mk1(inout s, 30, am);
+            let l = mkl(inout s, k_slist(), 0, 0, 0, from);
+            let am = mk1(inout s, am_scoped(), l);
+            return mk1(inout s, q_ambig(), am);
         }
     }
-    let canon = mk0(inout s, 7);
+    let canon = mk0(inout s, b_canon());
     let u = unify_brand(inout s, inout cx, rb, canon);
     if u != 0 {
         return unify_err(inout s, u);
@@ -954,8 +1010,8 @@ fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64
 fn implements(inout s: S, env: u64, in cx0: ChunkSeq[u64], tr: u64, brand: u64, vars: u64) -> u64 {
     let st = fb(in s, tr);
     if is_unresolved_infer(inout s, in cx0, st) {
-        let a = mk0(inout s, 34);
-        return mk1(inout s, 30, a);
+        let a = mk0(inout s, am_self());
+        return mk1(inout s, q_ambig(), a);
     }
     let mut cx = clone_cx(in cx0);
     let mode = brand_mode(inout s, env, inout cx, tr, brand);
@@ -963,15 +1019,15 @@ fn implements(inout s: S, env: u64, in cx0: ChunkSeq[u64], tr: u64, brand: u64, 
         return mode;
     }
     let rbrand = resolve(inout s, in cx, brand);
-    let builder = mk2(inout s, 14, tr, brand);
+    let builder = mk2(inout s, g_impl(), tr, brand);
     let tid = fa(in s, tr);
     let base = s.ph_src.len();
     let mt = tg(in s, mode);
-    if mt == 8 {
+    if mt == b_named() {
         let m = fa(in s, mode);
         let ci = add(s.nimpl, m);
         if fa(in s, sw(in s.cf_tref, ci)) != tid {
-            return mk1(inout s, 47, m);
+            return mk1(inout s, r_modelmis(), m);
         }
         env_implements(inout s, env, in cx, tr, rbrand, builder, vars);
         if applies_from(in s, base, false) {
@@ -992,7 +1048,7 @@ fn implements(inout s: S, env: u64, in cx0: ChunkSeq[u64], tr: u64, brand: u64, 
         return 0;
     }
     env_implements(inout s, env, in cx, tr, rbrand, builder, vars);
-    if applies_from(in s, base, false) || mt == 9 {
+    if applies_from(in s, base, false) || mt == b_var() {
         return 0;
     }
     let at = sw(in s.ib_at, tid);
@@ -1030,7 +1086,7 @@ fn env_implements(
             break;
         }
         let a = kid(in s, asm, k);
-        if tg(in s, a) == 14 && fa(in s, fa(in s, a)) == tid {
+        if tg(in s, a) == g_impl() && fa(in s, fa(in s, a)) == tid {
             let mut cx = clone_cx(in cx0);
             let atr = fa(in s, a);
             let ab = fb(in s, a);
@@ -1042,8 +1098,8 @@ fn env_implements(
                 unify_err(inout s, u)
             } else {
                 let g = goal_of(inout s, in cx, builder);
-                let step = mk1(inout s, 19, k);
-                let d = mk2(inout s, 17, g, step);
+                let step = mk1(inout s, st_assume(), k);
+                let d = mk2(inout s, d_node(), g, step);
                 make_response(inout s, in cx, vars, d)
             };
             push_phase(inout s, src(2, k), v);
@@ -1051,7 +1107,7 @@ fn env_implements(
         k = inc(k);
     }
     let st = fb(in s, tr);
-    if tg(in s, st) != 3 {
+    if tg(in s, st) != t_proj() {
         return;
     }
     let ptr = fa(in s, st);
@@ -1064,7 +1120,7 @@ fn env_implements(
     let pst = fb(in s, ptr);
     s.tmp.push(pst);
     push_kids(inout s, ptr);
-    let binder = mkl(inout s, 27, 0, 0, 0, from);
+    let binder = mkl(inout s, k_list(), 0, 0, 0, from);
     let mut bi: u64 = 0;
     loop {
         if bi >= bn {
@@ -1127,19 +1183,19 @@ fn alias_bound(
     if u2 != 0 {
         return unify_err(inout s, u2);
     }
-    let parent = mk2(inout s, 14, ptr, pb);
+    let parent = mk2(inout s, g_impl(), ptr, pb);
     let from = s.tmp.len();
     s.tmp.push(parent);
-    let goals = mkl(inout s, 27, 0, 0, 0, from);
+    let goals = mkl(inout s, k_list(), 0, 0, 0, from);
     let children = drive(inout s, env, inout cx, goals);
-    if tg(in s, children) != 27 {
+    if tg(in s, children) != k_list() {
         return nested_to_cand(inout s, children);
     }
     let g = goal_of(inout s, in cx, builder);
-    let step = mk1(inout s, 20, bi);
+    let step = mk1(inout s, st_alias(), bi);
     let f2 = s.tmp.len();
     push_kids(inout s, children);
-    let d = mkl(inout s, 17, g, step, 0, f2);
+    let d = mkl(inout s, d_node(), g, step, 0, f2);
     make_response(inout s, in cx, vars, d)
 }
 
@@ -1194,18 +1250,18 @@ fn try_conformance(
         s.tmp.truncate(from);
         return dup_err(inout s);
     }
-    let wcs = mkl(inout s, 27, 0, 0, 0, from);
+    let wcs = mkl(inout s, k_list(), 0, 0, 0, from);
     let children = drive(inout s, env, inout cx, wcs);
-    if tg(in s, children) != 27 {
+    if tg(in s, children) != k_list() {
         return nested_to_cand(inout s, children);
     }
     let g = goal_of(inout s, in cx, builder);
     let f2 = s.tmp.len();
     push_kids(inout s, args);
-    let step = mkl(inout s, 18, source, 0, 0, f2);
+    let step = mkl(inout s, st_conf(), source, 0, 0, f2);
     let f3 = s.tmp.len();
     push_kids(inout s, children);
-    let d = mkl(inout s, 17, g, step, 0, f3);
+    let d = mkl(inout s, d_node(), g, step, 0, f3);
     make_response(inout s, in cx, vars, d)
 }
 
@@ -1213,8 +1269,8 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
     let tr = fa(in s, p);
     let st = fb(in s, tr);
     if is_unresolved_infer(inout s, in cx0, st) {
-        let a = mk0(inout s, 34);
-        return mk1(inout s, 30, a);
+        let a = mk0(inout s, am_self());
+        return mk1(inout s, q_ambig(), a);
     }
     let mut cx = clone_cx(in cx0);
     let pbrand = fb(in s, p);
@@ -1223,13 +1279,13 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
     if is_err(in s, mode) {
         return mode;
     }
-    let builder = mk2(inout s, 15, p, ty);
+    let builder = mk2(inout s, g_peq(), p, ty);
     let tid = fa(in s, tr);
     let mt = tg(in s, mode);
-    if mt == 8 {
+    if mt == b_named() {
         let m = fa(in s, mode);
         if fa(in s, sw(in s.cf_tref, add(s.nimpl, m))) != tid {
-            return mk1(inout s, 47, m);
+            return mk1(inout s, r_modelmis(), m);
         }
     }
     let brand = resolve(inout s, in cx, pbrand);
@@ -1243,7 +1299,7 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
             break;
         }
         let a = kid(in s, asm, k);
-        if tg(in s, a) == 15 {
+        if tg(in s, a) == g_peq() {
             let ap = fa(in s, a);
             let aty = fb(in s, a);
             let atr = fa(in s, ap);
@@ -1259,14 +1315,14 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
                 } else {
                     let u2 = unify_ty(inout s, inout c, aty, ty);
                     if u2 == 1 {
-                        let cv = mk0(inout s, 51);
-                        mk1(inout s, 53, cv)
+                        let cv = mk0(inout s, c_value());
+                        mk1(inout s, ce_nosol(), cv)
                     } else if u2 != 0 {
                         unify_err(inout s, u2)
                     } else {
                         let g = goal_of(inout s, in c, builder);
-                        let step = mk1(inout s, 22, k);
-                        let d = mk2(inout s, 17, g, step);
+                        let step = mk1(inout s, st_passume(), k);
+                        let d = mk2(inout s, d_node(), g, step);
                         make_response(inout s, in c, vars, d)
                     }
                 };
@@ -1279,7 +1335,7 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
         return 0;
     }
     // 2. The trait holds through the environment: rigid projection.
-    let tbuilder = mk2(inout s, 14, tr, brand);
+    let tbuilder = mk2(inout s, g_impl(), tr, brand);
     let ebase = s.ph_src.len();
     env_implements(inout s, env, in cx, tr, brand, tbuilder, vars);
     let n = s.ph_val.len();
@@ -1289,18 +1345,18 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
         if i >= n {
             break;
         }
-        if tg(in s, sw(in s.ph_val, i)) != 52 {
+        if tg(in s, sw(in s.ph_val, i)) != ce_head() {
             env_applies = true;
         }
         i = inc(i);
     }
     truncate_phase(inout s, ebase);
-    if env_applies || mt == 9 {
+    if env_applies || mt == b_var() {
         let stt = tg(in s, st);
-        let rigid = (stt == 2 && vkind(fa(in s, st)) == 1) || stt == 3;
+        let rigid = (stt == t_var() && vkind(fa(in s, st)) == 1) || stt == t_proj();
         let v = if !rigid {
-            let r = mk2(inout s, 42, 2, none());
-            mk1(inout s, 32, r)
+            let r = mk2(inout s, un_internal(), 2, none());
+            mk1(inout s, q_unsup(), r)
         } else {
             rigid_projection(inout s, env, in cx, p, brand, ty, builder, vars)
         };
@@ -1309,7 +1365,7 @@ fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, v
         return 0;
     }
     // 3. The selected model's value, or canonical impls.
-    if mt == 8 {
+    if mt == b_named() {
         let m = fa(in s, mode);
         let ci = add(s.nimpl, m);
         let v = try_proj_conformance(
@@ -1367,28 +1423,28 @@ fn rigid_projection(
     let mut cx = clone_cx(in cx0);
     let tr = fa(in s, p);
     let assoc = fc(in s, p);
-    let pp = mk(inout s, 3, tr, brand, assoc);
-    let parent = mk2(inout s, 14, tr, brand);
+    let pp = mk(inout s, t_proj(), tr, brand, assoc);
+    let parent = mk2(inout s, g_impl(), tr, brand);
     let from = s.tmp.len();
     s.tmp.push(parent);
-    let goals = mkl(inout s, 27, 0, 0, 0, from);
+    let goals = mkl(inout s, k_list(), 0, 0, 0, from);
     let children = drive(inout s, env, inout cx, goals);
-    if tg(in s, children) != 27 {
+    if tg(in s, children) != k_list() {
         return nested_to_cand(inout s, children);
     }
     let u = unify_ty(inout s, inout cx, pp, ty);
     if u == 1 {
-        let cv = mk0(inout s, 51);
-        return mk1(inout s, 53, cv);
+        let cv = mk0(inout s, c_value());
+        return mk1(inout s, ce_nosol(), cv);
     }
     if u != 0 {
         return unify_err(inout s, u);
     }
     let g = goal_of(inout s, in cx, builder);
-    let step = mk0(inout s, 23);
+    let step = mk0(inout s, st_rigid());
     let f2 = s.tmp.len();
     push_kids(inout s, children);
-    let d = mkl(inout s, 17, g, step, 0, f2);
+    let d = mkl(inout s, d_node(), g, step, 0, f2);
     make_response(inout s, in cx, vars, d)
 }
 
@@ -1429,8 +1485,8 @@ fn try_proj_conformance(
     let value = norm_ty(inout s, inout cx, value, inout norms);
     let u2 = unify_ty(inout s, inout cx, value, ty);
     if u2 == 1 {
-        let cv = mk0(inout s, 51);
-        return mk1(inout s, 53, cv);
+        let cv = mk0(inout s, c_value());
+        return mk1(inout s, ce_nosol(), cv);
     }
     if u2 != 0 {
         return unify_err(inout s, u2);
@@ -1450,18 +1506,18 @@ fn try_proj_conformance(
         s.tmp.push(g);
         i = inc(i);
     }
-    let goals = mkl(inout s, 27, 0, 0, 0, from);
+    let goals = mkl(inout s, k_list(), 0, 0, 0, from);
     let children = drive(inout s, env, inout cx, goals);
-    if tg(in s, children) != 27 {
+    if tg(in s, children) != k_list() {
         return nested_to_cand(inout s, children);
     }
     let g = goal_of(inout s, in cx, builder);
     let f2 = s.tmp.len();
     push_kids(inout s, args);
-    let step = mkl(inout s, 21, source, k, 0, f2);
+    let step = mkl(inout s, st_pconf(), source, k, 0, f2);
     let f3 = s.tmp.len();
     push_kids(inout s, children);
-    let d = mkl(inout s, 17, g, step, 0, f3);
+    let d = mkl(inout s, d_node(), g, step, 0, f3);
     make_response(inout s, in cx, vars, d)
 }
 
@@ -1477,18 +1533,18 @@ fn mode_bound(inout s: S, env: u64, in cx: ChunkSeq[u64], goal: u64, ty: u64, bo
     let v = decide(inout s, from, b);
     s.atoms.truncate(from);
     if v == 0 {
-        let step = mk0(inout s, 24);
-        let d = mk2(inout s, 17, goal, step);
+        let step = mk0(inout s, st_mode());
+        let d = mk2(inout s, d_node(), goal, step);
         return make_response(inout s, in cx, vars, d);
     }
     if v == 1 {
         let atom = s.vatom;
-        let r = mk2(inout s, 46, atom, b);
-        let f = mk2(inout s, 43, goal, r);
-        return mk1(inout s, 31, f);
+        let r = mk2(inout s, r_mode(), atom, b);
+        let f = mk2(inout s, f_node(), goal, r);
+        return mk1(inout s, q_nosol(), f);
     }
-    let a = mk0(inout s, 37);
-    mk1(inout s, 30, a)
+    let a = mk0(inout s, am_mode());
+    mk1(inout s, q_ambig(), a)
 }
 
 // Combines the candidates of the phase stack from base on: any unsupported
@@ -1507,15 +1563,15 @@ fn combine(inout s: S, goal: u64, base: u64) -> u64 {
         let v = sw(in s.ph_val, i);
         let source = sw(in s.ph_src, i);
         let t = tg(in s, v);
-        if t == 29 {
+        if t == q_proven() {
             proven.push(i);
-        } else if t == 53 {
+        } else if t == ce_nosol() {
             let cause = fa(in s, v);
-            let cf = mk2(inout s, 49, source, cause);
+            let cf = mk2(inout s, cf_node(), source, cause);
             s.tmp.push(cf);
-        } else if t == 30 {
+        } else if t == q_ambig() {
             amb.push(i);
-        } else if t == 32 || t == 33 {
+        } else if t == q_unsup() || t == q_over() {
             s.tmp.truncate(from);
             return v;
         }
@@ -1598,9 +1654,9 @@ fn combine(inout s: S, goal: u64, base: u64) -> u64 {
             s.tmp.push(sw(in srcs, x));
             x = inc(x);
         }
-        let l = mkl(inout s, 28, 0, 0, 0, f2);
-        let am = mk1(inout s, 35, l);
-        return mk1(inout s, 30, am);
+        let l = mkl(inout s, k_slist(), 0, 0, 0, f2);
+        let am = mk1(inout s, am_multi(), l);
+        return mk1(inout s, q_ambig(), am);
     }
     if np > 0 {
         s.tmp.truncate(from);
@@ -1611,10 +1667,10 @@ fn combine(inout s: S, goal: u64, base: u64) -> u64 {
         return sw(in s.ph_val, sw(in amb, 0));
     }
     let reason = if s.tmp.len() == from {
-        mk0(inout s, 44)
+        mk0(inout s, r_nocand())
     } else {
-        mkl(inout s, 45, 0, 0, 0, from)
+        mkl(inout s, r_cands(), 0, 0, 0, from)
     };
-    let f = mk2(inout s, 43, goal, reason);
-    mk1(inout s, 31, f)
+    let f = mk2(inout s, f_node(), goal, reason);
+    mk1(inout s, q_nosol(), f)
 }

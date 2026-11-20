@@ -1,0 +1,1078 @@
+// Module resolve of @vesper/forge: scope-set resolution of a parsed
+// fragment (src/resolve.rs `Resolver`) and the registry's visibility and
+// claim checks (src/registry.rs `visible_from`, `validate_claim`).
+//
+// A binding is a candidate for a reference when they have the same symbol
+// and the binding's scopes are a subset of the reference's; the candidate
+// with the largest scope set wins, and maximal candidates that disagree
+// are ambiguous. Each `let` (and each source parameter) mints a binding
+// scope that covers its body for tokens not newer than the binder (the
+// `Ctx` ranks of src/resolve.rs).
+//
+// The input `w` (built by src/port.rs) is one word table:
+//   0 max_depth (unused here: the caller checks delimiters)
+//   1 next scope index, 2 scope limit, 3 next binder index, 4 binder limit
+//   5 tokens, 6 their base: rows of 10 words: kind, symbol, origin,
+//     has claim, claim package, claim item, scopes first, scopes len,
+//     text start, text len
+//   7 origins, 8 their base: rows of 2 words: rank, emitting package
+//     (origins are numbered in `Origin` order)
+//   9, 10 unused
+//   11 definitions claimed by tokens but not in `g`, 12 their base: rows
+//     of 6 words, sorted by id: package, item, kind, visibility, path
+//     start, path len (in `text`)
+//   13, 14 unused
+//   15 parameters, 16 their base: token indices
+//   17 the term's base
+// Scope sets are sorted runs of `w` (absolute offsets). Texts are ranges
+// of `text`.
+//
+// The host's table `g` (with the definition paths in `gt`), built once per
+// set of globals by src/port.rs:
+//   0 globals, 1 their base: rows of 5 words: symbol, scopes first,
+//     scopes len, def package, def item
+//   2 the globals' definitions, 3 their base: rows as above (paths in `gt`)
+//   4 packages, 5 their base: rows of 3 words, sorted by id: id,
+//     dependencies first, dependencies len (a sorted run)
+//
+// The term is in pre-order, a path being [n, token.., symbol]:
+//   [1, path] Ref, [2, token] Lit, [3, binder, value, body] Let,
+//   [4, open, close, nargs, callee, args..] Call,
+//   [5, keyword, epath path, handler path, body] Handle,
+//   [6, n, items..] Block.
+use self::util::{
+    byte,
+    same_set,
+    set_insert,
+    sq,
+    subset,
+    wd
+};
+
+pub fn err_exhausted() -> u64 {
+    4
+}
+
+pub fn err_preresolved_binder() -> u64 {
+    5
+}
+
+pub fn err_mixed_path() -> u64 {
+    6
+}
+
+pub fn err_unbound() -> u64 {
+    7
+}
+
+pub fn err_ambiguous() -> u64 {
+    8
+}
+
+pub fn err_wrong_kind() -> u64 {
+    9
+}
+
+pub fn err_expected_global() -> u64 {
+    10
+}
+
+pub fn err_unknown_definition() -> u64 {
+    11
+}
+
+pub fn err_unknown_package() -> u64 {
+    12
+}
+
+pub fn err_not_a_dependency() -> u64 {
+    13
+}
+
+pub fn err_private() -> u64 {
+    14
+}
+
+pub fn err_printed_mismatch() -> u64 {
+    15
+}
+
+pub fn err_parameter() -> u64 {
+    16
+}
+
+fn def_effect() -> u64 {
+    1
+}
+
+fn def_handler() -> u64 {
+    3
+}
+
+fn tok_stride() -> u64 {
+    10
+}
+
+// A resolution: tag 0 Local (a = binder), 1 Global (a = package,
+// b = item); `Resolution`'s order is the order of (tag, a, b).
+pub copy struct Res {
+    tag: u64,
+    a: u64,
+    b: u64
+}
+
+pub struct R {
+    next_scope: u64,
+    scope_limit: u64,
+    first_binder: u64,
+    next_binder: u64,
+    binder_limit: u64,
+    err: u64,
+    e1: u64,
+    e2: u64,
+    e3: u64,
+    e4: u64,
+    // Variable-length error data (the ambiguous candidates).
+    ext: ChunkSeq[u64],
+    // The result: an 8-word header, then the records (see `fg_resolve`).
+    out: ChunkSeq[u64],
+    // Local bindings: symbol, scopes first, scopes len (in `sp`), binder.
+    locals: ChunkSeq[u64],
+    sp: ChunkSeq[u64],
+    // The enclosing binding scopes: (scope, rank) pairs; a context is a
+    // prefix of this stack.
+    ctx: ChunkSeq[u64],
+    // The scope set of the reference being looked up.
+    tmp: ChunkSeq[u64],
+    // Aliases by binder (index binder - first_binder): has, package, item,
+    // origins first, origins len (in `apool`).
+    alias: ChunkSeq[u64],
+    apool: ChunkSeq[u64],
+    // The last reference's resolution (`references.last()`).
+    has_last: bool,
+    last: Res,
+    // Lookup candidates: in globals (0 local, 1 global), scopes first,
+    // scopes len, tag, a, b.
+    cands: ChunkSeq[u64]
+}
+
+fn header(capacity: u64) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::with_capacity[u64](capacity);
+    out.resize(8, 0);
+    out
+}
+
+pub fn resolver_new(in w: Slice[u64]) -> R {
+    R {
+        next_scope: wd(in w, 1),
+        scope_limit: wd(in w, 2),
+        first_binder: wd(in w, 3),
+        next_binder: wd(in w, 3),
+        binder_limit: wd(in w, 4),
+        err: 0,
+        e1: 0,
+        e2: 0,
+        e3: 0,
+        e4: 0,
+        ext: ChunkSeq::new[u64](),
+        out: header(wrapping_mul(wrapping_add(wd(in w, 5), 4), 4)),
+        locals: ChunkSeq::new[u64](),
+        sp: ChunkSeq::new[u64](),
+        ctx: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64](),
+        alias: ChunkSeq::new[u64](),
+        apool: ChunkSeq::new[u64](),
+        has_last: false,
+        last: Res {
+            tag: 0,
+            a: 0,
+            b: 0
+        },
+        cands: ChunkSeq::new[u64]()
+    }
+}
+
+fn tok(in w: Slice[u64], i: u64, field: u64) -> u64 {
+    wd(in w, wrapping_add(wrapping_add(wd(in w, 6), wrapping_mul(i, tok_stride())), field))
+}
+
+fn origin_rank(in w: Slice[u64], o: u64) -> u64 {
+    wd(in w, wrapping_add(wd(in w, 8), wrapping_mul(o, 2)))
+}
+
+fn origin_package(in w: Slice[u64], o: u64) -> u64 {
+    wd(in w, wrapping_add(wd(in w, 8), wrapping_add(wrapping_mul(o, 2), 1)))
+}
+
+fn fresh_scope(inout r: R) -> u64 {
+    if r.next_scope >= r.scope_limit {
+        if r.err == 0 {
+            r.err = err_exhausted();
+            r.e1 = 0;
+            r.e2 = r.scope_limit;
+        }
+        return 0;
+    }
+    r.next_scope = wrapping_add(r.next_scope, 1);
+    wrapping_sub(r.next_scope, 1)
+}
+
+fn fresh_binder(inout r: R) -> u64 {
+    if r.next_binder >= r.binder_limit {
+        if r.err == 0 {
+            r.err = err_exhausted();
+            r.e1 = 3;
+            r.e2 = r.binder_limit;
+        }
+        return 0;
+    }
+    r.next_binder = wrapping_add(r.next_binder, 1);
+    alias_none(inout r);
+    wrapping_sub(r.next_binder, 1)
+}
+
+fn alias_none(inout r: R) {
+    r.alias.push(0);
+    r.alias.push(0);
+    r.alias.push(0);
+    r.alias.push(0);
+    r.alias.push(0);
+}
+
+fn raise(inout r: R, code: u64, a: u64, b: u64, c: u64, d: u64) {
+    if r.err == 0 {
+        r.err = code;
+        r.e1 = a;
+        r.e2 = b;
+        r.e3 = c;
+        r.e4 = d;
+    }
+}
+
+// Pushes onto `out` the sorted union of the token's scopes w[f..f + n]
+// and the context scopes (the first `ctx_len` pairs) that cover a token of
+// rank `rank` (`Ctx::for_origin`).
+fn scopes_for(
+    in w: Slice[u64],
+    f: u64,
+    n: u64,
+    in ctx: ChunkSeq[u64],
+    ctx_len: u64,
+    rank: u64,
+    inout out: ChunkSeq[u64]
+) {
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    loop {
+        // The next covering context scope (context scopes ascend).
+        loop {
+            if j >= ctx_len {
+                break;
+            }
+            if rank <= sq(in ctx, wrapping_add(wrapping_mul(j, 2), 1)) {
+                break;
+            }
+            j = wrapping_add(j, 1);
+        }
+        let hi = i < n;
+        let hj = j < ctx_len;
+        if !hi && !hj {
+            break;
+        }
+        let x = wd(in w, wrapping_add(f, i));
+        let y = sq(in ctx, wrapping_mul(j, 2));
+        if hi && (!hj || x < y) {
+            out.push(x);
+            i = wrapping_add(i, 1);
+        } else if hj && (!hi || y < x) {
+            out.push(y);
+            j = wrapping_add(j, 1);
+        } else {
+            out.push(x);
+            i = wrapping_add(i, 1);
+            j = wrapping_add(j, 1);
+        }
+    }
+}
+
+// Pushes a binding for token `t`: its scopes extended by the first
+// `ctx_len` context pairs, as a local and an output binder.
+fn bind(in w: Slice[u64], inout r: R, t: u64, ctx_len: u64, binder: u64) {
+    let first = r.sp.len();
+    scopes_for(
+        in w,
+        tok(in w, t, 6),
+        tok(in w, t, 7),
+        in r.ctx,
+        ctx_len,
+        origin_rank(in w, tok(in w, t, 2)),
+        inout r.sp
+    );
+    let len = wrapping_sub(r.sp.len(), first);
+    r.locals.push(tok(in w, t, 1));
+    r.locals.push(first);
+    r.locals.push(len);
+    r.locals.push(binder);
+    r.out.push(1);
+    r.out.push(binder);
+    r.out.push(t);
+    r.out.push(len);
+    for k in 0..len {
+        r.out.push(sq(in r.sp, wrapping_add(first, k)));
+    }
+}
+
+// Pushes a context pair (scope, rank) after the first `ctx_len`.
+fn ctx_with(inout r: R, ctx_len: u64, scope: u64, rank: u64) {
+    r.ctx.truncate(wrapping_mul(ctx_len, 2));
+    r.ctx.push(scope);
+    r.ctx.push(rank);
+}
+
+// `Resolver::parameters`: returns the context length.
+pub fn parameters(in w: Slice[u64], inout r: R) -> u64 {
+    let n = wd(in w, 15);
+    let base = wd(in w, 16);
+    let ntok = wd(in w, 5);
+    let mut ctx_len: u64 = 0;
+    for p in 0..n {
+        let index = wd(in w, wrapping_add(base, p));
+        if index >= ntok {
+            raise(inout r, err_parameter(), index, 0, 0, 0);
+            return ctx_len;
+        }
+        let mut distinct = true;
+        let sym = tok(in w, index, 1);
+        for l in 0..(r.locals.len() >> 2) {
+            if sq(in r.locals, wrapping_mul(l, 4)) == sym {
+                distinct = false;
+            }
+        }
+        // Only source tokens (rank 0) without a claim.
+        if tok(in w, index, 0)
+            != 1
+            || origin_rank(in w, tok(in w, index, 2))
+            != 0
+            || tok(in w, index, 3)
+            != 0
+            || !distinct {
+            raise(inout r, err_parameter(), index, 1, 0, 0);
+            return ctx_len;
+        }
+        let scope = fresh_scope(inout r);
+        if r.err != 0 {
+            return ctx_len;
+        }
+        ctx_with(inout r, ctx_len, scope, 0);
+        ctx_len = wrapping_add(ctx_len, 1);
+        let binder = fresh_binder(inout r);
+        if r.err != 0 {
+            return ctx_len;
+        }
+        bind(in w, inout r, index, ctx_len, binder);
+    }
+    ctx_len
+}
+
+// Marks a definition row of the host's table `g` (else of the call's `w`).
+fn in_host() -> u64 {
+    4611686018427387904
+}
+
+// The row at of (package, item) in a table of `n` 6-word rows from `base`
+// sorted by id, or `none`.
+fn find_row(in t: Slice[u64], base: u64, n: u64, pkg: u64, item: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = n;
+    loop {
+        if lo >= hi {
+            return 18446744073709551615;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let at = wrapping_add(base, wrapping_mul(mid, 6));
+        let p = wd(in t, at);
+        let i = wd(in t, wrapping_add(at, 1));
+        if p == pkg && i == item {
+            return at;
+        }
+        if p < pkg || (p == pkg && i < item) {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// The definition of (package, item): its row in the host's table (the
+// globals' definitions, marked with `in_host()`) or in the call's (the
+// other claimed definitions), or `none`.
+fn def_row(in w: Slice[u64], in g: Slice[u64], pkg: u64, item: u64) -> u64 {
+    let at = find_row(in g, wd(in g, 3), wd(in g, 2), pkg, item);
+    if at != 18446744073709551615 {
+        return wrapping_add(at, in_host());
+    }
+    find_row(in w, wd(in w, 12), wd(in w, 11), pkg, item)
+}
+
+// Word k of the definition row `d`.
+fn def_word(in w: Slice[u64], in g: Slice[u64], d: u64, k: u64) -> u64 {
+    if d >= in_host() {
+        wd(in g, wrapping_add(wrapping_sub(d, in_host()), k))
+    } else {
+        wd(in w, wrapping_add(d, k))
+    }
+}
+
+// The package row of `id` in the host's table, or `none`.
+fn package_row(in g: Slice[u64], id: u64) -> u64 {
+    let base = wd(in g, 5);
+    let mut lo: u64 = 0;
+    let mut hi = wd(in g, 4);
+    loop {
+        if lo >= hi {
+            return 18446744073709551615;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let at = wrapping_add(base, wrapping_mul(mid, 3));
+        let p = wd(in g, at);
+        if p == id {
+            return at;
+        }
+        if p < id {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// `DefinitionRegistry::visible_from`; raises and returns false on failure.
+fn visible_from(in w: Slice[u64], in g: Slice[u64], inout r: R, from: u64, pkg: u64, item: u64)
+    -> bool {
+    let d = def_row(in w, in g, pkg, item);
+    if d == 18446744073709551615 {
+        raise(inout r, err_unknown_definition(), pkg, item, 0, 0);
+        return false;
+    }
+    if pkg == from {
+        return true;
+    }
+    let p = package_row(in g, from);
+    if p == 18446744073709551615 {
+        raise(inout r, err_unknown_package(), from, 0, 0, 0);
+        return false;
+    }
+    let deps = wd(in g, wrapping_add(p, 1));
+    let ndeps = wd(in g, wrapping_add(p, 2));
+    let mut found = false;
+    for k in 0..ndeps {
+        if wd(in g, wrapping_add(deps, k)) == pkg {
+            found = true;
+        }
+    }
+    if !found {
+        raise(inout r, err_not_a_dependency(), from, pkg, item, 0);
+        return false;
+    }
+    if def_word(in w, in g, d, 3) != 0 {
+        raise(inout r, err_private(), from, pkg, item, 0);
+        return false;
+    }
+    true
+}
+
+// Whether the path's tokens joined by `::` spell text[start..start + len].
+// `names` holds the definition paths: the host's text or the call's.
+fn path_spells(
+    in w: Slice[u64],
+    in text: Slice[u8],
+    in names: Slice[u8],
+    at: u64,
+    start: u64,
+    len: u64
+) -> bool {
+    let n = wd(in w, at);
+    let mut k: u64 = 0;
+    for i in 0..n {
+        if i > 0 {
+            if wrapping_add(k, 2)
+                > len
+                || byte(in names, wrapping_add(start, k))
+                != 58
+                || byte(in names, wrapping_add(start, wrapping_add(k, 1)))
+                != 58 {
+                return false;
+            }
+            k = wrapping_add(k, 2);
+        }
+        let t = wd(in w, wrapping_add(at, wrapping_add(i, 1)));
+        let ts = tok(in w, t, 8);
+        let tl = tok(in w, t, 9);
+        if wrapping_add(k, tl) > len {
+            return false;
+        }
+        for b in 0..tl {
+            if byte(in text, wrapping_add(ts, b))
+                != byte(in names, wrapping_add(start, wrapping_add(k, b))) {
+                return false;
+            }
+        }
+        k = wrapping_add(k, tl);
+    }
+    k == len
+}
+
+// Inserts the origins of the path at `at` into the sorted run r.apool[from..].
+fn path_origins(in w: Slice[u64], inout r: R, at: u64, from: u64) {
+    let n = wd(in w, at);
+    for i in 0..n {
+        let t = wd(in w, wrapping_add(at, wrapping_add(i, 1)));
+        set_insert(inout r.apool, from, tok(in w, t, 2));
+    }
+}
+
+fn path_end(in w: Slice[u64], at: u64) -> u64 {
+    wrapping_add(at, wrapping_add(wd(in w, at), 2))
+}
+
+// `Resolver::lookup` for `symbol` against the scope set in `r.tmp`.
+fn lookup(in w: Slice[u64], in g: Slice[u64], inout r: R, symbol: u64, token: u64) -> Res {
+    r.cands.clear();
+    let nl = r.locals.len() >> 2;
+    let tn = r.tmp.len();
+    for l in 0..nl {
+        let at = wrapping_mul(l, 4);
+        if sq(in r.locals, at) == symbol {
+            let f = sq(in r.locals, wrapping_add(at, 1));
+            let n = sq(in r.locals, wrapping_add(at, 2));
+            if subset(in r.sp.as_slice(), f, n, in r.tmp.as_slice(), 0, tn) {
+                r.cands.push(0);
+                r.cands.push(f);
+                r.cands.push(n);
+                r.cands.push(0);
+                r.cands.push(sq(in r.locals, wrapping_add(at, 3)));
+                r.cands.push(0);
+            }
+        }
+    }
+    let ng = wd(in g, 0);
+    let gb = wd(in g, 1);
+    for k in 0..ng {
+        let at = wrapping_add(gb, wrapping_mul(k, 5));
+        if wd(in g, at) == symbol {
+            let f = wd(in g, wrapping_add(at, 1));
+            let n = wd(in g, wrapping_add(at, 2));
+            if subset(in g, f, n, in r.tmp.as_slice(), 0, tn) {
+                r.cands.push(1);
+                r.cands.push(f);
+                r.cands.push(n);
+                r.cands.push(1);
+                r.cands.push(wd(in g, wrapping_add(at, 3)));
+                r.cands.push(wd(in g, wrapping_add(at, 4)));
+            }
+        }
+    }
+    let nc = r.cands.len() / 6;
+    let none = Res {
+        tag: 0,
+        a: 0,
+        b: 0
+    };
+    if nc == 0 {
+        raise(inout r, err_unbound(), token, symbol, 0, 0);
+        return none;
+    }
+    // The maximal candidates' resolutions, sorted and distinct, as triples
+    // in `ext`.
+    r.ext.clear();
+    for c in 0..nc {
+        let ca = wrapping_mul(c, 6);
+        let cn = sq(in r.cands, wrapping_add(ca, 2));
+        let mut maximal = true;
+        for o in 0..nc {
+            let oa = wrapping_mul(o, 6);
+            let on = sq(in r.cands, wrapping_add(oa, 2));
+            if cn < on && cand_subset(in g, in r, ca, oa) {
+                maximal = false;
+                break;
+            }
+        }
+        if maximal {
+            res_insert(
+                inout r.ext,
+                sq(in r.cands, wrapping_add(ca, 3)),
+                sq(in r.cands, wrapping_add(ca, 4)),
+                sq(in r.cands, wrapping_add(ca, 5))
+            );
+        }
+    }
+    if r.ext.len() == 3 {
+        let res = Res {
+            tag: sq(in r.ext, 0),
+            a: sq(in r.ext, 1),
+            b: sq(in r.ext, 2)
+        };
+        r.ext.clear();
+        return res;
+    }
+    raise(inout r, err_ambiguous(), token, symbol, 0, 0);
+    none
+}
+
+// Whether candidate a's scopes are a subset of candidate b's.
+fn cand_subset(in g: Slice[u64], in r: R, ca: u64, cb: u64) -> bool {
+    let af = sq(in r.cands, wrapping_add(ca, 1));
+    let an = sq(in r.cands, wrapping_add(ca, 2));
+    let bf = sq(in r.cands, wrapping_add(cb, 1));
+    let bn = sq(in r.cands, wrapping_add(cb, 2));
+    let ag = sq(in r.cands, ca) == 1;
+    let bg = sq(in r.cands, cb) == 1;
+    if ag && bg {
+        subset(in g, af, an, in g, bf, bn)
+    } else if ag {
+        subset(in g, af, an, in r.sp.as_slice(), bf, bn)
+    } else if bg {
+        subset(in r.sp.as_slice(), af, an, in g, bf, bn)
+    } else {
+        subset(in r.sp.as_slice(), af, an, in r.sp.as_slice(), bf, bn)
+    }
+}
+
+// Inserts the triple (t, a, b) into the sorted, distinct triples of `s`.
+fn res_insert(inout s: ChunkSeq[u64], t: u64, a: u64, b: u64) {
+    let n = s.len() / 3;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let at = wrapping_mul(i, 3);
+        let x = sq(in s, at);
+        let y = sq(in s, wrapping_add(at, 1));
+        let z = sq(in s, wrapping_add(at, 2));
+        if x == t && y == a && z == b {
+            return;
+        }
+        if x > t || (x == t && (y > a || (y == a && z > b))) {
+            break;
+        }
+        i = wrapping_add(i, 1);
+    }
+    s.push(0);
+    s.push(0);
+    s.push(0);
+    let mut k = n;
+    loop {
+        if k <= i {
+            break;
+        }
+        let from = wrapping_mul(wrapping_sub(k, 1), 3);
+        let to = wrapping_mul(k, 3);
+        let _ = s.try_set(to, sq(in s, from));
+        let _ = s.try_set(wrapping_add(to, 1), sq(in s, wrapping_add(from, 1)));
+        let _ = s.try_set(wrapping_add(to, 2), sq(in s, wrapping_add(from, 2)));
+        k = wrapping_sub(k, 1);
+    }
+    let at = wrapping_mul(i, 3);
+    let _ = s.try_set(at, t);
+    let _ = s.try_set(wrapping_add(at, 1), a);
+    let _ = s.try_set(wrapping_add(at, 2), b);
+}
+
+// `Resolver::path`: resolves the path at `at` and records the reference.
+fn path(
+    in w: Slice[u64],
+    in text: Slice[u8],
+    in g: Slice[u64],
+    in gt: Slice[u8],
+    inout r: R,
+    at: u64,
+    ctx_len: u64
+) -> Res {
+    let none = Res {
+        tag: 0,
+        a: 0,
+        b: 0
+    };
+    let n = wd(in w, at);
+    let first = wd(in w, wrapping_add(at, 1));
+    let symbol = wd(in w, wrapping_add(at, wrapping_add(n, 1)));
+    let ff = tok(in w, first, 6);
+    let fl = tok(in w, first, 7);
+    let fo = tok(in w, first, 2);
+    let mut nclaims: u64 = 0;
+    let mut cp: u64 = 0;
+    let mut ci: u64 = 0;
+    for i in 0..n {
+        let t = wd(in w, wrapping_add(at, wrapping_add(i, 1)));
+        if !same_set(in w, tok(in w, t, 6), tok(in w, t, 7), in w, ff, fl)
+            || tok(in w, t, 2)
+            != fo {
+            raise(inout r, err_mixed_path(), t, 0, 0, 0);
+            return none;
+        }
+        if tok(in w, t, 3) != 0 {
+            let p = tok(in w, t, 4);
+            let it = tok(in w, t, 5);
+            if nclaims == 0 {
+                nclaims = 1;
+                cp = p;
+                ci = it;
+            } else if p != cp || it != ci {
+                nclaims = 2;
+            }
+        }
+    }
+    if nclaims > 1 {
+        raise(inout r, err_mixed_path(), first, 0, 0, 0);
+        return none;
+    }
+    let mut res = none;
+    let mut pre: u64 = 0;
+    if nclaims == 1 {
+        let from = origin_package(in w, fo);
+        if !visible_from(in w, in g, inout r, from, cp, ci) {
+            return none;
+        }
+        let d = def_row(in w, in g, cp, ci);
+        let start = def_word(in w, in g, d, 4);
+        let len = def_word(in w, in g, d, 5);
+        let spelled = if d >= in_host() {
+            path_spells(in w, in text, in gt, at, start, len)
+        } else {
+            path_spells(in w, in text, in text, at, start, len)
+        };
+        if !spelled {
+            raise(inout r, err_printed_mismatch(), cp, ci, symbol, 0);
+            return none;
+        }
+        res = Res {
+            tag: 1,
+            a: cp,
+            b: ci
+        };
+        pre = 1;
+    } else {
+        r.tmp.clear();
+        scopes_for(in w, ff, fl, in r.ctx, ctx_len, origin_rank(in w, fo), inout r.tmp);
+        res = lookup(in w, in g, inout r, symbol, first);
+        if r.err != 0 {
+            return none;
+        }
+    }
+    r.out.push(2);
+    r.out.push(first);
+    r.out.push(symbol);
+    r.out.push(res.tag);
+    r.out.push(res.a);
+    r.out.push(res.b);
+    r.out.push(pre);
+    r.has_last = true;
+    r.last = res;
+    res
+}
+
+// Records an operation whose origins are r.apool[from..], then drops them.
+fn push_op(inout r: R, kind: u64, a: u64, b: u64, c: u64, d: u64, token: u64, from: u64) {
+    r.out.push(3);
+    r.out.push(kind);
+    r.out.push(a);
+    r.out.push(b);
+    r.out.push(c);
+    r.out.push(d);
+    r.out.push(token);
+    let n = wrapping_sub(r.apool.len(), from);
+    r.out.push(n);
+    for k in 0..n {
+        r.out.push(sq(in r.apool, wrapping_add(from, k)));
+    }
+    r.apool.truncate(from);
+}
+
+// `first_token` of the term at `at`, or `none`.
+fn first_token(in w: Slice[u64], at: u64) -> u64 {
+    let k = wd(in w, at);
+    if k == 1 {
+        wd(in w, wrapping_add(at, 2))
+    } else if k == 2 || k == 3 || k == 5 {
+        wd(in w, wrapping_add(at, 1))
+    } else if k == 4 {
+        let f = first_token(in w, wrapping_add(at, 4));
+        if f == 18446744073709551615 {
+            wd(in w, wrapping_add(at, 1))
+        } else {
+            f
+        }
+    } else if wd(in w, wrapping_add(at, 1)) == 0 {
+        18446744073709551615
+    } else {
+        first_token(in w, wrapping_add(at, 2))
+    }
+}
+
+// `collect_origins` of the term at `at` into r.apool[from..]; returns the
+// term's end.
+fn collect_origins(in w: Slice[u64], inout r: R, at: u64, from: u64) -> u64 {
+    let k = wd(in w, at);
+    if k == 1 {
+        path_origins(in w, inout r, wrapping_add(at, 1), from);
+        path_end(in w, wrapping_add(at, 1))
+    } else if k == 2 {
+        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), 2));
+        wrapping_add(at, 2)
+    } else if k == 3 {
+        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), 2));
+        let body = collect_origins(in w, inout r, wrapping_add(at, 2), from);
+        collect_origins(in w, inout r, body, from)
+    } else if k == 4 {
+        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), 2));
+        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 2)), 2));
+        let nargs = wd(in w, wrapping_add(at, 3));
+        let mut next = collect_origins(in w, inout r, wrapping_add(at, 4), from);
+        for i in 0..nargs {
+            next = collect_origins(in w, inout r, next, from);
+        }
+        next
+    } else if k == 5 {
+        set_insert(inout r.apool, from, tok(in w, wd(in w, wrapping_add(at, 1)), 2));
+        let epath = wrapping_add(at, 2);
+        path_origins(in w, inout r, epath, from);
+        let handler = path_end(in w, epath);
+        path_origins(in w, inout r, handler, from);
+        collect_origins(in w, inout r, path_end(in w, handler), from)
+    } else {
+        let n = wd(in w, wrapping_add(at, 1));
+        let mut next = wrapping_add(at, 2);
+        for i in 0..n {
+            next = collect_origins(in w, inout r, next, from);
+        }
+        next
+    }
+}
+
+// `Resolver::global_of_kind`.
+fn global_of_kind(
+    in w: Slice[u64],
+    in text: Slice[u8],
+    in g: Slice[u64],
+    in gt: Slice[u8],
+    inout r: R,
+    at: u64,
+    ctx_len: u64,
+    kind: u64
+) -> Res {
+    let res = path(in w, in text, in g, in gt, inout r, at, ctx_len);
+    if r.err != 0 {
+        return res;
+    }
+    let first = wd(in w, wrapping_add(at, 1));
+    if res.tag == 1 {
+        let d = def_row(in w, in g, res.a, res.b);
+        if d == 18446744073709551615 || def_word(in w, in g, d, 2) != kind {
+            raise(inout r, err_wrong_kind(), first, res.a, res.b, kind);
+        }
+    } else {
+        raise(inout r, err_expected_global(), first, 0, 0, 0);
+    }
+    res
+}
+
+// `Resolver::term` on the term at `at` in the context of the first
+// `ctx_len` pairs; returns the term's end.
+pub fn term(
+    in w: Slice[u64],
+    in text: Slice[u8],
+    in g: Slice[u64],
+    in gt: Slice[u8],
+    inout r: R,
+    at: u64,
+    ctx_len: u64
+) -> u64 {
+    let k = wd(in w, at);
+    if k == 2 {
+        return wrapping_add(at, 2);
+    }
+    if k == 1 {
+        let p = wrapping_add(at, 1);
+        let res = path(in w, in text, in g, in gt, inout r, p, ctx_len);
+        if r.err != 0 {
+            return 0;
+        }
+        if res.tag == 1 {
+            let from = r.apool.len();
+            path_origins(in w, inout r, p, from);
+            push_op(inout r, 1, res.a, res.b, 0, 0, wd(in w, wrapping_add(p, 1)), from);
+        }
+        return path_end(in w, p);
+    }
+    if k == 3 {
+        let binder = wd(in w, wrapping_add(at, 1));
+        let value = wrapping_add(at, 2);
+        let body = term(in w, in text, in g, in gt, inout r, value, ctx_len);
+        if r.err != 0 {
+            return 0;
+        }
+        // `let b = <path>` makes `b` an alias of the path's target.
+        let mut has_alias = false;
+        let mut ap: u64 = 0;
+        let mut ai: u64 = 0;
+        let afrom = r.apool.len();
+        if wd(in w, value) == 1 && r.has_last {
+            let last = r.last;
+            if last.tag == 1 {
+                has_alias = true;
+                ap = last.a;
+                ai = last.b;
+                path_origins(in w, inout r, wrapping_add(value, 1), afrom);
+            } else {
+                let row = wrapping_mul(wrapping_sub(last.a, r.first_binder), 5);
+                if sq(in r.alias, row) == 1 {
+                    has_alias = true;
+                    ap = sq(in r.alias, wrapping_add(row, 1));
+                    ai = sq(in r.alias, wrapping_add(row, 2));
+                    let of = sq(in r.alias, wrapping_add(row, 3));
+                    let on = sq(in r.alias, wrapping_add(row, 4));
+                    for q in 0..on {
+                        set_insert(inout r.apool, afrom, sq(in r.apool, wrapping_add(of, q)));
+                    }
+                    path_origins(in w, inout r, wrapping_add(value, 1), afrom);
+                }
+            }
+        }
+        if tok(in w, binder, 3) != 0 {
+            raise(
+                inout r,
+                err_preresolved_binder(),
+                binder,
+                tok(in w, binder, 4),
+                tok(in w, binder, 5),
+                0
+            );
+            return 0;
+        }
+        let scope = fresh_scope(inout r);
+        if r.err != 0 {
+            return 0;
+        }
+        ctx_with(inout r, ctx_len, scope, origin_rank(in w, tok(in w, binder, 2)));
+        let inner = wrapping_add(ctx_len, 1);
+        let id = fresh_binder(inout r);
+        if r.err != 0 {
+            return 0;
+        }
+        if has_alias {
+            // The alias's origins stay in `apool` (below every later
+            // operation's run).
+            let row = wrapping_mul(wrapping_sub(id, r.first_binder), 5);
+            let _ = r.alias.try_set(row, 1);
+            let _ = r.alias.try_set(wrapping_add(row, 1), ap);
+            let _ = r.alias.try_set(wrapping_add(row, 2), ai);
+            let _ = r.alias.try_set(wrapping_add(row, 3), afrom);
+            let _ = r.alias.try_set(wrapping_add(row, 4), wrapping_sub(r.apool.len(), afrom));
+        }
+        bind(in w, inout r, binder, inner, id);
+        return term(in w, in text, in g, in gt, inout r, body, inner);
+    }
+    if k == 4 {
+        let open = wd(in w, wrapping_add(at, 1));
+        let close = wd(in w, wrapping_add(at, 2));
+        let nargs = wd(in w, wrapping_add(at, 3));
+        let callee = wrapping_add(at, 4);
+        let mut first = first_token(in w, callee);
+        if first == 18446744073709551615 {
+            first = open;
+        }
+        let mut next: u64 = 0;
+        if wd(in w, callee) == 1 {
+            // The call syntax contributes provenance too: generated
+            // parentheses around spliced caller syntax are a generated call.
+            let from = r.apool.len();
+            set_insert(inout r.apool, from, tok(in w, open, 2));
+            set_insert(inout r.apool, from, tok(in w, close, 2));
+            let p = wrapping_add(callee, 1);
+            path_origins(in w, inout r, p, from);
+            let res = path(in w, in text, in g, in gt, inout r, p, ctx_len);
+            if r.err != 0 {
+                return 0;
+            }
+            let mut kind: u64 = 3;
+            let mut da: u64 = 0;
+            let mut db: u64 = 0;
+            if res.tag == 1 {
+                kind = 1;
+                da = res.a;
+                db = res.b;
+            } else {
+                let row = wrapping_mul(wrapping_sub(res.a, r.first_binder), 5);
+                if sq(in r.alias, row) == 1 {
+                    kind = 1;
+                    da = sq(in r.alias, wrapping_add(row, 1));
+                    db = sq(in r.alias, wrapping_add(row, 2));
+                    let of = sq(in r.alias, wrapping_add(row, 3));
+                    let on = sq(in r.alias, wrapping_add(row, 4));
+                    for q in 0..on {
+                        set_insert(inout r.apool, from, sq(in r.apool, wrapping_add(of, q)));
+                    }
+                }
+            }
+            push_op(inout r, kind, da, db, 0, 0, first, from);
+            next = path_end(in w, p);
+        } else {
+            // The callee's own operations come first.
+            next = term(in w, in text, in g, in gt, inout r, callee, ctx_len);
+            if r.err != 0 {
+                return 0;
+            }
+            let from = r.apool.len();
+            set_insert(inout r.apool, from, tok(in w, open, 2));
+            set_insert(inout r.apool, from, tok(in w, close, 2));
+            let end = collect_origins(in w, inout r, callee, from);
+            push_op(inout r, 3, 0, 0, 0, 0, first, from);
+        }
+        for a in 0..nargs {
+            next = term(in w, in text, in g, in gt, inout r, next, ctx_len);
+            if r.err != 0 {
+                return 0;
+            }
+        }
+        return next;
+    }
+    if k == 5 {
+        let keyword = wd(in w, wrapping_add(at, 1));
+        let epath = wrapping_add(at, 2);
+        let handler = path_end(in w, epath);
+        let body = path_end(in w, handler);
+        let e = global_of_kind(in w, in text, in g, in gt, inout r, epath, ctx_len, def_effect());
+        if r.err != 0 {
+            return 0;
+        }
+        let h = global_of_kind(
+            in w,
+            in text,
+            in g,
+            in gt,
+            inout r,
+            handler,
+            ctx_len,
+            def_handler()
+        );
+        if r.err != 0 {
+            return 0;
+        }
+        let from = r.apool.len();
+        path_origins(in w, inout r, epath, from);
+        path_origins(in w, inout r, handler, from);
+        set_insert(inout r.apool, from, tok(in w, keyword, 2));
+        push_op(inout r, 2, e.a, e.b, h.a, h.b, keyword, from);
+        return term(in w, in text, in g, in gt, inout r, body, ctx_len);
+    }
+    let n = wd(in w, wrapping_add(at, 1));
+    let mut next = wrapping_add(at, 2);
+    for i in 0..n {
+        next = term(in w, in text, in g, in gt, inout r, next, ctx_len);
+        if r.err != 0 {
+            return 0;
+        }
+    }
+    next
+}

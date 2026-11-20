@@ -123,7 +123,9 @@ impl Checker<'_> {
     }
 
     /// Forgets integer facts about every binding the body may write, so the
-    /// loop-entry environment over-approximates each iteration's start.
+    /// loop-entry environment over-approximates each iteration's start. A
+    /// fact about a binding the body does not write (a guard `if n > 0`
+    /// around the loop) holds in the body.
     fn havoc(&self, body: &Expr, env: &mut Env) {
         let mut written = std::collections::BTreeSet::new();
         let mut calls = false;
@@ -140,6 +142,11 @@ impl Checker<'_> {
                 {
                     written.insert(p.root);
                 }
+                // A function object called through a local may change its
+                // own state.
+                if let ExprKind::Name(name) = &callee.kind {
+                    written.insert(name.clone());
+                }
                 for a in args {
                     if let Some(p) = super::Place::from_expr(&a.expr) {
                         written.insert(p.root);
@@ -148,8 +155,12 @@ impl Checker<'_> {
             }
             _ => {}
         });
+        // A call can change a local only through an argument or receiver
+        // that names it (closures capture by value, handler clauses capture
+        // snapshots), so a local the body names nowhere as a written place
+        // keeps its facts. A borrowed `inout` parameter stays conservative.
         for (name, b) in &mut env.bindings {
-            if written.contains(name) || (calls && b.pass != Pass::Sink) {
+            if written.contains(name) || (calls && b.pass == Pass::Inout) {
                 b.mutation = Arc::new(());
                 b.integer = None;
                 b.nonzero = false;

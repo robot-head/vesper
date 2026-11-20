@@ -25,6 +25,40 @@
 #![deny(unsafe_code)]
 
 pub mod ansi;
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+
+/// Which build this is: `"vesper"` for `vesper-highlight` with the
+/// `vesper-port` feature (Tier 0's classes in Vesper), `"rust"` otherwise
+/// (and for the seed copy `vesper-highlight-seed` that the compiler links).
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the port's runtime, for leak tests.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::live_allocations()
+}
+
+/// Tier 0 through the port alone, for the differential tests: CST mode, or
+/// token mode with `tokens`. `None` when the Rust classifier takes the
+/// source (the lexer stopped at a ceiling).
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_tier0(src: &str, tokens: bool) -> Option<Vec<HighlightSpan>> {
+    if tokens {
+        port::tokens(src)
+    } else {
+        port::cst(src)
+    }
+}
 pub mod brand;
 pub mod color;
 pub mod css;

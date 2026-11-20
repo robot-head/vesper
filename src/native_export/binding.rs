@@ -95,6 +95,7 @@ fn rust_type(ty: &AbiType, types_path: &str) -> String {
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "str".into(),
         AbiType::Object { .. } => "vesper_port_abi::OpaqueObject<'static>".into(),
+        AbiType::Extern { name } => format!("{name}<'static>"),
     }
 }
 
@@ -196,7 +197,7 @@ pub fn rust_binding(interface: &LibraryInterface, options: &BindingOptions) -> S
         let _ = writeln!(out, "pub fn {}({params}) -> {ret} {{", ident(&f.name));
         let mut args = vec![];
         if f.result_pointer {
-            let _ = writeln!(out, "    let mut result = vec![0u64; {}];", f.result_words);
+            let _ = writeln!(out, "    let mut result = [0u64; {}];", f.result_words);
             args.push("result.as_mut_ptr()".to_string());
         }
         for p in &f.params {
@@ -204,7 +205,7 @@ pub fn rust_binding(interface: &LibraryInterface, options: &BindingOptions) -> S
             if p.pointer {
                 let _ = writeln!(
                     out,
-                    "    let mut arg_{0} = vec![0u64; <{1} as Abi>::WORDS];\n    Abi::put(&{n}, &mut arg_{0});",
+                    "    let mut arg_{0} = [0u64; <{1} as Abi>::WORDS];\n    Abi::put(&{n}, &mut arg_{0});",
                     p.name,
                     rust_type(&p.ty, &types_path)
                 );
@@ -214,7 +215,7 @@ pub fn rust_binding(interface: &LibraryInterface, options: &BindingOptions) -> S
             }
         }
         if let Some(words) = f.fail_record_words {
-            let _ = writeln!(out, "    let mut fail = vec![0u64; {words}];");
+            let _ = writeln!(out, "    let mut fail = [0u64; {words}];");
             args.push("fail.as_mut_ptr()".into());
         }
         let _ = writeln!(
@@ -387,6 +388,7 @@ fn error_variant(ty: &AbiType) -> String {
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "Str".into(),
         AbiType::Object { .. } => "Object".into(),
+        AbiType::Extern { name } => name.clone(),
     }
 }
 

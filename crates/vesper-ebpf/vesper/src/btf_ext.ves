@@ -27,6 +27,48 @@ use self::core::{
     tkind
 };
 
+// `.BTF.ext` (src/btf_ext.rs): the BTF magic and version, the header
+// before CO-RE (24 bytes), the subsection (offset, length) pairs from byte
+// 8, record sizes, `bpf_line_info.line_col` (line << 10 | column) and the
+// largest record size accepted.
+const BTF_MAGIC: u64 = 60319;
+const BTF_VERSION: u64 = 1;
+const EXT_HDR_MIN_LEN: u64 = 24;
+const EXT_PARTS_OFF: u64 = 8;
+const EXT_PART_SIZE: u64 = 8;
+const FUNC_REC_SIZE: u64 = 8;
+const LINE_REC_SIZE: u64 = 16;
+const LINE_COL_SHIFT: u64 = 10;
+const LINE_COL_MASK: u64 = 1023;
+const MAX_REC_SIZE: u64 = 256;
+// The last `enum bpf_core_relo_kind` (BPF_CORE_TYPE_MATCHES).
+const CORE_KIND_MAX: u64 = 12;
+// Deepest local type `local_type` follows.
+const MAX_LOCAL_DEPTH: u64 = 16;
+
+// BTF kinds as core.ves `tkind` gives them (enum64 reads as enum), and its
+// code for an id past the table.
+const KIND_VOID: u64 = 0;
+const KIND_INT: u64 = 1;
+const KIND_PTR: u64 = 2;
+const KIND_ARRAY: u64 = 3;
+const KIND_STRUCT: u64 = 4;
+const KIND_UNION: u64 = 5;
+const KIND_ENUM: u64 = 6;
+const KIND_FUNC: u64 = 12;
+const KIND_VAR: u64 = 14;
+const KIND_DATASEC: u64 = 15;
+const TKIND_MISSING: u64 = 99;
+
+// Access strings are `:`-separated decimal u32s, an optional `+` first.
+const ASCII_PLUS: u64 = 43;
+const ASCII_0: u64 = 48;
+const ASCII_9: u64 = 57;
+const ASCII_COLON: u64 = 58;
+const U32_MAX: u64 = 4294967295;
+// A map without a `type` member.
+const NO_MAP_TYPE: u64 = 18446744073709551615;
+
 fn wd(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
@@ -77,7 +119,7 @@ fn records(
         return 4;
     }
     rec = le32(in ext, lo);
-    if rec < min_rec || rec & 3 != 0 || rec > 256 {
+    if rec < min_rec || rec & 3 != 0 || rec > MAX_REC_SIZE {
         bad = rec;
         return 5;
     }
@@ -117,7 +159,7 @@ fn slot_ok(off: u64, inout bad: u64) -> u64 {
 // `u32::from_str` of bytes `at..at + n` of `strs`: (ok, value).
 fn parse_u32(in strs: Slice[u8], at: u64, n: u64) -> (bool, u64) {
     let mut i: u64 = 0;
-    if n > 0 && byte(in strs, at) == 43 {
+    if n > 0 && byte(in strs, at) == ASCII_PLUS {
         i = 1;
     }
     if i >= n {
@@ -129,11 +171,11 @@ fn parse_u32(in strs: Slice[u8], at: u64, n: u64) -> (bool, u64) {
             break;
         }
         let c = byte(in strs, wrapping_add(at, i));
-        if c < 48 || c > 57 {
+        if c < ASCII_0 || c > ASCII_9 {
             return (false, 0);
         }
-        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, 48));
-        if v > 4294967295 {
+        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, ASCII_0));
+        if v > U32_MAX {
             return (false, 0);
         }
         i = wrapping_add(i, 1);
@@ -150,19 +192,19 @@ fn local_depth(
     inout out: ChunkSeq[u64],
     inout bad: u64
 ) -> u64 {
-    if depth > 16 {
+    if depth > MAX_LOCAL_DEPTH {
         return 11;
     }
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
-    if k == 99 {
+    if k == TKIND_MISSING {
         bad = id;
         return 12;
     }
     let name = tf(in tab, in idx, t, 1);
     let a = tf(in tab, in idx, t, 2);
     let d1 = wrapping_add(depth, 1);
-    if k == 0 {
+    if k == KIND_VOID {
         out.push(0);
         out.push(0);
         out.push(0);
@@ -171,7 +213,7 @@ fn local_depth(
         out.push(0);
         return 0;
     }
-    if k == 1 {
+    if k == KIND_INT {
         out.push(1);
         out.push(name);
         out.push(0);
@@ -180,7 +222,7 @@ fn local_depth(
         out.push(0);
         return 0;
     }
-    if k == 2 {
+    if k == KIND_PTR {
         out.push(2);
         out.push(0);
         out.push(0);
@@ -189,7 +231,7 @@ fn local_depth(
         out.push(0);
         return local_depth(in tab, in idx, a, d1, inout out, inout bad);
     }
-    if k == 3 {
+    if k == KIND_ARRAY {
         out.push(3);
         out.push(0);
         out.push(0);
@@ -198,7 +240,7 @@ fn local_depth(
         out.push(tf(in tab, in idx, t, 4));
         return local_depth(in tab, in idx, a, d1, inout out, inout bad);
     }
-    if k == 4 || k == 5 {
+    if k == KIND_STRUCT || k == KIND_UNION {
         let n = tf(in tab, in idx, t, 6);
         out.push(4);
         out.push(name);
@@ -206,7 +248,7 @@ fn local_depth(
         out.push(a);
         out
             .push(
-            if k == 5 {
+            if k == KIND_UNION {
                 1
             } else {
                 0
@@ -228,7 +270,7 @@ fn local_depth(
                     bits = if !ok {
                         0
                     } else if s > 8 {
-                        4294967295
+                        U32_MAX
                     } else {
                         wrapping_mul(s, 8)
                     };
@@ -256,7 +298,7 @@ fn local_depth(
         }
         return 0;
     }
-    if k == 6 {
+    if k == KIND_ENUM {
         let n = tf(in tab, in idx, t, 6);
         out.push(5);
         out.push(name);
@@ -289,13 +331,13 @@ pub fn local_type_words(in tab: Slice[u64], in idx: Slice[u64], id: u64) -> Chun
 
 // The bounds of subsection `i` (`part`): 0 with `lo`, `hi`, or an error.
 fn part(in ext: Slice[u8], hdr: u64, i: u64, inout lo: u64, inout hi: u64) -> u64 {
-    let at = wrapping_add(8, wrapping_mul(i, 8));
-    if wrapping_add(at, 8) > hdr {
+    let at = wrapping_add(EXT_PARTS_OFF, wrapping_mul(i, EXT_PART_SIZE));
+    if wrapping_add(at, EXT_PART_SIZE) > hdr {
         lo = 0;
         hi = 0;
         return 0;
     }
-    if wrapping_add(at, 8) > ext.len() {
+    if wrapping_add(at, EXT_PART_SIZE) > ext.len() {
         return 4;
     }
     let s = wrapping_add(hdr, le32(in ext, at));
@@ -316,11 +358,16 @@ pub fn parse_ext(
     in section: Slice[u8]
 ) -> ChunkSeq[u64] {
     let len = ext.len();
-    if len < 8 || (byte(in ext, 0) | (byte(in ext, 1) << 8)) != 60319 || byte(in ext, 2) != 1 {
+    if len
+        < 8
+        || (byte(in ext, 0) | (byte(in ext, 1) << 8))
+        != BTF_MAGIC
+        || byte(in ext, 2)
+        != BTF_VERSION {
         return err(1, 0, 0);
     }
     let hdr = le32(in ext, 4);
-    if hdr < 24 {
+    if hdr < EXT_HDR_MIN_LEN {
         return err(2, 0, 0);
     }
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -335,7 +382,17 @@ pub fn parse_ext(
         return err(p0, 0, 0);
     }
     let mut rs: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let c0 = records(in ext, lo, hi, in strs, in section, 8, inout rs, inout rec, inout bad);
+    let c0 = records(
+        in ext,
+        lo,
+        hi,
+        in strs,
+        in section,
+        FUNC_REC_SIZE,
+        inout rs,
+        inout rec,
+        inout bad
+    );
     if c0 != 0 {
         return err(c0, bad, 0);
     }
@@ -350,7 +407,7 @@ pub fn parse_ext(
             return err(s, bad, 0);
         }
         let ty = le32(in ext, wrapping_add(r, 4));
-        if tkind(in tab, in idx, ty) != 12 {
+        if tkind(in tab, in idx, ty) != KIND_FUNC {
             return err(8, ty, 0);
         }
         // a stable insertion by slot
@@ -389,7 +446,17 @@ pub fn parse_ext(
         return err(p1, 0, 0);
     }
     rs.clear();
-    let c1 = records(in ext, lo, hi, in strs, in section, 16, inout rs, inout rec, inout bad);
+    let c1 = records(
+        in ext,
+        lo,
+        hi,
+        in strs,
+        in section,
+        LINE_REC_SIZE,
+        inout rs,
+        inout rec,
+        inout bad
+    );
     if c1 != 0 {
         return err(c1, bad, 0);
     }
@@ -406,8 +473,8 @@ pub fn parse_ext(
         out.push(off >> 3);
         out.push(le32(in ext, wrapping_add(r, 4)));
         out.push(le32(in ext, wrapping_add(r, 8)));
-        out.push(lc >> 10);
-        out.push(lc & 1023);
+        out.push(lc >> LINE_COL_SHIFT);
+        out.push(lc & LINE_COL_MASK);
     }
     // CO-RE relocations
     let p2 = part(in ext, hdr, 2, inout lo, inout hi);
@@ -415,7 +482,17 @@ pub fn parse_ext(
         return err(p2, 0, 0);
     }
     rs.clear();
-    let c2 = records(in ext, lo, hi, in strs, in section, 16, inout rs, inout rec, inout bad);
+    let c2 = records(
+        in ext,
+        lo,
+        hi,
+        in strs,
+        in section,
+        LINE_REC_SIZE,
+        inout rs,
+        inout rec,
+        inout bad
+    );
     if c2 != 0 {
         return err(c2, bad, 0);
     }
@@ -424,7 +501,7 @@ pub fn parse_ext(
     for i in 0..nr {
         let r = wd(in rs.as_slice(), i);
         let kind = le32(in ext, wrapping_add(r, 12));
-        if kind > 12 {
+        if kind > CORE_KIND_MAX {
             return err(9, kind, 0);
         }
         let (sat, sn) = name_span(in strs, le32(in ext, wrapping_add(r, 8)));
@@ -434,7 +511,7 @@ pub fn parse_ext(
         let end = wrapping_add(sat, sn);
         let mut j = sat;
         loop {
-            if j == end || byte(in strs, j) == 58 {
+            if j == end || byte(in strs, j) == ASCII_COLON {
                 let (ok, v) = parse_u32(in strs, start, wrapping_sub(j, start));
                 if !ok {
                     return err(10, start, wrapping_sub(j, start));
@@ -492,21 +569,21 @@ pub fn maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8])
     let n = idx.len();
     for id in 0..n {
         if tkind(in tab, in idx, id)
-            == 15
+            == KIND_DATASEC
             && name_eq(in strs, tf(in tab, in idx, id, 1), in maps_name.as_slice()) {
             let nv = tf(in tab, in idx, id, 6);
             for v in 0..nv {
                 let var = te(in tab, in idx, id, 3, v, 0);
                 let off = te(in tab, in idx, id, 3, v, 1);
-                if tkind(in tab, in idx, var) != 14 {
+                if tkind(in tab, in idx, var) != KIND_VAR {
                     return err(1, 0, 0);
                 }
                 let st = skip_mods(in tab, in idx, tf(in tab, in idx, var, 2));
                 let sk = tkind(in tab, in idx, st);
-                if sk != 4 && sk != 5 {
+                if sk != KIND_STRUCT && sk != KIND_UNION {
                     return err(2, 0, 0);
                 }
-                let mut kind: u64 = 18446744073709551615;
+                let mut kind: u64 = NO_MAP_TYPE;
                 let mut key: u64 = 0;
                 let mut value: u64 = 0;
                 let mut max: u64 = 0;
@@ -515,11 +592,11 @@ pub fn maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8])
                 for m in 0..nm {
                     let mname = te(in tab, in idx, st, 4, m, 0);
                     let mty = te(in tab, in idx, st, 4, m, 1);
-                    if tkind(in tab, in idx, mty) != 2 {
+                    if tkind(in tab, in idx, mty) != KIND_PTR {
                         return err(3, 0, 0);
                     }
                     let arr = tf(in tab, in idx, mty, 2);
-                    if tkind(in tab, in idx, arr) != 3 {
+                    if tkind(in tab, in idx, arr) != KIND_ARRAY {
                         return err(3, 0, 0);
                     }
                     let len = tf(in tab, in idx, arr, 4);
@@ -540,7 +617,7 @@ pub fn maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8])
                         return err(5, mname, 0);
                     }
                 }
-                if kind == 18446744073709551615 {
+                if kind == NO_MAP_TYPE {
                     return err(6, 0, 0);
                 }
                 out.push(off);
@@ -565,7 +642,7 @@ fn bytes_of(in s: Str) -> ChunkSeq[u8] {
 }
 
 fn supported_map_type(t: u64) -> bool {
-    if t > 4294967295 {
+    if t > U32_MAX {
         return false;
     }
     match map_from_kernel_type(wrapping_u32(t)) {

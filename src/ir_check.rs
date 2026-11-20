@@ -161,6 +161,7 @@ pub fn validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
             origins: Origins::build(f),
             local_consumes: BTreeMap::new(),
             reservable: reservable(f),
+            scrutinees: scrutinees(f),
         };
         checker.function(f);
         diagnostics.extend(checker.diagnostics);
@@ -279,6 +280,20 @@ struct Flow<'a> {
     local_consumes: BTreeMap<ValueId, Span>,
     /// The `inout` loans that a call takes as an argument ([`reservable`]).
     reservable: BTreeSet<ValueId>,
+    /// The values that a `match` terminator inspects ([`scrutinees`]).
+    scrutinees: BTreeSet<ValueId>,
+}
+/// The values `f` matches on. A by-value read of a borrowed slot's
+/// non-copy place that only a `match` inspects is a borrow (§4.3): the
+/// match binds `in` borrows of its payloads.
+fn scrutinees(f: &FunctionIr) -> BTreeSet<ValueId> {
+    f.blocks
+        .iter()
+        .filter_map(|b| match &b.terminator {
+            crate::ir::Terminator::Match { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect()
 }
 /// The values that some call, sequence, tiled or `Box` operation of `f`
 /// takes as an `inout` argument. Only their loans are reserved before the
@@ -517,20 +532,20 @@ impl Flow<'_> {
             }
         }
     }
-    fn bind(&mut self, s: &mut State, p: &Pattern, t: &Type, origin: ValueId) {
+    fn bind(&mut self, s: &mut State, p: &Pattern, t: &Type, origin: ValueId, pass: Pass) {
         match &p.kind {
             PatternKind::Bind(n) => {
                 s.slots.insert(
                     n.clone(),
                     SlotState {
                         ty: t.clone(),
-                        pass: Pass::Sink,
+                        pass,
                         moved: BTreeSet::new(),
                     },
                 );
             }
             PatternKind::Wild => {
-                if self.mode(t) == Mode::Linear {
+                if pass == Pass::Sink && self.mode(t) == Mode::Linear {
                     self.caused(
                         "IR wildcard discards a linear value",
                         p.span.clone(),
@@ -542,7 +557,7 @@ impl Flow<'_> {
             PatternKind::Tuple(ps) => {
                 if let Type::Tuple(ts) = t {
                     for (p, t) in ps.iter().zip(ts) {
-                        self.bind(s, p, t, origin);
+                        self.bind(s, p, t, origin, pass);
                     }
                 }
             }
@@ -561,7 +576,7 @@ impl Flow<'_> {
                         .collect();
                     for (n, p) in fields {
                         if let Some(f) = v.fields.iter().find(|f| &f.name == n) {
-                            self.bind(s, p, &substitute(&f.ty, &vars), origin);
+                            self.bind(s, p, &substitute(&f.ty, &vars), origin, pass);
                         }
                     }
                 }
@@ -653,14 +668,30 @@ impl Flow<'_> {
                         })
                         .collect::<Vec<_>>()
                 };
+                let read_pass = pass;
+                let mut pass = *pass;
+                if pass == Pass::Sink
+                    && self.scrutinees.contains(&i.dest)
+                    && s.slots
+                        .get(root)
+                        .is_some_and(|slot| slot.pass != Pass::Sink)
+                    && self.mode(&i.ty) != Mode::Copy
+                {
+                    pass = Pass::In;
+                }
                 if s.slots.contains_key(root) || !self.world.functions.contains_key(root) {
                     for p in &places {
-                        self.access(s, p, *pass, &i.span);
+                        self.access(s, p, pass, &i.span);
                     }
                 }
-                if *pass != Pass::Sink {
+                if pass != Pass::Sink {
                     owned = false;
-                    loan = Some((places, *pass));
+                    // A borrowed scrutinee lends its place to the arms'
+                    // bindings, which the checker keeps from conflicting
+                    // with any write (§4.3); it takes no value loan.
+                    if *read_pass != Pass::Sink {
+                        loan = Some((places, pass));
+                    }
                 }
             }
             Op::Bind { pattern, value } => {
@@ -669,8 +700,16 @@ impl Flow<'_> {
                     .get(value)
                     .map(|v| v.ty.clone())
                     .unwrap_or(Type::Infer);
-                self.consume(s, *value, &i.span);
-                self.bind(s, pattern, &t, *value);
+                // A borrowed scrutinee binds borrows of its payloads.
+                let pass = if self.scrutinees.contains(value)
+                    && s.values.get(value).is_some_and(|v| !v.owned)
+                {
+                    Pass::In
+                } else {
+                    self.consume(s, *value, &i.span);
+                    Pass::Sink
+                };
+                self.bind(s, pattern, &t, *value, pass);
             }
             Op::Write { place, op, value } => {
                 self.consume(s, *value, &i.span);

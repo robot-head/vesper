@@ -10,10 +10,13 @@ members = [
     "crates/vesper-span/seed",
     "crates/vesper-lsp",
     "crates/vesper-diagnostics",
+    "crates/vesper-diagnostics/seed",
     "crates/vesper-grammar",
     "crates/vesper-grammar/seed",
     "crates/vesper-fmt",
+    "crates/vesper-fmt/seed",
     "crates/vesper-lint",
+    "crates/vesper-lint/seed",
     "crates/vesper-bench",
     "crates/vesper-bench/seed",
     "crates/vesper-bench-pmu",
@@ -22,6 +25,7 @@ members = [
     "crates/vesper-prism",
     "crates/vesper-ffi",
     "crates/vesper-forge",
+    "crates/vesper-forge/seed",
     "crates/vesper-loom-calculus",
     "crates/vesper-loom-calculus/seed",
     "crates/vesper-lean-syntax",
@@ -94,11 +98,13 @@ members = [
     "crates/vesper-ignis-vulkan",
     "crates/vesper-codegen-verified",
     "crates/vesper-highlight",
+    "crates/vesper-highlight/seed",
     "crates/vesper-fusion",
     "crates/vesper-port-abi",
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-test",
     "crates/vesper-hybrid",
     "crates/vesper-std-driver",
     "crates/vesper-std-host",
@@ -115,10 +121,13 @@ default-members = [
     "crates/vesper-span/seed",
     "crates/vesper-lsp",
     "crates/vesper-diagnostics",
+    "crates/vesper-diagnostics/seed",
     "crates/vesper-grammar",
     "crates/vesper-grammar/seed",
     "crates/vesper-fmt",
+    "crates/vesper-fmt/seed",
     "crates/vesper-lint",
+    "crates/vesper-lint/seed",
     "crates/vesper-bench",
     "crates/vesper-bench/seed",
     "crates/vesper-bench-pmu",
@@ -127,6 +136,7 @@ default-members = [
     "crates/vesper-prism",
     "crates/vesper-ffi",
     "crates/vesper-forge",
+    "crates/vesper-forge/seed",
     "crates/vesper-loom-calculus",
     "crates/vesper-loom-calculus/seed",
     "crates/vesper-lean-syntax",
@@ -199,11 +209,13 @@ default-members = [
     "crates/vesper-ignis-vulkan",
     "crates/vesper-codegen-verified",
     "crates/vesper-highlight",
+    "crates/vesper-highlight/seed",
     "crates/vesper-fusion",
     "crates/vesper-port-abi",
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-test",
     "crates/vesper-std-driver",
     "crates/vesper-std-host",
     "crates/vesper-tools",
@@ -258,19 +270,25 @@ edition = "2024"
 vesper-std-host = { path = "crates/vesper-std-host" }
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
-vesper-forge = { path = "crates/vesper-forge", default-features = false }
+# The compiler links the frozen Rust seed copy of vesper-forge (#1157).
+vesper-forge = { path = "crates/vesper-forge/seed", package = "vesper-forge-seed", default-features = false }
 vesper-simd = { path = "crates/vesper-simd" }
 # The compiler links the frozen Rust seed copy of vesper-lean-syntax (#1128).
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
 vesper-syntax = { path = "crates/vesper-syntax" }
-vesper-highlight = { path = "crates/vesper-highlight", features = ["shot"] }
+# The compiler links the frozen Rust seed copies of vesper-highlight and
+# vesper-fmt (seed-copy rule, #1154).
+vesper-highlight = { path = "crates/vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
 # The compiler links the frozen Rust seed copy of vesper-span (#1128).
 vesper-span = { path = "crates/vesper-span/seed", package = "vesper-span-seed" }
 vesper-lsp = { path = "crates/vesper-lsp" }
-vesper-diagnostics = { path = "crates/vesper-diagnostics" }
-vesper-fmt = { path = "crates/vesper-fmt" }
-vesper-lint = { path = "crates/vesper-lint" }
+# The compiler links the frozen Rust seed copy of vesper-diagnostics (#1128).
+vesper-diagnostics = { path = "crates/vesper-diagnostics/seed", package = "vesper-diagnostics-seed" }
+vesper-fmt = { path = "crates/vesper-fmt/seed", package = "vesper-fmt-seed" }
+# The compiler links the frozen Rust seed copy of vesper-lint (#1156).
+vesper-lint = { path = "crates/vesper-lint/seed", package = "vesper-lint-seed" }
 vesper-doc = { path = "crates/vesper-doc" }
+vesper-test = { path = "crates/vesper-test" }
 # The compiler links the frozen Rust seed copy, never the port-backed package
 # (seed-copy rule, docs/maintenance/porting-a-crate.md).
 vesper-beacon = { path = "crates/vesper-beacon/seed", package = "vesper-beacon-seed" }
@@ -339,6 +357,8 @@ wit-parser = "=0.261.0"
 vesper-aegis = { path = "crates/vesper-aegis/seed", package = "vesper-aegis-seed" }
 vesper-bench = { path = "crates/vesper-bench/seed", package = "vesper-bench-seed" }
 vesper-nexus = { path = "crates/vesper-nexus" }
+# HostCall drives the JIT-compiled front end v2 in tests/self_host_front_v2.rs (#1147).
+vesper-port-abi = { path = "crates/vesper-port-abi" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 

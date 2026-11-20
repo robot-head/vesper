@@ -992,6 +992,9 @@ pub fn parse(source: &str, limits: Limits) -> Result<MacroSource, Error> {
     while p.kind() != K::Eof {
         if p.word("macro") {
             p.push_def()?;
+        } else if p.word("test") && p.tokens[p.significant[p.pos + 1]].kind == K::LBrace {
+            // Test blocks are inactive during ordinary macro expansion.
+            p.pos = p.matching(p.pos + 1)? + 1;
         } else {
             match p.kind() {
                 K::Fn => p.function()?,

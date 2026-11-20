@@ -32,6 +32,62 @@ use core::cmp::Ordering;
 
 #[cfg(not(vesper_port))]
 const MAX_BYTES: usize = 16 * 1024 * 1024;
+/// ITU-T X.690 (BER/DER) identifier and length octets.
+#[cfg_attr(vesper_port, allow(dead_code))]
+mod x690 {
+    /// Bits 8-7 of the identifier octet: the tag class (§8.1.2.2).
+    pub const CLASS_SHIFT: u32 = 6;
+    /// Bit 6: constructed encoding (§8.1.2.5).
+    pub const CONSTRUCTED: u8 = 0x20;
+    /// Bits 5-1: the tag number, or `HIGH_TAG` for the high-tag-number form
+    /// (§8.1.2.4).
+    pub const TAG_NUMBER_MASK: u8 = 0x1f;
+    pub const HIGH_TAG: u64 = 31;
+    /// Base-128 subidentifiers and high tag numbers: bit 8 says more follow.
+    pub const MORE: u8 = 0x80;
+    pub const SEVEN_BITS: u8 = 0x7f;
+    pub const BASE128: u64 = 128;
+    /// Lengths below `LONG_FORM` use the short form; a long form's first
+    /// octet is `LONG_FORM | count` (§8.1.3.4, §8.1.3.5).
+    pub const LONG_FORM: u8 = 0x80;
+    /// DER encodes TRUE as all ones (X.690 §11.1).
+    pub const TRUE: u8 = 0xff;
+    /// A BIT STRING's initial octet counts at most seven unused bits.
+    pub const MAX_UNUSED_BITS: u8 = 7;
+    /// Universal tag numbers (X.680 §8.6).
+    pub const BOOLEAN: u64 = 1;
+    pub const INTEGER: u64 = 2;
+    pub const BIT_STRING: u64 = 3;
+    pub const OCTET_STRING: u64 = 4;
+    pub const NULL: u64 = 5;
+    pub const OBJECT_IDENTIFIER: u64 = 6;
+    pub const UTF8_STRING: u64 = 12;
+    pub const SEQUENCE: u64 = 16;
+    pub const SET: u64 = 17;
+    pub const PRINTABLE_STRING: u64 = 19;
+    pub const IA5_STRING: u64 = 22;
+    /// The most base-128 octets a high tag number may use here (fits `u64`).
+    pub const MAX_TAG_OCTETS: usize = 10;
+    /// Two's-complement INTEGER contents: the sign bit of an octet, and the
+    /// octet a negative value's redundant leading octet would be (§8.3.2).
+    pub const SIGN_BIT: u8 = 0x80;
+    pub const ALL_ONES: u8 = 0xff;
+}
+use x690::*;
+
+/// Ceilings [`Limits`] may not exceed.
+#[cfg(not(vesper_port))]
+const MAX_NODES: usize = 16384;
+#[cfg(not(vesper_port))]
+const MAX_SCHEMA_NODES: usize = 4096;
+#[cfg(not(vesper_port))]
+const MAX_DEPTH: usize = 64;
+#[cfg(not(vesper_port))]
+const MAX_WORK: usize = 128 * 1024 * 1024;
+#[cfg(not(vesper_port))]
+const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
+#[cfg(not(vesper_port))]
+const MAX_INTERMEDIATE_BYTES: usize = 64 * 1024 * 1024;
 const ENCODE_METADATA: usize =
     2 * core::mem::size_of::<Vec<u8>>() + 2 * core::mem::size_of::<usize>();
 #[derive(Clone, Copy, Debug)]
@@ -67,12 +123,12 @@ impl Limits {
         if self.max_input_bytes > MAX_BYTES
             || self.max_value_bytes > MAX_BYTES
             || self.max_output_bytes > MAX_BYTES
-            || self.max_nodes > 16384
-            || self.max_schema_nodes > 4096
-            || self.max_depth > 64
-            || self.max_work > 128 * 1024 * 1024
-            || self.max_metadata_bytes > 4 * 1024 * 1024
-            || self.max_intermediate_bytes > 64 * 1024 * 1024
+            || self.max_nodes > MAX_NODES
+            || self.max_schema_nodes > MAX_SCHEMA_NODES
+            || self.max_depth > MAX_DEPTH
+            || self.max_work > MAX_WORK
+            || self.max_metadata_bytes > MAX_METADATA_BYTES
+            || self.max_intermediate_bytes > MAX_INTERMEDIATE_BYTES
         {
             return Err(error(ErrorKind::InvalidLimits, 0));
         }
@@ -237,20 +293,22 @@ pub enum Kind {
     SetOf,
 }
 impl Kind {
+    /// The identifier octet (universal class, so bits 8-7 are zero).
     fn tag(self) -> u8 {
-        match self {
-            Self::Boolean => 1,
-            Self::Integer => 2,
-            Self::BitString => 3,
-            Self::OctetString => 4,
-            Self::Null => 5,
-            Self::ObjectIdentifier => 6,
-            Self::Utf8String => 12,
-            Self::Ia5String => 22,
-            Self::PrintableString => 19,
-            Self::Sequence => 0x30,
-            Self::SetOf => 0x31,
-        }
+        let number = match self {
+            Self::Boolean => BOOLEAN,
+            Self::Integer => INTEGER,
+            Self::BitString => BIT_STRING,
+            Self::OctetString => OCTET_STRING,
+            Self::Null => NULL,
+            Self::ObjectIdentifier => OBJECT_IDENTIFIER,
+            Self::Utf8String => UTF8_STRING,
+            Self::Ia5String => IA5_STRING,
+            Self::PrintableString => PRINTABLE_STRING,
+            Self::Sequence => return CONSTRUCTED | SEQUENCE as u8,
+            Self::SetOf => return CONSTRUCTED | SET as u8,
+        };
+        number as u8
     }
 }
 #[cfg(not(vesper_port))]
@@ -331,7 +389,7 @@ impl<'d, 'a> Node<'d, 'a> {
         }
     }
     pub fn boolean(self) -> Option<bool> {
-        (self.kind() == Kind::Boolean).then(|| self.content()[0] == 0xff)
+        (self.kind() == Kind::Boolean).then(|| self.content()[0] == TRUE)
     }
     pub fn integer_bytes(self) -> Option<&'a [u8]> {
         (self.kind() == Kind::Integer).then(|| self.content())
@@ -344,7 +402,7 @@ impl<'d, 'a> Node<'d, 'a> {
         if bytes.len() > 8 {
             return Err(error(ErrorKind::Overflow, 0));
         }
-        let mut value = if bytes[0] & 0x80 != 0 { -1_i64 } else { 0 };
+        let mut value = if bytes[0] & SIGN_BIT != 0 { -1_i64 } else { 0 };
         for byte in bytes {
             value = (value << 8) | i64::from(*byte);
         }
@@ -418,38 +476,38 @@ fn header(
 ) -> Result<(Kind, usize, usize)> {
     let mut pos = start;
     let first = byte(input, &mut pos, end, meter)?;
-    let class = first >> 6;
-    let constructed = first & 0x20 != 0;
-    let mut number = u64::from(first & 31);
-    if number == 31 {
+    let class = first >> CLASS_SHIFT;
+    let constructed = first & CONSTRUCTED != 0;
+    let mut number = u64::from(first & TAG_NUMBER_MASK);
+    if number == HIGH_TAG {
         number = 0;
         let mut count = 0;
         loop {
             let b = byte(input, &mut pos, end, meter)?;
-            if count == 0 && b & 127 == 0 {
+            if count == 0 && b & SEVEN_BITS == 0 {
                 return Err(error(ErrorKind::NonCanonicalTag, pos - 1));
             }
             number = number
-                .checked_mul(128)
-                .and_then(|n| n.checked_add(u64::from(b & 127)))
+                .checked_mul(BASE128)
+                .and_then(|n| n.checked_add(u64::from(b & SEVEN_BITS)))
                 .ok_or(error(ErrorKind::Overflow, pos - 1))?;
             count += 1;
-            if b & 128 == 0 {
+            if b & MORE == 0 {
                 break;
             }
-            if count >= 10 {
+            if count >= MAX_TAG_OCTETS {
                 return Err(error(ErrorKind::Overflow, pos - 1));
             }
         }
-        if number < 31 {
+        if number < HIGH_TAG {
             return Err(error(ErrorKind::NonCanonicalTag, start));
         }
     }
     let length = byte(input, &mut pos, end, meter)?;
-    let len = if length < 128 {
+    let len = if length < LONG_FORM {
         usize::from(length)
     } else {
-        let count = usize::from(length & 127);
+        let count = usize::from(length & SEVEN_BITS);
         if count == 0 {
             return Err(error(ErrorKind::IndefiniteLength, pos - 1));
         }
@@ -463,11 +521,11 @@ fn header(
                 return Err(error(ErrorKind::NonCanonicalLength, pos - 1));
             }
             len = len
-                .checked_mul(256)
+                .checked_mul(1 << u8::BITS)
                 .and_then(|n| n.checked_add(usize::from(b)))
                 .ok_or(error(ErrorKind::Overflow, pos - 1))?;
         }
-        if len < 128 {
+        if len < usize::from(LONG_FORM) {
             return Err(error(ErrorKind::NonCanonicalLength, start));
         }
         len
@@ -484,17 +542,17 @@ fn header(
         return Err(error(ErrorKind::EndOfContents, start));
     }
     let kind = match number {
-        1 => Kind::Boolean,
-        2 => Kind::Integer,
-        3 => Kind::BitString,
-        4 => Kind::OctetString,
-        5 => Kind::Null,
-        6 => Kind::ObjectIdentifier,
-        12 => Kind::Utf8String,
-        19 => Kind::PrintableString,
-        22 => Kind::Ia5String,
-        16 => Kind::Sequence,
-        17 => Kind::SetOf,
+        BOOLEAN => Kind::Boolean,
+        INTEGER => Kind::Integer,
+        BIT_STRING => Kind::BitString,
+        OCTET_STRING => Kind::OctetString,
+        NULL => Kind::Null,
+        OBJECT_IDENTIFIER => Kind::ObjectIdentifier,
+        UTF8_STRING => Kind::Utf8String,
+        PRINTABLE_STRING => Kind::PrintableString,
+        IA5_STRING => Kind::Ia5String,
+        SEQUENCE => Kind::Sequence,
+        SET => Kind::SetOf,
         _ => return Err(error(ErrorKind::UnsupportedTag { class, number }, start)),
     };
     if constructed != matches!(kind, Kind::Sequence | Kind::SetOf) {
@@ -511,16 +569,16 @@ fn primitive(kind: Kind, content: &[u8], offset: usize, meter: &mut Meter) -> Re
         ErrorKind::ValueLimit,
     )?;
     let invalid = match kind {
-        Kind::Boolean => content.len() != 1 || !matches!(content[0], 0 | 0xff),
+        Kind::Boolean => content.len() != 1 || !matches!(content[0], 0 | TRUE),
         Kind::Integer => {
             content.is_empty()
                 || content.len() > 1
-                    && ((content[0] == 0 && content[1] & 0x80 == 0)
-                        || (content[0] == 0xff && content[1] & 0x80 != 0))
+                    && ((content[0] == 0 && content[1] & SIGN_BIT == 0)
+                        || (content[0] == ALL_ONES && content[1] & SIGN_BIT != 0))
         }
         Kind::BitString => {
             content.is_empty()
-                || content[0] > 7
+                || content[0] > MAX_UNUSED_BITS
                 || (content.len() == 1 && content[0] != 0)
                 || (content.len() > 1
                     && content[content.len() - 1] & ((1u8 << content[0]) - 1) != 0)
@@ -539,14 +597,14 @@ fn primitive(kind: Kind, content: &[u8], offset: usize, meter: &mut Meter) -> Re
                 let mut value = 0u64;
                 let mut first = true;
                 for (i, b) in content.iter().copied().enumerate() {
-                    if first && b == 0x80 {
+                    if first && b == MORE {
                         return Err(error(ErrorKind::ObjectIdentifier, offset + i));
                     }
                     value = value
-                        .checked_mul(128)
-                        .and_then(|n| n.checked_add(u64::from(b & 127)))
+                        .checked_mul(BASE128)
+                        .and_then(|n| n.checked_add(u64::from(b & SEVEN_BITS)))
                         .ok_or(error(ErrorKind::Overflow, offset + i))?;
-                    if b & 0x80 == 0 {
+                    if b & MORE == 0 {
                         value = 0;
                         first = true;
                     } else {
@@ -775,7 +833,7 @@ impl Value<'_> {
 }
 #[cfg(not(vesper_port))]
 fn length_octets(len: usize) -> usize {
-    if len < 128 {
+    if len < usize::from(LONG_FORM) {
         1
     } else {
         1 + (usize::BITS - len.leading_zeros()).div_ceil(8) as usize
@@ -922,11 +980,11 @@ fn reserve<T>(count: usize) -> Result<Vec<T>> {
 #[cfg(not(vesper_port))]
 fn push_header(out: &mut Vec<u8>, kind: Kind, len: usize) {
     out.push(kind.tag());
-    if len < 128 {
+    if len < usize::from(LONG_FORM) {
         out.push(len as u8);
     } else {
         let count = length_octets(len) - 1;
-        out.push(0x80 | count as u8);
+        out.push(LONG_FORM | count as u8);
         for i in (0..count).rev() {
             out.push((len >> (i * 8)) as u8);
         }
@@ -966,7 +1024,7 @@ fn build(value: &Value<'_>) -> Result<Vec<u8>> {
     let mut out = reserve(tlv_size(content)?)?;
     push_header(&mut out, kind, content);
     match value {
-        Value::Boolean(b) => out.push(if *b { 0xff } else { 0 }),
+        Value::Boolean(b) => out.push(if *b { TRUE } else { 0 }),
         Value::Integer(b) | Value::ObjectIdentifier(b) | Value::OctetString(b) => {
             out.extend_from_slice(b)
         }

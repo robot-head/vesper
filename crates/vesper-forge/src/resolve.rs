@@ -13,10 +13,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ForgeError;
-use crate::host::{ExpansionRecord, HygieneHost, InvocationSite, check_delimiters};
+#[cfg(not(vesper_port))]
+use crate::host::check_delimiters;
+use crate::host::{ExpansionRecord, HygieneHost, InvocationSite};
 use crate::identity::{BinderId, ExpansionId, ScopeId, ScopeSet, Symbol};
 use crate::registry::{DefId, DefKind};
-use crate::syntax::{Path, Term, parse};
+#[cfg(not(vesper_port))]
+use crate::syntax::parse;
+use crate::syntax::{Path, Term};
 use crate::token::{HostToken, Origin};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -105,8 +109,13 @@ impl HygieneHost {
         for t in &tokens {
             self.validate_token(t)?;
         }
-        check_delimiters(&tokens, self.quote_limits.max_depth)?;
-        let term = parse(self, &tokens)?;
+        #[cfg(vesper_port)]
+        let term = crate::port::check_and_parse(self, &tokens)?;
+        #[cfg(not(vesper_port))]
+        let term = {
+            check_delimiters(&tokens, self.quote_limits.max_depth)?;
+            parse(self, &tokens)?
+        };
         self.resolve_preparsed(tokens, term)
     }
 
@@ -130,6 +139,10 @@ impl HygieneHost {
         for t in &tokens {
             self.validate_token(t)?;
         }
+        // The Vesper build checks the delimiters in its resolver kernel
+        // (collecting the expansions below cannot fail on validated
+        // tokens, so the order of errors is the same).
+        #[cfg(not(vesper_port))]
         check_delimiters(&tokens, self.quote_limits.max_depth)?;
         let mut expansions = BTreeMap::new();
         for t in &tokens {
@@ -151,23 +164,27 @@ impl HygieneHost {
                 }
             }
         }
-        let mut r = Resolver {
-            host: self,
-            tokens: &tokens,
-            locals: Vec::new(),
-            binders: Vec::new(),
-            references: Vec::new(),
-            operations: Vec::new(),
-            aliases: HashMap::new(),
-        };
-        let ctx = r.parameters(parameters)?;
-        r.term(&term, &ctx)?;
-        let Resolver {
+        #[cfg(vesper_port)]
+        let crate::port::Resolved {
             binders,
             references,
             operations,
-            ..
-        } = r;
+        } = crate::port::check_and_resolve(self, &tokens, &term, parameters)?;
+        #[cfg(not(vesper_port))]
+        let (binders, references, operations) = {
+            let mut r = Resolver {
+                host: self,
+                tokens: &tokens,
+                locals: Vec::new(),
+                binders: Vec::new(),
+                references: Vec::new(),
+                operations: Vec::new(),
+                aliases: HashMap::new(),
+            };
+            let ctx = r.parameters(parameters)?;
+            r.term(&term, &ctx)?;
+            (r.binders, r.references, r.operations)
+        };
         Ok(ResolvedFragment {
             tokens,
             term,

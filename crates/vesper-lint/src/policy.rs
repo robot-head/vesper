@@ -173,6 +173,12 @@ impl Policy {
     /// Parse the complete TOML document only after lexical/shape/work preflight.
     /// Duplicate decoded keys are rejected by the actual TOML parser.
     pub fn parse(source: &str, limits: PolicyLimits) -> Result<Self, PolicyError> {
+        // The port reads every document except one with serde's private
+        // datetime marker as the first key of a table.
+        #[cfg(vesper_port)]
+        if let Some(result) = crate::port::policy_parse(source, limits) {
+            return result;
+        }
         limits.validate()?;
         let mut budget = Budget::new(limits);
         let tokens = preflight(source, &mut budget)?;
@@ -228,6 +234,19 @@ impl Policy {
             work: budget.work,
         };
         Ok(policy)
+    }
+    /// A policy from the port's result (`cfg(vesper_port)`).
+    #[cfg(vesper_port)]
+    pub(crate) fn from_parts(
+        levels: Vec<(LintName, Severity)>,
+        configured: Vec<LintName>,
+        usage: PolicyUsage,
+    ) -> Self {
+        Self {
+            levels: levels.into_iter().collect(),
+            configured: configured.into_iter().collect(),
+            usage,
+        }
     }
     pub fn severity(&self, name: LintName) -> Option<Severity> {
         self.levels.get(&name).copied()

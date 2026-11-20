@@ -13,5 +13,7 @@ wasmtime = { version = "50", default-features = false, features = ["cranelift", 
 wit-parser = { version = "=0.261.0", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-vesper-fmt = { path = "../vesper-fmt" }
+# The Rust seed copy: the root package links nexus, and the port-backed
+# vesper-fmt builds its object with //:bin/vesper (a Bazel cycle, #1154).
+vesper-fmt = { path = "../vesper-fmt/seed", package = "vesper-fmt-seed" }
 vesper-syntax = { path = "../vesper-syntax" }

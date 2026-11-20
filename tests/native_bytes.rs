@@ -9,6 +9,7 @@ use std::{
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
+use vesper::seq::SeqOp;
 use vesper::{check, ir, ir_check, ir_opt, native, parser, runtime::Runtime};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -77,6 +78,34 @@ fn hoisted(source: &str) -> (ir::Program, usize) {
     vesper::fip::elaborate_non_fip_drops(&c.world, &mut program);
     let n = vesper::bounds_hoist::run(&mut program);
     (program, n)
+}
+
+fn count(program: &ir::Program, function: &str, pick: impl Fn(&SeqOp) -> bool) -> usize {
+    program.functions[function]
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter(|i| matches!(&i.op, ir::Op::Seq { op, .. } if pick(op)))
+        .count()
+}
+
+/// Accesses a guard or a dominating comparison made unchecked.
+fn unchecked(program: &ir::Program, function: &str) -> usize {
+    count(program, function, |op| matches!(op, SeqOp::Hoisted(_)))
+}
+
+fn checked(program: &ir::Program, function: &str) -> usize {
+    count(program, function, |op| {
+        matches!(
+            op,
+            SeqOp::Get
+                | SeqOp::Set
+                | SeqOp::SliceGet
+                | SeqOp::SliceSet
+                | SeqOp::TryGet
+                | SeqOp::TrySet
+        )
+    })
 }
 
 /// Runs `main` in the evaluator, both JIT configurations and (where a C
@@ -221,8 +250,12 @@ fn run() -> u64 eff [Fail[RuntimeError]] {
     pairs(in s.as_slice())
 }",
     );
-    let (program, n) = hoisted(&source);
-    assert!(n >= 3, "scale, the set loop and pairs are versioned: {n}");
+    // `scale` and the set loop are versioned; `pairs` reads below
+    // `s.len()`, which its loop comparisons prove with no guard.
+    let (program, _) = hoisted(&source);
+    for f in ["scale", "pairs", "run"] {
+        assert!(unchecked(&program, f) >= 1, "{f}: unchecked accesses");
+    }
     assert!(ir_check::evidence(&program).is_empty());
     let s: Vec<u64> = (0..30).map(|i| i * 3 * 5 + 1).collect();
     let mut expected: u64 = 0;
@@ -268,8 +301,12 @@ fn run() -> u64 eff [Fail[RuntimeError]] {
     acc
 }",
     );
-    let (program, n) = hoisted(&source);
-    assert!(n >= 2, "copy_into and the final sum are versioned: {n}");
+    // `copy_into` is versioned; the final sum's `i < d.len()` proves its
+    // reads with no guard.
+    let (program, _) = hoisted(&source);
+    for f in ["copy_into", "run"] {
+        assert!(unchecked(&program, f) >= 1, "{f}: unchecked accesses");
+    }
     assert!(ir_check::evidence(&program).is_empty());
     let s: Vec<u64> = (0..40).map(|i| i * 3).collect();
     let mut d = vec![1u64; 30];
@@ -349,7 +386,17 @@ fn resizing_loops_are_not_versioned() {
             )
         })
         .count();
-    assert_eq!(guards, 1, "only the read-only loop is versioned");
+    // The read-only loop's `i < s.len()` proves its read without a guard,
+    // so a guard would mean the pushing loop was versioned.
+    assert_eq!(guards, 0, "the pushing loop is not versioned");
+    assert!(
+        checked(&program, "run") >= 1,
+        "the pushing loop stays checked"
+    );
+    assert!(
+        unchecked(&program, "run") >= 1,
+        "the read-only loop is unchecked"
+    );
     let expected: u64 = 2 * (0..10).map(|i| i * 3).sum::<u64>();
     assert_eq!(differential("hoist_resize", &source), expected.to_string());
 }

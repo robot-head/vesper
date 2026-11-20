@@ -79,7 +79,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.seq_reserve(h, needed, 1, None)?;
         let data = self.str_word(h, DATA);
         let dst = self.b.ins().iadd(data, len);
-        self.seq_copy(dst, src, n);
+        self.seq_copy_run(dst, src, n);
         self.b.ins().store(MemFlags::new(), needed, h, LEN);
         Ok(())
     }

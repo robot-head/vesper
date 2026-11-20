@@ -46,9 +46,9 @@ fn seq_field_offsets(world: &World, layout: &Layout, base: i32, out: &mut Vec<i3
         return false;
     };
     for f in fields {
-        if seq::is_seq_type(&f.ty) {
+        if seq::is_seq_type(&f.ty) || crate::strings::is_string_type(&f.ty) {
             out.push(base + f.offset);
-        } else if !seq::holds_sequence(world, &f.ty) {
+        } else if !seq::holds_sequence(world, &f.ty) && !crate::fip::needs_drop(world, &f.ty) {
             continue;
         } else if seq::is_slice_type(&f.ty)
             || !seq_field_offsets(world, &f.layout, base + f.offset, out)
@@ -185,6 +185,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             .cloned()
     }
 
+    /// The kind of the drop slot that local `name` names, if it has one.
+    pub(super) fn seq_drop_slot_kind(&self, name: &str) -> Option<crate::fip::SeqDrop> {
+        self.seq_drop_slot(name).map(|s| s.kind)
+    }
+
     /// Frees what drop `slot` holds now: a sequence with the elements still
     /// in it, a string's buffer, or what an owned aggregate holds.
     fn seq_drop_free(&mut self, slot: &SeqDropSlot) -> Result<(), String> {
@@ -221,6 +226,28 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.seq_drop_free(slot)?;
         }
         Ok(())
+    }
+
+    /// A field moved out of an owned aggregate slot (`r.found` by value):
+    /// the read copied it out, so its bytes in the slot are zeroed and the
+    /// slot's drop frees only the fields still in it (§13). `ptr` is the
+    /// address of the moved field; `ty` its type.
+    pub(super) fn seq_drop_field_moved(&mut self, root: &str, ptr: ir::Value, ty: &Type) {
+        let Some(slot) = self.seq_drop_slot(root) else {
+            return;
+        };
+        if !matches!(
+            slot.kind,
+            crate::fip::SeqDrop::Owned | crate::fip::SeqDrop::Fields
+        ) {
+            return;
+        }
+        let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+        let size = Layout::of(self.world, &ty).map_or(0, |l| l.size);
+        for offset in (0..size).step_by(8) {
+            let zero = self.zero();
+            self.seq_set_word(ptr, offset as i32, zero);
+        }
     }
 
     /// A sequence or owned aggregate moved out of local `name` leaves its
@@ -391,12 +418,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut words = vec![];
         let (receiver, handle) = if seq::is_slice_type(ty) {
             let view = self.address(&e)?;
+            let view = self.hoisted_receiver(view);
             for offset in [0, 8, 16] {
                 words.push(((view, offset), self.seq_word(view, offset)));
             }
             (view, words[0].1)
         } else {
             let handle = self.expr(&e)?;
+            let handle = self.hoisted_receiver(handle);
             (handle, handle)
         };
         for offset in [LEN, DATA] {
@@ -406,6 +435,20 @@ impl<M: Module> Codegen<'_, '_, M> {
             t.header_words.extend(words);
         }
         Ok(receiver)
+    }
+
+    /// A copy of `value` only the loop's hoisted reads use, so the header
+    /// words cached under it are found only where the preheader dominates
+    /// (#1151). Frontend variables can return the same value in blocks the
+    /// preheader does not dominate once their blocks are sealed early.
+    fn hoisted_receiver(&mut self, value: ir::Value) -> ir::Value {
+        let copy = self.b.ins().iadd_imm(value, 0);
+        let info = self.info(value);
+        self.write_info(copy, info);
+        if self.invariant_headers.contains(&value) {
+            self.invariant_headers.insert(copy);
+        }
+        copy
     }
 
     fn seq_set_word(&mut self, ptr: ir::Value, offset: i32, value: ir::Value) {
@@ -779,7 +822,37 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let (h, start, len) = self.seq_view(arg(0)?, &arg_types[0]);
                 let i = arg(1)?;
                 let valid = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
-                if op == SeqOp::TrySet {
+                let plain_word = op == SeqOp::TrySet
+                    && self.operands_only
+                    && !Layout::of(self.world, &elem)?.aggregate()
+                    && !(self.drops_enabled() && crate::fip::elem_needs_drop(self.world, &elem));
+                if plain_word {
+                    // Optimized code stores a plain word without a branch
+                    // (#1151): an index past the end writes a private slot
+                    // instead. Cranelift places a pure value at its first
+                    // use, so behind a branch each stored value was built
+                    // inside its store block, where the next store could not
+                    // reuse it, and straight-line code that stores values
+                    // sharing work recomputed all of it for every store.
+                    let slot = match self.discard_slot {
+                        Some(slot) => slot,
+                        None => {
+                            let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+                                ir::StackSlotKind::ExplicitSlot,
+                                16,
+                                3,
+                            ));
+                            self.discard_slot = Some(slot);
+                            slot
+                        }
+                    };
+                    let ptr = self.m.target_config().pointer_type();
+                    let discard = self.b.ins().stack_addr(ptr, slot, 0);
+                    let addr = self.seq_elem_addr(h, start, i, stride);
+                    let target = self.b.ins().select(valid, addr, discard);
+                    self.seq_store_elem(target, arg(2)?, &elem)?;
+                    self.b.ins().uextend(types::I64, valid)
+                } else if op == SeqOp::TrySet {
                     let yes = self.b.create_block();
                     let no = self.b.create_block();
                     let done = self.b.create_block();

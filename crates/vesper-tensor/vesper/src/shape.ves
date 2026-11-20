@@ -19,8 +19,10 @@ use self::num::{
     u64_zero
 };
 
+const U64_MAX: u64 = 18446744073709551615;
+
 fn max_u64() -> u64 {
-    18446744073709551615
+    U64_MAX
 }
 
 // Whether `a * b` fits in `u64`.

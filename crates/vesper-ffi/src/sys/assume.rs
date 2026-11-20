@@ -213,6 +213,9 @@ impl FunctionDescriptor {
                     (NoCaptureViaReturn, AfterReturn),
                     (NoRetention, Unverifiable),
                 ],
+                // The callee reads a fresh NUL-terminated copy, never the
+                // caller's memory.
+                ParameterType::CStr => &[(NonNull, BeforeCall), (NoRetention, Unverifiable)],
             };
             for (assumption, checkability) in list {
                 if *assumption == NoCaptureViaReturn && !returns_pointer {
@@ -231,7 +234,8 @@ impl FunctionDescriptor {
             | ValueType::Scalar(_)
             | ValueType::Bool
             | ValueType::Enum(_)
-            | ValueType::Handle { .. } => out.push(DeclaredAssumption {
+            | ValueType::Handle { .. }
+            | ValueType::NonNullHandle { .. } => out.push(DeclaredAssumption {
                 position: Position::Return,
                 parameter: None,
                 assumption: ValidBits,
@@ -299,7 +303,9 @@ impl FunctionDescriptor {
             let assumption = match p.ty {
                 ParameterType::Slice { .. } => Assumption::WithinLength,
                 ParameterType::Pointer { .. } => Assumption::SingleElement,
-                ParameterType::Value(_) | ParameterType::Handle { .. } => continue,
+                ParameterType::Value(_) | ParameterType::Handle { .. } | ParameterType::CStr => {
+                    continue;
+                }
             };
             let borrowed = borrows.iter().any(|b| b.argument == i);
             let mut mine = guards.iter().filter(|g| g.argument == i);
@@ -344,7 +350,10 @@ impl FunctionDescriptor {
         };
         let returns_pointer = matches!(self.result, ValueType::Address { .. });
         for (i, p) in self.parameters.iter().enumerate() {
-            if matches!(p.ty, ParameterType::Value(_) | ParameterType::Handle { .. }) {
+            if matches!(
+                p.ty,
+                ParameterType::Value(_) | ParameterType::Handle { .. } | ParameterType::CStr
+            ) {
                 continue;
             }
             if returns_pointer {
@@ -410,6 +419,18 @@ impl FunctionDescriptor {
                         match validate(t, *bits) {
                             Ok(_) => Outcome::Held,
                             Err(e) => Outcome::Violated(e),
+                        },
+                    );
+                }
+                (ParameterType::CStr, RawArgument::Pointer { address }) => {
+                    report.push(
+                        at,
+                        name,
+                        NonNull,
+                        if *address == 0 {
+                            Outcome::Violated(ValidationError::NullAddress)
+                        } else {
+                            Outcome::Held
                         },
                     );
                 }

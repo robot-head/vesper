@@ -1,0 +1,70 @@
+[package]
+name = "vesper-forge-seed"
+version = "0.1.0"
+edition = "2024"
+description = "Frozen Rust seed copy of vesper-forge for the compiler's own dependency closure"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; self-hosting SH1 lane 14,
+# #1157): the compiler links this package, the Rust build of ../src, under
+# the library name `vesper_forge`. Crates inside
+# `cargo tree -p vesper -e normal,build` depend on it with
+# `vesper-forge = { path = ".../seed", package = "vesper-forge-seed" }`;
+# every other crate uses the package `vesper-forge`. The Rust code takes bug
+# fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_forge"
+path = "../src/lib.rs"
+
+[features]
+default = ["sandbox-transport"]
+sandbox-transport = ["dep:vesper-loom-sandbox"]
+
+[dependencies]
+vesper-syntax = { path = "../../vesper-syntax" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+vesper-loom-sandbox = { path = "../../vesper-loom-sandbox", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[test]]
+name = "authority"
+path = "../tests/authority.rs"
+
+[[test]]
+name = "fragment"
+path = "../tests/fragment.rs"
+
+[[test]]
+name = "hygiene"
+path = "../tests/hygiene.rs"
+
+[[test]]
+name = "sandbox_execution"
+path = "../tests/sandbox_execution.rs"
+
+[[test]]
+name = "transport"
+path = "../tests/transport.rs"
+
+[[test]]
+name = "typed_function_parameters"
+path = "../tests/typed_function_parameters.rs"
+
+[[test]]
+name = "typed_quote"
+path = "../tests/typed_quote.rs"
+
+[[test]]
+name = "typed_tuple"
+path = "../tests/typed_tuple.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

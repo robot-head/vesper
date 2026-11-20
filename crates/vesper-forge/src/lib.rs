@@ -34,15 +34,35 @@ mod error;
 mod host;
 mod identity;
 mod lex;
+#[cfg(vesper_port)]
+mod port;
 #[cfg(feature = "sandbox-transport")]
 pub mod quote_transport;
 mod registry;
+// The Vesper build runs the delimiter check, the parser and the resolver
+// in its kernels (src/port.rs); the Rust code stays for the seed build.
+#[cfg_attr(vesper_port, allow(dead_code))]
 mod resolve;
+#[cfg_attr(vesper_port, allow(dead_code))]
 pub mod syntax;
 mod token;
 #[cfg(feature = "sandbox-transport")]
 pub mod transport;
 pub mod typed_quote;
+
+/// Which build of the hygiene core this crate is: `"rust"`, or
+/// `"vesper"` for the port-backed build (`vesper-port`, SH1 lane 14, #1157).
+#[cfg(not(vesper_port))]
+pub const IMPLEMENTATION: &str = "rust";
+#[cfg(vesper_port)]
+pub use port::IMPLEMENTATION;
+
+/// Live sequence allocations of the Vesper library (for leak tests).
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::live_allocations()
+}
 
 pub use authority::{
     AUTHORITY_SCHEMA_VERSION, AcceptedExpansion, Authority, AuthorityArg, AuthorityAudit,

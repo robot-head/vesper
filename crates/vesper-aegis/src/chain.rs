@@ -87,11 +87,37 @@ pub enum Curve {
     P384,
 }
 
+/// Scalar (and coordinate) sizes of the NIST curves (SEC 2).
+const P256_SCALAR_LEN: usize = 32;
+const P384_SCALAR_LEN: usize = 48;
+/// SEC 1 §2.3.3: an uncompressed point starts with `0x04`.
+pub(crate) const SEC1_UNCOMPRESSED: u8 = 0x04;
+/// X.509 `TBSCertificate` field positions after the optional `[0]
+/// version` (RFC 5280 §4.1): serialNumber 0, signature 1, issuer 2,
+/// validity 3, subject 4, subjectPublicKeyInfo 5.
+const TBS_ISSUER: usize = 2;
+const TBS_SUBJECT: usize = 4;
+const TBS_SPKI: usize = 5;
+
+/// The DER (ITU-T X.690) bytes `tlv` and `RawCert::parse` read: identifier
+/// octets, the short and long length forms (this reader takes at most four
+/// length octets).
+mod der {
+    pub(super) const BIT_STRING: u8 = 0x03;
+    pub(super) const SEQUENCE: u8 = 0x30;
+    pub(super) const CONTEXT_0: u8 = 0xa0;
+    pub(super) const LONG_FORM: u8 = 0x80;
+    pub(super) const LENGTH_OCTETS_MASK: u8 = 0x7f;
+    pub(super) const MAX_LENGTH_OCTETS: usize = 4;
+    /// A tag octet and a short-form length octet.
+    pub(super) const SHORT_HEADER: usize = 2;
+}
+
 impl Curve {
     pub fn scalar_len(self) -> usize {
         match self {
-            Curve::P256 => 32,
-            Curve::P384 => 48,
+            Curve::P256 => P256_SCALAR_LEN,
+            Curve::P384 => P384_SCALAR_LEN,
         }
     }
 
@@ -120,14 +146,14 @@ impl EcPublicKey {
             });
         }
         let mut sec1 = Vec::with_capacity(xy.len() + 1);
-        sec1.push(4);
+        sec1.push(SEC1_UNCOMPRESSED);
         sec1.extend_from_slice(xy);
         Ok(EcPublicKey { curve, sec1 })
     }
 
     /// Build from an uncompressed SEC1 point (as in CCA realm tokens).
     pub fn from_sec1(curve: Curve, sec1: &[u8]) -> Result<Self, AttestError> {
-        if sec1.len() != 1 + 2 * curve.scalar_len() || sec1[0] != 4 {
+        if sec1.len() != 1 + 2 * curve.scalar_len() || sec1[0] != SEC1_UNCOMPRESSED {
             return Err(AttestError::UnexpectedKeyType {
                 what: "uncompressed SEC1 point",
             });
@@ -369,7 +395,7 @@ impl<'a> RawCert<'a> {
         let (tbs, body) = tlv(body).ok_or_else(|| bad("tbs"))?;
         let (signature_alg, body) = tlv(body).ok_or_else(|| bad("signatureAlgorithm"))?;
         let (sig, body) = tlv(body).ok_or_else(|| bad("signatureValue"))?;
-        if !body.is_empty() || sig[0] != 0x03 {
+        if !body.is_empty() || sig[0] != der::BIT_STRING {
             return Err(bad("signatureValue"));
         }
         let sig = contents(sig).ok_or_else(|| bad("signatureValue"))?;
@@ -385,17 +411,17 @@ impl<'a> RawCert<'a> {
             t = rest;
         }
         // [0] version present (v3) shifts the fixed fields by one.
-        let o = usize::from(fields.first().is_some_and(|f| f[0] == 0xa0));
+        let o = usize::from(fields.first().is_some_and(|f| f[0] == der::CONTEXT_0));
         let field = |i: usize| fields.get(o + i).copied().ok_or_else(|| bad("tbs field"));
-        let spki = field(5)?;
+        let spki = field(TBS_SPKI)?;
         let (spki_alg, _) =
             tlv(contents(spki).ok_or_else(|| bad("spki"))?).ok_or_else(|| bad("spki"))?;
         Ok(RawCert {
             tbs,
             signature_alg,
             signature,
-            issuer: field(2)?,
-            subject: field(4)?,
+            issuer: field(TBS_ISSUER)?,
+            subject: field(TBS_SUBJECT)?,
             spki,
             spki_alg,
         })
@@ -405,18 +431,18 @@ impl<'a> RawCert<'a> {
 /// Split one DER TLV (definite length, single-byte tag) off `b`.
 fn tlv(b: &[u8]) -> Option<(&[u8], &[u8])> {
     let first_len = *b.get(1)?;
-    let (len, header) = if first_len < 0x80 {
-        (usize::from(first_len), 2)
+    let (len, header) = if first_len < der::LONG_FORM {
+        (usize::from(first_len), der::SHORT_HEADER)
     } else {
-        let n = usize::from(first_len & 0x7f);
-        if n == 0 || n > 4 {
+        let n = usize::from(first_len & der::LENGTH_OCTETS_MASK);
+        if n == 0 || n > der::MAX_LENGTH_OCTETS {
             return None;
         }
         let mut len = 0usize;
-        for &x in b.get(2..2 + n)? {
+        for &x in b.get(der::SHORT_HEADER..der::SHORT_HEADER + n)? {
             len = (len << 8) | usize::from(x);
         }
-        (len, 2 + n)
+        (len, der::SHORT_HEADER + n)
     };
     let end = header.checked_add(len)?;
     if end > b.len() {
@@ -426,16 +452,16 @@ fn tlv(b: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 fn contents(t: &[u8]) -> Option<&[u8]> {
-    let header = if t[1] < 0x80 {
-        2
+    let header = if t[1] < der::LONG_FORM {
+        der::SHORT_HEADER
     } else {
-        2 + usize::from(t[1] & 0x7f)
+        der::SHORT_HEADER + usize::from(t[1] & der::LENGTH_OCTETS_MASK)
     };
     t.get(header..)
 }
 
 fn sequence_contents(t: &[u8]) -> Result<&[u8], AttestError> {
-    if t.first() != Some(&0x30) {
+    if t.first() != Some(&der::SEQUENCE) {
         return Err(AttestError::CertificateChain("algorithm identifier".into()));
     }
     contents(t).ok_or_else(|| AttestError::CertificateChain("algorithm identifier".into()))

@@ -236,3 +236,229 @@ pub fn saturating_mul_i64(a: i64, b: i64) -> i64 {
         }
     }
 }
+
+test {
+    // @case exact(40, 2, 42)
+    // @case upper_bound(254, 1, 255)
+    // @case overflow(255, 1, 255)
+    // @case zero_identity(255, 0, 255)
+    fn test_saturating_add_u8(a: u8, b: u8, expected: u8) -> bool {
+        saturating_add_u8(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case lower_bound(255, 255, 0)
+    // @case underflow(0, 255, 0)
+    // @case zero_identity(255, 0, 255)
+    fn test_saturating_sub_u8(a: u8, b: u8, expected: u8) -> bool {
+        saturating_sub_u8(a, b) == expected
+    }
+
+    // @case exact(6, 7, 42)
+    // @case zero(255, 0, 0)
+    // @case upper_bound(255, 1, 255)
+    // @case overflow(128, 2, 255)
+    fn test_saturating_mul_u8(a: u8, b: u8, expected: u8) -> bool {
+        saturating_mul_u8(a, b) == expected
+    }
+
+    // @case exact(40, 2, 42)
+    // @case upper_bound(65534, 1, 65535)
+    // @case overflow(65535, 1, 65535)
+    // @case zero_identity(65535, 0, 65535)
+    fn test_saturating_add_u16(a: u16, b: u16, expected: u16) -> bool {
+        saturating_add_u16(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case lower_bound(65535, 65535, 0)
+    // @case underflow(0, 65535, 0)
+    // @case zero_identity(65535, 0, 65535)
+    fn test_saturating_sub_u16(a: u16, b: u16, expected: u16) -> bool {
+        saturating_sub_u16(a, b) == expected
+    }
+
+    // @case exact(6, 7, 42)
+    // @case zero(65535, 0, 0)
+    // @case upper_bound(65535, 1, 65535)
+    // @case overflow(32768, 2, 65535)
+    fn test_saturating_mul_u16(a: u16, b: u16, expected: u16) -> bool {
+        saturating_mul_u16(a, b) == expected
+    }
+
+    // @case exact(40, 2, 42)
+    // @case upper_bound(4294967294, 1, 4294967295)
+    // @case overflow(4294967295, 1, 4294967295)
+    // @case zero_identity(4294967295, 0, 4294967295)
+    fn test_saturating_add_u32(a: u32, b: u32, expected: u32) -> bool {
+        saturating_add_u32(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case lower_bound(4294967295, 4294967295, 0)
+    // @case underflow(0, 4294967295, 0)
+    // @case zero_identity(4294967295, 0, 4294967295)
+    fn test_saturating_sub_u32(a: u32, b: u32, expected: u32) -> bool {
+        saturating_sub_u32(a, b) == expected
+    }
+
+    // @case exact(6, 7, 42)
+    // @case zero(4294967295, 0, 0)
+    // @case upper_bound(4294967295, 1, 4294967295)
+    // @case overflow(2147483648, 2, 4294967295)
+    fn test_saturating_mul_u32(a: u32, b: u32, expected: u32) -> bool {
+        saturating_mul_u32(a, b) == expected
+    }
+
+    // @case exact(40, 2, 42)
+    // @case upper_bound(18446744073709551614, 1, 18446744073709551615)
+    // @case overflow(18446744073709551615, 1, 18446744073709551615)
+    // @case zero_identity(18446744073709551615, 0, 18446744073709551615)
+    fn test_saturating_add_u64(a: u64, b: u64, expected: u64) -> bool {
+        saturating_add_u64(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case lower_bound(18446744073709551615, 18446744073709551615, 0)
+    // @case underflow(0, 18446744073709551615, 0)
+    // @case zero_identity(18446744073709551615, 0, 18446744073709551615)
+    fn test_saturating_sub_u64(a: u64, b: u64, expected: u64) -> bool {
+        saturating_sub_u64(a, b) == expected
+    }
+
+    // @case exact(6, 7, 42)
+    // @case zero(18446744073709551615, 0, 0)
+    // @case upper_bound(18446744073709551615, 1, 18446744073709551615)
+    // @case overflow(9223372036854775808, 2, 18446744073709551615)
+    fn test_saturating_mul_u64(a: u64, b: u64, expected: u64) -> bool {
+        saturating_mul_u64(a, b) == expected
+    }
+
+    // @case exact(40, 2, 42)
+    // @case upper_bound(126, 1, 127)
+    // @case lower_bound(-127, -1, -128)
+    // @case above_max(127, 1, 127)
+    // @case below_min(-128, -1, -128)
+    // @case opposite_extremes(127, -128, -1)
+    fn test_saturating_add_i8(a: i8, b: i8, expected: i8) -> bool {
+        saturating_add_i8(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case upper_bound(126, -1, 127)
+    // @case lower_bound(-127, 1, -128)
+    // @case above_max(127, -1, 127)
+    // @case below_min(-128, 1, -128)
+    // @case same_extreme(-128, -128, 0)
+    fn test_saturating_sub_i8(a: i8, b: i8, expected: i8) -> bool {
+        saturating_sub_i8(a, b) == expected
+    }
+
+    // @case exact(-6, 7, -42)
+    // @case two_negatives(-6, -7, 42)
+    // @case zero(-128, 0, 0)
+    // @case upper_bound(127, 1, 127)
+    // @case lower_bound(-128, 1, -128)
+    // @case above_max(-128, -1, 127)
+    // @case positive_overflow(127, 2, 127)
+    // @case below_min(-65, 2, -128)
+    fn test_saturating_mul_i8(a: i8, b: i8, expected: i8) -> bool {
+        saturating_mul_i8(a, b) == expected
+    }
+
+    // @case exact(40, 2, 42)
+    // @case upper_bound(32766, 1, 32767)
+    // @case lower_bound(-32767, -1, -32768)
+    // @case above_max(32767, 1, 32767)
+    // @case below_min(-32768, -1, -32768)
+    // @case opposite_extremes(32767, -32768, -1)
+    fn test_saturating_add_i16(a: i16, b: i16, expected: i16) -> bool {
+        saturating_add_i16(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case upper_bound(32766, -1, 32767)
+    // @case lower_bound(-32767, 1, -32768)
+    // @case above_max(32767, -1, 32767)
+    // @case below_min(-32768, 1, -32768)
+    // @case same_extreme(-32768, -32768, 0)
+    fn test_saturating_sub_i16(a: i16, b: i16, expected: i16) -> bool {
+        saturating_sub_i16(a, b) == expected
+    }
+
+    // @case exact(-6, 7, -42)
+    // @case two_negatives(-6, -7, 42)
+    // @case zero(-32768, 0, 0)
+    // @case upper_bound(32767, 1, 32767)
+    // @case lower_bound(-32768, 1, -32768)
+    // @case above_max(-32768, -1, 32767)
+    // @case positive_overflow(32767, 2, 32767)
+    // @case below_min(-16385, 2, -32768)
+    fn test_saturating_mul_i16(a: i16, b: i16, expected: i16) -> bool {
+        saturating_mul_i16(a, b) == expected
+    }
+
+    // @case exact(40, 2, 42)
+    // @case upper_bound(2147483646, 1, 2147483647)
+    // @case lower_bound(-2147483647, -1, -2147483648)
+    // @case above_max(2147483647, 1, 2147483647)
+    // @case below_min(-2147483648, -1, -2147483648)
+    // @case opposite_extremes(2147483647, -2147483648, -1)
+    fn test_saturating_add_i32(a: i32, b: i32, expected: i32) -> bool {
+        saturating_add_i32(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case upper_bound(2147483646, -1, 2147483647)
+    // @case lower_bound(-2147483647, 1, -2147483648)
+    // @case above_max(2147483647, -1, 2147483647)
+    // @case below_min(-2147483648, 1, -2147483648)
+    // @case same_extreme(-2147483648, -2147483648, 0)
+    fn test_saturating_sub_i32(a: i32, b: i32, expected: i32) -> bool {
+        saturating_sub_i32(a, b) == expected
+    }
+
+    // @case exact(-6, 7, -42)
+    // @case two_negatives(-6, -7, 42)
+    // @case zero(-2147483648, 0, 0)
+    // @case upper_bound(2147483647, 1, 2147483647)
+    // @case lower_bound(-2147483648, 1, -2147483648)
+    // @case above_max(-2147483648, -1, 2147483647)
+    // @case positive_overflow(2147483647, 2, 2147483647)
+    // @case below_min(-1073741825, 2, -2147483648)
+    fn test_saturating_mul_i32(a: i32, b: i32, expected: i32) -> bool {
+        saturating_mul_i32(a, b) == expected
+    }
+
+    // @case exact(40, 2, 42)
+    // @case upper_bound(9223372036854775806, 1, 9223372036854775807)
+    // @case lower_bound(-9223372036854775807, -1, -9223372036854775808)
+    // @case above_max(9223372036854775807, 1, 9223372036854775807)
+    // @case below_min(-9223372036854775808, -1, -9223372036854775808)
+    // @case opposite_extremes(9223372036854775807, -9223372036854775808, -1)
+    fn test_saturating_add_i64(a: i64, b: i64, expected: i64) -> bool {
+        saturating_add_i64(a, b) == expected
+    }
+
+    // @case exact(10, 3, 7)
+    // @case upper_bound(9223372036854775806, -1, 9223372036854775807)
+    // @case lower_bound(-9223372036854775807, 1, -9223372036854775808)
+    // @case above_max(9223372036854775807, -1, 9223372036854775807)
+    // @case below_min(-9223372036854775808, 1, -9223372036854775808)
+    // @case same_extreme(-9223372036854775808, -9223372036854775808, 0)
+    fn test_saturating_sub_i64(a: i64, b: i64, expected: i64) -> bool {
+        saturating_sub_i64(a, b) == expected
+    }
+
+    // @case exact(-6, 7, -42)
+    // @case two_negatives(-6, -7, 42)
+    // @case zero(-9223372036854775808, 0, 0)
+    // @case upper_bound(9223372036854775807, 1, 9223372036854775807)
+    // @case lower_bound(-9223372036854775808, 1, -9223372036854775808)
+    // @case above_max(-9223372036854775808, -1, 9223372036854775807)
+    // @case positive_overflow(9223372036854775807, 2, 9223372036854775807)
+    // @case below_min(-4611686018427387905, 2, -9223372036854775808)
+    fn test_saturating_mul_i64(a: i64, b: i64, expected: i64) -> bool {
+        saturating_mul_i64(a, b) == expected
+    }
+}

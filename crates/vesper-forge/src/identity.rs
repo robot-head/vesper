@@ -206,4 +206,11 @@ impl Counter {
     pub(crate) fn minted(&self, index: u32) -> bool {
         index < self.next
     }
+
+    /// The next index and the limit, for a kernel that mints on the
+    /// host's behalf (src/port.rs replays what it minted).
+    #[cfg_attr(not(vesper_port), allow(dead_code))]
+    pub(crate) fn state(&self) -> (u32, u32) {
+        (self.next, self.limit)
+    }
 }

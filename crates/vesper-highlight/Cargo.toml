@@ -3,6 +3,20 @@ name = "vesper-highlight"
 version = "0.1.0"
 edition = "2024"
 description = "Vesper Chroma (§43): lossless CST semantic highlighting, OKLCH palettes with contrast audits, HTML/ANSI/wire output and a wasm32 C ABI"
+build = "build.rs"
+
+# The compiler and every crate inside `cargo tree -p vesper -e normal,build`
+# use the frozen Rust seed copy, crates/vesper-highlight/seed (package
+# vesper-highlight-seed, same library name), instead of this package; see
+# "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
+#
+# This package builds the same Rust by default. Under `vesper-port`,
+# build.rs links the Vesper port in vesper/ (the Tier 0 lexical classes)
+# and sets cfg(vesper_port), and `highlight_tier0` and
+# `highlight_tier0_tokens` forward to it (self-hosting SH1 lane 11, #1154).
+# Palettes, Tier 1, the renderers, `shot` and the wasm32 module stay Rust.
+# Rust stays the default until the port matches it in function and
+# performance (docs/parallel-results/self-host-fmt-highlight.md).
 
 [dependencies]
 vesper-syntax = { path = "../vesper-syntax" }
@@ -18,5 +32,32 @@ rustybuzz = { version = "=0.20.1", optional = true }
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "png-format"], optional = true }
 ttf-parser = { version = "=0.25.1", optional = true }
 
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[dev-dependencies]
+# The frozen Rust build, the reference of tests/differential.rs and
+# examples/abba.rs.
+highlight-seed = { package = "vesper-highlight-seed", path = "seed" }
+vesper-bench = { path = "../vesper-bench" }
+
+[build-dependencies]
+# Not optional: a package whose build script runs the harness is
+# port-backed for the seed-copy guard (crates/vesper-port-harness/tests/
+# closure_guard.rs), whichever build it selects.
+vesper-port-harness = { path = "../vesper-port-harness" }
+
 [features]
+vesper-port = ["dep:vesper-port-abi"]
+# Deliberately wrong Vesper builds, one edit per ported area: the port test
+# runs must fail (port/test-port.sh asserts which tests do).
+vesper-port-divergent = ["vesper-port"]
 shot = ["dep:base64", "dep:blake3", "dep:png", "dep:rustybuzz", "dep:tiny-skia", "dep:ttf-parser"]
+
+[[example]]
+name = "abba"
+required-features = ["vesper-port"]
+
+[lints.rust]
+# cfg(vesper_port) is set by build.rs under `vesper-port`; the seed package
+# has no build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

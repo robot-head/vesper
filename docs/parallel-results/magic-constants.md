@@ -41,8 +41,25 @@ included, and many of them are fine as they are.
 | --- | --- | --- |
 | #1162 | BBR (Rust + `.ves` port), inliner fold, checker facts | ack path +0.1% Ir |
 | #1172 | warp-tcp: header offsets, option kinds and lengths, RFC 9293/7323/5961 limits (Rust reference + `.ves` port) | codec and transfer Ir identical |
-| next | warp-wheel: slot and span limits, lease mixing constants | single-literal constants, folded (no benchmark example) |
-| next | Prism: per-module ASCII constants, RFC 9110 tchar/field-value and RFC 3986 target masks, status codes, host limits | `abba measure 20` 62.87 M -> 62.85 M Ir |
+| #1193 | warp-wheel: slot and span limits, lease mixing constants | single-literal constants, folded (no benchmark example) |
+| #1193 | Prism: per-module ASCII constants, RFC 9110 tchar/field-value and RFC 3986 target masks, status codes, host limits | `abba measure 20` 62.87 M -> 62.85 M Ir |
+| #1197 | silicon: the RISC-V AIA register map (APLIC offsets, IDC registers, `target[i]` and `msiaddrcfgh` fields, `sourcecfg.SM` codes, IMSIC iselects) | `abba one port` aia-intc, aplic-direct, imsic Ir unchanged |
+| #1199 | eBPF instruction codec: the kernel's `BPF_*` opcode fields (class, op, jmp, source, size, mode, atomic) | decode workload 5.42 M -> 5.32 M Ir per warm call (-1.9%) |
+| #1202 | eBPF interpreter: helper ids, map types, errnos, limits, ring buffer header bits, `xdp_md`/`__sk_buff` offsets, FNV and xorshift64* constants, region kinds (Rust and port) | interp workload 25.63 M Ir per warm call before and after (+0.01%) |
+| #1203 | eBPF BTF, `.BTF.ext`, CO-RE and wire: BTF kinds and `info` fields, header layout, UTF-8 bounds, `line_col`, CO-RE relocation kinds, local tree tags, frame offsets, map types and limits (Rust and port) | warm call Ir: btf 10.574 M -> 10.593 M (+0.18%), ext 934.3 K -> 942.0 K (+0.82%), core 2.7407 M -> 2.7405 M |
+| #1204 | eBPF verifier: register tags, frame and stack layout, stack and packet limits, `xdp_md`/`__sk_buff` context offsets, map types, socket tuple sizes, ASCII (Rust and port). Integer `match` arms stay literal (constants are not patterns yet) | warm call Ir: verify 679.6 K -> 681.4 K (+0.26%), scalar 8.7395 M -> 8.7394 M, concrete 763.7 K -> 766.0 K (+0.30%) |
+| #1205 | Tensor: IEEE binary32/binary16/BF16 fields (new `host::ieee`), FP8 and E8M0 codes, GGML `nearest_int` magic, every GGML type id and block size, GGUF value types, host/K/V/shape ceilings, JSON surrogates and control range, UTF-8 (RFC 3629, Unicode Table 3-7), xorshift64* multiplier, FNV-1a, Q4_K scratch layout, `open_weights` codes, ASCII (Rust and port). Port result and tape codes stay documented numbers | whole-benchmark Ir: dequantize Q8_0 2.5038 G -> 2.5024 G, Q4_K 3.9149 G -> 3.9149 G, shape plan 16.550 G -> 16.550 G |
+| #1206 | Grammar: X.690 identifier/length octets, universal tags and DER kinds, LEB128 and u24 frames, Protobuf wire types/field-number range/ZigZag masks, Cap'n Proto pointer fields, segment table and packing runs, FlatBuffers offsets and vtables, Arrow IPC framing/`MetadataVersion`/`MessageHeader`/struct sizes, grammar rule tags and metadata/capture layouts, Unicode Table 3-7, hard ceilings (Rust and port). FlatBuffer field ids, slot widths and error kinds stay literal | `grammar_abba window` (2,000 decodes) Ir: Protobuf 227.979 M -> 227.975 M, DER 189.242 M -> 189.237 M |
+| #1207 | Aegis: SEV-SNP report versions, signature algorithm, FLAGS reserved bits, ETCB layout, Venice family/models and P-384 signature components; TDX quote versions, body types and lengths, attestation key and TEE type, certification data types; SGX quote and report body; Intel TCB info/QE identity versions; X.509 DER tags and TBS fields, SEC1 points; CCA REMs, RoTPK and digest lengths; CoRIM CDDL map keys; civil-time (Hinnant) constants; claims wire layouts, architectures and TCB components; port tail modes (Rust and port). Format codes, error kinds and field widths in layout order stay literal | `abba window port` (1,000 passes) Ir: snp 35,484,197 -> 35,483,973, tdx 43,505,390 -> 43,505,166, sgx 23,801,174 -> 23,800,961, policy 105,848,700 -> 105,848,494 |
+| #1208 | Kinetic: the fdlibm `exp`/`log`/`sin`/`cos`/`atan2` coefficients and high-word thresholds (fdlibm names, as `_BITS` patterns in the port), IEEE binary64/binary32 fields, crmath formats, Machin and ln 2 series constants, working-precision and error-bound terms, GJK/EPA tolerances and iteration caps, the Morton magic-bits masks, LBVH child words, SAP radix and pair-key passes (Rust counterparts of the ported modules and the whole port; the rigid/world/diff physics tolerances are left for a follow-up). Status codes stay literal | `abba one port` (200 runs) Ir: crmath 9.067 G -> 8.959 G (-1.2%), lbvh 4.9820 G -> 4.9812 G, gjk 915.9 M -> 915.8 M, fastmath, morton, sap and colorer unchanged |
+| #1211 | Kinetic physics (Rust only): hull, separating-axis and edge tolerances, segment and tangent minimums, unit-quaternion and unit-vector checks, contact merge and manifold tolerances, broadphase box rounding and inflation, the barrier spin count. Config defaults (`dt`, substeps, margins) stay in their `Default` impls, where the field names already say what they are | Rust-only code, no port change |
+| #1213 | Pact port: every node tag and kind/flag constant now uses the `term.ves` tag functions (`t_ctor()` ... `e_env()`) instead of bare numbers, child-reference masks, ASCII bytes, the FNV-1a, Fibonacci-hashing and SplitMix64 multipliers and slot shifts, and the default solver limits (as in the Rust `SolverConfig::default()`). Diagnostic codes and the derivation wire codes in `out.ves` stay documented numbers | `abba once` Ir: fixture 7,516,603 -> 7,440,968 (-1.0%), large 213.90 M -> 206.96 M (-3.2%) |
+| #1214 | Ignis: the D3D12 enhanced-barrier `SYNC_*`/`ACCESS_*` bits, Vulkan `VkPipelineStageFlagBits2`/`VkAccessFlagBits2` and Metal 4 `MTLStages` bits in the port (replacing the comment tables), the split-free sync mask, and the queue, subresource, lifecycle and recorder ceilings (Rust reference and port). `D3D12_BARRIER_LAYOUT` values in `layout_raw` and the layout ranks stay literal | `abba profile` (256 passes, 20 ops) Ir: build 22.550 M -> 22.553 M, plan 331.181 M -> 331.183 M, lower 33.442 M -> 33.467 M (+0.08%); `abba digest` unchanged |
+| #1215 | Quarry port: SQL keyword ids (`kw_select()` ... `kw_using()`) and `Tok` kinds (`tk_word()` ... `tk_op()`) as shared functions, per-module ASCII bytes, the i64 literal bounds, the hard `Limits` ceilings (as in `Limits::default`), the identifier length and word-byte `find_not_in` bitmaps, binary64 fields and the sign bit, and the access-path cost model (page/row/index costs, rows per page, index fanout and unknown-parameter selectivities, spec/planner-ddl.md); Rust `MAX_IDENTIFIER_LEN`. `Cmp`, `Raw` kinds, value tags, error kinds and word-stream layouts stay documented numbers (lib.ves), and the Rust store (`src/store`, WAL, pages) is left for its own PR | `planner_abba window 20` Ir: 28,187,669 -> 28,182,522 |
+| #1216 | Warp: the RFC 9000 §19 frame types and the port's frame kinds, long-header types and header-protection masks (RFC 9001 §5.4.1), varint prefixes, limits and masks (§16), packet-number encoding windows (§17.1, A.2), the ECN codepoints, the application space, `ack_delay_exponent` ceiling (§18.2) and every-second-packet ACK threshold (§13.2.2), kPacketThreshold (RFC 9002), and the address-validation token kinds and plain-text layout. The Rust reference gets the same names (`MAX_ACK_DELAY_EXPONENT`, `PN_MAX_LEN`, `ADDR_LEN`, `PLAIN_*`, the protected-bit masks, `MAX_CID_LEN` in frames and tokens). The `token_open` result codes and the address family bytes stay documented numbers; the Rust endpoint is left for a later PR | `abba once <arm> 20` Ir: frames 166.50 M -> 166.44 M, ack 178.104 M -> 178.113 M (+0.005%), recovery and buffers unchanged, transfer 509.90 M -> 509.89 M |
+| #1220 | Aura port: widget kinds, properties, events, value tags and patch tags as shared `codes.ves` functions (`k_*`, `p_*`, `e_*`, `v_*`, `op_*`), recorded event tags as module constants, the patch width, the `encode_view_tree` layout flags (as `sim_aura::layout_flags`) and u32/u16 ceilings, the close states (Vesper and `src/ported/session.rs`), the White_Space code points, UTF-8 lead bytes and the Width sign bit. `codec.rs`'s enum/code tables are the code definitions and stay; result codes stay documented numbers | `abba measure 200` Ir: 1,442.56 M -> 1,437.49 M (-0.35%) |
+| #1229 | prism-h3 QPACK (Rust + `.ves` port): the RFC 9204 §4 first-byte patterns and prefix lengths of every field line and encoder/decoder instruction (new `src/qpack/wire.rs`, mirrored as module constants in `decoder.ves`/`encoder.ves`), the §3.2.1 entry overhead, the entry-share scale, the pending-instruction ceiling, the RFC 7541 §5.1 continuation bits and the shortest Huffman code, the Huffman table layout (code-word fields, trie and nibble-table fields, padding depth), FNV-1a and the compaction thresholds. HTTP/3 frames, settings, capsules, priorities and messages are part 2 | `abba once <w> 6` minus `once <w> 1` Ir (port): decode 169.832 M -> 169.832 M, encode 78.563 M -> 78.591 M (+0.04%), frames and messages unchanged |
+| next | prism-h3 HTTP/3 (Rust + `.ves` port): the RFC 9114 §7.2.4.1 and RFC 9204/9220/9297/WebTransport setting identifiers, the reserved HTTP/2 frame types and settings (§7.2.8, §11.2.2), the grease base and step (§7.2.8, §8.1, also in `H3Error::is_reserved`/`webtransport_code`), the frame reader modes, the RFC 9000 §16 varint prefixes and limits, the CLOSE_WEBTRANSPORT_SESSION code length, Unicode Table 3-7 in `valid_utf8`, the RFC 9218 urgency range and default, RFC 8941 bare-item kinds, digit limits and ASCII bytes, the scheduler word layout, the RFC 9110 tchar/field-value/pseudo-value `find_not_in` bitmaps, pseudo-header ids, content-length digit cap and status range. Field-name lengths beside their literal names, frame-type functions and error codes stay | `abba once <w> 6` minus `once <w> 1` Ir (port): decode, encode, frames and messages unchanged (169.832 M, 78.588 M, 61.555 M, 99.640 M) |
 
 ## Order
 
@@ -85,6 +102,34 @@ uses (`SLASH: u8 = 47`, `DIGIT_0`, ...). The user chose this over adding byte
 literals first (2026-11-20).
 
 ## Gaps left
+
+- A `pub const` can't be imported from another module: `use self::term::{REF_A}`
+  fails with E0111 ("module self::term has no item"). The pact port keeps
+  its zero-argument tag functions for shared tags and declares per-module
+  constants (ASCII bytes, hash multipliers) where they are used.
+- Named constants in a hot byte loop can cost a little: in the `.BTF.ext`
+  access-string parser (`parse_u32`), writing `ASCII_0`/`ASCII_9`/`U32_MAX`
+  instead of literals costs about 14 K Ir per warm `ext` call (1.5%). The
+  constants are single literals, so the inliner's fold should make them free;
+  it does not reach these comparisons yet.
+- A zero-argument code function in a struct-literal argument of an inlined
+  callee is not free: in Aura's `slots.ves`, `record(inout s, lim,
+  op(ev_slot_bound(), slot, 0, 0, 0))` cost 24 M Ir more than the literal
+  (+1.7% on `abba measure 200`), while the same functions in `if` tests and
+  in `plan.ves`'s `emit(.., op(op_create(), ..))` were free. A module
+  `const` in the same place costs nothing, so Aura's recorded event tags
+  are constants in `slots.ves` and `widgets.ves`.
+- A tuple of constants is not free either: prism-h3's encoder picking all
+  three N bits at once with `let (a, b, c) = if sensitive { (X, Y, Z) }
+  else { (0, 0, 0) }` cost 0.9% Ir on `encode`; one `u8` and two shifts
+  cost nothing.
+- Constants are not patterns: `match c { JEQ => ... }` is refused
+  ("unknown pattern constructor"). The eBPF port's decoders compare with
+  `if` chains instead of matching integer literals.
+- An index that starts with an uppercase name parses as type arguments:
+  `b[LO..HI]` and `s[S_PACKED + j]` fail with E0002 ("expected RBracket"),
+  because `name[Upper` reads like `ChunkSeq::new[u8]`. The tensor port
+  writes `b[(LO)..HI]` or `s[j + S_PACKED]`; fmt keeps the parentheses.
 
 - A constant derived from other constants (`GAIN_UNIT - LOSS_THRESH`) is
   not folded by the inliner (its function is not a single literal), so it

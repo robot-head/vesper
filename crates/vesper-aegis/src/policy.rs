@@ -57,6 +57,16 @@ pub struct RelyingPartyPolicy {
 /// Check order follows the design: architecture, debug, TCB floor, boot
 /// measurement, Loom.lock, `.olean`, channel binding; then the SNP-only
 /// checks and register-replay requirement. `lean/AegisToctou.lean` models
+/// The policy words before the allowed architectures, the policy bytes
+/// before the allowed measurements, and a measurement's size
+/// (vesper/src/claims.ves `PW_ARCHS`, `PB_MEASUREMENTS`).
+#[cfg(vesper_port)]
+const PW_HEADER_WORDS: usize = 8;
+#[cfg(vesper_port)]
+const PB_HEADER_BYTES: usize = 64;
+#[cfg(vesper_port)]
+const MEASUREMENT_LEN: usize = 48;
+
 /// this function (`checkPolicy`).
 #[cfg(vesper_port)]
 pub fn verify_attestation_claims(
@@ -83,8 +93,9 @@ pub fn verify_attestation_claims(
     cb[112..120].copy_from_slice(&claims.chan_binding_prefix);
     cb[120..].copy_from_slice(&claims.channel_binding);
     let floors = &policy.tcb_floors;
-    let mut pw =
-        Vec::with_capacity(8 + policy.allowed_archs.len() + policy.allowed_measurements.len());
+    let mut pw = Vec::with_capacity(
+        PW_HEADER_WORDS + policy.allowed_archs.len() + policy.allowed_measurements.len(),
+    );
     pw.extend([
         floors.tdx.into(),
         floors.snp.into(),
@@ -97,7 +108,8 @@ pub fn verify_attestation_claims(
     ]);
     pw.extend(policy.allowed_archs.iter().map(|a| *a as u64));
     pw.extend(policy.allowed_measurements.iter().map(|(a, _)| *a as u64));
-    let mut pb = Vec::with_capacity(64 + 48 * policy.allowed_measurements.len());
+    let mut pb =
+        Vec::with_capacity(PB_HEADER_BYTES + MEASUREMENT_LEN * policy.allowed_measurements.len());
     pb.extend_from_slice(&policy.expected_loom_blake3);
     pb.extend_from_slice(&policy.expected_olean_mif);
     for (_, m) in &policy.allowed_measurements {

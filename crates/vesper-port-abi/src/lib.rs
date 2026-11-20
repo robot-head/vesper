@@ -18,7 +18,11 @@
 //! Strings cross as the three-word value `{len, cap, data}`: [`with_str`]
 //! lends a `&str`, [`with_string_mut`] lends a `&mut String`, [`string_take`]
 //! copies a returned `String` and frees it, and [`str_view`] borrows a
-//! string a handle owns.
+//! string a handle owns. A returned string is taken as UTF-8 without
+//! validating it again: Vesper strings are UTF-8 by construction.
+//! [`HostCall`] calls an entry point a binding does not cover (a JIT
+//! function, say) with `Str`/`Slice[u8]` arguments and a `ChunkSeq`/`String`
+//! result.
 //!
 //! Export ABI v3 (`vesper.native.export-abi/3`) lends Rust storage to Vesper
 //! in place: a [`Mirror`] is a `#[repr(C)]` struct in the Vesper word layout
@@ -41,8 +45,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+mod host;
 mod mirror;
 mod seq;
+pub use host::HostCall;
 pub use mirror::*;
 pub use seq::*;
 

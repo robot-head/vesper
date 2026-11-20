@@ -26,6 +26,9 @@ const PAGE: i64 = 4096;
 /// them: 256 steps add at most `256 * 255 = 65_280` per lane.
 const SUM_BLOCK_STEPS: i64 = 256;
 
+/// The shortest run [`Codegen::seq_copy_run`] copies with `memmove`.
+pub(super) const SHORT_COPY: i64 = 16;
+
 fn little() -> MemFlags {
     MemFlags::new().with_endianness(ir::Endianness::Little)
 }
@@ -350,6 +353,34 @@ impl<M: Module> Codegen<'_, '_, M> {
             // source out of the destination, so a forward copy is exact.
             self.seq_copy(dst, src, bytes);
         }
+    }
+
+    /// Copies a run of `bytes` bytes from `src` to `dst`, which do not
+    /// overlap (`String::push_str`, #1147): a short run (under
+    /// [`SHORT_COPY`] bytes, most literals) is a byte loop, which costs less
+    /// than a call; a longer one is one `memmove` where the C library is
+    /// available.
+    pub(crate) fn seq_copy_run(&mut self, dst: ir::Value, src: ir::Value, bytes: ir::Value) {
+        if !self.seq_has_libc() {
+            self.seq_copy(dst, src, bytes);
+            return;
+        }
+        let short = self.b.create_block();
+        let long = self.b.create_block();
+        let done = self.b.create_block();
+        let small = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThan, bytes, SHORT_COPY);
+        self.branch(small, short, &[], long, &[]);
+        self.b.switch_to_block(short);
+        self.seq_copy(dst, src, bytes);
+        self.jump(done, &[]);
+        self.b.switch_to_block(long);
+        let config = self.m.target_config();
+        self.b.call_memmove(config, dst, src, bytes);
+        self.jump(done, &[]);
+        self.b.switch_to_block(done);
     }
 
     /// Moves `bytes` bytes from `src` to `dst`, which may overlap

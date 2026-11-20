@@ -163,6 +163,15 @@ fn fence_add(base: u64, increment: u64) -> FenceSum {
     }
 }
 
+// Ceilings on `Limits` (each limit but `max_scratch` and `max_drain_polls`
+// must also be nonzero).
+const MAX_QUEUES: u64 = 64;
+const MAX_INFLIGHT: u64 = 4096;
+const MAX_COMMANDS: u64 = 1000000;
+const MAX_SCRATCH: u64 = 4096;
+const MAX_POLL_EVENTS: u64 = 65536;
+const MAX_DRAIN_POLLS: u64 = 65536;
+
 fn limits_valid(l: Limits) -> bool {
     !(
         l
@@ -170,31 +179,31 @@ fn limits_valid(l: Limits) -> bool {
             == 0
             || l
             .max_queues
-            > 64
+            > MAX_QUEUES
             || l
             .max_inflight
             == 0
             || l
             .max_inflight
-            > 4096
+            > MAX_INFLIGHT
             || l
             .max_commands
             == 0
             || l
             .max_commands
-            > 1000000
+            > MAX_COMMANDS
             || l
             .max_scratch
-            > 4096
+            > MAX_SCRATCH
             || l
             .max_poll_events
             == 0
             || l
             .max_poll_events
-            > 65536
+            > MAX_POLL_EVENTS
             || l
             .max_drain_polls
-            > 65536
+            > MAX_DRAIN_POLLS
     )
 }
 

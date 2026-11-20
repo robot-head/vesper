@@ -1,0 +1,80 @@
+// Helpers every table uses. Arithmetic on table indices stays far below
+// 2^32 and uses wrapping_* (checked `+` is a Fail effect).
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+pub fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+pub fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// FNV-1a over a 64-bit word: the digest every census task folds its
+// results into, matched bit for bit by the Rust harness.
+pub fn fold(h: u64, x: u64) -> u64 {
+    wrapping_mul(h ^ x, 1099511628211)
+}
+
+pub fn fold_bytes(h: u64, in b: Slice[u8]) -> u64 {
+    let mut x = h;
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        x = fold(x, widen_u64(c));
+    }
+    fold(x, 255)
+}
+
+pub fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        push_decimal(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+pub fn push_signed(inout out: ChunkSeq[u8], v: i64) {
+    if v < 0 {
+        out.push(45);
+        push_decimal(inout out, wrapping_u64(wrapping_neg_i64(v)));
+    } else {
+        push_decimal(inout out, wrapping_u64(v));
+    }
+}
+
+pub fn inc32(x: u32) -> u32 {
+    wrapping_add(x, 1)
+}
+
+// `u32::MAX`: an absent index or symbol in every table.
+const NONE32: u32 = 4294967295;

@@ -1,0 +1,434 @@
+// Module parse of @vesper/forge: the delimiter check and the parser of the
+// Forge lexical fragment v1 (src/host.rs `check_delimiters`,
+// src/syntax.rs), over host tokens.
+//
+// Tokens arrive as rows of three words, `kind`, `start`, `len`, where
+// text[start..start + len] is the token's text. Kinds: 1 Ident, 2 Punct,
+// 3 Int, 4 Str, 5/6/7 Open Paren/Bracket/Brace, 8/9/10 Close
+// Paren/Bracket/Brace; 0 is past the end.
+//
+//   expr    := 'let' IDENT '=' expr ';' expr
+//            | 'handle' path 'with' path block
+//            | postfix
+//   postfix := primary ( '(' [ expr { ',' expr } ] ')' )*
+//   primary := path | INT | STRING | '(' expr ')' | block
+//   block   := '{' [ expr { ';' expr } [';'] ] '}'
+//   path    := IDENT { '::' IDENT }
+use self::util::{
+    spells,
+    wd
+};
+
+// Error codes shared with the resolver and src/port.rs.
+pub fn err_depth() -> u64 {
+    1
+}
+
+pub fn err_unbalanced() -> u64 {
+    2
+}
+
+pub fn err_parse() -> u64 {
+    3
+}
+
+// The `expected` texts of `ForgeError::Parse`.
+pub fn want_end() -> u64 {
+    1
+}
+
+pub fn want_eq() -> u64 {
+    2
+}
+
+pub fn want_semi() -> u64 {
+    3
+}
+
+pub fn want_with() -> u64 {
+    4
+}
+
+pub fn want_close_paren() -> u64 {
+    5
+}
+
+pub fn want_close_brace() -> u64 {
+    6
+}
+
+pub fn want_open_brace() -> u64 {
+    7
+}
+
+pub fn want_ident() -> u64 {
+    8
+}
+
+pub fn k_ident() -> u64 {
+    1
+}
+
+pub fn k_punct() -> u64 {
+    2
+}
+
+pub fn k_int() -> u64 {
+    3
+}
+
+pub fn k_str() -> u64 {
+    4
+}
+
+pub fn k_open_paren() -> u64 {
+    5
+}
+
+pub fn k_open_brace() -> u64 {
+    7
+}
+
+pub fn k_close_paren() -> u64 {
+    8
+}
+
+pub fn k_close_brace() -> u64 {
+    10
+}
+
+// `check_delimiters` over the kinds of `n` rows of `stride` words from
+// rows[base..]: 0 when balanced and at most `max_depth` deep, else
+// `err_depth()`, or `err_unbalanced()` with the token index in `at`.
+// `stack` is scratch space (left cleared).
+pub fn delimiters(
+    in rows: Slice[u64],
+    base: u64,
+    n: u64,
+    stride: u64,
+    max_depth: u64,
+    inout at: u64,
+    inout stack: ChunkSeq[u64]
+) -> u64 {
+    stack.clear();
+    for i in 0..n {
+        let k = wd(in rows, wrapping_add(base, wrapping_mul(i, stride)));
+        if k >= 5 && k <= 7 {
+            stack.push(k);
+            if stack.len() > max_depth {
+                stack.clear();
+                return err_depth();
+            }
+        } else if k >= 8 && k <= 10 {
+            let top = match stack.pop() {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            if wrapping_add(top, 3) != k {
+                at = i;
+                stack.clear();
+                return err_unbalanced();
+            }
+        }
+    }
+    if stack.len() != 0 {
+        at = n;
+        stack.clear();
+        return err_unbalanced();
+    }
+    0
+}
+
+// The parser's state. `paths` holds every finished path in creation order
+// (its token count, then its token indices): the order src/syntax.rs
+// interns them in. `term` is the tree in post-order (see `fg_parse`).
+pub struct Parser {
+    n: u64,
+    pos: u64,
+    depth: u64,
+    max_depth: u64,
+    err: u64,
+    e1: u64,
+    e2: u64,
+    paths: ChunkSeq[u64],
+    npaths: u64,
+    term: ChunkSeq[u64]
+}
+
+pub fn parser_new(n: u64, max_depth: u64) -> Parser {
+    Parser {
+        n: n,
+        pos: 0,
+        depth: 0,
+        max_depth: max_depth,
+        err: 0,
+        e1: 0,
+        e2: 0,
+        paths: ChunkSeq::new[u64](),
+        npaths: 0,
+        term: ChunkSeq::new[u64]()
+    }
+}
+
+fn kind(in toks: Slice[u64], in p: Parser) -> u64 {
+    if p.pos >= p.n {
+        0
+    } else {
+        wd(in toks, wrapping_mul(p.pos, 3))
+    }
+}
+
+fn text_is(in toks: Slice[u64], in text: Slice[u8], i: u64, in lit: Str) -> bool {
+    let at = wrapping_mul(i, 3);
+    spells(in text, wd(in toks, wrapping_add(at, 1)), wd(in toks, wrapping_add(at, 2)), in lit)
+}
+
+fn is_punct(in toks: Slice[u64], in text: Slice[u8], in p: Parser, in s: Str) -> bool {
+    kind(in toks, in p) == k_punct() && text_is(in toks, in text, p.pos, in s)
+}
+
+fn is_keyword(in toks: Slice[u64], in text: Slice[u8], in p: Parser, in s: Str) -> bool {
+    kind(in toks, in p) == k_ident() && text_is(in toks, in text, p.pos, in s)
+}
+
+fn fail(inout p: Parser, expected: u64) {
+    p.err = err_parse();
+    p.e1 = p.pos;
+    p.e2 = expected;
+}
+
+fn expect_punct(
+    in toks: Slice[u64],
+    in text: Slice[u8],
+    inout p: Parser,
+    in s: Str,
+    expected: u64
+) {
+    if is_punct(in toks, in text, in p, in s) {
+        p.pos = wrapping_add(p.pos, 1);
+    } else {
+        fail(inout p, expected);
+    }
+}
+
+// Consumes a token of kind `k`; returns its index.
+fn expect_kind(in toks: Slice[u64], inout p: Parser, k: u64, expected: u64) -> u64 {
+    if kind(in toks, in p) == k {
+        p.pos = wrapping_add(p.pos, 1);
+        wrapping_sub(p.pos, 1)
+    } else {
+        fail(inout p, expected);
+        0
+    }
+}
+
+// An identifier that is not a keyword (`let`, `handle`, `with`).
+fn ident(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) -> u64 {
+    if kind(in toks, in p)
+        == k_ident()
+        && !text_is(in toks, in text, p.pos, in "let")
+        && !text_is(in toks, in text, p.pos, in "handle")
+        && !text_is(in toks, in text, p.pos, in "with") {
+        p.pos = wrapping_add(p.pos, 1);
+        wrapping_sub(p.pos, 1)
+    } else {
+        fail(inout p, want_ident());
+        0
+    }
+}
+
+fn enter(inout p: Parser) {
+    p.depth = wrapping_add(p.depth, 1);
+    if p.depth > p.max_depth {
+        p.err = err_depth();
+    }
+}
+
+// A path; returns its index in `paths`.
+fn path(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) -> u64 {
+    // The count goes in front once the path is finished; an unfinished path
+    // is dropped (src/syntax.rs interns only finished paths).
+    let start = p.paths.len();
+    p.paths.push(0);
+    let first = ident(in toks, in text, inout p);
+    if p.err != 0 {
+        p.paths.truncate(start);
+        return 0;
+    }
+    p.paths.push(first);
+    loop {
+        if !is_punct(in toks, in text, in p, in "::") {
+            break;
+        }
+        p.pos = wrapping_add(p.pos, 1);
+        let t = ident(in toks, in text, inout p);
+        if p.err != 0 {
+            p.paths.truncate(start);
+            return 0;
+        }
+        p.paths.push(t);
+    }
+    p.paths.try_set(start, wrapping_sub(wrapping_sub(p.paths.len(), start), 1));
+    p.npaths = wrapping_add(p.npaths, 1);
+    wrapping_sub(p.npaths, 1)
+}
+
+pub fn expr(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
+    enter(inout p);
+    if p.err != 0 {
+        return;
+    }
+    expr_inner(in toks, in text, inout p);
+    p.depth = wrapping_sub(p.depth, 1);
+}
+
+fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
+    if is_keyword(in toks, in text, in p, in "let") {
+        p.pos = wrapping_add(p.pos, 1);
+        let binder = ident(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        expect_punct(in toks, in text, inout p, in "=", want_eq());
+        if p.err != 0 {
+            return;
+        }
+        expr(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        expect_punct(in toks, in text, inout p, in ";", want_semi());
+        if p.err != 0 {
+            return;
+        }
+        expr(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        p.term.push(3);
+        p.term.push(binder);
+        return;
+    }
+    if is_keyword(in toks, in text, in p, in "handle") {
+        let keyword = p.pos;
+        p.pos = wrapping_add(p.pos, 1);
+        let epath = path(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        if !is_keyword(in toks, in text, in p, in "with") {
+            fail(inout p, want_with());
+            return;
+        }
+        p.pos = wrapping_add(p.pos, 1);
+        let handler = path(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        block(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        p.term.push(5);
+        p.term.push(keyword);
+        p.term.push(epath);
+        p.term.push(handler);
+        return;
+    }
+    primary(in toks, in text, inout p);
+    if p.err != 0 {
+        return;
+    }
+    // Each postfix call nests one level deeper, bounded like any nesting.
+    let base_depth = p.depth;
+    loop {
+        if kind(in toks, in p) != k_open_paren() {
+            break;
+        }
+        enter(inout p);
+        if p.err != 0 {
+            p.depth = base_depth;
+            return;
+        }
+        let open = p.pos;
+        p.pos = wrapping_add(p.pos, 1);
+        let mut nargs: u64 = 0;
+        if kind(in toks, in p) != k_close_paren() {
+            loop {
+                expr(in toks, in text, inout p);
+                if p.err != 0 {
+                    return;
+                }
+                nargs = wrapping_add(nargs, 1);
+                if is_punct(in toks, in text, in p, in ",") {
+                    p.pos = wrapping_add(p.pos, 1);
+                } else {
+                    break;
+                }
+            }
+        }
+        let close = expect_kind(in toks, inout p, k_close_paren(), want_close_paren());
+        if p.err != 0 {
+            return;
+        }
+        p.term.push(4);
+        p.term.push(open);
+        p.term.push(close);
+        p.term.push(nargs);
+    }
+    p.depth = base_depth;
+}
+
+fn primary(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
+    let k = kind(in toks, in p);
+    if k == k_int() || k == k_str() {
+        p.pos = wrapping_add(p.pos, 1);
+        p.term.push(2);
+        p.term.push(wrapping_sub(p.pos, 1));
+    } else if k == k_open_paren() {
+        p.pos = wrapping_add(p.pos, 1);
+        expr(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        let close = expect_kind(in toks, inout p, k_close_paren(), want_close_paren());
+    } else if k == k_open_brace() {
+        block(in toks, in text, inout p);
+    } else {
+        let at = path(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        p.term.push(1);
+        p.term.push(at);
+    }
+}
+
+fn block(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
+    let open = expect_kind(in toks, inout p, k_open_brace(), want_open_brace());
+    if p.err != 0 {
+        return;
+    }
+    let mut items: u64 = 0;
+    loop {
+        if kind(in toks, in p) == k_close_brace() {
+            break;
+        }
+        expr(in toks, in text, inout p);
+        if p.err != 0 {
+            return;
+        }
+        items = wrapping_add(items, 1);
+        if is_punct(in toks, in text, in p, in ";") {
+            p.pos = wrapping_add(p.pos, 1);
+        } else {
+            break;
+        }
+    }
+    let close = expect_kind(in toks, inout p, k_close_brace(), want_close_brace());
+    if p.err != 0 {
+        return;
+    }
+    p.term.push(6);
+    p.term.push(items);
+}

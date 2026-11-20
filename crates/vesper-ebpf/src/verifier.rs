@@ -68,6 +68,21 @@ const STACK_SLOTS: usize = (BPF_MAX_STACK_BYTES / 8) as usize;
 
 /// `sizeof(struct xdp_md)`.
 pub const XDP_MD_SIZE: i32 = 24;
+// The `xdp_md` offsets as context offsets, for patterns.
+const XDP_DATA: i32 = xdp_md::DATA as i32;
+const XDP_DATA_END: i32 = xdp_md::DATA_END as i32;
+const XDP_INGRESS_IFINDEX: i32 = xdp_md::INGRESS_IFINDEX as i32;
+const XDP_RX_QUEUE_INDEX: i32 = xdp_md::RX_QUEUE_INDEX as i32;
+
+/// Field offsets in `struct xdp_md` (include/uapi/linux/bpf.h).
+pub mod xdp_md {
+    pub const DATA: usize = 0;
+    pub const DATA_END: usize = 4;
+    pub const DATA_META: usize = 8;
+    pub const INGRESS_IFINDEX: usize = 12;
+    pub const RX_QUEUE_INDEX: usize = 16;
+}
+
 /// `sizeof(struct __sk_buff)`.
 pub const SK_BUFF_SIZE: i32 = 192;
 /// `PERF_MAX_TRACE_SIZE`: the largest tracepoint record.
@@ -82,30 +97,65 @@ pub const PT_REGS_SIZE: i32 = if cfg!(target_arch = "x86_64") {
 } else {
     0
 };
+/// `struct __sk_buff` field offsets (`include/uapi/linux/bpf.h`).
+pub mod skb {
+    pub const LEN: i32 = 0;
+    pub const PKT_TYPE: i32 = 4;
+    pub const MARK: i32 = 8;
+    pub const QUEUE_MAPPING: i32 = 12;
+    pub const PROTOCOL: i32 = 16;
+    pub const VLAN_TCI: i32 = 24;
+    pub const VLAN_PROTO: i32 = 28;
+    pub const PRIORITY: i32 = 32;
+    pub const INGRESS_IFINDEX: i32 = 36;
+    pub const IFINDEX: i32 = 40;
+    pub const TC_INDEX: i32 = 44;
+    /// `cb[0..5]`, five `u32`s.
+    pub const CB: i32 = 48;
+    pub const CB_LEN: usize = 5;
+    pub const HASH: i32 = 68;
+    pub const TC_CLASSID: i32 = 72;
+    pub const DATA: i32 = 76;
+    pub const DATA_END: i32 = 80;
+}
 /// `struct __sk_buff` offsets of `data` and `data_end`.
-pub const SKB_DATA: i32 = 76;
-pub const SKB_DATA_END: i32 = 80;
+pub const SKB_DATA: i32 = skb::DATA;
+pub const SKB_DATA_END: i32 = skb::DATA_END;
 /// `struct __sk_buff` fields a tc program may read (all `u32`; narrower
 /// loads are rejected here although the kernel allows some).
 pub(crate) const SKB_READ: &[i32] = &[
-    0,  // len
-    4,  // pkt_type
-    8,  // mark
-    12, // queue_mapping
-    16, // protocol
-    24, // vlan_tci
-    28, // vlan_proto
-    32, // priority
-    36, // ingress_ifindex
-    40, // ifindex
-    44, // tc_index
-    48, 52, 56, 60, 64, // cb[0..5]
-    68, // hash
-    72, // tc_classid
+    skb::LEN,
+    skb::PKT_TYPE,
+    skb::MARK,
+    skb::QUEUE_MAPPING,
+    skb::PROTOCOL,
+    skb::VLAN_TCI,
+    skb::VLAN_PROTO,
+    skb::PRIORITY,
+    skb::INGRESS_IFINDEX,
+    skb::IFINDEX,
+    skb::TC_INDEX,
+    skb::CB,
+    skb::CB + 4,
+    skb::CB + 8,
+    skb::CB + 12,
+    skb::CB + 16,
+    skb::HASH,
+    skb::TC_CLASSID,
 ];
 /// Fields a tc program may write (`tc_cls_act_is_valid_access`, minus
 /// `queue_mapping` and `tstamp`).
-pub(crate) const SKB_WRITE: &[i32] = &[8, 32, 44, 48, 52, 56, 60, 64, 72];
+pub(crate) const SKB_WRITE: &[i32] = &[
+    skb::MARK,
+    skb::PRIORITY,
+    skb::TC_INDEX,
+    skb::CB,
+    skb::CB + 4,
+    skb::CB + 8,
+    skb::CB + 12,
+    skb::CB + 16,
+    skb::TC_CLASSID,
+];
 /// `bpf_loop`'s callback must return 0 (continue) or 1 (stop).
 const LOOP_CALLBACK_MAX_RET: u64 = 1;
 
@@ -1911,10 +1961,12 @@ impl<'a> Verifier<'a> {
                 }
                 let field = o & !3;
                 match field {
-                    0 if size == Size::W => Ok(Target::CtxData),
-                    4 if size == Size::W => Ok(Target::CtxDataEnd),
+                    XDP_DATA if size == Size::W => Ok(Target::CtxData),
+                    XDP_DATA_END if size == Size::W => Ok(Target::CtxDataEnd),
                     // `__is_valid_xdp_access`: every field is a full u32
-                    12 | 16 if size == Size::W => Ok(Target::Scalar(size)),
+                    XDP_INGRESS_IFINDEX | XDP_RX_QUEUE_INDEX if size == Size::W => {
+                        Ok(Target::Scalar(size))
+                    }
                     _ => Err(err(
                         pc,
                         "mem.ctx_invalid_access",

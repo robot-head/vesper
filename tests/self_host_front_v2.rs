@@ -143,58 +143,58 @@ fn front() -> &'static Front {
     })
 }
 
-/// The `Str` value `{len, 0, data}` of `source`, which an `in Str`
-/// parameter takes by address.
-fn str_words(source: &str) -> [u64; 3] {
-    [source.len() as u64, 0, source.as_ptr() as u64]
-}
+/// The JIT's sequence runtime, for `HostCall` to free returned sequences.
+const JIT_RUNTIME: vesper_port_abi::SeqRuntime = {
+    extern "C" fn new(cap: i64, stride: i64) -> i64 {
+        vesper::seq::native_runtime::vesper_seq_new(cap as u64, stride as u64) as i64
+    }
+    extern "C" fn free(handle: i64) -> i64 {
+        vesper::seq::native_runtime::vesper_seq_free(handle as u64) as i64
+    }
+    vesper_port_abi::SeqRuntime { new, free }
+};
 
+/// Calls an entry taking one `in Str` and returning a word.
 fn call(f: &native::WordFunction, source: &str) -> u64 {
-    let words = str_words(source);
-    // SAFETY: the entry takes one `in Str`, passed as the address of its
-    // three words, which live across the call; `source` outlives it.
-    unsafe { f.call(&[words.as_ptr() as u64]) }.unwrap()
+    vesper_port_abi::HostCall::new()
+        .str(source)
+        .with_words(|w| {
+            // SAFETY: the entry takes one `in Str`, which `HostCall` passes as
+            // the address of its three words for the call.
+            unsafe { f.call(w) }.unwrap()
+        })
 }
 
-/// Reads and frees a returned `ChunkSeq[u64]` (header `{len, cap, data}`).
-fn take_words(handle: u64) -> Vec<u64> {
-    // SAFETY: `handle` is a live sequence header the entry returned, whose
-    // `data` holds `len` packed u64 elements.
-    let words = unsafe {
-        let header = handle as *const u64;
-        let len = *header as usize;
-        let data = *header.add(2) as *const u64;
-        if len == 0 {
-            vec![]
-        } else {
-            std::slice::from_raw_parts(data, len).to_vec()
-        }
-    };
-    vesper::seq::native_runtime::vesper_seq_free(handle);
-    words
+/// Calls an entry taking an `in Str` and then `extra` words, returning a
+/// `ChunkSeq[u64]`.
+fn call_words(f: &native::WordFunction, source: &str, extra: &[u64]) -> Vec<u64> {
+    let call = extra
+        .iter()
+        .fold(vesper_port_abi::HostCall::new().str(source), |c, &w| {
+            c.word(w)
+        });
+    // SAFETY: the entry takes an `in Str` (passed as the address of its
+    // three words) and `extra.len()` `u64` words, and returns a live
+    // sequence of the JIT runtime holding `u64`s, which `HostCall` copies
+    // and frees.
+    unsafe { call.seq(JIT_RUNTIME, |w| f.call(w).unwrap()) }
 }
 
 fn vesper_tables(source: &str) -> Tables {
-    tables_from_words(&take_words(call(&front().tables, source)))
+    tables_from_words(&call_words(&front().tables, source, &[]))
 }
 
 /// `parse_tables_with_limits` with the source, token and diagnostic limits.
 fn vesper_tables_with_limits(source: &str, limits: parser::ParseLimits) -> Tables {
-    let words = str_words(source);
     // Native word functions take at most three words, so the token and
     // diagnostic limits share one (`parse_tables_with_packed_limits`).
     let counts = limits.max_tokens as u64 | (limits.max_diagnostics as u64) << 32;
-    // SAFETY: the entry takes an `in Str` (the address of its three words,
-    // which outlive the call) and two `u64` words.
-    let handle = unsafe {
-        front().with_limits.call(&[
-            words.as_ptr() as u64,
-            limits.max_source_bytes as u64,
-            counts,
-        ])
-    }
-    .unwrap();
-    tables_from_words(&take_words(handle))
+    let words = call_words(
+        &front().with_limits,
+        source,
+        &[limits.max_source_bytes as u64, counts],
+    );
+    tables_from_words(&words)
 }
 
 fn tables_from_words(words: &[u64]) -> Tables {
@@ -327,6 +327,22 @@ fn repository_sources() -> Vec<PathBuf> {
 
 fn under_bazel() -> bool {
     std::env::var_os("TEST_SRCDIR").is_some()
+}
+
+#[test]
+fn test_blocks_match_the_rust_parser() {
+    for source in [
+        "test { fn example() -> bool { true } } fn main() {}",
+        "test /* comment */ { fn break() {} } fn f() { loop { break; } }",
+        "test { fn open() {",
+    ] {
+        if let Some(difference) = compare(source) {
+            panic!("{source}: {difference}");
+        }
+        if let Some(difference) = compare_editor(source, recovery::Limits::default()) {
+            panic!("{source} (editor): {difference}");
+        }
+    }
 }
 
 /// Every repository `.ves` file gives the same CST and diagnostics.
@@ -612,6 +628,8 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "fn f[e: eff](xs: (i64, i64), e: i64) -> i64 { xs[e] } fn g[e: eff](xs: (i64, i64)) -> i64 { xs[e] }",
         "fn f() { TiledSeq::load_tile_vec[c](x); t.col_get[c](x); t.col_set[c](); t.other[c](x) }",
         "fn f() { Box::new[dyn Show](x); f[fn() -> i64](g); f[u8](1); f[Unit](1); x[y]; x[a..b]; x[A](); x[[M]](y) }",
+        // Function objects `dyn Fn(..)` (#1084) and their recovery (#1155).
+        "fn f(w: dyn FnMut(in u8) -> u8 eff [e], v: dyn Fn(), u: dyn FnOnce(sink S, inout T), t: dyn Fnx(u8), s: dyn Fn[u8], r: dyn FnMut(u8 -> ) {}",
         "trait T[A: Tr, B: Other] {} effect E[T: Ord] {} trait U {}",
         "effect E[T: Ord] { fn op(); } trait U {}",
         "use @scope/name::{a, b as c}; use self::x::y; use self::{}; use a::b; pub use @x/y::z; use @a/b-c::d::{E as F, g}; use model M;",
@@ -682,6 +700,15 @@ fn edge_cases_and_limits_match_the_rust_parser() {
             "fn f() -> A{}{} {{}}",
             "[A".repeat(n),
             "]".repeat(n)
+        ));
+    }
+    // The or-pattern expansion budget (`OR_PATTERN_EXPANSION`): copying a
+    // body too often is E0002 at the end of the arm (#1155).
+    for alts in [2, 300, 500, 900] {
+        let pats = vec!["1"; alts].join(" | ");
+        let body = format!("{{ {} 0 }}", "x; ".repeat(300));
+        cases.push(format!(
+            "fn f(x: u8) -> u8 {{ match x {{ {pats} => {body}, _ => match x {{ 2 | 3 => {body} }} }} }}"
         ));
     }
     // Heights: a parenthesized chain resets the depth but not the AST
@@ -1222,12 +1249,8 @@ fn pack_limits(l: recovery::Limits) -> (u64, u64) {
 }
 
 fn vesper_editor(source: &str, limits: recovery::Limits) -> Editor {
-    let words = str_words(source);
     let (a, b) = pack_limits(limits);
-    // SAFETY: the entry takes an `in Str` (the address of its three words,
-    // which outlive the call) and two `u64` words.
-    let handle = unsafe { front().editor.call(&[words.as_ptr() as u64, a, b]) }.unwrap();
-    let words = take_words(handle);
+    let words = call_words(&front().editor, source, &[a, b]);
     if words[0] != 0 {
         assert_eq!(words.len(), 1, "a failed parse has one word");
         return Editor::Failed(words[0]);

@@ -31,12 +31,12 @@ filegroup(
 # the tests catch each edit.
 DIVERGENT = {
     "reader": ("reader", {"acc = acc | x;": "acc = acc | (x & 18446744073709551614);"}),
-    "snp": ("snp", {"if version < 2 || version > 6 {": "if version < 2 || version > 7 {"}),
-    "tdx": ("tdx", {"            885\n": "            884\n"}),
-    "sgx": ("sgx", {"if cert_type != 5 {": "if cert_type != 6 {"}),
-    "wire": ("claims", {"if tag < 1 || tag > 3 {": "if tag < 1 || tag > 2 {"}),
+    "snp": ("snp", {"if version < SNP_REPORT_MIN_VERSION || version > SNP_REPORT_MAX_VERSION {": "if version < SNP_REPORT_MIN_VERSION || version > 7 {"}),
+    "tdx": ("tdx", {"const TDX_BODY_TD15_EX_LEN: u64 = 885;": "const TDX_BODY_TD15_EX_LEN: u64 = 884;"}),
+    "sgx": ("sgx", {"if cert_type != CERT_DATA_PCK_CHAIN_PEM {": "if cert_type != 6 {"}),
+    "wire": ("claims", {"if tag < ARCH_TDX || tag > ARCH_CCA {": "if tag < ARCH_TDX || tag > ARCH_SNP {"}),
     "policy": ("claims", {"if tcb_svn < floor {": "if tcb_svn <= floor {"}),
-    "time": ("time", {"        byte(in s, 19) == 90\n": "        byte(in s, 19) == 89\n"}),
+    "time": ("time", {"        byte(in s, 19) == UPPER_Z\n": "        byte(in s, 19) == 89\n"}),
 }
 
 [

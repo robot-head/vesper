@@ -379,3 +379,62 @@ fn merge_pair_runs[K: mod copy + Ord, V: mod copy](
         vals.try_copy_from(0, in vs.as_slice());
     }
 }
+
+test {
+    // @case empty(in "abc", in "", in "")
+    // @case identity(in "bbaa", in "0123", in "2301")
+    // @case ties_by_index(in "aaa", in "210", in "012")
+    // @case repeated_indices(in "bba", in "21022", in "22201")
+    // @case invalid_indices_last(in "bbaa", in "932107", in "230179")
+    // @case all_indices_invalid(in "", in "973", in "379")
+    fn test_sort_by_key(in keys: Str, in order: Str, in expected: Str) -> bool {
+        let mut indices = ChunkSeq::new[u32]();
+        for i in 0..order.len() {
+            match order.try_byte_at(i) {
+                Option::Some(digit) => indices.push(widen_u32(wrapping_sub(digit, 48))),
+                Option::None => return false,
+            }
+        }
+        sort_by_key(in keys.as_bytes(), inout indices.as_slice_mut());
+        for i in 0..indices.len() {
+            match indices.try_get(i) {
+                Option::Some(index) => {
+                    let digit = wrapping_add(wrapping_u8(index), 48);
+                    if expected.try_byte_at(i) != Option::Some(digit) {
+                        return false;
+                    }
+                },
+                Option::None => return false,
+            }
+        }
+        expected.len() == indices.len()
+    }
+
+    fn bytes_match(in actual: Slice[u8], in expected: Str) -> bool {
+        if actual.len() != expected.len() {
+            return false;
+        }
+        for i in 0..actual.len() {
+            if actual.try_get(i) != expected.try_byte_at(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case empty(in "", in "", in "", in "")
+    // @case stable_ties(in "baba", in "0123", in "aabb", in "1302")
+    // @case extra_keys(in "bac!", in "012", in "abc!", in "102")
+    // @case extra_values(in "bac", in "012!", in "abc", in "102!")
+    // @case empty_common_prefix(in "", in "012", in "", in "012")
+    fn test_sort_pairs(in keys: Str, in values: Str, in expected_keys: Str, in expected_values: Str)
+        -> bool {
+        let mut ks = ChunkSeq::new[u8]();
+        let mut vs = ChunkSeq::new[u8]();
+        ks.extend(in keys.as_bytes());
+        vs.extend(in values.as_bytes());
+        sort_pairs(inout ks.as_slice_mut(), inout vs.as_slice_mut());
+        bytes_match(in ks.as_slice(), in expected_keys)
+            && bytes_match(in vs.as_slice(), in expected_values)
+    }
+}

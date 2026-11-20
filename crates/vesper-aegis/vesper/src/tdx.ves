@@ -21,9 +21,34 @@ use self::reader::{
     unsupported
 };
 
+// src/tdx.rs: quote versions, the body types and their lengths, ECDSA
+// P-256 attestation keys, the TDX TEE type, certification data types and
+// the signature data ceiling. Field widths in the parsers follow the
+// layout tables, in order.
+const TDX_QUOTE_VERSION: u64 = 4;
+const TDX_QUOTE_VERSION_5: u64 = 5;
+const TDX_BODY_TYPE_TD10: u64 = 2;
+const TDX_BODY_TYPE_TD15: u64 = 3;
+const TDX_BODY_TYPE_TD15_EX: u64 = 4;
+const TDX_BODY_LEN: u64 = 584;
+const TDX_BODY_TD15_LEN: u64 = 648;
+const TDX_BODY_TD15_EX_LEN: u64 = 885;
+const TDX_ATT_KEY_ECDSA_P256: u64 = 2;
+const TDX_TEE_TYPE: u64 = 129;
+const CERT_DATA_PCK_CHAIN_PEM: u64 = 5;
+const CERT_DATA_QE_REPORT: u64 = 6;
+const MAX_SIG_DATA_LEN: u64 = 65536;
+// `vm_index` of a TD 1.5 "ex" body: 0 to 3.
+const MAX_VM_INDEX: u64 = 3;
+// Format code (lib.ves), the result words `parse` reserves and the cap on
+// its byte reservation hint.
+const FORMAT_TDX_QUOTE_V4: u64 = 0;
+const QUOTE_WORDS: u64 = 16;
+const RESERVE_HINT_MAX: u64 = 16384;
+
 // The largest signature-data section (MAX_SIG_DATA_LEN).
 pub fn max_sig_data() -> u64 {
-    65536
+    MAX_SIG_DATA_LEN
 }
 
 // A length-prefixed byte string: its length goes to `w`, its bytes to `d`.
@@ -88,7 +113,7 @@ pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d: Ch
         Option::Some(x) => widen_u64(x),
         Option::None => 0,
     };
-    if vm_index > 3 {
+    if vm_index > MAX_VM_INDEX {
         unsupported(in r, 70, vm_index);
     }
     w.push(vm_index);
@@ -114,15 +139,15 @@ pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d: Ch
 // bytes, qe_report_signature, qe_auth_data, the PEM chain.
 pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
     -> u64 eff [Fail[AErr]] {
-    let mut r = rd(0, b.len(), 0);
-    w.reserve(16);
+    let mut r = rd(0, b.len(), FORMAT_TDX_QUOTE_V4);
+    w.reserve(QUOTE_WORDS);
     // A hint only: capped so a short quote at the front of a large
     // buffer (prefix mode) or an input rejected at the header reserves
     // no more than a real quote needs.
-    let hint = if b.len() < 16384 {
+    let hint = if b.len() < RESERVE_HINT_MAX {
         b.len()
     } else {
-        16384
+        RESERVE_HINT_MAX
     };
     d.reserve(hint);
     let version = rd_u16(in b, inout r, 80);
@@ -135,24 +160,24 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
     w.push(rd_u16(in b, inout r, 84));
     arr(in b, inout r, 16, 85, inout d);
     arr(in b, inout r, 20, 86, inout d);
-    if version != 4 && version != 5 {
+    if version != TDX_QUOTE_VERSION && version != TDX_QUOTE_VERSION_5 {
         unsupported(in r, 80, version);
     }
-    if att_key_type != 2 {
+    if att_key_type != TDX_ATT_KEY_ECDSA_P256 {
         unsupported(in r, 81, att_key_type);
     }
-    if tee_type != 129 {
+    if tee_type != TDX_TEE_TYPE {
         unsupported(in r, 82, tee_type);
     }
-    if version == 5 {
+    if version == TDX_QUOTE_VERSION_5 {
         let body_type = rd_u16(in b, inout r, 87);
         let body_size = rd_u32(in b, inout r, 88);
-        let want: u64 = if body_type == 2 {
-            584
-        } else if body_type == 3 {
-            648
-        } else if body_type == 4 {
-            885
+        let want: u64 = if body_type == TDX_BODY_TYPE_TD10 {
+            TDX_BODY_LEN
+        } else if body_type == TDX_BODY_TYPE_TD15 {
+            TDX_BODY_TD15_LEN
+        } else if body_type == TDX_BODY_TYPE_TD15_EX {
+            TDX_BODY_TD15_EX_LEN
         } else {
             unsupported(in r, 87, body_type)
         };
@@ -160,14 +185,14 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
             unsupported(in r, 88, body_size);
         }
         let at = take(inout r, body_size, 89);
-        let mut br = rd(at, wrapping_add(at, body_size), 0);
+        let mut br = rd(at, wrapping_add(at, body_size), FORMAT_TDX_QUOTE_V4);
         w.push(body_type);
         td_body(in b, inout br, inout w, inout d);
-        if body_type != 2 {
+        if body_type != TDX_BODY_TYPE_TD10 {
             arr(in b, inout br, 16, 90, inout d);
             arr(in b, inout br, 48, 91, inout d);
         }
-        if body_type == 4 {
+        if body_type == TDX_BODY_TYPE_TD15_EX {
             td15_ex(in b, inout br, inout w, inout d);
         }
         finish(in br);
@@ -177,34 +202,34 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
     }
     let sig_len = rd_u32(in b, inout r, 92);
     if sig_len > max_sig_data() {
-        raise(k_over_budget(), 0, 92, max_sig_data(), sig_len);
+        raise(k_over_budget(), FORMAT_TDX_QUOTE_V4, 92, max_sig_data(), sig_len);
     }
     let sig = take(inout r, sig_len, 93);
     let used = r.pos;
 
-    let mut s = rd(sig, wrapping_add(sig, sig_len), 0);
+    let mut s = rd(sig, wrapping_add(sig, sig_len), FORMAT_TDX_QUOTE_V4);
     arr(in b, inout s, 64, 94, inout d);
     arr(in b, inout s, 64, 95, inout d);
     let cert_type = rd_u16(in b, inout s, 96);
-    if cert_type != 6 {
+    if cert_type != CERT_DATA_QE_REPORT {
         unsupported(in s, 96, cert_type);
     }
     let cert_size = rd_u32(in b, inout s, 97);
     let cert = take(inout s, cert_size, 98);
     finish(in s);
 
-    let mut c = rd(cert, wrapping_add(cert, cert_size), 0);
+    let mut c = rd(cert, wrapping_add(cert, cert_size), FORMAT_TDX_QUOTE_V4);
     qe_report(in b, inout c, inout w, inout d);
     arr(in b, inout c, 64, 99, inout d);
     let auth_len = rd_u16(in b, inout c, 100);
     blob(in b, inout c, auth_len, 101, inout w, inout d);
     let inner_type = rd_u16(in b, inout c, 102);
-    if inner_type != 5 {
+    if inner_type != CERT_DATA_PCK_CHAIN_PEM {
         unsupported(in c, 102, inner_type);
     }
     let inner_size = rd_u32(in b, inout c, 103);
     blob(in b, inout c, inner_size, 104, inout w, inout d);
     finish(in c);
-    tail(in b, used, mode, 0);
+    tail(in b, used, mode, FORMAT_TDX_QUOTE_V4);
     used
 }

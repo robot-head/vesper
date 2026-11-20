@@ -4,21 +4,59 @@ version = "0.1.0"
 edition = "2024"
 description = "Forge quotation hygiene, emission provenance and emitted-code authority gate"
 publish = false
+build = "build.rs"
+
+# The compiler and every crate inside `cargo tree -p vesper -e normal,build`
+# use the frozen Rust seed copy, crates/vesper-forge/seed (package
+# vesper-forge-seed, same library name), instead of this package; see
+# "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
+#
+# This package builds the same Rust by default. Under `vesper-port`,
+# build.rs links the Vesper port in vesper/ and sets cfg(vesper_port), and
+# the hygiene core (delimiter check, fragment parser, scope-set resolver)
+# runs in Vesper (self-hosting wave SH1 lane 14, #1157). Rust stays the
+# default until the port matches it in function and performance
+# (docs/parallel-results/self-host-forge.md).
 
 [features]
 default = ["sandbox-transport"]
 # Import untrusted flat `vesper-loom-sandbox` transport outcomes.
 sandbox-transport = ["dep:vesper-loom-sandbox"]
+vesper-port = ["dep:vesper-port-abi"]
+# Build the port from an edited copy of the package (one divergence check per
+# ported area): the tests named in port/test-port.sh must then fail.
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 vesper-syntax = { path = "../vesper-syntax" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 vesper-loom-sandbox = { path = "../vesper-loom-sandbox", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# The frozen Rust build, the reference of tests/port_differential.rs and
+# tests/port_bench.rs.
+forge-seed = { package = "vesper-forge-seed", path = "seed" }
+vesper-bench = { path = "../vesper-bench" }
+
+[build-dependencies]
+# Not optional: a package whose build script runs the harness is
+# port-backed for the seed-copy guard (crates/vesper-port-harness/tests/
+# closure_guard.rs), whichever build it selects.
+vesper-port-harness = { path = "../vesper-port-harness" }
 
 [[example]]
 name = "forge_gate"
 required-features = ["sandbox-transport"]
+
+# The ABBA benchmark of the port against the seed (scripts/bench.sh).
+[[example]]
+name = "abba"
+required-features = ["vesper-port"]
+
+[lints.rust]
+# cfg(vesper_port) is set by build.rs (the harness) under `vesper-port`; the
+# seed package has no build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

@@ -329,6 +329,8 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // The front end v2 (#1129) is a package that imports
                     // with `use` (#880).
                     || path.ends_with("packages/vesper-front")
+                    // The AST package (#1152) imports with `use` too.
+                    || path.ends_with("packages/vesper-ast")
                     // The Quarry port (#904) uses `use`-free syntax the
                     // Stage 1 parser lacks (#880); it joins with the others.
                     || path.ends_with("crates/vesper-quarry/vesper")
@@ -337,6 +339,9 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // Self-hosting SH0 lane 6 (#1128): `p[a..b]` string intervals (#887).
                     || path.ends_with("crates/vesper-span/vesper")
                     || path.ends_with("crates/vesper-lean-syntax/vesper")
+                    // Self-hosting SH1 lane 1 (#1128): `use` (#880) and
+                    // `t[a..b]` intervals (#887).
+                    || path.ends_with("crates/vesper-diagnostics/vesper")
                     // Port P1 lane 16 (#913): `use` (#880).
                     || path.ends_with("crates/vesper-loom-calculus/vesper")
                     // Port P1 lane 17 (#914): `use` (#880).
@@ -397,6 +402,13 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // modules export with `pub fn`, which the Stage 1
                     // parser lacks (node counts differ).
                     || path.ends_with("crates/vesper-hybrid/modules")
+                    // SH1 lane 11 (#1154): the fmt and highlight ports use `use` (#880).
+                    || path.ends_with("crates/vesper-fmt/vesper")
+                    || path.ends_with("crates/vesper-highlight/vesper")
+                    // SH1 lane 14 (#1157): the forge port uses `use` (#880).
+                    || path.ends_with("crates/vesper-forge/vesper")
+                    // SH1 lane 13 (#1156): the lint port uses `use` (#880).
+                    || path.ends_with("crates/vesper-lint/vesper")
                     // SH1 lane 5 (#1148): or-patterns, which the Stage 1
                     // parser lacks.
                     || path.ends_with("tests/fixtures/ergonomics")

@@ -1,117 +1,131 @@
 // Unit tests and conformance entry points for @vesper-std.
 //
-// Every `test_*` function returns 0 when it passes, else the number of its
+// Every `check_*` function returns 0 when it passes, else the number of its
 // first failing check. `run_all` returns 0, or `1000 * t + c` for check `c`
 // of the `t`-th test. `trace_*` entries return the hash of a regenerated
 // conformance trace (see `traces.ves`), and `trace_digest` folds them all.
-use self::core_tests::{
-    test_core_ordering,
-    test_core_option,
-    test_core_result
-};
-use self::text_tests::{
-    test_fmt_write,
-    test_fmt_parse,
-    test_bytes
-};
-use self::map_tests::{
-    test_btree,
-    test_struct_keys,
-    test_flat_table,
-    test_flat_table_differential
-};
-use self::seq_tests::{
-    test_sets,
-    test_radix_seq,
-    test_version
-};
-use self::string_tests::test_fmt_string;
-use self::traces::{
-    map_trace,
-    seq_trace
-};
+test {
+    use self::core_tests::{
+        check_core_ordering,
+        check_core_option,
+        check_core_result
+    };
+    use self::text_tests::{
+        check_fmt_write,
+        check_fmt_parse,
+        check_bytes
+    };
+    use self::map_tests::{
+        check_btree,
+        check_struct_keys,
+        check_flat_table,
+        check_flat_table_differential
+    };
+    use self::seq_tests::{
+        check_sets,
+        check_radix_seq,
+        check_version
+    };
+    use self::string_tests::check_fmt_string;
+    use self::traces::{
+        map_trace,
+        seq_trace
+    };
 
-// `1000 * t + c` for check `c` failing in test `t`, else `prior`.
-fn first_failure(t: u64, c: u64, prior: u64) -> u64 {
-    if prior != 0 || c == 0 {
-        prior
-    } else {
-        wrapping_add(wrapping_mul(t, 1000), c)
+    // `1000 * t + c` for check `c` failing in test `t`, else `prior`.
+    fn first_failure(t: u64, c: u64, prior: u64) -> u64 {
+        if prior != 0 || c == 0 {
+            prior
+        } else {
+            wrapping_add(wrapping_mul(t, 1000), c)
+        }
     }
-}
 
-// 0 when every test passes, else `1000 * t + c` for the first failure
-// (tests are numbered from 1 in the order below). `n` sizes the map tests
-// and `radix` the sequence test.
-fn run_sized(n: u64, radix: u64) -> u64 {
-    let mut r: u64 = 0;
-    r = first_failure(1, test_core_ordering(), r);
-    r = first_failure(2, test_core_option(), r);
-    r = first_failure(3, test_core_result(), r);
-    r = first_failure(4, test_fmt_write(), r);
-    r = first_failure(5, test_fmt_parse(), r);
-    r = first_failure(6, test_bytes(), r);
-    r = first_failure(7, test_btree(n), r);
-    r = first_failure(8, test_struct_keys(), r);
-    r = first_failure(9, test_flat_table(n), r);
-    r = first_failure(10, test_flat_table_differential(wrapping_mul(n, 2)), r);
-    r = first_failure(11, test_sets(), r);
-    r = first_failure(12, test_radix_seq(radix), r);
-    r = first_failure(13, test_version(), r);
-    r = first_failure(14, test_fmt_string(), r);
-    r
-}
+    // 0 when every test passes, else `1000 * t + c` for the first failure
+    // (tests are numbered from 1 in the order below). `n` sizes the map tests
+    // and `radix` the sequence test.
+    fn run_sized(n: u64, radix: u64) -> u64 {
+        let mut r: u64 = 0;
+        r = first_failure(1, check_core_ordering(), r);
+        r = first_failure(2, check_core_option(), r);
+        r = first_failure(3, check_core_result(), r);
+        r = first_failure(4, check_fmt_write(), r);
+        r = first_failure(5, check_fmt_parse(), r);
+        r = first_failure(6, check_bytes(), r);
+        r = first_failure(7, check_btree(n), r);
+        r = first_failure(8, check_struct_keys(), r);
+        r = first_failure(9, check_flat_table(n), r);
+        r = first_failure(10, check_flat_table_differential(wrapping_mul(n, 2)), r);
+        r = first_failure(11, check_sets(), r);
+        r = first_failure(12, check_radix_seq(radix), r);
+        r = first_failure(13, check_version(), r);
+        r = first_failure(14, check_fmt_string(), r);
+        r
+    }
 
-// The full sizes, for native code.
-fn run_all() -> u64 {
-    run_sized(600, 1100)
-}
+    // @case first_map_split_and_full_leaf(20, 32)
+    // @case multiple_map_leaves_and_second_radix_leaf(34, 33)
+    // @case evaluator_reference_sizes(40, 70)
+    fn test_std_integration(map_size: u64, radix_size: u64) -> Result[(), u64] {
+        let failure = run_sized(map_size, radix_size);
+        if failure == 0 {
+            Result::Ok(())
+        } else {
+            Result::Err(failure)
+        }
+    }
 
-// Sizes the evaluator runs quickly; they still split nodes.
-fn run_small() -> u64 {
-    run_sized(40, 70)
-}
+    // The full sizes, for native code.
+    fn run_all() -> u64 {
+        run_sized(600, 1100)
+    }
 
-fn trace_digest() -> u64 {
-    let mut h: u64 = 0;
-    h = wrapping_add(wrapping_mul(h, 31), trace_small_churn());
-    h = wrapping_add(wrapping_mul(h, 31), trace_dense_churn());
-    h = wrapping_add(wrapping_mul(h, 31), trace_wide());
-    h = wrapping_add(wrapping_mul(h, 31), trace_ascending());
-    h = wrapping_add(wrapping_mul(h, 31), trace_descending());
-    h = wrapping_add(wrapping_mul(h, 31), trace_seq_small());
-    h = wrapping_add(wrapping_mul(h, 31), trace_seq_deep());
-    h
-}
+    // Sizes the evaluator runs quickly; they still split nodes.
+    fn run_small() -> u64 {
+        run_sized(40, 70)
+    }
 
-fn trace_small_churn() -> u64 {
-    map_trace(1, 600, 40, 0)
-}
+    fn trace_digest() -> u64 {
+        let mut h: u64 = 0;
+        h = wrapping_add(wrapping_mul(h, 31), trace_small_churn());
+        h = wrapping_add(wrapping_mul(h, 31), trace_dense_churn());
+        h = wrapping_add(wrapping_mul(h, 31), trace_wide());
+        h = wrapping_add(wrapping_mul(h, 31), trace_ascending());
+        h = wrapping_add(wrapping_mul(h, 31), trace_descending());
+        h = wrapping_add(wrapping_mul(h, 31), trace_seq_small());
+        h = wrapping_add(wrapping_mul(h, 31), trace_seq_deep());
+        h
+    }
 
-fn trace_dense_churn() -> u64 {
-    map_trace(2, 6000, 700, 0)
-}
+    fn trace_small_churn() -> u64 {
+        map_trace(1, 600, 40, 0)
+    }
 
-fn trace_wide() -> u64 {
-    map_trace(3, 8000, 1099511627776, 0)
-}
+    fn trace_dense_churn() -> u64 {
+        map_trace(2, 6000, 700, 0)
+    }
 
-fn trace_ascending() -> u64 {
-    map_trace(4, 3000, 0, 1)
-}
+    fn trace_wide() -> u64 {
+        map_trace(3, 8000, 1099511627776, 0)
+    }
 
-fn trace_descending() -> u64 {
-    map_trace(5, 3000, 0, 2)
-}
+    fn trace_ascending() -> u64 {
+        map_trace(4, 3000, 0, 1)
+    }
 
-fn trace_seq_small() -> u64 {
-    seq_trace(11, 800)
-}
+    fn trace_descending() -> u64 {
+        map_trace(5, 3000, 0, 2)
+    }
 
-fn trace_seq_deep() -> u64 {
-    seq_trace(12, 12000)
-}
+    fn trace_seq_small() -> u64 {
+        seq_trace(11, 800)
+    }
 
-fn main() -> u64 {
-    run_all()
+    fn trace_seq_deep() -> u64 {
+        seq_trace(12, 12000)
+    }
+
+    fn main() -> u64 {
+        run_all()
+    }
 }

@@ -11,7 +11,7 @@ actions:
       cpu: 8
       memory: 22GB
       disk: 60GB
-    timeout: 90m
+    timeout: 60m
     triggers:
       push:
         branches:
@@ -20,30 +20,27 @@ actions:
         branches:
           - "*"
     steps:
+      # Recycled runners keep earlier runs' /tmp leftovers (#1200).
+      - run: "scripts/ci/reclaim-disk.sh"
       - run: "python3 tools/bazel/sync_build_files.py --check"
       - run: "scripts/ci/install-lean.sh"
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
-          scripts/ci/install-logos-rust.sh
-      # Builds everything and runs every test, including the per-package
-      # `clippy` (warnings are errors) and `rustfmt` checks. On a PR that
-      # touches no Lean-facing path, the `lean_replay` tests are built but not
-      # run; pushes to main run all of them (docs/ci-platforms.md).
+      # Core builds, tests, Clippy and rustfmt. The explicit build filter
+      # keeps replay test binaries and their runfiles off this runner.
       - run: |
           export VESPER_LEAN="$(cat .ci-lean-path)"
-          export VESPER_CARGO="$(cat .ci-logos-cargo-path)"
-          export VESPER_LOGOS42_ROOT="$(mktemp -d /tmp/vesper-logos42-ci.XXXXXX)/checker"
-          LEAN_REPLAY_FLAGS="$(python3 scripts/ci/lean_replay_scope.py || true)"
-          BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-logos42.sh "$VESPER_LOGOS42_ROOT"
-          bazel test --config=ci --config=rbe_build --config=ci_tests $LEAN_REPLAY_FLAGS //...
-      - run: "scripts/ci/check-lean-models.sh"
+          scripts/ci/reclaim-disk.sh watch &
+          disk_watch=$!
+          trap 'kill "$disk_watch" 2>/dev/null || true; scripts/ci/reclaim-disk.sh report' EXIT
+          bazel test --config=ci --config=rbe_build --config=ci_tests --remote_download_outputs=minimal --build_tag_filters=-lean_replay --test_tag_filters=-lean_replay //...
 
   - name: "Native and acceptance scripts"
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 16GB
+      memory: 22GB
       disk: 60GB
     timeout: 60m
     triggers:
@@ -58,9 +55,10 @@ actions:
       # Written by the prebuild step below; scripts/bazel-lib.sh reads it.
       VESPER_BAZEL_EXECUTABLES: ".ci-bazel-executables"
     steps:
+      - run: "scripts/ci/reclaim-disk.sh"
       - run: |
           sudo apt-get update
-          sudo apt-get install -y python-is-python3 qemu-user binutils-aarch64-linux-gnu
+          sudo apt-get install -y build-essential python-is-python3 qemu-user binutils-aarch64-linux-gnu
       - run: "scripts/ci/install-lean.sh"
       # One Bazel build for every executable the scripts run, instead of a
       # build and a cquery per executable.
@@ -83,3 +81,6 @@ actions:
       - run: "scripts/test-source-macro-parameters.sh"
       - run: "scripts/test-source-macro-tuples.sh"
       - run: "scripts/test-doc-links.sh"
+      # Keep model validation and replay on this separate required runner.
+      - run: "scripts/ci/check-lean-models.sh"
+      - run: "bash scripts/ci/test-lean-replay.sh"

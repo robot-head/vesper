@@ -1,0 +1,110 @@
+// Module util of @vesper/forge: word and byte reads, sorted scope sets and
+// origin sets.
+
+// Word `i` of `s`, or 0 past its end.
+pub fn wd(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Word `i` of `s`, or 0 past its end.
+pub fn sq(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Byte `i` of `s` as a word, or 256 past its end.
+pub fn byte(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 256,
+    }
+}
+
+// Whether text[start..start + len] spells `lit`.
+pub fn spells(in text: Slice[u8], start: u64, len: u64, in lit: Str) -> bool {
+    let b = lit.as_bytes();
+    if b.len() != len {
+        return false;
+    }
+    for i in 0..len {
+        if byte(in text, wrapping_add(start, i)) != byte(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether the sorted set a[af..af + al] is a subset of the sorted set
+// b[bf..bf + bl] (`ScopeSet::is_subset`).
+pub fn subset(in a: Slice[u64], af: u64, al: u64, in b: Slice[u64], bf: u64, bl: u64) -> bool {
+    if al > bl {
+        return false;
+    }
+    let mut j: u64 = 0;
+    for i in 0..al {
+        let x = wd(in a, wrapping_add(af, i));
+        loop {
+            if j >= bl {
+                return false;
+            }
+            let y = wd(in b, wrapping_add(bf, j));
+            j = wrapping_add(j, 1);
+            if y == x {
+                break;
+            }
+            if y > x {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// Whether the sorted sets a[af..af + al] and b[bf..bf + bl] are equal.
+pub fn same_set(in a: Slice[u64], af: u64, al: u64, in b: Slice[u64], bf: u64, bl: u64) -> bool {
+    if al != bl {
+        return false;
+    }
+    for i in 0..al {
+        if wd(in a, wrapping_add(af, i)) != wd(in b, wrapping_add(bf, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// Inserts `v` into the sorted, duplicate-free run s[from..] (a
+// `BTreeSet` insert), keeping it sorted.
+pub fn set_insert(inout s: ChunkSeq[u64], from: u64, v: u64) {
+    let n = s.len();
+    let mut i = n;
+    loop {
+        if i <= from {
+            break;
+        }
+        let x = sq(in s, wrapping_sub(i, 1));
+        if x == v {
+            return;
+        }
+        if x < v {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+    }
+    s.push(v);
+    let mut k = n;
+    loop {
+        if k <= i {
+            break;
+        }
+        let x = sq(in s, wrapping_sub(k, 1));
+        let _ = s.try_set(k, x);
+        k = wrapping_sub(k, 1);
+    }
+    let _ = s.try_set(i, v);
+}

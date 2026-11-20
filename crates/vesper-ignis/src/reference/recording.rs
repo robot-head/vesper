@@ -7,6 +7,11 @@ use crate::recording::{RecordingError, SubmitMode};
 use std::collections::{BTreeMap, VecDeque};
 use std::marker::PhantomData;
 
+// Ceilings on the recorder's bounds.
+const MAX_HISTORY: usize = 65_536;
+const MAX_PENDING: usize = 4096;
+const MAX_WORK_PER_POLL: usize = 1_000_000;
+
 struct Active {
     submission: Submission,
     cursors: Vec<usize>,
@@ -37,10 +42,10 @@ impl<A, R, T> RecordingBackend<A, R, T> {
         work_per_poll: usize,
     ) -> Result<Self, &'static str> {
         if history_limit == 0
-            || history_limit > 65_536
+            || history_limit > MAX_HISTORY
             || pending_limit == 0
-            || pending_limit > 4096
-            || work_per_poll > 1_000_000
+            || pending_limit > MAX_PENDING
+            || work_per_poll > MAX_WORK_PER_POLL
         {
             return Err("recording backend bounds");
         }

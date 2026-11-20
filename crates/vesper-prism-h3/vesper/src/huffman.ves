@@ -22,6 +22,27 @@ use self::huffman_codes::{
     huffman_codes
 };
 
+// A code word (huffman_codes): `bit length << CODE_LEN_SHIFT | code`.
+const CODE_LEN_SHIFT: u64 = 32;
+const CODE_MASK: u64 = 0xffffffff;
+// The trie's internal nodes (the code is complete) and the EOS symbol
+// (RFC 7541 Appendix B); a leaf child holds `leaf() | symbol`.
+const INTERNAL_NODES: u64 = 256;
+const EOS_SYMBOL: u64 = 256;
+const SYMBOL_MASK: u64 = 0x1ff;
+// The nibble table: 16 entries per node, each the next node in the low 16
+// bits and a decoded symbol above them.
+const NIBBLE_BITS: u64 = 4;
+const NIBBLES: u64 = 16;
+const NIBBLE_MASK: u64 = 0x0f;
+const NIB_NODE_MASK: u64 = 0xffff;
+const NIB_SYMBOL_SHIFT: u64 = 16;
+// `info[node]`: the depth in the low 8 bits and bit 8 when those bits are
+// all ones; RFC 7541 §5.2 allows at most 7 bits of such padding.
+const INFO_DEPTH_MASK: u64 = 0xff;
+const INFO_ALL_ONES: u64 = 0x100;
+const MAX_PADDING_BITS: u64 = 7;
+
 fn symbol_count() -> u64 {
     257
 }
@@ -59,13 +80,13 @@ fn eos_seen() -> u64 {
 pub fn huff_tables() -> Huff {
     let codes = huffman_codes();
     let mut child = zeros(2);
-    let mut info = ChunkSeq::with_capacity[u64](256);
-    info.push(256);
+    let mut info = ChunkSeq::with_capacity[u64](INTERNAL_NODES);
+    info.push(INFO_ALL_ONES);
     let mut nodes: u64 = 1;
     for s in 0..symbol_count() {
         let e = word(in codes.as_slice(), s);
-        let len = shr(e, 32);
-        let code = e & 4294967295;
+        let len = shr(e, CODE_LEN_SHIFT);
+        let code = e & CODE_MASK;
         let mut node: u64 = 0;
         for k in 0..len {
             let b = shr(code, wrapping_sub(wrapping_sub(len, 1), k)) & 1;
@@ -82,19 +103,19 @@ pub fn huff_tables() -> Huff {
                     let _set = child.try_set(slot, c);
                     let up = word(in info.as_slice(), node);
                     let ones = if b == 1 {
-                        up & 256
+                        up & INFO_ALL_ONES
                     } else {
                         0
                     };
-                    info.push(inc(up & 255) | ones);
+                    info.push(inc(up & INFO_DEPTH_MASK) | ones);
                 }
                 node = c;
             }
         }
     }
-    let mut nib = ChunkSeq::with_capacity[u64](wrapping_mul(nodes, 16));
+    let mut nib = ChunkSeq::with_capacity[u64](wrapping_mul(nodes, NIBBLES));
     for node_at in 0..nodes {
-        for n in 0..16 {
+        for n in 0..NIBBLES {
             nib.push(walk(in child, node_at, n));
         }
     }
@@ -106,19 +127,18 @@ pub fn huff_tables() -> Huff {
     }
 }
 
-fn walk(in child: ChunkSeq[u64], node_at: u64, n: i64) -> u64 {
-    let nibble = wrapping_u64(n);
+fn walk(in child: ChunkSeq[u64], node_at: u64, nibble: u64) -> u64 {
     let mut node = node_at;
     let mut out: u64 = 0;
     for k in 0..4 {
         let b = shr(nibble, wrapping_u64(wrapping_sub(3, k))) & 1;
         let c = word(in child.as_slice(), wrapping_add(wrapping_mul(node, 2), b));
         if c & leaf() != 0 {
-            let sym = c & 511;
-            if sym == 256 {
+            let sym = c & SYMBOL_MASK;
+            if sym == EOS_SYMBOL {
                 return eos_seen();
             }
-            out = emitted() | shl(sym, 16);
+            out = emitted() | shl(sym, NIB_SYMBOL_SHIFT);
             node = 0;
         } else {
             node = c;
@@ -132,7 +152,7 @@ pub fn huff_encoded_len(in h: Huff, in data: Slice[u8]) -> u64 {
     let mut bits: u64 = 0;
     for i in 0..data.len() {
         let e = word(in h.codes.as_slice(), widen_u64(byte(in data, i)));
-        bits = wrapping_add(bits, shr(e, 32));
+        bits = wrapping_add(bits, shr(e, CODE_LEN_SHIFT));
     }
     div_ceil(bits, 8)
 }
@@ -144,8 +164,8 @@ pub fn huff_encode(in h: Huff, in data: Slice[u8], inout out: ChunkSeq[u8]) {
     let mut nbits: u64 = 0;
     for i in 0..data.len() {
         let e = word(in h.codes.as_slice(), widen_u64(byte(in data, i)));
-        let len = shr(e, 32);
-        acc = shl(acc, len) | (e & 4294967295);
+        let len = shr(e, CODE_LEN_SHIFT);
+        acc = shl(acc, len) | (e & CODE_MASK);
         nbits = wrapping_add(nbits, len);
         loop {
             if nbits < 8 {
@@ -172,7 +192,10 @@ pub fn huff_decode(in h: Huff, in data: Slice[u8], max_len: u64, inout out: Chun
     let mut produced: u64 = 0;
     for i in 0..data.len() {
         let b = widen_u64(byte(in data, i));
-        let hi = word(in h.nib.as_slice(), wrapping_add(wrapping_mul(node_at, 16), shr(b, 4)));
+        let hi = word(
+            in h.nib.as_slice(),
+            wrapping_add(wrapping_mul(node_at, NIBBLES), shr(b, NIBBLE_BITS))
+        );
         if hi & eos_seen() != 0 {
             return Option::Some(HuffmanError::Eos);
         }
@@ -180,10 +203,13 @@ pub fn huff_decode(in h: Huff, in data: Slice[u8], max_len: u64, inout out: Chun
             if produced == max_len {
                 return Option::Some(HuffmanError::TooLong);
             }
-            out.push(wrapping_u8(shr(hi, 16)));
+            out.push(wrapping_u8(shr(hi, NIB_SYMBOL_SHIFT)));
             produced = inc(produced);
         }
-        let lo = word(in h.nib.as_slice(), wrapping_add(wrapping_mul(hi & 65535, 16), b & 15));
+        let lo = word(
+            in h.nib.as_slice(),
+            wrapping_add(wrapping_mul(hi & NIB_NODE_MASK, NIBBLES), b & NIBBLE_MASK)
+        );
         if lo & eos_seen() != 0 {
             return Option::Some(HuffmanError::Eos);
         }
@@ -191,13 +217,13 @@ pub fn huff_decode(in h: Huff, in data: Slice[u8], max_len: u64, inout out: Chun
             if produced == max_len {
                 return Option::Some(HuffmanError::TooLong);
             }
-            out.push(wrapping_u8(shr(lo, 16)));
+            out.push(wrapping_u8(shr(lo, NIB_SYMBOL_SHIFT)));
             produced = inc(produced);
         }
-        node_at = lo & 65535;
+        node_at = lo & NIB_NODE_MASK;
     }
     let info = word(in h.info.as_slice(), node_at);
-    if info & 255 > 7 || info & 256 == 0 {
+    if info & INFO_DEPTH_MASK > MAX_PADDING_BITS || info & INFO_ALL_ONES == 0 {
         return Option::Some(HuffmanError::BadPadding);
     }
     Option::None

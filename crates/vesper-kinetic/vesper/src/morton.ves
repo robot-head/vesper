@@ -1,21 +1,37 @@
 // Module morton of @vesper/kinetic (see lib.ves): 30-bit 3D Morton codes
 // (src/morton.rs) and the 63-bit codes of the LBVH (src/lbvh.rs).
 
+// The magic-bits interleave: an axis value (10 bits, or 21 for the LBVH's
+// 63-bit codes) is spread so that two zero bits follow each of its bits,
+// by shifting and masking with the pattern each step leaves (named by the
+// shift); compacting runs the steps backwards.
+const AXIS_MASK: u32 = 0x3ff;
+const SPREAD_MASK_16: u32 = 0x030000ff;
+const SPREAD_MASK_8: u32 = 0x0300f00f;
+const SPREAD_MASK_4: u32 = 0x030c30c3;
+const SPREAD_MASK_2: u32 = 0x09249249;
+const MORTON64_AXIS_MAX: u32 = 0x1fffff;
+const SPREAD21_MASK_32: u64 = 0x001f00000000ffff;
+const SPREAD21_MASK_16: u64 = 0x001f0000ff0000ff;
+const SPREAD21_MASK_8: u64 = 0x100f00f00f00f00f;
+const SPREAD21_MASK_4: u64 = 0x10c30c30c30c30c3;
+const SPREAD21_MASK_2: u64 = 0x1249249249249249;
+
 pub fn spread(v: u32) -> u32 {
-    let mut x = v & 0x3ff;
-    x = (x | (x << 16)) & 0x030000ff;
-    x = (x | (x << 8)) & 0x0300f00f;
-    x = (x | (x << 4)) & 0x030c30c3;
-    x = (x | (x << 2)) & 0x09249249;
+    let mut x = v & AXIS_MASK;
+    x = (x | (x << 16)) & SPREAD_MASK_16;
+    x = (x | (x << 8)) & SPREAD_MASK_8;
+    x = (x | (x << 4)) & SPREAD_MASK_4;
+    x = (x | (x << 2)) & SPREAD_MASK_2;
     x
 }
 
 pub fn compact(v: u32) -> u32 {
-    let mut x = v & 0x09249249;
-    x = (x | (x >> 2)) & 0x030c30c3;
-    x = (x | (x >> 4)) & 0x0300f00f;
-    x = (x | (x >> 8)) & 0x030000ff;
-    x = (x | (x >> 16)) & 0x3ff;
+    let mut x = v & SPREAD_MASK_2;
+    x = (x | (x >> 2)) & SPREAD_MASK_4;
+    x = (x | (x >> 4)) & SPREAD_MASK_8;
+    x = (x | (x >> 8)) & SPREAD_MASK_16;
+    x = (x | (x >> 16)) & AXIS_MASK;
     x
 }
 
@@ -24,22 +40,22 @@ pub fn encode_masked(x: u16, y: u16, z: u16) -> u32 {
 }
 
 pub fn spread21(v: u32) -> u64 {
-    let mut x = widen_u64(v & 0x1fffff);
-    x = (x | (x << 32)) & 0x001f00000000ffff;
-    x = (x | (x << 16)) & 0x001f0000ff0000ff;
-    x = (x | (x << 8)) & 0x100f00f00f00f00f;
-    x = (x | (x << 4)) & 0x10c30c30c30c30c3;
-    x = (x | (x << 2)) & 0x1249249249249249;
+    let mut x = widen_u64(v & MORTON64_AXIS_MAX);
+    x = (x | (x << 32)) & SPREAD21_MASK_32;
+    x = (x | (x << 16)) & SPREAD21_MASK_16;
+    x = (x | (x << 8)) & SPREAD21_MASK_8;
+    x = (x | (x << 4)) & SPREAD21_MASK_4;
+    x = (x | (x << 2)) & SPREAD21_MASK_2;
     x
 }
 
 pub fn compact21(code: u64) -> u32 {
-    let mut x = code & 0x1249249249249249;
-    x = (x | (x >> 2)) & 0x10c30c30c30c30c3;
-    x = (x | (x >> 4)) & 0x100f00f00f00f00f;
-    x = (x | (x >> 8)) & 0x001f0000ff0000ff;
-    x = (x | (x >> 16)) & 0x001f00000000ffff;
-    x = (x | (x >> 32)) & 0x1fffff;
+    let mut x = code & SPREAD21_MASK_2;
+    x = (x | (x >> 2)) & SPREAD21_MASK_4;
+    x = (x | (x >> 4)) & SPREAD21_MASK_8;
+    x = (x | (x >> 8)) & SPREAD21_MASK_16;
+    x = (x | (x >> 16)) & SPREAD21_MASK_32;
+    x = (x | (x >> 32)) & widen_u64(MORTON64_AXIS_MAX);
     wrapping_u32(x)
 }
 

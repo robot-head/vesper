@@ -1,0 +1,985 @@
+// @vesper/highlight: the lexical token classes of Vesper Chroma (design
+// §43) in Vesper (self-hosting SH1 lane 11, #1154): the Tier 0 classifier of
+// crates/vesper-highlight/src/tier0.rs (`classify`) over the token table of
+// @vesper/front, in token mode (the lexer stream) and in CST mode (the
+// parser's tree, where tokens inside `TYPE` nodes are types). Palettes,
+// Tier 1 facts and every renderer stay in Rust.
+//
+// Both entry points return one word per token, in source order:
+//   end | class << 32 | flags << 48
+// where `class` is the `VesperTokenClass` discriminant and `flags` the wire
+// flag bits (4: ligature, 8: recovered). Each span starts where the previous
+// one ends, so the words partition the source.
+
+use @vesper/front::{
+    Tokens,
+    Diags
+};
+use @vesper/front::lex::{
+    lex_with_limits,
+    hard_source_bytes,
+    hard_tokens,
+    hard_diagnostics,
+    max_diagnostics,
+    token_end,
+    token_sym
+};
+use @vesper/front::diag::{
+    diags_new
+};
+use @vesper/front::parse::{
+    parse_tokens,
+    hard_depth
+};
+
+// ---------------------------------------------------------------- kinds
+
+// Token kinds: the discriminants of `vesper_syntax::lexer::TokenKind`, which
+// are also the `kind` rows of @vesper/front's token table.
+
+const K_WHITESPACE: u8 = 0;
+const K_COMMENT: u8 = 1;
+const K_BLOCK_COMMENT: u8 = 2;
+const K_UPPER: u8 = 3;
+const K_LOWER: u8 = 4;
+const K_FLOAT: u8 = 5;
+const K_INT: u8 = 6;
+const K_STRING: u8 = 7;
+const K_STRUCT: u8 = 8;
+const K_ENUM: u8 = 9;
+const K_EFFECT: u8 = 10;
+const K_IMPL: u8 = 11;
+const K_FN: u8 = 12;
+const K_LET: u8 = 13;
+const K_COPY: u8 = 14;
+const K_AFFINE: u8 = 15;
+const K_LINEAR: u8 = 16;
+const K_MOD: u8 = 17;
+const K_EFF: u8 = 18;
+const K_IN: u8 = 19;
+const K_INOUT: u8 = 20;
+const K_SINK: u8 = 21;
+const K_SELF_KW: u8 = 22;
+const K_HANDLE: u8 = 23;
+const K_STATE: u8 = 24;
+const K_WITH: u8 = 25;
+const K_RETURN: u8 = 26;
+const K_MATCH: u8 = 27;
+const K_IF: u8 = 28;
+const K_ELSE: u8 = 29;
+const K_TRUE: u8 = 30;
+const K_FALSE: u8 = 31;
+const K_L_PAREN: u8 = 32;
+const K_R_PAREN: u8 = 33;
+const K_L_BRACE: u8 = 34;
+const K_R_BRACE: u8 = 35;
+const K_L_BRACKET: u8 = 36;
+const K_R_BRACKET: u8 = 37;
+const K_COMMA: u8 = 38;
+const K_SEMI: u8 = 39;
+const K_COLON: u8 = 40;
+const K_COLON_COLON: u8 = 41;
+const K_DOT: u8 = 42;
+const K_QUESTION: u8 = 43;
+const K_AT: u8 = 44;
+const K_AT_AT: u8 = 45;
+const K_ARROW: u8 = 46;
+const K_FAT_ARROW: u8 = 47;
+const K_EQ: u8 = 48;
+const K_PLUS_EQ: u8 = 49;
+const K_STAR_EQ: u8 = 50;
+const K_SLASH_EQ: u8 = 51;
+const K_PERCENT_EQ: u8 = 52;
+const K_MINUS_EQ: u8 = 53;
+const K_PLUS: u8 = 54;
+const K_MINUS: u8 = 55;
+const K_STAR: u8 = 56;
+const K_SLASH: u8 = 57;
+const K_PERCENT: u8 = 58;
+const K_EQ_EQ: u8 = 59;
+const K_NE: u8 = 60;
+const K_LT: u8 = 61;
+const K_LE: u8 = 62;
+const K_GT: u8 = 63;
+const K_GE: u8 = 64;
+const K_AND: u8 = 65;
+const K_OR: u8 = 66;
+const K_BANG: u8 = 67;
+const K_PIPE: u8 = 68;
+const K_ERROR: u8 = 69;
+const K_EOF: u8 = 70;
+const K_DOLLAR: u8 = 71;
+const K_TILDE: u8 = 72;
+const K_PIPE_EQ: u8 = 73;
+const K_AMP_EQ: u8 = 74;
+const K_DOT_DOT: u8 = 75;
+const K_DOT_DOT_EQ: u8 = 76;
+const K_AMP: u8 = 77;
+const K_CARET: u8 = 78;
+const K_SHL: u8 = 79;
+const K_SHR: u8 = 80;
+
+// ---------------------------------------------------------------- classes
+
+const C_KEYWORD_CONTROL: u64 = 0;
+const C_MODAL_SPECIFIER: u64 = 1;
+const C_PASS_MODE_IN: u64 = 2;
+const C_PASS_MODE_INOUT: u64 = 3;
+const C_PASS_MODE_SINK: u64 = 4;
+const C_FIELD_LEAF_MUT: u64 = 6;
+const C_EFFECT_LINEAR: u64 = 8;
+const C_EFFECT_ABORTABLE: u64 = 9;
+const C_TYPE_NOMINAL: u64 = 10;
+const C_WIRE_ENDIAN_SCALAR: u64 = 11;
+const C_FUNCTION_IDENT: u64 = 12;
+const C_LITERAL_SCALAR: u64 = 13;
+const C_DOC_PROOF_ANCHOR: u64 = 14;
+const C_PUNCT_LIGATURE: u64 = 15;
+const C_COMMENT_TRIVIA: u64 = 16;
+const C_WHITESPACE: u64 = 17;
+
+const F_LIGATURE: u64 = 4;
+const F_RECOVERED: u64 = 8;
+
+// `MAX_EFFECT_NAMES`.
+const MAX_EFFECT_NAMES: u64 = 64;
+// The parser's `TYPE` node, as a builder start event (2^31 + 204).
+const EV_TYPE: u32 = 2147483852;
+const EV_FINISH: u32 = 4294967295;
+const EV_START: u32 = 2147483648;
+// The start offsets that stand for the two built-in effect names.
+const NAME_FAIL: u32 = 4294967295;
+const NAME_CANCEL: u32 = 4294967294;
+
+// A source this package cannot classify as Rust does: past the front end's
+// default lexer ceilings (65,536 tokens, 128 diagnostics, 1 MiB). The Rust
+// side classifies it.
+pub copy struct Refused {
+    len: u64
+}
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    }
+}
+
+fn w32(in s: ChunkSeq[u32], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn kind_at(in t: Tokens, i: u64) -> u8 {
+    match t.kind.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => K_EOF,
+    }
+}
+
+fn sym_at(in t: Tokens, i: u64) -> u32 {
+    token_sym(in t, i)
+}
+
+fn trivia(k: u8) -> bool {
+    k <= K_BLOCK_COMMENT
+}
+
+// Whether `src[s..e]` spells `word`.
+fn is(in src: Slice[u8], s: u64, e: u64, in word: Slice[u8]) -> bool {
+    if wrapping_sub(e, s) != word.len() {
+        return false;
+    }
+    for i in 0..word.len() {
+        if byte(in src, wrapping_add(s, i)) != byte(in word, i) {
+            return false;
+        }
+    }
+    true
+}
+
+const W_TILED: u8 = 1;
+const W_HOT: u8 = 2;
+const W_COLD: u8 = 3;
+const W_PROOF: u8 = 4;
+const W_FIP: u8 = 5;
+const W_AS: u8 = 6;
+const W_FOR: u8 = 7;
+const W_LOOP: u8 = 8;
+const W_BREAK: u8 = 9;
+const W_CONTINUE: u8 = 10;
+const W_MUT: u8 = 11;
+const W_PUB: u8 = 12;
+const W_USE: u8 = 13;
+const W_TRAIT: u8 = 14;
+const W_MODEL: u8 = 15;
+const W_WIRE: u8 = 16;
+const W_TYPE: u8 = 17;
+const W_WHERE: u8 = 18;
+const W_REGION: u8 = 19;
+const W_DIM: u8 = 20;
+const W_U8: u8 = 21;
+const W_U16: u8 = 22;
+const W_U32: u8 = 23;
+const W_U64: u8 = 24;
+const W_U128: u8 = 25;
+const W_I8: u8 = 26;
+const W_I16: u8 = 27;
+const W_I32: u8 = 28;
+const W_I64: u8 = 29;
+const W_I128: u8 = 30;
+const W_F32: u8 = 31;
+const W_F64: u8 = 32;
+const W_BOOL: u8 = 33;
+const W_USIZE: u8 = 34;
+const W_ISIZE: u8 = 35;
+
+// The identifier words Tier 0 tests, by spelling (0 for none): one length
+// test and at most a few byte comparisons per identifier.
+fn word_of(in src: Slice[u8], s: u64, e: u64) -> u8 {
+    let n = wrapping_sub(e, s);
+    if n == 2 {
+        if is(in src, s, e, in "as".as_bytes()) {
+            return W_AS;
+        }
+        if is(in src, s, e, in "u8".as_bytes()) {
+            return W_U8;
+        }
+        if is(in src, s, e, in "i8".as_bytes()) {
+            return W_I8;
+        }
+    } else if n == 3 {
+        if is(in src, s, e, in "hot".as_bytes()) {
+            return W_HOT;
+        }
+        if is(in src, s, e, in "fip".as_bytes()) {
+            return W_FIP;
+        }
+        if is(in src, s, e, in "for".as_bytes()) {
+            return W_FOR;
+        }
+        if is(in src, s, e, in "mut".as_bytes()) {
+            return W_MUT;
+        }
+        if is(in src, s, e, in "pub".as_bytes()) {
+            return W_PUB;
+        }
+        if is(in src, s, e, in "use".as_bytes()) {
+            return W_USE;
+        }
+        if is(in src, s, e, in "dim".as_bytes()) {
+            return W_DIM;
+        }
+        if is(in src, s, e, in "u16".as_bytes()) {
+            return W_U16;
+        }
+        if is(in src, s, e, in "u32".as_bytes()) {
+            return W_U32;
+        }
+        if is(in src, s, e, in "u64".as_bytes()) {
+            return W_U64;
+        }
+        if is(in src, s, e, in "i16".as_bytes()) {
+            return W_I16;
+        }
+        if is(in src, s, e, in "i32".as_bytes()) {
+            return W_I32;
+        }
+        if is(in src, s, e, in "i64".as_bytes()) {
+            return W_I64;
+        }
+        if is(in src, s, e, in "f32".as_bytes()) {
+            return W_F32;
+        }
+        if is(in src, s, e, in "f64".as_bytes()) {
+            return W_F64;
+        }
+    } else if n == 4 {
+        if is(in src, s, e, in "cold".as_bytes()) {
+            return W_COLD;
+        }
+        if is(in src, s, e, in "loop".as_bytes()) {
+            return W_LOOP;
+        }
+        if is(in src, s, e, in "wire".as_bytes()) {
+            return W_WIRE;
+        }
+        if is(in src, s, e, in "type".as_bytes()) {
+            return W_TYPE;
+        }
+        if is(in src, s, e, in "u128".as_bytes()) {
+            return W_U128;
+        }
+        if is(in src, s, e, in "i128".as_bytes()) {
+            return W_I128;
+        }
+        if is(in src, s, e, in "bool".as_bytes()) {
+            return W_BOOL;
+        }
+    } else if n == 5 {
+        if is(in src, s, e, in "tiled".as_bytes()) {
+            return W_TILED;
+        }
+        if is(in src, s, e, in "proof".as_bytes()) {
+            return W_PROOF;
+        }
+        if is(in src, s, e, in "break".as_bytes()) {
+            return W_BREAK;
+        }
+        if is(in src, s, e, in "trait".as_bytes()) {
+            return W_TRAIT;
+        }
+        if is(in src, s, e, in "model".as_bytes()) {
+            return W_MODEL;
+        }
+        if is(in src, s, e, in "where".as_bytes()) {
+            return W_WHERE;
+        }
+        if is(in src, s, e, in "usize".as_bytes()) {
+            return W_USIZE;
+        }
+        if is(in src, s, e, in "isize".as_bytes()) {
+            return W_ISIZE;
+        }
+    } else if n == 6 {
+        if is(in src, s, e, in "region".as_bytes()) {
+            return W_REGION;
+        }
+    } else if n == 8 {
+        if is(in src, s, e, in "continue".as_bytes()) {
+            return W_CONTINUE;
+        }
+    }
+    0
+}
+
+// `is_wire_scalar`: `u16be`, `i64le`, `f32be`, ...
+fn is_wire_scalar(in src: Slice[u8], s: u64, e: u64) -> bool {
+    let n = wrapping_sub(e, s);
+    if n < 4 {
+        return false;
+    }
+    let lead = byte(in src, s);
+    if lead != 117 && lead != 105 && lead != 102 {
+        return false;
+    }
+    let o = wrapping_sub(e, 2);
+    let order = is(in src, o, e, in "be".as_bytes()) || is(in src, o, e, in "le".as_bytes());
+    let ws = wrapping_add(s, 1);
+    let width = if lead == 102 {
+        is(in src, ws, o, in "32".as_bytes()) || is(in src, ws, o, in "64".as_bytes())
+    } else {
+        is(in src, ws, o, in "8".as_bytes())
+            || is(in src, ws, o, in "16".as_bytes())
+            || is(in src, ws, o, in "32".as_bytes())
+            || is(in src, ws, o, in "64".as_bytes())
+            || is(in src, ws, o, in "128".as_bytes())
+    };
+    order && width
+}
+
+// `PRIMITIVES`.
+fn is_primitive(w: u8) -> bool {
+    w >= W_U8
+}
+
+// `CONTEXTUAL_DECL`.
+fn is_contextual_decl(w: u8) -> bool {
+    w >= W_PUB && w <= W_DIM
+}
+
+// `is_loop_keyword`. `before` and `after` are K_EOF for none.
+fn is_loop_keyword(w: u8, before: u8, after: u8) -> bool {
+    let statement_start = before
+        == K_EOF
+        || before
+        == K_L_BRACE
+        || before
+        == K_R_BRACE
+        || before
+        == K_SEMI
+        || before
+        == K_FAT_ARROW
+        || before
+        == K_EQ;
+    if w == W_LOOP {
+        after == K_L_BRACE
+    } else if w == W_FOR {
+        statement_start && (after == K_LOWER || after == K_L_PAREN)
+    } else if w == W_BREAK {
+        statement_start
+            && !(
+            after
+                == K_EQ
+                || after
+                == K_DOT
+                || after
+                == K_COLON
+                || after
+                == K_COLON_COLON
+                || after
+                == K_COMMA
+        )
+    } else if w == W_CONTINUE {
+        statement_start
+            && (
+            after
+                == K_EOF
+                || after
+                == K_SEMI
+                || after
+                == K_R_BRACE
+                || after
+                == K_R_PAREN
+                || after
+                == K_R_BRACKET
+                || after
+                == K_COMMA
+        )
+    } else if w == W_MUT {
+        before == K_LET
+    } else {
+        false
+    }
+}
+
+// The effect names Tier 0 tracks: name ranges (or a built-in name) and
+// whether each is linear.
+struct Effects {
+    start: ChunkSeq[u32],
+    sym: ChunkSeq[u32],
+    end: ChunkSeq[u32],
+    linear: ChunkSeq[bool]
+}
+
+// Whether effect `i` is the identifier `src[s..e]` with symbol `sym` (the
+// front end interns every identifier, so equal names have equal symbols).
+fn effect_is(in fx: Effects, i: u64, in src: Slice[u8], s: u64, e: u64, sym: u32) -> bool {
+    let a = match fx.start.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if a == NAME_FAIL {
+        is(in src, s, e, in "Fail".as_bytes())
+    } else if a == NAME_CANCEL {
+        is(in src, s, e, in "Cancel".as_bytes())
+    } else {
+        match fx.sym.try_get(i) {
+            Option::Some(v) => v == sym,
+            Option::None => false,
+        }
+    }
+}
+
+// The index of the effect named `src[s..e]`, or the count.
+fn effect_find(in fx: Effects, in src: Slice[u8], s: u64, e: u64, sym: u32) -> u64 {
+    let n = fx.start.len();
+    for i in 0..n {
+        if effect_is(in fx, i, in src, s, e, sym) {
+            return i;
+        }
+    }
+    n
+}
+
+// `note`: `linear` is 0 (false), 1 (true) or 2 (no change).
+fn note(inout fx: Effects, in src: Slice[u8], s: u64, e: u64, sym: u32, linear: u8) {
+    let i = effect_find(in fx, in src, s, e, sym);
+    if i < fx.start.len() {
+        if linear != 2 {
+            fx.linear.try_set(i, linear == 1);
+        }
+    } else if fx.start.len() < MAX_EFFECT_NAMES {
+        fx.start.push(wrapping_u32(s));
+        fx.sym.push(sym);
+        fx.end.push(wrapping_u32(e));
+        fx.linear.push(linear == 1);
+    }
+}
+
+// `classify` over the token table `t` of `src`. `in_type[i]` marks tokens
+// inside a `TYPE` node (CST mode); in token mode it is empty and primitive
+// scalars after `:`, `->`, `[` or `,` are types instead.
+fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_mode: bool)
+    -> ChunkSeq[u64] {
+    // The last token is the Eof sentinel.
+    let n = wrapping_sub(t.kind.len(), 1);
+    let mut sig = ChunkSeq::with_capacity[u32](wrapping_add(wrapping_shr_u64(n, 1), 1));
+    let mut sig_pos = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        if trivia(kind_at(in t, i)) {
+            sig_pos.push(4294967295);
+        } else {
+            sig_pos.push(wrapping_u32(sig.len()));
+            sig.push(wrapping_u32(i));
+        }
+    }
+    let ns = sig.len();
+    // The kind, start and end of significant token `p`.
+    let mut sk = ChunkSeq::with_capacity[u8](ns);
+    for p in 0..ns {
+        sk.push(kind_at(in t, w32(in sig, p)));
+    }
+
+    // Pre-pass: effect names (declared, in `eff [...]` rows, or handled).
+    let mut fx = Effects {
+        start: ChunkSeq::with_capacity[u32](8),
+        sym: ChunkSeq::with_capacity[u32](8),
+        end: ChunkSeq::with_capacity[u32](8),
+        linear: ChunkSeq::with_capacity[bool](8)
+    };
+    fx.start.push(NAME_FAIL);
+    fx.sym.push(0);
+    fx.end.push(0);
+    fx.linear.push(false);
+    fx.start.push(NAME_CANCEL);
+    fx.sym.push(0);
+    fx.end.push(0);
+    fx.linear.push(false);
+    let mut declared = ChunkSeq::new[u32]();
+    let mut rows = ChunkSeq::new[bool]();
+    for p in 0..ns {
+        let k = match sk.try_get(p) {
+            Option::Some(k) => k,
+            Option::None => K_EOF,
+        };
+        let before = if p == 0 {
+            K_EOF
+        } else {
+            match sk.try_get(wrapping_sub(p, 1)) {
+                Option::Some(k) => k,
+                Option::None => K_EOF,
+            }
+        };
+        let after = match sk.try_get(wrapping_add(p, 1)) {
+            Option::Some(k) => k,
+            Option::None => K_EOF,
+        };
+        if k == K_EFFECT {
+            let linear = p > 0 && before == K_LINEAR;
+            if after == K_UPPER {
+                let j = w32(in sig, wrapping_add(p, 1));
+                let s = w32(in t.start, j);
+                let e = token_end(in t, j);
+                if linear {
+                    declared.push(wrapping_u32(j));
+                }
+                note(
+                    inout fx,
+                    in src,
+                    s,
+                    e,
+                    sym_at(in t, j),
+                    if linear {
+                        1
+                    } else {
+                        0
+                    }
+                );
+            }
+        } else if k == K_HANDLE {
+            if after == K_UPPER {
+                let j = w32(in sig, wrapping_add(p, 1));
+                note(inout fx, in src, w32(in t.start, j), token_end(in t, j), sym_at(in t, j), 2);
+            }
+        } else if k == K_L_BRACKET {
+            rows.push(p > 0 && before == K_EFF);
+        } else if k == K_R_BRACKET {
+            if rows.len() != 0 {
+                rows.truncate(wrapping_sub(rows.len(), 1));
+            }
+        } else if k == K_UPPER {
+            let open = row_open(in rows);
+            if open && (before == K_L_BRACKET || before == K_COMMA || before == K_COLON) {
+                let i = w32(in sig, p);
+                note(inout fx, in src, w32(in t.start, i), token_end(in t, i), sym_at(in t, i), 2);
+            }
+        }
+    }
+    for d in 0..declared.len() {
+        let j = w32(in declared, d);
+        note(inout fx, in src, w32(in t.start, j), token_end(in t, j), sym_at(in t, j), 1);
+    }
+
+    let mut out = ChunkSeq::with_capacity[u64](n);
+    // Inside the projection list of `inout name.{a, b.c}`: its brace depth.
+    let mut projection = false;
+    let mut depth: u64 = 0;
+    for i in 0..n {
+        let k = kind_at(in t, i);
+        let s = w32(in t.start, i);
+        let e = token_end(in t, i);
+        let p = w32(in sig_pos, i);
+        let significant = p != 4294967295;
+        // The significant tokens around this one (K_EOF for none).
+        let before = if significant && p > 0 {
+            match sk.try_get(wrapping_sub(p, 1)) {
+                Option::Some(k) => k,
+                Option::None => K_EOF,
+            }
+        } else {
+            K_EOF
+        };
+        let after = if significant {
+            match sk.try_get(wrapping_add(p, 1)) {
+                Option::Some(k) => k,
+                Option::None => K_EOF,
+            }
+        } else {
+            K_EOF
+        };
+        let mut flags: u64 = if k == K_ERROR {
+            F_RECOVERED
+        } else {
+            0
+        };
+        let simple = simple_class(k);
+        let class = if simple != NO_CLASS {
+            simple
+        } else if k == K_INOUT {
+            if after == K_LOWER {
+                projection = true;
+                depth = 0;
+            }
+            C_PASS_MODE_INOUT
+        } else if k == K_UPPER {
+            let f = effect_find(in fx, in src, s, e, sym_at(in t, i));
+            if f < fx.start.len() {
+                let linear = match fx.linear.try_get(f) {
+                    Option::Some(l) => l,
+                    Option::None => false,
+                };
+                if linear {
+                    C_EFFECT_LINEAR
+                } else {
+                    C_EFFECT_ABORTABLE
+                }
+            } else {
+                C_TYPE_NOMINAL
+            }
+        } else if k == K_LOWER {
+            classify_lower(
+                in src,
+                in t,
+                in sk,
+                in sig,
+                i,
+                p,
+                s,
+                e,
+                before,
+                after,
+                projection,
+                match in_type.try_get(i) {
+                    Option::Some(b) => b,
+                    Option::None => false,
+                },
+                token_mode
+            )
+        } else if k
+            == K_AT
+            && after
+            == K_LOWER
+            && next_is(in src, in t, in sig, p, in "proof".as_bytes()) {
+            C_DOC_PROOF_ANCHOR
+        } else if k
+            == K_AT
+            && after
+            == K_LOWER
+            && next_is(in src, in t, in sig, p, in "fip".as_bytes()) {
+            C_KEYWORD_CONTROL
+        } else if k
+            == K_ARROW
+            || k
+            == K_FAT_ARROW
+            || k
+            == K_COLON_COLON
+            || k
+            == K_EQ_EQ
+            || k
+            == K_NE
+            || k
+            == K_LE
+            || k
+            == K_GE
+            || k
+            == K_AND
+            || k
+            == K_OR {
+            flags = flags | F_LIGATURE;
+            C_PUNCT_LIGATURE
+        } else {
+            C_PUNCT_LIGATURE
+        };
+        // Track the end of an `inout name.{...}` projection list.
+        if projection {
+            if k == K_L_BRACE {
+                depth = wrapping_add(depth, 1);
+            } else if k == K_R_BRACE {
+                if depth > 0 {
+                    depth = wrapping_sub(depth, 1);
+                }
+                if depth == 0 {
+                    projection = false;
+                }
+            } else if (k == K_COLON || k == K_COMMA || k == K_R_PAREN) && depth == 0 {
+                projection = false;
+            }
+        }
+        out.push(e | wrapping_shl_u64(class, 32) | wrapping_shl_u64(flags, 48));
+    }
+    out
+}
+
+// The class of a token kind that needs no context, or NO_CLASS.
+fn simple_class(k: u8) -> u64 {
+    if k == K_WHITESPACE {
+        C_WHITESPACE
+    } else if k == K_COMMENT || k == K_BLOCK_COMMENT {
+        C_COMMENT_TRIVIA
+    } else if control_keyword(k) {
+        C_KEYWORD_CONTROL
+    } else if k == K_COPY || k == K_AFFINE || k == K_LINEAR || k == K_MOD {
+        C_MODAL_SPECIFIER
+    } else if k == K_IN {
+        C_PASS_MODE_IN
+    } else if k == K_SINK {
+        C_PASS_MODE_SINK
+    } else if k == K_TRUE || k == K_FALSE || k == K_INT || k == K_FLOAT || k == K_STRING {
+        C_LITERAL_SCALAR
+    } else {
+        NO_CLASS
+    }
+}
+
+const NO_CLASS: u64 = 255;
+
+// The keywords classed as control (split in two to stay inside the
+// formatter's nesting limit).
+fn control_keyword(k: u8) -> bool {
+    declaration_keyword(k)
+        || k
+        == K_STATE
+        || k
+        == K_WITH
+        || k
+        == K_RETURN
+        || k
+        == K_MATCH
+        || k
+        == K_IF
+        || k
+        == K_ELSE
+}
+
+fn declaration_keyword(k: u8) -> bool {
+    k
+        == K_STRUCT
+        || k
+        == K_ENUM
+        || k
+        == K_EFFECT
+        || k
+        == K_IMPL
+        || k
+        == K_FN
+        || k
+        == K_LET
+        || k
+        == K_EFF
+        || k
+        == K_SELF_KW
+        || k
+        == K_HANDLE
+}
+
+// Whether the significant token after position `p` spells `word`.
+fn next_is(in src: Slice[u8], in t: Tokens, in sig: ChunkSeq[u32], p: u64, in word: Slice[u8])
+    -> bool {
+    let q = wrapping_add(p, 1);
+    if q >= sig.len() {
+        return false;
+    }
+    let j = w32(in sig, q);
+    is(in src, w32(in t.start, j), token_end(in t, j), in word)
+}
+
+// Whether the innermost open bracket is an effect row.
+fn row_open(in rows: ChunkSeq[bool]) -> bool {
+    if rows.len() == 0 {
+        return false;
+    }
+    match rows.try_get(wrapping_sub(rows.len(), 1)) {
+        Option::Some(r) => r,
+        Option::None => false,
+    }
+}
+
+fn modal_start(k: u8) -> bool {
+    k == K_STRUCT || k == K_COPY || k == K_AFFINE || k == K_LINEAR || k == K_MOD
+}
+
+fn sig_kind(in sk: ChunkSeq[u8], p: u64, offset: u64) -> u8 {
+    match sk.try_get(wrapping_add(p, offset)) {
+        Option::Some(k) => k,
+        Option::None => K_EOF,
+    }
+}
+
+// The class of an identifier (`K::Lower` in `classify`).
+fn classify_lower(
+    in src: Slice[u8],
+    in t: Tokens,
+    in sk: ChunkSeq[u8],
+    in sig: ChunkSeq[u32],
+    i: u64,
+    p: u64,
+    s: u64,
+    e: u64,
+    before: u8,
+    after: u8,
+    projection: bool,
+    in_type: bool,
+    token_mode: bool
+) -> u64 {
+    let w = word_of(in src, s, e);
+    let is_tiled_decl = w
+        == W_TILED
+        && before
+        != K_FN
+        && sig_kind(in sk, p, 1)
+        == K_L_PAREN
+        && sig_kind(in sk, p, 2)
+        == K_INT
+        && sig_kind(in sk, p, 3)
+        == K_R_PAREN
+        && modal_start(sig_kind(in sk, p, 4));
+    let is_field_temp = (w == W_HOT || w == W_COLD)
+        && (before == K_L_BRACE || before == K_COMMA)
+        && after
+        == K_LOWER
+        && sig_kind(in sk, p, 2)
+        == K_COLON;
+    if projection && (before == K_DOT || before == K_L_BRACE || before == K_COMMA) {
+        C_FIELD_LEAF_MUT
+    } else if is_wire_scalar(in src, s, e) {
+        C_WIRE_ENDIAN_SCALAR
+    } else if before == K_AT && w == W_PROOF {
+        C_DOC_PROOF_ANCHOR
+    } else if before
+        == K_AT
+        && w
+        == W_FIP
+        || is_tiled_decl
+        || is_field_temp
+        || is_loop_keyword(w, before, after) {
+        C_KEYWORD_CONTROL
+    } else if before == K_FN || after == K_L_PAREN {
+        C_FUNCTION_IDENT
+    } else if is_contextual_decl(w)
+        && (
+        after
+            == K_UPPER
+            || after
+            == K_LOWER
+            || after
+            == K_FN
+            || after
+            == K_STRUCT
+            || after
+            == K_ENUM
+            || after
+            == K_EFFECT
+            || after
+            == K_IMPL
+            || after
+            == K_LINEAR
+            || after
+            == K_COPY
+            || after
+            == K_AFFINE
+            || after
+            == K_L_BRACE
+    )
+        || (w == W_AS || w == W_FOR)
+        && (before == K_UPPER || before == K_R_BRACKET)
+        && after
+        == K_UPPER {
+        C_KEYWORD_CONTROL
+    } else if in_type
+        || token_mode
+        && is_primitive(w)
+        && (before == K_COLON || before == K_ARROW || before == K_L_BRACKET || before == K_COMMA) {
+        C_TYPE_NOMINAL
+    } else {
+        C_PASS_MODE_IN
+    }
+}
+
+// Lexes `src` as `highlight_tier0_tokens_with_limit` (token mode) or
+// `parse_with_limits` (CST mode, `max_diag` diagnostics) do: the caller has
+// checked the byte budget, so the hard byte ceiling admits `src`. `Refused`
+// if the lexer stopped at a ceiling (the Rust code keeps the flat stream).
+fn lex_or_refuse(in src: Slice[u8], inout d: Diags, max_diag: u64) -> Tokens eff [Fail[Refused]] {
+    let t = lex_with_limits(in src, inout d, hard_source_bytes(), hard_tokens(), max_diag);
+    if t.limited || t.rejected {
+        Fail::raise(
+            Refused {
+                len: src.len()
+            }
+        );
+    }
+    t
+}
+
+// `highlight_tier0_tokens`: the classes of the lexer's token stream.
+pub fn tier0_tokens(in source: Str) -> ChunkSeq[u64] eff [Fail[Refused]] {
+    let src = source.as_bytes();
+    let mut d = diags_new();
+    let t = lex_or_refuse(in src, inout d, hard_diagnostics());
+    let none = ChunkSeq::new[bool]();
+    classify(in src, in t, in none, true)
+}
+
+// `highlight_tier0`: the classes of the parser's CST leaves, whose order is
+// the token order; a token is a type inside a `TYPE` node.
+pub fn tier0(in source: Str) -> ChunkSeq[u64] eff [Fail[Refused]] {
+    let src = source.as_bytes();
+    let mut d = diags_new();
+    let t = lex_or_refuse(in src, inout d, max_diagnostics());
+    let p = parse_tokens(in src, t, d, max_diagnostics(), hard_depth());
+    // Walk the builder events: a token event is a leaf in text order.
+    let n = p.t.kind.len();
+    let mut in_type = ChunkSeq::with_capacity[bool](n);
+    in_type.resize(n, false);
+    let mut open = ChunkSeq::with_capacity[bool](64);
+    let mut types: u64 = 0;
+    for i in 0..p.ev.len() {
+        let ev = match p.ev.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if ev == EV_FINISH {
+            let last = wrapping_sub(open.len(), 1);
+            let was_type = match open.try_get(last) {
+                Option::Some(b) => b,
+                Option::None => false,
+            };
+            if was_type {
+                types = wrapping_sub(types, 1);
+            }
+            open.truncate(last);
+        } else if ev >= EV_START {
+            let is_type = ev == EV_TYPE;
+            if is_type {
+                types = wrapping_add(types, 1);
+            }
+            open.push(is_type);
+        } else if types > 0 {
+            in_type.try_set(widen_u64(ev), true);
+        }
+    }
+    classify(in src, in p.t, in in_type, false)
+}

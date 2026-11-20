@@ -12,6 +12,15 @@ use self::{
     S
 };
 
+// 64-bit FNV-1a offset basis and prime (node hashes).
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+// SplitMix64's first finalizer multiplier.
+const MIX_MUL: u64 = 13787848793156543929;
+// Finalizer shifts.
+const MIX_SHIFT_A: u64 = 29;
+const MIX_SHIFT_B: u64 = 32;
+
 pub fn none() -> u64 {
     18446744073709551615
 }
@@ -306,41 +315,55 @@ fn var_flag(v: u64) -> u64 {
     }
 }
 
-// Which fields hold node ids: 1 = a, 2 = b, 4 = c, 8 = the kids. Var
-// fields are reported by `var_field`.
+// Which fields hold node ids: a, b, c and the kids. Var fields are
+// reported by `var_field`.
+const REF_A: u64 = 1;
+const REF_B: u64 = 2;
+const REF_C: u64 = 4;
+const REF_KIDS: u64 = 8;
+
 pub fn refs(tag: u64) -> u64 {
-    if tag == 1 {
-        8
-    } else if tag == 3 {
-        3
-    } else if tag == 6 || tag == 11 {
-        8
-    } else if tag == 13 {
-        10
-    } else if tag >= 14 && tag <= 17 {
-        if tag == 17 {
-            11
+    if tag == t_ctor() {
+        REF_KIDS
+    } else if tag == t_proj() {
+        REF_A | REF_B
+    } else if tag == g_row() || tag == l_eff() {
+        REF_KIDS
+    } else if tag == t_ref() {
+        REF_B | REF_KIDS
+    } else if tag >= g_impl() && tag <= d_node() {
+        if tag == d_node() {
+            REF_A | REF_B | REF_KIDS
         } else {
-            3
+            REF_A | REF_B
         }
-    } else if tag == 18 || tag == 21 || tag == 27 || tag == 45 {
-        8
-    } else if tag == 29 {
-        7
-    } else if tag >= 30 && tag <= 32 {
-        1
-    } else if tag == 39 || tag == 41 || tag == 43 || tag == 50 || tag == 53 {
-        if tag == 43 {
-            3
+    } else if tag == st_conf() || tag == st_pconf() || tag == k_list() || tag == r_cands() {
+        REF_KIDS
+    } else if tag == q_proven() {
+        REF_A | REF_B | REF_C
+    } else if tag >= q_ambig() && tag <= q_unsup() {
+        REF_A
+    } else if tag
+        == am_stalled()
+        || tag
+        == un_mixed()
+        || tag
+        == f_node()
+        || tag
+        == c_nested()
+        || tag
+        == ce_nosol() {
+        if tag == f_node() {
+            REF_A | REF_B
         } else {
-            1
+            REF_A
         }
-    } else if tag == 42 || tag == 49 {
-        2
-    } else if tag == 46 {
-        3
-    } else if tag == 55 {
-        7
+    } else if tag == un_internal() || tag == cf_node() {
+        REF_B
+    } else if tag == r_mode() {
+        REF_A | REF_B
+    } else if tag == e_env() {
+        REF_A | REF_B | REF_C
     } else {
         0
     }
@@ -348,21 +371,21 @@ pub fn refs(tag: u64) -> u64 {
 
 // Whether field `a` is a variable.
 pub fn var_field(tag: u64) -> bool {
-    tag == 2 || tag == 5 || tag == 9 || tag == 10 || tag == 12
+    tag == t_var() || tag == m_var() || tag == b_var() || tag == g_cap() || tag == l_cap()
 }
 
 // The parameter kind of an argument node.
 pub fn kind_of(tag: u64) -> u64 {
-    if tag <= 3 {
-        0
-    } else if tag <= 5 {
-        1
-    } else if tag == 6 {
-        2
-    } else if tag <= 9 {
-        3
+    if tag <= t_proj() {
+        kd_type()
+    } else if tag <= m_var() {
+        kd_mode()
+    } else if tag == g_row() {
+        kd_row()
+    } else if tag <= b_var() {
+        kd_brand()
     } else {
-        4
+        kd_cap()
     }
 }
 
@@ -394,7 +417,7 @@ pub fn kid(in s: S, n: u64, i: u64) -> u64 {
 
 // Label key: an effect id, or `1 << 34 | var` for a capability label.
 pub fn label_key(in s: S, l: u64) -> u64 {
-    if tg(in s, l) == 11 {
+    if tg(in s, l) == l_eff() {
         fa(in s, l)
     } else {
         17179869184 | fa(in s, l)
@@ -405,12 +428,12 @@ pub fn label_key(in s: S, l: u64) -> u64 {
 // Interning.
 
 fn mix(h: u64, x: u64) -> u64 {
-    wrapping_mul(h ^ x, 1099511628211)
+    wrapping_mul(h ^ x, FNV_PRIME)
 }
 
 fn finish(h: u64) -> u64 {
-    let x = wrapping_mul(h ^ (h >> 29), 13787848793156543929);
-    x ^ (x >> 32)
+    let x = wrapping_mul(h ^ (h >> MIX_SHIFT_A), MIX_MUL);
+    x ^ (x >> MIX_SHIFT_B)
 }
 
 fn node_flags(in s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
@@ -419,22 +442,22 @@ fn node_flags(in s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
     if var_field(tag) {
         f = var_flag(a);
     }
-    if tag == 3 {
-        f = 8;
+    if tag == t_proj() {
+        f = fl_proj();
     }
-    if tag == 6 && a != none() {
+    if tag == g_row() && a != none() {
         f = var_flag(a);
     }
-    if (r & 1) != 0 {
+    if (r & REF_A) != 0 {
         f = f | flags(in s, a);
     }
-    if (r & 2) != 0 {
+    if (r & REF_B) != 0 {
         f = f | flags(in s, b);
     }
-    if (r & 4) != 0 {
+    if (r & REF_C) != 0 {
         f = f | flags(in s, c);
     }
-    if (r & 8) != 0 {
+    if (r & REF_KIDS) != 0 {
         let n = s.tmp.len();
         let mut i = from;
         let mut prev: u64 = 0;
@@ -445,7 +468,7 @@ fn node_flags(in s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
             }
             let k = sw(in s.tmp, i);
             f = f | flags(in s, k);
-            if tag == 6 {
+            if tag == g_row() {
                 let key = label_key(in s, k);
                 if i > from && key <= prev {
                     bad = true;
@@ -496,7 +519,7 @@ fn grow(inout s: S) {
 pub fn mkl(inout s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
     let n = s.tmp.len();
     let len = sub(n, from);
-    let mut h = mix(mix(mix(mix(14695981039346656037, tag), a), b), c);
+    let mut h = mix(mix(mix(mix(FNV_OFFSET, tag), a), b), c);
     let mut i = from;
     loop {
         if i >= n {
@@ -607,25 +630,25 @@ pub fn push_kids(inout s: S, n: u64) {
 
 // The empty list and slist.
 pub fn nil(inout s: S) -> u64 {
-    mk0(inout s, 27)
+    mk0(inout s, k_list())
 }
 
 pub fn snil(inout s: S) -> u64 {
-    mk0(inout s, 28)
+    mk0(inout s, k_slist())
 }
 
 // The bare variable of a kind as an argument node.
 pub fn var_arg(inout s: S, kind: u64, v: u64) -> u64 {
-    if kind == 0 {
-        mk1(inout s, 2, v)
-    } else if kind == 1 {
-        mk1(inout s, 5, v)
-    } else if kind == 2 {
-        mk(inout s, 6, v, 0, 0)
-    } else if kind == 3 {
-        mk1(inout s, 9, v)
+    if kind == kd_type() {
+        mk1(inout s, t_var(), v)
+    } else if kind == kd_mode() {
+        mk1(inout s, m_var(), v)
+    } else if kind == kd_row() {
+        mk(inout s, g_row(), v, 0, 0)
+    } else if kind == kd_brand() {
+        mk1(inout s, b_var(), v)
     } else {
-        mk1(inout s, 10, v)
+        mk1(inout s, g_cap(), v)
     }
 }
 
@@ -635,11 +658,11 @@ pub fn arg_kind(in s: S, n: u64) -> u64 {
 }
 
 pub fn goal_impl(inout s: S, tref: u64, brand: u64) -> u64 {
-    mk2(inout s, 14, tref, brand)
+    mk2(inout s, g_impl(), tref, brand)
 }
 
 pub fn der_leaf(inout s: S, goal: u64, step: u64) -> u64 {
-    mk2(inout s, 17, goal, step)
+    mk2(inout s, d_node(), goal, step)
 }
 
 pub fn new_arena(inout s: S) {

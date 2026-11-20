@@ -53,6 +53,12 @@ use self::out::{
     w_term
 };
 
+// Default solver limits, as in the Rust `SolverConfig::default()`. The
+// depth bound keeps recursion within a 2 MiB thread stack.
+const DEFAULT_MAX_DEPTH: u64 = 48;
+const DEFAULT_MAX_STEPS: u64 = 100000;
+const DEFAULT_MAX_FIX: u64 = 16;
+
 pub struct S {
     tg: ChunkSeq[u64],
     fa: ChunkSeq[u64],
@@ -273,9 +279,9 @@ fn new_s() -> S {
         st_cocyc: 0,
         st_indcyc: 0,
         st_reruns: 0,
-        max_depth: 48,
-        max_steps: 100000,
-        max_fix: 16,
+        max_depth: DEFAULT_MAX_DEPTH,
+        max_steps: DEFAULT_MAX_STEPS,
+        max_fix: DEFAULT_MAX_FIX,
         steps: 0,
         cenv: 0,
         cgoal: 0,

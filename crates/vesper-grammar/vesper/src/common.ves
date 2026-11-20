@@ -6,8 +6,16 @@ use self::{
 };
 
 // The largest u64, also the "absent" marker in result streams.
+// Unsigned LEB128 (src/framing.rs `LEB128_*`): seven payload bits per byte
+// and a continuation bit.
+const LEB128_PAYLOAD: u64 = 127;
+const LEB128_MORE: u64 = 128;
+const LEB128_SHIFT: u64 = 7;
+// `u64::MAX`, the "absent" word.
+const NONE: u64 = 18446744073709551615;
+
 pub fn none() -> u64 {
-    18446744073709551615
+    NONE
 }
 
 // Raise `kind` (the index of the variant in the Rust module's ErrorKind)
@@ -174,10 +182,10 @@ pub fn leb_len(value: u64) -> u64 {
     let mut v = value;
     let mut count: u64 = 1;
     loop {
-        if v < 128 {
+        if v < LEB128_MORE {
             break;
         }
-        v = v >> 7;
+        v = v >> LEB128_SHIFT;
         count = wrapping_add(count, 1);
     }
     count
@@ -187,12 +195,12 @@ pub fn leb_len(value: u64) -> u64 {
 pub fn put_leb(inout out: Slice[u8], at: u64, value: u64, len: u64) {
     let mut v = value;
     for i in 0..len {
-        let more: u64 = if v >= 128 {
-            128
+        let more: u64 = if v >= LEB128_MORE {
+            LEB128_MORE
         } else {
             0
         };
-        out.try_set(wrapping_add(at, i), wrapping_u8((v & 127) | more));
-        v = v >> 7;
+        out.try_set(wrapping_add(at, i), wrapping_u8((v & LEB128_PAYLOAD) | more));
+        v = v >> LEB128_SHIFT;
     }
 }

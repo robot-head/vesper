@@ -10,17 +10,34 @@ vesper_hybrid(
             "edit_src": "modules/layout/src/lib.ves",
             "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
         },
+        "hybrid_parse": {
+            "edit_src": "modules/parse/src/lib.ves",
+            "edits": {"    if b {\n        1\n    } else {\n        0\n    }": "    if b {\n        0\n    } else {\n        1\n    }"},
+        },
     },
     # The included CLI sources (src/main.rs and its command modules) and
     # what they embed.
     extra_compile_data = ["//:files"],
     # The differential harness runs the default compiler beside the hybrid
-    # over the bootstrap corpus, examples/ and tests/.
+    # over the bootstrap corpus, examples/ and tests/; tests/parse.rs also
+    # reads the parser test sources.
     extra_test_data = [
         "//:files",
         "//bootstrap:files",
+        "//crates/vesper-syntax:files",
     ],
-    modules = {"hybrid_layout": "modules/layout"},
+    # The parse module (#1155) builds on the front end v2 and the AST.
+    module_deps = {
+        "hybrid_parse": [
+            "//:ast_package",
+            "//:front_package",
+            "//:std_intern_package",
+        ],
+    },
+    modules = {
+        "hybrid_layout": "modules/layout",
+        "hybrid_parse": "modules/parse",
+    },
     test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
     test_path_binaries = {
         "test/differential": [

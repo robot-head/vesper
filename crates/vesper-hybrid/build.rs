@@ -11,7 +11,10 @@ use vesper_port_harness::{GENERATED_BINDING_ENV, OBJECT_ENV, Port};
 
 /// The swapped modules: (library, Vesper package, committed binding).
 /// SH1+ lanes append theirs (recipe in the report).
-const MODULES: &[(&str, &str, &str)] = &[("hybrid_layout", "modules/layout", "port/layout.rs")];
+const MODULES: &[(&str, &str, &str)] = &[
+    ("hybrid_layout", "modules/layout", "port/layout.rs"),
+    ("hybrid_parse", "modules/parse", "port/parse.rs"),
+];
 
 /// The divergence check of the differential harness: the enum tag word
 /// takes two words, so every enum layout moves (mirrored in BUILD.bazel).
@@ -19,6 +22,14 @@ const MODULES: &[(&str, &str, &str)] = &[("hybrid_layout", "modules/layout", "po
 const DIVERGENT_EDIT: (&str, &str) = (
     "        8\n    } else {\n        0\n",
     "        16\n    } else {\n        0\n",
+);
+
+/// The parse module's divergence check: every AST flag (`let mut`, `pub`,
+/// `@fip`, named fields, ...) reads back inverted (mirrored in BUILD.bazel).
+#[cfg(feature = "divergent-parse")]
+const DIVERGENT_PARSE_EDIT: (&str, &str) = (
+    "    if b {\n        1\n    } else {\n        0\n    }",
+    "    if b {\n        0\n    } else {\n        1\n    }",
 );
 
 fn main() {
@@ -45,6 +56,12 @@ fn main() {
         #[cfg(feature = "divergent")]
         let port = if *library == "hybrid_layout" {
             port.edit(DIVERGENT_EDIT.0, DIVERGENT_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-parse")]
+        let port = if *library == "hybrid_parse" {
+            port.edit(DIVERGENT_PARSE_EDIT.0, DIVERGENT_PARSE_EDIT.1)
         } else {
             port
         };

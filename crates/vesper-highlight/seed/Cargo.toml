@@ -1,0 +1,47 @@
+[package]
+name = "vesper-highlight-seed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Frozen Rust seed copy of vesper-highlight for the compiler's own dependency closure"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; self-hosting SH1 lane 11,
+# #1154): the compiler links this package, the Rust build of ../src, under
+# the library name `vesper_highlight`. Crates inside
+# `cargo tree -p vesper -e normal,build` depend on it with
+# `vesper-highlight = { path = ".../seed", package = "vesper-highlight-seed" }`;
+# every other crate uses the port-backed package `vesper-highlight`. The
+# Rust code takes bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_highlight"
+path = "../src/lib.rs"
+
+[dependencies]
+vesper-syntax = { path = "../../vesper-syntax" }
+rowan = { workspace = true }
+smol_str = "=0.3.7"
+base64 = { version = "=0.22.1", optional = true }
+blake3 = { version = "=1.8.7", optional = true }
+png = { version = "=0.17.16", optional = true }
+rustybuzz = { version = "=0.20.1", optional = true }
+tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "png-format"], optional = true }
+ttf-parser = { version = "=0.25.1", optional = true }
+
+[features]
+shot = ["dep:base64", "dep:blake3", "dep:png", "dep:rustybuzz", "dep:tiny-skia", "dep:ttf-parser"]
+
+[[test]]
+name = "chroma"
+path = "../tests/chroma.rs"
+
+[[test]]
+name = "html_line_endings"
+path = "../tests/html_line_endings.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

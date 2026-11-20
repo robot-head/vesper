@@ -22,8 +22,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // plan.rs: a child move reports its positions swapped.
     (
-        "op(10, node.id, child_id, from, index)",
-        "op(10, node.id, child_id, index, from)",
+        "op(op_move_child(), node.id, child_id, from, index)",
+        "op(op_move_child(), node.id, child_id, index, from)",
     ),
     // session.rs: a stale plan passes the session's revision check.
     (
@@ -37,7 +37,7 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // sim_aura.rs: Inputs drop out of the focus order.
     (
-        "                if kind == 2 || kind == 3 {\n                    q.items.push(id);",
-        "                if kind == 2 {\n                    q.items.push(id);",
+        "                if kind == k_button() || kind == k_input() {\n                    q.items.push(id);",
+        "                if kind == k_button() {\n                    q.items.push(id);",
     ),
 ];

@@ -16,6 +16,9 @@ use @vesper-std/sort::keyed::{
     sort_by_key
 };
 
+// Bodies, constraints and colours are u32 indices.
+const U32_MAX: u64 = 0xffffffff;
+
 fn raise_coloring(e: ColoringError) -> u64 eff [Fail[ColoringError]] {
     Fail::raise(e);
     0
@@ -59,7 +62,7 @@ pub fn color_pairs(
     inout sorted: Slice[u32]
 ) -> u64 eff [Fail[ColoringError]] {
     let n = a.len();
-    if n > capacity || n > 0xffffffff {
+    if n > capacity || n > U32_MAX {
         return raise_coloring(
             ColoringError::CapacityExceeded {
                 constraints: wrapping_usize(n),
@@ -79,7 +82,7 @@ pub fn color_pairs(
                 }
             );
         }
-        if cb <= 0xffffffff && cb >= bodies {
+        if cb <= U32_MAX && cb >= bodies {
             return raise_coloring(
                 ColoringError::BodyOutOfRange {
                     constraint: wrapping_usize(c),
@@ -99,7 +102,7 @@ pub fn color_pairs(
         let wa = widen_u64(ca);
         let mut lo = wa;
         let mut hi = wa;
-        if cb <= 0xffffffff {
+        if cb <= U32_MAX {
             if cb < wa {
                 lo = cb;
             } else {
@@ -120,7 +123,7 @@ pub fn color_pairs(
         let ca = widen_u64(g32(in a, wi));
         let cb = g64(in b, wi);
         let mut busy = g64(in masks, ca);
-        if cb <= 0xffffffff {
+        if cb <= U32_MAX {
             busy = busy | g64(in masks, cb);
         }
         let free = ~busy;
@@ -134,7 +137,7 @@ pub fn color_pairs(
         let color = widen_u64(trailing_zeros_u64(free));
         let bit = shl_u64(1, wrapping_u32(color));
         masks.try_set(ca, g64(in masks, ca) | bit);
-        if cb <= 0xffffffff {
+        if cb <= U32_MAX {
             masks.try_set(cb, g64(in masks, cb) | bit);
         }
         colors.try_set(wi, wrapping_u8(color));
@@ -163,7 +166,7 @@ pub fn color_sets(
     if offs.len() > 0 {
         count = wrapping_sub(offs.len(), 1);
     }
-    if count > capacity || count > 0xffffffff {
+    if count > capacity || count > U32_MAX {
         return raise_coloring(
             ColoringError::CapacityExceeded {
                 constraints: wrapping_usize(count),
@@ -190,7 +193,7 @@ pub fn color_sets(
                 }
             );
         }
-        let mut min: u64 = 0xffffffff;
+        let mut min: u64 = U32_MAX;
         let mut max: u64 = 0;
         for k in lo..hi {
             let body = g32(in bodies, k);

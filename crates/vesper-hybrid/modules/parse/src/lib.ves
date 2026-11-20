@@ -1,0 +1,628 @@
+// @vesper/hybrid-parse: `vesper_syntax::parser::parse` served from Vesper
+// in the hybrid Stage 2 build (self-hosting SH1 lane 12, #1155).
+//
+// `parse_words` runs the front end v2 (@vesper/front) and the AST lowering
+// (@vesper/ast) once and returns everything `Parse` holds as one word
+// stream: the CST as its builder events, the diagnostics, and the AST's
+// arenas row by row. crates/vesper-hybrid/src/parse.rs reads the stream
+// back into a rowan `GreenNode`, `Diagnostic`s and a `vesper_core::ast::
+// Module`. The layout (one u64 per word, sections in this order):
+//
+//   format                 `format()`
+//   events                 count, then one word per CST builder event:
+//                            node start   1 * 2^62 + kind
+//                            node finish  2 * 2^62
+//                            token        kind * 2^48 + end * 2^24 + start
+//   diagnostics            count, then per diagnostic its code (1, 2 or 3
+//                          for E000n), start, end and message length, then
+//                          the message bytes eight per word, little-endian
+//   ast                    0 for a source over the byte budget (the empty
+//                          module), else 1 and (empty arenas when the parse
+//                          halted or hit a limit):
+//     names                symbol count n, n + 1 text offsets, the text's
+//                          byte length, then its bytes eight per word
+//     29 arenas            per arena its row count, then each row's fields
+//                          in declaration order (@vesper/ast lib.ves), one
+//                          word each; then the list pool and the module's
+//                          five lists (items, model uses, bounds, uses,
+//                          public names), each a count and its words
+//
+// Offsets fit in 24 bits because sources over `max_source_bytes()` (1 MiB)
+// are refused before lexing.
+
+// @export abi 4
+
+use @vesper/ast::{
+    Ast
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper/front::Diags;
+use @vesper/front::lex::{
+    max_source_bytes,
+    token_end
+};
+use @vesper/front::diag::{
+    limit_message_observed
+};
+
+// The layout version of `parse_words`; the Rust reader checks it.
+pub fn format() -> u64 {
+    1
+}
+
+fn tag_start() -> u64 {
+    4611686018427387904
+}
+
+fn tag_finish() -> u64 {
+    9223372036854775808
+}
+
+// `ITEM`'s sibling `MODULE` and `TokenKind::Error`
+// (crates/vesper-syntax/src/parser.rs, lexer.rs).
+fn module_kind() -> u64 {
+    200
+}
+
+fn error_kind() -> u64 {
+    69
+}
+
+fn bw(b: bool) -> u64 {
+    if b {
+        1
+    } else {
+        0
+    }
+}
+
+fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Bytes `from..to` of `b`, eight per word, little-endian.
+fn pack(inout o: ChunkSeq[u64], in b: Slice[u8], from: u64, to: u64) {
+    let mut acc: u64 = 0;
+    let mut k: u32 = 0;
+    for i in from..to {
+        let c = match b.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        acc = acc | wrapping_shl_u64(c, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            o.push(acc);
+            acc = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        o.push(acc);
+    }
+}
+
+fn token_word(kind: u64, start: u64, end: u64) -> u64 {
+    wrapping_shl_u64(kind, 48) | wrapping_shl_u64(end, 24) | start
+}
+
+fn put_diags(inout o: ChunkSeq[u64], in d: Diags) {
+    let n = d.code.len();
+    o.push(n);
+    for i in 0..n {
+        let from = w(u32_at(in d.at, i));
+        let to = if wrapping_add(i, 1) < n {
+            w(u32_at(in d.at, wrapping_add(i, 1)))
+        } else {
+            d.text.len()
+        };
+        o.push(widen_u64(u8_at(in d.code, i)));
+        o.push(w(u32_at(in d.start, i)));
+        o.push(w(u32_at(in d.end, i)));
+        o.push(wrapping_sub(to, from));
+        pack(inout o, in d.text.as_slice(), from, to);
+    }
+}
+
+// `parse`'s fallback for a source over the byte budget: one Error token
+// over the longest UTF-8 prefix within it, E0003 and the empty module.
+fn oversized(inout o: ChunkSeq[u64], in b: Slice[u8]) {
+    let n = b.len();
+    let mut retained = max_source_bytes();
+    loop {
+        let c = match b.try_get(retained) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if retained == 0 || c < 128 || c >= 192 {
+            break;
+        }
+        retained = wrapping_sub(retained, 1);
+    }
+    if retained == 0 {
+        o.push(2);
+    } else {
+        o.push(3);
+    }
+    o.push(tag_start() | module_kind());
+    if retained != 0 {
+        o.push(token_word(error_kind(), 0, retained));
+    }
+    o.push(tag_finish());
+    let mut m = ChunkSeq::new[u8]();
+    limit_message_observed(inout m, 0, max_source_bytes(), n, retained);
+    o.push(1);
+    o.push(3);
+    o.push(retained);
+    o.push(retained);
+    o.push(m.len());
+    pack(inout o, in m.as_slice(), 0, m.len());
+    o.push(0);
+}
+
+// Parses `source` (`vesper_syntax::parser::parse`) into the word stream
+// described above.
+pub fn parse_words(in source: Str) -> ChunkSeq[u64] {
+    let b = source.as_bytes();
+    let mut o = ChunkSeq::new[u64]();
+    o.push(format());
+    if b.len() > max_source_bytes() {
+        oversized(inout o, in b);
+        return o;
+    }
+    let l = lower_source(in source);
+    let nev = l.p.ev.len();
+    o.reserve(wrapping_add(nev, 64));
+    o.push(nev);
+    for i in 0..nev {
+        let e = u32_at(in l.p.ev, i);
+        if e == 4294967295 {
+            o.push(tag_finish());
+        } else if e >= 2147483648 {
+            o.push(tag_start() | wrapping_sub(w(e), 2147483648));
+        } else {
+            let t = w(e);
+            let kind = widen_u64(u8_at(in l.p.t.kind, t));
+            let start = w(u32_at(in l.p.t.start, t));
+            o.push(token_word(kind, start, token_end(in l.p.t, t)));
+        }
+    }
+    put_diags(inout o, in l.p.d);
+    // A halted or limited parse lowers nothing: its arenas hold the empty
+    // module, which reads back as `Module::default()`.
+    o.push(1);
+    put_ast(inout o, in l.ast);
+    o
+}
+
+fn put_u32s(inout o: ChunkSeq[u64], in s: ChunkSeq[u32]) {
+    let n = s.len();
+    o.push(n);
+    for i in 0..n {
+        o.push(w(u32_at(in s, i)));
+    }
+}
+
+fn put_ast(inout o: ChunkSeq[u64], in a: Ast) {
+    // Names.
+    let nsyms = a.names.len();
+    o.push(nsyms);
+    for i in 0..wrapping_add(nsyms, 1) {
+        o
+            .push(
+            match a.names.starts.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            }
+        );
+    }
+    let text = a.names.text.as_bytes();
+    o.push(text.len());
+    pack(inout o, in text, 0, text.len());
+    put_exprs_and_pats(inout o, in a);
+    put_decls(inout o, in a);
+    put_items(inout o, in a);
+    put_u32s(inout o, in a.pool);
+    put_u32s(inout o, in a.m_items);
+    put_u32s(inout o, in a.m_model_uses);
+    put_u32s(inout o, in a.m_bounds);
+    put_u32s(inout o, in a.m_uses);
+    put_u32s(inout o, in a.m_public);
+}
+
+fn put_exprs_and_pats(inout o: ChunkSeq[u64], in a: Ast) {
+    o.push(a.lits.len());
+    for k in 0..a.lits.len() {
+        match a.lits.at(k) {
+            Option::Some(r) => {
+                o.push(widen_u64(r.kind));
+                o.push(bw(r.neg));
+                o.push(r.bits);
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.exprs.len());
+    for k in 0..a.exprs.len() {
+        match a.exprs.at(k) {
+            Option::Some(r) => {
+                o.push(widen_u64(r.kind));
+                o.push(w(r.start));
+                o.push(w(r.end));
+                o.push(w(r.a));
+                o.push(w(r.b));
+                o.push(w(r.c));
+                o.push(w(r.d));
+                o.push(w(r.e));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.pats.len());
+    for k in 0..a.pats.len() {
+        match a.pats.at(k) {
+            Option::Some(r) => {
+                o.push(widen_u64(r.kind));
+                o.push(w(r.start));
+                o.push(w(r.end));
+                o.push(w(r.a));
+                o.push(w(r.b));
+                o.push(w(r.c));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.types.len());
+    for k in 0..a.types.len() {
+        match a.types.at(k) {
+            Option::Some(r) => {
+                o.push(widen_u64(r.kind));
+                o.push(w(r.a));
+                o.push(w(r.b));
+                o.push(w(r.c));
+                o.push(w(r.d));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.stmts.len());
+    for k in 0..a.stmts.len() {
+        match a.stmts.at(k) {
+            Option::Some(r) => {
+                o.push(widen_u64(r.kind));
+                o.push(w(r.pat));
+                o.push(w(r.ty));
+                o.push(w(r.value));
+                o.push(bw(r.mutable));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.args.len());
+    for k in 0..a.args.len() {
+        match a.args.at(k) {
+            Option::Some(r) => {
+                o.push(widen_u64(r.pass));
+                o.push(bw(r.explicit));
+                o.push(w(r.expr));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.clauses.len());
+    for k in 0..a.clauses.len() {
+        match a.clauses.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(w(r.pats));
+                o.push(w(r.body));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.params.len());
+    for k in 0..a.params.len() {
+        match a.params.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(widen_u64(r.pass));
+                o.push(w(r.projections));
+                o.push(w(r.ty));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.effects.len());
+    for k in 0..a.effects.len() {
+        match a.effects.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.instances));
+                o.push(w(r.tail));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.effect_nodes.len());
+    for k in 0..a.effect_nodes.len() {
+        match a.effect_nodes.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.label));
+                o.push(w(r.name));
+                o.push(w(r.args));
+            },
+            Option::None => {},
+        }
+    }
+}
+
+fn put_decls(inout o: ChunkSeq[u64], in a: Ast) {
+    o.push(a.generics.len());
+    for k in 0..a.generics.len() {
+        match a.generics.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(widen_u64(r.bound));
+                o.push(bw(r.row));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.fields.len());
+    for k in 0..a.fields.len() {
+        match a.fields.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(w(r.ty));
+                o.push(widen_u64(r.modality));
+                o.push(widen_u64(r.temperature));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.variants.len());
+    for k in 0..a.variants.len() {
+        match a.variants.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(w(r.fields));
+                o.push(bw(r.named));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.adts.len());
+    for k in 0..a.adts.len() {
+        match a.adts.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(widen_u64(r.mode));
+                o.push(w(r.generics));
+                o.push(w(r.variants));
+                o.push(bw(r.is_enum));
+                o.push(bw(r.tiled));
+                o.push(w(r.tile_width));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.fns.len());
+    for k in 0..a.fns.len() {
+        match a.fns.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(bw(r.fip));
+                o.push(w(r.generics));
+                o.push(w(r.params));
+                o.push(w(r.result));
+                o.push(w(r.effects));
+                o.push(w(r.body));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.effect_decls.len());
+    for k in 0..a.effect_decls.len() {
+        match a.effect_decls.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(bw(r.linear));
+                o.push(w(r.generics));
+                o.push(w(r.ops));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.impls.len());
+    for k in 0..a.impls.len() {
+        match a.impls.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.ty));
+                o.push(w(r.generics));
+                o.push(w(r.methods));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.traits.len());
+    for k in 0..a.traits.len() {
+        match a.traits.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(bw(r.public));
+                o.push(w(r.generics));
+                o.push(w(r.assoc));
+                o.push(w(r.methods));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.assoc_decls.len());
+    for k in 0..a.assoc_decls.len() {
+        match a.assoc_decls.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(widen_u64(r.bound));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.trait_refs.len());
+    for k in 0..a.trait_refs.len() {
+        match a.trait_refs.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.package));
+                o.push(w(r.name));
+                o.push(w(r.args));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.wheres.len());
+    for k in 0..a.wheres.len() {
+        match a.wheres.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.ty));
+                o.push(w(r.trait_ref));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.assoc_binds.len());
+    for k in 0..a.assoc_binds.len() {
+        match a.assoc_binds.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(w(r.ty));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.confs.len());
+    for k in 0..a.confs.len() {
+        match a.confs.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.model));
+                o.push(bw(r.public));
+                o.push(w(r.generics));
+                o.push(w(r.trait_ref));
+                o.push(w(r.self_ty));
+                o.push(w(r.wheres));
+                o.push(w(r.assoc));
+                o.push(w(r.methods));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+}
+
+fn put_items(inout o: ChunkSeq[u64], in a: Ast) {
+    o.push(a.items.len());
+    for k in 0..a.items.len() {
+        match a.items.at(k) {
+            Option::Some(r) => {
+                o.push(widen_u64(r.kind));
+                o.push(w(r.node));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.model_uses.len());
+    for k in 0..a.model_uses.len() {
+        match a.model_uses.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.model));
+                o.push(w(r.start));
+                o.push(w(r.end));
+                o.push(w(r.scope_start));
+                o.push(w(r.scope_end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.bounds.len());
+    for k in 0..a.bounds.len() {
+        match a.bounds.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.param));
+                o.push(w(r.trait_ref));
+                o.push(w(r.start));
+                o.push(w(r.end));
+                o.push(w(r.owner));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.uses.len());
+    for k in 0..a.uses.len() {
+        match a.uses.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.package));
+                o.push(w(r.supers));
+                o.push(w(r.path));
+                o.push(w(r.names));
+                o.push(bw(r.public));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.use_names.len());
+    for k in 0..a.use_names.len() {
+        match a.use_names.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.name));
+                o.push(w(r.alias));
+                o.push(w(r.start));
+                o.push(w(r.end));
+            },
+            Option::None => {},
+        }
+    }
+    o.push(a.lists.len());
+    for k in 0..a.lists.len() {
+        match a.lists.at(k) {
+            Option::Some(r) => {
+                o.push(w(r.first));
+                o.push(w(r.len));
+            },
+            Option::None => {},
+        }
+    }
+}

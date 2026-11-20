@@ -20,8 +20,8 @@ const DIVERGENT: &[(&str, &str)] = &[
     // formats.rs, Q4_K (vesper/src/qk.ves): the sub-block minimum keeps the
     // wrong high bits; reference_fixtures q4_k_bytes_equal_llama_cpp fails.
     (
-        "s.set(288 + j, b | ((lm >> 4) << 6));",
-        "s.set(288 + j, b | ((lm >> 3) << 6));",
+        "s.set(S_PACKED + j, b | ((lm >> 4) << 6));",
+        "s.set(S_PACKED + j, b | ((lm >> 3) << 6));",
     ),
     // formats.rs, FP8 (vesper/src/ocp.ves): normal codes get the next
     // exponent; reference_fixtures
@@ -46,11 +46,14 @@ const DIVERGENT: &[(&str, &str)] = &[
     // tokenizer.rs (vesper/src/tokens.ves): byte-fallback pieces are looked
     // up as lowercase `<0xab>`; tokenizer_sampling
     // encoder_matches_run_c_and_round_trips fails.
-    ("        55 + d\n", "        87 + d\n"),
+    (
+        "        HEX_UPPER_BASE + d\n",
+        "        HEX_UPPER_BASE + 32 + d\n",
+    ),
     // gguf.rs (vesper/src/store.ves): the default alignment is 16; abba
     // both_builds_read_the_same_gguf_files fails.
     (
-        "    let mut alignment: u64 = 32;",
+        "    let mut alignment: u64 = DEFAULT_ALIGNMENT;",
         "    let mut alignment: u64 = 16;",
     ),
     // kv.rs (vesper/src/pool.ves): a sequence may hold one token more than
@@ -62,27 +65,27 @@ const DIVERGENT: &[(&str, &str)] = &[
     // attention.rs (vesper/src/lib.ves): BF16 keys and values lose a bit of
     // their high byte; abba both_builds_attend_the_same fails.
     (
-        "from_bits_f32((lo | (hi << 8)) << 16)",
-        "from_bits_f32((lo | (hi << 7)) << 16)",
+        "from_bits_f32((lo | (hi << 8)) << BF16_SHIFT)",
+        "from_bits_f32((lo | (hi << 7)) << BF16_SHIFT)",
     ),
     // llama.rs (vesper/src/llama.ves): `<0x-A>` decodes as a byte, not
     // `<0x+A>`; abba both_builds_read_the_same_llama2c_files fails.
     (
-        "if piece[start + 3] == 43 && lo < 16 {",
-        "if piece[start + 3] == 45 && lo < 16 {",
+        "if piece[start + 3] == 43 && lo < NOT_HEX {",
+        "if piece[start + 3] == 45 && lo < NOT_HEX {",
     ),
     // mmap.rs (vesper/src/lib.ves): an empty weight file fails to map; abba
     // both_builds_open_the_same_weight_files fails.
     (
-        "    if len == 0 {\n        return 1;",
-        "    if len == 0 {\n        return 4;",
+        "    if len == 0 {\n        return OPEN_EMPTY;",
+        "    if len == 0 {\n        return OPEN_MAP_FAILED;",
     ),
     // json.rs (vesper/src/text.ves): a leading zero is accepted before two
     // more digits only; abba both_builds_read_the_same_safetensors_headers
     // fails.
     (
-        "if at - start > 1 && b[start] == 48 {",
-        "if at - start > 2 && b[start] == 48 {",
+        "if at - start > 1 && b[start] == DIGIT_0 {",
+        "if at - start > 2 && b[start] == DIGIT_0 {",
     ),
     // ops.rs (vesper/src/lib.ves): softmax divides by twice the sum;
     // inference_ops silu_swiglu_softmax_argmax fails.

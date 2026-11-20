@@ -23,6 +23,11 @@ use self::lex::{
 };
 use self::parse::{
     at_end,
+    kw_create,
+    kw_drop,
+    kw_not,
+    kw_null,
+    kw_table,
     expect_sym,
     expect_word,
     ident,
@@ -32,6 +37,12 @@ use self::parse::{
 };
 
 // DDL (src/parse.rs `ddl` and `HermeticCatalog::apply_ddl_changes`).
+
+// ASCII bytes.
+const LPAREN: u64 = 40;
+const RPAREN: u64 = 41;
+const COMMA: u64 = 44;
+const SEMICOLON: u64 = 59;
 
 pub fn scalar_type(inout q: Q) -> u64 {
     let t = take(inout q);
@@ -75,10 +86,10 @@ pub fn parse_ddl(inout q: Q) -> u64 {
         if !bound(inout q, bn, 2, "DDL statement limit") {
             return count;
         }
-        if word(inout q, 19) {
-            expect_word(inout q, 21, "table");
+        if word(inout q, kw_create()) {
+            expect_word(inout q, kw_table(), "table");
             let name = ident(inout q);
-            expect_sym(inout q, 40);
+            expect_sym(inout q, LPAREN);
             if q.err != 0 {
                 return count;
             }
@@ -111,11 +122,11 @@ pub fn parse_ddl(inout q: Q) -> u64 {
                 if q.err != 0 {
                     return count;
                 }
-                let nullable = if word(inout q, 14) {
-                    expect_word(inout q, 16, "null");
+                let nullable = if word(inout q, kw_not()) {
+                    expect_word(inout q, kw_null(), "null");
                     false
                 } else {
-                    word(inout q, 16);
+                    word(inout q, kw_null());
                     true
                 };
                 if q.err != 0 {
@@ -138,14 +149,14 @@ pub fn parse_ddl(inout q: Q) -> u64 {
                     }
                 );
                 ncols = wrapping_add(ncols, 1);
-                if !sym(inout q, 44) {
+                if !sym(inout q, COMMA) {
                     break;
                 }
             }
             q.words.try_set(at, ncols);
-            expect_sym(inout q, 41);
-        } else if word(inout q, 20) {
-            expect_word(inout q, 21, "table");
+            expect_sym(inout q, RPAREN);
+        } else if word(inout q, kw_drop()) {
+            expect_word(inout q, kw_table(), "table");
             let name = ident(inout q);
             if q.err != 0 {
                 return count;
@@ -158,7 +169,7 @@ pub fn parse_ddl(inout q: Q) -> u64 {
             return count;
         }
         count = wrapping_add(count, 1);
-        if !sym(inout q, 59) && q.err == 0 && !at_end(in q) {
+        if !sym(inout q, SEMICOLON) && q.err == 0 && !at_end(in q) {
             syntax(inout q, "expected statement separator");
         }
     }

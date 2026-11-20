@@ -4,11 +4,11 @@ use crate::ack::ReceivedPackets;
 use crate::endpoint::WarpError;
 use crate::frame::Frame;
 use crate::header::HeaderParser;
-use crate::packet_number::{PnLen, encoded_len};
+use crate::packet_number::{PN_MAX_LEN, PnLen, encoded_len};
 
 /// A short header's largest size: the first byte, a 20-byte DCID and a
 /// 4-byte packet number.
-pub(crate) const MAX_SHORT_HEADER: usize = 1 + 20 + 4;
+pub(crate) const MAX_SHORT_HEADER: usize = 1 + crate::header::MAX_CID_LEN + PN_MAX_LEN;
 const TAG_LEN: usize = vesper_warp_crypto::TAG_LEN;
 
 /// `WarpEndpoint::write_plaintext`: the plain text of the 1-RTT packet

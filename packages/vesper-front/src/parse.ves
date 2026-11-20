@@ -96,6 +96,8 @@ use self::words::{
     w_fip,
     w_trait,
     w_tiled,
+    w_test,
+    w_test_case,
     w_wire,
     w_for,
     w_where,
@@ -120,6 +122,8 @@ use self::words::{
 };
 use self::util::{
     inc,
+    saturating_add_u64,
+    saturating_mul_u64,
     add,
     max64,
     narrow,
@@ -886,8 +890,6 @@ fn reserved_word(k: u8) -> bool {
         || k
         == k_mod()
         || k
-        == k_eff()
-        || k
         == k_in()
         || k
         == k_inout()
@@ -917,10 +919,11 @@ fn reserved_word(k: u8) -> bool {
         == k_impl()
 }
 
-// `state`, `linear` and `with` are keywords only where their forms start;
-// wherever a name is expected they are names (`at_contextual_name`).
+// `state`, `linear`, `with` and `eff` are keywords only where their forms
+// start; wherever a name is expected they are names (`at_contextual_name`).
+// `eff` opens an effect row only after a signature and as the `e: eff` bound.
 fn contextual_name(k: u8) -> bool {
-    k == k_state() || k == k_linear() || k == k_with()
+    k == k_state() || k == k_linear() || k == k_with() || k == k_eff()
 }
 
 fn at_contextual_name(in p: P) -> bool {
@@ -1105,6 +1108,51 @@ fn fip_attr(inout p: P) -> bool {
     }
 }
 
+// `Parser::attr_paren_args`: a balanced `(...)` list for `@test(...)` or
+// `@test_case(...)`.
+fn attr_paren_args(inout p: P) {
+    expect(inout p, k_l_paren());
+    let mut depth: u64 = 1;
+    loop {
+        if depth == 0 || at(in p, k_eof()) || p.halted {
+            break;
+        }
+        let k = kind(in p);
+        if k == k_l_paren() {
+            depth = inc(depth);
+        } else if k == k_r_paren() {
+            depth = wrapping_sub(depth, 1);
+        }
+        bump(inout p);
+    }
+    if depth > 0 && !p.halted {
+        err(inout p, in "unterminated attribute argument list");
+    }
+}
+
+// `Parser::test_attr`: `@test`, `@test(...)` or `@test_case(...)`.
+fn test_attr(inout p: P) -> bool {
+    if at(in p, k_at()) && at_word(in p, 1, w_test()) {
+        bump(inout p);
+        bump(inout p);
+        if at(in p, k_l_paren()) {
+            attr_paren_args(inout p);
+        }
+        true
+    } else if at(in p, k_at()) && at_word(in p, 1, w_test_case()) {
+        bump(inout p);
+        bump(inout p);
+        if at(in p, k_l_paren()) {
+            attr_paren_args(inout p);
+        } else {
+            err(inout p, in "@test_case requires an argument list in parentheses");
+        }
+        true
+    } else {
+        false
+    }
+}
+
 fn is_mode_kind(k: u8) -> bool {
     k == k_copy() || k == k_affine() || k == k_linear()
 }
@@ -1120,8 +1168,53 @@ fn import_root(in p: P, n: u64) -> bool {
     k == k_at() || k == k_self_kw() || at_word(in p, n, w_super())
 }
 
+// The item kinds `pub` may precede in `Parser::declaration`.
+fn pub_item_follows(in p: P) -> bool {
+    at_word(in p, 1, w_trait())
+        || (at_word(in p, 1, w_const()) && nth(in p, 2) == k_upper())
+        || at_word(in p, 1, w_model())
+        || nth(in p, 1)
+        == k_fn()
+        || is_type_decl_kind(nth(in p, 1))
+        || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
+        || (
+        nth(in p, 1)
+            == k_at()
+            && (
+            at_word(in p, 2, w_fip())
+                || at_word(in p, 2, w_test())
+                || at_word(in p, 2, w_test_case())
+        )
+    )
+}
+
+// Keep inactive test declarations as lossless tokens in the ordinary CST.
+fn skip_test_block(inout p: P) {
+    bump(inout p);
+    bump(inout p);
+    let mut depth: u64 = 1;
+    loop {
+        if depth == 0 || at(in p, k_eof()) {
+            break;
+        }
+        if at(in p, k_l_brace()) {
+            depth = inc(depth);
+        } else if at(in p, k_r_brace()) {
+            depth = wrapping_sub(depth, 1);
+        }
+        bump(inout p);
+    }
+    if depth != 0 {
+        expect(inout p, k_r_brace());
+    }
+}
+
 // `Parser::declaration`: whether it produced an item.
 fn declaration(inout p: P) -> bool {
+    if at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace() {
+        skip_test_block(inout p);
+        return false;
+    }
     if at_word(in p, 0, w_use()) && at_word(in p, 1, w_model()) {
         use_model(inout p);
         return false;
@@ -1151,28 +1244,30 @@ fn declaration(inout p: P) -> bool {
         return false;
     }
     p.item_start = cur_start(in p);
-    let mut fip = fip_attr(inout p);
-    let public = at_word(in p, 0, w_pub())
-        && (
-        at_word(in p, 1, w_trait())
-            || (at_word(in p, 1, w_const()) && nth(in p, 2) == k_upper())
-            || at_word(in p, 1, w_model())
-            || nth(in p, 1)
-            == k_fn()
-            || is_type_decl_kind(nth(in p, 1))
-            || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
-            || (
-            !fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()) && nth(in p, 3) == k_fn()
-        )
-    );
-    if public {
-        bump(inout p);
-    }
-    if !fip {
-        fip = fip_attr(inout p);
+    let mut fip = false;
+    let mut has_test_attr = false;
+    let mut public = false;
+    loop {
+        if fip_attr(inout p) {
+            fip = true;
+            continue;
+        }
+        if test_attr(inout p) {
+            has_test_attr = true;
+            continue;
+        }
+        if !public && at_word(in p, 0, w_pub()) && pub_item_follows(in p) {
+            bump(inout p);
+            public = true;
+            continue;
+        }
+        break;
     }
     if fip && !at(in p, k_fn()) {
         err(inout p, in "@fip may only annotate a fn declaration");
+    }
+    if has_test_attr && !at(in p, k_fn()) {
+        err(inout p, in "@test and @test_case may only annotate a fn declaration");
     }
     if at_word(in p, 0, w_const()) && nth(in p, 1) == k_upper() {
         const_item(inout p);
@@ -1534,6 +1629,56 @@ fn array_length(inout p: P) -> u64 {
     0
 }
 
+// Whether token `i` is `Fn`, `FnMut` or `FnOnce`.
+fn is_fn_trait(in p: P, i: u64) -> bool {
+    let s = tstart(in p, i);
+    let n = wrapping_sub(tend(in p, i), s);
+    let b = p.src.as_slice();
+    token_text_is(in b, s, n, in "Fn".as_bytes())
+        || token_text_is(in b, s, n, in "FnMut".as_bytes())
+        || token_text_is(in b, s, n, in "FnOnce".as_bytes())
+}
+
+fn token_text_is(in b: Slice[u8], s: u64, n: u64, in w: Slice[u8]) -> bool {
+    if n != w.len() {
+        return false;
+    }
+    for i in 0..n {
+        if u8_at_slice(in b, add(s, i)) != u8_at_slice(in w, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn u8_at_slice(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    }
+}
+
+// `Parser::function_signature`: `(pass T, ..) -> R eff [E]` of a function
+// type or a `dyn Fn` object.
+fn signature(inout p: P) {
+    expect(inout p, k_l_paren());
+    loop {
+        if at(in p, k_r_paren()) || at(in p, k_eof()) {
+            break;
+        }
+        pass(inout p);
+        ty(inout p);
+        if !eat(inout p, k_comma()) {
+            break;
+        }
+    }
+    expect(inout p, k_r_paren());
+    if eat(inout p, k_arrow()) {
+        ty(inout p);
+    }
+    effects(inout p);
+}
+
 fn ty_inner(inout p: P) -> u8 {
     start_node(inout p, n_type());
     let mut leaves: u64 = 1;
@@ -1541,22 +1686,7 @@ fn ty_inner(inout p: P) -> u8 {
         if eat(inout p, k_at()) {
             mode(inout p);
         }
-        expect(inout p, k_l_paren());
-        loop {
-            if at(in p, k_r_paren()) || at(in p, k_eof()) {
-                break;
-            }
-            pass(inout p);
-            ty(inout p);
-            if !eat(inout p, k_comma()) {
-                break;
-            }
-        }
-        expect(inout p, k_r_paren());
-        if eat(inout p, k_arrow()) {
-            ty(inout p);
-        }
-        effects(inout p);
+        signature(inout p);
         t_function()
     } else if eat(inout p, k_l_paren()) {
         let mut sum: u64 = 0;
@@ -1615,8 +1745,13 @@ fn ty_inner(inout p: P) -> u8 {
         t_named()
     } else if at_word(in p, 0, w_dyn()) && nth(in p, 1) == k_upper() {
         bump(inout p);
-        upper(inout p);
-        type_args(inout p);
+        let name = upper(inout p);
+        if is_fn_trait(in p, name) && at(in p, k_l_paren()) {
+            // A function object `dyn FnMut(A) -> R eff [E]` (§7.3).
+            signature(inout p);
+        } else {
+            type_args(inout p);
+        }
         t_named()
     } else if at_path_root(in p) {
         // `self::m::T[args]`, `super::m::T`, `@scope/name::m::T`.
@@ -2213,6 +2348,8 @@ fn for_header(in p: P, cur: u64) -> bool {
             == k_true()
             || n
             == k_false()
+            || n
+            == k_eff()
     )
 }
 
@@ -2294,6 +2431,12 @@ fn if_expr(inout p: P) -> Ex {
     record(inout p, e)
 }
 
+// `OR_PATTERN_EXPANSION`: the total token weight of the match-arm bodies
+// that or-pattern alternatives may copy in one parse.
+fn or_pattern_expansion() -> u64 {
+    262144
+}
+
 fn match_expr(inout p: P) -> Ex {
     let start = cur_start(in p);
     expect(inout p, k_match());
@@ -2307,18 +2450,36 @@ fn match_expr(inout p: P) -> Ex {
         let before = p.pos;
         let mark = p.binds.len();
         pattern(inout p);
+        let mut alternatives: u64 = 1;
         loop {
             if !eat(inout p, k_pipe()) {
                 break;
             }
             pattern(inout p);
+            alternatives = inc(alternatives);
         }
         expect(inout p, k_fat_arrow());
         let outer = p.vals_trail.len();
         bind_values(inout p, mark);
+        let body_start = p.pos;
+        let expanded = p.expansion;
         let body = expr(inout p);
         vals_restore(inout p, outer);
         h = hmax(h, body.h);
+        // A body's weight is its tokens plus the copies nested in it; each
+        // extra alternative copies it (the AST's or-pattern arms).
+        let weight = saturating_add_u64(
+            wrapping_sub(p.pos, body_start),
+            wrapping_sub(p.expansion, expanded)
+        );
+        p
+            .expansion = saturating_add_u64(
+            p.expansion,
+            saturating_mul_u64(weight, wrapping_sub(alternatives, 1))
+        );
+        if p.expansion > or_pattern_expansion() {
+            err(inout p, in "or-pattern alternatives copy too much code; split the match");
+        }
         let block_body = body.k == x_block();
         if !eat(inout p, k_comma()) && !at(in p, k_r_brace()) && !(block_body && p.pos > before) {
             err(inout p, in "expected ',' between match arms");
@@ -2343,7 +2504,11 @@ fn closure(inout p: P) -> Ex {
     if eat(inout p, k_arrow()) {
         ty(inout p);
     }
-    effects(inout p);
+    // `Parser::closure`: after the head `eff [` opens an effect row; a body
+    // that starts with any other use of the name `eff` is an expression.
+    if at(in p, k_eff()) && nth(in p, 1) == k_l_bracket() {
+        effects(inout p);
+    }
     let outer = p.vals_trail.len();
     bind_values(inout p, mark);
     let body = expr(inout p);
@@ -2868,7 +3033,12 @@ fn primary_inner(inout p: P) -> Ex {
             if !eat(inout p, k_colon_colon()) {
                 break;
             }
-            let j = ident(inout p);
+            // `E::eff()`: contextual names are path segments too.
+            let j = if at_contextual_name(in p) {
+                bump(inout p)
+            } else {
+                ident(inout p)
+            };
             segments = inc(segments);
             if segments == 2 && tk(in p, j) == k_lower() {
                 second = tword(in p, j);
@@ -3216,7 +3386,8 @@ fn parse_tokens_new(
         sites: ChunkSeq::new[u32](),
         hdr: ChunkSeq::new[u64](),
         hdr_syms: ChunkSeq::new[u32](),
-        item_start: 0
+        item_start: 0,
+        expansion: 0
     };
     p.src.extend(in source);
     p.rows.resize(nsyms, 0);
@@ -3239,16 +3410,42 @@ fn index_tokens(inout p: P) {
 // `contextual_item_names`: `fn break()` and friends keep the word a name.
 fn contextual_item_names(inout p: P) {
     let mut previous: u8 = 255;
+    let mut depth: u64 = 0;
+    let mut skipping_test = false;
     for j in 0..p.sig.len() {
         let i = w32(in p.sig, j);
         let k = tk(in p, i);
-        if previous == k_fn() && k == k_lower() {
+        if depth
+            == 0
+            && k
+            == k_lower()
+            && tword(in p, i)
+            == w_test()
+            && inc(j)
+            < p
+            .sig
+            .len()
+            && tk(in p, w32(in p.sig, inc(j)))
+            == k_l_brace() {
+            skipping_test = true;
+        }
+        if !skipping_test && previous == k_fn() && k == k_lower() {
             let w = tword(in p, i);
             if w == w_break() || w == w_continue() || w == w_for() || w == w_loop() {
                 let sym = tsym(in p, i);
                 if !bound(in p, sym) {
                     val_insert(inout p, sym);
                 }
+            }
+        }
+        if k == k_l_brace() {
+            depth = inc(depth);
+        } else if k == k_r_brace() {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+            }
+            if depth == 0 {
+                skipping_test = false;
             }
         }
         previous = k;

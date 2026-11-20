@@ -144,9 +144,20 @@ pub fn format_for_verification(
     if !comments.eq(model.comments().iter().map(String::as_str)) {
         return Err(ProofError::Conservation);
     }
+    // The port build hashes through @vesper-std/hash-sys (the same digests).
+    #[cfg(vesper_port)]
+    let (source_hash, output_hash) = (
+        crate::port::blake3_bytes(source),
+        crate::port::blake3_bytes(&result.output),
+    );
+    #[cfg(not(vesper_port))]
+    let (source_hash, output_hash) = (
+        *blake3::hash(source.as_bytes()).as_bytes(),
+        *blake3::hash(result.output.as_bytes()).as_bytes(),
+    );
     Ok(FormatVerification {
-        source_hash: *blake3::hash(source.as_bytes()).as_bytes(),
-        output_hash: *blake3::hash(result.output.as_bytes()).as_bytes(),
+        source_hash,
+        output_hash,
         output: result.output,
         changed: result.changed,
         model,

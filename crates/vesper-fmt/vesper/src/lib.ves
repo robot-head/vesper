@@ -1,0 +1,1589 @@
+// @export vsys direct rust=crate::blake3_shim
+// | sys library Blake3 (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_std_blake3",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type Hasher;
+// |     fn vesper_blake3_new() -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_keyed(nocapture in key: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_derive_key(nocapture in context: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_update(inout h: Hasher, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
+// |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// | }
+//
+// The `.vsys` library above is @vesper-std/hash-sys's (`.vsys` imports are
+// read from the root module of a library build only, #1150), provided by
+// packages/vesper-std/hash/sys/shim.rs, which the Rust crate links as
+// `crate::blake3_shim`.
+//
+// @vesper/fmt: `vesper_fmt::format_source` in Vesper (self-hosting SH1
+// lane 11, #1154), over the token table and CST parser of @vesper/front.
+//
+// `format` is crates/vesper-fmt/src/lib.rs `format_with_capture` without a
+// proof capture: the lexer gate (gate.ves), the parser's syntax check, the
+// layout of the significant tokens (layout.ves), the bounded document and
+// its renderer (doc.ves), then the conservation and idempotence checks. It
+// charges the same work units as Rust, so the same input and limits give the
+// same output or the same error. Sources in the macro profile (`m!`,
+// `quote`) are `OpaqueMacro` here: the Rust side formats them with its own
+// macro-profile parser, which this package does not port.
+
+use @vesper/front::{
+    Tokens,
+    P
+};
+use @vesper-std/hash::blake3::{
+    Digest
+};
+use @vesper-std/hash-sys::{
+    hash
+};
+use @vesper/front::diag::{
+    diags_new
+};
+use @vesper/front::parse::{
+    parse_tokens,
+    hard_depth
+};
+use @vesper/front::{
+    Tokens
+};
+use @vesper/front::lex::{
+    lex_with_limits,
+    max_diagnostics,
+    token_end
+};
+use @vesper/front::diag::{
+    diags_new
+};
+
+// ---------------------------------------------------------------- kinds
+
+// Token kinds: the discriminants of `vesper_syntax::lexer::TokenKind`, which
+// are also the `kind` rows of @vesper/front's token table.
+
+const K_WHITESPACE: u8 = 0;
+const K_COMMENT: u8 = 1;
+const K_BLOCK_COMMENT: u8 = 2;
+const K_UPPER: u8 = 3;
+const K_LOWER: u8 = 4;
+const K_FLOAT: u8 = 5;
+const K_INT: u8 = 6;
+const K_STRING: u8 = 7;
+const K_STRUCT: u8 = 8;
+const K_ENUM: u8 = 9;
+const K_EFFECT: u8 = 10;
+const K_IMPL: u8 = 11;
+const K_FN: u8 = 12;
+const K_LET: u8 = 13;
+const K_COPY: u8 = 14;
+const K_AFFINE: u8 = 15;
+const K_LINEAR: u8 = 16;
+const K_MOD: u8 = 17;
+const K_EFF: u8 = 18;
+const K_IN: u8 = 19;
+const K_INOUT: u8 = 20;
+const K_SINK: u8 = 21;
+const K_SELF_KW: u8 = 22;
+const K_HANDLE: u8 = 23;
+const K_STATE: u8 = 24;
+const K_WITH: u8 = 25;
+const K_RETURN: u8 = 26;
+const K_MATCH: u8 = 27;
+const K_IF: u8 = 28;
+const K_ELSE: u8 = 29;
+const K_TRUE: u8 = 30;
+const K_FALSE: u8 = 31;
+const K_L_PAREN: u8 = 32;
+const K_R_PAREN: u8 = 33;
+const K_L_BRACE: u8 = 34;
+const K_R_BRACE: u8 = 35;
+const K_L_BRACKET: u8 = 36;
+const K_R_BRACKET: u8 = 37;
+const K_COMMA: u8 = 38;
+const K_SEMI: u8 = 39;
+const K_COLON: u8 = 40;
+const K_COLON_COLON: u8 = 41;
+const K_DOT: u8 = 42;
+const K_QUESTION: u8 = 43;
+const K_AT: u8 = 44;
+const K_AT_AT: u8 = 45;
+const K_ARROW: u8 = 46;
+const K_FAT_ARROW: u8 = 47;
+const K_EQ: u8 = 48;
+const K_PLUS_EQ: u8 = 49;
+const K_STAR_EQ: u8 = 50;
+const K_SLASH_EQ: u8 = 51;
+const K_PERCENT_EQ: u8 = 52;
+const K_MINUS_EQ: u8 = 53;
+const K_PLUS: u8 = 54;
+const K_MINUS: u8 = 55;
+const K_STAR: u8 = 56;
+const K_SLASH: u8 = 57;
+const K_PERCENT: u8 = 58;
+const K_EQ_EQ: u8 = 59;
+const K_NE: u8 = 60;
+const K_LT: u8 = 61;
+const K_LE: u8 = 62;
+const K_GT: u8 = 63;
+const K_GE: u8 = 64;
+const K_AND: u8 = 65;
+const K_OR: u8 = 66;
+const K_BANG: u8 = 67;
+const K_PIPE: u8 = 68;
+const K_ERROR: u8 = 69;
+const K_EOF: u8 = 70;
+const K_DOLLAR: u8 = 71;
+const K_TILDE: u8 = 72;
+const K_PIPE_EQ: u8 = 73;
+const K_AMP_EQ: u8 = 74;
+const K_DOT_DOT: u8 = 75;
+const K_DOT_DOT_EQ: u8 = 76;
+const K_AMP: u8 = 77;
+const K_CARET: u8 = 78;
+const K_SHL: u8 = 79;
+const K_SHR: u8 = 80;
+
+// ---------------------------------------------------------------- work
+
+// The error record, the limits and the work counter of `vesper_fmt`
+// (crates/vesper-fmt/src/lib.rs `Error`, `Limits` and `Work`).
+
+// `FmtFail::code` is the index of the Rust `Error` variant:
+//   0 InputLimit, 1 OutputLimit, 2 TokenLimit, 3 NodeLimit, 4 DepthLimit,
+//   5 WorkLimit, 6 Overflow, 7 Allocation, 8 InvalidDoc,
+//   9 Syntax { offset }, 10 OpaqueMacro, 11 Conservation, 12 NotIdempotent.
+// `offset` is the byte offset of `Syntax`, else 0.
+pub copy struct FmtFail {
+    code: u64,
+    offset: u64
+}
+
+const E_INPUT: u64 = 0;
+const E_OUTPUT: u64 = 1;
+const E_TOKEN: u64 = 2;
+const E_NODE: u64 = 3;
+const E_DEPTH: u64 = 4;
+const E_WORK: u64 = 5;
+const E_OVERFLOW: u64 = 6;
+const E_SYNTAX: u64 = 9;
+const E_MACRO: u64 = 10;
+const E_CONSERVATION: u64 = 11;
+const E_IDEMPOTENT: u64 = 12;
+
+const U64_MAX: u64 = 18446744073709551615;
+
+fn fail(code: u64) eff [Fail[FmtFail]] {
+    Fail::raise(
+        FmtFail {
+            code: code,
+            offset: 0
+        }
+    );
+}
+
+fn fail_at(offset: u64) eff [Fail[FmtFail]] {
+    Fail::raise(
+        FmtFail {
+            code: E_SYNTAX,
+            offset: offset
+        }
+    );
+}
+
+// `a + b`, or `Overflow`.
+fn cadd(a: u64, b: u64) -> u64 eff [Fail[FmtFail]] {
+    if a > wrapping_sub(U64_MAX, b) {
+        fail(E_OVERFLOW);
+    }
+    wrapping_add(a, b)
+}
+
+fn min64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// `Limits` (all fields are `usize` in Rust, at most `u64::MAX` here).
+copy struct Limits {
+    max_input_bytes: u64,
+    max_output_bytes: u64,
+    max_tokens: u64,
+    max_doc_nodes: u64,
+    max_depth: u64,
+    max_work: u64
+}
+
+// `Work`: units used and the ceiling.
+copy struct Work {
+    used: u64,
+    max: u64
+}
+
+fn charge(inout w: Work, n: u64) eff [Fail[FmtFail]] {
+    w.used = cadd(w.used, n);
+    if w.used > w.max {
+        fail(E_WORK);
+    }
+}
+
+// ---------------------------------------------------------------- doc
+
+// The bounded document algebra and its renderer: crates/vesper-fmt/src/doc.rs
+// (`Document::push`, `render` and `following_width`), charge for charge, so
+// the same inputs give the same output and the same limit errors.
+//
+// Nodes are rows of parallel sequences. A text node is a byte range of the
+// source being formatted; the two literal texts the formatter adds, " " and
+// "\n", are their own kinds. A concatenation's children are a run of `kids`.
+
+const D_NIL: u8 = 0;
+const D_TEXT: u8 = 1;
+const D_COMMENT: u8 = 2;
+const D_HARD: u8 = 3;
+const D_SOFT_SPACE: u8 = 4;
+const D_SOFT_EMPTY: u8 = 5;
+const D_NEST: u8 = 6;
+const D_CONCAT: u8 = 7;
+const D_GROUP: u8 = 8;
+// `Doc::Text(" ")` and `Doc::Text("\n")`.
+const D_SPACE: u8 = 9;
+const D_NEWLINE: u8 = 10;
+
+// No width: the node holds a line break.
+const NONE: u64 = 18446744073709551615;
+const LINE_WIDTH: u64 = 100;
+const MAX_DOC_DEPTH: u64 = 256;
+
+struct Doc {
+    kind: ChunkSeq[u8],
+    // Text: start; Nest: spaces; Concat: first child in `kids`; Group: inner.
+    a: ChunkSeq[u32],
+    // Text: end; Nest: inner; Concat: child count.
+    b: ChunkSeq[u32],
+    width: ChunkSeq[u64],
+    depth: ChunkSeq[u32],
+    kids: ChunkSeq[u32],
+    w: Work,
+    max_nodes: u64,
+    max_output: u64
+}
+
+fn doc_new(in lim: Limits, capacity: u64) -> Doc {
+    Doc {
+        kind: ChunkSeq::with_capacity[u8](capacity),
+        a: ChunkSeq::with_capacity[u32](capacity),
+        b: ChunkSeq::with_capacity[u32](capacity),
+        width: ChunkSeq::with_capacity[u64](capacity),
+        depth: ChunkSeq::with_capacity[u32](capacity),
+        kids: ChunkSeq::with_capacity[u32](capacity),
+        w: Work {
+            used: 0,
+            max: lim.max_work
+        },
+        max_nodes: lim.max_doc_nodes,
+        max_output: lim.max_output_bytes
+    }
+}
+
+fn u32_at(in s: ChunkSeq[u32], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn kind_at(in d: Doc, id: u64) -> u8 {
+    match d.kind.try_get(id) {
+        Option::Some(k) => k,
+        Option::None => D_NIL,
+    }
+}
+
+fn width_at(in d: Doc, id: u64) -> u64 {
+    match d.width.try_get(id) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn depth_at(in d: Doc, id: u64) -> u64 {
+    u32_at(in d.depth, id)
+}
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    }
+}
+
+// Unicode scalars in `s[a..b]` (UTF-8 lead bytes).
+fn chars(in s: Slice[u8], a: u64, b: u64) -> u64 {
+    let mut n: u64 = 0;
+    for i in a..b {
+        if byte(in s, i) & 192 != 128 {
+            n = wrapping_add(n, 1);
+        }
+    }
+    n
+}
+
+// Whether `s[a..b]` holds a `\n` or `\r`.
+fn has_break(in s: Slice[u8], a: u64, b: u64) -> bool {
+    if a >= b {
+        return false;
+    }
+    match s[a..b].find_either(10, 13) {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+fn add_node(inout d: Doc, kind: u8, a: u64, b: u64, width: u64, depth: u64)
+    -> u64 eff [Fail[FmtFail]] {
+    if depth > MAX_DOC_DEPTH {
+        fail(E_DEPTH);
+    }
+    let id = d.kind.len();
+    d.kind.push(kind);
+    d.a.push(wrapping_u32(a));
+    d.b.push(wrapping_u32(b));
+    d.width.push(width);
+    d.depth.push(wrapping_u32(depth));
+    id
+}
+
+fn begin(inout d: Doc) eff [Fail[FmtFail]] {
+    charge(inout d.w, 1);
+    if d.kind.len() >= d.max_nodes {
+        fail(E_NODE);
+    }
+}
+
+// `Doc::Text` or `Doc::Comment` of `src[s..e]`.
+fn push_text(inout d: Doc, in src: Slice[u8], s: u64, e: u64, comment: bool)
+    -> u64 eff [Fail[FmtFail]] {
+    begin(inout d);
+    charge(inout d.w, wrapping_sub(e, s));
+    let line_comment = comment
+        && wrapping_sub(e, s)
+        >= 2
+        && byte(in src, s)
+        == 47
+        && byte(in src, wrapping_add(s, 1))
+        == 47;
+    let width = if line_comment || has_break(in src, s, e) {
+        NONE
+    } else {
+        chars(in src, s, e)
+    };
+    let kind = if comment {
+        D_COMMENT
+    } else {
+        D_TEXT
+    };
+    add_node(inout d, kind, s, e, width, 1)
+}
+
+// A leaf without a source range: `HardLine`, `SoftLineOrSpace`,
+// `SoftLineOrEmpty`, `Text(" ")` or `Text("\n")`.
+fn push_leaf(inout d: Doc, kind: u8) -> u64 eff [Fail[FmtFail]] {
+    begin(inout d);
+    let width = if kind == D_HARD || kind == D_NEWLINE {
+        NONE
+    } else if kind == D_SOFT_SPACE || kind == D_SPACE {
+        1
+    } else {
+        0
+    };
+    if kind == D_SPACE || kind == D_NEWLINE {
+        charge(inout d.w, 1);
+    }
+    add_node(inout d, kind, 0, 0, width, 1)
+}
+
+fn push_nest(inout d: Doc, spaces: u64, inner: u64) -> u64 eff [Fail[FmtFail]] {
+    begin(inout d);
+    if spaces > d.max_output {
+        fail(E_OUTPUT);
+    }
+    let depth = cadd(depth_at(in d, inner), 1);
+    let width = width_at(in d, inner);
+    add_node(inout d, D_NEST, spaces, inner, width, depth)
+}
+
+fn push_group(inout d: Doc, inner: u64) -> u64 eff [Fail[FmtFail]] {
+    begin(inout d);
+    let depth = cadd(depth_at(in d, inner), 1);
+    let width = width_at(in d, inner);
+    add_node(inout d, D_GROUP, inner, 0, width, depth)
+}
+
+fn push_concat(inout d: Doc, in ids: Slice[u32]) -> u64 eff [Fail[FmtFail]] {
+    begin(inout d);
+    let n = ids.len();
+    if n > d.max_nodes {
+        fail(E_NODE);
+    }
+    charge(inout d.w, n);
+    let mut width: u64 = 0;
+    let mut depth: u64 = 1;
+    let first = d.kids.len();
+    for i in 0..n {
+        let id = match ids.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        let child = cadd(depth_at(in d, id), 1);
+        if child > depth {
+            depth = child;
+        }
+        let w = width_at(in d, id);
+        if width != NONE {
+            width = if w == NONE {
+                NONE
+            } else {
+                cadd(width, w)
+            };
+        }
+        d.kids.push(wrapping_u32(id));
+    }
+    add_node(inout d, D_CONCAT, first, n, width, depth)
+}
+
+fn push_concat2(inout d: Doc, x: u64, y: u64) -> u64 eff [Fail[FmtFail]] {
+    let mut ids = ChunkSeq::with_capacity[u32](2);
+    ids.push(wrapping_u32(x));
+    ids.push(wrapping_u32(y));
+    push_concat(inout d, in ids.as_slice())
+}
+
+// The bytes a text node emits.
+fn text_len(in d: Doc, id: u64) -> u64 {
+    let k = kind_at(in d, id);
+    if k == D_TEXT || k == D_COMMENT {
+        wrapping_sub(u32_at(in d.b, id), u32_at(in d.a, id))
+    } else if k == D_SPACE || k == D_NEWLINE {
+        1
+    } else {
+        0
+    }
+}
+
+// A pending render entry: node, flat flag and indentation in one word.
+fn entry(indent: u64, flat: bool, id: u64) -> u64 {
+    let f: u64 = if flat {
+        4294967296
+    } else {
+        0
+    };
+    id | f | wrapping_shl_u64(indent, 33)
+}
+
+fn entry_id(e: u64) -> u64 {
+    e & 4294967295
+}
+
+fn entry_flat(e: u64) -> bool {
+    e & 4294967296 != 0
+}
+
+fn entry_rest(e: u64) -> u64 {
+    wrapping_shr_u64(e, 33)
+}
+
+fn push_frame(in d: Doc, inout frames: ChunkSeq[u64], id: u64, flat: bool) eff [Fail[FmtFail]] {
+    if frames.len() >= d.max_nodes {
+        fail(E_NODE);
+    }
+    frames.push(entry(0, flat, id));
+}
+
+// `Document::following_width`: the width of what follows on the current
+// line, from the top of the pending stack, until a line break or until it
+// passes `remaining`.
+fn following_width(inout d: Doc, in src: Slice[u8], in pending: ChunkSeq[u64], remaining: u64)
+    -> u64 eff [Fail[FmtFail]] {
+    let mut width: u64 = 0;
+    // Frames: node, flat flag and the next child index of a Concat.
+    let mut frames = ChunkSeq::with_capacity[u64](16);
+    let mut p = pending.len();
+    loop {
+        if p == 0 {
+            break;
+        }
+        p = wrapping_sub(p, 1);
+        let top = match pending.try_get(p) {
+            Option::Some(e) => e,
+            Option::None => 0,
+        };
+        frames.truncate(0);
+        frames.push(entry(0, entry_flat(top), entry_id(top)));
+        loop {
+            let nf = frames.len();
+            if nf == 0 {
+                break;
+            }
+            charge(inout d.w, 1);
+            let last = wrapping_sub(nf, 1);
+            let frame = match frames.try_get(last) {
+                Option::Some(e) => e,
+                Option::None => 0,
+            };
+            let fid = entry_id(frame);
+            let fflat = entry_flat(frame);
+            let mut vid: u64 = fid;
+            let vflat = fflat;
+            if kind_at(in d, fid) == D_CONCAT {
+                let next = entry_rest(frame);
+                if next < u32_at(in d.b, fid) {
+                    frames.try_set(last, entry(wrapping_add(next, 1), fflat, fid));
+                    vid = u32_at(in d.kids, wrapping_add(u32_at(in d.a, fid), next));
+                } else {
+                    frames.truncate(last);
+                    continue;
+                }
+            } else {
+                frames.truncate(last);
+            }
+            charge(inout d.w, 1);
+            charge(inout d.w, text_len(in d, vid));
+            let k = kind_at(in d, vid);
+            if k == D_TEXT || k == D_COMMENT {
+                let s = u32_at(in d.a, vid);
+                let e = u32_at(in d.b, vid);
+                let cut = if s >= e {
+                    e
+                } else {
+                    match src[s..e].find_either(10, 13) {
+                        Option::Some(j) => wrapping_add(s, j),
+                        Option::None => e,
+                    }
+                };
+                width = cadd(width, chars(in src, s, cut));
+                if cut != e {
+                    return width;
+                }
+            } else if k == D_SPACE {
+                width = cadd(width, 1);
+            } else if k == D_NEWLINE || k == D_HARD {
+                return width;
+            } else if k == D_SOFT_SPACE || k == D_SOFT_EMPTY {
+                if !vflat {
+                    return width;
+                }
+                if k == D_SOFT_SPACE {
+                    width = cadd(width, 1);
+                }
+            } else if k == D_NEST {
+                push_frame(in d, inout frames, u32_at(in d.b, vid), vflat);
+                continue;
+            } else if k == D_GROUP {
+                push_frame(in d, inout frames, u32_at(in d.a, vid), false);
+                continue;
+            } else if k == D_CONCAT {
+                push_frame(in d, inout frames, vid, vflat);
+                continue;
+            }
+            if width > remaining {
+                return width;
+            }
+        }
+    }
+    width
+}
+
+fn append_check(in out: ChunkSeq[u8], n: u64, max: u64) eff [Fail[FmtFail]] {
+    if cadd(out.len(), n) > max {
+        fail(E_OUTPUT);
+    }
+}
+
+// `Document::render`.
+fn render(inout d: Doc, in src: Slice[u8], root: u64) -> ChunkSeq[u8] eff [Fail[FmtFail]] {
+    let mut out = ChunkSeq::with_capacity[u8](
+        wrapping_add(src.len(), wrapping_shr_u64(src.len(), 2))
+    );
+    let mut stack = ChunkSeq::with_capacity[u64](64);
+    stack.push(entry(0, false, root));
+    let mut column: u64 = 0;
+    let max = d.max_output;
+    loop {
+        let ns = stack.len();
+        if ns == 0 {
+            break;
+        }
+        let top = match stack.try_get(wrapping_sub(ns, 1)) {
+            Option::Some(e) => e,
+            Option::None => 0,
+        };
+        stack.truncate(wrapping_sub(ns, 1));
+        let id = entry_id(top);
+        let flat = entry_flat(top);
+        let indent = entry_rest(top);
+        charge(inout d.w, 1);
+        charge(inout d.w, text_len(in d, id));
+        let k = kind_at(in d, id);
+        if k == D_TEXT || k == D_COMMENT {
+            let s = u32_at(in d.a, id);
+            let e = u32_at(in d.b, id);
+            append_check(in out, wrapping_sub(e, s), max);
+            out.extend(src[s..e]);
+            // The column after the text: its last line, or the line it
+            // extends.
+            let mut j = e;
+            let mut nl = false;
+            loop {
+                if j <= s {
+                    break;
+                }
+                if byte(in src, wrapping_sub(j, 1)) == 10 {
+                    nl = true;
+                    break;
+                }
+                j = wrapping_sub(j, 1);
+            }
+            column = if nl {
+                chars(in src, j, e)
+            } else {
+                cadd(column, chars(in src, s, e))
+            };
+        } else if k == D_SPACE {
+            append_check(in out, 1, max);
+            out.push(32);
+            column = cadd(column, 1);
+        } else if k == D_NEWLINE {
+            append_check(in out, 1, max);
+            out.push(10);
+            column = 0;
+        } else if k == D_HARD || k == D_SOFT_SPACE || k == D_SOFT_EMPTY {
+            if k == D_HARD || !flat {
+                append_check(in out, 1, max);
+                out.push(10);
+                charge(inout d.w, indent);
+                append_check(in out, indent, max);
+                out.resize(wrapping_add(out.len(), indent), 32);
+                column = indent;
+            } else if k == D_SOFT_SPACE {
+                append_check(in out, 1, max);
+                out.push(32);
+                column = cadd(column, 1);
+            }
+        } else if k == D_NEST {
+            stack.push(entry(cadd(indent, u32_at(in d.a, id)), flat, u32_at(in d.b, id)));
+        } else if k == D_GROUP {
+            let inner = u32_at(in d.a, id);
+            let available = if column >= LINE_WIDTH {
+                0
+            } else {
+                wrapping_sub(LINE_WIDTH, column)
+            };
+            let width = width_at(in d, inner);
+            let fits = if width != NONE && width <= available {
+                let room = wrapping_sub(available, width);
+                following_width(inout d, in src, in stack, room) <= room
+            } else {
+                false
+            };
+            stack.push(entry(indent, fits, inner));
+        } else if k == D_CONCAT {
+            let first = u32_at(in d.a, id);
+            let n = u32_at(in d.b, id);
+            if cadd(stack.len(), n) > d.max_nodes {
+                fail(E_NODE);
+            }
+            let mut i = n;
+            loop {
+                if i == 0 {
+                    break;
+                }
+                i = wrapping_sub(i, 1);
+                stack.push(entry(indent, flat, u32_at(in d.kids, wrapping_add(first, i))));
+            }
+        }
+        charge(inout d.w, 1);
+    }
+    out
+}
+
+// ---------------------------------------------------------------- gate
+
+// The lexer gate: crates/vesper-fmt/src/lib.rs `guarded_lex`. It lexes with
+// the lexer's hard ceilings and one diagnostic, refuses macro syntax, and
+// preflights delimiter depth and expression chains, charging the same work
+// units as Rust.
+
+// `lexer::HARD_SOURCE_BYTES` and `lexer::HARD_TOKENS`.
+const HARD_SOURCE_BYTES: u64 = 8388608;
+const HARD_TOKENS: u64 = 262144;
+// The parser charge per lexed token (`PARSE_UNITS_PER_TOKEN`).
+const PARSE_UNITS_PER_TOKEN: u64 = 64;
+// Chain components the preflight accepts (`MAX_CHAIN`).
+const MAX_CHAIN: u64 = 128;
+const MAX_NESTING: u64 = 24;
+
+fn tok_kind(in t: Tokens, i: u64) -> u8 {
+    match t.kind.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => K_EOF,
+    }
+}
+
+fn tok_start(in t: Tokens, i: u64) -> u64 {
+    match t.start.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn tok_end(in t: Tokens, i: u64) -> u64 {
+    token_end(in t, i)
+}
+
+fn trivia(k: u8) -> bool {
+    k <= K_BLOCK_COMMENT
+}
+
+fn is_binary_operator(k: u8) -> bool {
+    k
+        == K_PLUS
+        || k
+        == K_MINUS
+        || k
+        == K_STAR
+        || k
+        == K_SLASH
+        || k
+        == K_PERCENT
+        || k
+        == K_EQ_EQ
+        || k
+        == K_NE
+        || k
+        == K_LT
+        || k
+        == K_LE
+        || k
+        == K_GT
+        || k
+        == K_GE
+        || k
+        == K_AND
+        || k
+        == K_OR
+        || k
+        == K_AMP
+        || k
+        == K_CARET
+        || k
+        == K_SHL
+        || k
+        == K_SHR
+}
+
+fn text_is(in src: Slice[u8], s: u64, e: u64, in word: Slice[u8]) -> bool {
+    if wrapping_sub(e, s) != word.len() {
+        return false;
+    }
+    for i in 0..word.len() {
+        let a = match src.try_get(wrapping_add(s, i)) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        let b = match word.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 1,
+        };
+        if a != b {
+            return false;
+        }
+    }
+    true
+}
+
+// `continues_chain`: whether a token right after a closing `}` extends the
+// same expression.
+fn continues_chain(k: u8, in src: Slice[u8], s: u64, e: u64) -> bool {
+    is_binary_operator(k)
+        || k
+        == K_DOT
+        || k
+        == K_QUESTION
+        || k
+        == K_ELSE
+        || k
+        == K_WITH
+        || k
+        == K_L_PAREN
+        || k
+        == K_L_BRACKET
+        || k
+        == K_DOT_DOT
+        || k
+        == K_DOT_DOT_EQ
+        || k
+        == K_EQ
+        || k
+        == K_PLUS_EQ
+        || k
+        == K_MINUS_EQ
+        || k
+        == K_STAR_EQ
+        || k
+        == K_SLASH_EQ
+        || k
+        == K_PERCENT_EQ
+        || k
+        == K_ARROW
+        || k
+        == K_FAT_ARROW
+        || k
+        == K_COLON
+        || k
+        == K_COLON_COLON
+        || text_is(in src, s, e, in "as".as_bytes())
+}
+
+fn opaque_word(in src: Slice[u8], s: u64, e: u64) -> bool {
+    text_is(in src, s, e, in "quote".as_bytes())
+        || text_is(in src, s, e, in "quasiquote".as_bytes())
+        || text_is(in src, s, e, in "syntax_quote".as_bytes())
+}
+
+// Lexes `src` with `lex_with_limits(HARD_SOURCE_BYTES, HARD_TOKENS, 1)`,
+// as `guarded_lex` does: a lexer limit (a second error or a token overflow)
+// is `TokenLimit`, one error is `Syntax` at its start. The caller has
+// checked the byte ceiling.
+fn lex_hard(in src: Slice[u8]) -> Tokens eff [Fail[FmtFail]] {
+    let mut d = diags_new();
+    let t = lex_with_limits(in src, inout d, HARD_SOURCE_BYTES, HARD_TOKENS, 1);
+    if t.limited || t.rejected {
+        fail(E_TOKEN);
+    }
+    // Lexer errors are code 1 rows, in source order.
+    if d.code.len() != 0 {
+        let first = match d.start.try_get(0) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        fail_at(first);
+    }
+    t
+}
+
+// `guarded_lex` with `allow_macros = false`. Macro syntax is
+// `OpaqueMacro`, which the caller hands to the Rust build.
+fn gate(in src: Slice[u8], in lim: Limits, inout w: Work) -> Tokens eff [Fail[FmtFail]] {
+    charge(inout w, src.len());
+    if src.len() > HARD_SOURCE_BYTES {
+        fail(E_INPUT);
+    }
+    let t = lex_hard(in src);
+    let ntok = t.kind.len();
+    if ntok > min64(lim.max_tokens, HARD_TOKENS) {
+        fail(E_TOKEN);
+    }
+    let max_depth = min64(lim.max_depth, MAX_NESTING);
+    // Open delimiters, and the chain count at every level (`path_counts`)
+    // with their running sum.
+    let mut stack = ChunkSeq::with_capacity[u8](32);
+    let mut counts = ChunkSeq::with_capacity[u64](32);
+    counts.push(0);
+    // Per delimiter level: the chain count where the latest `if` that does
+    // not continue an `else` started (NONE for none).
+    let mut if_bases = ChunkSeq::with_capacity[u64](32);
+    if_bases.push(NONE);
+    let mut total: u64 = 0;
+    let mut previous: u8 = K_EOF;
+    let mut after_block = false;
+    for i in 0..ntok {
+        let k = tok_kind(in t, i);
+        if trivia(k) || k == K_EOF {
+            continue;
+        }
+        let s = tok_start(in t, i);
+        let e = tok_end(in t, i);
+        if k == K_BANG && (previous == K_LOWER || previous == K_UPPER) {
+            fail(E_MACRO);
+        }
+        if k == K_LOWER && opaque_word(in src, s, e) {
+            fail(E_MACRO);
+        }
+        let top = wrapping_sub(counts.len(), 1);
+        let mut counter = match counts.try_get(top) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        total = wrapping_sub(total, counter);
+        let ifs = wrapping_sub(if_bases.len(), 1);
+        if after_block && k == K_ELSE {
+            // `} else` goes back to where its `if` started: every arm of an
+            // `else if` chain is one component of the same expression, so a
+            // chain of any length counts like a single `if`.
+            let base = match if_bases.try_get(ifs) {
+                Option::Some(b) => b,
+                Option::None => NONE,
+            };
+            if base != NONE {
+                counter = base;
+            }
+        } else if after_block && !continues_chain(k, in src, s, e) {
+            counter = 0;
+        }
+        after_block = false;
+        if k == K_IF && previous != K_ELSE {
+            if_bases.try_set(ifs, counter);
+        }
+        if k == K_SEMI || k == K_COMMA {
+            counter = 0;
+        } else {
+            counter = cadd(counter, 1);
+        }
+        counts.try_set(top, counter);
+        total = cadd(total, counter);
+        if total > MAX_CHAIN {
+            fail(E_DEPTH);
+        }
+        if k == K_L_PAREN || k == K_L_BRACKET || k == K_L_BRACE {
+            stack.push(k);
+            counts.push(0);
+            if_bases.push(NONE);
+            if stack.len() > max_depth {
+                fail(E_DEPTH);
+            }
+        } else if k == K_R_PAREN || k == K_R_BRACKET || k == K_R_BRACE {
+            let expected = if k == K_R_PAREN {
+                K_L_PAREN
+            } else if k == K_R_BRACKET {
+                K_L_BRACKET
+            } else {
+                K_L_BRACE
+            };
+            let n = stack.len();
+            let open = if n == 0 {
+                K_EOF
+            } else {
+                match stack.try_get(wrapping_sub(n, 1)) {
+                    Option::Some(o) => o,
+                    Option::None => K_EOF,
+                }
+            };
+            if open != expected {
+                fail_at(s);
+            }
+            stack.truncate(wrapping_sub(n, 1));
+            let last = wrapping_sub(counts.len(), 1);
+            let dropped = match counts.try_get(last) {
+                Option::Some(c) => c,
+                Option::None => 0,
+            };
+            total = wrapping_sub(total, dropped);
+            counts.truncate(last);
+            if_bases.truncate(wrapping_sub(if_bases.len(), 1));
+            if stack.len() == 0 {
+                let base = match counts.try_get(0) {
+                    Option::Some(c) => c,
+                    Option::None => 0,
+                };
+                total = wrapping_sub(total, base);
+                counts.try_set(0, 0);
+            }
+            after_block = k == K_R_BRACE;
+        }
+        previous = k;
+    }
+    if stack.len() != 0 {
+        fail_at(src.len());
+    }
+    charge(inout w, wrapping_mul(ntok, PARSE_UNITS_PER_TOKEN));
+    t
+}
+
+// The work units of a second `guarded_lex` of a source the gate accepted
+// with `ntok` tokens: the same charges, without lexing again.
+fn gate_charge(len: u64, ntok: u64, inout w: Work) eff [Fail[FmtFail]] {
+    charge(inout w, len);
+    charge(inout w, wrapping_mul(ntok, PARSE_UNITS_PER_TOKEN));
+}
+
+// ---------------------------------------------------------------- layout
+
+// Layout: crates/vesper-fmt/src/lib.rs `gap` and `sequence`, which lower the
+// significant tokens (the CST's leaves without whitespace) to a document.
+
+// The significant tokens. `flags` bit 0: the whitespace before held a blank
+// line; bit 1: no whitespace separates the token from the previous one.
+struct Atoms {
+    kind: ChunkSeq[u8],
+    start: ChunkSeq[u32],
+    end: ChunkSeq[u32],
+    flags: ChunkSeq[u8]
+}
+
+const G_NONE: u8 = 0;
+const G_SOFT: u8 = 1;
+const G_EMPTY: u8 = 2;
+const G_OPERATOR: u8 = 3;
+const G_RETURN: u8 = 4;
+const G_HARD: u8 = 5;
+// No closing delimiter: the top-level sequence.
+const NO_END: u8 = 255;
+
+fn akind(in a: Atoms, i: u64) -> u8 {
+    match a.kind.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => K_EOF,
+    }
+}
+
+fn w32(in s: ChunkSeq[u32], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn aflags(in a: Atoms, i: u64) -> u8 {
+    match a.flags.try_get(i) {
+        Option::Some(f) => f,
+        Option::None => 0,
+    }
+}
+
+fn starts_range_bound(k: u8) -> bool {
+    k
+        == K_INT
+        || k
+        == K_FLOAT
+        || k
+        == K_LOWER
+        || k
+        == K_UPPER
+        || k
+        == K_L_PAREN
+        || k
+        == K_MINUS
+        || k
+        == K_SELF_KW
+}
+
+fn ends_operand(k: u8) -> bool {
+    k
+        == K_LOWER
+        || k
+        == K_UPPER
+        || k
+        == K_INT
+        || k
+        == K_FLOAT
+        || k
+        == K_STRING
+        || k
+        == K_TRUE
+        || k
+        == K_FALSE
+        || k
+        == K_SELF_KW
+        || k
+        == K_R_PAREN
+        || k
+        == K_R_BRACKET
+        || k
+        == K_R_BRACE
+}
+
+fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
+    if p == K_DOLLAR || c == K_BANG && (p == K_LOWER || p == K_UPPER) {
+        return G_NONE;
+    }
+    if p == K_COMMENT || p == K_SEMI {
+        return G_HARD;
+    }
+    if p == K_COMMA {
+        return if block {
+            G_HARD
+        } else {
+            G_SOFT
+        };
+    }
+    if after_block
+        && !(
+        c
+            == K_COMMA
+            || c
+            == K_SEMI
+            || c
+            == K_R_PAREN
+            || c
+            == K_R_BRACKET
+            || c
+            == K_DOT
+            || c
+            == K_QUESTION
+            || c
+            == K_ELSE
+            || c
+            == K_WITH
+    ) {
+        return G_HARD;
+    }
+    if c == K_COMMENT || c == K_BLOCK_COMMENT || p == K_BLOCK_COMMENT {
+        return G_SOFT;
+    }
+    if c == K_DOT && (p == K_INT || p == K_FLOAT) {
+        return G_SOFT;
+    }
+    if c == K_DOT {
+        return G_EMPTY;
+    }
+    if c == K_COLON_COLON {
+        return G_NONE;
+    }
+    if (c == K_DOT_DOT || c == K_DOT_DOT_EQ)
+        && ends_operand(p)
+        || (p == K_DOT_DOT || p == K_DOT_DOT_EQ)
+        && starts_range_bound(c) {
+        return G_NONE;
+    }
+    if c == K_ARROW {
+        return G_RETURN;
+    }
+    if is_binary_operator(c) && ends_operand(p) {
+        return G_OPERATOR;
+    }
+    if c
+        == K_COMMA
+        || c
+        == K_SEMI
+        || c
+        == K_COLON
+        || c
+        == K_DOT
+        || c
+        == K_COLON_COLON
+        || c
+        == K_QUESTION
+        || c
+        == K_R_PAREN
+        || c
+        == K_R_BRACKET {
+        return G_NONE;
+    }
+    if p == K_DOT || p == K_COLON_COLON || p == K_AT || p == K_AT_AT {
+        return if p == K_AT && c == K_AT {
+            G_SOFT
+        } else {
+            G_NONE
+        };
+    }
+    if (c == K_L_PAREN || c == K_L_BRACKET) && (ends_operand(p) || p == K_BANG || p == K_FN) {
+        return G_NONE;
+    }
+    // `eff (` never starts an effect row, so `eff` is a name there
+    // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175).
+    if c == K_L_PAREN && p == K_EFF {
+        return G_NONE;
+    }
+    G_SOFT
+}
+
+// `concat_group`: a non-empty line becomes one group of the output.
+fn concat_group(inout ids: ChunkSeq[u32], inout d: Doc, inout out: ChunkSeq[u32]) eff [
+    Fail[FmtFail]
+] {
+    if ids.len() != 0 {
+        let node = push_concat(inout d, in ids.as_slice());
+        ids.truncate(0);
+        out.push(wrapping_u32(push_group(inout d, node)));
+    }
+}
+
+fn close_of(k: u8) -> u8 {
+    if k == K_L_PAREN {
+        K_R_PAREN
+    } else if k == K_L_BRACKET {
+        K_R_BRACKET
+    } else {
+        K_R_BRACE
+    }
+}
+
+fn concat4(inout d: Doc, a: u64, b: u64, c: u64, e: u64) -> u64 eff [Fail[FmtFail]] {
+    let mut ids = ChunkSeq::with_capacity[u32](4);
+    ids.push(wrapping_u32(a));
+    ids.push(wrapping_u32(b));
+    if c != 4294967295 {
+        ids.push(wrapping_u32(c));
+    }
+    if e != 4294967295 {
+        ids.push(wrapping_u32(e));
+    }
+    push_concat(inout d, in ids.as_slice())
+}
+
+// `sequence`: the atoms from `pos` up to the closing delimiter `end`.
+fn sequence(in at: Atoms, inout pos: u64, end: u8, block: bool, inout d: Doc, in src: Slice[u8])
+    -> u64 eff [Fail[FmtFail]] {
+    let n = at.kind.len();
+    let list = end != NO_END && !block;
+    let mut output = ChunkSeq::new[u32]();
+    let mut line = ChunkSeq::new[u32]();
+    let mut has_prev = false;
+    let mut prev: u8 = 0;
+    let mut previous_block = false;
+    let mut previous_unary = false;
+    let mut package = false;
+    loop {
+        if pos >= n {
+            break;
+        }
+        let c = akind(in at, pos);
+        if end != NO_END && c == end {
+            break;
+        }
+        let f = aflags(in at, pos);
+        let blank = f & 1 != 0;
+        let glued = f & 2 != 0;
+        let is_block = c == K_L_BRACE && (!has_prev || prev != K_DOT);
+        package = glued
+            && has_prev
+            && (
+            prev
+                == K_AT
+                && c
+                == K_LOWER
+                || package
+                && (c == K_LOWER || c == K_MINUS || c == K_SLASH || c == K_INT)
+        );
+        let spacing = if previous_unary || package {
+            G_NONE
+        } else if list && has_prev && prev == K_SEMI {
+            G_SOFT
+        } else if has_prev {
+            gap(prev, c, block, previous_block)
+        } else {
+            G_NONE
+        };
+        let after_comma = has_prev && prev == K_COMMA;
+        let near_comment = c
+            == K_COMMENT
+            || c
+            == K_BLOCK_COMMENT
+            || has_prev
+            && prev
+            == K_BLOCK_COMMENT;
+        if spacing == G_HARD {
+            concat_group(inout line, inout d, inout output);
+            if blank {
+                output.push(wrapping_u32(push_leaf(inout d, D_NEWLINE)));
+            }
+            output.push(wrapping_u32(push_leaf(inout d, D_HARD)));
+        } else if spacing == G_SOFT && list && after_comma {
+            concat_group(inout line, inout d, inout output);
+            output.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
+        } else if spacing == G_SOFT && !is_block && near_comment {
+            line.push(wrapping_u32(push_leaf(inout d, D_SOFT_SPACE)));
+        } else if spacing == G_SOFT && !is_block {
+            line.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
+        } else if spacing == G_RETURN {
+            concat_group(inout line, inout d, inout output);
+            let lead = push_leaf(inout d, D_SOFT_SPACE);
+            line.push(wrapping_u32(push_nest(inout d, 4, lead)));
+        } else if spacing == G_EMPTY || spacing == G_OPERATOR {
+            let lead = push_leaf(
+                inout d,
+                if spacing == G_EMPTY {
+                    D_SOFT_EMPTY
+                } else {
+                    D_SOFT_SPACE
+                }
+            );
+            line.push(wrapping_u32(push_nest(inout d, 4, lead)));
+        }
+        if is_block {
+            concat_group(inout line, inout d, inout output);
+            if spacing == G_SOFT {
+                output.push(wrapping_u32(push_leaf(inout d, D_SPACE)));
+            }
+        }
+        let cs = w32(in at.start, pos);
+        let ce = w32(in at.end, pos);
+        pos = wrapping_add(pos, 1);
+        let node = if c == K_L_PAREN || c == K_L_BRACKET || c == K_L_BRACE {
+            let close = close_of(c);
+            let empty = pos < n && akind(in at, pos) == close;
+            let start = push_text(inout d, in src, cs, ce, false);
+            let inner = sequence(in at, inout pos, close, is_block, inout d, in src);
+            let last_is_line_comment = pos > 0 && akind(in at, wrapping_sub(pos, 1)) == K_COMMENT;
+            let trailing_comma = !is_block
+                && pos
+                > 0
+                && akind(in at, wrapping_sub(pos, 1))
+                == K_COMMA;
+            if !(pos < n && akind(in at, pos) == close) {
+                fail(E_CONSERVATION);
+            }
+            let fs = w32(in at.start, pos);
+            let fe = w32(in at.end, pos);
+            pos = wrapping_add(pos, 1);
+            let finish = push_text(inout d, in src, fs, fe, false);
+            if empty {
+                concat4(inout d, start, finish, 4294967295, 4294967295)
+            } else {
+                let lead = push_leaf(
+                    inout d,
+                    if is_block || trailing_comma {
+                        D_HARD
+                    } else {
+                        D_SOFT_EMPTY
+                    }
+                );
+                let content = concat4(inout d, lead, inner, 4294967295, 4294967295);
+                let nest = push_nest(inout d, 4, content);
+                let trail = push_leaf(
+                    inout d,
+                    if is_block || last_is_line_comment || trailing_comma {
+                        D_HARD
+                    } else {
+                        D_SOFT_EMPTY
+                    }
+                );
+                let all = concat4(inout d, start, nest, trail, finish);
+                push_group(inout d, all)
+            }
+        } else {
+            push_text(inout d, in src, cs, ce, c == K_COMMENT || c == K_BLOCK_COMMENT)
+        };
+        if is_block {
+            output.push(wrapping_u32(node));
+        } else {
+            line.push(wrapping_u32(node));
+        }
+        previous_block = is_block;
+        previous_unary = (c == K_MINUS || c == K_BANG || c == K_TILDE)
+            && (!has_prev || !ends_operand(prev));
+        has_prev = true;
+        prev = if c == K_L_PAREN || c == K_L_BRACKET || c == K_L_BRACE {
+            close_of(c)
+        } else {
+            c
+        };
+    }
+    concat_group(inout line, inout d, inout output);
+    push_concat(inout d, in output.as_slice())
+}
+
+// ---------------------------------------------------------------- entry points
+
+// The significant tokens of a parsed token table, with the blank-line and
+// glued flags the layout reads.
+fn atoms(in src: Slice[u8], in t: Tokens) -> Atoms {
+    let n = t.kind.len();
+    let cap = wrapping_add(wrapping_shr_u64(n, 1), 1);
+    let mut a = Atoms {
+        kind: ChunkSeq::with_capacity[u8](cap),
+        start: ChunkSeq::with_capacity[u32](cap),
+        end: ChunkSeq::with_capacity[u32](cap),
+        flags: ChunkSeq::with_capacity[u8](cap)
+    };
+    let mut blank = false;
+    let mut glued = false;
+    for i in 0..n {
+        let k = tok_kind(in t, i);
+        if k == K_EOF {
+            continue;
+        }
+        let s = tok_start(in t, i);
+        let e = tok_end(in t, i);
+        if k == K_WHITESPACE {
+            if !blank {
+                let mut lines: u64 = 0;
+                let mut j = s;
+                loop {
+                    if j >= e || lines >= 2 {
+                        break;
+                    }
+                    match src[j..e].find_byte(10) {
+                        Option::Some(at) => {
+                            lines = wrapping_add(lines, 1);
+                            j = wrapping_add(wrapping_add(j, at), 1);
+                        },
+                        Option::None => {
+                            j = e;
+                        },
+                    }
+                }
+                blank = lines >= 2;
+            }
+            glued = false;
+        } else {
+            let mut f: u8 = 0;
+            if blank {
+                f = f | 1;
+            }
+            if glued {
+                f = f | 2;
+            }
+            a.kind.push(k);
+            a.start.push(wrapping_u32(s));
+            a.end.push(wrapping_u32(e));
+            a.flags.push(f);
+            blank = false;
+            glued = true;
+        }
+    }
+    a
+}
+
+// Whether two gated sources have the same significant tokens (kinds and
+// texts).
+fn same_pieces(in a: Slice[u8], in ta: Tokens, in b: Slice[u8], in tb: Tokens) -> bool {
+    let na = ta.kind.len();
+    let nb = tb.kind.len();
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    loop {
+        loop {
+            if i >= na {
+                break;
+            }
+            let k = tok_kind(in ta, i);
+            if k != K_WHITESPACE && k != K_EOF {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        loop {
+            if j >= nb {
+                break;
+            }
+            let k = tok_kind(in tb, j);
+            if k != K_WHITESPACE && k != K_EOF {
+                break;
+            }
+            j = wrapping_add(j, 1);
+        }
+        if i >= na || j >= nb {
+            return i >= na && j >= nb;
+        }
+        if tok_kind(in ta, i) != tok_kind(in tb, j) {
+            return false;
+        }
+        let s = tok_start(in ta, i);
+        let e = tok_end(in ta, i);
+        let s2 = tok_start(in tb, j);
+        let e2 = tok_end(in tb, j);
+        if wrapping_sub(e, s) != wrapping_sub(e2, s2) {
+            return false;
+        }
+        for x in 0..wrapping_sub(e, s) {
+            if byte(in a, wrapping_add(s, x)) != byte(in b, wrapping_add(s2, x)) {
+                return false;
+            }
+        }
+        i = wrapping_add(i, 1);
+        j = wrapping_add(j, 1);
+    }
+}
+
+// `once` without a capture: gate, parse, lay out and render `src`. `t` is
+// the token table the gate accepted (lexed again by the caller when it has
+// one already).
+fn once_tokens(in src: Slice[u8], sink t: Tokens, in lim: Limits, inout w: Work)
+    -> ChunkSeq[u8] eff [Fail[FmtFail]] {
+    // `parse_with_limits(HARD_SOURCE_BYTES, HARD_TOKENS)`: the default
+    // diagnostic limit and parse depth.
+    let p = parse_tokens(in src, t, diags_new(), max_diagnostics(), hard_depth());
+    if p.d.code.len() != 0 {
+        let at = match p.d.start.try_get(0) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        fail_at(at);
+    }
+    let at = atoms(in src, in p.t);
+    let mut dl = lim;
+    dl.max_work = wrapping_sub(w.max, w.used);
+    let mut d = doc_new(in dl, wrapping_add(wrapping_mul(at.kind.len(), 3), 8));
+    let mut pos: u64 = 0;
+    let root = sequence(in at, inout pos, 255, false, inout d, in src);
+    let end = push_leaf(inout d, D_HARD);
+    let root = push_concat2(inout d, root, end);
+    let out = render(inout d, in src, root);
+    charge(inout w, d.w.used);
+    charge(inout w, out.len());
+    out
+}
+
+// `format_source(source, limits)`: the canonical text, or the error.
+pub fn format(
+    in source: Str,
+    max_input_bytes: u64,
+    max_output_bytes: u64,
+    max_tokens: u64,
+    max_doc_nodes: u64,
+    max_depth: u64,
+    max_work: u64
+) -> ChunkSeq[u8] eff [Fail[FmtFail]] {
+    let src = source.as_bytes();
+    if src.len() > max_input_bytes {
+        fail(E_INPUT);
+    }
+    let lim = Limits {
+        max_input_bytes: max_input_bytes,
+        max_output_bytes: max_output_bytes,
+        max_tokens: max_tokens,
+        max_doc_nodes: max_doc_nodes,
+        max_depth: max_depth,
+        max_work: max_work
+    };
+    let mut w = Work {
+        used: 0,
+        max: max_work
+    };
+    let t = gate(in src, in lim, inout w);
+    let output = once_tokens(in src, t, in lim, inout w);
+    let ts = gate(in src, in lim, inout w);
+    let to = gate(in output.as_slice(), in lim, inout w);
+    if !same_pieces(in src, in ts, in output.as_slice(), in to) {
+        fail(E_CONSERVATION);
+    }
+    let to2 = gate(in output.as_slice(), in lim, inout w);
+    let second = once_tokens(in output.as_slice(), to2, in lim, inout w);
+    if second.len() != output.len() {
+        fail(E_IDEMPOTENT);
+    }
+    for i in 0..output.len() {
+        if byte(in second.as_slice(), i) != byte(in output.as_slice(), i) {
+            fail(E_IDEMPOTENT);
+        }
+    }
+    output
+}
+
+// The BLAKE3 digest of `data` (`blake3::hash`), through @vesper-std/hash-sys:
+// `format_for_verification`'s source and output hashes.
+pub fn blake3(in data: Str) -> Hash32 eff [Ffi[Blake3]] {
+    let d = hash(in data.as_bytes());
+    Hash32 {
+        w0: d.w0,
+        w1: d.w1,
+        w2: d.w2,
+        w3: d.w3
+    }
+}
+
+// A digest's 32 bytes as four little-endian words.
+pub copy struct Hash32 {
+    w0: u64,
+    w1: u64,
+    w2: u64,
+    w3: u64
+}

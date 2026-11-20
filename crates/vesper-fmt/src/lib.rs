@@ -3,13 +3,53 @@
 //! Supported source expression macros are syntax-validated without execution.
 //! Unsupported macro/quotation syntax and invalid/incomplete buffers are errors:
 //! callers keep their original source, including all opaque payload trivia.
-#![forbid(unsafe_code)]
+// The seed build (the compiler's copy) stays safe. The port-backed build
+// links the Vesper port through the generated binding, which calls the C ABI.
+#![cfg_attr(not(vesper_port), forbid(unsafe_code))]
+#![cfg_attr(vesper_port, deny(unsafe_code))]
 mod doc;
 mod macro_source;
 mod proof_lean;
 pub mod proof_model;
 mod proof_source;
 pub mod recovery;
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+// The Rust side of @vesper-std/hash-sys's `.vsys` library `Blake3`, which the
+// port imports for the BLAKE3 digests of `format_for_verification`.
+#[cfg(vesper_port)]
+#[allow(dead_code)]
+#[rustfmt::skip]
+#[path = "../../../packages/vesper-std/hash/sys/shim.rs"]
+mod blake3_shim;
+
+/// Which build this is: `"vesper"` for `vesper-fmt` with the `vesper-port`
+/// feature, `"rust"` otherwise (and for the seed copy `vesper-fmt-seed` that
+/// the compiler links).
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the port's runtime, for leak tests.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::live_allocations()
+}
+
+/// [`format_source`] through the port alone, for the differential tests:
+/// `None` when the source is one the Rust code formats (the macro
+/// profile).
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_format_source(source: &str, limits: Limits) -> Option<Result<FormatResult, Error>> {
+    port::format_source(source, limits)
+}
 pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
 pub use proof_model::{DocumentModel, ProofError, ProofLimits};
 pub use proof_source::{FormatVerification, format_for_verification};
@@ -381,6 +421,11 @@ fn once(
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
+    // The port formats the source unless it is in the macro profile.
+    #[cfg(vesper_port)]
+    if let Some(result) = port::format_source(source, limits) {
+        return result;
+    }
     let mut work = Work::new(limits.max_work);
     format_with_work(source, limits, &mut work)
 }
@@ -560,6 +605,11 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     if matches!(current.kind, K::LParen | K::LBracket)
         && (ends_operand(previous.kind) || matches!(previous.kind, K::Bang | K::Fn))
     {
+        return Gap::None;
+    }
+    // `eff (` never starts an effect row, so `eff` is a name there
+    // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175).
+    if current.kind == K::LParen && previous.kind == K::Eff {
         return Gap::None;
     }
     Gap::Soft

@@ -26,7 +26,8 @@ use crate::insn::{
 use crate::program::{MapDef, MapKind, Program, ProgramType};
 use crate::scalar::sext_const;
 use crate::verifier::{
-    PERF_MAX_TRACE_SIZE, PT_REGS_SIZE, SK_BUFF_SIZE, SKB_DATA, SKB_DATA_END, SKB_WRITE, XDP_MD_SIZE,
+    MAX_CALL_FRAMES, PERF_MAX_TRACE_SIZE, PT_REGS_SIZE, SK_BUFF_SIZE, SKB_DATA, SKB_DATA_END,
+    SKB_WRITE, XDP_MD_SIZE, skb, xdp_md,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -406,15 +407,18 @@ pub struct Task {
     pub tgid: u32,
     pub uid: u32,
     pub gid: u32,
-    /// `task->comm`: NUL-terminated within its 16 bytes.
-    pub comm: [u8; 16],
+    /// `task->comm`: NUL-terminated within its [`TASK_COMM_LEN`] bytes.
+    pub comm: [u8; TASK_COMM_LEN],
 }
+
+/// `TASK_COMM_LEN`: `task->comm` bytes, including the NUL.
+pub const TASK_COMM_LEN: usize = 16;
 
 impl Task {
     /// A task named `comm` (truncated to 15 bytes).
     pub fn named(comm: &str, pid: u32, tgid: u32) -> Task {
-        let mut c = [0u8; 16];
-        for (d, s) in c.iter_mut().zip(comm.bytes().take(15)) {
+        let mut c = [0u8; TASK_COMM_LEN];
+        for (d, s) in c.iter_mut().zip(comm.bytes().take(TASK_COMM_LEN - 1)) {
             *d = s;
         }
         Task {
@@ -463,6 +467,16 @@ pub const PACKET_OTHERHOST: u32 = 3;
 /// Interface index of `lo`, the device `BPF_PROG_TEST_RUN` uses.
 pub const LOOPBACK_IFINDEX: u32 = 1;
 
+/// Ethernet framing (`include/uapi/linux/if_ether.h`): address and header
+/// lengths, the EtherType offset, the smallest EtherType (below it the field
+/// is an 802.3 length) and the protocols such frames get.
+const ETH_ALEN: usize = 6;
+const ETH_HLEN: usize = 14;
+const ETH_TYPE_OFF: usize = 2 * ETH_ALEN;
+const ETH_P_802_3_MIN: u16 = 0x0600;
+const ETH_P_802_3: u16 = 0x0001;
+const ETH_P_802_2: u16 = 0x0004;
+
 impl SkbMeta {
     /// What `BPF_PROG_TEST_RUN` derives for `packet` on the loopback
     /// device (`bpf_prog_test_run_skb`, `eth_type_trans`): the packet type
@@ -476,10 +490,10 @@ impl SkbMeta {
             ifindex: LOOPBACK_IFINDEX,
             ..SkbMeta::default()
         };
-        if packet.len() < 14 {
+        if packet.len() < ETH_HLEN {
             return m;
         }
-        let dst = &packet[..6];
+        let dst = &packet[..ETH_ALEN];
         // lo has no broadcast address (`dev->broadcast` is all zero, which
         // is not a multicast address), so ff:ff:ff:ff:ff:ff is multicast
         // there: checked against Linux 6.18
@@ -490,13 +504,17 @@ impl SkbMeta {
         } else {
             PACKET_HOST
         };
-        let ty = u16::from_be_bytes([packet[12], packet[13]]);
-        m.protocol = if ty >= 0x600 {
+        let ty = u16::from_be_bytes([packet[ETH_TYPE_OFF], packet[ETH_TYPE_OFF + 1]]);
+        m.protocol = if ty >= ETH_P_802_3_MIN {
             ty
-        } else if packet.len() >= 16 && packet[14] == 0xff && packet[15] == 0xff {
-            0x0001 // ETH_P_802_3
+        } else if packet.len() >= ETH_HLEN + 2
+            && packet[ETH_HLEN] == 0xff
+            && packet[ETH_HLEN + 1] == 0xff
+        {
+            // A raw 802.3 frame (Novell's IPX) starts with 0xffff.
+            ETH_P_802_3
         } else {
-            0x0004 // ETH_P_802_2
+            ETH_P_802_2
         };
         m
     }
@@ -505,23 +523,29 @@ impl SkbMeta {
     /// the pointer fields (`data`, `data_end`, ...) zero.
     pub fn to_ctx(&self, len: u32) -> Vec<u8> {
         let mut c = vec![0u8; SK_BUFF_SIZE as usize];
-        let mut put = |at: usize, v: u32| c[at..at + 4].copy_from_slice(&v.to_le_bytes());
-        put(0, len);
-        put(4, self.pkt_type);
-        put(8, self.mark);
-        put(12, self.queue_mapping);
-        put(16, u16::from_ne_bytes(self.protocol.to_be_bytes()) as u32);
-        put(24, self.vlan_tci);
-        put(28, self.vlan_proto);
-        put(32, self.priority);
-        put(36, self.ingress_ifindex);
-        put(40, self.ifindex);
-        put(44, self.tc_index);
+        let mut put = |at: i32, v: u32| {
+            let at = at as usize;
+            c[at..at + 4].copy_from_slice(&v.to_le_bytes())
+        };
+        put(skb::LEN, len);
+        put(skb::PKT_TYPE, self.pkt_type);
+        put(skb::MARK, self.mark);
+        put(skb::QUEUE_MAPPING, self.queue_mapping);
+        put(
+            skb::PROTOCOL,
+            u16::from_ne_bytes(self.protocol.to_be_bytes()) as u32,
+        );
+        put(skb::VLAN_TCI, self.vlan_tci);
+        put(skb::VLAN_PROTO, self.vlan_proto);
+        put(skb::PRIORITY, self.priority);
+        put(skb::INGRESS_IFINDEX, self.ingress_ifindex);
+        put(skb::IFINDEX, self.ifindex);
+        put(skb::TC_INDEX, self.tc_index);
         for (i, v) in self.cb.iter().enumerate() {
-            put(48 + 4 * i, *v);
+            put(skb::CB + 4 * i as i32, *v);
         }
-        put(68, self.hash);
-        put(72, self.tc_classid);
+        put(skb::HASH, self.hash);
+        put(skb::TC_CLASSID, self.tc_classid);
         c
     }
 }
@@ -663,21 +687,32 @@ struct PortTarget {
 /// The name this environment had when it ran XDP programs only.
 pub type XdpEnv = Env;
 
+/// The `bpf_get_prandom_u32` state a fresh environment starts from.
+const PRANDOM_SEED: u64 = 0x5eed;
+/// The xorshift64* output multiplier (Vigna 2016).
+const XORSHIFT64_STAR_MUL: u64 = 0x2545_f491_4f6c_dd1d;
+/// Instructions a run may execute before it stops.
+const DEFAULT_INSN_BUDGET: u64 = 1_000_000;
+/// The address of the first region; regions are page aligned and a guard
+/// page apart, so stray pointers never land in another region.
+const FIRST_REGION_BASE: u64 = 0x1000_0000;
+const PAGE_SIZE: u64 = 0x1000;
+
 impl Env {
     pub fn new(prog: &Program) -> Self {
         let mut env = Env {
             maps: Vec::new(),
             cpu: 0,
             now_ns: 0,
-            prandom_state: 0x5eed,
+            prandom_state: PRANDOM_SEED,
             sockets: Vec::new(),
             task: Task::default(),
-            insn_budget: 1_000_000,
+            insn_budget: DEFAULT_INSN_BUDGET,
             defs: prog.maps.clone(),
             prog_type: prog.prog_type,
             tail: HashMap::new(),
             regions: Vec::new(),
-            next_base: 0x1000_0000,
+            next_base: FIRST_REGION_BASE,
             persistent: 0,
             deferred: Vec::new(),
             pkt_start: 0,
@@ -790,7 +825,8 @@ impl Env {
 
     fn alloc(&mut self, kind: Kind, bytes: Vec<u8>, init: bool) -> RegionId {
         let base = self.next_base;
-        self.next_base += (bytes.len() as u64 + 0x1000).div_ceil(0x1000) * 0x1000 + 0x1000;
+        self.next_base +=
+            (bytes.len() as u64 + PAGE_SIZE).div_ceil(PAGE_SIZE) * PAGE_SIZE + PAGE_SIZE;
         let n = bytes.len();
         self.regions.push(Region {
             kind,
@@ -900,7 +936,19 @@ struct LoopFrame {
 
 /// `BPF_MAX_LOOPS`.
 const BPF_MAX_LOOPS: u64 = 1 << 23;
+
+/// Error numbers helpers return negated (`include/uapi/asm-generic/errno-base.h`).
+const ENOENT: u64 = 2;
 const E2BIG: u64 = 7;
+const EAGAIN: u64 = 11;
+const EEXIST: u64 = 17;
+
+/// `MAX_BPF_REG`: R0..=R10.
+const MAX_BPF_REG: usize = 11;
+/// The callee-saved registers R6..=R9.
+const CALLEE_SAVED: std::ops::RangeInclusive<usize> = 6..=9;
+/// `MAX_BPF_STACK`: bytes of each frame's stack.
+const STACK_BYTES: usize = crate::verifier::BPF_MAX_STACK_BYTES as usize;
 
 const HEADROOM: usize = 256;
 
@@ -989,15 +1037,15 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
         prov: Some(ctx),
     };
     let new_stack = |env: &mut Env| {
-        let r = env.alloc(Kind::Stack, vec![0; 512], false);
+        let r = env.alloc(Kind::Stack, vec![0; STACK_BYTES], false);
         Value {
-            v: env.regions[r as usize].base + 512,
+            v: env.regions[r as usize].base + STACK_BYTES as u64,
             prov: Some(r),
         }
     };
     let mut code = Arc::new(code);
-    let mut regs = [Value::scalar(0); 11];
-    let mut init = [false; 11];
+    let mut regs = [Value::scalar(0); MAX_BPF_REG];
+    let mut init = [false; MAX_BPF_REG];
     regs[1] = ctx_ptr;
     init[1] = true;
     regs[10] = new_stack(env);
@@ -1144,7 +1192,7 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
                         if r.init[at..at + n].iter().any(|b| !b) {
                             break Err(InterpError::UninitStackRead {
                                 pc,
-                                off: at as i64 - 512,
+                                off: at as i64 - STACK_BYTES as i64,
                             });
                         }
                         let mut b = [0u8; 8];
@@ -1237,7 +1285,7 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
                 }
             }
             Insn::Call(CallTarget::Local(off)) => {
-                if frames.len() + 1 >= 8 {
+                if frames.len() + 1 >= MAX_CALL_FRAMES {
                     break Err(InterpError::CallDepth { pc });
                 }
                 frames.push(Frame {
@@ -1247,7 +1295,7 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
                     lp: None,
                 });
                 regs[10] = new_stack(env);
-                init[6..=9].fill(false);
+                init[CALLEE_SAVED].fill(false);
                 init[0] = false;
                 pc = (pc as i64 + 1 + off as i64) as usize;
                 continue;
@@ -1273,7 +1321,7 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
                     set!(Reg::R0, Value::scalar(0));
                     init[1..=5].fill(false);
                 } else {
-                    if frames.len() + 1 >= 8 {
+                    if frames.len() + 1 >= MAX_CALL_FRAMES {
                         break Err(InterpError::CallDepth { pc });
                     }
                     let entry = (cb.v & 0xffff_ffff) as usize;
@@ -1386,9 +1434,9 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
                             env.regions[p as usize].live = false;
                         }
                         if r0.v != 0 || lp.i + 1 == lp.n {
-                            regs[6..=9].copy_from_slice(&f.saved);
+                            regs[CALLEE_SAVED].copy_from_slice(&f.saved);
                             init.fill(false);
-                            init[6..=9].fill(true);
+                            init[CALLEE_SAVED].fill(true);
                             init[10] = true;
                             regs[10] = f.fp;
                             let done = if r0.v != 0 { lp.i + 1 } else { lp.n };
@@ -1411,8 +1459,8 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
                         if let Some(p) = regs[10].prov {
                             env.regions[p as usize].live = false;
                         }
-                        regs[6..=9].copy_from_slice(&f.saved);
-                        init[6..=9].fill(true);
+                        regs[CALLEE_SAVED].copy_from_slice(&f.saved);
+                        init[CALLEE_SAVED].fill(true);
                         regs[10] = f.fp;
                         init[1..=5].fill(false);
                         set!(Reg::R0, r0);
@@ -1461,7 +1509,7 @@ fn call_kfunc(
     pc: usize,
     name: &str,
     a: &[Value; 3],
-    init: &[bool; 11],
+    init: &[bool; MAX_BPF_REG],
 ) -> Result<Option<Value>, InterpError> {
     let arg = |i: usize| -> Result<Value, InterpError> {
         if init[i + 1] {
@@ -1578,10 +1626,10 @@ fn ctx_read(
     match t {
         // xdp_md: data, data_end, data_meta, ifindex, rxq, egress
         ProgramType::Xdp => match at {
-            0 => Ok(Some(packet_ptr(false))),
-            4 => Ok(Some(packet_ptr(true))),
-            12 => Ok(Some(Value::scalar(1))),
-            16 => Ok(Some(Value::scalar(0))),
+            xdp_md::DATA => Ok(Some(packet_ptr(false))),
+            xdp_md::DATA_END => Ok(Some(packet_ptr(true))),
+            xdp_md::INGRESS_IFINDEX => Ok(Some(Value::scalar(LOOPBACK_IFINDEX as u64))),
+            xdp_md::RX_QUEUE_INDEX => Ok(Some(Value::scalar(0))),
             _ => Err(bad()),
         },
         ProgramType::SchedCls => match at as i32 {
@@ -1756,23 +1804,23 @@ fn call_helper(
                     // else (including BPF_F_LOCK without a spin lock) is -EINVAL
                     let flags = a[3].v;
                     if flags > BPF_EXIST {
-                        return Ok(Value::scalar((-22i64) as u64)); // -EINVAL
+                        return Ok(Value::scalar(EINVAL.wrapping_neg())); // -EINVAL
                     }
                     if def.kind.is_array() {
                         if !exists {
-                            return Ok(Value::scalar((-7i64) as u64)); // -E2BIG
+                            return Ok(Value::scalar(E2BIG.wrapping_neg())); // -E2BIG
                         }
                         if flags == BPF_NOEXIST {
-                            return Ok(Value::scalar((-17i64) as u64)); // -EEXIST
+                            return Ok(Value::scalar(EEXIST.wrapping_neg())); // -EEXIST
                         }
                     } else if flags == BPF_NOEXIST && exists {
-                        return Ok(Value::scalar((-17i64) as u64)); // -EEXIST
+                        return Ok(Value::scalar(EEXIST.wrapping_neg())); // -EEXIST
                     } else if flags == BPF_EXIST && !exists {
-                        return Ok(Value::scalar((-2i64) as u64)); // -ENOENT
+                        return Ok(Value::scalar(ENOENT.wrapping_neg())); // -ENOENT
                     }
                     let len = matches!(&env.maps[m], MapState::Kv { entries, .. } if entries.len() >= def.max_entries as usize);
                     if !exists && len {
-                        return Ok(Value::scalar((-7i64) as u64));
+                        return Ok(Value::scalar(E2BIG.wrapping_neg()));
                     }
                     if let MapState::Kv { entries, .. } = &env.maps[m]
                         && let Some(&r) = entries.get(&key)
@@ -1794,7 +1842,7 @@ fn call_helper(
                         env.deferred.push(r);
                         return Ok(Value::scalar(0));
                     }
-                    Ok(Value::scalar((-2i64) as u64)) // -ENOENT
+                    Ok(Value::scalar(ENOENT.wrapping_neg())) // -ENOENT
                 }
             }
         }
@@ -1807,7 +1855,7 @@ fn call_helper(
             x ^= x >> 27;
             env.prandom_state = x;
             Ok(Value::scalar(
-                (x.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 32) as u32 as u64,
+                (x.wrapping_mul(XORSHIFT64_STAR_MUL) >> 32) as u32 as u64,
             ))
         }
         h::GET_SMP_PROCESSOR_ID => Ok(Value::scalar(env.cpu as u64)),
@@ -1817,8 +1865,8 @@ fn call_helper(
             let len = env.regions[pkt as usize].bytes.len() as i64;
             let new = *data_off as i64 + delta;
             // keep at least an Ethernet header, as the kernel does
-            if new < 0 || len - new < 14 {
-                return Ok(Value::scalar((-22i64) as u64)); // -EINVAL
+            if new < 0 || len - new < ETH_HLEN as i64 {
+                return Ok(Value::scalar(EINVAL.wrapping_neg())); // -EINVAL
             }
             *data_off = new as usize;
             env.pkt_start = new as usize;
@@ -1887,7 +1935,7 @@ fn call_helper(
                     ring.commit(hdr, false);
                     Ok(Value::scalar(0))
                 }
-                None => Ok(Value::scalar((-11i64) as u64)), // -EAGAIN
+                None => Ok(Value::scalar(EAGAIN.wrapping_neg())), // -EAGAIN
             }
         }
         h::SK_LOOKUP_TCP => {
@@ -1935,7 +1983,12 @@ fn call_helper(
                 return Err(bad("bpf_get_current_comm with size 0"));
             }
             let (rid, at) = resolve(env, pc, a[0], 0, size)?;
-            let name_len = env.task.comm.iter().position(|&b| b == 0).unwrap_or(16);
+            let name_len = env
+                .task
+                .comm
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(TASK_COMM_LEN);
             let keep = name_len.min(size - 1);
             let mut out = vec![0u8; size];
             out[..keep].copy_from_slice(&env.task.comm[..keep]);

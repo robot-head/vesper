@@ -19,6 +19,10 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'crates/vesper-syntax/**'
+      - 'packages/vesper-front/**'
+      - 'packages/vesper-ast/**'
+      - 'packages/vesper-std/**'
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
       - 'crates/vesper-port-abi/**'
@@ -28,6 +32,10 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'crates/vesper-syntax/**'
+      - 'packages/vesper-front/**'
+      - 'packages/vesper-ast/**'
+      - 'packages/vesper-std/**'
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
       - 'crates/vesper-port-abi/**'
@@ -81,3 +89,7 @@ jobs:
         run: cargo test --locked -p vesper-hybrid -- --nocapture
       - name: The differential harness catches a divergent pilot module
         run: cargo test --locked -p vesper-hybrid --features divergent --test differential -- --nocapture
+      - name: The differential harness catches a divergent parse module
+        # A wrong parse cannot compile the pilot test's program, so only the
+        # harness runs here.
+        run: cargo test --locked -p vesper-hybrid --features divergent-parse --test differential hybrid_matches_the_default_compiler -- --nocapture

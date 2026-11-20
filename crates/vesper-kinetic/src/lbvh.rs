@@ -25,6 +25,19 @@ pub const MORTON64_AXIS_BITS: u32 = 21;
 /// Largest quantised coordinate.
 pub const MORTON64_AXIS_MAX: u32 = (1 << MORTON64_AXIS_BITS) - 1;
 
+// The 21-bit magic-bits interleave (see `morton`): the pattern each
+// spreading step leaves, named by its shift.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD21_MASK_32: u64 = 0x001f_0000_0000_ffff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD21_MASK_16: u64 = 0x001f_0000_ff00_00ff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD21_MASK_8: u64 = 0x100f_00f0_0f00_f00f;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD21_MASK_4: u64 = 0x10c3_0c30_c30c_30c3;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SPREAD21_MASK_2: u64 = 0x1249_2492_4924_9249;
+
 /// Spread the low 21 bits of `v` so bit `i` lands on bit `3i`.
 #[inline]
 pub fn spread21(v: u32) -> u64 {
@@ -35,11 +48,11 @@ pub fn spread21(v: u32) -> u64 {
     #[cfg(not(vesper_port))]
     {
         let mut x = u64::from(v & MORTON64_AXIS_MAX);
-        x = (x | (x << 32)) & 0x001f_0000_0000_ffff;
-        x = (x | (x << 16)) & 0x001f_0000_ff00_00ff;
-        x = (x | (x << 8)) & 0x100f_00f0_0f00_f00f;
-        x = (x | (x << 4)) & 0x10c3_0c30_c30c_30c3;
-        x = (x | (x << 2)) & 0x1249_2492_4924_9249;
+        x = (x | (x << 32)) & SPREAD21_MASK_32;
+        x = (x | (x << 16)) & SPREAD21_MASK_16;
+        x = (x | (x << 8)) & SPREAD21_MASK_8;
+        x = (x | (x << 4)) & SPREAD21_MASK_4;
+        x = (x | (x << 2)) & SPREAD21_MASK_2;
         x
     }
 }
@@ -53,12 +66,12 @@ pub fn compact21(code: u64) -> u32 {
     }
     #[cfg(not(vesper_port))]
     {
-        let mut x = code & 0x1249_2492_4924_9249;
-        x = (x | (x >> 2)) & 0x10c3_0c30_c30c_30c3;
-        x = (x | (x >> 4)) & 0x100f_00f0_0f00_f00f;
-        x = (x | (x >> 8)) & 0x001f_0000_ff00_00ff;
-        x = (x | (x >> 16)) & 0x001f_0000_0000_ffff;
-        x = (x | (x >> 32)) & 0x0000_0000_001f_ffff;
+        let mut x = code & SPREAD21_MASK_2;
+        x = (x | (x >> 2)) & SPREAD21_MASK_4;
+        x = (x | (x >> 4)) & SPREAD21_MASK_8;
+        x = (x | (x >> 8)) & SPREAD21_MASK_16;
+        x = (x | (x >> 16)) & SPREAD21_MASK_32;
+        x = (x | (x >> 32)) & u64::from(MORTON64_AXIS_MAX);
         x as u32
     }
 }

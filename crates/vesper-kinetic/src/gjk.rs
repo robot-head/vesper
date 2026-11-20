@@ -221,7 +221,7 @@ fn affine_closest(pts: &[SupportPoint], subset: &[usize]) -> Option<[f64; 4]> {
                 piv = row;
             }
         }
-        if g[piv][col].abs() <= 1e-12 * scale_ref.max(f64::MIN_POSITIVE) {
+        if g[piv][col].abs() <= REL_TOL * scale_ref.max(f64::MIN_POSITIVE) {
             return None;
         }
         g.swap(col, piv);
@@ -282,6 +282,12 @@ fn closest_on_simplex(simplex: &mut Vec<SupportPoint>, lambdas: &mut Vec<f64>) -
     v
 }
 
+/// The relative tolerance of GJK's convergence, the Gram pivots and EPA's
+/// degenerate seeds, and its square (for squared lengths).
+#[cfg_attr(vesper_port, allow(dead_code))]
+const REL_TOL: f64 = 1e-12;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const REL_TOL_SQ: f64 = 1e-24;
 const GJK_MAX_ITER: usize = 128;
 
 struct GjkOutcome {
@@ -308,7 +314,7 @@ fn gjk_cores(sa: &Shape, sb: &Shape) -> Result<GjkOutcome, GjkError> {
     let mut best_vv = f64::INFINITY;
     for _ in 0..GJK_MAX_ITER {
         let vv = dot(v, v);
-        if vv <= 1e-24 * size * size || simplex.len() == 4 {
+        if vv <= REL_TOL_SQ * size * size || simplex.len() == 4 {
             converged = true;
             break;
         }
@@ -323,7 +329,7 @@ fn gjk_cores(sa: &Shape, sb: &Shape) -> Result<GjkOutcome, GjkError> {
         best_vv = vv;
         let p = core_support_point(sa, sb, scale(v, -1.0));
         // Converged: the new support does not get closer than |v|.
-        if vv - dot(v, p.w) <= 1e-12 * vv || simplex.iter().any(|s| s.w == p.w) {
+        if vv - dot(v, p.w) <= REL_TOL * vv || simplex.iter().any(|s| s.w == p.w) {
             converged = true;
             break;
         }
@@ -343,9 +349,9 @@ fn gjk_cores(sa: &Shape, sb: &Shape) -> Result<GjkOutcome, GjkError> {
     // A full tetrahedron means the origin is inside it. A stall within
     // 1e-6 (relative) of the origin is treated as contact, so EPA measures
     // it (and reports the hair-width gap or overlap).
-    let distance = if vv <= 1e-24 * size * size
+    let distance = if vv <= REL_TOL_SQ * size * size
         || simplex.len() == 4
-        || (stalled && vv <= 1e-12 * size * size)
+        || (stalled && vv <= REL_TOL * size * size)
     {
         0.0
     } else {
@@ -581,14 +587,14 @@ fn epa(sa: &Shape, sb: &Shape, seed: &[SupportPoint]) -> Result<CorePenetration,
     let p3 = far(&|w| dot(sub(w, a0), plane).abs(), &cand);
     let a3 = cand[p3].w;
     let extent = norm(sub(a1, a0));
-    if !(extent > 1e-12) {
+    if !(extent > REL_TOL) {
         return Ok(CorePenetration::Flat(flat_normal([0.0; 3], [0.0; 3])));
     }
-    if !(norm(plane) > 1e-12 * extent * extent) {
+    if !(norm(plane) > REL_TOL * extent * extent) {
         return Ok(CorePenetration::Flat(flat_normal(sub(a1, a0), [0.0; 3])));
     }
     let volume = dot(sub(a3, a0), plane).abs();
-    if !(volume > 1e-12 * extent * extent * extent) {
+    if !(volume > REL_TOL * extent * extent * extent) {
         return Ok(CorePenetration::Flat(flat_normal(sub(a1, a0), plane)));
     }
     let mut pts = vec![cand[p0], cand[p1], cand[p2], cand[p3]];

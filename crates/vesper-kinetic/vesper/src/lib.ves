@@ -59,6 +59,11 @@ pub copy enum MortonError {
     CodeOutOfRange(u32)
 }
 
+// A 30-bit Morton code: three 10-bit axes; a code with bit 30 or 31 set
+// is out of range.
+const AXIS_MAX: u16 = 1023;
+const MORTON30_HIGH_BITS: u32 = 0xc0000000;
+
 pub fn morton_spread(v: u32) -> u32 {
     m_spread(v)
 }
@@ -72,7 +77,7 @@ pub fn morton_encode_masked(x: u16, y: u16, z: u16) -> u32 {
 }
 
 pub fn morton_encode(x: u16, y: u16, z: u16) -> u32 eff [Fail[MortonError]] {
-    if x > 1023 {
+    if x > AXIS_MAX {
         Fail::raise(
             MortonError::AxisOutOfRange {
                 axis: 0,
@@ -80,7 +85,7 @@ pub fn morton_encode(x: u16, y: u16, z: u16) -> u32 eff [Fail[MortonError]] {
             }
         );
     }
-    if y > 1023 {
+    if y > AXIS_MAX {
         Fail::raise(
             MortonError::AxisOutOfRange {
                 axis: 1,
@@ -88,7 +93,7 @@ pub fn morton_encode(x: u16, y: u16, z: u16) -> u32 eff [Fail[MortonError]] {
             }
         );
     }
-    if z > 1023 {
+    if z > AXIS_MAX {
         Fail::raise(
             MortonError::AxisOutOfRange {
                 axis: 2,
@@ -108,7 +113,7 @@ pub fn morton_decode_masked(code: u32) -> (u16, u16, u16) {
 }
 
 pub fn morton_decode(code: u32) -> (u16, u16, u16) eff [Fail[MortonError]] {
-    if (code & 0xc0000000) != 0 {
+    if (code & MORTON30_HIGH_BITS) != 0 {
         Fail::raise(MortonError::CodeOutOfRange(code));
     }
     morton_decode_masked(code)

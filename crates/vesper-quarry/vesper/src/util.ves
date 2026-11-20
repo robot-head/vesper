@@ -16,7 +16,56 @@ use self::{
     Val
 };
 
+// ASCII bytes (`B_` as u8, for pool bytes).
+const DIGIT_0: u64 = 48;
+const B_DIGIT_0: u8 = 48;
+const B_DIGIT_9: u8 = 57;
+const B_UPPER_A: u8 = 65;
+const B_UPPER_Z: u8 = 90;
+const B_UNDERSCORE: u8 = 95;
+const B_LOWER_A: u8 = 97;
+const B_LOWER_Z: u8 = 122;
+// ASCII lowercase = uppercase | 0x20.
+const B_CASE_BIT: u8 = 32;
+
+// Identifiers are at most this many bytes (src/lib.rs `identifier`).
+const MAX_IDENT_LEN: u64 = 128;
+
+// `find_not_in` byte sets, as bitmaps of bytes 0..63 (LO) and 64..127 (HI).
+// Word bytes: `0`-`9` (LO bits 48-57), `A`-`Z` (HI bits 1-26), `_` (HI bit
+// 31) and `a`-`z` (HI bits 33-58).
+const WORD_BYTES_LO: u64 = 0x3ff000000000000;
+const WORD_BYTES_HI: u64 = 0x7fffffe87fffffe;
+// Every byte but `A`-`Z`.
+const ALL_BYTES_LO: u64 = 0xffffffffffffffff;
+const NOT_UPPER_HI: u64 = 0xfffffffff8000001;
+
 // Small helpers.
+
+// `Tok::kind` values (lib.ves).
+pub fn tk_word() -> u64 {
+    1
+}
+
+pub fn tk_param() -> u64 {
+    2
+}
+
+pub fn tk_int() -> u64 {
+    3
+}
+
+pub fn tk_text() -> u64 {
+    4
+}
+
+pub fn tk_sym() -> u64 {
+    5
+}
+
+pub fn tk_op() -> u64 {
+    6
+}
 
 pub fn none() -> u64 {
     18446744073709551615
@@ -287,7 +336,7 @@ pub fn put_u64(inout m: ChunkSeq[u8], x: u64) {
     let mut v = x;
     loop {
         let (d, r) = div_rem(v, 10);
-        m.push(wrapping_u8(wrapping_add(r, 48)));
+        m.push(wrapping_u8(wrapping_add(r, DIGIT_0)));
         v = d;
         if v == 0 {
             break;
@@ -406,35 +455,52 @@ pub fn bound(inout q: Q, n: u64, li: u64, in what: Str) -> bool {
     }
 }
 
+// The hard ceilings of `Limits` (src/lib.rs `Limits::default`), in field
+// order.
+const HARD_SQL_BYTES: u64 = 65536;
+const HARD_TOKENS: u64 = 8192;
+const HARD_NODES: u64 = 512;
+const HARD_NESTING: u64 = 32;
+const HARD_TABLES: u64 = 64;
+const HARD_COLUMNS_PER_TABLE: u64 = 128;
+const HARD_RELATIONS: u64 = 16;
+const HARD_INPUT_ROWS: u64 = 10000;
+const HARD_INPUT_BYTES: u64 = 4194304;
+const HARD_WORK: u64 = 1000000;
+const HARD_INTERMEDIATE_ROWS: u64 = 10000;
+const HARD_INTERMEDIATE_BYTES: u64 = 8388608;
+const HARD_OUTPUT_ROWS: u64 = 10000;
+const HARD_OUTPUT_BYTES: u64 = 4194304;
+
 pub fn hard(i: u64) -> u64 {
     if i == 0 {
-        65536
+        HARD_SQL_BYTES
     } else if i == 1 {
-        8192
+        HARD_TOKENS
     } else if i == 2 {
-        512
+        HARD_NODES
     } else if i == 3 {
-        32
+        HARD_NESTING
     } else if i == 4 {
-        64
+        HARD_TABLES
     } else if i == 5 {
-        128
+        HARD_COLUMNS_PER_TABLE
     } else if i == 6 {
-        16
+        HARD_RELATIONS
     } else if i == 7 {
-        10000
+        HARD_INPUT_ROWS
     } else if i == 8 {
-        4194304
+        HARD_INPUT_BYTES
     } else if i == 9 {
-        1000000
+        HARD_WORK
     } else if i == 10 {
-        10000
+        HARD_INTERMEDIATE_ROWS
     } else if i == 11 {
-        8388608
+        HARD_INTERMEDIATE_BYTES
     } else if i == 12 {
-        10000
+        HARD_OUTPUT_ROWS
     } else {
-        4194304
+        HARD_OUTPUT_BYTES
     }
 }
 
@@ -461,7 +527,7 @@ pub fn load_limits(inout q: Q, in limits: Slice[u64]) -> bool {
 
 // The first byte of `w` that is not an ASCII letter, digit or `_`.
 pub fn word_end(in w: Slice[u8]) -> Option[u64] {
-    w.find_not_in(287948901175001088, 576460745995190270, false)
+    w.find_not_in(WORD_BYTES_LO, WORD_BYTES_HI, false)
 }
 
 // `identifier` for the word `w`, a copy of `pool[off..off + w.len()]`:
@@ -471,17 +537,17 @@ pub fn identifier_in(inout q: Q, in w: Slice[u8], off: u64) -> u64 {
     let len = w.len();
     let first = match w.try_get(0) {
         Option::Some(c) => c,
-        Option::None => 48,
+        Option::None => B_DIGIT_0,
     };
     let word = match word_end(in w) {
         Option::Some(i) => false,
         Option::None => true,
     };
-    if len > 128 || first < 65 || !word {
+    if len > MAX_IDENT_LEN || first < B_UPPER_A || !word {
         fail(inout q, 1, "expected ASCII identifier of at most 128 bytes");
         return 0;
     }
-    match w.find_not_in(18446744073709551615, 18446744073575333889, true) {
+    match w.find_not_in(ALL_BYTES_LO, NOT_UPPER_HI, true) {
         Option::Some(i) => {
             let start = q.pool.len();
             q.pool.extend_ascii_lowercase(in w);
@@ -496,19 +562,19 @@ pub fn identifier_in(inout q: Q, in w: Slice[u8], off: u64) -> u64 {
 // lowercase form, so only a name with an uppercase byte is copied (to the
 // end of the pool).
 pub fn identifier(inout q: Q, off: u64, len: u64) -> u64 {
-    let mut ok = len > 0 && len <= 128;
+    let mut ok = len > 0 && len <= MAX_IDENT_LEN;
     let mut upper = false;
     for i in 0..len {
         let c = match q.pool.try_get(wrapping_add(off, i)) {
             Option::Some(c) => c,
             Option::None => 0,
         };
-        let lower = c >= 97 && c <= 122;
-        let up = c >= 65 && c <= 90;
+        let lower = c >= B_LOWER_A && c <= B_LOWER_Z;
+        let up = c >= B_UPPER_A && c <= B_UPPER_Z;
         if up {
             upper = true;
         }
-        if !(lower || up || c == 95) && (i == 0 || c < 48 || c > 57) {
+        if !(lower || up || c == B_UNDERSCORE) && (i == 0 || c < B_DIGIT_0 || c > B_DIGIT_9) {
             ok = false;
         }
     }
@@ -525,8 +591,8 @@ pub fn identifier(inout q: Q, off: u64, len: u64) -> u64 {
             Option::Some(c) => c,
             Option::None => 0,
         };
-        let lower = if c >= 65 && c <= 90 {
-            wrapping_add(c, 32)
+        let lower = if c >= B_UPPER_A && c <= B_UPPER_Z {
+            wrapping_add(c, B_CASE_BIT)
         } else {
             c
         };

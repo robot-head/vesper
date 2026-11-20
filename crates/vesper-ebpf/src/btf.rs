@@ -10,6 +10,34 @@ use std::collections::HashMap;
 use std::fmt;
 
 pub const BTF_MAGIC: u16 = 0xeb9f;
+/// `BTF_VERSION`.
+pub const BTF_VERSION: u8 = 1;
+/// `sizeof(struct btf_header)`.
+pub const BTF_HDR_LEN: u32 = 24;
+
+/// `btf_type.info`: vlen in bits 0-15, kind in bits 24-28, kind_flag in
+/// bit 31 (`BTF_INFO_KIND`, `BTF_INFO_VLEN`, `BTF_INFO_KFLAG`).
+const INFO_VLEN_MASK: u32 = 0xffff;
+const INFO_KIND_SHIFT: u32 = 24;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const INFO_KIND_MASK: u32 = 0x1f;
+const INFO_KFLAG_SHIFT: u32 = 31;
+/// A member's offset word when kind_flag is set: bit offset in bits 0-23,
+/// bitfield size in bits 24-31 (`BTF_MEMBER_BIT_OFFSET`/`_BITFIELD_SIZE`).
+const MEMBER_BIT_OFFSET_MASK: u32 = 0xff_ffff;
+const MEMBER_BITFIELD_SHIFT: u32 = 24;
+/// The `BTF_KIND_INT` word: encoding in bits 24-27, offset in bits 16-23,
+/// bits in 0-7 (`BTF_INT_ENCODING`, `BTF_INT_OFFSET`, `BTF_INT_BITS`).
+const INT_ENCODING_SHIFT: u32 = 24;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const INT_ENCODING_MASK: u32 = 0xf;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const INT_OFFSET_SHIFT: u32 = 16;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const INT_BYTE_MASK: u32 = 0xff;
+/// Upper bound on a vector preallocated from an untrusted vlen.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MAX_PREALLOC: usize = 4096;
 
 pub const KIND_INT: u32 = 1;
 pub const KIND_PTR: u32 = 2;
@@ -384,14 +412,14 @@ impl Btf {
 
     #[cfg(not(vesper_port))]
     fn parse_with(btf: &[u8], base: Option<&Btf>) -> Result<Btf, BtfError> {
-        if btf.len() < 24 || u16::from_le_bytes([btf[0], btf[1]]) != BTF_MAGIC {
+        if btf.len() < BTF_HDR_LEN as usize || u16::from_le_bytes([btf[0], btf[1]]) != BTF_MAGIC {
             return Err(bad("bad header"));
         }
         if btf[2] != 1 {
             return Err(bad(format!("unsupported version {}", btf[2])));
         }
         let hdr_len = rd32(btf, 4)? as usize;
-        if hdr_len < 24 {
+        if hdr_len < BTF_HDR_LEN as usize {
             return Err(bad("header too short"));
         }
         let type_off = rd32(btf, 8)? as usize;
@@ -421,9 +449,9 @@ impl Btf {
             let info = rd32(types, at + 4)?;
             let sot = rd32(types, at + 8)?;
             at += 12;
-            let kind = (info >> 24) & 0x1f;
-            let vlen = (info & 0xffff) as usize;
-            let kflag = info >> 31 != 0;
+            let kind = (info >> INFO_KIND_SHIFT) & INFO_KIND_MASK;
+            let vlen = (info & INFO_VLEN_MASK) as usize;
+            let kflag = info >> INFO_KFLAG_SHIFT != 0;
             let mut word = || -> Result<u32, BtfError> {
                 let v = rd32(types, at)?;
                 at += 4;
@@ -435,9 +463,9 @@ impl Btf {
                     BtfType::Int {
                         name,
                         size: sot,
-                        encoding: (w >> 24) & 0xf,
-                        offset: (w >> 16) & 0xff,
-                        bits: w & 0xff,
+                        encoding: (w >> INT_ENCODING_SHIFT) & INT_ENCODING_MASK,
+                        offset: (w >> INT_OFFSET_SHIFT) & INT_BYTE_MASK,
+                        bits: w & INT_BYTE_MASK,
                     }
                 }
                 KIND_PTR => BtfType::Ptr { ty: sot },
@@ -447,13 +475,13 @@ impl Btf {
                     len: word()?,
                 },
                 KIND_STRUCT | KIND_UNION => {
-                    let mut members = Vec::with_capacity(vlen.min(4096));
+                    let mut members = Vec::with_capacity(vlen.min(MAX_PREALLOC));
                     for _ in 0..vlen {
                         let n = word()?;
                         let ty = word()?;
                         let off = word()?;
                         let (bit_offset, bitfield_size) = if kflag {
-                            (off & 0xff_ffff, off >> 24)
+                            (off & MEMBER_BIT_OFFSET_MASK, off >> MEMBER_BITFIELD_SHIFT)
                         } else {
                             (off, 0)
                         };
@@ -472,7 +500,7 @@ impl Btf {
                     }
                 }
                 KIND_ENUM => {
-                    let mut values = Vec::with_capacity(vlen.min(4096));
+                    let mut values = Vec::with_capacity(vlen.min(MAX_PREALLOC));
                     for _ in 0..vlen {
                         let n = word()?;
                         let v = word()?;
@@ -486,7 +514,7 @@ impl Btf {
                     }
                 }
                 KIND_ENUM64 => {
-                    let mut values = Vec::with_capacity(vlen.min(4096));
+                    let mut values = Vec::with_capacity(vlen.min(MAX_PREALLOC));
                     for _ in 0..vlen {
                         let n = word()?;
                         let lo = word()? as u64;
@@ -511,7 +539,7 @@ impl Btf {
                     linkage: vlen as u32,
                 },
                 KIND_FUNC_PROTO => {
-                    let mut params = Vec::with_capacity(vlen.min(4096));
+                    let mut params = Vec::with_capacity(vlen.min(MAX_PREALLOC));
                     for _ in 0..vlen {
                         params.push((word()?, word()?));
                     }
@@ -523,7 +551,7 @@ impl Btf {
                     linkage: word()?,
                 },
                 KIND_DATASEC => {
-                    let mut vars = Vec::with_capacity(vlen.min(4096));
+                    let mut vars = Vec::with_capacity(vlen.min(MAX_PREALLOC));
                     for _ in 0..vlen {
                         vars.push((word()?, word()?, word()?));
                     }
@@ -746,7 +774,11 @@ impl BtfBuilder {
         size_or_type: u32,
     ) -> u32 {
         self.word(name);
-        self.word((kind << 24) | (vlen & 0xffff) | if kflag { 1 << 31 } else { 0 });
+        self.word(
+            (kind << INFO_KIND_SHIFT)
+                | (vlen & INFO_VLEN_MASK)
+                | if kflag { 1 << INFO_KFLAG_SHIFT } else { 0 },
+        );
         self.word(size_or_type);
         self.count += 1;
         self.count
@@ -755,7 +787,7 @@ impl BtfBuilder {
     pub fn int(&mut self, name: &str, size: u32, signed: bool) -> u32 {
         let n = self.str(name);
         let t = self.header(n, KIND_INT, 0, false, size);
-        self.word((if signed { INT_SIGNED } else { 0 } << 24) | (size * 8));
+        self.word((if signed { INT_SIGNED } else { 0 } << INT_ENCODING_SHIFT) | (size * 8));
         t
     }
 
@@ -817,7 +849,7 @@ impl BtfBuilder {
         for (m, nm) in members.iter().zip(names) {
             self.word(nm);
             self.word(m.1);
-            self.word((m.3 << 24) | (m.2 & 0xff_ffff));
+            self.word((m.3 << MEMBER_BITFIELD_SHIFT) | (m.2 & MEMBER_BIT_OFFSET_MASK));
         }
         t
     }
@@ -884,9 +916,9 @@ impl BtfBuilder {
     pub fn finish(self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&BTF_MAGIC.to_le_bytes());
-        out.push(1); // version
+        out.push(BTF_VERSION);
         out.push(0); // flags
-        out.extend_from_slice(&24u32.to_le_bytes()); // hdr_len
+        out.extend_from_slice(&BTF_HDR_LEN.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes()); // type_off
         out.extend_from_slice(&(self.types.len() as u32).to_le_bytes());
         out.extend_from_slice(&(self.types.len() as u32).to_le_bytes()); // str_off

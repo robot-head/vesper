@@ -1,0 +1,146 @@
+// @vesper/forge: Vesper port of the vesper-forge hygiene core
+// (self-hosting wave SH1 lane 14, #1157): the delimiter check
+// (src/host.rs `check_delimiters`), the parser of the Forge lexical
+// fragment (src/syntax.rs) and scope-set resolution with the registry's
+// visibility and claim checks (src/resolve.rs, src/registry.rs).
+//
+// The host itself (identities, symbols, expansions and splice arenas)
+// stays in Rust: src/port.rs flattens what a kernel reads into word
+// tables, and replays the identities a kernel minted (symbols for joined
+// paths, scopes and binders) on the host in the same order, so both
+// builds leave the host in the same state, on success and on failure.
+use self::parse::{
+    Parser,
+    delimiters,
+    expr,
+    parser_new,
+    want_end
+};
+use self::resolve::{
+    parameters,
+    resolver_new,
+    term
+};
+
+// `check_delimiters` over token kinds (1 Ident .. 10 Close Brace): 0 when
+// balanced, 1 when deeper than `max_depth`, else 2 + the index of the
+// unbalanced token.
+pub fn fg_delimiters(in kinds: Slice[u64], max_depth: u64) -> u64 {
+    let mut at: u64 = 0;
+    let mut stack = ChunkSeq::new[u64]();
+    let e = delimiters(in kinds, 0, kinds.len(), 1, max_depth, inout at, inout stack);
+    if e == 0 {
+        0
+    } else if e == 1 {
+        1
+    } else {
+        wrapping_add(at, 2)
+    }
+}
+
+// Checks the delimiters of, then parses, `n` tokens given as rows of
+// (kind, text start, text len) over `text`. The result is
+//   [error, e1, e2, paths, path words, paths.., term..]
+// where error is 0, 1 (nesting depth), 2 (unbalanced at e1) or 3 (parse
+// error at token e1 expecting e2). The paths are every finished path in
+// creation order, as [n, token..]; on success the term follows in
+// post-order: [1, path] Ref, [2, token] Lit, [3, binder] Let (after its
+// value and body), [4, open, close, nargs] Call (after its callee and
+// arguments), [5, keyword, effect path, handler path] Handle (after its
+// body), [6, n] Block (after its items).
+pub fn fg_parse(in toks: Slice[u64], in text: Slice[u8], max_depth: u64) -> ChunkSeq[u64] {
+    let n = toks.len() / 3;
+    let mut p = parser_new(n, max_depth);
+    let mut at: u64 = 0;
+    let e = delimiters(in toks, 0, n, 3, max_depth, inout at, inout p.term);
+    if e != 0 {
+        let mut out = ChunkSeq::with_capacity[u64](5);
+        out.push(e);
+        out.push(at);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        return out;
+    }
+    expr(in toks, in text, inout p);
+    if p.err == 0 && p.pos != n {
+        p.err = 3;
+        p.e1 = p.pos;
+        p.e2 = want_end();
+    }
+    let mut out = ChunkSeq::with_capacity[u64](
+        wrapping_add(wrapping_add(p.paths.len(), p.term.len()), 5)
+    );
+    out.push(p.err);
+    out.push(p.e1);
+    out.push(p.e2);
+    out.push(p.npaths);
+    out.push(p.paths.len());
+    out.extend(in p.paths.as_slice());
+    if p.err == 0 {
+        out.extend(in p.term.as_slice());
+    }
+    out
+}
+
+// Checks the delimiters of, then resolves, the fragment in `w` against the
+// host's table `g` (layouts in resolve.ves). The result is
+//   [error, scopes minted, binders minted, e1, e2, e3, e4, n, records..,
+//    extra..]
+// where the records (only meaningful on success) are, in creation order,
+//   [1, id, token, n, scope..] a binder,
+//   [2, token, symbol, tag, a, b, pre-resolved] a reference,
+//   [3, kind, a, b, c, d, token, n, origin..] an operation,
+// and `extra`, the last n words, holds the ambiguous candidates as
+// (tag, a, b) triples.
+pub fn fg_resolve(in w: Slice[u64], in text: Slice[u8], in g: Slice[u64], in gt: Slice[u8])
+    -> ChunkSeq[u64] {
+    let mut r = resolver_new(in w);
+    let mut at: u64 = 0;
+    let e = delimiters(
+        in w,
+        match w.try_get(6) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        },
+        match w.try_get(5) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        },
+        10,
+        match w.try_get(0) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        },
+        inout at,
+        inout r.tmp
+    );
+    if e != 0 {
+        r.err = e;
+        r.e1 = at;
+    } else {
+        let scope0 = r.next_scope;
+        let ctx_len = parameters(in w, inout r);
+        if r.err == 0 {
+            let root = match w.try_get(17) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            let end = term(in w, in text, in g, in gt, inout r, root, ctx_len);
+        }
+        r.out.try_set(1, wrapping_sub(r.next_scope, scope0));
+        r.out.try_set(2, wrapping_sub(r.next_binder, r.first_binder));
+    }
+    r.out.try_set(0, r.err);
+    r.out.try_set(3, r.e1);
+    r.out.try_set(4, r.e2);
+    r.out.try_set(5, r.e3);
+    r.out.try_set(6, r.e4);
+    if r.err != 0 {
+        r.out.try_set(7, r.ext.len());
+        r.out.extend(in r.ext.as_slice());
+    }
+    let mut out = ChunkSeq::new[u64]();
+    swap(inout out, inout r.out);
+    out
+}

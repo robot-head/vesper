@@ -209,14 +209,15 @@ impl Directives {
                 }
                 match version {
                     "3" if out.abi.is_none() => out.abi = Some(3),
-                    "3" => {
+                    "4" if out.abi.is_none() => out.abi = Some(4),
+                    "3" | "4" => {
                         return Err(ExportError::Directive(
                             "@export abi: the ABI is named twice".into(),
                         ));
                     }
                     other => {
                         return Err(ExportError::Directive(format!(
-                            "@export abi: expected 3, found '{other}' (v1 and v2 follow from the forms a library uses)"
+                            "@export abi: expected 3 or 4, found '{other}' (v1 and v2 follow from the forms a library uses)"
                         )));
                     }
                 }

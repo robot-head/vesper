@@ -11,9 +11,9 @@ use crate::identity::{
 };
 use crate::lex::lex_generated;
 use crate::registry::{DefId, DefKind, DefinitionRegistry, PackageId};
-use crate::token::{
-    GeneratedToken, HostToken, Origin, Quotation, QuoteItem, QuoteLimits, TokenKind,
-};
+#[cfg(not(vesper_port))]
+use crate::token::TokenKind;
+use crate::token::{GeneratedToken, HostToken, Origin, Quotation, QuoteItem, QuoteLimits};
 
 /// Where a macro was invoked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -88,6 +88,10 @@ pub struct HygieneHost {
     module_scopes: BTreeMap<PackageId, ScopeId>,
     pub(crate) globals: Vec<GlobalBinding>,
     expansion_state: BTreeMap<u32, ExpansionState>,
+    /// The Vesper resolver's copy of the globals, their definitions and the
+    /// registry's packages, rebuilt when a global is declared.
+    #[cfg(vesper_port)]
+    pub(crate) port_tables: Option<crate::port::HostTables>,
 }
 
 impl HygieneHost {
@@ -121,6 +125,8 @@ impl HygieneHost {
             module_scopes: BTreeMap::new(),
             globals: Vec::new(),
             expansion_state: BTreeMap::new(),
+            #[cfg(vesper_port)]
+            port_tables: None,
         }
     }
 
@@ -144,6 +150,16 @@ impl HygieneHost {
 
     pub(crate) fn fresh_binder(&mut self) -> Result<BinderId, ForgeError> {
         Ok(BinderId(self.binders.mint()?))
+    }
+
+    #[cfg_attr(not(vesper_port), allow(dead_code))]
+    pub(crate) fn scope_counter(&self) -> (u32, u32) {
+        self.scopes.state()
+    }
+
+    #[cfg_attr(not(vesper_port), allow(dead_code))]
+    pub(crate) fn binder_counter(&self) -> (u32, u32) {
+        self.binders.state()
     }
 
     /// Interns `text`.
@@ -555,6 +571,10 @@ impl HygieneHost {
     }
 }
 
+#[cfg(vesper_port)]
+pub(crate) use crate::port::check_delimiters;
+
+#[cfg(not(vesper_port))]
 pub(crate) fn check_delimiters(tokens: &[HostToken], max_depth: usize) -> Result<(), ForgeError> {
     let mut stack = Vec::new();
     for (i, t) in tokens.iter().enumerate() {

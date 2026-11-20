@@ -1,222 +1,229 @@
 // Unit tests for the maps of @vesper-std/collections.
-use @vesper-std/collections::btree::{
-    CacheBTree,
-    BTreeCursor,
-    btree_new
-};
-use @vesper-std/collections::flat_table::{
-    FlatTable,
-    flat_table_new
-};
-use @vesper-std/core::option::is_none;
-use self::support::{
-    check,
-    count,
-    rem,
-    some_u64,
-    some_pair
-};
+test {
+    use @vesper-std/collections::btree::{
+        CacheBTree,
+        BTreeCursor,
+        btree_new
+    };
+    use @vesper-std/collections::flat_table::{
+        FlatTable,
+        flat_table_new
+    };
+    use @vesper-std/core::option::is_none;
+    use self::support::{
+        check,
+        count,
+        rem,
+        some_u64,
+        some_pair
+    };
 
-// `n` keys (`n` not a multiple of 7919, at least 20): several levels of
-// splits once `n` passes 16 * 17.
-pub fn test_btree(n: u64) -> u64 {
-    let mut r: u64 = 0;
-    let last = wrapping_sub(n, 1);
-    let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
-    r = check(t.is_empty() && t.len() == 0 && is_none(t.get(1)), 1, r);
-    r = check(is_none(t.remove(1)), 2, r);
-    let first = t.first();
-    r = check(
-        match first {
-            Option::Some(_) => false,
-            Option::None => true,
-        },
-        3,
+    // `n` keys (`n` not a multiple of 7919, at least 20): several levels of
+    // splits once `n` passes 16 * 17.
+    pub fn check_btree(n: u64) -> u64 {
+        let mut r: u64 = 0;
+        let last = wrapping_sub(n, 1);
+        let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
+        r = check(t.is_empty() && t.len() == 0 && is_none(t.get(1)), 1, r);
+        r = check(is_none(t.remove(1)), 2, r);
+        let first = t.first();
+        r = check(
+            match first {
+                Option::Some(_) => false,
+                Option::None => true,
+            },
+            3,
+            r
+        );
+        // The keys 0..n in a scrambled order.
+        for i in 0..n {
+            let k = rem(wrapping_mul(i, 7919), n);
+            t.insert(k, wrapping_mul(k, 10));
+        }
+        r = check(t.len() == n && !t.is_empty(), 4, r);
+        r = check(some_u64(t.get(13), 130) && t.contains_key(0) && !t.contains_key(n), 5, r);
+        r = check(some_u64(t.insert(5, 1), 50) && some_u64(t.get(5), 1), 6, r);
+        r = check(
+            some_pair(t.first(), 0, 0) && some_pair(t.last(), last, wrapping_mul(last, 10)),
+            7,
+            r
+        );
+        r = check(
+            some_pair(t.nth(10), 10, 100) && some_pair(t.nth(last), last, wrapping_mul(last, 10)),
+            8,
+            r
+        );
+        r = check(
+            match t.nth(n) {
+                Option::Some(_) => false,
+                Option::None => true,
+            },
+            9,
+            r
+        );
+        // Remove every even key.
+        let evens = wrapping_add(n, 1) / 2;
+        for i in 0..evens {
+            t.remove(wrapping_mul(i, 2));
+        }
+        r = check(
+            t.len() == wrapping_sub(n, evens) && !t.contains_key(4) && t.contains_key(5),
+            10,
+            r
+        );
+        r = check(some_pair(t.first(), 1, 10) && some_pair(t.nth(1), 3, 30), 11, r);
+        let c = t.lower_bound(10);
+        r = check(some_pair(t.entry(c), 11, 110), 12, r);
+        r = check(some_pair(t.entry(t.advance(c)), 13, 130), 13, r);
+        let end = t.lower_bound(wrapping_mul(n, 2));
+        r = check(
+            match t.entry(end) {
+                Option::Some(_) => false,
+                Option::None => true,
+            },
+            14,
+            r
+        );
+        r = check(
+            match t.entry(t.advance(end)) {
+                Option::Some(_) => false,
+                Option::None => true,
+            },
+            15,
+            r
+        );
+        let mut ks: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut vs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let got = t.range_into(10, 20, 3, inout ks, inout vs);
+        r = check(got == 3 && some_u64(ks.try_get(0), 11) && some_u64(vs.try_get(2), 150), 16, r);
+        // The odd keys from n - 10 up: 5 of them.
+        let tail = t.range_into(wrapping_sub(n, 10), wrapping_mul(n, 2), 100, inout ks, inout vs);
+        r = check(tail == 5 && ks.len() == 8, 17, r);
+        // Removing every key from the top leaves an empty, reusable tree.
+        for i in 0..n {
+            t.remove(wrapping_sub(last, i));
+        }
+        r = check(t.is_empty() && is_none(t.get(1)), 18, r);
+        r = check(
+            match t.last() {
+                Option::Some(_) => false,
+                Option::None => true,
+            },
+            19,
+            r
+        );
+        t.insert(3, 4);
+        r = check(some_pair(t.first(), 3, 4) && some_pair(t.last(), 3, 4), 20, r);
+        t.clear();
+        r = check(t.is_empty() && is_none(t.get(3)), 21, r);
+        t.insert(8, 9);
+        r = check(t.len() == 1 && some_u64(t.get(8), 9), 22, r);
+        let fresh = t.cursor_first();
+        r = check(some_pair(t.entry(fresh), 8, 9), 23, r);
         r
-    );
-    // The keys 0..n in a scrambled order.
-    for i in 0..n {
-        let k = rem(wrapping_mul(i, 7919), n);
-        t.insert(k, wrapping_mul(k, 10));
     }
-    r = check(t.len() == n && !t.is_empty(), 4, r);
-    r = check(some_u64(t.get(13), 130) && t.contains_key(0) && !t.contains_key(n), 5, r);
-    r = check(some_u64(t.insert(5, 1), 50) && some_u64(t.get(5), 1), 6, r);
-    r = check(
-        some_pair(t.first(), 0, 0) && some_pair(t.last(), last, wrapping_mul(last, 10)),
-        7,
-        r
-    );
-    r = check(
-        some_pair(t.nth(10), 10, 100) && some_pair(t.nth(last), last, wrapping_mul(last, 10)),
-        8,
-        r
-    );
-    r = check(
-        match t.nth(n) {
-            Option::Some(_) => false,
-            Option::None => true,
-        },
-        9,
-        r
-    );
-    // Remove every even key.
-    let evens = wrapping_add(n, 1) / 2;
-    for i in 0..evens {
-        t.remove(wrapping_mul(i, 2));
+
+    // A key type with an opted-in builtin `Ord` and `Hash`.
+    copy struct Point {
+        x: i64,
+        y: i64
     }
-    r = check(t.len() == wrapping_sub(n, evens) && !t.contains_key(4) && t.contains_key(5), 10, r);
-    r = check(some_pair(t.first(), 1, 10) && some_pair(t.nth(1), 3, 30), 11, r);
-    let c = t.lower_bound(10);
-    r = check(some_pair(t.entry(c), 11, 110), 12, r);
-    r = check(some_pair(t.entry(t.advance(c)), 13, 130), 13, r);
-    let end = t.lower_bound(wrapping_mul(n, 2));
-    r = check(
-        match t.entry(end) {
-            Option::Some(_) => false,
-            Option::None => true,
-        },
-        14,
-        r
-    );
-    r = check(
-        match t.entry(t.advance(end)) {
-            Option::Some(_) => false,
-            Option::None => true,
-        },
-        15,
-        r
-    );
-    let mut ks: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let mut vs: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    let got = t.range_into(10, 20, 3, inout ks, inout vs);
-    r = check(got == 3 && some_u64(ks.try_get(0), 11) && some_u64(vs.try_get(2), 150), 16, r);
-    // The odd keys from n - 10 up: 5 of them.
-    let tail = t.range_into(wrapping_sub(n, 10), wrapping_mul(n, 2), 100, inout ks, inout vs);
-    r = check(tail == 5 && ks.len() == 8, 17, r);
-    // Removing every key from the top leaves an empty, reusable tree.
-    for i in 0..n {
-        t.remove(wrapping_sub(last, i));
-    }
-    r = check(t.is_empty() && is_none(t.get(1)), 18, r);
-    r = check(
-        match t.last() {
-            Option::Some(_) => false,
-            Option::None => true,
-        },
-        19,
-        r
-    );
-    t.insert(3, 4);
-    r = check(some_pair(t.first(), 3, 4) && some_pair(t.last(), 3, 4), 20, r);
-    t.clear();
-    r = check(t.is_empty() && is_none(t.get(3)), 21, r);
-    t.insert(8, 9);
-    r = check(t.len() == 1 && some_u64(t.get(8), 9), 22, r);
-    let fresh = t.cursor_first();
-    r = check(some_pair(t.entry(fresh), 8, 9), 23, r);
-    r
-}
 
-// A key type with an opted-in builtin `Ord` and `Hash`.
-copy struct Point {
-    x: i64,
-    y: i64
-}
+    impl Eq for Point {}
 
-impl Eq for Point {}
+    impl Ord for Point {}
 
-impl Ord for Point {}
+    impl Hash for Point {}
 
-impl Hash for Point {}
-
-pub fn test_struct_keys() -> u64 {
-    let mut r: u64 = 0;
-    let mut t: CacheBTree[Point, u64] = btree_new[Point, u64]();
-    let mut f: FlatTable[Point, u64] = flat_table_new[Point, u64]();
-    for i in 0..count(50) {
-        let p = Point {
-            x: wrapping_sub(25, wrapping_i64(i)),
-            y: wrapping_i64(i % 3)
+    pub fn check_struct_keys() -> u64 {
+        let mut r: u64 = 0;
+        let mut t: CacheBTree[Point, u64] = btree_new[Point, u64]();
+        let mut f: FlatTable[Point, u64] = flat_table_new[Point, u64]();
+        for i in 0..count(50) {
+            let p = Point {
+                x: wrapping_sub(25, wrapping_i64(i)),
+                y: wrapping_i64(i % 3)
+            };
+            t.insert(p, i);
+            f.insert(p, i);
+        }
+        let probe = Point {
+            x: 0,
+            y: 1
         };
-        t.insert(p, i);
-        f.insert(p, i);
-    }
-    let probe = Point {
-        x: 0,
-        y: 1
-    };
-    r = check(some_u64(t.get(probe), 25) && some_u64(f.get(probe), 25), 1, r);
-    let low = match t.first() {
-        Option::Some((p, v)) => v,
-        Option::None => 0,
-    };
-    r = check(low == 49, 2, r);
-    r
-}
-
-// `n` entries (at least 2), enough to rebuild the index several times.
-pub fn test_flat_table(n: u64) -> u64 {
-    let mut r: u64 = 0;
-    let last = wrapping_sub(n, 1);
-    let mut f: FlatTable[u64, u64] = flat_table_new[u64, u64]();
-    r = check(f.is_empty() && is_none(f.get(3)) && is_none(f.remove(3)), 1, r);
-    for i in 0..n {
-        f.insert(wrapping_mul(i, 3), i);
-    }
-    r = check(f.len() == n && !f.is_empty(), 2, r);
-    r = check(some_u64(f.get(3), 1) && !f.contains_key(4), 3, r);
-    r = check(some_u64(f.insert(3, 7), 1) && f.len() == n, 4, r);
-    // Entry order is insertion order; removal moves the last entry.
-    r = check(
-        some_pair(f.entry_at(0), 0, 0) && some_pair(f.entry_at(last), wrapping_mul(last, 3), last),
-        5,
+        r = check(some_u64(t.get(probe), 25) && some_u64(f.get(probe), 25), 1, r);
+        let low = match t.first() {
+            Option::Some((p, v)) => v,
+            Option::None => 0,
+        };
+        r = check(low == 49, 2, r);
         r
-    );
-    r = check(
-        some_u64(f.remove(0), 0) && some_pair(f.entry_at(0), wrapping_mul(last, 3), last),
-        6,
-        r
-    );
-    r = check(f.len() == last && !f.contains_key(0), 7, r);
-    for i in 1..n {
-        f.remove(wrapping_mul(i, 3));
     }
-    r = check(f.is_empty() && is_none(f.get(9)), 8, r);
-    f.insert(1, 2);
-    let mut ks: ChunkSeq[u64] = ChunkSeq::new[u64]();
-    f.keys_into(inout ks);
-    r = check(ks.len() == 1 && some_u64(ks.try_get(0), 1), 9, r);
-    f.clear();
-    r = check(f.is_empty() && is_none(f.get(1)) && is_none(f.entry_at(0)), 10, r);
-    r
-}
 
-// FlatTable against CacheBTree on a random workload: every lookup agrees.
-pub fn test_flat_table_differential(ops: u64) -> u64 {
-    let mut f: FlatTable[u64, u64] = flat_table_new[u64, u64]();
-    let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
-    let mut x: u64 = 88172645463325252;
-    for i in 0..ops {
-        x = x ^ (x << 13);
-        x = x ^ (x >> 7);
-        x = x ^ (x << 17);
-        let k = x % 512;
-        let op = (x >> 20) % 3;
-        if op == 0 {
-            if f.insert(k, i) != t.insert(k, i) {
-                return wrapping_add(10000, i);
-            }
-        } else if op == 1 {
-            if f.remove(k) != t.remove(k) {
-                return wrapping_add(20000, i);
-            }
-        } else if f.get(k) != t.get(k) {
-            return wrapping_add(30000, i);
+    // `n` entries (at least 2), enough to rebuild the index several times.
+    pub fn check_flat_table(n: u64) -> u64 {
+        let mut r: u64 = 0;
+        let last = wrapping_sub(n, 1);
+        let mut f: FlatTable[u64, u64] = flat_table_new[u64, u64]();
+        r = check(f.is_empty() && is_none(f.get(3)) && is_none(f.remove(3)), 1, r);
+        for i in 0..n {
+            f.insert(wrapping_mul(i, 3), i);
         }
-        if f.len() != t.len() {
-            return wrapping_add(40000, i);
+        r = check(f.len() == n && !f.is_empty(), 2, r);
+        r = check(some_u64(f.get(3), 1) && !f.contains_key(4), 3, r);
+        r = check(some_u64(f.insert(3, 7), 1) && f.len() == n, 4, r);
+        // Entry order is insertion order; removal moves the last entry.
+        r = check(
+            some_pair(f.entry_at(0), 0, 0)
+                && some_pair(f.entry_at(last), wrapping_mul(last, 3), last),
+            5,
+            r
+        );
+        r = check(
+            some_u64(f.remove(0), 0) && some_pair(f.entry_at(0), wrapping_mul(last, 3), last),
+            6,
+            r
+        );
+        r = check(f.len() == last && !f.contains_key(0), 7, r);
+        for i in 1..n {
+            f.remove(wrapping_mul(i, 3));
         }
+        r = check(f.is_empty() && is_none(f.get(9)), 8, r);
+        f.insert(1, 2);
+        let mut ks: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        f.keys_into(inout ks);
+        r = check(ks.len() == 1 && some_u64(ks.try_get(0), 1), 9, r);
+        f.clear();
+        r = check(f.is_empty() && is_none(f.get(1)) && is_none(f.entry_at(0)), 10, r);
+        r
     }
-    0
+
+    // FlatTable against CacheBTree on a random workload: every lookup agrees.
+    pub fn check_flat_table_differential(ops: u64) -> u64 {
+        let mut f: FlatTable[u64, u64] = flat_table_new[u64, u64]();
+        let mut t: CacheBTree[u64, u64] = btree_new[u64, u64]();
+        let mut x: u64 = 88172645463325252;
+        for i in 0..ops {
+            x = x ^ (x << 13);
+            x = x ^ (x >> 7);
+            x = x ^ (x << 17);
+            let k = x % 512;
+            let op = (x >> 20) % 3;
+            if op == 0 {
+                if f.insert(k, i) != t.insert(k, i) {
+                    return wrapping_add(10000, i);
+                }
+            } else if op == 1 {
+                if f.remove(k) != t.remove(k) {
+                    return wrapping_add(20000, i);
+                }
+            } else if f.get(k) != t.get(k) {
+                return wrapping_add(30000, i);
+            }
+            if f.len() != t.len() {
+                return wrapping_add(40000, i);
+            }
+        }
+        0
+    }
 }

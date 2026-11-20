@@ -1,0 +1,2115 @@
+// `vesper_lint::policy::Policy::parse` (crates/vesper-lint/src/policy.rs):
+// the lexical and structural preflight, the TOML reader and the policy
+// extraction. lib.ves exports it as `policy_parse`.
+
+use @vesper-std/sort::unstable::{
+    sort
+};
+use self::LintFail;
+use self::util::{
+    fail,
+    at,
+    word,
+    u32_at,
+    inc,
+    cadd,
+    push_text,
+    put
+};
+
+const NONE: u32 = 4294967295;
+const U64_MAX: u64 = 18446744073709551615;
+// End of input for `at`.
+const EOF: u64 = 256;
+
+// ================================================================ policy
+//
+// crates/vesper-lint/src/policy.rs. Error codes (`LintFail::code`) are the
+// indices of `POLICY_ERRORS` in port.rs; each names the Rust error kind and
+// message.
+
+const P_INVALID_LIMITS: u64 = 0;
+const P_WORK_OVERFLOW: u64 = 1;
+const P_WORK_LIMIT: u64 = 2;
+const P_BYTE_OVERFLOW: u64 = 3;
+const P_DECODED_LIMIT: u64 = 4;
+const P_VALUE_DEPTH: u64 = 5;
+const P_TREE_OVERFLOW: u64 = 6;
+const P_NODE_LIMIT: u64 = 7;
+const P_KEY_BYTES: u64 = 8;
+const P_INPUT_BYTES: u64 = 9;
+const P_TOKEN_LIMIT: u64 = 10;
+const P_ESTIMATE_OVERFLOW: u64 = 11;
+const P_LEXICAL_ESTIMATE: u64 = 12;
+const P_STRING_ESCAPE: u64 = 13;
+const P_QUOTE_RUN: u64 = 14;
+const P_UNTERMINATED: u64 = 15;
+const P_PREPARSE_DEPTH: u64 = 16;
+const P_AOT_HEADER: u64 = 17;
+const P_HEADER: u64 = 18;
+const P_HEADER_UNTERMINATED: u64 = 19;
+const P_KEY: u64 = 20;
+const P_MISMATCHED: u64 = 21;
+const P_COMMA: u64 = 22;
+const P_UNCLOSED: u64 = 23;
+const P_TOML: u64 = 24;
+const P_LINTS_SHAPE: u64 = 26;
+const P_VESPER_SHAPE: u64 = 27;
+const P_RULE_COUNT: u64 = 28;
+const P_SEVERITY_STRING: u64 = 29;
+const P_SEVERITY: u64 = 30;
+const P_POLICY_KEY: u64 = 31;
+const P_UNKNOWN_RULE: u64 = 32;
+const P_UNAVAILABLE_DENY: u64 = 34;
+const P_PLUGINS_SHAPE: u64 = 35;
+const P_PLUGINS: u64 = 36;
+const P_UNKNOWN_SECTION: u64 = 37;
+// Not a Rust error: the document has a table whose first key is serde's
+// private datetime marker, which `toml::Value` decodes with toml_datetime's
+// own parser. The Rust code parses such a document.
+const P_UNSUPPORTED: u64 = 38;
+
+// `PolicyLimits::default()`, the hard ceilings.
+const HARD_BYTES: u64 = 65536;
+const HARD_DEPTH: u64 = 32;
+const HARD_TOKENS: u64 = 8192;
+const HARD_NODES: u64 = 4096;
+const HARD_WORK: u64 = 262144;
+
+copy struct Limits {
+    bytes: u64,
+    depth: u64,
+    tokens: u64,
+    nodes: u64,
+    work: u64
+}
+
+// `policy::Budget`.
+copy struct Budget {
+    lim: Limits,
+    work: u64,
+    nodes: u64,
+    value_bytes: u64
+}
+
+fn charge(inout b: Budget, n: u64) eff [Fail[LintFail]] {
+    b.work = cadd(b.work, n, P_WORK_OVERFLOW);
+    if b.work > b.lim.work {
+        fail(P_WORK_LIMIT);
+    }
+}
+
+fn text(inout b: Budget, n: u64) eff [Fail[LintFail]] {
+    b.value_bytes = cadd(b.value_bytes, n, P_BYTE_OVERFLOW);
+    if b.value_bytes > b.lim.bytes {
+        fail(P_DECODED_LIMIT);
+    }
+    charge(inout b, n);
+}
+
+fn validate_limits(in l: Limits) eff [Fail[LintFail]] {
+    if l
+        .bytes
+        == 0
+        || l
+        .bytes
+        > HARD_BYTES
+        || l
+        .depth
+        == 0
+        || l
+        .depth
+        > HARD_DEPTH
+        || l
+        .tokens
+        == 0
+        || l
+        .tokens
+        > HARD_TOKENS
+        || l
+        .nodes
+        == 0
+        || l
+        .nodes
+        > HARD_NODES
+        || l
+        .work
+        == 0
+        || l
+        .work
+        > HARD_WORK {
+        fail(P_INVALID_LIMITS);
+    }
+}
+
+// ---------------------------------------------------------------- preflight
+//
+// `lexical`, `string_end`, `header` and `preflight` of policy.rs.
+
+const T_ATOM: u8 = 0;
+const T_STRING: u8 = 1;
+const T_DOT: u8 = 2;
+const T_EQ: u8 = 3;
+const T_LEFT_ARRAY: u8 = 4;
+const T_RIGHT_ARRAY: u8 = 5;
+const T_LEFT_TABLE: u8 = 6;
+const T_RIGHT_TABLE: u8 = 7;
+const T_COMMA: u8 = 8;
+const T_NEWLINE: u8 = 9;
+
+fn atom_stop(c: u64) -> bool {
+    c
+        == 32
+        || c
+        == 9
+        || c
+        == 13
+        || c
+        == 10
+        || c
+        == 35
+        || c
+        == 39
+        || c
+        == 34
+        || c
+        == 46
+        || c
+        == 61
+        || c
+        == 91
+        || c
+        == 93
+        || c
+        == 123
+        || c
+        == 125
+        || c
+        == 44
+}
+
+fn string_end(in s: Slice[u8], start: u64) -> u64 eff [Fail[LintFail]] {
+    let n = s.len();
+    let delim = at(in s, start);
+    let multiline = wrapping_add(start, 3)
+        <= n
+        && at(in s, inc(start))
+        == delim
+        && at(in s, wrapping_add(start, 2))
+        == delim;
+    let mut i = if multiline {
+        wrapping_add(start, 3)
+    } else {
+        inc(start)
+    };
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = at(in s, i);
+        if delim == 34 && c == 92 {
+            i = cadd(i, 2, P_STRING_ESCAPE);
+            continue;
+        }
+        if c == delim {
+            if !multiline {
+                return inc(i);
+            }
+            let mut end = i;
+            loop {
+                if end >= n || at(in s, end) != delim {
+                    break;
+                }
+                end = inc(end);
+            }
+            let run = wrapping_sub(end, i);
+            if run >= 3 {
+                if run > 5 {
+                    fail(P_QUOTE_RUN);
+                }
+                return end;
+            }
+            i = end;
+        } else {
+            i = inc(i);
+        }
+    }
+    fail(P_UNTERMINATED);
+    0
+}
+
+fn lexical(in s: Slice[u8], inout b: Budget, inout out: ChunkSeq[u8]) eff [Fail[LintFail]] {
+    let n = s.len();
+    if n > b.lim.bytes {
+        fail(P_INPUT_BYTES);
+    }
+    charge(inout b, n);
+    let mut i: u64 = 0;
+    let mut nodes: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = at(in s, i);
+        let mut kind: u8 = T_ATOM;
+        if c == 32 || c == 9 {
+            i = inc(i);
+            continue;
+        } else if c == 35 {
+            loop {
+                if i >= n {
+                    break;
+                }
+                let d = at(in s, i);
+                if d == 10 || d == 13 {
+                    break;
+                }
+                i = inc(i);
+            }
+            continue;
+        } else if c == 10 || c == 13 {
+            if c == 13 && at(in s, inc(i)) == 10 {
+                i = inc(i);
+            }
+            i = inc(i);
+            kind = T_NEWLINE;
+        } else if c == 39 || c == 34 {
+            i = string_end(in s, i);
+            kind = T_STRING;
+        } else {
+            i = inc(i);
+            if c == 46 {
+                kind = T_DOT;
+            } else if c == 61 {
+                kind = T_EQ;
+            } else if c == 91 {
+                kind = T_LEFT_ARRAY;
+            } else if c == 93 {
+                kind = T_RIGHT_ARRAY;
+            } else if c == 123 {
+                kind = T_LEFT_TABLE;
+            } else if c == 125 {
+                kind = T_RIGHT_TABLE;
+            } else if c == 44 {
+                kind = T_COMMA;
+            } else {
+                loop {
+                    if i >= n || atom_stop(at(in s, i)) {
+                        break;
+                    }
+                    i = inc(i);
+                }
+                kind = T_ATOM;
+            }
+        }
+        if out.len() >= b.lim.tokens {
+            fail(P_TOKEN_LIMIT);
+        }
+        if kind == T_ATOM || kind == T_STRING || kind == T_LEFT_ARRAY || kind == T_LEFT_TABLE {
+            nodes = cadd(nodes, 1, P_ESTIMATE_OVERFLOW);
+            if nodes > b.lim.nodes {
+                fail(P_LEXICAL_ESTIMATE);
+            }
+        }
+        out.push(kind);
+    }
+}
+
+const C_ARRAY: u8 = 0;
+const C_TABLE: u8 = 1;
+
+copy struct Frame {
+    kind: u8,
+    depth: u64,
+    key: u64,
+    expect_key: bool,
+    value: bool,
+    value_depth: u64
+}
+
+fn tok(in t: ChunkSeq[u8], i: u64) -> u8 {
+    match t.try_get(i) {
+        Option::Some(k) => k,
+        // No token: not a kind any rule matches.
+        Option::None => 255,
+    }
+}
+
+fn check_depth(depth: u64, in b: Budget) eff [Fail[LintFail]] {
+    if depth > b.lim.depth {
+        fail(P_PREPARSE_DEPTH);
+    }
+}
+
+// `header`: the index after the header and its depth.
+fn header(in t: ChunkSeq[u8], start: u64, inout b: Budget) -> (u64, u64) eff [Fail[LintFail]] {
+    let array = tok(in t, inc(start)) == T_LEFT_ARRAY;
+    let mut i = if array {
+        wrapping_add(start, 2)
+    } else {
+        inc(start)
+    };
+    let mut parts: u64 = 0;
+    let mut expect = true;
+    loop {
+        if i >= t.len() {
+            break;
+        }
+        let k = tok(in t, i);
+        charge(inout b, 1);
+        if (k == T_ATOM || k == T_STRING) && expect {
+            parts = inc(parts);
+            expect = false;
+            check_depth(wrapping_mul(parts, 2), in b);
+        } else if k == T_DOT && !expect {
+            expect = true;
+        } else if k == T_RIGHT_ARRAY && !expect {
+            if array {
+                if tok(in t, inc(i)) != T_RIGHT_ARRAY {
+                    fail(P_AOT_HEADER);
+                }
+                charge(inout b, 1);
+                i = inc(i);
+            }
+            return (inc(i), wrapping_mul(parts, 2));
+        } else {
+            fail(P_HEADER);
+        }
+        i = inc(i);
+    }
+    fail(P_HEADER_UNTERMINATED);
+    (0, 0)
+}
+
+fn new_frame(kind: u8, depth: u64) -> Frame {
+    Frame {
+        kind: kind,
+        depth: depth,
+        key: 0,
+        expect_key: true,
+        value: kind == C_ARRAY,
+        value_depth: depth
+    }
+}
+
+// `preflight`: the number of tokens.
+fn preflight(in s: Slice[u8], inout b: Budget) -> u64 eff [Fail[LintFail]] {
+    let mut t = ChunkSeq::new[u8]();
+    lexical(in s, inout b, inout t);
+    let n = t.len();
+    let mut root = new_frame(C_TABLE, 0);
+    let mut stack = ChunkSeq::new[Frame]();
+    let mut line_start = true;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        charge(inout b, 1);
+        let kind = tok(in t, i);
+        if kind == T_NEWLINE {
+            if stack.len() == 0 {
+                root.key = 0;
+                root.expect_key = true;
+                root.value = false;
+                line_start = true;
+            }
+            i = inc(i);
+            continue;
+        }
+        if line_start && stack.len() == 0 && kind == T_LEFT_ARRAY && !root.value && root.key == 0 {
+            let (next, depth) = header(in t, i, inout b);
+            i = next;
+            root.depth = depth;
+            line_start = false;
+            continue;
+        }
+        line_start = false;
+        let nested = stack.len() != 0;
+        let top = wrapping_sub(stack.len(), 1);
+        let mut frame = if nested {
+            match stack.try_get(top) {
+                Option::Some(f) => f,
+                Option::None => root,
+            }
+        } else {
+            root
+        };
+        if !frame.value {
+            if (kind == T_ATOM || kind == T_STRING) && frame.expect_key {
+                frame.key = inc(frame.key);
+                frame.expect_key = false;
+                check_depth(wrapping_add(frame.depth, wrapping_mul(frame.key, 2)), in b);
+            } else if kind == T_DOT && !frame.expect_key {
+                frame.expect_key = true;
+            } else if kind == T_EQ && !frame.expect_key {
+                frame.value = true;
+                frame.value_depth = wrapping_add(frame.depth, wrapping_mul(frame.key, 2));
+            } else if kind == T_RIGHT_TABLE && frame.kind == C_TABLE && frame.key == 0 && nested {
+                stack.truncate(top);
+                i = inc(i);
+                continue;
+            } else {
+                fail(P_KEY);
+            }
+            if nested {
+                stack.try_set(top, frame);
+            } else {
+                root = frame;
+            }
+            i = inc(i);
+            continue;
+        }
+        if kind == T_LEFT_ARRAY || kind == T_LEFT_TABLE {
+            let base = if frame.kind == C_ARRAY {
+                frame.depth
+            } else {
+                frame.value_depth
+            };
+            let depth = inc(base);
+            check_depth(depth, in b);
+            let k = if kind == T_LEFT_ARRAY {
+                C_ARRAY
+            } else {
+                C_TABLE
+            };
+            stack.push(new_frame(k, depth));
+        } else if kind == T_RIGHT_ARRAY || kind == T_RIGHT_TABLE {
+            let expected = if kind == T_RIGHT_ARRAY {
+                C_ARRAY
+            } else {
+                C_TABLE
+            };
+            if !nested || frame.kind != expected {
+                fail(P_MISMATCHED);
+            }
+            stack.truncate(top);
+        } else if kind == T_COMMA {
+            if frame.kind == C_TABLE && nested {
+                frame.key = 0;
+                frame.expect_key = true;
+                frame.value = false;
+                stack.try_set(top, frame);
+            } else if !nested {
+                fail(P_COMMA);
+            }
+        }
+        i = inc(i);
+    }
+    if stack.len() != 0 {
+        fail(P_UNCLOSED);
+    }
+    n
+}
+
+// ---------------------------------------------------------------- TOML
+//
+// The `toml_edit` 0.22 grammar (`parser/document.rs` and the files it
+// uses) and its `ParseState` (`parser/state.rs`), for `toml::from_str` into
+// a `toml::Value`. Every syntax or semantic error is `P_TOML`, the one
+// error the Rust code maps them to. Values are decoded only as far as the
+// policy needs them: strings and keys to their decoded bytes, everything
+// else to its kind.
+//
+// Items are nodes. A table's entries are a linked list in insertion order
+// (`toml_edit`'s IndexMap order, which decides serde's datetime marker
+// below); the walk of `validate_value` and the policy read them in key
+// order (`toml::Table` is a BTreeMap).
+
+// Node kinds. Item::Value: the scalars, an array and an inline table;
+// Item::Table; Item::ArrayOfTables.
+const N_STRING: u8 = 1;
+const N_INTEGER: u8 = 2;
+const N_FLOAT: u8 = 3;
+const N_BOOL: u8 = 4;
+const N_DATETIME: u8 = 5;
+const N_ARRAY: u8 = 6;
+const N_INLINE: u8 = 7;
+const N_TABLE: u8 = 8;
+const N_AOT: u8 = 9;
+
+copy struct TNode {
+    kind: u8,
+    implicit: bool,
+    dotted: bool,
+    // A table or array: its first and last entries and their count; a
+    // string: the range of its decoded bytes in `Toml.text`.
+    first: u32,
+    last: u32,
+    count: u32
+}
+
+copy struct TEnt {
+    // The key's decoded bytes in `Toml.text` (an array element has none)
+    // and their hash.
+    kstart: u32,
+    klen: u32,
+    hash: u64,
+    child: u32,
+    next: u32
+}
+
+struct Toml {
+    nodes: ChunkSeq[TNode],
+    ents: ChunkSeq[TEnt],
+    text: ChunkSeq[u8],
+    // The parsed key path: (start, len, hash) per part.
+    path: ChunkSeq[u64],
+    current: u32,
+    pos: u64
+}
+
+fn terr() eff [Fail[LintFail]] {
+    fail(P_TOML);
+}
+
+fn node(in t: Toml, id: u32) -> TNode {
+    match t.nodes.try_get(widen_u64(id)) {
+        Option::Some(n) => n,
+        Option::None => TNode {
+            kind: 0,
+            implicit: false,
+            dotted: false,
+            first: NONE,
+            last: NONE,
+            count: 0
+        },
+    }
+}
+
+fn ent(in t: Toml, id: u32) -> TEnt {
+    match t.ents.try_get(widen_u64(id)) {
+        Option::Some(e) => e,
+        Option::None => TEnt {
+            kstart: 0,
+            klen: 0,
+            hash: 0,
+            child: NONE,
+            next: NONE
+        },
+    }
+}
+
+fn set_node(inout t: Toml, id: u32, n: TNode) {
+    t.nodes.try_set(widen_u64(id), n);
+}
+
+fn new_node(inout t: Toml, kind: u8, implicit: bool, dotted: bool) -> u32 {
+    let id = wrapping_u32(t.nodes.len());
+    t
+        .nodes
+        .push(
+        TNode {
+            kind: kind,
+            implicit: implicit,
+            dotted: dotted,
+            first: NONE,
+            last: NONE,
+            count: 0
+        }
+    );
+    id
+}
+
+fn scalar(inout t: Toml, kind: u8) -> u32 {
+    new_node(inout t, kind, false, false)
+}
+
+// Appends an entry for `child` (key `kstart..kstart+klen` of `text`) to
+// container `c`.
+fn append(inout t: Toml, c: u32, kstart: u64, klen: u64, hash: u64, child: u32) {
+    let e = wrapping_u32(t.ents.len());
+    t
+        .ents
+        .push(
+        TEnt {
+            kstart: wrapping_u32(kstart),
+            klen: wrapping_u32(klen),
+            hash: hash,
+            child: child,
+            next: NONE
+        }
+    );
+    let mut n = node(in t, c);
+    if n.last == NONE {
+        n.first = e;
+    } else {
+        let mut l = ent(in t, n.last);
+        l.next = e;
+        t.ents.try_set(widen_u64(n.last), l);
+    }
+    n.last = e;
+    n.count = wrapping_add(n.count, 1);
+    set_node(inout t, c, n);
+}
+
+fn key_eq(in t: Toml, a: u64, alen: u64, b: u64, blen: u64) -> bool {
+    if alen != blen {
+        return false;
+    }
+    for i in 0..alen {
+        if at(in t.text.as_slice(), wrapping_add(a, i))
+            != at(in t.text.as_slice(), wrapping_add(b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// The entry of container `c` with the given key, or NONE.
+fn lookup(in t: Toml, c: u32, kstart: u64, klen: u64, hash: u64) -> u32 {
+    let mut e = node(in t, c).first;
+    loop {
+        if e == NONE {
+            break;
+        }
+        let x = ent(in t, e);
+        if x.hash == hash && key_eq(in t, widen_u64(x.kstart), widen_u64(x.klen), kstart, klen) {
+            return e;
+        }
+        e = x.next;
+    }
+    NONE
+}
+
+// Unlinks entry `e` from container `c` (IndexMap `shift_remove`).
+fn unlink(inout t: Toml, c: u32, e: u32) {
+    let mut n = node(in t, c);
+    let mut prev = NONE;
+    let mut cur = n.first;
+    loop {
+        if cur == NONE {
+            return;
+        }
+        if cur == e {
+            break;
+        }
+        prev = cur;
+        cur = ent(in t, cur).next;
+    }
+    let next = ent(in t, e).next;
+    if prev == NONE {
+        n.first = next;
+    } else {
+        let mut p = ent(in t, prev);
+        p.next = next;
+        t.ents.try_set(widen_u64(prev), p);
+    }
+    if n.last == e {
+        n.last = prev;
+    }
+    n.count = wrapping_sub(n.count, 1);
+    set_node(inout t, c, n);
+    let mut x = ent(in t, e);
+    x.next = NONE;
+    t.ents.try_set(widen_u64(e), x);
+}
+
+fn fnv(in t: Toml, start: u64, len: u64) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..len {
+        h = wrapping_mul(h ^ at(in t.text.as_slice(), wrapping_add(start, i)), 1099511628211);
+    }
+    h
+}
+
+fn cur(in s: Slice[u8], in t: Toml) -> u64 {
+    at(in s, t.pos)
+}
+
+fn peek_at(in s: Slice[u8], in t: Toml, k: u64) -> u64 {
+    at(in s, wrapping_add(t.pos, k))
+}
+
+fn bump(inout t: Toml) {
+    t.pos = inc(t.pos);
+}
+
+fn is_digit(c: u64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_hex(c: u64) -> bool {
+    is_digit(c) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102)
+}
+
+fn hex_val(c: u64) -> u64 {
+    if is_digit(c) {
+        wrapping_sub(c, 48)
+    } else if c >= 97 {
+        wrapping_sub(c, 87)
+    } else {
+        wrapping_sub(c, 55)
+    }
+}
+
+fn skip_ws(in s: Slice[u8], inout t: Toml) {
+    loop {
+        let c = cur(in s, in t);
+        if c != 32 && c != 9 {
+            break;
+        }
+        bump(inout t);
+    }
+}
+
+// `newline`: LF or CRLF.
+fn newline(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    let c = cur(in s, in t);
+    if c == 10 {
+        bump(inout t);
+    } else if c == 13 && peek_at(in s, in t, 1) == 10 {
+        t.pos = wrapping_add(t.pos, 2);
+    } else {
+        terr();
+    }
+}
+
+fn non_eol(c: u64) -> bool {
+    c == 9 || (c >= 32 && c <= 126) || (c >= 128 && c != EOF)
+}
+
+// `comment`: `#` and the rest of the line's allowed characters.
+fn comment(in s: Slice[u8], inout t: Toml) {
+    bump(inout t);
+    loop {
+        if !non_eol(cur(in s, in t)) {
+            break;
+        }
+        bump(inout t);
+    }
+}
+
+// `line_ending`: a newline or the end of input.
+fn line_ending(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    if cur(in s, in t) != EOF {
+        newline(in s, inout t);
+    }
+}
+
+// `line_trailing`: whitespace, an optional comment, a line ending.
+fn line_trailing(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    skip_ws(in s, inout t);
+    if cur(in s, in t) == 35 {
+        comment(in s, inout t);
+    }
+    line_ending(in s, inout t);
+}
+
+// `ws_comment_newline`.
+fn ws_comment_newline(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    loop {
+        skip_ws(in s, inout t);
+        let c = cur(in s, in t);
+        if c == 35 {
+            comment(in s, inout t);
+            newline(in s, inout t);
+        } else if c == 10 || c == 13 {
+            newline(in s, inout t);
+        } else {
+            break;
+        }
+    }
+}
+
+// Appends the UTF-8 encoding of scalar `v` to the decoded text.
+fn push_char(inout t: Toml, v: u64) {
+    if v < 128 {
+        t.text.push(wrapping_u8(v));
+    } else if v < 2048 {
+        t.text.push(wrapping_u8(192 | (v >> 6)));
+        t.text.push(wrapping_u8(128 | (v & 63)));
+    } else if v < 65536 {
+        t.text.push(wrapping_u8(224 | (v >> 12)));
+        t.text.push(wrapping_u8(128 | ((v >> 6) & 63)));
+        t.text.push(wrapping_u8(128 | (v & 63)));
+    } else {
+        t.text.push(wrapping_u8(240 | (v >> 18)));
+        t.text.push(wrapping_u8(128 | ((v >> 12) & 63)));
+        t.text.push(wrapping_u8(128 | ((v >> 6) & 63)));
+        t.text.push(wrapping_u8(128 | (v & 63)));
+    }
+}
+
+// `escaped` after the backslash.
+fn escape(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    let c = cur(in s, in t);
+    bump(inout t);
+    if c == 98 {
+        t.text.push(8);
+    } else if c == 102 {
+        t.text.push(12);
+    } else if c == 110 {
+        t.text.push(10);
+    } else if c == 114 {
+        t.text.push(13);
+    } else if c == 116 {
+        t.text.push(9);
+    } else if c == 92 {
+        t.text.push(92);
+    } else if c == 34 {
+        t.text.push(34);
+    } else if c == 117 || c == 85 {
+        let digits: u64 = if c == 117 {
+            4
+        } else {
+            8
+        };
+        let mut v: u64 = 0;
+        for i in 0..digits {
+            let d = cur(in s, in t);
+            if !is_hex(d) {
+                terr();
+            }
+            v = wrapping_add(wrapping_mul(v, 16), hex_val(d));
+            bump(inout t);
+        }
+        if v > 1114111 || (v >= 55296 && v <= 57343) {
+            terr();
+        }
+        push_char(inout t, v);
+    } else {
+        terr();
+    }
+}
+
+// Characters a basic string holds unescaped (and a multiline one, besides
+// newlines).
+fn basic_unescaped(c: u64) -> bool {
+    c
+        == 32
+        || c
+        == 9
+        || c
+        == 33
+        || (c >= 35 && c <= 91)
+        || (c >= 93 && c <= 126)
+        || (c >= 128 && c != EOF)
+}
+
+fn literal_char(c: u64) -> bool {
+    c == 9 || (c >= 32 && c <= 38) || (c >= 40 && c <= 126) || (c >= 128 && c != EOF)
+}
+
+// `basic_string` from its opening quote; the decoded bytes go to `text`.
+fn basic_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    bump(inout t);
+    loop {
+        let c = cur(in s, in t);
+        if c == 34 {
+            bump(inout t);
+            return;
+        } else if c == 92 {
+            bump(inout t);
+            escape(in s, inout t);
+        } else if basic_unescaped(c) {
+            t.text.push(wrapping_u8(c));
+            bump(inout t);
+        } else {
+            terr();
+        }
+    }
+}
+
+fn literal_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    bump(inout t);
+    loop {
+        let c = cur(in s, in t);
+        if c == 39 {
+            bump(inout t);
+            return;
+        } else if literal_char(c) {
+            t.text.push(wrapping_u8(c));
+            bump(inout t);
+        } else {
+            terr();
+        }
+    }
+}
+
+// A run of `q` quotes inside a multiline string: fewer than three are
+// content; three or more close it, the first `run - 3` (at most two) still
+// content. Returns whether the string closed.
+fn ml_quotes(in s: Slice[u8], inout t: Toml, q: u64) -> bool {
+    let mut run: u64 = 0;
+    loop {
+        if cur(in s, in t) != q {
+            break;
+        }
+        run = inc(run);
+        bump(inout t);
+        if run == 5 {
+            break;
+        }
+    }
+    if run < 3 {
+        for i in 0..run {
+            t.text.push(wrapping_u8(q));
+        }
+        return false;
+    }
+    // `opt(mlb_quotes(DELIM))` then the delimiter: the quotes past the
+    // first five stay in the input.
+    for i in 0..wrapping_sub(run, 3) {
+        t.text.push(wrapping_u8(q));
+    }
+    true
+}
+
+// `ml_basic_string` after its opening delimiter.
+fn ml_basic_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    let c0 = cur(in s, in t);
+    if c0 == 10 || (c0 == 13 && peek_at(in s, in t, 1) == 10) {
+        newline(in s, inout t);
+    }
+    loop {
+        let c = cur(in s, in t);
+        if c == 34 {
+            if ml_quotes(in s, inout t, 34) {
+                return;
+            }
+        } else if c == 92 {
+            // `mlb_escaped_nl`: a backslash, whitespace and a newline, then
+            // any whitespace and newlines; otherwise an escape.
+            let save = t.pos;
+            bump(inout t);
+            skip_ws(in s, inout t);
+            let d = cur(in s, in t);
+            if d == 10 || (d == 13 && peek_at(in s, in t, 1) == 10) {
+                loop {
+                    let e = cur(in s, in t);
+                    if e == 32 || e == 9 {
+                        bump(inout t);
+                    } else if e == 10 || (e == 13 && peek_at(in s, in t, 1) == 10) {
+                        newline(in s, inout t);
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                t.pos = inc(save);
+                escape(in s, inout t);
+            }
+        } else if c == 10 || c == 13 {
+            newline(in s, inout t);
+            t.text.push(10);
+        } else if basic_unescaped(c) {
+            t.text.push(wrapping_u8(c));
+            bump(inout t);
+        } else {
+            terr();
+        }
+    }
+}
+
+// `ml_literal_string` after its opening delimiter (CRLF decodes to LF).
+fn ml_literal_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    let c0 = cur(in s, in t);
+    if c0 == 10 || (c0 == 13 && peek_at(in s, in t, 1) == 10) {
+        newline(in s, inout t);
+    }
+    loop {
+        let c = cur(in s, in t);
+        if c == 39 {
+            if ml_quotes(in s, inout t, 39) {
+                return;
+            }
+        } else if c == 10 || c == 13 {
+            newline(in s, inout t);
+            t.text.push(10);
+        } else if literal_char(c) {
+            t.text.push(wrapping_u8(c));
+            bump(inout t);
+        } else {
+            terr();
+        }
+    }
+}
+
+// `simple_key`: pushes (start, len, hash) of its decoded bytes to `path`.
+fn simple_key(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    let start = t.text.len();
+    let c = cur(in s, in t);
+    if c == 34 {
+        basic_string(in s, inout t);
+    } else if c == 39 {
+        literal_string(in s, inout t);
+    } else {
+        let mut n: u64 = 0;
+        loop {
+            let d = cur(in s, in t);
+            if !(
+                (d >= 65 && d <= 90) || (d >= 97 && d <= 122) || is_digit(d) || d == 45 || d == 95
+            ) {
+                break;
+            }
+            t.text.push(wrapping_u8(d));
+            bump(inout t);
+            n = inc(n);
+        }
+        if n == 0 {
+            terr();
+        }
+    }
+    let len = wrapping_sub(t.text.len(), start);
+    t.path.push(start);
+    t.path.push(len);
+    t.path.push(fnv(in t, start, len));
+}
+
+// `key`: dotted simple keys with whitespace around each; the parts are in
+// `path`, which this clears first.
+fn key(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    t.path.clear();
+    loop {
+        skip_ws(in s, inout t);
+        simple_key(in s, inout t);
+        skip_ws(in s, inout t);
+        if cur(in s, in t) != 46 {
+            break;
+        }
+        bump(inout t);
+    }
+}
+
+fn path_parts(in t: Toml) -> u64 {
+    t.path.len() / 3
+}
+
+fn part(in t: Toml, i: u64) -> (u64, u64, u64) {
+    let j = wrapping_mul(i, 3);
+    (
+        word(in t.path.as_slice(), j),
+        word(in t.path.as_slice(), inc(j)),
+        word(in t.path.as_slice(), wrapping_add(j, 2))
+    )
+}
+
+// `ParseState::descend_path` (and `inline_table::descend_path` when
+// `inline`) over parts `0..n` of `path`.
+fn descend(inout t: Toml, table: u32, n: u64, dotted: bool, inline: bool)
+    -> u32 eff [Fail[LintFail]] {
+    let mut c = table;
+    for i in 0..n {
+        let (ks, kl, h) = part(in t, i);
+        let e = lookup(in t, c, ks, kl, h);
+        if e == NONE {
+            let kind = if inline {
+                N_INLINE
+            } else {
+                N_TABLE
+            };
+            let child = new_node(inout t, kind, true, dotted);
+            append(inout t, c, ks, kl, h, child);
+            c = child;
+        } else {
+            let child = ent(in t, e).child;
+            let x = node(in t, child);
+            if !inline && x.kind == N_AOT {
+                // The last table of the array (never empty here).
+                c = ent(in t, x.last).child;
+            } else if (inline && x.kind == N_INLINE) || (!inline && x.kind == N_TABLE) {
+                if dotted && !x.implicit {
+                    terr();
+                }
+                c = child;
+            } else {
+                terr();
+            }
+        }
+    }
+    c
+}
+
+// `on_keyval` / `table_from_pairs`: inserts `value` under the parsed key
+// path into `table`.
+fn insert_keyval(inout t: Toml, table: u32, value: u32, inline: bool) eff [Fail[LintFail]] {
+    let n = path_parts(in t);
+    let parent = wrapping_sub(n, 1);
+    let target = descend(inout t, table, parent, true, inline);
+    if node(in t, target).dotted == (parent == 0) {
+        terr();
+    }
+    let (ks, kl, h) = part(in t, parent);
+    if lookup(in t, target, ks, kl, h) != NONE {
+        terr();
+    }
+    append(inout t, target, ks, kl, h, value);
+}
+
+// The scalar at the cursor that starts with `+`, `-` or a digit:
+// `alt((date_time, float, integer))`.
+fn number(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
+    let start = t.pos;
+    if date_time(in s, inout t) {
+        return scalar(inout t, N_DATETIME);
+    }
+    t.pos = start;
+    if float(in s, inout t) {
+        return scalar(inout t, N_FLOAT);
+    }
+    t.pos = start;
+    integer(in s, inout t);
+    scalar(inout t, N_INTEGER)
+}
+
+// Exactly `n` digits at the cursor (`unsigned_digits::<n, n>`), their
+// value, or false when fewer than `n` are there.
+fn digits(in s: Slice[u8], inout t: Toml, n: u64, inout v: u64) -> bool {
+    let mut x: u64 = 0;
+    for i in 0..n {
+        let d = peek_at(in s, in t, i);
+        if !is_digit(d) {
+            return false;
+        }
+        x = wrapping_add(wrapping_mul(x, 10), wrapping_sub(d, 48));
+    }
+    t.pos = wrapping_add(t.pos, n);
+    v = x;
+    true
+}
+
+// `partial_time`: false on a backtrack before the first colon.
+fn partial_time(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
+    let mut h: u64 = 0;
+    if !digits(in s, inout t, 2, inout h) || h > 23 {
+        return false;
+    }
+    if cur(in s, in t) != 58 {
+        return false;
+    }
+    bump(inout t);
+    let mut m: u64 = 0;
+    if !digits(in s, inout t, 2, inout m) || m > 59 {
+        terr();
+    }
+    if cur(in s, in t) != 58 {
+        terr();
+    }
+    bump(inout t);
+    let mut sec: u64 = 0;
+    if !digits(in s, inout t, 2, inout sec) || sec > 60 {
+        terr();
+    }
+    // `opt(time_secfrac)`.
+    if cur(in s, in t) == 46 && is_digit(peek_at(in s, in t, 1)) {
+        bump(inout t);
+        loop {
+            if !is_digit(cur(in s, in t)) {
+                break;
+            }
+            bump(inout t);
+        }
+    }
+    true
+}
+
+// `date_time`: true when one was read, false on a backtrack.
+fn date_time(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
+    let start = t.pos;
+    let mut year: u64 = 0;
+    if digits(in s, inout t, 4, inout year) && cur(in s, in t) == 45 {
+        bump(inout t);
+        let mut month: u64 = 0;
+        if !digits(in s, inout t, 2, inout month) || month < 1 || month > 12 {
+            terr();
+        }
+        if cur(in s, in t) != 45 {
+            terr();
+        }
+        bump(inout t);
+        let mut day: u64 = 0;
+        if !digits(in s, inout t, 2, inout day) || day < 1 || day > 31 {
+            terr();
+        }
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let max: u64 = if month == 2 && leap {
+            29
+        } else if month == 2 {
+            28
+        } else if month == 4 || month == 6 || month == 9 || month == 11 {
+            30
+        } else {
+            31
+        };
+        if day > max {
+            terr();
+        }
+        // `opt((time_delim, partial_time, opt(time_offset)))`.
+        let after_date = t.pos;
+        let d = cur(in s, in t);
+        if d == 84 || d == 116 || d == 32 {
+            bump(inout t);
+            if partial_time(in s, inout t) {
+                let o = cur(in s, in t);
+                if o == 90 || o == 122 {
+                    bump(inout t);
+                } else if o == 43 || o == 45 {
+                    bump(inout t);
+                    let mut oh: u64 = 0;
+                    if !digits(in s, inout t, 2, inout oh) || oh > 23 {
+                        terr();
+                    }
+                    if cur(in s, in t) != 58 {
+                        terr();
+                    }
+                    bump(inout t);
+                    let mut om: u64 = 0;
+                    if !digits(in s, inout t, 2, inout om) || om > 59 {
+                        terr();
+                    }
+                }
+            } else {
+                t.pos = after_date;
+            }
+        }
+        return true;
+    }
+    t.pos = start;
+    partial_time(in s, inout t)
+}
+
+// Digits with single underscores between them (`_` must be followed by a
+// digit, a cut). The first must already be checked by the caller.
+fn digit_run(
+    in s: Slice[u8],
+    inout t: Toml,
+    hex: bool,
+    radix_max: u64,
+    inout out: ChunkSeq[u8]
+) eff [Fail[LintFail]] {
+    loop {
+        let c = cur(in s, in t);
+        let ok = if hex {
+            is_hex(c)
+        } else {
+            is_digit(c) && wrapping_sub(c, 48) <= radix_max
+        };
+        if ok {
+            out.push(wrapping_u8(c));
+            bump(inout t);
+        } else if c == 95 {
+            bump(inout t);
+            let d = cur(in s, in t);
+            let dok = if hex {
+                is_hex(d)
+            } else {
+                is_digit(d) && wrapping_sub(d, 48) <= radix_max
+            };
+            if !dok {
+                terr();
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+// `dec_int`: false on a backtrack; the digits (sign excluded) go to `out`
+// and `neg` tells the sign.
+fn dec_int(in s: Slice[u8], inout t: Toml, inout out: ChunkSeq[u8], inout neg: bool)
+    -> bool eff [Fail[LintFail]] {
+    out.clear();
+    let c = cur(in s, in t);
+    neg = false;
+    if c == 43 || c == 45 {
+        neg = c == 45;
+        bump(inout t);
+    }
+    let d = cur(in s, in t);
+    if d >= 49 && d <= 57 {
+        out.push(wrapping_u8(d));
+        bump(inout t);
+        digit_run(in s, inout t, false, 9, inout out);
+        true
+    } else if d == 48 {
+        out.push(48);
+        bump(inout t);
+        true
+    } else {
+        false
+    }
+}
+
+// `zero_prefixable_int`, a cut: at least one digit.
+fn zp_int(in s: Slice[u8], inout t: Toml, inout out: ChunkSeq[u8]) eff [Fail[LintFail]] {
+    let d = cur(in s, in t);
+    if !is_digit(d) {
+        terr();
+    }
+    out.push(wrapping_u8(d));
+    bump(inout t);
+    digit_run(in s, inout t, false, 9, inout out);
+}
+
+// The smallest decimal that rounds to f64 infinity, 2^1024 - 2^970
+// (ties round to even, which overflows), as its significant digits; its
+// decimal exponent is 308 (one digit before the point).
+fn inf_threshold() -> Str {
+    "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792"
+}
+
+// Whether the decimal with `digits` (no leading zeros unless it is 0) and
+// exponent `exp` (value = 0.d1d2... * 10^(exp)) is at least the infinity
+// threshold.
+fn overflows(in d: ChunkSeq[u8], exp: i64) -> bool {
+    // Skip leading zeros of the significand.
+    let n = d.len();
+    let mut lead: u64 = 0;
+    loop {
+        if lead >= n || at(in d.as_slice(), lead) != 48 {
+            break;
+        }
+        lead = inc(lead);
+    }
+    if lead == n {
+        return false;
+    }
+    // The value is 0.d[lead..] * 10^(exp - lead); the threshold is
+    // 0.T * 10^309.
+    let e = wrapping_sub(exp, wrapping_i64(lead));
+    if e < 309 {
+        return false;
+    }
+    if e > 309 {
+        return true;
+    }
+    let th = inf_threshold().as_bytes();
+    let m = th.len();
+    let mut i: u64 = 0;
+    loop {
+        let a = if wrapping_add(lead, i) < n {
+            at(in d.as_slice(), wrapping_add(lead, i))
+        } else {
+            48
+        };
+        let b = if i < m {
+            at(in th, i)
+        } else {
+            48
+        };
+        if a != b {
+            return a > b;
+        }
+        if wrapping_add(lead, i) >= n && i >= m {
+            return true;
+        }
+        i = inc(i);
+    }
+    false
+}
+
+// `float`: true when one was read (`float_` then the +infinity cut, or
+// `special_float`), false on a backtrack.
+fn float(in s: Slice[u8], inout t: Toml) -> bool eff [Fail[LintFail]] {
+    let start = t.pos;
+    let mut ip = ChunkSeq::new[u8]();
+    let mut neg = false;
+    if dec_int(in s, inout t, inout ip, inout neg) {
+        let c = cur(in s, in t);
+        if c == 101 || c == 69 || c == 46 {
+            // The significand's digits and the decimal exponent of the
+            // point after the integer part.
+            let mut sig = ChunkSeq::new[u8]();
+            sig.extend(in ip.as_slice());
+            let point = ip.len();
+            if c == 46 {
+                bump(inout t);
+                zp_int(in s, inout t, inout sig);
+            }
+            let mut exp: i64 = 0;
+            let e = cur(in s, in t);
+            if e == 101 || e == 69 {
+                bump(inout t);
+                let sc = cur(in s, in t);
+                let mut eneg = false;
+                if sc == 43 || sc == 45 {
+                    eneg = sc == 45;
+                    bump(inout t);
+                }
+                let mut ed = ChunkSeq::new[u8]();
+                zp_int(in s, inout t, inout ed);
+                // Saturate: beyond a few thousand the result is decided.
+                let mut v: i64 = 0;
+                for i in 0..ed.len() {
+                    if v < 100000 {
+                        v = wrapping_add(
+                            wrapping_mul(v, 10),
+                            wrapping_i64(wrapping_sub(at(in ed.as_slice(), i), 48))
+                        );
+                    }
+                }
+                exp = if eneg {
+                    wrapping_neg_i64(v)
+                } else {
+                    v
+                };
+            }
+            if !neg && overflows(in sig, wrapping_add(exp, wrapping_i64(point))) {
+                terr();
+            }
+            return true;
+        }
+    }
+    // `special_float`.
+    t.pos = start;
+    let c = cur(in s, in t);
+    if c == 43 || c == 45 {
+        bump(inout t);
+    }
+    let a = cur(in s, in t);
+    let b = peek_at(in s, in t, 1);
+    let d = peek_at(in s, in t, 2);
+    if (a == 105 && b == 110 && d == 102) || (a == 110 && b == 97 && d == 110) {
+        t.pos = wrapping_add(t.pos, 3);
+        return true;
+    }
+    false
+}
+
+// Whether the digits `d` (radix `r`: 2, 8, 10 or 16) are at most `max`.
+fn fits(in d: ChunkSeq[u8], r: u64, max: u64) -> bool {
+    let lim = if r == 16 {
+        max / 16
+    } else if r == 10 {
+        max / 10
+    } else if r == 8 {
+        max / 8
+    } else {
+        max / 2
+    };
+    let rest = wrapping_sub(max, wrapping_mul(lim, r));
+    let mut v: u64 = 0;
+    for i in 0..d.len() {
+        let x = hex_val(at(in d.as_slice(), i));
+        if v > lim || (v == lim && x > rest) {
+            return false;
+        }
+        v = wrapping_add(wrapping_mul(v, r), x);
+    }
+    true
+}
+
+// `integer` (cut throughout): hex, octal, binary or decimal, in i64 range.
+fn integer(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    let i64_max: u64 = 9223372036854775807;
+    let c = cur(in s, in t);
+    let p = peek_at(in s, in t, 1);
+    let mut ds = ChunkSeq::new[u8]();
+    if c == 48 && (p == 120 || p == 111 || p == 98) {
+        t.pos = wrapping_add(t.pos, 2);
+        let hex = p == 120;
+        let r: u64 = if p == 120 {
+            16
+        } else if p == 111 {
+            8
+        } else {
+            2
+        };
+        let d = cur(in s, in t);
+        let first = if hex {
+            is_hex(d)
+        } else {
+            is_digit(d) && wrapping_sub(d, 48) < r
+        };
+        if !first {
+            terr();
+        }
+        digit_run(in s, inout t, hex, wrapping_sub(r, 1), inout ds);
+        if !fits(in ds, r, i64_max) {
+            terr();
+        }
+        return;
+    }
+    let mut neg = false;
+    if !dec_int(in s, inout t, inout ds, inout neg) {
+        terr();
+    }
+    let max = if neg {
+        inc(i64_max)
+    } else {
+        i64_max
+    };
+    if !fits(in ds, 10, max) {
+        terr();
+    }
+}
+
+fn expect_word(in s: Slice[u8], inout t: Toml, in w: Str) eff [Fail[LintFail]] {
+    let b = w.as_bytes();
+    for i in 0..b.len() {
+        if cur(in s, in t) != at(in b, i) {
+            terr();
+        }
+        bump(inout t);
+    }
+}
+
+// A string value at the cursor (`string`): its decoded bytes are
+// `text[start..]`.
+fn string_value(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
+    let start = t.text.len();
+    let q = cur(in s, in t);
+    if peek_at(in s, in t, 1) == q && peek_at(in s, in t, 2) == q {
+        t.pos = wrapping_add(t.pos, 3);
+        if q == 34 {
+            ml_basic_string(in s, inout t);
+        } else {
+            ml_literal_string(in s, inout t);
+        }
+    } else if q == 34 {
+        basic_string(in s, inout t);
+    } else {
+        literal_string(in s, inout t);
+    }
+    let id = scalar(inout t, N_STRING);
+    let mut n = node(in t, id);
+    n.first = wrapping_u32(start);
+    n.count = wrapping_u32(wrapping_sub(t.text.len(), start));
+    set_node(inout t, id, n);
+    id
+}
+
+// `value`.
+fn value(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
+    let c = cur(in s, in t);
+    if c == 34 || c == 39 {
+        string_value(in s, inout t)
+    } else if c == 91 {
+        array(in s, inout t)
+    } else if c == 123 {
+        inline_table(in s, inout t)
+    } else if c == 43 || c == 45 || is_digit(c) {
+        number(in s, inout t)
+    } else if c == 116 {
+        expect_word(in s, inout t, in "true");
+        scalar(inout t, N_BOOL)
+    } else if c == 102 {
+        expect_word(in s, inout t, in "false");
+        scalar(inout t, N_BOOL)
+    } else if c == 105 {
+        expect_word(in s, inout t, in "inf");
+        scalar(inout t, N_FLOAT)
+    } else if c == 110 {
+        expect_word(in s, inout t, in "nan");
+        scalar(inout t, N_FLOAT)
+    } else {
+        // `_` (integer) and `.` (float) fail too.
+        terr();
+        0
+    }
+}
+
+fn array(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
+    bump(inout t);
+    let id = new_node(inout t, N_ARRAY, false, false);
+    ws_comment_newline(in s, inout t);
+    if cur(in s, in t) == 93 {
+        bump(inout t);
+        return id;
+    }
+    loop {
+        let v = value(in s, inout t);
+        append(inout t, id, 0, 0, 0, v);
+        ws_comment_newline(in s, inout t);
+        let c = cur(in s, in t);
+        if c == 44 {
+            bump(inout t);
+            ws_comment_newline(in s, inout t);
+            if cur(in s, in t) == 93 {
+                bump(inout t);
+                return id;
+            }
+        } else if c == 93 {
+            bump(inout t);
+            return id;
+        } else {
+            terr();
+        }
+    }
+    id
+}
+
+fn inline_table(in s: Slice[u8], inout t: Toml) -> u32 eff [Fail[LintFail]] {
+    bump(inout t);
+    let id = new_node(inout t, N_INLINE, false, false);
+    let save = t.pos;
+    skip_ws(in s, inout t);
+    if cur(in s, in t) == 125 {
+        bump(inout t);
+        return id;
+    }
+    t.pos = save;
+    // The key paths of the pairs, kept while their values parse.
+    let mut paths = ChunkSeq::new[u64]();
+    let mut values = ChunkSeq::new[u32]();
+    loop {
+        key(in s, inout t);
+        if cur(in s, in t) != 61 {
+            terr();
+        }
+        bump(inout t);
+        skip_ws(in s, inout t);
+        paths.push(t.path.len());
+        paths.extend(in t.path.as_slice());
+        let v = value(in s, inout t);
+        values.push(v);
+        skip_ws(in s, inout t);
+        let c = cur(in s, in t);
+        if c == 44 {
+            bump(inout t);
+        } else if c == 125 {
+            bump(inout t);
+            break;
+        } else {
+            terr();
+        }
+    }
+    // `table_from_pairs`.
+    let mut j: u64 = 0;
+    for k in 0..values.len() {
+        let n = word(in paths.as_slice(), j);
+        j = inc(j);
+        t.path.clear();
+        for i in 0..n {
+            t.path.push(word(in paths.as_slice(), j));
+            j = inc(j);
+        }
+        let v = u32_at(in values, k);
+        insert_keyval(inout t, id, v, true);
+    }
+    id
+}
+
+// `[a.b]` (`on_std_header`): `path` holds the header's key.
+fn std_header(inout t: Toml, root: u32) eff [Fail[LintFail]] {
+    let n = path_parts(in t);
+    let parent = descend(inout t, root, wrapping_sub(n, 1), false, false);
+    let (ks, kl, h) = part(in t, wrapping_sub(n, 1));
+    let e = lookup(in t, parent, ks, kl, h);
+    if e == NONE {
+        let table = new_node(inout t, N_TABLE, false, false);
+        append(inout t, parent, ks, kl, h, table);
+        t.current = table;
+        return;
+    }
+    let child = ent(in t, e).child;
+    let mut x = node(in t, child);
+    if x.kind != N_TABLE || !x.implicit || x.dotted {
+        terr();
+    }
+    // The implicit table is taken out and inserted again when the header's
+    // table is finished, so it moves to the end of its parent.
+    unlink(inout t, parent, e);
+    append(inout t, parent, ks, kl, h, child);
+    x.implicit = false;
+    x.dotted = false;
+    set_node(inout t, child, x);
+    t.current = child;
+}
+
+// `[[a.b]]` (`on_array_header`).
+fn array_header(inout t: Toml, root: u32) eff [Fail[LintFail]] {
+    let n = path_parts(in t);
+    let parent = descend(inout t, root, wrapping_sub(n, 1), false, false);
+    let (ks, kl, h) = part(in t, wrapping_sub(n, 1));
+    let e = lookup(in t, parent, ks, kl, h);
+    let aot = if e == NONE {
+        let a = new_node(inout t, N_AOT, false, false);
+        append(inout t, parent, ks, kl, h, a);
+        a
+    } else {
+        let a = ent(in t, e).child;
+        if node(in t, a).kind != N_AOT {
+            terr();
+        }
+        a
+    };
+    let table = new_node(inout t, N_TABLE, false, false);
+    append(inout t, aot, 0, 0, 0, table);
+    t.current = table;
+}
+
+// `document`: the root table's node id (0).
+fn parse_toml(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
+    let root = new_node(inout t, N_TABLE, false, false);
+    t.current = root;
+    if at(in s, 0) == 239 && at(in s, 1) == 187 && at(in s, 2) == 191 {
+        t.pos = 3;
+    }
+    skip_ws(in s, inout t);
+    loop {
+        let c = cur(in s, in t);
+        if c == EOF {
+            break;
+        }
+        if c == 35 {
+            comment(in s, inout t);
+            line_ending(in s, inout t);
+        } else if c == 91 {
+            if peek_at(in s, in t, 1) == 91 {
+                t.pos = wrapping_add(t.pos, 2);
+                key(in s, inout t);
+                if cur(in s, in t) != 93 || peek_at(in s, in t, 1) != 93 {
+                    terr();
+                }
+                t.pos = wrapping_add(t.pos, 2);
+                line_trailing(in s, inout t);
+                array_header(inout t, root);
+            } else {
+                bump(inout t);
+                key(in s, inout t);
+                if cur(in s, in t) != 93 {
+                    terr();
+                }
+                bump(inout t);
+                line_trailing(in s, inout t);
+                std_header(inout t, root);
+            }
+        } else if c == 10 || c == 13 {
+            newline(in s, inout t);
+        } else {
+            key(in s, inout t);
+            if cur(in s, in t) != 61 {
+                terr();
+            }
+            bump(inout t);
+            skip_ws(in s, inout t);
+            // The value may hold inline tables, which use `path`.
+            let mut keep = ChunkSeq::new[u64]();
+            keep.extend(in t.path.as_slice());
+            let v = value(in s, inout t);
+            line_trailing(in s, inout t);
+            t.path.clear();
+            t.path.extend(in keep.as_slice());
+            let current = t.current;
+            insert_keyval(inout t, current, v, false);
+        }
+        skip_ws(in s, inout t);
+    }
+}
+
+// serde's private datetime marker: a table whose first key it is becomes
+// a `toml::Value::Datetime` (or an error), parsed by toml_datetime.
+fn marker_first(in t: Toml) -> bool {
+    let m = "$__toml_private_datetime".as_bytes();
+    for id in 0..t.nodes.len() {
+        let n = node(in t, wrapping_u32(id));
+        if (n.kind == N_TABLE || n.kind == N_INLINE) && n.first != NONE {
+            let e = ent(in t, n.first);
+            if widen_u64(e.klen) == m.len() {
+                let mut same = true;
+                for i in 0..m.len() {
+                    if at(in t.text.as_slice(), wrapping_add(widen_u64(e.kstart), i))
+                        != at(in m, i) {
+                        same = false;
+                    }
+                }
+                if same {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+// Byte order of two keys (`String`'s `Ord`).
+fn key_lt(in t: Toml, a: u32, b: u32) -> bool {
+    let x = ent(in t, a);
+    let y = ent(in t, b);
+    let xl = widen_u64(x.klen);
+    let yl = widen_u64(y.klen);
+    let n = if xl < yl {
+        xl
+    } else {
+        yl
+    };
+    for i in 0..n {
+        let p = at(in t.text.as_slice(), wrapping_add(widen_u64(x.kstart), i));
+        let q = at(in t.text.as_slice(), wrapping_add(widen_u64(y.kstart), i));
+        if p != q {
+            return p < q;
+        }
+    }
+    xl < yl
+}
+
+// The entries of table `c` in key order, appended to `out`.
+fn sorted_entries(in t: Toml, c: u32, inout out: ChunkSeq[u32]) {
+    let base = out.len();
+    let mut e = node(in t, c).first;
+    loop {
+        if e == NONE {
+            break;
+        }
+        // Insertion into the sorted tail (keys are distinct).
+        out.push(e);
+        let mut j = wrapping_sub(out.len(), 1);
+        loop {
+            if j <= base {
+                break;
+            }
+            let prev = u32_at(in out, wrapping_sub(j, 1));
+            if !key_lt(in t, e, prev) {
+                break;
+            }
+            out.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        out.try_set(j, e);
+        e = ent(in t, e).next;
+    }
+}
+
+fn is_table(k: u8) -> bool {
+    k == N_TABLE || k == N_INLINE
+}
+
+// `validate_value` over the tree from the root.
+fn validate_tree(in t: Toml, inout b: Budget) eff [Fail[LintFail]] {
+    // Pending (node, depth) pairs.
+    let mut stack = ChunkSeq::new[u64]();
+    stack.push(0);
+    stack.push(0);
+    let mut enqueued: u64 = 1;
+    let mut order = ChunkSeq::new[u32]();
+    loop {
+        let n = stack.len();
+        if n == 0 {
+            break;
+        }
+        let depth = word(in stack.as_slice(), wrapping_sub(n, 1));
+        let id = wrapping_u32(word(in stack.as_slice(), wrapping_sub(n, 2)));
+        stack.truncate(wrapping_sub(n, 2));
+        charge(inout b, 1);
+        b.nodes = inc(b.nodes);
+        if depth > b.lim.depth || b.nodes > b.lim.nodes {
+            fail(P_VALUE_DEPTH);
+        }
+        let x = node(in t, id);
+        if x.kind == N_STRING {
+            text(inout b, widen_u64(x.count));
+        } else if x
+            .kind
+            == N_INTEGER
+            || x
+            .kind
+            == N_FLOAT
+            || x
+            .kind
+            == N_BOOL
+            || x
+            .kind
+            == N_DATETIME {
+            text(inout b, 8);
+        } else {
+            let len = widen_u64(x.count);
+            enqueued = cadd(enqueued, len, P_TREE_OVERFLOW);
+            if enqueued > b.lim.nodes {
+                fail(P_NODE_LIMIT);
+            }
+            charge(inout b, len);
+            if is_table(x.kind) {
+                order.clear();
+                sorted_entries(in t, id, inout order);
+                for i in 0..order.len() {
+                    let e = ent(in t, u32_at(in order, i));
+                    if widen_u64(e.klen) > 128 {
+                        fail(P_KEY_BYTES);
+                    }
+                    text(inout b, widen_u64(e.klen));
+                    stack.push(widen_u64(e.child));
+                    stack.push(inc(depth));
+                }
+            } else {
+                let mut e = x.first;
+                loop {
+                    if e == NONE {
+                        break;
+                    }
+                    let y = ent(in t, e);
+                    stack.push(widen_u64(y.child));
+                    stack.push(inc(depth));
+                    e = y.next;
+                }
+            }
+        }
+    }
+}
+
+// The policy's lints, in `LintName` order; 7 for an unknown name.
+fn lint_name(in t: Toml, e: TEnt) -> u64 {
+    let s = widen_u64(e.kstart);
+    let l = widen_u64(e.klen);
+    if text_is(in t, s, l, in "overbroad_inout_projection") {
+        0
+    } else if text_is(in t, s, l, in "unused_effect_capability") {
+        1
+    } else if text_is(in t, s, l, in "demote_alloc_to_region") {
+        2
+    } else if text_is(in t, s, l, in "overly_restrictive_mode") {
+        3
+    } else if text_is(in t, s, l, in "missed_fip_opportunity") {
+        4
+    } else if text_is(in t, s, l, in "early_cancel_checkpoint") {
+        5
+    } else if text_is(in t, s, l, in "unredacted_pii_boundary") {
+        6
+    } else {
+        7
+    }
+}
+
+fn text_is(in t: Toml, start: u64, len: u64, in w: Str) -> bool {
+    let b = w.as_bytes();
+    if len != b.len() {
+        return false;
+    }
+    for i in 0..len {
+        if at(in t.text.as_slice(), wrapping_add(start, i)) != at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The entry of root-level table `c` with key `w`, or NONE.
+fn get_key(in t: Toml, c: u32, in w: Str) -> u32 {
+    let mut e = node(in t, c).first;
+    loop {
+        if e == NONE {
+            break;
+        }
+        let x = ent(in t, e);
+        if text_is(in t, widen_u64(x.kstart), widen_u64(x.klen), in w) {
+            return e;
+        }
+        e = x.next;
+    }
+    NONE
+}
+
+const SEV_ALLOW: u64 = 1;
+const SEV_WARN: u64 = 2;
+const SEV_DENY: u64 = 3;
+
+// `Policy::from_validated_value`: writes the severity (0 for none) of each
+// lint to `levels[0..7]` and the configured mask to `levels[7]`.
+fn extract(in t: Toml, inout b: Budget, inout levels: ChunkSeq[u64]) eff [Fail[LintFail]] {
+    let lints = get_key(in t, 0, in "lints");
+    if lints == NONE {
+        return;
+    }
+    let lt = ent(in t, lints).child;
+    if !is_table(node(in t, lt).kind) {
+        fail(P_LINTS_SHAPE);
+    }
+    let mut sections = ChunkSeq::new[u32]();
+    sorted_entries(in t, lt, inout sections);
+    for i in 0..sections.len() {
+        charge(inout b, 1);
+        let se = ent(in t, u32_at(in sections, i));
+        let value = node(in t, se.child);
+        if text_is(in t, widen_u64(se.kstart), widen_u64(se.klen), in "vesper") {
+            if !is_table(value.kind) {
+                fail(P_VESPER_SHAPE);
+            }
+            if widen_u64(value.count) > 7 {
+                fail(P_RULE_COUNT);
+            }
+            let mut rules = ChunkSeq::new[u32]();
+            sorted_entries(in t, se.child, inout rules);
+            for r in 0..rules.len() {
+                charge(inout b, 1);
+                let re = ent(in t, u32_at(in rules, r));
+                let v = node(in t, re.child);
+                if v.kind != N_STRING {
+                    fail(P_SEVERITY_STRING);
+                }
+                let vs = widen_u64(v.first);
+                let vl = widen_u64(v.count);
+                let sev = if text_is(in t, vs, vl, in "allow") {
+                    SEV_ALLOW
+                } else if text_is(in t, vs, vl, in "warn") {
+                    SEV_WARN
+                } else if text_is(in t, vs, vl, in "deny") {
+                    SEV_DENY
+                } else {
+                    fail(P_SEVERITY);
+                    0
+                };
+                // `Policy::insert` (keys of one table are distinct, so no
+                // rule is configured twice).
+                if widen_u64(re.klen) > 128 {
+                    fail(P_POLICY_KEY);
+                }
+                let lint = lint_name(in t, re);
+                if lint == 7 {
+                    fail(P_UNKNOWN_RULE);
+                }
+                if lint >= 2 && sev == SEV_DENY {
+                    fail(P_UNAVAILABLE_DENY);
+                }
+                levels.try_set(lint, sev);
+                let mask = word(in levels.as_slice(), 7) | wrapping_shl_u64(1, wrapping_u32(lint));
+                levels.try_set(7, mask);
+            }
+        } else if text_is(in t, widen_u64(se.kstart), widen_u64(se.klen), in "plugins") {
+            if !is_table(value.kind) {
+                fail(P_PLUGINS_SHAPE);
+            }
+            if value.count != 0 {
+                fail(P_PLUGINS);
+            }
+        } else {
+            fail(P_UNKNOWN_SECTION);
+        }
+    }
+}
+
+// `Policy::parse`. The result: the severities of the seven lints in
+// `LintName` order (0 none, 1 allow, 2 warn, 3 deny), the configured mask,
+// then the usage: decoded bytes, tokens, nodes and work.
+pub fn parse_policy(in source: Str, bytes: u64, depth: u64, tokens: u64, nodes: u64, work: u64)
+    -> ChunkSeq[u64] eff [Fail[LintFail]] {
+    let lim = Limits {
+        bytes: bytes,
+        depth: depth,
+        tokens: tokens,
+        nodes: nodes,
+        work: work
+    };
+    validate_limits(in lim);
+    let mut b = Budget {
+        lim: lim,
+        work: 0,
+        nodes: 0,
+        value_bytes: 0
+    };
+    let s = source.as_bytes();
+    let ntokens = preflight(in s, inout b);
+    let mut t = Toml {
+        nodes: ChunkSeq::new[TNode](),
+        ents: ChunkSeq::new[TEnt](),
+        text: ChunkSeq::new[u8](),
+        path: ChunkSeq::new[u64](),
+        current: 0,
+        pos: 0
+    };
+    parse_toml(in s, inout t);
+    if marker_first(in t) {
+        fail(P_UNSUPPORTED);
+    }
+    validate_tree(in t, inout b);
+    let mut levels = ChunkSeq::with_capacity[u64](13);
+    levels.resize(8, 0);
+    levels.try_set(0, SEV_WARN);
+    levels.try_set(1, SEV_WARN);
+    extract(in t, inout b, inout levels);
+    levels.push(b.value_bytes);
+    levels.push(ntokens);
+    levels.push(b.nodes);
+    levels.push(b.work);
+    levels
+}

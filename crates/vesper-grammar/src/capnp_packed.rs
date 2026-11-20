@@ -30,8 +30,19 @@ use core::fmt;
 #[cfg(vesper_port)]
 use crate::port;
 
+/// Cap'n Proto packing (encoding spec, "Packing"): input is 8-byte words; a
+/// tag byte marks a word's nonzero bytes. Tag `ZERO_TAG` is followed by a
+/// count of further all-zero words and `LITERAL_TAG` by a count of words
+/// copied verbatim; a run holds at most `MAX_RUN` further words.
+const WORD_BYTES: usize = 8;
+const ZERO_TAG: u8 = 0;
+const LITERAL_TAG: u8 = 0xff;
+const MAX_RUN: usize = 255;
+/// A run's tag byte and its count byte.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const RUN_HEADER_BYTES: usize = 2;
 const HARD_BYTES: usize = 64 * 1024 * 1024;
-const HARD_WORDS: usize = HARD_BYTES / 8;
+const HARD_WORDS: usize = HARD_BYTES / WORD_BYTES;
 const HARD_WORK: usize = 512 * 1024 * 1024;
 
 /// Logical per-call limits, not process memory, CPU time, or caller allocation.
@@ -154,23 +165,23 @@ pub fn unpacked_len(input: &[u8], limits: Limits) -> Result<usize> {
         pos += 1;
         take(input, &mut pos, tag.count_ones() as usize)?;
         let mut group_words = 1usize;
-        if tag == 0 || tag == 0xff {
+        if tag == ZERO_TAG || tag == LITERAL_TAG {
             take(input, &mut pos, 1)?;
             let additional = usize::from(input[pos - 1]);
             group_words = add(group_words, additional)?;
-            if tag == 0xff {
-                take(input, &mut pos, mul(additional, 8)?)?;
+            if tag == LITERAL_TAG {
+                take(input, &mut pos, mul(additional, WORD_BYTES)?)?;
             }
         }
         words = add(words, group_words)?;
         bound(words, limits.max_words, ErrorKind::WordLimit)?;
         bound(
-            mul(words, 8)?,
+            mul(words, WORD_BYTES)?,
             limits.max_output_bytes,
             ErrorKind::OutputLimit,
         )?;
     }
-    let size = mul(words, 8)?;
+    let size = mul(words, WORD_BYTES)?;
     work(input.len(), size, 2, limits)?;
     Ok(size)
 }
@@ -218,7 +229,7 @@ pub fn unpack_into(input: &[u8], output: &mut [u8], limits: Limits) -> Result<us
     while pos < input.len() {
         let tag = input[pos];
         pos += 1;
-        let word = &mut output[written..written + 8];
+        let word = &mut output[written..written + WORD_BYTES];
         for (i, byte) in word.iter_mut().enumerate() {
             *byte = if tag & (1 << i) == 0 {
                 0
@@ -228,12 +239,12 @@ pub fn unpack_into(input: &[u8], output: &mut [u8], limits: Limits) -> Result<us
                 b
             };
         }
-        written += 8;
-        if tag == 0 || tag == 0xff {
+        written += WORD_BYTES;
+        if tag == ZERO_TAG || tag == LITERAL_TAG {
             let additional = usize::from(input[pos]);
             pos += 1;
-            let bytes = additional * 8;
-            if tag == 0 {
+            let bytes = additional * WORD_BYTES;
+            if tag == ZERO_TAG {
                 output[written..written + bytes].fill(0);
             } else {
                 output[written..written + bytes].copy_from_slice(&input[pos..pos + bytes]);
@@ -260,14 +271,14 @@ fn tag(word: &[u8]) -> u8 {
 
 /// Returns this group's tag and number of additional words in its run.
 fn group(input: &[u8], index: usize) -> (u8, usize) {
-    let first = tag(&input[index..index + 8]);
-    if first != 0 && first != 0xff {
+    let first = tag(&input[index..index + WORD_BYTES]);
+    if first != ZERO_TAG && first != LITERAL_TAG {
         return (first, 0);
     }
     let mut additional = 0;
-    while additional < 255 {
-        let next = index + (additional + 1) * 8;
-        if next >= input.len() || tag(&input[next..next + 8]) != first {
+    while additional < MAX_RUN {
+        let next = index + (additional + 1) * WORD_BYTES;
+        if next >= input.len() || tag(&input[next..next + WORD_BYTES]) != first {
             break;
         }
         additional += 1;
@@ -279,22 +290,26 @@ fn group(input: &[u8], index: usize) -> (u8, usize) {
 #[cfg(not(vesper_port))]
 pub fn packed_len(input: &[u8], limits: Limits) -> Result<usize> {
     input_preflight(input.len(), limits, 4)?;
-    if !input.len().is_multiple_of(8) {
+    if !input.len().is_multiple_of(WORD_BYTES) {
         return Err(Error::new(ErrorKind::UnalignedInput, input.len()));
     }
-    bound(input.len() / 8, limits.max_words, ErrorKind::WordLimit)?;
+    bound(
+        input.len() / WORD_BYTES,
+        limits.max_words,
+        ErrorKind::WordLimit,
+    )?;
     let mut index = 0usize;
     let mut size = 0usize;
     while index < input.len() {
         let (tag, additional) = group(input, index);
         let group_size = match tag {
-            0 => 2,
-            0xff => add(10, mul(additional, 8)?)?,
+            ZERO_TAG => RUN_HEADER_BYTES,
+            LITERAL_TAG => add(RUN_HEADER_BYTES + WORD_BYTES, mul(additional, WORD_BYTES)?)?,
             _ => 1 + tag.count_ones() as usize,
         };
         size = add(size, group_size)?;
         bound(size, limits.max_output_bytes, ErrorKind::OutputLimit)?;
-        index += (additional + 1) * 8;
+        index += (additional + 1) * WORD_BYTES;
     }
     work(input.len(), size, 4, limits)?;
     Ok(size)
@@ -318,18 +333,18 @@ pub fn pack_into(input: &[u8], output: &mut [u8], limits: Limits) -> Result<usiz
         let (tag, additional) = group(input, index);
         output[written] = tag;
         written += 1;
-        for b in &input[index..index + 8] {
+        for b in &input[index..index + WORD_BYTES] {
             if *b != 0 {
                 output[written] = *b;
                 written += 1;
             }
         }
-        index += 8;
-        if tag == 0 || tag == 0xff {
+        index += WORD_BYTES;
+        if tag == ZERO_TAG || tag == LITERAL_TAG {
             output[written] = additional as u8;
             written += 1;
-            let bytes = additional * 8;
-            if tag == 0xff {
+            let bytes = additional * WORD_BYTES;
+            if tag == LITERAL_TAG {
                 output[written..written + bytes].copy_from_slice(&input[index..index + bytes]);
                 written += bytes;
             }

@@ -53,6 +53,10 @@ pub(crate) const SPIN_BIT: u8 = 0x20;
 pub(crate) const SHORT_RESERVED: u8 = 0x18;
 pub(crate) const KEY_PHASE: u8 = 0x04;
 pub(crate) const LONG_RESERVED: u8 = 0x0c;
+/// First-byte bits under header protection (RFC 9001 §5.4.1): the low
+/// five of a short header, the low four of a long one.
+pub(crate) const SHORT_PROTECTED_BITS: u8 = 0x1f;
+pub(crate) const LONG_PROTECTED_BITS: u8 = 0x0f;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeaderError {

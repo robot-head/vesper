@@ -938,6 +938,7 @@ fn compile_session_with_linkage<M: Module>(
             split: BTreeMap::new(),
             current_call_slot: None,
             in_fip_fn: world.functions.get(&plan.entry).is_some_and(|f| f.fip),
+            borrowed_bind: false,
             trace_fail: None,
             trace_entry: None,
             source_locations: true,
@@ -947,6 +948,7 @@ fn compile_session_with_linkage<M: Module>(
             own_abi: super::FnAbi::default(),
             result_buffer: None,
             forced_call_vars: None,
+            discard_slot: None,
             session: Some(SessionCodegen {
                 ctx: context,
                 park,

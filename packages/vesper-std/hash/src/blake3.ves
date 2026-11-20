@@ -441,3 +441,111 @@ pub fn digest_hex(d: Digest, inout out: String) {
         i = wrapping_add(i, 1);
     }
 }
+
+test {
+    // BLAKE3 reference test_vectors.json uses input bytes 0..250, repeated.
+    fn vector_input(count: u64) -> ChunkSeq[u8] {
+        let mut input = ChunkSeq::with_capacity[u8](count);
+        let mut byte: u8 = 0;
+        for i in 0..count {
+            input.push(byte);
+            byte = if byte == 250 {
+                0
+            } else {
+                wrapping_add(byte, 1)
+            };
+        }
+        input
+    }
+
+    fn digest_matches(digest: Digest, in expected: Str) -> bool {
+        let mut actual = String::new();
+        actual.push_str(in ":");
+        digest_hex(digest, inout actual);
+        let mut prefixed = String::new();
+        prefixed.push_str(in ":");
+        prefixed.push_str(in expected);
+        actual == prefixed
+    }
+
+    // @case empty(0, 0, in "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
+    // @case one_byte(1, 0, in "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213")
+    // @case before_block(63, 32, in "e9bc37a594daad83be9470df7f7b3798297c3d834ce80ba85d6e207627b7db7b")
+    // @case at_block(64, 1, in "4eed7141ea4a5cd4b788606bd23f46e212af9cacebacdc7d1f4c6dc7f2511b98")
+    // @case after_block(65, 64, in "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee")
+    // @case before_chunk(1023, 64, in "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11")
+    // @case at_chunk(1024, 1023, in "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7")
+    // @case after_chunk(1025, 1024, in "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444")
+    // @case tree_merge(2049, 1025, in "5f4d72f40d7a5f82b15ca2b2e44b1de3c2ef86c426c95c1af0b6879522563030")
+    fn test_hash_vectors(count: u64, split: u64, in expected: Str) -> bool {
+        let input = vector_input(count);
+        let mut stream = blake3_new();
+        stream.update(in input[0..split]);
+        if stream.count() != split {
+            return false;
+        }
+        stream.update(in input[split..count]);
+        let one_shot = blake3(in input.as_slice());
+        let streamed = stream.finalize();
+        stream
+            .count()
+            == count
+            && digest_matches(one_shot, in expected)
+            && digest_matches(streamed, in expected)
+    }
+
+    // @case empty(0, in "92b2b75604ed3c761f9d6f62392c8a9227ad0ea3f09573e783f1498a4ed60d26", in "2cc39783c223154fea8dfb7c1b1660f2ac2dcbd1c1de8277b0b0dd39b7e50d7d")
+    // @case straddles_chunk(1025, in "357dc55de0c7e382c900fd6e320acc04146be01db6a8ce7210b7189bd664ea69", in "effaa245f065fbf82ac186839a249707c3bddf6d3fdda22d1b95a3c970379bcb")
+    fn test_keyed_and_derived(count: u64, in keyed: Str, in derived: Str) -> bool {
+        let input = vector_input(count);
+        let got_keyed = blake3_keyed(
+            in "whats the Elvish word for friend".as_bytes(),
+            in input.as_slice()
+        );
+        let got_derived = blake3_derive_key(
+            in "BLAKE3 2019-12-27 16:29:52 test vectors context",
+            in input.as_slice()
+        );
+        match got_keyed {
+            Option::Some(digest) => digest_matches(digest, in keyed)
+                && digest_matches(got_derived, in derived),
+            Option::None => false,
+        }
+    }
+
+    // @case empty(0)
+    // @case short(31)
+    // @case long(33)
+    fn test_rejects_key_length(length: u64) -> bool {
+        let input = vector_input(length);
+        match blake3_keyed(in input.as_slice(), in "".as_bytes()) {
+            Option::Some(_) => false,
+            Option::None => true,
+        }
+    }
+
+    // @case zero(0, in "")
+    // @case one(1, in "af")
+    // @case digest(32, in "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262")
+    // @case full_block(64, in "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262e00f03e7b69af26b7faaf09fcd333050338ddfe085b8cc869ca98b206c08243a")
+    // @case second_block(65, in "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262e00f03e7b69af26b7faaf09fcd333050338ddfe085b8cc869ca98b206c08243a26")
+    fn test_xof(length: u64, in expected: Str) -> bool {
+        let stream = blake3_new();
+        let mut output = ChunkSeq::new[u8]();
+        output.push(123);
+        stream.finalize_xof(length, inout output);
+        if output.len() != wrapping_add(length, 1) || output.try_get(0) != Option::Some(123) {
+            return false;
+        }
+        let mut actual = String::new();
+        for i in 1..output.len() {
+            let byte = match output.try_get(i) {
+                Option::Some(value) => value,
+                Option::None => return false,
+            };
+            actual.push_char(hex_digit(byte >> 4));
+            actual.push_char(hex_digit(byte & 15));
+        }
+        actual == expected
+    }
+}

@@ -1,0 +1,76 @@
+// Helpers shared by the modules of @vesper/lint (lib.ves, policy.ves).
+
+use self::LintFail;
+
+// Each module keeps its own copy of the constants it reads (constants are
+// not imported across modules).
+const NONE: u32 = 4294967295;
+const U64_MAX: u64 = 18446744073709551615;
+// End of input for `at`.
+const EOF: u64 = 256;
+
+pub fn fail(code: u64) eff [Fail[LintFail]] {
+    Fail::raise(
+        LintFail {
+            code: code
+        }
+    );
+}
+
+pub fn at(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(c) => widen_u64(c),
+        Option::None => EOF,
+    }
+}
+
+pub fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE,
+    }
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+// `a + b`, or `code` on overflow.
+pub fn cadd(a: u64, b: u64, code: u64) -> u64 eff [Fail[LintFail]] {
+    if a > wrapping_sub(U64_MAX, b) {
+        fail(code);
+    }
+    wrapping_add(a, b)
+}
+
+// Packs `bytes` into `out` as its length, then eight bytes per word,
+// little-endian.
+pub fn push_text(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
+    let n = bytes.len();
+    out.push(n);
+    let mut w: u64 = 0;
+    let mut k: u64 = 0;
+    for i in 0..n {
+        w = w | wrapping_shl_u64(at(in bytes, i), wrapping_u32(wrapping_mul(k, 8)));
+        k = inc(k);
+        if k == 8 {
+            out.push(w);
+            w = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(w);
+    }
+}
+
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}

@@ -160,6 +160,9 @@ impl Tape {
     }
 }
 
+/// A direction whose squared length is at most this is degenerate.
+const MIN_SQUARED_LENGTH: f64 = 1e-24;
+
 fn validate(scene: &DiffScene) -> Result<(), DiffError> {
     let finite3 = |v: &[f64; 3]| v.iter().all(|x| x.is_finite());
     if !(scene.dt.is_finite() && scene.dt > 0.0) {
@@ -534,7 +537,7 @@ fn project_pair(
     let dd2 = t.mul(d[2], d[2])?;
     let s01 = t.add(dd0, dd1)?;
     let dd = t.add(s01, dd2)?;
-    if !(t.v(dd) > 1e-24) {
+    if !(t.v(dd) > MIN_SQUARED_LENGTH) {
         return Err(degenerate);
     }
     let len = t.sqrt(dd)?;

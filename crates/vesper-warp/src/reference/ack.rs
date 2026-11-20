@@ -2,7 +2,9 @@
 //! `vesper-port` (the Vesper build is `vesper/src/ack.ves`). Frozen: bug
 //! fixes only (#1066).
 
-use crate::ack::{ACK_ELICITING_THRESHOLD, AckError, Ecn, Received, ReceivedPackets};
+use crate::ack::{
+    ACK_ELICITING_THRESHOLD, AckError, Ecn, MAX_ACK_DELAY_EXPONENT, Received, ReceivedPackets,
+};
 use crate::frame::{AckFrame, AckRange, EcnCounts};
 use crate::{PN_LIMIT, PnSpace};
 
@@ -168,7 +170,7 @@ impl<const N: usize> ReceivedPackets<N> {
         now_ns: u64,
         ack_delay_exponent: u8,
     ) -> Result<Option<AckFrame<'_>>, AckError> {
-        if ack_delay_exponent > 20 {
+        if ack_delay_exponent > MAX_ACK_DELAY_EXPONENT {
             return Err(AckError::BadAckDelayExponent(ack_delay_exponent));
         }
         if self.len == 0 {

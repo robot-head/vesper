@@ -5,18 +5,58 @@ use self::{
     S
 };
 use self::term::{
+    b_canon,
+    b_named,
+    b_var,
+    c_nested,
     dec,
     fa,
     fb,
     fc,
+    g_impl,
+    g_peq,
+    g_row,
     inc,
     kid,
+    l_eff,
+    m_const,
+    m_var,
     nlen,
     none,
+    r_indcyc,
+    r_modelmis,
+    r_nocand,
+    st_alias,
+    st_assume,
+    st_conf,
+    st_mode,
+    st_norm,
+    st_passume,
+    st_pconf,
+    st_rigid,
+    t_ctor,
+    t_proj,
+    t_var,
     tg,
     vidx,
     vkind
 };
+
+// ASCII bytes.
+const NEWLINE: u8 = 10;
+const SPACE: u8 = 32;
+const BANG: u8 = 33;
+const HASH: u8 = 35;
+const RPAREN: u8 = 41;
+const LT: u8 = 60;
+const QUESTION: u8 = 63;
+const LBRACKET: u8 = 91;
+const RBRACKET: u8 = 93;
+const CARET: u8 = 94;
+const BACKTICK: u8 = 96;
+
+// term.ves `r_mode()`: this module's own `r_mode` renders a mode.
+const R_MODE_TAG: u64 = 46;
 
 pub fn lit(inout s: S, in t: Str) {
     for i in 0..t.len() {
@@ -42,11 +82,11 @@ pub fn num(inout s: S, x: u64) {
 pub fn r_var(inout s: S, v: u64) {
     let k = vkind(v);
     if k == 0 {
-        byte(inout s, 94);
+        byte(inout s, CARET);
     } else if k == 1 {
-        byte(inout s, 33);
+        byte(inout s, BANG);
     } else {
-        byte(inout s, 63);
+        byte(inout s, QUESTION);
     }
     num(inout s, vidx(v));
 }
@@ -77,7 +117,7 @@ pub fn r_kind_debug(inout s: S, k: u64) {
 
 pub fn r_id(inout s: S, in prefix: Str, x: u64) {
     lit(inout s, prefix);
-    byte(inout s, 35);
+    byte(inout s, HASH);
     num(inout s, x);
 }
 
@@ -102,14 +142,14 @@ fn r_args_from(inout s: S, n: u64, from: u64) {
 // `[args]` when there are any.
 fn r_bracket_args(inout s: S, n: u64) {
     if nlen(in s, n) > 0 {
-        byte(inout s, 91);
+        byte(inout s, LBRACKET);
         r_args_from(inout s, n, 0);
-        byte(inout s, 93);
+        byte(inout s, RBRACKET);
     }
 }
 
 pub fn r_mode(inout s: S, n: u64) {
-    if tg(in s, n) == 4 {
+    if tg(in s, n) == m_const() {
         let h51 = fa(in s, n);
         r_mode_const(inout s, h51);
     } else {
@@ -120,9 +160,9 @@ pub fn r_mode(inout s: S, n: u64) {
 
 pub fn r_brand(inout s: S, n: u64) {
     let t = tg(in s, n);
-    if t == 7 {
+    if t == b_canon() {
         lit(inout s, "canonical");
-    } else if t == 8 {
+    } else if t == b_named() {
         let h49 = fa(in s, n);
         r_id(inout s, "model", h49);
     } else {
@@ -132,7 +172,7 @@ pub fn r_brand(inout s: S, n: u64) {
 }
 
 pub fn r_label(inout s: S, l: u64) {
-    if tg(in s, l) == 11 {
+    if tg(in s, l) == l_eff() {
         let h47 = fa(in s, l);
         r_id(inout s, "effect", h47);
         r_bracket_args(inout s, l);
@@ -161,12 +201,12 @@ pub fn r_row(inout s: S, n: u64) {
     let t = fa(in s, n);
     if t != none() {
         if len > 0 {
-            byte(inout s, 32);
+            byte(inout s, SPACE);
         }
         lit(inout s, "| ");
         r_var(inout s, t);
     }
-    byte(inout s, 93);
+    byte(inout s, RBRACKET);
 }
 
 pub fn r_trait_ref(inout s: S, n: u64) {
@@ -179,7 +219,7 @@ pub fn r_trait_ref(inout s: S, n: u64) {
 }
 
 pub fn r_proj(inout s: S, n: u64) {
-    byte(inout s, 60);
+    byte(inout s, LT);
     let t = fa(in s, n);
     r_trait_ref(inout s, t);
     lit(inout s, " via ");
@@ -192,11 +232,11 @@ pub fn r_proj(inout s: S, n: u64) {
 
 pub fn r_ty(inout s: S, n: u64) {
     let t = tg(in s, n);
-    if t == 1 {
+    if t == t_ctor() {
         let h43 = fa(in s, n);
         r_id(inout s, "type", h43);
         r_bracket_args(inout s, n);
-    } else if t == 2 {
+    } else if t == t_var() {
         let h42 = fa(in s, n);
         r_var(inout s, h42);
     } else {
@@ -207,14 +247,14 @@ pub fn r_ty(inout s: S, n: u64) {
 // `GenericArg` Display.
 pub fn r_arg(inout s: S, n: u64) {
     let t = tg(in s, n);
-    if t <= 3 {
+    if t <= t_proj() {
         r_ty(inout s, n);
-    } else if t <= 5 {
+    } else if t <= m_var() {
         lit(inout s, "mod ");
         r_mode(inout s, n);
-    } else if t == 6 {
+    } else if t == g_row() {
         r_row(inout s, n);
-    } else if t <= 9 {
+    } else if t <= b_var() {
         lit(inout s, "brand ");
         r_brand(inout s, n);
     } else {
@@ -228,11 +268,11 @@ pub fn r_goal(inout s: S, n: u64) {
     let t = tg(in s, n);
     let a = fa(in s, n);
     let b = fb(in s, n);
-    if t == 14 {
+    if t == g_impl() {
         r_trait_ref(inout s, a);
         lit(inout s, " via ");
         r_brand(inout s, b);
-    } else if t == 15 {
+    } else if t == g_peq() {
         r_proj(inout s, a);
         lit(inout s, " == ");
         r_ty(inout s, b);
@@ -257,7 +297,7 @@ pub fn d_var(inout s: S, v: u64) {
         lit(inout s, "Infer(");
     }
     num(inout s, vidx(v));
-    byte(inout s, 41);
+    byte(inout s, RPAREN);
 }
 
 // `LabelKey` Debug.
@@ -270,12 +310,12 @@ pub fn d_label_key(inout s: S, k: u64) {
         lit(inout s, "Capability(");
         let v = wrapping_sub(k, 17179869184);
         d_var(inout s, v);
-        byte(inout s, 41);
+        byte(inout s, RPAREN);
     }
 }
 
 fn d_list(inout s: S, n: u64) {
-    byte(inout s, 91);
+    byte(inout s, LBRACKET);
     let len = nlen(in s, n);
     let mut i: u64 = 0;
     loop {
@@ -289,11 +329,11 @@ fn d_list(inout s: S, n: u64) {
         d_arg(inout s, k);
         i = inc(i);
     }
-    byte(inout s, 93);
+    byte(inout s, RBRACKET);
 }
 
 fn d_mode_term(inout s: S, n: u64) {
-    if tg(in s, n) == 4 {
+    if tg(in s, n) == m_const() {
         lit(inout s, "Const(");
         let m = fa(in s, n);
         if m == 0 {
@@ -303,20 +343,20 @@ fn d_mode_term(inout s: S, n: u64) {
         } else {
             lit(inout s, "Linear");
         }
-        byte(inout s, 41);
+        byte(inout s, RPAREN);
     } else {
         lit(inout s, "Var(");
         let h40 = fa(in s, n);
         d_var(inout s, h40);
-        byte(inout s, 41);
+        byte(inout s, RPAREN);
     }
 }
 
 fn d_brand(inout s: S, n: u64) {
     let t = tg(in s, n);
-    if t == 7 {
+    if t == b_canon() {
         lit(inout s, "Canonical");
-    } else if t == 8 {
+    } else if t == b_named() {
         lit(inout s, "Named(ModelId(");
         let h39 = fa(in s, n);
         num(inout s, h39);
@@ -325,7 +365,7 @@ fn d_brand(inout s: S, n: u64) {
         lit(inout s, "Var(");
         let h38 = fa(in s, n);
         d_var(inout s, h38);
-        byte(inout s, 41);
+        byte(inout s, RPAREN);
     }
 }
 
@@ -343,18 +383,18 @@ fn d_trait_ref(inout s: S, n: u64) {
 
 fn d_ty(inout s: S, n: u64) {
     let t = tg(in s, n);
-    if t == 1 {
+    if t == t_ctor() {
         lit(inout s, "Ctor { ctor: TypeCtorId(");
         let h36 = fa(in s, n);
         num(inout s, h36);
         lit(inout s, "), args: ");
         d_list(inout s, n);
         lit(inout s, " }");
-    } else if t == 2 {
+    } else if t == t_var() {
         lit(inout s, "Var(");
         let h35 = fa(in s, n);
         d_var(inout s, h35);
-        byte(inout s, 41);
+        byte(inout s, RPAREN);
     } else {
         lit(inout s, "Projection(Projection { trait_ref: ");
         let tr = fa(in s, n);
@@ -381,7 +421,7 @@ fn d_row(inout s: S, n: u64) {
             lit(inout s, ", ");
         }
         let l = kid(in s, n, i);
-        if tg(in s, l) == 11 {
+        if tg(in s, l) == l_eff() {
             lit(inout s, "Effect { effect: EffectId(");
             let h33 = fa(in s, l);
             num(inout s, h33);
@@ -392,7 +432,7 @@ fn d_row(inout s: S, n: u64) {
             lit(inout s, "Capability(");
             let h32 = fa(in s, l);
             d_var(inout s, h32);
-            byte(inout s, 41);
+            byte(inout s, RPAREN);
         }
         i = inc(i);
     }
@@ -403,7 +443,7 @@ fn d_row(inout s: S, n: u64) {
     } else {
         lit(inout s, "Some(");
         d_var(inout s, t);
-        byte(inout s, 41);
+        byte(inout s, RPAREN);
     }
     lit(inout s, " }");
 }
@@ -411,16 +451,16 @@ fn d_row(inout s: S, n: u64) {
 // `GenericArg` Debug.
 pub fn d_arg(inout s: S, n: u64) {
     let t = tg(in s, n);
-    if t <= 3 {
+    if t <= t_proj() {
         lit(inout s, "Ty(");
         d_ty(inout s, n);
-    } else if t <= 5 {
+    } else if t <= m_var() {
         lit(inout s, "Mode(");
         d_mode_term(inout s, n);
-    } else if t == 6 {
+    } else if t == g_row() {
         lit(inout s, "Row(");
         d_row(inout s, n);
-    } else if t <= 9 {
+    } else if t <= b_var() {
         lit(inout s, "Brand(");
         d_brand(inout s, n);
     } else {
@@ -428,7 +468,7 @@ pub fn d_arg(inout s: S, n: u64) {
         let h31 = fa(in s, n);
         d_var(inout s, h31);
     }
-    byte(inout s, 41);
+    byte(inout s, RPAREN);
 }
 
 fn d_source(inout s: S, src: u64) {
@@ -444,24 +484,24 @@ fn d_source(inout s: S, src: u64) {
 // `Step` Debug.
 pub fn d_step(inout s: S, n: u64) {
     let t = tg(in s, n);
-    if t == 18 {
+    if t == st_conf() {
         lit(inout s, "Conformance { source: ");
         let h30 = fa(in s, n);
         d_source(inout s, h30);
         lit(inout s, ", args: ");
         d_list(inout s, n);
         lit(inout s, " }");
-    } else if t == 19 {
+    } else if t == st_assume() {
         lit(inout s, "Assumption { index: ");
         let h29 = fa(in s, n);
         num(inout s, h29);
         lit(inout s, " }");
-    } else if t == 20 {
+    } else if t == st_alias() {
         lit(inout s, "AliasBound { bound: ");
         let h28 = fa(in s, n);
         num(inout s, h28);
         lit(inout s, " }");
-    } else if t == 21 {
+    } else if t == st_pconf() {
         lit(inout s, "ProjectionConformance { source: ");
         let h27 = fa(in s, n);
         d_source(inout s, h27);
@@ -471,16 +511,16 @@ pub fn d_step(inout s: S, n: u64) {
         let h26 = fb(in s, n);
         num(inout s, h26);
         lit(inout s, " }");
-    } else if t == 22 {
+    } else if t == st_passume() {
         lit(inout s, "ProjectionAssumption { index: ");
         let h25 = fa(in s, n);
         num(inout s, h25);
         lit(inout s, " }");
-    } else if t == 23 {
+    } else if t == st_rigid() {
         lit(inout s, "RigidProjection");
-    } else if t == 24 {
+    } else if t == st_mode() {
         lit(inout s, "Mode");
-    } else if t == 25 {
+    } else if t == st_norm() {
         lit(inout s, "Normalize");
     } else {
         lit(inout s, "CoinductiveHypothesis");
@@ -521,7 +561,7 @@ pub fn r_source(inout s: S, c: u64) {
 
 fn goal_tick(inout s: S, depth: u64, g: u64) {
     pad(inout s, depth);
-    byte(inout s, 96);
+    byte(inout s, BACKTICK);
     r_goal(inout s, g);
     lit(inout s, "`: ");
 }
@@ -531,21 +571,21 @@ pub fn r_failure(inout s: S, f: u64, depth: u64) {
     let r = fb(in s, f);
     let t = tg(in s, r);
     goal_tick(inout s, depth, g);
-    if t == 44 {
+    if t == r_nocand() {
         lit(inout s, "no matching impl, model or assumption\n");
-    } else if t == 46 {
+    } else if t == R_MODE_TAG {
         lit(inout s, "mode ");
         let a = fa(in s, r);
         r_mode(inout s, a);
         lit(inout s, " is not below ");
         let b = fb(in s, r);
         r_mode(inout s, b);
-        byte(inout s, 10);
-    } else if t == 47 {
+        byte(inout s, NEWLINE);
+    } else if t == r_modelmis() {
         let h24 = fa(in s, r);
         r_id(inout s, "model", h24);
         lit(inout s, " does not model this trait\n");
-    } else if t == 48 {
+    } else if t == r_indcyc() {
         lit(inout s, "inductive cycle without a base case\n");
     } else {
         lit(inout s, "every candidate failed\n");
@@ -561,7 +601,7 @@ pub fn r_failure(inout s: S, f: u64, depth: u64) {
             lit(inout s, "  ");
             let h23 = fa(in s, c);
             r_source(inout s, h23);
-            if tg(in s, cause) == 50 {
+            if tg(in s, cause) == c_nested() {
                 lit(inout s, " requires\n");
                 let inner = fa(in s, cause);
                 r_failure(inout s, inner, wrapping_add(depth, 2));

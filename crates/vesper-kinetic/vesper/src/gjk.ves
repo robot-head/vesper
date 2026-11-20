@@ -19,6 +19,22 @@ pub copy struct V3 {
     z: f64,
 }
 
+// IEEE 754 binary64: the sign-clearing mask, the exponent field, +infinity
+// and the least positive normal (f64::MIN_POSITIVE).
+const F64_ABS_MASK: u64 = 0x7fffffffffffffff;
+const F64_EXP_MASK: u64 = 0x7ff0000000000000;
+const F64_INFINITY_BITS: u64 = 0x7ff0000000000000;
+const F64_MIN_POSITIVE_BITS: u64 = 0x0010000000000000;
+// src/gjk.rs: the relative tolerance (and its square, for squared
+// lengths) of GJK's convergence, the Gram pivots and EPA's degenerate
+// seeds; the GJK and EPA iteration caps; and the 3-by-4 Gram system.
+const REL_TOL: f64 = 0.000000000001;
+const REL_TOL_SQ: f64 = 0.000000000000000000000001;
+const GJK_MAX_ITER: u64 = 128;
+const EPA_MAX_ITER: u64 = 256;
+const GRAM_COLS: u64 = 4;
+const GRAM_LEN: u64 = 12;
+
 copy struct Sp {
     w: V3,
     a: V3,
@@ -101,15 +117,15 @@ fn eq3(a: V3, b: V3) -> bool {
 }
 
 fn fabs(x: f64) -> f64 {
-    from_bits_f64(to_bits_f64(x) & 0x7fffffffffffffff)
+    from_bits_f64(to_bits_f64(x) & F64_ABS_MASK)
 }
 
 fn finite(x: f64) -> bool {
-    (to_bits_f64(x) & 0x7ff0000000000000) != 0x7ff0000000000000
+    (to_bits_f64(x) & F64_EXP_MASK) != F64_EXP_MASK
 }
 
 fn inf() -> f64 {
-    from_bits_f64(0x7ff0000000000000)
+    from_bits_f64(F64_INFINITY_BITS)
 }
 
 // f64::max: the other operand when one is NaN.
@@ -266,11 +282,11 @@ fn support_point(ka: u32, in da: Slice[f64], kb: u32, in db: Slice[f64], dir: V3
 
 // Row `r`, column `c` of the 3 x 4 elimination matrix in `g`.
 fn gm(in g: ChunkSeq[f64], r: u64, c: u64) -> f64 {
-    fd_at(in g, wrapping_add(wrapping_mul(r, 4), c))
+    fd_at(in g, wrapping_add(wrapping_mul(r, GRAM_COLS), c))
 }
 
 fn gset(inout g: ChunkSeq[f64], r: u64, c: u64, v: f64) {
-    g.try_set(wrapping_add(wrapping_mul(r, 4), c), v);
+    g.try_set(wrapping_add(wrapping_mul(r, GRAM_COLS), c), v);
 }
 
 // Index of the `k`-th set bit of `mask`.
@@ -318,7 +334,7 @@ fn affine_closest(in pts: ChunkSeq[Sp], mask: u64, inout lam: ChunkSeq[f64], ino
     for i in 0..m {
         scale_ref = fmax(scale_ref, gm(in g, i, i));
     }
-    let tiny = 0.000000000001 * fmax(scale_ref, from_bits_f64(0x0010000000000000));
+    let tiny = REL_TOL * fmax(scale_ref, from_bits_f64(F64_MIN_POSITIVE_BITS));
     for col in 0..m {
         let mut piv = col;
         for row in inc(col)..m {
@@ -429,8 +445,8 @@ fn gjk_cores(
     lam.resize(4, 0.0);
     let mut best_l: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](4);
     best_l.resize(4, 0.0);
-    let mut g: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](12);
-    g.resize(12, 0.0);
+    let mut g: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](GRAM_LEN);
+    g.resize(GRAM_LEN, 0.0);
     let start = sub(some_point(ka, in da), some_point(kb, in db));
     let first = support_point(ka, in da, kb, in db, scale(start, -1.0));
     simplex.clear();
@@ -442,9 +458,9 @@ fn gjk_cores(
     let mut converged = false;
     let mut stalled = false;
     let mut best_vv = inf();
-    for it in 0..u(128) {
+    for it in 0..u(GJK_MAX_ITER) {
         let vv = dot(v, v);
-        if vv <= 0.000000000000000000000001 * size * size || simplex.len() == 4 {
+        if vv <= REL_TOL_SQ * size * size || simplex.len() == 4 {
             converged = true;
             break;
         }
@@ -461,7 +477,7 @@ fn gjk_cores(
                 seen = true;
             }
         }
-        if vv - dot(v, p.w) <= 0.000000000001 * vv || seen {
+        if vv - dot(v, p.w) <= REL_TOL * vv || seen {
             converged = true;
             break;
         }
@@ -481,13 +497,13 @@ fn gjk_cores(
     }
     let vv = dot(v, v);
     let distance = if vv
-        <= 0.000000000000000000000001
+        <= REL_TOL_SQ
         * size
         * size
         || simplex
         .len()
         == 4
-        || (stalled && vv <= 0.000000000001 * size * size) {
+        || (stalled && vv <= REL_TOL * size * size) {
         0.0
     } else {
         sqrt(vv)
@@ -551,9 +567,8 @@ fn canonical_sign(v: V3) -> V3 {
     }
 }
 
-fn epa_tol() -> f64 {
-    0.000000001
-}
+// src/gjk.rs EPA_TOL: EPA stops when a face is this close (relative).
+const EPA_TOL: f64 = 0.000000001;
 
 // make_face of src/gjk.rs; `false` when the face has no normal.
 fn make_face(in pts: ChunkSeq[Sp], i: u64, j: u64, k: u64, inside: V3, inout out: ChunkSeq[Face])
@@ -707,14 +722,14 @@ fn epa(
     let p3 = far(in cand, 2, a0, a1, plane);
     let a3 = sp_at(in cand, p3).w;
     let extent = norm(sub(a1, a0));
-    if !(extent > 0.000000000001) {
+    if !(extent > REL_TOL) {
         return flat_result(flat_normal(z, z), inout res);
     }
-    if !(norm(plane) > 0.000000000001 * extent * extent) {
+    if !(norm(plane) > REL_TOL * extent * extent) {
         return flat_result(flat_normal(sub(a1, a0), z), inout res);
     }
     let volume = fabs(dot(sub(a3, a0), plane));
-    if !(volume > 0.000000000001 * extent * extent * extent) {
+    if !(volume > REL_TOL * extent * extent * extent) {
         return flat_result(flat_normal(sub(a1, a0), plane), inout res);
     }
     let mut pts: ChunkSeq[Sp] = ChunkSeq::with_capacity[Sp](64);
@@ -731,10 +746,10 @@ fn epa(
         return degenerate();
     }
     let size = fmax(extent, 1.0);
-    let tol = epa_tol() * size;
+    let tol = EPA_TOL * size;
     let mut horizon: ChunkSeq[Edge] = ChunkSeq::with_capacity[Edge](32);
     let mut kept: ChunkSeq[Face] = ChunkSeq::with_capacity[Face](64);
-    for it in 0..u(256) {
+    for it in 0..u(EPA_MAX_ITER) {
         let mut best: u64 = 0;
         for i in 0..faces.len() {
             if face_at(in faces, i).dist < face_at(in faces, best).dist {

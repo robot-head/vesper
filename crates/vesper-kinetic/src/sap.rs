@@ -45,6 +45,15 @@ pub const WORKGROUP: usize = 256;
 /// Radix digit width in bits.
 const RADIX_BITS: u32 = 8;
 const RADIX: usize = 1 << RADIX_BITS;
+/// IEEE 754 binary32's sign bit.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_SIGN_BIT: u32 = 0x8000_0000;
+/// A pair key takes eight radix passes, or four once indices fit in 16
+/// bits (at most 65,536 of them).
+const PAIR_PASSES: u32 = 8;
+const SMALL_PAIR_PASSES: u32 = 4;
+const SMALL_INDEX_COUNT: usize = 1 << 16;
+const SMALL_INDEX_MASK: u64 = 0xffff;
 
 /// Typed sort-and-sweep failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +102,7 @@ pub fn sortable(x: f32) -> u32 {
     #[cfg(not(vesper_port))]
     {
         let b = x.to_bits();
-        if b >> 31 == 1 { !b } else { b | 0x8000_0000 }
+        if b >> 31 == 1 { !b } else { b | F32_SIGN_BIT }
     }
 }
 
@@ -518,18 +527,22 @@ impl SweepAndPrune {
                 }
             });
             // 9. Sort the pair keys.
-            let passes = if n <= 1 << 16 { 4 } else { 8 };
-            if passes == 4 {
+            let passes = if n <= SMALL_INDEX_COUNT {
+                SMALL_PAIR_PASSES
+            } else {
+                PAIR_PASSES
+            };
+            if passes == SMALL_PAIR_PASSES {
                 // Indices fit in 16 bits: compress each key to 32 bits so four
                 // passes sort it.
                 for k in &mut self.pair_keys {
-                    *k = ((*k >> 32) << 16) | (*k & 0xffff);
+                    *k = ((*k >> 32) << 16) | (*k & SMALL_INDEX_MASK);
                 }
             }
             radix_sort(&mut self.pair_keys, None, passes, &mut self.sort);
             for &k in &self.pair_keys {
-                let (a, b) = if passes == 4 {
-                    ((k >> 16) as u32, (k & 0xffff) as u32)
+                let (a, b) = if passes == SMALL_PAIR_PASSES {
+                    ((k >> 16) as u32, (k & SMALL_INDEX_MASK) as u32)
                 } else {
                     ((k >> 32) as u32, k as u32)
                 };

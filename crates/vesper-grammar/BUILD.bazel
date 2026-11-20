@@ -43,15 +43,15 @@ vesper_crate(
 # module with that module's edit, each linked into the test file that covers
 # the module.
 DIVERGENT = {
-    "framing": ("framing", {"value = value | shl(byte & 127, wrapping_mul(i, 7));": "value = value | shl(byte & 127, wrapping_mul(i, 6));"}),
+    "framing": ("framing", {"value = value | shl(byte & LEB128_PAYLOAD, wrapping_mul(i, LEB128_SHIFT));": "value = value | shl(byte & LEB128_PAYLOAD, wrapping_mul(i, 6));"}),
     "arrow": ("arrow", {"if (value >= 0) == (sum >= 0) && (next >= 0) != (sum >= 0) {": "if (value >= 0) == (sum >= 0) && (next >= 0) != (sum >= 0) && sum < 0 {"}),
     "capnp": ("capnp", {"let pad: u64 = if count & 1 == 0 {": "let pad: u64 = if count & 1 == 1 {"}),
     "capnp_packed": ("capnp", {"group = wrapping_add(group, additional);": "group = wrapping_add(group, wrapping_add(additional, 1));"}),
-    "grammar": ("grammar", {"max_depth: min(sw(in lim, 4), 64),": "max_depth: min(sw(in lim, 4), 3),"}),
+    "grammar": ("grammar", {"max_depth: min(sw(in lim, 4), HARD_MAX_DEPTH),": "max_depth: min(sw(in lim, 4), 3),"}),
     "codec": ("codec", {"let len = leb_len(n);": "let len = leb_len(wrapping_add(n, 1));"}),
-    "protobuf": ("protobuf", {"        low | 18446744069414584320": "        low"}),
+    "protobuf": ("protobuf", {"        low | HIGH_32_ONES": "        low"}),
     "der": ("der", {"if less(\n": "if !less(\n"}),
-    "ipc": ("ipc", {"if version != 3 && version != 4 {": "if version != 4 {"}),
+    "ipc": ("ipc", {"if version != METADATA_V4 && version != METADATA_V5 {": "if version != METADATA_V5 {"}),
 }
 
 # The test file of each module's check (see tests/divergence.rs).

@@ -1,0 +1,9 @@
+[package]
+name = "@vesper/highlight"
+version = "0.1.0"
+edition = "2026"
+# Classification only computes: no I/O, clock or network.
+capability_ceiling = ["Fail"]
+
+[dependencies]
+"@vesper/front" = { version = "^0.1", path = "../../../packages/vesper-front" }

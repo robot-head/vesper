@@ -46,6 +46,11 @@ pub const CERT_DATA_QE_REPORT: u16 = 6;
 pub const CERT_DATA_PCK_CHAIN_PEM: u16 = 5;
 /// Upper bound on the signature-data section; real quotes are ~5 KiB.
 pub const MAX_SIG_DATA_LEN: usize = 64 * 1024;
+/// A v5 body descriptor: `body_type` (u16) and `body_size` (u32).
+const TDX_BODY_DESCRIPTOR_LEN: usize = 6;
+/// `vm_index` of a TD 1.5 "ex" body: 0 to 3.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const TD15_MAX_VM_INDEX: u8 = 3;
 /// `TDATTRIBUTES.DEBUG` (bit 0).
 pub const TD_ATTRIBUTE_DEBUG: u64 = 1;
 
@@ -119,7 +124,7 @@ impl Td15ExFields {
     #[cfg(not(vesper_port))]
     fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         let vm_index: [u8; 1] = r.array("body.vm_index")?;
-        if vm_index[0] > 3 {
+        if vm_index[0] > TD15_MAX_VM_INDEX {
             return Err(unsupported("body.vm_index", vm_index[0].into()));
         }
         Ok(Td15ExFields {
@@ -346,14 +351,14 @@ impl TdxQuote {
     /// Bounds-checked parse; the input must contain exactly one quote.
     #[cfg(vesper_port)]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        Ok(Self::parse_port(bytes, 0)?.0)
+        Ok(Self::parse_port(bytes, crate::port::TAIL_EXACT)?.0)
     }
 
     /// Parse a quote from a fixed-size quote buffer: bytes after the
     /// quote's declared length must all be zero.
     #[cfg(vesper_port)]
     pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
-        Ok(Self::parse_port(bytes, 1)?.0)
+        Ok(Self::parse_port(bytes, crate::port::TAIL_PADDED)?.0)
     }
 
     /// Bounds-checked parse; the input must contain exactly one quote.
@@ -387,7 +392,7 @@ impl TdxQuote {
     /// of bytes it occupies (header, body, length and signature data).
     #[cfg(vesper_port)]
     pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
-        Self::parse_port(bytes, 2)
+        Self::parse_port(bytes, crate::port::TAIL_PREFIX)
     }
 
     /// `mode`: 0 exact, 1 zero padded, 2 prefix (vesper/src/reader.ves).
@@ -549,7 +554,8 @@ impl TdxQuote {
     /// Header and body (with the v5 body descriptor): the bytes the
     /// attestation key signs.
     pub fn signed_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(TDX_HEADER_LEN + 6 + TDX_BODY_TD15_EX_LEN);
+        let mut out =
+            Vec::with_capacity(TDX_HEADER_LEN + TDX_BODY_DESCRIPTOR_LEN + TDX_BODY_TD15_EX_LEN);
         self.header.encode(&mut out);
         let mut body = Vec::with_capacity(TDX_BODY_TD15_EX_LEN);
         self.body.encode(&mut body);

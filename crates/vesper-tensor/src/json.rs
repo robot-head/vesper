@@ -150,6 +150,18 @@ struct Parser<'a> {
     at: usize,
 }
 const BAD: Error = Error::Malformed("JSON header");
+/// UTF-16 surrogate halves (Unicode §3.8); a `\u` escape pair encodes one
+/// supplementary-plane code point (RFC 8259 §7).
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HIGH_SURROGATES: std::ops::Range<u32> = 0xd800..0xdc00;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LOW_SURROGATES: std::ops::Range<u32> = 0xdc00..0xe000;
+/// The first code point outside the Basic Multilingual Plane.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SUPPLEMENTARY_BASE: u32 = 0x1_0000;
+/// JSON strings must escape `U+0000` through `U+001F` (RFC 8259 §7).
+#[cfg_attr(vesper_port, allow(dead_code))]
+const CONTROL_END: u8 = 0x20;
 
 #[cfg_attr(vesper_port, allow(dead_code))]
 impl Parser<'_> {
@@ -296,14 +308,16 @@ impl Parser<'_> {
                         b't' => '\t',
                         b'u' => {
                             let hi = self.hex4()?;
-                            let code = if (0xd800..0xdc00).contains(&hi) {
+                            let code = if HIGH_SURROGATES.contains(&hi) {
                                 self.literal(b"\\u")?;
                                 let lo = self.hex4()?;
-                                if !(0xdc00..0xe000).contains(&lo) {
+                                if !LOW_SURROGATES.contains(&lo) {
                                     return Err(Error::Malformed("unpaired JSON surrogate"));
                                 }
-                                0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
-                            } else if (0xdc00..0xe000).contains(&hi) {
+                                SUPPLEMENTARY_BASE
+                                    + ((hi - HIGH_SURROGATES.start) << 10)
+                                    + (lo - LOW_SURROGATES.start)
+                            } else if LOW_SURROGATES.contains(&hi) {
                                 return Err(Error::Malformed("unpaired JSON surrogate"));
                             } else {
                                 hi
@@ -315,7 +329,9 @@ impl Parser<'_> {
                     let mut buf = [0u8; 4];
                     out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                 }
-                0x00..=0x1f => return Err(Error::Malformed("control character in JSON string")),
+                0x00..CONTROL_END => {
+                    return Err(Error::Malformed("control character in JSON string"))
+                }
                 _ => out.push(b),
             }
         }
@@ -331,7 +347,9 @@ pub fn quote(s: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < u32::from(CONTROL_END) => {
+                out.push_str(&format!("\\u{:04x}", c as u32))
+            }
             c => out.push(c),
         }
     }

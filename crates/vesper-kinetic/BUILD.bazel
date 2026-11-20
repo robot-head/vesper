@@ -46,7 +46,7 @@ filegroup(
         (
             "morton",
             "lib",
-            "if (code & 0xc0000000) != 0 {",
+            "if (code & MORTON30_HIGH_BITS) != 0 {",
             "if (code & 0x80000000) != 0 {",
         ),
         (

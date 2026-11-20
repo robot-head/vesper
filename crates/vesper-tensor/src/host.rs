@@ -76,29 +76,41 @@ pub struct Limits {
     /// not a count of CPU instructions or a wall-clock bound.
     pub max_work: u64,
 }
+const DEFAULT_MAX_NODES: usize = 256;
+const DEFAULT_MAX_DEPTH: usize = 64;
+const DEFAULT_MAX_VALUES: usize = 1 << 20;
+const DEFAULT_MAX_BYTES: usize = 8 << 20;
+const DEFAULT_MAX_WORK: u64 = 1 << 24;
+/// The largest values [`Limits`] accepts; a configuration above them is a
+/// host configuration error.
+const CEILING_MAX_NODES: usize = 4096;
+const CEILING_MAX_DEPTH: usize = 128;
+const CEILING_MAX_VALUES: usize = 1 << 24;
+const CEILING_MAX_BYTES: usize = 128 << 20;
+const CEILING_MAX_WORK: u64 = 1_000_000_000;
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_nodes: 256,
-            max_depth: 64,
-            max_values: 1_048_576,
-            max_bytes: 8_388_608,
-            max_work: 16_777_216,
+            max_nodes: DEFAULT_MAX_NODES,
+            max_depth: DEFAULT_MAX_DEPTH,
+            max_values: DEFAULT_MAX_VALUES,
+            max_bytes: DEFAULT_MAX_BYTES,
+            max_work: DEFAULT_MAX_WORK,
         }
     }
 }
 impl Limits {
     fn validate(self) -> Result<(), Error> {
         if self.max_nodes == 0
-            || self.max_nodes > 4096
+            || self.max_nodes > CEILING_MAX_NODES
             || self.max_depth == 0
-            || self.max_depth > 128
+            || self.max_depth > CEILING_MAX_DEPTH
             || self.max_values == 0
-            || self.max_values > 16_777_216
+            || self.max_values > CEILING_MAX_VALUES
             || self.max_bytes == 0
-            || self.max_bytes > 134_217_728
+            || self.max_bytes > CEILING_MAX_BYTES
             || self.max_work == 0
-            || self.max_work > 1_000_000_000
+            || self.max_work > CEILING_MAX_WORK
         {
             return Err(Error::Limit("host configuration"));
         }
@@ -568,22 +580,69 @@ fn matvec(
     Ok(result)
 }
 
+/// IEEE 754 binary32 and binary16 bit fields (IEEE 754-2019 §3.4), shared by
+/// the binary16, BF16 and microscaling codecs.
+#[cfg_attr(vesper_port, allow(dead_code))]
+pub(crate) mod ieee {
+    /// Binary32 biased-exponent field, in place.
+    pub const F32_EXP_MASK: u32 = 0x7f80_0000;
+    /// Binary32 trailing significand field (23 bits).
+    pub const F32_MANT_MASK: u32 = 0x007f_ffff;
+    /// The implicit leading significand bit of a normal binary32.
+    pub const F32_IMPLICIT_BIT: u32 = 0x0080_0000;
+    /// Width of the binary32 trailing significand.
+    pub const F32_MANT_BITS: u32 = 23;
+    /// Biased exponent field value after shifting down (all ones = Inf/NaN).
+    pub const F32_EXP_FIELD: u32 = 0xff;
+    /// Binary32 exponent bias.
+    pub const F32_BIAS: i32 = 127;
+    /// Minimum binary32 subnormal exponent: a subnormal is `mantissa * 2^-149`.
+    pub const F32_SUBNORMAL_EXP: i32 = 149;
+    /// Binary16 sign bit.
+    pub const F16_SIGN: u16 = 0x8000;
+    /// Width of the binary16 trailing significand.
+    pub const F16_MANT_BITS: u32 = 10;
+    /// Binary16 trailing significand field (10 bits).
+    pub const F16_MANT_MASK: u16 = 0x03ff;
+    /// Binary16 exponent field after shifting down (all ones = Inf/NaN).
+    pub const F16_EXP_FIELD: u16 = 0x1f;
+    /// Binary16 positive infinity.
+    pub const F16_INFINITY: u16 = 0x7c00;
+    /// Binary16 canonical quiet NaN (infinity plus the quiet bit).
+    pub const F16_QUIET_NAN: u16 = 0x7e00;
+    /// Binary32 bias minus binary16 bias (127 - 15).
+    pub const F32_TO_F16_REBIAS: i32 = 112;
+    /// Significand bits dropped going from binary32 to binary16 (23 - 10).
+    pub const F32_TO_F16_SHIFT: u32 = 13;
+    /// BF16 keeps the high half of a binary32.
+    pub const BF16_SHIFT: u32 = 16;
+    /// BF16 quiet bit (the top trailing significand bit).
+    pub const BF16_QUIET_BIT: u16 = 0x0040;
+}
+
 /// Exact IEEE binary16→binary32 conversion, including signed zero, subnormals,
 /// infinities and NaNs. The executor rejects nonfinite scales after decoding.
 /// NaNs keep payload bits shifted to binary32; no arithmetic is performed here.
 pub fn decode_fp16(bits: u16) -> f32 {
-    let sign = (u32::from(bits & 0x8000)) << 16;
-    let exponent = (bits >> 10) & 31;
-    let fraction = u32::from(bits & 1023);
+    use ieee::*;
+    let sign = (u32::from(bits & F16_SIGN)) << BF16_SHIFT;
+    let exponent = (bits >> F16_MANT_BITS) & F16_EXP_FIELD;
+    let fraction = u32::from(bits & F16_MANT_MASK);
     let out = match exponent {
         0 if fraction == 0 => sign,
         0 => {
-            let shift = fraction.leading_zeros() - 21;
+            // Move the leading fraction bit up to the implicit-bit position.
+            let shift = fraction.leading_zeros() - (u32::BITS - F16_MANT_BITS - 1);
             let normalized = fraction << shift;
-            sign | ((113 - shift) << 23) | ((normalized & 1023) << 13)
+            let exp = (F32_TO_F16_REBIAS as u32 + 1) - shift;
+            sign | (exp << F32_MANT_BITS)
+                | ((normalized & u32::from(F16_MANT_MASK)) << F32_TO_F16_SHIFT)
         }
-        31 => sign | 0x7f80_0000 | (fraction << 13),
-        _ => sign | ((u32::from(exponent) + 112) << 23) | (fraction << 13),
+        F16_EXP_FIELD => sign | F32_EXP_MASK | (fraction << F32_TO_F16_SHIFT),
+        _ => {
+            let exp = u32::from(exponent) + F32_TO_F16_REBIAS as u32;
+            sign | (exp << F32_MANT_BITS) | (fraction << F32_TO_F16_SHIFT)
+        }
     };
     f32::from_bits(out)
 }

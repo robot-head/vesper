@@ -115,6 +115,26 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
+        "test/imported_source_tests": glob([
+            "packages/vesper-ast/Loom.toml",
+            "packages/vesper-ast/src/*.ves",
+            "packages/vesper-front/Loom.toml",
+            "packages/vesper-front/src/*.ves",
+            "packages/vesper-std/*/Loom.toml",
+            "packages/vesper-std/*/src/*.ves",
+        ]) + [
+            "//crates/vesper-prism-h3:files",
+            "//crates/vesper-semver:files",
+        ],
+        "test/test_runner_cli": glob([
+            "packages/vesper-std/*/src/*.ves",
+        ]) + [
+            "//crates/vesper-crucible:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-simpulse:files",
+            "packages/vesper-ast/src/text.ves",
+            "packages/vesper-front/src/util.ves",
+        ],
         # Self-hosting SH0 lane 7 (#1129): the front end v2 against the Rust
         # parser on the root package's `.ves` files and the parser test suites.
         # Anchored globs: a root `**` glob without the vesper_crate `_NEVER`
@@ -129,6 +149,40 @@ vesper_crate(
             "tests/self_host_parse.rs",
             "tests/self_host_front_end.rs",
         ]) + ["//crates/vesper-syntax:files"],
+        # Self-hosting SH1 lane 9 (#1152): the Vesper AST against vesper_core::ast
+        # on the same corpus as the front end v2 differential. Anchored globs.
+        "test/self_host_ast": glob([
+            "examples/**/*.ves",
+            "packages/**/*.ves",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "packages/vesper-ast/**",
+            "packages/vesper-front/**",
+            "packages/vesper-std/**",
+            "tests/self_host_parse.rs",
+            "tests/self_host_front_end.rs",
+            "tests/self_host_front_v2.rs",
+        ]) + ["//crates/vesper-syntax:files"],
+        # Self-hosting SH2 lane 4 (#1176): @vesper/check-data and the shared
+        # differential harness over the corpus the root package can declare
+        # (crates/* are their own Bazel packages; Cargo runs the full corpus).
+        # Anchored globs.
+        "test/self_host_check_data": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        "test/self_host_check_harness": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH2 lane 7 (#1179): core typing on the same corpus.
+        "test/self_host_check_core_typing": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -175,8 +229,8 @@ vesper_crate(
     # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself.
     test_shards = {"test/self_host_front_end": 4},
     # Reservations include subprocess overhead; they do not enforce RSS limits.
-    # `lean_replay` marks the Lean/Logos replay suite. PR runs of "Test all
-    # targets" skip it unless Lean-facing paths change; pushes to main run it
+    # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
+    # scripts" when Lean-facing paths change and on pushes to main
     # (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md "PR test tiers").
     test_tags = {
         # These harnesses can run several compiler/evaluator cases in parallel.
@@ -424,6 +478,8 @@ vesper_crate(
         "test/format_proof_cli": "long",
         "test/forge_provenance_cli": "long",
         "test/verify_extract_cli": "long",
+        # Front-end and AST tests check and lower their full package closures.
+        "test/imported_source_tests": "long",
         # Fresh replay covers both complete model import closures.
         "test/logos42_acceptance": "eternal",
         "test/oracle42_acceptance": "long",
@@ -437,8 +493,15 @@ vesper_crate(
         "test/self_host_front_end": "long",
         # The front end v2 differential (#1129) takes about 140 s unoptimized.
         "test/self_host_front_v2": "long",
+        # The AST differential (#1152) runs the front end v2 and the lowering.
+        "test/self_host_ast": "long",
         # The Vesper-source checker corpus and JIT checks exceed 300 s on macOS.
         "test/self_host_check": "long",
+        # The checker data differential (#1176) checks every corpus world.
+        "test/self_host_check_data": "long",
+        "test/self_host_check_harness": "long",
+        # The core typing differential (#1179) checks every corpus world.
+        "test/self_host_check_core_typing": "long",
     },
 )
 
@@ -463,6 +526,59 @@ vesper_package(
     srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
     manifest = "packages/vesper-std/sort/Loom.toml",
     visibility = ["//visibility:public"],
+)
+
+# The front end v2 and @vesper-std/hash(-sys) as dependencies of the fmt and
+# highlight ports (self-hosting SH1 lane 11, #1154).
+vesper_package(
+    name = "front_package",
+    srcs = glob(["packages/vesper-front/src/**/*.ves"]),
+    manifest = "packages/vesper-front/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "std_hash_package",
+    srcs = glob(["packages/vesper-std/hash/src/**/*.ves"]),
+    manifest = "packages/vesper-std/hash/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+# The AST and @vesper-std/arena and intern as dependencies of the lint port
+# (self-hosting SH1 lane 13, #1156) and of the hybrid compiler's parse module
+# (lane 12, #1155).
+vesper_package(
+    name = "std_arena_package",
+    srcs = glob(["packages/vesper-std/arena/src/**/*.ves"]),
+    manifest = "packages/vesper-std/arena/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "std_intern_package",
+    srcs = glob(["packages/vesper-std/intern/src/**/*.ves"]),
+    manifest = "packages/vesper-std/intern/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "ast_package",
+    srcs = glob(["packages/vesper-ast/src/**/*.ves"]),
+    manifest = "packages/vesper-ast/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":front_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
+)
+
+vesper_package(
+    name = "std_hash_sys_package",
+    srcs = glob(["packages/vesper-std/hash/sys/src/**/*.ves"]),
+    manifest = "packages/vesper-std/hash/sys/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":std_hash_package"],
 )
 
 filegroup(

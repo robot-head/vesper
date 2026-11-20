@@ -5,6 +5,28 @@ use crate::insn::{
 };
 use std::fmt;
 
+/// `enum bpf_map_type` values of the supported kinds.
+pub const BPF_MAP_TYPE_HASH: u32 = 1;
+pub const BPF_MAP_TYPE_ARRAY: u32 = 2;
+pub const BPF_MAP_TYPE_PERCPU_HASH: u32 = 5;
+pub const BPF_MAP_TYPE_PERCPU_ARRAY: u32 = 6;
+pub const BPF_MAP_TYPE_LRU_HASH: u32 = 9;
+pub const BPF_MAP_TYPE_RINGBUF: u32 = 27;
+pub const BPF_MAP_TYPE_PROG_ARRAY: u32 = 3;
+
+/// `BPF_OBJ_NAME_LEN`: map names hold at most 15 bytes and a NUL.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const BPF_OBJ_NAME_LEN: usize = 16;
+/// The smallest ring buffer: one page.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const RINGBUF_MIN_SIZE: u32 = 4096;
+/// `MAX_BPF_STACK`, the kernel's bound on a map key.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MAX_BPF_STACK: u32 = 512;
+/// The largest map value this crate accepts (1 MiB).
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MAX_VALUE_SIZE: u32 = 1 << 20;
+
 /// Kernel map types this crate supports (`enum bpf_map_type`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MapKind {
@@ -27,13 +49,13 @@ impl MapKind {
     #[cfg(not(vesper_port))]
     pub fn kernel_type(self) -> u32 {
         match self {
-            MapKind::Hash => 1,
-            MapKind::Array => 2,
-            MapKind::PerCpuHash => 5,
-            MapKind::PerCpuArray => 6,
-            MapKind::LruHash => 9,
-            MapKind::RingBuf => 27,
-            MapKind::ProgArray => 3,
+            MapKind::Hash => BPF_MAP_TYPE_HASH,
+            MapKind::Array => BPF_MAP_TYPE_ARRAY,
+            MapKind::PerCpuHash => BPF_MAP_TYPE_PERCPU_HASH,
+            MapKind::PerCpuArray => BPF_MAP_TYPE_PERCPU_ARRAY,
+            MapKind::LruHash => BPF_MAP_TYPE_LRU_HASH,
+            MapKind::RingBuf => BPF_MAP_TYPE_RINGBUF,
+            MapKind::ProgArray => BPF_MAP_TYPE_PROG_ARRAY,
         }
     }
 
@@ -45,13 +67,13 @@ impl MapKind {
     #[cfg(not(vesper_port))]
     pub fn from_kernel_type(t: u32) -> Option<MapKind> {
         Some(match t {
-            1 => MapKind::Hash,
-            2 => MapKind::Array,
-            5 => MapKind::PerCpuHash,
-            6 => MapKind::PerCpuArray,
-            9 => MapKind::LruHash,
-            27 => MapKind::RingBuf,
-            3 => MapKind::ProgArray,
+            BPF_MAP_TYPE_HASH => MapKind::Hash,
+            BPF_MAP_TYPE_ARRAY => MapKind::Array,
+            BPF_MAP_TYPE_PERCPU_HASH => MapKind::PerCpuHash,
+            BPF_MAP_TYPE_PERCPU_ARRAY => MapKind::PerCpuArray,
+            BPF_MAP_TYPE_LRU_HASH => MapKind::LruHash,
+            BPF_MAP_TYPE_RINGBUF => MapKind::RingBuf,
+            BPF_MAP_TYPE_PROG_ARRAY => MapKind::ProgArray,
             _ => return None,
         })
     }
@@ -118,7 +140,7 @@ impl MapDef {
 
     #[cfg(not(vesper_port))]
     pub fn validate(&self) -> Result<(), String> {
-        if self.name.is_empty() || self.name.len() > 15 || !self.name.is_ascii() {
+        if self.name.is_empty() || self.name.len() >= BPF_OBJ_NAME_LEN || !self.name.is_ascii() {
             return Err(format!(
                 "map name {:?} must be 1..=15 ASCII bytes",
                 self.name
@@ -130,7 +152,7 @@ impl MapDef {
                     return Err("ringbuf key and value size must be 0".into());
                 }
                 let n = self.max_entries;
-                if n < 4096 || !n.is_power_of_two() {
+                if n < RINGBUF_MIN_SIZE || !n.is_power_of_two() {
                     return Err("ringbuf size must be a power of two >= 4096".into());
                 }
             }
@@ -144,10 +166,10 @@ impl MapDef {
                 if k == MapKind::ProgArray && self.value_size != 4 {
                     return Err("program arrays have 4-byte values".into());
                 }
-                if self.key_size == 0 || self.key_size > 512 {
+                if self.key_size == 0 || self.key_size > MAX_BPF_STACK {
                     return Err("key size must be 1..=512".into());
                 }
-                if self.value_size > (1 << 20) {
+                if self.value_size > MAX_VALUE_SIZE {
                     return Err("value size too large".into());
                 }
             }

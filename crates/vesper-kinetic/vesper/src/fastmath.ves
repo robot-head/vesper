@@ -7,22 +7,143 @@
 // or non-finite ones (`needs_crmath` is false); lib.ves sends the rest to
 // the correctly rounded module crmath.
 
+// IEEE 754 binary64 fields: the exponent bias, the 52 fraction bits, the
+// 11-bit exponent field (alone and in place), the sign-clearing mask, the
+// low word, and +-infinity and the quiet NaN.
+const F64_EXP_BIAS: i32 = 1023;
+const F64_MANT_BITS: u64 = 52;
+const F64_EXP_FIELD: u32 = 0x7ff;
+const F64_EXP_MASK: u64 = 0x7ff0000000000000;
+const F64_ABS_MASK: u64 = 0x7fffffffffffffff;
+const LOW_WORD_MASK: u64 = 0xffffffff;
+const F64_INFINITY_BITS: u64 = 0x7ff0000000000000;
+const F64_NEG_INFINITY_BITS: u64 = 0xfff0000000000000;
+const F64_NAN_BITS: u64 = 0x7ff8000000000000;
+// The high word: 20 fraction bits, its fraction mask, its sign-clearing
+// mask, the high word of 1.0 and of the least normal (2^-1022).
+const HIGH_MANT_BITS: u32 = 20;
+const HIGH_MANT_MASK: i32 = 0x000fffff;
+const HIGH_ABS_MASK: u32 = 0x7fffffff;
+const HIGH_ONE: i32 = 0x3ff00000;
+const HIGH_MIN_NORMAL: i32 = 0x00100000;
+// `pow2` and the scaling at the ends of `exp`'s range: the least k scaled
+// in one step, the k that overflows 2^k, and the split of a subnormal
+// scale into two factors.
+const POW2_NORMAL_MIN: i32 = -1021;
+const POW2_OVERFLOW: i32 = 1024;
+const POW2_SUBNORMAL_SPLIT: i32 = 1000;
+// 1.5 * 2^52: adding and subtracting it rounds to an integer (`rint`).
+const RINT_SHIFT_BITS: u64 = 0x4338000000000000;
+// fdlibm e_exp.c: ln2_hi, ln2_lo, invln2, o_threshold, u_threshold, the
+// 2^-28 below which exp(x) = 1 + x, and P1..P5.
+const LN2_HI_BITS: u64 = 0x3fe62e42fee00000;
+const LN2_LO_BITS: u64 = 0x3dea39ef35793c76;
+const INV_LN2_BITS: u64 = 0x3ff71547652b82fe;
+const EXP_O_THRESHOLD_BITS: u64 = 0x40862e42fefa39ef;
+const EXP_U_THRESHOLD_BITS: u64 = 0xc0874910d52d3051;
+const EXP_TINY_BITS: u64 = 0x3e30000000000000;
+const EXP_P1_BITS: u64 = 0x3fc555555555553e;
+const EXP_P2_BITS: u64 = 0xbf66c16c16bebd93;
+const EXP_P3_BITS: u64 = 0x3f11566aaf25de2c;
+const EXP_P4_BITS: u64 = 0xbebbbd41c5d26bf1;
+const EXP_P5_BITS: u64 = 0x3e66376972bea4d0;
+// fdlibm e_log.c: two54 (and its exponent, for subnormal inputs), the
+// rounding offset that picks k so that x/2^k is near sqrt(2) (0x95f64),
+// the two thresholds of the t1/t2 split, 1/3 and Lg1..Lg7.
+const TWO54_BITS: u64 = 0x4350000000000000;
+const TWO54_EXP: i32 = 54;
+const LOG_SQRT2_ROUND: i32 = 0x95f64;
+const LOG_T1_SPLIT: i32 = 0x6147a;
+const LOG_T2_SPLIT: i32 = 0x6b851;
+const ONE_THIRD_BITS: u64 = 0x3fd5555555555555;
+const LG1_BITS: u64 = 0x3fe5555555555593;
+const LG2_BITS: u64 = 0x3fd999999997fa04;
+const LG3_BITS: u64 = 0x3fd2492494229359;
+const LG4_BITS: u64 = 0x3fcc71c51d8e78af;
+const LG5_BITS: u64 = 0x3fc7466496cb03de;
+const LG6_BITS: u64 = 0x3fc39a09d078c69f;
+const LG7_BITS: u64 = 0x3fc2f112df3e5244;
+// fdlibm k_sin.c S1..S6 and k_cos.c C1..C6.
+const S1_BITS: u64 = 0xbfc5555555555549;
+const S2_BITS: u64 = 0x3f8111111110f8a6;
+const S3_BITS: u64 = 0xbf2a01a019c161d5;
+const S4_BITS: u64 = 0x3ec71de357b1fe7d;
+const S5_BITS: u64 = 0xbe5ae5e68a2b9ceb;
+const S6_BITS: u64 = 0x3de5d93a5acfd57c;
+const C1_BITS: u64 = 0x3fa555555555554c;
+const C2_BITS: u64 = 0xbf56c16c16c15177;
+const C3_BITS: u64 = 0x3efa01a019cb1590;
+const C4_BITS: u64 = 0xbe927e4f809c52ad;
+const C5_BITS: u64 = 0x3e21ee9ebdb4b1c4;
+const C6_BITS: u64 = 0xbda8fae9be8838d4;
+// fdlibm e_rem_pio2.c (medium arguments): invpio2, pio2_1..pio2_3 and
+// their tails, and the exponent losses after which the next, longer
+// split of pi/2 is used.
+const INV_PIO2_BITS: u64 = 0x3fe45f306dc9c883;
+const PIO2_1_BITS: u64 = 0x3ff921fb54400000;
+const PIO2_1T_BITS: u64 = 0x3dd0b4611a626331;
+const PIO2_2_BITS: u64 = 0x3dd0b4611a600000;
+const PIO2_2T_BITS: u64 = 0x3ba3198a2e037073;
+const PIO2_3_BITS: u64 = 0x3ba3198a2e000000;
+const PIO2_3T_BITS: u64 = 0x397b839a252049c1;
+const PIO2_2_LOSS: i32 = 16;
+const PIO2_3_LOSS: i32 = 49;
+// pi/4, pi/2, pi and pi's tail (e_atan2.c pi_lo), 2^-27 (below which sin
+// x = x and cos x = 1) as a double and as a high word, and MEDIUM_LIMIT of
+// src/fastmath.rs (2^20 * pi/2).
+const PI_O_4_BITS: u64 = 0x3fe921fb54442d18;
+const PI_O_2_BITS: u64 = 0x3ff921fb54442d18;
+const PI_BITS: u64 = 0x400921fb54442d18;
+const PI_LO_BITS: u64 = 0x3ca1a62633145c07;
+const TWO_M27_BITS: u64 = 0x3e40000000000000;
+const TWO_M27_HIGH: u32 = 0x3e400000;
+const MEDIUM_LIMIT_BITS: u64 = 0x413921fb00000000;
+// fdlibm s_atan.c: atanhi/atanlo (atan of 0.5, 1, 1.5 and infinity; the
+// second and fourth his are pi/4 and pi/2), aT[0..10], the high words of
+// 2^66, 0.4375, 0.6875, 1.1875 and 2.4375 that pick the reduction, and id
+// 4 for "no reduction".
+const ATAN_HI0_BITS: u64 = 0x3fddac670561bb4f;
+const ATAN_HI2_BITS: u64 = 0x3fef730bd281f69b;
+const ATAN_LO0_BITS: u64 = 0x3c7a2b7f222f65e2;
+const ATAN_LO1_BITS: u64 = 0x3c81a62633145c07;
+const ATAN_LO2_BITS: u64 = 0x3c7007887af0cbbd;
+const ATAN_LO3_BITS: u64 = 0x3c91a62633145c07;
+const AT0_BITS: u64 = 0x3fd555555555550d;
+const AT1_BITS: u64 = 0xbfc999999998ebc4;
+const AT2_BITS: u64 = 0x3fc24924920083ff;
+const AT3_BITS: u64 = 0xbfbc71c6fe231671;
+const AT4_BITS: u64 = 0x3fb745cdc54c206e;
+const AT5_BITS: u64 = 0xbfb3b0f2af749a6d;
+const AT6_BITS: u64 = 0x3fb10d66a0d03d51;
+const AT7_BITS: u64 = 0xbfadde2d52defd9a;
+const AT8_BITS: u64 = 0x3fa97b4b24760deb;
+const AT9_BITS: u64 = 0xbfa2b4442c6a6c2f;
+const AT10_BITS: u64 = 0x3f90ad3ae322da11;
+const ATAN_HUGE_HIGH: u32 = 0x44100000;
+const ATAN_SMALL_HIGH: u32 = 0x3fdc0000;
+const ATAN_ID1_HIGH: u32 = 0x3fe60000;
+const ATAN_ID2_HIGH: u32 = 0x3ff30000;
+const ATAN_ID3_HIGH: u32 = 0x40038000;
+const ATAN_NO_REDUCTION: u64 = 4;
+// e_atan2.c: an exponent gap above which |y/x| is huge (or tiny).
+const ATAN2_EXP_GAP: i32 = 60;
+
 fn high(x: f64) -> u32 {
     wrapping_u32((to_bits_f64(x) >> 32))
 }
 
 fn with_high(x: f64, hi: u32) -> f64 {
-    from_bits_f64((widen_u64(hi) << 32) | (to_bits_f64(x) & 0xffffffff))
+    from_bits_f64((widen_u64(hi) << 32) | (to_bits_f64(x) & LOW_WORD_MASK))
 }
 
 // 2^k for -1022 <= k <= 1023.
 fn pow2(k: i32) -> f64 {
-    from_bits_f64((wrapping_u64(wrapping_add(k, 1023)) << 52))
+    from_bits_f64((wrapping_u64(wrapping_add(k, F64_EXP_BIAS)) << F64_MANT_BITS))
 }
 
 // Round to nearest, ties to even, for |x| < 2^51.
 fn rint(x: f64) -> f64 {
-    let shift = from_bits_f64(0x4338000000000000);
+    let shift = from_bits_f64(RINT_SHIFT_BITS);
     (x + shift) - shift
 }
 
@@ -31,44 +152,44 @@ fn is_nan(x: f64) -> bool {
 }
 
 fn is_finite(x: f64) -> bool {
-    (to_bits_f64(x) & 0x7ff0000000000000) != 0x7ff0000000000000
+    (to_bits_f64(x) & F64_EXP_MASK) != F64_EXP_MASK
 }
 
 fn fabs(x: f64) -> f64 {
-    from_bits_f64(to_bits_f64(x) & 0x7fffffffffffffff)
+    from_bits_f64(to_bits_f64(x) & F64_ABS_MASK)
 }
 
 fn infinity() -> f64 {
-    from_bits_f64(0x7ff0000000000000)
+    from_bits_f64(F64_INFINITY_BITS)
 }
 
 fn ln2_hi() -> f64 {
-    from_bits_f64(0x3fe62e42fee00000)
+    from_bits_f64(LN2_HI_BITS)
 }
 
 fn ln2_lo() -> f64 {
-    from_bits_f64(0x3dea39ef35793c76)
+    from_bits_f64(LN2_LO_BITS)
 }
 
 pub fn exp(x: f64) -> f64 {
     if is_nan(x) {
         return x + x;
     }
-    if x > from_bits_f64(0x40862e42fefa39ef) {
+    if x > from_bits_f64(EXP_O_THRESHOLD_BITS) {
         return infinity();
     }
-    if x < from_bits_f64(0xc0874910d52d3051) {
+    if x < from_bits_f64(EXP_U_THRESHOLD_BITS) {
         return 0.0;
     }
     let ax = fabs(x);
-    if ax < from_bits_f64(0x3e30000000000000) {
+    if ax < from_bits_f64(EXP_TINY_BITS) {
         return 1.0 + x;
     }
     let mut hi = x;
     let mut lo = 0.0;
     let mut k: i32 = 0;
     if !(ax <= 0.5 * ln2_hi()) {
-        let kf = rint(x * from_bits_f64(0x3ff71547652b82fe));
+        let kf = rint(x * from_bits_f64(INV_LN2_BITS));
         hi = x - kf * ln2_hi();
         lo = kf * ln2_lo();
         k = saturating_i32(kf);
@@ -78,29 +199,29 @@ pub fn exp(x: f64) -> f64 {
     let c = r
         - t
         * (
-        from_bits_f64(0x3fc555555555553e)
+        from_bits_f64(EXP_P1_BITS)
             + t
             * (
-            from_bits_f64(0xbf66c16c16bebd93)
+            from_bits_f64(EXP_P2_BITS)
                 + t
                 * (
-                from_bits_f64(0x3f11566aaf25de2c)
+                from_bits_f64(EXP_P3_BITS)
                     + t
-                    * (from_bits_f64(0xbebbbd41c5d26bf1) + t * from_bits_f64(0x3e66376972bea4d0))
+                    * (from_bits_f64(EXP_P4_BITS) + t * from_bits_f64(EXP_P5_BITS))
             )
         )
     );
     let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
     if k == 0 {
         y
-    } else if k >= -1021 {
-        if k == 1024 {
-            y * 2.0 * pow2(1023)
+    } else if k >= POW2_NORMAL_MIN {
+        if k == POW2_OVERFLOW {
+            y * 2.0 * pow2(F64_EXP_BIAS)
         } else {
             y * pow2(k)
         }
     } else {
-        y * pow2(wrapping_add(k, 1000)) * pow2(-1000)
+        y * pow2(wrapping_add(k, POW2_SUBNORMAL_SPLIT)) * pow2(-POW2_SUBNORMAL_SPLIT)
     }
 }
 
@@ -109,10 +230,10 @@ pub fn log(x0: f64) -> f64 {
         return x0 + x0;
     }
     if x0 == 0.0 {
-        return from_bits_f64(0xfff0000000000000);
+        return from_bits_f64(F64_NEG_INFINITY_BITS);
     }
     if x0 < 0.0 {
-        return from_bits_f64(0x7ff8000000000000);
+        return from_bits_f64(F64_NAN_BITS);
     }
     if x0 == infinity() {
         return x0;
@@ -120,26 +241,26 @@ pub fn log(x0: f64) -> f64 {
     let mut x = x0;
     let mut k: i32 = 0;
     let mut hx = wrapping_i32(high(x));
-    if hx < 0x00100000 {
-        k = wrapping_sub(k, 54);
-        x = x * from_bits_f64(0x4350000000000000);
+    if hx < HIGH_MIN_NORMAL {
+        k = wrapping_sub(k, TWO54_EXP);
+        x = x * from_bits_f64(TWO54_BITS);
         hx = wrapping_i32(high(x));
     }
-    k = wrapping_add(k, wrapping_sub((hx >> 20), 1023));
-    hx = hx & 0x000fffff;
-    let i = wrapping_add(hx, 0x95f64) & 0x100000;
-    x = with_high(x, wrapping_u32(hx | (i ^ 0x3ff00000)));
-    k = wrapping_add(k, (i >> 20));
+    k = wrapping_add(k, wrapping_sub((hx >> HIGH_MANT_BITS), F64_EXP_BIAS));
+    hx = hx & HIGH_MANT_MASK;
+    let i = wrapping_add(hx, LOG_SQRT2_ROUND) & HIGH_MIN_NORMAL;
+    x = with_high(x, wrapping_u32(hx | (i ^ HIGH_ONE)));
+    k = wrapping_add(k, (i >> HIGH_MANT_BITS));
     let f = x - 1.0;
     let dk = widen_f64(k);
-    if (0x000fffff & wrapping_add(2, hx)) < 3 {
+    if (HIGH_MANT_MASK & wrapping_add(2, hx)) < 3 {
         if f == 0.0 {
             if k == 0 {
                 return 0.0;
             }
             return dk * ln2_hi() + dk * ln2_lo();
         }
-        let r = f * f * (0.5 - from_bits_f64(0x3fd5555555555555) * f);
+        let r = f * f * (0.5 - from_bits_f64(ONE_THIRD_BITS) * f);
         if k == 0 {
             return f - r;
         }
@@ -147,23 +268,17 @@ pub fn log(x0: f64) -> f64 {
     }
     let s = f / (2.0 + f);
     let z = s * s;
-    let mut ii = wrapping_sub(hx, 0x6147a);
+    let mut ii = wrapping_sub(hx, LOG_T1_SPLIT);
     let w = z * z;
-    let j = wrapping_sub(0x6b851, hx);
+    let j = wrapping_sub(LOG_T2_SPLIT, hx);
     let t1 = w
-        * (
-        from_bits_f64(0x3fd999999997fa04)
-            + w
-            * (from_bits_f64(0x3fcc71c51d8e78af) + w * from_bits_f64(0x3fc39a09d078c69f))
-    );
+        * (from_bits_f64(LG2_BITS) + w * (from_bits_f64(LG4_BITS) + w * from_bits_f64(LG6_BITS)));
     let t2 = z
         * (
-        from_bits_f64(0x3fe5555555555593)
+        from_bits_f64(LG1_BITS)
             + w
             * (
-            from_bits_f64(0x3fd2492494229359)
-                + w
-                * (from_bits_f64(0x3fc7466496cb03de) + w * from_bits_f64(0x3fc2f112df3e5244))
+            from_bits_f64(LG3_BITS) + w * (from_bits_f64(LG5_BITS) + w * from_bits_f64(LG7_BITS))
         )
     );
     ii = ii | j;
@@ -185,14 +300,14 @@ pub fn log(x0: f64) -> f64 {
 fn k_sin(x: f64, y: f64, has_tail: bool) -> f64 {
     let z = x * x;
     let w = z * z;
-    let r = from_bits_f64(0x3f8111111110f8a6)
+    let r = from_bits_f64(S2_BITS)
         + z
-        * (from_bits_f64(0xbf2a01a019c161d5) + z * from_bits_f64(0x3ec71de357b1fe7d))
+        * (from_bits_f64(S3_BITS) + z * from_bits_f64(S4_BITS))
         + z
         * w
-        * (from_bits_f64(0xbe5ae5e68a2b9ceb) + z * from_bits_f64(0x3de5d93a5acfd57c));
+        * (from_bits_f64(S5_BITS) + z * from_bits_f64(S6_BITS));
     let v = z * x;
-    let s1 = from_bits_f64(0xbfc5555555555549);
+    let s1 = from_bits_f64(S1_BITS);
     if !has_tail {
         x + v * (s1 + z * r)
     } else {
@@ -204,25 +319,17 @@ fn k_cos(x: f64, y: f64) -> f64 {
     let z = x * x;
     let w = z * z;
     let r = z
-        * (
-        from_bits_f64(0x3fa555555555554c)
-            + z
-            * (from_bits_f64(0xbf56c16c16c15177) + z * from_bits_f64(0x3efa01a019cb1590))
-    )
+        * (from_bits_f64(C1_BITS) + z * (from_bits_f64(C2_BITS) + z * from_bits_f64(C3_BITS)))
         + w
         * w
-        * (
-        from_bits_f64(0xbe927e4f809c52ad)
-            + z
-            * (from_bits_f64(0x3e21ee9ebdb4b1c4) + z * from_bits_f64(0xbda8fae9be8838d4))
-    );
+        * (from_bits_f64(C4_BITS) + z * (from_bits_f64(C5_BITS) + z * from_bits_f64(C6_BITS)));
     let hz = 0.5 * z;
     let w2 = 1.0 - hz;
     w2 + (((1.0 - w2) - hz) + (z * r - x * y))
 }
 
 fn exp_of(v: f64) -> i32 {
-    wrapping_i32((high(v) >> 20) & 0x7ff)
+    wrapping_i32((high(v) >> HIGH_MANT_BITS) & F64_EXP_FIELD)
 }
 
 copy struct Reduced {
@@ -232,23 +339,23 @@ copy struct Reduced {
 }
 
 fn rem_pio2_medium(x: f64) -> Reduced {
-    let fnum = rint(x * from_bits_f64(0x3fe45f306dc9c883));
+    let fnum = rint(x * from_bits_f64(INV_PIO2_BITS));
     let n = saturating_i32(fnum);
-    let mut r = x - fnum * from_bits_f64(0x3ff921fb54400000);
-    let mut w = fnum * from_bits_f64(0x3dd0b4611a626331);
+    let mut r = x - fnum * from_bits_f64(PIO2_1_BITS);
+    let mut w = fnum * from_bits_f64(PIO2_1T_BITS);
     let j = exp_of(x);
     let mut y0 = r - w;
-    if wrapping_sub(j, exp_of(y0)) > 16 {
+    if wrapping_sub(j, exp_of(y0)) > PIO2_2_LOSS {
         let t = r;
-        w = fnum * from_bits_f64(0x3dd0b4611a600000);
+        w = fnum * from_bits_f64(PIO2_2_BITS);
         r = t - w;
-        w = fnum * from_bits_f64(0x3ba3198a2e037073) - ((t - r) - w);
+        w = fnum * from_bits_f64(PIO2_2T_BITS) - ((t - r) - w);
         y0 = r - w;
-        if wrapping_sub(j, exp_of(y0)) > 49 {
+        if wrapping_sub(j, exp_of(y0)) > PIO2_3_LOSS {
             let t2 = r;
-            w = fnum * from_bits_f64(0x3ba3198a2e000000);
+            w = fnum * from_bits_f64(PIO2_3_BITS);
             r = t2 - w;
-            w = fnum * from_bits_f64(0x397b839a252049c1) - ((t2 - r) - w);
+            w = fnum * from_bits_f64(PIO2_3T_BITS) - ((t2 - r) - w);
             y0 = r - w;
         }
     }
@@ -265,8 +372,8 @@ pub fn sin(x: f64) -> f64 {
         return x - x;
     }
     let ax = fabs(x);
-    if ax <= from_bits_f64(0x3fe921fb54442d18) {
-        if ax < from_bits_f64(0x3e40000000000000) {
+    if ax <= from_bits_f64(PI_O_4_BITS) {
+        if ax < from_bits_f64(TWO_M27_BITS) {
             return x;
         }
         return k_sin(x, 0.0, false);
@@ -289,8 +396,8 @@ pub fn cos(x: f64) -> f64 {
         return x - x;
     }
     let ax = fabs(x);
-    if ax <= from_bits_f64(0x3fe921fb54442d18) {
-        if ax < from_bits_f64(0x3e40000000000000) {
+    if ax <= from_bits_f64(PI_O_4_BITS) {
+        if ax < from_bits_f64(TWO_M27_BITS) {
             return 1.0;
         }
         return k_cos(x, 0.0);
@@ -310,33 +417,33 @@ pub fn cos(x: f64) -> f64 {
 
 fn atan_hi(id: u64) -> f64 {
     if id == 0 {
-        from_bits_f64(0x3fddac670561bb4f)
+        from_bits_f64(ATAN_HI0_BITS)
     } else if id == 1 {
-        from_bits_f64(0x3fe921fb54442d18)
+        from_bits_f64(PI_O_4_BITS)
     } else if id == 2 {
-        from_bits_f64(0x3fef730bd281f69b)
+        from_bits_f64(ATAN_HI2_BITS)
     } else {
-        from_bits_f64(0x3ff921fb54442d18)
+        from_bits_f64(PI_O_2_BITS)
     }
 }
 
 fn atan_lo(id: u64) -> f64 {
     if id == 0 {
-        from_bits_f64(0x3c7a2b7f222f65e2)
+        from_bits_f64(ATAN_LO0_BITS)
     } else if id == 1 {
-        from_bits_f64(0x3c81a62633145c07)
+        from_bits_f64(ATAN_LO1_BITS)
     } else if id == 2 {
-        from_bits_f64(0x3c7007887af0cbbd)
+        from_bits_f64(ATAN_LO2_BITS)
     } else {
-        from_bits_f64(0x3c91a62633145c07)
+        from_bits_f64(ATAN_LO3_BITS)
     }
 }
 
 fn atan(x0: f64) -> f64 {
     let hx = high(x0);
-    let ix = hx & 0x7fffffff;
+    let ix = hx & HIGH_ABS_MASK;
     let negative = (hx >> 31) == 1;
-    if ix >= 0x44100000 {
+    if ix >= ATAN_HUGE_HIGH {
         if is_nan(x0) {
             return x0 + x0;
         }
@@ -346,24 +453,23 @@ fn atan(x0: f64) -> f64 {
         }
         return z;
     }
-    // id 4 is fdlibm's "no reduction".
-    let mut id: u64 = 4;
+    let mut id: u64 = ATAN_NO_REDUCTION;
     let mut x = x0;
-    if ix < 0x3fdc0000 {
-        if ix < 0x3e400000 {
+    if ix < ATAN_SMALL_HIGH {
+        if ix < TWO_M27_HIGH {
             return x0;
         }
     } else {
         let a = fabs(x0);
-        if ix < 0x3ff30000 {
-            if ix < 0x3fe60000 {
+        if ix < ATAN_ID2_HIGH {
+            if ix < ATAN_ID1_HIGH {
                 id = 0;
                 x = (2.0 * a - 1.0) / (2.0 + a);
             } else {
                 id = 1;
                 x = (a - 1.0) / (a + 1.0);
             }
-        } else if ix < 0x40038000 {
+        } else if ix < ATAN_ID3_HIGH {
             id = 2;
             x = (a - 1.5) / (1.0 + 1.5 * a);
         } else {
@@ -375,39 +481,37 @@ fn atan(x0: f64) -> f64 {
     let w = z * z;
     let s1 = z
         * (
-        from_bits_f64(0x3fd555555555550d)
+        from_bits_f64(AT0_BITS)
             + w
             * (
-            from_bits_f64(0x3fc24924920083ff)
+            from_bits_f64(AT2_BITS)
                 + w
                 * (
-                from_bits_f64(0x3fb745cdc54c206e)
+                from_bits_f64(AT4_BITS)
                     + w
                     * (
-                    from_bits_f64(0x3fb10d66a0d03d51)
+                    from_bits_f64(AT6_BITS)
                         + w
-                        * (
-                        from_bits_f64(0x3fa97b4b24760deb) + w * from_bits_f64(0x3f90ad3ae322da11)
-                    )
+                        * (from_bits_f64(AT8_BITS) + w * from_bits_f64(AT10_BITS))
                 )
             )
         )
     );
     let s2 = w
         * (
-        from_bits_f64(0xbfc999999998ebc4)
+        from_bits_f64(AT1_BITS)
             + w
             * (
-            from_bits_f64(0xbfbc71c6fe231671)
+            from_bits_f64(AT3_BITS)
                 + w
                 * (
-                from_bits_f64(0xbfb3b0f2af749a6d)
+                from_bits_f64(AT5_BITS)
                     + w
-                    * (from_bits_f64(0xbfadde2d52defd9a) + w * from_bits_f64(0xbfa2b4442c6a6c2f))
+                    * (from_bits_f64(AT7_BITS) + w * from_bits_f64(AT9_BITS))
             )
         )
     );
-    if id == 4 {
+    if id == ATAN_NO_REDUCTION {
         return x - x * (s1 + s2);
     }
     let z2 = atan_hi(id) - ((x * (s1 + s2) - atan_lo(id)) - x);
@@ -420,7 +524,7 @@ fn atan(x0: f64) -> f64 {
 
 // Whether `sin`/`cos` of `x` takes the correctly rounded path.
 pub fn needs_crmath(x: f64) -> bool {
-    is_finite(x) && fabs(x) >= from_bits_f64(0x413921fb00000000)
+    is_finite(x) && fabs(x) >= from_bits_f64(MEDIUM_LIMIT_BITS)
 }
 
 fn sign_negative(x: f64) -> bool {
@@ -428,14 +532,14 @@ fn sign_negative(x: f64) -> bool {
 }
 
 fn is_infinite(x: f64) -> bool {
-    (to_bits_f64(x) & 0x7fffffffffffffff) == 0x7ff0000000000000
+    (to_bits_f64(x) & F64_ABS_MASK) == F64_INFINITY_BITS
 }
 
 pub fn atan2(y: f64, x: f64) -> f64 {
-    let pi_o_4 = from_bits_f64(0x3fe921fb54442d18);
-    let pi_o_2 = from_bits_f64(0x3ff921fb54442d18);
-    let pi = from_bits_f64(0x400921fb54442d18);
-    let pi_lo = from_bits_f64(0x3ca1a62633145c07);
+    let pi_o_4 = from_bits_f64(PI_O_4_BITS);
+    let pi_o_2 = from_bits_f64(PI_O_2_BITS);
+    let pi = from_bits_f64(PI_BITS);
+    let pi_lo = from_bits_f64(PI_LO_BITS);
     if is_nan(x) || is_nan(y) {
         return x + y;
     }
@@ -492,14 +596,14 @@ pub fn atan2(y: f64, x: f64) -> f64 {
         return pi_o_2;
     }
     let k = wrapping_shr_i32(
-        wrapping_sub(wrapping_i32(high(y) & 0x7fffffff), wrapping_i32(high(x) & 0x7fffffff)),
-        20
+        wrapping_sub(wrapping_i32(high(y) & HIGH_ABS_MASK), wrapping_i32(high(x) & HIGH_ABS_MASK)),
+        HIGH_MANT_BITS
     );
     let mut z = 0.0;
-    if k > 60 {
+    if k > ATAN2_EXP_GAP {
         z = pi_o_2 + 0.5 * pi_lo;
         m = m & 1;
-    } else if x_neg && k < -60 {
+    } else if x_neg && k < -ATAN2_EXP_GAP {
         z = 0.0;
     } else {
         z = atan(fabs(y / x));

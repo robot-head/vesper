@@ -206,6 +206,15 @@ suite on all four required platforms. Its compile-time scoreboard row is
 recorded. Deleting the Rust module is a separate owner call per module, made
 only at parity.
 
+**SH1 compile-time scoreboard.** Each row is one swap into the hybrid build,
+measured against the default (Rust) compiler on the hybrid differential
+corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
+`tests/`, port-compiler profile, Linux x86-64.
+
+| Swap | Lane | Whole corpus wall | Whole corpus Ir | Swapped module alone | Report |
+|---|---|--:|--:|---|---|
+| `parse` (front end v2 + AST, read back into `Parse`) | SH1-12 (#1155) | 1.03x | 1.06x | 1.00x wall, 1.19x Ir over 911 sources | [self-host-parser-swap.md](../parallel-results/self-host-parser-swap.md) |
+
 ## Estimates
 
 These are rough. They come from the port waves so far, where one lane ported

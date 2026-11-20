@@ -5568,17 +5568,17 @@ dependencies = [
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
- "vesper-diagnostics",
+ "vesper-diagnostics-seed",
  "vesper-doc",
  "vesper-ebpf-seed",
  "vesper-ffi",
  "vesper-fiber-abi",
- "vesper-fmt",
- "vesper-forge",
- "vesper-highlight",
+ "vesper-fmt-seed",
+ "vesper-forge-seed",
+ "vesper-highlight-seed",
  "vesper-kinetic-seed",
  "vesper-lean-syntax-seed",
- "vesper-lint",
+ "vesper-lint-seed",
  "vesper-loom-admission",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
@@ -5588,6 +5588,7 @@ dependencies = [
  "vesper-nexus",
  "vesper-pact-binding",
  "vesper-pact-seed",
+ "vesper-port-abi",
  "vesper-pulse",
  "vesper-resonance-seed",
  "vesper-semver-seed",
@@ -5598,6 +5599,7 @@ dependencies = [
  "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
+ "vesper-test",
  "vesper-vault",
  "wasm-encoder 0.261.0",
  "wasmtime",
@@ -5848,6 +5850,22 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "serde_json",
+ "unicode-width 0.1.14",
+ "vesper-bench",
+ "vesper-core",
+ "vesper-diagnostics-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-span-seed",
+]
+
+[[package]]
+name = "vesper-diagnostics-seed"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "serde_json",
+ "unicode-width 0.1.14",
  "vesper-core",
  "vesper-span-seed",
 ]
@@ -5939,6 +5957,19 @@ name = "vesper-fmt"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "vesper-bench",
+ "vesper-fmt-seed",
+ "vesper-lean-syntax-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-syntax",
+]
+
+[[package]]
+name = "vesper-fmt-seed"
+version = "0.1.0"
+dependencies = [
+ "blake3",
  "vesper-lean-syntax-seed",
  "vesper-syntax",
 ]
@@ -5950,7 +5981,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "vesper-bench",
+ "vesper-forge-seed",
  "vesper-loom-sandbox",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-syntax",
 ]
 
@@ -5967,6 +6002,17 @@ dependencies = [
  "vesper-forge",
  "vesper-loom-cas",
  "vesper-loom-sandbox",
+]
+
+[[package]]
+name = "vesper-forge-seed"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vesper-loom-sandbox",
+ "vesper-syntax",
 ]
 
 [[package]]
@@ -6017,6 +6063,25 @@ dependencies = [
  "smol_str",
  "tiny-skia",
  "ttf-parser",
+ "vesper-bench",
+ "vesper-highlight-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-syntax",
+]
+
+[[package]]
+name = "vesper-highlight-seed"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "png",
+ "rowan",
+ "rustybuzz",
+ "smol_str",
+ "tiny-skia",
+ "ttf-parser",
  "vesper-syntax",
 ]
 
@@ -6039,6 +6104,7 @@ dependencies = [
  "libc",
  "object 0.37.3",
  "petgraph",
+ "rowan",
  "salsa",
  "serde",
  "serde_json",
@@ -6052,18 +6118,18 @@ dependencies = [
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
- "vesper-diagnostics",
+ "vesper-diagnostics-seed",
  "vesper-doc",
  "vesper-ebpf-seed",
  "vesper-ffi",
  "vesper-fiber-abi",
- "vesper-fmt",
- "vesper-forge",
+ "vesper-fmt-seed",
+ "vesper-forge-seed",
  "vesper-grammar-seed",
- "vesper-highlight",
+ "vesper-highlight-seed",
  "vesper-kinetic-seed",
  "vesper-lean-syntax-seed",
- "vesper-lint",
+ "vesper-lint-seed",
  "vesper-loom-admission",
  "vesper-loom-audit-seed",
  "vesper-loom-calculus-seed",
@@ -6086,6 +6152,7 @@ dependencies = [
  "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
+ "vesper-test",
  "vesper-vault",
  "wasm-encoder 0.261.0",
  "wit-component",
@@ -6172,6 +6239,21 @@ version = "0.1.0"
 
 [[package]]
 name = "vesper-lint"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "vesper",
+ "vesper-bench",
+ "vesper-core",
+ "vesper-lint-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-lint-seed"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -6367,7 +6449,7 @@ name = "vesper-nexus"
 version = "0.1.0"
 dependencies = [
  "vesper-ffi",
- "vesper-fmt",
+ "vesper-fmt-seed",
  "vesper-simpulse-seed",
  "vesper-syntax",
  "wasmtime",
@@ -6675,6 +6757,16 @@ name = "vesper-tensor-seed"
 version = "0.1.0"
 dependencies = [
  "memmap2",
+]
+
+[[package]]
+name = "vesper-test"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "vesper-vault",
 ]
 
 [[package]]

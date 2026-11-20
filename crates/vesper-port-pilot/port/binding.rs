@@ -70,7 +70,7 @@ unsafe extern "C" {
 
 /// Calls `add_i8` of the Vesper library `pilot` (`vesper_pilot_add_i8`).
 pub fn add_i8(a: i8, b: i8) -> Result<i8, vesper_port_abi::ArithOverflow> {
-    let mut fail = vec![0u64; 2];
+    let mut fail = [0u64; 2];
     // SAFETY: `vesper_pilot_add_i8` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     let raw = unsafe { vesper_pilot_add_i8(a as i64, b as i64, fail.as_mut_ptr()) };
@@ -83,9 +83,9 @@ pub fn add_i8(a: i8, b: i8) -> Result<i8, vesper_port_abi::ArithOverflow> {
 
 /// Calls `area` of the Vesper library `pilot` (`vesper_pilot_area`).
 pub fn area(s: crate::Shape) -> Result<i64, vesper_port_abi::ArithOverflow> {
-    let mut arg_s = vec![0u64; <crate::Shape as Abi>::WORDS];
+    let mut arg_s = [0u64; <crate::Shape as Abi>::WORDS];
     Abi::put(&s, &mut arg_s);
-    let mut fail = vec![0u64; 2];
+    let mut fail = [0u64; 2];
     // SAFETY: `vesper_pilot_area` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     let raw = unsafe { vesper_pilot_area(arg_s.as_mut_ptr(), fail.as_mut_ptr()) };
@@ -98,7 +98,7 @@ pub fn area(s: crate::Shape) -> Result<i64, vesper_port_abi::ArithOverflow> {
 
 /// Calls `bounds` of the Vesper library `pilot` (`vesper_pilot_bounds`).
 pub fn bounds(a: i64, b: i64) -> (i64, i64) {
-    let mut result = vec![0u64; 2];
+    let mut result = [0u64; 2];
     // SAFETY: `vesper_pilot_bounds` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     unsafe { vesper_pilot_bounds(result.as_mut_ptr(), a as i64, b as i64) };
@@ -115,7 +115,7 @@ pub fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
 
 /// Calls `collatz_steps` of the Vesper library `pilot` (`vesper_pilot_collatz_steps`).
 pub fn collatz_steps(n: u64) -> Result<u64, vesper_port_abi::ArithOverflow> {
-    let mut fail = vec![0u64; 2];
+    let mut fail = [0u64; 2];
     // SAFETY: `vesper_pilot_collatz_steps` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     let raw = unsafe { vesper_pilot_collatz_steps(n as i64, fail.as_mut_ptr()) };
@@ -128,10 +128,10 @@ pub fn collatz_steps(n: u64) -> Result<u64, vesper_port_abi::ArithOverflow> {
 
 /// Calls `first_some` of the Vesper library `pilot` (`vesper_pilot_first_some`).
 pub fn first_some(a: Option<u32>, b: Option<u32>) -> Option<u32> {
-    let mut result = vec![0u64; 2];
-    let mut arg_a = vec![0u64; <Option<u32> as Abi>::WORDS];
+    let mut result = [0u64; 2];
+    let mut arg_a = [0u64; <Option<u32> as Abi>::WORDS];
     Abi::put(&a, &mut arg_a);
-    let mut arg_b = vec![0u64; <Option<u32> as Abi>::WORDS];
+    let mut arg_b = [0u64; <Option<u32> as Abi>::WORDS];
     Abi::put(&b, &mut arg_b);
     // SAFETY: `vesper_pilot_first_some` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
@@ -157,12 +157,12 @@ pub fn is_digit(c: u8) -> bool {
 
 /// Calls `midpoint` of the Vesper library `pilot` (`vesper_pilot_midpoint`).
 pub fn midpoint(p: crate::Point, q: crate::Point) -> Result<crate::Point, vesper_port_abi::ArithOverflow> {
-    let mut result = vec![0u64; 2];
-    let mut arg_p = vec![0u64; <crate::Point as Abi>::WORDS];
+    let mut result = [0u64; 2];
+    let mut arg_p = [0u64; <crate::Point as Abi>::WORDS];
     Abi::put(&p, &mut arg_p);
-    let mut arg_q = vec![0u64; <crate::Point as Abi>::WORDS];
+    let mut arg_q = [0u64; <crate::Point as Abi>::WORDS];
     Abi::put(&q, &mut arg_q);
-    let mut fail = vec![0u64; 2];
+    let mut fail = [0u64; 2];
     // SAFETY: `vesper_pilot_midpoint` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     unsafe { vesper_pilot_midpoint(result.as_mut_ptr(), arg_p.as_mut_ptr(), arg_q.as_mut_ptr(), fail.as_mut_ptr()) };
@@ -175,7 +175,7 @@ pub fn midpoint(p: crate::Point, q: crate::Point) -> Result<crate::Point, vesper
 
 /// Calls `ratio` of the Vesper library `pilot` (`vesper_pilot_ratio`).
 pub fn ratio(a: i64, b: i64) -> Result<i64, crate::RatioError> {
-    let mut fail = vec![0u64; 2];
+    let mut fail = [0u64; 2];
     // SAFETY: `vesper_pilot_ratio` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     let raw = unsafe { vesper_pilot_ratio(a as i64, b as i64, fail.as_mut_ptr()) };
@@ -189,7 +189,7 @@ pub fn ratio(a: i64, b: i64) -> Result<i64, crate::RatioError> {
 
 /// Calls `sum_u16` of the Vesper library `pilot` (`vesper_pilot_sum_u16`).
 pub fn sum_u16(a: u16, b: u16) -> Result<u16, vesper_port_abi::ArithOverflow> {
-    let mut fail = vec![0u64; 2];
+    let mut fail = [0u64; 2];
     // SAFETY: `vesper_pilot_sum_u16` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires.
     let raw = unsafe { vesper_pilot_sum_u16(a as i64, b as i64, fail.as_mut_ptr()) };

@@ -37,6 +37,8 @@ use crate::ir::{Argument, FunctionIr, Instruction, Op, Program, Terminator, Valu
 use crate::seq::{Access, IndexForm, SeqOp};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod facts;
+
 /// Versions every eligible counted loop of `program`; returns how many.
 pub fn run(program: &mut Program) -> usize {
     program.functions.values_mut().map(hoist_function).sum()
@@ -44,6 +46,8 @@ pub fn run(program: &mut Program) -> usize {
 
 /// Versions the eligible loops of one function.
 pub fn hoist_function(f: &mut FunctionIr) -> usize {
+    // Accesses that dominating comparisons prove in bounds need no guard.
+    facts::drop_compared_checks(f);
     // Inner loops first: versioning a loop copies its body, nested loops
     // and all, with the same value ids, and a loop whose values a copy
     // outside it uses is not versioned.
@@ -71,6 +75,9 @@ pub fn hoist_function(f: &mut FunctionIr) -> usize {
             version(f, h, enclosing.as_ref())
         })
         .count();
+    // Loops bounded by a compared, loop-invariant end the function cannot
+    // relate to the length.
+    let versioned = versioned + facts::version_compared_loops(f);
     drop_dominated_checks(f);
     versioned
 }
@@ -1109,45 +1116,11 @@ fn clone_loop(
     receivers: &[Receiver],
     candidates: &BTreeMap<ValueId, (Access, String)>,
 ) {
-    let mut next_value = f
-        .values
-        .keys()
-        .copied()
-        .chain(f.blocks.iter().flat_map(|b| {
-            b.instructions
-                .iter()
-                .map(|i| i.dest)
-                .chain(b.params.iter().copied())
-        }))
-        .max()
-        .map_or(0, |v| v + 1);
-    let mut next_token = f
-        .blocks
-        .iter()
-        .flat_map(|b| {
-            [b.entry_token, b.outgoing_token]
-                .into_iter()
-                .chain(b.incoming_tokens.iter().map(|(_, t)| *t))
-                .chain(
-                    b.instructions
-                        .iter()
-                        .filter_map(|i| i.token)
-                        .flat_map(|(a, b)| [a, b]),
-                )
-        })
-        .max()
-        .map_or(0, |t| t + 1);
-    let mut fresh_value = |f: &mut FunctionIr, ty: Type| {
-        let v = next_value;
-        next_value += 1;
-        f.values.insert(v, ty);
-        v
-    };
+    let mut fresh = Fresh::new(f);
     // The guard, at the end of the preheader.
     let span = f.blocks[h].instructions[0].span.clone();
     let before = f.blocks[pre].outgoing_token;
-    let guard_token = next_token;
-    next_token += 1;
+    let guard_token = fresh.token();
     let u64_ty = Type::named("u64");
     let read_slot = |dest, root: &str| Instruction {
         dest,
@@ -1162,8 +1135,8 @@ fn clone_loop(
         token: Some((before, before)),
         fallible: false,
     };
-    let lo = fresh_value(f, u64_ty.clone());
-    let hi = fresh_value(f, u64_ty.clone());
+    let lo = fresh.value(f, u64_ty.clone());
+    let hi = fresh.value(f, u64_ty.clone());
     let mut guard_insts = vec![read_slot(lo, &head.index), read_slot(hi, &head.bound)];
     let sink = |value| Argument {
         pass: Pass::Sink,
@@ -1176,7 +1149,7 @@ fn clone_loop(
     let mut guards = vec![];
     let mut token = before;
     for (k, r) in receivers.iter().enumerate() {
-        let v = fresh_value(f, r.read.ty.clone());
+        let v = fresh.value(f, r.read.ty.clone());
         guard_insts.push(Instruction {
             dest: v,
             span: span.clone(),
@@ -1197,7 +1170,7 @@ fn clone_loop(
             let value = match term {
                 Offset::Value(c) => *c,
                 Offset::Local(read) => {
-                    let c = fresh_value(f, u64_ty.clone());
+                    let c = fresh.value(f, u64_ty.clone());
                     guard_insts.push(Instruction {
                         dest: c,
                         span: span.clone(),
@@ -1208,7 +1181,7 @@ fn clone_loop(
                     c
                 }
                 Offset::Const(constant) => {
-                    let c = fresh_value(f, u64_ty.clone());
+                    let c = fresh.value(f, u64_ty.clone());
                     guard_insts.push(Instruction {
                         dest: c,
                         token: constant.token.map(|_| (before, before)),
@@ -1224,16 +1197,11 @@ fn clone_loop(
             args.push(sink(ok));
         }
         let last = k + 1 == receivers.len();
-        let guard = fresh_value(f, Type::named("bool"));
+        let guard = fresh.value(f, Type::named("bool"));
         // Each guard is a state action of its own: the token chain runs
         // from the preheader's token through every guard to `guard_token`.
         let input = token;
-        token = if last {
-            guard_token
-        } else {
-            next_token += 1;
-            next_token - 1
-        };
+        token = if last { guard_token } else { fresh.token() };
         guards.push(Instruction {
             dest: guard,
             op: Op::Seq {
@@ -1257,6 +1225,102 @@ fn clone_loop(
     // The reads and constants first, then the guards.
     guard_insts.extend(guards);
     let guard = previous.expect("a versioned loop hoists a receiver");
+    copy_loop(
+        f,
+        h,
+        pre,
+        blocks,
+        LoopGuard {
+            insts: guard_insts,
+            guard,
+            token: guard_token,
+        },
+        &mut fresh,
+        |_, _, i| candidates.get(&i.dest).map(|(access, _)| *access),
+    );
+}
+
+/// The guard a versioned loop's preheader ends with: its instructions, its
+/// `bool` result and the state token it leaves.
+pub(crate) struct LoopGuard {
+    pub(crate) insts: Vec<Instruction>,
+    pub(crate) guard: ValueId,
+    pub(crate) token: u32,
+}
+
+/// Fresh value ids and state tokens of a function.
+pub(crate) struct Fresh {
+    next_value: ValueId,
+    next_token: u32,
+}
+
+impl Fresh {
+    pub(crate) fn new(f: &FunctionIr) -> Self {
+        let next_value = f
+            .values
+            .keys()
+            .copied()
+            .chain(f.blocks.iter().flat_map(|b| {
+                b.instructions
+                    .iter()
+                    .map(|i| i.dest)
+                    .chain(b.params.iter().copied())
+            }))
+            .max()
+            .map_or(0, |v| v + 1);
+        let next_token = f
+            .blocks
+            .iter()
+            .flat_map(|b| {
+                [b.entry_token, b.outgoing_token]
+                    .into_iter()
+                    .chain(b.incoming_tokens.iter().map(|(_, t)| *t))
+                    .chain(
+                        b.instructions
+                            .iter()
+                            .filter_map(|i| i.token)
+                            .flat_map(|(a, b)| [a, b]),
+                    )
+            })
+            .max()
+            .map_or(0, |t| t + 1);
+        Self {
+            next_value,
+            next_token,
+        }
+    }
+
+    pub(crate) fn value(&mut self, f: &mut FunctionIr, ty: Type) -> ValueId {
+        let v = self.next_value;
+        self.next_value += 1;
+        f.values.insert(v, ty);
+        v
+    }
+
+    pub(crate) fn token(&mut self) -> u32 {
+        self.next_token += 1;
+        self.next_token - 1
+    }
+}
+
+/// Ends `pre` with `guard` and adds a fast copy of the loop `blocks` (headed
+/// by `h`) that the guard enters; the copy turns each access `convert` names
+/// (by original block, instruction index and instruction) into an unchecked
+/// one.
+pub(crate) fn copy_loop(
+    f: &mut FunctionIr,
+    h: usize,
+    pre: usize,
+    blocks: &BTreeSet<usize>,
+    guard: LoopGuard,
+    fresh: &mut Fresh,
+    convert: impl Fn(usize, usize, &Instruction) -> Option<Access>,
+) {
+    let LoopGuard {
+        insts: guard_insts,
+        guard,
+        token: guard_token,
+    } = guard;
     // Fresh blocks, block parameters and tokens for the copy. Instructions
     // keep their value ids: the native backend keeps each IR value in one
     // frontend variable, so a fresh id per copied value would add a
@@ -1285,12 +1349,11 @@ fn clone_loop(
         );
         for v in defs {
             let ty = f.values.get(&v).cloned().unwrap_or(Type::Infer);
-            let n = fresh_value(f, ty);
+            let n = fresh.value(f, ty);
             value_map.insert(v, n);
         }
         for t in tokens {
-            token_map.insert(t, next_token);
-            next_token += 1;
+            token_map.insert(t, fresh.token());
         }
     }
     let map_value = |v: &mut ValueId| {
@@ -1314,11 +1377,11 @@ fn clone_loop(
         if b == h {
             block.incoming_tokens.push((pre, guard_token));
         }
-        for i in &mut block.instructions {
-            if let Some((access, _)) = candidates.get(&i.dest)
+        for (k, i) in block.instructions.iter_mut().enumerate() {
+            if let Some(access) = convert(b, k, i)
                 && let Op::Seq { op, .. } = &mut i.op
             {
-                *op = SeqOp::Hoisted(*access);
+                *op = SeqOp::Hoisted(access);
                 i.fallible = false;
             }
             map_value(&mut i.dest);
@@ -1498,6 +1561,51 @@ pub fn stable_views(f: &FunctionIr) -> Vec<HeaderHoist> {
             });
         }
     }
+    // A sequence field of an `in` parameter (`self.nodes` of `in self`):
+    // nothing can write, move or resize a place under an `in` borrow, so
+    // its handle and header are fixed for the call too.
+    let mut fields: BTreeMap<Vec<String>, HeaderHoist> = BTreeMap::new();
+    for param in f.params.iter().filter(|p| p.pass == Pass::In) {
+        if insts().any(|i| matches!(&i.op, Op::Bind { pattern, .. } if binds(pattern, &param.name)))
+        {
+            continue;
+        }
+        for i in insts() {
+            let Op::Read {
+                root, path, pass, ..
+            } = &i.op
+            else {
+                continue;
+            };
+            if root != &param.name || path.is_empty() || *pass != Pass::In {
+                continue;
+            }
+            let ty = crate::numeric::default_type(&i.ty);
+            if !crate::seq::is_seq_type(&ty) || crate::strings::is_text(&ty) {
+                continue;
+            }
+            let place = Place {
+                root: root.clone(),
+                path: path.clone(),
+            };
+            if only_access_receivers(&users, i.dest, *pass, &place, None) {
+                let mut key = vec![root.clone()];
+                key.extend(path.iter().cloned());
+                fields
+                    .entry(key)
+                    .or_insert_with(|| HeaderHoist {
+                        preheader: 0,
+                        place,
+                        ty,
+                        reads: BTreeSet::new(),
+                        entry: true,
+                    })
+                    .reads
+                    .insert(i.dest);
+            }
+        }
+    }
+    out.extend(fields.into_values());
     out
 }
 
@@ -1601,11 +1709,14 @@ pub fn header_hoists(f: &FunctionIr) -> Vec<HeaderHoist> {
         let both: BTreeSet<usize> = blocks.union(&twin).copied().collect();
         let insts = || blocks.iter().flat_map(|&b| f.blocks[b].instructions.iter());
         let all_insts = || both.iter().flat_map(|&b| f.blocks[b].instructions.iter());
+        // A call returning `Never` (`Fail::raise`) leaves the loop for good:
+        // no handler it runs comes back to the loop's hoisted words.
+        let never = Type::named("Never");
         if all_insts().any(|i| {
             matches!(
                 i.op,
                 Op::Closure { .. } | Op::Handle { .. } | Op::Indirect { .. }
-            ) || matches!(&i.op, Op::Call { callee, .. } if callee.contains("::"))
+            ) || matches!(&i.op, Op::Call { callee, .. } if callee.contains("::") && i.ty != never)
         }) {
             // An effect operation runs a handler outside the loop's view.
             continue;
@@ -1615,7 +1726,7 @@ pub fn header_hoists(f: &FunctionIr) -> Vec<HeaderHoist> {
         // words are spilled and reloaded anyway, and many of them push other
         // values out of registers: such a loop hoists one receiver at most
         // (Ignis's pass loops ran 4% more instructions with no cap).
-        let calls = all_insts().any(|i| calls_out(&i.op));
+        let calls = all_insts().any(|i| calls_out(&i.op) && i.ty != never);
         let mut places: BTreeMap<String, HeaderHoist> = BTreeMap::new();
         for i in insts() {
             let Op::Read {

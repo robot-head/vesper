@@ -1,0 +1,1794 @@
+// @vesper/lint: `vesper_lint` in Vesper (self-hosting SH1 lane 13, #1156).
+//
+// Three entry points, each the Rust function of crates/vesper-lint/src it
+// is named after, decision for decision:
+//
+// - `analyze` (`vesper_lint::analyze`): the unused effect capability
+//   (L0102) and overbroad inout projection (L0101) rules over the checked
+//   facts of a program. The Rust side passes the facts as a word stream and
+//   a text blob (crates/vesper-lint/src/port.rs `encode`); this side decodes
+//   them into @vesper/ast nodes (`TypeNode`, `EffectNode`, `EffectsNode`,
+//   `GenericNode`, `ListRef`, with the AST's kind numbering), checks every
+//   limit in the Rust order, runs both rules with the same work budget and
+//   returns the findings, their messages and the skipped functions.
+// - `policy_parse` (`vesper_lint::policy::Policy::parse`): the lexical and
+//   structural preflight, a TOML reader that accepts and rejects exactly
+//   what the `toml` crate (0.8, toml_edit 0.22) does for `toml::Value`, the
+//   bounded walk of the decoded tree, and the `[lints]` policy extraction.
+// - `apply_edits` (`vesper_lint::apply_edits`).
+//
+// Errors are `LintFail { code }`: the index of the Rust error message in
+// port.rs's tables. tests/differential.rs runs the Rust code and this
+// package on the same inputs and requires equal results.
+
+use @vesper/ast::{
+    TypeNode,
+    EffectNode,
+    EffectsNode,
+    GenericNode,
+    ListRef
+};
+use @vesper-std/intern::{
+    Interner,
+    Symbol,
+    interner_new,
+    symbol_from_id
+};
+use self::policy::{
+    parse_policy
+};
+use self::util::{
+    fail,
+    at,
+    word,
+    u32_at,
+    inc,
+    cadd,
+    push_text,
+    put
+};
+use @vesper-std/sort::unstable::{
+    sort
+};
+
+// ---------------------------------------------------------------- common
+
+const NONE: u32 = 4294967295;
+const U64_MAX: u64 = 18446744073709551615;
+// End of input for `at`.
+const EOF: u64 = 256;
+
+pub copy struct LintFail {
+    code: u64
+}
+
+// ================================================================ policy
+
+// `Policy::parse` (policy.ves `parse_policy`). The result: the severities of
+// the seven lints in `LintName` order (0 none, 1 allow, 2 warn, 3 deny), the
+// configured mask, then the usage: decoded bytes, tokens, nodes and work.
+pub fn policy_parse(in source: Str, bytes: u64, depth: u64, tokens: u64, nodes: u64, work: u64)
+    -> ChunkSeq[u64] eff [Fail[LintFail]] {
+    parse_policy(in source, bytes, depth, tokens, nodes, work)
+}
+
+// ================================================================ analyze
+//
+// crates/vesper-lint/src/lib.rs `analyze`. Error codes are the indices of
+// `LINT_ERRORS` in port.rs; skip reasons below 16 index `SKIP_REASONS`, and
+// `16 + k` is the reason text of action `k` of the program (`Opaque`; the
+// actions of all functions in order, as the callee that has it may be any
+// function the skipped one reaches).
+
+const L_INVALID_LIMITS: u64 = 0;
+const L_FUNCTION_LIMIT: u64 = 1;
+const L_FACT_LIMIT: u64 = 3;
+const L_SIGNATURE_LIMIT: u64 = 4;
+const L_STRUCT_FIELD_LIMIT: u64 = 5;
+const L_SUBSTITUTION_LIMIT: u64 = 6;
+const L_PROJECTION_DEPTH: u64 = 7;
+const L_TYPE_COMPLEXITY: u64 = 8;
+const L_TYPE_ARITY: u64 = 9;
+const L_ARROW_SHAPE: u64 = 10;
+const L_NESTED_EFFECT_ARITY: u64 = 11;
+const L_ROW_SHAPE: u64 = 12;
+const L_EFFECT_ARITY: u64 = 13;
+const L_WORK_LIMIT: u64 = 14;
+
+const R_UNRESOLVED_CALLEE: u64 = 0;
+const R_OPEN_ROW: u64 = 1;
+const R_HIGHER_ORDER: u64 = 2;
+const R_UNRESOLVED_INSTANCE: u64 = 3;
+const R_RECURSIVE: u64 = 4;
+const R_UNRESOLVED_CALL: u64 = 5;
+const R_UNRESOLVED_SUBSTITUTION: u64 = 6;
+const R_UNMAPPED: u64 = 7;
+const R_OPAQUE: u64 = 16;
+
+// `Type` kinds of @vesper/ast `TypeNode`.
+const TY_NAMED: u8 = 1;
+const TY_TUPLE: u8 = 2;
+const TY_FUNCTION: u8 = 3;
+const TY_ROW: u8 = 4;
+const TY_INFER: u8 = 5;
+const TY_INT_LITERAL: u8 = 6;
+
+const PASS_INOUT: u8 = 1;
+
+const A_PERFORM: u8 = 0;
+const A_CALL: u8 = 1;
+const A_ACCESS: u8 = 2;
+const A_OPAQUE: u8 = 3;
+
+// A function's facts (`FunctionFacts` and its `declaration`).
+copy struct FnFacts {
+    name: u32,
+    owned: bool,
+    body: bool,
+    start: u64,
+    end: u64,
+    // Lists of GenericNode and ParamRow ids.
+    generics: u32,
+    params: u32,
+    result: u32,
+    effects: u32,
+    act_first: u32,
+    act_len: u32,
+    // A list of ParamRow ids: `parameters` (the `ParameterFacts`).
+    facts: u32
+}
+
+// A `Param`; `fields` is the list of `struct_fields` of a parameter fact.
+copy struct ParamRow {
+    name: u32,
+    pass: u8,
+    projections: u32,
+    ty: u32,
+    start: u64,
+    end: u64,
+    fields: u32
+}
+
+// An `Action`. Perform: `a` an EffectNode. Call: `a` the callee's name, `b`
+// a list of (name, Type) pairs. Access: `a` the root, `b` the path (names).
+copy struct ActRow {
+    kind: u8,
+    a: u32,
+    b: u32,
+    pass: u8,
+    moves: bool
+}
+
+struct Prog {
+    names: Interner,
+    // Each symbol's bytes in the text blob, for ordering.
+    sym_start: ChunkSeq[u64],
+    sym_len: ChunkSeq[u64],
+    types: ChunkSeq[TypeNode],
+    ilits: ChunkSeq[u64],
+    lists: ChunkSeq[ListRef],
+    pool: ChunkSeq[u32],
+    effs: ChunkSeq[EffectNode],
+    rows: ChunkSeq[EffectsNode],
+    generics: ChunkSeq[GenericNode],
+    params: ChunkSeq[ParamRow],
+    acts: ChunkSeq[ActRow],
+    fns: ChunkSeq[FnFacts],
+    // The function index of each symbol, NONE for none.
+    fn_of: ChunkSeq[u32]
+}
+
+// The word stream's cursor.
+copy struct Rd {
+    pos: u64
+}
+
+fn rd(in w: Slice[u64], inout r: Rd) -> u64 {
+    let v = word(in w, r.pos);
+    r.pos = inc(r.pos);
+    v
+}
+
+fn list_new(inout p: Prog, in items: ChunkSeq[u32]) -> u32 {
+    let id = wrapping_u32(p.lists.len());
+    p
+        .lists
+        .push(
+        ListRef {
+            first: wrapping_u32(p.pool.len()),
+            len: wrapping_u32(items.len())
+        }
+    );
+    p.pool.extend(in items.as_slice());
+    id
+}
+
+fn list_len(in p: Prog, l: u32) -> u64 {
+    match p.lists.try_get(widen_u64(l)) {
+        Option::Some(r) => widen_u64(r.len),
+        Option::None => 0,
+    }
+}
+
+fn list_at(in p: Prog, l: u32, i: u64) -> u32 {
+    match p.lists.try_get(widen_u64(l)) {
+        Option::Some(r) => u32_at(in p.pool, wrapping_add(widen_u64(r.first), i)),
+        Option::None => NONE,
+    }
+}
+
+fn type_at(in p: Prog, t: u32) -> TypeNode {
+    match p.types.try_get(widen_u64(t)) {
+        Option::Some(n) => n,
+        Option::None => TypeNode {
+            kind: 0,
+            a: 0,
+            b: 0,
+            c: 0,
+            d: 0
+        },
+    }
+}
+
+fn eff_at(in p: Prog, e: u32) -> EffectNode {
+    match p.effs.try_get(widen_u64(e)) {
+        Option::Some(n) => n,
+        Option::None => EffectNode {
+            label: NONE,
+            name: NONE,
+            args: 0
+        },
+    }
+}
+
+fn row_at(in p: Prog, r: u32) -> EffectsNode {
+    match p.rows.try_get(widen_u64(r)) {
+        Option::Some(n) => n,
+        Option::None => EffectsNode {
+            instances: 0,
+            tail: NONE
+        },
+    }
+}
+
+fn param_at(in p: Prog, i: u32) -> ParamRow {
+    match p.params.try_get(widen_u64(i)) {
+        Option::Some(n) => n,
+        Option::None => ParamRow {
+            name: NONE,
+            pass: 0,
+            projections: 0,
+            ty: NONE,
+            start: 0,
+            end: 0,
+            fields: 0
+        },
+    }
+}
+
+fn act_at(in p: Prog, i: u64) -> ActRow {
+    match p.acts.try_get(i) {
+        Option::Some(n) => n,
+        Option::None => ActRow {
+            kind: A_OPAQUE,
+            a: NONE,
+            b: 0,
+            pass: 0,
+            moves: false
+        },
+    }
+}
+
+fn fn_at(in p: Prog, i: u64) -> FnFacts {
+    match p.fns.try_get(i) {
+        Option::Some(f) => f,
+        Option::None => FnFacts {
+            name: NONE,
+            owned: false,
+            body: false,
+            start: 0,
+            end: 0,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: 0,
+            act_first: 0,
+            act_len: 0,
+            facts: 0
+        },
+    }
+}
+
+fn add_type(inout p: Prog, n: TypeNode) -> u32 {
+    let id = wrapping_u32(p.types.len());
+    p.types.push(n);
+    id
+}
+
+// A name: its (start, len) words in the text blob, interned.
+fn rd_name(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
+    let start = rd(in w, inout r);
+    let len = rd(in w, inout r);
+    let before = p.names.len();
+    let sym = p.names.intern(in blob[start..wrapping_add(start, len)]);
+    if p.names.len() != before {
+        p.sym_start.push(start);
+        p.sym_len.push(len);
+    }
+    sym.id()
+}
+
+fn rd_opt_name(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
+    if rd(in w, inout r) == 0 {
+        NONE
+    } else {
+        rd_name(in w, inout r, inout p, in blob)
+    }
+}
+
+fn rd_types(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
+    let n = rd(in w, inout r);
+    let mut items = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        items.push(rd_type(in w, inout r, inout p, in blob));
+    }
+    list_new(inout p, in items)
+}
+
+fn rd_effect(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
+    let label = rd_opt_name(in w, inout r, inout p, in blob);
+    let name = rd_name(in w, inout r, inout p, in blob);
+    let args = rd_types(in w, inout r, inout p, in blob);
+    let id = wrapping_u32(p.effs.len());
+    p
+        .effs
+        .push(
+        EffectNode {
+            label: label,
+            name: name,
+            args: args
+        }
+    );
+    id
+}
+
+fn rd_effects(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
+    let n = rd(in w, inout r);
+    let mut items = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        items.push(rd_effect(in w, inout r, inout p, in blob));
+    }
+    let instances = list_new(inout p, in items);
+    let tail = rd_opt_name(in w, inout r, inout p, in blob);
+    let id = wrapping_u32(p.rows.len());
+    p
+        .rows
+        .push(
+        EffectsNode {
+            instances: instances,
+            tail: tail
+        }
+    );
+    id
+}
+
+fn rd_type(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
+    let tag = rd(in w, inout r);
+    if tag == 0 {
+        let at = wrapping_u32(p.ilits.len());
+        p.ilits.push(rd(in w, inout r));
+        p.ilits.push(rd(in w, inout r));
+        add_type(
+            inout p,
+            TypeNode {
+                kind: TY_INT_LITERAL,
+                a: at,
+                b: 0,
+                c: 0,
+                d: 0
+            }
+        )
+    } else if tag == 1 {
+        let name = rd_name(in w, inout r, inout p, in blob);
+        let args = rd_types(in w, inout r, inout p, in blob);
+        add_type(
+            inout p,
+            TypeNode {
+                kind: TY_NAMED,
+                a: name,
+                b: args,
+                c: 0,
+                d: 0
+            }
+        )
+    } else if tag == 2 {
+        let args = rd_types(in w, inout r, inout p, in blob);
+        add_type(
+            inout p,
+            TypeNode {
+                kind: TY_TUPLE,
+                a: args,
+                b: 0,
+                c: 0,
+                d: 0
+            }
+        )
+    } else if tag == 3 {
+        let n = rd(in w, inout r);
+        let mut items = ChunkSeq::with_capacity[u32](wrapping_mul(n, 2));
+        for i in 0..n {
+            items.push(wrapping_u32(rd(in w, inout r)));
+            items.push(rd_type(in w, inout r, inout p, in blob));
+        }
+        let params = list_new(inout p, in items);
+        let result = rd_type(in w, inout r, inout p, in blob);
+        let effects = rd_effects(in w, inout r, inout p, in blob);
+        let mode = wrapping_u32(rd(in w, inout r));
+        add_type(
+            inout p,
+            TypeNode {
+                kind: TY_FUNCTION,
+                a: params,
+                b: result,
+                c: effects,
+                d: mode
+            }
+        )
+    } else if tag == 4 {
+        let effects = rd_effects(in w, inout r, inout p, in blob);
+        add_type(
+            inout p,
+            TypeNode {
+                kind: TY_ROW,
+                a: effects,
+                b: 0,
+                c: 0,
+                d: 0
+            }
+        )
+    } else {
+        add_type(
+            inout p,
+            TypeNode {
+                kind: TY_INFER,
+                a: 0,
+                b: 0,
+                c: 0,
+                d: 0
+            }
+        )
+    }
+}
+
+fn rd_param(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) -> u32 {
+    let name = rd_name(in w, inout r, inout p, in blob);
+    let pass = wrapping_u8(rd(in w, inout r));
+    let n = rd(in w, inout r);
+    let mut projections = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        let m = rd(in w, inout r);
+        let mut names = ChunkSeq::with_capacity[u32](m);
+        for j in 0..m {
+            names.push(rd_name(in w, inout r, inout p, in blob));
+        }
+        projections.push(list_new(inout p, in names));
+    }
+    let projections = list_new(inout p, in projections);
+    let ty = rd_type(in w, inout r, inout p, in blob);
+    let start = rd(in w, inout r);
+    let end = rd(in w, inout r);
+    let id = wrapping_u32(p.params.len());
+    p
+        .params
+        .push(
+        ParamRow {
+            name: name,
+            pass: pass,
+            projections: projections,
+            ty: ty,
+            start: start,
+            end: end,
+            fields: 0
+        }
+    );
+    id
+}
+
+fn rd_function(in w: Slice[u64], inout r: Rd, inout p: Prog, in blob: Str) {
+    let name = rd_name(in w, inout r, inout p, in blob);
+    let owned = rd(in w, inout r) != 0;
+    let body = rd(in w, inout r) != 0;
+    let start = rd(in w, inout r);
+    let end = rd(in w, inout r);
+    let ng = rd(in w, inout r);
+    let mut gs = ChunkSeq::with_capacity[u32](ng);
+    for i in 0..ng {
+        let gname = rd_name(in w, inout r, inout p, in blob);
+        let bound = wrapping_u8(rd(in w, inout r));
+        let row = rd(in w, inout r) != 0;
+        gs.push(wrapping_u32(p.generics.len()));
+        p
+            .generics
+            .push(
+            GenericNode {
+                name: gname,
+                bound: bound,
+                row: row
+            }
+        );
+    }
+    let generics = list_new(inout p, in gs);
+    let np = rd(in w, inout r);
+    let mut ps = ChunkSeq::with_capacity[u32](np);
+    for i in 0..np {
+        ps.push(rd_param(in w, inout r, inout p, in blob));
+    }
+    let params = list_new(inout p, in ps);
+    let result = rd_type(in w, inout r, inout p, in blob);
+    let effects = rd_effects(in w, inout r, inout p, in blob);
+    let na = rd(in w, inout r);
+    let act_first = wrapping_u32(p.acts.len());
+    for i in 0..na {
+        let kind = wrapping_u8(rd(in w, inout r));
+        if kind == A_PERFORM {
+            let e = rd_effect(in w, inout r, inout p, in blob);
+            p
+                .acts
+                .push(
+                ActRow {
+                    kind: kind,
+                    a: e,
+                    b: 0,
+                    pass: 0,
+                    moves: false
+                }
+            );
+        } else if kind == A_CALL {
+            let callee = rd_name(in w, inout r, inout p, in blob);
+            let n = rd(in w, inout r);
+            let mut subs = ChunkSeq::with_capacity[u32](wrapping_mul(n, 2));
+            for j in 0..n {
+                subs.push(rd_name(in w, inout r, inout p, in blob));
+                subs.push(rd_type(in w, inout r, inout p, in blob));
+            }
+            let b = list_new(inout p, in subs);
+            p
+                .acts
+                .push(
+                ActRow {
+                    kind: kind,
+                    a: callee,
+                    b: b,
+                    pass: 0,
+                    moves: false
+                }
+            );
+        } else if kind == A_ACCESS {
+            let root = rd_name(in w, inout r, inout p, in blob);
+            let n = rd(in w, inout r);
+            let mut path = ChunkSeq::with_capacity[u32](n);
+            for j in 0..n {
+                path.push(rd_name(in w, inout r, inout p, in blob));
+            }
+            let b = list_new(inout p, in path);
+            let pass = wrapping_u8(rd(in w, inout r));
+            let moves = rd(in w, inout r) != 0;
+            p
+                .acts
+                .push(
+                ActRow {
+                    kind: kind,
+                    a: root,
+                    b: b,
+                    pass: pass,
+                    moves: moves
+                }
+            );
+        } else {
+            p
+                .acts
+                .push(
+                ActRow {
+                    kind: A_OPAQUE,
+                    a: NONE,
+                    b: 0,
+                    pass: 0,
+                    moves: false
+                }
+            );
+        }
+    }
+    let nf = rd(in w, inout r);
+    let mut fs = ChunkSeq::with_capacity[u32](nf);
+    for i in 0..nf {
+        let id = rd_param(in w, inout r, inout p, in blob);
+        let m = rd(in w, inout r);
+        let mut fields = ChunkSeq::with_capacity[u32](m);
+        for j in 0..m {
+            fields.push(rd_name(in w, inout r, inout p, in blob));
+        }
+        let mut row = param_at(in p, id);
+        row.fields = list_new(inout p, in fields);
+        p.params.try_set(widen_u64(id), row);
+        fs.push(id);
+    }
+    let facts = list_new(inout p, in fs);
+    p
+        .fns
+        .push(
+        FnFacts {
+            name: name,
+            owned: owned,
+            body: body,
+            start: start,
+            end: end,
+            generics: generics,
+            params: params,
+            result: result,
+            effects: effects,
+            act_first: act_first,
+            act_len: wrapping_u32(na),
+            facts: facts
+        }
+    );
+}
+
+fn decode(in w: Slice[u64], in blob: Str) -> Prog {
+    let mut p = Prog {
+        names: interner_new(),
+        sym_start: ChunkSeq::new[u64](),
+        sym_len: ChunkSeq::new[u64](),
+        types: ChunkSeq::new[TypeNode](),
+        ilits: ChunkSeq::new[u64](),
+        lists: ChunkSeq::new[ListRef](),
+        pool: ChunkSeq::new[u32](),
+        effs: ChunkSeq::new[EffectNode](),
+        rows: ChunkSeq::new[EffectsNode](),
+        generics: ChunkSeq::new[GenericNode](),
+        params: ChunkSeq::new[ParamRow](),
+        acts: ChunkSeq::new[ActRow](),
+        fns: ChunkSeq::new[FnFacts](),
+        fn_of: ChunkSeq::new[u32]()
+    };
+    let mut r = Rd {
+        pos: 0
+    };
+    let n = rd(in w, inout r);
+    for i in 0..n {
+        rd_function(in w, inout r, inout p, in blob);
+    }
+    p.fn_of.resize(p.names.len(), NONE);
+    for i in 0..p.fns.len() {
+        let f = fn_at(in p, i);
+        p.fn_of.try_set(widen_u64(f.name), wrapping_u32(i));
+    }
+    p
+}
+
+// ---------------------------------------------------------------- limits
+
+// `validate_type`: the explicit stack walk, error for error.
+fn validate_type(in p: Prog, ty: u32) eff [Fail[LintFail]] {
+    // (type, depth) pairs.
+    let mut stack = ChunkSeq::new[u64]();
+    stack.push(widen_u64(ty));
+    stack.push(0);
+    let mut nodes: u64 = 0;
+    loop {
+        let n = stack.len();
+        if n == 0 {
+            break;
+        }
+        let depth = word(in stack.as_slice(), wrapping_sub(n, 1));
+        let t = wrapping_u32(word(in stack.as_slice(), wrapping_sub(n, 2)));
+        stack.truncate(wrapping_sub(n, 2));
+        nodes = inc(nodes);
+        if depth > 32 || nodes > 512 {
+            fail(L_TYPE_COMPLEXITY);
+        }
+        let x = type_at(in p, t);
+        let d = inc(depth);
+        if x.kind == TY_NAMED || x.kind == TY_TUPLE {
+            let args = if x.kind == TY_NAMED {
+                x.b
+            } else {
+                x.a
+            };
+            let len = list_len(in p, args);
+            if len > 512 {
+                fail(L_TYPE_ARITY);
+            }
+            for i in 0..len {
+                stack.push(widen_u64(list_at(in p, args, i)));
+                stack.push(d);
+            }
+        } else if x.kind == TY_FUNCTION {
+            let row = row_at(in p, x.c);
+            let np = list_len(in p, x.a) / 2;
+            if np > 128 || list_len(in p, row.instances) > 64 {
+                fail(L_ARROW_SHAPE);
+            }
+            for i in 0..np {
+                stack.push(widen_u64(list_at(in p, x.a, inc(wrapping_mul(i, 2)))));
+                stack.push(d);
+            }
+            stack.push(widen_u64(x.b));
+            stack.push(d);
+            push_row_args(in p, row, inout stack, d);
+        } else if x.kind == TY_ROW {
+            let row = row_at(in p, x.a);
+            if list_len(in p, row.instances) > 64 {
+                fail(L_ROW_SHAPE);
+            }
+            push_row_args(in p, row, inout stack, d);
+        }
+    }
+}
+
+fn push_row_args(in p: Prog, row: EffectsNode, inout stack: ChunkSeq[u64], d: u64) eff [
+    Fail[LintFail]
+] {
+    for i in 0..list_len(in p, row.instances) {
+        let e = eff_at(in p, list_at(in p, row.instances, i));
+        let n = list_len(in p, e.args);
+        if n > 64 {
+            fail(L_NESTED_EFFECT_ARITY);
+        }
+        for j in 0..n {
+            stack.push(widen_u64(list_at(in p, e.args, j)));
+            stack.push(d);
+        }
+    }
+}
+
+fn validate_effect(in p: Prog, e: u32) eff [Fail[LintFail]] {
+    let x = eff_at(in p, e);
+    let n = list_len(in p, x.args);
+    if n > 64 {
+        fail(L_EFFECT_ARITY);
+    }
+    for i in 0..n {
+        validate_type(in p, list_at(in p, x.args, i));
+    }
+}
+
+// The limit checks of `analyze`, in its order.
+fn check_limits(in p: Prog, functions: u64, actions: u64, work: u64, depth: u64) eff [
+    Fail[LintFail]
+] {
+    if functions
+        == 0
+        || functions
+        > 256
+        || actions
+        == 0
+        || actions
+        > 16384
+        || work
+        == 0
+        || work
+        > 1000000
+        || depth
+        == 0
+        || depth
+        > 64 {
+        fail(L_INVALID_LIMITS);
+    }
+    if p.fns.len() > functions {
+        fail(L_FUNCTION_LIMIT);
+    }
+    let mut count: u64 = 0;
+    for i in 0..p.fns.len() {
+        let f = fn_at(in p, i);
+        count = wrapping_add(count, widen_u64(f.act_len));
+        let row = row_at(in p, f.effects);
+        if count > actions || list_len(in p, row.instances) > 64 || list_len(in p, f.facts) > 128 {
+            fail(L_FACT_LIMIT);
+        }
+        if list_len(in p, f.params) > 128 || list_len(in p, f.generics) > 64 {
+            fail(L_SIGNATURE_LIMIT);
+        }
+        validate_type(in p, f.result);
+        for j in 0..list_len(in p, f.params) {
+            validate_type(in p, param_at(in p, list_at(in p, f.params, j)).ty);
+        }
+        for j in 0..list_len(in p, f.facts) {
+            let q = param_at(in p, list_at(in p, f.facts, j));
+            validate_type(in p, q.ty);
+            if list_len(in p, q.fields) > 128 {
+                fail(L_STRUCT_FIELD_LIMIT);
+            }
+        }
+        for j in 0..list_len(in p, row.instances) {
+            validate_effect(in p, list_at(in p, row.instances, j));
+        }
+        for j in 0..widen_u64(f.act_len) {
+            let a = act_at(in p, wrapping_add(widen_u64(f.act_first), j));
+            if a.kind == A_PERFORM {
+                validate_effect(in p, a.a);
+            } else if a.kind == A_CALL {
+                let n = list_len(in p, a.b) / 2;
+                if n > 64 {
+                    fail(L_SUBSTITUTION_LIMIT);
+                }
+                for k in 0..n {
+                    validate_type(in p, list_at(in p, a.b, inc(wrapping_mul(k, 2))));
+                }
+            } else if a.kind == A_ACCESS {
+                if list_len(in p, a.b) > 32 {
+                    fail(L_PROJECTION_DEPTH);
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- types
+
+fn opaque_type(in p: Prog, t: u32) -> bool {
+    let x = type_at(in p, t);
+    if x.kind == TY_NAMED || x.kind == TY_TUPLE {
+        let args = if x.kind == TY_NAMED {
+            x.b
+        } else {
+            x.a
+        };
+        for i in 0..list_len(in p, args) {
+            if opaque_type(in p, list_at(in p, args, i)) {
+                return true;
+            }
+        }
+        false
+    } else {
+        true
+    }
+}
+
+fn types_eq(in p: Prog, a: u32, b: u32) -> bool {
+    let n = list_len(in p, a);
+    if n != list_len(in p, b) {
+        return false;
+    }
+    for i in 0..n {
+        if !type_eq(in p, list_at(in p, a, i), list_at(in p, b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn effect_eq(in p: Prog, a: u32, b: u32) -> bool {
+    if a == b {
+        return true;
+    }
+    let x = eff_at(in p, a);
+    let y = eff_at(in p, b);
+    x.label == y.label && x.name == y.name && types_eq(in p, x.args, y.args)
+}
+
+fn row_eq(in p: Prog, a: u32, b: u32) -> bool {
+    let x = row_at(in p, a);
+    let y = row_at(in p, b);
+    if x.tail != y.tail {
+        return false;
+    }
+    let n = list_len(in p, x.instances);
+    if n != list_len(in p, y.instances) {
+        return false;
+    }
+    for i in 0..n {
+        if !effect_eq(in p, list_at(in p, x.instances, i), list_at(in p, y.instances, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// Structural `Type` equality.
+fn type_eq(in p: Prog, a: u32, b: u32) -> bool {
+    if a == b {
+        return true;
+    }
+    let x = type_at(in p, a);
+    let y = type_at(in p, b);
+    if x.kind != y.kind {
+        return false;
+    }
+    if x.kind == TY_NAMED {
+        x.a == y.a && types_eq(in p, x.b, y.b)
+    } else if x.kind == TY_TUPLE {
+        types_eq(in p, x.a, y.a)
+    } else if x.kind == TY_FUNCTION {
+        let n = list_len(in p, x.a);
+        if n != list_len(in p, y.a) || x.d != y.d {
+            return false;
+        }
+        for i in 0..n {
+            let u = list_at(in p, x.a, i);
+            let v = list_at(in p, y.a, i);
+            if i % 2 == 0 {
+                if u != v {
+                    return false;
+                }
+            } else if !type_eq(in p, u, v) {
+                return false;
+            }
+        }
+        type_eq(in p, x.b, y.b) && row_eq(in p, x.c, y.c)
+    } else if x.kind == TY_ROW {
+        row_eq(in p, x.a, y.a)
+    } else if x.kind == TY_INT_LITERAL {
+        word(in p.ilits.as_slice(), widen_u64(x.a))
+            == word(in p.ilits.as_slice(), widen_u64(y.a))
+            && word(in p.ilits.as_slice(), inc(widen_u64(x.a)))
+            == word(in p.ilits.as_slice(), inc(widen_u64(y.a)))
+    } else {
+        true
+    }
+}
+
+// `substitute` for the types that reach it (named and tuple types: the
+// effect arguments `required` returns are never opaque). `subs` is a list
+// of (name, Type) pairs.
+fn substitute(inout p: Prog, t: u32, subs: u32) -> u32 {
+    let x = type_at(in p, t);
+    if x.kind == TY_NAMED {
+        let n = list_len(in p, x.b);
+        if n == 0 {
+            for i in 0..list_len(in p, subs) / 2 {
+                if list_at(in p, subs, wrapping_mul(i, 2)) == x.a {
+                    return list_at(in p, subs, inc(wrapping_mul(i, 2)));
+                }
+            }
+            return t;
+        }
+        let mut items = ChunkSeq::with_capacity[u32](n);
+        for i in 0..n {
+            let a = list_at(in p, x.b, i);
+            items.push(substitute(inout p, a, subs));
+        }
+        let args = list_new(inout p, in items);
+        add_type(
+            inout p,
+            TypeNode {
+                kind: TY_NAMED,
+                a: x.a,
+                b: args,
+                c: 0,
+                d: 0
+            }
+        )
+    } else if x.kind == TY_TUPLE {
+        let n = list_len(in p, x.a);
+        let mut items = ChunkSeq::with_capacity[u32](n);
+        for i in 0..n {
+            let a = list_at(in p, x.a, i);
+            items.push(substitute(inout p, a, subs));
+        }
+        let args = list_new(inout p, in items);
+        add_type(
+            inout p,
+            TypeNode {
+                kind: TY_TUPLE,
+                a: args,
+                b: 0,
+                c: 0,
+                d: 0
+            }
+        )
+    } else {
+        t
+    }
+}
+
+// ---------------------------------------------------------------- required
+
+struct Work {
+    remaining: u64,
+    used: u64,
+    depth: u64
+}
+
+fn tick(inout w: Work) eff [Fail[LintFail]] {
+    if w.remaining == 0 {
+        fail(L_WORK_LIMIT);
+    }
+    w.remaining = wrapping_sub(w.remaining, 1);
+    w.used = inc(w.used);
+}
+
+// `required`'s result: `reason` is NONE-as-u64 for `Ok(effects)`.
+struct Req {
+    reason: u64,
+    effects: ChunkSeq[u32]
+}
+
+const OK: u64 = 18446744073709551615;
+
+fn req_err(reason: u64) -> Req {
+    Req {
+        reason: reason,
+        effects: ChunkSeq::new[u32]()
+    }
+}
+
+// `resolve`: the last instance of `row` matching `request`, or NONE.
+fn resolve(in p: Prog, row: u32, request: u32) -> u32 {
+    let inst = row_at(in p, row).instances;
+    let q = eff_at(in p, request);
+    let mut i = list_len(in p, inst);
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let id = list_at(in p, inst, i);
+        let e = eff_at(in p, id);
+        if e
+            .name
+            == q
+            .name
+            && types_eq(in p, e.args, q.args)
+            && (q.label == NONE || e.label == q.label) {
+            return id;
+        }
+    }
+    NONE
+}
+
+fn contains_effect(in p: Prog, in list: ChunkSeq[u32], e: u32) -> bool {
+    for i in 0..list.len() {
+        if effect_eq(in p, u32_at(in list, i), e) {
+            return true;
+        }
+    }
+    false
+}
+
+fn required(inout p: Prog, name: u32, inout seen: ChunkSeq[bool], inout depth: u64, inout w: Work)
+    -> Req eff [Fail[LintFail]] {
+    tick(inout w);
+    let fi = u32_at(in p.fn_of, widen_u64(name));
+    if fi == NONE {
+        return req_err(R_UNRESOLVED_CALLEE);
+    }
+    let f = fn_at(in p, widen_u64(fi));
+    let row = row_at(in p, f.effects);
+    if row.tail != NONE {
+        return req_err(R_OPEN_ROW);
+    }
+    for i in 0..list_len(in p, f.generics) {
+        match p.generics.try_get(widen_u64(list_at(in p, f.generics, i))) {
+            Option::Some(g) => {
+                if g.row {
+                    return req_err(R_OPEN_ROW);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    for i in 0..list_len(in p, f.params) {
+        if opaque_type(in p, param_at(in p, list_at(in p, f.params, i)).ty) {
+            return req_err(R_HIGHER_ORDER);
+        }
+    }
+    if opaque_type(in p, f.result) {
+        return req_err(R_HIGHER_ORDER);
+    }
+    for i in 0..list_len(in p, row.instances) {
+        let e = eff_at(in p, list_at(in p, row.instances, i));
+        for j in 0..list_len(in p, e.args) {
+            if opaque_type(in p, list_at(in p, e.args, j)) {
+                return req_err(R_UNRESOLVED_INSTANCE);
+            }
+        }
+    }
+    if !f.owned || !f.body {
+        let mut out = ChunkSeq::new[u32]();
+        for i in 0..list_len(in p, row.instances) {
+            out.push(list_at(in p, row.instances, i));
+        }
+        return Req {
+            reason: OK,
+            effects: out
+        };
+    }
+    let at_seen = match seen.try_get(widen_u64(fi)) {
+        Option::Some(b) => b,
+        Option::None => false,
+    };
+    if depth >= w.depth || at_seen {
+        return req_err(R_RECURSIVE);
+    }
+    seen.try_set(widen_u64(fi), true);
+    depth = inc(depth);
+    let result = required_body(inout p, f, inout seen, inout depth, inout w);
+    seen.try_set(widen_u64(fi), false);
+    depth = wrapping_sub(depth, 1);
+    result
+}
+
+fn required_body(
+    inout p: Prog,
+    f: FnFacts,
+    inout seen: ChunkSeq[bool],
+    inout depth: u64,
+    inout w: Work
+) -> Req eff [Fail[LintFail]] {
+    let mut out = ChunkSeq::new[u32]();
+    let mut requested = ChunkSeq::new[u32]();
+    for k in 0..widen_u64(f.act_len) {
+        tick(inout w);
+        let a = act_at(in p, wrapping_add(widen_u64(f.act_first), k));
+        requested.clear();
+        if a.kind == A_PERFORM {
+            requested.push(a.a);
+        } else if a.kind == A_CALL {
+            let ti = u32_at(in p.fn_of, widen_u64(a.a));
+            if ti == NONE {
+                return req_err(R_UNRESOLVED_CALL);
+            }
+            let target = fn_at(in p, widen_u64(ti));
+            let nsubs = list_len(in p, a.b) / 2;
+            for i in 0..list_len(in p, target.generics) {
+                let gname = match p.generics.try_get(widen_u64(list_at(in p, target.generics, i))) {
+                    Option::Some(g) => g.name,
+                    Option::None => NONE,
+                };
+                let mut found = false;
+                for j in 0..nsubs {
+                    if list_at(in p, a.b, wrapping_mul(j, 2)) == gname {
+                        found = true;
+                    }
+                }
+                if !found {
+                    return req_err(R_UNRESOLVED_SUBSTITUTION);
+                }
+            }
+            for j in 0..nsubs {
+                if opaque_type(in p, list_at(in p, a.b, inc(wrapping_mul(j, 2)))) {
+                    return req_err(R_UNRESOLVED_SUBSTITUTION);
+                }
+            }
+            let callee = required(inout p, a.a, inout seen, inout depth, inout w);
+            if callee.reason != OK {
+                return req_err(callee.reason);
+            }
+            for i in 0..callee.effects.len() {
+                let e = eff_at(in p, u32_at(in callee.effects, i));
+                let n = list_len(in p, e.args);
+                let mut items = ChunkSeq::with_capacity[u32](n);
+                for j in 0..n {
+                    let t = list_at(in p, e.args, j);
+                    items.push(substitute(inout p, t, a.b));
+                }
+                let args = list_new(inout p, in items);
+                let id = wrapping_u32(p.effs.len());
+                p
+                    .effs
+                    .push(
+                    EffectNode {
+                        label: e.label,
+                        name: e.name,
+                        args: args
+                    }
+                );
+                requested.push(id);
+            }
+        } else if a.kind == A_OPAQUE {
+            return req_err(wrapping_add(R_OPAQUE, wrapping_add(widen_u64(f.act_first), k)));
+        } else {
+            continue;
+        }
+        for i in 0..requested.len() {
+            let found = resolve(in p, f.effects, u32_at(in requested, i));
+            if found == NONE {
+                return req_err(R_UNMAPPED);
+            }
+            if !contains_effect(in p, in out, found) {
+                out.push(found);
+            }
+        }
+    }
+    Req {
+        reason: OK,
+        effects: out
+    }
+}
+
+// ---------------------------------------------------------------- display
+
+fn put_sym(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, sym: u32) {
+    let s = word(in p.sym_start.as_slice(), widen_u64(sym));
+    let n = word(in p.sym_len.as_slice(), widen_u64(sym));
+    let x = blob.as_bytes();
+    o.extend(in x[s..wrapping_add(s, n)]);
+}
+
+fn sym_is(in p: Prog, in blob: Str, sym: u32, in w: Str) -> bool {
+    let s = word(in p.sym_start.as_slice(), widen_u64(sym));
+    let n = word(in p.sym_len.as_slice(), widen_u64(sym));
+    let b = w.as_bytes();
+    if n != b.len() {
+        return false;
+    }
+    let x = blob.as_bytes();
+    for i in 0..n {
+        if at(in x, wrapping_add(s, i)) != at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn put_types(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, list: u32, stride: u64, offset: u64) {
+    let n = if stride == 2 {
+        list_len(in p, list) / 2
+    } else {
+        list_len(in p, list)
+    };
+    for i in 0..n {
+        if i != 0 {
+            put(inout o, in ", ");
+        }
+        put_type(
+            inout o,
+            in p,
+            in blob,
+            list_at(in p, list, wrapping_add(wrapping_mul(i, stride), offset))
+        );
+    }
+}
+
+// `Display for Type` for the types that reach a message (named and tuple
+// types: the effects of a finding are never opaque; the function arrow and
+// `_` are kept for completeness).
+fn put_type(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, t: u32) {
+    let x = type_at(in p, t);
+    if x.kind == TY_NAMED {
+        if sym_is(in p, in blob, x.a, in "dyn") && list_len(in p, x.b) == 1 {
+            put(inout o, in "dyn ");
+            put_type(inout o, in p, in blob, list_at(in p, x.b, 0));
+            return;
+        }
+        put_sym(inout o, in p, in blob, x.a);
+        if list_len(in p, x.b) != 0 {
+            o.push(91);
+            put_types(inout o, in p, in blob, x.b, 1, 0);
+            o.push(93);
+        }
+    } else if x.kind == TY_TUPLE {
+        o.push(40);
+        put_types(inout o, in p, in blob, x.a, 1, 0);
+        o.push(41);
+    } else if x.kind == TY_FUNCTION {
+        put(inout o, in "fn(");
+        put_types(inout o, in p, in blob, x.a, 2, 1);
+        put(inout o, in ") -> ");
+        put_type(inout o, in p, in blob, x.b);
+    } else {
+        o.push(95);
+    }
+}
+
+fn put_effect(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, e: u32) {
+    let x = eff_at(in p, e);
+    if x.label != NONE {
+        put_sym(inout o, in p, in blob, x.label);
+        put(inout o, in ": ");
+    }
+    put_sym(inout o, in p, in blob, x.name);
+    if list_len(in p, x.args) != 0 {
+        o.push(91);
+        put_types(inout o, in p, in blob, x.args, 1, 0);
+        o.push(93);
+    }
+}
+
+// ---------------------------------------------------------------- paths
+
+// Byte order of two symbols.
+fn sym_cmp(in p: Prog, in blob: Str, a: u32, b: u32) -> i64 {
+    if a == b {
+        return 0;
+    }
+    let x = blob.as_bytes();
+    let sa = word(in p.sym_start.as_slice(), widen_u64(a));
+    let la = word(in p.sym_len.as_slice(), widen_u64(a));
+    let sb = word(in p.sym_start.as_slice(), widen_u64(b));
+    let lb = word(in p.sym_len.as_slice(), widen_u64(b));
+    let n = if la < lb {
+        la
+    } else {
+        lb
+    };
+    for i in 0..n {
+        let u = at(in x, wrapping_add(sa, i));
+        let v = at(in x, wrapping_add(sb, i));
+        if u != v {
+            return if u < v {
+                -1
+            } else {
+                1
+            };
+        }
+    }
+    if la < lb {
+        -1
+    } else if la > lb {
+        1
+    } else {
+        0
+    }
+}
+
+// `Vec<String>` order of two paths (lists of names).
+fn path_lt(in p: Prog, in blob: Str, a: u32, b: u32) -> bool {
+    let n = list_len(in p, a);
+    let m = list_len(in p, b);
+    let k = if n < m {
+        n
+    } else {
+        m
+    };
+    for i in 0..k {
+        let c = sym_cmp(in p, in blob, list_at(in p, a, i), list_at(in p, b, i));
+        if c != 0 {
+            return c < 0;
+        }
+    }
+    n < m
+}
+
+fn path_eq(in p: Prog, a: u32, b: u32) -> bool {
+    let n = list_len(in p, a);
+    if n != list_len(in p, b) {
+        return false;
+    }
+    for i in 0..n {
+        if list_at(in p, a, i) != list_at(in p, b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether path `a` starts with path `b`.
+fn starts_with(in p: Prog, a: u32, b: u32) -> bool {
+    let n = list_len(in p, b);
+    if n > list_len(in p, a) {
+        return false;
+    }
+    for i in 0..n {
+        if list_at(in p, a, i) != list_at(in p, b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Sorts `paths` (action indices, each an Access) by path, merging runs.
+fn sort_paths(in p: Prog, in blob: Str, f: FnFacts, inout paths: ChunkSeq[u32]) {
+    let n = paths.len();
+    if n < 2 {
+        return;
+    }
+    let mut src = ChunkSeq::with_capacity[u32](n);
+    src.extend(in paths.as_slice());
+    let mut dst = ChunkSeq::with_capacity[u32](n);
+    dst.resize(n, 0);
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if wrapping_add(lo, width) < n {
+                wrapping_add(lo, width)
+            } else {
+                n
+            };
+            let hi = if wrapping_add(mid, width) < n {
+                wrapping_add(mid, width)
+            } else {
+                n
+            };
+            let mut i = lo;
+            let mut j = mid;
+            let mut k = lo;
+            loop {
+                if k >= hi {
+                    break;
+                }
+                let take_right = if i >= mid {
+                    true
+                } else if j >= hi {
+                    false
+                } else {
+                    let a = act_path(in p, f, u32_at(in src, j));
+                    let b = act_path(in p, f, u32_at(in src, i));
+                    path_lt(in p, in blob, a, b)
+                };
+                if take_right {
+                    dst.try_set(k, u32_at(in src, j));
+                    j = inc(j);
+                } else {
+                    dst.try_set(k, u32_at(in src, i));
+                    i = inc(i);
+                }
+                k = inc(k);
+            }
+            lo = hi;
+        }
+        src.clear();
+        src.extend(in dst.as_slice());
+        width = wrapping_mul(width, 2);
+    }
+    paths.clear();
+    paths.extend(in src.as_slice());
+}
+
+fn act_path(in p: Prog, f: FnFacts, k: u32) -> u32 {
+    act_at(in p, wrapping_add(widen_u64(f.act_first), widen_u64(k))).b
+}
+
+// `minimize`: sorted, without paths that extend a kept one.
+fn minimize(in p: Prog, in blob: Str, f: FnFacts, inout paths: ChunkSeq[u32]) {
+    sort_paths(in p, in blob, f, inout paths);
+    let mut out = ChunkSeq::with_capacity[u32](paths.len());
+    for i in 0..paths.len() {
+        let k = u32_at(in paths, i);
+        let path = act_path(in p, f, k);
+        let mut covered = false;
+        for j in 0..out.len() {
+            if starts_with(in p, path, act_path(in p, f, u32_at(in out, j))) {
+                covered = true;
+                break;
+            }
+        }
+        if !covered {
+            out.push(k);
+        }
+    }
+    paths.clear();
+    paths.extend(in out.as_slice());
+}
+
+fn put_paths(inout o: ChunkSeq[u8], in p: Prog, in blob: Str, f: FnFacts, in paths: ChunkSeq[u32]) {
+    for i in 0..paths.len() {
+        if i != 0 {
+            put(inout o, in ", ");
+        }
+        let path = act_path(in p, f, u32_at(in paths, i));
+        for j in 0..list_len(in p, path) {
+            if j != 0 {
+                o.push(46);
+            }
+            put_sym(inout o, in p, in blob, list_at(in p, path, j));
+        }
+    }
+}
+
+fn contains_path(in p: Prog, f: FnFacts, in paths: ChunkSeq[u32], path: u32) -> bool {
+    for i in 0..paths.len() {
+        if path_eq(in p, act_path(in p, f, u32_at(in paths, i)), path) {
+            return true;
+        }
+    }
+    false
+}
+
+fn list_has(in p: Prog, list: u32, x: u32) -> bool {
+    for i in 0..list_len(in p, list) {
+        if list_at(in p, list, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// `projection_findings` for function `fi`; findings go to `out`, counted in
+// `count`.
+fn projection_findings(
+    in p: Prog,
+    in blob: Str,
+    fi: u64,
+    inout w: Work,
+    inout out: ChunkSeq[u64],
+    inout count: u64
+) eff [Fail[LintFail]] {
+    let f = fn_at(in p, fi);
+    for k in 0..widen_u64(f.act_len) {
+        if act_at(in p, wrapping_add(widen_u64(f.act_first), k)).kind == A_OPAQUE {
+            return;
+        }
+    }
+    let mut writes = ChunkSeq::new[u32]();
+    let mut reads = ChunkSeq::new[u32]();
+    for pi in 0..list_len(in p, f.facts) {
+        let q = param_at(in p, list_at(in p, f.facts, pi));
+        if q
+            .pass
+            != PASS_INOUT
+            || list_len(in p, q.projections)
+            != 0
+            || list_len(in p, q.fields)
+            == 0 {
+            continue;
+        }
+        writes.clear();
+        reads.clear();
+        let mut blocked = false;
+        for k in 0..widen_u64(f.act_len) {
+            tick(inout w);
+            let a = act_at(in p, wrapping_add(widen_u64(f.act_first), k));
+            if a.kind != A_ACCESS || a.a != q.name {
+                continue;
+            }
+            if list_len(in p, a.b)
+                == 0
+                || a
+                .moves
+                || !list_has(in p, q.fields, list_at(in p, a.b, 0)) {
+                blocked = true;
+                break;
+            }
+            if a.pass == PASS_INOUT {
+                if !contains_path(in p, f, in writes, a.b) {
+                    writes.push(wrapping_u32(k));
+                }
+            } else if !contains_path(in p, f, in reads, a.b) {
+                reads.push(wrapping_u32(k));
+            }
+        }
+        if blocked || writes.len() == 0 {
+            continue;
+        }
+        minimize(in p, in blob, f, inout writes);
+        minimize(in p, in blob, f, inout reads);
+        let mut kept = ChunkSeq::with_capacity[u32](reads.len());
+        for i in 0..reads.len() {
+            let r = u32_at(in reads, i);
+            let mut under = false;
+            for j in 0..writes.len() {
+                if starts_with(
+                    in p,
+                    act_path(in p, f, r),
+                    act_path(in p, f, u32_at(in writes, j))
+                ) {
+                    under = true;
+                    break;
+                }
+            }
+            if !under {
+                kept.push(r);
+            }
+        }
+        reads.clear();
+        reads.extend(in kept.as_slice());
+        let mut all = true;
+        for i in 0..list_len(in p, q.fields) {
+            let field = list_at(in p, q.fields, i);
+            let mut whole = false;
+            for j in 0..writes.len() {
+                let path = act_path(in p, f, u32_at(in writes, j));
+                if list_len(in p, path) == 1 && list_at(in p, path, 0) == field {
+                    whole = true;
+                    break;
+                }
+            }
+            if !whole {
+                all = false;
+                break;
+            }
+        }
+        if all {
+            continue;
+        }
+        out.push(0);
+        out.push(fi);
+        out.push(q.start);
+        out.push(q.end);
+        out.push(pi);
+        out.push(writes.len());
+        for i in 0..writes.len() {
+            out.push(widen_u64(u32_at(in writes, i)));
+        }
+        out.push(reads.len());
+        for i in 0..reads.len() {
+            out.push(widen_u64(u32_at(in reads, i)));
+        }
+        let mut msg = ChunkSeq::new[u8]();
+        put(inout msg, in "inout ");
+        put_sym(inout msg, in p, in blob, q.name);
+        put(inout msg, in " mutates {");
+        put_paths(inout msg, in p, in blob, f, in writes);
+        put(inout msg, in "} and reads {");
+        put_paths(inout msg, in p, in blob, f, in reads);
+        put(inout msg, in "}; narrower signature needs caller review (diagnostic only)");
+        push_text(inout out, in msg.as_slice());
+        count = inc(count);
+    }
+}
+
+// `analyze`. `facts` and `blob` are port.rs's encoding of the program.
+// The result: the work used, the findings (each its rule (0 L0101,
+// 1 L0102), function index, span, the rule's detail and the message), then
+// the skipped functions (function index, reason).
+pub fn analyze(
+    in facts: Slice[u64],
+    in blob: Str,
+    functions: u64,
+    actions: u64,
+    work: u64,
+    call_depth: u64
+) -> ChunkSeq[u64] eff [Fail[LintFail]] {
+    let mut p = decode(in facts, in blob);
+    check_limits(in p, functions, actions, work, call_depth);
+    let mut w = Work {
+        remaining: work,
+        used: 0,
+        depth: call_depth
+    };
+    let mut findings = ChunkSeq::new[u64]();
+    let mut nfindings: u64 = 0;
+    let mut skipped = ChunkSeq::new[u64]();
+    let mut seen = ChunkSeq::new[bool]();
+    seen.resize(p.fns.len(), false);
+    for fi in 0..p.fns.len() {
+        let f = fn_at(in p, fi);
+        if !f.owned || !f.body {
+            continue;
+        }
+        let mut depth: u64 = 0;
+        let req = required(inout p, f.name, inout seen, inout depth, inout w);
+        if req.reason == OK {
+            let inst = row_at(in p, f.effects).instances;
+            for i in 0..list_len(in p, inst) {
+                let e = list_at(in p, inst, i);
+                if !contains_effect(in p, in req.effects, e) {
+                    findings.push(1);
+                    findings.push(fi);
+                    findings.push(f.start);
+                    findings.push(f.end);
+                    findings.push(i);
+                    let mut msg = ChunkSeq::new[u8]();
+                    put(inout msg, in "unused effect capability ");
+                    put_effect(inout msg, in p, in blob, e);
+                    push_text(inout findings, in msg.as_slice());
+                    nfindings = inc(nfindings);
+                }
+            }
+        } else {
+            skipped.push(fi);
+            skipped.push(req.reason);
+        }
+        projection_findings(in p, in blob, fi, inout w, inout findings, inout nfindings);
+    }
+    let mut out = ChunkSeq::with_capacity[u64](
+        wrapping_add(wrapping_add(findings.len(), skipped.len()), 3)
+    );
+    out.push(w.used);
+    out.push(nfindings);
+    out.extend(in findings.as_slice());
+    out.push(skipped.len() / 2);
+    out.extend(in skipped.as_slice());
+    out
+}
+
+// ================================================================ edits
+
+const E_EDIT_LIMIT: u64 = 15;
+const E_STALE: u64 = 16;
+const E_CANDIDATE: u64 = 18;
+
+copy struct EditKey {
+    start: u64,
+    end: u64,
+    index: u64
+}
+
+impl Ord for EditKey {}
+
+fn char_boundary(in s: Slice[u8], i: u64) -> bool {
+    if i == s.len() {
+        return true;
+    }
+    if i > s.len() {
+        return false;
+    }
+    let c = at(in s, i);
+    c < 128 || c >= 192
+}
+
+// `apply_edits`: `edits` holds the count, then per edit its span and the
+// (start, len) of its expected text and replacement in `texts`.
+pub fn apply_edits(in source: Str, in edits: Slice[u64], in texts: Str, max_bytes: u64)
+    -> ChunkSeq[u8] eff [Fail[LintFail]] {
+    let n = word(in edits, 0);
+    let s = source.as_bytes();
+    let x = texts.as_bytes();
+    if n > 8192 || s.len() > max_bytes || max_bytes > 262144 {
+        fail(E_EDIT_LIMIT);
+    }
+    let mut keys = ChunkSeq::with_capacity[EditKey](n);
+    for i in 0..n {
+        let b = inc(wrapping_mul(i, 6));
+        keys
+            .push(
+            EditKey {
+                start: word(in edits, b),
+                end: word(in edits, inc(b)),
+                index: i
+            }
+        );
+    }
+    sort(inout keys.as_slice_mut());
+    let mut end: u64 = 0;
+    let mut bytes = s.len();
+    for k in 0..n {
+        let e = match keys.try_get(k) {
+            Option::Some(e) => e,
+            Option::None => EditKey {
+                start: 0,
+                end: 0,
+                index: 0
+            },
+        };
+        let b = inc(wrapping_mul(e.index, 6));
+        let es = word(in edits, wrapping_add(b, 2));
+        let el = word(in edits, wrapping_add(b, 3));
+        let rl = word(in edits, wrapping_add(b, 5));
+        if e
+            .start
+            < end
+            || e
+            .start
+            >= e
+            .end
+            || e
+            .end
+            > s
+            .len()
+            || !char_boundary(in s, e.start)
+            || !char_boundary(in s, e.end)
+            || wrapping_sub(e.end, e.start)
+            != el {
+            fail(E_STALE);
+        }
+        for i in 0..el {
+            if at(in s, wrapping_add(e.start, i)) != at(in x, wrapping_add(es, i)) {
+                fail(E_STALE);
+            }
+        }
+        end = e.end;
+        bytes = wrapping_add(wrapping_sub(bytes, el), rl);
+        if bytes > max_bytes {
+            fail(E_CANDIDATE);
+        }
+    }
+    let mut out = ChunkSeq::with_capacity[u8](bytes);
+    let mut cursor: u64 = 0;
+    for k in 0..n {
+        let e = match keys.try_get(k) {
+            Option::Some(e) => e,
+            Option::None => EditKey {
+                start: 0,
+                end: 0,
+                index: 0
+            },
+        };
+        let b = inc(wrapping_mul(e.index, 6));
+        let rs = word(in edits, wrapping_add(b, 4));
+        let rl = word(in edits, wrapping_add(b, 5));
+        out.extend(in s[cursor..e.start]);
+        out.extend(in x[rs..wrapping_add(rs, rl)]);
+        cursor = e.end;
+    }
+    out.extend(in s[cursor..s.len()]);
+    out
+}

@@ -18,6 +18,22 @@ use self::util::{
     u
 };
 
+// IEEE 754 binary32: the sign bit and +-infinity.
+const F32_SIGN_BIT: u32 = 0x80000000;
+const F32_INFINITY_BITS: u32 = 0x7f800000;
+const F32_NEG_INFINITY_BITS: u32 = 0xff800000;
+// LSD radix sort, a byte a pass; a pair key takes eight passes, or four
+// once indices fit in 16 bits (at most 65,536 of them).
+const RADIX_BITS: u64 = 8;
+const RADIX_BUCKETS: u64 = 256;
+const RADIX_MASK: u64 = 255;
+const PAIR_PASSES: u64 = 8;
+const SMALL_PAIR_PASSES: u64 = 4;
+const SMALL_INDEX_COUNT: u64 = 0x10000;
+const SMALL_INDEX_MASK: u64 = 0xffff;
+// A saturated overlap count.
+const U32_MAX: u32 = 0xffffffff;
+
 fn raise_sap(e: SapError) -> u64 eff [Fail[SapError]] {
     Fail::raise(e);
     0
@@ -28,7 +44,7 @@ pub fn sortable(bits: u32) -> u32 {
     if (bits >> 31) == 1 {
         ~bits
     } else {
-        bits | 0x80000000
+        bits | F32_SIGN_BIT
     }
 }
 
@@ -46,8 +62,8 @@ fn radix_sort(
     inout hist: Slice[u32]
 ) {
     for pass in 0..passes {
-        let shift = wrapping_u32(wrapping_mul(pass, 8));
-        for d in 0..u(256) {
+        let shift = wrapping_u32(wrapping_mul(pass, RADIX_BITS));
+        for d in 0..u(RADIX_BUCKETS) {
             hist.try_set(d, 0);
         }
         let odd = (pass & 1) == 1;
@@ -58,11 +74,11 @@ fn radix_sort(
             } else {
                 k = g64(in keys, i);
             }
-            let d = shr_u64(k, shift) & 255;
+            let d = shr_u64(k, shift) & RADIX_MASK;
             hist.try_set(d, wrapping_add(g32(in hist, d), 1));
         }
         let mut run: u32 = 0;
-        for d in 0..u(256) {
+        for d in 0..u(RADIX_BUCKETS) {
             let c = g32(in hist, d);
             hist.try_set(d, run);
             run = wrapping_add(run, c);
@@ -70,7 +86,7 @@ fn radix_sort(
         for i in 0..n {
             if odd {
                 let k = g64(in tk, i);
-                let d = shr_u64(k, shift) & 255;
+                let d = shr_u64(k, shift) & RADIX_MASK;
                 let at = widen_u64(g32(in hist, d));
                 hist.try_set(d, wrapping_add(g32(in hist, d), 1));
                 keys.try_set(at, k);
@@ -79,7 +95,7 @@ fn radix_sort(
                 }
             } else {
                 let k = g64(in keys, i);
-                let d = shr_u64(k, shift) & 255;
+                let d = shr_u64(k, shift) & RADIX_MASK;
                 let at = widen_u64(g32(in hist, d));
                 hist.try_set(d, wrapping_add(g32(in hist, d), 1));
                 tk.try_set(at, k);
@@ -115,8 +131,8 @@ pub fn build(
             );
         }
     }
-    let inf = from_bits_f32(0x7f800000);
-    let ninf = from_bits_f32(0xff800000);
+    let inf = from_bits_f32(F32_INFINITY_BITS);
+    let ninf = from_bits_f32(F32_NEG_INFINITY_BITS);
     let mut lo0 = inf;
     let mut lo1 = inf;
     let mut lo2 = inf;
@@ -208,7 +224,7 @@ pub fn pair_total(in smin: Slice[u32], in smax: Slice[u32], axis: u64, inout cou
             if !(t < n && gf(in smin, wrapping_add(wrapping_mul(t, 3), axis)) <= up) {
                 break;
             }
-            if sweep_overlaps(in smin, in smax, s, t) && c != 0xffffffff {
+            if sweep_overlaps(in smin, in smax, s, t) && c != U32_MAX {
                 c = wrapping_add(c, 1);
             }
             t = inc(t);
@@ -257,20 +273,20 @@ pub fn write_pairs(
             t = inc(t);
         }
     }
-    let mut passes: u64 = 8;
-    if n <= 0x10000 {
+    let mut passes: u64 = PAIR_PASSES;
+    if n <= SMALL_INDEX_COUNT {
         // Indices fit in 16 bits: compress each key so four passes sort it.
-        passes = 4;
+        passes = SMALL_PAIR_PASSES;
         for i in 0..total {
             let k = g64(in out, i);
-            out.try_set(i, ((k >> 32) << 16) | (k & 0xffff));
+            out.try_set(i, ((k >> 32) << 16) | (k & SMALL_INDEX_MASK));
         }
     }
     radix_sort(inout out, inout novals, false, total, passes, inout tk, inout tv, inout hist);
-    if passes == 4 {
+    if passes == SMALL_PAIR_PASSES {
         for i in 0..total {
             let k = g64(in out, i);
-            out.try_set(i, ((k >> 16) << 32) | (k & 0xffff));
+            out.try_set(i, ((k >> 16) << 32) | (k & SMALL_INDEX_MASK));
         }
     }
 }

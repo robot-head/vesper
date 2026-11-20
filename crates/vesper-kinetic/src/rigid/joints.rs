@@ -167,9 +167,12 @@ impl JointState {
     }
 }
 
+/// `unit` refuses vectors no longer than this.
+const MIN_UNIT_LENGTH: f32 = 1.0e-6;
+
 fn unit(v: V3) -> Option<V3> {
     let l = length(v);
-    (l.is_finite() && l > 1.0e-6).then(|| scale(v, det::div(1.0, l)))
+    (l.is_finite() && l > MIN_UNIT_LENGTH).then(|| scale(v, det::div(1.0, l)))
 }
 
 impl RigidWorld {

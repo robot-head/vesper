@@ -22,6 +22,88 @@
 // 6 enumerator index, 7 needs the local type id, 8 no match, 9 candidates
 // disagree.
 
+// Local type tree tags (see above).
+const LT_VOID: u64 = 0;
+const LT_INT: u64 = 1;
+const LT_PTR: u64 = 2;
+const LT_ARRAY: u64 = 3;
+const LT_STRUCT: u64 = 4;
+const LT_ENUM: u64 = 5;
+
+// `BTF_KIND_*` (see btf.ves) and `tkind`'s code for an id past the table.
+const KIND_VOID: u64 = 0;
+const KIND_INT: u64 = 1;
+const KIND_PTR: u64 = 2;
+const KIND_ARRAY: u64 = 3;
+const KIND_STRUCT: u64 = 4;
+const KIND_UNION: u64 = 5;
+const KIND_ENUM: u64 = 6;
+const KIND_FWD: u64 = 7;
+const KIND_TYPEDEF: u64 = 8;
+const KIND_VOLATILE: u64 = 9;
+const KIND_CONST: u64 = 10;
+const KIND_RESTRICT: u64 = 11;
+const KIND_FUNC: u64 = 12;
+const KIND_FUNC_PROTO: u64 = 13;
+const KIND_VAR: u64 = 14;
+const KIND_DATASEC: u64 = 15;
+const KIND_FLOAT: u64 = 16;
+const KIND_DECL_TAG: u64 = 17;
+const KIND_TYPE_TAG: u64 = 18;
+const KIND_ENUM64: u64 = 19;
+const TKIND_MISSING: u64 = 99;
+
+// `enum bpf_core_relo_kind`.
+const CORE_FIELD_BYTE_OFFSET: u64 = 0;
+const CORE_FIELD_BYTE_SIZE: u64 = 1;
+const CORE_FIELD_EXISTS: u64 = 2;
+const CORE_FIELD_SIGNED: u64 = 3;
+const CORE_FIELD_LSHIFT_U64: u64 = 4;
+const CORE_FIELD_RSHIFT_U64: u64 = 5;
+const CORE_TYPE_ID_LOCAL: u64 = 6;
+const CORE_TYPE_ID_TARGET: u64 = 7;
+const CORE_TYPE_EXISTS: u64 = 8;
+const CORE_TYPE_SIZE: u64 = 9;
+const CORE_ENUMVAL_EXISTS: u64 = 10;
+const CORE_ENUMVAL_VALUE: u64 = 11;
+const CORE_TYPE_MATCHES: u64 = 12;
+
+// A candidate that gives no value; a relocation without a local type id.
+const NO_VALUE: u64 = 100;
+const NO_LOCAL_ID: u64 = 18446744073709551615;
+
+// Pointer size; how many modifiers `skip_mods` follows and how deep
+// `size_of`, `types_match` and `find_member` recurse (src/btf.rs, core.rs).
+const PTR_SIZE: u64 = 8;
+const MAX_MOD_CHAIN: u64 = 64;
+const MAX_SIZE_DEPTH: u64 = 64;
+const MAX_MATCH_DEPTH: u64 = 32;
+
+// `essential_name` cuts at the first `___` (a flavor suffix).
+const ASCII_UNDERSCORE: u64 = 95;
+
+// Integer bounds and sign extension.
+const U16_MAX: u64 = 65535;
+const U32_MAX: u64 = 4294967295;
+const I16_MAX: u64 = 32767;
+const I32_MIN: i64 = -2147483648;
+const I32_MAX: i64 = 2147483647;
+const SIGN_BIT16: u64 = 32768;
+const SIGN_BIT32: u64 = 2147483648;
+const HIGH48: u64 = 18446744073709486080;
+const HIGH32: u64 = 18446744069414584320;
+
+// Instruction classes, `BPF_X` and `BPF_LD | BPF_IMM | BPF_DW` (see insn.ves).
+const CLASS_MASK: u64 = 7;
+const CLASS_LD: u64 = 0;
+const CLASS_LDX: u64 = 1;
+const CLASS_ST: u64 = 2;
+const CLASS_STX: u64 = 3;
+const CLASS_ALU: u64 = 4;
+const CLASS_ALU64: u64 = 7;
+const SRC_X: u64 = 8;
+const LD_IMM64: u64 = 24;
+
 fn wd(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
@@ -60,11 +142,11 @@ fn ltag(in lt: Slice[u64], p: u64) -> u64 {
 
 fn lsize(in lt: Slice[u64], p: u64) -> u64 {
     let tag = ltag(in lt, p);
-    if tag == 0 {
+    if tag == LT_VOID {
         0
-    } else if tag == 2 {
-        8
-    } else if tag == 3 {
+    } else if tag == LT_PTR {
+        PTR_SIZE
+    } else if tag == LT_ARRAY {
         wrapping_mul(lsize(in lt, wrapping_add(p, 6)), wd(in lt, wrapping_add(p, 5)))
     } else {
         wd(in lt, wrapping_add(p, 3))
@@ -76,15 +158,15 @@ fn lend(in lt: Slice[u64], p: u64) -> u64 {
     let tag = ltag(in lt, p);
     let n = wd(in lt, wrapping_add(p, 5));
     let body = wrapping_add(p, 6);
-    if tag == 2 || tag == 3 {
+    if tag == LT_PTR || tag == LT_ARRAY {
         lend(in lt, body)
-    } else if tag == 4 {
+    } else if tag == LT_STRUCT {
         let mut q = body;
         for i in 0..n {
             q = lend(in lt, wrapping_add(q, 6));
         }
         q
-    } else if tag == 5 {
+    } else if tag == LT_ENUM {
         wrapping_add(body, wrapping_mul(n, 3))
     } else {
         body
@@ -102,10 +184,10 @@ fn lmember(in lt: Slice[u64], p: u64, i: u64) -> u64 {
 
 fn lsigned(in lt: Slice[u64], p: u64) -> bool {
     let tag = ltag(in lt, p);
-    if tag == 1 {
+    if tag == LT_INT {
         return wd(in lt, wrapping_add(p, 4)) != 0;
     }
-    if tag == 5 {
+    if tag == LT_ENUM {
         let n = wd(in lt, wrapping_add(p, 5));
         for i in 0..n {
             let v = wd(
@@ -133,11 +215,11 @@ pub fn has(in idx: Slice[u64], id: u64) -> bool {
 // The kind of type `id`, enum64 as enum; 99 when there is no such type.
 pub fn tkind(in tab: Slice[u64], in idx: Slice[u64], id: u64) -> u64 {
     if !has(in idx, id) {
-        return 99;
+        return TKIND_MISSING;
     }
     let k = wd(in tab, rec(in idx, id));
-    if k == 19 {
-        6
+    if k == KIND_ENUM64 {
+        KIND_ENUM
     } else {
         k
     }
@@ -155,10 +237,19 @@ pub fn te(in tab: Slice[u64], in idx: Slice[u64], id: u64, k: u64, i: u64, w: u6
 // `Btf::skip_mods`.
 pub fn skip_mods(in tab: Slice[u64], in idx: Slice[u64], id0: u64) -> u64 {
     let mut id = id0;
-    let n: u64 = 64;
+    let n: u64 = MAX_MOD_CHAIN;
     for i in 0..n {
         let k = tkind(in tab, in idx, id);
-        if k == 8 || k == 9 || k == 10 || k == 11 || k == 18 {
+        if k
+            == KIND_TYPEDEF
+            || k
+            == KIND_VOLATILE
+            || k
+            == KIND_CONST
+            || k
+            == KIND_RESTRICT
+            || k
+            == KIND_TYPE_TAG {
             id = tf(in tab, in idx, id, 2);
         } else {
             return id;
@@ -169,18 +260,29 @@ pub fn skip_mods(in tab: Slice[u64], in idx: Slice[u64], id0: u64) -> u64 {
 
 // `Btf::size_of`: (false, _) for None.
 pub fn size_of(in tab: Slice[u64], in idx: Slice[u64], id: u64, depth: u64) -> (bool, u64) {
-    if depth > 64 {
+    if depth > MAX_SIZE_DEPTH {
         return (false, 0);
     }
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
-    if k == 1 || k == 4 || k == 5 || k == 6 || k == 16 || k == 15 {
+    if k
+        == KIND_INT
+        || k
+        == KIND_STRUCT
+        || k
+        == KIND_UNION
+        || k
+        == KIND_ENUM
+        || k
+        == KIND_FLOAT
+        || k
+        == KIND_DATASEC {
         return (true, tf(in tab, in idx, t, 2));
     }
-    if k == 2 {
-        return (true, 8);
+    if k == KIND_PTR {
+        return (true, PTR_SIZE);
     }
-    if k == 3 {
+    if k == KIND_ARRAY {
         let (ok, es) = size_of(in tab, in idx, tf(in tab, in idx, t, 2), wrapping_add(depth, 1));
         if !ok {
             return (false, 0);
@@ -220,11 +322,11 @@ fn essential_len(in s: Slice[u8], at: u64, n: u64) -> u64 {
     for i in 0..last {
         let j = wrapping_add(at, i);
         if bt(in s, j)
-            == 95
+            == ASCII_UNDERSCORE
             && bt(in s, wrapping_add(j, 1))
-            == 95
+            == ASCII_UNDERSCORE
             && bt(in s, wrapping_add(j, 2))
-            == 95 {
+            == ASCII_UNDERSCORE {
             return i;
         }
     }
@@ -258,7 +360,7 @@ fn name_is(in ltext: Slice[u8], loff: u64, llen: u64, in strs: Slice[u8], toff: 
 
 fn lname_off(in lt: Slice[u64], p: u64) -> u64 {
     let tag = ltag(in lt, p);
-    if tag == 1 || tag == 4 || tag == 5 {
+    if tag == LT_INT || tag == LT_STRUCT || tag == LT_ENUM {
         wd(in lt, wrapping_add(p, 1))
     } else {
         0
@@ -267,7 +369,7 @@ fn lname_off(in lt: Slice[u64], p: u64) -> u64 {
 
 fn lname_len(in lt: Slice[u64], p: u64) -> u64 {
     let tag = ltag(in lt, p);
-    if tag == 1 || tag == 4 || tag == 5 {
+    if tag == LT_INT || tag == LT_STRUCT || tag == LT_ENUM {
         wd(in lt, wrapping_add(p, 2))
     } else {
         0
@@ -281,20 +383,20 @@ fn kind_compatible(in lt: Slice[u64], p: u64, in tab: Slice[u64], in idx: Slice[
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
     let tag = ltag(in lt, p);
-    if tag == 4 {
-        return (k == 4 && wd(in lt, wrapping_add(p, 4)) == 0)
-            || (k == 5 && wd(in lt, wrapping_add(p, 4)) != 0);
+    if tag == LT_STRUCT {
+        return (k == KIND_STRUCT && wd(in lt, wrapping_add(p, 4)) == 0)
+            || (k == KIND_UNION && wd(in lt, wrapping_add(p, 4)) != 0);
     }
-    if tag == 1 || tag == 5 {
-        return k == 1 || k == 6;
+    if tag == LT_INT || tag == LT_ENUM {
+        return k == KIND_INT || k == KIND_ENUM;
     }
-    if tag == 2 {
-        return k == 2;
+    if tag == LT_PTR {
+        return k == KIND_PTR;
     }
-    if tag == 3 {
-        return k == 3;
+    if tag == LT_ARRAY {
+        return k == KIND_ARRAY;
     }
-    tag == 0 && k == 0
+    tag == LT_VOID && k == KIND_VOID
 }
 
 // `find_member`: (found, member type, bit offset, bitfield size).
@@ -308,12 +410,12 @@ fn find_member(
     llen: u64,
     depth: u64
 ) -> (bool, u64, u64, u64) {
-    if depth > 32 {
+    if depth > MAX_MATCH_DEPTH {
         return (false, 0, 0, 0);
     }
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
-    if k != 4 && k != 5 {
+    if k != KIND_STRUCT && k != KIND_UNION {
         return (false, 0, 0, 0);
     }
     let n = tf(in tab, in idx, t, 6);
@@ -345,7 +447,7 @@ fn find_member(
 }
 
 fn wrapping_u32_add(a: u64, b: u64) -> u64 {
-    wrapping_add(a, b) & 4294967295
+    wrapping_add(a, b) & U32_MAX
 }
 
 // libbpf's `__bpf_core_types_match`.
@@ -360,7 +462,7 @@ fn types_match(
     behind_ptr: bool,
     depth: u64
 ) -> bool {
-    if depth > 32 {
+    if depth > MAX_MATCH_DEPTH {
         return false;
     }
     let tid = skip_mods(in tab, in idx, id);
@@ -374,19 +476,19 @@ fn types_match(
     }
     let tag = ltag(in lt, p);
     let d1 = wrapping_add(depth, 1);
-    if tag == 0 {
-        return k == 0;
+    if tag == LT_VOID {
+        return k == KIND_VOID;
     }
-    if tag == 1 {
+    if tag == LT_INT {
         return k
-            == 1
+            == KIND_INT
             && wd(in lt, wrapping_add(p, 3))
             == tf(in tab, in idx, tid, 2)
             && (wd(in lt, wrapping_add(p, 4)) != 0)
             == ((tf(in tab, in idx, tid, 3) & 1) != 0);
     }
-    if tag == 5 {
-        if k != 6 {
+    if tag == LT_ENUM {
+        if k != KIND_ENUM {
             return false;
         }
         let n = wd(in lt, wrapping_add(p, 5));
@@ -411,9 +513,9 @@ fn types_match(
         }
         return true;
     }
-    if tag == 2 {
+    if tag == LT_PTR {
         return k
-            == 2
+            == KIND_PTR
             && types_match(
             in lt,
             in ltext,
@@ -426,9 +528,9 @@ fn types_match(
             d1
         );
     }
-    if tag == 3 {
+    if tag == LT_ARRAY {
         return k
-            == 3
+            == KIND_ARRAY
             && wd(in lt, wrapping_add(p, 5))
             == tf(in tab, in idx, tid, 4)
             && types_match(
@@ -445,13 +547,13 @@ fn types_match(
     }
     // a struct or union
     let union = wd(in lt, wrapping_add(p, 4)) != 0;
-    if k == 7 {
+    if k == KIND_FWD {
         return behind_ptr && union == (tf(in tab, in idx, tid, 2) != 0);
     }
-    if k != 4 && k != 5 {
+    if k != KIND_STRUCT && k != KIND_UNION {
         return false;
     }
-    if union != (k == 5) {
+    if union != (k == KIND_UNION) {
         return false;
     }
     if behind_ptr {
@@ -527,13 +629,13 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
         byte_sz = sz;
         bit_sz = width;
     }
-    if kind == 0 {
+    if kind == CORE_FIELD_BYTE_OFFSET {
         out = byte_off;
-    } else if kind == 1 {
+    } else if kind == CORE_FIELD_BYTE_SIZE {
         out = byte_sz;
-    } else if kind == 2 {
+    } else if kind == CORE_FIELD_EXISTS {
         out = 1;
-    } else if kind == 3 {
+    } else if kind == CORE_FIELD_SIGNED {
         out = if signed {
             1
         } else {
@@ -543,7 +645,7 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
         if byte_sz > 8 {
             return 4;
         }
-        if kind == 4 {
+        if kind == CORE_FIELD_LSHIFT_U64 {
             out = wrapping_sub(
                 64,
                 wrapping_sub(wrapping_add(bits, bit_sz), wrapping_mul(byte_off, 8))
@@ -556,7 +658,7 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
 }
 
 fn is_field(kind: u64) -> bool {
-    kind <= 5
+    kind <= CORE_FIELD_RSHIFT_U64
 }
 
 // `CoreSpec::local_field`: (code, bits, width, node).
@@ -571,7 +673,7 @@ fn local_field(in lt: Slice[u64], in access: Slice[u64], inout bad: u64) -> (u64
     for j in 1..na {
         let i = wd(in access, j);
         let tag = ltag(in lt, cur);
-        if tag == 4 {
+        if tag == LT_STRUCT {
             if i >= wd(in lt, wrapping_add(cur, 5)) {
                 bad = i;
                 return (2, 0, 0, 0);
@@ -584,7 +686,7 @@ fn local_field(in lt: Slice[u64], in access: Slice[u64], inout bad: u64) -> (u64
                 bits = wrapping_add(bits, wrapping_mul(wd(in lt, wrapping_add(m, 2)), 8));
             }
             cur = wrapping_add(m, 6);
-        } else if tag == 3 && i < wd(in lt, wrapping_add(cur, 5)) {
+        } else if tag == LT_ARRAY && i < wd(in lt, wrapping_add(cur, 5)) {
             let elem = wrapping_add(cur, 6);
             bits = wrapping_add(bits, wrapping_mul(wrapping_mul(i, lsize(in lt, elem)), 8));
             cur = elem;
@@ -604,8 +706,8 @@ pub fn local_value(
     inout out: u64,
     inout bad: u64
 ) -> u64 {
-    if kind == 6 || kind == 7 {
-        if local_id == 18446744073709551615 {
+    if kind == CORE_TYPE_ID_LOCAL || kind == CORE_TYPE_ID_TARGET {
+        if local_id == NO_LOCAL_ID {
             return 7;
         }
         out = local_id;
@@ -618,16 +720,16 @@ pub fn local_value(
         }
         return field_value(kind, bits, width, lsize(in lt, ty), lsigned(in lt, ty), inout out);
     }
-    if kind == 8 || kind == 10 || kind == 12 {
+    if kind == CORE_TYPE_EXISTS || kind == CORE_ENUMVAL_EXISTS || kind == CORE_TYPE_MATCHES {
         out = 1;
         return 0;
     }
-    if kind == 9 {
+    if kind == CORE_TYPE_SIZE {
         out = lsize(in lt, 0);
         return 0;
     }
     // EnumvalValue
-    if ltag(in lt, 0) != 5 {
+    if ltag(in lt, 0) != LT_ENUM {
         return 5;
     }
     let i = wd(in access, 0);
@@ -657,7 +759,7 @@ fn target_field(
     }
     let (rok, root_size) = size_of(in tab, in idx, cand, 0);
     if !rok {
-        return 100;
+        return NO_VALUE;
     }
     let mut bits = wrapping_mul(wrapping_mul(wd(in access, 0), root_size), 8);
     let mut width: u64 = 0;
@@ -666,7 +768,7 @@ fn target_field(
     for j in 1..na {
         let i = wd(in access, j);
         let tag = ltag(in lt, local);
-        if tag == 4 {
+        if tag == LT_STRUCT {
             if i >= wd(in lt, wrapping_add(local, 5)) {
                 bad = i;
                 return 2;
@@ -683,28 +785,28 @@ fn target_field(
                 0
             );
             if !f {
-                return 100;
+                return NO_VALUE;
             }
             let child = wrapping_add(m, 6);
             if !kind_compatible(in lt, child, in tab, in idx, ty) {
-                return 100;
+                return NO_VALUE;
             }
             bits = wrapping_add(bits, off);
             width = bf;
             local = child;
             cur = ty;
-        } else if tag == 3 {
+        } else if tag == LT_ARRAY {
             let t = skip_mods(in tab, in idx, cur);
-            if tkind(in tab, in idx, t) != 3 {
-                return 100;
+            if tkind(in tab, in idx, t) != KIND_ARRAY {
+                return NO_VALUE;
             }
             let telem = tf(in tab, in idx, t, 2);
             if i >= tf(in tab, in idx, t, 4) {
-                return 100;
+                return NO_VALUE;
             }
             let (eok, es) = size_of(in tab, in idx, telem, 0);
             if !eok {
-                return 100;
+                return NO_VALUE;
             }
             bits = wrapping_add(bits, wrapping_mul(wrapping_mul(i, es), 8));
             width = 0;
@@ -716,13 +818,13 @@ fn target_field(
     }
     let (sok, size) = size_of(in tab, in idx, cur, 0);
     if !sok {
-        return 100;
+        return NO_VALUE;
     }
     let t = skip_mods(in tab, in idx, cur);
     let k = tkind(in tab, in idx, t);
-    let signed = if k == 1 {
+    let signed = if k == KIND_INT {
         (tf(in tab, in idx, t, 3) & 1) != 0
-    } else if k == 6 {
+    } else if k == KIND_ENUM {
         tf(in tab, in idx, t, 3) != 0
     } else {
         false
@@ -769,43 +871,43 @@ pub fn values_over(
         let mut v: u64 = 0;
         let mut bad: u64 = 0;
         let mut code: u64 = 0;
-        if kind == 8 {
+        if kind == CORE_TYPE_EXISTS {
             v = 1;
-        } else if kind == 7 {
+        } else if kind == CORE_TYPE_ID_TARGET {
             v = id;
-        } else if kind == 12 {
+        } else if kind == CORE_TYPE_MATCHES {
             v = if types_match(in lt, in ltext, 0, in tab, in idx, in strs, id, false, 0) {
                 1
             } else {
                 0
             };
-        } else if kind == 9 {
+        } else if kind == CORE_TYPE_SIZE {
             let (ok, s) = size_of(in tab, in idx, id, 0);
             v = s;
             if !ok {
-                code = 100;
+                code = NO_VALUE;
             }
-        } else if kind == 10 || kind == 11 {
-            if ltag(in lt, 0) != 5 {
+        } else if kind == CORE_ENUMVAL_EXISTS || kind == CORE_ENUMVAL_VALUE {
+            if ltag(in lt, 0) != LT_ENUM {
                 code = 5;
             } else {
                 let i = wd(in access, 0);
                 if access.len() == 0 || i >= wd(in lt, 5) {
                     code = 6;
-                } else if tkind(in tab, in idx, id) != 6 {
-                    code = 100;
+                } else if tkind(in tab, in idx, id) != KIND_ENUM {
+                    code = NO_VALUE;
                 } else {
                     let at = wrapping_add(6, wrapping_mul(i, 3));
                     let wo = wd(in lt, at);
                     let wl = wd(in lt, wrapping_add(at, 1));
                     let tn = tf(in tab, in idx, id, 6);
-                    code = 100;
+                    code = NO_VALUE;
                     for j in 0..tn {
                         if code
-                            == 100
+                            == NO_VALUE
                             && name_is(in ltext, wo, wl, in strs, te(in tab, in idx, id, 2, j, 0)) {
                             code = 0;
-                            v = if kind == 11 {
+                            v = if kind == CORE_ENUMVAL_VALUE {
                                 te(in tab, in idx, id, 2, j, 1)
                             } else {
                                 1
@@ -830,7 +932,7 @@ pub fn values_over(
         }
         if code == 0 {
             out.push(v);
-        } else if code != 100 {
+        } else if code != NO_VALUE {
             let mut e: ChunkSeq[u64] = ChunkSeq::new[u64]();
             e.push(1);
             e.push(code);
@@ -842,7 +944,14 @@ pub fn values_over(
 }
 
 fn is_exists(kind: u64) -> bool {
-    kind == 2 || kind == 8 || kind == 10 || kind == 12
+    kind
+        == CORE_FIELD_EXISTS
+        || kind
+        == CORE_TYPE_EXISTS
+        || kind
+        == CORE_ENUMVAL_EXISTS
+        || kind
+        == CORE_TYPE_MATCHES
 }
 
 // `CoreSpec::combine`: 0 with the value in `out`, 8 no match, 9 disagree.
@@ -874,16 +983,16 @@ pub fn combine(kind: u64, in values: Slice[u64], inout out: u64) -> u64 {
 }
 
 fn sext32(v: u64) -> u64 {
-    if v & 2147483648 != 0 {
-        v | 18446744069414584320
+    if v & SIGN_BIT32 != 0 {
+        v | HIGH32
     } else {
         v
     }
 }
 
 fn sext16(v: u64) -> u64 {
-    if v & 32768 != 0 {
-        v | 18446744073709486080
+    if v & SIGN_BIT16 != 0 {
+        v | HIGH48
     } else {
         v
     }
@@ -908,22 +1017,22 @@ pub fn patch_insn(
         o.push(1);
         return o;
     }
-    let class = code & 7;
-    let imm32 = imm & 4294967295;
-    if (class == 4 || class == 7) && code & 8 == 0 {
+    let class = code & CLASS_MASK;
+    let imm32 = imm & U32_MAX;
+    if (class == CLASS_ALU || class == CLASS_ALU64) && code & SRC_X == 0 {
         if imm32 != expected && sext32(imm32) != expected {
             o.push(2);
             o.push(imm32);
             return o;
         }
         let sv = signed(value);
-        if sv >= -2147483648 && sv <= 2147483647 {
+        if sv >= I32_MIN && sv <= I32_MAX {
             o.push(0);
-            o.push(value & 4294967295);
+            o.push(value & U32_MAX);
             o.push(0);
             return o;
         }
-        if value <= 4294967295 {
+        if value <= U32_MAX {
             o.push(0);
             o.push(value);
             o.push(0);
@@ -933,14 +1042,14 @@ pub fn patch_insn(
         o.push(2);
         return o;
     }
-    if class == 1 || class == 2 || class == 3 {
-        let found = sext16(off & 65535);
+    if class == CLASS_LDX || class == CLASS_ST || class == CLASS_STX {
+        let found = sext16(off & U16_MAX);
         if found != expected {
             o.push(2);
             o.push(found);
             return o;
         }
-        if value > 32767 {
+        if value > I16_MAX {
             o.push(1);
             o.push(3);
             return o;
@@ -950,15 +1059,15 @@ pub fn patch_insn(
         o.push(0);
         return o;
     }
-    if class == 0 && code == 24 && has_next {
-        let found = imm32 | ((next_imm & 4294967295) << 32);
+    if class == CLASS_LD && code == LD_IMM64 && has_next {
+        let found = imm32 | ((next_imm & U32_MAX) << 32);
         if found != expected {
             o.push(2);
             o.push(found);
             return o;
         }
         o.push(0);
-        o.push(value & 4294967295);
+        o.push(value & U32_MAX);
         o.push(value >> 32);
         return o;
     }

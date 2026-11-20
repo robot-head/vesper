@@ -3,8 +3,41 @@
 //! The facade must parse/check/lower actual source before constructing these
 //! DTOs. They are inspection data, not certificates accepted from plugins or
 //! untrusted JSON. This leaf has no dependency on the compiler facade.
-#![forbid(unsafe_code)]
+// The seed build (the compiler's copy) stays safe. The port-backed build
+// links the Vesper port through the generated binding, which calls the C ABI.
+#![cfg_attr(not(vesper_port), forbid(unsafe_code))]
+#![cfg_attr(vesper_port, deny(unsafe_code))]
 pub mod policy;
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+
+/// Which build this is: `"vesper"` for `vesper-lint` with the `vesper-port`
+/// feature, `"rust"` otherwise (and for the seed copy `vesper-lint-seed`
+/// that the compiler links).
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the port's runtime, for leak tests.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::live_allocations()
+}
+
+/// The number of words the port's encoding of `program` takes (for the
+/// benchmark's boundary cost).
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_encoded_words(program: &CheckedProgram) -> usize {
+    let e = port::encode(program);
+    e.words.len() + e.blob.len()
+}
 
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -121,6 +154,13 @@ impl Budget {
 /// Analyze only actual resolved facts; all comparisons preserve full labels and
 /// structural type arguments. No stringified type/name-set authority is used.
 pub fn analyze(program: &CheckedProgram, limits: Limits) -> Result<LintReport, LintError> {
+    #[cfg(vesper_port)]
+    return port::analyze(program, limits);
+    #[cfg(not(vesper_port))]
+    analyze_rust(program, limits)
+}
+#[cfg_attr(vesper_port, allow(dead_code))]
+fn analyze_rust(program: &CheckedProgram, limits: Limits) -> Result<LintReport, LintError> {
     if limits.functions == 0
         || limits.functions > 256
         || limits.actions == 0
@@ -512,6 +552,17 @@ pub struct SourceEdit {
 /// Validate nonoverlap, exact original bytes, UTF-8 boundaries and output size.
 /// Compiler rechecking and publication are mandatory facade responsibilities.
 pub fn apply_edits(
+    source: &str,
+    edits: &[SourceEdit],
+    max_bytes: usize,
+) -> Result<String, LintError> {
+    #[cfg(vesper_port)]
+    return port::apply_edits(source, edits, max_bytes);
+    #[cfg(not(vesper_port))]
+    apply_edits_rust(source, edits, max_bytes)
+}
+#[cfg_attr(vesper_port, allow(dead_code))]
+fn apply_edits_rust(
     source: &str,
     edits: &[SourceEdit],
     max_bytes: usize,

@@ -26,32 +26,41 @@ test = false
 # A deliberately wrong pilot module: the differential harness must fail
 # (tests/differential.rs, asserted by the Hybrid compiler workflow).
 divergent = []
+# The same check for the parse module (#1155): every AST flag reads back
+# inverted.
+divergent-parse = []
 
 [dependencies]
 vesper = { path = "../.." }
 vesper-port-abi = { path = "../vesper-port-abi" }
+# The parse swap rebuilds the rowan CST (src/parse_words.rs).
+rowan = { workspace = true }
 # Everything below is the root package's [dependencies], for the included
 # CLI sources; tests/manifest.rs keeps the lists in step.
 blake3 = "1.8"
 vesper-core = { path = "../vesper-core" }
-vesper-forge = { path = "../vesper-forge", default-features = false }
+# The compiler links the frozen Rust seed copy of vesper-forge (#1157).
+vesper-forge = { path = "../vesper-forge/seed", package = "vesper-forge-seed", default-features = false }
 vesper-simd = { path = "../vesper-simd" }
 # The compiler links the frozen Rust seed copies of vesper-lean-syntax and
 # vesper-span (#1128).
 vesper-lean-syntax = { path = "../vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
 vesper-syntax = { path = "../vesper-syntax" }
-vesper-highlight = { path = "../vesper-highlight", features = ["shot"] }
+vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
 vesper-span = { path = "../vesper-span/seed", package = "vesper-span-seed" }
 vesper-lsp = { path = "../vesper-lsp" }
-vesper-diagnostics = { path = "../vesper-diagnostics" }
-vesper-fmt = { path = "../vesper-fmt" }
-vesper-lint = { path = "../vesper-lint" }
+# The compiler links the frozen Rust seed copy of vesper-diagnostics (#1128).
+vesper-diagnostics = { path = "../vesper-diagnostics/seed", package = "vesper-diagnostics-seed" }
+vesper-fmt = { path = "../vesper-fmt/seed", package = "vesper-fmt-seed" }
+# The compiler links the frozen Rust seed copy of vesper-lint (#1156).
+vesper-lint = { path = "../vesper-lint/seed", package = "vesper-lint-seed" }
 # The compiler links the frozen Rust seed copy of vesper-bench (#1040).
 vesper-bench = { path = "../vesper-bench/seed", package = "vesper-bench-seed" }
 vesper-bench-pmu = { path = "../vesper-bench-pmu" }
 # The compiler links the frozen Rust seed copy (seed-copy rule, #906).
 vesper-grammar = { path = "../vesper-grammar/seed", package = "vesper-grammar-seed" }
 vesper-doc = { path = "../vesper-doc" }
+vesper-test = { path = "../vesper-test" }
 # The compiler links the frozen Rust seed copy, never the port-backed package
 # (seed-copy rule, docs/maintenance/porting-a-crate.md).
 vesper-beacon = { path = "../vesper-beacon/seed", package = "vesper-beacon-seed" }

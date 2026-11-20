@@ -39,6 +39,51 @@ use self::reason::{
     reason_of
 };
 
+// QPACK wire patterns (RFC 9204 §4; src/qpack/wire.rs): first-byte bits
+// and integer prefix lengths.
+// §3.2.1: an entry's size is its name and value lengths plus 32.
+const ENTRY_OVERHEAD: u64 = 32;
+// `max_entry_share` is in 1/256ths of the capacity.
+const ENTRY_SHARE_SCALE: u64 = 256;
+// §4.1.2: a value string's length prefix.
+const VALUE_PREFIX: u64 = 7;
+// §4.3 encoder instructions.
+const INSERT_NAME_REF: u8 = 0x80;
+const INSERT_NAME_REF_STATIC: u8 = 0x40;
+const INSERT_NAME_REF_PREFIX: u64 = 6;
+const INSERT_LITERAL: u8 = 0x40;
+const INSERT_LITERAL_PREFIX: u64 = 5;
+const SET_CAPACITY: u8 = 0x20;
+const SET_CAPACITY_PREFIX: u64 = 5;
+// §4.4 decoder instructions; one is at most 10 bytes, so more pending than
+// this is malformed.
+const SECTION_ACK: u8 = 0x80;
+const SECTION_ACK_PREFIX: u64 = 7;
+const STREAM_CANCEL: u8 = 0x40;
+const STREAM_CANCEL_PREFIX: u64 = 6;
+const MAX_PENDING_INSTRUCTION: u64 = 16;
+// §4.5.1 the field section prefix.
+const RIC_PREFIX: u64 = 8;
+const BASE_NEGATIVE: u8 = 0x80;
+const DELTA_BASE_PREFIX: u64 = 7;
+// §4.5.2-§4.5.6 field lines.
+const INDEXED: u8 = 0x80;
+const INDEXED_STATIC: u8 = 0x40;
+const INDEXED_PREFIX: u64 = 6;
+const INDEXED_POST_BASE: u8 = 0x10;
+const INDEXED_POST_BASE_PREFIX: u64 = 4;
+const NAME_REF: u8 = 0x40;
+const NAME_REF_NEVER: u8 = 0x20;
+const NAME_REF_STATIC: u8 = 0x10;
+const NAME_REF_PREFIX: u64 = 4;
+const POST_BASE_NAME_REF_PREFIX: u64 = 3;
+const LITERAL_NAME: u8 = 0x20;
+const LITERAL_NAME_PREFIX: u64 = 3;
+// compact_refs rebuilds `sec_refs` past this many words once live
+// references are at most a quarter of them.
+const COMPACT_MIN_REFS: u64 = 4096;
+const COMPACT_LIVE_SHARE: u64 = 4;
+
 // RFC 9204 §4.5.1.1 encoding of the Required Insert Count.
 pub fn encode_ric(ric: u64, max_entries: u64) -> u64 {
     let full = wrapping_mul(2, max_entries);
@@ -156,8 +201,9 @@ fn dynamic_name(in e: EncoderCore, in name: Slice[u8], may_block: bool) -> Optio
 // acknowledged and unreferenced, writing the insert instruction.
 fn try_insert(inout e: EncoderCore, in h: Huff, in name: Slice[u8], in value: Slice[u8])
     -> Option[u64] {
-    let size = wrapping_add(wrapping_add(name.len(), value.len()), 32);
-    if wrapping_mul(size, 256) > wrapping_mul(e.table.capacity, e.cfg.max_entry_share) {
+    let size = wrapping_add(wrapping_add(name.len(), value.len()), ENTRY_OVERHEAD);
+    if wrapping_mul(size, ENTRY_SHARE_SCALE)
+        > wrapping_mul(e.table.capacity, e.cfg.max_entry_share) {
         return Option::None;
     }
     let n = match table_evictions_for(in e.table, size) {
@@ -173,16 +219,27 @@ fn try_insert(inout e: EncoderCore, in h: Huff, in name: Slice[u8], in value: Sl
         }
     }
     match static_name(in h.st, in name) {
-        Option::Some(i) => encode_int(inout e.out, 192, 6, i),
+        Option::Some(i) => encode_int(
+            inout e.out,
+            INSERT_NAME_REF | INSERT_NAME_REF_STATIC,
+            INSERT_NAME_REF_PREFIX,
+            i
+        ),
         Option::None => match dynamic_name(in e, in name, true) {
             Option::Some(abs) => {
                 let rel = wrapping_sub(wrapping_sub(e.table.inserted, abs), 1);
-                encode_int(inout e.out, 128, 6, rel);
+                encode_int(inout e.out, INSERT_NAME_REF, INSERT_NAME_REF_PREFIX, rel);
             },
-            Option::None => encode_string(in h, inout e.out, 64, 5, in name),
+            Option::None => encode_string(
+                in h,
+                inout e.out,
+                INSERT_LITERAL,
+                INSERT_LITERAL_PREFIX,
+                in name
+            ),
         },
     }
-    encode_string(in h, inout e.out, 0, 7, in value);
+    encode_string(in h, inout e.out, 0, VALUE_PREFIX, in value);
     table_insert(inout e.table, in name, in value);
     e.stats.inserts = inc(e.stats.inserts);
     Option::Some(wrapping_sub(e.table.inserted, 1))
@@ -221,7 +278,7 @@ fn field_line(
     if !sensitive {
         match static_exact(in h.st, in name, in value) {
             Option::Some(i) => {
-                encode_int(inout e.lines, 192, 6, i);
+                encode_int(inout e.lines, INDEXED | INDEXED_STATIC, INDEXED_PREFIX, i);
                 e.stats.static_refs = inc(e.stats.static_refs);
                 return;
             },
@@ -245,21 +302,39 @@ fn field_line(
         };
         match found {
             Option::Some(abs) => {
-                reference(inout e, abs, base, 128, 6, 16, 4);
+                reference(
+                    inout e,
+                    abs,
+                    base,
+                    INDEXED,
+                    INDEXED_PREFIX,
+                    INDEXED_POST_BASE,
+                    INDEXED_POST_BASE_PREFIX
+                );
                 e.stats.dynamic_refs = inc(e.stats.dynamic_refs);
                 return;
             },
             Option::None => (),
         }
     }
-    let n: u8 = if sensitive {
-        32
+    // The N bit of each literal form: NAME_REF_NEVER, and shifted right by
+    // 2 and 1 it is the N bit of the post-base and literal-name forms
+    // (POST_BASE_NAME_REF_NEVER and LITERAL_NAME_NEVER in src/qpack/wire.rs).
+    let ref_never: u8 = if sensitive {
+        NAME_REF_NEVER
     } else {
         0
     };
+    let post_never = ref_never >> 2;
+    let literal_never = ref_never >> 1;
     e.stats.literals = inc(e.stats.literals);
     match static_name(in h.st, in name) {
-        Option::Some(i) => encode_int(inout e.lines, 80 | n, 4, i),
+        Option::Some(i) => encode_int(
+            inout e.lines,
+            NAME_REF | NAME_REF_STATIC | ref_never,
+            NAME_REF_PREFIX,
+            i
+        ),
         Option::None => {
             let dynamic = if use_dynamic {
                 dynamic_name(in e, in name, may_block)
@@ -267,12 +342,26 @@ fn field_line(
                 Option::None
             };
             match dynamic {
-                Option::Some(abs) => reference(inout e, abs, base, 64 | n, 4, (n >> 2), 3),
-                Option::None => encode_string(in h, inout e.lines, 32 | (n >> 1), 3, in name),
+                Option::Some(abs) => reference(
+                    inout e,
+                    abs,
+                    base,
+                    NAME_REF | ref_never,
+                    NAME_REF_PREFIX,
+                    post_never,
+                    POST_BASE_NAME_REF_PREFIX
+                ),
+                Option::None => encode_string(
+                    in h,
+                    inout e.lines,
+                    LITERAL_NAME | literal_never,
+                    LITERAL_NAME_PREFIX,
+                    in name
+                ),
             }
         },
     }
-    encode_string(in h, inout e.lines, 0, 7, in value);
+    encode_string(in h, inout e.lines, 0, VALUE_PREFIX, in value);
 }
 
 // `Encoder::encode`. The fields are `bytes` (each name then its value) and
@@ -325,13 +414,18 @@ pub fn enc_encode(
         ric = max64(ric, inc(word(in e.cur_refs.as_slice(), i)));
     }
     let mut out = ChunkSeq::with_capacity[u8](wrapping_add(e.lines.len(), 4));
-    encode_int(inout out, 0, 8, encode_ric(ric, e.max_entries));
+    encode_int(inout out, 0, RIC_PREFIX, encode_ric(ric, e.max_entries));
     if ric == 0 {
         out.push(0);
     } else if base >= ric {
-        encode_int(inout out, 0, 7, wrapping_sub(base, ric));
+        encode_int(inout out, 0, DELTA_BASE_PREFIX, wrapping_sub(base, ric));
     } else {
-        encode_int(inout out, 128, 7, wrapping_sub(wrapping_sub(ric, base), 1));
+        encode_int(
+            inout out,
+            BASE_NEGATIVE,
+            DELTA_BASE_PREFIX,
+            wrapping_sub(wrapping_sub(ric, base), 1)
+        );
     }
     out.extend(in e.lines.as_slice());
     if ric > 0 {
@@ -351,14 +445,14 @@ pub fn enc_encode(
 // Rebuilds `sec_refs` once released spans are most of it.
 fn compact_refs(inout e: EncoderCore) {
     let total = e.sec_refs.len();
-    if total < 4096 {
+    if total < COMPACT_MIN_REFS {
         return;
     }
     let mut live: u64 = 0;
     for i in 0..sections(in e) {
         live = wrapping_add(live, word(in e.sec_n.as_slice(), i));
     }
-    if wrapping_mul(live, 4) > total {
+    if wrapping_mul(live, COMPACT_LIVE_SHARE) > total {
         return;
     }
     let mut pool = ChunkSeq::with_capacity[u64](wrapping_mul(live, 2));
@@ -424,10 +518,10 @@ pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
             break;
         }
         let first = byte(in e.pending.as_slice(), at);
-        let bits: u64 = if first & 128 != 0 {
-            7
+        let bits: u64 = if first & SECTION_ACK != 0 {
+            SECTION_ACK_PREFIX
         } else {
-            6
+            STREAM_CANCEL_PREFIX
         };
         let value = match decode_int(in e.pending.as_slice(), at, bits) {
             Result::Ok(num) => {
@@ -441,7 +535,7 @@ pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
                 return fail(inout e, reason_of(err));
             },
         };
-        if first & 128 != 0 {
+        if first & SECTION_ACK != 0 {
             match find_section(in e, value) {
                 Option::Some(i) => {
                     e.known_received = max64(e.known_received, sec_ric(in e, i));
@@ -451,7 +545,7 @@ pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
                     return fail(inout e, Reason::UnexpectedAcknowledgment(value));
                 },
             }
-        } else if first & 64 != 0 {
+        } else if first & STREAM_CANCEL != 0 {
             loop {
                 match find_section(in e, value) {
                     Option::Some(i) => release(inout e, i),
@@ -472,7 +566,7 @@ pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
         }
     }
     drain_front(inout e.pending, at);
-    if e.pending.len() > 16 {
+    if e.pending.len() > MAX_PENDING_INSTRUCTION {
         return fail(inout e, Reason::InstructionTooLong);
     }
     Result::Ok(())
@@ -486,14 +580,14 @@ pub fn enc_apply_peer_settings(
 ) {
     e.peer_capacity = max_table_capacity;
     e.peer_blocked = blocked_streams;
-    e.max_entries = max_table_capacity / 32;
+    e.max_entries = max_table_capacity / ENTRY_OVERHEAD;
     let cap = if e.cfg.max_table_capacity < max_table_capacity {
         e.cfg.max_table_capacity
     } else {
         max_table_capacity
     };
     if cap > 0 && cap != e.table.capacity {
-        encode_int(inout e.out, 32, 5, cap);
+        encode_int(inout e.out, SET_CAPACITY, SET_CAPACITY_PREFIX, cap);
         table_set_capacity(inout e.table, cap);
     }
 }

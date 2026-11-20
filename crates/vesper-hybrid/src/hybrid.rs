@@ -15,8 +15,18 @@ use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 #[path = "../port/layout.rs"]
 mod layout_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/parse.rs"]
+mod parse_binding;
+
+#[path = "parse_words.rs"]
+mod parse_words;
+
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Sources parsed by the Vesper parse module.
+static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -47,9 +57,21 @@ const VESPER_WORD_LAYOUT: vesper::layout::WordLayout = vesper::layout::WordLayou
     },
 };
 
+/// `vesper_syntax::parser::ParseTable` from `modules/parse`: the front end
+/// v2 and the AST of `@vesper/ast`, read back by `parse_words::decode`.
+const VESPER_PARSE: vesper_syntax::parser::ParseTable = vesper_syntax::parser::ParseTable {
+    parse: |source| {
+        PARSE_CALLS.fetch_add(1, Relaxed);
+        parse_words::decode(source, &parse_binding::parse_words(source))
+    },
+};
+
 extern "C" fn install() {
+    // Nothing runs before this constructor, so the slots are empty.
     if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
-        // Nothing runs before this constructor, so the slot is empty.
+        std::process::abort();
+    }
+    if vesper_syntax::parser::install_parse(VESPER_PARSE).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
@@ -66,6 +88,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: layout answered {} calls from Vesper",
         LAYOUT_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: parse answered {} calls from Vesper",
+        PARSE_CALLS.load(Relaxed)
     );
 }
 

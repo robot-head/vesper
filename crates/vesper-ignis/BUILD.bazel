@@ -42,7 +42,7 @@ vesper_port_object(
     name = "ignis_vesper_divergent",
     src = ":ignis_source",
     edits = {
-        "bits = bits | 0x8 | 0x80;": "bits = bits | 0x8 | 0x10 | 0x80;",
+        "bits = bits | SYNC_VERTEX_SHADING | SYNC_COMPUTE_SHADING;": "bits = bits | SYNC_VERTEX_SHADING | SYNC_PIXEL_SHADING | SYNC_COMPUTE_SHADING;",
         "let differ = a.has_layout && b.has_layout && a.layout != b.layout;": "let differ = false;",
         "has_other: has_prior && access_is_write(access),": "has_other: false,",
         "b: get64(in value_of, p)": "b: wrapping_add(get64(in value_of, p), 1)",

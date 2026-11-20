@@ -46,7 +46,16 @@ pub(super) fn define<M: Module>(
         .ok_or("a v2 library lists its runtime symbols")?;
     super::super::seq_native::aot_runtime::define(m)?;
     let box_alloc = crate::fip::aot_runtime::declare_or_define(m)?;
-    let _ = box_alloc;
+    // v4 (#1149): Rust-encoded trees allocate their boxes here.
+    if let Some(symbol) = &symbols.box_new {
+        let box_new = m
+            .declare_function(symbol, Linkage::Export, &word_sig(m, 1, true))
+            .map_err(e)?;
+        body(m, box_new, 1, |b, m, args| {
+            let r = call(b, m, box_alloc, &[args[0]]);
+            b.ins().return_(&[r[0]]);
+        })?;
+    }
     let box_free = crate::fip::aot_runtime::declare_or_define_free(m)?;
     let seq_new_local = m
         .declare_function("vesper_seq_new", Linkage::Local, &word_sig(m, 2, true))
@@ -296,7 +305,8 @@ fn drop_at<M: Module>(
         AbiType::Scalar { .. }
         | AbiType::Slice { .. }
         | AbiType::Str { owned: false }
-        | AbiType::Object { .. } => {}
+        | AbiType::Object { .. }
+        | AbiType::Extern { .. } => {}
     }
 }
 

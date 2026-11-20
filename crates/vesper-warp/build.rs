@@ -26,7 +26,7 @@ fn main() {
 #[cfg(feature = "vesper-port-divergent")]
 const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // varint.ves: a 2-byte varint keeps only 13 value bits.
-    ("varint", "widen_u64(v) & 16383", "widen_u64(v) & 8191"),
+    ("varint", "widen_u64(v) & VI2_MASK", "widen_u64(v) & 8191"),
     // pn.ves: the A.3 half-window shrinks to a quarter.
     ("pn", "let hwin = win / 2;", "let hwin = win / 4;"),
     // header.ves: the short-header packet number starts one byte late.
@@ -44,18 +44,22 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // ack.ves: an immediate ACK waits for three ack-eliciting packets.
     (
         "ack",
-        "s.unacked_ack_eliciting >= 2",
+        "s.unacked_ack_eliciting >= ACK_ELICITING_THRESHOLD",
         "s.unacked_ack_eliciting >= 3",
     ),
     // recovery.ves: kPacketThreshold becomes 4.
-    ("recovery", "sat_add(e.pn, 3)", "sat_add(e.pn, 4)"),
+    (
+        "recovery",
+        "sat_add(e.pn, PACKET_THRESHOLD)",
+        "sat_add(e.pn, 4)",
+    ),
     // stream.ves: an in-order insert no longer advances the readable prefix.
     ("stream", "if start <= s.contig {", "if start < s.contig {"),
     // lib.ves (lifecycle.rs): a Retry token's ODCID is read one byte early.
     (
         "lifecycle",
-        "in token[41..wrapping_add(41, len)]",
-        "in token[40..wrapping_add(40, len)]",
+        "in token[(TK_ODCID)..wrapping_add(TK_ODCID, len)]",
+        "in token[(TK_ODCID_LEN)..wrapping_add(TK_ODCID_LEN, len)]",
     ),
     // packet.ves (endpoint.rs): 1-RTT packets always carry key phase 0.
     ("packet", "let phase = key_phase;", "let phase = false;"),

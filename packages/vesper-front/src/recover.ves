@@ -54,6 +54,7 @@ use self::words::{
     w_pub,
     w_fip,
     w_trait,
+    w_test,
     w_tiled
 };
 use self::util::{
@@ -792,14 +793,16 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
         let span_end = token_end(in t, wrapping_sub(end, 1));
         let lexical = span_end > opaque;
         let has_body = ext.body_start != none();
+        let test_block = word(in t, start, w_test())
+            && kind_at(in t, next(in t, inc(start)))
+            == k_l_brace();
         let opaque_item = lexical
             || macros
             .len()
             != 0
-            || kind
-            == d_other()
+            || (kind == d_other() && !test_block)
             || (ext.uncertain && kind != d_function())
-            || (name == none() && kind != d_impl() && kind != d_use());
+            || (name == none() && kind != d_impl() && kind != d_use() && !test_block);
         let mut status: u64 = 1;
         let mut header_start = span_start;
         let mut header_end = if has_body {

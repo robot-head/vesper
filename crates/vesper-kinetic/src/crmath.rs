@@ -69,6 +69,125 @@ pub fn precision_cap_hits() -> u64 {
     CAP_HITS.with(|c| c.get())
 }
 
+// IEEE 754 binary64 and binary32 (the same names as
+// vesper/src/crmath.ves): precision with the hidden bit, emin, emax,
+// +infinity, the sign bit, the quiet NaN and 1.0; and binary64's fraction
+// width, exponent field and width, hidden bit, the exponent of its
+// subnormals (emin - 52) and the offset from a biased exponent to the
+// exponent of the integer mantissa (bias + 52).
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_PREC: i64 = 53;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_PREC: i64 = 24;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_EMIN: i64 = -1022;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_EMIN: i64 = -126;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_EMAX: i64 = 1023;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_EMAX: i64 = 127;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_INF_BITS: u64 = 0x7ff0_0000_0000_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_INF_BITS: u64 = 0x7f80_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_SIGN_BIT: u64 = 0x8000_0000_0000_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_SIGN_BIT: u64 = 0x8000_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_NAN_BITS: u64 = 0x7fc0_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_ONE_BITS: u64 = 0x3ff0_0000_0000_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_ONE_BITS: u64 = 0x3f80_0000;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_FRAC_BITS: u32 = 52;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_FRAC_MASK: u64 = (1 << F64_FRAC_BITS) - 1;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_EXP_FIELD: u64 = 0x7ff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_EXP_WIDTH: u32 = 11;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_HIDDEN_BIT: u64 = 1 << F64_FRAC_BITS;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_SUBNORMAL_EXP: i64 = -1074;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_NORMAL_EXP_OFFSET: i64 = 1075;
+/// The first precision of Ziv's loop.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F64_START_PRECISION: u32 = 96;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const F32_START_PRECISION: u32 = 64;
+/// Guard bits of the arctangent series.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const GUARD: u32 = 40;
+/// The constants cache: at least 256 bits; Machin's
+/// `pi = 16 atan(1/5) - 4 atan(1/239)` and `ln 2 = 2 atanh(1/3)`, each
+/// series 8 bits wider than the cached value.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MIN_CONST_BITS: u32 = 256;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const CONST_SERIES_GUARD: u32 = 8;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MACHIN_A: u32 = 5;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MACHIN_B: u32 = 239;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MACHIN_A_FACTOR: u32 = 16;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MACHIN_B_FACTOR: u32 = 4;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LN2_ATANH_K: u32 = 3;
+/// The extra fraction bits and error bounds (in units, per series term and
+/// fixed) of each evaluation; the comments at each use derive them.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const EXP_EXTRA_BITS: u32 = 16;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LN2_WIDE_BITS: u32 = 16;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const EXP_ERROR_PER_TERM: u64 = 6;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const EXP_ERROR_BASE: u64 = 24;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LOG_EXTRA_BITS: u32 = 80;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LOG_ERROR_PER_TERM: u64 = 12;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LOG_ERROR_BASE: u64 = 32;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SIN_COS_EXTRA_BITS: u32 = 96;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const REDUCTION_WIDE_BITS: u32 = 16;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SIN_COS_ERROR_PER_TERM: u64 = 4;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SIN_COS_ERROR_BASE: u64 = 16;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN2_EXTRA_BITS: u32 = 32;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN2_TINY_CAP: u32 = 2300;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN_ERROR_SCALE: u64 = 4;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN_ERROR_PER_TERM: u64 = 7;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ATAN_ERROR_BASE: u64 = 32;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const PI_MULTIPLE_EXTRA_BITS: u32 = 8;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const PI_MULTIPLE_WIDE_BITS: u32 = 4;
+/// `|x|` above which `exp(x)` overflows or underflows in every format.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const EXP_LIMIT: f64 = 1100.0;
+/// `floor(sqrt(2) * 2^52)` (6369051672525772.8...): log folds mantissas
+/// above it into `[1/sqrt(2), sqrt(2))`.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SQRT2_TOP: u64 = 6_369_051_672_525_772;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Format {
     F32,
@@ -79,36 +198,36 @@ impl Format {
     /// (precision bits incl. hidden bit, emin, emax)
     fn params(self) -> (i64, i64, i64) {
         match self {
-            Format::F32 => (24, -126, 127),
-            Format::F64 => (53, -1022, 1023),
+            Format::F32 => (F32_PREC, F32_EMIN, F32_EMAX),
+            Format::F64 => (F64_PREC, F64_EMIN, F64_EMAX),
         }
     }
 
     fn inf_bits(self) -> u64 {
         match self {
-            Format::F32 => 0x7f80_0000,
-            Format::F64 => 0x7ff0_0000_0000_0000,
+            Format::F32 => F32_INF_BITS,
+            Format::F64 => F64_INF_BITS,
         }
     }
 
     fn sign_bit(self) -> u64 {
         match self {
-            Format::F32 => 0x8000_0000,
-            Format::F64 => 0x8000_0000_0000_0000,
+            Format::F32 => F32_SIGN_BIT,
+            Format::F64 => F64_SIGN_BIT,
         }
     }
 
     fn nan_bits(self) -> u64 {
         match self {
-            Format::F32 => 0x7fc0_0000,
-            Format::F64 => 0x7ff8_0000_0000_0000,
+            Format::F32 => F32_NAN_BITS,
+            Format::F64 => F64_NAN_BITS,
         }
     }
 
     fn one_bits(self) -> u64 {
         match self {
-            Format::F32 => 0x3f80_0000,
-            Format::F64 => 0x3ff0_0000_0000_0000,
+            Format::F32 => F32_ONE_BITS,
+            Format::F64 => F64_ONE_BITS,
         }
     }
 }
@@ -175,19 +294,19 @@ struct Exact {
 fn decode(x: f64) -> Exact {
     let bits = x.to_bits();
     let neg = bits >> 63 == 1;
-    let biased = ((bits >> 52) & 0x7ff) as i64;
-    let frac = bits & ((1u64 << 52) - 1);
+    let biased = ((bits >> F64_FRAC_BITS) & F64_EXP_FIELD) as i64;
+    let frac = bits & F64_FRAC_MASK;
     if biased == 0 {
         Exact {
             neg,
             mant: frac,
-            exp: -1074,
+            exp: F64_SUBNORMAL_EXP,
         }
     } else {
         Exact {
             neg,
-            mant: frac | (1u64 << 52),
-            exp: biased - 1075,
+            mant: frac | F64_HIDDEN_BIT,
+            exp: biased - F64_NORMAL_EXP_OFFSET,
         }
     }
 }
@@ -237,7 +356,6 @@ fn mul_fix(a: &BigInt, b: &BigInt, f: u32) -> BigInt {
 
 /// `atan(1/k)` scaled by `2^f`, error at most one unit.
 fn atan_inv(k: u32, f: u32) -> BigInt {
-    const GUARD: u32 = 40;
     let g = f + GUARD;
     let k2 = BigInt::from(u64::from(k) * u64::from(k));
     let mut term: BigInt = (BigInt::one() << g) / BigInt::from(k);
@@ -258,7 +376,6 @@ fn atan_inv(k: u32, f: u32) -> BigInt {
 
 /// `atanh(1/k)` scaled by `2^f`, error at most one unit.
 fn atanh_inv(k: u32, f: u32) -> BigInt {
-    const GUARD: u32 = 40;
     let g = f + GUARD;
     let k2 = BigInt::from(u64::from(k) * u64::from(k));
     let mut term: BigInt = (BigInt::one() << g) / BigInt::from(k);
@@ -291,14 +408,16 @@ fn constants(f: u32) -> (BigInt, BigInt) {
     CONSTANTS.with(|c| {
         let mut c = c.borrow_mut();
         if c.bits < f {
-            let bits = f.max(256).next_power_of_two();
+            let bits = f.max(MIN_CONST_BITS).next_power_of_two();
             // Machin: π = 16·atan(1/5) − 4·atan(1/239); ln 2 = 2·atanh(1/3).
             // Each series (≤ 2 units) is computed 8 bits wider, so after
             // scaling (≤ 40 units) and the shift the cached value is within 2
             // units; the shift below adds at most one more.
-            let w = bits + 8;
-            let pi = ((atan_inv(5, w) * 16u32) - (atan_inv(239, w) * 4u32)) >> 8u32;
-            let ln2 = (atanh_inv(3, w) * 2u32) >> 8u32;
+            let w = bits + CONST_SERIES_GUARD;
+            let pi = ((atan_inv(MACHIN_A, w) * MACHIN_A_FACTOR)
+                - (atan_inv(MACHIN_B, w) * MACHIN_B_FACTOR))
+                >> CONST_SERIES_GUARD;
+            let ln2 = (atanh_inv(LN2_ATANH_K, w) * 2u32) >> CONST_SERIES_GUARD;
             *c = Constants { bits, pi, ln2 };
         }
         let drop = u64::from(c.bits - f);
@@ -341,8 +460,8 @@ fn ziv(fmt: Format, start: u32, mut eval: impl FnMut(u32) -> Approx) -> u64 {
 
 fn start_precision(fmt: Format) -> u32 {
     match fmt {
-        Format::F32 => 64,
-        Format::F64 => 96,
+        Format::F32 => F32_START_PRECISION,
+        Format::F64 => F64_START_PRECISION,
     }
 }
 
@@ -355,10 +474,10 @@ fn exp_bits(x: f64, fmt: Format) -> u64 {
     if x == f64::INFINITY {
         return fmt.inf_bits();
     }
-    if x == f64::NEG_INFINITY || x < -1100.0 {
+    if x == f64::NEG_INFINITY || x < -EXP_LIMIT {
         return 0;
     }
-    if x > 1100.0 {
+    if x > EXP_LIMIT {
         return fmt.inf_bits();
     }
     if x == 0.0 {
@@ -370,15 +489,15 @@ fn exp_bits(x: f64, fmt: Format) -> u64 {
     // and `round`, the same on every IEEE-754 machine) chooses it.
     let k = (x / std::f64::consts::LN_2).round() as i64;
     ziv(fmt, start_precision(fmt), |p| {
-        let f = p + 16;
+        let f = p + EXP_EXTRA_BITS;
         // r = x − k·ln 2 at fraction f. ln 2 is taken 16 bits wider so that
         // |k| ≤ 1600 scales its 3-unit error to under one unit.
-        let (_, ln2_wide) = constants(f + 16);
+        let (_, ln2_wide) = constants(f + LN2_WIDE_BITS);
         let mut x_fix = e.fixed_abs(f);
         if e.neg {
             x_fix = -x_fix;
         }
-        let kln2 = (ln2_wide * BigInt::from(k)) >> 16u32;
+        let kln2 = (ln2_wide * BigInt::from(k)) >> LN2_WIDE_BITS;
         let r = x_fix - kln2; // error ≤ 1 + 1 + 1 units
         // Taylor series Σ r^n / n!, each term truncated.
         let one = BigInt::one() << f;
@@ -397,7 +516,7 @@ fn exp_bits(x: f64, fmt: Format) -> u64 {
         // the shrinking inherited error); the tail after a term truncates to
         // zero is < 3 units; r's 3-unit error is amplified by exp(r) < 1.5.
         // The bound below doubles that.
-        let error = 6 * n + 24;
+        let error = EXP_ERROR_PER_TERM * n + EXP_ERROR_BASE;
         Approx {
             negative: false,
             value: sum,
@@ -426,19 +545,19 @@ fn log_bits(x: f64, fmt: Format) -> u64 {
     // x = M · 2^(lead − 52) with M ∈ [2^52, 2^53); fold into
     // m = M / 2^52 ∈ [1/√2, √2) and exponent e.
     let lead = ex.lead();
-    let top = ex.mant << (ex.mant.leading_zeros() - 11); // normalised M
+    let top = ex.mant << (ex.mant.leading_zeros() - F64_EXP_WIDTH); // normalised M
     let mut e = lead;
     // √2 · 2^52 = 6369051672525772.8…
-    let (num, den_shift): (BigInt, u32) = if top > 6_369_051_672_525_772 {
+    let (num, den_shift): (BigInt, u32) = if top > SQRT2_TOP {
         e += 1;
-        (BigInt::from(top), 53)
+        (BigInt::from(top), F64_FRAC_BITS + 1)
     } else {
-        (BigInt::from(top), 52)
+        (BigInt::from(top), F64_FRAC_BITS)
     };
     ziv(fmt, start_precision(fmt), |p| {
         // |log x| ≥ 2^-54 when e == 0 (x within one ulp of 1 still differs
         // from 1 by 2^-53), so 64 extra fraction bits keep relative precision.
-        let f = p + 80;
+        let f = p + LOG_EXTRA_BITS;
         // z = (m − 1)/(m + 1) = (num − 2^s)/(num + 2^s).
         let base = BigInt::one() << den_shift;
         let z = ((&num - &base) << f) / (&num + &base); // error ≤ 1
@@ -456,13 +575,13 @@ fn log_bits(x: f64, fmt: Format) -> u64 {
         }
         let log_m = sum << 1u32;
         // e·ln 2 with ln 2 taken 16 bits wider (|e| ≤ 1100).
-        let (_, ln2_wide) = constants(f + 16);
-        let eln2 = (ln2_wide * BigInt::from(e)) >> 16u32;
+        let (_, ln2_wide) = constants(f + LN2_WIDE_BITS);
+        let eln2 = (ln2_wide * BigInt::from(e)) >> LN2_WIDE_BITS;
         let total = eln2 + log_m;
         // Series: ≤ 3 units per term (power and division truncations plus
         // the propagated z² error) and ≤ 5 for the tail, all doubled; ln 2
         // term ≤ 2 units. The bound below doubles that again.
-        let error = 12 * n + 32;
+        let error = LOG_ERROR_PER_TERM * n + LOG_ERROR_BASE;
         Approx {
             negative: total.sign() == Sign::Minus,
             value: total.abs(),
@@ -529,17 +648,17 @@ fn sin_cos_bits(x: f64, fmt: Format, want_cos: bool) -> u64 {
         // from it for binary64 inputs (Muller's worst case is ≈2^-61), so 96
         // extra bits plus Ziv's doubling cover it.
         let tiny = if lead < 0 { (-lead) as u32 } else { 0 };
-        let f = p + 96 + tiny;
+        let f = p + SIN_COS_EXTRA_BITS + tiny;
         // Reduce: q = round(x / (π/2)), r = x − q·π/2, with π taken wide
         // enough that q·(π error) stays under one unit.
         let int_bits = if lead > 0 { lead as u32 } else { 0 };
-        let wide = f + int_bits + 16;
+        let wide = f + int_bits + REDUCTION_WIDE_BITS;
         let (pi_wide, _) = constants(wide);
         let half_pi_wide = pi_wide >> 1u32;
         let x_wide = ex.fixed_abs(wide);
         let q: BigInt = (&x_wide + (&half_pi_wide >> 1u32)) / &half_pi_wide;
         let r_wide = &x_wide - &q * &half_pi_wide;
-        let r = shift(&r_wide, -i64::from(int_bits + 16)); // error ≤ 2
+        let r = shift(&r_wide, -i64::from(int_bits + REDUCTION_WIDE_BITS)); // error ≤ 2
         let quadrant = {
             let low = (&q % 4u32).to_u32_digits().1;
             low.first().copied().unwrap_or(0)
@@ -565,7 +684,7 @@ fn sin_cos_bits(x: f64, fmt: Format, want_cos: bool) -> u64 {
         }
         // ≤ 2 units per series term, 2 from r (|derivative| ≤ 1), 2 for the
         // tail; the bound below doubles that.
-        let error = 4 * terms + 16;
+        let error = SIN_COS_ERROR_PER_TERM * terms + SIN_COS_ERROR_BASE;
         Approx {
             negative: neg,
             value: val,
@@ -622,7 +741,7 @@ fn atan2_bits(y: f64, x: f64, fmt: Format) -> u64 {
     ziv(fmt, start_precision(fmt), |p| {
         // atan t ≈ t for tiny t: give the fraction room below t's exponent.
         let tiny = (ly - lx).unsigned_abs().saturating_sub(1) as u32;
-        let f = p + 32 + tiny.min(2300);
+        let f = p + ATAN2_EXTRA_BITS + tiny.min(ATAN2_TINY_CAP);
         let (num, den, num_shift, den_shift, inverted) = if y_le_x {
             (&ny, &nx, sy, sx, false)
         } else {
@@ -696,20 +815,20 @@ fn atan_le_one(u: &BigInt, f: u32) -> (BigInt, u64) {
     // Each halving maps an input error e to ≤ 0.75·e + 1.5 units (so w is
     // within 3 units); the series adds ≤ 4.5 units per term; the final ×4
     // scales everything. The bound below is about 1.5 times that.
-    let error = 4 * (7 * n + 32);
+    let error = ATAN_ERROR_SCALE * (ATAN_ERROR_PER_TERM * n + ATAN_ERROR_BASE);
     (sum << 2u32, error)
 }
 
 /// `quarters · π/4` correctly rounded (for the Annex F special results).
 fn pi_multiple_bits(quarters: u32, fmt: Format) -> u64 {
     ziv(fmt, start_precision(fmt), |p| {
-        let f = p + 8;
-        let (pi, _) = constants(f + 4);
+        let f = p + PI_MULTIPLE_EXTRA_BITS;
+        let (pi, _) = constants(f + PI_MULTIPLE_WIDE_BITS);
         Approx {
             negative: false,
             value: (pi * BigInt::from(quarters)) >> 2u32,
             error: 4,
-            exp: -i64::from(f + 4),
+            exp: -i64::from(f + PI_MULTIPLE_WIDE_BITS),
         }
     })
 }

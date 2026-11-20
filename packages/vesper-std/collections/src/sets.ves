@@ -158,3 +158,110 @@ impl [K: mod copy + Eq + Hash] FlatSet[K] {
         self.map.keys_into(inout out);
     }
 }
+
+test {
+    // @case remove_first(in "235", in "523", 5, true, in "23", in "32")
+    // @case remove_middle(in "235", in "523", 2, true, in "35", in "53")
+    // @case remove_last(in "235", in "523", 3, true, in "25", in "52")
+    // @case remove_missing(in "235", in "523", 4, false, in "235", in "523")
+    fn test_set_orders(
+        in ordered_before: Str,
+        in flat_before: Str,
+        remove: u8,
+        present: bool,
+        in ordered_after: Str,
+        in flat_after: Str
+    ) -> bool {
+        let mut ordered = ordered_set_new[u8]();
+        let mut flat = flat_set_new[u8]();
+        if !ordered.is_empty() || !flat.is_empty() {
+            return false;
+        }
+        for i in 0..flat_before.len() {
+            let entry = match flat_before.try_byte_at(i) {
+                Option::Some(digit) => digit,
+                Option::None => return false,
+            };
+            if !ordered
+                .insert(entry)
+                || !flat
+                .insert(entry)
+                || ordered
+                .insert(entry)
+                || flat
+                .insert(entry) {
+                return false;
+            }
+        }
+        for i in 0..ordered_before.len() {
+            if ordered
+                .nth(i)
+                != ordered_before
+                .try_byte_at(i)
+                || flat
+                .element_at(i)
+                != flat_before
+                .try_byte_at(i) {
+                return false;
+            }
+        }
+        let key = wrapping_add(remove, 48);
+        let had_key = ordered.contains(key) == present && flat.contains(key) == present;
+        let ordered_removed = ordered.remove(key);
+        let flat_removed = flat.remove(key);
+        if !had_key || ordered_removed != present || flat_removed != present {
+            return false;
+        }
+        if ordered.remove(key) || flat.remove(key) || ordered.contains(key) || flat.contains(key) {
+            return false;
+        }
+        let mut ordered_out = ChunkSeq::new[u8]();
+        let mut flat_out = ChunkSeq::new[u8]();
+        ordered.elements_into(inout ordered_out);
+        flat.elements_into(inout flat_out);
+        if ordered.len() != ordered_after.len() || flat.len() != flat_after.len() {
+            return false;
+        }
+        for i in 0..ordered.len() {
+            if ordered_out
+                .try_get(i)
+                != ordered_after
+                .try_byte_at(i)
+                || flat_out
+                .try_get(i)
+                != flat_after
+                .try_byte_at(i) {
+                return false;
+            }
+        }
+        ordered.clear();
+        flat.clear();
+        ordered.is_empty() && flat.is_empty()
+    }
+
+    // @case before_first(0, Option::Some(2))
+    // @case exact(2, Option::Some(2))
+    // @case between(4, Option::Some(5))
+    // @case exact_last(5, Option::Some(5))
+    // @case beyond_last(6, Option::None)
+    fn test_ordered_set_bounds(key: u8, expected: Option[u8]) -> bool {
+        let mut set = ordered_set_new[u8]();
+        if set.first() != Option::None || set.last() != Option::None {
+            return false;
+        }
+        set.insert(5);
+        set.insert(2);
+        set
+            .first()
+            == Option::Some(2)
+            && set
+            .last()
+            == Option::Some(5)
+            && set
+            .nth(2)
+            == Option::None
+            && set
+            .ceiling(key)
+            == expected
+    }
+}

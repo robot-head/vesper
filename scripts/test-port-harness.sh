@@ -295,3 +295,8 @@ skip_port vesper-kinetic || . crates/vesper-kinetic/port/check.sh  # port P3b la
 skip_port vesper-flux || . crates/vesper-flux/port/check.sh  # port P3b lane 7 (#1069): vesper-flux on its Vesper kernels and one divergence check per ported kernel
 skip_port vesper-span || sh crates/vesper-span/port/test-port.sh  # self-hosting SH0 lane 6 (#1128): vesper-span, both builds, the differential test and one divergence check per ported area
 skip_port vesper-lean-syntax || sh crates/vesper-lean-syntax/port/test-port.sh  # self-hosting SH0 lane 6 (#1128): vesper-lean-syntax, both builds, the differential test and one divergence check per ported area
+skip_port vesper-diagnostics || sh crates/vesper-diagnostics/port/test-port.sh  # self-hosting SH1 lane 1 (#1128): vesper-diagnostics, both builds, the differential test and one divergence check per ported area
+skip_port vesper-fmt || sh crates/vesper-fmt/port/test-port.sh  # self-hosting SH1 lane 11 (#1154): vesper-fmt, all three builds, the differential test and one divergence check per ported area
+skip_port vesper-highlight || sh crates/vesper-highlight/port/test-port.sh  # self-hosting SH1 lane 11 (#1154): vesper-highlight tier 0, all three builds, the differential test and one divergence check per ported area
+skip_port vesper-forge || sh crates/vesper-forge/port/test-port.sh  # self-hosting SH1 lane 14 (#1157): vesper-forge hygiene core, both builds, the differential test and one divergence check per ported area
+skip_port vesper-lint || sh crates/vesper-lint/port/test-port.sh  # self-hosting SH1 lane 13 (#1156): vesper-lint, all three builds, the differential test and one divergence check per ported area

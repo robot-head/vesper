@@ -28,6 +28,57 @@ use self::text::{
     utf8_ok
 };
 
+// GGUF limits (src/gguf.rs `DEFAULT_ALIGNMENT`, `MAX_TENSORS`,
+// `MAX_METADATA`, `MAX_STRING`).
+const DEFAULT_ALIGNMENT: u64 = 32;
+const MAX_TENSORS: u64 = 1048576;
+const MAX_METADATA: u64 = 1048576;
+const MAX_STRING: u64 = 16777216;
+// 64-bit FNV-1a (draft-eastlake-fnv) for the name table.
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+// GGML type ids (ggml.h `enum ggml_type`, src/gguf.rs `GgmlType`) and block
+// sizes; byte sizes are ggml.c `type_traits`.
+const GGML_F32: u64 = 0;
+const GGML_F16: u64 = 1;
+const GGML_Q4_0: u64 = 2;
+const GGML_Q4_1: u64 = 3;
+const GGML_Q5_0: u64 = 6;
+const GGML_Q5_1: u64 = 7;
+const GGML_Q8_0: u64 = 8;
+const GGML_Q8_1: u64 = 9;
+const GGML_Q2_K: u64 = 10;
+const GGML_Q3_K: u64 = 11;
+const GGML_Q4_K: u64 = 12;
+const GGML_Q5_K: u64 = 13;
+const GGML_Q6_K: u64 = 14;
+const GGML_Q8_K: u64 = 15;
+const GGML_I8: u64 = 24;
+const GGML_I16: u64 = 25;
+const GGML_I32: u64 = 26;
+const GGML_I64: u64 = 27;
+const GGML_F64: u64 = 28;
+const GGML_BF16: u64 = 30;
+const GGML_MXFP4: u64 = 39;
+const QK: u64 = 32;
+const QK_K: u64 = 256;
+// GGUF metadata value types (GGUF spec `gguf_metadata_value_type`) and the
+// width `width` gives an unknown one.
+const GGUF_UINT8: u64 = 0;
+const GGUF_INT8: u64 = 1;
+const GGUF_UINT16: u64 = 2;
+const GGUF_INT16: u64 = 3;
+const GGUF_UINT32: u64 = 4;
+const GGUF_INT32: u64 = 5;
+const GGUF_FLOAT32: u64 = 6;
+const GGUF_BOOL: u64 = 7;
+const GGUF_STRING: u64 = 8;
+const GGUF_ARRAY: u64 = 9;
+const GGUF_UINT64: u64 = 10;
+const GGUF_INT64: u64 = 11;
+const GGUF_FLOAT64: u64 = 12;
+const UNKNOWN_WIDTH: u64 = 99;
+
 // Failure codes, in src/gguf.rs's messages: 1 "truncated GGUF", 2 "not a
 // GGUF file", 3 version (detail), 4 tensor limit, 5 metadata limit, 6 string
 // length limit, 7 "GGUF string is not UTF-8", 8 "GGUF bool", 9 nested
@@ -84,7 +135,7 @@ fn string_at(in b: Slice[u8], inout status: Slice[u64], at: u64)
     -> (u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
     let start = need(in b, inout status, at, 8);
     let len = le(in b, at, 8);
-    if len > 16777216 {
+    if len > MAX_STRING {
         fail(inout status, 6, 0, 0);
     }
     let end = need(in b, inout status, start, len);
@@ -110,20 +161,20 @@ fn read_string(in b: Slice[u8], inout tape: Slice[u64], inout status: Slice[u64]
 }
 
 // The byte width of a scalar metadata type, 0 for a string or array, or
-// 99 for an unknown type.
+// `UNKNOWN_WIDTH` for an unknown type.
 fn width(ty: u64) -> u64 {
-    if ty == 0 || ty == 1 || ty == 7 {
+    if ty == GGUF_UINT8 || ty == GGUF_INT8 || ty == GGUF_BOOL {
         1
-    } else if ty == 2 || ty == 3 {
+    } else if ty == GGUF_UINT16 || ty == GGUF_INT16 {
         2
-    } else if ty == 4 || ty == 5 || ty == 6 {
+    } else if ty == GGUF_UINT32 || ty == GGUF_INT32 || ty == GGUF_FLOAT32 {
         4
-    } else if ty == 10 || ty == 11 || ty == 12 {
+    } else if ty == GGUF_UINT64 || ty == GGUF_INT64 || ty == GGUF_FLOAT64 {
         8
-    } else if ty == 8 || ty == 9 {
+    } else if ty == GGUF_STRING || ty == GGUF_ARRAY {
         0
     } else {
-        99
+        UNKNOWN_WIDTH
     }
 }
 
@@ -147,12 +198,12 @@ fn read_item(
         return (end, n + 2);
     }
     let w = width(ty);
-    if w == 99 {
+    if w == UNKNOWN_WIDTH {
         fail(inout status, 12, 0, 0);
     }
     let end = need(in b, inout status, at, w);
     let v = le(in b, at, w);
-    if ty == 7 && v > 1 {
+    if ty == GGUF_BOOL && v > 1 {
         fail(inout status, 8, 0, 0);
     }
     if !write {
@@ -211,9 +262,9 @@ fn add_name(
     if 2 * (count + 1) > slots {
         fail(inout status, 31, 0, 0);
     }
-    let mut h: u64 = 14695981039346656037 ^ space;
+    let mut h: u64 = FNV_OFFSET ^ space;
     for i in u64_zero()..len {
-        h = wrapping_mul(h ^ widen_u64(b[start + i]), 1099511628211);
+        h = wrapping_mul(h ^ widen_u64(b[start + i]), FNV_PRIME);
     }
     let tag = ((len << 1) | space) + 1;
     let mask = slots - 1;
@@ -243,42 +294,42 @@ fn add_name(
 
 // GGML block geometry `(elements, bytes)`, or `(0, 0)` for an unknown type.
 fn geometry(ty: u64) -> (u64, u64) {
-    if ty == 0 {
+    if ty == GGML_F32 {
         (1, 4)
-    } else if ty == 1 || ty == 25 || ty == 30 {
+    } else if ty == GGML_F16 || ty == GGML_I16 || ty == GGML_BF16 {
         (1, 2)
-    } else if ty == 2 {
-        (32, 18)
-    } else if ty == 3 {
-        (32, 20)
-    } else if ty == 6 {
-        (32, 22)
-    } else if ty == 7 {
-        (32, 24)
-    } else if ty == 8 {
-        (32, 34)
-    } else if ty == 9 {
-        (32, 36)
-    } else if ty == 10 {
-        (256, 84)
-    } else if ty == 11 {
-        (256, 110)
-    } else if ty == 12 {
-        (256, 144)
-    } else if ty == 13 {
-        (256, 176)
-    } else if ty == 14 {
-        (256, 210)
-    } else if ty == 15 {
-        (256, 292)
-    } else if ty == 24 {
+    } else if ty == GGML_Q4_0 {
+        (QK, 18)
+    } else if ty == GGML_Q4_1 {
+        (QK, 20)
+    } else if ty == GGML_Q5_0 {
+        (QK, 22)
+    } else if ty == GGML_Q5_1 {
+        (QK, 24)
+    } else if ty == GGML_Q8_0 {
+        (QK, 34)
+    } else if ty == GGML_Q8_1 {
+        (QK, 36)
+    } else if ty == GGML_Q2_K {
+        (QK_K, 84)
+    } else if ty == GGML_Q3_K {
+        (QK_K, 110)
+    } else if ty == GGML_Q4_K {
+        (QK_K, 144)
+    } else if ty == GGML_Q5_K {
+        (QK_K, 176)
+    } else if ty == GGML_Q6_K {
+        (QK_K, 210)
+    } else if ty == GGML_Q8_K {
+        (QK_K, 292)
+    } else if ty == GGML_I8 {
         (1, 1)
-    } else if ty == 26 {
+    } else if ty == GGML_I32 {
         (1, 4)
-    } else if ty == 27 || ty == 28 {
+    } else if ty == GGML_I64 || ty == GGML_F64 {
         (1, 8)
-    } else if ty == 39 {
-        (32, 17)
+    } else if ty == GGML_MXFP4 {
+        (QK, 17)
     } else {
         (0, 0)
     }
@@ -381,10 +432,10 @@ pub fn parse_gguf(
     let k_end = need(in b, inout status, at, 8);
     let kv_count = le(in b, at, 8);
     at = k_end;
-    if tensor_count > 1048576 {
+    if tensor_count > MAX_TENSORS {
         fail(inout status, 4, 0, 0);
     }
-    if kv_count > 1048576 {
+    if kv_count > MAX_METADATA {
         fail(inout status, 5, 0, 0);
     }
     // The header pair is written last, once the alignment is known.
@@ -392,7 +443,7 @@ pub fn parse_gguf(
     n = put(inout tape, inout status, n, kv_count, tensor_count);
     let mut count: u64 = 0;
     // 0: no general.alignment; 1: a valid one; 2: an invalid one.
-    let mut alignment: u64 = 32;
+    let mut alignment: u64 = DEFAULT_ALIGNMENT;
     let mut alignment_state: u64 = 0;
     for e in u64_zero()..kv_count {
         let key_at = n;

@@ -1,0 +1,146 @@
+// @vesper-std/test: ergonomic pure-Vesper assertion helpers for Vesper Anvil.
+//
+// Usable immediately without waiting for §7.5 `sugar` power-asserts; every
+// helper is total and allocation-free, returning `true` when the assertion
+// holds and `false` when it fails.
+
+// The package version, for diagnostics.
+pub fn version() -> u64 {
+    1
+}
+
+// Assert that `cond` is `true`.
+pub fn expect(cond: bool) -> bool {
+    cond
+}
+
+// Assert that `cond` is `true`.
+pub fn expect_true(cond: bool) -> bool {
+    cond
+}
+
+// Assert that `cond` is `false`.
+pub fn expect_false(cond: bool) -> bool {
+    !cond
+}
+
+// Assert `actual == expected` for `i64`.
+pub fn expect_eq_i64(actual: i64, expected: i64) -> bool {
+    actual == expected
+}
+
+// Assert `actual != unexpected` for `i64`.
+pub fn expect_ne_i64(actual: i64, unexpected: i64) -> bool {
+    actual != unexpected
+}
+
+// Assert `actual == expected` for `u64`.
+pub fn expect_eq_u64(actual: u64, expected: u64) -> bool {
+    actual == expected
+}
+
+// Assert `actual != unexpected` for `u64`.
+pub fn expect_ne_u64(actual: u64, unexpected: u64) -> bool {
+    actual != unexpected
+}
+
+// Assert `actual == expected` for `u32`.
+pub fn expect_eq_u32(actual: u32, expected: u32) -> bool {
+    actual == expected
+}
+
+// Assert `actual != unexpected` for `u32`.
+pub fn expect_ne_u32(actual: u32, unexpected: u32) -> bool {
+    actual != unexpected
+}
+
+// Assert `actual == expected` for `u8`.
+pub fn expect_eq_u8(actual: u8, expected: u8) -> bool {
+    actual == expected
+}
+
+// Assert `actual != unexpected` for `u8`.
+pub fn expect_ne_u8(actual: u8, unexpected: u8) -> bool {
+    actual != unexpected
+}
+
+// Assert `actual == expected` for `bool`.
+pub fn expect_eq_bool(actual: bool, expected: bool) -> bool {
+    actual == expected
+}
+
+// Ordering assertions for `i64`.
+pub fn expect_lt_i64(lhs: i64, rhs: i64) -> bool {
+    lhs < rhs
+}
+
+pub fn expect_le_i64(lhs: i64, rhs: i64) -> bool {
+    lhs <= rhs
+}
+
+pub fn expect_gt_i64(lhs: i64, rhs: i64) -> bool {
+    lhs > rhs
+}
+
+pub fn expect_ge_i64(lhs: i64, rhs: i64) -> bool {
+    lhs >= rhs
+}
+
+// Ordering assertions for `u64`.
+pub fn expect_lt_u64(lhs: u64, rhs: u64) -> bool {
+    lhs < rhs
+}
+
+pub fn expect_le_u64(lhs: u64, rhs: u64) -> bool {
+    lhs <= rhs
+}
+
+pub fn expect_gt_u64(lhs: u64, rhs: u64) -> bool {
+    lhs > rhs
+}
+
+pub fn expect_ge_u64(lhs: u64, rhs: u64) -> bool {
+    lhs >= rhs
+}
+
+// Generic equality assertion over any `copy + Eq` type.
+pub fn expect_eq[T: mod copy + Eq](actual: T, expected: T) -> bool {
+    actual == expected
+}
+
+// Generic inequality assertion over any `copy + Eq` type.
+pub fn expect_ne[T: mod copy + Eq](actual: T, unexpected: T) -> bool {
+    actual != unexpected
+}
+
+// Assert that an `Option[T]` is `Option::Some(_)`.
+pub fn expect_some[T: mod copy](opt: Option[T]) -> bool {
+    match opt {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+// Assert that an `Option[T]` is `Option::None`.
+pub fn expect_none[T: mod copy](opt: Option[T]) -> bool {
+    match opt {
+        Option::Some(_) => false,
+        Option::None => true,
+    }
+}
+
+// Assert that a `Result[T, E]` is `Result::Ok(_)`.
+pub fn expect_ok[T: mod copy, E: mod copy](res: Result[T, E]) -> bool {
+    match res {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+// Assert that a `Result[T, E]` is `Result::Err(_)`.
+pub fn expect_err[T: mod copy, E: mod copy](res: Result[T, E]) -> bool {
+    match res {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    }
+}

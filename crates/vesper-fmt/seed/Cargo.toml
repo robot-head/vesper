@@ -1,0 +1,55 @@
+[package]
+name = "vesper-fmt-seed"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Frozen Rust seed copy of vesper-fmt for the compiler's own dependency closure"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; self-hosting SH1 lane 11,
+# #1154): the compiler links this package, the Rust build of ../src, under
+# the library name `vesper_fmt`. Crates inside
+# `cargo tree -p vesper -e normal,build` depend on it with
+# `vesper-fmt = { path = ".../seed", package = "vesper-fmt-seed" }`; every
+# other crate uses the port-backed package `vesper-fmt`. The Rust code takes
+# bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_fmt"
+path = "../src/lib.rs"
+
+[dependencies]
+blake3 = "1.8"
+vesper-lean-syntax = { path = "../../vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
+vesper-syntax = { path = "../../vesper-syntax" }
+
+[[test]]
+name = "else_if_chains"
+path = "../tests/else_if_chains.rs"
+
+[[test]]
+name = "format"
+path = "../tests/format.rs"
+
+[[test]]
+name = "macro_source"
+path = "../tests/macro_source.rs"
+
+[[test]]
+name = "proof_lean"
+path = "../tests/proof_lean.rs"
+
+[[test]]
+name = "proof_model"
+path = "../tests/proof_model.rs"
+
+[[test]]
+name = "recovery"
+path = "../tests/recovery.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

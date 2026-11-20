@@ -30,7 +30,7 @@ fn main() {
 const EDITS: &[(&str, &str)] = &[
     // morton.rs: a code with bit 30 set decodes instead of failing.
     (
-        "if (code & 0xc0000000) != 0 {",
+        "if (code & MORTON30_HIGH_BITS) != 0 {",
         "if (code & 0x80000000) != 0 {",
     ),
     // fastmath.rs: the cosine kernel adds the reduction tail instead of subtracting it.

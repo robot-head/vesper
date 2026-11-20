@@ -684,8 +684,7 @@ fn short_inner_loops_keep_their_checks() {
     // only the outer loop is guarded. A row loop of fixed length is guarded
     // ([`inner_loops_are_guarded`]).
     let source = program(
-        "fn pairs(in s: Slice[u64]) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
-    let n = s.len();
+        "fn pairs(in s: Slice[u64], n: u64) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut hits: u64 = 0;
     for i in 0..n {
         let a = s[i];
@@ -702,9 +701,11 @@ fn run() -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     for i in 0..12 {
         s.push(i % 4);
     }
-    pairs(in s.as_slice())
+    pairs(in s.as_slice(), 12)
 }",
     );
+    // (With `n = s.len()` both loops are proved in bounds without a guard,
+    // `tests/byte_loop_facts.rs`; a bound passed in needs the guards.)
     assert_eq!(guards(&hoisted(&source), "pairs"), 1);
     // Each residue appears 3 times: 3 pairs each.
     assert_eq!(differential("bounds_pairs", &source), 12);

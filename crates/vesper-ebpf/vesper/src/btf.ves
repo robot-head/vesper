@@ -22,6 +22,75 @@
 // unknown kind (value), 7 type (value) refers past the type table, 8 name
 // offset out of range, 9 unterminated name, 10 non-UTF-8 name.
 
+// BTF (src/btf.rs, include/uapi/linux/btf.h): the header, its field
+// offsets, and the 12-byte `struct btf_type`.
+const BTF_MAGIC: u64 = 60319;
+const BTF_VERSION: u64 = 1;
+const BTF_HDR_LEN: u64 = 24;
+const HDR_VERSION: u64 = 2;
+const HDR_HDR_LEN: u64 = 4;
+const HDR_TYPE_OFF: u64 = 8;
+const HDR_TYPE_LEN: u64 = 12;
+const HDR_STR_OFF: u64 = 16;
+const HDR_STR_LEN: u64 = 20;
+const BTF_TYPE_SIZE: u64 = 12;
+
+// `btf_type.info`: vlen bits 0-15, kind bits 24-28, kind_flag bit 31.
+const INFO_VLEN_MASK: u64 = 65535;
+const INFO_KIND_SHIFT: u64 = 24;
+const INFO_KIND_MASK: u64 = 31;
+const INFO_KFLAG_SHIFT: u64 = 31;
+// A kind_flag member offset: bit offset bits 0-23, bitfield size 24-31.
+const MEMBER_BIT_OFFSET_MASK: u64 = 16777215;
+const MEMBER_BITFIELD_SHIFT: u64 = 24;
+// The `BTF_KIND_INT` word: encoding bits 24-27, offset 16-23, bits 0-7.
+const INT_ENCODING_SHIFT: u64 = 24;
+const INT_ENCODING_MASK: u64 = 15;
+const INT_OFFSET_SHIFT: u64 = 16;
+const INT_BYTE_MASK: u64 = 255;
+
+// `BTF_KIND_*`.
+const KIND_INT: u64 = 1;
+const KIND_PTR: u64 = 2;
+const KIND_ARRAY: u64 = 3;
+const KIND_STRUCT: u64 = 4;
+const KIND_UNION: u64 = 5;
+const KIND_ENUM: u64 = 6;
+const KIND_FWD: u64 = 7;
+const KIND_TYPEDEF: u64 = 8;
+const KIND_VOLATILE: u64 = 9;
+const KIND_CONST: u64 = 10;
+const KIND_RESTRICT: u64 = 11;
+const KIND_FUNC: u64 = 12;
+const KIND_FUNC_PROTO: u64 = 13;
+const KIND_VAR: u64 = 14;
+const KIND_DATASEC: u64 = 15;
+const KIND_FLOAT: u64 = 16;
+const KIND_DECL_TAG: u64 = 17;
+const KIND_TYPE_TAG: u64 = 18;
+const KIND_ENUM64: u64 = 19;
+
+// Sign extension of a 32-bit enum value.
+const SIGN_BIT32: u64 = 2147483648;
+const HIGH32: u64 = 18446744069414584320;
+
+// UTF-8 (RFC 3629 section 4): continuation bytes 80..BF, two-byte leads
+// C2..DF, three-byte E0..EF, four-byte F0..F4, and the tighter second-byte
+// ranges after E0, ED, F0 and F4.
+const UTF8_CONT_LO: u64 = 128;
+const UTF8_CONT_HI: u64 = 191;
+const UTF8_LEAD2_LO: u64 = 194;
+const UTF8_LEAD2_HI: u64 = 223;
+const UTF8_LEAD3_LO: u64 = 224;
+const UTF8_LEAD3_HI: u64 = 239;
+const UTF8_LEAD_ED: u64 = 237;
+const UTF8_LEAD4_LO: u64 = 240;
+const UTF8_LEAD4_HI: u64 = 244;
+const UTF8_E0_CONT_LO: u64 = 160;
+const UTF8_ED_CONT_HI: u64 = 159;
+const UTF8_F0_CONT_LO: u64 = 144;
+const UTF8_F4_CONT_HI: u64 = 143;
+
 pub fn byte(in s: Slice[u8], at: u64) -> u64 {
     match s.try_get(at) {
         Option::Some(v) => widen_u64(v),
@@ -52,11 +121,11 @@ fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 {
 
 // Entry words per kind after the seven-word record header.
 fn entry_words(kind: u64) -> u64 {
-    if kind == 4 || kind == 5 {
+    if kind == KIND_STRUCT || kind == KIND_UNION {
         4
-    } else if kind == 6 || kind == 19 || kind == 13 {
+    } else if kind == KIND_ENUM || kind == KIND_ENUM64 || kind == KIND_FUNC_PROTO {
         2
-    } else if kind == 15 {
+    } else if kind == KIND_DATASEC {
         3
     } else {
         0
@@ -64,8 +133,8 @@ fn entry_words(kind: u64) -> u64 {
 }
 
 fn sext32(v: u64) -> u64 {
-    if v & 2147483648 != 0 {
-        v | 18446744069414584320
+    if v & SIGN_BIT32 != 0 {
+        v | HIGH32
     } else {
         v
     }
@@ -98,49 +167,51 @@ pub fn valid_utf8(in base: Slice[u8], in own: Slice[u8], at: u64, end: u64) -> b
         }
         let c = cat_byte(in base, in own, i);
         let i1 = wrapping_add(i, 1);
-        if c < 128 {
+        if c < UTF8_CONT_LO {
             i = i1;
-        } else if c >= 194 && c <= 223 {
-            if !cont(in base, in own, i1, end, 128, 191) {
+        } else if c >= UTF8_LEAD2_LO && c <= UTF8_LEAD2_HI {
+            if !cont(in base, in own, i1, end, UTF8_CONT_LO, UTF8_CONT_HI) {
                 return false;
             }
             i = wrapping_add(i, 2);
-        } else if c >= 224 && c <= 239 {
-            let lo: u64 = if c == 224 {
-                160
+        } else if c >= UTF8_LEAD3_LO && c <= UTF8_LEAD3_HI {
+            // E0 needs A0..BF (no overlong forms), ED 80..9F (no surrogates)
+            let lo: u64 = if c == UTF8_LEAD3_LO {
+                UTF8_E0_CONT_LO
             } else {
-                128
+                UTF8_CONT_LO
             };
-            let hi: u64 = if c == 237 {
-                159
+            let hi: u64 = if c == UTF8_LEAD_ED {
+                UTF8_ED_CONT_HI
             } else {
-                191
+                UTF8_CONT_HI
             };
             if !cont(in base, in own, i1, end, lo, hi) {
                 return false;
             }
-            if !cont(in base, in own, wrapping_add(i, 2), end, 128, 191) {
+            if !cont(in base, in own, wrapping_add(i, 2), end, UTF8_CONT_LO, UTF8_CONT_HI) {
                 return false;
             }
             i = wrapping_add(i, 3);
-        } else if c >= 240 && c <= 244 {
-            let lo: u64 = if c == 240 {
-                144
+        } else if c >= UTF8_LEAD4_LO && c <= UTF8_LEAD4_HI {
+            // F0 needs 90..BF (no overlong forms), F4 80..8F (at most U+10FFFF)
+            let lo: u64 = if c == UTF8_LEAD4_LO {
+                UTF8_F0_CONT_LO
             } else {
-                128
+                UTF8_CONT_LO
             };
-            let hi: u64 = if c == 244 {
-                143
+            let hi: u64 = if c == UTF8_LEAD4_HI {
+                UTF8_F4_CONT_HI
             } else {
-                191
+                UTF8_CONT_HI
             };
             if !cont(in base, in own, i1, end, lo, hi) {
                 return false;
             }
-            if !cont(in base, in own, wrapping_add(i, 2), end, 128, 191) {
+            if !cont(in base, in own, wrapping_add(i, 2), end, UTF8_CONT_LO, UTF8_CONT_HI) {
                 return false;
             }
-            if !cont(in base, in own, wrapping_add(i, 3), end, 128, 191) {
+            if !cont(in base, in own, wrapping_add(i, 3), end, UTF8_CONT_LO, UTF8_CONT_HI) {
                 return false;
             }
             i = wrapping_add(i, 4);
@@ -186,32 +257,39 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         if at >= len {
             break;
         }
-        if wrapping_add(at, 12) > len {
+        if wrapping_add(at, BTF_TYPE_SIZE) > len {
             return 5;
         }
         let name = le32(in types, at);
         let info = le32(in types, wrapping_add(at, 4));
         let sot = le32(in types, wrapping_add(at, 8));
-        at = wrapping_add(at, 12);
-        let kind = (info >> 24) & 31;
-        let vlen = info & 65535;
-        let kflag = (info >> 31) != 0;
+        at = wrapping_add(at, BTF_TYPE_SIZE);
+        let kind = (info >> INFO_KIND_SHIFT) & INFO_KIND_MASK;
+        let vlen = info & INFO_VLEN_MASK;
+        let kflag = (info >> INFO_KFLAG_SHIFT) != 0;
         // words the kind reads after the common 12 bytes
-        let fixed: u64 = if kind == 1 || kind == 14 || kind == 17 {
+        let fixed: u64 = if kind == KIND_INT || kind == KIND_VAR || kind == KIND_DECL_TAG {
             1
-        } else if kind == 3 {
+        } else if kind == KIND_ARRAY {
             3
         } else {
             0
         };
-        let per: u64 = if kind == 4 || kind == 5 || kind == 15 || kind == 19 {
+        let per: u64 = if kind
+            == KIND_STRUCT
+            || kind
+            == KIND_UNION
+            || kind
+            == KIND_DATASEC
+            || kind
+            == KIND_ENUM64 {
             3
-        } else if kind == 6 || kind == 13 {
+        } else if kind == KIND_ENUM || kind == KIND_FUNC_PROTO {
             2
         } else {
             0
         };
-        if kind == 0 || kind > 19 {
+        if kind == 0 || kind > KIND_ENUM64 {
             bad = kind;
             return 6;
         }
@@ -224,20 +302,20 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         let mut c: u64 = 0;
         let mut d: u64 = 0;
         let mut n: u64 = 0;
-        if kind == 1 {
+        if kind == KIND_INT {
             let w = le32(in types, at);
             a = sot;
-            b = (w >> 24) & 15;
-            c = (w >> 16) & 255;
-            d = w & 255;
-        } else if kind == 3 {
+            b = (w >> INT_ENCODING_SHIFT) & INT_ENCODING_MASK;
+            c = (w >> INT_OFFSET_SHIFT) & INT_BYTE_MASK;
+            d = w & INT_BYTE_MASK;
+        } else if kind == KIND_ARRAY {
             a = le32(in types, at);
             b = le32(in types, wrapping_add(at, 4));
             c = le32(in types, wrapping_add(at, 8));
-        } else if kind == 4 || kind == 5 || kind == 15 {
+        } else if kind == KIND_STRUCT || kind == KIND_UNION || kind == KIND_DATASEC {
             a = sot;
             n = vlen;
-        } else if kind == 6 || kind == 19 {
+        } else if kind == KIND_ENUM || kind == KIND_ENUM64 {
             a = sot;
             b = if kflag {
                 1
@@ -245,19 +323,19 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                 0
             };
             n = vlen;
-        } else if kind == 7 {
+        } else if kind == KIND_FWD {
             a = if kflag {
                 1
             } else {
                 0
             };
-        } else if kind == 12 {
+        } else if kind == KIND_FUNC {
             a = sot;
             b = vlen;
-        } else if kind == 13 {
+        } else if kind == KIND_FUNC_PROTO {
             a = sot;
             n = vlen;
-        } else if kind == 14 || kind == 17 {
+        } else if kind == KIND_VAR || kind == KIND_DECL_TAG {
             a = sot;
             b = le32(in types, at);
         } else {
@@ -266,7 +344,18 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         }
         // `BtfType::name_off`: these kinds carry no name
         let named = !(
-            kind == 2 || kind == 3 || kind == 9 || kind == 10 || kind == 11 || kind == 13
+            kind
+                == KIND_PTR
+                || kind
+                == KIND_ARRAY
+                || kind
+                == KIND_VOLATILE
+                || kind
+                == KIND_CONST
+                || kind
+                == KIND_RESTRICT
+                || kind
+                == KIND_FUNC_PROTO
         );
         out.push(kind);
         out
@@ -284,18 +373,18 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         out.push(n);
         at = wrapping_add(at, wrapping_mul(fixed, 4));
         for i in 0..n {
-            if kind == 4 || kind == 5 {
+            if kind == KIND_STRUCT || kind == KIND_UNION {
                 let off = le32(in types, wrapping_add(at, 8));
                 out.push(le32(in types, at));
                 out.push(le32(in types, wrapping_add(at, 4)));
                 if kflag {
-                    out.push(off & 16777215);
-                    out.push(off >> 24);
+                    out.push(off & MEMBER_BIT_OFFSET_MASK);
+                    out.push(off >> MEMBER_BITFIELD_SHIFT);
                 } else {
                     out.push(off);
                     out.push(0);
                 }
-            } else if kind == 6 {
+            } else if kind == KIND_ENUM {
                 out.push(le32(in types, at));
                 let v = le32(in types, wrapping_add(at, 4));
                 out
@@ -306,7 +395,7 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                         v
                     }
                 );
-            } else if kind == 19 {
+            } else if kind == KIND_ENUM64 {
                 out.push(le32(in types, at));
                 out
                     .push(
@@ -314,7 +403,7 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                         le32(in types, wrapping_add(at, 8)) << 32
                     )
                 );
-            } else if kind == 13 {
+            } else if kind == KIND_FUNC_PROTO {
                 out.push(le32(in types, at));
                 out.push(le32(in types, wrapping_add(at, 4)));
             } else {
@@ -352,32 +441,39 @@ fn validate(
         let k = entry_words(kind);
         let mut past = false;
         if kind
-            == 2
+            == KIND_PTR
             || kind
-            == 8
+            == KIND_TYPEDEF
             || kind
-            == 9
+            == KIND_VOLATILE
             || kind
-            == 10
+            == KIND_CONST
             || kind
-            == 11
+            == KIND_RESTRICT
             || kind
-            == 14
+            == KIND_VAR
             || kind
-            == 17
+            == KIND_DECL_TAG
             || kind
-            == 18
+            == KIND_TYPE_TAG
             || kind
-            == 12 {
+            == KIND_FUNC {
             past = a >= ntypes;
-        } else if kind == 3 {
+        } else if kind == KIND_ARRAY {
             past = a >= ntypes || b >= ntypes;
-        } else if kind == 13 {
+        } else if kind == KIND_FUNC_PROTO {
             past = a >= ntypes;
         }
-        if kind == 4 || kind == 5 || kind == 13 || kind == 15 {
+        if kind
+            == KIND_STRUCT
+            || kind
+            == KIND_UNION
+            || kind
+            == KIND_FUNC_PROTO
+            || kind
+            == KIND_DATASEC {
             // the type is entry word 1 of a member or param, word 0 of a var
-            let at: u64 = if kind == 15 {
+            let at: u64 = if kind == KIND_DATASEC {
                 0
             } else {
                 1
@@ -398,7 +494,16 @@ fn validate(
         if c0 != 0 {
             return c0;
         }
-        if kind == 4 || kind == 5 || kind == 6 || kind == 19 || kind == 13 {
+        if kind
+            == KIND_STRUCT
+            || kind
+            == KIND_UNION
+            || kind
+            == KIND_ENUM
+            || kind
+            == KIND_ENUM64
+            || kind
+            == KIND_FUNC_PROTO {
             for i in 0..n {
                 let o = word_at(in out, wrapping_add(e, wrapping_mul(i, k)));
                 let ci = check_name(in base, in own, o);
@@ -474,21 +579,21 @@ fn parse_sections(
 pub fn parse_btf(in btf: Slice[u8], split: bool, base_types: u64, in base_strings: Slice[u8])
     -> ChunkSeq[u64] {
     let len = btf.len();
-    if len < 24 || (byte(in btf, 0) | (byte(in btf, 1) << 8)) != 60319 {
+    if len < BTF_HDR_LEN || (byte(in btf, 0) | (byte(in btf, 1) << 8)) != BTF_MAGIC {
         return failed(0, 0);
     }
-    let version = byte(in btf, 2);
-    if version != 1 {
+    let version = byte(in btf, HDR_VERSION);
+    if version != BTF_VERSION {
         return failed(1, version);
     }
-    let hdr_len = le32(in btf, 4);
-    if hdr_len < 24 {
+    let hdr_len = le32(in btf, HDR_HDR_LEN);
+    if hdr_len < BTF_HDR_LEN {
         return failed(2, 0);
     }
-    let ts = wrapping_add(hdr_len, le32(in btf, 8));
-    let te = wrapping_add(ts, le32(in btf, 12));
-    let ss = wrapping_add(hdr_len, le32(in btf, 16));
-    let se = wrapping_add(ss, le32(in btf, 20));
+    let ts = wrapping_add(hdr_len, le32(in btf, HDR_TYPE_OFF));
+    let te = wrapping_add(ts, le32(in btf, HDR_TYPE_LEN));
+    let ss = wrapping_add(hdr_len, le32(in btf, HDR_STR_OFF));
+    let se = wrapping_add(ss, le32(in btf, HDR_STR_LEN));
     if te > len {
         return failed(3, 0);
     }

@@ -25,6 +25,38 @@ use self::qk::{
     dequantize_block
 };
 
+// Block geometry (src/quant.rs, src/formats.rs): Q8_0, Q4_0 and MXFP4 blocks
+// hold `BLOCK` elements, Q4_K super-blocks `QK_K`.
+const BLOCK: u64 = 32;
+const Q8_0_BYTES: u64 = 34;
+const Q4_0_BYTES: u64 = 18;
+const QK_K: u64 = 256;
+const Q4_K_BYTES: u64 = 144;
+const MXFP4_BYTES: u64 = 17;
+// The port's `WeightFormat` codes (src/quant.rs `port_format`); 7 is F8E4M3.
+const FORMAT_F32: u8 = 0;
+const FORMAT_F16: u8 = 1;
+const FORMAT_BF16: u8 = 2;
+const FORMAT_Q8_0: u8 = 3;
+const FORMAT_Q4_0: u8 = 4;
+const FORMAT_Q4_K: u8 = 5;
+const FORMAT_MXFP4: u8 = 6;
+const FORMAT_F8E5M2: u8 = 8;
+// Binary32 exponent field in place (its bits are +Inf) and exponent bias.
+const F32_EXP_MASK: u32 = 2139095040;
+const F32_BIAS: i32 = 127;
+// E8M0 (OCP MX v1.0) reserves 255 for NaN; 254 is the largest scale.
+const E8M0_NAN: u8 = 255;
+const E8M0_MAX_FINITE: i32 = 254;
+const E8M0_MAX_FINITE_U8: u8 = 254;
+// The largest Q8_0 magnitude and Q4_0 nibble.
+const Q8_MAX: f32 = 127.0;
+const Q4_MAX: i8 = 15;
+const Q4_MAX_U8: u8 = 15;
+// The low nibble of a packed pair, and the Q4_0 nibble bias.
+const NIBBLE: u8 = 15;
+const Q4_0_BIAS: i16 = 8;
+
 fn f(in s: Slice[u32], i: u64) -> f32 eff [Fail[RuntimeError]] {
     from_bits_f32(s[i])
 }
@@ -34,7 +66,7 @@ pub fn dequantize_q8_0(in block: Slice[u8], inout out: Slice[u32], at: u64) eff 
     Fail[RuntimeError]
 ] {
     let d = half_at(in block, 0);
-    for i in u64_zero()..32 {
+    for i in u64_zero()..BLOCK {
         let q = wrapping_i8(block[2 + i]);
         out.set(at + i, to_bits_f32(d * widen_f32(q)));
     }
@@ -47,8 +79,8 @@ pub fn dequantize_q4_0(in block: Slice[u8], inout out: Slice[u32], at: u64) eff 
     let d = half_at(in block, 0);
     for i in u64_zero()..16 {
         let packed = block[2 + i];
-        let lo = widen_i16(packed & 15) - 8;
-        let hi = widen_i16(packed >> 4) - 8;
+        let lo = widen_i16(packed & NIBBLE) - Q4_0_BIAS;
+        let hi = widen_i16(packed >> 4) - Q4_0_BIAS;
         out.set(at + i, to_bits_f32(d * widen_f32(lo)));
         out.set(at + 16 + i, to_bits_f32(d * widen_f32(hi)));
     }
@@ -98,7 +130,7 @@ pub fn dequantize_mxfp4(in block: Slice[u8], inout out: Slice[u32], at: u64) eff
     let d = e8m0_half(block[0]);
     for j in u64_zero()..16 {
         let b = block[1 + j];
-        out.set(at + j, to_bits_f32(d * widen_f32(e2m1_doubled(b & 15))));
+        out.set(at + j, to_bits_f32(d * widen_f32(e2m1_doubled(b & NIBBLE))));
         out.set(at + j + 16, to_bits_f32(d * widen_f32(e2m1_doubled(b >> 4))));
     }
 }
@@ -111,36 +143,52 @@ pub fn decode_piece(format: u8, scale: f32, in raw: Slice[u8], inout out: Slice[
     Fail[RuntimeError]
 ] {
     let n = out.len();
-    if format == 0 {
+    if format == FORMAT_F32 {
         for i in 0..n {
             out.set(i, raw.read_u32_le(4 * i));
         }
-    } else if format == 1 {
+    } else if format == FORMAT_F16 {
         for i in 0..n {
             out.set(i, to_bits_f32(decode_fp16(raw.read_u16_le(2 * i))));
         }
-    } else if format == 2 {
+    } else if format == FORMAT_BF16 {
         for i in 0..n {
             out.set(i, to_bits_f32(decode_bf16(raw.read_u16_le(2 * i))));
         }
-    } else if format == 3 {
-        for b in u64_zero()..n / 32 {
-            dequantize_q8_0(in raw[34 * b..34 * b + 34], inout out, 32 * b);
+    } else if format == FORMAT_Q8_0 {
+        for b in u64_zero()..n / BLOCK {
+            dequantize_q8_0(
+                in raw[b * Q8_0_BYTES..b * Q8_0_BYTES + Q8_0_BYTES],
+                inout out,
+                BLOCK * b
+            );
         }
-    } else if format == 4 {
-        for b in u64_zero()..n / 32 {
-            dequantize_q4_0(in raw[18 * b..18 * b + 18], inout out, 32 * b);
+    } else if format == FORMAT_Q4_0 {
+        for b in u64_zero()..n / BLOCK {
+            dequantize_q4_0(
+                in raw[b * Q4_0_BYTES..b * Q4_0_BYTES + Q4_0_BYTES],
+                inout out,
+                BLOCK * b
+            );
         }
-    } else if format == 5 {
-        for b in u64_zero()..n / 256 {
-            dequantize_block(in raw[144 * b..144 * b + 144], inout out, 256 * b);
+    } else if format == FORMAT_Q4_K {
+        for b in u64_zero()..n / QK_K {
+            dequantize_block(
+                in raw[b * Q4_K_BYTES..b * Q4_K_BYTES + Q4_K_BYTES],
+                inout out,
+                QK_K * b
+            );
         }
-    } else if format == 6 {
-        for b in u64_zero()..n / 32 {
-            dequantize_mxfp4(in raw[17 * b..17 * b + 17], inout out, 32 * b);
+    } else if format == FORMAT_MXFP4 {
+        for b in u64_zero()..n / BLOCK {
+            dequantize_mxfp4(
+                in raw[b * MXFP4_BYTES..b * MXFP4_BYTES + MXFP4_BYTES],
+                inout out,
+                BLOCK * b
+            );
         }
     } else {
-        let e5m2 = format == 8;
+        let e5m2 = format == FORMAT_F8E5M2;
         for i in 0..n {
             out.set(i, to_bits_f32(fp8_decode(e5m2, raw[i]) * scale));
         }
@@ -157,7 +205,7 @@ pub fn check_rows(in data: Slice[u32], cols: u64, block: u64) eff [
         Fail::raise(Fault::Shape);
     }
     for i in 0..data.len() {
-        if data[i] & 2139095040 == 2139095040 {
+        if data[i] & F32_EXP_MASK == F32_EXP_MASK {
             Fail::raise(Fault::NonFinite);
         }
     }
@@ -171,23 +219,23 @@ fn push_half(inout out: ChunkSeq[u8], bits: u16) {
 // GGML reference Q8_0.
 pub fn quantize_q8_0(in data: Slice[u32], cols: u64)
     -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
-    check_rows(in data, cols, 32);
-    let blocks = data.len() / 32;
-    let mut out = ChunkSeq::with_capacity[u8](blocks * 34);
+    check_rows(in data, cols, BLOCK);
+    let blocks = data.len() / BLOCK;
+    let mut out = ChunkSeq::with_capacity[u8](blocks * Q8_0_BYTES);
     for b in 0..blocks {
         let mut amax: f32 = 0.0;
-        for i in u64_zero()..32 {
-            amax = max(amax, abs(f(in data, 32 * b + i)));
+        for i in u64_zero()..BLOCK {
+            amax = max(amax, abs(f(in data, BLOCK * b + i)));
         }
-        let d = amax / 127.0;
+        let d = amax / Q8_MAX;
         let id: f32 = if d != 0.0 {
             1.0 / d
         } else {
             0.0
         };
         push_half(inout out, encode_fp16(d));
-        for i in u64_zero()..32 {
-            out.push(wrapping_u8(saturating_i8(round(f(in data, 32 * b + i) * id))));
+        for i in u64_zero()..BLOCK {
+            out.push(wrapping_u8(saturating_i8(round(f(in data, BLOCK * b + i) * id))));
         }
     }
     out
@@ -195,24 +243,24 @@ pub fn quantize_q8_0(in data: Slice[u32], cols: u64)
 
 fn q4(v: f32, id: f32) -> u8 eff [Fail[ArithOverflow]] {
     let q = saturating_i8(v * id + 8.5);
-    if q < 15 {
+    if q < Q4_MAX {
         wrapping_u8(q)
     } else {
-        15
+        Q4_MAX_U8
     }
 }
 
 // GGML reference Q4_0.
 pub fn quantize_q4_0(in data: Slice[u32], cols: u64)
     -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
-    check_rows(in data, cols, 32);
-    let blocks = data.len() / 32;
-    let mut out = ChunkSeq::with_capacity[u8](blocks * 18);
+    check_rows(in data, cols, BLOCK);
+    let blocks = data.len() / BLOCK;
+    let mut out = ChunkSeq::with_capacity[u8](blocks * Q4_0_BYTES);
     for b in 0..blocks {
         let mut amax: f32 = 0.0;
         let mut mx: f32 = 0.0;
-        for i in u64_zero()..32 {
-            let v = f(in data, 32 * b + i);
+        for i in u64_zero()..BLOCK {
+            let v = f(in data, BLOCK * b + i);
             if amax < abs(v) {
                 amax = abs(v);
                 mx = v;
@@ -226,8 +274,8 @@ pub fn quantize_q4_0(in data: Slice[u32], cols: u64)
         };
         push_half(inout out, encode_fp16(d));
         for j in u64_zero()..16 {
-            let lo = q4(f(in data, 32 * b + j), id);
-            let hi = q4(f(in data, 32 * b + j + 16), id);
+            let lo = q4(f(in data, BLOCK * b + j), id);
+            let hi = q4(f(in data, BLOCK * b + j + 16), id);
             out.push(lo | (hi << 4));
         }
     }
@@ -236,7 +284,7 @@ pub fn quantize_q4_0(in data: Slice[u32], cols: u64)
 
 fn mxfp4_code(d: f32, x: f32) -> u8 eff [Fail[ArithOverflow]] {
     let mut best: u8 = 0;
-    let mut best_err = from_bits_f32(2139095040);
+    let mut best_err = from_bits_f32(F32_EXP_MASK);
     for i in u64_zero()..16 {
         let k = wrapping_u8(i);
         let e = abs(d * widen_f32(e2m1_doubled(k)) - x);
@@ -251,20 +299,20 @@ fn mxfp4_code(d: f32, x: f32) -> u8 eff [Fail[ArithOverflow]] {
 // GGML / gguf-py MXFP4 quantization with an exact exponent.
 pub fn quantize_mxfp4(in data: Slice[u32], cols: u64)
     -> ChunkSeq[u8] eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
-    check_rows(in data, cols, 32);
-    let blocks = data.len() / 32;
-    let mut out = ChunkSeq::with_capacity[u8](blocks * 17);
+    check_rows(in data, cols, BLOCK);
+    let blocks = data.len() / BLOCK;
+    let mut out = ChunkSeq::with_capacity[u8](blocks * MXFP4_BYTES);
     for b in 0..blocks {
         let mut amax: f32 = 0.0;
-        for i in u64_zero()..32 {
-            amax = max(amax, abs(f(in data, 32 * b + i)));
+        for i in u64_zero()..BLOCK {
+            amax = max(amax, abs(f(in data, BLOCK * b + i)));
         }
         let e: u8 = if amax > 0.0 {
-            let raw = floor_log2(amax) - 2 + 127;
+            let raw = floor_log2(amax) - 2 + F32_BIAS;
             if raw < 0 {
                 0
-            } else if raw > 254 {
-                254
+            } else if raw > E8M0_MAX_FINITE {
+                E8M0_MAX_FINITE_U8
             } else {
                 wrapping_u8(raw)
             }
@@ -274,8 +322,8 @@ pub fn quantize_mxfp4(in data: Slice[u32], cols: u64)
         let d = e8m0_half(e);
         out.push(e);
         for j in u64_zero()..16 {
-            let lo = mxfp4_code(d, f(in data, 32 * b + j));
-            let hi = mxfp4_code(d, f(in data, 32 * b + j + 16));
+            let lo = mxfp4_code(d, f(in data, BLOCK * b + j));
+            let hi = mxfp4_code(d, f(in data, BLOCK * b + j + 16));
             out.push(lo | (hi << 4));
         }
     }
@@ -317,16 +365,16 @@ pub fn fp8_codes(in data: Slice[u32], e5m2: bool, scale: f32)
 pub fn finite_payload(format: u8, in raw: Slice[u8])
     -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let n = raw.len();
-    if format == 0 {
+    if format == FORMAT_F32 {
         for i in u64_zero()..n / 4 {
             if !finite_bits(raw.read_u32_le(4 * i)) {
                 return false;
             }
         }
-    } else if format == 1 || format == 2 {
+    } else if format == FORMAT_F16 || format == FORMAT_BF16 {
         for i in u64_zero()..n / 2 {
             let h = raw.read_u16_le(2 * i);
-            let v = if format == 1 {
+            let v = if format == FORMAT_F16 {
                 decode_fp16(h)
             } else {
                 decode_bf16(h)
@@ -335,31 +383,31 @@ pub fn finite_payload(format: u8, in raw: Slice[u8])
                 return false;
             }
         }
-    } else if format == 3 || format == 4 {
-        let width: u64 = if format == 3 {
-            34
+    } else if format == FORMAT_Q8_0 || format == FORMAT_Q4_0 {
+        let width: u64 = if format == FORMAT_Q8_0 {
+            Q8_0_BYTES
         } else {
-            18
+            Q4_0_BYTES
         };
         for b in u64_zero()..n / width {
             if !is_finite(half_at(in raw, width * b)) {
                 return false;
             }
         }
-    } else if format == 5 {
-        for b in u64_zero()..n / 144 {
-            if !check_block(in raw[144 * b..144 * b + 144]) {
+    } else if format == FORMAT_Q4_K {
+        for b in u64_zero()..n / Q4_K_BYTES {
+            if !check_block(in raw[b * Q4_K_BYTES..b * Q4_K_BYTES + Q4_K_BYTES]) {
                 return false;
             }
         }
-    } else if format == 6 {
-        for b in u64_zero()..n / 17 {
-            if raw[17 * b] == 255 {
+    } else if format == FORMAT_MXFP4 {
+        for b in u64_zero()..n / MXFP4_BYTES {
+            if raw[b * MXFP4_BYTES] == E8M0_NAN {
                 return false;
             }
         }
     } else {
-        let e5m2 = format == 8;
+        let e5m2 = format == FORMAT_F8E5M2;
         for i in 0..n {
             if !is_finite(fp8_decode(e5m2, raw[i])) {
                 return false;

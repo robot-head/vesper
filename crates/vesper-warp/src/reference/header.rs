@@ -30,7 +30,11 @@ impl ProtectedHeader {
     /// Mask applied to the first byte by header protection: low 5 bits for
     /// short headers, low 4 bits for long headers.
     pub const fn first_byte_mask(&self) -> u8 {
-        if self.version.is_none() { 0x1f } else { 0x0f }
+        if self.version.is_none() {
+            SHORT_PROTECTED_BITS
+        } else {
+            LONG_PROTECTED_BITS
+        }
     }
     /// Step 2: read the packet-number field from `packet` *after* header
     /// protection has been removed in place. Reserved bits are deliberately

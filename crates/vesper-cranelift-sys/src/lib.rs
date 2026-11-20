@@ -423,9 +423,9 @@ pub unsafe extern "C" fn vcl_module_pointer_type(m: *const Module) -> u32 {
 
 /// Keep the CLIF text of every function defined from now on.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vcl_module_keep_clif(m: *mut Module, keep: u32) {
+pub unsafe extern "C" fn vcl_module_keep_clif(m: *mut Module, keep: bool) {
     with_module(m, (), |m| {
-        m.keep_clif = keep != 0;
+        m.keep_clif = keep;
         Ok(())
     })
 }
@@ -526,15 +526,15 @@ pub unsafe extern "C" fn vcl_declare_data(
     name: *const u8,
     name_len: usize,
     linkage: u32,
-    writable: u32,
-    tls: u32,
+    writable: bool,
+    tls: bool,
 ) -> u32 {
     with_module(m, INVALID, |m| {
         // SAFETY: the `.vsys` CSlice contract.
         let name = text(unsafe { slice(name, name_len) })?;
         let l = codes::linkage(linkage).ok_or_else(|| format!("unknown linkage {linkage}"))?;
         let id =
-            m.m.declare_data(name, l, writable != 0, tls != 0)
+            m.m.declare_data(name, l, writable, tls)
                 .map_err(|e| e.to_string())?;
         Ok(index_of(&mut m.datas, id))
     })
@@ -1587,10 +1587,10 @@ pub unsafe extern "C" fn vcl_trap(b: *mut Builder, code: u32) {
 }
 /// `trapnz` (`if_nonzero`) or `trapz`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn vcl_trap_if(b: *mut Builder, c: u32, if_nonzero: u32, code: u32) {
+pub unsafe extern "C" fn vcl_trap_if(b: *mut Builder, c: u32, if_nonzero: bool, code: u32) {
     with_builder(b, (), |b| {
         let t = codes::trap(code).ok_or_else(|| format!("unknown trap code {code}"))?;
-        let i = if if_nonzero != 0 {
+        let i = if if_nonzero {
             b.fb().ins().trapnz(value(c), t)
         } else {
             b.fb().ins().trapz(value(c), t)

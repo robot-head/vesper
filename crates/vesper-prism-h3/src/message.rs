@@ -6,6 +6,22 @@
 
 use crate::qpack::Field;
 
+/// Every u64 of up to 19 decimal digits fits; u64::MAX has 20.
+#[cfg(not(feature = "vesper-port"))]
+const MAX_CONTENT_LENGTH_DIGITS: usize = 19;
+/// RFC 9110 §15: a status code is three digits, 100 to 599.
+#[cfg(not(feature = "vesper-port"))]
+const STATUS_DIGITS: usize = 3;
+#[cfg(not(feature = "vesper-port"))]
+const STATUS_CODES: std::ops::RangeInclusive<u16> = 100..=599;
+/// ASCII DEL, never allowed in a pseudo-header value.
+#[cfg(not(feature = "vesper-port"))]
+const ASCII_DEL: u8 = 0x7f;
+/// Words per field in the port's field list: name length, value length,
+/// sensitive.
+#[cfg(feature = "vesper-port")]
+const META_WORDS: usize = 3;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageError {
     /// A name with uppercase or non-token characters, or empty.
@@ -95,7 +111,10 @@ fn utf8(v: &[u8]) -> Result<String, MessageError> {
 fn content_length(fields: &[Field]) -> Result<Option<u64>, MessageError> {
     let mut found: Option<u64> = None;
     for f in fields.iter().filter(|f| f.name == b"content-length") {
-        if f.value.is_empty() || !f.value.iter().all(u8::is_ascii_digit) || f.value.len() > 19 {
+        if f.value.is_empty()
+            || !f.value.iter().all(u8::is_ascii_digit)
+            || f.value.len() > MAX_CONTENT_LENGTH_DIGITS
+        {
             return Err(MessageError::InvalidContentLength);
         }
         let n: u64 = std::str::from_utf8(&f.value)
@@ -147,7 +166,7 @@ pub fn parse_request(fields: Vec<Field>) -> Result<RequestHead, MessageError> {
             // Includes :status.
             _ => return Err(MessageError::UnknownPseudoHeader),
         };
-        if p.value.iter().any(|&b| b <= b' ' || b == 0x7f) {
+        if p.value.iter().any(|&b| b <= b' ' || b == ASCII_DEL) {
             return Err(MessageError::InvalidPseudoHeader);
         }
         *slot = Some(utf8(&p.value)?);
@@ -215,7 +234,7 @@ pub fn parse_response(fields: Vec<Field>) -> Result<ResponseHead, MessageError> 
         if p.name != b":status" {
             return Err(MessageError::UnknownPseudoHeader);
         }
-        if p.value.len() != 3 || !p.value.iter().all(u8::is_ascii_digit) {
+        if p.value.len() != STATUS_DIGITS || !p.value.iter().all(u8::is_ascii_digit) {
             return Err(MessageError::InvalidStatus);
         }
         status = Some(
@@ -225,7 +244,7 @@ pub fn parse_response(fields: Vec<Field>) -> Result<ResponseHead, MessageError> 
         );
     }
     let status = status.ok_or(MessageError::MissingPseudoHeader)?;
-    if !(100..=599).contains(&status) {
+    if !STATUS_CODES.contains(&status) {
         return Err(MessageError::InvalidStatus);
     }
     let content_length = content_length(&fields)?;
@@ -261,7 +280,7 @@ use crate::qpack::port::{abi::Span, binding as port};
 #[cfg(feature = "vesper-port")]
 fn flatten(fields: &[Field]) -> (Vec<u8>, Vec<u64>) {
     let mut bytes = Vec::with_capacity(fields.iter().map(|f| f.name.len() + f.value.len()).sum());
-    let mut meta = Vec::with_capacity(fields.len() * 3);
+    let mut meta = Vec::with_capacity(fields.len() * META_WORDS);
     for f in fields {
         bytes.extend_from_slice(&f.name);
         bytes.extend_from_slice(&f.value);

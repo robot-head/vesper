@@ -18,9 +18,8 @@ pub struct Big {
     mag: ChunkSeq[u32],
 }
 
-fn limb_mask() -> u64 {
-    0xffffffff
-}
+// The value bits of one 32-bit limb.
+const LIMB_MASK: u64 = 0xffffffff;
 
 // Unsigned `a / b` and `a % b` for a nonzero `b` (callers check).
 pub fn div64(a: u64, b: u64) -> u64 {
@@ -69,7 +68,7 @@ fn trim(inout a: ChunkSeq[u32]) {
 fn nat_from_u64(x: u64) -> ChunkSeq[u32] {
     let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](2);
     if x != 0 {
-        r.push(wrapping_u32(x & limb_mask()));
+        r.push(wrapping_u32(x & LIMB_MASK));
         let hi = x >> 32;
         if hi != 0 {
             r.push(wrapping_u32(hi));
@@ -136,7 +135,7 @@ fn nat_add(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
     let mut carry: u64 = 0;
     for i in 0..n {
         let s = wrapping_add(wrapping_add(widen_u64(g32(in a, i)), widen_u64(g32(in b, i))), carry);
-        r.push(wrapping_u32(s & limb_mask()));
+        r.push(wrapping_u32(s & LIMB_MASK));
         carry = s >> 32;
     }
     if carry != 0 {
@@ -155,7 +154,7 @@ fn nat_sub(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
             wrapping_sub(widen_u64(g32(in a, i)), widen_u64(g32(in b, i))),
             borrow
         );
-        r.push(wrapping_u32(t & limb_mask()));
+        r.push(wrapping_u32(t & LIMB_MASK));
         borrow = t >> 63;
     }
     trim(inout r);
@@ -183,7 +182,7 @@ fn nat_mul(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
                     ),
                     carry
                 );
-                r.try_set(at, wrapping_u32(p & limb_mask()));
+                r.try_set(at, wrapping_u32(p & LIMB_MASK));
                 carry = p >> 32;
             }
             r.try_set(wrapping_add(i, nb), wrapping_u32(carry));
@@ -202,7 +201,7 @@ fn nat_mul_small(in a: Slice[u32], m: u64) -> ChunkSeq[u32] {
     let mut carry: u64 = 0;
     for i in 0..na {
         let p = wrapping_add(wrapping_mul(widen_u64(g32(in a, i)), m), carry);
-        r.push(wrapping_u32(p & limb_mask()));
+        r.push(wrapping_u32(p & LIMB_MASK));
         carry = p >> 32;
     }
     if carry != 0 {
@@ -230,7 +229,7 @@ fn nat_shl(in a: Slice[u32], k: u64) -> ChunkSeq[u32] {
     let mut carry: u64 = 0;
     for i in 0..na {
         let x = widen_u64(g32(in a, i));
-        r.push(wrapping_u32((shl_u64(x, bits) | carry) & limb_mask()));
+        r.push(wrapping_u32((shl_u64(x, bits) | carry) & LIMB_MASK));
         carry = shr_u64(x, back);
     }
     if carry != 0 {
@@ -257,7 +256,7 @@ fn nat_shr(in a: Slice[u32], k: u64) -> ChunkSeq[u32] {
     for i in 0..n {
         let lo = shr_u64(widen_u64(g32(in a, wrapping_add(words, i))), bits);
         let hi = shl_u64(widen_u64(g32(in a, wrapping_add(words, inc(i)))), back);
-        r.push(wrapping_u32((lo | hi) & limb_mask()));
+        r.push(wrapping_u32((lo | hi) & LIMB_MASK));
     }
     trim(inout r);
     r
@@ -336,12 +335,12 @@ fn nat_div(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
         let mut rhat = wrapping_sub(top, wrapping_mul(qhat, vtop));
         let below = widen_u64(g32(in un.as_slice(), wrapping_add(j, wrapping_sub(nb, 2))));
         loop {
-            if !(qhat > limb_mask() || wrapping_mul(qhat, vnext) > ((rhat << 32) | below)) {
+            if !(qhat > LIMB_MASK || wrapping_mul(qhat, vnext) > ((rhat << 32) | below)) {
                 break;
             }
             qhat = dec(qhat);
             rhat = wrapping_add(rhat, vtop);
-            if rhat > limb_mask() {
+            if rhat > LIMB_MASK {
                 break;
             }
         }
@@ -353,15 +352,15 @@ fn nat_div(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
             carry = p >> 32;
             let at = wrapping_add(i, j);
             let t = wrapping_sub(
-                wrapping_sub(widen_u64(g32(in un.as_slice(), at)), p & limb_mask()),
+                wrapping_sub(widen_u64(g32(in un.as_slice(), at)), p & LIMB_MASK),
                 borrow
             );
-            un.try_set(at, wrapping_u32(t & limb_mask()));
+            un.try_set(at, wrapping_u32(t & LIMB_MASK));
             borrow = t >> 63;
         }
         let at = wrapping_add(j, nb);
         let t = wrapping_sub(wrapping_sub(widen_u64(g32(in un.as_slice(), at)), carry), borrow);
-        un.try_set(at, wrapping_u32(t & limb_mask()));
+        un.try_set(at, wrapping_u32(t & LIMB_MASK));
         if (t >> 63) != 0 {
             // Added back: qhat was one too large.
             qhat = dec(qhat);
@@ -375,14 +374,14 @@ fn nat_div(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
                     ),
                     c
                 );
-                un.try_set(at, wrapping_u32(s2 & limb_mask()));
+                un.try_set(at, wrapping_u32(s2 & LIMB_MASK));
                 c = s2 >> 32;
             }
             let at = wrapping_add(j, nb);
             un
                 .try_set(
                 at,
-                wrapping_u32(wrapping_add(widen_u64(g32(in un.as_slice(), at)), c) & limb_mask())
+                wrapping_u32(wrapping_add(widen_u64(g32(in un.as_slice(), at)), c) & LIMB_MASK)
             );
         }
         q.try_set(j, wrapping_u32(qhat));
@@ -552,7 +551,7 @@ pub fn big_div_small(in a: Big, d: u64) -> Big {
 
 // `a / d` truncated toward zero, for any nonzero `d < 2^64`.
 pub fn big_div_u64(in a: Big, d: u64) -> Big {
-    if d <= limb_mask() {
+    if d <= LIMB_MASK {
         return big_div_small(in a, d);
     }
     let b = big_u64(d);

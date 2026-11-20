@@ -177,8 +177,16 @@ fn ext_string(value: &[u8], what: &str) -> Result<String, AttestError> {
         .map_err(|_| ext_err(format!("{what}: not a string")))
 }
 
+/// The KDS `hwID` length: 8 bytes on Turin, the 64-byte chip ID before.
+const TURIN_HW_ID_LEN: usize = 8;
+const HW_ID_LEN: usize = 64;
+
 fn hw_id_len(product: AmdProduct) -> usize {
-    if product == AmdProduct::Turin { 8 } else { 64 }
+    if product == AmdProduct::Turin {
+        TURIN_HW_ID_LEN
+    } else {
+        HW_ID_LEN
+    }
 }
 
 /// The hwID extension value: raw chip ID bytes, or a DER `OCTET STRING`
@@ -385,7 +393,7 @@ pub fn verify_snp_collateral(
     baseline: Option<&SnpTcbBaseline>,
 ) -> Result<VerifiedSnpReport, AttestError> {
     let report = SnpReport::parse(bytes)?;
-    if report.version >= 3 {
+    if report.version >= crate::snp::SNP_REPORT_VERSION_CPUID {
         match report.product() {
             Some(p) if p == collateral.product => {}
             Some(_) => {

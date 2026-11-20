@@ -22,7 +22,7 @@
 //! ([`verify_cca_token`]) or endorsed directly by instance ID, as
 //! Veraison's trust anchors do ([`verify_cca_endorsed`]).
 
-use crate::chain::{Curve, EcPublicKey, TrustRoot, verify_chain};
+use crate::chain::{Curve, EcPublicKey, SEC1_UNCOMPRESSED, TrustRoot, verify_chain};
 use crate::claims::{
     AttestationClaims, ENCLAVE_FLAG_DEBUG_DISABLED, GuestRuntimeClaims, RegisterHash,
     SupplyChainEvidence, TeeArch, ct_eq, single_extend,
@@ -76,6 +76,17 @@ pub mod keys {
 
 /// Most software components accepted in one platform token.
 pub const MAX_CCA_SW_COMPONENTS: usize = 64;
+/// Realm extensible measurement registers (RMM `REM[0..4]`).
+pub const CCA_REMS: usize = 4;
+/// A TBB RoTPK entry: name, index (0..=5) and hash; at most 12 entries.
+const ROTPK_ENTRIES: usize = 3;
+const ROTPK_MAX_INDEX: u64 = 5;
+const MAX_TBB_ROTPKS: usize = 12;
+/// Digest lengths a hash claim may have: SHA-256, SHA-384, SHA-512.
+const DIGEST_LENS: [usize; 3] = [32, 48, 64];
+/// An uncompressed P-384 SEC1 point: `0x04 || X || Y`, 48 bytes each.
+const P384_COORD_LEN: usize = 48;
+const P384_SEC1_LEN: usize = 1 + 2 * P384_COORD_LEN;
 
 /// Security lifecycle states `0x3000..=0x30FF` are "secured"; every other
 /// state (including `0x5000` non-recoverable debug) counts as debug.
@@ -92,7 +103,7 @@ pub struct CcaRealmClaims {
     pub public_key: Vec<u8>,
     pub public_key_hash_algo: RegisterHash,
     pub initial_measurement: Vec<u8>,
-    pub extensible_measurements: [Vec<u8>; 4],
+    pub extensible_measurements: [Vec<u8>; CCA_REMS],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,7 +138,7 @@ impl CcaTbbRotpk {
     fn from_value(v: &Value) -> Result<Self, ParseError> {
         use keys::*;
         let m = ClaimMap::new(v, "TBB RoTPK")?;
-        if m.0.len() != 3 {
+        if m.0.len() != ROTPK_ENTRIES {
             return Err(cbor_err("TBB RoTPK", "expected name, index and hash"));
         }
         let name = m
@@ -141,10 +152,10 @@ impl CcaTbbRotpk {
             .get(ROTPK_INDEX, "TBB RoTPK index")?
             .as_integer()
             .and_then(|i| u64::try_from(i).ok())
-            .filter(|i| *i <= 5)
+            .filter(|i| *i <= ROTPK_MAX_INDEX)
             .ok_or_else(|| cbor_err("TBB RoTPK index", "expected 0..=5"))?;
         let hash = bytes(m.get(ROTPK_HASH, "TBB RoTPK hash")?, "TBB RoTPK hash")?.to_vec();
-        if !matches!(hash.len(), 32 | 48 | 64) {
+        if !DIGEST_LENS.contains(&hash.len()) {
             return Err(cbor_err("TBB RoTPK hash", "length is not 32, 48 or 64"));
         }
         Ok(CcaTbbRotpk {
@@ -218,7 +229,7 @@ impl CcaSwComponent {
             (&measurement_value, "software component measurement value"),
             (&signer_id, "software component signer ID"),
         ] {
-            if !matches!(b.len(), 32 | 48 | 64) {
+            if !DIGEST_LENS.contains(&b.len()) {
                 return Err(cbor_err(field, "length is not 32, 48 or 64"));
             }
         }
@@ -438,10 +449,10 @@ impl CcaRealmClaims {
             .get(REALM_EXTENSIBLE_MEASUREMENTS, "REMs")?
             .as_array()
             .ok_or_else(|| cbor_err("REMs", "expected array"))?;
-        if rems.len() != 4 {
+        if rems.len() != CCA_REMS {
             return Err(cbor_err("REMs", "expected four registers"));
         }
-        let mut regs: [Vec<u8>; 4] = Default::default();
+        let mut regs: [Vec<u8>; CCA_REMS] = Default::default();
         for (dst, src) in regs.iter_mut().zip(rems) {
             let b = bytes(src, "REM")?;
             if !measurement_len_ok(b.len(), hash_algo) {
@@ -538,7 +549,7 @@ impl CcaPlatformClaims {
                 let a = v
                     .as_array()
                     .ok_or_else(|| cbor_err("TBB RoTPK", "expected array"))?;
-                if a.len() > 12 {
+                if a.len() > MAX_TBB_ROTPKS {
                     return Err(cbor_err("TBB RoTPK", "too many entries"));
                 }
                 a.iter()
@@ -753,7 +764,7 @@ fn cmw_record<'v>(v: &'v Value, field: &'static str) -> Result<&'v [u8], ParseEr
 /// x/y) or a raw 97-byte SEC1 point.
 pub fn realm_public_key(encoded: &[u8]) -> Result<EcPublicKey, AttestError> {
     use coset::{CborSerializable, CoseKey, KeyType, Label};
-    if encoded.len() == 97 && encoded[0] == 4 {
+    if encoded.len() == P384_SEC1_LEN && encoded[0] == SEC1_UNCOMPRESSED {
         return EcPublicKey::from_sec1(Curve::P384, encoded);
     }
     let bad = |what| AttestError::UnexpectedKeyType { what };
@@ -780,11 +791,11 @@ pub fn realm_public_key(encoded: &[u8]) -> Result<EcPublicKey, AttestError> {
     let coord = |label| {
         param(label)
             .and_then(Value::as_bytes)
-            .filter(|b| b.len() == 48)
+            .filter(|b| b.len() == P384_COORD_LEN)
             .ok_or(bad("RAK COSE_Key coordinate"))
     };
-    let mut sec1 = Vec::with_capacity(97);
-    sec1.push(4);
+    let mut sec1 = Vec::with_capacity(P384_SEC1_LEN);
+    sec1.push(SEC1_UNCOMPRESSED);
     sec1.extend_from_slice(coord(iana::Ec2KeyParameter::X)?);
     sec1.extend_from_slice(coord(iana::Ec2KeyParameter::Y)?);
     EcPublicKey::from_sec1(Curve::P384, &sec1)
@@ -794,11 +805,14 @@ pub fn realm_public_key(encoded: &[u8]) -> Result<EcPublicKey, AttestError> {
 /// and tests).
 pub fn encode_realm_cose_key(sec1: &[u8]) -> Vec<u8> {
     use coset::CborSerializable;
-    assert!(sec1.len() == 97 && sec1[0] == 4, "uncompressed P-384 point");
+    assert!(
+        sec1.len() == P384_SEC1_LEN && sec1[0] == SEC1_UNCOMPRESSED,
+        "uncompressed P-384 point"
+    );
     coset::CoseKeyBuilder::new_ec2_pub_key(
         iana::EllipticCurve::P_384,
-        sec1[1..49].to_vec(),
-        sec1[49..].to_vec(),
+        sec1[1..=P384_COORD_LEN].to_vec(),
+        sec1[1 + P384_COORD_LEN..].to_vec(),
     )
     .build()
     .to_vec()

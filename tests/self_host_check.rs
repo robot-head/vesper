@@ -352,6 +352,8 @@ fn walk(dir: &Path, paths: &mut Vec<PathBuf>) {
         if path.ends_with("tests/fixtures/packages")
             || path.ends_with("packages/vesper-std")
             || path.ends_with("packages/vesper-front")
+            // The AST package (#1152) imports with `use` too.
+            || path.ends_with("packages/vesper-ast")
         {
             continue;
         }

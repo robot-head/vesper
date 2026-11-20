@@ -702,7 +702,11 @@ fn row_tokens<'a>(f: &ast::Function, tokens: &'a [Token]) -> Result<Vec<&'a Toke
     let mut depth = 0usize;
     let mut position = None;
     for (i, t) in header.iter().enumerate() {
-        if t.kind == K::Eff && depth == 0 {
+        // `eff` is also a name (`fn eff(..)`); only `eff [` opens the row.
+        if t.kind == K::Eff
+            && depth == 0
+            && header.get(i + 1).is_some_and(|n| n.kind == K::LBracket)
+        {
             position = Some(i);
         }
         match t.kind {

@@ -20,13 +20,15 @@ workflow runs the Cargo divergence check.
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-def vesper_hybrid(modules, divergent = {}, **kwargs):
+def vesper_hybrid(modules, module_deps = {}, divergent = {}, **kwargs):
     """The hybrid compiler crate in this package.
 
     Args:
       modules: dict from Vesper library name (`vesper_<library>_<fn>`
         symbols, as in build.rs's MODULES) to its Loom package directory,
         relative to this package.
+      module_deps: dict from library name to the `vesper_package` labels of
+        its package's path dependencies.
       divergent: dict from library name to a struct-like dict
         `{"edit_src": <file>, "edits": {old: new}}` for its divergent object.
       **kwargs: passed to `vesper_crate`.
@@ -38,6 +40,7 @@ def vesper_hybrid(modules, divergent = {}, **kwargs):
             name = library + "_package",
             srcs = native.glob([package + "/src/**/*.ves"]),
             manifest = package + "/Loom.toml",
+            deps = module_deps.get(library, []),
         )
         vesper_port_object(
             name = library + "_vesper",
