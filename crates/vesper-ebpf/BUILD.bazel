@@ -80,7 +80,7 @@ filegroup(
         ("scalar", "scalar", "    let mu = chi | a.mask | b.mask;\n    tn(sv & ~mu, mu)", "    let mu = chi | a.mask;\n    tn(sv & ~mu, mu)"),
         ("interp", "concrete", "        AluOp::Arsh => sar(a, b & 63),\n", "        AluOp::Arsh => shr(a, b & 63),\n"),
         ("verifier", "scalar", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 1));\n", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 2));\n"),
-        ("helpers", "helpers", "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n", "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n"),
+        ("helpers", "helpers", "        ProgramType::SchedCls => id == Helper::SkLookupTcp || id == Helper::SkRelease,\n", "        ProgramType::SchedCls => id == Helper::XdpAdjustHead || id == Helper::SkLookupTcp || id == Helper::SkRelease,\n"),
         ("program", "program", "            if max_entries < RINGBUF_MIN_SIZE ||", "            if max_entries < (RINGBUF_MIN_SIZE >> 1) ||"),
         ("callgraph", "callgraph", "        if bytes > lim {\n", "        if bytes > wrapping_add(lim, 8) {\n"),
         ("wire", "wire", "        src_ipv4: wrapping_u32(be(in s, SRC_IPV4, 4)),\n", "        src_ipv4: wrapping_u32(be(in s, DST_IPV4, 4)),\n"),
@@ -88,7 +88,7 @@ filegroup(
         ("btf", "btf", "        if kind == 0 || kind > BtfKind::Enum64 {\n", "        if kind == 0 || kind > wrapping_add(BtfKind::Enum64, 1) {\n"),
         ("core", "core", "        if slen(in strs, mname) == 0 {\n", "        if slen(in strs, mname) == 99 {\n"),
         ("btf_ext", "btf_ext", "        out.push(lc & LINE_COL_MASK);\n", "        out.push(lc & (LINE_COL_MASK >> 1));\n"),
-        ("interp_run", "interp", "    if kind == KIND_PACKET && at < i.data_off {\n", "    if kind == KIND_PACKET && wrapping_add(at, 1) < i.data_off {\n"),
+        ("interp_run", "interp", "    if kind == Region::Packet && at < i.data_off {\n", "    if kind == Region::Packet && wrapping_add(at, 1) < i.data_off {\n"),
     ]
 ]
 

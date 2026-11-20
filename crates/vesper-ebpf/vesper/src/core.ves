@@ -23,6 +23,10 @@
 // disagree.
 
 use self::btf::BtfKind;
+use self::insn::{
+    BpfClass,
+    BpfSrc
+};
 
 // Local type tree tags (see above).
 enum LocalTag: u64 {
@@ -35,19 +39,21 @@ enum LocalTag: u64 {
 }
 
 // `enum bpf_core_relo_kind`.
-const CORE_FIELD_BYTE_OFFSET: u64 = 0;
-const CORE_FIELD_BYTE_SIZE: u64 = 1;
-const CORE_FIELD_EXISTS: u64 = 2;
-const CORE_FIELD_SIGNED: u64 = 3;
-const CORE_FIELD_LSHIFT_U64: u64 = 4;
-const CORE_FIELD_RSHIFT_U64: u64 = 5;
-const CORE_TYPE_ID_LOCAL: u64 = 6;
-const CORE_TYPE_ID_TARGET: u64 = 7;
-const CORE_TYPE_EXISTS: u64 = 8;
-const CORE_TYPE_SIZE: u64 = 9;
-const CORE_ENUMVAL_EXISTS: u64 = 10;
-const CORE_ENUMVAL_VALUE: u64 = 11;
-const CORE_TYPE_MATCHES: u64 = 12;
+pub enum CoreReloc: u64 {
+    FieldByteOffset,
+    FieldByteSize,
+    FieldExists,
+    FieldSigned,
+    FieldLshiftU64,
+    FieldRshiftU64,
+    TypeIdLocal,
+    TypeIdTarget,
+    TypeExists,
+    TypeSize,
+    EnumvalExists,
+    EnumvalValue,
+    TypeMatches,
+}
 
 // A candidate that gives no value; a relocation without a local type id.
 const NO_VALUE: u64 = 100;
@@ -74,15 +80,8 @@ const SIGN_BIT32: u64 = 2147483648;
 const HIGH48: u64 = 18446744073709486080;
 const HIGH32: u64 = 18446744069414584320;
 
-// Instruction classes, `BPF_X` and `BPF_LD | BPF_IMM | BPF_DW` (see insn.ves).
-const CLASS_MASK: u64 = 7;
-const CLASS_LD: u64 = 0;
-const CLASS_LDX: u64 = 1;
-const CLASS_ST: u64 = 2;
-const CLASS_STX: u64 = 3;
-const CLASS_ALU: u64 = 4;
-const CLASS_ALU64: u64 = 7;
-const SRC_X: u64 = 8;
+// `BPF_LD | BPF_IMM | BPF_DW` (classes and `BPF_X` are `BpfClass` and
+// `BpfSrc` of insn.ves).
 const LD_IMM64: u64 = 24;
 
 fn wd(in s: Slice[u64], i: u64) -> u64 {
@@ -610,13 +609,13 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
         byte_sz = sz;
         bit_sz = width;
     }
-    if kind == CORE_FIELD_BYTE_OFFSET {
+    if kind == CoreReloc::FieldByteOffset {
         out = byte_off;
-    } else if kind == CORE_FIELD_BYTE_SIZE {
+    } else if kind == CoreReloc::FieldByteSize {
         out = byte_sz;
-    } else if kind == CORE_FIELD_EXISTS {
+    } else if kind == CoreReloc::FieldExists {
         out = 1;
-    } else if kind == CORE_FIELD_SIGNED {
+    } else if kind == CoreReloc::FieldSigned {
         out = if signed {
             1
         } else {
@@ -626,7 +625,7 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
         if byte_sz > 8 {
             return 4;
         }
-        if kind == CORE_FIELD_LSHIFT_U64 {
+        if kind == CoreReloc::FieldLshiftU64 {
             out = wrapping_sub(
                 64,
                 wrapping_sub(wrapping_add(bits, bit_sz), wrapping_mul(byte_off, 8))
@@ -639,7 +638,7 @@ fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout 
 }
 
 fn is_field(kind: u64) -> bool {
-    kind <= CORE_FIELD_RSHIFT_U64
+    kind <= CoreReloc::FieldRshiftU64
 }
 
 // `CoreSpec::local_field`: (code, bits, width, node).
@@ -687,7 +686,7 @@ pub fn local_value(
     inout out: u64,
     inout bad: u64
 ) -> u64 {
-    if kind == CORE_TYPE_ID_LOCAL || kind == CORE_TYPE_ID_TARGET {
+    if kind == CoreReloc::TypeIdLocal || kind == CoreReloc::TypeIdTarget {
         if local_id == NO_LOCAL_ID {
             return 7;
         }
@@ -701,11 +700,16 @@ pub fn local_value(
         }
         return field_value(kind, bits, width, lsize(in lt, ty), lsigned(in lt, ty), inout out);
     }
-    if kind == CORE_TYPE_EXISTS || kind == CORE_ENUMVAL_EXISTS || kind == CORE_TYPE_MATCHES {
+    if kind
+        == CoreReloc::TypeExists
+        || kind
+        == CoreReloc::EnumvalExists
+        || kind
+        == CoreReloc::TypeMatches {
         out = 1;
         return 0;
     }
-    if kind == CORE_TYPE_SIZE {
+    if kind == CoreReloc::TypeSize {
         out = lsize(in lt, 0);
         return 0;
     }
@@ -852,23 +856,23 @@ pub fn values_over(
         let mut v: u64 = 0;
         let mut bad: u64 = 0;
         let mut code: u64 = 0;
-        if kind == CORE_TYPE_EXISTS {
+        if kind == CoreReloc::TypeExists {
             v = 1;
-        } else if kind == CORE_TYPE_ID_TARGET {
+        } else if kind == CoreReloc::TypeIdTarget {
             v = id;
-        } else if kind == CORE_TYPE_MATCHES {
+        } else if kind == CoreReloc::TypeMatches {
             v = if types_match(in lt, in ltext, 0, in tab, in idx, in strs, id, false, 0) {
                 1
             } else {
                 0
             };
-        } else if kind == CORE_TYPE_SIZE {
+        } else if kind == CoreReloc::TypeSize {
             let (ok, s) = size_of(in tab, in idx, id, 0);
             v = s;
             if !ok {
                 code = NO_VALUE;
             }
-        } else if kind == CORE_ENUMVAL_EXISTS || kind == CORE_ENUMVAL_VALUE {
+        } else if kind == CoreReloc::EnumvalExists || kind == CoreReloc::EnumvalValue {
             if ltag(in lt, 0) != LocalTag::Enum {
                 code = 5;
             } else {
@@ -888,7 +892,7 @@ pub fn values_over(
                             == NO_VALUE
                             && name_is(in ltext, wo, wl, in strs, te(in tab, in idx, id, 2, j, 0)) {
                             code = 0;
-                            v = if kind == CORE_ENUMVAL_VALUE {
+                            v = if kind == CoreReloc::EnumvalValue {
                                 te(in tab, in idx, id, 2, j, 1)
                             } else {
                                 1
@@ -926,13 +930,13 @@ pub fn values_over(
 
 fn is_exists(kind: u64) -> bool {
     kind
-        == CORE_FIELD_EXISTS
+        == CoreReloc::FieldExists
         || kind
-        == CORE_TYPE_EXISTS
+        == CoreReloc::TypeExists
         || kind
-        == CORE_ENUMVAL_EXISTS
+        == CoreReloc::EnumvalExists
         || kind
-        == CORE_TYPE_MATCHES
+        == CoreReloc::TypeMatches
 }
 
 // `CoreSpec::combine`: 0 with the value in `out`, 8 no match, 9 disagree.
@@ -998,9 +1002,9 @@ pub fn patch_insn(
         o.push(1);
         return o;
     }
-    let class = code & CLASS_MASK;
+    let class = code & BpfClass::Mask;
     let imm32 = imm & U32_MAX;
-    if (class == CLASS_ALU || class == CLASS_ALU64) && code & SRC_X == 0 {
+    if (class == BpfClass::Alu || class == BpfClass::Alu64) && code & BpfSrc::X == 0 {
         if imm32 != expected && sext32(imm32) != expected {
             o.push(2);
             o.push(imm32);
@@ -1023,7 +1027,7 @@ pub fn patch_insn(
         o.push(2);
         return o;
     }
-    if class == CLASS_LDX || class == CLASS_ST || class == CLASS_STX {
+    if class == BpfClass::Ldx || class == BpfClass::St || class == BpfClass::Stx {
         let found = sext16(off & U16_MAX);
         if found != expected {
             o.push(2);
@@ -1040,7 +1044,7 @@ pub fn patch_insn(
         o.push(0);
         return o;
     }
-    if class == CLASS_LD && code == LD_IMM64 && has_next {
+    if class == BpfClass::Ld && code == LD_IMM64 && has_next {
         let found = imm32 | ((next_imm & U32_MAX) << 32);
         if found != expected {
             o.push(2);

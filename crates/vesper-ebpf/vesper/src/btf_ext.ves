@@ -22,6 +22,7 @@ use self::btf::{
 };
 use self::program::map_from_kernel_type;
 use self::core::{
+    CoreReloc,
     size_of,
     skip_mods,
     tf,
@@ -41,8 +42,6 @@ const LINE_REC_SIZE: u64 = 16;
 const LINE_COL_SHIFT: u64 = 10;
 const LINE_COL_MASK: u64 = 1023;
 const MAX_REC_SIZE: u64 = 256;
-// The last `enum bpf_core_relo_kind` (BPF_CORE_TYPE_MATCHES).
-const CORE_KIND_MAX: u64 = 12;
 // Deepest local type `local_type` follows.
 const MAX_LOCAL_DEPTH: u64 = 16;
 
@@ -487,7 +486,7 @@ pub fn parse_ext(
     for i in 0..nr {
         let r = wd(in rs.as_slice(), i);
         let kind = le32(in ext, wrapping_add(r, 12));
-        if kind > CORE_KIND_MAX {
+        if kind > CoreReloc::TypeMatches {
             return err(9, kind, 0);
         }
         let (sat, sn) = name_span(in strs, le32(in ext, wrapping_add(r, 8)));

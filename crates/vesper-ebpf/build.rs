@@ -63,8 +63,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 4 helpers.rs: tc programs may call bpf_xdp_adjust_head.
     (
-        "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n",
-        "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n",
+        "        ProgramType::SchedCls => id == Helper::SkLookupTcp || id == Helper::SkRelease,\n",
+        "        ProgramType::SchedCls => id == Helper::XdpAdjustHead || id == Helper::SkLookupTcp || id == Helper::SkRelease,\n",
     ),
     // 5 program.rs: a ringbuf of 2048 bytes is accepted.
     (
@@ -104,7 +104,7 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 12 interp.rs (the run): the byte just before `data` is readable.
     (
-        "    if kind == KIND_PACKET && at < i.data_off {\n",
-        "    if kind == KIND_PACKET && wrapping_add(at, 1) < i.data_off {\n",
+        "    if kind == Region::Packet && at < i.data_off {\n",
+        "    if kind == Region::Packet && wrapping_add(at, 1) < i.data_off {\n",
     ),
 ];

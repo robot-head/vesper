@@ -8,7 +8,7 @@
 // (include/uapi/linux/bpf.h, RFC 9669), grouped as value enums.
 
 // Instruction classes (`BPF_CLASS`, low three bits).
-pub enum BpfClass: u8 {
+pub enum BpfClass: _ {
     Ld = 0,
     Ldx = 1,
     St = 2,
@@ -58,7 +58,7 @@ pub enum BpfJmp: u8 {
 }
 
 // The source bit (`BPF_K` immediate, `BPF_X` register; `BPF_TO_BE` on END).
-pub enum BpfSrc: u8 {
+pub enum BpfSrc: _ {
     K = 0,
     X = 8,
     ToBe = 8,
