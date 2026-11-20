@@ -115,11 +115,14 @@ fn replace_at_stage(
 ) -> Result<(), String> {
     // Own cleanup only after exclusive creation succeeds: a colliding existing
     // file must never be deleted by a staging guard.
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staging)
-        .map_err(|e| e.to_string())?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&staging).map_err(|e| e.to_string())?;
     let mut stage = Staging {
         path: staging,
         cleanup: true,

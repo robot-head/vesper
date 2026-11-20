@@ -1,11 +1,12 @@
-# `.vsys` imports from dependency packages (SH1 lane 7, part 1)
+# `.vsys` imports from dependency packages, C strings and handles (SH1 lane 7)
 
 Self-hosting wave SH1, lane 7. Claim #1150, prompt
 `docs/agent-prompts/self-host-sh1/07-vsys-packages.md`. Base `e29e63d`.
 
-This is part 1 of the lane: packages carry their own `.vsys` imports. Part 2
-(C string parameters, non-NULL handle results, the shim's flag conversions
-and an evaluator host for `vesper run`) follows in its own PR.
+Part 1 (PR #1164, merged as `284a16a`): packages carry their own `.vsys`
+imports. Part 2 (base `284a16a`, its own PR): C string parameters, OS error
+codes, non-NULL handle results, the shim's `bool` flags and an evaluator
+host for `vesper run`. Part 2's section is at the end.
 
 ## Repros on main first
 
@@ -75,7 +76,7 @@ and an evaluator host for `vesper run`) follows in its own PR.
   `@t/flip`, which carries `Probe`; checked from `packages::load` and run in
   the JIT with optimize on and off. Without the field, the calls do not check.
 * `manifest_vsys_paths_are_checked`: the five manifest errors.
-* `cli_checks_and_jits_an_executable_over_std_fs`: an executable package
+* `cli_checks_jits_and_runs_an_executable_over_std_fs`: an executable package
   over `@vesper-std/fs` as a dependency, with no `.vsys` text of its own:
   `vesper check`, and `vesper jit` (both optimizer settings) write, read back
   and remove a real file. Runs on Linux, macOS and Windows.
@@ -133,3 +134,81 @@ C string parameters (`nocapture in path: CStr`, copied into a NUL-terminated
 buffer, interior NULs refused, errno/`GetLastError` read after the call),
 non-NULL handle results, the Cranelift shim's `bool` parameters in place of
 `u32` flags (family tests byte-identical), and the evaluator host.
+
+## Part 2
+
+### What changed
+
+* **`nocapture in s: CStr`** (`vesper_ffi::sys::ParameterType::CStr`; `in`
+  only, never `Option`). In source it takes a `Slice[u8]`. The native
+  lowering (`src/ffi_lowering/native.rs`) copies the bytes into a `malloc`
+  buffer with a NUL appended, passes C one pointer, and frees it after the
+  call; `memchr` finds an interior NUL, and then C is not called. A function
+  with a `CStr` parameter returns `Result[R, ForeignInvalid]`, with
+  `Err(ForeignInvalid { raw })` naming the first NUL's offset. JIT and
+  objects use the same lowering (`malloc`/`memcpy`/`free` are the ones the
+  sequence runtime already imports, plus `memchr`).
+* **`-> ForeignVal[T] errno`** (`FunctionDescriptor::reads_errno`): the OS
+  error code is read right after the call (after the MPK restore, before
+  copy-backs and frees): `__errno_location()` on Linux, `__error()` on
+  macOS/FreeBSD, `GetLastError()` on Windows (the JIT binds a Rust stand-in,
+  since its symbol lookup does not search kernel32). The source result is
+  `(R, u32)`. Canonical descriptor bytes are unchanged for functions without
+  it (`errno/after-call` is appended only when declared).
+* **`ForeignVal[NonNull[H]]`** (`ValueType::NonNullHandle`): source code gets
+  `H` itself, no error arm. A `NULL` traps (user trap 6,
+  `ffi_lowering::NULL_HANDLE_TRAP`; trap 7 is a failed C-string allocation).
+  `CStr` and `NonNull` are now reserved type names in `.vsys`.
+* **`vesper run`** of a package with imports runs in the evaluator through
+  `ffi_lowering::EvalHost` (`src/ffi_lowering/eval_host.rs`), the
+  descriptor-driven marshaller moved out of `tests/std_io_support`: wire
+  structs from their compiled layouts (integers of every endianness, byte
+  arrays, nested structs), slices of scalars or structs as `Slice` or tuple,
+  nullable pointers and slices, `CStr`, `errno`, and every result mapping.
+  It hosts the same libraries as `vesper jit` (`vesper_std_host`). The
+  std I/O tests' evaluator mode now uses it.
+* **Shim flags** (own commit): `vcl_module_keep_clif(keep)`,
+  `vcl_declare_data(writable, tls)` and `vcl_trap_if(if_nonzero)` take
+  `bool` in the Rust exports, the header (`<stdbool.h>`) and the `.vsys`;
+  `@vesper/cranelift`'s wrappers pass their `bool`s through.
+* **Manuscript §16.3** (flagged): "C Strings and OS Error Codes", and
+  `ForeignVal[NonNull[H]]` in "Opaque Extern-Type Handles".
+
+### Tests
+
+In `tests/vsys_packages.rs`:
+
+* `cstr_arguments_are_terminated_copies`: a whole slice, a sub-slice
+  (`p[1..3]`), an empty slice and a refused one (no call made), JIT with
+  optimize on and off, and the evaluator.
+* `errno_is_read_after_the_call`: a host function that looks up a missing
+  path; the code Vesper reads equals the one the host saw (2 on Unix, 3 on
+  Windows), JIT and evaluator.
+* `an_executable_passes_a_path_to_libc`: `vesper build` of an executable
+  that calls libc `access(2)` directly through a `CStr` and gets `ENOENT`
+  (Unix).
+* `non_null_handle_results_have_no_error_arm` (JIT and evaluator; matching
+  the result as a `Result` no longer checks) and
+  `a_null_non_null_handle_traps` (an executable linked with C, Unix).
+* `cli_checks_jits_and_runs_an_executable_over_std_fs`: `vesper run` now
+  prints the same answer as `vesper jit`.
+
+### Numbers
+
+No existing code generation changed: calls without `CStr`, `errno` or
+`NonNull` lower as before, and the shim's checked family tests pass
+unchanged (the flag change touches no code they compile). A `CStr` call
+costs one `malloc`/`memcpy`/`memchr`/`free` per string argument.
+
+### Compiler gaps (part 2)
+
+1. **`CStr` arguments always allocate.** A short string could use a stack
+   buffer; paths are usually under 256 bytes.
+2. **No `CStr` result** (a C function returning `const char *`), and no
+   `CStr` fields in wire structs.
+3. **The std I/O shim still takes `CSlice[u8]` paths.** It could take
+   `CStr` and drop its own copies; that is the std I/O lane's call.
+4. **The evaluator host calls through at most eight integer words**, which
+   covers every current `.vsys` function.
+5. **`@vesper/cranelift` keeps its library in a `// @export vsys`
+   directive.** With part 1 it could move to a `[package] vsys` file.

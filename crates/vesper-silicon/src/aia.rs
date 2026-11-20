@@ -151,6 +151,32 @@ impl SourceMode {
     }
 }
 
+// `mmsiaddrcfgh`/`smsiaddrcfgh` fields (§4.5.4, §4.5.5): the PPN's bits
+// 43:32, LHXW, HHXW, LHXS and HHXS, and the Lock bit.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_PPN: u32 = 0xfff;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_LHXW_SHIFT: u32 = 12;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_LHXW: u32 = 0xf;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_HHXW_SHIFT: u32 = 16;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_HHXW: u32 = 0x7;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_LHXS_SHIFT: u32 = 20;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_LHXS: u32 = 0x7;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_HHXS_SHIFT: u32 = 24;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_HHXS: u32 = 0x1f;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MSIADDRCFGH_L_SHIFT: u32 = 31;
+// An MSI target address is a page number shifted by the 4 KiB page size.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const PAGE_SHIFT: u32 = 12;
+
 /// The `mmsiaddrcfg[h]` / `smsiaddrcfg[h]` fields (§4.5.3–4.5.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MsiAddrCfg {
@@ -182,7 +208,7 @@ impl MsiAddrCfg {
             } else {
                 (self.m_ppn, self.lhxs_m, 0)
             };
-            (ppn | (g << (self.hhxs + 12)) | (h << lhxs) | guest) << 12
+            (ppn | (g << (self.hhxs + PAGE_SHIFT)) | (h << lhxs) | guest) << PAGE_SHIFT
         }
     }
 
@@ -194,17 +220,17 @@ impl MsiAddrCfg {
 
     #[cfg_attr(vesper_port, allow(dead_code))]
     fn high_m(&self) -> u32 {
-        (u32::from(self.locked) << 31)
-            | (self.hhxs << 24)
-            | (self.lhxs_m << 20)
-            | (self.hhxw << 16)
-            | (self.lhxw << 12)
-            | ((self.m_ppn >> 32) as u32 & 0xfff)
+        (u32::from(self.locked) << MSIADDRCFGH_L_SHIFT)
+            | (self.hhxs << MSIADDRCFGH_HHXS_SHIFT)
+            | (self.lhxs_m << MSIADDRCFGH_LHXS_SHIFT)
+            | (self.hhxw << MSIADDRCFGH_HHXW_SHIFT)
+            | (self.lhxw << MSIADDRCFGH_LHXW_SHIFT)
+            | ((self.m_ppn >> 32) as u32 & MSIADDRCFGH_PPN)
     }
 
     #[cfg_attr(vesper_port, allow(dead_code))]
     fn high_s(&self) -> u32 {
-        (self.lhxs_s << 20) | ((self.s_ppn >> 32) as u32 & 0xfff)
+        (self.lhxs_s << MSIADDRCFGH_LHXS_SHIFT) | ((self.s_ppn >> 32) as u32 & MSIADDRCFGH_PPN)
     }
 }
 

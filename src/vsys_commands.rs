@@ -1,11 +1,12 @@
-//! `check`, `jit` and `build` of a package graph whose packages carry
+//! `check`, `jit`, `run` and `build` of a package graph whose packages carry
 //! `.vsys` libraries in their manifests (`[package] vsys`, manuscript §16.3;
 //! self-hosting SH1 lane 7, #1150). Such a program checks only through the
 //! Bridge lowering (`vesper::ffi_lowering`), which resolves its `Lib::f`
 //! calls and `Ffi[Lib]` rows against the imports.
 //!
 //! * `check` reports the Bridge lowering's diagnostics at their files.
-//! * `jit` binds each foreign symbol to a host function the CLI links in:
+//! * `jit` and `run` bind each foreign symbol to a host function the CLI
+//!   links in (`run` through the evaluator's host, `ffi_lowering::EvalHost`):
 //!   the standard I/O libraries (`link name = "vesper_std_host"`, the shim in
 //!   crates/vesper-std-host). Other libraries are refused before any code
 //!   runs; link them into an executable with `build`.
@@ -77,7 +78,7 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
             Ok(())
         }
         "jit" => {
-            let symbols = host_symbols(&imports)?;
+            let symbols = host_symbols(&imports, "jit")?;
             let symbols: Vec<(&str, *const u8)> = symbols.iter().map(|(n, a)| (*n, *a)).collect();
             let value = checked
                 .jit_with_options(c.entry, &symbols, c.optimize)
@@ -86,12 +87,18 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
             Ok(())
         }
         "build" => build(&c, &checked),
-        "run" => Err(format!(
-            "run: {} calls .vsys libraries, which the evaluator cannot reach yet; use `vesper jit` or `vesper build`",
-            c.package.package
-        )),
+        "run" => {
+            // The evaluator reaches the same host functions as `jit`.
+            let symbols = host_symbols(&imports, "run")?;
+            let host = ffi_lowering::EvalHost::new(&imports, &symbols)?;
+            let value = checked
+                .evaluate(c.entry, |call| host.call(call))
+                .map_err(|e| e.to_string())?;
+            println!("{value}");
+            Ok(())
+        }
         _ => Err(format!(
-            "{} {}: not supported for packages with .vsys imports yet (check, jit and build are)",
+            "{} {}: not supported for packages with .vsys imports yet (check, jit, run and build are)",
             c.command, c.format
         )),
     }
@@ -99,13 +106,16 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
 
 /// The host functions the CLI provides for `imports`: every function of a
 /// library linked as [`STD_HOST`].
-fn host_symbols(imports: &Imports) -> Result<Vec<(&'static str, *const u8)>, String> {
+fn host_symbols(
+    imports: &Imports,
+    command: &str,
+) -> Result<Vec<(&'static str, *const u8)>, String> {
     let mut out = vec![];
     let std = ffi_lowering::std_host_symbols();
     for (library, _) in imports.libraries() {
         if library.link().name() != STD_HOST {
             return Err(format!(
-                "jit: library {} links '{}', which this vesper does not host; link it into an executable with `vesper build`",
+                "{command}: library {} links '{}', which this vesper does not host; link it into an executable with `vesper build`",
                 library.name(),
                 library.link().name()
             ));
@@ -113,7 +123,7 @@ fn host_symbols(imports: &Imports) -> Result<Vec<(&'static str, *const u8)>, Str
         for f in library.functions() {
             let (name, address) = std.iter().find(|(n, _)| *n == f.symbol()).ok_or_else(|| {
                 format!(
-                    "jit: {}::{} is not a function of {STD_HOST}",
+                    "{command}: {}::{} is not a function of {STD_HOST}",
                     library.name(),
                     f.symbol()
                 )

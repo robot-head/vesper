@@ -14,7 +14,8 @@ mod seq;
 mod tiled;
 use resource_trace::{
     ResourceConsume, ResourceIdentity, ResourceTraceCompletion, ResourceTraceConfig,
-    ResourceTraceEngine, ResourceTraceError, ResourceTraceFailure, ResourceTraceObserver,
+    ResourceTraceEngine, ResourceTraceError, ResourceTraceFailure, ResourceTraceLimits,
+    ResourceTraceObserver,
 };
 
 type Env = BTreeMap<String, Slot>;
@@ -564,20 +565,21 @@ impl<'a> Runtime<'a> {
                 match (&pattern.kind, value) {
                     (PatternKind::Tuple(patterns), Value::Tuple(values)) => {
                         let next_depth = match trace_child_depth(
-                            trace,
+                            limits,
                             nodes,
                             pending.len(),
                             patterns.len(),
                             depth,
-                            Some(&pattern.span),
                         ) {
                             Ok(d) => d,
-                            Err(err) => {
+                            Err(reason) => {
                                 if best_effort {
                                     trace.mark_truncated();
                                     break;
                                 }
-                                return Err(err);
+                                return Err(trace
+                                    .fail(reason, Some(pattern.span.clone()))
+                                    .to_string());
                             }
                         };
                         let mut overflowed = false;
@@ -656,20 +658,21 @@ impl<'a> Runtime<'a> {
                             }
                         } else {
                             let next_depth = match trace_child_depth(
-                                trace,
+                                limits,
                                 nodes,
                                 pending.len(),
                                 patterns.len(),
                                 depth,
-                                Some(&pattern.span),
                             ) {
                                 Ok(d) => d,
-                                Err(err) => {
+                                Err(reason) => {
                                     if best_effort {
                                         trace.mark_truncated();
                                         break;
                                     }
-                                    return Err(err);
+                                    return Err(trace
+                                        .fail(reason, Some(pattern.span.clone()))
+                                        .to_string());
                                 }
                             };
                             let mut overflowed = false;
@@ -795,7 +798,8 @@ impl<'a> Runtime<'a> {
                             .to_string());
                     }
                     let next_depth =
-                        trace_child_depth(trace, nodes, pending.len(), types.len(), depth, None)?;
+                        trace_child_depth(limits, nodes, pending.len(), types.len(), depth)
+                            .map_err(|reason| trace.fail(reason, None).to_string())?;
                     for (ty, value) in types.iter().zip(values).rev() {
                         trace_push(
                             &mut pending,
@@ -871,13 +875,13 @@ impl<'a> Runtime<'a> {
                             .to_string());
                     }
                     let next_depth = trace_child_depth(
-                        trace,
+                        limits,
                         nodes,
                         pending.len(),
                         variant.fields.len(),
                         depth,
-                        None,
-                    )?;
+                    )
+                    .map_err(|reason| trace.fail(reason, None).to_string())?;
                     for field in variant.fields.iter().rev() {
                         let value = fields.get(&field.name).ok_or_else(|| {
                             trace
@@ -2714,35 +2718,26 @@ impl<'a> Runtime<'a> {
 }
 // Prepay every scheduled visit and depth before growing a traversal stack.
 fn trace_child_depth(
-    trace: &mut ResourceTraceEngine,
+    limits: ResourceTraceLimits,
     visited: usize,
     pending: usize,
     children: usize,
     depth: usize,
-    site: Option<&Span>,
-) -> Result<usize, String> {
-    let limits = trace.limits();
+) -> Result<usize, ResourceTraceFailure> {
     if visited
         .checked_add(pending)
         .and_then(|n| n.checked_add(children))
         .is_none_or(|n| n > limits.max_value_nodes)
     {
-        return Err(trace
-            .fail(ResourceTraceFailure::ValueNodeLimit, site.cloned())
-            .to_string());
+        return Err(ResourceTraceFailure::ValueNodeLimit);
     }
     if children == 0 {
         return Ok(depth);
     }
-    let next_depth = depth
+    depth
         .checked_add(1)
         .filter(|d| *d <= limits.max_value_depth)
-        .ok_or_else(|| {
-            trace
-                .fail(ResourceTraceFailure::ValueDepthLimit, site.cloned())
-                .to_string()
-        })?;
-    Ok(next_depth)
+        .ok_or(ResourceTraceFailure::ValueDepthLimit)
 }
 fn trace_push<T>(values: &mut Vec<T>, value: T, max: usize) -> Result<(), ResourceTraceFailure> {
     if values.len() >= max {
