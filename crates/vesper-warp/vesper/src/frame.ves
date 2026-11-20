@@ -20,25 +20,61 @@ use self::varint::{
     vi_value_at
 };
 
-fn t_padding() -> u64 {
-    0
-}
+// Frame types (RFC 9000 §19, Table 3). STREAM is 0x08-0x0f: the low bits
+// are OFF, LEN and FIN.
+const T_PADDING: u64 = 0;
+const T_PING: u64 = 1;
+const T_ACK: u64 = 2;
+const T_ACK_ECN: u64 = 3;
+const T_RESET_STREAM: u64 = 4;
+const T_STOP_SENDING: u64 = 5;
+const T_CRYPTO: u64 = 6;
+const T_NEW_TOKEN: u64 = 7;
+const T_STREAM: u64 = 8;
+const T_STREAM_MAX: u64 = 15;
+const T_MAX_DATA: u64 = 16;
+const T_MAX_STREAM_DATA: u64 = 17;
+const T_MAX_STREAMS_BIDI: u64 = 18;
+const T_MAX_STREAMS_UNI: u64 = 19;
+const T_DATA_BLOCKED: u64 = 20;
+const T_STREAM_DATA_BLOCKED: u64 = 21;
+const T_STREAMS_BLOCKED_BIDI: u64 = 22;
+const T_STREAMS_BLOCKED_UNI: u64 = 23;
+const T_NEW_CONNECTION_ID: u64 = 24;
+const T_RETIRE_CONNECTION_ID: u64 = 25;
+const T_PATH_CHALLENGE: u64 = 26;
+const T_PATH_RESPONSE: u64 = 27;
+const T_CONNECTION_CLOSE: u64 = 28;
+const T_CONNECTION_CLOSE_APP: u64 = 29;
+const T_HANDSHAKE_DONE: u64 = 30;
 
-fn t_ack() -> u64 {
-    2
-}
+// A frame's kind: the variant index of `Frame` and `FrameW`.
+const K_PADDING: u64 = 0;
+const K_PING: u64 = 1;
+const K_ACK: u64 = 2;
+const K_CRYPTO: u64 = 3;
+const K_STREAM: u64 = 4;
+const K_MAX_DATA: u64 = 5;
+const K_MAX_STREAM_DATA: u64 = 6;
+const K_RESET_STREAM: u64 = 7;
+const K_STOP_SENDING: u64 = 8;
+const K_MAX_STREAMS: u64 = 9;
+const K_DATA_BLOCKED: u64 = 10;
+const K_STREAM_DATA_BLOCKED: u64 = 11;
+const K_STREAMS_BLOCKED: u64 = 12;
+const K_CONNECTION_CLOSE: u64 = 13;
+const K_HANDSHAKE_DONE: u64 = 14;
+const K_NEW_TOKEN: u64 = 15;
+const K_NEW_CONNECTION_ID: u64 = 16;
+const K_RETIRE_CONNECTION_ID: u64 = 17;
+const K_PATH_CHALLENGE: u64 = 18;
+const K_PATH_RESPONSE: u64 = 19;
 
-fn t_ack_ecn() -> u64 {
-    3
-}
-
-fn t_crypto() -> u64 {
-    6
-}
-
-fn t_stream() -> u64 {
-    8
-}
+// Connection IDs are at most 20 bytes (RFC 9000 §17.2); PATH_CHALLENGE and
+// PATH_RESPONSE carry 8 bytes of data (§19.17).
+const MAX_CID_LEN: u64 = 20;
+const PATH_DATA_LEN: u64 = 8;
+const U64_MAX: u64 = 18446744073709551615;
 
 fn stream_off() -> u64 {
     4
@@ -52,10 +88,7 @@ fn stream_fin() -> u64 {
     1
 }
 
-fn t_handshake_done() -> u64 {
-    30
-}
-
+// 2^60, the stream count limit (RFC 9000 §4.6).
 pub fn max_stream_count() -> u64 {
     1152921504606846976
 }
@@ -74,28 +107,28 @@ pub fn fr_allowed(ty: u64, pt: PktType) -> bool {
         PktType::OneRtt => true,
         _ => false,
     };
-    if ty == 0 || ty == 1 || ty == 28 {
+    if ty == T_PADDING || ty == T_PING || ty == T_CONNECTION_CLOSE {
         true
-    } else if ty == 2 || ty == 3 || ty == 6 {
+    } else if ty == T_ACK || ty == T_ACK_ECN || ty == T_CRYPTO {
         !zero_rtt
-    } else if ty == 7 || ty == 27 || ty == 30 {
+    } else if ty == T_NEW_TOKEN || ty == T_PATH_RESPONSE || ty == T_HANDSHAKE_DONE {
         one_rtt
     } else if ty
-        == 24
+        == T_NEW_CONNECTION_ID
         || ty
-        == 25
+        == T_RETIRE_CONNECTION_ID
         || ty
-        == 26
+        == T_PATH_CHALLENGE
         || ty
-        == 4
+        == T_RESET_STREAM
         || ty
-        == 5
+        == T_STOP_SENDING
         || ty
-        == 29
+        == T_CONNECTION_CLOSE_APP
         || ty
-        >= 8
+        >= T_STREAM
         && ty
-        <= 23 {
+        <= T_STREAMS_BLOCKED_UNI {
         zero_rtt || one_rtt
     } else {
         false
@@ -169,7 +202,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             }
         );
     }
-    if ty > t_handshake_done() {
+    if ty > T_HANDSHAKE_DONE {
         Fail::raise(
             FrameErr::UnknownType {
                 ty: ty
@@ -184,7 +217,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             }
         );
     }
-    if ty == 0 {
+    if ty == T_PADDING {
         let mut p = p0;
         loop {
             if p >= buf.len() || b8(in buf, p) != 0 {
@@ -199,16 +232,16 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p
         };
     }
-    if ty == 1 {
+    if ty == T_PING {
         return FrameAt {
             f: FrameW::Ping,
             end: p0
         };
     }
-    if ty == 2 || ty == 3 {
+    if ty == T_ACK || ty == T_ACK_ECN {
         return parse_ack(in buf, p0, ty);
     }
-    if ty == 6 {
+    if ty == T_CRYPTO {
         let (offset, p1) = vi(in buf, p0, ty);
         let (len, p2) = vi(in buf, p1, ty);
         let data = take(in buf, p2, len, ty);
@@ -227,7 +260,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: wrapping_add(p2, len)
         };
     }
-    if ty >= 8 && ty <= 15 {
+    if ty >= T_STREAM && ty <= T_STREAM_MAX {
         let (stream_id, p1) = vi(in buf, p0, ty);
         let mut p = p1;
         let mut offset: u64 = 0;
@@ -264,7 +297,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: wrapping_add(p, len)
         };
     }
-    if ty == 16 {
+    if ty == T_MAX_DATA {
         let (max, p1) = vi(in buf, p0, ty);
         return FrameAt {
             f: FrameW::MaxData {
@@ -273,7 +306,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p1
         };
     }
-    if ty == 17 {
+    if ty == T_MAX_STREAM_DATA {
         let (stream_id, p1) = vi(in buf, p0, ty);
         let (max, p2) = vi(in buf, p1, ty);
         return FrameAt {
@@ -284,7 +317,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p2
         };
     }
-    if ty == 4 {
+    if ty == T_RESET_STREAM {
         let (stream_id, p1) = vi(in buf, p0, ty);
         let (error_code, p2) = vi(in buf, p1, ty);
         let (final_size, p3) = vi(in buf, p2, ty);
@@ -297,7 +330,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p3
         };
     }
-    if ty == 5 {
+    if ty == T_STOP_SENDING {
         let (stream_id, p1) = vi(in buf, p0, ty);
         let (error_code, p2) = vi(in buf, p1, ty);
         return FrameAt {
@@ -308,13 +341,20 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p2
         };
     }
-    if ty >= 18 && ty <= 23 && ty != 20 && ty != 21 {
+    if ty
+        >= T_MAX_STREAMS_BIDI
+        && ty
+        <= T_STREAMS_BLOCKED_UNI
+        && ty
+        != T_DATA_BLOCKED
+        && ty
+        != T_STREAM_DATA_BLOCKED {
         let (n, p1) = vi(in buf, p0, ty);
         if n > max_stream_count() {
             malformed(ty);
         }
         let uni = ty & 1 == 1;
-        if ty <= 19 {
+        if ty <= T_MAX_STREAMS_UNI {
             return FrameAt {
                 f: FrameW::MaxStreams {
                     uni: uni,
@@ -331,7 +371,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p1
         };
     }
-    if ty == 20 {
+    if ty == T_DATA_BLOCKED {
         let (limit, p1) = vi(in buf, p0, ty);
         return FrameAt {
             f: FrameW::DataBlocked {
@@ -340,7 +380,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p1
         };
     }
-    if ty == 21 {
+    if ty == T_STREAM_DATA_BLOCKED {
         let (stream_id, p1) = vi(in buf, p0, ty);
         let (limit, p2) = vi(in buf, p1, ty);
         return FrameAt {
@@ -351,11 +391,11 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p2
         };
     }
-    if ty == 28 || ty == 29 {
+    if ty == T_CONNECTION_CLOSE || ty == T_CONNECTION_CLOSE_APP {
         let (error_code, p1) = vi(in buf, p0, ty);
         let mut p = p1;
         let mut frame_type: u64 = 0;
-        if ty == 28 {
+        if ty == T_CONNECTION_CLOSE {
             let (t, p2) = vi(in buf, p, ty);
             frame_type = t;
             p = p2;
@@ -365,20 +405,20 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
         return FrameAt {
             f: FrameW::ConnectionClose {
                 error_code: error_code,
-                has_frame_type: ty == 28,
+                has_frame_type: ty == T_CONNECTION_CLOSE,
                 frame_type: frame_type,
                 reason: reason
             },
             end: wrapping_add(p3, len)
         };
     }
-    if ty == 30 {
+    if ty == T_HANDSHAKE_DONE {
         return FrameAt {
             f: FrameW::HandshakeDone,
             end: p0
         };
     }
-    if ty == 7 {
+    if ty == T_NEW_TOKEN {
         let (len, p1) = vi(in buf, p0, ty);
         if len == 0 {
             malformed(ty);
@@ -391,14 +431,14 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: wrapping_add(p1, len)
         };
     }
-    if ty == 24 {
+    if ty == T_NEW_CONNECTION_ID {
         let (seq, p1) = vi(in buf, p0, ty);
         let (retire_prior_to, p2) = vi(in buf, p1, ty);
         if p2 >= buf.len() {
             truncated(ty);
         }
         let len = b8(in buf, p2);
-        if len == 0 || len > 20 || retire_prior_to > seq {
+        if len == 0 || len > MAX_CID_LEN || retire_prior_to > seq {
             malformed(ty);
         }
         let p3 = wrapping_add(p2, 1);
@@ -415,7 +455,7 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: wrapping_add(p4, reset_token_len())
         };
     }
-    if ty == 25 {
+    if ty == T_RETIRE_CONNECTION_ID {
         let (seq, p1) = vi(in buf, p0, ty);
         return FrameAt {
             f: FrameW::RetireConnectionId {
@@ -425,24 +465,24 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
         };
     }
     // PATH_CHALLENGE (26) and PATH_RESPONSE (27).
-    let _d = take(in buf, p0, 8, ty);
+    let _d = take(in buf, p0, PATH_DATA_LEN, ty);
     let data = match buf.try_read_u64_be(p0) {
         Option::Some(v) => v,
         Option::None => 0,
     };
-    if ty == 26 {
+    if ty == T_PATH_CHALLENGE {
         return FrameAt {
             f: FrameW::PathChallenge {
                 data: data
             },
-            end: wrapping_add(p0, 8)
+            end: wrapping_add(p0, PATH_DATA_LEN)
         };
     }
     FrameAt {
         f: FrameW::PathResponse {
             data: data
         },
-        end: wrapping_add(p0, 8)
+        end: wrapping_add(p0, PATH_DATA_LEN)
     }
 }
 
@@ -482,7 +522,7 @@ fn parse_ack(in buf: Slice[u8], p0: u64, ty: u64) -> FrameAt eff [Fail[FrameErr]
     let mut ect0: u64 = 0;
     let mut ect1: u64 = 0;
     let mut ce: u64 = 0;
-    if ty == t_ack_ecn() {
+    if ty == T_ACK_ECN {
         let (a, q1) = vi(in buf, p, ty);
         let (b, q2) = vi(in buf, q1, ty);
         let (c, q3) = vi(in buf, q2, ty);
@@ -539,7 +579,7 @@ pub fn fr_wire_next(in pairs: Slice[u8], at: u64, prev_smallest: u64) -> Option[
 // `AckFrame::from_ranges`' checks: descending, disjoint, non-adjacent.
 pub fn fr_check_ranges(in ranges: Slice[AckRange], ack_delay: u64) eff [Fail[FrameErr]] {
     if ranges.len() == 0 {
-        malformed(t_ack());
+        malformed(T_ACK);
     }
     let mut prev_smallest: u64 = 0;
     for i in 0..ranges.len() {
@@ -551,23 +591,19 @@ pub fn fr_check_ranges(in ranges: Slice[AckRange], ack_delay: u64) eff [Fail[Fra
             },
         };
         if r.smallest > r.largest || r.largest > vi_max() {
-            malformed(t_ack());
+            malformed(T_ACK);
         }
         if i
             > 0
             && (
-            r
-                .largest
-                > wrapping_sub(18446744073709551615, 2)
-                || wrapping_add(r.largest, 2)
-                > prev_smallest
+            r.largest > wrapping_sub(U64_MAX, 2) || wrapping_add(r.largest, 2) > prev_smallest
         ) {
-            malformed(t_ack());
+            malformed(T_ACK);
         }
         prev_smallest = r.smallest;
     }
     if ack_delay > vi_max() {
-        malformed(t_ack());
+        malformed(T_ACK);
     }
 }
 
@@ -581,58 +617,65 @@ pub fn fr_check_ranges(in ranges: Slice[AckRange], ack_delay: u64) eff [Fail[Fra
 // `uni` (1) for MAX_STREAMS and STREAMS_BLOCKED; the transport variant (1)
 // for a CONNECTION_CLOSE.
 pub fn fr_kind_type(kind: u64, bits: u64) -> u64 {
-    if kind == 0 {
-        0
-    } else if kind == 1 {
-        1
-    } else if kind == 2 {
-        2 | bits & 1
-    } else if kind == 3 {
-        6
-    } else if kind == 4 {
-        t_stream() | bits & 7
-    } else if kind == 5 {
-        16
-    } else if kind == 6 {
-        17
-    } else if kind == 7 {
-        4
-    } else if kind == 8 {
-        5
-    } else if kind == 9 {
-        18 | bits & 1
-    } else if kind == 10 {
-        20
-    } else if kind == 11 {
-        21
-    } else if kind == 12 {
-        22 | bits & 1
-    } else if kind == 13 {
-        wrapping_sub(29, bits & 1)
-    } else if kind == 14 {
-        30
-    } else if kind == 15 {
-        7
-    } else if kind == 16 {
-        24
-    } else if kind == 17 {
-        25
-    } else if kind == 18 {
-        26
+    if kind == K_PADDING {
+        T_PADDING
+    } else if kind == K_PING {
+        T_PING
+    } else if kind == K_ACK {
+        T_ACK | bits & 1
+    } else if kind == K_CRYPTO {
+        T_CRYPTO
+    } else if kind == K_STREAM {
+        T_STREAM | bits & 7
+    } else if kind == K_MAX_DATA {
+        T_MAX_DATA
+    } else if kind == K_MAX_STREAM_DATA {
+        T_MAX_STREAM_DATA
+    } else if kind == K_RESET_STREAM {
+        T_RESET_STREAM
+    } else if kind == K_STOP_SENDING {
+        T_STOP_SENDING
+    } else if kind == K_MAX_STREAMS {
+        T_MAX_STREAMS_BIDI | bits & 1
+    } else if kind == K_DATA_BLOCKED {
+        T_DATA_BLOCKED
+    } else if kind == K_STREAM_DATA_BLOCKED {
+        T_STREAM_DATA_BLOCKED
+    } else if kind == K_STREAMS_BLOCKED {
+        T_STREAMS_BLOCKED_BIDI | bits & 1
+    } else if kind == K_CONNECTION_CLOSE {
+        wrapping_sub(T_CONNECTION_CLOSE_APP, bits & 1)
+    } else if kind == K_HANDSHAKE_DONE {
+        T_HANDSHAKE_DONE
+    } else if kind == K_NEW_TOKEN {
+        T_NEW_TOKEN
+    } else if kind == K_NEW_CONNECTION_ID {
+        T_NEW_CONNECTION_ID
+    } else if kind == K_RETIRE_CONNECTION_ID {
+        T_RETIRE_CONNECTION_ID
+    } else if kind == K_PATH_CHALLENGE {
+        T_PATH_CHALLENGE
     } else {
-        27
+        T_PATH_RESPONSE
     }
 }
 
 // RFC 9002 §2: everything but ACK, PADDING and CONNECTION_CLOSE.
 pub fn fr_kind_is_ack_eliciting(kind: u64) -> bool {
-    !(kind == 0 || kind == 2 || kind == 13)
+    !(kind == K_PADDING || kind == K_ACK || kind == K_CONNECTION_CLOSE)
 }
 
 // RFC 9000 §9.1 probing frames: PADDING, PATH_CHALLENGE, PATH_RESPONSE and
 // NEW_CONNECTION_ID.
 pub fn fr_kind_is_probing(kind: u64) -> bool {
-    kind == 0 || kind == 18 || kind == 19 || kind == 16
+    kind
+        == K_PADDING
+        || kind
+        == K_PATH_CHALLENGE
+        || kind
+        == K_PATH_RESPONSE
+        || kind
+        == K_NEW_CONNECTION_ID
 }
 
 fn flag(b: bool, v: u64) -> u64 {
@@ -649,8 +692,8 @@ fn kind_of(f: FrameW) -> (u64, u64) {
         FrameW::Padding {
             len
         }
-        => (0, 0),
-        FrameW::Ping => (1, 0),
+        => (K_PADDING, 0),
+        FrameW::Ping => (K_PING, 0),
         FrameW::Ack {
             largest,
             ack_delay,
@@ -663,12 +706,12 @@ fn kind_of(f: FrameW) -> (u64, u64) {
             count,
             pairs
         }
-        => (2, flag(has_ecn, 1)),
+        => (K_ACK, flag(has_ecn, 1)),
         FrameW::Crypto {
             offset,
             data
         }
-        => (3, 0),
+        => (K_CRYPTO, 0),
         FrameW::Stream {
             stream_id,
             offset,
@@ -677,7 +720,7 @@ fn kind_of(f: FrameW) -> (u64, u64) {
             has_length
         }
         => (
-            4,
+            K_STREAM,
             flag(fin, stream_fin()) | flag(has_length, stream_len()) | flag(
                 offset != 0,
                 stream_off()
@@ -686,73 +729,73 @@ fn kind_of(f: FrameW) -> (u64, u64) {
         FrameW::MaxData {
             max
         }
-        => (5, 0),
+        => (K_MAX_DATA, 0),
         FrameW::MaxStreamData {
             stream_id,
             max
         }
-        => (6, 0),
+        => (K_MAX_STREAM_DATA, 0),
         FrameW::ResetStream {
             stream_id,
             error_code,
             final_size
         }
-        => (7, 0),
+        => (K_RESET_STREAM, 0),
         FrameW::StopSending {
             stream_id,
             error_code
         }
-        => (8, 0),
+        => (K_STOP_SENDING, 0),
         FrameW::MaxStreams {
             uni,
             max
         }
-        => (9, flag(uni, 1)),
+        => (K_MAX_STREAMS, flag(uni, 1)),
         FrameW::DataBlocked {
             limit
         }
-        => (10, 0),
+        => (K_DATA_BLOCKED, 0),
         FrameW::StreamDataBlocked {
             stream_id,
             limit
         }
-        => (11, 0),
+        => (K_STREAM_DATA_BLOCKED, 0),
         FrameW::StreamsBlocked {
             uni,
             limit
         }
-        => (12, flag(uni, 1)),
+        => (K_STREAMS_BLOCKED, flag(uni, 1)),
         FrameW::ConnectionClose {
             error_code,
             has_frame_type,
             frame_type,
             reason
         }
-        => (13, flag(has_frame_type, 1)),
-        FrameW::HandshakeDone => (14, 0),
+        => (K_CONNECTION_CLOSE, flag(has_frame_type, 1)),
+        FrameW::HandshakeDone => (K_HANDSHAKE_DONE, 0),
         FrameW::NewToken {
             token
         }
-        => (15, 0),
+        => (K_NEW_TOKEN, 0),
         FrameW::NewConnectionId {
             seq,
             retire_prior_to,
             cid,
             reset_token
         }
-        => (16, 0),
+        => (K_NEW_CONNECTION_ID, 0),
         FrameW::RetireConnectionId {
             seq
         }
-        => (17, 0),
+        => (K_RETIRE_CONNECTION_ID, 0),
         FrameW::PathChallenge {
             data
         }
-        => (18, 0),
+        => (K_PATH_CHALLENGE, 0),
         FrameW::PathResponse {
             data
         }
-        => (19, 0),
+        => (K_PATH_RESPONSE, 0),
     }
 }
 
@@ -1033,7 +1076,7 @@ pub fn fr_encode(
             reset_token
         }
         => {
-            if retire_prior_to > seq || a.len() == 0 || a.len() > 20 {
+            if retire_prior_to > seq || a.len() == 0 || a.len() > MAX_CID_LEN {
                 enc();
             }
             at = w_vi(inout out, at, seq);
@@ -1080,7 +1123,7 @@ pub fn fr_encode_stream_header(
     if !end_ok(offset, len) {
         enc();
     }
-    let mut ty = t_stream() | stream_len();
+    let mut ty = T_STREAM | stream_len();
     if offset != 0 {
         ty = ty | stream_off();
     }
@@ -1100,7 +1143,7 @@ pub fn fr_encode_crypto_header(inout out: Slice[u8], offset: u64, len: u64)
     if !end_ok(offset, len) {
         enc();
     }
-    let at = w_vi(inout out, 0, t_crypto());
+    let at = w_vi(inout out, 0, T_CRYPTO);
     let at2 = w_vi(inout out, at, offset);
     w_vi(inout out, at2, len)
 }

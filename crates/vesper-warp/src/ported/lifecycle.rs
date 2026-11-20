@@ -12,8 +12,10 @@ use zeroize::Zeroizing;
 
 use super::binding as b;
 use crate::frame::RESET_TOKEN_LEN;
+use crate::header::MAX_CID_LEN;
 use crate::lifecycle::{
-    MAX_TOKEN_LEN, PeerAddr, TOKEN_NEW, TOKEN_RETRY, TokenError, TokenKind, encode_addr, random,
+    ADDR_LEN, MAX_TOKEN_LEN, PeerAddr, TOKEN_NEW, TOKEN_RETRY, TokenError, TokenKind, encode_addr,
+    random,
 };
 
 /// Seals and opens address-validation tokens (AES-256-GCM, random
@@ -54,7 +56,7 @@ impl TokenKey {
             TokenKind::Retry { odcid, len } => (TOKEN_RETRY, &odcid[..usize::from(*len)]),
             TokenKind::NewToken => (TOKEN_NEW, &[]),
         };
-        let mut a = [0u8; 19];
+        let mut a = [0u8; ADDR_LEN];
         encode_addr(addr, &mut a);
         keys::with_key(&self.aead, || {
             b::token_seal(k, odcid, &a, now_ns, &mut out[..]) as usize
@@ -76,9 +78,9 @@ impl TokenKey {
         let mut buf = [0u8; MAX_TOKEN_LEN];
         let buf = &mut buf[..token.len()];
         buf.copy_from_slice(token);
-        let mut a = [0u8; 19];
+        let mut a = [0u8; ADDR_LEN];
         encode_addr(addr, &mut a);
-        let mut odcid = [0u8; 20];
+        let mut odcid = [0u8; MAX_CID_LEN];
         let r = keys::with_key(&self.aead, || {
             b::token_open(buf, &a, now_ns, lifetimes.0, lifetimes.1, &mut odcid)
         });

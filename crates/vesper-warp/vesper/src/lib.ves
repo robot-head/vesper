@@ -1099,6 +1099,23 @@ fn tk_opened(code: u64, len: u64) -> TokenOpened {
     }
 }
 
+// Token layout (src/lifecycle.rs): kind, a 12-byte nonce, then the sealed
+// plaintext (issued_ns, the 19 address bytes, the ODCID length and the
+// ODCID) and a 16-byte AEAD tag.
+const TOKEN_RETRY: u64 = 1;
+const TOKEN_NEW: u64 = 2;
+const TK_NONCE: u64 = 1;
+const TK_ISSUED: u64 = 13;
+const TK_ADDR: u64 = 21;
+const ADDR_LEN: u64 = 19;
+const TK_ODCID_LEN: u64 = 40;
+const TK_ODCID: u64 = 41;
+// TK_ODCID plus the tag, and that plus a 20-byte ODCID.
+const TK_MIN_LEN: u64 = 57;
+const TK_MAX_LEN: u64 = 77;
+const MAX_CID_LEN: u64 = 20;
+const RESET_TOKEN_LEN: u64 = 16;
+
 // Seals a token of `kind` (1 Retry, 2 NEW_TOKEN) for the 19 address bytes
 // `addr` into `out`; returns its length, or 0 when the arguments do not fit.
 pub fn token_seal(
@@ -1109,16 +1126,16 @@ pub fn token_seal(
     inout out: Slice[u8]
 ) -> u64 eff [Ffi[WarpKeys]] {
     let n = odcid.len();
-    let total = wrapping_add(57, n);
-    if n > 20 || addr.len() != 19 || out.len() < total {
+    let total = wrapping_add(TK_MIN_LEN, n);
+    if n > MAX_CID_LEN || addr.len() != ADDR_LEN || out.len() < total {
         return 0;
     }
     out.try_set(0, kind);
-    WarpKeys::vesper_warp_keys_random(inout out[1..13]);
-    tk_put_be64(inout out, 13, now_ns);
-    let _a = out.try_copy_from(21, in addr);
-    out.try_set(40, wrapping_u8(n));
-    let _o = out.try_copy_from(41, in odcid);
+    WarpKeys::vesper_warp_keys_random(inout out[(TK_NONCE)..TK_ISSUED]);
+    tk_put_be64(inout out, TK_ISSUED, now_ns);
+    let _a = out.try_copy_from(TK_ADDR, in addr);
+    out.try_set(TK_ODCID_LEN, wrapping_u8(n));
+    let _o = out.try_copy_from(TK_ODCID, in odcid);
     if WarpKeys::vesper_warp_keys_seal(inout out[0..total]) != 0 {
         return 0;
     }
@@ -1136,18 +1153,18 @@ pub fn token_open(
     inout odcid: Slice[u8]
 ) -> TokenOpened eff [Ffi[WarpKeys]] {
     let t = token.len();
-    if t < 57 || t > 77 {
+    if t < TK_MIN_LEN || t > TK_MAX_LEN {
         return tk_opened(2, 0);
     }
     let kind = tk_byte(in token, 0);
-    if kind != 1 && kind != 2 {
+    if kind != TOKEN_RETRY && kind != TOKEN_NEW {
         return tk_opened(2, 0);
     }
     if WarpKeys::vesper_warp_keys_open(inout token[0..t]) != 0 {
         return tk_opened(2, 0);
     }
-    let issued = tk_get_be64(in token, 13);
-    let lifetime = if kind == 1 {
+    let issued = tk_get_be64(in token, TK_ISSUED);
+    let lifetime = if kind == TOKEN_RETRY {
         retry_lifetime_ns
     } else {
         new_lifetime_ns
@@ -1155,20 +1172,20 @@ pub fn token_open(
     if now_ns < issued || wrapping_sub(now_ns, issued) > lifetime {
         return tk_opened(3, 0);
     }
-    if !ct_eq(in token[21..40], in addr) {
+    if !ct_eq(in token[(TK_ADDR)..TK_ODCID_LEN], in addr) {
         return tk_opened(4, 0);
     }
-    let len = tk_byte(in token, 40);
-    if wrapping_add(len, 57) != t || len > 20 {
+    let len = tk_byte(in token, TK_ODCID_LEN);
+    if wrapping_add(len, TK_MIN_LEN) != t || len > MAX_CID_LEN {
         return tk_opened(2, 0);
     }
-    if kind == 2 {
+    if kind == TOKEN_NEW {
         if len == 0 {
             return tk_opened(1, 0);
         }
         return tk_opened(2, 0);
     }
-    let _c = odcid.try_copy_from(0, in token[41..wrapping_add(41, len)]);
+    let _c = odcid.try_copy_from(0, in token[(TK_ODCID)..wrapping_add(TK_ODCID, len)]);
     tk_opened(0, len)
 }
 
@@ -1180,7 +1197,7 @@ pub fn reset_token(in key: Slice[u8], in cid: Slice[u8], inout out: Slice[u8]) e
 
 // A received stateless reset token against one of ours, in constant time.
 pub fn reset_token_eq(in ours: Slice[u8], in theirs: Slice[u8]) -> bool {
-    theirs.len() == 16 && ct_eq(in ours, in theirs)
+    theirs.len() == RESET_TOKEN_LEN && ct_eq(in ours, in theirs)
 }
 
 // ---------------------------------------------------------------------------

@@ -43,12 +43,12 @@ vesper_port_object(
         target = VESPER_TARGET,
     )
     for module, old, new in [
-        ("varint", "widen_u64(v) & 16383", "widen_u64(v) & 8191"),
+        ("varint", "widen_u64(v) & VI2_MASK", "widen_u64(v) & 8191"),
         ("pn", "let hwin = win / 2;", "let hwin = win / 4;"),
         ("header", "let pn_offset = wrapping_add(dcid_len, 1);", "let pn_offset = wrapping_add(dcid_len, 2);"),
         ("frame", "fin: ty & stream_fin() != 0,", "fin: ty & stream_fin() == 0,"),
-        ("ack", "s.unacked_ack_eliciting >= 2", "s.unacked_ack_eliciting >= 3"),
-        ("recovery", "sat_add(e.pn, 3)", "sat_add(e.pn, 4)"),
+        ("ack", "s.unacked_ack_eliciting >= ACK_ELICITING_THRESHOLD", "s.unacked_ack_eliciting >= 3"),
+        ("recovery", "sat_add(e.pn, PACKET_THRESHOLD)", "sat_add(e.pn, 4)"),
         ("stream", "if start <= s.contig {", "if start < s.contig {"),
         ("packet", "let phase = key_phase;", "let phase = false;"),
     ]
@@ -59,7 +59,7 @@ vesper_port_object(
 vesper_port_object(
     name = "warp_vesper_divergent_lifecycle",
     edit_src = "vesper/src/lib.ves",
-    edits = {"in token[41..wrapping_add(41, len)]": "in token[40..wrapping_add(40, len)]"},
+    edits = {"in token[(TK_ODCID)..wrapping_add(TK_ODCID, len)]": "in token[(TK_ODCID_LEN)..wrapping_add(TK_ODCID_LEN, len)]"},
     library = "warp",
     package = ":port_package",
     target = VESPER_TARGET,

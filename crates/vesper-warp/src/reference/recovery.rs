@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 /// Converts an encoded ACK Delay to nanoseconds (RFC 9000 §19.3),
 /// saturating: the value is peer-controlled.
 pub fn ack_delay_ns(encoded: u64, ack_delay_exponent: u8) -> Result<u64, RecoveryError> {
-    if ack_delay_exponent > 20 {
+    if ack_delay_exponent > crate::ack::MAX_ACK_DELAY_EXPONENT {
         return Err(RecoveryError::BadAckDelayExponent(ack_delay_exponent));
     }
     let us = encoded

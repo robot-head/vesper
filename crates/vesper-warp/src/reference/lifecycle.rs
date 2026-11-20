@@ -9,9 +9,10 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::frame::RESET_TOKEN_LEN;
+use crate::header::MAX_CID_LEN;
 use crate::lifecycle::{
-    MAX_TOKEN_LEN, NONCE_LEN, PeerAddr, TAG_LEN, TOKEN_NEW, TOKEN_PLAIN_MAX, TOKEN_RETRY,
-    TokenError, TokenKind, encode_addr, random,
+    ADDR_LEN, MAX_TOKEN_LEN, NONCE_LEN, PLAIN_ADDR, PLAIN_ODCID, PLAIN_ODCID_LEN, PeerAddr,
+    TAG_LEN, TOKEN_NEW, TOKEN_PLAIN_MAX, TOKEN_RETRY, TokenError, TokenKind, encode_addr, random,
 };
 
 /// Seals and opens address-validation tokens (AES-256-GCM, random
@@ -55,13 +56,13 @@ impl TokenKey {
         out[0] = k;
         random(&mut out[1..1 + NONCE_LEN]);
         let mut plain = [0u8; TOKEN_PLAIN_MAX];
-        plain[..8].copy_from_slice(&now_ns.to_be_bytes());
-        let mut a = [0u8; 19];
+        plain[..PLAIN_ADDR].copy_from_slice(&now_ns.to_be_bytes());
+        let mut a = [0u8; ADDR_LEN];
         encode_addr(addr, &mut a);
-        plain[8..27].copy_from_slice(&a);
-        plain[27] = odcid.len() as u8;
-        plain[28..28 + odcid.len()].copy_from_slice(odcid);
-        let plain_len = 28 + odcid.len();
+        plain[PLAIN_ADDR..PLAIN_ODCID_LEN].copy_from_slice(&a);
+        plain[PLAIN_ODCID_LEN] = odcid.len() as u8;
+        plain[PLAIN_ODCID..PLAIN_ODCID + odcid.len()].copy_from_slice(odcid);
+        let plain_len = PLAIN_ODCID + odcid.len();
         let start = 1 + NONCE_LEN;
         out[start..start + plain_len].copy_from_slice(&plain[..plain_len]);
         let (head, body) = out.split_at_mut(start);
@@ -84,7 +85,7 @@ impl TokenKey {
         lifetimes: (u64, u64),
     ) -> Result<TokenKind, TokenError> {
         let start = 1 + NONCE_LEN;
-        if token.len() < start + 28 + TAG_LEN || token.len() > MAX_TOKEN_LEN {
+        if token.len() < start + PLAIN_ODCID + TAG_LEN || token.len() > MAX_TOKEN_LEN {
             return Err(TokenError::Invalid);
         }
         let kind = token[0];
@@ -103,7 +104,7 @@ impl TokenKey {
                 tag,
             )
             .map_err(|_| TokenError::Invalid)?;
-        let issued = u64::from_be_bytes(plain[..8].try_into().expect("8 bytes"));
+        let issued = u64::from_be_bytes(plain[..PLAIN_ADDR].try_into().expect("8 bytes"));
         let lifetime = if kind == TOKEN_RETRY {
             lifetimes.0
         } else {
@@ -112,13 +113,13 @@ impl TokenKey {
         if now_ns < issued || now_ns - issued > lifetime {
             return Err(TokenError::Expired);
         }
-        let mut a = [0u8; 19];
+        let mut a = [0u8; ADDR_LEN];
         encode_addr(addr, &mut a);
-        if !bool::from(plain[8..27].ct_eq(&a)) {
+        if !bool::from(plain[PLAIN_ADDR..PLAIN_ODCID_LEN].ct_eq(&a)) {
             return Err(TokenError::WrongAddress);
         }
-        let len = plain[27];
-        if usize::from(len) + 28 != plain_len || len > 20 {
+        let len = plain[PLAIN_ODCID_LEN];
+        if usize::from(len) + PLAIN_ODCID != plain_len || usize::from(len) > MAX_CID_LEN {
             return Err(TokenError::Invalid);
         }
         if kind == TOKEN_NEW {
@@ -128,8 +129,9 @@ impl TokenKey {
                 Err(TokenError::Invalid)
             };
         }
-        let mut odcid = [0u8; 20];
-        odcid[..usize::from(len)].copy_from_slice(&plain[28..28 + usize::from(len)]);
+        let mut odcid = [0u8; MAX_CID_LEN];
+        odcid[..usize::from(len)]
+            .copy_from_slice(&plain[PLAIN_ODCID..PLAIN_ODCID + usize::from(len)]);
         Ok(TokenKind::Retry { odcid, len })
     }
 }

@@ -262,7 +262,8 @@ impl Frame<'_> {
                 cid,
                 reset_token,
             } => {
-                if retire_prior_to > seq || cid.is_empty() || cid.len() > 20 {
+                if retire_prior_to > seq || cid.is_empty() || cid.len() > crate::header::MAX_CID_LEN
+                {
                     return Err(VarIntError::BadLength(0));
                 }
                 w.varint(*seq)?;
@@ -529,7 +530,7 @@ fn parse_one<'a>(r: &mut Reader<'a>, packet_type: PacketType) -> Result<Frame<'a
             let len = r.u8().ok_or(truncated)?;
             // §19.15: a length outside 1..=20, or Retire Prior To above the
             // sequence number, is a FRAME_ENCODING_ERROR.
-            if len == 0 || len > 20 || retire_prior_to > seq {
+            if len == 0 || usize::from(len) > crate::header::MAX_CID_LEN || retire_prior_to > seq {
                 return Err(malformed);
             }
             let cid = take(r, u64::from(len), truncated)?;
