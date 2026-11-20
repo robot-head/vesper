@@ -194,18 +194,16 @@ impl Checker<'_> {
     /// Registers `value`, the initializer of an immutable `let`, as a bound
     /// view when it is a string or slice view (`s.as_bytes()`, `s.as_str()`,
     /// `s[a..b]`, `s.as_slice()`) of a place that stays unchanged while the
-    /// function runs: an `in` parameter, or an immutable binding that is
-    /// itself a view. The bound view is a read-only `Str` or `Slice` local
-    /// that cannot outlive its source: the binding is shared (`in`), so it
-    /// cannot be moved, rebound mutably or written, and views are
-    /// second-class (never returned or stored).
+    /// view is in scope: an `in` parameter, an immutable binding that is
+    /// itself a view, or an immutable owned binding (a `let` without `mut`
+    /// holding a `String`, a `ChunkSeq` or an aggregate of them), which
+    /// cannot be written and, while the view is in scope, cannot be moved
+    /// ([`Checker::check_view_sources`], SH3 lane 4). The bound view is a
+    /// read-only `Str` or `Slice` local that cannot outlive its source: the
+    /// binding is shared (`in`), so it cannot be moved, rebound mutably or
+    /// written, and views are second-class (never returned or stored).
     pub(in crate::check) fn bind_view(&mut self, value: &Expr, env: &Env) -> bool {
-        let base = whole_view(value)
-            .or_else(|| crate::seq::interval(value).map(|(b, _, _)| b))
-            .or_else(|| match crate::seq::whole_view(value) {
-                Some((b, false)) => Some(b),
-                _ => None,
-            });
+        let base = view_source(value);
         // A view of a string literal, or of the static text a `-> Str`
         // function returns, is a view of static bytes and never dangles.
         if base.is_some_and(|b| self.static_text_source(b)) {
@@ -220,7 +218,8 @@ impl Checker<'_> {
             return false;
         };
         let view = crate::seq::is_slice_type(&b.ty) || is_str_type(&b.ty);
-        let bound = b.pass == Pass::In || (b.frozen && view);
+        let owned = b.frozen && b.pass == Pass::Sink;
+        let bound = b.pass == Pass::In || (b.frozen && view) || owned;
         if bound {
             self.slice_args
                 .insert((value.span.start, value.span.end), Pass::In);
@@ -236,6 +235,50 @@ impl Checker<'_> {
                 if self.world.functions.get(n).is_some_and(|f| is_str_type(&f.result))),
             _ => false,
         }
+    }
+
+    /// Records the bound view `name` (declared at `span`) of an immutable
+    /// owned binding, whose source must not move while the view is in scope.
+    pub(in crate::check) fn record_view_source(
+        &mut self,
+        value: &Expr,
+        name: &str,
+        span: Span,
+        env: &Env,
+    ) {
+        let Some(source) = view_source(value).and_then(Place::from_expr) else {
+            return;
+        };
+        if env
+            .bindings
+            .get(&source.root)
+            .is_some_and(|b| b.pass == Pass::Sink)
+        {
+            self.view_sources.push((source, name.to_string(), span));
+        }
+    }
+
+    /// Rejects a move of `p` while a bound view of an overlapping place is
+    /// in scope (`E1531`).
+    pub(in crate::check) fn check_view_sources(&mut self, p: &Place, env: &Env, span: &Span) -> bool {
+        let mut ok = true;
+        for (source, view, at) in self.view_sources.clone() {
+            let live = env.bindings.get(&view).is_some_and(|b| b.span == at);
+            if live && source.overlaps(p) {
+                ok = false;
+                self.error(
+                    "E1531",
+                    format!(
+                        "cannot move '{}' while the view '{view}' of it is in scope",
+                        p.display()
+                    ),
+                    span.clone(),
+                );
+                self.related(at, "the view is bound here");
+                self.help("A bound view lives until the end of its block; move the source after that block, or copy what the view reads.");
+            }
+        }
+        ok
     }
 
     /// A `Str` (or, for `as_bytes`, `Slice[u8]`) view of `base`, allowed only
@@ -292,4 +335,15 @@ impl Checker<'_> {
             Type::named(STR_TYPE)
         }
     }
+}
+
+/// The base of a string or slice view expression (`s.as_bytes()`,
+/// `s.as_str()`, `s[a..b]`, `s.as_slice()`).
+fn view_source(value: &Expr) -> Option<&Expr> {
+    whole_view(value)
+        .or_else(|| crate::seq::interval(value).map(|(b, _, _)| b))
+        .or_else(|| match crate::seq::whole_view(value) {
+            Some((b, false)) => Some(b),
+            _ => None,
+        })
 }
