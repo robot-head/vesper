@@ -140,8 +140,8 @@ fn refused(body: &str, code: &str, needle: &str) {
     );
 }
 
-/// Repro (G1): assignment through an element, `xs[0].n = 1`, and compound
-/// assignment and nested field paths `xs[i].inner.k += v`.
+/// Repro (G1): assignment through an element, `xs[0].n = 1`, nested field
+/// paths `xs[i].inner.k = v`, and values that read the same sequence.
 #[test]
 fn assignment_through_an_element() {
     let source = handled(&format!(
@@ -152,12 +152,12 @@ fn body() -> u64 eff [Fail[RuntimeError]] {{
     xs.push(fresh(0));
     xs.push(fresh(5));
     xs[0].n = 1;
-    xs[1].n += 10;
+    xs[1].n = wrapping_add(xs[1].n, 10);
     xs[0].slots = ChunkSeq::new[u32]();
     let mut os = ChunkSeq::new[Outer]();
     os.push(Outer {{ inner: Inner {{ k: 3, tag: 1 }}, s: fresh(2) }});
     let i: u64 = 0;
-    os[i].inner.k += 4;
+    os[i].inner.k = wrapping_add(os[i].inner.k, 4);
     os[i].inner.tag = 9;
     os[i].s.n = wrapping_add(xs[1].n, 1);
     let mut cs = ChunkSeq::new[Inner]();
@@ -304,6 +304,20 @@ fn f(inout st: St) { put_name(in st, inout st.err, 3) }",
         "E0301",
         "overlapping arguments",
     );
+    let c = checked(
+        "struct St { names: ChunkSeq[u32], err: u64 }
+fn put_name(in st: St, inout err: u64, x: u32) { err = wrapping_add(err, st.names.len()); }
+fn f(inout st: St) { put_name(in st, inout st.err, 3) }
+fn main() -> u64 { 0 }",
+    );
+    assert!(
+        c.diagnostics.iter().any(|d| d
+            .help
+            .as_deref()
+            .is_some_and(|h| h.contains("reaches every field, including 'st.err'"))),
+        "{:#?}",
+        c.diagnostics
+    );
 }
 
 /// Repro (G4): an element lent to a call raises `IndexOutOfBounds`, so with
@@ -360,4 +374,64 @@ fn g(in xs: ChunkSeq[State]) eff [Fail[RuntimeError]] { xs[0].n = 1; }",
     ] {
         refused(body, code, needle);
     }
+}
+
+/// G9: functions that hold non-copy element views inline. A matched
+/// `try_get` is a borrow wherever it is spliced, so the caller's drop
+/// elaboration never frees the element; the JIT's frees prove it.
+#[test]
+fn functions_with_element_views_inline() {
+    let source = handled(&format!(
+        "{STATE}fn n_at(in xs: ChunkSeq[State], i: u64) -> u64 {{
+    match xs.try_get(i) {{ Some(s) => wrapping_add(s.n, s.slots.len()), None => 0 }}
+}}
+fn bump_at(inout xs: ChunkSeq[State], i: u64) {{
+    match xs.try_get_mut(i) {{ Some(s) => {{ s.n = wrapping_add(s.n, 1); s.slots.push(1); }}, None => {{}} }}
+}}
+fn set_n(inout xs: ChunkSeq[State], i: u64, v: u64) eff [Fail[RuntimeError]] {{ xs[i].n = v; }}
+fn body() -> u64 eff [Fail[RuntimeError]] {{
+    let mut xs = ChunkSeq::new[State]();
+    xs.push(fresh(1));
+    xs.push(fresh(2));
+    let mut t: u64 = 0;
+    let mut i: u64 = 0;
+    loop {{
+        if i >= 6 {{ break; }}
+        bump_at(inout xs, i & 1);
+        t = wrapping_add(t, n_at(in xs, i & 1));
+        i = wrapping_add(i, 1);
+    }}
+    set_n(inout xs, 0, 50);
+    wrapping_add(t, wrapping_mul(n_at(in xs, 0), 1000))
+}}"
+    ));
+    let c = accepted(&source);
+    let mut program = vesper::ir::lower_world(&c.world);
+    vesper::ir_opt::optimize(&c.world, &mut program).unwrap();
+    let report = vesper::ir_inline::inline(
+        &c.world,
+        &mut program,
+        &vesper::ir_inline::Budget::default(),
+    );
+    for callee in ["n_at", "bump_at", "set_n"] {
+        assert!(
+            report.callees.get(callee).is_some_and(|n| *n > 0),
+            "{callee} was not inlined: {:?}",
+            report.refused.get(callee)
+        );
+    }
+    // n after each bump at index i & 1 (0, 1, 0, 1, ..): xs[0] and xs[1]
+    // gain 1 to n and one slot per bump.
+    let mut n = [1u64, 2];
+    let mut slots = [0u64, 0];
+    let mut t = 0;
+    for i in 0..6 {
+        n[i & 1] += 1;
+        slots[i & 1] += 1;
+        t += n[i & 1] + slots[i & 1];
+    }
+    assert_eq!(
+        differential("inline_views", &source),
+        t + (50 + slots[0]) * 1000
+    );
 }

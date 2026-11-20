@@ -165,6 +165,49 @@ pub struct Report {
     contents: BTreeMap<String, BTreeMap<String, usize>>,
 }
 
+/// The borrowed `match` scrutinees of `f` (`fip::borrowed_scrutinees`) that
+/// do not depend on `f`'s parameter list: element views (a matched
+/// `try_get` or `try_get_mut`, §13) and by-value reads of the names a view
+/// match binds, transitively. The caller's own `borrowed_scrutinees` finds
+/// them again after splicing, so drop elaboration never treats the element
+/// as owned.
+fn view_scrutinees(f: &FunctionIr) -> BTreeSet<ValueId> {
+    use crate::seq::{Access, SeqOp};
+    let matched: BTreeSet<ValueId> = f
+        .blocks
+        .iter()
+        .filter_map(|b| match &b.terminator {
+            Terminator::Match { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect();
+    let mut names = BTreeSet::new();
+    let mut out = BTreeSet::new();
+    loop {
+        let before = (names.len(), out.len());
+        for i in f.blocks.iter().flat_map(|b| &b.instructions) {
+            match &i.op {
+                Op::Seq {
+                    op: SeqOp::TryGet | SeqOp::Hoisted(Access::TryGet),
+                    ..
+                } if matched.contains(&i.dest) => {
+                    out.insert(i.dest);
+                }
+                Op::Read { root, .. } if matched.contains(&i.dest) && names.contains(root) => {
+                    out.insert(i.dest);
+                }
+                Op::Bind { pattern, value } if out.contains(value) => {
+                    names.extend(crate::check::pattern_names(pattern));
+                }
+                _ => {}
+            }
+        }
+        if (names.len(), out.len()) == before {
+            return out;
+        }
+    }
+}
+
 /// Why a direct call stayed a call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Refusal {
@@ -488,11 +531,16 @@ fn inlinable(world: &World, f: &FunctionIr) -> Result<(), &'static str> {
     // the callee's own parameter list marks as a borrow
     // (`fip::borrowed_scrutinees`); spliced into a caller that owns the
     // argument it would read as a move.
+    // An element view (a matched `try_get`, §13) and the matches on what it
+    // binds are borrows wherever they are spliced, so they do not refuse
+    // (`view_scrutinees`).
+    let views = view_scrutinees(f);
     refuse(
         crate::fip::borrowed_scrutinees(f).iter().any(|v| {
-            f.values
-                .get(v)
-                .is_some_and(|t| world.mode(t, &f.bounds) != crate::ast::Mode::Copy)
+            !views.contains(v)
+                && f.values
+                    .get(v)
+                    .is_some_and(|t| world.mode(t, &f.bounds) != crate::ast::Mode::Copy)
         }),
         "borrowed match",
     )?;
