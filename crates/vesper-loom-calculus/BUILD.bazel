@@ -46,7 +46,7 @@ filegroup(
         target = VESPER_TARGET,
     )
     for module, old, new in [
-        ("check", "if c == 92 || c == 58 || c == 0 {", "if c == 92 || c == 0 {"),
+        ("check", "if c == Ascii::Backslash || c == Ascii::Colon || c == Ascii::Nul {", "if c == Ascii::Backslash || c == Ascii::Nul {"),
         ("semver", "return v.minor >= c.minor;", "return v.minor > c.minor;"),
         ("solve", "if grew && !sbool(in l.queued, parent) {", "if false && grew {"),
         ("upgrade", "let relaxed = !new_forbid;", "let relaxed = false;"),
