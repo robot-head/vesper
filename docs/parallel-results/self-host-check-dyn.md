@@ -107,6 +107,11 @@ before timing).
 Most of the gap on the larger set is the Rust passes cloning the module
 and their maps per function; the Vesper passes rewrite one arena in place.
 
+No callgrind numbers yet: under callgrind, compiling the package in the
+test process (about 490 billion instructions) did not finish within an
+hour, before any timed call. They come with the hybrid follow-up, which
+builds the package once as a library object.
+
 ## Stage 1 guard
 
 No file under `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`,
@@ -131,8 +136,9 @@ The bootstrap-stage1 workflow run on the branch is linked from the PR.
    `vesper check` on a package with `a.ves` holding `pub const N: u32 = 7;`
    and `lib.ves` holding `use self::a::{N}; pub fn f() -> u32 { N }` fails
    with E0111 "module self::a has no item 'N'".
-3. **`eff` is a keyword.** A local named `eff` fails with E0002, so the
-   effect variables are `hfx`. SH2 lane 3 (#1218) makes it contextual.
+3. **`eff` was a keyword** while this was written: a local named `eff`
+   failed with E0002, so the effect variables are `hfx`. SH2 lane 3
+   (#1218, now merged) makes it contextual.
 4. **Word entries take at most three parameters.** `check_dyn` packs its
    options into one `flags` word (bit 0 forces both passes).
 5. **No JSON in Vesper.** The `dyn_fn` span base depends on the length of
