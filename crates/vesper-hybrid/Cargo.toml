@@ -43,7 +43,8 @@ vesper-syntax = { path = "../vesper-syntax" }
 vesper-highlight = { path = "../vesper-highlight", features = ["shot"] }
 vesper-span = { path = "../vesper-span/seed", package = "vesper-span-seed" }
 vesper-lsp = { path = "../vesper-lsp" }
-vesper-diagnostics = { path = "../vesper-diagnostics" }
+# The compiler links the frozen Rust seed copy of vesper-diagnostics (#1128).
+vesper-diagnostics = { path = "../vesper-diagnostics/seed", package = "vesper-diagnostics-seed" }
 vesper-fmt = { path = "../vesper-fmt" }
 vesper-lint = { path = "../vesper-lint" }
 # The compiler links the frozen Rust seed copy of vesper-bench (#1040).

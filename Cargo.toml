@@ -10,6 +10,7 @@ members = [
     "crates/vesper-span/seed",
     "crates/vesper-lsp",
     "crates/vesper-diagnostics",
+    "crates/vesper-diagnostics/seed",
     "crates/vesper-grammar",
     "crates/vesper-grammar/seed",
     "crates/vesper-fmt",
@@ -115,6 +116,7 @@ default-members = [
     "crates/vesper-span/seed",
     "crates/vesper-lsp",
     "crates/vesper-diagnostics",
+    "crates/vesper-diagnostics/seed",
     "crates/vesper-grammar",
     "crates/vesper-grammar/seed",
     "crates/vesper-fmt",
@@ -263,7 +265,8 @@ vesper-highlight = { path = "crates/vesper-highlight", features = ["shot"] }
 # The compiler links the frozen Rust seed copy of vesper-span (#1128).
 vesper-span = { path = "crates/vesper-span/seed", package = "vesper-span-seed" }
 vesper-lsp = { path = "crates/vesper-lsp" }
-vesper-diagnostics = { path = "crates/vesper-diagnostics" }
+# The compiler links the frozen Rust seed copy of vesper-diagnostics (#1128).
+vesper-diagnostics = { path = "crates/vesper-diagnostics/seed", package = "vesper-diagnostics-seed" }
 vesper-fmt = { path = "crates/vesper-fmt" }
 vesper-lint = { path = "crates/vesper-lint" }
 vesper-doc = { path = "crates/vesper-doc" }

@@ -5568,7 +5568,7 @@ dependencies = [
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
- "vesper-diagnostics",
+ "vesper-diagnostics-seed",
  "vesper-doc",
  "vesper-ebpf-seed",
  "vesper-ffi",
@@ -5848,6 +5848,22 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "serde_json",
+ "unicode-width 0.1.14",
+ "vesper-bench",
+ "vesper-core",
+ "vesper-diagnostics-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-span-seed",
+]
+
+[[package]]
+name = "vesper-diagnostics-seed"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "serde_json",
+ "unicode-width 0.1.14",
  "vesper-core",
  "vesper-span-seed",
 ]
@@ -6052,7 +6068,7 @@ dependencies = [
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
- "vesper-diagnostics",
+ "vesper-diagnostics-seed",
  "vesper-doc",
  "vesper-ebpf-seed",
  "vesper-ffi",
