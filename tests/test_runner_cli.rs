@@ -481,12 +481,72 @@ fn test_add_positive_weak() -> bool eff [Fail[ArithOverflow]] {
         }
     }
 
+    let single = vesper(
+        &temp.0,
+        &[
+            "test",
+            "strong.ves",
+            "--mutate",
+            "--mutant-offset",
+            "1",
+            "--max-mutants",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(single.status.success());
+    let single = parse_json(&single);
+    assert_eq!(single["total_candidates"], strong_json["total_candidates"]);
+    assert_eq!(single["offset"], 1);
+    assert_eq!(single["tested"], 1);
+    assert_eq!(single["capped"], true);
+    assert_eq!(single["mutants"][0], strong_json["mutants"][1]);
+
     let weak_out = vesper(&temp.0, &["test", "weak.ves", "--mutate", "--json"]);
     assert!(!weak_out.status.success());
     let weak_json = parse_json(&weak_out);
     assert_eq!(weak_json["mode"], "mutate");
     assert_eq!(weak_json["passed"], false);
     assert!(weak_json["survived"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn mutation_gate_replays_tests_against_a_dependency() {
+    let temp = Temp::new(&[
+        (
+            "app/Loom.toml",
+            "[package]\nname = \"@test/app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\n\"@test/dep\" = { version = \"^0.1\", path = \"../dep\" }\n",
+        ),
+        (
+            "dep/Loom.toml",
+            "[package]\nname = \"@test/dep\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        ),
+        ("dep/src/lib.ves", "pub fn flag() -> bool { true }"),
+        (
+            "app/src/lib.ves",
+            "test { use @test/dep::flag; fn test_flag() -> bool { flag() } }",
+        ),
+    ]);
+    let out = vesper(
+        &temp.0,
+        &[
+            "test",
+            "app",
+            "--mutate",
+            "--mutate-dependency",
+            "dep/src/lib.ves",
+            "--no-opt",
+            "--json",
+        ],
+    );
+    let report = parse_json(&out);
+    assert!(out.status.success(), "{report}");
+    assert_eq!(report["tested"], 1);
+    assert_eq!(report["mutants"][0]["killed_by"], "test_flag");
+    assert_eq!(
+        fs::read_to_string(temp.path("dep/src/lib.ves")).unwrap(),
+        "pub fn flag() -> bool { true }"
+    );
 }
 
 #[test]
@@ -709,7 +769,7 @@ fn standard_library_collection_source_unit_tests_pass() {
         ("packages/vesper-std/graph/src/util.ves", 9),
         ("packages/vesper-std/hash/src/fast.ves", 23),
         ("packages/vesper-std/intern/src/lib.ves", 33),
-        ("packages/vesper-std/sort/src/unstable.ves", 23),
+        ("packages/vesper-std/sort/src/unstable.ves", 28),
     ]);
 }
 

@@ -138,6 +138,7 @@ test {
 
     // @case empty(0)
     // @case singleton(1)
+    // @case reversed_pair(2)
     // @case one_run(16)
     // @case partial_second_run(17)
     // @case two_runs(32)
