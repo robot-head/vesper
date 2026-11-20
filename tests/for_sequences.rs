@@ -243,6 +243,11 @@ fn rejected_loops() {
         ),
         ("fn f() -> u64 { for z in 5 { } 0 }", "E0213", "iterates"),
         (
+            "fn f() -> u64 { let mut q: ChunkSeq[Option[u64]] = ChunkSeq::new(); q.push(Option::None); for Option::Some(x) in q { } 0 }",
+            "E0210",
+            "irrefutable",
+        ),
+        (
             "fn f() -> u64 { let a: [Option[u64]; 2] = [Option::None, Option::None]; for Option::Some(x) in a { } 0 }",
             "E0210",
             "irrefutable",

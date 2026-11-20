@@ -260,7 +260,12 @@ impl Checker<'_> {
 
     /// Rejects a move of `p` while a bound view of an overlapping place is
     /// in scope (`E1531`).
-    pub(in crate::check) fn check_view_sources(&mut self, p: &Place, env: &Env, span: &Span) -> bool {
+    pub(in crate::check) fn check_view_sources(
+        &mut self,
+        p: &Place,
+        env: &Env,
+        span: &Span,
+    ) -> bool {
         let mut ok = true;
         for (source, view, at) in self.view_sources.clone() {
             let live = env.bindings.get(&view).is_some_and(|b| b.span == at);

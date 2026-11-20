@@ -17,14 +17,14 @@ mod tiled_rules;
 
 #[path = "arrays/check.rs"]
 mod array_rules;
+#[path = "loops/for_sequences.rs"]
+mod for_sequences;
 #[path = "integer_widths/literal_typing.rs"]
 mod literal_typing;
 #[path = "loops/check.rs"]
 mod loop_rules;
 #[path = "loops/try_option.rs"]
 mod try_option;
-#[path = "loops/for_sequences.rs"]
-mod for_sequences;
 
 const TRY_OPERAND: &str = "'?' requires Result[T, E], or Option[T] in a function returning Option";
 #[path = "seq/check.rs"]

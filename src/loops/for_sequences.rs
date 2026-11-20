@@ -16,7 +16,7 @@
 //! (as `?` on `Option` is), so every backend runs an ordinary range loop:
 //!
 //! ```text
-//! for $for0_i in 0..xs.len() { match xs.try_get($for0_i) { Option::Some(pat) => { body; }, _ => {} } }
+//! for $for0_i in 0..xs.len() { match xs.try_get($for0_i) { Option::Some($for0_x) => { let pat = $for0_x; body; }, _ => {} } }
 //! for $for0_i in 0..a.len() { let pat = a[$for0_i]; body; }
 //! for $for0_i in 0..2 { let pat = match $for0_i { 0 => "a", _ => "b" }; body; }
 //! ```
@@ -104,7 +104,9 @@ impl Checker<'_> {
         // variable's uses, as a range's bounds do.
         let literal = match &ty {
             Type::Tuple(ts)
-                if !place && !ts.is_empty() && ts.iter().all(|t| matches!(t, Type::IntLiteral(_))) =>
+                if !place
+                    && !ts.is_empty()
+                    && ts.iter().all(|t| matches!(t, Type::IntLiteral(_))) =>
             {
                 let hinted = self.literal_element(pat);
                 if hinted.is_none() {
@@ -117,13 +119,7 @@ impl Checker<'_> {
         };
         let ty = literal.clone().unwrap_or(ty);
         let (element, plan) = if let Some((t, _)) = crate::arrays::element(&ty) {
-            (
-                t.clone(),
-                Plan::Array {
-                    place,
-                    ty: literal,
-                },
-            )
+            (t.clone(), Plan::Array { place, ty: literal })
         } else if let Some(t) = crate::seq::elem(&ty) {
             let plan = match view {
                 Some((_, bounds)) => Plan::View {
@@ -221,7 +217,8 @@ pub(super) fn desugar(
     let mut r = Rewriter {
         plans,
         next: after,
-        count: 0,
+        // Hidden names stay distinct from any earlier rewrite's.
+        count: after,
     };
     for item in &mut module.items {
         let functions: Vec<&mut Function> = match item {
@@ -441,20 +438,36 @@ impl Rewriter<'_> {
                 let bound = self.method(source, "len", vec![]);
                 let i = read_index(self);
                 let get = self.method(receiver, "try_get", vec![i]);
+                // The element binds through a `let`, so the pattern must be
+                // irrefutable (`E0210`) as for an array.
+                let element = format!("{HIDDEN_PREFIX}{k}_x");
+                let payload = Pattern {
+                    kind: PatternKind::Bind(element.clone()),
+                    span: self.fresh(),
+                };
                 let some = Pattern {
                     kind: PatternKind::Constructor {
                         name: "Option::Some".into(),
-                        fields: vec![("0".into(), pat)],
+                        fields: vec![("0".into(), payload)],
                         named: false,
                     },
                     span: self.fresh(),
                 };
+                let value = self.name(&element);
                 let none = Pattern {
                     kind: PatternKind::Wild,
                     span: self.fresh(),
                 };
                 let arm = self.node(ExprKind::Block {
-                    statements: vec![body_stmt],
+                    statements: vec![
+                        Statement::Let {
+                            pat,
+                            ty: Type::Infer,
+                            value,
+                            mutable: false,
+                        },
+                        body_stmt,
+                    ],
                     tail: None,
                 });
                 let skip = self.node(ExprKind::Block {
