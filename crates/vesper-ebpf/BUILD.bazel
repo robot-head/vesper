@@ -81,7 +81,7 @@ filegroup(
         ("interp", "concrete", "        AluOp::Arsh => sar(a, b & 63),\n", "        AluOp::Arsh => shr(a, b & 63),\n"),
         ("verifier", "scalar", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 1));\n", "            x.umin = max_u64(x.umin, wrapping_add(y.umin, 2));\n"),
         ("helpers", "helpers", "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n", "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n"),
-        ("program", "program", "            if max_entries < 4096 ||", "            if max_entries < 2048 ||"),
+        ("program", "program", "            if max_entries < RINGBUF_MIN_SIZE ||", "            if max_entries < (RINGBUF_MIN_SIZE >> 1) ||"),
         ("callgraph", "callgraph", "        if bytes > lim {\n", "        if bytes > wrapping_add(lim, 8) {\n"),
         ("wire", "wire", "        src_ipv4: wrapping_u32(be(in s, SRC_IPV4, 4)),\n", "        src_ipv4: wrapping_u32(be(in s, DST_IPV4, 4)),\n"),
         ("explore", "verifier", "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > range {\n", "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > wrapping_add(range, 1) {\n"),

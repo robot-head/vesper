@@ -68,8 +68,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 5 program.rs: a ringbuf of 2048 bytes is accepted.
     (
-        "            if max_entries < 4096 ||",
-        "            if max_entries < 2048 ||",
+        "            if max_entries < RINGBUF_MIN_SIZE ||",
+        "            if max_entries < (RINGBUF_MIN_SIZE >> 1) ||",
     ),
     // 6 callgraph.rs: a path may exceed the stack limit by one frame slot.
     (
