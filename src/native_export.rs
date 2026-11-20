@@ -761,6 +761,11 @@ impl Planner<'_> {
             ty: source.to_string(),
             reason: reason.into(),
         };
+        if contains_extern(ty) && !matches!(ty, AbiType::Extern { .. }) {
+            return Err(refuse(
+                "holds an opaque .vsys extern-type handle; Rust lends one only directly as an `in` parameter (export ABI v4)",
+            ));
+        }
         if matches!(ty, AbiType::Extern { .. }) {
             return match position {
                 Position::Param(Pass::In) => Ok(()),
@@ -984,6 +989,13 @@ impl Planner<'_> {
                             .iter()
                             .map(|f| {
                                 let ty = planner.ty(function, &f.ty)?;
+                                if contains_extern(&ty) {
+                                    return Err(ExportError::Type {
+                                        function: function.into(),
+                                        ty: format!("{n}.{}", f.name),
+                                        reason: "holds an opaque .vsys extern-type handle; Rust lends one only directly as an `in` parameter (export ABI v4)".into(),
+                                    });
+                                }
                                 if handle {
                                     planner.field_shape(&ty).map_err(|reason| {
                                         ExportError::Type {
@@ -1090,6 +1102,18 @@ pub(crate) fn lent(ty: &AbiType, types: &BTreeMap<String, TypeDecl>, options: bo
             && matches!(ty, AbiType::Named { name, args }
                 if matches!(name.as_str(), "Option" | "Result") && !owning(ty, types)
                     && args.len() == if name == "Option" { 1 } else { 2 })
+}
+
+/// Whether `ty` is or holds a v4 lent extern-type handle.
+fn contains_extern(ty: &AbiType) -> bool {
+    match ty {
+        AbiType::Extern { .. } => true,
+        AbiType::Tuple { items } => items.iter().any(contains_extern),
+        AbiType::Named { args, .. } => args.iter().any(contains_extern),
+        AbiType::Seq { elem } | AbiType::Slice { elem } => contains_extern(elem),
+        AbiType::Box { inner } => contains_extern(inner),
+        AbiType::Scalar { .. } | AbiType::Str { .. } | AbiType::Object { .. } => false,
+    }
 }
 
 fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {

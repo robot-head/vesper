@@ -32,7 +32,7 @@ Rust stays the default build everywhere, and no Rust code was deleted.
     tree with no copy;
   - lent Rust handles: an `in` parameter of a `.vsys` extern type
     (`affine extern type World;`) is the address of a Rust value
-    (`World::lend(&world)`); Vesper reads it only through the library's
+    (`unsafe { World::lend(&world) }`: the caller vouches for its type); Vesper reads it only through the library's
     accessor imports, which the linking crate implements. Every other
     position is refused;
   - `box_new` in the runtime symbols, which encoders call.
@@ -125,7 +125,15 @@ reads the Vesper tree in place.
    `E0307`.
 4. **Deep recursion frames.** A Vesper render of a 10,000-deep right-leaning
    tree overflows the 8 MB main stack; measurements use n = 1,000.
-5. **No view of a `ChunkSeq[String]` element.** `<Elem>Seq<'a>` covers
+5. **`@fip` functions cannot match a borrowed `Box`** (`E0806`): a borrowed
+   box supplies no ReuseSlot, and the FIP model and `ir_opt::fip_reuse_pass`
+   (Stage 1 guarded) have no borrowed boxes. Take the tree `sink` there.
+6. **Borrowed-match callees are not inlined.** The IR marks a borrowed
+   scrutinee only through the callee's own `in`/`inout` parameters
+   (`fip::borrowed_scrutinees`), so `ir_inline` refuses a callee that
+   matches a borrowed non-copy place. Carrying the borrow in the IR
+   (`Op::Read { pass: In }` on the scrutinee) needs `src/ir.rs`.
+7. **No view of a `ChunkSeq[String]` element.** `<Elem>Seq<'a>` covers
    handle elements; a sequence of strings still decodes.
 
 ## What is left

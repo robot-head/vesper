@@ -13,30 +13,56 @@
 //!   elements are `<Elem>Ref<'a>` views, so a whole Vesper tree can be
 //!   walked from Rust without a copy.
 //! * **Lent Rust handles.** An `in` parameter of a `.vsys` extern type
-//!   `H` is `H<'a>`, made with `H::lend(&value)` from any Rust value: the
+//!   `H` is `H<'a>`, made with `unsafe { H::lend(&value) }` from the Rust value the
+//!   accessor imports expect (the caller vouches for its type): the
 //!   handle word is the value's address, which Vesper passes on to the
 //!   library's accessor imports (implemented by the linking crate) and
 //!   never reads.
 use super::*;
 
-/// Whether every field of `decl` has a tree form.
-pub(super) fn tree_type(g: &Gen<'_>, decl: &TypeDecl) -> bool {
-    decl.handle
-        && decl
-            .variants
-            .iter()
-            .flat_map(|v| &v.fields)
-            .all(|f| tree_form(g, &f.ty))
+/// The handle types with a tree: those whose fields all have tree forms,
+/// where a field naming another handle type (directly or as a sequence
+/// element) counts only if that type has a tree too. The greatest fixed
+/// point, so recursive trees keep theirs.
+pub(super) fn tree_types(g: &Gen<'_>) -> BTreeSet<String> {
+    let mut ok: BTreeSet<String> = g
+        .types()
+        .values()
+        .filter(|d| d.handle)
+        .map(|d| d.name.clone())
+        .collect();
+    loop {
+        let next: BTreeSet<String> = g
+            .types()
+            .values()
+            .filter(|d| ok.contains(&d.name))
+            .filter(|d| {
+                d.variants
+                    .iter()
+                    .flat_map(|v| &v.fields)
+                    .all(|f| tree_form(g, &ok, &f.ty))
+            })
+            .map(|d| d.name.clone())
+            .collect();
+        if next == ok {
+            return ok;
+        }
+        ok = next;
+    }
 }
 
-fn tree_form(g: &Gen<'_>, ty: &AbiType) -> bool {
+fn tree_form(g: &Gen<'_>, ok: &BTreeSet<String>, ty: &AbiType) -> bool {
     match ty {
         _ if !g.owning(ty) && !matches!(ty, AbiType::Extern { .. }) => true,
         AbiType::Str { owned: true } => true,
-        AbiType::Box { inner } => !matches!(**inner, AbiType::Object { .. }) && tree_form(g, inner),
-        AbiType::Seq { elem } => !g.owning(elem) || seq_of_handles(g, elem).is_some(),
-        AbiType::Named { name, args } if name == "Option" => tree_form(g, &args[0]),
-        AbiType::Named { name, .. } => g.types().get(name).is_some_and(|d| d.handle),
+        AbiType::Box { inner } => {
+            !matches!(**inner, AbiType::Object { .. }) && tree_form(g, ok, inner)
+        }
+        AbiType::Seq { elem } => {
+            !g.owning(elem) || seq_of_handles(g, elem).is_some_and(|d| ok.contains(&d.name))
+        }
+        AbiType::Named { name, args } if name == "Option" => tree_form(g, ok, &args[0]),
+        AbiType::Named { name, .. } => ok.contains(name),
         _ => false,
     }
 }
@@ -347,7 +373,7 @@ fn seq_view(out: &mut String, decl: &TypeDecl) {
 fn extern_handle(out: &mut String, name: &str) {
     let _ = writeln!(
         out,
-        "/// A Rust value lent to Vesper as the `.vsys` extern-type handle `{name}` (export\n/// ABI v4). The handle word is the value's address: Vesper passes it to the\n/// library's accessor imports, which the linking crate implements over the\n/// same Rust type, and never reads or frees it.\n#[derive(Clone, Copy, Debug)]\npub struct {name}<'a> {{\n    word: u64,\n    _lent: core::marker::PhantomData<&'a ()>,\n}}\n\nimpl<'a> {name}<'a> {{\n    /// Lends `value` for the calls this handle is passed to.\n    pub fn lend<T>(value: &'a T) -> Self {{\n        Self {{ word: value as *const T as usize as u64, _lent: core::marker::PhantomData }}\n    }}\n\n    /// The handle word.\n    pub fn word(&self) -> u64 {{\n        self.word\n    }}\n}}\n"
+        "/// A Rust value lent to Vesper as the `.vsys` extern-type handle `{name}` (export\n/// ABI v4). The handle word is the value's address: Vesper passes it to the\n/// library's accessor imports, which the linking crate implements over the\n/// same Rust type, and never reads or frees it.\n#[derive(Clone, Copy, Debug)]\npub struct {name}<'a> {{\n    word: u64,\n    _lent: core::marker::PhantomData<&'a ()>,\n}}\n\nimpl<'a> {name}<'a> {{\n    /// Lends `value` for the calls this handle is passed to.\n    ///\n    /// # Safety\n    /// The library's accessor imports for `{name}` (implemented by the linking\n    /// crate) must read the handle word as a `&T`: Vesper checks nothing\n    /// about `T`, so lending a value of another type is undefined behavior.\n    pub unsafe fn lend<T>(value: &'a T) -> Self {{\n        Self {{ word: value as *const T as usize as u64, _lent: core::marker::PhantomData }}\n    }}\n\n    /// The handle word.\n    pub fn word(&self) -> u64 {{\n        self.word\n    }}\n}}\n"
     );
 }
 
@@ -376,7 +402,8 @@ pub(super) fn items(g: &Gen<'_>, out: &mut String) {
         seq_view(out, &g.types()[name]);
     }
     let mut any_tree = false;
-    for decl in g.types().values().filter(|d| tree_type(g, d)) {
+    let trees = tree_types(g);
+    for decl in g.types().values().filter(|d| trees.contains(&d.name)) {
         tree(g, out, decl);
         any_tree = true;
     }

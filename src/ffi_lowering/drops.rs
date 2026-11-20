@@ -215,12 +215,15 @@ fn release_wildcards(
     names: &BTreeMap<String, String>,
     sites: &mut Vec<DropSite>,
 ) {
+    // A wildcard arm of a match on a borrowed place (§4.3) discards nothing:
+    // the handle stays the caller's.
+    let borrowed = crate::fip::borrowed_scrutinees(f);
     for b in &mut f.blocks {
         for inst in &mut b.instructions {
             let Op::Bind { pattern, value } = &inst.op else {
                 continue;
             };
-            if !matches!(pattern.kind, PatternKind::Wild) {
+            if !matches!(pattern.kind, PatternKind::Wild) || borrowed.contains(value) {
                 continue;
             }
             let Some(ty) = f.values.get(value) else {
@@ -293,10 +296,14 @@ fn refuse_unplaced(world: &World, f: &FunctionIr, names: &BTreeSet<String>) -> R
             _ => false,
         }
     }
+    // A borrowed match (§4.3) discards nothing: its `_`s leave the handle
+    // with the caller.
+    let borrowed = crate::fip::borrowed_scrutinees(f);
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
         match &inst.op {
             Op::Bind { pattern, value } => {
-                if let Some(ty) = f.values.get(value)
+                if !borrowed.contains(value)
+                    && let Some(ty) = f.values.get(value)
                     && wild_handle(world, pattern, ty, names)
                 {
                     return Err(format!(

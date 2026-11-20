@@ -484,6 +484,18 @@ fn inlinable(world: &World, f: &FunctionIr) -> Result<(), &'static str> {
         "fip slots or Box drops",
     )?;
     refuse(f.result.name() == "Never", "Never result")?;
+    // A match on a borrowed non-copy place (§4.3) is a `Sink` read that only
+    // the callee's own parameter list marks as a borrow
+    // (`fip::borrowed_scrutinees`); spliced into a caller that owns the
+    // argument it would read as a move.
+    refuse(
+        crate::fip::borrowed_scrutinees(f).iter().any(|v| {
+            f.values
+                .get(v)
+                .is_some_and(|t| world.mode(t, &f.bounds) != crate::ast::Mode::Copy)
+        }),
+        "borrowed match",
+    )?;
     refuse(
         f.blocks.is_empty() || !f.blocks[0].params.is_empty(),
         "entry block",

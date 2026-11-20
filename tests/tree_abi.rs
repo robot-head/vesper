@@ -9,7 +9,7 @@
 //! * lent views that also read a `ChunkSeq` of handles in place
 //!   (`<Elem>Seq<'a>`), so Rust can walk a whole Vesper tree without a copy;
 //! * lent Rust handles: an `in` parameter of a `.vsys` extern type is a Rust
-//!   value's address (`H::lend(&value)`) that Vesper hands to accessor
+//!   value's address (`unsafe { H::lend(&value) }`) that Vesper hands to accessor
 //!   imports the linking crate implements.
 //!
 //! The end-to-end test builds the library object, generates its binding,
@@ -375,8 +375,15 @@ fn check() {
     // Lent Rust handle: Vesper reads the Rust value through `.vsys`
     // accessor imports that this crate implements.
     let types = host::Types(vec![1, 2, 3, 9]);
-    assert_eq!(words_of_all(World::lend(&types)), 15);
-    assert_eq!(words_of_all(World::lend(&host::Types(vec![]))), 0);
+    assert_eq!({
+        // SAFETY: the accessors read a `host::Types`.
+        words_of_all(unsafe { World::lend(&types) })
+    }, 15);
+    assert_eq!({
+        let empty = host::Types(vec![]);
+        // SAFETY: the accessors read a `host::Types`.
+        words_of_all(unsafe { World::lend(&empty) })
+    }, 0);
     println!("ok");
 }
 
@@ -624,6 +631,10 @@ fn lent_rust_handles_cross_only_as_in_parameters() {
     let e =
         refused("pub fn f(inout w: World) -> u64 eff [Ffi[Host]] { Host::world_type_count(in w) }");
     assert!(e.contains("only to an `in` parameter"), "{e}");
+    // Nor inside a container, which the binding could not represent.
+    let e =
+        refused("pub fn f(in p: (World, u64)) -> u64 eff [Ffi[Host]] { match p { (w, n) => n } }");
+    assert!(e.contains("only directly as an `in` parameter"), "{e}");
     // Without `abi 4` the handle stays inside Vesper, as before.
     let v3 = match compile_source(
         "t.ves",
@@ -637,6 +648,53 @@ fn lent_rust_handles_cross_only_as_in_parameters() {
         Err(e) => e.to_string(),
     };
     assert!(v3.contains("@export abi 4"), "{v3}");
+}
+
+#[test]
+fn lending_a_rust_value_is_unsafe() {
+    // Vesper cannot check the lent value's type against what the accessor
+    // imports read, so the caller vouches for it.
+    let text = rust_binding(&tree().interface, &BindingOptions::default());
+    assert!(
+        text.contains("pub unsafe fn lend<T>(value: &'a T) -> Self {"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_handle_holding_a_handle_without_a_tree_has_no_tree() {
+    // `B` holds a sequence of strings, which has no tree form, so neither
+    // `B` nor `A`, which holds a `B`, gets a tree (both stay opaque
+    // handles); `C` is a tree.
+    let source = "// @export abi 4
+pub struct B {
+    values: ChunkSeq[String]
+}
+
+pub struct A {
+    b: B,
+    n: u64
+}
+
+pub struct C {
+    name: String,
+    next: Option[Box[C]]
+}
+
+pub fn a_n(in a: A) -> u64 {
+    a.n
+}
+
+pub fn c_one(in c: C) -> u64 {
+    1
+}
+";
+    let lib = compile_source("nest.ves", source, &options("nest")).unwrap();
+    let text = rust_binding(&lib.interface, &BindingOptions::default());
+    for absent in ["ATree", "BTree", "encode_a", "encode_b"] {
+        assert!(!text.contains(absent), "binding has {absent:?}:\n{text}");
+    }
+    assert!(text.contains("pub struct CTree {"), "{text}");
 }
 
 #[test]

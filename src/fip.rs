@@ -1250,6 +1250,21 @@ impl<'a> FipChecker<'a> {
             }
             ExprKind::Match { value, arms } => {
                 let scrutinee_ty = self.expr_type(value);
+                // A match on a borrowed place (§4.3) binds `in` borrows: its
+                // boxes are the caller's, so they can supply no ReuseSlot.
+                // The FIP model has no borrowed boxes; take the tree `sink`.
+                if let Some(p) = Place::from_expr(value)
+                    && f.params
+                        .iter()
+                        .any(|q| q.name == p.root && q.pass != Pass::Sink)
+                    && type_contains_box(self.world, &scrutinee_ty)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        "E0806",
+                        "@fip function cannot match a borrowed Box value; its boxes belong to the caller and supply no ReuseSlot (take it `sink`)",
+                        value.span.clone(),
+                    ));
+                }
                 self.check_expr(f, value, state, true, false);
                 let mut arm_states = vec![];
                 for (pat, body) in arms {

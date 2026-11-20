@@ -202,8 +202,9 @@ library into a Rust program and exercises every form.
   `// @export vsys direct rust=<path>` block (`affine extern type World;`
   with accessor imports such as `fn world_type_count(in w: World) ->
   ForeignVal[u64];`) may be an `in` parameter of an exported function. The
-  binding's `World<'a>` is made with `World::lend(&value)` from any Rust
-  value; the handle word is its address. The linking crate implements the
+  binding's `World<'a>` is made with `unsafe { World::lend(&value) }`; the
+  handle word is the value's address, and the caller vouches that it has the
+  type the accessors read (nothing checks it). The linking crate implements the
   accessors at `<path>` over the same Rust type
   (`extern "C" fn world_type_count(w: *const Types) -> u64`). Vesper only
   passes the word on to the imports. This is how the checker's `World` and

@@ -463,3 +463,161 @@ fn main() -> u64 {
 fn borrowed_string_bindings_are_not_freed() {
     native_runs("strings", STRINGS, 2 + 2 * 36, true);
 }
+
+// ---------------------------------------------------------------------------
+// Review follow-ups: the other passes that free or reuse what a match binds.
+
+#[test]
+fn fip_functions_cannot_match_borrowed_boxes() {
+    // A borrowed box supplies no ReuseSlot: `Box::new(x)` must not hand
+    // the caller's allocation back as a new box.
+    let c = codes(
+        "@fip
+fn duplicate(in b: Box[u64]) -> Box[u64] {
+    match b {
+        Box(x) => Box::new(x),
+    }
+}
+fn main() -> u64 { 0 }",
+    );
+    assert!(c.iter().any(|c| c == "E0806"), "{c:?}");
+}
+
+const INLINED: &str = "
+struct Data {
+    xs: ChunkSeq[u64],
+    n: u64,
+}
+
+fn count(in d: Data) -> u64 {
+    match d {
+        Data { xs, n } => wrapping_add(n, xs.len()),
+    }
+}
+
+fn main() -> u64 {
+    let mut xs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    xs.push(1);
+    xs.push(2);
+    xs.push(3);
+    let d = Data { xs: xs, n: 10 };
+    let a = count(in d);
+    let b = count(in d);
+    wrapping_add(a, wrapping_add(b, d.xs.len()))
+}
+";
+
+#[test]
+fn small_borrowed_matches_are_not_inlined_into_owners() {
+    // Inlined into `main`, which owns `d`, the borrowed scrutinee would
+    // read as a move and empty `d.xs` for the second call.
+    let c = accepted(INLINED);
+    let mut runtime = Runtime::new(&c.world);
+    let want = runtime.run("main", vec![]).unwrap().to_string();
+    assert_eq!(want, "29");
+    for optimize in [true, false] {
+        let stray = seq_runtime::stray_frees();
+        let got = native::jit_with_options(&c.world, "main", optimize)
+            .unwrap()
+            .to_string();
+        assert_eq!(got, want, "JIT (optimize {optimize})");
+        assert_eq!(seq_runtime::stray_frees(), stray, "optimize {optimize}");
+    }
+}
+
+const RES_VSYS: &str = r#"sys library Res (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_res", artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    affine extern type Probe drop res_release;
+    fn res_open(n: u64) -> ForeignVal[Probe];
+    fn res_close(sink p: Probe) -> ForeignVal[u64];
+    fn res_release(sink p: Probe) -> ForeignVal[Unit];
+}
+"#;
+
+const RES_SOURCE: &str = r#"
+fn open(n: u64) -> Probe eff [Ffi[Res]] {
+    match Res::res_open(n) {
+        Ok(p) => p,
+        Err(_) => loop {},
+    }
+}
+
+// A wildcard arm of a borrowed match releases nothing: `p` is the caller's.
+fn peek(in p: Probe) -> u64 eff [Ffi[Res]] {
+    match p {
+        _ => 7,
+    }
+}
+
+pub fn borrowed_wildcard() -> u64 eff [Ffi[Res]] {
+    let p = open(1);
+    let a = peek(in p);
+    let b = peek(in p);
+    wrapping_add(wrapping_add(a, b), Res::res_close(p))
+}
+"#;
+
+static RES_OPENED: AtomicU64 = AtomicU64::new(0);
+static RES_CLOSED: AtomicU64 = AtomicU64::new(0);
+static RES_RELEASED: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn res_open(n: u64) -> *mut u64 {
+    RES_OPENED.fetch_add(1, Ordering::SeqCst);
+    Box::into_raw(Box::new(n))
+}
+extern "C" fn res_close(p: *mut u64) -> u64 {
+    RES_CLOSED.fetch_add(1, Ordering::SeqCst);
+    // SAFETY: the sink import consumes the handle exactly once.
+    *unsafe { Box::from_raw(p) }
+}
+extern "C" fn res_release(p: *mut u64) {
+    RES_RELEASED.fetch_add(1, Ordering::SeqCst);
+    // SAFETY: the drop import consumes the handle exactly once.
+    drop(unsafe { Box::from_raw(p) });
+}
+
+#[test]
+fn borrowed_wildcards_release_no_foreign_handle() {
+    let target = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        ("x86_64-unknown-linux-gnu", "sysv64")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        ("aarch64-unknown-linux-gnu", "aapcs64")
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        ("aarch64-apple-darwin", "darwin64")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        ("x86_64-pc-windows-msvc", "win64")
+    } else {
+        eprintln!("no .vsys target for this host");
+        return;
+    };
+    let mut imports = vesper::ffi_lowering::Imports::new();
+    imports
+        .add(
+            &RES_VSYS
+                .replace("@TARGET@", target.0)
+                .replace("@ABI@", target.1),
+            vesper::ffi_lowering::Handler::Direct,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    let checked =
+        vesper::ffi_lowering::check_source(RES_SOURCE, &imports).unwrap_or_else(|e| panic!("{e}"));
+    let symbols: Vec<(&str, *const u8)> = vec![
+        ("res_open", res_open as *const u8),
+        ("res_close", res_close as *const u8),
+        ("res_release", res_release as *const u8),
+    ];
+    let got = checked
+        .jit("borrowed_wildcard", &symbols)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .to_string();
+    assert_eq!(got, "15");
+    assert_eq!(RES_OPENED.load(Ordering::SeqCst), 1);
+    assert_eq!(RES_CLOSED.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        RES_RELEASED.load(Ordering::SeqCst),
+        0,
+        "peek released the caller's handle"
+    );
+}
