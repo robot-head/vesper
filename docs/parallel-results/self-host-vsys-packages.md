@@ -51,6 +51,13 @@ and an evaluator host for `vesper run`) follows in its own PR.
     library by its link name (`-l<name>`), searching the new
     `--link-search <dir>` directories. Unix only for now.
   * `run` refuses with a pointer to `jit`/`build` (part 2).
+  * Review fixes: `build` compiles through the CLI's `native_code`, so the
+    verifiers that `ConstTime`, `Realtime` and `DetFloat` imply still run;
+    a `link = "static"` library links its archive (by path from
+    `--link-search`, else `-Wl,-Bstatic`) even beside a shared one.
+  * `vesper-hybrid` lists `vesper-std-host` too (its manifest test requires
+    every root dependency), and the CLI reaches the host through
+    `ffi_lowering::std_host_symbols`.
 * **Packages.** `@vesper-std/fs`, `process` and `env` name their `.vsys` in
   their manifests.
 * **Driver.** `crates/vesper-std-driver/vesper/src/lib.ves` drops its three
@@ -75,7 +82,9 @@ and an evaluator host for `vesper run`) follows in its own PR.
 * `build_links_an_executable_with_a_dependency_library`: `vesper build` links
   the executable with a C `libprobe.a` the dependency's `.vsys` names, and
   runs it (Unix).
-* `jit_refuses_a_library_it_does_not_host`,
+* `build_keeps_capability_implied_verifiers`,
+  `static_libraries_link_their_archive`,
+  `jit_refuses_a_library_it_does_not_host`,
   `cli_reports_a_dependency_error_at_its_file`,
   `a_library_build_links_a_carried_import_by_name`,
   `bool_parameters_and_results`.
@@ -88,7 +97,8 @@ with `vesper build --link-search <dir of libvesper_std_host.a>` and read a
 
 No file under `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`,
 `lean/**`, `bootstrap/**` or `packages/vesper-compiler/**` changed. The
-bootstrap-stage1 workflow result is linked from the PR.
+bootstrap-stage1 workflow (Stage 1 reproducibility and cross-backend
+ratchet, Stage 0 two-seed build) passed on the branch.
 
 ## Numbers
 
