@@ -1,0 +1,641 @@
+// `Resolver` of src/packages.rs: module and item lookup over the whole
+// package graph (`use` targets, qualified paths, re-exports) and the
+// internal name of every item.
+//
+// A call that fails (`Err(Diagnostic)` in Rust) returns `none()` and
+// leaves the diagnostic pending in `St.err_*`; the caller emits it with
+// `emit` or drops it.
+
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use self::state::{
+    St,
+    at32,
+    at64,
+    emit,
+    err,
+    find_module,
+    hi,
+    inc,
+    lo,
+    mod_path_into,
+    mod_path_len,
+    mod_seg,
+    n32,
+    none,
+    pair,
+    push_decimal,
+    push_sym,
+    sym_byte,
+    sym_len,
+    sym_less,
+    sym_path_split,
+    sym_slice,
+    sym_starts,
+    w
+};
+
+pub fn no_key() -> u64 {
+    18446744073709551615
+}
+
+// Codes of the loader's diagnostics (src/packages.rs).
+pub fn unknown_import() -> u32 {
+    111
+}
+
+pub fn private_item() -> u32 {
+    112
+}
+
+pub fn ambiguous() -> u32 {
+    113
+}
+
+// ---------------------------------------------------------------- names
+
+// Appends bytes `from..to` of `sym`, escaped (`escape_component`): `_`
+// becomes `_1` and `-` becomes `_2`.
+fn push_escaped(inout s: St, sym: u32, from: u64, to: u64) {
+    let (a, z) = s.g.span(symbol_from_id(sym));
+    let mut run = wrapping_add(a, from);
+    let end = wrapping_add(a, to);
+    let mut i = run;
+    loop {
+        if i >= end || i >= z {
+            break;
+        }
+        let c = match s.g.text_byte(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c == 95 || c == 45 {
+            s.buf.push_str(in s.g.text[run..i]);
+            if c == 95 {
+                s.buf.push_str(in "_1");
+            } else {
+                s.buf.push_str(in "_2");
+            }
+            run = inc(i);
+        }
+        i = inc(i);
+    }
+    let stop = if end < z {
+        end
+    } else {
+        z
+    };
+    if run < stop {
+        s.buf.push_str(in s.g.text[run..stop]);
+    }
+}
+
+// `mangled(name, path, item)`: the escaped components of the package's
+// scope and name, the module path and the item, joined by `__`.
+fn mangle(inout s: St, m: u32, item: u32) -> u32 {
+    let name = at32(in s.pkg_name, w(at32(in s.mod_pkg, w(m))));
+    let n = sym_len(in s, name);
+    // `trim_start_matches('@')`.
+    let mut start: u64 = 0;
+    loop {
+        if start >= n || sym_byte(in s, name, start) != 64 {
+            break;
+        }
+        start = inc(start);
+    }
+    let mut slash = n;
+    let mut i = start;
+    loop {
+        if i >= n {
+            break;
+        }
+        if sym_byte(in s, name, i) == 47 {
+            slash = i;
+            break;
+        }
+        i = inc(i);
+    }
+    s.buf.clear();
+    if slash == n {
+        // No scope: `("", name)`, the name untrimmed.
+        s.buf.push_str(in "__");
+        push_escaped(inout s, name, 0, n);
+    } else {
+        push_escaped(inout s, name, start, slash);
+        s.buf.push_str(in "__");
+        push_escaped(inout s, name, inc(slash), n);
+    }
+    for k in 0..mod_path_len(in s, m) {
+        s.buf.push_str(in "__");
+        let x = mod_seg(in s, m, k);
+        push_escaped(inout s, x, 0, sym_len(in s, x));
+    }
+    s.buf.push_str(in "__");
+    push_escaped(inout s, item, 0, sym_len(in s, item));
+    s.g.intern(in s.buf).id()
+}
+
+// `Resolver::name_of`: its root re-export name, its plain name in the root
+// package's root module, else the mangled name.
+pub fn name_of(inout s: St, key: u64) -> u32 {
+    match s.renamed.get(key) {
+        Option::Some(n) => {
+            return n;
+        },
+        Option::None => {},
+    }
+    let m = hi(key);
+    let item = lo(key);
+    if m == s.root_mod {
+        return item;
+    }
+    match s.mangled.get(key) {
+        Option::Some(n) => {
+            return n;
+        },
+        Option::None => {},
+    }
+    let x = mangle(inout s, m, item);
+    s.mangled.insert(key, x);
+    x
+}
+
+// `Resolver::shown`: `@scope/name::m::item`, appended to `out`.
+pub fn push_shown(in s: St, key: u64, inout out: String) {
+    let m = hi(key);
+    push_sym(in s, at32(in s.pkg_name, w(at32(in s.mod_pkg, w(m)))), inout out);
+    for k in 0..mod_path_len(in s, m) {
+        out.push_str(in "::");
+        push_sym(in s, mod_seg(in s, m, k), inout out);
+    }
+    out.push_str(in "::");
+    push_sym(in s, lo(key), inout out);
+}
+
+pub fn shown(inout s: St, key: u64) -> u32 {
+    let mut t = String::new();
+    push_shown(in s, key, inout t);
+    s.g.intern(in t).id()
+}
+
+// ---------------------------------------------------------------- paths
+
+// `Resolver::root_of`: a path root, `self` (the package root), `super`
+// repeated `supers` times (ancestors of module `cur`) or the dependency
+// `package` of `cur`'s package. Returns the package (or `none()`), writes
+// the base module path to `base` and its display name to `shown`.
+fn root_of(
+    inout s: St,
+    cur: u32,
+    package: u32,
+    supers: u32,
+    start: u32,
+    end: u32,
+    inout base: ChunkSeq[u32],
+    inout shown: String
+) -> u32 {
+    let p = at32(in s.mod_pkg, w(cur));
+    base.clear();
+    shown.clear();
+    if package != none() {
+        let f = w(at32(in s.pkg_dep_first, w(p)));
+        let n = w(at32(in s.pkg_dep_len, w(p)));
+        for i in 0..n {
+            if at32(in s.dep_name, wrapping_add(f, i)) == package {
+                let d = at32(in s.dep_target, wrapping_add(f, i));
+                push_sym(in s, at32(in s.pkg_name, w(d)), inout shown);
+                return d;
+            }
+        }
+        let mut optional = false;
+        let of = w(at32(in s.pkg_opt_first, w(p)));
+        let on = w(at32(in s.pkg_opt_len, w(p)));
+        for i in 0..on {
+            if at32(in s.opt_name, wrapping_add(of, i)) == package {
+                optional = true;
+            }
+        }
+        err(inout s, unknown_import(), start, end);
+        let mut msg = String::new();
+        push_sym(in s, package, inout msg);
+        if optional {
+            msg.push_str(in " is an optional dependency of ");
+            push_sym(in s, at32(in s.pkg_name, w(p)), inout msg);
+            msg.push_str(in ", and package checking does not enable optional dependencies yet");
+        } else {
+            msg.push_str(in " is not a dependency of ");
+            push_sym(in s, at32(in s.pkg_name, w(p)), inout msg);
+            msg.push_str(in "; add it to [dependencies] in Loom.toml");
+        }
+        s.err_msg.push_str(in msg);
+        return none();
+    }
+    let depth = mod_path_len(in s, cur);
+    if supers == 0 {
+        shown.push_str(in "self");
+        return p;
+    }
+    if w(supers) > depth {
+        err(inout s, unknown_import(), start, end);
+        let mut msg = String::new();
+        msg.push_str(in "`super` goes above the package root: module ");
+        msg.push_str(in "self");
+        for k in 0..depth {
+            msg.push_str(in "::");
+            push_sym(in s, mod_seg(in s, cur, k), inout msg);
+        }
+        msg.push_str(in " has ");
+        push_decimal(inout msg, depth);
+        msg.push_str(in " ancestor module(s)");
+        s.err_msg.push_str(in msg);
+        return none();
+    }
+    shown.push_str(in "self");
+    let keep = wrapping_sub(depth, w(supers));
+    for k in 0..keep {
+        let x = mod_seg(in s, cur, k);
+        base.push(x);
+        shown.push_str(in "::");
+        push_sym(in s, x, inout shown);
+    }
+    p
+}
+
+// `Resolver::use_module`: the module use row `u` of module `cur` names, or
+// `none()`; writes its display name to `shown`.
+pub fn use_module(inout s: St, cur: u32, u: u32, inout shown: String) -> u32 {
+    let start = at32(in s.use_start, w(u));
+    let end = at32(in s.use_end, w(u));
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let pkg = root_of(
+        inout s,
+        cur,
+        at32(in s.use_package, w(u)),
+        at32(in s.use_supers, w(u)),
+        start,
+        end,
+        inout path,
+        inout shown
+    );
+    if pkg == none() {
+        return none();
+    }
+    let f = w(at32(in s.use_path_first, w(u)));
+    let n = w(at32(in s.use_path_len, w(u)));
+    for i in 0..n {
+        let x = at32(in s.seg, wrapping_add(f, i));
+        path.push(x);
+        shown.push_str(in "::");
+        push_sym(in s, x, inout shown);
+    }
+    let m = find_module(in s, pkg, in path);
+    if m == none() {
+        err(inout s, unknown_import(), start, end);
+        let mut msg = String::new();
+        msg.push_str(in "no module ");
+        msg.push_str(in shown);
+        s.err_msg.push_str(in msg);
+    }
+    m
+}
+
+// `Resolver::lookup`: item `name` of module `tm`, declared there (and
+// `pub`, unless the lookup comes from that module) or one of its `pub use`
+// names. Returns the item key (or `no_key()`) and its kind.
+pub fn lookup(inout s: St, tm: u32, name: u32, same: bool, in shown: String, start: u32, end: u32)
+    -> (u64, u8) {
+    let k = pair(tm, name);
+    match s.item_kind.get(k) {
+        Option::Some(kind) => {
+            if !same && !s.public.contains_key(k) {
+                err(inout s, private_item(), start, end);
+                let mut msg = String::new();
+                msg.push_str(in "'");
+                push_sym(in s, name, inout msg);
+                msg.push_str(in "' is private to module ");
+                msg.push_str(in shown);
+                s.err_msg.push_str(in msg);
+                s.err_help.push_str(in "mark the item `pub` to export it");
+                s.err_has_help = true;
+                return (no_key(), 0);
+            }
+            return (k, kind);
+        },
+        Option::None => {},
+    }
+    match s.reexp_key.get(k) {
+        Option::Some(target) => {
+            let kind = match s.reexp_kind.get(k) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            return (target, kind);
+        },
+        Option::None => {},
+    }
+    err(inout s, unknown_import(), start, end);
+    let mut msg = String::new();
+    msg.push_str(in "module ");
+    msg.push_str(in shown);
+    msg.push_str(in " has no item '");
+    push_sym(in s, name, inout msg);
+    msg.push_str(in "'");
+    s.err_msg.push_str(in msg);
+    let c = sym_byte(in s, name, 0);
+    if sym_len(in s, name) > 0 && c >= 65 && c <= 90 && mod_path_len(in s, tm) == 0 {
+        s
+            .err_help
+            .push_str(
+            in "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import"
+        );
+        s.err_has_help = true;
+    }
+    (no_key(), 0)
+}
+
+// The local name of use-name row `n` (`UseName::local`).
+pub fn local_of(in s: St, n: u64) -> u32 {
+    let alias = at32(in s.un_alias, n);
+    if alias != none() {
+        alias
+    } else {
+        at32(in s.un_name, n)
+    }
+}
+
+// `Resolver::reexports`: every module's `pub use` names, resolved to the
+// items they re-export, following chains to a fixed point. Names that do
+// not resolve are reported when the module's imports are bound.
+pub fn reexports(inout s: St) {
+    let mut shown = String::new();
+    loop {
+        let mut changed = false;
+        for m in 0..s.mod_pkg.len() {
+            let uf = w(at32(in s.mod_use_first, m));
+            let un = w(at32(in s.mod_use_len, m));
+            for ui in 0..un {
+                let u = wrapping_add(uf, ui);
+                let public = match s.use_public.try_get(u) {
+                    Option::Some(x) => x != 0,
+                    Option::None => false,
+                };
+                if public {
+                    let tm = use_module(inout s, n32(m), n32(u), inout shown);
+                    s.err_code = 0;
+                    if tm != none() {
+                        let same = tm == n32(m);
+                        let nf = w(at32(in s.use_names_first, u));
+                        let nn = w(at32(in s.use_names_len, u));
+                        for k in 0..nn {
+                            let n = wrapping_add(nf, k);
+                            let local = local_of(in s, n);
+                            let key = pair(n32(m), local);
+                            if !s.reexp_key.contains_key(key) {
+                                let (found, kind) = lookup(
+                                    inout s,
+                                    tm,
+                                    at32(in s.un_name, n),
+                                    same,
+                                    in shown,
+                                    at32(in s.un_start, n),
+                                    at32(in s.un_end, n)
+                                );
+                                s.err_code = 0;
+                                if found != no_key() {
+                                    s.reexp_key.insert(key, found);
+                                    s.reexp_kind.insert(key, kind);
+                                    if n32(m) == s.root_mod {
+                                        s.root_reexports.push(local);
+                                    }
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+// `Resolver::overrides`: the items the root package's root module
+// re-exports take their root names (`pub use self::m::f as g;` exports
+// `m::f` as `g`). Visits the re-exported names in byte order, as Rust's
+// `BTreeMap` does.
+pub fn overrides(inout s: St) {
+    let r = s.root_mod;
+    if r == none() {
+        return;
+    }
+    // Insertion sort by text: a root module re-exports few names.
+    let mut order: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..s.root_reexports.len() {
+        let x = at32(in s.root_reexports, i);
+        order.push(x);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let a = at32(in order, wrapping_sub(j, 1));
+            let b = at32(in order, j);
+            if !sym_less(in s, b, a) {
+                break;
+            }
+            order.try_set(wrapping_sub(j, 1), b);
+            order.try_set(j, a);
+            j = wrapping_sub(j, 1);
+        }
+    }
+    let file = at32(in s.mod_file, w(r));
+    for i in 0..order.len() {
+        let local = at32(in order, i);
+        let item = at64_key(in s, pair(r, local));
+        if hi(item) == r && lo(item) == local {
+            continue;
+        }
+        match s.renamed.get(item) {
+            Option::Some(first) => {
+                // The span of the first use name of the root module whose
+                // local name is `local`.
+                let mut start: u32 = 0;
+                let mut end: u32 = 0;
+                let uf = w(at32(in s.mod_use_first, w(r)));
+                let un = w(at32(in s.mod_use_len, w(r)));
+                let mut found = false;
+                for ui in 0..un {
+                    let u = wrapping_add(uf, ui);
+                    let nf = w(at32(in s.use_names_first, u));
+                    let nn = w(at32(in s.use_names_len, u));
+                    for k in 0..nn {
+                        let n = wrapping_add(nf, k);
+                        if !found && local_of(in s, n) == local {
+                            found = true;
+                            start = at32(in s.un_start, n);
+                            end = at32(in s.un_end, n);
+                        }
+                    }
+                }
+                err(inout s, ambiguous(), start, end);
+                let mut msg = String::new();
+                push_shown(in s, item, inout msg);
+                msg.push_str(in " is re-exported by the root module as both '");
+                push_sym(in s, first, inout msg);
+                msg.push_str(in "' and '");
+                push_sym(in s, local, inout msg);
+                msg.push_str(in "'");
+                s.err_msg.push_str(in msg);
+                s.err_help.push_str(in "an item has one exported name; keep one `pub use`");
+                s.err_has_help = true;
+                emit(inout s, file);
+            },
+            Option::None => {
+                s.renamed.insert(item, local);
+            },
+        }
+    }
+}
+
+fn at64_key(in s: St, k: u64) -> u64 {
+    match s.reexp_key.get(k) {
+        Option::Some(x) => x,
+        Option::None => no_key(),
+    }
+}
+
+// `Resolver::qualified`: a qualified path `self::m::f`, `super::m::T::new`
+// or `@scope/name::m::E::V`, from module `cur`: its root, the longest
+// module path that leaves an item, the item, then any `::rest`, as the
+// item's internal name followed by `::rest`. Returns `none()` on error.
+pub fn qualified(inout s: St, cur: u32, path: u32, start: u32, end: u32) -> u32 {
+    // `path.split("::")`.
+    let mut segs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let n = sym_len(in s, path);
+    let mut a: u64 = 0;
+    loop {
+        let mut i = a;
+        let mut cut = n;
+        loop {
+            if inc(i) >= n {
+                break;
+            }
+            if sym_byte(in s, path, i) == 58 && sym_byte(in s, path, inc(i)) == 58 {
+                cut = i;
+                break;
+            }
+            i = inc(i);
+        }
+        let x = sym_slice(inout s, path, a, cut);
+        segs.push(x);
+        if cut >= n {
+            break;
+        }
+        a = wrapping_add(cut, 2);
+    }
+    let s0 = at32(in segs, 0);
+    let mut package = none();
+    let mut supers: u32 = 0;
+    let mut first: u64 = 1;
+    if sym_byte(in s, s0, 0) == 64 && sym_len(in s, s0) > 0 {
+        package = s0;
+    } else if s0 == s.s_super {
+        let mut k: u64 = 0;
+        loop {
+            if k >= segs.len() || at32(in segs, k) != s.s_super {
+                break;
+            }
+            k = inc(k);
+        }
+        supers = n32(k);
+        first = k;
+    }
+    let mut base: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut shown = String::new();
+    let pkg = root_of(inout s, cur, package, supers, start, end, inout base, inout shown);
+    if pkg == none() {
+        return none();
+    }
+    let rest = wrapping_sub(segs.len(), first);
+    if first >= segs.len() {
+        err(inout s, unknown_import(), start, end);
+        let mut msg = String::new();
+        msg.push_str(in "the path `");
+        push_sym(in s, path, inout msg);
+        msg.push_str(in "` names a module, not an item");
+        s.err_msg.push_str(in msg);
+        return none();
+    }
+    // The longest prefix of `rest` that is a module, leaving an item.
+    let mut j = rest;
+    let mut module = none();
+    let mut probe: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    loop {
+        if j == 0 {
+            break;
+        }
+        j = wrapping_sub(j, 1);
+        probe.clear();
+        probe.extend(in base.as_slice());
+        for k in 0..j {
+            probe.push(at32(in segs, wrapping_add(first, k)));
+        }
+        let m = find_module(in s, pkg, in probe);
+        if m != none() {
+            module = m;
+            break;
+        }
+    }
+    if module == none() {
+        err(inout s, unknown_import(), start, end);
+        let mut msg = String::new();
+        msg.push_str(in "no module ");
+        msg.push_str(in shown);
+        s.err_msg.push_str(in msg);
+        return none();
+    }
+    for k in 0..j {
+        shown.push_str(in "::");
+        push_sym(in s, at32(in segs, wrapping_add(first, k)), inout shown);
+    }
+    let same = module == cur;
+    let item = at32(in segs, wrapping_add(first, j));
+    let (key, kind) = lookup(inout s, module, item, same, in shown, start, end);
+    if key == no_key() {
+        let c = sym_byte(in s, item, 0);
+        if s
+            .err_code
+            == unknown_import()
+            && inc(j)
+            < rest
+            && sym_len(in s, item)
+            > 0
+            && c
+            >= 97
+            && c
+            <= 122 {
+            err(inout s, unknown_import(), start, end);
+            let mut msg = String::new();
+            msg.push_str(in "no module ");
+            msg.push_str(in shown);
+            msg.push_str(in "::");
+            push_sym(in s, item, inout msg);
+            s.err_msg.push_str(in msg);
+        }
+        return none();
+    }
+    let target = name_of(inout s, key);
+    if inc(j) >= rest {
+        return target;
+    }
+    let mut out = String::new();
+    push_sym(in s, target, inout out);
+    for k in inc(j)..rest {
+        out.push_str(in "::");
+        push_sym(in s, at32(in segs, wrapping_add(first, k)), inout out);
+    }
+    s.g.intern(in out).id()
+}

@@ -23,6 +23,72 @@ use self::dragon::{
 };
 use self::index::raise;
 
+// Word-stream value tags (the layout above).
+const TAG_NULL: u64 = 0;
+const TAG_BOOL: u64 = 1;
+const TAG_U64: u64 = 2;
+const TAG_I64: u64 = 3;
+const TAG_F64: u64 = 4;
+const TAG_STRING: u64 = 5;
+const TAG_ARRAY: u64 = 6;
+const TAG_OBJECT: u64 = 7;
+const TAG_RAW: u64 = 8;
+// Raw token kinds, in `Kind` order (Null Bool Number String Array Object).
+const KIND_STRING: u64 = 3;
+const KIND_ARRAY: u64 = 4;
+const KIND_OBJECT: u64 = 5;
+// Words per raw token record and per remembered key.
+const RAW_TOKEN_WORDS: u64 = 3;
+const KEY_WORDS: u64 = 2;
+// The hard nesting ceiling, whatever `max_depth` says (src/encode.rs).
+const HARD_MAX_DEPTH: u64 = 128;
+// src/encode.rs `FLOAT_TEXT_BYTES`: the longest float text accepted.
+const FLOAT_TEXT_BYTES: u64 = 512;
+// Preflight charges two formatting passes per float.
+const FLOAT_PASSES: u64 = 2;
+const U64_MAX: u64 = 0xffffffffffffffff;
+// IEEE 754 binary64: an all-ones exponent is infinite or NaN.
+const MANTISSA_BITS: u64 = 52;
+const EXPONENT_MASK: u64 = 0x7ff;
+// Encoded widths: `null`/`true`, `false`, a two-byte escape, `\uXXXX`, a
+// pair of quotes or brackets.
+const NULL_LEN: u64 = 4;
+const TRUE_LEN: u64 = 4;
+const FALSE_LEN: u64 = 5;
+const ESCAPE_LEN: u64 = 2;
+const UNICODE_ESCAPE_LEN: u64 = 6;
+const DELIMITERS_LEN: u64 = 2;
+const DECIMAL_BASE: u64 = 10;
+const NIBBLE_MASK: u64 = 0x0f;
+// `hex`: '0' + n below ten, 'a' - 10 + n above.
+const HEX_LETTER_OFFSET: u64 = 0x57;
+const ASCII_BACKSPACE: u64 = 0x08;
+const ASCII_TAB: u64 = 0x09;
+const ASCII_LF: u64 = 0x0a;
+const ASCII_FF: u64 = 0x0c;
+const ASCII_CR: u64 = 0x0d;
+const ASCII_SPACE: u64 = 0x20;
+const ASCII_QUOTE: u64 = 0x22;
+const ASCII_COMMA: u64 = 0x2c;
+const ASCII_MINUS: u64 = 0x2d;
+const ASCII_ZERO: u64 = 0x30;
+const ASCII_COLON: u64 = 0x3a;
+const ASCII_LBRACKET: u64 = 0x5b;
+const ASCII_BACKSLASH: u64 = 0x5c;
+const ASCII_RBRACKET: u64 = 0x5d;
+const ASCII_LOWER_A: u64 = 0x61;
+const ASCII_LOWER_B: u64 = 0x62;
+const ASCII_LOWER_E: u64 = 0x65;
+const ASCII_LOWER_F: u64 = 0x66;
+const ASCII_LOWER_L: u64 = 0x6c;
+const ASCII_LOWER_N: u64 = 0x6e;
+const ASCII_LOWER_R: u64 = 0x72;
+const ASCII_LOWER_S: u64 = 0x73;
+const ASCII_LOWER_T: u64 = 0x74;
+const ASCII_LOWER_U: u64 = 0x75;
+const ASCII_LBRACE: u64 = 0x7b;
+const ASCII_RBRACE: u64 = 0x7d;
+
 copy struct Check {
     lim: EncodeLimits,
     work: u64,
@@ -38,7 +104,7 @@ fn fail(kind: ErrorKind) -> Unit eff [Fail[Error]] {
 
 // `add`: checked, Overflow on wrap.
 fn add(a: u64, b: u64) -> u64 eff [Fail[Error]] {
-    if b > wrapping_sub(18446744073709551615, a) {
+    if b > wrapping_sub(U64_MAX, a) {
         fail(ErrorKind::Overflow);
     }
     wrapping_add(a, b)
@@ -90,10 +156,23 @@ fn string_bytes(inout c: Check, n: u64) -> Unit eff [Fail[Error]] {
 }
 
 fn escaped_width(b: u64) -> u64 {
-    if b == 34 || b == 92 || b == 10 || b == 13 || b == 9 || b == 8 || b == 12 {
-        2
-    } else if b < 32 {
-        6
+    if b
+        == ASCII_QUOTE
+        || b
+        == ASCII_BACKSLASH
+        || b
+        == ASCII_LF
+        || b
+        == ASCII_CR
+        || b
+        == ASCII_TAB
+        || b
+        == ASCII_BACKSPACE
+        || b
+        == ASCII_FF {
+        ESCAPE_LEN
+    } else if b < ASCII_SPACE {
+        UNICODE_ESCAPE_LEN
     } else {
         1
     }
@@ -102,7 +181,7 @@ fn escaped_width(b: u64) -> u64 {
 fn string(inout c: Check, in pool: Slice[u8], off: u64, len: u64) -> u64 eff [Fail[Error]] {
     string_bytes(inout c, len);
     charge(inout c, len);
-    let mut size: u64 = 2;
+    let mut size: u64 = DELIMITERS_LEN;
     for i in 0..len {
         size = add(size, escaped_width(byte(in pool, wrapping_add(off, i))));
     }
@@ -110,7 +189,7 @@ fn string(inout c: Check, in pool: Slice[u8], off: u64, len: u64) -> u64 eff [Fa
 }
 
 fn depth_check(in c: Check, depth: u64) -> Unit eff [Fail[Error]] {
-    if depth >= c.lim.max_depth || depth >= 128 {
+    if depth >= c.lim.max_depth || depth >= HARD_MAX_DEPTH {
         fail(ErrorKind::DepthLimit);
     }
 }
@@ -119,19 +198,18 @@ fn digits(n: u64) -> u64 {
     let mut d: u64 = 1;
     let mut x = n;
     loop {
-        if x < 10 {
+        if x < DECIMAL_BASE {
             break;
         }
         d = wrapping_add(d, 1);
-        x = x / 10;
+        x = x / DECIMAL_BASE;
     }
     d
 }
 
-// The work of one bounded binary64 formatting pass (`FLOAT_FORMAT_PASS_WORK`).
-fn float_pass_work() -> u64 {
-    262656
-}
+// The work of one bounded binary64 formatting pass (src/encode.rs
+// `FLOAT_FORMAT_PASS_WORK`, FLOAT_TEXT_BYTES^2 + FLOAT_TEXT_BYTES).
+const FLOAT_FORMAT_PASS_WORK: u64 = 262656;
 
 fn same_bytes(in pool: Slice[u8], a: u64, b: u64, n: u64) -> bool {
     for i in 0..n {
@@ -146,7 +224,7 @@ fn same_bytes(in pool: Slice[u8], a: u64, b: u64, n: u64) -> bool {
 fn value(inout c: Check, in w: Slice[u64], in pool: Slice[u8], depth: u64)
     -> u64 eff [Fail[Error]] {
     let tag = next(inout c, in w);
-    if tag == 8 {
+    if tag == TAG_RAW {
         let _off = next(inout c, in w);
         let len = next(inout c, in w);
         let n = next(inout c, in w);
@@ -156,53 +234,53 @@ fn value(inout c: Check, in w: Slice[u64], in pool: Slice[u8], depth: u64)
             let relative = next(inout c, in w);
             let bytes = next(inout c, in w);
             token(inout c);
-            if kind == 4 || kind == 5 {
+            if kind == KIND_ARRAY || kind == KIND_OBJECT {
                 let d = add(depth, relative);
                 depth_check(in c, d);
             }
-            if kind == 3 {
+            if kind == KIND_STRING {
                 string_bytes(inout c, bytes);
             }
         }
         return len;
     }
     token(inout c);
-    if tag == 0 {
-        4
-    } else if tag == 1 {
+    if tag == TAG_NULL {
+        NULL_LEN
+    } else if tag == TAG_BOOL {
         if next(inout c, in w) != 0 {
-            4
+            TRUE_LEN
         } else {
-            5
+            FALSE_LEN
         }
-    } else if tag == 2 {
+    } else if tag == TAG_U64 {
         digits(next(inout c, in w))
-    } else if tag == 3 {
+    } else if tag == TAG_I64 {
         let v = wrapping_i64(next(inout c, in w));
         if v < 0 {
             add(1, digits(wrapping_sub(0, wrapping_u64(v))))
         } else {
             digits(wrapping_u64(v))
         }
-    } else if tag == 4 {
+    } else if tag == TAG_F64 {
         let bits = next(inout c, in w);
-        if (bits >> 52) & 2047 == 2047 {
+        if (bits >> MANTISSA_BITS) & EXPONENT_MASK == EXPONENT_MASK {
             fail(ErrorKind::Number);
         }
-        charge(inout c, wrapping_mul(float_pass_work(), 2));
+        charge(inout c, wrapping_mul(FLOAT_FORMAT_PASS_WORK, FLOAT_PASSES));
         let len = shortest_len(shortest(bits));
-        if len > 512 {
+        if len > FLOAT_TEXT_BYTES {
             fail(ErrorKind::Number);
         }
         len
-    } else if tag == 5 {
+    } else if tag == TAG_STRING {
         let off = next(inout c, in w);
         let len = next(inout c, in w);
         string(inout c, in pool, off, len)
-    } else if tag == 6 {
+    } else if tag == TAG_ARRAY {
         depth_check(in c, depth);
         let count = next(inout c, in w);
-        let mut size: u64 = 2;
+        let mut size: u64 = DELIMITERS_LEN;
         for i in 0..count {
             if i != 0 {
                 size = add(size, 1);
@@ -214,20 +292,20 @@ fn value(inout c: Check, in w: Slice[u64], in pool: Slice[u8], depth: u64)
     } else {
         depth_check(in c, depth);
         let count = next(inout c, in w);
-        let mut size: u64 = 2;
+        let mut size: u64 = DELIMITERS_LEN;
         // Keys seen so far: (offset, length) pairs.
-        let mut keys: ChunkSeq[u64] = ChunkSeq::with_capacity(wrapping_mul(count, 2));
+        let mut keys: ChunkSeq[u64] = ChunkSeq::with_capacity(wrapping_mul(count, KEY_WORDS));
         for i in 0..count {
             let off = next(inout c, in w);
             let len = next(inout c, in w);
             // The object key is itself a string token.
             token(inout c);
             for j in 0..i {
-                let p_off = match keys.try_get(wrapping_mul(j, 2)) {
+                let p_off = match keys.try_get(wrapping_mul(j, KEY_WORDS)) {
                     Option::Some(v) => v,
                     Option::None => 0,
                 };
-                let p_len = match keys.try_get(wrapping_add(wrapping_mul(j, 2), 1)) {
+                let p_len = match keys.try_get(wrapping_add(wrapping_mul(j, KEY_WORDS), 1)) {
                     Option::Some(v) => v,
                     Option::None => 0,
                 };
@@ -303,127 +381,131 @@ fn put_integer(inout out: Slice[u8], inout wr: W, n: u64) {
             break;
         }
         i = wrapping_sub(i, 1);
-        out.try_set(wrapping_add(wr.pos, i), wrapping_u8(wrapping_add(48, x % 10)));
-        x = x / 10;
+        out
+            .try_set(
+            wrapping_add(wr.pos, i),
+            wrapping_u8(wrapping_add(ASCII_ZERO, x % DECIMAL_BASE))
+        );
+        x = x / DECIMAL_BASE;
     }
     wr.pos = wrapping_add(wr.pos, d);
 }
 
 fn hex(n: u64) -> u64 {
-    if n < 10 {
-        wrapping_add(48, n)
+    if n < DECIMAL_BASE {
+        wrapping_add(ASCII_ZERO, n)
     } else {
-        wrapping_add(87, n)
+        wrapping_add(HEX_LETTER_OFFSET, n)
     }
 }
 
 fn put_string(inout out: Slice[u8], inout wr: W, in pool: Slice[u8], off: u64, len: u64) {
-    put(inout out, inout wr, 34);
+    put(inout out, inout wr, ASCII_QUOTE);
     for i in 0..len {
         let b = byte(in pool, wrapping_add(off, i));
-        if b == 34 || b == 92 {
-            put(inout out, inout wr, 92);
+        if b == ASCII_QUOTE || b == ASCII_BACKSLASH {
+            put(inout out, inout wr, ASCII_BACKSLASH);
             put(inout out, inout wr, b);
-        } else if b == 10 {
-            put(inout out, inout wr, 92);
-            put(inout out, inout wr, 110);
-        } else if b == 13 {
-            put(inout out, inout wr, 92);
-            put(inout out, inout wr, 114);
-        } else if b == 9 {
-            put(inout out, inout wr, 92);
-            put(inout out, inout wr, 116);
-        } else if b == 8 {
-            put(inout out, inout wr, 92);
-            put(inout out, inout wr, 98);
-        } else if b == 12 {
-            put(inout out, inout wr, 92);
-            put(inout out, inout wr, 102);
-        } else if b < 32 {
-            put(inout out, inout wr, 92);
-            put(inout out, inout wr, 117);
-            put(inout out, inout wr, 48);
-            put(inout out, inout wr, 48);
+        } else if b == ASCII_LF {
+            put(inout out, inout wr, ASCII_BACKSLASH);
+            put(inout out, inout wr, ASCII_LOWER_N);
+        } else if b == ASCII_CR {
+            put(inout out, inout wr, ASCII_BACKSLASH);
+            put(inout out, inout wr, ASCII_LOWER_R);
+        } else if b == ASCII_TAB {
+            put(inout out, inout wr, ASCII_BACKSLASH);
+            put(inout out, inout wr, ASCII_LOWER_T);
+        } else if b == ASCII_BACKSPACE {
+            put(inout out, inout wr, ASCII_BACKSLASH);
+            put(inout out, inout wr, ASCII_LOWER_B);
+        } else if b == ASCII_FF {
+            put(inout out, inout wr, ASCII_BACKSLASH);
+            put(inout out, inout wr, ASCII_LOWER_F);
+        } else if b < ASCII_SPACE {
+            put(inout out, inout wr, ASCII_BACKSLASH);
+            put(inout out, inout wr, ASCII_LOWER_U);
+            put(inout out, inout wr, ASCII_ZERO);
+            put(inout out, inout wr, ASCII_ZERO);
             put(inout out, inout wr, hex(b >> 4));
-            put(inout out, inout wr, hex(b & 15));
+            put(inout out, inout wr, hex(b & NIBBLE_MASK));
         } else {
             put(inout out, inout wr, b);
         }
     }
-    put(inout out, inout wr, 34);
+    put(inout out, inout wr, ASCII_QUOTE);
 }
 
 fn write_value(inout out: Slice[u8], inout wr: W, in w: Slice[u64], in pool: Slice[u8]) {
     let tag = take(inout wr, in w);
-    if tag == 0 {
-        put(inout out, inout wr, 110);
-        put(inout out, inout wr, 117);
-        put(inout out, inout wr, 108);
-        put(inout out, inout wr, 108);
-    } else if tag == 1 {
+    if tag == TAG_NULL {
+        put(inout out, inout wr, ASCII_LOWER_N);
+        put(inout out, inout wr, ASCII_LOWER_U);
+        put(inout out, inout wr, ASCII_LOWER_L);
+        put(inout out, inout wr, ASCII_LOWER_L);
+    } else if tag == TAG_BOOL {
         if take(inout wr, in w) != 0 {
-            put(inout out, inout wr, 116);
-            put(inout out, inout wr, 114);
-            put(inout out, inout wr, 117);
-            put(inout out, inout wr, 101);
+            put(inout out, inout wr, ASCII_LOWER_T);
+            put(inout out, inout wr, ASCII_LOWER_R);
+            put(inout out, inout wr, ASCII_LOWER_U);
+            put(inout out, inout wr, ASCII_LOWER_E);
         } else {
-            put(inout out, inout wr, 102);
-            put(inout out, inout wr, 97);
-            put(inout out, inout wr, 108);
-            put(inout out, inout wr, 115);
-            put(inout out, inout wr, 101);
+            put(inout out, inout wr, ASCII_LOWER_F);
+            put(inout out, inout wr, ASCII_LOWER_A);
+            put(inout out, inout wr, ASCII_LOWER_L);
+            put(inout out, inout wr, ASCII_LOWER_S);
+            put(inout out, inout wr, ASCII_LOWER_E);
         }
-    } else if tag == 2 {
+    } else if tag == TAG_U64 {
         let n = take(inout wr, in w);
         put_integer(inout out, inout wr, n);
-    } else if tag == 3 {
+    } else if tag == TAG_I64 {
         let v = wrapping_i64(take(inout wr, in w));
         if v < 0 {
-            put(inout out, inout wr, 45);
+            put(inout out, inout wr, ASCII_MINUS);
             put_integer(inout out, inout wr, wrapping_sub(0, wrapping_u64(v)));
         } else {
             put_integer(inout out, inout wr, wrapping_u64(v));
         }
-    } else if tag == 4 {
+    } else if tag == TAG_F64 {
         let s = shortest(take(inout wr, in w));
         put_shortest(inout out, wr.pos, s);
         wr.pos = wrapping_add(wr.pos, shortest_len(s));
-    } else if tag == 5 {
+    } else if tag == TAG_STRING {
         let off = take(inout wr, in w);
         let len = take(inout wr, in w);
         put_string(inout out, inout wr, in pool, off, len);
-    } else if tag == 8 {
+    } else if tag == TAG_RAW {
         let off = take(inout wr, in w);
         let len = take(inout wr, in w);
         let n = take(inout wr, in w);
-        wr.at = wrapping_add(wr.at, wrapping_mul(n, 3));
+        wr.at = wrapping_add(wr.at, wrapping_mul(n, RAW_TOKEN_WORDS));
         for i in 0..len {
             put(inout out, inout wr, byte(in pool, wrapping_add(off, i)));
         }
-    } else if tag == 6 {
+    } else if tag == TAG_ARRAY {
         let count = take(inout wr, in w);
-        put(inout out, inout wr, 91);
+        put(inout out, inout wr, ASCII_LBRACKET);
         for i in 0..count {
             if i != 0 {
-                put(inout out, inout wr, 44);
+                put(inout out, inout wr, ASCII_COMMA);
             }
             write_value(inout out, inout wr, in w, in pool);
         }
-        put(inout out, inout wr, 93);
+        put(inout out, inout wr, ASCII_RBRACKET);
     } else {
         let count = take(inout wr, in w);
-        put(inout out, inout wr, 123);
+        put(inout out, inout wr, ASCII_LBRACE);
         for i in 0..count {
             if i != 0 {
-                put(inout out, inout wr, 44);
+                put(inout out, inout wr, ASCII_COMMA);
             }
             let off = take(inout wr, in w);
             let len = take(inout wr, in w);
             put_string(inout out, inout wr, in pool, off, len);
-            put(inout out, inout wr, 58);
+            put(inout out, inout wr, ASCII_COLON);
             write_value(inout out, inout wr, in w, in pool);
         }
-        put(inout out, inout wr, 125);
+        put(inout out, inout wr, ASCII_RBRACE);
     }
 }
 

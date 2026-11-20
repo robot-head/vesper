@@ -42,6 +42,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     pub(super) fn scalar_zero(&mut self, ty: ir::Type) -> ir::Value {
         if is_float_type(ty) {
             self.float_const(ty, 0.0)
+        } else if ty == types::I128 {
+            self.wide_const(0)
         } else {
             self.b.ins().iconst(ty, 0)
         }

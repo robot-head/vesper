@@ -34,7 +34,11 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "if p < end && at(in t, p) == 47 {",
     ),
     // dragon.ves (encode): negative floats print with a plus sign.
-    ("encode", "out.try_set(p, 45);", "out.try_set(p, 43);"),
+    (
+        "encode",
+        "out.try_set(p, ASCII_MINUS);",
+        "out.try_set(p, ASCII_PLUS);",
+    ),
     // grisu.ves: weeding keeps the last digit (the text still round-trips,
     // but is not the closest shortest one).
     (

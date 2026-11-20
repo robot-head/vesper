@@ -2382,6 +2382,12 @@ impl Checker<'_> {
         let ty = instantiate_latent_effects(&ty, expected);
         if *expected != Type::Infer {
             self.expect_type(expected, &ty, e.span.clone());
+            // A literal in an aggregate takes its 128-bit field's kind, whose
+            // layout is two words (SH2 lane 2, #1174). Only types holding
+            // `i128` or `u128` change.
+            if crate::integer_widths::holds_wide(expected) {
+                self.constrain_literals(e, expected);
+            }
         }
         if let Some(before) = before {
             let mut moved = vec![];
@@ -4228,6 +4234,11 @@ impl Checker<'_> {
             Type::IntLiteral(_) => (i128::MIN, i128::MAX),
             t => {
                 let k = crate::numeric::IntegerKind::from_type(t)?;
+                // `u128` values pass the exact domain's `i128::MAX`: no
+                // bounds (SH2 lane 2, #1174).
+                if k == crate::numeric::IntegerKind::U128 {
+                    return None;
+                }
                 (k.min(), k.max())
             }
         };
@@ -4835,6 +4846,9 @@ impl Checker<'_> {
             self.leave_control();
             union_effects(&mut outgoing, &self.finish_observing());
             self.expect_type(&out, &actual, op.body.span.clone());
+            if crate::integer_widths::holds_wide(&out) {
+                self.constrain_literals(&op.body, &out);
+            }
             self.exhaust(
                 &local,
                 local.bindings.keys().cloned().collect(),

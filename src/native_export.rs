@@ -861,6 +861,16 @@ impl Planner<'_> {
                 "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports, or, with `// @export abi 4`, is lent `in` by Rust)",
             ));
         }
+        // `i128`/`u128` (SH2 lane 2, #1174) are two words that no export
+        // ABI version lays out yet.
+        if let Type::Named(n, args) = ty
+            && args.is_empty()
+            && crate::numeric::is_wide_name(n)
+        {
+            return Err(refuse(
+                "is a 128-bit integer, which no export ABI version carries yet; pass its two u64 words (wrapping_u64(x), wrapping_u64(x >> 64))",
+            ));
+        }
         match ty {
             Type::Tuple(items) if items.is_empty() => Ok(AbiType::Scalar {
                 name: "Unit".into(),

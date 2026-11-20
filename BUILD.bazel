@@ -190,6 +190,13 @@ vesper_crate(
             "tests/dyn_effects.rs",
             "tests/dyn_fn.rs",
         ]),
+        # Self-hosting SH2 lane 6 (#1178): the package assembler over every
+        # Loom package the root package declares. Anchored globs.
+        "test/self_host_check_names_packages": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 7 (#1179): core typing on the same corpus.
         "test/self_host_check_core_typing": glob([
             "examples/**",
@@ -515,6 +522,8 @@ vesper_crate(
         "test/self_host_check_harness": "long",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
+        # The package assembler differential (#1178) compiles the AST package.
+        "test/self_host_check_names_packages": "long",
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
     },
