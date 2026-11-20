@@ -45,6 +45,7 @@ fn parser<'a>(
         halted: false,
         halt_kind: None,
         expr_heights: Default::default(),
+        expansion: 0,
         editor: false,
         site_limit: 0,
         site_exhausted: false,

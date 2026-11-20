@@ -329,6 +329,7 @@ impl Checker<'_> {
             | SeqOp::Extend
             | SeqOp::Fill
             | SeqOp::BytesEq
+            | SeqOp::BytesCmp
             | SeqOp::FindByte
             | SeqOp::EqIgnoreAsciiCase
             | SeqOp::ExtendAsciiLowercase
@@ -447,6 +448,7 @@ impl Checker<'_> {
                 op,
                 SeqOp::Extend
                     | SeqOp::BytesEq
+                    | SeqOp::BytesCmp
                     | SeqOp::EqIgnoreAsciiCase
                     | SeqOp::ExtendAsciiLowercase
                     | SeqOp::ExtendReversed
@@ -470,7 +472,10 @@ impl Checker<'_> {
                 // `eq` only reads, so it may compare two views of one sequence.
                 // Distinct field paths are disjoint, as for call arguments.
                 if let (true, Some(src), Some(dst)) = (
-                    !matches!(op, SeqOp::BytesEq | SeqOp::EqIgnoreAsciiCase),
+                    !matches!(
+                        op,
+                        SeqOp::BytesEq | SeqOp::BytesCmp | SeqOp::EqIgnoreAsciiCase
+                    ),
                     self.seq_view_place(&a.expr),
                     Place::from_expr(base),
                 ) && src.overlaps(&dst)
@@ -519,6 +524,7 @@ impl Checker<'_> {
             | SeqOp::BytesEq
             | SeqOp::EqIgnoreAsciiCase => Type::named("bool"),
             SeqOp::SumBe16 => u64_ty,
+            SeqOp::BytesCmp => Type::named("i32"),
             SeqOp::FindByte | SeqOp::FindEither | SeqOp::FindNotIn => {
                 Type::Named("Option".into(), vec![u64_ty])
             }

@@ -3,7 +3,11 @@
 
 fn set_pacing_rate_with_gain(inout b: Bbrv3, gain: u64) {
     // bw * gain * (100 - PacingMarginPercent) / (1000 * 100), saturated.
-    let rate = mul_div_sat(b.bw, wrapping_mul(gain, 99), 100000);
+    let rate = mul_div_sat(
+        b.bw,
+        wrapping_mul(gain, PACING_MARGIN_KEEP_PERCENT),
+        GAIN_UNIT_TIMES_PERCENT
+    );
     if b.full_bw_reached || rate > b.pacing_rate {
         b.pacing_rate = max(rate, 1);
     }
@@ -15,7 +19,11 @@ fn set_pacing_rate(inout b: Bbrv3) {
 }
 
 fn set_send_quantum(inout b: Bbrv3) {
-    b.send_quantum = max(min(b.pacing_rate / 1000, 65536), wrapping_mul(b.smss, 2));
+    b
+        .send_quantum = max(
+        min(b.pacing_rate / MILLIS_PER_SEC, MAX_SEND_QUANTUM),
+        wrapping_mul(b.smss, 2)
+    );
 }
 
 fn bdp_multiple(inout b: Bbrv3, gain: u64) -> u64 {
@@ -57,7 +65,7 @@ fn update_max_inflight(inout b: Bbrv3) {
 }
 
 fn probe_rtt_cwnd_bound(inout b: Bbrv3) -> u64 {
-    let bdp = bdp_multiple(inout b, 500);
+    let bdp = bdp_multiple(inout b, PROBE_RTT_CWND_GAIN);
     let bound = min(bdp, b.probe_rtt_cwnd);
     max(bound, min_pipe_cwnd(in b))
 }
@@ -76,11 +84,11 @@ fn set_cwnd(inout b: Bbrv3) {
         b.cwnd = min(b.cwnd, bound);
     }
     bound_cwnd_for_model(inout b);
-    b.cwnd = min(b.cwnd, 4294967295);
+    b.cwnd = min(b.cwnd, U32_MAX);
 }
 
 fn bound_cwnd_for_model(inout b: Bbrv3) {
-    let mut cap = infinity();
+    let mut cap = INFINITY;
     if is_probe_bw(in b) && b.bbr_state != BbrState::ProbeBwCruise {
         cap = b.inflight_longterm;
     } else if b.bbr_state == BbrState::ProbeRtt || b.bbr_state == BbrState::ProbeBwCruise {
@@ -96,8 +104,8 @@ pub fn inflight_at_loss(size: u64, tx_in_flight: u64, lost: u64) -> u64 {
     let inflight_prev = sat_sub(tx_in_flight, size);
     let lost_prev = sat_sub(lost, size);
     // numerator = inflight_prev * 20 - lost_prev * 1000, in 128 bits.
-    let (l1, h1) = mul_wide(inflight_prev, 20);
-    let (l2, h2) = mul_wide(lost_prev, 1000);
+    let (l1, h1) = mul_wide(inflight_prev, LOSS_THRESH);
+    let (l2, h2) = mul_wide(lost_prev, GAIN_UNIT);
     let positive = h1 > h2 || (h1 == h2 && l1 > l2);
     let lost_prefix = if positive {
         let borrow: u64 = if l1 < l2 {
@@ -107,7 +115,7 @@ pub fn inflight_at_loss(size: u64, tx_in_flight: u64, lost: u64) -> u64 {
         };
         let lo = wrapping_sub(l1, l2);
         let hi = wrapping_sub(wrapping_sub(h1, h2), borrow);
-        div_wide_sat(hi, lo, 980)
+        div_wide_sat(hi, lo, GAIN_UNIT_MINUS_LOSS_THRESH)
     } else {
         0
     };
@@ -144,7 +152,7 @@ pub fn bbrv3_check_probe_rtt_done(inout b: Bbrv3, now_ns: u64) {
 // `IsInflightTooHigh()`: the loss rate exceeds LossThresh (2%), or any
 // loss without selective ACKs.
 pub fn bbrv3_is_inflight_too_high(has_selective_acks: bool, lost: u64, tx_in_flight: u64) -> bool {
-    product_gt(lost, 1000, tx_in_flight, 20) || (lost > 0 && !has_selective_acks)
+    product_gt(lost, GAIN_UNIT, tx_in_flight, LOSS_THRESH) || (lost > 0 && !has_selective_acks)
 }
 
 pub fn bbrv3_raise_inflight_longterm_slope(inout b: Bbrv3) {

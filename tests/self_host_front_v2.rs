@@ -464,6 +464,7 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "fn f(s: S) { s[..]; s[a..]; s[..b]; s.a.b[..]; (s)[1..]; f()[..]; s[..][..]; s[1 + 2..] }",
         "fn f() { s[..; s[a.. }",
         "fn f(state: u8, with: u8) -> u8 { let linear = state + with; linear.with.state }",
+        "fn f(k: u8) -> u8 { match k { 1 | 2 | 3 => 0, T::A(x) | T::B(x) => x, (0, _) | (_, 0) => 1, 1 | => 2, | 1 => 3, 1 || 2 => 4, _ => 5 } }",
         "fn f() -> self::m::T[u8] eff [self::E, a: super::F, @a/b::G[u8] | r] { g[self::T](x); g[super::T](x); g[@a/b::T](x) }",
         "fn f() { let x = super::m::P { a: 1 }; match x { self::E::A(y) => y, @a/b::E::B { q } => q, super::C => 0 } }",
         "fn f() { handle self::m::E in { 0 } with { return x => x } }",

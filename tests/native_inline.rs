@@ -293,3 +293,22 @@ fn box_holding_callers_keep_their_calls() {
     let (_, program) = inlined(source, &Budget::default());
     assert_eq!(calls(&program, "main", "key"), 4);
 }
+
+/// A module constant whose initializer is one literal reaches the inlined
+/// program as that literal: no call, and no share of the growth budgets.
+/// A constant with a computed initializer stays a call the inliner treats
+/// like any other.
+#[test]
+fn literal_constants_fold_to_their_literal() {
+    let source = "const LIMIT: u32 = 30; \
+        const TABLE: (u64, u64) = (2, 3); \
+        fn clamp(x: u32) -> u32 { if x < LIMIT { x } else { LIMIT } } \
+        fn main() -> u64 { let (a, b) = TABLE; wrapping_add(wrapping_add(a, b), widen_u64(clamp(41))) }";
+    agree(source, "35");
+    let (report, program) = inlined(source, &Budget::default());
+    assert_eq!(report.constants, 2, "{report:?}");
+    assert_eq!(calls(&program, "clamp", "const$LIMIT"), 0);
+    let (off, program) = inlined(source, &Budget::none());
+    assert_eq!(off.constants, 0, "the inliner is off: {off:?}");
+    assert_eq!(calls(&program, "clamp", "const$LIMIT"), 2);
+}
