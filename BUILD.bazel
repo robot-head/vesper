@@ -223,8 +223,8 @@ vesper_crate(
     # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself.
     test_shards = {"test/self_host_front_end": 4},
     # Reservations include subprocess overhead; they do not enforce RSS limits.
-    # `lean_replay` marks the Lean/Logos replay suite. PR runs of "Test all
-    # targets" skip it unless Lean-facing paths change; pushes to main run it
+    # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
+    # scripts" when Lean-facing paths change and on pushes to main
     # (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md "PR test tiers").
     test_tags = {
         # These harnesses can run several compiler/evaluator cases in parallel.
