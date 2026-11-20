@@ -8,6 +8,40 @@
 use crate::port;
 use crate::{Error, ErrorKind, Result, add, bound, mul};
 
+/// Cap'n Proto encoding spec: messages are 8-byte words, and a pointer's low
+/// two bits are its kind (0 struct, 1 list, 2 far, 3 other).
+const WORD_BYTES: usize = 8;
+/// Stream framing: a little-endian u32 segment count minus one, one u32
+/// size per segment, and padding to a word boundary.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const TABLE_ENTRY_BYTES: usize = 4;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const POINTER_KIND_MASK: u64 = 3;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const STRUCT_POINTER: u8 = 0;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LIST_POINTER: u8 = 1;
+/// Bits 2-31: the signed word offset from the end of the pointer.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const OFFSET_SHIFT: u32 = 2;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const OFFSET_MASK: u64 = 0x3fff_ffff;
+/// Struct pointers: bits 32-47 the data section and 48-63 the pointer
+/// section, both in words.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const DATA_WORDS_SHIFT: u32 = 32;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const POINTER_WORDS_SHIFT: u32 = 48;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SECTION_MASK: u64 = 0xffff;
+/// List pointers: bits 32-34 the element size and 35-63 the element count.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ELEMENT_SIZE_SHIFT: u32 = 32;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ELEMENT_SIZE_MASK: u64 = 7;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const ELEMENT_COUNT_SHIFT: u32 = 35;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     pub max_input_bytes: usize,
@@ -88,14 +122,14 @@ pub fn local_struct_pointer(
     segment: &[u8],
     pointer_word: usize,
 ) -> core::result::Result<Option<StructView<'_>>, PointerError> {
-    let Some((raw, target_byte)) = local_pointer(segment, pointer_word, 0)? else {
+    let Some((raw, target_byte)) = local_pointer(segment, pointer_word, STRUCT_POINTER)? else {
         return Ok(None);
     };
-    let data_bytes = usize::from(((raw >> 32) & 0xffff) as u16)
-        .checked_mul(8)
+    let data_bytes = usize::from(((raw >> DATA_WORDS_SHIFT) & SECTION_MASK) as u16)
+        .checked_mul(WORD_BYTES)
         .ok_or(PointerError::Overflow)?;
-    let pointer_bytes = usize::from(((raw >> 48) & 0xffff) as u16)
-        .checked_mul(8)
+    let pointer_bytes = usize::from(((raw >> POINTER_WORDS_SHIFT) & SECTION_MASK) as u16)
+        .checked_mul(WORD_BYTES)
         .ok_or(PointerError::Overflow)?;
     let data_end = target_byte
         .checked_add(data_bytes)
@@ -162,10 +196,11 @@ pub fn local_list_pointer(
     segment: &[u8],
     pointer_word: usize,
 ) -> core::result::Result<Option<ListView<'_>>, PointerError> {
-    let Some((raw, target_byte)) = local_pointer(segment, pointer_word, 1)? else {
+    let Some((raw, target_byte)) = local_pointer(segment, pointer_word, LIST_POINTER)? else {
         return Ok(None);
     };
-    let (kind, bits) = match (raw >> 32) & 7 {
+    // Element sizes: void, bit, byte, two, four and eight bytes, pointer.
+    let (kind, bits) = match (raw >> ELEMENT_SIZE_SHIFT) & ELEMENT_SIZE_MASK {
         0 => (ListKind::Void, 0u64),
         1 => (ListKind::Bit, 1),
         2 => (ListKind::Byte, 8),
@@ -175,13 +210,13 @@ pub fn local_list_pointer(
         6 => (ListKind::Pointer, 64),
         _ => return Err(PointerError::UnsupportedCompositeList),
     };
-    let count = (raw >> 35) as u32;
+    let count = (raw >> ELEMENT_COUNT_SHIFT) as u32;
     // The 29-bit count and 64-bit element maximum fit in u64.
     let bit_count = u64::from(count) * bits;
     let logical_bytes =
         usize::try_from(bit_count.div_ceil(8)).map_err(|_| PointerError::Overflow)?;
-    let padded_bytes =
-        usize::try_from(bit_count.div_ceil(64) * 8).map_err(|_| PointerError::Overflow)?;
+    let padded_bytes = usize::try_from(bit_count.div_ceil(u64::BITS.into()) * WORD_BYTES as u64)
+        .map_err(|_| PointerError::Overflow)?;
     let padded_end = target_byte
         .checked_add(padded_bytes)
         .ok_or(PointerError::Overflow)?;
@@ -227,11 +262,15 @@ fn local_pointer(
     pointer_word: usize,
     expected_kind: u8,
 ) -> core::result::Result<Option<(u64, usize)>, PointerError> {
-    if !segment.len().is_multiple_of(8) {
+    if !segment.len().is_multiple_of(WORD_BYTES) {
         return Err(PointerError::MisalignedSegment);
     }
-    let start = pointer_word.checked_mul(8).ok_or(PointerError::Overflow)?;
-    let end = start.checked_add(8).ok_or(PointerError::Overflow)?;
+    let start = pointer_word
+        .checked_mul(WORD_BYTES)
+        .ok_or(PointerError::Overflow)?;
+    let end = start
+        .checked_add(WORD_BYTES)
+        .ok_or(PointerError::Overflow)?;
     let bytes = segment
         .get(start..end)
         .ok_or(PointerError::PointerOutOfBounds)?;
@@ -239,12 +278,12 @@ fn local_pointer(
     if raw == 0 {
         return Ok(None);
     }
-    let kind = (raw & 3) as u8;
+    let kind = (raw & POINTER_KIND_MASK) as u8;
     if kind != expected_kind {
         return Err(PointerError::UnsupportedKind(kind));
     }
     // Sign-extend the 30-bit displacement from the word after the pointer.
-    let offset = (((raw >> 2) & 0x3fff_ffff) as i32) << 2 >> 2;
+    let offset = (((raw >> OFFSET_SHIFT) & OFFSET_MASK) as i32) << OFFSET_SHIFT >> OFFSET_SHIFT;
     let base = pointer_word.checked_add(1).ok_or(PointerError::Overflow)?;
     let distance = usize::try_from(offset.unsigned_abs()).map_err(|_| PointerError::Overflow)?;
     let target = if offset < 0 {
@@ -253,7 +292,9 @@ fn local_pointer(
         base.checked_add(distance)
     }
     .ok_or(PointerError::TargetOutOfBounds)?;
-    let target_byte = target.checked_mul(8).ok_or(PointerError::Overflow)?;
+    let target_byte = target
+        .checked_mul(WORD_BYTES)
+        .ok_or(PointerError::Overflow)?;
     Ok(Some((raw, target_byte)))
 }
 
@@ -276,7 +317,7 @@ impl<'a> Iterator for Segments<'a> {
                 .try_into()
                 .expect("validated table"),
         );
-        let len = (words as usize) * 8; // The total byte count was checked at parse time.
+        let len = (words as usize) * WORD_BYTES; // The total byte count was checked at parse time.
         let end = self.offset + len;
         let result = &self.payload[self.offset..end];
         self.offset = end;
@@ -297,21 +338,28 @@ pub fn parse_prefix(input: &[u8], limits: Limits) -> Result<(Message<'_>, &[u8])
     bound(input.len(), limits.max_input_bytes, ErrorKind::InputLimit)?;
     bound(1, limits.max_work, ErrorKind::WorkLimit)?;
     let count_bytes = input
-        .get(..4)
+        .get(..TABLE_ENTRY_BYTES)
         .ok_or(Error::new(ErrorKind::UnexpectedEof, input.len()))?;
     let minus_one = u32::from_le_bytes(count_bytes.try_into().expect("four bytes"));
     let count = usize::try_from(u64::from(minus_one) + 1)
         .map_err(|_| Error::new(ErrorKind::Overflow, 0))?;
     bound(count, limits.max_segments, ErrorKind::CountLimit)?;
     bound(add(1, count)?, limits.max_work, ErrorKind::WorkLimit)?;
-    let table_end = add(4, mul(count, 4)?)?;
-    let header_end = add(table_end, if count.is_multiple_of(2) { 4 } else { 0 })?;
+    let table_end = add(TABLE_ENTRY_BYTES, mul(count, TABLE_ENTRY_BYTES)?)?;
+    let header_end = add(
+        table_end,
+        if count.is_multiple_of(2) {
+            TABLE_ENTRY_BYTES
+        } else {
+            0
+        },
+    )?;
     let header = input
         .get(..header_end)
         .ok_or(Error::new(ErrorKind::UnexpectedEof, input.len()))?;
-    let table = &header[4..table_end];
+    let table = &header[TABLE_ENTRY_BYTES..table_end];
     let mut words = 0u64;
-    for &entry in table.as_chunks::<4>().0 {
+    for &entry in table.as_chunks::<TABLE_ENTRY_BYTES>().0 {
         let size = u32::from_le_bytes(entry);
         words = words
             .checked_add(u64::from(size))
@@ -321,7 +369,7 @@ pub fn parse_prefix(input: &[u8], limits: Limits) -> Result<(Message<'_>, &[u8])
         }
     }
     let bytes = usize::try_from(words).map_err(|_| Error::new(ErrorKind::Overflow, 0))?;
-    let end = add(header_end, mul(bytes, 8)?)?;
+    let end = add(header_end, mul(bytes, WORD_BYTES)?)?;
     let payload = input
         .get(header_end..end)
         .ok_or(Error::new(ErrorKind::UnexpectedEof, input.len()))?;

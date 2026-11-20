@@ -4,6 +4,25 @@ use self::common::{
     sb
 };
 
+// Well-formed UTF-8 byte sequences (Unicode Standard Table 3-7): ASCII,
+// continuation bytes, the lead byte ranges of two-, three- and four-byte
+// sequences, and the narrower second bytes after E0 (no overlongs), ED (no
+// surrogates), F0 (no overlongs) and F4 (nothing past U+10FFFF).
+const ASCII_END: u64 = 128;
+const CONT_MIN: u64 = 128;
+const CONT_MAX: u64 = 191;
+const LEAD2_MIN: u64 = 194;
+const LEAD2_MAX: u64 = 223;
+const LEAD3_MIN: u64 = 224;
+const LEAD3_MAX: u64 = 239;
+const SURROGATE_LEAD: u64 = 237;
+const E0_SECOND_MIN: u64 = 160;
+const ED_SECOND_MAX: u64 = 159;
+const LEAD4_MIN: u64 = 240;
+const LEAD4_MAX: u64 = 244;
+const F0_SECOND_MIN: u64 = 144;
+const F4_SECOND_MAX: u64 = 143;
+
 fn cont(in s: Slice[u8], at: u64, end: u64, lo: u64, hi: u64) -> bool {
     if at >= end {
         return false;
@@ -25,42 +44,42 @@ pub fn valid_up_to(in s: Slice[u8], start: u64, end: u64) -> u64 {
         let i1 = wrapping_add(i, 1);
         let i2 = wrapping_add(i, 2);
         let i3 = wrapping_add(i, 3);
-        if b < 128 {
+        if b < ASCII_END {
             i = i1;
-        } else if b >= 194 && b <= 223 {
-            if !cont(in s, i1, end, 128, 191) {
+        } else if b >= LEAD2_MIN && b <= LEAD2_MAX {
+            if !cont(in s, i1, end, CONT_MIN, CONT_MAX) {
                 return i;
             }
             i = i2;
-        } else if b >= 224 && b <= 239 {
-            let lo: u64 = if b == 224 {
-                160
+        } else if b >= LEAD3_MIN && b <= LEAD3_MAX {
+            let lo: u64 = if b == LEAD3_MIN {
+                E0_SECOND_MIN
             } else {
-                128
+                CONT_MIN
             };
-            let hi: u64 = if b == 237 {
-                159
+            let hi: u64 = if b == SURROGATE_LEAD {
+                ED_SECOND_MAX
             } else {
-                191
+                CONT_MAX
             };
-            if !cont(in s, i1, end, lo, hi) || !cont(in s, i2, end, 128, 191) {
+            if !cont(in s, i1, end, lo, hi) || !cont(in s, i2, end, CONT_MIN, CONT_MAX) {
                 return i;
             }
             i = i3;
-        } else if b >= 240 && b <= 244 {
-            let lo: u64 = if b == 240 {
-                144
+        } else if b >= LEAD4_MIN && b <= LEAD4_MAX {
+            let lo: u64 = if b == LEAD4_MIN {
+                F0_SECOND_MIN
             } else {
-                128
+                CONT_MIN
             };
-            let hi: u64 = if b == 244 {
-                143
+            let hi: u64 = if b == LEAD4_MAX {
+                F4_SECOND_MAX
             } else {
-                191
+                CONT_MAX
             };
             if !cont(in s, i1, end, lo, hi)
-                || !cont(in s, i2, end, 128, 191)
-                || !cont(in s, i3, end, 128, 191) {
+                || !cont(in s, i2, end, CONT_MIN, CONT_MAX)
+                || !cont(in s, i3, end, CONT_MIN, CONT_MAX) {
                 return i;
             }
             i = wrapping_add(i, 4);

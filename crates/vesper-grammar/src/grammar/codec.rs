@@ -324,6 +324,16 @@ impl<'a> Reader<'_, '_, 'a> {
     }
 }
 
+/// Work charged to size and plan one LEB128 number.
+#[cfg(not(vesper_port))]
+const NUMBER_WORK: usize = 10;
+/// The encoder's passes over each output byte: scratch zeroing, the writes
+/// and the final copy.
+#[cfg(not(vesper_port))]
+const COPY_PASSES: usize = 3;
+#[cfg(not(vesper_port))]
+use framing::U24_HEADER_BYTES;
+
 /// The Rust size of one plan write, which the encoder's metadata budget
 /// counts (the port charges the same).
 #[cfg(vesper_port)]
@@ -381,7 +391,7 @@ impl<'p> Planner<'p, '_> {
         )
     }
     fn number(&mut self, number: u64) -> Result<()> {
-        self.plan.budget.work(10)?;
+        self.plan.budget.work(NUMBER_WORK)?;
         let len = framing::encoded_u64_len(number);
         self.length(len)?;
         self.plan.push(Write::Number(number, len))?;
@@ -441,7 +451,7 @@ impl<'p> Planner<'p, '_> {
                 )?;
                 let payload =
                     u64::try_from(payload).map_err(|_| Error::new(ErrorKind::Overflow, 0))?;
-                self.plan.budget.work(10)?;
+                self.plan.budget.work(NUMBER_WORK)?;
                 let len = framing::encoded_u64_len(payload);
                 self.length(len)?;
                 self.plan.writes[prefix] = Write::Number(payload, len);
@@ -450,7 +460,7 @@ impl<'p> Planner<'p, '_> {
             (Rule::U24Frame(child), Value::Frame(value)) => {
                 self.plan.budget.children(1, depth)?;
                 let prefix = self.plan.push(Write::U24(0))?;
-                self.length(3)?;
+                self.length(U24_HEADER_BYTES)?;
                 let start = self.plan.len;
                 self.node(*child, value, depth + 1)?;
                 let payload = self.plan.len - start;
@@ -459,10 +469,10 @@ impl<'p> Planner<'p, '_> {
                     self.grammar.limits.max_frame_bytes,
                     ErrorKind::PayloadLimit,
                 )?;
-                if payload > 0x00ff_ffff {
+                if payload > framing::MAX_U24_PAYLOAD {
                     return Err(Error::new(ErrorKind::Overflow, 0));
                 }
-                self.plan.budget.work(3)?;
+                self.plan.budget.work(U24_HEADER_BYTES)?;
                 self.plan.writes[prefix] = Write::U24(payload as u32);
                 Ok(())
             }
@@ -570,7 +580,7 @@ pub fn encode_into(
     plan.budget.metadata(plan.len)?;
     // Scratch zero initialization, writes, final copy, and write dispatch.
     plan.budget
-        .work(add(mul(plan.len, 3)?, plan.writes.len())?)?;
+        .work(add(mul(plan.len, COPY_PASSES)?, plan.writes.len())?)?;
     let mut scratch = Vec::new();
     scratch
         .try_reserve_exact(plan.len)

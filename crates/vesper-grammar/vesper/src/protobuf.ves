@@ -41,8 +41,59 @@ use self::utf8::{
     valid_up_to
 };
 
+// Kind and Value indices (see above).
+const K_U32: u64 = 0;
+const K_U64: u64 = 1;
+const K_INT32: u64 = 2;
+const K_INT64: u64 = 3;
+const K_SINT32: u64 = 4;
+const K_SINT64: u64 = 5;
+const K_BOOL: u64 = 6;
+const K_FIXED32: u64 = 7;
+const K_FIXED64: u64 = 8;
+const K_SFIXED32: u64 = 9;
+const K_SFIXED64: u64 = 10;
+const K_STRING: u64 = 11;
+const K_BYTES: u64 = 12;
+const K_MESSAGE: u64 = 13;
+// Schema fields and stream fields are four words each.
+const FIELD_WORDS: u64 = 4;
+// The Protobuf encoding (protobuf.dev/programming-guides/encoding, and
+// src/protobuf.rs): field numbers are below 2^29 and skip the reserved
+// 19000..=19999; a key is `number << 3 | wire type`.
+const FIELD_NUMBER_END: u64 = 536870912;
+const RESERVED_FIRST: u64 = 19000;
+const RESERVED_LAST: u64 = 19999;
+const TAG_TYPE_BITS: u64 = 3;
+const WIRE_TYPE_MASK: u64 = 7;
+const WIRE_VARINT: u64 = 0;
+const WIRE_I64: u64 = 1;
+const WIRE_LEN: u64 = 2;
+const WIRE_I32: u64 = 5;
+const FIXED32_BYTES: u64 = 4;
+const FIXED64_BYTES: u64 = 8;
+// Work charged per nesting level of each node (src/protobuf.rs
+// `NODE_DEPTH_WORK`).
+const NODE_DEPTH_WORK: u64 = 64;
+// Ceiling on `max_depth` (src/protobuf.rs `HARD_DEPTH`).
+const HARD_DEPTH: u64 = 64;
+// Schema metadata: two words per message (color, height); `schema_depth`
+// colors a message VISITING on entry and DONE on exit.
+const META_WORDS: u64 = 2;
+const VISITING: u64 = 1;
+const DONE: u64 = 2;
+// Two's-complement masks for sign extension and ZigZag.
+const U32_MAX: u64 = 4294967295;
+const I32_SIGN: u64 = 2147483648;
+const HIGH_32_ONES: u64 = 18446744069414584320;
+const I64_SIGN: u64 = 9223372036854775808;
+const LOW_63_BITS: u64 = 9223372036854775807;
+const ALL_ONES: u64 = 18446744073709551615;
+// src/protobuf.rs `MAX_WIRE_BYTES` (`i32::MAX`).
+const MAX_WIRE_BYTES: u64 = 2147483647;
+
 fn max_wire() -> u64 {
-    2147483647
+    MAX_WIRE_BYTES
 }
 
 // The budget, the parse position, and the limits it reads.
@@ -100,7 +151,7 @@ fn node(inout b: Pb, depth: u64) -> Unit eff [Fail[GErr]] {
     bound(depth, b.max_depth, 17);
     b.nodes = add(b.nodes, 1);
     bound(b.nodes, b.max_nodes, 16);
-    let units = mul_or(64, depth, 10, 0);
+    let units = mul_or(NODE_DEPTH_WORK, depth, 10, 0);
     work(inout b, units);
 }
 
@@ -127,22 +178,22 @@ fn reserve(inout b: Pb, len: u64, inout cap: u64) -> Unit eff [Fail[GErr]] {
 }
 
 fn field_number(n: u64) -> bool {
-    n != 0 && n < 536870912 && !(n >= 19000 && n <= 19999)
+    n != 0 && n < FIELD_NUMBER_END && !(n >= RESERVED_FIRST && n <= RESERVED_LAST)
 }
 
 fn numeric(kind: u64) -> bool {
-    kind < 11
+    kind < K_STRING
 }
 
 fn wire(kind: u64) -> u64 {
-    if kind == 8 || kind == 10 {
-        1
-    } else if kind >= 11 {
-        2
-    } else if kind == 7 || kind == 9 {
-        5
+    if kind == K_FIXED64 || kind == K_SFIXED64 {
+        WIRE_I64
+    } else if kind >= K_STRING {
+        WIRE_LEN
+    } else if kind == K_FIXED32 || kind == K_SFIXED32 {
+        WIRE_I32
     } else {
-        0
+        WIRE_VARINT
     }
 }
 
@@ -152,7 +203,7 @@ fn msg_rec(in schema: Slice[u64], id: u64) -> u64 {
 
 // Field `i` of message `id`: the offset of its four words.
 fn field_at(in schema: Slice[u64], id: u64, i: u64) -> u64 {
-    wrapping_add(wrapping_add(msg_rec(in schema, id), 1), wrapping_mul(i, 4))
+    wrapping_add(wrapping_add(msg_rec(in schema, id), 1), wrapping_mul(i, FIELD_WORDS))
 }
 
 fn field_tag(in schema: Slice[u64], f: u64) -> u64 {
@@ -160,11 +211,11 @@ fn field_tag(in schema: Slice[u64], f: u64) -> u64 {
     let kind = sw(in schema, wrapping_add(f, 1));
     let repeated = sw(in schema, wrapping_add(f, 3)) != 0;
     let w = if repeated && numeric(kind) {
-        2
+        WIRE_LEN
     } else {
         wire(kind)
     };
-    wrapping_mul(number, 8) | w
+    (number << TAG_TYPE_BITS) | w
 }
 
 // Schema::validate.
@@ -174,7 +225,7 @@ pub fn validate(in schema: Slice[u64], root: u64, in lim: Slice[u64]) -> Unit ef
         fail(0, root);
     }
     let max_depth = sw(in lim, 3);
-    if max_depth == 0 || max_depth > 64 {
+    if max_depth == 0 || max_depth > HARD_DEPTH {
         fail(17, 0);
     }
     bound(n, sw(in lim, 0), 0);
@@ -200,7 +251,10 @@ pub fn validate(in schema: Slice[u64], root: u64, in lim: Slice[u64]) -> Unit ef
                 }
                 fail(3, id);
             }
-            if sw(in schema, wrapping_add(f, 1)) == 13 && sw(in schema, wrapping_add(f, 2)) >= n {
+            if sw(in schema, wrapping_add(f, 1))
+                == K_MESSAGE
+                && sw(in schema, wrapping_add(f, 2))
+                >= n {
                 fail(0, id);
             }
             previous = number;
@@ -210,7 +264,7 @@ pub fn validate(in schema: Slice[u64], root: u64, in lim: Slice[u64]) -> Unit ef
     metadata(inout b, bytes);
     // Two words per message: color, height.
     let mut meta = ChunkSeq::new[u64]();
-    let words = wrapping_mul(n, 2);
+    let words = wrapping_mul(n, META_WORDS);
     for i in 0..words {
         meta.push(0);
     }
@@ -229,21 +283,21 @@ fn mget(in meta: ChunkSeq[u64], i: u64) -> u64 {
 fn schema_depth(in schema: Slice[u64], inout meta: ChunkSeq[u64], inout b: Pb, id: u64, depth: u64)
     -> u64 eff [Fail[GErr]] {
     work(inout b, 1);
-    let color = mget(in meta, wrapping_mul(id, 2));
-    if color == 1 {
+    let color = mget(in meta, wrapping_mul(id, META_WORDS));
+    if color == VISITING {
         fail(2, id);
     }
     bound(depth, b.max_depth, 17);
-    if color == 2 {
-        return mget(in meta, wrapping_add(wrapping_mul(id, 2), 1));
+    if color == DONE {
+        return mget(in meta, wrapping_add(wrapping_mul(id, META_WORDS), 1));
     }
-    meta.try_set(wrapping_mul(id, 2), 1);
+    meta.try_set(wrapping_mul(id, META_WORDS), VISITING);
     let mut height: u64 = 1;
     let count = sw(in schema, msg_rec(in schema, id));
     for i in 0..count {
         work(inout b, 1);
         let f = field_at(in schema, id, i);
-        if sw(in schema, wrapping_add(f, 1)) == 13 {
+        if sw(in schema, wrapping_add(f, 1)) == K_MESSAGE {
             let child = sw(in schema, wrapping_add(f, 2));
             let h = add(
                 schema_depth(in schema, inout meta, inout b, child, wrapping_add(depth, 1)),
@@ -253,8 +307,8 @@ fn schema_depth(in schema: Slice[u64], inout meta: ChunkSeq[u64], inout b: Pb, i
         }
     }
     bound(height, b.max_depth, 17);
-    meta.try_set(wrapping_mul(id, 2), 2);
-    meta.try_set(wrapping_add(wrapping_mul(id, 2), 1), height);
+    meta.try_set(wrapping_mul(id, META_WORDS), DONE);
+    meta.try_set(wrapping_add(wrapping_mul(id, META_WORDS), 1), height);
     height
 }
 
@@ -370,12 +424,12 @@ fn message(
         }
         let at = b.pos;
         let key = var(in input, inout b, end);
-        let number = key >> 3;
-        if number > 4294967295 || !field_number(number) {
+        let number = key >> TAG_TYPE_BITS;
+        if number > U32_MAX || !field_number(number) {
             fail(1, at);
         }
-        let w = key & 7;
-        if !(w == 0 || w == 1 || w == 2 || w == 5) {
+        let w = key & WIRE_TYPE_MASK;
+        if !(w == WIRE_VARINT || w == WIRE_I64 || w == WIRE_LEN || w == WIRE_I32) {
             fail(6, at);
         }
         if number < previous {
@@ -415,21 +469,21 @@ fn message(
         } else {
             node(inout b, depth);
             reserve(inout b, count, inout cap);
-            if kind == 11 || kind == 12 {
+            if kind == K_STRING || kind == K_BYTES {
                 let finish = range(in input, inout b, end);
                 let start = b.pos;
                 work(inout b, wrapping_sub(finish, start));
                 b.pos = finish;
-                if kind == 11 {
+                if kind == K_STRING {
                     let valid = valid_up_to(in input, start, finish);
                     if valid != finish {
                         fail(9, valid);
                     }
                 }
                 push4(inout out, number, kind, start, wrapping_sub(finish, start));
-            } else if kind == 13 {
+            } else if kind == K_MESSAGE {
                 let finish = range(in input, inout b, end);
-                push4(inout out, number, 13, 0, 0);
+                push4(inout out, number, K_MESSAGE, 0, 0);
                 message(
                     in schema,
                     in input,
@@ -451,20 +505,20 @@ fn message(
 
 // Sign-extends the low 32 bits of `n`.
 fn sext32(n: u64) -> u64 {
-    let low = n & 4294967295;
-    if low >= 2147483648 {
-        low | 18446744069414584320
+    let low = n & U32_MAX;
+    if low >= I32_SIGN {
+        low | HIGH_32_ONES
     } else {
         low
     }
 }
 
 fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fail[GErr]] {
-    if kind >= 7 && kind <= 10 {
-        let len: u64 = if kind == 7 || kind == 9 {
-            4
+    if kind >= K_FIXED32 && kind <= K_SFIXED64 {
+        let len: u64 = if kind == K_FIXED32 || kind == K_SFIXED32 {
+            FIXED32_BYTES
         } else {
-            8
+            FIXED64_BYTES
         };
         let next = add(b.pos, len);
         if next > end {
@@ -473,12 +527,12 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
         work(inout b, len);
         let at = b.pos;
         b.pos = next;
-        if len == 4 {
+        if len == FIXED32_BYTES {
             let v = match input.try_read_u32_le(at) {
                 Option::Some(v) => widen_u64(v),
                 Option::None => 0,
             };
-            return if kind == 9 {
+            return if kind == K_SFIXED32 {
                 sext32(v)
             } else {
                 v
@@ -491,32 +545,32 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
     }
     let at = b.pos;
     let n = var(in input, inout b, end);
-    if kind == 0 {
-        if n > 4294967295 {
+    if kind == K_U32 {
+        if n > U32_MAX {
             fail(10, at);
         }
         n
-    } else if kind == 1 || kind == 3 {
+    } else if kind == K_U64 || kind == K_INT64 {
         n
-    } else if kind == 2 {
+    } else if kind == K_INT32 {
         if sext32(n) != n {
             fail(7, at);
         }
         n
-    } else if kind == 4 {
-        if n > 4294967295 {
+    } else if kind == K_SINT32 {
+        if n > U32_MAX {
             fail(10, at);
         }
         let half = n >> 1;
         let v = if n & 1 == 0 {
             half
         } else {
-            (~half) & 4294967295
+            (~half) & U32_MAX
         };
         sext32(v)
-    } else if kind == 5 {
+    } else if kind == K_SINT64 {
         (n >> 1) ^ wrapping_sub(0, n & 1)
-    } else if kind == 6 {
+    } else if kind == K_BOOL {
         if n > 1 {
             fail(7, at);
         }
@@ -531,21 +585,21 @@ fn scalar(in input: Slice[u8], inout b: Pb, kind: u64, end: u64) -> u64 eff [Fai
 // The varint bits of a scalar of Value index `tag` (`x` = its bits), or
 // the fixed width (4 or 8) with `fixed` set.
 fn var_bits(tag: u64, x: u64) -> u64 {
-    if tag == 4 {
-        let n = x & 4294967295;
-        let neg: u64 = if n >= 2147483648 {
-            4294967295
+    if tag == K_SINT32 {
+        let n = x & U32_MAX;
+        let neg: u64 = if n >= I32_SIGN {
+            U32_MAX
         } else {
             0
         };
-        ((n << 1) & 4294967295) ^ neg
-    } else if tag == 5 {
-        let neg: u64 = if x >= 9223372036854775808 {
-            18446744073709551615
+        ((n << 1) & U32_MAX) ^ neg
+    } else if tag == K_SINT64 {
+        let neg: u64 = if x >= I64_SIGN {
+            ALL_ONES
         } else {
             0
         };
-        ((x & 9223372036854775807) << 1) ^ neg
+        ((x & LOW_63_BITS) << 1) ^ neg
     } else {
         x
     }
@@ -553,14 +607,14 @@ fn var_bits(tag: u64, x: u64) -> u64 {
 
 // scalar_size: the wire size of a scalar field value.
 fn scalar_size(kind: u64, tag: u64, x: u64) -> u64 eff [Fail[GErr]] {
-    if kind != tag || kind > 10 {
+    if kind != tag || kind > K_SFIXED64 {
         fail(11, 0);
     }
-    if kind == 7 || kind == 9 {
-        4
-    } else if kind == 8 || kind == 10 {
-        8
-    } else if kind == 6 {
+    if kind == K_FIXED32 || kind == K_SFIXED32 {
+        FIXED32_BYTES
+    } else if kind == K_FIXED64 || kind == K_SFIXED64 {
+        FIXED64_BYTES
+    } else if kind == K_BOOL {
         1
     } else {
         leb_len(var_bits(tag, x))
@@ -670,10 +724,10 @@ fn scan_message(
 // The record after the field at `cur`: a nested message's record holds
 // the index just past its subtree (src/port.rs), so no walk is needed.
 fn next_field(in vals: Slice[u64], cur: u64) -> u64 {
-    if w(in vals, wrapping_add(cur, 1)) == 13 {
+    if w(in vals, wrapping_add(cur, 1)) == K_MESSAGE {
         w(in vals, wrapping_add(cur, 2))
     } else {
-        wrapping_add(cur, 4)
+        wrapping_add(cur, FIELD_WORDS)
     }
 }
 
@@ -688,13 +742,13 @@ fn scan_value(
     depth: u64
 ) -> u64 eff [Fail[GErr]] {
     let tag = w(in vals, wrapping_add(cur, 1));
-    if (kind == 11 && tag == 11) || (kind == 12 && tag == 12) {
+    if (kind == K_STRING && tag == K_STRING) || (kind == K_BYTES && tag == K_BYTES) {
         let len = w(in vals, wrapping_add(cur, 3));
         bound(len, max_wire(), 10);
         bound(len, b.max_payload, 15);
         work(inout b, len);
         add(leb_len(len), len)
-    } else if kind == 13 && tag == 13 {
+    } else if kind == K_MESSAGE && tag == K_MESSAGE {
         let slot = sizes.len();
         sizes.push(0);
         let len = scan_message(
@@ -703,7 +757,7 @@ fn scan_value(
             inout b,
             inout sizes,
             child,
-            wrapping_add(cur, 4),
+            wrapping_add(cur, FIELD_WORDS),
             wrapping_add(depth, 1)
         );
         bound(len, max_wire(), 10);
@@ -750,12 +804,12 @@ fn put_var(inout out: Slice[u8], inout wr: Wr, n: u64) {
 }
 
 fn put_scalar(inout out: Slice[u8], inout wr: Wr, tag: u64, x: u64) {
-    if tag == 7 || tag == 9 {
+    if tag == K_FIXED32 || tag == K_SFIXED32 {
         out.try_write_u32_le(wr.pos, wrapping_u32(x));
-        wr.pos = wrapping_add(wr.pos, 4);
-    } else if tag == 8 || tag == 10 {
+        wr.pos = wrapping_add(wr.pos, FIXED32_BYTES);
+    } else if tag == K_FIXED64 || tag == K_SFIXED64 {
         out.try_write_u64_le(wr.pos, x);
-        wr.pos = wrapping_add(wr.pos, 8);
+        wr.pos = wrapping_add(wr.pos, FIXED64_BYTES);
     } else {
         put_var(inout out, inout wr, var_bits(tag, x));
     }
@@ -799,15 +853,15 @@ fn write_message(
                 let x = w(in vals, wrapping_add(c, 2));
                 len = wrapping_add(
                     len,
-                    if t == 7 || t == 9 {
+                    if t == K_FIXED32 || t == K_SFIXED32 {
                         4
-                    } else if t == 8 || t == 10 {
+                    } else if t == K_FIXED64 || t == K_SFIXED64 {
                         8
                     } else {
                         leb_len(var_bits(t, x))
                     }
                 );
-                c = wrapping_add(c, 4);
+                c = wrapping_add(c, FIELD_WORDS);
             }
             put_var(inout out, inout wr, tag);
             put_var(inout out, inout wr, len);
@@ -815,7 +869,7 @@ fn write_message(
                 let t = w(in vals, wrapping_add(wr.cur, 1));
                 let x = w(in vals, wrapping_add(wr.cur, 2));
                 put_scalar(inout out, inout wr, t, x);
-                wr.cur = wrapping_add(wr.cur, 4);
+                wr.cur = wrapping_add(wr.cur, FIELD_WORDS);
             }
         } else {
             for j in i..end {
@@ -823,12 +877,12 @@ fn write_message(
                 let t = w(in vals, wrapping_add(wr.cur, 1));
                 let x = w(in vals, wrapping_add(wr.cur, 2));
                 let y = w(in vals, wrapping_add(wr.cur, 3));
-                wr.cur = wrapping_add(wr.cur, 4);
-                if t == 11 || t == 12 {
+                wr.cur = wrapping_add(wr.cur, FIELD_WORDS);
+                if t == K_STRING || t == K_BYTES {
                     put_var(inout out, inout wr, y);
                     out.try_copy_from(wr.pos, in arena[x..wrapping_add(x, y)]);
                     wr.pos = wrapping_add(wr.pos, y);
-                } else if t == 13 {
+                } else if t == K_MESSAGE {
                     let len = match sizes.try_get(wr.size) {
                         Option::Some(v) => v,
                         Option::None => 0,

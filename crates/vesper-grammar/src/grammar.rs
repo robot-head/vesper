@@ -12,6 +12,17 @@ use crate::{Error, ErrorKind, Result, add, bound, charge, mul};
 use core::ops::Range;
 
 pub const HARD_MAX_REPETITIONS: usize = 4096;
+/// The depth ceiling whatever `Limits::max_depth` says.
+const HARD_MAX_DEPTH: usize = 64;
+/// FIRST sets are 256-bit byte sets in four `u64` words.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const SET_WORD_BITS: usize = u64::BITS as usize;
+/// The port's per-rule metadata (vesper/src/grammar.ves): the four FIRST-set
+/// words, then nullable, color and height.
+#[cfg_attr(not(vesper_port), allow(dead_code))]
+const PORT_META_WORDS: usize = 7;
+#[cfg_attr(not(vesper_port), allow(dead_code))]
+const PORT_META_NULLABLE: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct Branch {
@@ -85,7 +96,7 @@ struct Meta {
 #[cfg(not(vesper_port))]
 impl Meta {
     fn contains(self, byte: u8) -> bool {
-        self.first[usize::from(byte) / 64] & (1 << (byte % 64)) != 0
+        self.first[usize::from(byte) / SET_WORD_BITS] & (1 << (byte as usize % SET_WORD_BITS)) != 0
     }
     fn union(&mut self, other: Self) {
         for (a, b) in self.first.iter_mut().zip(other.first) {
@@ -188,7 +199,14 @@ impl<'g> Grammar<'g> {
             .map_err(|_| Error::new(ErrorKind::AllocationFailed, 0))?;
         meta.resize(rules.len(), Meta::default());
         for id in 0..rules.len() {
-            build(id, rules, &mut meta, &mut work, limits.max_depth.min(64), 1)?;
+            build(
+                id,
+                rules,
+                &mut meta,
+                &mut work,
+                limits.max_depth.min(HARD_MAX_DEPTH),
+                1,
+            )?;
         }
         Ok(Self {
             rules,
@@ -228,7 +246,8 @@ impl<'g> Grammar<'g> {
     }
     #[cfg(vesper_port)]
     pub fn nullable(&self, rule: usize) -> Option<bool> {
-        (rule < self.rules.len()).then(|| self.meta[rule * 7 + 4] != 0)
+        (rule < self.rules.len())
+            .then(|| self.meta[rule * PORT_META_WORDS + PORT_META_NULLABLE] != 0)
     }
     #[cfg(not(vesper_port))]
     pub fn first_contains(&self, rule: usize, byte: u8) -> Option<bool> {
@@ -236,8 +255,11 @@ impl<'g> Grammar<'g> {
     }
     #[cfg(vesper_port)]
     pub fn first_contains(&self, rule: usize, byte: u8) -> Option<bool> {
-        (rule < self.rules.len())
-            .then(|| self.meta[rule * 7 + usize::from(byte / 64)] & (1 << (byte % 64)) != 0)
+        (rule < self.rules.len()).then(|| {
+            self.meta[rule * PORT_META_WORDS + usize::from(byte) / SET_WORD_BITS]
+                & (1 << (byte as usize % SET_WORD_BITS))
+                != 0
+        })
     }
     #[cfg(not(vesper_port))]
     pub fn parse_prefix<'a>(&self, input: &'a [u8]) -> Result<Parsed<'a>> {
@@ -315,10 +337,14 @@ fn build(
     };
     match &rules[id] {
         Rule::Empty => result.nullable = true,
-        Rule::Byte(byte) => result.first[usize::from(*byte) / 64] |= 1 << (byte % 64),
+        Rule::Byte(byte) => {
+            result.first[usize::from(*byte) / SET_WORD_BITS] |=
+                1 << (*byte as usize % SET_WORD_BITS)
+        }
         Rule::Literal(bytes) => {
             if let Some(byte) = bytes.first() {
-                result.first[usize::from(*byte) / 64] |= 1 << (byte % 64);
+                result.first[usize::from(*byte) / SET_WORD_BITS] |=
+                    1 << (*byte as usize % SET_WORD_BITS);
             } else {
                 result.nullable = true;
             }
@@ -422,7 +448,7 @@ impl Run<'_, '_, '_> {
         charge(&mut self.work, 1)?;
         bound(
             depth,
-            self.grammar.limits.max_depth.min(64),
+            self.grammar.limits.max_depth.min(HARD_MAX_DEPTH),
             ErrorKind::DepthLimit,
         )?;
         bound(

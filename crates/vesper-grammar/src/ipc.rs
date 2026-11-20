@@ -108,26 +108,81 @@ impl Default for Limits {
         }
     }
 }
+/// Ceilings [`Limits::validate`] enforces.
+const HARD_INPUT_BYTES: usize = 128 * 1024 * 1024;
+const HARD_METADATA_BYTES: usize = 4 * 1024 * 1024;
+const HARD_TOTAL_METADATA_BYTES: usize = 16 * 1024 * 1024;
+const HARD_FIELDS: usize = 1024;
+const HARD_BATCHES: usize = 4096;
+const HARD_ROWS_PER_BATCH: usize = 8_388_608;
+const HARD_TOTAL_ROWS: usize = 16_777_216;
+const HARD_NAME_BYTES: usize = 4096;
+const HARD_METADATA_OBJECTS: usize = 8192;
+const HARD_WORK: usize = 512 * 1024 * 1024;
+const HARD_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
+const HARD_DEPTH: usize = 32;
+/// FlatBuffers vtables: two `u16` sizes, then at most `(MAX_VTABLE_BYTES -
+/// 4) / 2` field slots (Arrow's tables have at most 32 fields).
+const VTABLE_HEADER_BYTES: usize = 4;
+const MAX_VTABLE_BYTES: usize = 68;
+/// Arrow `Message.fbs` structs: `FieldNode` and `Buffer` are two `i64`s,
+/// aligned to eight bytes; body buffers are eight-byte aligned, and the
+/// 64-byte profiles check `ALIGN_64` (Arrow columnar format, "Buffer
+/// Alignment and Padding").
+const I64_BYTES: usize = 8;
+const STRUCT_ALIGN: usize = 8;
+const FIELD_NODE_BYTES: usize = 16;
+const BUFFER_BYTES: usize = 16;
+const BUFFER_ALIGN: usize = 8;
+const ALIGN_64: usize = 64;
+/// The only integer columns read are 64-bit signed (`Int { bitWidth: 64,
+/// is_signed: true }`).
+const INT64_BITS: i32 = 64;
+/// The most `Schema.features` entries read.
+const MAX_FEATURES: usize = 64;
+/// Arrow IPC encapsulated messages (columnar format, "Encapsulated message
+/// format"): a `0xFFFFFFFF` continuation marker and a u32 metadata length,
+/// or (before 0.15) the length alone.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const CONTINUATION: u32 = u32::MAX;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const U32_BYTES: usize = 4;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const LEGACY_PREFIX_BYTES: usize = 4;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const MODERN_PREFIX_BYTES: usize = 8;
+/// `Schema.fbs` `MetadataVersion` values read: V4 and V5.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const METADATA_V4: u16 = 3;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const METADATA_V5: u16 = 4;
+/// `Message.fbs` `MessageHeader` union tags.
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HEADER_SCHEMA: u8 = 1;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HEADER_DICTIONARY_BATCH: u8 = 2;
+#[cfg_attr(vesper_port, allow(dead_code))]
+const HEADER_RECORD_BATCH: u8 = 3;
 impl Limits {
     pub fn validate(self) -> Result<()> {
         for (value, hard) in [
-            (self.max_input_bytes, 128 * 1024 * 1024),
-            (self.max_metadata_bytes, 4 * 1024 * 1024),
-            (self.max_total_metadata_bytes, 16 * 1024 * 1024),
-            (self.max_fields, 1024),
-            (self.max_batches, 4096),
-            (self.max_rows_per_batch, 8_388_608),
-            (self.max_total_rows, 16_777_216),
-            (self.max_name_bytes, 4096),
-            (self.max_metadata_objects, 8192),
-            (self.max_work, 512 * 1024 * 1024),
-            (self.max_allocation_bytes, 64 * 1024 * 1024),
+            (self.max_input_bytes, HARD_INPUT_BYTES),
+            (self.max_metadata_bytes, HARD_METADATA_BYTES),
+            (self.max_total_metadata_bytes, HARD_TOTAL_METADATA_BYTES),
+            (self.max_fields, HARD_FIELDS),
+            (self.max_batches, HARD_BATCHES),
+            (self.max_rows_per_batch, HARD_ROWS_PER_BATCH),
+            (self.max_total_rows, HARD_TOTAL_ROWS),
+            (self.max_name_bytes, HARD_NAME_BYTES),
+            (self.max_metadata_objects, HARD_METADATA_OBJECTS),
+            (self.max_work, HARD_WORK),
+            (self.max_allocation_bytes, HARD_ALLOCATION_BYTES),
         ] {
             if value > hard {
                 return Err(err(ErrorKind::Configuration, 0));
             }
         }
-        if self.max_depth == 0 || self.max_depth > 32 {
+        if self.max_depth == 0 || self.max_depth > HARD_DEPTH {
             return Err(err(ErrorKind::Configuration, 0));
         }
         Ok(())
@@ -407,7 +462,11 @@ impl<'a, 'b> Fb<'a, 'b> {
         }
         let length = self.u16(vtable)? as usize;
         let object = self.u16(add(vtable, 2)?)? as usize;
-        if length < 4 || !length.is_multiple_of(2) || length > 68 || object < 4 {
+        if length < VTABLE_HEADER_BYTES
+            || !length.is_multiple_of(2)
+            || length > MAX_VTABLE_BYTES
+            || object < VTABLE_HEADER_BYTES
+        {
             return Err(self.fail(ErrorKind::Flatbuffer, vtable));
         }
         self.claim(vtable, length, Role::Vtable)?;
@@ -532,9 +591,9 @@ fn schema<'a>(fb: &mut Fb<'a, '_>, message: Table, version: u16) -> Result<Schem
     }
     fb.empty_metadata(table, 2)?;
     let features = fb.field(table, 3)?;
-    let (start, count) = fb.vector(features, 8, 8, 64)?;
+    let (start, count) = fb.vector(features, I64_BYTES, STRUCT_ALIGN, MAX_FEATURES)?;
     for i in 0..count {
-        if fb.i64(start + i * 8)? != 0 {
+        if fb.i64(start + i * I64_BYTES)? != 0 {
             return Err(fb.fail(ErrorKind::UnsupportedFeature, start + i * 8));
         }
     }
@@ -565,7 +624,7 @@ fn schema<'a>(fb: &mut Fb<'a, '_>, message: Table, version: u16) -> Result<Schem
             Some(at) => fb.i32(at)?,
             None => 0,
         };
-        if width != 64 || fb.scalar8(int, 1, 0)? != 1 {
+        if width != INT64_BITS || fb.scalar8(int, 1, 0)? != 1 {
             return Err(fb.fail(ErrorKind::UnsupportedType, int.pos));
         }
         let nullable = fb.scalar8(field, 1, 0)?;
@@ -606,10 +665,19 @@ fn batch<'a>(
         return Err(fb.fail(ErrorKind::CountLimit, table.pos));
     }
     let nodes = fb.field(table, 1)?;
-    let (node_start, node_count) = fb.vector(nodes, 16, 8, fb.budget.limits.max_fields)?;
+    let (node_start, node_count) = fb.vector(
+        nodes,
+        FIELD_NODE_BYTES,
+        STRUCT_ALIGN,
+        fb.budget.limits.max_fields,
+    )?;
     let buffers = fb.field(table, 2)?;
-    let (buffer_start, buffer_count) =
-        fb.vector(buffers, 16, 8, mul(fb.budget.limits.max_fields, 2)?)?;
+    let (buffer_start, buffer_count) = fb.vector(
+        buffers,
+        BUFFER_BYTES,
+        STRUCT_ALIGN,
+        mul(fb.budget.limits.max_fields, 2)?,
+    )?;
     if node_count != schema.fields.len()
         || buffer_count != mul(schema.fields.len(), 2)?
         || (schema.fields.is_empty() && !body.is_empty())
@@ -620,17 +688,18 @@ fn batch<'a>(
     // Descriptor ranges are retained only temporarily for cross-column alias checks.
     let mut ranges = fb.budget.reserve(buffer_count)?;
     for i in 0..buffer_count {
-        let at = buffer_start + i * 16;
+        let at = buffer_start + i * BUFFER_BYTES;
         let descriptor = BufferDesc {
             offset_bytes: fb.i64(at)?,
-            byte_length: fb.i64(at + 8)?,
+            byte_length: fb.i64(at + I64_BYTES)?,
         };
-        let range = arrow::checked_buffer_range(body.len() as u64, descriptor, 8).map_err(|e| {
-            err(
-                ErrorKind::Column(e.kind),
-                body_at.checked_add(e.offset).unwrap_or(body_at),
-            )
-        })?;
+        let range = arrow::checked_buffer_range(body.len() as u64, descriptor, BUFFER_ALIGN)
+            .map_err(|e| {
+                err(
+                    ErrorKind::Column(e.kind),
+                    body_at.checked_add(e.offset).unwrap_or(body_at),
+                )
+            })?;
         for old in &ranges {
             fb.budget.work(1)?;
             let old: &core::ops::Range<usize> = old;
@@ -647,19 +716,19 @@ fn batch<'a>(
                 profile,
                 AlignmentProfile::Relative64 | AlignmentProfile::HostAddress64
             )
-            && (!range.start.is_multiple_of(64)
+            && (!range.start.is_multiple_of(ALIGN_64)
                 || (profile == AlignmentProfile::HostAddress64
-                    && !add(body.as_ptr() as usize, range.start)?.is_multiple_of(64)))
+                    && !add(body.as_ptr() as usize, range.start)?.is_multiple_of(ALIGN_64)))
         {
             return Err(err(ErrorKind::Alignment, body_at + range.start));
         }
         ranges.push(range);
     }
     for (i, field) in schema.fields.iter().enumerate() {
-        let at = node_start + i * 16;
+        let at = node_start + i * FIELD_NODE_BYTES;
         let node = FieldNode {
             row_length: fb.i64(at)?,
-            null_count: fb.i64(at + 8)?,
+            null_count: fb.i64(at + I64_BYTES)?,
         };
         if nonnegative(node.row_length, fb.base + at)? != rows {
             return Err(fb.fail(ErrorKind::Descriptor, at));
@@ -741,10 +810,14 @@ pub fn parse_prefix_with_alignment(
     let mut framing = None;
     loop {
         let first = read_u32(input, pos, &mut budget)?;
-        let modern = first == u32::MAX;
-        let prefix = if modern { 8 } else { 4 };
+        let modern = first == CONTINUATION;
+        let prefix = if modern {
+            MODERN_PREFIX_BYTES
+        } else {
+            LEGACY_PREFIX_BYTES
+        };
         let length = if modern {
-            read_u32(input, add(pos, 4)?, &mut budget)?
+            read_u32(input, add(pos, U32_BYTES)?, &mut budget)?
         } else {
             first
         };
@@ -780,7 +853,7 @@ pub fn parse_prefix_with_alignment(
         }
         let metadata_at = add(pos, prefix)?;
         let body_at = add(metadata_at, length)?;
-        if !body_at.is_multiple_of(8) {
+        if !body_at.is_multiple_of(BUFFER_ALIGN) {
             return Err(err(ErrorKind::Alignment, body_at));
         }
         let metadata = input
@@ -789,12 +862,12 @@ pub fn parse_prefix_with_alignment(
         let mut fb = Fb::new(metadata, metadata_at, &mut budget)?;
         let message = fb.root()?;
         let version = fb.scalar16(message, 0, 0)?;
-        if !matches!(version, 3 | 4) {
+        if !matches!(version, METADATA_V4 | METADATA_V5) {
             return Err(fb.fail(ErrorKind::UnsupportedVersion, message.pos));
         }
         fb.empty_metadata(message, 4)?;
         let body_len = nonnegative(fb.scalar64(message, 3, 0)?, metadata_at + message.pos)?;
-        if !body_len.is_multiple_of(8) {
+        if !body_len.is_multiple_of(BUFFER_ALIGN) {
             return Err(err(ErrorKind::Alignment, body_at));
         }
         let end = add(body_at, body_len)?;
@@ -802,7 +875,7 @@ pub fn parse_prefix_with_alignment(
             .get(body_at..end)
             .ok_or(err(ErrorKind::UnexpectedEof, body_at))?;
         match fb.scalar8(message, 1, 0)? {
-            1 => {
+            HEADER_SCHEMA => {
                 if current_schema.is_some() || !body.is_empty() {
                     return Err(err(ErrorKind::Schema, pos));
                 }
@@ -812,7 +885,7 @@ pub fn parse_prefix_with_alignment(
                     .reserve(limits.max_batches.min(input.len() / 8 + 1))?;
                 framing = Some(modern);
             }
-            3 => {
+            HEADER_RECORD_BATCH => {
                 let schema = current_schema
                     .as_ref()
                     .ok_or(err(ErrorKind::MissingSchema, pos))?;
@@ -834,7 +907,7 @@ pub fn parse_prefix_with_alignment(
                 }
                 batches.push(value);
             }
-            2 => return Err(err(ErrorKind::UnsupportedDictionary, pos)),
+            HEADER_DICTIONARY_BATCH => return Err(err(ErrorKind::UnsupportedDictionary, pos)),
             _ => return Err(err(ErrorKind::UnsupportedHeader, pos)),
         }
         pos = end;
@@ -852,11 +925,11 @@ pub fn parse_prefix_with_alignment(
 }
 #[cfg(not(vesper_port))]
 fn read_u32(input: &[u8], at: usize, budget: &mut Budget) -> Result<u32> {
-    let end = add(at, 4)?;
+    let end = add(at, U32_BYTES)?;
     let bytes = input
         .get(at..end)
         .ok_or(err(ErrorKind::UnexpectedEof, at))?;
-    budget.work(4)?;
+    budget.work(U32_BYTES)?;
     Ok(u32::from_le_bytes(bytes.try_into().expect("four bytes")))
 }
 

@@ -50,6 +50,86 @@ use self::utf8::{
     valid_up_to
 };
 
+// Ceilings (src/ipc.rs `HARD_*`), in `lim` order.
+const HARD_INPUT_BYTES: u64 = 134217728;
+const HARD_METADATA_BYTES: u64 = 4194304;
+const HARD_TOTAL_METADATA_BYTES: u64 = 16777216;
+const HARD_FIELDS: u64 = 1024;
+const HARD_BATCHES: u64 = 4096;
+const HARD_ROWS_PER_BATCH: u64 = 8388608;
+const HARD_TOTAL_ROWS: u64 = 16777216;
+const HARD_NAME_BYTES: u64 = 4096;
+const HARD_METADATA_OBJECTS: u64 = 8192;
+const HARD_DEPTH: u64 = 32;
+const HARD_WORK: u64 = 536870912;
+const HARD_ALLOCATION_BYTES: u64 = 67108864;
+// FlatBuffers (flatbuffers.dev, "Internals"): 4-byte aligned unsigned
+// offsets, a table's signed offset to its vtable, and vtables of two u16
+// sizes then u16 field slots (src/ipc.rs `VTABLE_HEADER_BYTES`,
+// `MAX_VTABLE_BYTES`). Vectors and strings start with a u32 count; a
+// string also ends in a NUL.
+const UOFFSET_BYTES: u64 = 4;
+const UOFFSET_MASK: u64 = 3;
+const SOFFSET_SIGN: u64 = 2147483648;
+const SOFFSET_RANGE: u64 = 4294967296;
+const VOFFSET_BYTES: u64 = 2;
+const VOFFSET_MASK: u64 = 1;
+const VTABLE_HEADER_BYTES: u64 = 4;
+const MAX_VTABLE_BYTES: u64 = 68;
+const STRING_OVERHEAD_BYTES: u64 = 5;
+// Region roles and table kinds (see `claim`).
+const ROLE_ROOT: u64 = 0;
+const ROLE_TABLE: u64 = 1;
+const ROLE_VTABLE: u64 = 6;
+const ROLE_STRING: u64 = 8;
+const ROLE_VECTOR: u64 = 16;
+const T_MESSAGE: u64 = 0;
+const T_SCHEMA: u64 = 1;
+const T_FIELD: u64 = 2;
+const T_INT: u64 = 3;
+const T_RECORD_BATCH: u64 = 4;
+// Arrow `Message.fbs` and `Schema.fbs` (src/ipc.rs): `FieldNode` and
+// `Buffer` structs, the `Type` union's Int tag, 64-bit integer columns,
+// `MetadataVersion` V4 and V5, and `MessageHeader` tags.
+const I64_BYTES: u64 = 8;
+const STRUCT_ALIGN: u64 = 8;
+const FIELD_NODE_BYTES: u64 = 16;
+const BUFFER_BYTES: u64 = 16;
+const BUFFER_ALIGN: u64 = 8;
+const BUFFER_ALIGN_MASK: u64 = 7;
+const ALIGN_64_MASK: u64 = 63;
+const BUFFERS_PER_FIELD: u64 = 2;
+const TYPE_INT: u64 = 2;
+const INT64_BITS: u64 = 64;
+const MAX_FEATURES: u64 = 64;
+const METADATA_V4: u64 = 3;
+const METADATA_V5: u64 = 4;
+const HEADER_SCHEMA: u64 = 1;
+const HEADER_DICTIONARY_BATCH: u64 = 2;
+const HEADER_RECORD_BATCH: u64 = 3;
+// Encapsulated message framing: a continuation marker and a u32 length,
+// or (legacy) the length alone; lengths above `i32::MAX` are refused.
+const CONTINUATION: u64 = 4294967295;
+const U32_BYTES: u64 = 4;
+const LEGACY_PREFIX_BYTES: u64 = 4;
+const MODERN_PREFIX_BYTES: u64 = 8;
+const MAX_METADATA_LENGTH: u64 = 2147483647;
+const FRAMING_UNSET: u64 = 0;
+const FRAMING_LEGACY: u64 = 1;
+const FRAMING_MODERN: u64 = 2;
+// arrow::AlignmentProfile indices.
+const P_RELATIVE8: u64 = 1;
+const P_RELATIVE64: u64 = 2;
+const P_HOST_ADDRESS64: u64 = 3;
+// Word strides: regions (start, end, role), fields (name start, name
+// length, nullable), buffer ranges (start, end) and a field's two ranges.
+const REGION_WORDS: u64 = 3;
+const FIELD_WORDS: u64 = 3;
+const RANGE_WORDS: u64 = 2;
+const FIELD_RANGE_WORDS: u64 = 4;
+// `nonnegative`: the sign bit of an `i64`.
+const I64_SIGN: u64 = 9223372036854775808;
+
 // The Budget: remaining work, requested metadata bytes, metadata length.
 pub copy struct Bud {
     remaining: u64,
@@ -88,7 +168,7 @@ fn reserve(inout b: Bud, in lim: Slice[u64], count: u64, size: u64) -> Unit eff 
 }
 
 fn nonnegative(n: u64, at: u64) -> u64 eff [Fail[GErr]] {
-    if n >= 9223372036854775808 {
+    if n >= I64_SIGN {
         fail(28, at);
     }
     n
@@ -143,14 +223,20 @@ fn claim(
     if end > f.len {
         ffail(f, 12, start);
     }
-    let n = regs.len() / 3;
+    let n = regs.len() / REGION_WORDS;
     for i in 0..n {
         work(inout b, 1);
-        let rs = cw(in regs, wrapping_mul(i, 3));
-        let re = cw(in regs, wrapping_add(wrapping_mul(i, 3), 1));
-        let rr = cw(in regs, wrapping_add(wrapping_mul(i, 3), 2));
+        let rs = cw(in regs, wrapping_mul(i, REGION_WORDS));
+        let re = cw(in regs, wrapping_add(wrapping_mul(i, REGION_WORDS), 1));
+        let rr = cw(in regs, wrapping_add(wrapping_mul(i, REGION_WORDS), 2));
         if start < re && rs < end {
-            if start == rs && end == re && (role == rr || (len == 4 && role >= 16 && rr >= 16)) {
+            if start
+                == rs
+                && end
+                == re
+                && (
+                role == rr || (len == UOFFSET_BYTES && role >= ROLE_VECTOR && rr >= ROLE_VECTOR)
+            ) {
                 return;
             }
             ffail(f, 14, start);
@@ -173,14 +259,14 @@ fn cw(in s: ChunkSeq[u64], i: u64) -> u64 {
 
 fn offset(in input: Slice[u8], f: Fb, inout b: Bud, at: u64) -> u64 eff [Fail[GErr]] {
     let value = fu32(in input, f, inout b, at);
-    if value < 4 {
+    if value < UOFFSET_BYTES {
         ffail(f, 12, at);
     }
     let target = add_or(at, value, 9, at);
-    if target & 3 != 0 {
+    if target & UOFFSET_MASK != 0 {
         ffail(f, 12, at);
     }
-    if add_or(target, 4, 9, target) > f.len {
+    if add_or(target, UOFFSET_BYTES, 9, target) > f.len {
         ffail(f, 12, at);
     }
     target
@@ -188,7 +274,7 @@ fn offset(in input: Slice[u8], f: Fb, inout b: Bud, at: u64) -> u64 eff [Fail[GE
 
 // Kind::width: the slot widths of each table kind; 0 is an unknown slot.
 fn kwidth(kind: u64, index: u64) -> u64 {
-    if kind == 0 {
+    if kind == T_MESSAGE {
         if index == 0 {
             2
         } else if index == 1 {
@@ -200,7 +286,7 @@ fn kwidth(kind: u64, index: u64) -> u64 {
         } else {
             0
         }
-    } else if kind == 1 {
+    } else if kind == T_SCHEMA {
         if index == 0 {
             2
         } else if index <= 3 {
@@ -208,7 +294,7 @@ fn kwidth(kind: u64, index: u64) -> u64 {
         } else {
             0
         }
-    } else if kind == 2 {
+    } else if kind == T_FIELD {
         if index == 1 || index == 2 {
             1
         } else if index <= 6 {
@@ -216,7 +302,7 @@ fn kwidth(kind: u64, index: u64) -> u64 {
         } else {
             0
         }
-    } else if kind == 3 {
+    } else if kind == T_INT {
         if index == 0 {
             4
         } else if index == 1 {
@@ -246,40 +332,51 @@ fn table(
     if depth > sw(in lim, 9) {
         ffail(f, 5, pos);
     }
-    if pos & 3 != 0 {
+    if pos & UOFFSET_MASK != 0 {
         ffail(f, 13, pos);
     }
     let distance = fu32(in input, f, inout b, pos);
-    let vtable = if distance >= 2147483648 {
-        add_or(pos, wrapping_sub(4294967296, distance), 9, pos)
+    let vtable = if distance >= SOFFSET_SIGN {
+        add_or(pos, wrapping_sub(SOFFSET_RANGE, distance), 9, pos)
     } else {
         if distance > pos {
             ffail(f, 12, pos);
         }
         wrapping_sub(pos, distance)
     };
-    if vtable & 1 != 0 {
+    if vtable & VOFFSET_MASK != 0 {
         ffail(f, 13, vtable);
     }
     let length = fu16(in input, f, inout b, vtable);
-    let object = fu16(in input, f, inout b, add_or(vtable, 2, 9, vtable));
-    if length < 4 || length & 1 != 0 || length > 68 || object < 4 {
+    let object = fu16(in input, f, inout b, add_or(vtable, VOFFSET_BYTES, 9, vtable));
+    if length
+        < VTABLE_HEADER_BYTES
+        || length
+        & VOFFSET_MASK
+        != 0
+        || length
+        > MAX_VTABLE_BYTES
+        || object
+        < UOFFSET_BYTES {
         ffail(f, 12, vtable);
     }
-    claim(f, inout b, inout regs, in lim, vtable, length, 6);
-    claim(f, inout b, inout regs, in lim, pos, object, wrapping_add(kind, 1));
-    let slots = wrapping_sub(length, 4) / 2;
+    claim(f, inout b, inout regs, in lim, vtable, length, ROLE_VTABLE);
+    claim(f, inout b, inout regs, in lim, pos, object, wrapping_add(ROLE_TABLE, kind));
+    let slots = wrapping_sub(length, VTABLE_HEADER_BYTES) / VOFFSET_BYTES;
     for index in 0..slots {
-        let slot = wrapping_add(wrapping_add(vtable, 4), wrapping_mul(index, 2));
+        let slot = wrapping_add(
+            wrapping_add(vtable, VTABLE_HEADER_BYTES),
+            wrapping_mul(index, VOFFSET_BYTES)
+        );
         let off = fu16(in input, f, inout b, slot);
         if off != 0 {
             let width = kwidth(kind, index);
             if width == 0 {
                 ffail(f, 24, slot);
             }
-            let align = min(width, 8);
+            let align = min(width, STRUCT_ALIGN);
             if off
-                < 4
+                < UOFFSET_BYTES
                 || add_or(off, width, 9, off)
                 > object
                 || add_or(pos, off, 9, pos)
@@ -288,7 +385,10 @@ fn table(
                 ffail(f, 12, wrapping_add(pos, off));
             }
             for prior in 0..index {
-                let pslot = wrapping_add(wrapping_add(vtable, 4), wrapping_mul(prior, 2));
+                let pslot = wrapping_add(
+                    wrapping_add(vtable, VTABLE_HEADER_BYTES),
+                    wrapping_mul(prior, VOFFSET_BYTES)
+                );
                 let previous = fu16(in input, f, inout b, pslot);
                 if previous != 0 {
                     let old = kwidth(kind, prior);
@@ -318,7 +418,10 @@ fn field(in input: Slice[u8], f: Fb, inout b: Bud, t: Table, index: u64) -> u64 
         in input,
         f,
         inout b,
-        wrapping_add(wrapping_add(t.vtable, 4), wrapping_mul(index, 2))
+        wrapping_add(
+            wrapping_add(t.vtable, VTABLE_HEADER_BYTES),
+            wrapping_mul(index, VOFFSET_BYTES)
+        )
     );
     if off == 0 {
         none()
@@ -377,12 +480,12 @@ fn vector(
     if count > max {
         ffail(f, 3, target);
     }
-    let start = add_or(target, 4, 9, target);
+    let start = add_or(target, UOFFSET_BYTES, 9, target);
     if count != 0 && start & wrapping_sub(alignment, 1) != 0 {
         ffail(f, 13, start);
     }
-    let len = add_or(4, mul_or(count, width, 9, count), 9, 4);
-    claim(f, inout b, inout regs, in lim, target, len, wrapping_add(16, width));
+    let len = add_or(UOFFSET_BYTES, mul_or(count, width, 9, count), 9, UOFFSET_BYTES);
+    claim(f, inout b, inout regs, in lim, target, len, wrapping_add(ROLE_VECTOR, width));
     pair(start, count)
 }
 
@@ -396,7 +499,17 @@ fn empty_metadata(
     index: u64
 ) -> Unit eff [Fail[GErr]] {
     let at = field(in input, f, inout b, t, index);
-    let v = vector(in input, f, inout b, inout regs, in lim, at, 4, 4, sw(in lim, 3));
+    let v = vector(
+        in input,
+        f,
+        inout b,
+        inout regs,
+        in lim,
+        at,
+        UOFFSET_BYTES,
+        UOFFSET_BYTES,
+        sw(in lim, 3)
+    );
     if v.b != 0 {
         ffail(f, 24, t.pos);
     }
@@ -419,8 +532,16 @@ fn string(
     if len > sw(in lim, 7) {
         ffail(f, 4, target);
     }
-    let start = add_or(target, 4, 9, target);
-    claim(f, inout b, inout regs, in lim, target, add_or(5, len, 9, 5), 8);
+    let start = add_or(target, UOFFSET_BYTES, 9, target);
+    claim(
+        f,
+        inout b,
+        inout regs,
+        in lim,
+        target,
+        add_or(STRING_OVERHEAD_BYTES, len, 9, STRING_OVERHEAD_BYTES),
+        ROLE_STRING
+    );
     let nul = add_or(start, len, 9, start);
     if fu8(in input, f, inout b, nul) != 0 {
         ffail(f, 12, nul);
@@ -460,25 +581,45 @@ fn schema(
     message: Table,
     inout fields: ChunkSeq[u64]
 ) -> Unit eff [Fail[GErr]] {
-    let t = header(in input, f, inout b, inout regs, in lim, message, 1);
+    let t = header(in input, f, inout b, inout regs, in lim, message, T_SCHEMA);
     if scalar16(in input, f, inout b, t, 0, 0) != 0 {
         ffail(f, 21, t.pos);
     }
     empty_metadata(in input, f, inout b, inout regs, in lim, t, 2);
     let features_at = field(in input, f, inout b, t, 3);
-    let features = vector(in input, f, inout b, inout regs, in lim, features_at, 8, 8, 64);
+    let features = vector(
+        in input,
+        f,
+        inout b,
+        inout regs,
+        in lim,
+        features_at,
+        I64_BYTES,
+        I64_BYTES,
+        MAX_FEATURES
+    );
     for i in 0..features.b {
-        let at = wrapping_add(features.a, wrapping_mul(i, 8));
+        let at = wrapping_add(features.a, wrapping_mul(i, I64_BYTES));
         if fi64(in input, f, inout b, at) != 0 {
             ffail(f, 25, at);
         }
     }
     let list_at = field(in input, f, inout b, t, 1);
-    let list = vector(in input, f, inout b, inout regs, in lim, list_at, 4, 4, sw(in lim, 3));
+    let list = vector(
+        in input,
+        f,
+        inout b,
+        inout regs,
+        in lim,
+        list_at,
+        UOFFSET_BYTES,
+        UOFFSET_BYTES,
+        sw(in lim, 3)
+    );
     reserve(inout b, in lim, list.b, sw(in lim, 13));
     for i in 0..list.b {
-        let at = offset(in input, f, inout b, wrapping_add(list.a, wrapping_mul(i, 4)));
-        let ft = table(in input, f, inout b, inout regs, in lim, at, 2, 3);
+        let at = offset(in input, f, inout b, wrapping_add(list.a, wrapping_mul(i, UOFFSET_BYTES)));
+        let ft = table(in input, f, inout b, inout regs, in lim, at, T_FIELD, 3);
         if field(in input, f, inout b, ft, 4) != none() {
             ffail(f, 22, at);
         }
@@ -490,15 +631,15 @@ fn schema(
             inout regs,
             in lim,
             children_at,
-            4,
-            4,
+            UOFFSET_BYTES,
+            UOFFSET_BYTES,
             sw(in lim, 3)
         );
         if children.b != 0 {
             ffail(f, 26, at);
         }
         empty_metadata(in input, f, inout b, inout regs, in lim, ft, 6);
-        if scalar8(in input, f, inout b, ft, 2, 0) != 2 {
+        if scalar8(in input, f, inout b, ft, 2, 0) != TYPE_INT {
             ffail(f, 20, at);
         }
         let int_at = field(in input, f, inout b, ft, 3);
@@ -506,14 +647,14 @@ fn schema(
             ffail(f, 12, at);
         }
         let int_pos = offset(in input, f, inout b, int_at);
-        let it = table(in input, f, inout b, inout regs, in lim, int_pos, 3, 4);
+        let it = table(in input, f, inout b, inout regs, in lim, int_pos, T_INT, 4);
         let width_at = field(in input, f, inout b, it, 0);
         let width = if width_at == none() {
             0
         } else {
             fu32(in input, f, inout b, width_at)
         };
-        if width != 64 {
+        if width != INT64_BITS {
             ffail(f, 20, it.pos);
         }
         if scalar8(in input, f, inout b, it, 1, 0) != 1 {
@@ -536,7 +677,7 @@ fn schema(
 fn column_range(total: u64, offset_bytes: u64, byte_length: u64, body_at: u64)
     -> P2 eff [Fail[GErr]] {
     let r = handle Fail[GErr] in {
-        let p = checked_buffer_range(total, offset_bytes, byte_length, 8);
+        let p = checked_buffer_range(total, offset_bytes, byte_length, BUFFER_ALIGN);
         P4 {
             a: 0,
             b: p.a,
@@ -605,7 +746,7 @@ fn batch(
     remaining_rows: u64,
     inout out: ChunkSeq[u64]
 ) -> u64 eff [Fail[GErr]] {
-    let t = header(in input, f, inout b, inout regs, in lim, message, 4);
+    let t = header(in input, f, inout b, inout regs, in lim, message, T_RECORD_BATCH);
     if field(in input, f, inout b, t, 3) != none() {
         ffail(f, 23, t.pos);
     }
@@ -617,8 +758,8 @@ fn batch(
         inout regs,
         in lim,
         variadic_at,
-        8,
-        8,
+        I64_BYTES,
+        I64_BYTES,
         sw(in lim, 3)
     );
     if variadic.b != 0 {
@@ -629,12 +770,38 @@ fn batch(
         ffail(f, 3, t.pos);
     }
     let nodes_at = field(in input, f, inout b, t, 1);
-    let nodes = vector(in input, f, inout b, inout regs, in lim, nodes_at, 16, 8, sw(in lim, 3));
+    let nodes = vector(
+        in input,
+        f,
+        inout b,
+        inout regs,
+        in lim,
+        nodes_at,
+        FIELD_NODE_BYTES,
+        STRUCT_ALIGN,
+        sw(in lim, 3)
+    );
     let buffers_at = field(in input, f, inout b, t, 2);
-    let max_buffers = mul_or(sw(in lim, 3), 2, 9, sw(in lim, 3));
-    let buffers = vector(in input, f, inout b, inout regs, in lim, buffers_at, 16, 8, max_buffers);
-    let nf = fields.len() / 3;
-    if nodes.b != nf || buffers.b != mul_or(nf, 2, 9, nf) || (nf == 0 && body_len != 0) {
+    let max_buffers = mul_or(sw(in lim, 3), BUFFERS_PER_FIELD, 9, sw(in lim, 3));
+    let buffers = vector(
+        in input,
+        f,
+        inout b,
+        inout regs,
+        in lim,
+        buffers_at,
+        BUFFER_BYTES,
+        BUFFER_ALIGN,
+        max_buffers
+    );
+    let nf = fields.len() / FIELD_WORDS;
+    if nodes
+        .b
+        != nf
+        || buffers
+        .b
+        != mul_or(nf, BUFFERS_PER_FIELD, 9, nf)
+        || (nf == 0 && body_len != 0) {
         ffail(f, 28, t.pos);
     }
     reserve(inout b, in lim, nf, sw(in lim, 14));
@@ -643,23 +810,27 @@ fn batch(
     let profile = sw(in lim, 18);
     let mut ranges = ChunkSeq::new[u64]();
     for i in 0..buffers.b {
-        let at = wrapping_add(buffers.a, wrapping_mul(i, 16));
+        let at = wrapping_add(buffers.a, wrapping_mul(i, BUFFER_BYTES));
         let offset_bytes = fi64(in input, f, inout b, at);
-        let byte_length = fi64(in input, f, inout b, wrapping_add(at, 8));
+        let byte_length = fi64(in input, f, inout b, wrapping_add(at, I64_BYTES));
         let range = column_range(body_len, offset_bytes, byte_length, body_at);
         for j in 0..i {
             work(inout b, 1);
-            let os = cw(in ranges, wrapping_mul(j, 2));
-            let oe = cw(in ranges, wrapping_add(wrapping_mul(j, 2), 1));
+            let os = cw(in ranges, wrapping_mul(j, RANGE_WORDS));
+            let oe = cw(in ranges, wrapping_add(wrapping_mul(j, RANGE_WORDS), 1));
             if range.a != range.b && os != oe && range.a < oe && os < range.b {
                 fail(14, wrapping_add(body_at, range.a));
             }
         }
-        if range.a != range.b && (profile == 2 || profile == 3) {
-            if range.a & 63 != 0 {
+        if range.a != range.b && (profile == P_RELATIVE64 || profile == P_HOST_ADDRESS64) {
+            if range.a & ALIGN_64_MASK != 0 {
                 fail(13, wrapping_add(body_at, range.a));
             }
-            if profile == 3 && add_or(body_address, range.a, 9, body_address) & 63 != 0 {
+            if profile
+                == P_HOST_ADDRESS64
+                && add_or(body_address, range.a, 9, body_address)
+                & ALIGN_64_MASK
+                != 0 {
                 fail(13, wrapping_add(body_at, range.a));
             }
         }
@@ -672,20 +843,20 @@ fn batch(
     out.push(version);
     let body_end = wrapping_add(body_at, body_len);
     for i in 0..nf {
-        let at = wrapping_add(nodes.a, wrapping_mul(i, 16));
+        let at = wrapping_add(nodes.a, wrapping_mul(i, FIELD_NODE_BYTES));
         let row_length = fi64(in input, f, inout b, at);
-        let null_count = fi64(in input, f, inout b, wrapping_add(at, 8));
+        let null_count = fi64(in input, f, inout b, wrapping_add(at, I64_BYTES));
         if nonnegative(row_length, wrapping_add(f.base, at)) != rows {
             ffail(f, 28, at);
         }
-        if cw(in fields, wrapping_add(wrapping_mul(i, 3), 2)) == 0 && null_count != 0 {
+        if cw(in fields, wrapping_add(wrapping_mul(i, FIELD_WORDS), 2)) == 0 && null_count != 0 {
             ffail(f, 29, at);
         }
         work(inout b, rows);
-        let vs = cw(in ranges, wrapping_mul(i, 4));
-        let ve = cw(in ranges, wrapping_add(wrapping_mul(i, 4), 1));
-        let ws = cw(in ranges, wrapping_add(wrapping_mul(i, 4), 2));
-        let we = cw(in ranges, wrapping_add(wrapping_mul(i, 4), 3));
+        let vs = cw(in ranges, wrapping_mul(i, FIELD_RANGE_WORDS));
+        let ve = cw(in ranges, wrapping_add(wrapping_mul(i, FIELD_RANGE_WORDS), 1));
+        let ws = cw(in ranges, wrapping_add(wrapping_mul(i, FIELD_RANGE_WORDS), 2));
+        let we = cw(in ranges, wrapping_add(wrapping_mul(i, FIELD_RANGE_WORDS), 3));
         let request = ArReq {
             row_length: row_length,
             null_count: null_count,
@@ -693,7 +864,7 @@ fn batch(
             validity_length: wrapping_sub(ve, vs),
             values_offset: ws,
             values_length: wrapping_sub(we, ws),
-            profile: 1,
+            profile: P_RELATIVE8,
             body_address: body_address,
             max_body_bytes: sw(in lim, 0),
             max_rows: sw(in lim, 5),
@@ -720,40 +891,40 @@ fn batch(
 
 fn validate_limits(in lim: Slice[u64]) -> Unit eff [Fail[GErr]] {
     if sw(in lim, 0)
-        > 134217728
+        > HARD_INPUT_BYTES
         || sw(in lim, 1)
-        > 4194304
+        > HARD_METADATA_BYTES
         || sw(in lim, 2)
-        > 16777216
+        > HARD_TOTAL_METADATA_BYTES
         || sw(in lim, 3)
-        > 1024
+        > HARD_FIELDS
         || sw(in lim, 4)
-        > 4096
+        > HARD_BATCHES
         || sw(in lim, 5)
-        > 8388608
+        > HARD_ROWS_PER_BATCH
         || sw(in lim, 6)
-        > 16777216
+        > HARD_TOTAL_ROWS
         || sw(in lim, 7)
-        > 4096
+        > HARD_NAME_BYTES
         || sw(in lim, 8)
-        > 8192
+        > HARD_METADATA_OBJECTS
         || sw(in lim, 10)
-        > 536870912
+        > HARD_WORK
         || sw(in lim, 11)
-        > 67108864 {
+        > HARD_ALLOCATION_BYTES {
         fail(0, 0);
     }
-    if sw(in lim, 9) == 0 || sw(in lim, 9) > 32 {
+    if sw(in lim, 9) == 0 || sw(in lim, 9) > HARD_DEPTH {
         fail(0, 0);
     }
 }
 
 fn read_u32(in input: Slice[u8], at: u64, inout b: Bud) -> u64 eff [Fail[GErr]] {
-    let end = add_or(at, 4, 9, at);
+    let end = add_or(at, U32_BYTES, 9, at);
     if end > input.len() {
         fail(10, at);
     }
-    work(inout b, 4);
+    work(inout b, U32_BYTES);
     le32(in input, at)
 }
 
@@ -777,27 +948,26 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
     let mut batches = ChunkSeq::new[u64]();
     let mut count: u64 = 0;
     let mut total_rows: u64 = 0;
-    // 0 unset, 1 legacy, 2 modern.
-    let mut framing: u64 = 0;
+    let mut framing: u64 = FRAMING_UNSET;
     loop {
         let first = read_u32(in input, pos, inout b);
-        let modern = first == 4294967295;
+        let modern = first == CONTINUATION;
         let prefix: u64 = if modern {
-            8
+            MODERN_PREFIX_BYTES
         } else {
-            4
+            LEGACY_PREFIX_BYTES
         };
         let length = if modern {
-            read_u32(in input, add_or(pos, 4, 9, pos), inout b)
+            read_u32(in input, add_or(pos, U32_BYTES, 9, pos), inout b)
         } else {
             first
         };
         let frame: u64 = if modern {
-            2
+            FRAMING_MODERN
         } else {
-            1
+            FRAMING_LEGACY
         };
-        if framing != 0 && framing != frame {
+        if framing != FRAMING_UNSET && framing != frame {
             fail(11, pos);
         }
         if length == 0 {
@@ -807,7 +977,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
             let consumed = add_or(pos, prefix, 9, pos);
             let mut out = ChunkSeq::new[u64]();
             out.push(schema_version);
-            out.push(fields.len() / 3);
+            out.push(fields.len() / FIELD_WORDS);
             for i in 0..fields.len() {
                 out.push(cw(in fields, i));
             }
@@ -820,7 +990,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
             out.push(consumed);
             return out;
         }
-        if length > 2147483647 {
+        if length > MAX_METADATA_LENGTH {
             fail(11, pos);
         }
         if length > sw(in lim, 1) {
@@ -832,13 +1002,13 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
         }
         let metadata_at = add_or(pos, prefix, 9, pos);
         let body_at = add_or(metadata_at, length, 9, metadata_at);
-        if body_at & 7 != 0 {
+        if body_at & BUFFER_ALIGN_MASK != 0 {
             fail(13, body_at);
         }
         if body_at > n {
             fail(10, metadata_at);
         }
-        let cap = min(sw(in lim, 8), wrapping_add(length / 4, 1));
+        let cap = min(sw(in lim, 8), wrapping_add(length / UOFFSET_BYTES, 1));
         reserve(inout b, in lim, cap, sw(in lim, 12));
         let f = Fb {
             base: metadata_at,
@@ -846,11 +1016,11 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
             cap: cap
         };
         let mut regs = ChunkSeq::new[u64]();
-        claim(f, inout b, inout regs, in lim, 0, 4, 0);
+        claim(f, inout b, inout regs, in lim, 0, UOFFSET_BYTES, ROLE_ROOT);
         let root_at = offset(in input, f, inout b, 0);
-        let message = table(in input, f, inout b, inout regs, in lim, root_at, 0, 1);
+        let message = table(in input, f, inout b, inout regs, in lim, root_at, T_MESSAGE, 1);
         let version = scalar16(in input, f, inout b, message, 0, 0);
-        if version != 3 && version != 4 {
+        if version != METADATA_V4 && version != METADATA_V5 {
             ffail(f, 18, message.pos);
         }
         empty_metadata(in input, f, inout b, inout regs, in lim, message, 4);
@@ -858,7 +1028,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
             scalar64(in input, f, inout b, message, 3, 0),
             wrapping_add(metadata_at, message.pos)
         );
-        if body_len & 7 != 0 {
+        if body_len & BUFFER_ALIGN_MASK != 0 {
             fail(13, body_at);
         }
         let end = add_or(body_at, body_len, 9, body_at);
@@ -866,7 +1036,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
             fail(10, body_at);
         }
         let h = scalar8(in input, f, inout b, message, 1, 0);
-        if h == 1 {
+        if h == HEADER_SCHEMA {
             if have_schema || body_len != 0 {
                 fail(16, pos);
             }
@@ -875,7 +1045,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
             schema_version = version;
             reserve(inout b, in lim, min(sw(in lim, 4), wrapping_add(n / 8, 1)), sw(in lim, 16));
             framing = frame;
-        } else if h == 3 {
+        } else if h == HEADER_RECORD_BATCH {
             if !have_schema {
                 fail(17, pos);
             }
@@ -902,7 +1072,7 @@ pub fn parse_prefix(in input: Slice[u8], in lim: Slice[u64]) -> ChunkSeq[u64] ef
                 fail(3, pos);
             }
             count = wrapping_add(count, 1);
-        } else if h == 2 {
+        } else if h == HEADER_DICTIONARY_BATCH {
             fail(22, pos);
         } else {
             fail(19, pos);
