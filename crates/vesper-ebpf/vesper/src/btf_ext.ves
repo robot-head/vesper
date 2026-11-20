@@ -14,6 +14,8 @@
 // part at x, y bytes), 11 nests too deeply, 12 no type (x), 13 bad
 // bitfield member, 14 unsupported local type (the type x).
 use self::btf::{
+    BtfHeader,
+    BtfKind,
     byte,
     le32,
     name_span
@@ -27,12 +29,10 @@ use self::core::{
     tkind
 };
 
-// `.BTF.ext` (src/btf_ext.rs): the BTF magic and version, the header
+// `.BTF.ext` (src/btf_ext.rs; its magic and version are btf.ves `BtfHeader`): the header
 // before CO-RE (24 bytes), the subsection (offset, length) pairs from byte
 // 8, record sizes, `bpf_line_info.line_col` (line << 10 | column) and the
 // largest record size accepted.
-const BTF_MAGIC: u64 = 60319;
-const BTF_VERSION: u64 = 1;
 const EXT_HDR_MIN_LEN: u64 = 24;
 const EXT_PARTS_OFF: u64 = 8;
 const EXT_PART_SIZE: u64 = 8;
@@ -45,20 +45,6 @@ const MAX_REC_SIZE: u64 = 256;
 const CORE_KIND_MAX: u64 = 12;
 // Deepest local type `local_type` follows.
 const MAX_LOCAL_DEPTH: u64 = 16;
-
-// BTF kinds as core.ves `tkind` gives them (enum64 reads as enum), and its
-// code for an id past the table.
-const KIND_VOID: u64 = 0;
-const KIND_INT: u64 = 1;
-const KIND_PTR: u64 = 2;
-const KIND_ARRAY: u64 = 3;
-const KIND_STRUCT: u64 = 4;
-const KIND_UNION: u64 = 5;
-const KIND_ENUM: u64 = 6;
-const KIND_FUNC: u64 = 12;
-const KIND_VAR: u64 = 14;
-const KIND_DATASEC: u64 = 15;
-const TKIND_MISSING: u64 = 99;
 
 // Access strings are `:`-separated decimal u32s, an optional `+` first.
 const ASCII_PLUS: u64 = 43;
@@ -197,14 +183,14 @@ fn local_depth(
     }
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
-    if k == TKIND_MISSING {
+    if k == BtfKind::Missing {
         bad = id;
         return 12;
     }
     let name = tf(in tab, in idx, t, 1);
     let a = tf(in tab, in idx, t, 2);
     let d1 = wrapping_add(depth, 1);
-    if k == KIND_VOID {
+    if k == BtfKind::Void {
         out.push(0);
         out.push(0);
         out.push(0);
@@ -213,7 +199,7 @@ fn local_depth(
         out.push(0);
         return 0;
     }
-    if k == KIND_INT {
+    if k == BtfKind::Int {
         out.push(1);
         out.push(name);
         out.push(0);
@@ -222,7 +208,7 @@ fn local_depth(
         out.push(0);
         return 0;
     }
-    if k == KIND_PTR {
+    if k == BtfKind::Ptr {
         out.push(2);
         out.push(0);
         out.push(0);
@@ -231,7 +217,7 @@ fn local_depth(
         out.push(0);
         return local_depth(in tab, in idx, a, d1, inout out, inout bad);
     }
-    if k == KIND_ARRAY {
+    if k == BtfKind::Array {
         out.push(3);
         out.push(0);
         out.push(0);
@@ -240,7 +226,7 @@ fn local_depth(
         out.push(tf(in tab, in idx, t, 4));
         return local_depth(in tab, in idx, a, d1, inout out, inout bad);
     }
-    if k == KIND_STRUCT || k == KIND_UNION {
+    if k == BtfKind::Struct || k == BtfKind::Union {
         let n = tf(in tab, in idx, t, 6);
         out.push(4);
         out.push(name);
@@ -248,7 +234,7 @@ fn local_depth(
         out.push(a);
         out
             .push(
-            if k == KIND_UNION {
+            if k == BtfKind::Union {
                 1
             } else {
                 0
@@ -298,7 +284,7 @@ fn local_depth(
         }
         return 0;
     }
-    if k == KIND_ENUM {
+    if k == BtfKind::Enum {
         let n = tf(in tab, in idx, t, 6);
         out.push(5);
         out.push(name);
@@ -361,9 +347,9 @@ pub fn parse_ext(
     if len
         < 8
         || (byte(in ext, 0) | (byte(in ext, 1) << 8))
-        != BTF_MAGIC
+        != BtfHeader::Magic
         || byte(in ext, 2)
-        != BTF_VERSION {
+        != BtfHeader::Version {
         return err(1, 0, 0);
     }
     let hdr = le32(in ext, 4);
@@ -407,7 +393,7 @@ pub fn parse_ext(
             return err(s, bad, 0);
         }
         let ty = le32(in ext, wrapping_add(r, 4));
-        if tkind(in tab, in idx, ty) != KIND_FUNC {
+        if tkind(in tab, in idx, ty) != BtfKind::Func {
             return err(8, ty, 0);
         }
         // a stable insertion by slot
@@ -569,18 +555,18 @@ pub fn maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8])
     let n = idx.len();
     for id in 0..n {
         if tkind(in tab, in idx, id)
-            == KIND_DATASEC
+            == BtfKind::Datasec
             && name_eq(in strs, tf(in tab, in idx, id, 1), in maps_name.as_slice()) {
             let nv = tf(in tab, in idx, id, 6);
             for v in 0..nv {
                 let var = te(in tab, in idx, id, 3, v, 0);
                 let off = te(in tab, in idx, id, 3, v, 1);
-                if tkind(in tab, in idx, var) != KIND_VAR {
+                if tkind(in tab, in idx, var) != BtfKind::Var {
                     return err(1, 0, 0);
                 }
                 let st = skip_mods(in tab, in idx, tf(in tab, in idx, var, 2));
                 let sk = tkind(in tab, in idx, st);
-                if sk != KIND_STRUCT && sk != KIND_UNION {
+                if sk != BtfKind::Struct && sk != BtfKind::Union {
                     return err(2, 0, 0);
                 }
                 let mut kind: u64 = NO_MAP_TYPE;
@@ -592,11 +578,11 @@ pub fn maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8])
                 for m in 0..nm {
                     let mname = te(in tab, in idx, st, 4, m, 0);
                     let mty = te(in tab, in idx, st, 4, m, 1);
-                    if tkind(in tab, in idx, mty) != KIND_PTR {
+                    if tkind(in tab, in idx, mty) != BtfKind::Ptr {
                         return err(3, 0, 0);
                     }
                     let arr = tf(in tab, in idx, mty, 2);
-                    if tkind(in tab, in idx, arr) != KIND_ARRAY {
+                    if tkind(in tab, in idx, arr) != BtfKind::Array {
                         return err(3, 0, 0);
                     }
                     let len = tf(in tab, in idx, arr, 4);

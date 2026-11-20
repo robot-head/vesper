@@ -22,36 +22,17 @@
 // 6 enumerator index, 7 needs the local type id, 8 no match, 9 candidates
 // disagree.
 
-// Local type tree tags (see above).
-const LT_VOID: u64 = 0;
-const LT_INT: u64 = 1;
-const LT_PTR: u64 = 2;
-const LT_ARRAY: u64 = 3;
-const LT_STRUCT: u64 = 4;
-const LT_ENUM: u64 = 5;
+use self::btf::BtfKind;
 
-// `BTF_KIND_*` (see btf.ves) and `tkind`'s code for an id past the table.
-const KIND_VOID: u64 = 0;
-const KIND_INT: u64 = 1;
-const KIND_PTR: u64 = 2;
-const KIND_ARRAY: u64 = 3;
-const KIND_STRUCT: u64 = 4;
-const KIND_UNION: u64 = 5;
-const KIND_ENUM: u64 = 6;
-const KIND_FWD: u64 = 7;
-const KIND_TYPEDEF: u64 = 8;
-const KIND_VOLATILE: u64 = 9;
-const KIND_CONST: u64 = 10;
-const KIND_RESTRICT: u64 = 11;
-const KIND_FUNC: u64 = 12;
-const KIND_FUNC_PROTO: u64 = 13;
-const KIND_VAR: u64 = 14;
-const KIND_DATASEC: u64 = 15;
-const KIND_FLOAT: u64 = 16;
-const KIND_DECL_TAG: u64 = 17;
-const KIND_TYPE_TAG: u64 = 18;
-const KIND_ENUM64: u64 = 19;
-const TKIND_MISSING: u64 = 99;
+// Local type tree tags (see above).
+enum LocalTag: u64 {
+    Void,
+    Int,
+    Ptr,
+    Array,
+    Struct,
+    Enum,
+}
 
 // `enum bpf_core_relo_kind`.
 const CORE_FIELD_BYTE_OFFSET: u64 = 0;
@@ -142,11 +123,11 @@ fn ltag(in lt: Slice[u64], p: u64) -> u64 {
 
 fn lsize(in lt: Slice[u64], p: u64) -> u64 {
     let tag = ltag(in lt, p);
-    if tag == LT_VOID {
+    if tag == LocalTag::Void {
         0
-    } else if tag == LT_PTR {
+    } else if tag == LocalTag::Ptr {
         PTR_SIZE
-    } else if tag == LT_ARRAY {
+    } else if tag == LocalTag::Array {
         wrapping_mul(lsize(in lt, wrapping_add(p, 6)), wd(in lt, wrapping_add(p, 5)))
     } else {
         wd(in lt, wrapping_add(p, 3))
@@ -158,15 +139,15 @@ fn lend(in lt: Slice[u64], p: u64) -> u64 {
     let tag = ltag(in lt, p);
     let n = wd(in lt, wrapping_add(p, 5));
     let body = wrapping_add(p, 6);
-    if tag == LT_PTR || tag == LT_ARRAY {
+    if tag == LocalTag::Ptr || tag == LocalTag::Array {
         lend(in lt, body)
-    } else if tag == LT_STRUCT {
+    } else if tag == LocalTag::Struct {
         let mut q = body;
         for i in 0..n {
             q = lend(in lt, wrapping_add(q, 6));
         }
         q
-    } else if tag == LT_ENUM {
+    } else if tag == LocalTag::Enum {
         wrapping_add(body, wrapping_mul(n, 3))
     } else {
         body
@@ -184,10 +165,10 @@ fn lmember(in lt: Slice[u64], p: u64, i: u64) -> u64 {
 
 fn lsigned(in lt: Slice[u64], p: u64) -> bool {
     let tag = ltag(in lt, p);
-    if tag == LT_INT {
+    if tag == LocalTag::Int {
         return wd(in lt, wrapping_add(p, 4)) != 0;
     }
-    if tag == LT_ENUM {
+    if tag == LocalTag::Enum {
         let n = wd(in lt, wrapping_add(p, 5));
         for i in 0..n {
             let v = wd(
@@ -215,11 +196,11 @@ pub fn has(in idx: Slice[u64], id: u64) -> bool {
 // The kind of type `id`, enum64 as enum; 99 when there is no such type.
 pub fn tkind(in tab: Slice[u64], in idx: Slice[u64], id: u64) -> u64 {
     if !has(in idx, id) {
-        return TKIND_MISSING;
+        return BtfKind::Missing;
     }
     let k = wd(in tab, rec(in idx, id));
-    if k == KIND_ENUM64 {
-        KIND_ENUM
+    if k == BtfKind::Enum64 {
+        BtfKind::Enum
     } else {
         k
     }
@@ -241,15 +222,15 @@ pub fn skip_mods(in tab: Slice[u64], in idx: Slice[u64], id0: u64) -> u64 {
     for i in 0..n {
         let k = tkind(in tab, in idx, id);
         if k
-            == KIND_TYPEDEF
+            == BtfKind::Typedef
             || k
-            == KIND_VOLATILE
+            == BtfKind::Volatile
             || k
-            == KIND_CONST
+            == BtfKind::Const
             || k
-            == KIND_RESTRICT
+            == BtfKind::Restrict
             || k
-            == KIND_TYPE_TAG {
+            == BtfKind::TypeTag {
             id = tf(in tab, in idx, id, 2);
         } else {
             return id;
@@ -266,23 +247,23 @@ pub fn size_of(in tab: Slice[u64], in idx: Slice[u64], id: u64, depth: u64) -> (
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
     if k
-        == KIND_INT
+        == BtfKind::Int
         || k
-        == KIND_STRUCT
+        == BtfKind::Struct
         || k
-        == KIND_UNION
+        == BtfKind::Union
         || k
-        == KIND_ENUM
+        == BtfKind::Enum
         || k
-        == KIND_FLOAT
+        == BtfKind::Float
         || k
-        == KIND_DATASEC {
+        == BtfKind::Datasec {
         return (true, tf(in tab, in idx, t, 2));
     }
-    if k == KIND_PTR {
+    if k == BtfKind::Ptr {
         return (true, PTR_SIZE);
     }
-    if k == KIND_ARRAY {
+    if k == BtfKind::Array {
         let (ok, es) = size_of(in tab, in idx, tf(in tab, in idx, t, 2), wrapping_add(depth, 1));
         if !ok {
             return (false, 0);
@@ -360,7 +341,7 @@ fn name_is(in ltext: Slice[u8], loff: u64, llen: u64, in strs: Slice[u8], toff: 
 
 fn lname_off(in lt: Slice[u64], p: u64) -> u64 {
     let tag = ltag(in lt, p);
-    if tag == LT_INT || tag == LT_STRUCT || tag == LT_ENUM {
+    if tag == LocalTag::Int || tag == LocalTag::Struct || tag == LocalTag::Enum {
         wd(in lt, wrapping_add(p, 1))
     } else {
         0
@@ -369,7 +350,7 @@ fn lname_off(in lt: Slice[u64], p: u64) -> u64 {
 
 fn lname_len(in lt: Slice[u64], p: u64) -> u64 {
     let tag = ltag(in lt, p);
-    if tag == LT_INT || tag == LT_STRUCT || tag == LT_ENUM {
+    if tag == LocalTag::Int || tag == LocalTag::Struct || tag == LocalTag::Enum {
         wd(in lt, wrapping_add(p, 2))
     } else {
         0
@@ -383,20 +364,20 @@ fn kind_compatible(in lt: Slice[u64], p: u64, in tab: Slice[u64], in idx: Slice[
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
     let tag = ltag(in lt, p);
-    if tag == LT_STRUCT {
-        return (k == KIND_STRUCT && wd(in lt, wrapping_add(p, 4)) == 0)
-            || (k == KIND_UNION && wd(in lt, wrapping_add(p, 4)) != 0);
+    if tag == LocalTag::Struct {
+        return (k == BtfKind::Struct && wd(in lt, wrapping_add(p, 4)) == 0)
+            || (k == BtfKind::Union && wd(in lt, wrapping_add(p, 4)) != 0);
     }
-    if tag == LT_INT || tag == LT_ENUM {
-        return k == KIND_INT || k == KIND_ENUM;
+    if tag == LocalTag::Int || tag == LocalTag::Enum {
+        return k == BtfKind::Int || k == BtfKind::Enum;
     }
-    if tag == LT_PTR {
-        return k == KIND_PTR;
+    if tag == LocalTag::Ptr {
+        return k == BtfKind::Ptr;
     }
-    if tag == LT_ARRAY {
-        return k == KIND_ARRAY;
+    if tag == LocalTag::Array {
+        return k == BtfKind::Array;
     }
-    tag == LT_VOID && k == KIND_VOID
+    tag == LocalTag::Void && k == BtfKind::Void
 }
 
 // `find_member`: (found, member type, bit offset, bitfield size).
@@ -415,7 +396,7 @@ fn find_member(
     }
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
-    if k != KIND_STRUCT && k != KIND_UNION {
+    if k != BtfKind::Struct && k != BtfKind::Union {
         return (false, 0, 0, 0);
     }
     let n = tf(in tab, in idx, t, 6);
@@ -476,19 +457,19 @@ fn types_match(
     }
     let tag = ltag(in lt, p);
     let d1 = wrapping_add(depth, 1);
-    if tag == LT_VOID {
-        return k == KIND_VOID;
+    if tag == LocalTag::Void {
+        return k == BtfKind::Void;
     }
-    if tag == LT_INT {
+    if tag == LocalTag::Int {
         return k
-            == KIND_INT
+            == BtfKind::Int
             && wd(in lt, wrapping_add(p, 3))
             == tf(in tab, in idx, tid, 2)
             && (wd(in lt, wrapping_add(p, 4)) != 0)
             == ((tf(in tab, in idx, tid, 3) & 1) != 0);
     }
-    if tag == LT_ENUM {
-        if k != KIND_ENUM {
+    if tag == LocalTag::Enum {
+        if k != BtfKind::Enum {
             return false;
         }
         let n = wd(in lt, wrapping_add(p, 5));
@@ -513,9 +494,9 @@ fn types_match(
         }
         return true;
     }
-    if tag == LT_PTR {
+    if tag == LocalTag::Ptr {
         return k
-            == KIND_PTR
+            == BtfKind::Ptr
             && types_match(
             in lt,
             in ltext,
@@ -528,9 +509,9 @@ fn types_match(
             d1
         );
     }
-    if tag == LT_ARRAY {
+    if tag == LocalTag::Array {
         return k
-            == KIND_ARRAY
+            == BtfKind::Array
             && wd(in lt, wrapping_add(p, 5))
             == tf(in tab, in idx, tid, 4)
             && types_match(
@@ -547,13 +528,13 @@ fn types_match(
     }
     // a struct or union
     let union = wd(in lt, wrapping_add(p, 4)) != 0;
-    if k == KIND_FWD {
+    if k == BtfKind::Fwd {
         return behind_ptr && union == (tf(in tab, in idx, tid, 2) != 0);
     }
-    if k != KIND_STRUCT && k != KIND_UNION {
+    if k != BtfKind::Struct && k != BtfKind::Union {
         return false;
     }
-    if union != (k == KIND_UNION) {
+    if union != (k == BtfKind::Union) {
         return false;
     }
     if behind_ptr {
@@ -673,7 +654,7 @@ fn local_field(in lt: Slice[u64], in access: Slice[u64], inout bad: u64) -> (u64
     for j in 1..na {
         let i = wd(in access, j);
         let tag = ltag(in lt, cur);
-        if tag == LT_STRUCT {
+        if tag == LocalTag::Struct {
             if i >= wd(in lt, wrapping_add(cur, 5)) {
                 bad = i;
                 return (2, 0, 0, 0);
@@ -686,7 +667,7 @@ fn local_field(in lt: Slice[u64], in access: Slice[u64], inout bad: u64) -> (u64
                 bits = wrapping_add(bits, wrapping_mul(wd(in lt, wrapping_add(m, 2)), 8));
             }
             cur = wrapping_add(m, 6);
-        } else if tag == LT_ARRAY && i < wd(in lt, wrapping_add(cur, 5)) {
+        } else if tag == LocalTag::Array && i < wd(in lt, wrapping_add(cur, 5)) {
             let elem = wrapping_add(cur, 6);
             bits = wrapping_add(bits, wrapping_mul(wrapping_mul(i, lsize(in lt, elem)), 8));
             cur = elem;
@@ -729,7 +710,7 @@ pub fn local_value(
         return 0;
     }
     // EnumvalValue
-    if ltag(in lt, 0) != LT_ENUM {
+    if ltag(in lt, 0) != LocalTag::Enum {
         return 5;
     }
     let i = wd(in access, 0);
@@ -768,7 +749,7 @@ fn target_field(
     for j in 1..na {
         let i = wd(in access, j);
         let tag = ltag(in lt, local);
-        if tag == LT_STRUCT {
+        if tag == LocalTag::Struct {
             if i >= wd(in lt, wrapping_add(local, 5)) {
                 bad = i;
                 return 2;
@@ -795,9 +776,9 @@ fn target_field(
             width = bf;
             local = child;
             cur = ty;
-        } else if tag == LT_ARRAY {
+        } else if tag == LocalTag::Array {
             let t = skip_mods(in tab, in idx, cur);
-            if tkind(in tab, in idx, t) != KIND_ARRAY {
+            if tkind(in tab, in idx, t) != BtfKind::Array {
                 return NO_VALUE;
             }
             let telem = tf(in tab, in idx, t, 2);
@@ -822,9 +803,9 @@ fn target_field(
     }
     let t = skip_mods(in tab, in idx, cur);
     let k = tkind(in tab, in idx, t);
-    let signed = if k == KIND_INT {
+    let signed = if k == BtfKind::Int {
         (tf(in tab, in idx, t, 3) & 1) != 0
-    } else if k == KIND_ENUM {
+    } else if k == BtfKind::Enum {
         tf(in tab, in idx, t, 3) != 0
     } else {
         false
@@ -888,13 +869,13 @@ pub fn values_over(
                 code = NO_VALUE;
             }
         } else if kind == CORE_ENUMVAL_EXISTS || kind == CORE_ENUMVAL_VALUE {
-            if ltag(in lt, 0) != LT_ENUM {
+            if ltag(in lt, 0) != LocalTag::Enum {
                 code = 5;
             } else {
                 let i = wd(in access, 0);
                 if access.len() == 0 || i >= wd(in lt, 5) {
                     code = 6;
-                } else if tkind(in tab, in idx, id) != KIND_ENUM {
+                } else if tkind(in tab, in idx, id) != BtfKind::Enum {
                     code = NO_VALUE;
                 } else {
                     let at = wrapping_add(6, wrapping_mul(i, 3));

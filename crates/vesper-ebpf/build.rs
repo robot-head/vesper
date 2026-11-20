@@ -43,8 +43,8 @@ fn main() {
 const EDITS: &[(&str, &str)] = &[
     // 0 insn.rs: `lsh` encodes as `rsh`.
     (
-        "        AluOp::Lsh => (OP_LSH, 0),\n",
-        "        AluOp::Lsh => (OP_RSH, 0),\n",
+        "        AluOp::Lsh => (BpfAlu::Lsh, 0),\n",
+        "        AluOp::Lsh => (BpfAlu::Rsh, 0),\n",
     ),
     // 1 scalar.rs: tnum addition forgets the second operand's unknown bits.
     (
@@ -89,8 +89,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 9 btf.rs: an unknown kind 20 is read as a pointer.
     (
-        "        if kind == 0 || kind > KIND_ENUM64 {\n",
-        "        if kind == 0 || kind > wrapping_add(KIND_ENUM64, 1) {\n",
+        "        if kind == 0 || kind > BtfKind::Enum64 {\n",
+        "        if kind == 0 || kind > wrapping_add(BtfKind::Enum64, 1) {\n",
     ),
     // 10 core.rs: members are not found through anonymous aggregates.
     (
