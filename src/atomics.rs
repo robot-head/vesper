@@ -146,12 +146,14 @@ impl AtomicOp {
 }
 
 /// The cell kind of `Atomic[T]`: `Some(None)` for `bool`, `Some(Some(k))`
-/// for an integer kind, `None` for any other `T`.
+/// for a one-word integer kind, `None` for any other `T` (`i128` and
+/// `u128` have no single-instruction atomics on every target; SH2 lane 2,
+/// #1174).
 pub fn cell_kind(t: &Type) -> Option<Option<IntegerKind>> {
     let t = crate::numeric::default_type(t);
     match &t {
         Type::Named(n, a) if n == "bool" && a.is_empty() => Some(None),
-        _ => IntegerKind::from_type(&t).map(Some),
+        _ => IntegerKind::from_type(&t).filter(|k| !k.wide()).map(Some),
     }
 }
 

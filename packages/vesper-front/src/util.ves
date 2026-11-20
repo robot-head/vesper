@@ -130,3 +130,78 @@ pub fn saturating_mul_u64(a: u64, b: u64) -> u64 {
         sum
     }
 }
+
+test {
+    // @case zero(0, 0, 0, 1, 0, 0)
+    // @case small(2, 9, 11, 3, 9, 2)
+    // @case narrow_loses_high_bits(4294967300, 2, 4294967302, 4294967301, 4294967300, 4)
+    // @case wraps(18446744073709551615, 1, 0, 0, 18446744073709551615, 4294967295)
+    fn test_index_math(a: u64, b: u64, sum: u64, next: u64, largest: u64, low: u32) -> bool {
+        add(a, b) == sum && inc(a) == next && max64(a, b) == largest && narrow(a) == low
+    }
+
+    // @case no_shift(42, 0, 42)
+    // @case highest_bit(1, 63, 9223372036854775808)
+    // @case discards_high_bits(9223372036854775809, 1, 2)
+    fn test_shl(value: u64, shift: u32, expected: u64) -> bool {
+        shl(value, shift) == expected
+    }
+
+    // @case empty(in "", 0, 8, 0)
+    // @case zero_width(in "0123456789", 1, 0, 0)
+    // @case short_fast_path(in "0123456789", 1, 3, 0x333231)
+    // @case full_unaligned(in "0123456789", 1, 8, 0x3837363534333231)
+    // @case width_capped(in "0123456789", 1, 12, 0x3837363534333231)
+    // @case partial_word_zero_padded(in "abc", 1, 8, 0x6362)
+    // @case partial_short_zero_padded(in "abc", 2, 2, 0x63)
+    // @case past_end(in "abc", 3, 4, 0)
+    fn test_word_at(in input: Str, start: u64, width: u64, expected: u64) -> bool {
+        word_at(in input.as_bytes(), start, width) == expected
+    }
+
+    // @case zero(0, in ":0")
+    // @case one_digit(9, in ":9")
+    // @case two_digits(10, in ":10")
+    // @case internal_zeroes(100200, in ":100200")
+    // @case maximum(18446744073709551615, in ":18446744073709551615")
+    fn test_push_decimal(value: u64, in expected: Str) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        out.push(58);
+        push_decimal(inout out, value);
+        let bytes = expected.as_bytes();
+        if out.len() != bytes.len() {
+            return false;
+        }
+        for i in 0..out.len() {
+            if out.try_get(i) != bytes.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case first(0, 97, 4294967295, 4294967295, 4294967296)
+    // @case second(1, 98, 7, 7, 18446744073709551615)
+    // @case end(2, 0, 0, 0, 0)
+    // @case huge_offset(18446744073709551615, 0, 0, 0, 0)
+    fn test_total_reads(index: u64, byte_value: u8, word: u32, widened: u64, wide: u64) -> bool {
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.extend(in "ab".as_bytes());
+        let mut words = ChunkSeq::new[u32]();
+        words.push(4294967295);
+        words.push(7);
+        let mut wides = ChunkSeq::new[u64]();
+        wides.push(4294967296);
+        wides.push(18446744073709551615);
+        byte(in bytes.as_slice(), index)
+            == byte_value
+            && u8_at(in bytes, index)
+            == byte_value
+            && u32_at(in words, index)
+            == word
+            && w32(in words, index)
+            == widened
+            && u64_at(in wides, index)
+            == wide
+    }
+}

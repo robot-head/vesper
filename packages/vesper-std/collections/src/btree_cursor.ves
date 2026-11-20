@@ -16,7 +16,7 @@ fn at[T: mod copy](in s: Slice[T], i: u64, fallback: T) -> T {
     }
 }
 
-impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
+impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
     // `c` moved forward past empty leaves to a real entry, or to the end.
     fn settle(in self, c: BTreeCursor) -> BTreeCursor {
         let mut leaf = c.leaf;
@@ -83,19 +83,14 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
         )
     }
 
-    // The entry at `c`, or `None` at the end.
-    pub fn entry(in self, c: BTreeCursor) -> Option[(K, V)] {
+    // The key and value position (in `vals`) at `c`, or `None` at the end.
+    pub fn entry_position(in self, c: BTreeCursor) -> Option[(K, u64)] {
         if c.leaf == none_id() {
             return Option::None;
         }
         let i = wrapping_add(wrapping_mul(c.leaf, 16), c.pos);
         match self.lkeys.try_get(i) {
-            Option::Some(k) => {
-                match self.lvals.try_get(i) {
-                    Option::Some(v) => Option::Some((k, v)),
-                    Option::None => Option::None,
-                }
-            },
+            Option::Some(k) => Option::Some((k, at(in self.lvids.as_slice(), i, none_id()))),
             Option::None => Option::None,
         }
     }
@@ -112,6 +107,21 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
                 pos: wrapping_add(c.pos, 1)
             }
         )
+    }
+}
+
+impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
+    // The entry at `c`, or `None` at the end.
+    pub fn entry(in self, c: BTreeCursor) -> Option[(K, V)] {
+        match self.entry_position(c) {
+            Option::Some((k, id)) => {
+                match self.vals.try_get(id) {
+                    Option::Some(v) => Option::Some((k, v)),
+                    Option::None => Option::None,
+                }
+            },
+            Option::None => Option::None,
+        }
     }
 
     // The smallest entry.
@@ -219,5 +229,95 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             }
             c = self.advance(c);
         }
+    }
+}
+
+test {
+    use self::btree::btree_new;
+
+    fn odd_keys(count: u64) -> CacheBTree[u64, u64] {
+        let mut tree = btree_new[u64, u64]();
+        for index in 0..count {
+            let key = wrapping_add(index << 1, 1);
+            tree.insert(key, wrapping_add(key, 100));
+        }
+        tree
+    }
+
+    // @case empty(0)
+    // @case single(1)
+    // @case leaf_boundary(17)
+    // @case multiple_leaves(48)
+    fn test_cursor_traversal(count: u64) -> bool {
+        let tree = odd_keys(count);
+        let mut cursor = tree.cursor_first();
+        if tree.first() != tree.entry(cursor) {
+            return false;
+        }
+        let mut last: Option[(u64, u64)] = Option::None;
+        for i in 0..count {
+            let key = wrapping_add(i << 1, 1);
+            let value = wrapping_add(key, 100);
+            let expected = Option::Some((key, value));
+            if tree.entry(cursor) != expected || tree.nth(i) != expected {
+                return false;
+            }
+            last = expected;
+            cursor = tree.advance(cursor);
+        }
+        tree
+            .entry(cursor)
+            == Option::None
+            && tree
+            .entry(tree.advance(cursor))
+            == Option::None
+            && tree
+            .last()
+            == last
+            && tree
+            .nth(count)
+            == Option::None
+    }
+
+    // @case before_first(0, Option::Some((1, 101)))
+    // @case exact(5, Option::Some((5, 105)))
+    // @case between(6, Option::Some((7, 107)))
+    // @case crosses_leaf(16, Option::Some((17, 117)))
+    // @case beyond_last(40, Option::None)
+    fn test_lower_bound(key: u64, expected: Option[(u64, u64)]) -> bool {
+        let tree = odd_keys(20);
+        tree.entry(tree.lower_bound(key)) == expected
+    }
+
+    // @case includes_low_excludes_high(1, 7, 10, 3, 1)
+    // @case limit_caps_output(1, 7, 2, 2, 1)
+    // @case no_budget(1, 7, 0, 0, 1)
+    // @case inverted(7, 1, 5, 0, 7)
+    // @case crosses_leaf(14, 21, 10, 3, 15)
+    // @case outside_tree(45, 50, 5, 0, 45)
+    fn test_range_into(lo: u64, hi: u64, limit: u64, count: u64, first: u64) -> bool {
+        let tree = odd_keys(20);
+        let mut keys = ChunkSeq::new[u64]();
+        let mut values = ChunkSeq::new[u64]();
+        keys.push(88);
+        values.push(99);
+        let added = tree.range_into(lo, hi, limit, inout keys, inout values);
+        if added != count || keys.len() != wrapping_add(count, 1) || values.len() != keys.len() {
+            return false;
+        }
+        for i in 0..count {
+            let key = wrapping_add(first, i << 1);
+            let position = wrapping_add(i, 1);
+            let value = wrapping_add(key, 100);
+            if keys
+                .try_get(position)
+                != Option::Some(key)
+                || values
+                .try_get(position)
+                != Option::Some(value) {
+                return false;
+            }
+        }
+        keys.try_get(0) == Option::Some(88) && values.try_get(0) == Option::Some(99)
     }
 }

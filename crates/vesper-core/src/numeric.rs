@@ -5,10 +5,11 @@
 //! Every backend (checker facts, evaluator, both optimizers, the Cranelift
 //! JIT/object backend and Lean extraction) implements this one contract:
 //!
-//! * Integer kinds are `u8`, `u16`, `u32`, `u64`, `usize`, `i8`, `i16`,
-//!   `i32`, `i64` and `isize`. `usize` and `isize` are 64 bits wide on every
-//!   current target (they are distinct types from `u64` and `i64` with the
-//!   same values). Signed kinds are two's complement. Operands of a binary
+//! * Integer kinds are `u8`, `u16`, `u32`, `u64`, `usize`, `u128`, `i8`,
+//!   `i16`, `i32`, `i64`, `isize` and `i128`. `usize` and `isize` are 64 bits
+//!   wide on every current target (they are distinct types from `u64` and
+//!   `i64` with the same values); `i128` and `u128` are two words
+//!   ([`wide`]). Signed kinds are two's complement. Operands of a binary
 //!   operator have the same kind, except the amount of a shift; there are no
 //!   implicit conversions.
 //! * `+`, `-`, `*`, their compound assignments and value-level negation `-x`
@@ -59,6 +60,7 @@
 use crate::ast::Type;
 
 pub mod float;
+pub mod wide;
 pub use float::{FloatKind, is_float_name};
 
 /// Versioned identity of the integer semantics. Change it whenever any rule
@@ -138,8 +140,13 @@ pub enum IntegerKind {
     I16,
     I32,
     Isize,
+    /// `i128` (SH2 lane 2, #1174): two 64-bit words.
+    I128,
+    /// `u128` (SH2 lane 2, #1174): two 64-bit words.
+    U128,
 }
-/// Every integer kind, in source spelling order.
+/// Every one-word integer kind, in source spelling order. The 128-bit kinds
+/// are [`WIDE_INTEGER_KINDS`].
 pub const INTEGER_KINDS: [IntegerKind; 10] = [
     IntegerKind::U8,
     IntegerKind::U16,
@@ -152,15 +159,28 @@ pub const INTEGER_KINDS: [IntegerKind; 10] = [
     IntegerKind::I64,
     IntegerKind::Isize,
 ];
+/// The two-word integer kinds `i128` and `u128` (SH2 lane 2, #1174).
+///
+/// Their values are exact in the `i128` domain of this module except `u128`
+/// values above `i128::MAX`: for `u128`, [`IntegerKind::max`] is
+/// `i128::MAX` (the largest exact value the domain holds), so a checker
+/// fact past it is unknown, never wrong. Execution uses the full range
+/// through the bit-pattern functions of [`wide`].
+pub const WIDE_INTEGER_KINDS: [IntegerKind; 2] = [IntegerKind::I128, IntegerKind::U128];
 /// Whether `name` spells an integer kind.
 pub fn is_integer_name(name: &str) -> bool {
     IntegerKind::from_name(name).is_some()
 }
 /// Whether `name` spells a builtin scalar type: an integer kind, a float
 /// kind (`f32`, `f64`), `bool`, `Unit` or `Never`. Every scalar is one
-/// 64-bit word in every backend's value layout (an `f32` in its low half).
+/// 64-bit word in every backend's value layout (an `f32` in its low half),
+/// except `i128` and `u128`, which are two (see [`is_wide_name`]).
 pub fn is_scalar_name(name: &str) -> bool {
     is_integer_name(name) || is_float_name(name) || matches!(name, "bool" | "Unit" | "Never")
+}
+/// Whether `name` spells a two-word integer kind (`i128` or `u128`).
+pub fn is_wide_name(name: &str) -> bool {
+    IntegerKind::from_name(name).is_some_and(IntegerKind::wide)
 }
 impl IntegerKind {
     pub fn from_name(name: &str) -> Option<Self> {
@@ -175,6 +195,8 @@ impl IntegerKind {
             "i32" => Self::I32,
             "i64" => Self::I64,
             "isize" => Self::Isize,
+            "i128" => Self::I128,
+            "u128" => Self::U128,
             _ => return None,
         })
     }
@@ -203,6 +225,8 @@ impl IntegerKind {
             Self::I32 => "i32",
             Self::I64 => "i64",
             Self::Isize => "isize",
+            Self::I128 => "i128",
+            Self::U128 => "u128",
         }
     }
     pub fn ty(self) -> Type {
@@ -215,12 +239,17 @@ impl IntegerKind {
             Self::U16 | Self::I16 => 16,
             Self::U32 | Self::I32 => 32,
             Self::U64 | Self::Usize | Self::I64 | Self::Isize => 64,
+            Self::I128 | Self::U128 => 128,
         }
+    }
+    /// Whether the kind is two 64-bit words (`i128`, `u128`).
+    pub fn wide(self) -> bool {
+        self.bits() == 128
     }
     pub fn unsigned(self) -> bool {
         matches!(
             self,
-            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::Usize
+            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::Usize | Self::U128
         )
     }
     pub fn signed(self) -> bool {
@@ -239,28 +268,49 @@ impl IntegerKind {
             Self::I32 => Self::U32,
             Self::I64 => Self::U64,
             Self::Isize => Self::Usize,
+            Self::I128 => Self::U128,
+            Self::U128 => Self::I128,
         }
     }
     pub fn fits(self, n: i128) -> bool {
         (self.min()..=self.max()).contains(&n)
     }
     pub fn min(self) -> i128 {
-        if self.signed() {
+        if self == Self::I128 {
+            i128::MIN
+        } else if self.signed() {
             -(1i128 << (self.bits() - 1))
         } else {
             0
         }
     }
+    /// The largest value, or for `u128` the largest value of the `i128`
+    /// domain (`i128::MAX`; see [`WIDE_INTEGER_KINDS`] and [`Self::max_u128`]).
     pub fn max(self) -> i128 {
-        if self.signed() {
+        if self.wide() {
+            i128::MAX
+        } else if self.signed() {
             (1i128 << (self.bits() - 1)) - 1
         } else {
             self.mask() as i128
         }
     }
+    /// The largest value as a `u128` (exact for every kind).
+    pub fn max_u128(self) -> u128 {
+        if self == Self::U128 {
+            u128::MAX
+        } else {
+            self.max() as u128
+        }
+    }
     /// Reduce modulo `2^bits` into this kind's value range (two's complement
-    /// for signed kinds).
+    /// for signed kinds). For `u128` a result above `i128::MAX` has no exact
+    /// form and comes back negative (its bit pattern), which [`Self::fits`]
+    /// rejects.
     pub fn wrap(self, n: i128) -> i128 {
+        if self.wide() {
+            return n;
+        }
         let pattern = (n as u64 & self.mask()) as i128;
         if self.signed() && pattern > self.max() {
             pattern - (1i128 << self.bits())
@@ -272,16 +322,20 @@ impl IntegerKind {
     pub fn pattern(self, n: i128) -> u64 {
         n as u64 & self.mask()
     }
-    /// Checked `+`, `-`, `*`, `/` and `%` on in-range operands.
+    /// Checked `+`, `-`, `*`, `/` and `%` on in-range operands. A result
+    /// outside the `i128` domain is an overflow (for `u128`, one past the
+    /// domain: see [`WIDE_INTEGER_KINDS`]).
     pub fn checked(self, op: &str, a: i128, b: i128) -> Result<i128, ArithFailure> {
         let exact = match op {
-            "+" => a + b,
-            "-" => a - b,
+            "+" => a.checked_add(b).ok_or(ArithFailure::Overflow)?,
+            "-" => a.checked_sub(b).ok_or(ArithFailure::Overflow)?,
             "*" => a.checked_mul(b).ok_or(ArithFailure::Overflow)?,
             "/" | "%" if b == 0 => return Err(ArithFailure::DivisionByZero),
             // i128 holds every quotient of 64-bit operands, so MIN / -1 is
-            // exact here and then rejected by the range check.
-            "/" => a / b,
+            // exact here and then rejected by the range check; for `i128`
+            // it is the one quotient i128 does not hold.
+            "/" => a.checked_div(b).ok_or(ArithFailure::Overflow)?,
+            "%" if b == -1 => 0,
             "%" => a % b,
             _ => return Err(ArithFailure::Overflow),
         };
@@ -293,10 +347,14 @@ impl IntegerKind {
     }
     /// Checked value-level negation.
     pub fn checked_neg(self, a: i128) -> Option<i128> {
-        Some(-a).filter(|n| self.fits(*n))
+        // `-i128::MIN` is past the domain itself (a wrapped i128 fact).
+        a.checked_neg().filter(|n| self.fits(*n))
     }
     /// Total `wrapping_add`, `wrapping_sub` and `wrapping_mul`.
     pub fn wrapping(self, op: &str, a: i128, b: i128) -> i128 {
+        if self.wide() {
+            return wide::wrapping(op, a as u128, b as u128) as i128;
+        }
         let (a, b) = (self.wrap(a), self.wrap(b));
         self.wrap(match op {
             "+" => a.wrapping_add(b),
@@ -305,8 +363,10 @@ impl IntegerKind {
             _ => a.wrapping_mul(b),
         })
     }
+    /// The mask of the kind's bits in one 64-bit word (all ones for 64 bits
+    /// and more).
     pub fn mask(self) -> u64 {
-        if self.bits() == 64 {
+        if self.bits() >= 64 {
             u64::MAX
         } else {
             (1u64 << self.bits()) - 1
@@ -314,6 +374,9 @@ impl IntegerKind {
     }
     /// The total bit operators `&`, `|` and `^` on in-range operands.
     pub fn bit(self, op: &str, a: i128, b: i128) -> Option<i128> {
+        if self.wide() {
+            return wide::bit(op, a as u128, b as u128).map(|p| p as i128);
+        }
         let (a, b) = (self.pattern(a), self.pattern(b));
         Some(self.wrap(match op {
             "&" => a & b,
@@ -324,6 +387,9 @@ impl IntegerKind {
     }
     /// Bitwise complement `~a`.
     pub fn not(self, a: i128) -> i128 {
+        if self.wide() {
+            return !a;
+        }
         self.wrap(!self.pattern(a) as i128)
     }
     /// Checked `<<` and `>>`: the amount (of any integer kind) must be in
@@ -334,6 +400,9 @@ impl IntegerKind {
             return Err(ArithFailure::Overflow);
         }
         let amount = amount as u32;
+        if self.wide() {
+            return wide::shift(self, op, a as u128, amount).map(|p| p as i128);
+        }
         Ok(match op {
             "<<" => self.wrap((self.pattern(a) << amount) as i128),
             ">>" if self.unsigned() => (self.pattern(a) >> amount) as i128,
@@ -346,6 +415,9 @@ impl IntegerKind {
     /// other way.
     pub fn rotate(self, left: bool, a: i128, amount: i128) -> i128 {
         let bits = self.bits();
+        if self.wide() {
+            return wide::rotate(left, a as u128, amount) as i128;
+        }
         let n = amount.rem_euclid(i128::from(bits)) as u32;
         let n = if left { n } else { (bits - n) % bits };
         let p = self.pattern(a);
@@ -358,7 +430,7 @@ impl IntegerKind {
     }
     /// Whether every value of `self` is a value of `to`.
     pub fn widens_to(self, to: Self) -> bool {
-        to.min() <= self.min() && self.max() <= to.max()
+        to.min() <= self.min() && self.max_u128() <= to.max_u128()
     }
 }
 /// The three explicit integer conversion families (`widen_<k>`, `narrow_<k>`

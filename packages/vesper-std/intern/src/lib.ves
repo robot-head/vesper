@@ -328,3 +328,137 @@ impl Interner {
         self.text.try_byte_at(i)
     }
 }
+
+test {
+    // @case first(0)
+    // @case top_bit(2147483648)
+    // @case max_id(4294967295)
+    fn test_symbol_id(raw: u32) -> bool {
+        let symbol = symbol_from_id(raw);
+        symbol.id() == raw && symbol.index() == widen_u64(raw)
+    }
+
+    // @case empty(in "", in "prefix", 0)
+    // @case ascii(in "abc", in "prefixabc", 3)
+    // @case utf8(in "é水", in "prefixé水", 5)
+    // @case full_word(in "abcdefgh", in "prefixabcdefgh", 8)
+    // @case word_and_tail(in "abcdefghi", in "prefixabcdefghi", 9)
+    fn test_intern_lookup_resolve(in text: Str, in appended: Str, length: u64) -> bool {
+        let mut table = interner_new();
+        if !table.is_empty() || table.lookup(in text) != Option::None {
+            return false;
+        }
+        let first = table.intern(in text);
+        let second = table.intern(in text);
+        let (start, end) = table.span(first);
+        if first
+            .id()
+            != 0
+            || first
+            != second
+            || table
+            .lookup(in text)
+            != Option::Some(first)
+            || table
+            .is_empty()
+            || table
+            .len()
+            != 1
+            || !table
+            .contains(first)
+            || !table
+            .symbol_eq(first, in text)
+            || table
+            .symbol_len(first)
+            != length
+            || start
+            != 0
+            || end
+            != length
+            || table
+            .text_byte(end)
+            != Option::None {
+            return false;
+        }
+        let bytes = text.as_bytes();
+        for i in start..end {
+            if table.text_byte(i) != bytes.try_get(i) {
+                return false;
+            }
+        }
+        let mut out = String::new();
+        out.push_str(in "prefix");
+        if !table.resolve_into(first, inout out) || out.len() != appended.len() {
+            return false;
+        }
+        let expected = appended.as_bytes();
+        for i in 0..out.len() {
+            if out.try_byte_at(i) != expected.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case next_unused(1)
+    // @case high_unused(4294967295)
+    fn test_missing_symbol(raw: u32) -> bool {
+        let mut table = interner_new();
+        let first = table.intern(in "abc");
+        let unknown = symbol_from_id(raw);
+        let mut out = String::new();
+        out.push_str(in "z");
+        !table
+            .contains(unknown)
+            && table
+            .symbol_len(unknown)
+            == 0
+            && !table
+            .symbol_eq(unknown, in "")
+            && !table
+            .resolve_into(unknown, inout out)
+            && out
+            .len()
+            == 1
+            && out
+            .try_byte_at(0)
+            == Option::Some(122)
+            && table
+            .lookup(in "ab")
+            == Option::None
+            && !table
+            .symbol_eq(first, in "abd")
+    }
+
+    // @case empty(0, 0)
+    // @case at_initial_threshold(0, 8)
+    // @case first_growth(0, 9)
+    // @case repeated_growth(1, 40)
+    // @case preallocated(40, 40)
+    fn test_growth_preserves_symbol_order(capacity: u64, len: u64) -> bool {
+        let mut table = interner_with_capacity(capacity);
+        for i in 0..len {
+            let mut name = String::new();
+            name.push_char(wrapping_u32(wrapping_add(65, i)));
+            if table.intern(in name).index() != i {
+                return false;
+            }
+        }
+        for i in 0..len {
+            let mut name = String::new();
+            name.push_char(wrapping_u32(wrapping_add(65, i)));
+            let sym = symbol_from_id(wrapping_u32(i));
+            if table
+                .lookup(in name)
+                != Option::Some(sym)
+                || !table
+                .symbol_eq(sym, in name)
+                || table
+                .intern(in name)
+                != sym {
+                return false;
+            }
+        }
+        table.len() == len
+    }
+}

@@ -104,6 +104,15 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
     parsed.module
 }
 
+/// Whether `t` mentions `i128` or `u128` (SH2 lane 2, #1174).
+pub(crate) fn holds_wide(t: &Type) -> bool {
+    match t {
+        Type::Named(n, ts) => crate::numeric::is_wide_name(n) || ts.iter().any(holds_wide),
+        Type::Tuple(ts) => ts.iter().any(holds_wide),
+        _ => false,
+    }
+}
+
 /// The largest span end in `module`.
 pub(crate) fn module_end(module: &Module) -> usize {
     module.items.iter().map(item_end).max().unwrap_or(0)
@@ -175,6 +184,19 @@ impl BitOp {
     /// shifts, amount `n` (a `u32`).
     pub fn eval(self, kind: IntegerKind, a: i128, n: u32) -> i128 {
         let bits = kind.bits();
+        if kind.wide() {
+            // `a` is the value's bit pattern read as an `i128`.
+            let p = a as u128;
+            return match self {
+                Self::LeadingZeros => i128::from(p.leading_zeros()),
+                Self::TrailingZeros => i128::from(p.trailing_zeros()),
+                Self::CountOnes => i128::from(p.count_ones()),
+                Self::WrappingShl => p.wrapping_shl(n) as i128,
+                Self::WrappingShr if kind.unsigned() => p.wrapping_shr(n) as i128,
+                Self::WrappingShr => a.wrapping_shr(n),
+                Self::WrappingNeg => a.wrapping_neg(),
+            };
+        }
         let p = kind.pattern(a);
         match self {
             Self::LeadingZeros => i128::from(p.leading_zeros() - (64 - bits)),
@@ -205,18 +227,34 @@ fn bit_source(name: &str) -> Option<String> {
     } else {
         "x".to_string()
     };
-    // A SWAR population count of the `u64` value `v0`.
-    let popcount = "let v1 = wrapping_sub(v0, (v0 >> 1) & 0x5555555555555555); \
-         let v2 = wrapping_add(v1 & 0x3333333333333333, (v1 >> 2) & 0x3333333333333333); \
-         let v3 = wrapping_add(v2, v2 >> 4) & 0x0f0f0f0f0f0f0f0f; \
-         let c: u32 = wrapping_u32(wrapping_mul(v3, 0x0101010101010101) >> 56);";
+    // A SWAR population count of the `u64` value `v0{s}` into `c{s}`.
+    let swar = |s: &str| {
+        format!(
+            "let v1{s} = wrapping_sub(v0{s}, (v0{s} >> 1) & 0x5555555555555555); \
+             let v2{s} = wrapping_add(v1{s} & 0x3333333333333333, (v1{s} >> 2) & 0x3333333333333333); \
+             let v3{s} = wrapping_add(v2{s}, v2{s} >> 4) & 0x0f0f0f0f0f0f0f0f; \
+             let c{s}: u32 = wrapping_u32(wrapping_mul(v3{s}, 0x0101010101010101) >> 56);"
+        )
+    };
+    // The population count `c` of the `{un}` value `bits_of`: one word, or
+    // the two words of a 128-bit kind.
+    let popcount = |bits_of: &str| {
+        if kind.wide() {
+            format!(
+                "let w: u128 = {bits_of}; let v0lo: u64 = wrapping_u64(w); {} \
+                 let v0hi: u64 = wrapping_u64(w >> 64); {} let c: u32 = wrapping_add(clo, chi);",
+                swar("lo"),
+                swar("hi")
+            )
+        } else {
+            format!("let v0: u64 = widen_u64({bits_of}); {}", swar(""))
+        }
+    };
     Some(match op {
-        BitOp::CountOnes => format!(
-            "fn {name}(x: {k}) -> u32 {{ let v0: u64 = widen_u64({pattern}); {popcount} c }}"
-        ),
+        BitOp::CountOnes => format!("fn {name}(x: {k}) -> u32 {{ {} c }}", popcount(&pattern)),
         BitOp::TrailingZeros => format!(
-            "fn {name}(x: {k}) -> u32 {{ let p: {un} = {pattern}; \
-             let v0: u64 = widen_u64(~p & wrapping_sub(p, 1)); {popcount} c }}"
+            "fn {name}(x: {k}) -> u32 {{ let p: {un} = {pattern}; {} c }}",
+            popcount("~p & wrapping_sub(p, 1)")
         ),
         BitOp::LeadingZeros => {
             let mut smear = format!("let mut p: {un} = {pattern}; ");
@@ -226,8 +264,9 @@ fn bit_source(name: &str) -> Option<String> {
                 s *= 2;
             }
             format!(
-                "fn {name}(x: {k}) -> u32 {{ {smear}let v0: u64 = widen_u64(p); {popcount} \
-                 let width: u32 = {bits}; wrapping_sub(width, c) }}"
+                "fn {name}(x: {k}) -> u32 {{ {smear}{} \
+                 let width: u32 = {bits}; wrapping_sub(width, c) }}",
+                popcount("p")
             )
         }
         // 0 - x, modulo 2^bits.
@@ -338,6 +377,30 @@ fn checked_source(name: &str) -> Option<String> {
              if p < {} || p > {} {{ Option::None }} else {{ {} }}",
             kind.min(),
             kind.max(),
+            some(&format!("wrapping_{k}(p)"))
+        ),
+        // 128-bit kinds: no wider product to read, so a nonzero factor
+        // divides the wrapped product back exactly iff it did not wrap.
+        (CheckedOp::Mul, false, 128) => format!(
+            "if a == 0 {{ {} }} else {{ let p: {k} = wrapping_mul(a, b); \
+             if p / a != b {{ Option::None }} else {{ {} }} }}",
+            some("a"),
+            some("p")
+        ),
+        (CheckedOp::Mul, true, 128) => format!(
+            "let zero: {k} = 0; let uzero: u128 = 0; \
+             let ua: u128 = if a < 0 {{ wrapping_u128(wrapping_sub(zero, a)) }} else {{ wrapping_u128(a) }}; \
+             let ub: u128 = if b < 0 {{ wrapping_u128(wrapping_sub(zero, b)) }} else {{ wrapping_u128(b) }}; \
+             if ua == 0 {{ {} }} else {{ \
+                 let p: u128 = wrapping_mul(ua, ub); \
+                 let one: u128 = 1; let limit: u128 = rotate_right(one, 1); \
+                 if p / ua != ub {{ Option::None }} \
+                 else if (a < 0) != (b < 0) {{ \
+                     if p > limit {{ Option::None }} else {{ {} }} }} \
+                 else if p >= limit {{ Option::None }} \
+                 else {{ {} }} }}",
+            some("zero"),
+            some(&format!("wrapping_{k}(wrapping_sub(uzero, p))")),
             some(&format!("wrapping_{k}(p)"))
         ),
         // 64-bit kinds: the high word of the full product of the magnitudes.

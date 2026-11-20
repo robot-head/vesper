@@ -44,6 +44,10 @@ pub struct World {
     /// Checked integer operations which can raise Fail[ArithOverflow]. Spans
     /// absent here were proved in range (see `vesper.arith.checked/1`).
     pub overflow_ops: BTreeSet<(usize, usize)>,
+    /// `try_get`/`try_get_mut` calls that are the scrutinee of an element
+    /// view `match` (§13): their `Some` binding names the element in place
+    /// instead of a copy of it.
+    pub element_views: BTreeMap<(usize, usize), Pass>,
     pub string_capacity: usize,
     pub calls: BTreeMap<(usize, usize), BTreeMap<String, Type>>,
     /// Source trait/model elaboration metadata (empty without traits).
@@ -451,6 +455,8 @@ impl World {
                 state_guards: vec![],
                 partial_ops: BTreeSet::new(),
                 overflow_ops: BTreeSet::new(),
+                element_views: BTreeMap::new(),
+                element_view: None,
                 dead: 0,
                 string_capacity: 0,
                 static_text: false,
@@ -741,6 +747,8 @@ pub(crate) fn check_core(
             state_guards: vec![],
             partial_ops: BTreeSet::new(),
             overflow_ops: BTreeSet::new(),
+            element_views: BTreeMap::new(),
+            element_view: None,
             dead: 0,
             string_capacity: 0,
             static_text: false,
@@ -776,6 +784,7 @@ pub(crate) fn check_core(
             handler_effects,
             partial_ops,
             overflow_ops,
+            element_views,
             string_capacity,
             resolved: trait_calls,
             option_tries: tries,
@@ -791,6 +800,7 @@ pub(crate) fn check_core(
         world.handler_effects = handler_effects;
         world.partial_ops = partial_ops;
         world.overflow_ops = overflow_ops;
+        world.element_views = element_views;
         world.string_capacity = string_capacity;
         diagnostics = errors;
         if !changed {
@@ -863,6 +873,10 @@ struct Checker<'a> {
     state_guards: Vec<(usize, usize, Type, Span)>,
     partial_ops: BTreeSet<(usize, usize)>,
     overflow_ops: BTreeSet<(usize, usize)>,
+    element_views: BTreeMap<(usize, usize), Pass>,
+    /// Set while the scrutinee of an element view `match` is checked: how
+    /// the view borrows the element (§13).
+    element_view: Option<Pass>,
     dead: usize,
     string_capacity: usize,
     /// Checking the body of a `-> Str` function: string literals the
@@ -877,7 +891,7 @@ struct Checker<'a> {
     /// Places that an enclosing borrowed `match` lends to its arms' `in`
     /// bindings (§4.3), with the scrutinee's span: inside the arms they may
     /// be read but not written, lent `inout` or moved.
-    match_borrows: Vec<(Place, Span)>,
+    match_borrows: Vec<(Place, Span, Pass)>,
     /// Origin spans of the `inout` argument loans in `loans` (receivers and
     /// plain arguments): two-phase borrows (§4.3) reserve them while the
     /// call's other arguments are evaluated, so those arguments may read the
@@ -1377,69 +1391,7 @@ impl Checker<'_> {
         }
     }
     fn join_types(&mut self, a: &Type, b: &Type, span: Span) -> Type {
-        if a.name() == "Never" || *a == Type::Infer {
-            return b.clone();
-        }
-        if b.name() == "Never" || *b == Type::Infer {
-            return a.clone();
-        }
-        match (a, b) {
-            (Type::IntLiteral(x), Type::IntLiteral(y)) => {
-                let n = if (*x).max(*y) > i64::MAX as i128 {
-                    (*x).max(*y)
-                } else if (*x).min(*y) < 0 {
-                    (*x).min(*y)
-                } else {
-                    (*x).max(*y)
-                };
-                let kind = crate::numeric::IntegerKind::default_for(n);
-                if !kind.fits(*x) || !kind.fits(*y) {
-                    self.error("E0200", "branches have no common integer type", span);
-                }
-                Type::IntLiteral(n)
-            }
-            (Type::IntLiteral(_), _) => b.clone(),
-            (_, Type::IntLiteral(_)) => a.clone(),
-            (Type::Named(n, aa), Type::Named(m, bb)) if n == m && aa.len() == bb.len() => {
-                Type::Named(
-                    n.clone(),
-                    aa.iter()
-                        .zip(bb)
-                        .map(|(a, b)| self.join_types(a, b, span.clone()))
-                        .collect(),
-                )
-            }
-            (Type::Tuple(aa), Type::Tuple(bb)) if aa.len() == bb.len() => Type::Tuple(
-                aa.iter()
-                    .zip(bb)
-                    .map(|(a, b)| self.join_types(a, b, span.clone()))
-                    .collect(),
-            ),
-            (
-                Type::Function {
-                    params,
-                    result,
-                    effects,
-                    mode,
-                },
-                Type::Function {
-                    result: br,
-                    effects: be,
-                    mode: bm,
-                    ..
-                },
-            ) => {
-                let mut row = effects.clone();
-                union_effects(&mut row, be);
-                Type::Function {
-                    params: params.clone(),
-                    result: Box::new(self.join_types(result, br, span)),
-                    effects: row,
-                    mode: mode.join(*bm),
-                }
-            }
-            _ => a.clone(),
-        }
+        join_types(a, b, &span, &mut self.diagnostics)
     }
     fn expect_type(&mut self, expected: &Type, actual: &Type, span: Span) {
         if !compatible(expected, actual) {
@@ -1548,24 +1500,24 @@ impl Checker<'_> {
                 self.help("An exclusive argument loan cannot overlap another access while the call's arguments are evaluated.");
             }
         }
-        if matches!(usage, Usage::Borrow(Pass::Inout))
-            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy)
-        {
-            for (borrowed, origin) in self.match_borrows.clone() {
-                if borrowed.overlaps(p) {
-                    transfer_allowed = false;
-                    self.error(
-                        "E0301",
-                        format!(
-                            "access to '{}' conflicts with the borrow of '{}' by an enclosing match",
-                            p.display(),
-                            borrowed.display()
-                        ),
-                        span.clone(),
-                    );
-                    self.related(origin, "this match lends the place to its arms");
-                    self.help("The bindings of a match on a borrowed place borrow its payloads; the place cannot be written, lent `inout` or moved until the match ends.");
-                }
+        let writes = matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy);
+        for (borrowed, origin, lent) in self.match_borrows.clone() {
+            // An `inout` element view (§13) lends its sequence
+            // exclusively: the arms cannot even read it.
+            if (writes || lent == Pass::Inout) && borrowed.overlaps(p) {
+                transfer_allowed = false;
+                self.error(
+                    "E0301",
+                    format!(
+                        "access to '{}' conflicts with the borrow of '{}' by an enclosing match",
+                        p.display(),
+                        borrowed.display()
+                    ),
+                    span.clone(),
+                );
+                self.related(origin, "this match lends the place to its arms");
+                self.help("The bindings of a match on a borrowed place borrow its payloads; the place cannot be written, lent `inout` or moved until the match ends.");
             }
         }
         match usage {
@@ -2254,15 +2206,29 @@ impl Checker<'_> {
                 // type is not copy borrows it: the pattern's bindings are
                 // `in` borrows of its payloads, `Box` contents included, so a
                 // borrowed tree can be walked any number of times (§4.3).
-                let borrowed = self.borrowed_scrutinee(value, env);
+                let view = self.element_view_scrutinee(value, arms, env);
+                let borrowed = view
+                    .as_ref()
+                    .map(|(pass, _)| *pass)
+                    .or_else(|| self.borrowed_scrutinee(value, env));
                 let usage = borrowed.map_or(Usage::Own, |_| Usage::Borrow(Pass::In));
+                self.element_view = view.as_ref().map(|(pass, _)| *pass);
                 let t = self.expr(value, env, usage);
+                self.element_view = None;
                 self.coverage(arms, &t, e.span.clone());
                 let borrow_base = self.match_borrows.len();
-                if borrowed.is_some()
-                    && let Some(p) = Place::from_expr(value)
-                {
-                    self.match_borrows.push((p, value.span.clone()));
+                match view {
+                    // An element view (§13) borrows its sequence for the
+                    // whole match: `in` lets the arms read it, `inout`
+                    // lends it exclusively.
+                    Some((pass, p)) => self.match_borrows.push((p, value.span.clone(), pass)),
+                    None => {
+                        if borrowed.is_some()
+                            && let Some(p) = Place::from_expr(value)
+                        {
+                            self.match_borrows.push((p, value.span.clone(), Pass::In));
+                        }
+                    }
                 }
                 let original = env.clone();
                 let mut branches = vec![];
@@ -2444,6 +2410,12 @@ impl Checker<'_> {
         let ty = instantiate_latent_effects(&ty, expected);
         if *expected != Type::Infer {
             self.expect_type(expected, &ty, e.span.clone());
+            // A literal in an aggregate takes its 128-bit field's kind, whose
+            // layout is two words (SH2 lane 2, #1174). Only types holding
+            // `i128` or `u128` change.
+            if crate::integer_widths::holds_wide(expected) {
+                self.constrain_literals(e, expected);
+            }
         }
         if let Some(before) = before {
             let mut moved = vec![];
@@ -2931,7 +2903,13 @@ impl Checker<'_> {
         }
         let element = self.receiver_type(e, env);
         if !crate::dyn_trait::is_boxed(&element) {
-            return None;
+            // An element whose type is not copy is lent in place (an
+            // element view, §13): the call borrows the whole sequence as it
+            // borrows the element.
+            if element == Type::Infer || self.mode(&element) == Mode::Copy {
+                return None;
+            }
+            return Place::from_expr(base);
         }
         // An `inout` lend may only reach the object: a vtable stub's
         // receiver or a `dyn` parameter. A callee taking the box itself
@@ -4290,6 +4268,11 @@ impl Checker<'_> {
             Type::IntLiteral(_) => (i128::MIN, i128::MAX),
             t => {
                 let k = crate::numeric::IntegerKind::from_type(t)?;
+                // `u128` values pass the exact domain's `i128::MAX`: no
+                // bounds (SH2 lane 2, #1174).
+                if k == crate::numeric::IntegerKind::U128 {
+                    return None;
+                }
                 (k.min(), k.max())
             }
         };
@@ -4897,6 +4880,9 @@ impl Checker<'_> {
             self.leave_control();
             union_effects(&mut outgoing, &self.finish_observing());
             self.expect_type(&out, &actual, op.body.span.clone());
+            if crate::integer_widths::holds_wide(&out) {
+                self.constrain_literals(&op.body, &out);
+            }
             self.exhaust(
                 &local,
                 local.bindings.keys().cloned().collect(),
@@ -5209,7 +5195,7 @@ pub fn free_names(e: &Expr) -> BTreeSet<String> {
     out
 }
 
-fn pattern_names(p: &Pattern) -> BTreeSet<String> {
+pub(crate) fn pattern_names(p: &Pattern) -> BTreeSet<String> {
     match &p.kind {
         PatternKind::Bind(n) => BTreeSet::from([n.clone()]),
         PatternKind::Tuple(ps) => ps.iter().flat_map(pattern_names).collect(),
@@ -5357,6 +5343,75 @@ fn matrix_covered(world: &World, rows: &[Vec<Pattern>], types: &[Type], depth: u
     })
 }
 
+/// The common type of two branches; an `E0200` for integer literals no
+/// integer kind holds both of (`Checker::join_types`).
+fn join_types(a: &Type, b: &Type, span: &Span, diagnostics: &mut Vec<Diagnostic>) -> Type {
+    if a.name() == "Never" || *a == Type::Infer {
+        return b.clone();
+    }
+    if b.name() == "Never" || *b == Type::Infer {
+        return a.clone();
+    }
+    match (a, b) {
+        (Type::IntLiteral(x), Type::IntLiteral(y)) => {
+            let n = if (*x).max(*y) > i64::MAX as i128 {
+                (*x).max(*y)
+            } else if (*x).min(*y) < 0 {
+                (*x).min(*y)
+            } else {
+                (*x).max(*y)
+            };
+            let kind = crate::numeric::IntegerKind::default_for(n);
+            if !kind.fits(*x) || !kind.fits(*y) {
+                diagnostics.push(Diagnostic::new(
+                    "E0200",
+                    "branches have no common integer type",
+                    span.clone(),
+                ));
+            }
+            Type::IntLiteral(n)
+        }
+        (Type::IntLiteral(_), _) => b.clone(),
+        (_, Type::IntLiteral(_)) => a.clone(),
+        (Type::Named(n, aa), Type::Named(m, bb)) if n == m && aa.len() == bb.len() => Type::Named(
+            n.clone(),
+            aa.iter()
+                .zip(bb)
+                .map(|(a, b)| join_types(a, b, span, diagnostics))
+                .collect(),
+        ),
+        (Type::Tuple(aa), Type::Tuple(bb)) if aa.len() == bb.len() => Type::Tuple(
+            aa.iter()
+                .zip(bb)
+                .map(|(a, b)| join_types(a, b, span, diagnostics))
+                .collect(),
+        ),
+        (
+            Type::Function {
+                params,
+                result,
+                effects,
+                mode,
+            },
+            Type::Function {
+                result: br,
+                effects: be,
+                mode: bm,
+                ..
+            },
+        ) => {
+            let mut row = effects.clone();
+            union_effects(&mut row, be);
+            Type::Function {
+                params: params.clone(),
+                result: Box::new(join_types(result, br, span, diagnostics)),
+                effects: row,
+                mode: mode.join(*bm),
+            }
+        }
+        _ => a.clone(),
+    }
+}
 fn unresolved(t: &Type) -> bool {
     match t {
         Type::Infer => true,
@@ -5681,6 +5736,39 @@ fn instantiate_latent_effects(actual: &Type, target: &Type) -> Type {
     rename_capabilities(actual, &labels)
 }
 
+/// The core-typing relations and the exhaustiveness matrix, unchanged, for
+/// the differential of their Vesper port (self-hosting SH2 lane 7, #1179,
+/// `tests/self_host_check_core_typing.rs`). Not an API.
+#[doc(hidden)]
+pub mod core_typing_probe {
+    use super::*;
+    pub fn matrix_covered(world: &World, rows: &[Vec<Pattern>], types: &[Type]) -> bool {
+        super::matrix_covered(world, rows, types, 0)
+    }
+    pub fn is_uninhabited(world: &World, ty: &Type) -> bool {
+        super::is_uninhabited(world, ty, &mut BTreeSet::new())
+    }
+    pub fn infer(
+        expected: &Type,
+        actual: &Type,
+        generics: &[Generic],
+        vars: &mut BTreeMap<String, Type>,
+    ) {
+        super::infer(expected, actual, generics, vars)
+    }
+    pub fn refine_annotation(expected: &Type, actual: &Type) -> Type {
+        super::refine_annotation(expected, actual)
+    }
+    pub fn unresolved(t: &Type) -> bool {
+        super::unresolved(t)
+    }
+    /// The joined type and the number of `E0200` diagnostics.
+    pub fn join_types(a: &Type, b: &Type) -> (Type, usize) {
+        let mut diagnostics = vec![];
+        let t = super::join_types(a, b, &(0..0), &mut diagnostics);
+        (t, diagnostics.len())
+    }
+}
 #[cfg(test)]
 mod isolated_item_tests {
     use super::*;

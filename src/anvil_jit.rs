@@ -138,6 +138,10 @@ impl ScalarKind {
             Type::Named(name, args) if args.is_empty() => match name.as_str() {
                 n if is_integer_name(n) => {
                     let k = IntegerKind::from_name(n).expect("verified integer name");
+                    if k.wide() {
+                        // The Anvil JIT lowers every integer to one word.
+                        return Err(format!("anvil jit unsupported scalar type {ty}"));
+                    }
                     if k.unsigned() {
                         Ok(Self::Unsigned(k.bits()))
                     } else {
@@ -624,6 +628,15 @@ fn collect_reachable(
 }
 
 fn validate_function_ir(world: &World, ir: &FunctionIr) -> Result<(), String> {
+    // Locals and values fall back to one word when their kind is unknown,
+    // which would truncate an `i128`/`u128`, so refuse those outright.
+    let wide = |t: &Type| IntegerKind::from_type(t).is_some_and(IntegerKind::wide);
+    if ir.locals.values().any(wide) || ir.values.values().any(wide) {
+        return Err(format!(
+            "anvil jit unsupported 128-bit integer in '{}'",
+            ir.name
+        ));
+    }
     for block in &ir.blocks {
         for inst in &block.instructions {
             match &inst.op {
@@ -1840,6 +1853,21 @@ fn test_add() -> i64 eff [Fail[ArithOverflow]] {
         // Automatically restored to baseline: 10 + 5 = 15
         let restored = session.run_entry("test_add").expect("restored run");
         assert!(matches!(restored, Value::Int(15)), "got {restored}");
+    }
+
+    #[test]
+    fn wide_integers_are_refused() {
+        let (_, world) =
+            parse_and_check("fn test_wide() -> bool { let x: i128 = 18408377700990114895; x > 0 }");
+        let err = HotSwapJitSession::compile(
+            &world,
+            &["test_wide".to_string()],
+            &[],
+            BatchLimits::default(),
+        )
+        .err()
+        .expect("wide integers are refused");
+        assert!(err.contains("128-bit"), "{err}");
     }
 
     #[test]

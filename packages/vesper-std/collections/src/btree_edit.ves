@@ -13,9 +13,9 @@ fn at[T: mod copy](in s: Slice[T], i: u64, fallback: T) -> T {
     }
 }
 
-impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
-    // A new empty leaf, padded with `k` and `v`.
-    fn new_leaf(inout self, k: K, v: V) -> u64 {
+impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
+    // A new empty leaf, padded with `k`.
+    fn new_leaf(inout self, k: K) -> u64 {
         let id = self.lcount.len();
         let mut i: u64 = 0;
         loop {
@@ -23,7 +23,7 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
                 break;
             }
             self.lkeys.push(k);
-            self.lvals.push(v);
+            self.lvids.push(none_id());
             i = wrapping_add(i, 1);
         }
         self.lcount.push(0);
@@ -49,8 +49,9 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
         id
     }
 
-    // Insert `(k, v)` at position `pos` of a leaf with room for it.
-    fn leaf_insert_at(inout self, leaf: u64, pos: u64, k: K, v: V) {
+    // Insert `k` with value position `v` at position `pos` of a leaf with
+    // room for it.
+    fn leaf_insert_at(inout self, leaf: u64, pos: u64, k: K, v: u64) {
         let base = wrapping_mul(leaf, 16);
         let n = at(in self.lcount.as_slice(), leaf, 0);
         let mut i = n;
@@ -62,20 +63,38 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             let to = wrapping_add(base, i);
             let moved = at(in self.lkeys.as_slice(), from, k);
             self.lkeys.try_set(to, moved);
-            let moved = at(in self.lvals.as_slice(), from, v);
-            self.lvals.try_set(to, moved);
+            let moved = at(in self.lvids.as_slice(), from, v);
+            self.lvids.try_set(to, moved);
             i = wrapping_sub(i, 1);
         }
         self.lkeys.try_set(wrapping_add(base, pos), k);
-        self.lvals.try_set(wrapping_add(base, pos), v);
+        self.lvids.try_set(wrapping_add(base, pos), v);
         self.lcount.try_set(leaf, wrapping_add(n, 1));
     }
 
-    // Insert or replace; the previous value for `k`, if any.
-    pub fn insert(inout self, k: K, v: V) -> Option[V] {
+    // Replace the value at position `id`; the value it held.
+    fn replace_value(inout self, id: u64, sink v: V) -> Option[V] {
+        match self.vals.try_get_mut(id) {
+            Option::Some(slot) => Option::Some(replace(inout slot, v)),
+            Option::None => Option::None,
+        }
+    }
+
+    // Store `v` (the value of `k`) and return its value position.
+    fn push_value(inout self, k: K, sink v: V) -> u64 {
+        let id = self.vals.len();
+        self.vals.push(v);
+        self.vkeys.push(k);
+        id
+    }
+
+    // Insert or replace; the previous value for `k`, if any. The value is
+    // moved in, and the previous one moved out.
+    pub fn insert(inout self, k: K, sink v: V) -> Option[V] {
         if self.root == none_id() {
-            let leaf = self.new_leaf(k, v);
-            self.leaf_insert_at(leaf, 0, k, v);
+            let leaf = self.new_leaf(k);
+            let id = self.push_value(k, v);
+            self.leaf_insert_at(leaf, 0, k, id);
             self.root = leaf;
             self.height = 0;
             self.len = 1;
@@ -103,20 +122,20 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             let found = at(in self.lkeys.as_slice(), wrapping_add(base, pos), k);
             match found.cmp(k) {
                 Equal => {
-                    let old = self.lvals.try_get(wrapping_add(base, pos));
-                    self.lvals.try_set(wrapping_add(base, pos), v);
-                    return old;
+                    let id = at(in self.lvids.as_slice(), wrapping_add(base, pos), none_id());
+                    return self.replace_value(id, v);
                 },
                 _ => {},
             }
         }
         self.len = wrapping_add(self.len, 1);
+        let id = self.push_value(k, v);
         if n < 16 {
-            self.leaf_insert_at(leaf, pos, k, v);
+            self.leaf_insert_at(leaf, pos, k, id);
             return Option::None;
         }
         // Split the full leaf: entries 8..16 move to a new right sibling.
-        let right = self.new_leaf(k, v);
+        let right = self.new_leaf(k);
         let rbase = wrapping_mul(right, 16);
         let mut i: u64 = 0;
         loop {
@@ -126,8 +145,8 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             let from = wrapping_add(base, wrapping_add(8, i));
             let moved = at(in self.lkeys.as_slice(), from, k);
             self.lkeys.try_set(wrapping_add(rbase, i), moved);
-            let moved = at(in self.lvals.as_slice(), from, v);
-            self.lvals.try_set(wrapping_add(rbase, i), moved);
+            let moved = at(in self.lvids.as_slice(), from, none_id());
+            self.lvids.try_set(wrapping_add(rbase, i), moved);
             i = wrapping_add(i, 1);
         }
         self.lcount.try_set(leaf, 8);
@@ -140,9 +159,9 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
         }
         self.lnext.try_set(leaf, right);
         if pos <= 8 {
-            self.leaf_insert_at(leaf, pos, k, v);
+            self.leaf_insert_at(leaf, pos, k, id);
         } else {
-            self.leaf_insert_at(right, wrapping_sub(pos, 8), k, v);
+            self.leaf_insert_at(right, wrapping_sub(pos, 8), k, id);
         }
         let sep = at(in self.lkeys.as_slice(), rbase, k);
         self.insert_parent(sep, right);
@@ -230,7 +249,35 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
         self.icount.try_set(node, count);
     }
 
-    // Remove `k`; its value, if it was present.
+    // Move the value at position `id` (of key `k`) out. The last value
+    // takes its position, and its leaf entry is renamed.
+    fn take_value(inout self, id: u64, k: K) -> Option[V] {
+        let n = self.vals.len();
+        if id >= n {
+            return Option::None;
+        }
+        let last = wrapping_sub(n, 1);
+        if id != last {
+            let lk = at(in self.vkeys.as_slice(), last, k);
+            let leaf = self.find_leaf(lk);
+            let i = wrapping_add(wrapping_mul(leaf, 16), self.leaf_pos(leaf, lk));
+            self.lvids.try_set(i, id);
+            self.vkeys.try_set(id, lk);
+        }
+        self.vkeys.pop();
+        match self.vals.pop() {
+            Option::Some(moved) => {
+                if id == last {
+                    Option::Some(moved)
+                } else {
+                    self.replace_value(id, moved)
+                }
+            },
+            Option::None => Option::None,
+        }
+    }
+
+    // Remove `k`; its value, moved out, if it was present.
     pub fn remove(inout self, k: K) -> Option[V] {
         if self.root == none_id() {
             return Option::None;
@@ -249,7 +296,7 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
                 return Option::None;
             },
         }
-        let old = self.lvals.try_get(wrapping_add(base, pos));
+        let id = at(in self.lvids.as_slice(), wrapping_add(base, pos), none_id());
         let mut i = pos;
         loop {
             let next = wrapping_add(i, 1);
@@ -259,16 +306,69 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
             let from = wrapping_add(base, next);
             let moved = at(in self.lkeys.as_slice(), from, k);
             self.lkeys.try_set(wrapping_add(base, i), moved);
-            match self.lvals.try_get(from) {
-                Option::Some(x) => {
-                    self.lvals.try_set(wrapping_add(base, i), x);
-                },
-                Option::None => {},
-            }
+            let moved = at(in self.lvids.as_slice(), from, none_id());
+            self.lvids.try_set(wrapping_add(base, i), moved);
             i = next;
         }
         self.lcount.try_set(leaf, wrapping_sub(n, 1));
         self.len = wrapping_sub(self.len, 1);
-        old
+        self.take_value(id, k)
+    }
+}
+
+test {
+    use self::btree::btree_new;
+
+    // @case empty(0)
+    // @case single(1)
+    // @case full_leaf(16)
+    // @case leaf_split(17)
+    // @case internal_split(160)
+    fn test_insert_remove(count: u64) -> bool {
+        let mut tree = btree_new[u64, u64]();
+        let mut remaining = count;
+        loop {
+            if remaining == 0 {
+                break;
+            }
+            remaining = wrapping_sub(remaining, 1);
+            let key = remaining << 1;
+            let value = wrapping_add(remaining, 1000);
+            if tree.insert(key, value) != Option::None {
+                return false;
+            }
+        }
+        if tree.len() != count || tree.is_empty() != (count == 0) {
+            return false;
+        }
+        for i in 0..count {
+            let key = i << 1;
+            let value = wrapping_add(i, 1000);
+            if tree.get(key) != Option::Some(value) || !tree.contains_key(key) {
+                return false;
+            }
+            if tree.remove(wrapping_add(key, 1)) != Option::None {
+                return false;
+            }
+        }
+        for i in 0..count {
+            let key = i << 1;
+            let old = wrapping_add(i, 1000);
+            let new = wrapping_add(i, 2000);
+            if tree.insert(key, new) != Option::Some(old) || tree.get(key) != Option::Some(new) {
+                return false;
+            }
+        }
+        if tree.len() != count {
+            return false;
+        }
+        for i in 0..count {
+            let key = i << 1;
+            let value = wrapping_add(i, 2000);
+            if tree.remove(key) != Option::Some(value) || tree.contains_key(key) {
+                return false;
+            }
+        }
+        tree.is_empty() && tree.len() == 0 && tree.remove(0) == Option::None
     }
 }

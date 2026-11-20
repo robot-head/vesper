@@ -593,7 +593,6 @@ impl Parser<'_> {
                 K::Copy
                 | K::Affine
                 | K::Mod
-                | K::Eff
                 | K::In
                 | K::Inout
                 | K::Sink
@@ -621,8 +620,12 @@ impl Parser<'_> {
     /// `state`, `linear` and `with` are keywords only where their forms
     /// start (`handle E state p = ..`, `linear struct`, `.. with { .. }`);
     /// everywhere a name is expected they are ordinary lower-case names.
+    /// `state`, `linear`, `with` and `eff` are keywords only where their
+    /// forms start; wherever a name is expected they are names (manuscript
+    /// "Contextual keywords"). `eff` opens an effect row only after a
+    /// signature (`Self::effects`) and as the `e: eff` row bound.
     fn at_contextual_name(&self) -> bool {
-        matches!(self.kind(), K::State | K::Linear | K::With)
+        matches!(self.kind(), K::State | K::Linear | K::With | K::Eff)
     }
     /// At the root of a qualified path: `self::`, `super::` or
     /// `@scope/name::` (manuscript ch 11.3, "Qualified paths").
@@ -656,7 +659,7 @@ impl Parser<'_> {
         while self.at(K::ColonColon)
             && matches!(
                 self.nth(1),
-                K::Lower | K::Upper | K::State | K::Linear | K::With
+                K::Lower | K::Upper | K::State | K::Linear | K::With | K::Eff
             )
         {
             self.bump();
@@ -2237,7 +2240,7 @@ impl Parser<'_> {
         !self.bound_values.contains("for")
             && matches!(
                 self.nth(1),
-                K::Lower | K::Upper | K::LParen | K::Int | K::True | K::False
+                K::Lower | K::Upper | K::LParen | K::Int | K::True | K::False | K::Eff
             )
     }
     /// `for pat in start..end { body }` (manuscript `ForExpr`). The iterable
@@ -2422,8 +2425,14 @@ impl Parser<'_> {
         } else {
             Type::Infer
         };
-        let infer_effects = !self.at(K::Eff);
-        let effects = self.effects();
+        // After a closure head `eff [` opens an effect row; a body that
+        // starts with any other use of the name `eff` is an expression.
+        let infer_effects = !(self.at(K::Eff) && self.nth(1) == K::LBracket);
+        let effects = if infer_effects {
+            Effects::default()
+        } else {
+            self.effects()
+        };
         let outer_values = self.bound_values.mark();
         self.bound_values
             .extend(params.iter().map(|p| p.name.clone()));
@@ -2863,14 +2872,20 @@ impl Parser<'_> {
                         ExprKind::Name(name)
                     }
                 }
-                K::Lower | K::SelfKw | K::State | K::Linear | K::With => {
+                K::Lower | K::SelfKw | K::State | K::Linear | K::With | K::Eff => {
                     ExprKind::Name(self.bump())
                 }
                 K::Upper => {
                     let mut name = self.bump();
                     while self.eat(K::ColonColon) {
                         name.push_str("::");
-                        name.push_str(&self.ident());
+                        // `E::eff()`: contextual names are path segments too.
+                        let segment = if self.at_contextual_name() {
+                            self.bump()
+                        } else {
+                            self.ident()
+                        };
+                        name.push_str(&segment);
                     }
                     if self.at(K::LBrace) && !self.no_struct {
                         self.struct_literal(name)
@@ -3091,7 +3106,7 @@ impl Parser<'_> {
                     let name = self.qualified_path();
                     self.constructor_pattern(name)
                 }
-                K::Lower | K::State | K::Linear | K::With => {
+                K::Lower | K::State | K::Linear | K::With | K::Eff => {
                     let name = self.bump();
                     if name == "_" {
                         PatternKind::Wild

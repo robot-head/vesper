@@ -606,3 +606,57 @@ pub fn ast_rows(in source: Str) -> ChunkSeq[u64] {
     r.push(text);
     r
 }
+
+test {
+    // @case empty(in "", 0, 0, 0, 0)
+    // @case constant_body(in "fn f() -> i64 { 1 }", 1, 0, 0, 1)
+    // @case two_functions(in "fn f() {} fn g() {}", 2, 0, 0, 2)
+    // @case struct_decl(in "copy struct Pair { first: i64, second: u64 }", 0, 1, 0, 1)
+    // @case enum_decl(in "copy enum Flag { Off, On }", 0, 1, 0, 1)
+    // @case aliased_import(in "use self::ops::add as plus;", 0, 0, 1, 0)
+    fn test_ast_module_tables(in source: Str, functions: u64, adts: u64, imports: u64, items: u64)
+        -> bool {
+        let rows = ast_rows(in source);
+        let declarations = rows
+            .try_get(13)
+            == Option::Some(adts)
+            && rows
+            .try_get(14)
+            == Option::Some(functions);
+        let module_uses = rows
+            .try_get(26)
+            == Option::Some(imports)
+            && rows
+            .try_get(33)
+            == Option::Some(imports);
+        declarations && module_uses && rows.try_get(30) == Option::Some(items) && rows.len() == 37
+    }
+
+    // @case empty(in "")
+    // @case generic_call(in "fn f() -> i64 { call[i64](3) }")
+    // @case index_expression(in "fn f(in s: Slice[i64]) -> i64 { s[0] }")
+    // @case string_and_float(in "fn f() -> i64 { let s = \"é\"; let x = 0.125; 0 }")
+    // @case recovery(in "fn broken() { let = 1; } fn valid() {}")
+    fn test_ast_dump_stream(in source: Str) -> bool {
+        let words = ast_dump(in source);
+        let length = match words.try_get(0) {
+            Option::Some(value) => value,
+            Option::None => return false,
+        };
+        let payload_words = wrapping_add(length, 7) >> 3;
+        let low_prefix: u64 = 0x656c75646f6d;
+        let prefix = match words.try_get(2) {
+            Option::Some(value) => (value & 0xffffffffffff) == low_prefix,
+            Option::None => false,
+        };
+        prefix
+            && length
+            >= 6
+            && words
+            .try_get(1)
+            == Option::Some(0)
+            && words
+            .len()
+            == wrapping_add(payload_words, 2)
+    }
+}

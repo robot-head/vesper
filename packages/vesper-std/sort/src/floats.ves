@@ -88,3 +88,79 @@ pub fn sort_f32_bits(inout s: Slice[u32]) {
         }
     }
 }
+
+test {
+    // @case across_signed_zero(0x8000000000000000, 0, true)
+    // @case negative_nan(0xfff8000000000001, 0xfff0000000000000, true)
+    // @case negative_subnormal(0x8000000000000001, 0x8000000000000000, true)
+    // @case positive_subnormal(0, 1, true)
+    // @case positive_nan(0x7ff0000000000000, 0x7ff8000000000001, true)
+    // @case reverse(0x3ff0000000000000, 0xbff0000000000000, false)
+    // @case identical_nan(0x7ff8000000000001, 0x7ff8000000000001, false)
+    fn test_total_key_f64(a: u64, b: u64, ordered: bool) -> bool {
+        let x = total_key_f64(from_bits_f64(a));
+        let y = total_key_f64(from_bits_f64(b));
+        (x < y) == ordered && (x == y) == (a == b)
+    }
+
+    // @case unstable(false)
+    // @case stable(true)
+    fn test_float_total_order(stable: bool) -> bool {
+        let mut values = ChunkSeq::new[f64]();
+        values.push(from_bits_f64(0x7ff8000000000001));
+        values.push(from_bits_f64(0x0000000000000000));
+        values.push(from_bits_f64(0xfff0000000000000));
+        values.push(from_bits_f64(0x8000000000000000));
+        values.push(from_bits_f64(0xfff8000000000001));
+        values.push(from_bits_f64(0x7ff0000000000000));
+        if is_sorted_f64(in values.as_slice()) {
+            return false;
+        }
+        if stable {
+            stable_sort_f64(inout values.as_slice_mut());
+        } else {
+            sort_f64(inout values.as_slice_mut());
+        }
+        let mut expected = ChunkSeq::new[u64]();
+        expected.push(0xfff8000000000001);
+        expected.push(0xfff0000000000000);
+        expected.push(0x8000000000000000);
+        expected.push(0x0000000000000000);
+        expected.push(0x7ff0000000000000);
+        expected.push(0x7ff8000000000001);
+        for i in 0..expected.len() {
+            match values.try_get(i) {
+                Option::Some(value) => {
+                    if expected.try_get(i) != Option::Some(to_bits_f64(value)) {
+                        return false;
+                    }
+                },
+                Option::None => return false,
+            }
+        }
+        values.len() == 6 && is_sorted_f64(in values.as_slice())
+    }
+
+    // @case negative_nan(0xffc00001, 0x003ffffe)
+    // @case negative_infinity(0xff800000, 0x007fffff)
+    // @case negative_zero(0x80000000, 0x7fffffff)
+    // @case positive_zero(0, 0x80000000)
+    // @case positive_subnormal(1, 0x80000001)
+    // @case positive_infinity(0x7f800000, 0xff800000)
+    // @case positive_nan(0x7fc00001, 0xffc00001)
+    fn test_f32_keys(bits: u32, key: u32) -> bool {
+        total_key_f32_bits(bits) == key && f32_bits_from_key(key) == bits
+    }
+
+    // @case signed_zeros(0, 0x80000000, 0x80000000, 0)
+    // @case infinities(0x7f800000, 0xff800000, 0xff800000, 0x7f800000)
+    // @case negative_nan_before_negative_infinity(0xff800000, 0xffc00001, 0xffc00001, 0xff800000)
+    // @case positive_nan_payloads(0x7fc00002, 0x7fc00001, 0x7fc00001, 0x7fc00002)
+    fn test_sort_f32_bits(a: u32, b: u32, first: u32, second: u32) -> bool {
+        let mut values = ChunkSeq::new[u32]();
+        values.push(a);
+        values.push(b);
+        sort_f32_bits(inout values.as_slice_mut());
+        values.try_get(0) == Option::Some(first) && values.try_get(1) == Option::Some(second)
+    }
+}

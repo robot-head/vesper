@@ -36,37 +36,78 @@ impl Slot {
             .cell
             .try_borrow()
             .map_err(|_| "runtime value is mutably borrowed")?;
-        let mut v = &*cell;
-        for f in &self.path {
-            v = match v {
-                Value::Data { fields, .. } => fields
-                    .get(f)
-                    .ok_or_else(|| format!("unknown field '{f}'"))?,
-                Value::Tuple(v) => v
-                    .get(f.parse::<usize>().map_err(|_| "invalid tuple index")?)
-                    .ok_or("tuple index out of bounds")?,
-                _ => return Err("field access requires aggregate".into()),
-            };
-        }
-        Ok(v.clone())
+        slot_get(&cell, &self.path)
     }
     fn set(&self, value: Value) -> Result<(), String> {
         let mut cell = self
             .cell
             .try_borrow_mut()
             .map_err(|_| "runtime value is already borrowed")?;
-        let mut v = &mut *cell;
-        for f in &self.path {
-            v = match v {
-                Value::Data { fields, .. } => fields.get_mut(f).ok_or("unknown field")?,
-                Value::Tuple(v) => v
-                    .get_mut(f.parse::<usize>().map_err(|_| "invalid index")?)
-                    .ok_or("index out of bounds")?,
-                _ => return Err("assignment requires aggregate".into()),
-            };
+        slot_set(&mut cell, &self.path, value)
+    }
+}
+/// The path segment of sequence element `i` in a [`Slot`] path: an element
+/// view (§13) lent to an `inout` parameter names the element in place.
+fn element_segment(i: usize) -> String {
+    format!("#{i}")
+}
+fn element_index(segment: &str) -> Option<usize> {
+    segment.strip_prefix('#')?.parse().ok()
+}
+fn slot_get(v: &Value, path: &[String]) -> Result<Value, String> {
+    let Some((f, rest)) = path.split_first() else {
+        return Ok(v.clone());
+    };
+    match v {
+        Value::Data { fields, .. } => slot_get(
+            fields
+                .get(f)
+                .ok_or_else(|| format!("unknown field '{f}'"))?,
+            rest,
+        ),
+        Value::Tuple(v) => slot_get(
+            v.get(f.parse::<usize>().map_err(|_| "invalid tuple index")?)
+                .ok_or("tuple index out of bounds")?,
+            rest,
+        ),
+        Value::Seq(cell) if element_index(f).is_some() => {
+            let items = cell
+                .try_borrow()
+                .map_err(|_| "sequence is mutably borrowed")?;
+            let i = element_index(f).unwrap_or(usize::MAX);
+            slot_get(items.get(i).ok_or("element view out of bounds")?, rest)
         }
+        _ => Err("field access requires aggregate".into()),
+    }
+}
+fn slot_set(v: &mut Value, path: &[String], value: Value) -> Result<(), String> {
+    let Some((f, rest)) = path.split_first() else {
         *v = value;
-        Ok(())
+        return Ok(());
+    };
+    match v {
+        Value::Data { fields, .. } => {
+            slot_set(fields.get_mut(f).ok_or("unknown field")?, rest, value)
+        }
+        Value::Tuple(v) => slot_set(
+            v.get_mut(f.parse::<usize>().map_err(|_| "invalid index")?)
+                .ok_or("index out of bounds")?,
+            rest,
+            value,
+        ),
+        Value::Seq(cell) if element_index(f).is_some() => {
+            let cell = cell.clone();
+            let mut items = cell
+                .try_borrow_mut()
+                .map_err(|_| "sequence is already borrowed")?;
+            let i = element_index(f).unwrap_or(usize::MAX);
+            slot_set(
+                items.get_mut(i).ok_or("element view out of bounds")?,
+                rest,
+                value,
+            )
+        }
+        _ => Err("assignment requires aggregate".into()),
     }
 }
 #[derive(Clone)]
@@ -75,6 +116,12 @@ pub enum Value {
     UInt(u64, u32),
     /// A narrow signed integer (`i8`, `i16`, `i32`) and its width.
     SInt(i64, u32),
+    /// An `i128` (`signed`) or `u128` value as its bit pattern (SH2 lane 2,
+    /// #1174; `crate::numeric::wide`).
+    Wide {
+        pattern: u128,
+        signed: bool,
+    },
     Float(f64),
     /// An `f32` (`vesper.float.ieee754/1`).
     Float32(f32),
@@ -143,6 +190,13 @@ impl fmt::Display for Value {
             Self::Int(v) => write!(f, "{v}"),
             Self::UInt(v, _) => write!(f, "{v}"),
             Self::SInt(v, _) => write!(f, "{v}"),
+            Self::Wide { pattern, signed } => {
+                if *signed {
+                    write!(f, "{}", *pattern as i128)
+                } else {
+                    write!(f, "{pattern}")
+                }
+            }
             Self::Float(v) => write!(f, "{v}"),
             Self::Float32(v) => write!(f, "{v}"),
             Self::Bool(v) => write!(f, "{v}"),
@@ -813,11 +867,15 @@ impl<'a> Runtime<'a> {
                     let scalar = match name.as_str() {
                         n if crate::numeric::is_integer_name(n) => {
                             let kind = crate::numeric::IntegerKind::from_name(n).unwrap();
-                            Some(value_kind(value).is_some_and(|(k, v)| {
-                                k.bits() == kind.bits()
-                                    && k.unsigned() == kind.unsigned()
-                                    && kind.fits(v)
-                            }))
+                            Some(if kind.wide() {
+                                wide_kind(value).is_some_and(|(k, _)| k == kind)
+                            } else {
+                                value_kind(value).is_some_and(|(k, v)| {
+                                    k.bits() == kind.bits()
+                                        && k.unsigned() == kind.unsigned()
+                                        && kind.fits(v)
+                                })
+                            })
                         }
                         "f64" => Some(matches!(value, Value::Float(_))),
                         "f32" => Some(matches!(value, Value::Float32(_))),
@@ -968,10 +1026,17 @@ impl<'a> Runtime<'a> {
     }
     /// Install the entry function's linear effects at the host boundary. The
     /// host must resume each operation, including I/O errors and cancellation.
-    pub fn begin_external(
+    pub fn begin_external(self, entry: &str, args: Vec<Value>) -> Result<Execution<'a>, String> {
+        self.begin_external_for(entry, args, |_| true)
+    }
+
+    /// Install only the entry effects handled by this host. Other effects
+    /// follow ordinary evaluation and fail if performed without a handler.
+    pub(crate) fn begin_external_for(
         mut self,
         entry: &str,
         args: Vec<Value>,
+        handles: impl Fn(&str) -> bool,
     ) -> Result<Execution<'a>, String> {
         if let Some(trace) = &mut self.resource_trace {
             trace.begin_run().map_err(|e| e.to_string())?;
@@ -995,6 +1060,9 @@ impl<'a> Runtime<'a> {
         }
         let mut caller = Env::new();
         for effect in &function.effects.instances {
+            if !handles(&effect.name) {
+                continue;
+            }
             if !self.world.effects[&effect.name].linear {
                 return Err("external effects must guarantee one-shot resumption".into());
             }
@@ -1137,6 +1205,12 @@ impl<'a> Runtime<'a> {
                 Literal::Int(n) => {
                     if n > i64::MAX as i128 {
                         Value::UInt(n as u64, 64)
+                    } else if n < i64::MIN as i128 {
+                        // Only an `i128` holds it (SH2 lane 2, #1174).
+                        Value::Wide {
+                            pattern: n as u128,
+                            signed: true,
+                        }
                     } else {
                         Value::Int(n as i64)
                     }
@@ -1161,6 +1235,17 @@ impl<'a> Runtime<'a> {
                     slot.path.extend(path);
                     slot.get()?
                 }
+            }
+            Op::Bind { pattern, value }
+                if self.element_view_bind(
+                    &state.function,
+                    &state.values,
+                    &mut state.env,
+                    &pattern,
+                    value,
+                )? =>
+            {
+                Value::Tuple(vec![])
             }
             Op::Bind { pattern, value } => {
                 let value = get(value)?;
@@ -1298,9 +1383,18 @@ impl<'a> Runtime<'a> {
                 };
                 let first = get(a.value)?;
                 let second = get(b.value)?;
-                let a = slot_of(a.place)?;
+                // An element view (§13) names its element in place.
+                let a_element = self.element_ref(&state, &a);
+                let b_element = self.element_ref(&state, &b);
+                let a = match a_element {
+                    Some(slot) => slot,
+                    None => slot_of(a.place)?,
+                };
                 if op == crate::seq::SeqOp::Swap {
-                    let b = slot_of(b.place)?;
+                    let b = match b_element {
+                        Some(slot) => slot,
+                        None => slot_of(b.place)?,
+                    };
                     a.set(second)?;
                     b.set(first)?;
                     Value::Tuple(vec![])
@@ -1438,12 +1532,15 @@ impl<'a> Runtime<'a> {
                 let refs = args
                     .iter()
                     .map(|a| {
-                        a.place.as_ref().and_then(|p| {
-                            state.env.get(&p.root).cloned().map(|mut s| {
-                                s.path.extend(p.path.clone());
-                                s
+                        a.place
+                            .as_ref()
+                            .and_then(|p| {
+                                state.env.get(&p.root).cloned().map(|mut s| {
+                                    s.path.extend(p.path.clone());
+                                    s
+                                })
                             })
-                        })
+                            .or_else(|| self.element_ref(&state, a))
                     })
                     .collect();
                 let callee = if self.world.functions.contains_key(&callee) {
@@ -1490,12 +1587,15 @@ impl<'a> Runtime<'a> {
                 let refs = args
                     .iter()
                     .map(|a| {
-                        a.place.as_ref().and_then(|p| {
-                            state.env.get(&p.root).cloned().map(|mut s| {
-                                s.path.extend(p.path.clone());
-                                s
+                        a.place
+                            .as_ref()
+                            .and_then(|p| {
+                                state.env.get(&p.root).cloned().map(|mut s| {
+                                    s.path.extend(p.path.clone());
+                                    s
+                                })
                             })
-                        })
+                            .or_else(|| self.element_ref(&state, a))
                     })
                     .collect();
                 let caller = evidence_environment(&state.env);
@@ -1593,6 +1693,12 @@ impl<'a> Runtime<'a> {
                             Literal::Int(n) => {
                                 if n > i64::MAX as i128 {
                                     Value::UInt(n as u64, 64)
+                                } else if n < i64::MIN as i128 {
+                                    // Only an `i128` holds it (SH2 lane 2, #1174).
+                                    Value::Wide {
+                                        pattern: n as u128,
+                                        signed: true,
+                                    }
                                 } else {
                                     Value::Int(n as i64)
                                 }
@@ -2782,6 +2888,8 @@ fn bind_pattern(p: &Pattern, value: &Value, env: &mut Env) -> bool {
             (Literal::Int(a), Value::Int(b)) => *a == *b as i128,
             (Literal::Int(a), Value::UInt(b, _)) => *a == *b as i128,
             (Literal::Int(a), Value::SInt(b, _)) => *a == *b as i128,
+            (Literal::Int(a), Value::Wide { .. }) => exact_of(value)
+                .is_some_and(|(_, e)| e == crate::numeric::wide::Exact::from_i128(*a)),
             (Literal::Float(a), Value::Float(b)) => a == b,
             (Literal::Float(a), Value::Float32(b)) => (*a as f32) == *b,
             (Literal::Bool(a), Value::Bool(b)) => a == b,
@@ -2952,8 +3060,37 @@ fn atomic_call(op: crate::atomics::AtomicOp, args: &[Value]) -> Result<Value, St
     };
     Ok(old)
 }
+/// The 128-bit kind and bit pattern of a `Value::Wide`.
+fn wide_kind(v: &Value) -> Option<(crate::numeric::IntegerKind, u128)> {
+    use crate::numeric::IntegerKind as K;
+    match v {
+        Value::Wide { pattern, signed } => {
+            Some((if *signed { K::I128 } else { K::U128 }, *pattern))
+        }
+        _ => None,
+    }
+}
+/// The kind and exact value of any integer value, 128-bit ones included.
+fn exact_of(v: &Value) -> Option<(crate::numeric::IntegerKind, crate::numeric::wide::Exact)> {
+    use crate::numeric::wide::Exact;
+    if let Some((k, p)) = wide_kind(v) {
+        return Some((k, Exact::of(k, p)));
+    }
+    value_kind(v).map(|(k, n)| (k, Exact::from_i128(n)))
+}
+/// The value of a 128-bit `kind` with bit pattern `pattern`.
+fn wide_value(kind: crate::numeric::IntegerKind, pattern: u128) -> Value {
+    Value::Wide {
+        pattern,
+        signed: kind.signed(),
+    }
+}
+/// A value of `kind` from its exact value (or, for the 128-bit kinds, any
+/// `i128` whose bit pattern is the value's).
 fn integer_value(kind: crate::numeric::IntegerKind, n: i128) -> Value {
-    if kind.unsigned() {
+    if kind.wide() {
+        wide_value(kind, n as u128)
+    } else if kind.unsigned() {
         Value::UInt(n as u64, kind.bits())
     } else if kind.bits() < 64 {
         Value::SInt(n as i64, kind.bits())
@@ -2965,6 +3102,15 @@ fn integer_value(kind: crate::numeric::IntegerKind, n: i128) -> Value {
 /// low `bits(kind)` bits, read in `kind`'s representation.
 pub fn integer_from_word(kind: crate::numeric::IntegerKind, word: u64) -> Value {
     integer_value(kind, kind.wrap(word as i128))
+}
+/// The value of `kind` whose bit pattern (zero-extended) is `pattern`: the
+/// two words of an `i128` or `u128` (SH2 lane 2, #1174), or one word.
+pub fn integer_from_pattern(kind: crate::numeric::IntegerKind, pattern: u128) -> Value {
+    if kind.wide() {
+        wide_value(kind, pattern)
+    } else {
+        integer_from_word(kind, pattern as u64)
+    }
 }
 fn arith_fault(f: crate::numeric::ArithFailure) -> Fault {
     Fault::Raise(Failure::Arith(f))
@@ -3138,6 +3284,39 @@ fn unary(op: &str, v: Value) -> Result<Value, Fault> {
         ("-", Value::Float(n)) => Value::Float(-n),
         ("-", Value::Float32(n)) => Value::Float32(-n),
         ("!", Value::Bool(b)) => Value::Bool(!b),
+        ("~", Value::Wide { pattern, signed }) => Value::Wide {
+            pattern: !pattern,
+            signed,
+        },
+        ("-", Value::Wide { pattern, signed }) => {
+            let kind = wide_kind(&Value::Wide { pattern, signed }).unwrap().0;
+            wide_value(
+                kind,
+                crate::numeric::wide::checked_neg(kind, pattern).ok_or(Fault::Raise(
+                    Failure::Arith(crate::numeric::ArithFailure::Overflow),
+                ))?,
+            )
+        }
+        (name, v)
+            if crate::numeric::conversion(name).is_some()
+                && (wide_kind(&v).is_some()
+                    || crate::numeric::conversion(name).unwrap().1.wide()) =>
+        {
+            let (conversion, to) = crate::numeric::conversion(name).unwrap();
+            let (_, from) = exact_of(&v).ok_or("invalid conversion operand")?;
+            let pattern =
+                crate::numeric::wide::convert(conversion, to, from).map_err(arith_fault)?;
+            if to.wide() {
+                wide_value(to, pattern)
+            } else {
+                integer_value(
+                    to,
+                    crate::numeric::wide::Exact::of(to, pattern)
+                        .to_i128()
+                        .unwrap(),
+                )
+            }
+        }
         ("~", v) => {
             let (kind, n) = value_kind(&v).ok_or("invalid unary operands")?;
             integer_value(kind, kind.not(n))
@@ -3162,6 +3341,9 @@ fn unary(op: &str, v: Value) -> Result<Value, Fault> {
 /// Binary operators under `vesper.arith.checked/1`. Integer operands share a
 /// kind; an untyped `Int` operand adopts its unsigned partner's kind.
 fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
+    if wide_kind(&a).is_some() || wide_kind(&b).is_some() {
+        return wide_binary(op, &a, &b);
+    }
     if let (Some((ak, x)), Some((bk, y))) = (value_kind(&a), value_kind(&b)) {
         // The amount of a shift or rotation keeps its own kind.
         if crate::numeric::is_shift(op) {
@@ -3261,8 +3443,70 @@ fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
         _ => return Err("incompatible binary operands".into()),
     })
 }
+/// [`binary`] when an operand is an `i128` or `u128` (`numeric::wide`).
+/// The amount of a shift or rotation keeps its own kind; an untyped `Int`
+/// operand adopts its 128-bit partner's kind.
+fn wide_binary(op: &str, a: &Value, b: &Value) -> Result<Value, Fault> {
+    use crate::numeric::wide;
+    let ((ak, ae), (bk, be)) = match (exact_of(a), exact_of(b)) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Err("invalid 128-bit operands".into()),
+    };
+    if crate::numeric::is_shift(op) || crate::numeric::rotate_intrinsic(op).is_some() {
+        // A rotation reads its amount modulo the width, which divides 128,
+        // so the pattern's remainder mod 128 is exact for every kind (and
+        // for every sign, two's complement being modulo 2^128).
+        if let Some(left) = crate::numeric::rotate_intrinsic(op) {
+            let amount = (be.pattern % 128) as i128;
+            return Ok(match wide_kind(a) {
+                Some((k, p)) => wide_value(k, wide::rotate(left, p, amount)),
+                None => {
+                    let (k, n) = value_kind(a).ok_or("invalid rotation operand")?;
+                    integer_value(k, k.rotate(left, n, amount))
+                }
+            });
+        }
+        // A shift amount past the i128 domain is out of range either way.
+        let amount = be.to_i128().unwrap_or(i128::MAX);
+        return Ok(match wide_kind(a) {
+            Some((k, p)) => {
+                if !(0..128).contains(&amount) {
+                    return Err(arith_fault(crate::numeric::ArithFailure::Overflow));
+                }
+                wide_value(
+                    k,
+                    wide::shift(k, op, p, amount as u32).map_err(arith_fault)?,
+                )
+            }
+            None => {
+                let (k, n) = value_kind(a).ok_or("invalid shift operand")?;
+                integer_value(k, k.shift(op, n, amount).map_err(arith_fault)?)
+            }
+        });
+    }
+    let kind = if ak.wide() { ak } else { bk };
+    let (x, y) = (ae.wrap(kind), be.wrap(kind));
+    Ok(match op {
+        "+" | "-" | "*" | "/" | "%" => {
+            wide_value(kind, wide::checked(kind, op, x, y).map_err(arith_fault)?)
+        }
+        _ if crate::numeric::wrapping_intrinsic(op).is_some() => wide_value(
+            kind,
+            wide::wrapping(crate::numeric::wrapping_intrinsic(op).unwrap(), x, y),
+        ),
+        "&" | "|" | "^" => wide_value(kind, wide::bit(op, x, y).unwrap_or_default()),
+        "==" => Value::Bool(x == y),
+        "!=" => Value::Bool(x != y),
+        "<" => Value::Bool(wide::compare(kind, x, y).is_lt()),
+        "<=" => Value::Bool(wide::compare(kind, x, y).is_le()),
+        ">" => Value::Bool(wide::compare(kind, x, y).is_gt()),
+        ">=" => Value::Bool(wide::compare(kind, x, y).is_ge()),
+        _ => return Err("invalid 128-bit integer operator".into()),
+    })
+}
 fn equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        (Value::Wide { .. }, Value::Wide { .. }) => wide_kind(a) == wide_kind(b),
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::UInt(a, ab), Value::UInt(b, bb)) => a == b && ab == bb,
         (Value::SInt(a, ab), Value::SInt(b, bb)) => a == b && ab == bb,
@@ -3306,6 +3550,12 @@ fn coerce_value(v: Value, t: &Type) -> Value {
     let Some(kind) = crate::numeric::IntegerKind::from_type(t) else {
         return v;
     };
+    if kind.wide() {
+        return match exact_of(&v) {
+            Some((_, e)) => wide_value(kind, e.wrap(kind)),
+            None => v,
+        };
+    }
     match value_kind(&v) {
         Some((_, n)) => integer_value(kind, kind.wrap(n)),
         None => v,
@@ -3430,5 +3680,117 @@ fn result_error(t: &Type) -> Option<Type> {
     match t {
         Type::Named(n, args) if n == "Result" && args.len() == 2 => Some(args[1].clone()),
         _ => None,
+    }
+}
+
+impl Runtime<'_> {
+    /// The slot of the sequence element an `inout` argument lends in place
+    /// (an element view, §13): `arg` is the value of `s[i]` (`Get` or
+    /// `SliceGet` of a sequence place), and the slot names element `i` of
+    /// that sequence's cell, so the callee's writes reach the element.
+    /// Binds `Some(x)` of an element view `match` (§13): `x` names the
+    /// element in its sequence's cell, so an `inout` view's writes reach it.
+    /// `false` when `value` is not an element view's `try_get`.
+    fn element_view_bind(
+        &self,
+        function: &str,
+        values: &BTreeMap<crate::ir::ValueId, Value>,
+        env: &mut Env,
+        pattern: &Pattern,
+        value: crate::ir::ValueId,
+    ) -> Result<bool, String> {
+        use crate::seq::SeqOp;
+        if self.world.element_views.is_empty() {
+            return Ok(false);
+        }
+        let Some(f) = self.program.functions.get(function) else {
+            return Ok(false);
+        };
+        let Some(def) = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .find(|i| i.dest == value)
+        else {
+            return Ok(false);
+        };
+        let crate::ir::Op::Seq {
+            op: SeqOp::TryGet | SeqOp::Hoisted(crate::seq::Access::TryGet),
+            args,
+        } = &def.op
+        else {
+            return Ok(false);
+        };
+        if !self
+            .world
+            .element_views
+            .contains_key(&(def.span.start, def.span.end))
+        {
+            return Ok(false);
+        }
+        let PatternKind::Constructor { name, fields, .. } = &pattern.kind else {
+            return Ok(false);
+        };
+        let (true, Some((_, inner))) = (name.ends_with("Some"), fields.first()) else {
+            return Ok(false);
+        };
+        let (Some(base), Some(index)) = (args.first(), args.get(1)) else {
+            return Ok(false);
+        };
+        let index = match values.get(&index.value) {
+            Some(Value::UInt(i, _)) => usize::try_from(*i).ok(),
+            Some(Value::Int(i)) => usize::try_from(*i).ok(),
+            _ => None,
+        }
+        .ok_or("an element view's index is not an integer")?;
+        let (cell, start) = match values.get(&base.value) {
+            Some(Value::Seq(cell)) => (cell.clone(), 0),
+            Some(Value::Slice { seq, start, .. }) => (seq.clone(), *start),
+            _ => return Err("an element view's receiver is not a sequence".into()),
+        };
+        let slot = Slot {
+            cell: Rc::new(RefCell::new(Value::Seq(cell))),
+            path: vec![element_segment(start + index)],
+        };
+        if !bind_pattern_slot(inner, &slot, env)? {
+            return Err("IR binding pattern mismatch".into());
+        }
+        Ok(true)
+    }
+    fn element_ref(&self, state: &IrState, arg: &crate::ir::Argument) -> Option<Slot> {
+        use crate::seq::SeqOp;
+        if arg.pass != Pass::Inout {
+            return None;
+        }
+        let f = self.program.functions.get(&state.function)?;
+        let def = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .find(|i| i.dest == arg.value)?;
+        let crate::ir::Op::Seq {
+            op: SeqOp::Get | SeqOp::SliceGet | SeqOp::Hoisted(crate::seq::Access::Get),
+            args,
+        } = &def.op
+        else {
+            return None;
+        };
+        let (Some(base), Some(index)) = (args.first(), args.get(1)) else {
+            return None;
+        };
+        let index = match state.values.get(&index.value)? {
+            Value::UInt(i, _) => usize::try_from(*i).ok()?,
+            Value::Int(i) => usize::try_from(*i).ok()?,
+            _ => return None,
+        };
+        let (cell, start) = match state.values.get(&base.value)? {
+            Value::Seq(cell) => (cell.clone(), 0),
+            Value::Slice { seq, start, .. } => (seq.clone(), *start),
+            _ => return None,
+        };
+        Some(Slot {
+            cell: Rc::new(RefCell::new(Value::Seq(cell))),
+            path: vec![element_segment(start + index)],
+        })
     }
 }

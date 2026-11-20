@@ -170,16 +170,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .collect()
         } else {
             let ty = self.b.func.dfg.value_type(value);
-            vec![if ty == types::F64 {
-                self.b.ins().bitcast(types::I64, ir::MemFlags::new(), value)
-            } else if ty == types::F32 {
-                let bits = self.b.ins().bitcast(types::I32, ir::MemFlags::new(), value);
-                self.b.ins().uextend(types::I64, bits)
-            } else if ty.bits() < 64 {
-                self.b.ins().uextend(types::I64, value)
+            if ty == types::I128 {
+                // A 128-bit scalar is two words, low word first.
+                let (lo, hi) = self.b.ins().isplit(value);
+                vec![lo, hi]
             } else {
-                value
-            }]
+                vec![if ty == types::F64 {
+                    self.b.ins().bitcast(types::I64, ir::MemFlags::new(), value)
+                } else if ty == types::F32 {
+                    let bits = self.b.ins().bitcast(types::I32, ir::MemFlags::new(), value);
+                    self.b.ins().uextend(types::I64, bits)
+                } else if ty.bits() < 64 {
+                    self.b.ins().uextend(types::I64, value)
+                } else {
+                    value
+                }]
+            }
         };
         for (i, word) in words.into_iter().enumerate() {
             let index = self.b.ins().iconst(types::I64, i as i64);
@@ -210,7 +216,13 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         let index = self.zero();
         let word = self.region_call("vesper_region_load", &[id, handle, index])?;
-        Ok(match scalar(ty, &[])? {
+        let scalar_ty = scalar(ty, &[])?;
+        if scalar_ty == types::I128 {
+            let index = self.b.ins().iconst(types::I64, 1);
+            let high = self.region_call("vesper_region_load", &[id, handle, index])?;
+            return Ok(self.b.ins().iconcat(word, high));
+        }
+        Ok(match scalar_ty {
             types::F64 => self.b.ins().bitcast(types::F64, ir::MemFlags::new(), word),
             types::F32 => {
                 let bits = self.b.ins().ireduce(types::I32, word);

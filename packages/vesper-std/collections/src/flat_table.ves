@@ -9,6 +9,13 @@
 //
 // Slot values: 0 is empty, `none_id()` is a tombstone, anything else is an
 // entry position plus one.
+//
+// `V` need not be copy (self-hosting SH2 lane 1): `vals` holds the values in
+// entry order, `insert` moves a value in (and the replaced one out) and
+// `remove` moves the value out. A value that is not copy is read in place,
+// as an element view of `vals`:
+// `match t.vals.try_get(t.position(k)) { Some(v) => .., None => .. }`, and
+// `try_get_mut` to update one; `position` is `none_id()` for an absent key.
 
 fn none_id() -> u64 {
     18446744073709551615
@@ -39,7 +46,7 @@ pub struct FlatTable[K, V] {
 }
 
 // An empty table.
-pub fn flat_table_new[K: mod copy + Eq + Hash, V: mod copy]() -> FlatTable[K, V] {
+pub fn flat_table_new[K: mod copy + Eq + Hash, V: mod affine]() -> FlatTable[K, V] {
     let mut slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut i: u64 = 0;
     loop {
@@ -59,7 +66,7 @@ pub fn flat_table_new[K: mod copy + Eq + Hash, V: mod copy]() -> FlatTable[K, V]
     }
 }
 
-impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
+impl [K: mod copy + Eq + Hash, V: mod affine] FlatTable[K, V] {
     pub fn len(in self) -> u64 {
         self.keys.len()
     }
@@ -146,15 +153,17 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
         }
     }
 
-    // Insert or replace; the previous value for `k`, if any.
-    pub fn insert(inout self, k: K, v: V) -> Option[V] {
+    // Insert or replace; the previous value for `k`, if any. The value is
+    // moved in, and the previous one moved out.
+    pub fn insert(inout self, k: K, sink v: V) -> Option[V] {
         let h = mix(k.hash());
         let s = self.find_slot(k, h);
         if s != none_id() {
             let e = wrapping_sub(at(in self.slots.as_slice(), s, 1), 1);
-            let old = self.vals.try_get(e);
-            self.vals.try_set(e, v);
-            return old;
+            return match self.vals.try_get_mut(e) {
+                Option::Some(slot) => Option::Some(replace(inout slot, v)),
+                Option::None => Option::None,
+            };
         }
         // Keep occupied slots plus tombstones at most 7/8 of capacity.
         let capacity = wrapping_add(self.mask, 1);
@@ -176,14 +185,15 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
         Option::None
     }
 
-    // The value for `k`, if present.
-    pub fn get(in self, k: K) -> Option[V] {
+    // The entry position of `k` (its value's index in `vals`), or
+    // `none_id()` when `k` is absent.
+    pub fn position(in self, k: K) -> u64 {
         let h = mix(k.hash());
         let s = self.find_slot(k, h);
         if s == none_id() {
-            return Option::None;
+            return none_id();
         }
-        self.vals.try_get(wrapping_sub(at(in self.slots.as_slice(), s, 1), 1))
+        wrapping_sub(at(in self.slots.as_slice(), s, 1), 1)
     }
 
     pub fn contains_key(in self, k: K) -> bool {
@@ -200,7 +210,6 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
             return Option::None;
         }
         let e = wrapping_sub(at(in self.slots.as_slice(), s, 1), 1);
-        let old = self.vals.try_get(e);
         self.slots.try_set(s, none_id());
         self.tombs = wrapping_add(self.tombs, 1);
         let last = wrapping_sub(self.keys.len(), 1);
@@ -214,18 +223,24 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
                 },
                 Option::None => {},
             }
-            match self.vals.try_get(last) {
-                Option::Some(x) => {
-                    self.vals.try_set(e, x);
-                },
-                Option::None => {},
-            }
             self.hashes.try_set(e, lh);
         }
         self.keys.pop();
-        self.vals.pop();
         self.hashes.pop();
-        old
+        // The last value moves into the hole and the removed one out.
+        match self.vals.pop() {
+            Option::Some(moved) => {
+                if e == last {
+                    Option::Some(moved)
+                } else {
+                    match self.vals.try_get_mut(e) {
+                        Option::Some(slot) => Option::Some(replace(inout slot, moved)),
+                        Option::None => Option::None,
+                    }
+                }
+            },
+            Option::None => Option::None,
+        }
     }
 
     // Remove every entry.
@@ -234,6 +249,23 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
         self.vals.clear();
         self.hashes.clear();
         self.rebuild(8);
+    }
+
+    // Append every key to `out`, in entry order.
+    pub fn keys_into(in self, inout out: ChunkSeq[K]) {
+        out.extend(in self.keys.as_slice());
+    }
+
+    // The key at entry position `i` (0 ..< len).
+    pub fn key_at(in self, i: u64) -> Option[K] {
+        self.keys.try_get(i)
+    }
+}
+
+impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
+    // The value for `k`, if present.
+    pub fn get(in self, k: K) -> Option[V] {
+        self.vals.try_get(self.position(k))
     }
 
     // The entry at position `i` (0 ..< len), in the deterministic entry
@@ -249,9 +281,165 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
             Option::None => Option::None,
         }
     }
+}
 
-    // Append every key to `out`, in entry order.
-    pub fn keys_into(in self, inout out: ChunkSeq[K]) {
-        out.extend(in self.keys.as_slice());
+test {
+    // @case empty(0)
+    // @case one(1)
+    // @case at_load_threshold(7)
+    // @case crosses_load_threshold(8)
+    // @case repeated_growth(40)
+    fn test_insert_replace_and_clear(count: u64) -> bool {
+        let mut table = flat_table_new[u64, u64]();
+        if !table.is_empty() || table.len() != 0 {
+            return false;
+        }
+        for k in 0..count {
+            if table.insert(k, wrapping_add(k, 100)) != Option::None {
+                return false;
+            }
+        }
+        let mut keys = ChunkSeq::new[u64]();
+        keys.push(999);
+        table.keys_into(inout keys);
+        if keys.len() != wrapping_add(count, 1) || keys.try_get(0) != Option::Some(999) {
+            return false;
+        }
+        for k in 0..count {
+            let previous = wrapping_add(k, 100);
+            let replacement = wrapping_add(k, 200);
+            if keys
+                .try_get(wrapping_add(k, 1))
+                != Option::Some(k)
+                || !table
+                .contains_key(k)
+                || table
+                .entry_at(k)
+                != Option::Some((k, previous))
+                || table
+                .insert(k, replacement)
+                != Option::Some(previous)
+                || table
+                .get(k)
+                != Option::Some(replacement)
+                || table
+                .entry_at(k)
+                != Option::Some((k, replacement)) {
+                return false;
+            }
+        }
+        if table
+            .len()
+            != count
+            || table
+            .contains_key(count)
+            || table
+            .get(count)
+            != Option::None
+            || table
+            .entry_at(count)
+            != Option::None {
+            return false;
+        }
+        table.clear();
+        table
+            .len()
+            == 0
+            && table
+            .is_empty()
+            && table
+            .get(0)
+            == Option::None
+            && table
+            .insert(0, 11)
+            == Option::None
+            && table
+            .get(0)
+            == Option::Some(11)
+    }
+
+    // @case first(0, 2, 1)
+    // @case middle(1, 0, 2)
+    // @case last(2, 0, 1)
+    fn test_remove_and_reinsert(removed_key: u64, first: u64, second: u64) -> bool {
+        let mut table = flat_table_new[u64, u64]();
+        for k in 0..3 {
+            table.insert(k, wrapping_add(k, 10));
+        }
+        if table
+            .remove(removed_key)
+            != Option::Some(wrapping_add(removed_key, 10))
+            || table
+            .remove(removed_key)
+            != Option::None
+            || table
+            .len()
+            != 2
+            || table
+            .contains_key(removed_key)
+            || table
+            .entry_at(0)
+            != Option::Some((first, wrapping_add(first, 10)))
+            || table
+            .entry_at(1)
+            != Option::Some((second, wrapping_add(second, 10)))
+            || table
+            .get(first)
+            != Option::Some(wrapping_add(first, 10))
+            || table
+            .get(second)
+            != Option::Some(wrapping_add(second, 10)) {
+            return false;
+        }
+        let replacement: u64 = 99;
+        table
+            .insert(removed_key, replacement)
+            == Option::None
+            && table
+            .len()
+            == 3
+            && table
+            .get(removed_key)
+            == Option::Some(replacement)
+            && table
+            .entry_at(2)
+            == Option::Some((removed_key, replacement))
+    }
+
+    // @case first_key(0)
+    // @case different_initial_probe(17)
+    fn test_lookup_across_tombstone(first: u64) -> bool {
+        let mut table = flat_table_new[u64, u64]();
+        let slot = mix(first.hash()) & table.mask;
+        let mut later = wrapping_add(first, 1);
+        loop {
+            if (mix(later.hash()) & table.mask) == slot {
+                break;
+            }
+            later = wrapping_add(later, 1);
+        }
+        table.insert(first, 10);
+        table.insert(later, 20);
+        table
+            .remove(first)
+            == Option::Some(10)
+            && table
+            .get(later)
+            == Option::Some(20)
+            && table
+            .insert(later, 21)
+            == Option::Some(20)
+            && table
+            .insert(first, 11)
+            == Option::None
+            && table
+            .get(first)
+            == Option::Some(11)
+            && table
+            .get(later)
+            == Option::Some(21)
+            && table
+            .len()
+            == 2
     }
 }

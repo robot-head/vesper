@@ -78,6 +78,9 @@ use self::decoder::{
     dec_take_decoder_stream
 };
 
+// RFC 9204 §3.2.1: the per-entry overhead (MaxEntries is capacity / 32).
+const ENTRY_OVERHEAD: u64 = 32;
+
 pub copy enum HuffmanError {
     Eos,
     BadPadding,
@@ -353,7 +356,7 @@ pub fn encoder_core_take_encoder_stream(inout e: EncoderCore) -> ChunkSeq[u8] {
 pub fn decoder_core_new(cfg: DecoderConfig) -> DecoderCore {
     DecoderCore {
         cfg: cfg,
-        max_entries: cfg.max_table_capacity / 32,
+        max_entries: cfg.max_table_capacity / ENTRY_OVERHEAD,
         table: table_new(),
         pending: ChunkSeq::new[u8](),
         blk_stream: ChunkSeq::new[u64](),

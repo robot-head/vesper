@@ -11,6 +11,40 @@ use self::grisu::{
     grisu_shortest
 };
 
+// Rust's `Big32x40`: 40 little-endian 32-bit limbs, enough for any
+// binary64 exponent plus the 192-bit headroom of `limbs_for`.
+const MAX_LIMBS: u64 = 40;
+const LIMB_BITS: u64 = 32;
+const LIMB_HEADROOM_BITS: u64 = 192;
+const LIMB_MASK: u64 = 0xffffffff;
+const LIMB_BASE: u64 = 0x100000000;
+// `mul_pow10` multiplies by 10^9, the largest power of ten in a limb.
+const POW10_PER_LIMB: u64 = 9;
+const TEN_TO_NINE: u64 = 1000000000;
+const DECIMAL_BASE: u64 = 10;
+// `estimate_scaling_factor`: log10(2) * 2^32, rounded up.
+const LOG10_2_Q32: i64 = 1292913986;
+// IEEE 754 binary64.
+const MANTISSA_BITS: u64 = 52;
+const EXPONENT_MASK: u64 = 0x7ff;
+const MANTISSA_MASK: u64 = 0x000fffffffffffff;
+const HIDDEN_BIT: u64 = 0x0010000000000000;
+const SIGN_SHIFT: u64 = 63;
+// `integer_decode`: the exponent bias 1023 plus the 52 mantissa bits.
+const EXPONENT_OFFSET: i64 = 1075;
+// The exponent `integer_decode` gives a subnormal (biased exponent 0).
+const SUBNORMAL_EXPONENT: i64 = -1075;
+// At most 17 shortest digits, plus slack.
+const DIGIT_CAPACITY: u64 = 20;
+// The digit value of an ASCII digit (u64 arithmetic).
+const DIGIT_ZERO: u64 = 0x30;
+const ASCII_PLUS: u8 = 0x2b;
+const ASCII_MINUS: u8 = 0x2d;
+const ASCII_DOT: u8 = 0x2e;
+const ASCII_ZERO: u8 = 0x30;
+const ASCII_ONE: u8 = 0x31;
+const ASCII_NINE: u8 = 0x39;
+
 // At most 40 limbs (Rust's `Big32x40`); a value uses only those its
 // exponent can reach (`limbs_for`), so the loops run over `b.len()`.
 fn limbs_for(exp: i64) -> u64 {
@@ -19,16 +53,16 @@ fn limbs_for(exp: i64) -> u64 {
     } else {
         wrapping_u64(exp)
     };
-    let n = wrapping_add(e, 192) / 32;
-    if n > 40 {
-        40
+    let n = wrapping_add(e, LIMB_HEADROOM_BITS) / LIMB_BITS;
+    if n > MAX_LIMBS {
+        MAX_LIMBS
     } else {
         n
     }
 }
 
 fn mask32() -> u64 {
-    4294967295
+    LIMB_MASK
 }
 
 fn big_zero(n: u64) -> ChunkSeq[u64] {
@@ -49,7 +83,7 @@ fn limb(in b: ChunkSeq[u64], i: u64) -> u64 {
 fn big_from(v: u64, n: u64) -> ChunkSeq[u64] {
     let mut b = big_zero(n);
     b.try_set(0, v & mask32());
-    b.try_set(1, v >> 32);
+    b.try_set(1, v >> LIMB_BITS);
     b
 }
 
@@ -68,14 +102,14 @@ fn mul_small(inout b: ChunkSeq[u64], m: u64) {
     for i in 0..size {
         let v = wrapping_add(wrapping_mul(limb(in b, i), m), carry);
         b.try_set(i, v & mask32());
-        carry = v >> 32;
+        carry = v >> LIMB_BITS;
     }
 }
 
 fn mul_pow2(inout b: ChunkSeq[u64], n: u64) {
     let size = b.len();
-    let words = n / 32;
-    let bits = n % 32;
+    let words = n / LIMB_BITS;
+    let bits = n % LIMB_BITS;
     if words > 0 {
         let mut i = size;
         loop {
@@ -96,7 +130,7 @@ fn mul_pow2(inout b: ChunkSeq[u64], n: u64) {
         for i in 0..size {
             let v = bit_shl(limb(in b, i), bits) | carry;
             b.try_set(i, v & mask32());
-            carry = v >> 32;
+            carry = v >> LIMB_BITS;
         }
     }
 }
@@ -104,15 +138,15 @@ fn mul_pow2(inout b: ChunkSeq[u64], n: u64) {
 fn mul_pow10(inout b: ChunkSeq[u64], n: u64) {
     let mut left = n;
     loop {
-        if left < 9 {
+        if left < POW10_PER_LIMB {
             break;
         }
-        mul_small(inout b, 1000000000);
-        left = wrapping_sub(left, 9);
+        mul_small(inout b, TEN_TO_NINE);
+        left = wrapping_sub(left, POW10_PER_LIMB);
     }
     let mut m: u64 = 1;
     for _i in 0..left {
-        m = wrapping_mul(m, 10);
+        m = wrapping_mul(m, DECIMAL_BASE);
     }
     if m > 1 {
         mul_small(inout b, m);
@@ -153,7 +187,7 @@ fn big_add(inout a: ChunkSeq[u64], in b: ChunkSeq[u64]) {
     for i in 0..size {
         let v = wrapping_add(wrapping_add(limb(in a, i), limb(in b, i)), carry);
         a.try_set(i, v & mask32());
-        carry = v >> 32;
+        carry = v >> LIMB_BITS;
     }
 }
 
@@ -168,7 +202,7 @@ fn big_sub(inout a: ChunkSeq[u64], in b: ChunkSeq[u64]) {
             a.try_set(i, wrapping_sub(x, y));
             borrow = 0;
         } else {
-            a.try_set(i, wrapping_sub(wrapping_add(x, 4294967296), y));
+            a.try_set(i, wrapping_sub(wrapping_add(x, LIMB_BASE), y));
             borrow = 1;
         }
     }
@@ -177,7 +211,7 @@ fn big_sub(inout a: ChunkSeq[u64], in b: ChunkSeq[u64]) {
 // `flt2dec::estimate_scaling_factor`.
 fn estimate_scaling_factor(mant: u64, exp: i64) -> i64 {
     let nbits = wrapping_i64(wrapping_sub(64, clz64(wrapping_sub(mant, 1))));
-    wrapping_mul(wrapping_add(nbits, exp), 1292913986) >> 32
+    wrapping_mul(wrapping_add(nbits, exp), LOG10_2_Q32) >> LIMB_BITS
 }
 
 // Shortest digits of `mant * 2^exp`, with neighbors `minus` and `plus`
@@ -221,9 +255,9 @@ fn format_shortest(
     if sum_cmp(in mant, in plus, in scale) < rounding {
         k = wrapping_add(k, 1);
     } else {
-        mul_small(inout mant, 10);
-        mul_small(inout minus, 10);
-        mul_small(inout plus, 10);
+        mul_small(inout mant, DECIMAL_BASE);
+        mul_small(inout minus, DECIMAL_BASE);
+        mul_small(inout plus, DECIMAL_BASE);
     }
     let mut scale2 = big_copy(in scale);
     mul_pow2(inout scale2, 1);
@@ -251,15 +285,15 @@ fn format_shortest(
             big_sub(inout mant, in scale);
             d = wrapping_add(d, 1);
         }
-        out.push(wrapping_u8(wrapping_add(48, d)));
+        out.push(wrapping_u8(wrapping_add(DIGIT_ZERO, d)));
         down = big_cmp(in mant, in minus) < rounding;
         up = sum_cmp(in mant, in plus, in scale) < rounding;
         if down || up {
             break;
         }
-        mul_small(inout mant, 10);
-        mul_small(inout minus, 10);
-        mul_small(inout plus, 10);
+        mul_small(inout mant, DECIMAL_BASE);
+        mul_small(inout minus, DECIMAL_BASE);
+        mul_small(inout plus, DECIMAL_BASE);
     }
     if up {
         let mut round = !down;
@@ -280,10 +314,10 @@ fn format_shortest(
                 i = wrapping_sub(i, 1);
                 let c = match out.try_get(i) {
                     Option::Some(c) => c,
-                    Option::None => 48,
+                    Option::None => ASCII_ZERO,
                 };
-                if c == 57 {
-                    out.try_set(i, 48);
+                if c == ASCII_NINE {
+                    out.try_set(i, ASCII_ZERO);
                 } else {
                     out.try_set(i, wrapping_add(c, 1));
                     done = true;
@@ -292,8 +326,8 @@ fn format_shortest(
             }
             if !done {
                 // Every digit was a nine: 1 followed by zeros, one longer.
-                out.try_set(0, 49);
-                out.push(48);
+                out.try_set(0, ASCII_ONE);
+                out.push(ASCII_ZERO);
                 k = wrapping_add(k, 1);
             }
         }
@@ -316,18 +350,18 @@ fn digits_value(in d: ChunkSeq[u8]) -> u64 {
     for i in 0..d.len() {
         let c = match d.try_get(i) {
             Option::Some(c) => widen_u64(c),
-            Option::None => 48,
+            Option::None => DIGIT_ZERO,
         };
-        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, 48));
+        v = wrapping_add(wrapping_mul(v, DECIMAL_BASE), wrapping_sub(c, DIGIT_ZERO));
     }
     v
 }
 
 // `flt2dec::decode` then `grisu::format_shortest`, Dragon as its fallback.
 pub fn shortest(bits: u64) -> Shortest {
-    let neg = bits >> 63 == 1;
-    let biased = (bits >> 52) & 2047;
-    let frac = bits & 4503599627370495;
+    let neg = bits >> SIGN_SHIFT == 1;
+    let biased = (bits >> MANTISSA_BITS) & EXPONENT_MASK;
+    let frac = bits & MANTISSA_MASK;
     if biased == 0 && frac == 0 {
         return Shortest {
             neg: neg,
@@ -338,10 +372,10 @@ pub fn shortest(bits: u64) -> Shortest {
     }
     // `integer_decode` then `flt2dec::decode`: (mant, minus, plus, exp).
     let mut mant = frac;
-    let mut exp: i64 = -1075;
+    let mut exp: i64 = SUBNORMAL_EXPONENT;
     if biased != 0 {
-        mant = frac | 4503599627370496;
-        exp = wrapping_sub(wrapping_i64(biased), 1075);
+        mant = frac | HIDDEN_BIT;
+        exp = wrapping_sub(wrapping_i64(biased), EXPONENT_OFFSET);
     } else {
         mant = frac << 1;
     }
@@ -349,7 +383,7 @@ pub fn shortest(bits: u64) -> Shortest {
     let mut minus: u64 = 1;
     let mut plus: u64 = 1;
     if biased != 0 {
-        if mant == 4503599627370496 {
+        if mant == HIDDEN_BIT {
             mant = mant << 2;
             plus = 2;
             exp = wrapping_sub(exp, 2);
@@ -367,7 +401,7 @@ pub fn shortest(bits: u64) -> Shortest {
             k: g.k
         };
     }
-    let mut d: ChunkSeq[u8] = ChunkSeq::with_capacity(20);
+    let mut d: ChunkSeq[u8] = ChunkSeq::with_capacity(DIGIT_CAPACITY);
     let k = format_shortest(mant, minus, plus, exp, even, inout d);
     Shortest {
         neg: neg,
@@ -403,11 +437,11 @@ pub fn shortest_len(s: Shortest) -> u64 {
 pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
     let mut p = at;
     if s.neg {
-        out.try_set(p, 45);
+        out.try_set(p, ASCII_MINUS);
         p = wrapping_add(p, 1);
     }
     if s.n == 0 {
-        out.try_set(p, 48);
+        out.try_set(p, ASCII_ZERO);
         return;
     }
     let n = s.n;
@@ -415,11 +449,11 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
     if s.k <= 0 {
         // `0.` then -k zeros then the digits.
         let zeros = wrapping_u64(wrapping_sub(0, s.k));
-        out.try_set(p, 48);
-        out.try_set(wrapping_add(p, 1), 46);
+        out.try_set(p, ASCII_ZERO);
+        out.try_set(wrapping_add(p, 1), ASCII_DOT);
         let first = wrapping_add(wrapping_add(p, 2), zeros);
         for z in 0..zeros {
-            out.try_set(wrapping_add(wrapping_add(p, 2), z), 48);
+            out.try_set(wrapping_add(wrapping_add(p, 2), z), ASCII_ZERO);
         }
         let mut i = n;
         loop {
@@ -427,13 +461,17 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
                 break;
             }
             i = wrapping_sub(i, 1);
-            out.try_set(wrapping_add(first, i), wrapping_u8(wrapping_add(48, v % 10)));
-            v = v / 10;
+            out
+                .try_set(
+                wrapping_add(first, i),
+                wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE))
+            );
+            v = v / DECIMAL_BASE;
         }
     } else if wrapping_u64(s.k) < n {
         // The point after the first k digits.
         let point = wrapping_u64(s.k);
-        out.try_set(wrapping_add(p, point), 46);
+        out.try_set(wrapping_add(p, point), ASCII_DOT);
         let mut i = n;
         loop {
             if i == 0 {
@@ -445,14 +483,14 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
             } else {
                 wrapping_add(p, i)
             };
-            out.try_set(at_i, wrapping_u8(wrapping_add(48, v % 10)));
-            v = v / 10;
+            out.try_set(at_i, wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE)));
+            v = v / DECIMAL_BASE;
         }
     } else {
         // The digits, then k - n zeros.
         let k = wrapping_u64(s.k);
         for z in n..k {
-            out.try_set(wrapping_add(p, z), 48);
+            out.try_set(wrapping_add(p, z), ASCII_ZERO);
         }
         let mut i = n;
         loop {
@@ -460,8 +498,12 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
                 break;
             }
             i = wrapping_sub(i, 1);
-            out.try_set(wrapping_add(p, i), wrapping_u8(wrapping_add(48, v % 10)));
-            v = v / 10;
+            out
+                .try_set(
+                wrapping_add(p, i),
+                wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE))
+            );
+            v = v / DECIMAL_BASE;
         }
     }
 }

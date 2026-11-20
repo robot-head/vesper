@@ -115,9 +115,25 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
-        "test/test_runner_cli": [
-            "packages/vesper-std/core/src/option.ves",
-            "packages/vesper-std/core/src/saturating.ves",
+        "test/imported_source_tests": glob([
+            "packages/vesper-ast/Loom.toml",
+            "packages/vesper-ast/src/*.ves",
+            "packages/vesper-front/Loom.toml",
+            "packages/vesper-front/src/*.ves",
+            "packages/vesper-std/*/Loom.toml",
+            "packages/vesper-std/*/src/*.ves",
+        ]) + [
+            "//crates/vesper-prism-h3:files",
+            "//crates/vesper-semver:files",
+        ],
+        "test/test_runner_cli": glob([
+            "packages/vesper-std/*/src/*.ves",
+        ]) + [
+            "//crates/vesper-crucible:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-simpulse:files",
+            "packages/vesper-ast/src/text.ves",
+            "packages/vesper-front/src/util.ves",
         ],
         # Self-hosting SH0 lane 7 (#1129): the front end v2 against the Rust
         # parser on the root package's `.ves` files and the parser test suites.
@@ -168,6 +184,39 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
+        # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
+        # the repository's .ves sources. Anchored globs.
+        "test/self_host_check_dyn": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "tests/dyn_trait.rs",
+            "tests/dyn_box.rs",
+            "tests/dyn_effects.rs",
+            "tests/dyn_fn.rs",
+        ]),
+        # Self-hosting SH2 lane 6 (#1178): the package assembler over every
+        # Loom package the root package declares. Anchored globs.
+        "test/self_host_check_names_packages": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH2 lane 7 (#1179): core typing on the same corpus.
+        "test/self_host_check_core_typing": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH2 lane 12 (#1184): @vesper/check-fip against
+        # fip::check_world on the same corpus, its checker cases and mutants.
+        "test/self_host_check_fip": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -180,6 +229,8 @@ vesper_crate(
         "test/std_graph": [":files"],
         "test/std_hash": [":files"],
         "test/std_intern": [":files"],
+        # SH2 lane 1 (#1173): collections and arenas of values that are not copy.
+        "test/owning_collections": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([
@@ -214,8 +265,8 @@ vesper_crate(
     # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself.
     test_shards = {"test/self_host_front_end": 4},
     # Reservations include subprocess overhead; they do not enforce RSS limits.
-    # `lean_replay` marks the Lean/Logos replay suite. PR runs of "Test all
-    # targets" skip it unless Lean-facing paths change; pushes to main run it
+    # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
+    # scripts" when Lean-facing paths change and on pushes to main
     # (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md "PR test tiers").
     test_tags = {
         # These harnesses can run several compiler/evaluator cases in parallel.
@@ -463,6 +514,8 @@ vesper_crate(
         "test/format_proof_cli": "long",
         "test/forge_provenance_cli": "long",
         "test/verify_extract_cli": "long",
+        # Front-end and AST tests check and lower their full package closures.
+        "test/imported_source_tests": "long",
         # Fresh replay covers both complete model import closures.
         "test/logos42_acceptance": "eternal",
         "test/oracle42_acceptance": "long",
@@ -486,6 +539,13 @@ vesper_crate(
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
         "test/self_host_check_tensor_types": "eternal",
+        # The dyn differential runs both passes over every .ves source twice.
+        "test/self_host_check_dyn": "long",
+        # The package assembler differential (#1178) compiles the AST package.
+        "test/self_host_check_names_packages": "long",
+        # The core typing differential (#1179) checks every corpus world.
+        "test/self_host_check_core_typing": "long",
+        "test/self_host_check_fip": "long",
     },
 )
 

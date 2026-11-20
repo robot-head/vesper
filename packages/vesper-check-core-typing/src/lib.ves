@@ -1,0 +1,208 @@
+// @vesper/check-core-typing: the core typing of src/check.rs in Vesper
+// (self-hosting wave SH2, lane 7, #1179), on @vesper/check-data. Rust stays
+// the default checker; this is a non-default port with a differential
+// (tests/self_host_check_core_typing.rs).
+//
+// - ints.ves: integer literal values and `IntegerKind::fits`.
+// - relations.ves: `compatible`, `effects_include`, `refine_annotation`,
+//   `unresolved`, `union_effects`, `join_types` and `infer`.
+// - patterns.ves: `is_uninhabited`, `matrix_covered`, `irrefutable` and
+//   match coverage (E0212).
+//
+// The entries below are the differential's tasks.
+
+use @vesper/check-data::util::{
+    u32_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    Vars,
+    debug_type,
+    vars_new
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/check-data::{
+    pack_text
+};
+use self::relations::{
+    compatible,
+    infer,
+    join_types,
+    refine_annotation,
+    unresolved
+};
+use self::patterns::{
+    Pats,
+    arms_cover,
+    irrefutable,
+    is_uninhabited,
+    pats_new
+};
+
+// Pattern kinds (constants cannot be imported yet; keep equal to
+// patterns.ves).
+const P_TUPLE: u8 = 5;
+const P_CTOR: u8 = 6;
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+fn put_bool(inout o: ChunkSeq[u8], b: bool) {
+    o.push(32);
+    if b {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+}
+
+fn put_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
+    debug_type(in c.types, in c.names, ty, inout o);
+}
+
+// Task "relations".
+// - n pairs (a, b): P with compatible(a, b), compatible(b, a),
+//   unresolved(a); J with Debug of join_types(a, b) and its E0200 count;
+//   R with Debug of refine_annotation(a, b).
+// - m infer cases (g, g generic names, p, p pairs (expected, actual)):
+//   `infer` over the pairs in order on one map, then a V line per binding
+//   (name, Debug) and a `-` line. The harness sorts each case's V lines.
+pub fn core_typing_relations(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let k = c.world.k;
+    let mut o = ChunkSeq::new[u8]();
+    let n = r.word(in b);
+    for i in 0..n {
+        let x = u32_at(in c.tmap, r.word(in b));
+        let y = u32_at(in c.tmap, r.word(in b));
+        put(inout o, "P");
+        put_bool(inout o, compatible(in c.types, k, x, y));
+        put_bool(inout o, compatible(in c.types, k, y, x));
+        put_bool(inout o, unresolved(in c.types, x));
+        put(inout o, "\nJ ");
+        let mut errors: u64 = 0;
+        let j = join_types(inout c.types, k, x, y, inout errors);
+        put_debug(inout o, in c, j);
+        o.push(32);
+        put_u64(inout o, errors);
+        put(inout o, "\nR ");
+        let f = refine_annotation(inout c.types, x, y);
+        put_debug(inout o, in c, f);
+        o.push(10);
+    }
+    let m = r.word(in b);
+    for i in 0..m {
+        let g = r.word(in b);
+        let mut generics: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for j in 0..g {
+            generics.push(u32_at(in c.nmap, r.word(in b)));
+        }
+        let p = r.word(in b);
+        let mut vars = vars_new();
+        for j in 0..p {
+            let e = u32_at(in c.tmap, r.word(in b));
+            let a = u32_at(in c.tmap, r.word(in b));
+            infer(inout c.types, k, e, a, in generics, inout vars);
+        }
+        for j in 0..vars.keys.len() {
+            put(inout o, "V ");
+            c.names.write(u32_at(in vars.keys, j), inout o);
+            o.push(32);
+            put_debug(inout o, in c, u32_at(in vars.vals, j));
+            o.push(10);
+        }
+        put(inout o, "-\n");
+    }
+    pack_text(in o)
+}
+
+// One pattern tree of the task input (pre-order): kind; a tuple then has
+// n and n trees; a constructor its short name, n and n (field name, tree).
+fn read_pat(inout r: Reader, in b: Slice[u8], in c: Ctx, inout ps: Pats) -> u32 {
+    let kind = wrapping_u8(r.word(in b));
+    let mut name: u32 = 0;
+    let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut knames: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if kind == P_CTOR {
+        name = u32_at(in c.nmap, r.word(in b));
+    }
+    if kind == P_CTOR || kind == P_TUPLE {
+        let n = r.word(in b);
+        for i in 0..n {
+            if kind == P_CTOR {
+                knames.push(u32_at(in c.nmap, r.word(in b)));
+            }
+            let kid = read_pat(inout r, in b, in c, inout ps);
+            kids.push(kid);
+        }
+    }
+    ps.add(kind, name, in kids, in knames)
+}
+
+// Task "patterns".
+// - u types: U with is_uninhabited.
+// - q cases (type, k, k pattern trees): C with whether the k arms cover
+//   the type (no E0212), then I per arm with whether it is irrefutable.
+pub fn core_typing_patterns(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let mut ps = pats_new(inout c.names);
+    let mut o = ChunkSeq::new[u8]();
+    let u = r.word(in b);
+    for i in 0..u {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        put(inout o, "U");
+        put_bool(inout o, is_uninhabited(inout c.types, in c.world, ty, inout seen));
+        o.push(10);
+    }
+    let q = r.word(in b);
+    for i in 0..q {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        let k = r.word(in b);
+        let mut arms: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for j in 0..k {
+            let p = read_pat(inout r, in b, in c, inout ps);
+            arms.push(p);
+        }
+        put(inout o, "C");
+        put_bool(
+            inout o,
+            arms_cover(inout c.types, inout c.names, in c.world, inout ps, in arms, ty)
+        );
+        o.push(10);
+        for j in 0..k {
+            put(inout o, "I");
+            let p = u32_at(in arms, j);
+            put_bool(
+                inout o,
+                irrefutable(inout c.types, inout c.names, in c.world, inout ps, p, ty)
+            );
+            o.push(10);
+        }
+    }
+    pack_text(in o)
+}

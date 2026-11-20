@@ -607,6 +607,11 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     {
         return Gap::None;
     }
+    // `eff (` never starts an effect row, so `eff` is a name there
+    // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175).
+    if current.kind == K::LParen && previous.kind == K::Eff {
+        return Gap::None;
+    }
     Gap::Soft
 }
 fn sequence<'a>(

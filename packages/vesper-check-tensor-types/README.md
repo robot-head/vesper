@@ -33,10 +33,10 @@ fixtures, the checker's own test sources, seeded mutants (set
 `TENSOR_MUTANTS` per fixture, default 40) and the repository corpus.
 `abba_against_rust` (ignored; `CHECK_HARNESS_SPEED=1`) times both.
 
-**Function budget.** The native JIT refuses a package with more than 1,024
-monomorphized functions. This package plus `@vesper/ast` lowering sits near
-that limit, so small one-line helpers are written inline at their call
-sites. Check the count before adding helpers.
+**Function budget.** The port was written when the native JIT refused a
+package with more than 1,024 monomorphized functions. This package plus
+`@vesper/ast` lowering came to 1,054, so small one-line helpers are written
+inline at their call sites (999 functions). #1231 raised the limit to 4,096.
 
 Elaboration (`elaborate.rs`) is not ported yet: its map is private to the
 Rust module, so it needs a swap point in `src/tensor_types` first.

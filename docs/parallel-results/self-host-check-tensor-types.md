@@ -97,8 +97,9 @@ branch is linked from the PR.
    plus `@vesper/ast` lowering came to 1,054. Writing about 300 one-line
    helper calls inline brought it to 999, so the package now has little
    headroom. Repro: any package whose reachable functions pass 1,024, for
-   example 1,025 `fn fN() -> u64 { N }` called from `main`. The limit
-   should go, or at least rise, before the checker ports are combined.
+   example 1,025 `fn fN() -> u64 { N }` called from `main`. #1231 has since
+   raised the limit to 4,096 on `main`, so the inlining is no longer needed,
+   but the combined checker ports should still be measured against it.
 2. **A `const` cannot be imported across modules** (check-data gap 1).
    Each module repeats the type kind and code constants.
 3. **`eff` is a keyword** until lane 3 (#1175) lands, so a handler local

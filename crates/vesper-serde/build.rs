@@ -26,15 +26,23 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // lemire.ves: every Eisel-Lemire and Clinger result flips its low bit.
     ("lemire", "f.mantissa | sign", "(f.mantissa ^ 1) | sign"),
     // index.ves: the scalar parser refuses `e+` exponents.
-    ("index", "if s == 43 || s == 45 {", "if s == 45 {"),
+    (
+        "index",
+        "if s == ASCII_PLUS || s == ASCII_MINUS {",
+        "if s == ASCII_MINUS {",
+    ),
     // stage2.ves: stage 2 refuses fractions.
     (
         "stage2",
-        "if p < end && at(in t, p) == 46 {",
-        "if p < end && at(in t, p) == 47 {",
+        "if p < end && at(in t, p) == ASCII_DOT {",
+        "if p < end && at(in t, p) == ASCII_SLASH {",
     ),
     // dragon.ves (encode): negative floats print with a plus sign.
-    ("encode", "out.try_set(p, 45);", "out.try_set(p, 43);"),
+    (
+        "encode",
+        "out.try_set(p, ASCII_MINUS);",
+        "out.try_set(p, ASCII_PLUS);",
+    ),
     // grisu.ves: weeding keeps the last digit (the text still round-trips,
     // but is not the closest shortest one).
     (
