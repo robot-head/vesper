@@ -3586,7 +3586,7 @@ impl Runtime<'_> {
             .flat_map(|b| &b.instructions)
             .find(|i| i.dest == arg.value)?;
         let crate::ir::Op::Seq {
-            op: SeqOp::Get | SeqOp::SliceGet,
+            op: SeqOp::Get | SeqOp::SliceGet | SeqOp::Hoisted(crate::seq::Access::Get),
             args,
         } = &def.op
         else {

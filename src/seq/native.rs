@@ -1351,7 +1351,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let Some(crate::ir::Instruction {
             op:
                 crate::ir::Op::Seq {
-                    op: SeqOp::Get | SeqOp::SliceGet,
+                    op: SeqOp::Get | SeqOp::SliceGet | SeqOp::Hoisted(crate::seq::Access::Get),
                     args,
                 },
             ..

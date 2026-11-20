@@ -501,3 +501,76 @@ fn f(inout xs: ChunkSeq[State]) -> u64 eff [Fail[RuntimeError]] { rd(in xs[0], g
         );
     }
 }
+
+/// Review findings on #1221: an element argument whose read the bounds
+/// hoister turned into `Hoisted(Get)` (optimized JIT), `Box` elements bound
+/// through a view (freed while the sequence still owned them), and a narrow
+/// `inout` view written by a callee that then raises (the write must survive
+/// the handler).
+#[test]
+fn hoisted_boxed_and_raising_views() {
+    const HOISTED: &str = r#"struct State { slots: ChunkSeq[u32], n: u64 }
+fn add(inout s: State, v: u32) { s.slots.push(v); s.n = wrapping_add(s.n, 1); }
+fn run() -> u64 eff [Fail[RuntimeError]] {
+    let mut xs = ChunkSeq::new[State]();
+    xs.push(State { slots: ChunkSeq::new[u32](), n: 0 });
+    xs.push(State { slots: ChunkSeq::new[u32](), n: 0 });
+    let mut i: u64 = 0;
+    loop {
+        if i >= xs.len() { break; }
+        add(inout xs[i], 3);
+        i = wrapping_add(i, 1);
+    }
+    add(inout xs[1], 4);
+    add(inout xs[1], 5);
+    let mut t: u64 = 0;
+    i = 0;
+    loop {
+        if i >= xs.len() { break; }
+        t = match xs.try_get(i) { Some(s) => wrapping_add(t, wrapping_add(s.n, s.slots.len())), None => t };
+        i = wrapping_add(i, 1);
+    }
+    t
+}
+fn main() -> u64 {
+    handle Fail[RuntimeError] in { run() } with { return x => x, raise(e, k) => 999, }
+}
+"#;
+    const BOXED: &str = r#"enum E { Lit(u64), Neg(Box[E]) }
+fn value(in e: E) -> u64 { match e { E::Lit(v) => v, E::Neg(x) => match x { Box(a) => wrapping_add(value(in a), 100) } } }
+fn main() -> u64 {
+    let mut xs = ChunkSeq::new[E]();
+    xs.push(E::Neg(Box::new(E::Neg(Box::new(E::Lit(7))))));
+    xs.push(E::Lit(9));
+    let a = match xs.try_get(0) { Some(b) => value(in b), None => 0 };
+    let c = match xs.try_get(0) { Some(b) => match b { E::Neg(x) => match x { Box(y) => value(in y) }, E::Lit(v) => v }, None => 0 };
+    let d = match xs.try_get(0) { Some(b) => value(in b), None => 0 };
+    let mut k: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= 50 { break; }
+        xs.push(E::Neg(Box::new(E::Lit(i))));
+        k = match xs.try_get(0) { Some(b) => match b { E::Neg(x) => match x { Box(y) => wrapping_add(k, value(in y)) }, E::Lit(v) => v }, None => 0 };
+        i = wrapping_add(i, 1);
+    }
+    wrapping_add(wrapping_add(wrapping_add(a, c), d), k)
+}
+"#;
+    const NARROW: &str = r#"fn bump(inout v: u32) eff [Fail[RuntimeError]] { v = wrapping_add(v, 5); let xs = ChunkSeq::new[u32](); let z = xs[3]; }
+fn inner(inout xs: ChunkSeq[u32]) -> u64 {
+    handle Fail[RuntimeError] in {
+        match xs.try_get_mut(0) { Some(v) => { bump(inout v); 1 }, None => 2 }
+    } with { return x => x, raise(e, k) => 7, }
+}
+fn main() -> u64 {
+    let mut xs = ChunkSeq::new[u32]();
+    xs.push(10);
+    let r = inner(inout xs);
+    let v = match xs.try_get(0) { Some(v) => widen_u64(v), None => 0 };
+    wrapping_add(wrapping_mul(r, 1000), v)
+}
+"#;
+    assert_eq!(differential("hoisted", HOISTED), 8);
+    assert_eq!(differential("boxed", BOXED), 5871);
+    assert_eq!(differential("narrow raise", NARROW), 7015);
+}

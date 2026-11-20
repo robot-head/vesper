@@ -134,7 +134,12 @@ A non-copy value is read with an element view:
 
 ## Stage 1 guard
 
-__STAGE1__
+The bootstrap-stage1 workflow passed on the branch: a fresh
+`bootstrap/run.sh stage1 --reproduce --outcome` matches bootstrap/stage1.lock
+([run 44796027644](https://github.com/robot-head/vesper/actions/runs/44796027644)
+on 2756d8c). It runs again on the final head before merge. This lane does
+not touch src/verified_codegen/**, src/ir.rs, `ir_opt::optimize`, lean/**,
+bootstrap/** or packages/vesper-compiler/**.
 
 ## Numbers
 
@@ -210,6 +215,19 @@ for each new slot" without `Clone` or a constructor callback (G5), so
 so copy users (and `OrderedSet`) now read `lvids` and then `vals`. The
 Strata traces are unchanged, and the vesper_std tests did not slow
 measurably, but it is not free.
+
+**G8. Narrow writes inside inlined effectful callees.** A `u8`, `bool`
+or `u32` element lent `inout` goes through a word of scratch. The write-back
+runs before a called function's failure status is re-raised, so a raising
+callee keeps its writes. But when the callee is specialized inline for its
+handler (or is an effect operation), a raise jumps to the handler from
+inside the body and skips the write-back. Wider elements are lent by address
+and are not affected.
+
+**G9. Functions with non-copy views are not inlined.** A matched `try_get`
+counts as a borrowed scrutinee in drop elaboration (so a view of a `Box`
+element is never freed), and the inliner refuses borrowed matches on
+non-copy values.
 
 ## What is left
 

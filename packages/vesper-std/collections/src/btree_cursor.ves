@@ -108,7 +108,6 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
             }
         )
     }
-
 }
 
 impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {

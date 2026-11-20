@@ -222,7 +222,6 @@ impl [K, V: mod affine] IdxMap[K, V] {
 }
 
 impl [K, V: mod copy] IdxMap[K, V] {
-
     // The value for `i`, or the default.
     pub fn get(in self, i: Idx[K]) -> V {
         match self.vals.try_get(widen_u64(i.raw)) {

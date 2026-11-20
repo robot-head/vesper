@@ -6628,6 +6628,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.in_fip_fn = fip_scope;
             self.capabilities = capability_scope;
             let result = result?;
+            self.seq_element_writeback(writebacks)?;
             for lent in self.sink_blocks.split_off(lent) {
                 self.free_sink_block(lent)?;
             }
@@ -6759,6 +6760,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             if pass_trace {
                 self.check_trace_failed();
             }
+            // Narrow element views lent through scratch (§13) keep the
+            // callee's writes even when it raises: write them back before
+            // the status can transfer control to a handler.
+            self.seq_element_writeback(writebacks)?;
             if let Some(record) = record {
                 if status_call {
                     let status = self.b.inst_results(call)[1];
@@ -6782,7 +6787,6 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .store(ir::MemFlags::new(), value, destination, 0);
             }
         }
-        self.seq_element_writeback(writebacks)?;
         Ok(result)
     }
     fn fip_box_alloc(&mut self, size: u32) -> Result<ir::Value, String> {
