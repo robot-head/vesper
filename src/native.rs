@@ -177,10 +177,54 @@ fn instance_key(name: &str, vars: &BTreeMap<String, Type>) -> String {
 /// `Type::Named(<function>, [])`. `$` never starts a generic name, so
 /// substitution ignores these entries.
 const FN_ARG: &str = "$fn:";
-/// The most function instances one native entry (or export set) may
-/// monomorphize to. It bounds runaway instantiation; 4096 matches the
-/// checker's `MAX_INSTANCES` (the self-hosted dyn passes need ~1,030).
-pub(crate) const MAX_NATIVE_INSTANCES: usize = 4096;
+/// Type nodes one native instance's type arguments may hold. There is no
+/// cap on the number of instances (SH3 lane 7, #1246): a program has as
+/// many as it reaches. Only polymorphic recursion makes that number
+/// unbounded, and it does so by growing the type arguments, so bounding
+/// their size bounds the set (finitely many types fit in this many nodes)
+/// while any real program stays far below it. 256 matches the checker's
+/// `pact_frontend::mono::MAX_TYPE_SIZE`.
+pub(crate) const MAX_NATIVE_INSTANCE_TYPE_SIZE: usize = 256;
+/// Type nodes in an instance's type arguments ([`MAX_NATIVE_INSTANCE_TYPE_SIZE`]).
+fn instance_type_size(vars: &BTreeMap<String, Type>) -> usize {
+    fn size(t: &Type) -> usize {
+        match t {
+            Type::Named(_, args) | Type::Tuple(args) => 1 + args.iter().map(size).sum::<usize>(),
+            Type::Function { params, result, .. } => {
+                1 + params.iter().map(|(_, t)| size(t)).sum::<usize>() + size(result)
+            }
+            _ => 1,
+        }
+    }
+    vars.values().map(size).sum()
+}
+/// The error for an instance of `name` whose type arguments outgrew
+/// [`MAX_NATIVE_INSTANCE_TYPE_SIZE`]: the chain of instances from the
+/// nearest enclosing instance of the same function, which is the cycle
+/// that keeps growing them.
+fn polymorphic_recursion_error(
+    name: &str,
+    parent: Option<&str>,
+    parents: &BTreeMap<String, (Option<String>, String)>,
+) -> String {
+    let mut chain = vec![name.to_string()];
+    let mut at = parent.map(str::to_string);
+    while let Some(key) = at {
+        let Some((up, function)) = parents.get(&key) else {
+            break;
+        };
+        chain.push(function.clone());
+        if function == name {
+            break;
+        }
+        at = up.clone();
+    }
+    chain.reverse();
+    format!(
+        "native monomorphization of '{name}' creates unboundedly many instances (polymorphic recursion through {}): its type arguments passed {MAX_NATIVE_INSTANCE_TYPE_SIZE} type nodes",
+        chain.join(" -> ")
+    )
+}
 /// The function-value parameters of an instance bound to top-level
 /// functions, `param -> function` (empty for other instances; pass
 /// [`EmittedFunction::vars`]).
@@ -731,6 +775,11 @@ fn register_result_words(world: &World, f: &Function) -> Result<Option<u32>, Str
 /// No internal conventions: every function keeps the default ABI.
 static DEFAULT_ABI: std::sync::LazyLock<NativeAbi> = std::sync::LazyLock::new(NativeAbi::default);
 type InstanceMap = BTreeMap<String, (String, BTreeMap<String, Type>)>;
+/// How many function instances native code for `entry` compiles: the
+/// number the old fixed cap counted against (#1246).
+pub fn instance_count(world: &World, entry: &str) -> Result<usize, String> {
+    Ok(instances(world, entry)?.len())
+}
 fn instances(world: &World, entry: &str) -> Result<InstanceMap, String> {
     instances_for_entry(world, entry, false)
 }
@@ -747,6 +796,16 @@ fn trace_host_direct(world: &World, f: &Function) -> bool {
 fn instances_for_entry(
     world: &World,
     entry: &str,
+    include_entry: bool,
+) -> Result<InstanceMap, String> {
+    instances_for_roots(world, &[entry], include_entry)
+}
+/// The instances every root in `roots` reaches, from one lowering of the
+/// world and one walk ([`instances_for_entry`] per root lowered the whole
+/// world once per export, quadratic in a library's size, #1246).
+pub(crate) fn instances_for_roots(
+    world: &World,
+    roots: &[&str],
     include_entry: bool,
 ) -> Result<InstanceMap, String> {
     let program = crate::ffi_lowering::drops::lower_world(world);
@@ -768,21 +827,30 @@ fn instances_for_entry(
                 })
         })
         .collect::<BTreeSet<_>>();
-    let mut todo = vec![(entry.to_string(), BTreeMap::new())];
-    let mut seen = BTreeSet::new();
+    let mut todo: Vec<(String, BTreeMap<String, Type>, Option<String>)> = roots
+        .iter()
+        .rev()
+        .map(|root| (root.to_string(), BTreeMap::new(), None))
+        .collect();
+    // Instance key -> (the instance that first reached it, its function),
+    // to report a polymorphic-recursion cycle.
+    let mut seen: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
     let mut result = BTreeMap::new();
-    while let Some((name, vars)) = todo.pop() {
+    while let Some((name, vars, parent)) = todo.pop() {
         let key = instance_key(&name, &vars);
-        if !seen.insert(key.clone()) {
+        if seen.contains_key(&key) {
             continue;
         }
-        if seen.len() > MAX_NATIVE_INSTANCES {
-            return Err(format!(
-                "native monomorphization exceeds {MAX_NATIVE_INSTANCES} function instances"
-            ));
+        if instance_type_size(&vars) > MAX_NATIVE_INSTANCE_TYPE_SIZE {
+            return Err(polymorphic_recursion_error(&name, parent.as_deref(), &seen));
         }
+        seen.insert(key.clone(), (parent, name.clone()));
+        let from = key.clone();
+        let mut todo = |callee: String, vars: BTreeMap<String, Type>| {
+            todo.push((callee, vars, Some(from.clone())));
+        };
         let f = concrete(world, &name, &vars)?;
-        if (include_entry && (key == entry || trace_host_direct(world, &f)))
+        if (include_entry && (roots.contains(&key.as_str()) || trace_host_direct(world, &f)))
             || !specialized_function(world, &f)
             || !function_arguments(&vars).is_empty()
         {
@@ -790,7 +858,7 @@ fn instances_for_entry(
         }
         // Handle drops (§16.3) are calls the source body never names.
         for callee in crate::ffi_lowering::drops::drop_callees(world, &program, &name) {
-            todo.push((callee, BTreeMap::new()));
+            todo(callee, BTreeMap::new());
         }
         if let Some(body) = &f.body {
             visit(body, &mut |e| {
@@ -798,7 +866,7 @@ fn instances_for_entry(
                     && references.contains(&(e.span.start, e.span.end, n.clone()))
                     && world.functions[n].generics.is_empty()
                 {
-                    todo.push((n.clone(), BTreeMap::new()));
+                    todo(n.clone(), BTreeMap::new());
                 }
                 if let ExprKind::Call { callee, .. } = &e.kind {
                     let target = match &callee.kind {
@@ -829,7 +897,7 @@ fn instances_for_entry(
                             world.dyn_objects.vtable(object, &substitute(actual, &vars))
                     {
                         for (method, vars) in vtable.methods.clone() {
-                            todo.push((method, vars));
+                            todo(method, vars);
                         }
                     }
                     if let Some(name) = target {
@@ -871,7 +939,7 @@ fn instances_for_entry(
                             for (method, vars) in
                                 vtable.map(|v| v.methods.clone()).unwrap_or_default()
                             {
-                                todo.push((method, vars));
+                                todo(method, vars);
                             }
                         }
                         let instance = world.dyn_objects.erase(&name, &instance);
@@ -879,7 +947,7 @@ fn instances_for_entry(
                             // A vtable stub is called through its slot.
                             return;
                         }
-                        todo.push((name, instance));
+                        todo(name, instance);
                     }
                 }
             });
@@ -1551,6 +1619,12 @@ pub fn jit_traced_with_options(
 ) -> Result<crate::runtime::Value, String> {
     jit_run_entry(world, entry, optimize, EntryEffects::TraceHost)
 }
+/// Parameters a [`WordFunction`] may take: eight, so that ports pass
+/// options as words instead of packing them into a `flags` word (#1246).
+/// Six of them travel in registers on SysV x86-64, eight on AArch64 and
+/// four on Windows x64; the rest go on the stack, which the host call below
+/// and Cranelift's default convention agree on.
+pub const MAX_WORD_FUNCTION_ARGS: usize = 8;
 /// A JIT-compiled function whose parameters and result are each one
 /// machine word (`in` aggregates are their addresses), for host code that
 /// calls compiled Vesper from several threads at once (source atomics,
@@ -1572,8 +1646,13 @@ impl WordFunction {
     /// an `in` aggregate, and the row must be empty.
     pub fn compile(world: &World, entry: &str, optimize: bool) -> Result<Self, String> {
         let f = world.functions.get(entry).ok_or("unknown entry")?;
-        if !f.effects.instances.is_empty() || f.effects.tail.is_some() || f.params.len() > 3 {
-            return Err("a word function takes at most three words and has no effects".into());
+        if !f.effects.instances.is_empty()
+            || f.effects.tail.is_some()
+            || f.params.len() > MAX_WORD_FUNCTION_ARGS
+        {
+            return Err(format!(
+                "a word function takes at most {MAX_WORD_FUNCTION_ARGS} words and has no effects"
+            ));
         }
         if Layout::of(world, &f.result)?.aggregate() {
             return Err("a word function returns one word".into());
@@ -1654,6 +1733,26 @@ impl WordFunction {
                 [a, b, c] => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64) -> u64>(
                     code,
                 )(a, b, c),
+                [a, b, c, d] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d),
+                [a, b, c, d, e] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d, e),
+                [a, b, c, d, e, g] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d, e, g),
+                [a, b, c, d, e, g, h] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d, e, g, h),
+                [a, b, c, d, e, g, h, i] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d, e, g, h, i),
                 _ => unreachable!("arity checked at compile"),
             })
         }

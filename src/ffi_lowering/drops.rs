@@ -85,9 +85,8 @@ pub(super) fn generated(
                  match o {{ Some(h) => {library}::{symbol}(h), None => () }}\n\
              }}\n"
         );
-        let text = format!("{}{text}", " ".repeat(base));
-        base = text.len() + 1;
-        let parsed = crate::parser::parse(&text);
+        let parsed = crate::integer_widths::parse_at(&text, base);
+        base += text.len() + 1;
         debug_assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         for (item, ty) in parsed.module.items.into_iter().zip([
             Type::Named(h.to_owned(), vec![]),

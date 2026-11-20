@@ -419,7 +419,7 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
         (true, true) => format!("{PRELUDE}{WORKERS_PRELUDE}"),
     };
     let end = after.max(crate::integer_widths::module_end(module));
-    let parsed = crate::parser::parse(&format!("{}{source}", " ".repeat(end + 1)));
+    let parsed = crate::integer_widths::parse_at(&source, end + 1);
     debug_assert!(
         parsed.diagnostics.is_empty(),
         "atomic prelude: {:?}",
