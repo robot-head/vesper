@@ -6,6 +6,38 @@ use self::common::{
     shr
 };
 
+// The frame of `EthIpv4TcpWire`: field byte offsets and size (src/wire.rs
+// `eth_ipv4_tcp`).
+const DST_MAC: u64 = 0;
+const SRC_MAC: u64 = 6;
+const ETHER_TYPE: u64 = 12;
+const VER_IHL: u64 = 14;
+const TOS: u64 = 15;
+const TOTAL_LEN: u64 = 16;
+const IDENT: u64 = 18;
+const FRAG_OFF: u64 = 20;
+const TTL: u64 = 22;
+const PROTO: u64 = 23;
+const IP_CHECKSUM: u64 = 24;
+const SRC_IPV4: u64 = 26;
+const DST_IPV4: u64 = 30;
+const SRC_PORT: u64 = 34;
+const DST_PORT: u64 = 36;
+const SEQ_NUM: u64 = 38;
+const ACK_NUM: u64 = 42;
+const DATA_OFFSET_FLAGS: u64 = 46;
+const WINDOW_SIZE: u64 = 48;
+const TCP_CHECKSUM: u64 = 50;
+const URGENT_PTR: u64 = 52;
+const ETH_FRAME_SIZE: u64 = 54;
+
+// `SynDropAlertWire`: offsets (`syn_drop_alert`) and size.
+const ALERT_SRC_IPV4: u64 = 0;
+const ALERT_DST_PORT: u64 = 4;
+const ALERT_TCP_FLAGS: u64 = 6;
+const ALERT_OBSERVED_PPS: u64 = 8;
+const ALERT_SIZE: u64 = 16;
+
 pub copy enum WireError {
     Short {
         need: usize,
@@ -106,31 +138,31 @@ pub fn eth_encode(w: EthIpv4TcpWire) -> ChunkSeq[u8] {
 }
 
 pub fn eth_decode(in s: Slice[u8]) -> EthIpv4TcpWire eff [Fail[WireError]] {
-    if s.len() < 54 {
-        short(54, s.len());
+    if s.len() < ETH_FRAME_SIZE {
+        short(ETH_FRAME_SIZE, s.len());
     }
     EthIpv4TcpWire {
-        dst_mac: be(in s, 0, 6),
-        src_mac: be(in s, 6, 6),
-        ether_type: wrapping_u16(be(in s, 12, 2)),
-        ver_ihl: wrapping_u8(b(in s, 14)),
-        tos: wrapping_u8(b(in s, 15)),
-        total_len: wrapping_u16(be(in s, 16, 2)),
-        ident: wrapping_u16(be(in s, 18, 2)),
-        frag_off: wrapping_u16(be(in s, 20, 2)),
-        ttl: wrapping_u8(b(in s, 22)),
-        proto: wrapping_u8(b(in s, 23)),
-        ip_checksum: wrapping_u16(be(in s, 24, 2)),
-        src_ipv4: wrapping_u32(be(in s, 26, 4)),
-        dst_ipv4: wrapping_u32(be(in s, 30, 4)),
-        src_port: wrapping_u16(be(in s, 34, 2)),
-        dst_port: wrapping_u16(be(in s, 36, 2)),
-        seq_num: wrapping_u32(be(in s, 38, 4)),
-        ack_num: wrapping_u32(be(in s, 42, 4)),
-        data_offset_flags: wrapping_u16(be(in s, 46, 2)),
-        window_size: wrapping_u16(be(in s, 48, 2)),
-        tcp_checksum: wrapping_u16(be(in s, 50, 2)),
-        urgent_ptr: wrapping_u16(be(in s, 52, 2))
+        dst_mac: be(in s, DST_MAC, 6),
+        src_mac: be(in s, SRC_MAC, 6),
+        ether_type: wrapping_u16(be(in s, ETHER_TYPE, 2)),
+        ver_ihl: wrapping_u8(b(in s, VER_IHL)),
+        tos: wrapping_u8(b(in s, TOS)),
+        total_len: wrapping_u16(be(in s, TOTAL_LEN, 2)),
+        ident: wrapping_u16(be(in s, IDENT, 2)),
+        frag_off: wrapping_u16(be(in s, FRAG_OFF, 2)),
+        ttl: wrapping_u8(b(in s, TTL)),
+        proto: wrapping_u8(b(in s, PROTO)),
+        ip_checksum: wrapping_u16(be(in s, IP_CHECKSUM, 2)),
+        src_ipv4: wrapping_u32(be(in s, SRC_IPV4, 4)),
+        dst_ipv4: wrapping_u32(be(in s, DST_IPV4, 4)),
+        src_port: wrapping_u16(be(in s, SRC_PORT, 2)),
+        dst_port: wrapping_u16(be(in s, DST_PORT, 2)),
+        seq_num: wrapping_u32(be(in s, SEQ_NUM, 4)),
+        ack_num: wrapping_u32(be(in s, ACK_NUM, 4)),
+        data_offset_flags: wrapping_u16(be(in s, DATA_OFFSET_FLAGS, 2)),
+        window_size: wrapping_u16(be(in s, WINDOW_SIZE, 2)),
+        tcp_checksum: wrapping_u16(be(in s, TCP_CHECKSUM, 2)),
+        urgent_ptr: wrapping_u16(be(in s, URGENT_PTR, 2))
     }
 }
 
@@ -147,18 +179,18 @@ pub fn alert_encode(w: SynDropAlertWire) -> ChunkSeq[u8] {
 }
 
 pub fn alert_decode(in s: Slice[u8]) -> SynDropAlertWire eff [Fail[WireError]] {
-    if s.len() < 16 {
-        short(16, s.len());
+    if s.len() < ALERT_SIZE {
+        short(ALERT_SIZE, s.len());
     }
     let mut pps: u64 = 0;
     let eight: u64 = 8;
     for i in 0..eight {
-        pps = pps | shl(b(in s, wrapping_add(8, i)), wrapping_mul(i, 8));
+        pps = pps | shl(b(in s, wrapping_add(ALERT_OBSERVED_PPS, i)), wrapping_mul(i, 8));
     }
     SynDropAlertWire {
-        src_ipv4: wrapping_u32(be(in s, 0, 4)),
-        dst_port: wrapping_u16(be(in s, 4, 2)),
-        tcp_flags: wrapping_u16(be(in s, 6, 2)),
+        src_ipv4: wrapping_u32(be(in s, ALERT_SRC_IPV4, 4)),
+        dst_port: wrapping_u16(be(in s, ALERT_DST_PORT, 2)),
+        tcp_flags: wrapping_u16(be(in s, ALERT_TCP_FLAGS, 2)),
         observed_pps: pps
     }
 }

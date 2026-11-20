@@ -40,8 +40,13 @@
 #![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 
 use crate::btf::{Btf, BtfType};
-use crate::insn::{RawInsn, class};
+use crate::insn::{RawInsn, class, mode, size, source};
 use std::fmt;
+
+/// How deep `types_match` and `find_member` follow nested types.
+const MAX_MATCH_DEPTH: u32 = 32;
+/// `BPF_LD | BPF_IMM | BPF_DW`, the first slot of a 64-bit immediate load.
+const LD_IMM64: u8 = class::LD | mode::IMM | size::DW;
 
 /// A program-side description of a kernel type.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -824,7 +829,7 @@ fn names_match(local: &str, target: &str) -> bool {
 /// Behind a pointer, aggregates match by name and kind only (or a
 /// forward declaration of the same kind).
 fn types_match(local: &LocalType, target: &Btf, id: u32, behind_ptr: bool, depth: u32) -> bool {
-    if depth > 32 {
+    if depth > MAX_MATCH_DEPTH {
         return false;
     }
     let tid = target.skip_mods(id);
@@ -919,7 +924,7 @@ fn kind_compatible(local: &LocalType, target: &Btf, id: u32) -> bool {
 /// Find member `name` of aggregate `id`, looking through anonymous
 /// members: (member type, bit offset from the start of `id`, bitfield size).
 fn find_member(btf: &Btf, id: u32, name: &str, depth: u32) -> Option<(u32, u32, u32)> {
-    if depth > 32 {
+    if depth > MAX_MATCH_DEPTH {
         return None;
     }
     let Some(BtfType::Struct { members, .. }) = btf.get(btf.skip_mods(id)) else {
@@ -970,10 +975,10 @@ pub fn patch(
     );
     match w[0] {
         0 => {
-            if i.code & 0x07 == class::LD {
+            if i.code & class::MASK == class::LD {
                 insns[slot].imm = w[1] as u32 as i32;
                 insns[slot + 1].imm = w[2] as u32 as i32;
-            } else if matches!(i.code & 0x07, class::LDX | class::ST | class::STX) {
+            } else if matches!(i.code & class::MASK, class::LDX | class::ST | class::STX) {
                 insns[slot].off = w[1] as i16;
             } else {
                 insns[slot].imm = w[1] as u32 as i32;
@@ -1006,8 +1011,8 @@ pub fn patch(
         detail: d.to_owned(),
     };
     let code = insns.get(slot).ok_or_else(|| bad("past the end"))?.code;
-    match code & 0x07 {
-        class::ALU | class::ALU64 if code & 0x08 == 0 => {
+    match code & class::MASK {
+        class::ALU | class::ALU64 if code & source::X == 0 => {
             let i = &mut insns[slot];
             if i.imm as u32 as u64 != expected && i.imm as i64 as u64 != expected {
                 return Err(CoreError::LocalMismatch {
@@ -1032,7 +1037,7 @@ pub fn patch(
             }
             i.off = i16::try_from(value).map_err(|_| bad("offset does not fit 16 bits"))?;
         }
-        class::LD if code == 0x18 && slot + 1 < insns.len() => {
+        class::LD if code == LD_IMM64 && slot + 1 < insns.len() => {
             let found =
                 (insns[slot].imm as u32 as u64) | ((insns[slot + 1].imm as u32 as u64) << 32);
             if found != expected {

@@ -45,7 +45,8 @@ included, and many of them are fine as they are.
 | #1193 | Prism: per-module ASCII constants, RFC 9110 tchar/field-value and RFC 3986 target masks, status codes, host limits | `abba measure 20` 62.87 M -> 62.85 M Ir |
 | #1197 | silicon: the RISC-V AIA register map (APLIC offsets, IDC registers, `target[i]` and `msiaddrcfgh` fields, `sourcecfg.SM` codes, IMSIC iselects) | `abba one port` aia-intc, aplic-direct, imsic Ir unchanged |
 | #1199 | eBPF instruction codec: the kernel's `BPF_*` opcode fields (class, op, jmp, source, size, mode, atomic) | decode workload 5.42 M -> 5.32 M Ir per warm call (-1.9%) |
-| next | eBPF interpreter: helper ids, map types, errnos, limits, ring buffer header bits, `xdp_md`/`__sk_buff` offsets, FNV and xorshift64* constants, region kinds (Rust and port) | interp workload 25.63 M Ir per warm call before and after (+0.01%) |
+| #1202 | eBPF interpreter: helper ids, map types, errnos, limits, ring buffer header bits, `xdp_md`/`__sk_buff` offsets, FNV and xorshift64* constants, region kinds (Rust and port) | interp workload 25.63 M Ir per warm call before and after (+0.01%) |
+| next | eBPF BTF, `.BTF.ext`, CO-RE and wire: BTF kinds and `info` fields, header layout, UTF-8 bounds, `line_col`, CO-RE relocation kinds, local tree tags, frame offsets, map types and limits (Rust and port) | warm call Ir: btf 10.574 M -> 10.593 M (+0.18%), ext 934.3 K -> 942.0 K (+0.82%), core 2.7407 M -> 2.7405 M |
 
 ## Order
 
@@ -89,6 +90,11 @@ literals first (2026-11-20).
 
 ## Gaps left
 
+- Named constants in a hot byte loop can cost a little: in the `.BTF.ext`
+  access-string parser (`parse_u32`), writing `ASCII_0`/`ASCII_9`/`U32_MAX`
+  instead of literals costs about 14 K Ir per warm `ext` call (1.5%). The
+  constants are single literals, so the inliner's fold should make them free;
+  it does not reach these comparisons yet.
 - Constants are not patterns: `match c { JEQ => ... }` is refused
   ("unknown pattern constructor"). The eBPF port's decoders compare with
   `if` chains instead of matching integer literals.

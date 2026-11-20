@@ -83,11 +83,11 @@ filegroup(
         ("helpers", "helpers", "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n", "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n"),
         ("program", "program", "            if max_entries < 4096 ||", "            if max_entries < 2048 ||"),
         ("callgraph", "callgraph", "        if bytes > lim {\n", "        if bytes > wrapping_add(lim, 8) {\n"),
-        ("wire", "wire", "        src_ipv4: wrapping_u32(be(in s, 26, 4)),\n", "        src_ipv4: wrapping_u32(be(in s, 30, 4)),\n"),
+        ("wire", "wire", "        src_ipv4: wrapping_u32(be(in s, SRC_IPV4, 4)),\n", "        src_ipv4: wrapping_u32(be(in s, DST_IPV4, 4)),\n"),
         ("explore", "verifier", "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > range {\n", "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > wrapping_add(range, 1) {\n"),
-        ("btf", "btf", "        if kind == 0 || kind > 19 {\n", "        if kind == 0 || kind > 20 {\n"),
+        ("btf", "btf", "        if kind == 0 || kind > KIND_ENUM64 {\n", "        if kind == 0 || kind > wrapping_add(KIND_ENUM64, 1) {\n"),
         ("core", "core", "        if slen(in strs, mname) == 0 {\n", "        if slen(in strs, mname) == 99 {\n"),
-        ("btf_ext", "btf_ext", "        out.push(lc & 1023);\n", "        out.push(lc & 511);\n"),
+        ("btf_ext", "btf_ext", "        out.push(lc & LINE_COL_MASK);\n", "        out.push(lc & (LINE_COL_MASK >> 1));\n"),
         ("interp_run", "interp", "    if kind == KIND_PACKET && at < i.data_off {\n", "    if kind == KIND_PACKET && wrapping_add(at, 1) < i.data_off {\n"),
     ]
 ]
