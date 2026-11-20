@@ -12,6 +12,11 @@ use crate::{
 };
 use std::{marker::PhantomData, rc::Rc, thread::ThreadId};
 
+/// `Reconciler::close_state` (vesper/src/session.ves): a close is pending
+/// or done (0 is open).
+const CLOSE_PENDING: u64 = 1;
+const CLOSE_DONE: u64 = 2;
+
 /// A prepared update owns its intended tree and all reserved identities. A
 /// rejection returns this exact owner for retry/inspection. Dropping a plan
 /// never changes mounted widgets or disconnects their subscriptions.
@@ -260,14 +265,14 @@ impl<B: Backend> Session<B> {
             }));
         }
         let state = self.core.close_state();
-        if state == 1 {
+        if state == CLOSE_PENDING {
             return Err(Box::new(ShutdownFailure {
                 session: self,
                 error: ShutdownError::PendingClose,
                 update: None,
             }));
         }
-        if state != 2 {
+        if state != CLOSE_DONE {
             let update = match self.prepare(thread, None) {
                 Ok(u) => u,
                 Err(e) => {
