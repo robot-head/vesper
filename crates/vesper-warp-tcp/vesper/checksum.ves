@@ -64,8 +64,8 @@ pub fn compute_checksum(ips: Ips, in segment: Slice[u8]) -> Result[u16, WireErro
     match pseudo_header_sum(ips, n) {
         Result::Err(e) => Result::Err(e),
         Result::Ok(p) => {
-            let a = sum_range(p, in segment, 0, OFF_CHECKSUM);
-            Result::Ok(~fold(sum_range(a, in segment, OFF_URGENT, n)))
+            let a = sum_range(p, in segment, 0, Field::Checksum);
+            Result::Ok(~fold(sum_range(a, in segment, Field::Urgent, n)))
         },
     }
 }
@@ -78,9 +78,9 @@ fn fill_checksum_n(ips: Ips, inout segment: Slice[u8], n: u64) -> Result[Unit, W
     match pseudo_header_sum(ips, n) {
         Result::Err(e) => Result::Err(e),
         Result::Ok(p) => {
-            let a = sum_range(p, in segment, 0, OFF_CHECKSUM);
-            let c = ~fold(sum_range(a, in segment, OFF_URGENT, n));
-            wr16(inout segment, OFF_CHECKSUM, c);
+            let a = sum_range(p, in segment, 0, Field::Checksum);
+            let c = ~fold(sum_range(a, in segment, Field::Urgent, n));
+            wr16(inout segment, Field::Checksum, c);
             Result::Ok(())
         },
     }

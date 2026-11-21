@@ -594,6 +594,9 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "fn f() { handle self::m::E in { 0 } with { return x => x } }",
         "fn f() { @a /b::c; @a/b; self::; super::1 }",
         "fn f(let: u8, if: u8) { x.match; s.impl }",
+        "enum H: _ { A = 6, B, C = H::B << 3 } fn f(x: i32) -> u64 { match H::A { H::B => 1, _ => if x == H::C { H::A } else { 0 } } }",
+        "pub enum C: u8 { A, B = 2, D = C::B + 1, } enum E: u64 {} enum G[T]: u8 { A } enum H: u8 { A(u8), B } enum I: u8 { A = } enum J: [u8; 2] { K = [1, 2] }",
+        "fn f(c: u8) -> u8 { match c & C::Mask { C::A => 1, self::m::C::B | LIMIT => 2, _ => 3 } }",
         "fn f[r](x: T[self::m::U, r]) {}",
         // Fixed-size arrays and module constants (#1115).
         "const A: u8 = 1; pub const B: [u8; 2] = [1; 2]; const c: u8 = 1; pub const; const A u8 = ;",

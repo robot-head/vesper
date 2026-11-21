@@ -26,6 +26,10 @@ use self::index::{
     strings_equal,
     tok
 };
+use self::ascii::{
+    Ascii,
+    Utf8
+};
 
 // `BatchLimits::HARD` and the per-record `Limits` ceilings it enforces
 // (src/ndjson.rs).
@@ -59,22 +63,7 @@ const DECIMAL_BASE: u64 = 10;
 const NO_CHAR: u64 = 0x110000;
 // UTF-8 lead tags, the continuation tag and payload mask, and the first
 // code points that need 2, 3 and 4 bytes.
-const UTF8_LEAD2_TAG: u64 = 0xc0;
-const UTF8_LEAD3_TAG: u64 = 0xe0;
-const UTF8_LEAD4_TAG: u64 = 0xf0;
-const UTF8_CONT: u64 = 0x80;
-const UTF8_CONT_PAYLOAD: u64 = 0x3f;
-const UTF8_TWO_BYTE_MIN: u64 = 0x80;
-const UTF8_THREE_BYTE_MIN: u64 = 0x800;
-const UTF8_FOUR_BYTE_MIN: u64 = 0x10000;
-const ASCII_TAB: u64 = 0x09;
-const ASCII_LF: u64 = 0x0a;
 const LF_BYTE: u8 = 0x0a;
-const ASCII_CR: u64 = 0x0d;
-const ASCII_SPACE: u64 = 0x20;
-const ASCII_MINUS: u64 = 0x2d;
-const ASCII_ZERO: u64 = 0x30;
-const ASCII_NINE: u64 = 0x39;
 
 fn max64() -> u64 {
     0xffffffffffffffff
@@ -113,11 +102,11 @@ fn digits_u64(in t: Slice[u8], s: u64, e: u64) -> Option[u64] {
             break;
         }
         let b = at(in t, i);
-        if b < ASCII_ZERO || b > ASCII_NINE {
+        if b < Ascii::Zero || b > Ascii::Nine {
             return Option::None;
         }
         let (lo, hi) = mul_wide(v, DECIMAL_BASE);
-        let d = wrapping_sub(b, ASCII_ZERO);
+        let d = wrapping_sub(b, Ascii::Zero);
         if hi != 0 || d > wrapping_sub(max64(), lo) {
             return Option::None;
         }
@@ -133,7 +122,7 @@ fn parse_u64(in t: Slice[u8], s: u64, e: u64) -> Option[u64] {
 
 // (negative, magnitude) of an `i64`.
 fn parse_i64(in t: Slice[u8], s: u64, e: u64) -> Option[(bool, u64)] {
-    let neg = at(in t, s) == ASCII_MINUS;
+    let neg = at(in t, s) == Ascii::Minus;
     let from = if neg {
         wrapping_add(s, 1)
     } else {
@@ -376,26 +365,26 @@ pub fn tile_decode(in doc: Doc, in input: Slice[u8], root: u64) -> TilePoint eff
 
 // The UTF-8 bytes of scalar `c`, packed low byte first, and their count.
 fn utf8_bytes(c: u64) -> (u64, u64) {
-    if c < UTF8_TWO_BYTE_MIN {
+    if c < Utf8::TwoByteMin {
         (1, c)
-    } else if c < UTF8_THREE_BYTE_MIN {
-        (2, (UTF8_LEAD2_TAG | (c >> 6)) | bit_shl(UTF8_CONT | (c & UTF8_CONT_PAYLOAD), 8))
-    } else if c < UTF8_FOUR_BYTE_MIN {
+    } else if c < Utf8::ThreeByteMin {
+        (2, (Utf8::Lead2Tag | (c >> 6)) | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 8))
+    } else if c < Utf8::FourByteMin {
         (
             3,
-            (UTF8_LEAD3_TAG | (c >> 12)) | bit_shl(
-                UTF8_CONT | ((c >> 6) & UTF8_CONT_PAYLOAD),
+            (Utf8::Lead3Tag | (c >> 12)) | bit_shl(
+                Utf8::Cont | ((c >> 6) & Utf8::ContPayload),
                 8
-            ) | bit_shl(UTF8_CONT | (c & UTF8_CONT_PAYLOAD), 16)
+            ) | bit_shl(Utf8::Cont | (c & Utf8::ContPayload), 16)
         )
     } else {
         (
             4,
-            (UTF8_LEAD4_TAG | (c >> 18)) | bit_shl(
-                UTF8_CONT | ((c >> 12) & UTF8_CONT_PAYLOAD),
+            (Utf8::Lead4Tag | (c >> 18)) | bit_shl(
+                Utf8::Cont | ((c >> 12) & Utf8::ContPayload),
                 8
-            ) | bit_shl(UTF8_CONT | ((c >> 6) & UTF8_CONT_PAYLOAD), 16) | bit_shl(
-                UTF8_CONT | (c & UTF8_CONT_PAYLOAD),
+            ) | bit_shl(Utf8::Cont | ((c >> 6) & Utf8::ContPayload), 16) | bit_shl(
+                Utf8::Cont | (c & Utf8::ContPayload),
                 24
             )
         )
@@ -609,7 +598,7 @@ pub fn ndjson_admit(in input: Slice[u8], b: BatchLimits, record_size: u64)
     }
     let count = if len == 0 {
         0
-    } else if at(in input, wrapping_sub(len, 1)) != ASCII_LF {
+    } else if at(in input, wrapping_sub(len, 1)) != Ascii::Lf {
         initial_add(newlines, 1)
     } else {
         newlines
@@ -639,7 +628,7 @@ fn here(in c: NdCursor, code: u64) -> Unit eff [Fail[Fault]] {
 }
 
 fn blank(b: u64) -> bool {
-    b == ASCII_SPACE || b == ASCII_TAB || b == ASCII_CR
+    b == Ascii::Space || b == Ascii::Tab || b == Ascii::Cr
 }
 
 // The frame at `c.start`: its end, payload end and the record's limits
@@ -660,7 +649,7 @@ pub fn ndjson_frame(in input: Slice[u8], inout c: NdCursor, b: BatchLimits, r: L
         && body_end
         > start
         && at(in input, wrapping_sub(body_end, 1))
-        == ASCII_CR {
+        == Ascii::Cr {
         wrapping_sub(body_end, 1)
     } else {
         body_end

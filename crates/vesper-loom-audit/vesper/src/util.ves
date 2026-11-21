@@ -4,6 +4,8 @@ use @vesper/loom-calculus::{
     L
 };
 use @vesper/loom-calculus::util::{
+    Ascii,
+    Order,
     gb,
     min,
     none,
@@ -23,24 +25,25 @@ use self::{
 };
 
 // Error kinds, in the order of the Rust `Error` variants.
-pub fn e_input() -> u64 {
-    0
+pub enum ErrorKind: _ {
+    Input,
+    Catalog,
+    Policy,
+    Solution,
+    Limit
 }
 
-pub fn e_catalog() -> u64 {
-    1
+// Advisory and claim identities: a Vesper package or a native one.
+pub enum Identity: _ {
+    Vesper,
+    Native
 }
 
-pub fn e_policy() -> u64 {
-    2
-}
-
-pub fn e_solution() -> u64 {
-    3
-}
-
-pub fn e_limit() -> u64 {
-    4
+// The orders `msort` knows (see `order_of`).
+pub enum AuditSort: _ {
+    NativeClaims,
+    Ranges,
+    Advisories
 }
 
 // Append the literal t to dp.
@@ -76,7 +79,7 @@ pub fn fail(inout s: A, kind: u64, in t: Str) {
 // `Work::spend`: false (and a Limit error) when the budget is exhausted.
 pub fn spend(inout s: A, n: u64) -> bool {
     if n > s.work {
-        fail(inout s, e_limit(), "logical work");
+        fail(inout s, ErrorKind::Limit, "logical work");
         return false;
     }
     s.work = wrapping_sub(s.work, n);
@@ -142,24 +145,25 @@ pub fn mark_seen(inout s: A, i: u64) -> bool {
 }
 
 pub fn ascii_alnum(c: u8) -> bool {
-    (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+    (c >= Ascii::Zero && c <= Ascii::Nine)
+        || (c >= Ascii::UpperA && c <= Ascii::UpperZ)
+        || (c >= Ascii::LowerA && c <= Ascii::LowerZ)
 }
 
 // SemVer precedence (`Version::cmp_precedence`): build metadata ignored.
-// 0 less, 1 equal, 2 greater.
 pub fn prec_ord(in l: L, a: u64, b: u64) -> u64 {
     let x = ver(in l, a);
     let y = ver(in l, b);
     let o = ord(x.major, y.major);
-    if o != 1 {
+    if o != Order::Equal {
         return o;
     }
     let o = ord(x.minor, y.minor);
-    if o != 1 {
+    if o != Order::Equal {
         return o;
     }
     let o = ord(x.patch, y.patch);
-    if o != 1 {
+    if o != Order::Equal {
         return o;
     }
     pre_ord(in l, x.pre, y.pre)
@@ -168,15 +172,15 @@ pub fn prec_ord(in l: L, a: u64, b: u64) -> u64 {
 // Sort orders of `msort`. kind 0: native claims by (name, version);
 // 1: affected ranges by introduced precedence; 2: advisories by ID.
 fn order_of(in s: A, kind: u64, a: u64, b: u64) -> u64 {
-    if kind == 0 {
+    if kind == AuditSort::NativeClaims {
         let x = nat(in s, a);
         let y = nat(in s, b);
         let o = ord(x.name, y.name);
-        if o != 1 {
+        if o != Order::Equal {
             return o;
         }
         ver_ord(in s.l, x.ver, y.ver)
-    } else if kind == 1 {
+    } else if kind == AuditSort::Ranges {
         let x = rng(in s, a);
         let y = rng(in s, b);
         prec_ord(in s.l, x.intro, y.intro)

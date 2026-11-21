@@ -10,8 +10,9 @@
 // renames it in its leaf (`vkeys` keeps each value's key for that).
 //
 // Values that are not copy are read in place, as element views of `vals`:
-// `match t.vals.try_get(t.position(k)) { Some(v) => .., None => .. }`, and
-// `try_get_mut` to update one. `position` is `none_id()` for an absent key,
+// `t.with_ref(k, |in v| ..)` and `t.with_mut(k, |inout v| ..)` lend one to a
+// closure, or written out, `match t.vals.try_get(t.position(k)) { Some(v) =>
+// .., None => .. }` and `try_get_mut` to update one. `position` is `none_id()` for an absent key,
 // which no `try_get` accepts. `insert` moves the new value in and the old
 // one out, and `remove` moves the value out. Internal node `n` keeps its separators at `n * 16 ..` of `ikeys`
 // and its children at `n * 17 ..` of `ikids`; child `i` holds the keys `k`
@@ -220,6 +221,26 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
 
     pub fn contains_key(in self, k: K) -> bool {
         self.position(k) != none_id()
+    }
+
+    // Call `f` on the value of `k`, read in place, and return its result;
+    // `None` (and `f` not called) when `k` is absent. `f` is a lent closure
+    // (§4.2): it may read the caller's names, and nothing is copied.
+    pub fn with_ref[R, e: eff](in self, k: K, f: fn(in V) -> R eff [e]) -> Option[R] eff [e] {
+        match self.vals.try_get(self.position(k)) {
+            Option::Some(v) => Option::Some(f(in v)),
+            Option::None => Option::None,
+        }
+    }
+
+    // Call `f` on the value of `k`, lent `inout` in place, and return its
+    // result; `None` (and `f` not called) when `k` is absent.
+    pub fn with_mut[R, e: eff](inout self, k: K, f: fn(inout V) -> R eff [e]) -> Option[R] eff [e] {
+        let i = self.position(k);
+        match self.vals.try_get_mut(i) {
+            Option::Some(v) => Option::Some(f(inout v)),
+            Option::None => Option::None,
+        }
     }
 }
 

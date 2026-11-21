@@ -1,0 +1,470 @@
+// @vesper/check-regions-seqs: the region, sequence, string, array, tiled
+// and vector rules of the checker in Vesper (self-hosting wave SH2, lane 9,
+// #1181), on @vesper/check-data. Rust stays the default checker.
+//
+// This first part ports the rules that are functions of types and of the
+// `World` tables:
+// - regions.ves: `src/regions.rs` type half (region rows, handles,
+//   `normalize`, `validate_type`, `display`, `mismatch`).
+// - seqs.ves: `src/seq.rs` and `src/strings.rs` types, `holds_sequence`,
+//   `resolve` with the operation properties, `seq::check_world` (E1520),
+//   and `arrays::element`.
+// - tiled.ves: `src/tiled.rs` types and `check_world_adts` (E1501-E1503).
+// - vector.ves: `src/vector.rs` shapes, `type_error`, `layout_words`,
+//   profiles and `isa_row_entry` (E1404).
+// The checker methods of src/{regions,seq,strings,arrays,tiled,vector}/
+// check.rs and the expression passes of each `check_world` walk the AST;
+// they are the next part.
+//
+// The entries are the differential tasks of
+// tests/self_host_check_regions_seqs.rs; each returns `pack_text`'s text.
+
+use @vesper/check-data::util::{
+    add,
+    n32,
+    push_decimal,
+    u32_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    Vars,
+    display,
+    vars_new
+};
+use @vesper/check-data::world::{
+    Known,
+    World
+};
+use @vesper/check-data::diag::{
+    Diags,
+    diags_new
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/check-data::{
+    pack_text
+};
+use self::regions::{
+    is_handle_type,
+    mismatch,
+    normalize,
+    region_display,
+    validate_type
+};
+use self::seqs::{
+    Param,
+    SeqNames,
+    Sig,
+    Sigs,
+    array_element,
+    byte_scan,
+    elem,
+    fallible,
+    grows,
+    has_receiver,
+    holds_sequence,
+    is_seq_type,
+    is_slice_type,
+    is_str_type,
+    is_string_type,
+    mentions_slice,
+    mentions_str,
+    mutates,
+    op_debug,
+    op_name,
+    place_primitive,
+    receiver_pass,
+    resolve,
+    seq_check_world,
+    seq_names_new,
+    sigs_new,
+    with_arity
+};
+use self::tiled::{
+    check_world_adts,
+    hot_elem_bytes,
+    hot_vector_shape,
+    is_tiled_seq,
+    seq_adt,
+    seq_elem
+};
+use self::vector::{
+    Shape,
+    VecNames,
+    elem_bits,
+    lanes_per_chunk,
+    elem_name,
+    is_vector_spelling,
+    isa_row_entry,
+    layout_words,
+    required_profile,
+    profile_name,
+    shape_bits,
+    shape_display,
+    shape_of,
+    type_error,
+    vec_names_new
+};
+
+const NONE32: u32 = 4294967295;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn bit(inout o: ChunkSeq[u8], b: bool) {
+    o.push(32);
+    if b {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+}
+
+fn range(inout o: ChunkSeq[u8], in d: Diags, a: u64, b: u64) {
+    for i in a..b {
+        o.push(u8_at(in d.text, i));
+    }
+}
+
+// One diagnostic: `code|message|help|start|stop`.
+fn diag_line(inout o: ChunkSeq[u8], in d: Diags, i: u64) {
+    let r = d.row(i);
+    range(inout o, in d, r.code_a, r.msg_a);
+    o.push(124);
+    range(inout o, in d, r.msg_a, r.msg_b);
+    o.push(124);
+    range(inout o, in d, r.help_a, r.end);
+    o.push(124);
+    push_decimal(inout o, r.start);
+    o.push(124);
+    push_decimal(inout o, r.stop);
+    o.push(10);
+}
+
+fn ty_or_dash(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
+    o.push(32);
+    if ty == NONE32 {
+        o.push(45);
+    } else {
+        display(in c.types, in c.names, ty, inout o);
+    }
+}
+
+fn shape_or_dash(inout o: ChunkSeq[u8], s: Shape) {
+    o.push(32);
+    if s.elem == 0 {
+        o.push(45);
+    } else {
+        shape_display(s, inout o);
+    }
+}
+
+// The isa entries of a row: `I` lines.
+fn isa_lines(inout o: ChunkSeq[u8], in c: Ctx, in vn: VecNames, row: u32, i: u64) {
+    let rw = c.types.row(row);
+    for j in 0..w(rw.n) {
+        let e = c.types.effect_at(add(w(rw.a), j));
+        let mut d = diags_new();
+        put(inout o, "I ");
+        if isa_row_entry(in c.types, in c.names, in vn, e, i, wrapping_add(i, 1), inout d) {
+            diag_line(inout o, in d, 0);
+        } else {
+            put(inout o, "-\n");
+        }
+    }
+}
+
+// Task "types": every listed type through each module's type rules (see
+// tests/self_host_check_regions_seqs.rs `types_text` for the lines).
+// Task words: l, l pairs (source label, capability) of names; n, n types.
+pub fn regions_seqs_types(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let k = c.world.k;
+    let vn = vec_names_new(inout c.names);
+    let mut labels = vars_new();
+    let nl = r.word(in b);
+    for i in 0..nl {
+        let from = u32_at(in c.nmap, r.word(in b));
+        let to = u32_at(in c.nmap, r.word(in b));
+        labels.set(from, to);
+    }
+    let n = r.word(in b);
+    let mut o = ChunkSeq::new[u8]();
+    let mut prev = NONE32;
+    for i in 0..n {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        let start = i;
+        let stop = wrapping_add(i, 1);
+        put(inout o, "T ");
+        display(in c.types, in c.names, ty, inout o);
+        o.push(10);
+        // regions
+        let mut d = diags_new();
+        put(inout o, "R");
+        bit(inout o, is_handle_type(in c.types, k, ty));
+        if validate_type(in c.types, in c.names, k, ty, start, stop, inout d) {
+            o.push(32);
+            push_decimal(inout o, d.len());
+            o.push(10);
+            for j in 0..d.len() {
+                put(inout o, "  ");
+                diag_line(inout o, in d, j);
+            }
+        } else {
+            put(inout o, " -\n");
+        }
+        let norm = normalize(inout c.types, k, ty, in labels);
+        put(inout o, "N ");
+        region_display(in c.types, in c.names, k, norm, inout o);
+        o.push(10);
+        put(inout o, "M ");
+        let mut dm = diags_new();
+        if prev
+            != NONE32
+            && mismatch(in c.types, in c.names, k, prev, norm, start, stop, inout dm) {
+            diag_line(inout o, in dm, 0);
+        } else {
+            put(inout o, "-\n");
+        }
+        prev = norm;
+        // sequences, strings, arrays
+        put(inout o, "S");
+        bit(inout o, is_seq_type(in c.types, k, ty));
+        bit(inout o, is_slice_type(in c.types, k, ty));
+        ty_or_dash(inout o, in c, elem(in c.types, k, ty));
+        bit(inout o, mentions_slice(in c.types, k, ty));
+        bit(inout o, holds_sequence(in c.types, in c.world, k, ty));
+        o.push(10);
+        put(inout o, "X");
+        bit(inout o, is_string_type(in c.types, k, ty));
+        bit(inout o, is_str_type(in c.types, k, ty));
+        bit(inout o, mentions_str(in c.types, k, ty));
+        let ae = array_element(in c.types, ty);
+        ty_or_dash(inout o, in c, ae);
+        if ae != NONE32 {
+            o.push(32);
+            push_decimal(inout o, c.types.arity(ty));
+        }
+        o.push(10);
+        // tiled
+        put(inout o, "L");
+        bit(inout o, is_tiled_seq(in c.types, k, ty));
+        ty_or_dash(inout o, in c, seq_elem(in c.types, k, ty));
+        o.push(32);
+        let label = self::regions::seq_region_label(in c.types, k, ty);
+        if label == 0 {
+            o.push(45);
+        } else {
+            c.names.write(wrapping_sub(label, 1), inout o);
+        }
+        o.push(32);
+        let adt = seq_adt(in c.types, in c.world, k, ty);
+        if adt == NONE32 {
+            o.push(45);
+        } else {
+            let a = c.world.adt(adt);
+            c.names.write(a.name, inout o);
+            o.push(47);
+            push_decimal(inout o, w(wrapping_sub(a.tile, 1)));
+        }
+        o.push(32);
+        push_decimal(inout o, hot_elem_bytes(in c.types, k, ty));
+        shape_or_dash(inout o, hot_vector_shape(in c.types, k, ty, 8));
+        shape_or_dash(inout o, hot_vector_shape(in c.types, k, ty, 16));
+        shape_or_dash(inout o, hot_vector_shape(in c.types, k, ty, 32));
+        shape_or_dash(inout o, hot_vector_shape(in c.types, k, ty, 64));
+        o.push(10);
+        // vectors
+        put(inout o, "V");
+        bit(inout o, is_vector_spelling(in c.types, in c.names, k, ty));
+        let s = shape_of(in c.types, in c.names, k, ty);
+        o.push(32);
+        if s.elem == 0 {
+            o.push(45);
+        } else {
+            if s.kind == 1 {
+                put(inout o, "Vec");
+            } else {
+                put(inout o, "Mask");
+            }
+            shape_display(s, inout o);
+            o.push(32);
+            push_decimal(inout o, shape_bits(s));
+            o.push(32);
+            push_decimal(inout o, shape_bits(s) / 128);
+            o.push(32);
+            push_decimal(inout o, lanes_per_chunk(s));
+            o.push(32);
+            profile_name(required_profile(s), inout o);
+        }
+        o.push(32);
+        if !type_error(in c.types, in c.names, k, ty, inout o) {
+            o.push(45);
+        }
+        o.push(32);
+        let lw = layout_words(in c.types, in c.names, k, ty);
+        if lw == NONE32 {
+            o.push(45);
+        } else {
+            push_decimal(inout o, w(lw));
+        }
+        o.push(10);
+        let node = c.types.node(ty);
+        if node.kind == K_ROW || node.kind == K_FN {
+            isa_lines(inout o, in c, in vn, node.r2, i);
+        }
+    }
+    pack_text(in o)
+}
+
+// The lane 9 world section: function signatures in name order (name,
+// span, result, params of (name, pass, type, span)), then each ADT's span
+// and each field's temperature (0 none, 1 hot, 2 cold) in `World` order.
+fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
+    let mut sg = sigs_new();
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let name = u32_at(in c.nmap, r.word(in b));
+        let start = r.word(in b);
+        let stop = r.word(in b);
+        let result = u32_at(in c.tmap, r.word(in b));
+        let np = r.word(in b);
+        let pa = n32(sg.params.len());
+        for j in 0..np {
+            let pname = u32_at(in c.nmap, r.word(in b));
+            let pass = wrapping_u8(r.word(in b));
+            let ty = u32_at(in c.tmap, r.word(in b));
+            let ps = r.word(in b);
+            let pe = r.word(in b);
+            sg
+                .params
+                .push(
+                Param {
+                    name: pname,
+                    pass: pass,
+                    ty: ty,
+                    start: ps,
+                    stop: pe
+                }
+            );
+        }
+        sg
+            .sigs
+            .push(
+            Sig {
+                name: name,
+                start: start,
+                stop: stop,
+                result: result,
+                pa: pa,
+                pn: n32(np)
+            }
+        );
+    }
+    for i in 0..c.world.adts.len() {
+        sg.adt_start.push(r.word(in b));
+        sg.adt_stop.push(r.word(in b));
+    }
+    for i in 0..c.world.fields.len() {
+        sg.temps.push(wrapping_u8(r.word(in b)));
+    }
+    sg
+}
+
+// Task "world": `seq::check_world` then `tiled::check_world_adts`, one
+// diagnostic per line. Task words: the lane 9 world section.
+pub fn regions_seqs_world(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let sg = read_sigs(inout r, in b, in c);
+    let mut d = diags_new();
+    seq_check_world(in c.types, in c.names, in c.world, in sg, inout d);
+    let mut o = ChunkSeq::new[u8]();
+    for i in 0..d.len() {
+        diag_line(inout o, in d, i);
+    }
+    let mut dt = diags_new();
+    check_world_adts(in c.types, in c.names, in c.world, in sg, inout dt);
+    for i in 0..dt.len() {
+        diag_line(inout o, in dt, i);
+    }
+    pack_text(in o)
+}
+
+// Task "resolve": `seq::resolve(callee, receiver)` and the operation's
+// properties. Task words: n, n queries of (callee name, receiver type + 1
+// or 0 for a free call).
+pub fn regions_seqs_resolve(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let k = c.world.k;
+    let sn = seq_names_new(inout c.names);
+    let n = r.word(in b);
+    let mut o = ChunkSeq::new[u8]();
+    for i in 0..n {
+        let callee = u32_at(in c.nmap, r.word(in b));
+        let rx = r.word(in b);
+        let receiver = if rx == 0 {
+            NONE32
+        } else {
+            u32_at(in c.tmap, wrapping_sub(rx, 1))
+        };
+        let op = resolve(inout c.names, in sn, in c.types, k, callee, receiver);
+        if op == 0 {
+            put(inout o, "-\n");
+            continue;
+        }
+        op_debug(op, inout o);
+        o.push(32);
+        op_name(in c.names, in sn, op, inout o);
+        bit(inout o, fallible(op));
+        bit(inout o, mutates(op));
+        if receiver_pass(op) == 0 {
+            put(inout o, " In");
+        } else {
+            put(inout o, " Inout");
+        }
+        bit(inout o, byte_scan(op));
+        bit(inout o, has_receiver(op));
+        bit(inout o, place_primitive(op));
+        bit(inout o, grows(op));
+        o.push(32);
+        op_debug(with_arity(op, 3), inout o);
+        o.push(10);
+    }
+    pack_text(in o)
+}
+
+// The decode alone (`read_ctx` and the vector names), which the speed
+// test subtracts from the type task's time.
+pub fn regions_seqs_decode(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let vn = vec_names_new(inout c.names);
+    let o = ChunkSeq::new[u8]();
+    pack_text(in o)
+}
