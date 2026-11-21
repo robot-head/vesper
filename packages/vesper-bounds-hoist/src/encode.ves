@@ -1,0 +1,707 @@
+// One function of a `@vesper/place-ir` program as the input words of
+// tests/self_host_bounds_hoist/words.rs (`input`), which `read_fun`
+// decodes. The rewrite (rewrite.ves) works on the program's tables; the
+// decisions (plans.ves) work on `Fun`, so the pass encodes the function
+// it is hoisting after every change, as the Rust pass decides on the
+// function as it stands.
+//
+// The step words are left zero; the pass sets `Fun`'s step fields itself.
+// Names are interned locally by their bytes, so a `Fun` name id is not the
+// program's symbol; the decisions only compare names and read their text.
+
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::types::{
+    Types,
+    debug_type,
+    default_type
+};
+use @vesper/place-ir::{
+    Program
+};
+use self::fun::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+
+// place-ir opcodes (`OP_NAMES` of tests/common/ir_words.rs).
+const OP_CONST: u8 = 0;
+const OP_UNIT: u8 = 1;
+const OP_READ: u8 = 2;
+const OP_BIND: u8 = 3;
+const OP_WRITE: u8 = 4;
+const OP_UNARY: u8 = 5;
+const OP_BINARY: u8 = 6;
+const OP_TUPLE: u8 = 7;
+const OP_DATA: u8 = 8;
+const OP_PROJECT: u8 = 9;
+const OP_INDEX: u8 = 10;
+const OP_CALL: u8 = 11;
+const OP_INDIRECT: u8 = 12;
+const OP_TRY: u8 = 13;
+const OP_CLOSURE: u8 = 14;
+const OP_HANDLE: u8 = 15;
+const OP_VECTOR: u8 = 16;
+const OP_TILED: u8 = 17;
+const OP_SEQ: u8 = 18;
+const OP_FIP: u8 = 19;
+const OP_LOOP: u8 = 20;
+const OP_EXIT: u8 = 21;
+
+const TERM_RETURN: u8 = 0;
+const TERM_JUMP: u8 = 1;
+const TERM_BRANCH: u8 = 2;
+const TERM_MATCH: u8 = 3;
+
+const PAT_BIND: u64 = 1;
+const PAT_LITERAL: u64 = 2;
+const PAT_TUPLE: u64 = 3;
+const PAT_CONSTRUCTOR: u64 = 4;
+const LIT_INT: u64 = 0;
+const MAX_DEPTH: u64 = 512;
+
+// The pool kinds this package adds (rewrite.ves): `SeqOp::Hoisted(access)`
+// and `SeqOp::BoundsGuard`.
+pub const POOL_HOISTED: u64 = 5;
+pub const POOL_GUARD: u64 = 6;
+
+// `type_flags` of words.rs.
+const TY_U64: u64 = 1;
+const TY_USIZE: u64 = 2;
+const TY_SEQ: u64 = 4;
+const TY_SLICE: u64 = 8;
+const TY_TEXT: u64 = 16;
+const TY_NEVER: u64 = 32;
+const K_NAMED: u8 = 1;
+// A cache entry that holds the flags (bit 63) and the type's name + 1.
+const KNOWN: u64 = 9223372036854775808;
+
+// Per type id: the flags (bit 63 set once known) and the local name of
+// its `Debug` text.
+pub struct TypeCache {
+    flags: ChunkSeq[u64],
+    // the symbols of the names the flags test
+    s_usize: u32,
+    s_seq: u32,
+    s_slice: u32,
+    s_string: u32,
+    s_str: u32,
+    s_never: u32,
+    s_u64: u32,
+}
+
+fn sym(in names: Names, in s: Str) -> u32 {
+    names.lookup(in s.as_bytes())
+}
+
+pub fn type_cache(in names: Names, in t: Types) -> TypeCache {
+    TypeCache {
+        flags: ChunkSeq::new[u64](),
+        s_usize: sym(in names, "usize"),
+        s_seq: sym(in names, "ChunkSeq"),
+        s_slice: sym(in names, "Slice"),
+        s_string: sym(in names, "String"),
+        s_str: sym(in names, "Str"),
+        s_never: sym(in names, "Never"),
+        s_u64: t.s_u64,
+    }
+}
+
+fn named_is(in t: Types, ty: u32, name: u32, arity: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == name && n.n == arity
+}
+
+impl TypeCache {
+    // `type_flags`: of the default type for the integer, sequence, slice and
+    // text queries, of the type itself for `Never`.
+    pub fn flags_of(inout self, inout t: Types, ty: u32) -> u64 {
+        let cached = u64_at(in self.flags, w(ty));
+        if (cached & KNOWN) != 0 {
+            return cached ^ KNOWN;
+        }
+        let d = default_type(inout t, ty);
+        let mut x: u64 = 0;
+        if named_is(in t, d, self.s_u64, 0) {
+            x = x | TY_U64;
+        }
+        if named_is(in t, d, self.s_usize, 0) {
+            x = x | TY_USIZE;
+        }
+        if named_is(in t, d, self.s_seq, 1) {
+            x = x | TY_SEQ;
+        }
+        if named_is(in t, d, self.s_slice, 1) {
+            x = x | TY_SLICE;
+        }
+        if named_is(in t, d, self.s_string, 0) || named_is(in t, d, self.s_str, 0) {
+            x = x | TY_TEXT;
+        }
+        if named_is(in t, ty, self.s_never, 0) {
+            x = x | TY_NEVER;
+        }
+        if w(ty) >= self.flags.len() {
+            self.flags.resize(inc(w(ty)), 0);
+        }
+        let ok = self.flags.try_set(w(ty), x | KNOWN);
+        x
+    }
+}
+
+// The encoder: words after the names, and the local name table.
+struct Enc {
+    out: ChunkSeq[u64],
+    loc: Names,
+    // program symbol -> local name + 1
+    map: ChunkSeq[u32],
+    buf: ChunkSeq[u8],
+}
+
+impl Enc {
+    fn put(inout self, x: u64) {
+        self.out.push(x);
+    }
+
+    fn local(inout self, in names: Names, s: u32) -> u32 {
+        let m = u32_at(in self.map, w(s));
+        if m != 0 {
+            return wrapping_sub(m, 1);
+        }
+        self.buf.clear();
+        names.write(s, inout self.buf);
+        let l = self.loc.intern(in self.buf.as_slice());
+        if w(s) >= self.map.len() {
+            self.map.resize(inc(w(s)), 0);
+        }
+        let ok = self.map.try_set(w(s), wrapping_add(l, 1));
+        l
+    }
+
+    fn name(inout self, in names: Names, s: u32) {
+        let l = self.local(in names, s);
+        self.put(w(l));
+    }
+
+    fn bytes_name(inout self, in b: Slice[u8]) {
+        let l = self.loc.intern(in b);
+        self.put(w(l));
+    }
+
+    fn path(inout self, in p: Program, in names: Names, i: u64) {
+        let row = p.path(i);
+        self.put(row.n);
+        for k in 0..row.n {
+            self.name(in names, p.path_name(i, k));
+        }
+    }
+
+    fn type_name(inout self, inout t: Types, in names: Names, ty: u32) {
+        let d = default_type(inout t, ty);
+        self.buf.clear();
+        debug_type(in t, in names, d, inout self.buf);
+        let l = self.loc.intern(in self.buf.as_slice());
+        self.put(w(l));
+    }
+
+    // place-ir args (n, then n x (pass, value, root + 1 or 0, path)) as
+    // words.rs `args`.
+    fn args(inout self, in p: Program, in names: Names, at: u64) -> u64 {
+        let n = p.op(at);
+        self.put(n);
+        let mut x = inc(at);
+        for i in 0..n {
+            self.put(p.op(x));
+            self.put(p.op(inc(x)));
+            let root = p.op(add(x, 2));
+            if root == 0 {
+                self.put(0);
+            } else {
+                self.put(1);
+                self.name(in names, n32(wrapping_sub(root, 1)));
+                self.path(in p, in names, p.op(add(x, 3)));
+            }
+            x = add(x, 4);
+        }
+        x
+    }
+
+    fn values_at(inout self, in p: Program, at: u64) -> u64 {
+        let n = p.op(at);
+        self.put(n);
+        for i in 0..n {
+            self.put(p.op(add(inc(at), i)));
+        }
+        add(inc(at), n)
+    }
+}
+
+// The words a pattern takes, from `at`; collects the names it binds.
+fn pattern_names(in p: Program, at: u64, inout out: ChunkSeq[u32], depth: u64) -> u64 {
+    let kind = p.op(at);
+    let mut x = add(at, 3);
+    if depth > MAX_DEPTH {
+        return x;
+    }
+    if kind == PAT_BIND {
+        let n = n32(p.op(x));
+        let mut seen = false;
+        for i in 0..out.len() {
+            if u32_at(in out, i) == n {
+                seen = true;
+            }
+        }
+        if !seen {
+            out.push(n);
+        }
+        x = inc(x);
+    } else if kind == PAT_LITERAL {
+        x = add(x, 3);
+    } else if kind == PAT_TUPLE {
+        let n = p.op(x);
+        x = inc(x);
+        for i in 0..n {
+            x = pattern_names(in p, x, inout out, inc(depth));
+        }
+    } else if kind == PAT_CONSTRUCTOR {
+        // name, named, n, n x (field, pattern)
+        let n = p.op(add(x, 2));
+        x = add(x, 3);
+        for i in 0..n {
+            x = pattern_names(in p, inc(x), inout out, inc(depth));
+        }
+    }
+    x
+}
+
+// `seq_word` of words.rs, from a pool row.
+pub fn seq_class(in p: Program, in names: Names, pool: u64) -> u64 {
+    let row = p.pool_row(pool);
+    if row.kind == POOL_HOISTED {
+        return add(14, w(row.label));
+    }
+    if row.kind == POOL_GUARD {
+        return 18;
+    }
+    let s = row.label;
+    if names
+        .spells(s, in "New".as_bytes())
+        || names
+        .spells(s, in "WithCapacity".as_bytes())
+        || names
+        .spells(s, in "Swap".as_bytes())
+        || names
+        .spells(s, in "Replace".as_bytes()) {
+        return 1;
+    }
+    if names.spells(s, in "Get".as_bytes()) {
+        return 2;
+    }
+    if names.spells(s, in "SliceGet".as_bytes()) {
+        return 3;
+    }
+    if names.spells(s, in "Set".as_bytes()) {
+        return 4;
+    }
+    if names.spells(s, in "SliceSet".as_bytes()) {
+        return 5;
+    }
+    if names.spells(s, in "TryGet".as_bytes()) {
+        return 6;
+    }
+    if names.spells(s, in "TrySet".as_bytes()) {
+        return 7;
+    }
+    if names.spells(s, in "Len".as_bytes()) {
+        return 8;
+    }
+    if names.spells(s, in "SliceLen".as_bytes()) {
+        return 9;
+    }
+    if names.spells(s, in "AsSlice".as_bytes()) {
+        return 10;
+    }
+    if names.spells(s, in "SubSlice".as_bytes()) {
+        return 11;
+    }
+    if names.spells(s, in "Str(AsBytes)".as_bytes()) {
+        return 12;
+    }
+    if names.spells(s, in "Str(Len)".as_bytes()) {
+        return 13;
+    }
+    if names.spells(s, in "Hoisted(Get)".as_bytes()) {
+        return 14;
+    }
+    if names.spells(s, in "Hoisted(Set)".as_bytes()) {
+        return 15;
+    }
+    if names.spells(s, in "Hoisted(TryGet)".as_bytes()) {
+        return 16;
+    }
+    if names.spells(s, in "Hoisted(TrySet)".as_bytes()) {
+        return 17;
+    }
+    if names.has_prefix(s, in "BoundsGuard".as_bytes()) {
+        return 18;
+    }
+    0
+}
+
+impl Enc {
+    // The operands of instruction `op` from `a`, as words.rs `op`.
+    fn op(inout self, in p: Program, in names: Names, op: u8, a: u64) {
+        if op == OP_CONST {
+            if p.op(a) == LIT_INT {
+                let lo = p.op(inc(a));
+                let hi = p.op(add(a, 2));
+                // two's complement words to a sign and a magnitude
+                if (hi >> 63) != 0 {
+                    let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
+                    let carry: u64 = if nlo == 0 {
+                        1
+                    } else {
+                        0
+                    };
+                    self.put(0);
+                    self.put(1);
+                    self.put(nlo);
+                    self.put(wrapping_add(hi ^ 18446744073709551615, carry));
+                } else {
+                    self.put(0);
+                    self.put(0);
+                    self.put(lo);
+                    self.put(hi);
+                }
+            } else {
+                self.put(1);
+            }
+        } else if op == OP_UNIT {
+            self.put(16);
+        } else if op == OP_LOOP {
+            self.put(2);
+        } else if op == OP_READ {
+            // root, path, pass, projections
+            self.put(3);
+            self.name(in names, n32(p.op(a)));
+            self.put(p.op(add(a, 2)));
+            self.path(in p, in names, p.op(inc(a)));
+        } else if op == OP_BIND {
+            self.put(4);
+            self.put(p.op(a));
+            let pat = inc(a);
+            if p.op(pat) == PAT_BIND {
+                let l = self.local(in names, n32(p.op(add(pat, 3))));
+                self.put(inc(w(l)));
+            } else {
+                self.put(0);
+            }
+            let mut all: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let end = pattern_names(in p, pat, inout all, 0);
+            self.put(all.len());
+            for i in 0..all.len() {
+                self.name(in names, u32_at(in all, i));
+            }
+        } else if op == OP_WRITE {
+            // place (dotted), op, value
+            self.put(5);
+            self.put(p.op(add(a, 2)));
+            let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            names.write(n32(p.op(a)), inout text);
+            let mut dots: u64 = 0;
+            for i in 0..text.len() {
+                if u8_at(in text, i) == 46 {
+                    dots = inc(dots);
+                }
+            }
+            // the root, then `dots` path components
+            let mut part: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            let mut first = true;
+            for i in 0..text.len() {
+                let c = u8_at(in text, i);
+                if c == 46 {
+                    self.bytes_name(in part.as_slice());
+                    if first {
+                        self.put(dots);
+                        first = false;
+                    }
+                    part.clear();
+                } else {
+                    part.push(c);
+                }
+            }
+            self.bytes_name(in part.as_slice());
+            if first {
+                self.put(0);
+            }
+        } else if op == OP_UNARY || op == OP_PROJECT {
+            self.put(6);
+            let v = if op == OP_UNARY {
+                p.op(inc(a))
+            } else {
+                p.op(a)
+            };
+            self.put(v);
+        } else if op == OP_TRY || op == OP_EXIT {
+            self.put(6);
+            self.put(p.op(a));
+        } else if op == OP_BINARY {
+            self.put(7);
+            self.name(in names, n32(p.op(a)));
+            self.put(p.op(inc(a)));
+            self.put(p.op(add(a, 2)));
+        } else if op == OP_INDEX {
+            self.put(8);
+            self.put(2);
+            self.put(p.op(a));
+            self.put(p.op(inc(a)));
+        } else if op == OP_TUPLE {
+            self.put(8);
+            let end = self.values_at(in p, a);
+        } else if op == OP_VECTOR {
+            self.put(8);
+            let end = self.values_at(in p, inc(a));
+        } else if op == OP_DATA {
+            self.put(8);
+            let n = p.op(inc(a));
+            self.put(n);
+            for i in 0..n {
+                self.put(p.op(add(add(a, 3), wrapping_mul(i, 2))));
+            }
+        } else if op == OP_CALL {
+            self.put(9);
+            self.name(in names, n32(p.op(a)));
+            let end = self.args(in p, in names, inc(a));
+        } else if op == OP_SEQ {
+            self.put(10);
+            self.put(seq_class(in p, in names, p.op(a)));
+            let end = self.args(in p, in names, inc(a));
+        } else if op == OP_TILED {
+            self.put(11);
+            let end = self.args(in p, in names, inc(a));
+        } else if op == OP_FIP {
+            self.put(12);
+            let end = self.args(in p, in names, inc(a));
+        } else if op == OP_INDIRECT {
+            self.put(13);
+            self.put(p.op(a));
+            let end = self.args(in p, in names, inc(a));
+        } else if op == OP_CLOSURE {
+            self.put(14);
+        } else if op == OP_HANDLE {
+            self.put(15);
+            self.put(p.op(a));
+            self.put(p.op(inc(a)));
+        } else {
+            // not an opcode
+            self.put(16);
+        }
+    }
+}
+
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Skips a fip drop from `x`; pushes (block, root, path) for a place drop.
+fn skip_drop(in p: Program, x: u64, b: u64, inout drops: ChunkSeq[u64]) -> u64 {
+    let kind = p.op(x);
+    if kind == 1 {
+        drops.push(b);
+        drops.push(p.op(inc(x)));
+        drops.push(p.op(add(x, 2)));
+        return add(x, 4);
+    }
+    if kind == 2 {
+        return add(x, 4);
+    }
+    add(x, 3)
+}
+
+fn inst_drops(in p: Program, at: u64, inout drops: ChunkSeq[u64]) -> u64 {
+    let n = p.op(at);
+    let mut x = inc(at);
+    for i in 0..n {
+        let b = p.op(x);
+        let k = p.op(inc(x));
+        x = add(x, 2);
+        for j in 0..k {
+            x = skip_drop(in p, inc(x), b, inout drops);
+        }
+    }
+    x
+}
+
+// Function `fi` of `p` as the input words of words.rs (step words zero).
+pub fn encode_fun(in p: Program, inout t: Types, in names: Names, inout tc: TypeCache, fi: u64)
+    -> ChunkSeq[u8] {
+    let mut e = Enc {
+        out: ChunkSeq::new[u64](),
+        loc: names_new(),
+        map: ChunkSeq::new[u32](),
+        buf: ChunkSeq::new[u8](),
+    };
+    let f = p.function(fi);
+    // The step: kind, header, no enclosing loop, no tried headers.
+    e.put(0);
+    e.put(0);
+    e.put(0);
+    e.put(0);
+    // The header: parameters.
+    let mut x = f.ha;
+    let np = p.op(x);
+    x = inc(x);
+    e.put(np);
+    for i in 0..np {
+        let name = n32(p.op(x));
+        let pass = p.op(inc(x));
+        let k = p.op(add(x, 2));
+        x = add(add(x, 3), k);
+        let ty = n32(p.op(x));
+        x = add(x, 3);
+        e.name(in names, name);
+        e.put(pass);
+        let fl = tc.flags_of(inout t, ty);
+        e.put(fl);
+        e.type_name(inout t, in names, ty);
+    }
+    // result, effects, bounds, captures
+    x = add(x, 2);
+    let nb = p.op(x);
+    x = add(inc(x), wrapping_mul(nb, 2));
+    let nc = p.op(x);
+    x = add(inc(x), nc);
+    // values
+    let nv = p.op(x);
+    x = inc(x);
+    e.put(nv);
+    for i in 0..nv {
+        e.put(p.op(x));
+        let fl = tc.flags_of(inout t, n32(p.op(inc(x))));
+        e.put(fl);
+        x = add(x, 2);
+    }
+    // The trailer: call slots, join slots, box drops.
+    let mut y = f.ta;
+    let ns = p.op(y);
+    let mut slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    y = inc(y);
+    for i in 0..ns {
+        slots.push(p.op(y));
+        y = add(y, 5);
+    }
+    let nj = p.op(y);
+    y = inc(y);
+    e.put(nj);
+    for i in 0..nj {
+        e.put(p.op(y));
+        let k = p.op(inc(y));
+        y = add(y, 2);
+        for j in 0..k {
+            let m = p.op(add(y, 2));
+            y = add(add(y, 3), wrapping_mul(m, 3));
+        }
+    }
+    e.put(slots.len());
+    for i in 0..slots.len() {
+        e.put(u64_at(in slots, i));
+    }
+    let mut drops: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    y = inst_drops(in p, y, inout drops);
+    y = inst_drops(in p, y, inout drops);
+    let nt = p.op(y);
+    y = inc(y);
+    for i in 0..nt {
+        let b = p.op(y);
+        let k = p.op(inc(y));
+        y = add(y, 2);
+        for j in 0..k {
+            y = skip_drop(in p, y, b, inout drops);
+        }
+    }
+    let nd = drops.len() / 3;
+    e.put(nd);
+    for i in 0..nd {
+        let at = wrapping_mul(i, 3);
+        e.put(u64_at(in drops, at));
+        e.name(in names, n32(u64_at(in drops, inc(at))));
+        e.path(in p, in names, u64_at(in drops, add(at, 2)));
+    }
+    // Blocks.
+    e.put(f.bc);
+    for bi in 0..f.bc {
+        let bk = p.block(add(f.b0, bi));
+        // entry, incoming, outgoing, params
+        let ni = p.op(inc(bk.ha));
+        let params = add(add(bk.ha, 3), wrapping_mul(ni, 2));
+        let end = e.values_at(in p, params);
+        e.put(bk.ic);
+        for k in 0..bk.ic {
+            let i = p.inst(add(bk.i0, k));
+            e.put(w(i.dest));
+            let fl = tc.flags_of(inout t, i.ty);
+            e.put(fl);
+            e.type_name(inout t, in names, i.ty);
+            e.put(i.fallible);
+            e.op(in p, in names, i.op, i.a);
+        }
+        e.put(widen_u64(bk.term));
+        if bk.term == TERM_RETURN {
+            e.put(p.op(bk.ta));
+        } else if bk.term == TERM_JUMP {
+            e.put(p.op(bk.ta));
+            let end2 = e.values_at(in p, inc(bk.ta));
+        } else if bk.term == TERM_BRANCH {
+            e.put(p.op(bk.ta));
+            e.put(p.op(inc(bk.ta)));
+            e.put(p.op(add(bk.ta, 2)));
+        } else if bk.term == TERM_MATCH {
+            e.put(p.op(bk.ta));
+            let n = p.op(inc(bk.ta));
+            e.put(n);
+            let mut z = add(bk.ta, 2);
+            let mut scratch: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for j in 0..n {
+                z = pattern_names(in p, z, inout scratch, 0);
+                e.put(p.op(z));
+                z = inc(z);
+            }
+        }
+    }
+    // Names, then the words, as bytes.
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let nn = e.loc.len();
+    push_word(inout out, nn);
+    for s in 0..nn {
+        let a = e.loc.start(n32(s));
+        let b = e.loc.end(n32(s));
+        push_word(inout out, wrapping_sub(b, a));
+        for i in a..b {
+            out.push(e.loc.byte(n32(s), wrapping_sub(i, a)));
+        }
+        loop {
+            if (out.len() & 7) == 0 {
+                break;
+            }
+            out.push(0);
+        }
+    }
+    for i in 0..e.out.len() {
+        push_word(inout out, u64_at(in e.out, i));
+    }
+    out
+}
+
+fn push_word(inout out: ChunkSeq[u8], x: u64) {
+    for k in 0..8 {
+        out.push(wrapping_u8(wrapping_shr_u64(x, n32(wrapping_mul(k, 8)))));
+    }
+}
