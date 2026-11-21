@@ -39,13 +39,14 @@ impl ModuleSugar {
         if core.diagnostics.is_empty() {
             return result;
         }
-        let Ok(surface) = parser::parse_surface_with_limits(
+        let Ok(surface) = parser::parse_surface_with_test_mode(
             text,
             parser::ParseLimits {
                 max_source_bytes: crate::lexer::HARD_SOURCE_BYTES,
                 max_tokens: crate::lexer::HARD_TOKENS,
                 ..Default::default()
             },
+            tests,
         ) else {
             return result;
         };
@@ -61,10 +62,6 @@ impl ModuleSugar {
         // it did not recognize. Read the complete import items from the surface CST.
         core.module.uses.clear();
         for item in tree.descendants().filter(|n| n.kind() == parser::ITEM) {
-            let top = item.parent().is_some_and(|p| p.kind() == parser::MODULE);
-            if !top && !tests {
-                continue;
-            }
             let decl = item.children().find(|n| n.kind() == parser::SUGAR_DECL);
             if let Some(decl) = decl {
                 let span =
