@@ -55,8 +55,14 @@ pub fn main() -> c_int {
         // Passes catch their panics; the Vesper code does not unwind.
         .unwrap_or(PANIC_EXIT);
     if code == binding::delegate() {
-        crate::main();
+        // A panic in the Rust CLI (it resumes its CLI thread's) must not
+        // unwind across this C entry, which would abort: Rust's own start-up
+        // exits with 101 after the hook printed it.
+        let delegated = panic::catch_unwind(crate::main);
         let _ = io::stdout().flush();
+        if delegated.is_err() {
+            std::process::exit(PANIC_EXIT as i32);
+        }
         return 0;
     }
     let _ = io::stdout().flush();
