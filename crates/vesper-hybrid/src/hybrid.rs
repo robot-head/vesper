@@ -55,6 +55,11 @@ mod ir_inline_binding;
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/bounds_hoist.rs"]
+mod bounds_hoist_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -103,6 +108,8 @@ static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
 static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs `modules/bounds_hoist` hoisted.
+static BOUNDS_HOIST_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -315,12 +322,46 @@ const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
         place_ir_round_trip(Some(world), program);
         report
     }),
+    // SH3 lane 12 (#1251): bounds hoisting from `modules/bounds_hoist`.
     hoist: Some(|program| {
-        let n = vesper::bounds_hoist::run(program);
-        place_ir_round_trip(None, program);
+        let Some(p) = ir_words::through_vesper(None, program, bounds_hoist_binding::hoist_words)
+        else {
+            return vesper::bounds_hoist::run(program);
+        };
+        BOUNDS_HOIST_CALLS.fetch_add(1, Relaxed);
+        let n = versioned_loops(&p).saturating_sub(versioned_loops(program));
+        *program = p;
         n
     }),
 };
+
+/// The loops of `program` behind a bounds guard: branches on a
+/// `SeqOp::BoundsGuard` result of their own block, one per versioned loop
+/// (the count `bounds_hoist::run` returns, which no caller reads).
+fn versioned_loops(program: &vesper::ir::Program) -> usize {
+    use vesper::ir::{Op, Terminator};
+    use vesper::seq::SeqOp;
+    program
+        .functions
+        .values()
+        .flat_map(|f| &f.blocks)
+        .filter(|b| {
+            let Terminator::Branch { condition, .. } = b.terminator else {
+                return false;
+            };
+            b.instructions.iter().any(|i| {
+                i.dest == condition
+                    && matches!(
+                        i.op,
+                        Op::Seq {
+                            op: SeqOp::BoundsGuard { .. },
+                            ..
+                        }
+                    )
+            })
+        })
+        .count()
+}
 
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
@@ -398,6 +439,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: place-ir round-tripped {} programs through Vesper",
         PLACE_IR_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: bounds-hoist hoisted {} programs in Vesper",
+        BOUNDS_HOIST_CALLS.load(Relaxed)
     );
 }
 

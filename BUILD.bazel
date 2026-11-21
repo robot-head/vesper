@@ -253,6 +253,11 @@ vesper_crate(
             "//crates/vesper-warp-tcp:files",
             "//crates/vesper-warp-wheel:files",
         ],
+        # SH4 lane 14 (#1288): @vesper/codegen-freestanding against the
+        # freestanding image builder.
+        "test/self_host_freestanding": glob([
+            "packages/vesper-codegen-freestanding/**",
+        ]),
         # SH3 lane 11 (#1250): the inliner differential on the same corpus.
         "test/self_host_ir_inline": glob([
             "examples/**",
@@ -287,6 +292,16 @@ vesper_crate(
         ]),
         # Self-hosting SH3 lane 12 (#1251): bounds hoisting on the same corpus.
         "test/self_host_bounds_hoist": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        "test/self_host_bounds_hoist_pass": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        "test/self_host_bounds_hoist_jit": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -469,6 +484,17 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 16 (#1339): @vesper/lsp, @vesper/lsp-documents
+        # and @vesper/memo against crates/vesper-lsp and salsa over recorded
+        # `vesper lsp` sessions of the examples. Anchored globs.
+        "test/self_host_lsp_core": glob([
+            "examples/**",
+            "packages/vesper-lsp/**",
+            "packages/vesper-memo/**",
+        ]) + [
+            "//crates/vesper-serde:files",
+            "//crates/vesper-span:files",
+        ],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -813,6 +839,9 @@ vesper_crate(
         # Four round-trip tests and the pass harness share one stage build;
         # past 900 s on a busy runner.
         "test/self_host_place_ir": "eternal",
+        # SH4 lane 14 (#1288): 22 Cranelift image builds and the package's
+        # JIT compile before the comparisons; 5-8 minutes unoptimized.
+        "test/self_host_freestanding": "eternal",
         # Builds 51 port libraries with the vesper binary.
         "test/self_host_codegen_export": "long",
         "test/self_host_place_ir_jit": "long",
@@ -829,6 +858,10 @@ vesper_crate(
         "test/self_host_check_regions_seqs": "long",
         # The bounds-hoist differential also passed 900 s on loaded CI.
         "test/self_host_bounds_hoist": "eternal",
+        # The pass differential lowers, hoists and IR-checks each sampled
+        # program (~20 min debug); the JIT test runs two children.
+        "test/self_host_bounds_hoist_pass": "eternal",
+        "test/self_host_bounds_hoist_jit": "eternal",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
         # The package assembler differential (#1178) compiles the AST package.
@@ -839,6 +872,9 @@ vesper_crate(
         # The capability-effect differential (#1180): corpus, fixtures, mutants.
         "test/self_host_check_effects": "long",
         "test/self_host_check_fip": "long",
+        # The LSP core differential (#1339) records live `vesper lsp` sessions
+        # and JIT-compiles three packages: about 2.5 min unoptimized.
+        "test/self_host_lsp_core": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
         # The ir_opt differential (#1248) runs Rust's egglog on a corpus slice;
@@ -975,6 +1011,19 @@ vesper_package(
     manifest = "packages/vesper-place-ir/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+# Bounds hoisting for the hybrid compiler's bounds_hoist module (SH3 lane
+# 12, #1251).
+vesper_package(
+    name = "bounds_hoist_package",
+    srcs = glob(["packages/vesper-bounds-hoist/src/**/*.ves"]),
+    manifest = "packages/vesper-bounds-hoist/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+    ],
 )
 
 vesper_package(

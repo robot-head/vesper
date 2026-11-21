@@ -32,7 +32,7 @@ const EDITS: &[(&str, &str, &str)] = &[
     // delimiters: a closing bracket may close any opening delimiter.
     (
         "delimiters",
-        "            if wrapping_add(top, 3) != k {",
+        "            if wrapping_add(top, Tk::Close) != k {",
         "            if top == 0 {",
     ),
     // parse: `with` is no longer reserved, so it can name a binder.
@@ -45,13 +45,13 @@ const EDITS: &[(&str, &str, &str)] = &[
     // caller's `let` captures macro-generated references.
     (
         "resolve",
-        "            if rank <= sq(in ctx, wrapping_add(wrapping_mul(j, 2), 1)) {",
+        "            if rank <= sq(in ctx, wrapping_add(wrapping_mul(j, Ctx::Words), Ctx::Rank)) {",
         "            if rank <= 18446744073709551615 {",
     ),
     // registry: package-private definitions are visible to dependents.
     (
         "registry",
-        "    if def_word(in w, in g, d, 3) != 0 {",
-        "    if def_word(in w, in g, d, 3) > 1 {",
+        "    if def_word(in w, in g, d, Def::Visibility) != Vis::Public {",
+        "    if def_word(in w, in g, d, Def::Visibility) > 1 {",
     ),
 ];
