@@ -97,8 +97,13 @@ Vesper to call a function pointer, floats by value, or threads (gaps 1-3 and
   `ValidationMessage`s from it.
 - Presentation: libxcb is loaded with `libloading` (`xcb_connect`,
   `xcb_get_setup`, `xcb_create_window`, `xcb_map_window`, `xcb_get_image`,
-  `xcb_flush`, ...) and libc `free`. These are plain C calls a `.vsys` can
-  declare; `xcb_screen_iterator_t` and the reply structs are wire structs.
+  `xcb_flush`, ...) and libc `free`. Most are plain C calls a `.vsys` can
+  declare, with the reply structs read as wire structs through their
+  pointers. `xcb_setup_roots_iterator` returns `xcb_screen_iterator_t` by
+  value, which `.vsys` cannot declare (gap 9). The port avoids that call
+  and reads the first screen straight from the setup data that
+  `xcb_get_setup` points to: the fixed setup header, then the vendor string
+  and the pixmap formats, then the screens.
 - Sync fds: `poll`/`epoll_ctl`/`epoll_wait` (wire-struct `epoll_event`;
   packed on x86_64, which a `wire struct` expresses exactly), `close`, `dup`.
   Where `VK_KHR_external_semaphore_fd` is missing, a bridge thread waits on
@@ -180,8 +185,19 @@ WGSL parse and validation errors are naga's own behaviour. They become
 checks of the regeneration step. That step runs `naga-cli` (pinned and
 installed with `cargo install`, a development tool rather than repository
 Rust). Until the Rust crate is deleted, CI also checks that the committed
-words equal what the Rust crate produces. No naga shim goes into lane 17's
-crate.
+words equal what the Rust crate produces.
+
+This narrows the public API. `vesper-gpu-compute`'s `Context::kernel` takes
+caller-supplied WGSL, and `vesper-ignis-vulkan` exports `compile_wgsl`.
+With committed SPIR-V, both take a kernel or shader from the bundled set
+by name (the crate's own kernels and the test kernels), and arbitrary WGSL
+at run time goes away. The only callers in the repository are the crates'
+own modules and tests, plus `vesper-kinetic-gpu`, which uses the broadphase
+module rather than `Context::kernel`. The flip PR names this API change.
+If the owner wants arbitrary WGSL at run time kept, the fallback is a
+one-function naga shim (`wgsl_to_spirv`) in lane 17's shim crate, and every
+current test stays as it is. Until the flip, both builds compile WGSL with
+naga, so nothing changes.
 
 ## Compiler gaps
 
@@ -286,6 +302,14 @@ No thread spawn exists in Vesper or `@vesper-std`. aura-gtk's Pulse worker
 and ignis-vulkan's sync-fd bridge thread each run one. `pthread_create`
 needs gap 2. Lane 13 (runtime glue, `vesper-pulse`) is the natural owner of a
 thread primitive.
+
+### Gap 9: aggregates returned by value
+
+A `.vsys` function result is a scalar, an enum or a handle. A `wire
+struct` crosses only through a pointer (`nocapture in`/`inout`).
+`xcb_setup_roots_iterator` returns its 16-byte iterator by value, and so do
+a few other XCB iterator functions. The ignis-vulkan port reads the setup
+data directly instead (see above), so this gap blocks nothing here.
 
 ### Not gaps
 
