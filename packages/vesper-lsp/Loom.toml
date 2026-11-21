@@ -1,0 +1,10 @@
+[package]
+name = "@vesper/lsp"
+version = "0.1.0"
+edition = "2026"
+# The transport only computes over bytes the caller lends it: no I/O, clock
+# or network (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/serde" = { version = "^0.1", path = "../../crates/vesper-serde/vesper" }
