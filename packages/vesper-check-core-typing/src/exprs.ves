@@ -1,0 +1,1987 @@
+// Expression typing: `Checker::expr_expected` of src/check.rs and what it
+// calls for the expressions ported so far (literals, names, tuples,
+// constructors, fields, blocks and `let`, `if`, `match`, unary and binary
+// operators, calls of constructors and of effect-free functions), with
+// `construct`, `apply`, `apply_args`, `bind_mode`, `constrain_literals`
+// and `generic_bounds`.
+//
+// The checker reports a function it cannot check yet as skipped: one that
+// reaches an expression kind not ported here, a type of another lane
+// (strings, sequences, vectors, boxes, regions, `f32`, function types and
+// effect rows), an effectful callee or an intrinsic. Modes, moves and
+// loans (part 3), effects (lane 8) and literal typing (part 4) are not
+// here; the clean corpus needs none of them for its expression types.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    Vars,
+    debug_type,
+    default_type,
+    substitute,
+    vars_new
+};
+use @vesper/check-data::world::{
+    Adt,
+    Bounds,
+    Field,
+    Generic,
+    Known,
+    Variant,
+    World,
+    bounds_new,
+    constructor,
+    field_step,
+    mode_of,
+    set_by_symbol
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader
+};
+use self::ints::{
+    Lit,
+    above_i64,
+    default_fits,
+    fits,
+    lit_max
+};
+use self::relations::{
+    compatible,
+    infer,
+    item,
+    join_types,
+    lit_of,
+    mk_lit,
+    refine_annotation,
+    unresolved
+};
+use self::patterns::{
+    Pats,
+    arms_cover,
+    irrefutable,
+    pats_new
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+const K_INFER: u8 = 5;
+const M_LINEAR: u8 = 2;
+const P_INOUT: u8 = 1;
+const P_SINK: u8 = 2;
+
+// Expression kinds (the harness encoder's `E_*`).
+const E_OTHER: u8 = 0;
+const E_INT: u8 = 1;
+const E_FLOAT: u8 = 2;
+const E_BOOL: u8 = 3;
+const E_STRING: u8 = 4;
+const E_NAME: u8 = 5;
+const E_TUPLE: u8 = 6;
+const E_STRUCT: u8 = 7;
+const E_BLOCK: u8 = 8;
+const E_CALL: u8 = 9;
+const E_FIELD: u8 = 10;
+const E_UNARY: u8 = 11;
+const E_BINARY: u8 = 12;
+const E_IF: u8 = 13;
+const E_MATCH: u8 = 14;
+
+// Pattern kinds (patterns.ves).
+const P_WILD: u8 = 0;
+const P_BIND: u8 = 1;
+const P_TRUE: u8 = 2;
+const P_FALSE: u8 = 3;
+const P_LIT: u8 = 4;
+const P_TUPLE: u8 = 5;
+const P_CTOR: u8 = 6;
+
+// Binary operator codes.
+const B_ADD: u32 = 1;
+const B_SUB: u32 = 2;
+const B_MUL: u32 = 3;
+const B_DIV: u32 = 4;
+const B_REM: u32 = 5;
+const B_EQ: u32 = 6;
+const B_NE: u32 = 7;
+const B_LT: u32 = 8;
+const B_LE: u32 = 9;
+const B_GT: u32 = 10;
+const B_GE: u32 = 11;
+const B_AND: u32 = 12;
+const B_OR: u32 = 13;
+
+// One expression. Lists index the checker's tables (`kids`, `fnames`,
+// `stmts`, `targs`, `args`, `arms`), by kind:
+// - int literal: neg, mag; bool: x = value; name: x = full, y = qualifier
+//   (symbol + 1, 0 none, NONE32 refused), z = short name;
+// - tuple: kids[a..a+n]; struct: x/y/z name, kids and fnames [a..a+n];
+// - block: stmts[a..a+n], x = tail or NONE32;
+// - call: x = callee, y = 1 for an intrinsic, targs[b..b+m], args[a..a+n];
+// - field: x = base, y = field name; unary: x = operand, y = op;
+// - binary: x, z = operands, y = op; if: x = condition, y = then, z = else
+//   or NONE32; match: x = scrutinee, arms[a..a+n].
+pub copy struct Ex {
+    kind: u8,
+    start: u64,
+    end: u64,
+    a: u32,
+    n: u32,
+    b: u32,
+    m: u32,
+    x: u32,
+    y: u32,
+    z: u32,
+    neg: bool,
+    mag: u64,
+}
+
+pub copy struct Stmt {
+    is_let: bool,
+    pat: u32,
+    ty: u32,
+    value: u32,
+}
+
+pub copy struct Arg {
+    pass: u8,
+    explicit: bool,
+    expr: u32,
+}
+
+pub copy struct Arm {
+    pat: u32,
+    body: u32,
+}
+
+// Pattern extras beside the `Pats` row of the same id: spans, a binding's
+// name, a constructor's full name and qualifier, a literal's type.
+pub copy struct PatX {
+    start: u64,
+    end: u64,
+    // bind: the name; constructor: the full name.
+    name: u32,
+    // constructor qualifier (symbol + 1, 0 none, NONE32 refused)
+    qual: u32,
+    // literal: 0 int, 1 float, 2 bool, 3 string
+    lit: u8,
+    neg: bool,
+    mag: u64,
+}
+
+pub copy struct FnSig {
+    name: u32,
+    ga: u32,
+    gn: u32,
+    pa: u32,
+    pn: u32,
+    result: u32,
+    effectful: bool,
+    // `world.function_results`, or the declared result
+    inferred: u32,
+}
+
+pub copy struct ParamSig {
+    pass: u8,
+    name: u32,
+    ty: u32,
+    projections: u32,
+    start: u64,
+    end: u64,
+}
+
+pub copy struct Bind {
+    name: u32,
+    ty: u32,
+    pass: u8,
+}
+
+pub struct Ck {
+    c: Ctx,
+    ps: Pats,
+    px: ChunkSeq[PatX],
+    exs: ChunkSeq[Ex],
+    kids: ChunkSeq[u32],
+    fnames: ChunkSeq[u32],
+    stmts: ChunkSeq[Stmt],
+    targs: ChunkSeq[u32],
+    args: ChunkSeq[Arg],
+    arms: ChunkSeq[Arm],
+    fns: ChunkSeq[FnSig],
+    gens: ChunkSeq[Generic],
+    params: ChunkSeq[ParamSig],
+    // symbol -> function index + 1
+    fn_by_name: ChunkSeq[u32],
+    // The function being checked.
+    env: ChunkSeq[Bind],
+    bounds: Bounds,
+    // expression id -> recorded type, or NONE32
+    ety: ChunkSeq[u32],
+    skip: bool,
+    out: ChunkSeq[u8],
+    s_atomic: u32,
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+fn sym(in c: Ctx, x: u64) -> u32 {
+    u32_at(in c.nmap, x)
+}
+
+fn tyw(in c: Ctx, x: u64) -> u32 {
+    u32_at(in c.tmap, x)
+}
+
+fn qual_word(in c: Ctx, x: u64) -> u32 {
+    if x == NONE64 {
+        return NONE32;
+    }
+    if x == 0 {
+        return 0;
+    }
+    inc32w(sym(in c, wrapping_sub(x, 1)))
+}
+
+fn inc32w(x: u32) -> u32 {
+    wrapping_add(x, 1)
+}
+
+pub fn ck_new(sink c: Ctx) -> Ck {
+    let mut ck = Ck {
+        c: c,
+        ps: pats_dummy(),
+        px: ChunkSeq::new[PatX](),
+        exs: ChunkSeq::new[Ex](),
+        kids: ChunkSeq::new[u32](),
+        fnames: ChunkSeq::new[u32](),
+        stmts: ChunkSeq::new[Stmt](),
+        targs: ChunkSeq::new[u32](),
+        args: ChunkSeq::new[Arg](),
+        arms: ChunkSeq::new[Arm](),
+        fns: ChunkSeq::new[FnSig](),
+        gens: ChunkSeq::new[Generic](),
+        params: ChunkSeq::new[ParamSig](),
+        fn_by_name: ChunkSeq::new[u32](),
+        env: ChunkSeq::new[Bind](),
+        bounds: bounds_new(),
+        ety: ChunkSeq::new[u32](),
+        skip: false,
+        out: ChunkSeq::new[u8](),
+        s_atomic: 0,
+    };
+    let ps = pats_new(inout ck.c.names);
+    ck.ps = ps;
+    let s = ck.c.names.intern(in "Atomic".as_bytes());
+    ck.s_atomic = s;
+    // Pattern 0, the wildcard, has no extras.
+    ck
+        .px
+        .push(
+        PatX {
+            start: 0,
+            end: 0,
+            name: 0,
+            qual: 0,
+            lit: 0,
+            neg: false,
+            mag: 0
+        }
+    );
+    ck
+}
+
+fn pats_dummy() -> Pats {
+    let mut n = @vesper/check-data::names::names_new();
+    pats_new(inout n)
+}
+
+// ----- decoding --------------------------------------------------------------
+
+impl Ck {
+    pub fn ex(in self, i: u32) -> Ex {
+        match self.exs.try_get(w(i)) {
+            Option::Some(x) => x,
+            Option::None => Ex {
+                kind: E_OTHER,
+                start: 0,
+                end: 0,
+                a: 0,
+                n: 0,
+                b: 0,
+                m: 0,
+                x: NONE32,
+                y: 0,
+                z: NONE32,
+                neg: false,
+                mag: 0
+            },
+        }
+    }
+
+    fn patx(in self, p: u32) -> PatX {
+        match self.px.try_get(w(p)) {
+            Option::Some(x) => x,
+            Option::None => PatX {
+                start: 0,
+                end: 0,
+                name: 0,
+                qual: 0,
+                lit: 0,
+                neg: false,
+                mag: 0
+            },
+        }
+    }
+
+    fn stmt(in self, i: u64) -> Stmt {
+        match self.stmts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Stmt {
+                is_let: false,
+                pat: 0,
+                ty: 0,
+                value: NONE32
+            },
+        }
+    }
+
+    fn arg(in self, i: u64) -> Arg {
+        match self.args.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Arg {
+                pass: 0,
+                explicit: false,
+                expr: NONE32
+            },
+        }
+    }
+
+    fn arm(in self, i: u64) -> Arm {
+        match self.arms.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Arm {
+                pat: 0,
+                body: NONE32
+            },
+        }
+    }
+
+    fn fsig(in self, i: u32) -> FnSig {
+        match self.fns.try_get(w(i)) {
+            Option::Some(x) => x,
+            Option::None => FnSig {
+                name: 0,
+                ga: 0,
+                gn: 0,
+                pa: 0,
+                pn: 0,
+                result: 0,
+                effectful: true,
+                inferred: 0
+            },
+        }
+    }
+
+    fn param(in self, i: u64) -> ParamSig {
+        match self.params.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => ParamSig {
+                pass: 0,
+                name: 0,
+                ty: 0,
+                projections: 0,
+                start: 0,
+                end: 0
+            },
+        }
+    }
+
+    fn gen(in self, i: u64) -> Generic {
+        match self.gens.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Generic {
+                name: 0,
+                bound: 0,
+                row: false
+            },
+        }
+    }
+
+    fn kid(in self, i: u64) -> u32 {
+        u32_at(in self.kids, i)
+    }
+}
+
+fn push_ex(inout ck: Ck, x: Ex) -> u32 {
+    let id = n32(ck.exs.len());
+    ck.exs.push(x);
+    ck.ety.push(NONE32);
+    id
+}
+
+fn blank(kind: u8, start: u64, end: u64) -> Ex {
+    Ex {
+        kind: kind,
+        start: start,
+        end: end,
+        a: 0,
+        n: 0,
+        b: 0,
+        m: 0,
+        x: NONE32,
+        y: 0,
+        z: NONE32,
+        neg: false,
+        mag: 0
+    }
+}
+
+// One pattern (the harness's `encode_pattern`), into `ps` and `px`.
+fn read_xpat(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
+    let kind = wrapping_u8(r.word(in b));
+    let start = r.word(in b);
+    let end = r.word(in b);
+    let mut x = PatX {
+        start: start,
+        end: end,
+        name: 0,
+        qual: 0,
+        lit: 0,
+        neg: false,
+        mag: 0
+    };
+    let mut short: u32 = 0;
+    let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut knames: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if kind == P_BIND {
+        x.name = sym(in ck.c, r.word(in b));
+    } else if kind == P_LIT {
+        x.lit = wrapping_u8(r.word(in b));
+        if x.lit == 0 {
+            x.neg = r.word(in b) != 0;
+            x.mag = r.word(in b);
+        }
+    } else if kind == P_TUPLE {
+        let n = r.word(in b);
+        for i in 0..n {
+            let k = read_xpat(inout r, in b, inout ck);
+            kids.push(k);
+        }
+    } else if kind == P_CTOR {
+        x.name = sym(in ck.c, r.word(in b));
+        x.qual = qual_word(in ck.c, r.word(in b));
+        short = sym(in ck.c, r.word(in b));
+        let n = r.word(in b);
+        for i in 0..n {
+            knames.push(sym(in ck.c, r.word(in b)));
+            let k = read_xpat(inout r, in b, inout ck);
+            kids.push(k);
+        }
+    }
+    let id = ck.ps.add(kind, short, in kids, in knames);
+    ck.px.push(x);
+    id
+}
+
+fn read_name(inout r: Reader, in b: Slice[u8], in c: Ctx, inout x: Ex) {
+    x.x = sym(in c, r.word(in b));
+    x.y = qual_word(in c, r.word(in b));
+    x.z = sym(in c, r.word(in b));
+}
+
+// One expression (the harness's `encode_expr`).
+fn read_expr(inout r: Reader, in b: Slice[u8], inout ck: Ck) -> u32 {
+    let kind = wrapping_u8(r.word(in b));
+    let start = r.word(in b);
+    let end = r.word(in b);
+    let mut x = blank(kind, start, end);
+    if kind == E_INT {
+        x.neg = r.word(in b) != 0;
+        x.mag = r.word(in b);
+    } else if kind == E_BOOL {
+        x.x = n32(r.word(in b));
+    } else if kind == E_NAME {
+        read_name(inout r, in b, in ck.c, inout x);
+    } else if kind == E_TUPLE {
+        let n = r.word(in b);
+        let mut ks: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..n {
+            let k = read_expr(inout r, in b, inout ck);
+            ks.push(k);
+        }
+        x.a = n32(ck.kids.len());
+        x.n = n32(n);
+        for i in 0..n {
+            ck.kids.push(u32_at(in ks, i));
+            ck.fnames.push(0);
+        }
+    } else if kind == E_STRUCT {
+        read_name(inout r, in b, in ck.c, inout x);
+        let n = r.word(in b);
+        let mut ks: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut fs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..n {
+            fs.push(sym(in ck.c, r.word(in b)));
+            let k = read_expr(inout r, in b, inout ck);
+            ks.push(k);
+        }
+        x.a = n32(ck.kids.len());
+        x.n = n32(n);
+        for i in 0..n {
+            ck.kids.push(u32_at(in ks, i));
+            ck.fnames.push(u32_at(in fs, i));
+        }
+    } else if kind == E_BLOCK {
+        let n = r.word(in b);
+        let mut ss: ChunkSeq[Stmt] = ChunkSeq::new[Stmt]();
+        for i in 0..n {
+            let tag = r.word(in b);
+            if tag == 0 {
+                let p = read_xpat(inout r, in b, inout ck);
+                let ty = tyw(in ck.c, r.word(in b));
+                let mutable = r.word(in b);
+                let v = read_expr(inout r, in b, inout ck);
+                ss
+                    .push(
+                    Stmt {
+                        is_let: true,
+                        pat: p,
+                        ty: ty,
+                        value: v
+                    }
+                );
+            } else {
+                let v = read_expr(inout r, in b, inout ck);
+                ss
+                    .push(
+                    Stmt {
+                        is_let: false,
+                        pat: 0,
+                        ty: 0,
+                        value: v
+                    }
+                );
+            }
+        }
+        x.a = n32(ck.stmts.len());
+        x.n = n32(n);
+        for i in 0..n {
+            match ss.try_get(i) {
+                Option::Some(s) => ck.stmts.push(s),
+                Option::None => {},
+            }
+        }
+        if r.word(in b) != 0 {
+            x.x = read_expr(inout r, in b, inout ck);
+        }
+    } else if kind == E_CALL {
+        x.y = n32(r.word(in b));
+        x.x = read_expr(inout r, in b, inout ck);
+        let m = r.word(in b);
+        x.b = n32(ck.targs.len());
+        x.m = n32(m);
+        for i in 0..m {
+            ck.targs.push(tyw(in ck.c, r.word(in b)));
+        }
+        let n = r.word(in b);
+        let mut as_: ChunkSeq[Arg] = ChunkSeq::new[Arg]();
+        for i in 0..n {
+            let pass = wrapping_u8(r.word(in b));
+            let explicit = r.word(in b) != 0;
+            let e = read_expr(inout r, in b, inout ck);
+            as_
+                .push(
+                Arg {
+                    pass: pass,
+                    explicit: explicit,
+                    expr: e
+                }
+            );
+        }
+        x.a = n32(ck.args.len());
+        x.n = n32(n);
+        for i in 0..n {
+            match as_.try_get(i) {
+                Option::Some(a) => ck.args.push(a),
+                Option::None => {},
+            }
+        }
+    } else if kind == E_FIELD {
+        x.y = sym(in ck.c, r.word(in b));
+        x.x = read_expr(inout r, in b, inout ck);
+    } else if kind == E_UNARY {
+        x.y = n32(r.word(in b));
+        x.x = read_expr(inout r, in b, inout ck);
+    } else if kind == E_BINARY {
+        x.y = n32(r.word(in b));
+        x.x = read_expr(inout r, in b, inout ck);
+        x.z = read_expr(inout r, in b, inout ck);
+    } else if kind == E_IF {
+        x.x = read_expr(inout r, in b, inout ck);
+        x.y = read_expr(inout r, in b, inout ck);
+        if r.word(in b) != 0 {
+            x.z = read_expr(inout r, in b, inout ck);
+        }
+    } else if kind == E_MATCH {
+        x.x = read_expr(inout r, in b, inout ck);
+        let n = r.word(in b);
+        let mut ms: ChunkSeq[Arm] = ChunkSeq::new[Arm]();
+        for i in 0..n {
+            let p = read_xpat(inout r, in b, inout ck);
+            let e = read_expr(inout r, in b, inout ck);
+            ms
+                .push(
+                Arm {
+                    pat: p,
+                    body: e
+                }
+            );
+        }
+        x.a = n32(ck.arms.len());
+        x.n = n32(n);
+        for i in 0..n {
+            match ms.try_get(i) {
+                Option::Some(a) => ck.arms.push(a),
+                Option::None => {},
+            }
+        }
+    }
+    push_ex(inout ck, x)
+}
+
+// The function table of the task input.
+pub fn read_fns(inout r: Reader, in b: Slice[u8], inout ck: Ck) {
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let name = sym(in ck.c, r.word(in b));
+        let ga = n32(ck.gens.len());
+        let gn = r.word(in b);
+        for j in 0..gn {
+            let g = Generic {
+                name: sym(in ck.c, r.word(in b)),
+                bound: wrapping_u8(r.word(in b)),
+                row: r.word(in b) != 0
+            };
+            ck.gens.push(g);
+        }
+        let pa = n32(ck.params.len());
+        let pn = r.word(in b);
+        for j in 0..pn {
+            let p = ParamSig {
+                pass: wrapping_u8(r.word(in b)),
+                name: sym(in ck.c, r.word(in b)),
+                ty: tyw(in ck.c, r.word(in b)),
+                projections: n32(r.word(in b)),
+                start: r.word(in b),
+                end: r.word(in b)
+            };
+            ck.params.push(p);
+        }
+        let result = tyw(in ck.c, r.word(in b));
+        let effectful = r.word(in b) != 0;
+        let inferred = tyw(in ck.c, r.word(in b));
+        let id = n32(ck.fns.len());
+        ck
+            .fns
+            .push(
+            FnSig {
+                name: name,
+                ga: ga,
+                gn: n32(gn),
+                pa: pa,
+                pn: n32(pn),
+                result: result,
+                effectful: effectful,
+                inferred: inferred
+            }
+        );
+        set_by_symbol(inout ck.fn_by_name, name, inc32w(id));
+    }
+}
+
+fn fn_index(in ck: Ck, name: u32) -> u32 {
+    let x = u32_at(in ck.fn_by_name, w(name));
+    if x == 0 {
+        NONE32
+    } else {
+        wrapping_sub(x, 1)
+    }
+}
+
+// ----- checker state ---------------------------------------------------------
+
+fn error(inout ck: Ck, in code: Str, start: u64, end: u64) {
+    put(inout ck.out, "D ");
+    put(inout ck.out, code);
+    ck.out.push(32);
+    put_u64(inout ck.out, start);
+    ck.out.push(32);
+    put_u64(inout ck.out, end);
+    ck.out.push(10);
+}
+
+// Whether `ty` belongs to another lane's rules (strings, sequences,
+// vectors, boxes, regions, atomics, `f32`, function types, effect rows).
+fn foreign(in ck: Ck, ty: u32) -> bool {
+    let n = ck.c.types.node(ty);
+    if n.kind == K_FN || n.kind == K_ROW {
+        return true;
+    }
+    if n.kind == K_NAMED {
+        let k = ck.c.world.k;
+        let s = n.name;
+        if s
+            == k
+            .string
+            || s
+            == k
+            .str_
+            || s
+            == k
+            .chunk_seq
+            || s
+            == k
+            .slice
+            || s
+            == k
+            .tiled_seq
+            || s
+            == k
+            .vec
+            || s
+            == k
+            .mask
+            || s
+            == k
+            .box_
+            || s
+            == k
+            .region_box
+            || s
+            == k
+            .f32_
+            || s
+            == k
+            .dyn_
+            || s
+            == ck
+            .s_atomic {
+            return true;
+        }
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if foreign(in ck, item(in ck.c.types, add(w(n.a), i))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn note(inout ck: Ck, ty: u32) {
+    if foreign(in ck, ty) {
+        ck.skip = true;
+    }
+}
+
+fn record(inout ck: Ck, e: u32, ty: u32) {
+    note(inout ck, ty);
+    let ok = ck.ety.try_set(w(e), ty);
+}
+
+fn mode(inout ck: Ck, ty: u32) -> u8 {
+    mode_of(inout ck.c.types, in ck.c.names, in ck.c.world, ty, in ck.bounds)
+}
+
+fn lookup(in ck: Ck, name: u32) -> u32 {
+    let mut i = ck.env.len();
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        match ck.env.try_get(i) {
+            Option::Some(x) => {
+                if x.name == name {
+                    return n32(i);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE32
+}
+
+fn binding(in ck: Ck, i: u32) -> Bind {
+    match ck.env.try_get(w(i)) {
+        Option::Some(x) => x,
+        Option::None => Bind {
+            name: 0,
+            ty: 0,
+            pass: 0
+        },
+    }
+}
+
+fn bind_name(inout ck: Ck, name: u32, ty: u32, pass: u8) {
+    note(inout ck, ty);
+    ck
+        .env
+        .push(
+        Bind {
+            name: name,
+            ty: ty,
+            pass: pass
+        }
+    );
+}
+
+fn named(inout ck: Ck, s: u32) -> u32 {
+    ck.c.types.named0(s)
+}
+
+fn is_named(in ck: Ck, ty: u32, s: u32) -> bool {
+    let n = ck.c.types.node(ty);
+    n.kind == K_NAMED && n.name == s
+}
+
+fn expect_type(inout ck: Ck, expected: u32, actual: u32, start: u64, end: u64) {
+    if !compatible(in ck.c.types, ck.c.world.k, expected, actual) {
+        error(inout ck, "E0200", start, end);
+    }
+}
+
+fn join(inout ck: Ck, a: u32, b: u32, start: u64, end: u64) -> u32 {
+    let mut errors: u64 = 0;
+    let k = ck.c.world.k;
+    let j = join_types(inout ck.c.types, k, a, b, inout errors);
+    for i in 0..errors {
+        error(inout ck, "E0200", start, end);
+    }
+    j
+}
+
+// `check::integer(t)`.
+fn integer(in ck: Ck, ty: u32) -> bool {
+    let n = ck.c.types.node(ty);
+    if n.kind == K_LIT || n.kind == K_INFER {
+        return true;
+    }
+    n.kind == K_NAMED && ck.c.world.k.is_integer(n.name)
+}
+
+// `check::numeric(t)`.
+fn numeric(in ck: Ck, ty: u32) -> bool {
+    if integer(in ck, ty) {
+        return true;
+    }
+    let k = ck.c.world.k;
+    is_named(in ck, ty, k.f64_) || is_named(in ck, ty, k.f32_)
+}
+
+// `IntegerKind::from_type(t)`: the kind symbol, or NONE32.
+fn int_kind(in ck: Ck, ty: u32) -> u32 {
+    let n = ck.c.types.node(ty);
+    let k = ck.c.world.k;
+    if n.kind == K_LIT {
+        if above_i64(lit_of(n)) {
+            return k.u64_;
+        }
+        return k.i64_;
+    }
+    if n.kind == K_NAMED && k.is_integer(n.name) {
+        return n.name;
+    }
+    NONE32
+}
+
+fn default_kind(in ck: Ck, v: Lit) -> u32 {
+    if above_i64(v) {
+        ck.c.world.k.u64_
+    } else {
+        ck.c.world.k.i64_
+    }
+}
+
+fn bounds_of(in ck: Ck, f: FnSig) -> Bounds {
+    let mut bs = bounds_new();
+    for i in 0..w(f.gn) {
+        let g = ck.gen(add(w(f.ga), i));
+        if !g.row {
+            bs.set(g.name, g.bound);
+        }
+    }
+    bs
+}
+
+// ----- expressions -----------------------------------------------------------
+
+fn expr(inout ck: Ck, e: u32) -> u32 {
+    let hole = ck.c.types.infer;
+    expr_expected(inout ck, e, hole)
+}
+
+// `Checker::expr_expected`.
+pub fn expr_expected(inout ck: Ck, e: u32, expected: u32) -> u32 {
+    let hole = ck.c.types.infer;
+    if ck.skip {
+        return hole;
+    }
+    let x = ck.ex(e);
+    let ty = if x.kind == E_INT {
+        int_literal(inout ck, x, expected)
+    } else if x.kind == E_FLOAT {
+        let k = ck.c.world.k;
+        if is_named(in ck, expected, k.f32_) {
+            ck.skip = true;
+        }
+        named(inout ck, k.f64_)
+    } else if x.kind == E_BOOL {
+        let k = ck.c.world.k;
+        named(inout ck, k.bool_)
+    } else if x.kind == E_NAME {
+        name_expr(inout ck, x, expected)
+    } else if x.kind == E_TUPLE {
+        tuple_expr(inout ck, x, expected)
+    } else if x.kind == E_STRUCT {
+        let mut fields: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut values: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..w(x.n) {
+            fields.push(u32_at(in ck.fnames, add(w(x.a), i)));
+            values.push(ck.kid(add(w(x.a), i)));
+        }
+        construct(inout ck, x.y, x.z, in fields, in values, expected, x.start, x.end)
+    } else if x.kind == E_FIELD {
+        field_expr(inout ck, e, x)
+    } else if x.kind == E_BLOCK {
+        block_expr(inout ck, x, expected)
+    } else if x.kind == E_CALL {
+        call_expr(inout ck, x, expected)
+    } else if x.kind == E_UNARY {
+        unary_expr(inout ck, x, expected)
+    } else if x.kind == E_BINARY {
+        binary_expr(inout ck, x, expected)
+    } else if x.kind == E_IF {
+        if_expr(inout ck, x, expected)
+    } else if x.kind == E_MATCH {
+        match_expr(inout ck, x, expected)
+    } else {
+        // E_OTHER and string literals: not ported yet.
+        ck.skip = true;
+        hole
+    };
+    if ck.skip {
+        return hole;
+    }
+    // `instantiate_latent_effects` changes only function types, which
+    // skip the function.
+    if expected != hole {
+        expect_type(inout ck, expected, ty, x.start, x.end);
+    }
+    record(inout ck, e, ty);
+    ty
+}
+
+fn int_literal(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let v = Lit {
+        neg: x.neg,
+        mag: x.mag
+    };
+    let k = ck.c.world.k;
+    let kind = int_kind(in ck, expected);
+    if kind != NONE32 {
+        if !fits(k, kind, v) {
+            error(inout ck, "E0209", x.start, x.end);
+        }
+        return named(inout ck, kind);
+    }
+    if !default_fits(k, v, v) {
+        error(inout ck, "E0209", x.start, x.end);
+    }
+    mk_lit(inout ck.c.types, v)
+}
+
+fn ctor_of(in ck: Ck, qual: u32, short: u32) -> u64 {
+    if qual == NONE32 {
+        return NONE64;
+    }
+    let q = if qual == 0 {
+        NONE32
+    } else {
+        wrapping_sub(qual, 1)
+    };
+    constructor(in ck.c.world, q, short)
+}
+
+fn infer_args(inout ck: Ck, a: Adt) -> ChunkSeq[u32] {
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(a.gn) {
+        args.push(ck.c.types.infer);
+    }
+    args
+}
+
+fn name_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let hole = ck.c.types.infer;
+    let bi = lookup(in ck, x.x);
+    if bi != NONE32 {
+        // `place` on the whole binding (modes and moves: part 3).
+        return binding(in ck, bi).ty;
+    }
+    if fn_index(in ck, x.x) != NONE32 {
+        // A function value has a function type.
+        ck.skip = true;
+        return hole;
+    }
+    let c = ctor_of(in ck, x.y, x.z);
+    if c != NONE64 {
+        let a = ck.c.world.adt(n32(c >> 32));
+        let v = ck.c.world.variant(c & 4294967295);
+        if v.fc == 0 {
+            if is_named(in ck, expected, a.name) {
+                return expected;
+            }
+            let args = infer_args(inout ck, a);
+            return ck.c.types.named(a.name, in args);
+        }
+        error(inout ck, "E0203", x.start, x.end);
+        return hole;
+    }
+    // Qualified paths outside a package and unknown names: the package
+    // loader's diagnostics are lane 6's.
+    ck.skip = true;
+    hole
+}
+
+fn float_name(in ck: Ck, ty: u32) -> bool {
+    let k = ck.c.world.k;
+    is_named(in ck, ty, k.f64_) || is_named(in ck, ty, k.f32_)
+}
+
+fn tuple_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let en = ck.c.types.node(expected);
+    let mut ts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(x.n) {
+        let mut goal = ck.c.types.infer;
+        if en.kind == K_TUPLE && en.n == x.n {
+            let t = item(in ck.c.types, add(w(en.a), i));
+            if float_name(in ck, t) || ck.c.types.kind(t) == K_TUPLE {
+                goal = t;
+            }
+        }
+        let t = expr_expected(inout ck, ck.kid(add(w(x.a), i)), goal);
+        ts.push(t);
+    }
+    ck.c.types.tuple(in ts)
+}
+
+fn generic_names(in ck: Ck, a: Adt) -> ChunkSeq[u32] {
+    let mut gs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(a.gn) {
+        gs.push(ck.c.world.generic(add(w(a.ga), i)).name);
+    }
+    gs
+}
+
+// `vars` with every generic of `a` it lacks bound to `Infer`.
+fn with_infer(in ck: Ck, in vars: Vars, in gs: ChunkSeq[u32]) -> Vars {
+    let mut v = vars_new();
+    for i in 0..vars.keys.len() {
+        v.set(u32_at(in vars.keys, i), u32_at(in vars.vals, i));
+    }
+    for i in 0..gs.len() {
+        let g = u32_at(in gs, i);
+        if v.get(g) == NONE32 {
+            v.set(g, ck.c.types.infer);
+        }
+    }
+    v
+}
+
+// `Checker::construct`.
+fn construct(
+    inout ck: Ck,
+    qual: u32,
+    short: u32,
+    in fields: ChunkSeq[u32],
+    in values: ChunkSeq[u32],
+    expected: u32,
+    start: u64,
+    end: u64
+) -> u32 {
+    let hole = ck.c.types.infer;
+    let c = ctor_of(in ck, qual, short);
+    if c == NONE64 {
+        error(inout ck, "E0201", start, end);
+        return hole;
+    }
+    let a = ck.c.world.adt(n32(c >> 32));
+    let v = ck.c.world.variant(c & 4294967295);
+    let gs = generic_names(in ck, a);
+    let mut vars = vars_new();
+    if is_named(in ck, expected, a.name) {
+        let en = ck.c.types.node(expected);
+        for i in 0..w(a.gn) {
+            if i >= w(en.n) {
+                break;
+            }
+            vars.set(u32_at(in gs, i), item(in ck.c.types, add(w(en.a), i)));
+        }
+    }
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..fields.len() {
+        let n = u32_at(in fields, i);
+        let e = u32_at(in values, i);
+        let context = with_infer(in ck, in vars, in gs);
+        let fi = ck.c.world.find_field(v, n);
+        let mut target = hole;
+        if fi != NONE32 {
+            let f = ck.c.world.field(w(fi));
+            target = substitute(inout ck.c.types, f.ty, in context);
+        }
+        let t = expr_expected(inout ck, e, target);
+        if ck.skip {
+            return hole;
+        }
+        let x = ck.ex(e);
+        let mut dup = false;
+        for j in 0..seen.len() {
+            if u32_at(in seen, j) == n {
+                dup = true;
+            }
+        }
+        if dup {
+            error(inout ck, "E0204", x.start, x.end);
+        } else {
+            seen.push(n);
+        }
+        if fi != NONE32 {
+            let f = ck.c.world.field(w(fi));
+            let k = ck.c.world.k;
+            infer(inout ck.c.types, k, f.ty, t, in gs, inout vars);
+            let want = substitute(inout ck.c.types, f.ty, in vars);
+            expect_type(inout ck, want, t, x.start, x.end);
+        } else {
+            error(inout ck, "E0202", x.start, x.end);
+        }
+    }
+    if seen.len() != w(v.fc) {
+        error(inout ck, "E0204", start, end);
+    }
+    adt_bounds(inout ck, a, in vars, start, end);
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..gs.len() {
+        let t = vars.get(u32_at(in gs, i));
+        if t == NONE32 {
+            args.push(hole);
+        } else {
+            args.push(t);
+        }
+    }
+    ck.c.types.named(a.name, in args)
+}
+
+// `Checker::generic_bounds` over an ADT's generics.
+fn adt_bounds(inout ck: Ck, a: Adt, in vars: Vars, start: u64, end: u64) {
+    for i in 0..w(a.gn) {
+        let g = ck.c.world.generic(add(w(a.ga), i));
+        check_bound(inout ck, g, in vars, start, end);
+    }
+}
+
+fn check_bound(inout ck: Ck, g: Generic, in vars: Vars, start: u64, end: u64) {
+    let t = vars.get(g.name);
+    if t == NONE32 {
+        return;
+    }
+    let hole = ck.c.types.infer;
+    if t != hole && g.row != (ck.c.types.kind(t) == K_ROW) {
+        error(inout ck, "E0205", start, end);
+    }
+    if !g.row && mode(inout ck, t) > g.bound {
+        error(inout ck, "E0205", start, end);
+    }
+}
+
+// A place expression (`Place::from_expr`): its root binding name and field
+// path, or NONE32 as the root.
+fn place_of(in ck: Ck, e: u32, inout path: ChunkSeq[u32]) -> u32 {
+    let x = ck.ex(e);
+    if x.kind == E_NAME {
+        return x.x;
+    }
+    if x.kind == E_FIELD {
+        let root = place_of(in ck, x.x, inout path);
+        if root != NONE32 {
+            path.push(x.y);
+        }
+        return root;
+    }
+    NONE32
+}
+
+// `World::field(ty, path)`, or NONE32.
+fn field_path(inout ck: Ck, ty: u32, in path: ChunkSeq[u32]) -> u32 {
+    let mut t = ty;
+    for i in 0..path.len() {
+        t = field_step(
+            inout ck.c.types,
+            inout ck.c.names,
+            in ck.c.world,
+            t,
+            u32_at(in path, i),
+            false
+        );
+        if t == NONE32 {
+            return NONE32;
+        }
+    }
+    t
+}
+
+fn field_expr(inout ck: Ck, e: u32, x: Ex) -> u32 {
+    let hole = ck.c.types.infer;
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let root = place_of(in ck, e, inout path);
+    if root != NONE32 {
+        let bi = lookup(in ck, root);
+        if bi == NONE32 {
+            // `peek_type` of an unknown root, then `place`'s E0201: a
+            // qualified name (`Enum::Variant.x`) or a typo; not ported.
+            ck.skip = true;
+            return hole;
+        }
+        // `peek_type(base)`: a TiledSeq base is lane 9's.
+        let bt = binding(in ck, bi).ty;
+        note(inout ck, bt);
+        let t = field_path(inout ck, bt, in path);
+        if t == NONE32 {
+            error(inout ck, "E0202", x.start, x.end);
+            return hole;
+        }
+        return t;
+    }
+    let t = expr(inout ck, x.x);
+    if ck.skip {
+        return hole;
+    }
+    if mode(inout ck, t) == M_LINEAR {
+        error(inout ck, "E0306", x.start, x.end);
+    }
+    let mut one: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    one.push(x.y);
+    let f = field_path(inout ck, t, in one);
+    if f == NONE32 {
+        error(inout ck, "E0202", x.start, x.end);
+        return hole;
+    }
+    f
+}
+
+fn block_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let mark = ck.env.len();
+    let hole = ck.c.types.infer;
+    let k = ck.c.world.k;
+    let mut result = ck.c.types.unit;
+    for i in 0..w(x.n) {
+        if ck.skip {
+            return hole;
+        }
+        if ck.c.types.name(result) == k.never {
+            break;
+        }
+        let s = ck.stmt(add(w(x.a), i));
+        if s.is_let {
+            note(inout ck, s.ty);
+            let actual = expr_expected(inout ck, s.value, s.ty);
+            if ck.skip {
+                return hole;
+            }
+            let v = ck.ex(s.value);
+            expect_type(inout ck, s.ty, actual, v.start, v.end);
+            let t = if s.ty == hole {
+                default_type(inout ck.c.types, actual)
+            } else {
+                refine_annotation(inout ck.c.types, s.ty, actual)
+            };
+            if unresolved(in ck.c.types, t) {
+                error(inout ck, "E0208", v.start, v.end);
+            }
+            let px = ck.patx(s.pat);
+            if !irrefutable(
+                inout ck.c.types,
+                inout ck.c.names,
+                in ck.c.world,
+                inout ck.ps,
+                s.pat,
+                t
+            ) {
+                error(inout ck, "E0210", px.start, px.end);
+            }
+            bind_mode(inout ck, s.pat, t, P_SINK);
+        } else {
+            let t = expr(inout ck, s.value);
+            if ck.skip {
+                return hole;
+            }
+            if mode(inout ck, t) == M_LINEAR {
+                let v = ck.ex(s.value);
+                error(inout ck, "E0302", v.start, v.end);
+            }
+            if ck.c.types.name(t) == k.never {
+                result = t;
+            }
+        }
+    }
+    if ck.c.types.name(result) != k.never && x.x != NONE32 {
+        result = expr_expected(inout ck, x.x, expected);
+    }
+    ck.env.truncate(mark);
+    result
+}
+
+// `Checker::bind_mode` without the linear-value checks (part 3).
+fn bind_mode(inout ck: Ck, p: u32, ty: u32, pass: u8) {
+    let pt = ck.ps.pat(p);
+    let px = ck.patx(p);
+    let k = ck.c.world.k;
+    if pt.kind == P_WILD {
+        return;
+    }
+    if pt.kind == P_BIND {
+        bind_name(inout ck, px.name, ty, pass);
+        return;
+    }
+    if pt.kind == P_TRUE || pt.kind == P_FALSE || pt.kind == P_LIT {
+        let lt = if pt.kind == P_LIT && px.lit == 0 {
+            mk_lit(
+                inout ck.c.types,
+                Lit {
+                    neg: px.neg,
+                    mag: px.mag
+                }
+            )
+        } else if pt.kind == P_LIT && px.lit == 1 {
+            if is_named(in ck, ty, k.f32_) {
+                ck.skip = true;
+            }
+            named(inout ck, k.f64_)
+        } else if pt.kind == P_LIT && px.lit == 3 {
+            ck.skip = true;
+            named(inout ck, k.string)
+        } else {
+            named(inout ck, k.bool_)
+        };
+        expect_type(inout ck, ty, lt, px.start, px.end);
+        return;
+    }
+    if pt.kind == P_TUPLE {
+        let n = ck.c.types.node(ty);
+        if n.kind == K_TUPLE {
+            if pt.n != n.n {
+                error(inout ck, "E0211", px.start, px.end);
+            }
+            let mut m = w(pt.n);
+            if w(n.n) < m {
+                m = w(n.n);
+            }
+            for i in 0..m {
+                bind_mode(
+                    inout ck,
+                    ck.ps.kid(add(w(pt.a), i)),
+                    item(in ck.c.types, add(w(n.a), i)),
+                    pass
+                );
+            }
+        } else {
+            error(inout ck, "E0211", px.start, px.end);
+        }
+        return;
+    }
+    // A constructor pattern.
+    let c = ctor_of(in ck, px.qual, pt.name);
+    if c == NONE64 {
+        error(inout ck, "E0211", px.start, px.end);
+        return;
+    }
+    let a = ck.c.world.adt(n32(c >> 32));
+    let v = ck.c.world.variant(c & 4294967295);
+    let n = ck.c.types.node(ty);
+    let gs = generic_names(in ck, a);
+    let mut vars = vars_new();
+    if n.kind == K_NAMED {
+        if n.name != a.name {
+            error(inout ck, "E0211", px.start, px.end);
+        }
+        for i in 0..gs.len() {
+            if i >= w(n.n) {
+                break;
+            }
+            vars.set(u32_at(in gs, i), item(in ck.c.types, add(w(n.a), i)));
+        }
+    } else {
+        error(inout ck, "E0211", px.start, px.end);
+    }
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(pt.n) {
+        let fname = ck.ps.kname(add(w(pt.a), i));
+        let sub = ck.ps.kid(add(w(pt.a), i));
+        let mut dup = false;
+        for j in 0..seen.len() {
+            if u32_at(in seen, j) == fname {
+                dup = true;
+            }
+        }
+        let sx = ck.patx(sub);
+        if dup {
+            error(inout ck, "E0211", sx.start, sx.end);
+        } else {
+            seen.push(fname);
+        }
+        let fi = ck.c.world.find_field(v, fname);
+        if fi != NONE32 {
+            let f = ck.c.world.field(w(fi));
+            let ft = substitute(inout ck.c.types, f.ty, in vars);
+            bind_mode(inout ck, sub, ft, pass);
+        } else {
+            error(inout ck, "E0211", sx.start, sx.end);
+        }
+    }
+    if seen.len() != w(v.fc) {
+        error(inout ck, "E0211", px.start, px.end);
+    }
+}
+
+fn unary_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let t0 = expr_expected(inout ck, x.x, expected);
+    let t = default_type(inout ck.c.types, t0);
+    let k = ck.c.world.k;
+    if x.y == 1 {
+        let b = named(inout ck, k.bool_);
+        expect_type(inout ck, b, t, x.start, x.end);
+        return b;
+    }
+    if !numeric(in ck, t) {
+        error(inout ck, "E0200", x.start, x.end);
+    }
+    // Overflow of a negation raises `Fail` (lane 8's effect rows).
+    t
+}
+
+// `float_math_rules::float_literal_tree`.
+fn float_literal_tree(in ck: Ck, e: u32) -> bool {
+    let x = ck.ex(e);
+    if x.kind == E_FLOAT {
+        return true;
+    }
+    if x.kind == E_UNARY && x.y == 2 {
+        return float_literal_tree(in ck, x.x);
+    }
+    if x.kind == E_BINARY && x.y >= B_ADD && x.y <= B_REM {
+        return float_literal_tree(in ck, x.x) && float_literal_tree(in ck, x.z);
+    }
+    false
+}
+
+fn binary_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let hole = ck.c.types.infer;
+    let k = ck.c.world.k;
+    let op = x.y;
+    let arithmetic = op >= B_ADD && op <= B_REM;
+    let logic = op == B_AND || op == B_OR;
+    let goal = if logic {
+        named(inout ck, k.bool_)
+    } else if arithmetic && numeric(in ck, expected) && expected != hole {
+        expected
+    } else {
+        hole
+    };
+    let a = expr_expected(inout ck, x.x, goal);
+    if ck.skip {
+        return hole;
+    }
+    let right_goal = if goal != hole {
+        goal
+    } else if float_literal_tree(in ck, x.x) {
+        hole
+    } else if ck.c.types.kind(a) != K_LIT {
+        a
+    } else {
+        hole
+    };
+    // `&&` and `||` merge the environments of both paths (facts: part 3).
+    let b = expr_expected(inout ck, x.z, right_goal);
+    if ck.skip {
+        return hole;
+    }
+    let an = ck.c.types.node(a);
+    let bn = ck.c.types.node(b);
+    let common = if an.kind == K_LIT && bn.kind == K_LIT {
+        let hi = lit_max(lit_of(an), lit_of(bn));
+        named(inout ck, default_kind(in ck, hi))
+    } else if an.kind == K_LIT {
+        b
+    } else {
+        a
+    };
+    let l = ck.ex(x.x);
+    let r = ck.ex(x.z);
+    expect_type(inout ck, common, a, l.start, l.end);
+    expect_type(inout ck, common, b, r.start, r.end);
+    if an.kind == K_LIT {
+        record(inout ck, x.x, common);
+    }
+    if bn.kind == K_LIT {
+        record(inout ck, x.z, common);
+    }
+    let ordered = op == B_LT || op == B_LE || op == B_GT || op == B_GE;
+    if (arithmetic || ordered) && !numeric(in ck, common) {
+        error(inout ck, "E0200", x.start, x.end);
+    }
+    if (op == B_EQ || op == B_NE) && mode(inout ck, common) == M_LINEAR {
+        error(inout ck, "E0302", x.start, x.end);
+    }
+    // Division by zero and overflow raise `Fail` (lane 8's effect rows).
+    if logic || op == B_EQ || op == B_NE || ordered {
+        named(inout ck, k.bool_)
+    } else {
+        common
+    }
+}
+
+fn if_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let hole = ck.c.types.infer;
+    let k = ck.c.world.k;
+    let t = expr(inout ck, x.x);
+    let cx = ck.ex(x.x);
+    let b0 = named(inout ck, k.bool_);
+    expect_type(inout ck, b0, t, cx.start, cx.end);
+    let a = expr_expected(inout ck, x.y, expected);
+    let b = if x.z != NONE32 {
+        expr_expected(inout ck, x.z, expected)
+    } else {
+        ck.c.types.unit
+    };
+    if ck.skip {
+        return hole;
+    }
+    let result = join(inout ck, a, b, x.start, x.end);
+    let tx = ck.ex(x.y);
+    expect_type(inout ck, result, a, tx.start, tx.end);
+    expect_type(inout ck, result, b, x.start, x.end);
+    constrain_literals(inout ck, x.y, result);
+    if x.z != NONE32 {
+        constrain_literals(inout ck, x.z, result);
+    }
+    result
+}
+
+fn match_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let hole = ck.c.types.infer;
+    let k = ck.c.world.k;
+    let t = expr(inout ck, x.x);
+    if ck.skip {
+        return hole;
+    }
+    let mut pats: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(x.n) {
+        pats.push(ck.arm(add(w(x.a), i)).pat);
+    }
+    if !arms_cover(inout ck.c.types, inout ck.c.names, in ck.c.world, inout ck.ps, in pats, t) {
+        error(inout ck, "E0212", x.start, x.end);
+    }
+    let mut result = named(inout ck, k.never);
+    for i in 0..w(x.n) {
+        let arm = ck.arm(add(w(x.a), i));
+        let mark = ck.env.len();
+        bind_mode(inout ck, arm.pat, t, P_SINK);
+        let arm_type = expr_expected(inout ck, arm.body, expected);
+        ck.env.truncate(mark);
+        if ck.skip {
+            return hole;
+        }
+        let bx = ck.ex(arm.body);
+        if ck.c.types.name(result) == k.never {
+            result = arm_type;
+        } else {
+            let common = join(inout ck, result, arm_type, bx.start, bx.end);
+            expect_type(inout ck, common, result, bx.start, bx.end);
+            expect_type(inout ck, common, arm_type, bx.start, bx.end);
+            result = common;
+        }
+    }
+    for i in 0..w(x.n) {
+        constrain_literals(inout ck, ck.arm(add(w(x.a), i)).body, result);
+    }
+    result
+}
+
+// `Checker::constrain_literals`.
+fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
+    let actual = u32_at(in ck.ety, w(e));
+    if actual != NONE32 {
+        let k = ck.c.world.k;
+        let ak = ck.c.types.kind(actual);
+        if ak == K_LIT && int_kind(in ck, target) != NONE32 {
+            record(inout ck, e, target);
+        } else if (ak == K_NAMED || ak == K_TUPLE) && compatible(in ck.c.types, k, target, actual) {
+            let r = refine_annotation(inout ck.c.types, target, actual);
+            record(inout ck, e, r);
+        }
+    }
+    let x = ck.ex(e);
+    if x.kind == E_TUPLE {
+        let tn = ck.c.types.node(target);
+        if tn.kind == K_TUPLE {
+            let mut m = w(x.n);
+            if w(tn.n) < m {
+                m = w(tn.n);
+            }
+            for i in 0..m {
+                constrain_literals(
+                    inout ck,
+                    ck.kid(add(w(x.a), i)),
+                    item(in ck.c.types, add(w(tn.a), i))
+                );
+            }
+        }
+    } else if x.kind == E_STRUCT || (x.kind == E_CALL && ck.ex(x.x).kind == E_NAME) {
+        let (qual, short) = if x.kind == E_STRUCT {
+            (x.y, x.z)
+        } else {
+            let callee = ck.ex(x.x);
+            (callee.y, callee.z)
+        };
+        if x.kind == E_CALL && x.y != 0 {
+            // `Box::new` under fip (lane 12) never reaches here: boxes
+            // skip the function.
+            return;
+        }
+        let c = ctor_of(in ck, qual, short);
+        if c == NONE64 {
+            return;
+        }
+        let a = ck.c.world.adt(n32(c >> 32));
+        let v = ck.c.world.variant(c & 4294967295);
+        let gs = generic_names(in ck, a);
+        let mut vars = vars_new();
+        let tn = ck.c.types.node(target);
+        if tn.kind == K_NAMED {
+            for i in 0..gs.len() {
+                if i >= w(tn.n) {
+                    break;
+                }
+                vars.set(u32_at(in gs, i), item(in ck.c.types, add(w(tn.a), i)));
+            }
+        }
+        if x.kind == E_STRUCT {
+            for i in 0..w(x.n) {
+                let fi = ck.c.world.find_field(v, u32_at(in ck.fnames, add(w(x.a), i)));
+                if fi != NONE32 {
+                    let f = ck.c.world.field(w(fi));
+                    let ft = substitute(inout ck.c.types, f.ty, in vars);
+                    constrain_literals(inout ck, ck.kid(add(w(x.a), i)), ft);
+                }
+            }
+        } else {
+            let mut m = w(x.n);
+            if w(v.fc) < m {
+                m = w(v.fc);
+            }
+            for i in 0..m {
+                let f = ck.c.world.field(add(w(v.fa), i));
+                let ft = substitute(inout ck.c.types, f.ty, in vars);
+                constrain_literals(inout ck, ck.arg(add(w(x.a), i)).expr, ft);
+            }
+        }
+    } else if x.kind == E_BLOCK {
+        if x.x != NONE32 {
+            constrain_literals(inout ck, x.x, target);
+        }
+    } else if x.kind == E_IF {
+        constrain_literals(inout ck, x.y, target);
+        if x.z != NONE32 {
+            constrain_literals(inout ck, x.z, target);
+        }
+    } else if x.kind == E_MATCH {
+        for i in 0..w(x.n) {
+            constrain_literals(inout ck, ck.arm(add(w(x.a), i)).body, target);
+        }
+    }
+}
+
+// ----- calls -----------------------------------------------------------------
+
+fn call_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
+    let hole = ck.c.types.infer;
+    let callee = ck.ex(x.x);
+    if callee.kind != E_NAME || lookup(in ck, callee.x) != NONE32 || x.y != 0 {
+        // Closures, method calls and intrinsics: not ported yet.
+        ck.skip = true;
+        return hole;
+    }
+    let c = ctor_of(in ck, callee.y, callee.z);
+    if c != NONE64 {
+        let a = ck.c.world.adt(n32(c >> 32));
+        let mut fields: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut values: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..w(x.n) {
+            let s = ck.ps.index_name(inout ck.c.names, i);
+            fields.push(s);
+            values.push(ck.arg(add(w(x.a), i)).expr);
+        }
+        let mut targs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..w(x.m) {
+            targs.push(u32_at(in ck.targs, add(w(x.b), i)));
+        }
+        let goal = if x.m == 0 {
+            expected
+        } else {
+            ck.c.types.named(a.name, in targs)
+        };
+        let t = construct(inout ck, callee.y, callee.z, in fields, in values, goal, x.start, x.end);
+        if x.m != 0 && ck.c.types.kind(t) == K_NAMED {
+            let tn = ck.c.types.node(t);
+            let mut actual: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for i in 0..w(tn.n) {
+                actual.push(item(in ck.c.types, add(w(tn.a), i)));
+            }
+            let want = ck.c.types.named(tn.name, in targs);
+            let got = ck.c.types.named(tn.name, in actual);
+            expect_type(inout ck, want, got, x.start, x.end);
+            return want;
+        }
+        return t;
+    }
+    let fi = fn_index(in ck, callee.x);
+    if fi == NONE32 {
+        // Intrinsics, effect operations and trait calls: not ported yet.
+        ck.skip = true;
+        return hole;
+    }
+    let f = ck.fsig(fi);
+    if f.effectful {
+        ck.skip = true;
+        return hole;
+    }
+    apply(inout ck, f, x, expected)
+}
+
+fn fn_generics(in ck: Ck, f: FnSig) -> ChunkSeq[u32] {
+    let mut gs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(f.gn) {
+        gs.push(ck.gen(add(w(f.ga), i)).name);
+    }
+    gs
+}
+
+// `Checker::apply` for an effect-free function.
+fn apply(inout ck: Ck, f: FnSig, x: Ex, expected: u32) -> u32 {
+    let hole = ck.c.types.infer;
+    let k = ck.c.world.k;
+    let gs = fn_generics(in ck, f);
+    let mut vars = vars_new();
+    if expected != hole {
+        infer(inout ck.c.types, k, f.result, expected, in gs, inout vars);
+    }
+    let r = apply_args(inout ck, f, x, inout vars);
+    if ck.skip {
+        return hole;
+    }
+    substitute(inout ck.c.types, f.inferred, in vars)
+}
+
+fn copy_vars(in vars: Vars) -> Vars {
+    let mut v = vars_new();
+    for i in 0..vars.keys.len() {
+        v.set(u32_at(in vars.keys, i), u32_at(in vars.vals, i));
+    }
+    v
+}
+
+// `Checker::apply_args` for an effect-free function without projections.
+fn apply_args(inout ck: Ck, f: FnSig, x: Ex, inout vars: Vars) -> u32 {
+    let hole = ck.c.types.infer;
+    let k = ck.c.world.k;
+    let gs = fn_generics(in ck, f);
+    let mut explicit: u64 = 0;
+    for i in 0..w(f.gn) {
+        if explicit >= w(x.m) {
+            break;
+        }
+        let g = ck.gen(add(w(f.ga), i));
+        if g.row {
+            ck.skip = true;
+            return hole;
+        }
+        let t = u32_at(in ck.targs, add(w(x.b), explicit));
+        explicit = inc(explicit);
+        note(inout ck, t);
+        vars.set(g.name, t);
+    }
+    if explicit < w(x.m) {
+        error(inout ck, "E0205", x.start, x.end);
+    }
+    if x.n != f.pn {
+        error(inout ck, "E0207", x.start, x.end);
+    }
+    let mut m = w(x.n);
+    if w(f.pn) < m {
+        m = w(f.pn);
+    }
+    let mut actuals: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..m {
+        let arg = ck.arg(add(w(x.a), i));
+        let p = ck.param(add(w(f.pa), i));
+        let ax = ck.ex(arg.expr);
+        if p.projections != 0 {
+            ck.skip = true;
+            return hole;
+        }
+        if arg.explicit && arg.pass != p.pass {
+            error(inout ck, "E0308", ax.start, ax.end);
+        }
+        let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let place = place_of(in ck, arg.expr, inout path);
+        if p.pass == P_INOUT && place == NONE32 {
+            error(inout ck, "E0300", ax.start, ax.end);
+        }
+        let context = with_infer(in ck, in vars, in gs);
+        let target = substitute(inout ck.c.types, p.ty, in context);
+        note(inout ck, target);
+        let actual = if p.pass == P_INOUT {
+            expr(inout ck, arg.expr)
+        } else {
+            expr_expected(inout ck, arg.expr, target)
+        };
+        if ck.skip {
+            return hole;
+        }
+        if p.pass != P_SINK && place == NONE32 && mode(inout ck, actual) == M_LINEAR {
+            error(inout ck, "E0302", ax.start, ax.end);
+        }
+        if p.pass == P_INOUT && !compatible(in ck.c.types, k, actual, target) {
+            error(inout ck, "E0403", ax.start, ax.end);
+        }
+        infer(inout ck.c.types, k, p.ty, actual, in gs, inout vars);
+        actuals.push(actual);
+        let want = substitute(inout ck.c.types, p.ty, in vars);
+        expect_type(inout ck, want, actual, ax.start, ax.end);
+    }
+    for i in 0..vars.vals.len() {
+        let d = default_type(inout ck.c.types, u32_at(in vars.vals, i));
+        let ok = vars.vals.try_set(i, d);
+    }
+    for i in 0..m {
+        let arg = ck.arg(add(w(x.a), i));
+        let p = ck.param(add(w(f.pa), i));
+        let ax = ck.ex(arg.expr);
+        let target = substitute(inout ck.c.types, p.ty, in vars);
+        expect_type(inout ck, target, u32_at(in actuals, i), ax.start, ax.end);
+        constrain_literals(inout ck, arg.expr, target);
+    }
+    for i in 0..w(f.gn) {
+        let g = ck.gen(add(w(f.ga), i));
+        check_bound(inout ck, g, in vars, x.start, x.end);
+    }
+    substitute(inout ck.c.types, f.result, in vars)
+}
+
+// ----- functions -------------------------------------------------------------
+
+// `Checker::function_body` for the expression types: the parameters bound,
+// the body checked against the declared result. Writes `F start end` and a
+// `T start end type` row per recorded expression, or `S start end`.
+pub fn check_function(inout ck: Ck, fname: u32, start: u64, end: u64, body: u32, first: u32) {
+    ck.skip = false;
+    ck.env.truncate(0);
+    let fi = fn_index(in ck, fname);
+    if fi == NONE32 {
+        ck.skip = true;
+    }
+    let f = ck.fsig(fi);
+    if f.effectful {
+        ck.skip = true;
+    }
+    ck.bounds = bounds_of(in ck, f);
+    let mark = ck.out.len();
+    put(inout ck.out, "F ");
+    put_u64(inout ck.out, start);
+    ck.out.push(32);
+    put_u64(inout ck.out, end);
+    ck.out.push(10);
+    for i in 0..w(f.pn) {
+        let p = ck.param(add(w(f.pa), i));
+        bind_name(inout ck, p.name, p.ty, p.pass);
+    }
+    note(inout ck, f.result);
+    if !ck.skip {
+        let actual = expr_expected(inout ck, body, f.result);
+        if !ck.skip {
+            let bx = ck.ex(body);
+            expect_type(inout ck, f.result, actual, bx.start, bx.end);
+        }
+    }
+    if ck.skip {
+        ck.out.truncate(mark);
+        put(inout ck.out, "S ");
+        put_u64(inout ck.out, start);
+        ck.out.push(32);
+        put_u64(inout ck.out, end);
+        ck.out.push(10);
+        return;
+    }
+    for e in w(first)..ck.exs.len() {
+        let ty = u32_at(in ck.ety, e);
+        if ty != NONE32 {
+            let x = ck.ex(n32(e));
+            put(inout ck.out, "T ");
+            put_u64(inout ck.out, x.start);
+            ck.out.push(32);
+            put_u64(inout ck.out, x.end);
+            ck.out.push(32);
+            debug_type(in ck.c.types, in ck.c.names, ty, inout ck.out);
+            ck.out.push(10);
+        }
+    }
+}
+
+// The task: the function table, then each checked function (name, span,
+// body tree), checked as it is read.
+pub fn check_exprs(inout r: Reader, in b: Slice[u8], inout ck: Ck) {
+    read_fns(inout r, in b, inout ck);
+    let n = r.word(in b);
+    for i in 0..n {
+        let name = sym(in ck.c, r.word(in b));
+        let start = r.word(in b);
+        let end = r.word(in b);
+        let first = n32(ck.exs.len());
+        let body = read_expr(inout r, in b, inout ck);
+        check_function(inout ck, name, start, end, body, first);
+    }
+}

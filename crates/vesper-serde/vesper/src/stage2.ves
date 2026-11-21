@@ -22,6 +22,9 @@ use self::index::{
     tok,
     utf8_len
 };
+use self::ascii::{
+    Ascii
+};
 
 // `byte` past the end: no byte has this value.
 const NO_BYTE: u64 = 256;
@@ -31,35 +34,7 @@ const NULL_TRUE_LEN: u64 = 4;
 // The container stack's first allocation.
 const STACK_CAPACITY: u64 = 16;
 const U64_MAX: u64 = 0xffffffffffffffff;
-const ASCII_TAB: u64 = 0x09;
-const ASCII_LF: u64 = 0x0a;
-const ASCII_CR: u64 = 0x0d;
-const ASCII_SPACE: u64 = 0x20;
-const ASCII_QUOTE: u64 = 0x22;
-const ASCII_PLUS: u64 = 0x2b;
-const ASCII_COMMA: u64 = 0x2c;
-const ASCII_MINUS: u64 = 0x2d;
-const ASCII_DOT: u64 = 0x2e;
 // Used only by the divergence check (build.rs).
-const ASCII_SLASH: u64 = 0x2f;
-const ASCII_ZERO: u64 = 0x30;
-const ASCII_ONE: u64 = 0x31;
-const ASCII_NINE: u64 = 0x39;
-const ASCII_COLON: u64 = 0x3a;
-const ASCII_UPPER_E: u64 = 0x45;
-const ASCII_LBRACKET: u64 = 0x5b;
-const ASCII_RBRACKET: u64 = 0x5d;
-const ASCII_LOWER_A: u64 = 0x61;
-const ASCII_LOWER_E: u64 = 0x65;
-const ASCII_LOWER_F: u64 = 0x66;
-const ASCII_LOWER_L: u64 = 0x6c;
-const ASCII_LOWER_N: u64 = 0x6e;
-const ASCII_LOWER_R: u64 = 0x72;
-const ASCII_LOWER_S: u64 = 0x73;
-const ASCII_LOWER_T: u64 = 0x74;
-const ASCII_LOWER_U: u64 = 0x75;
-const ASCII_LBRACE: u64 = 0x7b;
-const ASCII_RBRACE: u64 = 0x7d;
 
 fn none() -> u64 {
     U64_MAX
@@ -289,7 +264,7 @@ fn string(
     let token = push(in b, inout toks, in t, in escapes, Kind::String, depth, open);
     entry(in b, in t, in escapes, i);
     let i1 = wrapping_add(i, 1);
-    let closed = byte(in b, in t, in s, i1) == ASCII_QUOTE && i1 < b.s_len;
+    let closed = byte(in b, in t, in s, i1) == Ascii::Quote && i1 < b.s_len;
     let bound = if closed {
         pos(in b, in s, i1)
     } else if b.truncated != none() {
@@ -381,7 +356,7 @@ fn min_or(a: u64, c: u64, otherwise: u64) -> u64 {
 }
 
 fn is_digit(c: u64) -> bool {
-    c >= ASCII_ZERO && c <= ASCII_NINE
+    c >= Ascii::Zero && c <= Ascii::Nine
 }
 
 fn digits_end(in t: Slice[u8], p0: u64, end: u64) -> u64 {
@@ -399,7 +374,7 @@ fn digits_end(in t: Slice[u8], p0: u64, end: u64) -> u64 {
 // valid prefix, or the offset of the byte that broke it; ok).
 fn number(in t: Slice[u8], start: u64, end: u64) -> (u64, bool) {
     let mut p = start;
-    if p < end && at(in t, p) == ASCII_MINUS {
+    if p < end && at(in t, p) == Ascii::Minus {
         p = wrapping_add(p, 1);
     }
     let first = if p < end {
@@ -407,23 +382,23 @@ fn number(in t: Slice[u8], start: u64, end: u64) -> (u64, bool) {
     } else {
         NO_BYTE
     };
-    if first == ASCII_ZERO {
+    if first == Ascii::Zero {
         p = wrapping_add(p, 1);
-    } else if first >= ASCII_ONE && first <= ASCII_NINE {
+    } else if first >= Ascii::One && first <= Ascii::Nine {
         p = digits_end(in t, wrapping_add(p, 1), end);
     } else {
         return (wrapping_sub(p, start), false);
     }
-    if p < end && at(in t, p) == ASCII_DOT {
+    if p < end && at(in t, p) == Ascii::Dot {
         p = wrapping_add(p, 1);
         if p >= end || !is_digit(at(in t, p)) {
             return (wrapping_sub(p, start), false);
         }
         p = digits_end(in t, p, end);
     }
-    if p < end && (at(in t, p) == ASCII_LOWER_E || at(in t, p) == ASCII_UPPER_E) {
+    if p < end && (at(in t, p) == Ascii::LowerE || at(in t, p) == Ascii::UpperE) {
         p = wrapping_add(p, 1);
-        if p < end && (at(in t, p) == ASCII_PLUS || at(in t, p) == ASCII_MINUS) {
+        if p < end && (at(in t, p) == Ascii::Plus || at(in t, p) == Ascii::Minus) {
             p = wrapping_add(p, 1);
         }
         if p >= end || !is_digit(at(in t, p)) {
@@ -445,33 +420,33 @@ fn literal_mismatch(in t: Slice[u8], start: u64, end: u64, which: u64) -> u64 {
     for k in 0..n {
         let want: u64 = if which == 0 {
             if k == 0 {
-                ASCII_LOWER_N
+                Ascii::LowerN
             } else if k == 1 {
-                ASCII_LOWER_U
+                Ascii::LowerU
             } else {
-                ASCII_LOWER_L
+                Ascii::LowerL
             }
         } else if which == 1 {
             if k == 0 {
-                ASCII_LOWER_T
+                Ascii::LowerT
             } else if k == 1 {
-                ASCII_LOWER_R
+                Ascii::LowerR
             } else if k == 2 {
-                ASCII_LOWER_U
+                Ascii::LowerU
             } else {
-                ASCII_LOWER_E
+                Ascii::LowerE
             }
         } else {
             if k == 0 {
-                ASCII_LOWER_F
+                Ascii::LowerF
             } else if k == 1 {
-                ASCII_LOWER_A
+                Ascii::LowerA
             } else if k == 2 {
-                ASCII_LOWER_L
+                Ascii::LowerL
             } else if k == 3 {
-                ASCII_LOWER_S
+                Ascii::LowerS
             } else {
-                ASCII_LOWER_E
+                Ascii::LowerE
             }
         };
         let q = wrapping_add(start, k);
@@ -500,7 +475,7 @@ fn scalar(
             break;
         }
         let c = at(in t, wrapping_sub(end, 1));
-        if c == ASCII_SPACE || c == ASCII_TAB || c == ASCII_LF || c == ASCII_CR {
+        if c == Ascii::Space || c == Ascii::Tab || c == Ascii::Lf || c == Ascii::Cr {
             end = wrapping_sub(end, 1);
         } else {
             break;
@@ -509,10 +484,10 @@ fn scalar(
     let first = at(in t, start);
     let mut kind = Kind::Number;
     let mut len: u64 = 0;
-    if first == ASCII_LOWER_N || first == ASCII_LOWER_T || first == ASCII_LOWER_F {
-        let which: u64 = if first == ASCII_LOWER_N {
+    if first == Ascii::LowerN || first == Ascii::LowerT || first == Ascii::LowerF {
+        let which: u64 = if first == Ascii::LowerN {
             0
-        } else if first == ASCII_LOWER_T {
+        } else if first == Ascii::LowerT {
             1
         } else {
             2
@@ -561,7 +536,7 @@ fn key(
     object: u64,
     depth: u64
 ) -> u64 eff [Fail[Error]] {
-    if byte(in b, in t, in s, i) != ASCII_QUOTE {
+    if byte(in b, in t, in s, i) != Ascii::Quote {
         syntax(in b, in t, in s, in escapes, i);
     }
     let key_index = toks.len();
@@ -580,7 +555,7 @@ fn key(
         here
     );
     b.dup = wrapping_add(b.dup, wrapping_sub(work, before));
-    op(in b, in t, in s, in escapes, next, ASCII_COLON);
+    op(in b, in t, in s, in escapes, next, Ascii::Colon);
     wrapping_add(next, 1)
 }
 
@@ -607,8 +582,8 @@ fn document(
     loop {
         let c = byte(in b, in t, in s, i);
         let mut opened = false;
-        if c == ASCII_LBRACE || c == ASCII_LBRACKET {
-            let object = c == ASCII_LBRACE;
+        if c == Ascii::Lbrace || c == Ascii::Lbracket {
+            let object = c == Ascii::Lbrace;
             if depth >= b.lim.max_depth || depth >= hard_depth() {
                 err(in b, in t, in escapes, ErrorKind::DepthLimit, pos(in b, in s, i));
             }
@@ -622,9 +597,9 @@ fn document(
             entry(in b, in t, in escapes, i);
             i = wrapping_add(i, 1);
             let close: u64 = if object {
-                ASCII_RBRACE
+                Ascii::Rbrace
             } else {
-                ASCII_RBRACKET
+                Ascii::Rbracket
             };
             if byte(in b, in t, in s, i) == close {
                 entry(in b, in t, in escapes, i);
@@ -650,16 +625,16 @@ fn document(
                 }
                 opened = true;
             }
-        } else if c == ASCII_QUOTE {
+        } else if c == Ascii::Quote {
             i = string(inout b, inout toks, in t, in s, in escapes, i, depth);
         } else if c
-            == ASCII_LOWER_N
+            == Ascii::LowerN
             || c
-            == ASCII_LOWER_T
+            == Ascii::LowerT
             || c
-            == ASCII_LOWER_F
+            == Ascii::LowerF
             || c
-            == ASCII_MINUS
+            == Ascii::Minus
             || is_digit(c) {
             i = scalar(in b, inout toks, in t, in s, in escapes, i, depth);
         } else {
@@ -678,12 +653,12 @@ fn document(
                 let object = frame & 1 == 1;
                 let token = frame >> 1;
                 let close: u64 = if object {
-                    ASCII_RBRACE
+                    Ascii::Rbrace
                 } else {
-                    ASCII_RBRACKET
+                    Ascii::Rbracket
                 };
                 let c2 = byte(in b, in t, in s, i);
-                if c2 == ASCII_COMMA {
+                if c2 == Ascii::Comma {
                     entry(in b, in t, in escapes, i);
                     i = wrapping_add(i, 1);
                     if object {

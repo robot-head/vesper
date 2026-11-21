@@ -1,7 +1,7 @@
 // session.rs: the reconciler a Session wraps.
 use self::codes::{
-    max_u64,
-    none_id
+    MAX_U64,
+    NONE_ID
 };
 use self::plan::{
     copy_mounted,
@@ -71,7 +71,7 @@ pub fn do_reconciler_prepare(
         p.fault = Option::Some(ViewFault::Closed);
         return p;
     }
-    if r.revision == max_u64() {
+    if r.revision == MAX_U64 {
         p.fault = Option::Some(ViewFault::IdentityExhausted);
         return p;
     }
@@ -124,7 +124,7 @@ pub fn do_reconciler_adopt(inout r: Reconciler, in p: Prepared) {
 
 pub fn do_reconciler_widget(in r: Reconciler, key: u64) -> Option[u64] {
     let i = mounted_find(in r.m, key);
-    if i == none_id() {
+    if i == NONE_ID {
         Option::None
     } else {
         Option::Some(mnode(in r.m.nodes, i).id)
@@ -133,11 +133,11 @@ pub fn do_reconciler_widget(in r: Reconciler, key: u64) -> Option[u64] {
 
 pub fn do_reconciler_slot(in r: Reconciler, key: u64, property: u64) -> Option[u64] {
     let i = mounted_find(in r.m, key);
-    if i == none_id() {
+    if i == NONE_ID {
         Option::None
     } else {
         let k = mounted_prop(in r.m, mnode(in r.m.nodes, i), property);
-        if k == none_id() {
+        if k == NONE_ID {
             Option::None
         } else {
             Option::Some(mprop(in r.m.props, k).slot)
@@ -147,11 +147,11 @@ pub fn do_reconciler_slot(in r: Reconciler, key: u64, property: u64) -> Option[u
 
 pub fn do_reconciler_subscription(in r: Reconciler, key: u64, event: u64) -> Option[u64] {
     let i = mounted_find(in r.m, key);
-    if i == none_id() {
+    if i == NONE_ID {
         Option::None
     } else {
         let k = mounted_sub(in r.m, mnode(in r.m.nodes, i), event);
-        if k == none_id() {
+        if k == NONE_ID {
             Option::None
         } else {
             Option::Some(msub(in r.m.subs, k).id)
@@ -164,7 +164,7 @@ pub fn do_reconciler_request_close(inout r: Reconciler) -> CloseRequest {
         CloseRequest::AlreadyPending
     } else if r.close == CLOSE_DONE {
         CloseRequest::Closed
-    } else if r.next_close == max_u64() {
+    } else if r.next_close == MAX_U64 {
         CloseRequest::Exhausted
     } else {
         let id = r.next_close;

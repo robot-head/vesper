@@ -4,10 +4,6 @@
 // raise (E0402), so parsers return Result/Option and use wrapping arithmetic.
 
 // ASCII bytes this module compares against (constants are per module).
-const LF: u8 = 10;
-const CR: u8 = 13;
-const SPACE: u8 = 32;
-const COLON: u8 = 58;
 
 use self::syntax::{
     inc,
@@ -26,6 +22,9 @@ use self::syntax::{
     push_token_lower,
     connection_options,
     value_ok
+};
+use self::ascii::{
+    Ascii
 };
 
 copy struct Limits {
@@ -123,22 +122,22 @@ fn empty_head() -> Head {
 // Parse a complete head (ending in CRLF CRLF) exactly like `parse_head`.
 fn parse_head(in h: Slice[u8], limits: Limits) -> Result[Head, Error] {
     let n = h.len();
-    let line_end = find(in h, 0, n, LF);
-    if line_end == 0 || byte(in h, dec(line_end)) != CR {
+    let line_end = find(in h, 0, n, Ascii::Lf);
+    if line_end == 0 || byte(in h, dec(line_end)) != Ascii::Cr {
         return bad(Error::InvalidLineEnding);
     }
     let line_hi = dec(line_end);
-    let m_hi = find(in h, 0, line_hi, SPACE);
+    let m_hi = find(in h, 0, line_hi, Ascii::Space);
     if m_hi >= line_hi {
         return bad(Error::InvalidRequestLine);
     }
     let t_lo = inc(m_hi);
-    let t_hi = find(in h, t_lo, line_hi, SPACE);
+    let t_hi = find(in h, t_lo, line_hi, Ascii::Space);
     if t_hi >= line_hi {
         return bad(Error::InvalidRequestLine);
     }
     let v_lo = inc(t_hi);
-    let v_hi = find(in h, v_lo, line_hi, SPACE);
+    let v_hi = find(in h, v_lo, line_hi, Ascii::Space);
     if m_hi == 0 || !all_token(in h, 0, m_hi) || t_hi == t_lo || v_hi < line_hi {
         return bad(Error::InvalidRequestLine);
     }
@@ -177,18 +176,18 @@ fn parse_head(in h: Slice[u8], limits: Limits) -> Result[Head, Error] {
         if at >= n {
             break;
         }
-        let end = find(in h, at, n, LF);
-        if inc(at) == end && byte(in h, at) == CR {
+        let end = find(in h, at, n, Ascii::Lf);
+        if inc(at) == end && byte(in h, at) == Ascii::Cr {
             break;
         }
         if count == limits.max_headers {
             return bad(Error::HeaderCountLimit);
         }
-        if end >= n || end == at || byte(in h, dec(end)) != CR {
+        if end >= n || end == at || byte(in h, dec(end)) != Ascii::Cr {
             return bad(Error::InvalidLineEnding);
         }
         let hi = dec(end);
-        let colon = find(in h, at, hi, COLON);
+        let colon = find(in h, at, hi, Ascii::Colon);
         if colon >= hi || colon == at || !push_token_lower(inout head.names, in h, at, colon) {
             return bad(Error::InvalidHeader);
         }
@@ -318,7 +317,7 @@ fn incomplete(inout d: DecoderCore, total: u64) -> Step {
 }
 
 fn crlf(in s: Slice[u8]) -> Option[u64] {
-    s.find_either(CR, LF)
+    s.find_either(Ascii::Cr, Ascii::Lf)
 }
 
 fn first_or(in s: Slice[u8], b: u8, none: u64) -> u64 {
@@ -328,8 +327,8 @@ fn first_or(in s: Slice[u8], b: u8, none: u64) -> u64 {
     }
 }
 
-// The first index in `lo..hi` (with `hi <= s.len()`) that holds CR or LF,
-// else `hi`: a scan for CR, then one for LF before it.
+// The first index in `lo..hi` (with `hi <= s.len()`) that holds Ascii::Cr or Ascii::Lf,
+// else `hi`: a scan for Ascii::Cr, then one for Ascii::Lf before it.
 fn line_break(in s: Slice[u8], lo: u64, hi: u64) -> u64 {
     if lo >= hi {
         return hi;
@@ -340,8 +339,8 @@ fn line_break(in s: Slice[u8], lo: u64, hi: u64) -> u64 {
     }
 }
 
-// The incremental CRLF scan, every byte examined once. Outside a CR, the run
-// of bytes that are neither CR nor LF is skipped with `find_byte`, up to the
+// The incremental CRLF scan, every byte examined once. Outside a Ascii::Cr, the run
+// of bytes that are neither Ascii::Cr nor Ascii::Lf is skipped with `find_byte`, up to the
 // end of the current slice or the head limit, whichever is first.
 fn scan_head(inout d: DecoderCore, in front: Slice[u8], in back: Slice[u8]) -> Scan {
     let total = wrapping_add(front.len(), back.len());
@@ -383,7 +382,7 @@ fn scan_head(inout d: DecoderCore, in front: Slice[u8], in back: Slice[u8]) -> S
             let index = d.scan;
             d.scan = inc(d.scan);
             if d.after_cr {
-                if b != LF {
+                if b != Ascii::Lf {
                     return Scan::Fail(Error::InvalidLineEnding);
                 }
                 d.after_cr = false;
@@ -394,9 +393,9 @@ fn scan_head(inout d: DecoderCore, in front: Slice[u8], in back: Slice[u8]) -> S
                     return Scan::Found(d.scan);
                 }
                 d.line_start = d.scan;
-            } else if b == CR {
+            } else if b == Ascii::Cr {
                 d.after_cr = true;
-            } else if b == LF {
+            } else if b == Ascii::Lf {
                 return Scan::Fail(Error::InvalidLineEnding);
             }
         }

@@ -15,6 +15,10 @@ use self::{
     Snap
 };
 use self::util::{
+    Ascii,
+    Code,
+    Order,
+    SortKind,
     add,
     dep,
     diag,
@@ -49,11 +53,21 @@ use self::check::{
     emit_id,
     emit_lit,
     mark,
+    since,
     system_name_valid
 };
 use self::semver::{
     matches
 };
+
+// The solution schema version this validator accepts.
+const SOLUTION_SCHEMA_VERSION: u64 = 1;
+// nfirst words per node: edge at and count, native edge at and count.
+const NODE_SPAN_WORDS: u64 = 4;
+const NODE_NATIVE_AT: u64 = 2;
+const NODE_NATIVE_COUNT: u64 = 3;
+// A native edge is (name, text, requirement).
+const NATIVE_EDGE_WORDS: u64 = 3;
 
 fn setb(inout s: ChunkSeq[bool], i: u64, v: bool) {
     s.try_set(i, v);
@@ -87,7 +101,7 @@ fn emit_mismatch(inout l: L, pkg: u64, subject: u64, in prefix: Str, vi: u64, te
     put_id(inout l, text);
     let so = soff(in l, subject);
     let sl = slen(in l, subject);
-    emit_at(inout l, 12, pkg, so, sl, mo);
+    emit_at(inout l, Code::VersionMismatch, pkg, so, sl, mo);
 }
 
 // Whether the capability's head (the text before the first `[`) is
@@ -97,7 +111,7 @@ fn foreign(in l: L, id: u64) -> bool {
     let n = slen(in l, id);
     let mut h = n;
     for i in 0..n {
-        if gb(in l, add(off, i)) == 91 {
+        if gb(in l, add(off, i)) == Ascii::LBracket {
             h = i;
             break;
         }
@@ -202,8 +216,14 @@ fn dense(inout l: L, caps: bool) -> u64 {
 pub fn solve(inout l: L) {
     let diag_at = l.diags.len();
     let k = l.k;
-    if l.schema != 1 {
-        emit_lit(inout l, 0, none(), "schema_version", "unsupported solution schema version");
+    if l.schema != SOLUTION_SCHEMA_VERSION {
+        emit_lit(
+            inout l,
+            Code::ManifestSyntax,
+            none(),
+            "schema_version",
+            "unsupported solution schema version"
+        );
     }
     fill_word(inout l.pof, k, none());
     fill_word(inout l.sysof, k, none());
@@ -216,7 +236,7 @@ pub fn solve(inout l: L) {
     for i in 0..l.sel_n {
         l.idx.push(add(l.sel_at, i));
     }
-    sort(inout l, 1);
+    sort(inout l, SortKind::Selections);
     l.work.clear();
     for i in 0..l.idx.len() {
         let x = sw(in l.idx, i);
@@ -229,7 +249,7 @@ pub fn solve(inout l: L) {
         if sw(in l.pof, name) != none() {
             emit_id(
                 inout l,
-                7,
+                Code::DuplicatePackage,
                 name,
                 name,
                 "version uniqueness requires one selection per package name"
@@ -255,16 +275,22 @@ pub fn solve(inout l: L) {
     for i in 0..l.ss_n {
         l.idx.push(add(l.ss_at, i));
     }
-    sort(inout l, 2);
+    sort(inout l, SortKind::NativeSelections);
     for j in 0..l.idx.len() {
         let s = ssel(in l, sw(in l.idx, j));
         if !system_name_valid(in l, s.name) {
-            emit_id(inout l, 6, none(), s.name, "invalid native package name");
+            emit_id(
+                inout l,
+                Code::InvalidSystemRequirement,
+                none(),
+                s.name,
+                "invalid native package name"
+            );
         }
         if sw(in l.sysof, s.name) != none() {
             emit_id(
                 inout l,
-                8,
+                Code::DuplicateSystemPackage,
                 none(),
                 s.name,
                 "native version uniqueness requires one selection per name"
@@ -286,7 +312,7 @@ pub fn solve(inout l: L) {
     fill_bool(inout l.reach, np);
     fill_bool(inout l.hasn, np);
     fill_bool(inout l.queued, np);
-    fill_word(inout l.nfirst, mul(np, 4), 0);
+    fill_word(inout l.nfirst, mul(np, NODE_SPAN_WORDS), 0);
     l.ea.clear();
     l.eb.clear();
     l.queue.clear();
@@ -300,13 +326,14 @@ pub fn solve(inout l: L) {
             if !matches(in l, r.req, mv) {
                 let so = mark(in l);
                 put(inout l, "root");
+                let sl = since(in l, so);
                 let mo = mark(in l);
                 let vt = ver(in l, mv).text;
                 put_id(inout l, vt);
                 put(inout l, " does not satisfy ");
                 let rt = req(in l, r.req).text;
                 put_id(inout l, rt);
-                emit_at(inout l, 12, r.name, so, 4, mo);
+                emit_at(inout l, Code::VersionMismatch, r.name, so, sl, mo);
             }
             let base = mul(p, l.nf);
             for j in 0..r.feat_n {
@@ -315,7 +342,13 @@ pub fn solve(inout l: L) {
             }
             l.queue.push(p);
         } else {
-            emit_lit(inout l, 9, r.name, "root", "root inclusion requires a selected package");
+            emit_lit(
+                inout l,
+                Code::MissingRoot,
+                r.name,
+                "root",
+                "root inclusion requires a selected package"
+            );
         }
     }
     // The additive fixed point over features and the active closure.
@@ -374,7 +407,7 @@ fn visit(inout l: L, p: u64) {
                 }
             }
         } else {
-            emit_id(inout l, 4, name, f, "requested feature is not declared");
+            emit_id(inout l, Code::UnknownFeature, name, f, "requested feature is not declared");
         }
     }
     if !first && sbool(in l.hasn, p) {
@@ -457,7 +490,7 @@ fn visit(inout l: L, p: u64) {
             } else {
                 emit_id(
                     inout l,
-                    10,
+                    Code::MissingDependency,
                     name,
                     d.name,
                     "dependency closure requires a selected package"
@@ -478,7 +511,7 @@ fn visit(inout l: L, p: u64) {
     for i in 0..l.se.len() {
         l.idx.push(i);
     }
-    sort(inout l, 6);
+    sort(inout l, SortKind::NativeEdges);
     let s_at = l.eb.len();
     let mut s_n: u64 = 0;
     let mut last = none();
@@ -500,7 +533,7 @@ fn visit(inout l: L, p: u64) {
         }
     }
     for j in 0..s_n {
-        let at = add(s_at, mul(j, 3));
+        let at = add(s_at, mul(j, NATIVE_EDGE_WORDS));
         let sname = sw(in l.eb, at);
         let text = sw(in l.eb, inc(at));
         let r = sw(in l.eb, add(at, 2));
@@ -510,15 +543,21 @@ fn visit(inout l: L, p: u64) {
                 emit_mismatch(inout l, name, sname, "native version ", sv, text);
             }
         } else {
-            emit_id(inout l, 11, name, sname, "active feature requires a native package selection");
+            emit_id(
+                inout l,
+                Code::MissingSystemPackage,
+                name,
+                sname,
+                "active feature requires a native package selection"
+            );
         }
     }
     setb(inout l.hasn, p, true);
-    let nb = mul(p, 4);
+    let nb = mul(p, NODE_SPAN_WORDS);
     setw(inout l.nfirst, nb, e_at);
     setw(inout l.nfirst, inc(nb), e_n);
-    setw(inout l.nfirst, add(nb, 2), s_at);
-    setw(inout l.nfirst, add(nb, 3), s_n);
+    setw(inout l.nfirst, add(nb, NODE_NATIVE_AT), s_at);
+    setw(inout l.nfirst, add(nb, NODE_NATIVE_COUNT), s_n);
 }
 
 // The node of the active edge ea[e], or none().
@@ -539,7 +578,7 @@ fn propagate(inout l: L) {
     fill_word(inout l.pcount, np, 0);
     for p in 0..np {
         if sbool(in l.hasn, p) {
-            let nb = mul(p, 4);
+            let nb = mul(p, NODE_SPAN_WORDS);
             let at = sw(in l.nfirst, nb);
             let n = sw(in l.nfirst, inc(nb));
             for e in 0..n {
@@ -565,7 +604,7 @@ fn propagate(inout l: L) {
     }
     for p in 0..np {
         if sbool(in l.hasn, p) {
-            let nb = mul(p, 4);
+            let nb = mul(p, NODE_SPAN_WORDS);
             let at = sw(in l.nfirst, nb);
             let n = sw(in l.nfirst, inc(nb));
             for e in 0..n {
@@ -647,13 +686,20 @@ fn check_node(inout l: L, p: u64) {
         }
         let so = mark(in l);
         put(inout l, "package.capability_ceiling");
-        emit_excess(inout l, 13, name, so, 26, "required capabilities exceed package ceiling: ");
+        emit_excess(
+            inout l,
+            Code::CapabilityEscalation,
+            name,
+            so,
+            since(in l, so),
+            "required capabilities exceed package ceiling: "
+        );
         if m.forbid {
             for c in 0..nc {
                 if sbool(in l.rrow, add(base, c)) && foreign(in l, sw(in l.clist, c)) {
                     emit_lit(
                         inout l,
-                        15,
+                        Code::UnsafeFfiForbidden,
                         name,
                         "package.forbid_unsafe_ffi",
                         "reachable package requires foreign authority"
@@ -662,7 +708,7 @@ fn check_node(inout l: L, p: u64) {
                 }
             }
         }
-        let nb = mul(p, 4);
+        let nb = mul(p, NODE_SPAN_WORDS);
         let at = sw(in l.nfirst, nb);
         let n = sw(in l.nfirst, inc(nb));
         for e in 0..n {
@@ -701,7 +747,7 @@ fn check_edge(inout l: L, name: u64, e: u64) {
             let dsl = slen(in l, d.name);
             emit_excess(
                 inout l,
-                14,
+                Code::EdgeCapabilityEscalation,
                 name,
                 dso,
                 dsl,
@@ -723,12 +769,12 @@ pub fn sort_diags(inout l: L, diag_at: u64) -> u64 {
     for i in diag_at..l.diags.len() {
         l.idx.push(i);
     }
-    sort(inout l, 3);
+    sort(inout l, SortKind::Diagnostics);
     l.dtmp.clear();
     let mut last = none();
     for j in 0..l.idx.len() {
         let x = sw(in l.idx, j);
-        let dup = last != none() && diag_ord(in l, in l.diags, last, x) == 1;
+        let dup = last != none() && diag_ord(in l, in l.diags, last, x) == Order::Equal;
         if !dup {
             last = x;
             let d = diag(in l.diags, x);
@@ -775,11 +821,11 @@ fn commit_node(inout l: L, p: u64) {
             }
         }
         let feat_n = wrapping_sub(l.gids.len(), feat_at);
-        let nb = mul(p, 4);
+        let nb = mul(p, NODE_SPAN_WORDS);
         let at = sw(in l.nfirst, nb);
         let n = sw(in l.nfirst, inc(nb));
-        let s_at = sw(in l.nfirst, add(nb, 2));
-        let s_n = sw(in l.nfirst, add(nb, 3));
+        let s_at = sw(in l.nfirst, add(nb, NODE_NATIVE_AT));
+        let s_n = sw(in l.nfirst, add(nb, NODE_NATIVE_COUNT));
         let e_at = l.ge.len();
         for e in 0..n {
             let x = sw(in l.ea, add(at, e));
@@ -787,7 +833,7 @@ fn commit_node(inout l: L, p: u64) {
         }
         let gs_at = l.gs.len();
         for j in 0..s_n {
-            let b = add(s_at, mul(j, 3));
+            let b = add(s_at, mul(j, NATIVE_EDGE_WORDS));
             let sname = sw(in l.eb, b);
             let text = sw(in l.eb, inc(b));
             let r = sw(in l.eb, add(b, 2));

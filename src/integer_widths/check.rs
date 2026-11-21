@@ -224,3 +224,43 @@ impl Checker<'_> {
         t
     }
 }
+
+/// Exact facts of `u128` over its whole range (SH3 lane 6, #1245). A fact is
+/// an `i128`; a `u128` fact is its value's bit pattern, so a value above
+/// `i128::MAX` reads as negative. These helpers apply each kind's checked
+/// rules to facts: patterns for `u128`, exact values for the other kinds.
+pub(super) fn fact_checked(
+    kind: IntegerKind,
+    op: &str,
+    a: i128,
+    b: i128,
+) -> Result<i128, crate::numeric::ArithFailure> {
+    if kind == IntegerKind::U128 {
+        crate::numeric::wide::checked(kind, op, a as u128, b as u128).map(|n| n as i128)
+    } else {
+        kind.checked(op, a, b)
+    }
+}
+/// Checked negation of a fact (only `-0` for `u128`).
+pub(super) fn fact_neg(kind: IntegerKind, a: i128) -> Option<i128> {
+    if kind == IntegerKind::U128 {
+        (a == 0).then_some(0)
+    } else {
+        kind.checked_neg(a)
+    }
+}
+/// Whether `n` is a fact of `kind`: every pattern is a `u128` value.
+pub(super) fn fact_fits(kind: IntegerKind, n: i128) -> bool {
+    kind == IntegerKind::U128 || kind.fits(n)
+}
+impl Checker<'_> {
+    /// Whether `e` is typed `u128` (by its recorded type, or a name's
+    /// binding).
+    pub(super) fn u128_expr(&self, e: &Expr, env: &Env) -> bool {
+        let named = |t: &Type| IntegerKind::from_type(t) == Some(IntegerKind::U128);
+        self.types
+            .get(&(e.span.start, e.span.end))
+            .is_some_and(named)
+            || matches!(&e.kind, ExprKind::Name(n) if env.bindings.get(n).is_some_and(|b| named(&b.ty)))
+    }
+}

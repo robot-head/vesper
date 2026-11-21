@@ -29,6 +29,9 @@ use self::closure::{
     assigned
 };
 use self::diag::{
+    Metric,
+    Objective,
+    SolverSort,
     msort,
     sat,
     setw
@@ -85,7 +88,7 @@ fn metrics_core(inout s: S, root: u64) {
     for i in 0..s.pa.len() {
         s.idx.push(i);
     }
-    msort(inout s, 5);
+    msort(inout s, SolverSort::Pairs);
     let mut dup: u64 = 0;
     for j in 1..s.idx.len() {
         let a = sw(in s.idx, wrapping_sub(j, 1));
@@ -121,24 +124,24 @@ pub fn metrics_of_current(inout s: S) {
 // `score_key`: two words per objective into key.
 pub fn score_key(inout s: S) {
     s.key.clear();
-    let cves = sw(in s.met, 0);
-    let surface = sw(in s.met, 1);
-    let dup = sw(in s.met, 2);
-    let stale = sw(in s.met, 3);
-    let trust = sw(in s.met, 4);
-    let unknown = sw(in s.met, 5);
+    let cves = sw(in s.met, Metric::Cves);
+    let surface = sw(in s.met, Metric::CapabilitySurface);
+    let dup = sw(in s.met, Metric::DupMajors);
+    let stale = sw(in s.met, Metric::Staleness);
+    let trust = sw(in s.met, Metric::TrustCost);
+    let unknown = sw(in s.met, Metric::UnknownMetadata);
     for i in 0..s.objs.len() {
         let o = sw(in s.objs, i);
-        if o == 0 {
+        if o == Objective::ZeroCve {
             s.key.push(unknown);
             s.key.push(cves);
-        } else if o == 1 {
+        } else if o == Objective::MinCapabilitySurface {
             s.key.push(0);
             s.key.push(surface);
-        } else if o == 2 {
+        } else if o == Objective::MinDupMajors {
             s.key.push(0);
             s.key.push(dup);
-        } else if o == 3 {
+        } else if o == Objective::MinStaleness {
             s.key.push(unknown);
             s.key.push(stale);
         } else {
