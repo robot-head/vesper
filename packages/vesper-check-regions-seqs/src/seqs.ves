@@ -1,0 +1,1011 @@
+// The type and world rules of src/seq.rs and src/strings.rs: sequence,
+// slice and text types, `holds_sequence`, the operation a call names
+// (`seq::resolve`, `strings::resolve`) with its properties, and the
+// second-class `Slice[T]` rule of `seq::check_world` (E1520). The checker
+// methods of src/seq/check.rs and src/strings/check.rs walk the AST: a
+// later PR of #1181.
+//
+// An operation is a `u32` code: `SeqOp` variants 1-41 (0 = none), `Wide`
+// accesses 64 + `Wide::index`, `StrOp` variants 100 + their order.
+
+use @vesper/check-data::util::{
+    add,
+    n32,
+    u32_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    display
+};
+use @vesper/check-data::world::{
+    Known,
+    World
+};
+use @vesper/check-data::diag::{
+    Diags
+};
+
+const NONE32: u32 = 4294967295;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const P_IN: u8 = 0;
+const P_INOUT: u8 = 1;
+
+const OP_NEW: u32 = 1;
+const OP_WITH_CAPACITY: u32 = 2;
+const OP_LEN: u32 = 3;
+const OP_PUSH: u32 = 4;
+const OP_POP: u32 = 5;
+const OP_GET: u32 = 6;
+const OP_SET: u32 = 7;
+const OP_TRY_GET: u32 = 8;
+const OP_TRY_SET: u32 = 9;
+const OP_CLEAR: u32 = 10;
+const OP_TRUNCATE: u32 = 11;
+const OP_RESERVE: u32 = 12;
+const OP_EXTEND: u32 = 13;
+const OP_FINISH: u32 = 14;
+const OP_AS_SLICE: u32 = 15;
+const OP_SLICE_LEN: u32 = 16;
+const OP_SLICE_GET: u32 = 17;
+const OP_SLICE_SET: u32 = 18;
+const OP_COPY_FROM: u32 = 19;
+const OP_TRY_COPY_FROM: u32 = 20;
+const OP_FILL: u32 = 21;
+const OP_SUM_BE16: u32 = 22;
+const OP_BYTES_EQ: u32 = 23;
+const OP_BYTES_CMP: u32 = 24;
+const OP_FIND_BYTE: u32 = 25;
+const OP_COPY_WITHIN: u32 = 26;
+const OP_TRY_COPY_WITHIN: u32 = 27;
+const OP_SWAP: u32 = 28;
+const OP_REPLACE: u32 = 29;
+const OP_FIND_EITHER: u32 = 30;
+const OP_FIND_NOT_IN: u32 = 31;
+const OP_EQ_IGNORE_ASCII_CASE: u32 = 32;
+const OP_EXTEND_ASCII_LOWERCASE: u32 = 33;
+const OP_MAKE_ASCII_LOWERCASE: u32 = 34;
+const OP_TRY_MAKE_ASCII_LOWERCASE: u32 = 35;
+const OP_RESIZE: u32 = 36;
+const OP_TRY_FILL: u32 = 37;
+const OP_EXTEND_FROM_WITHIN: u32 = 38;
+const OP_TRY_EXTEND_FROM_WITHIN: u32 = 39;
+const OP_EXTEND_REVERSED: u32 = 40;
+const OP_FILL_RANGE: u32 = 41;
+const OP_WIDE: u32 = 64;
+const OP_STR: u32 = 100;
+
+// Method and callee names, interned once in a fixed order (`name_at`).
+// 0-18 sequence methods, 19-33 shared block methods, 34-39 string
+// methods, 40-44 free callees, 45-68 the `Wide` accesses in
+// `WIDE_NAMES` order, 69 `try_get_mut` (an alias of `try_get`).
+pub struct SeqNames {
+    syms: ChunkSeq[u32],
+}
+
+fn intern(inout names: Names, inout s: ChunkSeq[u32], in text: Str) {
+    let x = names.intern(in text.as_bytes());
+    s.push(x);
+}
+
+pub fn seq_names_new(inout n: Names) -> SeqNames {
+    let mut s: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    intern(inout n, inout s, "len");
+    intern(inout n, inout s, "push");
+    intern(inout n, inout s, "pop");
+    intern(inout n, inout s, "get");
+    intern(inout n, inout s, "set");
+    intern(inout n, inout s, "try_get");
+    intern(inout n, inout s, "try_set");
+    intern(inout n, inout s, "clear");
+    intern(inout n, inout s, "truncate");
+    intern(inout n, inout s, "reserve");
+    intern(inout n, inout s, "extend");
+    intern(inout n, inout s, "extend_from_slice");
+    intern(inout n, inout s, "extend_ascii_lowercase");
+    intern(inout n, inout s, "resize");
+    intern(inout n, inout s, "extend_from_within");
+    intern(inout n, inout s, "try_extend_from_within");
+    intern(inout n, inout s, "extend_reversed");
+    intern(inout n, inout s, "as_slice");
+    intern(inout n, inout s, "as_slice_mut");
+    intern(inout n, inout s, "copy_from");
+    intern(inout n, inout s, "try_copy_from");
+    intern(inout n, inout s, "copy_within");
+    intern(inout n, inout s, "try_copy_within");
+    intern(inout n, inout s, "fill");
+    intern(inout n, inout s, "try_fill");
+    intern(inout n, inout s, "sum_be16");
+    intern(inout n, inout s, "eq");
+    intern(inout n, inout s, "cmp");
+    intern(inout n, inout s, "find_byte");
+    intern(inout n, inout s, "find_either");
+    intern(inout n, inout s, "find_not_in");
+    intern(inout n, inout s, "eq_ignore_ascii_case");
+    intern(inout n, inout s, "make_ascii_lowercase");
+    intern(inout n, inout s, "try_make_ascii_lowercase");
+    intern(inout n, inout s, "byte_at");
+    intern(inout n, inout s, "try_byte_at");
+    intern(inout n, inout s, "as_str");
+    intern(inout n, inout s, "as_bytes");
+    intern(inout n, inout s, "push_str");
+    intern(inout n, inout s, "push_char");
+    intern(inout n, inout s, "swap");
+    intern(inout n, inout s, "replace");
+    intern(inout n, inout s, "ChunkSeq::new");
+    intern(inout n, inout s, "ChunkSeq::with_capacity");
+    intern(inout n, inout s, "ChunkSeq::finish");
+    intern(inout n, inout s, "read_u16_le");
+    intern(inout n, inout s, "read_u16_be");
+    intern(inout n, inout s, "read_u32_le");
+    intern(inout n, inout s, "read_u32_be");
+    intern(inout n, inout s, "read_u64_le");
+    intern(inout n, inout s, "read_u64_be");
+    intern(inout n, inout s, "write_u16_le");
+    intern(inout n, inout s, "write_u16_be");
+    intern(inout n, inout s, "write_u32_le");
+    intern(inout n, inout s, "write_u32_be");
+    intern(inout n, inout s, "write_u64_le");
+    intern(inout n, inout s, "write_u64_be");
+    intern(inout n, inout s, "try_read_u16_le");
+    intern(inout n, inout s, "try_read_u16_be");
+    intern(inout n, inout s, "try_read_u32_le");
+    intern(inout n, inout s, "try_read_u32_be");
+    intern(inout n, inout s, "try_read_u64_le");
+    intern(inout n, inout s, "try_read_u64_be");
+    intern(inout n, inout s, "try_write_u16_le");
+    intern(inout n, inout s, "try_write_u16_be");
+    intern(inout n, inout s, "try_write_u32_le");
+    intern(inout n, inout s, "try_write_u32_be");
+    intern(inout n, inout s, "try_write_u64_le");
+    intern(inout n, inout s, "try_write_u64_be");
+    intern(inout n, inout s, "try_get_mut");
+    SeqNames {
+        syms: s
+    }
+}
+
+impl SeqNames {
+    // The position of symbol `s` in the table, or NONE32.
+    pub fn index(in self, s: u32) -> u32 {
+        for i in 0..self.syms.len() {
+            if u32_at(in self.syms, i) == s {
+                return n32(i);
+            }
+        }
+        NONE32
+    }
+
+    pub fn name_at(in self, i: u32) -> u32 {
+        u32_at(in self.syms, w(i))
+    }
+}
+
+// ----- types ------------------------------------------------------------------
+
+pub fn is_seq_type(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == k.chunk_seq && n.n == 1
+}
+
+pub fn is_slice_type(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == k.slice && n.n == 1
+}
+
+pub fn is_seq_or_slice(in t: Types, k: Known, ty: u32) -> bool {
+    is_seq_type(in t, k, ty) || is_slice_type(in t, k, ty)
+}
+
+// `seq::elem`: the element type, or NONE32.
+pub fn elem(in t: Types, k: Known, ty: u32) -> u32 {
+    if is_seq_or_slice(in t, k, ty) {
+        t.arg(ty, 0)
+    } else {
+        NONE32
+    }
+}
+
+pub fn mentions_slice(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_NAMED && n.name == k.slice {
+        return true;
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+        for i in 0..w(n.n) {
+            if mentions_slice(in t, k, u32_at(in t.items, add(w(n.a), i))) {
+                return true;
+            }
+        }
+    }
+    n.kind == K_FN && mentions_slice(in t, k, n.r)
+}
+
+pub fn is_string_type(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == k.string && n.n == 0
+}
+
+pub fn is_str_type(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == k.str_ && n.n == 0
+}
+
+pub fn is_text(in t: Types, k: Known, ty: u32) -> bool {
+    is_string_type(in t, k, ty) || is_str_type(in t, k, ty)
+}
+
+pub fn mentions_str(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_NAMED && n.name == k.str_ {
+        return true;
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+        for i in 0..w(n.n) {
+            if mentions_str(in t, k, u32_at(in t.items, add(w(n.a), i))) {
+                return true;
+            }
+        }
+    }
+    n.kind == K_FN && mentions_str(in t, k, n.r)
+}
+
+// `arrays::element`: the element type of a non-empty tuple of one type
+// (its length is the tuple's arity), or NONE32.
+pub fn array_element(in t: Types, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind != K_TUPLE || n.n == 0 {
+        return NONE32;
+    }
+    let first = t.arg(ty, 0);
+    for i in 1..w(n.n) {
+        if t.arg(ty, i) != first {
+            return NONE32;
+        }
+    }
+    first
+}
+
+fn on_stack(in seen: ChunkSeq[u32], s: u32) -> bool {
+    for i in 0..seen.len() {
+        if u32_at(in seen, i) == s {
+            return true;
+        }
+    }
+    false
+}
+
+fn holds_visit(in t: Types, in wd: World, k: Known, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
+    if is_seq_or_slice(in t, k, ty) {
+        return true;
+    }
+    let n = t.node(ty);
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if holds_visit(in t, in wd, k, t.arg(ty, i), inout seen) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind != K_NAMED {
+        return false;
+    }
+    for i in 0..w(n.n) {
+        if holds_visit(in t, in wd, k, t.arg(ty, i), inout seen) {
+            return true;
+        }
+    }
+    let id = wd.lookup(n.name);
+    if id == NONE32 {
+        return false;
+    }
+    if on_stack(in seen, n.name) {
+        return false;
+    }
+    seen.push(n.name);
+    let a = wd.adt(id);
+    let mut found = false;
+    for v in 0..w(a.vn) {
+        let var = wd.variant(add(w(a.va), v));
+        for f in 0..w(var.fc) {
+            let fd = wd.field(add(w(var.fa), f));
+            if !found && holds_visit(in t, in wd, k, fd.ty, inout seen) {
+                found = true;
+            }
+        }
+    }
+    let popped = seen.pop();
+    found
+}
+
+// `seq::holds_sequence`.
+pub fn holds_sequence(in t: Types, in wd: World, k: Known, ty: u32) -> bool {
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    holds_visit(in t, in wd, k, ty, inout seen)
+}
+
+// ----- resolve -----------------------------------------------------------------
+
+fn shared_method(i: u32) -> u32 {
+    if i >= 45 && i < 69 {
+        return wrapping_add(OP_WIDE, wrapping_sub(i, 45));
+    }
+    match i {
+        19 => OP_COPY_FROM,
+        20 => OP_TRY_COPY_FROM,
+        21 => OP_COPY_WITHIN,
+        22 => OP_TRY_COPY_WITHIN,
+        23 => OP_FILL,
+        24 => OP_TRY_FILL,
+        25 => OP_SUM_BE16,
+        26 => OP_BYTES_EQ,
+        27 => OP_BYTES_CMP,
+        28 => OP_FIND_BYTE,
+        29 => OP_FIND_EITHER,
+        30 => OP_FIND_NOT_IN,
+        31 => OP_EQ_IGNORE_ASCII_CASE,
+        32 => OP_MAKE_ASCII_LOWERCASE,
+        33 => OP_TRY_MAKE_ASCII_LOWERCASE,
+        _ => 0,
+    }
+}
+
+fn seq_method(i: u32) -> u32 {
+    match i {
+        0 => OP_LEN,
+        1 => OP_PUSH,
+        2 => OP_POP,
+        3 => OP_GET,
+        4 => OP_SET,
+        5 | 69 => OP_TRY_GET,
+        6 => OP_TRY_SET,
+        7 => OP_CLEAR,
+        8 => OP_TRUNCATE,
+        9 => OP_RESERVE,
+        10 => OP_EXTEND,
+        11 => OP_EXTEND,
+        12 => OP_EXTEND_ASCII_LOWERCASE,
+        13 => OP_RESIZE,
+        14 => OP_EXTEND_FROM_WITHIN,
+        15 => OP_TRY_EXTEND_FROM_WITHIN,
+        16 => OP_EXTEND_REVERSED,
+        17 => OP_AS_SLICE,
+        18 => OP_AS_SLICE,
+        _ => shared_method(i),
+    }
+}
+
+fn slice_method(i: u32) -> u32 {
+    match i {
+        0 => OP_SLICE_LEN,
+        3 => OP_SLICE_GET,
+        4 => OP_SLICE_SET,
+        5 | 69 => OP_TRY_GET,
+        6 => OP_TRY_SET,
+        _ => shared_method(i),
+    }
+}
+
+// `strings::resolve` as a code (100 + `StrOp`), or 0.
+pub fn str_resolve(in t: Types, k: Known, i: u32, receiver: u32) -> u32 {
+    let op: u32 = match i {
+        0 => 0,
+        34 => 1,
+        35 => 2,
+        36 => 3,
+        37 => 4,
+        38 => 6,
+        39 => 7,
+        7 => 8,
+        9 => 9,
+        _ => 99,
+    };
+    if op == 99 {
+        return 0;
+    }
+    let code = wrapping_add(OP_STR, op);
+    if is_string_type(in t, k, receiver) || (is_str_type(in t, k, receiver) && !mutates(code)) {
+        code
+    } else {
+        0
+    }
+}
+
+// The symbol of the last `::` segment of `s` (all of it without one).
+fn last_segment(inout names: Names, s: u32) -> u32 {
+    let a = names.start(s);
+    let b = names.end(s);
+    let mut cut = a;
+    let mut i = a;
+    loop {
+        if wrapping_add(i, 1) >= b {
+            break;
+        }
+        if u8_at(in names.text, i) == 58 && u8_at(in names.text, wrapping_add(i, 1)) == 58 {
+            cut = wrapping_add(i, 2);
+        }
+        i = wrapping_add(i, 1);
+    }
+    if cut == a {
+        return s;
+    }
+    let mut seg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for j in cut..b {
+        seg.push(u8_at(in names.text, j));
+    }
+    names.intern(in seg.as_slice())
+}
+
+// `seq::resolve(callee, receiver)`; `receiver` is NONE32 for a free call.
+pub fn resolve(
+    inout names: Names,
+    in sn: SeqNames,
+    in t: Types,
+    k: Known,
+    callee: u32,
+    receiver: u32
+) -> u32 {
+    if receiver != NONE32 {
+        let method = last_segment(inout names, callee);
+        let i = sn.index(method);
+        if is_text(in t, k, receiver) {
+            return str_resolve(in t, k, i, receiver);
+        }
+        if is_seq_type(in t, k, receiver) {
+            return seq_method(i);
+        }
+        if is_slice_type(in t, k, receiver) {
+            return slice_method(i);
+        }
+        return 0;
+    }
+    match sn.index(callee) {
+        40 => OP_SWAP,
+        41 => OP_REPLACE,
+        42 => OP_NEW,
+        43 => OP_WITH_CAPACITY,
+        44 => OP_FINISH,
+        _ => 0,
+    }
+}
+
+// ----- properties ---------------------------------------------------------------
+
+fn is_wide(op: u32) -> bool {
+    op >= OP_WIDE && op < wrapping_add(OP_WIDE, 24)
+}
+
+fn wide_index(op: u32) -> u32 {
+    wrapping_sub(op, OP_WIDE)
+}
+
+fn is_str(op: u32) -> bool {
+    op >= OP_STR
+}
+
+pub fn byte_scan(op: u32) -> bool {
+    op
+        == OP_SUM_BE16
+        || op
+        == OP_BYTES_EQ
+        || op
+        == OP_BYTES_CMP
+        || op
+        == OP_FIND_BYTE
+        || op
+        == OP_FIND_EITHER
+        || op
+        == OP_FIND_NOT_IN
+        || op
+        == OP_EQ_IGNORE_ASCII_CASE
+        || op
+        == OP_EXTEND_ASCII_LOWERCASE
+        || op
+        == OP_MAKE_ASCII_LOWERCASE
+        || op
+        == OP_TRY_MAKE_ASCII_LOWERCASE
+}
+
+pub fn fallible(op: u32) -> bool {
+    if is_str(op) {
+        return op == wrapping_add(OP_STR, 1);
+    }
+    if is_wide(op) {
+        return wide_index(op) < 12;
+    }
+    op
+        == OP_GET
+        || op
+        == OP_SET
+        || op
+        == OP_FINISH
+        || op
+        == OP_SLICE_GET
+        || op
+        == OP_SLICE_SET
+        || op
+        == OP_COPY_FROM
+        || op
+        == OP_COPY_WITHIN
+        || op
+        == OP_MAKE_ASCII_LOWERCASE
+        || op
+        == OP_FILL_RANGE
+        || op
+        == OP_EXTEND_FROM_WITHIN
+}
+
+pub fn mutates(op: u32) -> bool {
+    if is_str(op) {
+        return op >= wrapping_add(OP_STR, 6);
+    }
+    if is_wide(op) {
+        return (wide_index(op) / 6) % 2 == 1;
+    }
+    op
+        == OP_PUSH
+        || op
+        == OP_POP
+        || op
+        == OP_SET
+        || op
+        == OP_TRY_SET
+        || op
+        == OP_CLEAR
+        || op
+        == OP_TRUNCATE
+        || op
+        == OP_RESERVE
+        || op
+        == OP_EXTEND
+        || op
+        == OP_EXTEND_ASCII_LOWERCASE
+        || op
+        == OP_MAKE_ASCII_LOWERCASE
+        || op
+        == OP_TRY_MAKE_ASCII_LOWERCASE
+        || op
+        == OP_COPY_FROM
+        || op
+        == OP_TRY_COPY_FROM
+        || op
+        == OP_COPY_WITHIN
+        || op
+        == OP_TRY_COPY_WITHIN
+        || op
+        == OP_FILL
+        || op
+        == OP_RESIZE
+        || op
+        == OP_TRY_FILL
+        || op
+        == OP_FILL_RANGE
+        || op
+        == OP_EXTEND_FROM_WITHIN
+        || op
+        == OP_TRY_EXTEND_FROM_WITHIN
+        || op
+        == OP_EXTEND_REVERSED
+}
+
+pub fn place_primitive(op: u32) -> bool {
+    op == OP_SWAP || op == OP_REPLACE
+}
+
+pub fn receiver_pass(op: u32) -> u8 {
+    if mutates(op) || op == OP_SLICE_SET {
+        P_INOUT
+    } else {
+        P_IN
+    }
+}
+
+pub fn has_receiver(op: u32) -> bool {
+    !(op == OP_NEW || op == OP_WITH_CAPACITY || op == OP_SWAP || op == OP_REPLACE)
+}
+
+// Whether `seq::fip_allocation` reports the operation (it grows a sequence).
+pub fn grows(op: u32) -> bool {
+    op
+        == OP_NEW
+        || op
+        == OP_WITH_CAPACITY
+        || op
+        == OP_PUSH
+        || op
+        == OP_EXTEND
+        || op
+        == OP_EXTEND_ASCII_LOWERCASE
+        || op
+        == OP_RESIZE
+        || op
+        == OP_EXTEND_FROM_WITHIN
+        || op
+        == OP_TRY_EXTEND_FROM_WITHIN
+        || op
+        == OP_EXTEND_REVERSED
+        || op
+        == wrapping_add(OP_STR, 6)
+        || op
+        == wrapping_add(OP_STR, 7)
+        || op
+        == wrapping_add(OP_STR, 9)
+}
+
+// `SeqOp::with_arity`.
+pub fn with_arity(op: u32, operands: u64) -> u32 {
+    if op == OP_FILL && operands == 3 {
+        OP_FILL_RANGE
+    } else {
+        op
+    }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_bool(inout o: ChunkSeq[u8], b: bool) {
+    if b {
+        put(inout o, "true");
+    } else {
+        put(inout o, "false");
+    }
+}
+
+// `SeqOp::name`.
+pub fn op_name(in names: Names, in sn: SeqNames, op: u32, inout o: ChunkSeq[u8]) {
+    if is_wide(op) {
+        names.write(sn.name_at(wrapping_add(45, wide_index(op))), inout o);
+        return;
+    }
+    match op {
+        1 => put(inout o, "new"),
+        2 => put(inout o, "with_capacity"),
+        3 => put(inout o, "len"),
+        16 => put(inout o, "len"),
+        4 => put(inout o, "push"),
+        5 => put(inout o, "pop"),
+        6 => put(inout o, "get"),
+        17 => put(inout o, "get"),
+        7 => put(inout o, "set"),
+        18 => put(inout o, "set"),
+        8 => put(inout o, "try_get"),
+        9 => put(inout o, "try_set"),
+        10 => put(inout o, "clear"),
+        11 => put(inout o, "truncate"),
+        12 => put(inout o, "reserve"),
+        13 => put(inout o, "extend"),
+        14 => put(inout o, "finish"),
+        15 => put(inout o, "as_slice"),
+        19 => put(inout o, "copy_from"),
+        20 => put(inout o, "try_copy_from"),
+        21 => put(inout o, "fill"),
+        22 => put(inout o, "sum_be16"),
+        23 => put(inout o, "eq"),
+        24 => put(inout o, "cmp"),
+        25 => put(inout o, "find_byte"),
+        26 => put(inout o, "copy_within"),
+        27 => put(inout o, "try_copy_within"),
+        28 => put(inout o, "swap"),
+        29 => put(inout o, "replace"),
+        30 => put(inout o, "find_either"),
+        31 => put(inout o, "find_not_in"),
+        32 => put(inout o, "eq_ignore_ascii_case"),
+        33 => put(inout o, "extend_ascii_lowercase"),
+        34 => put(inout o, "make_ascii_lowercase"),
+        35 => put(inout o, "try_make_ascii_lowercase"),
+        36 => put(inout o, "resize"),
+        37 => put(inout o, "try_fill"),
+        38 => put(inout o, "extend_from_within"),
+        39 => put(inout o, "try_extend_from_within"),
+        40 => put(inout o, "extend_reversed"),
+        41 => put(inout o, "fill"),
+        100 => put(inout o, "len"),
+        101 => put(inout o, "byte_at"),
+        102 => put(inout o, "try_byte_at"),
+        103 => put(inout o, "as_str"),
+        104 => put(inout o, "as_bytes"),
+        105 => put(inout o, "slice"),
+        106 => put(inout o, "push_str"),
+        107 => put(inout o, "push_char"),
+        108 => put(inout o, "clear"),
+        109 => put(inout o, "reserve"),
+        _ => put(inout o, "?"),
+    }
+}
+
+fn total(inout o: ChunkSeq[u8], in name: Str, t: bool) {
+    put(inout o, name);
+    put(inout o, " { total: ");
+    put_bool(inout o, t);
+    put(inout o, " }");
+}
+
+// `{:?}` of the `SeqOp`.
+pub fn op_debug(op: u32, inout o: ChunkSeq[u8]) {
+    if is_wide(op) {
+        let i = wide_index(op);
+        let bytes: u64 = match (i / 2) % 3 {
+            0 => 2,
+            1 => 4,
+            _ => 8,
+        };
+        put(inout o, "Wide(Wide { bytes: ");
+        o.push(wrapping_u8(wrapping_add(bytes, 48)));
+        put(inout o, ", big: ");
+        put_bool(inout o, i % 2 == 1);
+        put(inout o, ", write: ");
+        put_bool(inout o, (i / 6) % 2 == 1);
+        put(inout o, ", total: ");
+        put_bool(inout o, i >= 12);
+        put(inout o, " })");
+        return;
+    }
+    if is_str(op) {
+        put(inout o, "Str(");
+        match wrapping_sub(op, OP_STR) {
+            0 => put(inout o, "Len"),
+            1 => put(inout o, "ByteAt"),
+            2 => put(inout o, "TryByteAt"),
+            3 => put(inout o, "AsStr"),
+            4 => put(inout o, "AsBytes"),
+            5 => put(inout o, "SubStr"),
+            6 => put(inout o, "PushStr"),
+            7 => put(inout o, "PushChar"),
+            8 => put(inout o, "Clear"),
+            _ => put(inout o, "Reserve"),
+        }
+        o.push(41);
+        return;
+    }
+    match op {
+        1 => put(inout o, "New"),
+        2 => put(inout o, "WithCapacity"),
+        3 => put(inout o, "Len"),
+        4 => put(inout o, "Push"),
+        5 => put(inout o, "Pop"),
+        6 => put(inout o, "Get"),
+        7 => put(inout o, "Set"),
+        8 => put(inout o, "TryGet"),
+        9 => put(inout o, "TrySet"),
+        10 => put(inout o, "Clear"),
+        11 => put(inout o, "Truncate"),
+        12 => put(inout o, "Reserve"),
+        13 => put(inout o, "Extend"),
+        14 => put(inout o, "Finish"),
+        15 => put(inout o, "AsSlice"),
+        16 => put(inout o, "SliceLen"),
+        17 => put(inout o, "SliceGet"),
+        18 => put(inout o, "SliceSet"),
+        19 => total(inout o, "CopyFrom", false),
+        20 => total(inout o, "CopyFrom", true),
+        21 => put(inout o, "Fill"),
+        22 => put(inout o, "SumBe16"),
+        23 => put(inout o, "BytesEq"),
+        24 => put(inout o, "BytesCmp"),
+        25 => put(inout o, "FindByte"),
+        26 => total(inout o, "CopyWithin", false),
+        27 => total(inout o, "CopyWithin", true),
+        28 => put(inout o, "Swap"),
+        29 => put(inout o, "Replace"),
+        30 => put(inout o, "FindEither"),
+        31 => put(inout o, "FindNotIn"),
+        32 => put(inout o, "EqIgnoreAsciiCase"),
+        33 => put(inout o, "ExtendAsciiLowercase"),
+        34 => total(inout o, "MakeAsciiLowercase", false),
+        35 => total(inout o, "MakeAsciiLowercase", true),
+        36 => put(inout o, "Resize"),
+        37 => total(inout o, "FillRange", true),
+        38 => total(inout o, "ExtendFromWithin", false),
+        39 => total(inout o, "ExtendFromWithin", true),
+        40 => put(inout o, "ExtendReversed"),
+        41 => total(inout o, "FillRange", false),
+        _ => put(inout o, "?"),
+    }
+}
+
+// ----- seq::check_world ------------------------------------------------------------
+
+// A function signature (`world.functions`, in name order): the lane 9
+// section of the harness input (`read_sigs` in lib.ves).
+pub copy struct Sig {
+    name: u32,
+    start: u64,
+    stop: u64,
+    result: u32,
+    // params[pa..pa+pn]
+    pa: u32,
+    pn: u32,
+}
+
+pub copy struct Param {
+    name: u32,
+    pass: u8,
+    ty: u32,
+    start: u64,
+    stop: u64,
+}
+
+pub struct Sigs {
+    sigs: ChunkSeq[Sig],
+    params: ChunkSeq[Param],
+    // ADT spans and field temperatures, in `World` order.
+    adt_start: ChunkSeq[u64],
+    adt_stop: ChunkSeq[u64],
+    // 0 none, 1 hot, 2 cold; one per field of `World::fields`
+    temps: ChunkSeq[u8],
+}
+
+pub fn sigs_new() -> Sigs {
+    Sigs {
+        sigs: ChunkSeq::new[Sig](),
+        params: ChunkSeq::new[Param](),
+        adt_start: ChunkSeq::new[u64](),
+        adt_stop: ChunkSeq::new[u64](),
+        temps: ChunkSeq::new[u8]()
+    }
+}
+
+impl Sigs {
+    pub fn sig(in self, i: u64) -> Sig {
+        match self.sigs.try_get(i) {
+            Option::Some(s) => s,
+            Option::None => Sig {
+                name: 0,
+                start: 0,
+                stop: 0,
+                result: 0,
+                pa: 0,
+                pn: 0
+            },
+        }
+    }
+
+    pub fn param(in self, i: u64) -> Param {
+        match self.params.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => Param {
+                name: 0,
+                pass: 0,
+                ty: 0,
+                start: 0,
+                stop: 0
+            },
+        }
+    }
+
+    pub fn adt_span_start(in self, i: u64) -> u64 {
+        match self.adt_start.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        }
+    }
+
+    pub fn adt_span_stop(in self, i: u64) -> u64 {
+        match self.adt_stop.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        }
+    }
+
+    pub fn temp(in self, field: u64) -> u8 {
+        u8_at(in self.temps, field)
+    }
+}
+
+fn second_class_open(inout d: Diags) -> u64 {
+    let c = d.open("E1520");
+    d.text.extend(in "Slice[T] is a second-class borrow and cannot appear in ".as_bytes());
+    c
+}
+
+fn second_class_close(inout d: Diags, c: u64, m: u64, start: u64, stop: u64) {
+    d
+        .close(
+        c,
+        m,
+        "take the slice as an 'in' or 'inout' parameter and pass s[a..b] or s.as_slice() at the call",
+        start,
+        stop
+    );
+}
+
+fn lower(b: u8) -> u8 {
+    if b >= 65 && b <= 90 {
+        wrapping_add(b, 32)
+    } else {
+        b
+    }
+}
+
+// Writes `s` ASCII-lowercased (Rust lowercases the whole message).
+fn write_lower(in names: Names, s: u32, inout out: ChunkSeq[u8]) {
+    let a = names.start(s);
+    let b = names.end(s);
+    for i in a..b {
+        out.push(lower(u8_at(in names.text, i)));
+    }
+}
+
+// `seq::check_world`: where `Slice[T]` may appear (E1520).
+pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, inout d: Diags) {
+    let k = wd.k;
+    for i in 0..sg.sigs.len() {
+        let f = sg.sig(i);
+        for j in 0..w(f.pn) {
+            let p = sg.param(add(w(f.pa), j));
+            let is_slice = is_slice_type(in t, k, p.ty);
+            let top = is_slice && (p.pass == P_IN || p.pass == P_INOUT);
+            let nested = if top {
+                mentions_slice(in t, k, t.arg(p.ty, 0))
+            } else {
+                mentions_slice(in t, k, p.ty)
+            };
+            if nested || (is_slice && !top) {
+                let c = d.open("E1520");
+                let m = d.text.len();
+                d
+                    .text
+                    .extend(
+                    in "Slice[T] is a second-class borrow and cannot appear in the ".as_bytes()
+                );
+                if p.pass == P_IN {
+                    put(inout d.text, "in");
+                } else if p.pass == P_INOUT {
+                    put(inout d.text, "inout");
+                } else {
+                    put(inout d.text, "sink");
+                }
+                put(inout d.text, " parameter '");
+                write_lower(in names, p.name, inout d.text);
+                d.text.push(39);
+                second_class_close(inout d, c, m, p.start, p.stop);
+            }
+        }
+        if mentions_slice(in t, k, f.result) {
+            let c = d.open("E1520");
+            let m = d.text.len();
+            d
+                .text
+                .extend(
+                in "Slice[T] is a second-class borrow and cannot appear in the result of '"
+                    .as_bytes()
+            );
+            names.write(f.name, inout d.text);
+            d.text.push(39);
+            second_class_close(inout d, c, m, f.start, f.stop);
+        }
+    }
+    for i in 0..wd.adts.len() {
+        let a = wd.adt(n32(i));
+        for v in 0..w(a.vn) {
+            let var = wd.variant(add(w(a.va), v));
+            for x in 0..w(var.fc) {
+                let fd = wd.field(add(w(var.fa), x));
+                if mentions_slice(in t, k, fd.ty) {
+                    let c = d.open("E1520");
+                    let m = d.text.len();
+                    d
+                        .text
+                        .extend(
+                        in "Slice[T] is a second-class borrow and cannot appear in field '"
+                            .as_bytes()
+                    );
+                    names.write(a.name, inout d.text);
+                    d.text.push(46);
+                    names.write(fd.name, inout d.text);
+                    d.text.push(39);
+                    second_class_close(inout d, c, m, sg.adt_span_start(i), sg.adt_span_stop(i));
+                }
+            }
+        }
+    }
+}

@@ -17,7 +17,11 @@ fn main() {
 #[cfg(feature = "vesper-port-divergent")]
 const DIVERGENT: &[(&str, &str, &str)] = &[
     // input.ves: a catalog of schema 2 is accepted (resolve schema_unknown_fields_and_root_collisions_are_errors).
-    ("input", "if s.cschema != 1 {", "if s.cschema == 0 {"),
+    (
+        "input",
+        "if s.cschema != CATALOG_SCHEMA_VERSION {",
+        "if s.cschema == 0 {",
+    ),
     // closure.ves: late features never revisit a processed package (resolve late_feature_requests_revisit_nodes_through_cycles).
     (
         "closure",
@@ -29,8 +33,8 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // snap.ves: partial validation rejects missing native selections (resolve native_constraints_unify_and_pick_latest_satisfying_version).
     (
         "snap",
-        "if d.code != 10 && d.code != 11 {",
-        "if d.code != 10 {",
+        "if d.code != Code::MissingDependency && d.code != Code::MissingSystemPackage {",
+        "if d.code != Code::MissingDependency {",
     ),
     // locked.ves: snapshot metadata is never compared (locked manifest_metadata_and_build_metadata_must_match).
     (

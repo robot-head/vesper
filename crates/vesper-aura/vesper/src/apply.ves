@@ -1,31 +1,11 @@
 // recording.rs: applying a transaction and the final checks.
 use self::codes::{
-    b_depth,
-    b_event_batch,
-    b_patches,
-    b_teardown,
-    b_text,
-    b_total_text,
-    i_broken_parent,
-    i_cycle,
-    i_disconnected,
-    i_limits,
-    i_reused,
-    i_unmounted,
-    max_u64,
-    none_id,
-    op_bind_slot,
-    op_create,
-    op_destroy,
-    op_disconnect,
-    op_insert_child,
-    op_move_child,
-    op_remove_child,
-    op_set_root,
-    op_set_slot,
-    op_subscribe,
-    op_unbind_slot,
-    v_text
+    Budget,
+    Invalid,
+    OpTag,
+    ValueTag,
+    MAX_U64,
+    NONE_ID
 };
 use self::recording::{
     copy_state,
@@ -82,7 +62,7 @@ pub fn allocate(inout s: RState, session: u64, serial: u64) -> Option[BackendFau
         return Option::Some(BackendFault::ForeignSession);
     }
     if serial <= s.high_water {
-        return Option::Some(BackendFault::Invalid(i_reused()));
+        return Option::Some(BackendFault::Invalid(Invalid::Reused));
     }
     s.high_water = serial;
     Option::None
@@ -106,7 +86,7 @@ pub fn stale_widget() -> Option[BackendFault] {
 
 pub fn record(inout s: RState, lim: Lim, e: Op) -> Option[BackendFault] {
     if s.events.len() >= lim.patches {
-        return budget(b_event_batch());
+        return budget(Budget::EventBatch);
     }
     s.events.push(e);
     Option::None
@@ -136,26 +116,26 @@ pub fn push_text(inout s: RState, in text: Slice[u8], tstart: u64, tlen: u64) ->
 pub fn apply_patch(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
     -> Option[BackendFault] {
     let tag = word(in w, base, 0);
-    if tag == op_set_root() {
+    if tag == OpTag::SetRoot {
         patch_set_root(inout s, lim, in w, base, in text)
-    } else if tag == op_create() {
+    } else if tag == OpTag::Create {
         patch_create(inout s, lim, in w, base, in text)
-    } else if tag == op_destroy() {
+    } else if tag == OpTag::Destroy {
         patch_destroy(inout s, lim, in w, base, in text)
-    } else if tag == op_bind_slot() {
+    } else if tag == OpTag::BindSlot {
         patch_bind_slot(inout s, lim, in w, base, in text)
-    } else if tag == op_set_slot() {
+    } else if tag == OpTag::SetSlot {
         patch_set_slot(inout s, lim, in w, base, in text)
-    } else if tag == op_unbind_slot() {
+    } else if tag == OpTag::UnbindSlot {
         patch_unbind_slot(inout s, lim, in w, base, in text)
-    } else if tag == op_subscribe() {
+    } else if tag == OpTag::Subscribe {
         patch_subscribe(inout s, lim, in w, base, in text)
-    } else if tag == op_disconnect() {
+    } else if tag == OpTag::Disconnect {
         patch_disconnect(inout s, lim, in w, base, in text)
-    } else if tag == op_remove_child() || tag == op_insert_child() || tag == op_move_child() {
+    } else if tag == OpTag::RemoveChild || tag == OpTag::InsertChild || tag == OpTag::MoveChild {
         patch_children(inout s, lim, in w, base, in text)
     } else {
-        invalid(i_limits())
+        invalid(Invalid::Limits)
     }
 }
 
@@ -166,7 +146,7 @@ pub fn validate_final(inout rec: Recorder) -> Option[BackendFault] {
         if rec.stage.nwidgets == 0 && rec.stage.nslots == 0 && rec.stage.nsubs == 0 {
             return Option::None;
         }
-        return invalid(i_unmounted());
+        return invalid(Invalid::Unmounted);
     }
     // Separate session/backend limits are permitted, so the backend must
     // independently retain enough patch budget to close its accepted tree.
@@ -175,32 +155,32 @@ pub fn validate_final(inout rec: Recorder) -> Option[BackendFault] {
     let nb = rec.stage.nsubs;
     let ne = rec.stage.edges.len();
     if n
-        > wrapping_sub(max_u64(), 1)
+        > wrapping_sub(MAX_U64, 1)
         || ns
-        > wrapping_sub(max_u64(), inc(n))
+        > wrapping_sub(MAX_U64, inc(n))
         || nb
-        > wrapping_sub(max_u64(), add(inc(n), ns))
+        > wrapping_sub(MAX_U64, add(inc(n), ns))
         || ne
-        > wrapping_sub(max_u64(), add(add(inc(n), ns), nb)) {
-        return budget(b_teardown());
+        > wrapping_sub(MAX_U64, add(add(inc(n), ns), nb)) {
+        return budget(Budget::Teardown);
     }
     if add(add(add(inc(n), ns), nb), ne) > lim.patches {
-        return budget(b_teardown());
+        return budget(Budget::Teardown);
     }
     let mut total: u64 = 0;
     for i in 0..rec.stage.slots.len() {
         if seq_bool(in rec.stage.slive, i) {
             let v = rslot(in rec.stage.slots, i);
-            if v.tag == v_text() {
+            if v.tag == ValueTag::Text {
                 if v.tlen > lim.text {
-                    return budget(b_text());
+                    return budget(Budget::Text);
                 }
-                if total > wrapping_sub(max_u64(), v.tlen) {
-                    return budget(b_total_text());
+                if total > wrapping_sub(MAX_U64, v.tlen) {
+                    return budget(Budget::TotalText);
                 }
                 total = add(total, v.tlen);
                 if total > lim.total {
-                    return budget(b_total_text());
+                    return budget(Budget::TotalText);
                 }
             }
         }
@@ -217,7 +197,7 @@ pub fn validate_final(inout rec: Recorder) -> Option[BackendFault] {
     for e in 0..ne {
         let p = widget_index(in rec.stage, redge(in rec.stage.edges, e).parent);
         owner.push(p);
-        if p != none_id() {
+        if p != NONE_ID {
             let count = seq_u64(in first, inc(p));
             first.try_set(inc(p), inc(count));
         }
@@ -230,11 +210,11 @@ pub fn validate_final(inout rec: Recorder) -> Option[BackendFault] {
     next_at.extend(in first[0..nw]);
     let mut kids: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](ne);
     for e in 0..ne {
-        kids.push(none_id());
+        kids.push(NONE_ID);
     }
     for e in 0..ne {
         let p = seq_u64(in owner, e);
-        if p != none_id() {
+        if p != NONE_ID {
             let at = seq_u64(in next_at, p);
             kids.try_set(at, widget_index(in rec.stage, redge(in rec.stage.edges, e).child));
             next_at.try_set(p, inc(at));
@@ -260,12 +240,12 @@ pub fn validate_final(inout rec: Recorder) -> Option[BackendFault] {
         stack.truncate(dec(top));
         depths.truncate(dec(top));
         if depth > lim.depth {
-            return budget(b_depth());
+            return budget(Budget::Depth);
         }
-        if i != none_id() && seq_bool(in seen_at, i) {
-            return invalid(i_cycle());
+        if i != NONE_ID && seq_bool(in seen_at, i) {
+            return invalid(Invalid::Cycle);
         }
-        if i == none_id() {
+        if i == NONE_ID {
             return stale_widget();
         }
         seen_at.try_set(i, true);
@@ -273,19 +253,19 @@ pub fn validate_final(inout rec: Recorder) -> Option[BackendFault] {
         let widget = rwidget(in rec.stage.widgets, i).serial;
         for k in seq_u64(in first, i)..seq_u64(in first, inc(i)) {
             let c = seq_u64(in kids, k);
-            if c == none_id() {
+            if c == NONE_ID {
                 return stale_widget();
             }
             let cw = rwidget(in rec.stage.widgets, c);
             if !cw.has_parent || cw.parent != widget {
-                return invalid(i_broken_parent());
+                return invalid(Invalid::BrokenParent);
             }
             stack.push(c);
             depths.push(inc(depth));
         }
     }
     if seen != n {
-        return invalid(i_disconnected());
+        return invalid(Invalid::Disconnected);
     }
     Option::None
 }
@@ -302,17 +282,17 @@ pub fn do_recorder_apply(
     in text: Slice[u8]
 ) -> Option[BackendFault] {
     if !lim_ok(rec.lim) {
-        return invalid(i_limits());
+        return invalid(Invalid::Limits);
     }
     if rec.st.has_session && rec.st.session != session {
         return foreign();
     }
-    if base == max_u64() || rec.st.revision != base || next != inc(base) {
+    if base == MAX_U64 || rec.st.revision != base || next != inc(base) {
         return Option::Some(BackendFault::StaleRevision);
     }
     let count = w.len() / PATCH_WORDS;
     if count > rec.lim.patches {
-        return budget(b_patches());
+        return budget(Budget::Patches);
     }
     let has_reject = rec.has_reject;
     let reject = rec.reject;

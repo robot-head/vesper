@@ -10,6 +10,9 @@ use self::grisu::{
     clz64,
     grisu_shortest
 };
+use self::ascii::{
+    Ascii
+};
 
 // Rust's `Big32x40`: 40 little-endian 32-bit limbs, enough for any
 // binary64 exponent plus the 192-bit headroom of `limbs_for`.
@@ -38,12 +41,6 @@ const SUBNORMAL_EXPONENT: i64 = -1075;
 const DIGIT_CAPACITY: u64 = 20;
 // The digit value of an ASCII digit (u64 arithmetic).
 const DIGIT_ZERO: u64 = 0x30;
-const ASCII_PLUS: u8 = 0x2b;
-const ASCII_MINUS: u8 = 0x2d;
-const ASCII_DOT: u8 = 0x2e;
-const ASCII_ZERO: u8 = 0x30;
-const ASCII_ONE: u8 = 0x31;
-const ASCII_NINE: u8 = 0x39;
 
 // At most 40 limbs (Rust's `Big32x40`); a value uses only those its
 // exponent can reach (`limbs_for`), so the loops run over `b.len()`.
@@ -314,10 +311,10 @@ fn format_shortest(
                 i = wrapping_sub(i, 1);
                 let c = match out.try_get(i) {
                     Option::Some(c) => c,
-                    Option::None => ASCII_ZERO,
+                    Option::None => Ascii::Zero,
                 };
-                if c == ASCII_NINE {
-                    out.try_set(i, ASCII_ZERO);
+                if c == Ascii::Nine {
+                    out.try_set(i, Ascii::Zero);
                 } else {
                     out.try_set(i, wrapping_add(c, 1));
                     done = true;
@@ -326,8 +323,8 @@ fn format_shortest(
             }
             if !done {
                 // Every digit was a nine: 1 followed by zeros, one longer.
-                out.try_set(0, ASCII_ONE);
-                out.push(ASCII_ZERO);
+                out.try_set(0, Ascii::One);
+                out.push(Ascii::Zero);
                 k = wrapping_add(k, 1);
             }
         }
@@ -437,11 +434,11 @@ pub fn shortest_len(s: Shortest) -> u64 {
 pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
     let mut p = at;
     if s.neg {
-        out.try_set(p, ASCII_MINUS);
+        out.try_set(p, Ascii::Minus);
         p = wrapping_add(p, 1);
     }
     if s.n == 0 {
-        out.try_set(p, ASCII_ZERO);
+        out.try_set(p, Ascii::Zero);
         return;
     }
     let n = s.n;
@@ -449,11 +446,11 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
     if s.k <= 0 {
         // `0.` then -k zeros then the digits.
         let zeros = wrapping_u64(wrapping_sub(0, s.k));
-        out.try_set(p, ASCII_ZERO);
-        out.try_set(wrapping_add(p, 1), ASCII_DOT);
+        out.try_set(p, Ascii::Zero);
+        out.try_set(wrapping_add(p, 1), Ascii::Dot);
         let first = wrapping_add(wrapping_add(p, 2), zeros);
         for z in 0..zeros {
-            out.try_set(wrapping_add(wrapping_add(p, 2), z), ASCII_ZERO);
+            out.try_set(wrapping_add(wrapping_add(p, 2), z), Ascii::Zero);
         }
         let mut i = n;
         loop {
@@ -471,7 +468,7 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
     } else if wrapping_u64(s.k) < n {
         // The point after the first k digits.
         let point = wrapping_u64(s.k);
-        out.try_set(wrapping_add(p, point), ASCII_DOT);
+        out.try_set(wrapping_add(p, point), Ascii::Dot);
         let mut i = n;
         loop {
             if i == 0 {
@@ -490,7 +487,7 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
         // The digits, then k - n zeros.
         let k = wrapping_u64(s.k);
         for z in n..k {
-            out.try_set(wrapping_add(p, z), ASCII_ZERO);
+            out.try_set(wrapping_add(p, z), Ascii::Zero);
         }
         let mut i = n;
         loop {

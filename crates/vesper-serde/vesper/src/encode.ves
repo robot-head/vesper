@@ -22,6 +22,9 @@ use self::dragon::{
     shortest_len
 };
 use self::index::raise;
+use self::ascii::{
+    Ascii
+};
 
 // Word-stream value tags (the layout above).
 const TAG_NULL: u64 = 0;
@@ -62,32 +65,6 @@ const DECIMAL_BASE: u64 = 10;
 const NIBBLE_MASK: u64 = 0x0f;
 // `hex`: '0' + n below ten, 'a' - 10 + n above.
 const HEX_LETTER_OFFSET: u64 = 0x57;
-const ASCII_BACKSPACE: u64 = 0x08;
-const ASCII_TAB: u64 = 0x09;
-const ASCII_LF: u64 = 0x0a;
-const ASCII_FF: u64 = 0x0c;
-const ASCII_CR: u64 = 0x0d;
-const ASCII_SPACE: u64 = 0x20;
-const ASCII_QUOTE: u64 = 0x22;
-const ASCII_COMMA: u64 = 0x2c;
-const ASCII_MINUS: u64 = 0x2d;
-const ASCII_ZERO: u64 = 0x30;
-const ASCII_COLON: u64 = 0x3a;
-const ASCII_LBRACKET: u64 = 0x5b;
-const ASCII_BACKSLASH: u64 = 0x5c;
-const ASCII_RBRACKET: u64 = 0x5d;
-const ASCII_LOWER_A: u64 = 0x61;
-const ASCII_LOWER_B: u64 = 0x62;
-const ASCII_LOWER_E: u64 = 0x65;
-const ASCII_LOWER_F: u64 = 0x66;
-const ASCII_LOWER_L: u64 = 0x6c;
-const ASCII_LOWER_N: u64 = 0x6e;
-const ASCII_LOWER_R: u64 = 0x72;
-const ASCII_LOWER_S: u64 = 0x73;
-const ASCII_LOWER_T: u64 = 0x74;
-const ASCII_LOWER_U: u64 = 0x75;
-const ASCII_LBRACE: u64 = 0x7b;
-const ASCII_RBRACE: u64 = 0x7d;
 
 copy struct Check {
     lim: EncodeLimits,
@@ -157,21 +134,21 @@ fn string_bytes(inout c: Check, n: u64) -> Unit eff [Fail[Error]] {
 
 fn escaped_width(b: u64) -> u64 {
     if b
-        == ASCII_QUOTE
+        == Ascii::Quote
         || b
-        == ASCII_BACKSLASH
+        == Ascii::Backslash
         || b
-        == ASCII_LF
+        == Ascii::Lf
         || b
-        == ASCII_CR
+        == Ascii::Cr
         || b
-        == ASCII_TAB
+        == Ascii::Tab
         || b
-        == ASCII_BACKSPACE
+        == Ascii::Backspace
         || b
-        == ASCII_FF {
+        == Ascii::Ff {
         ESCAPE_LEN
-    } else if b < ASCII_SPACE {
+    } else if b < Ascii::Space {
         UNICODE_ESCAPE_LEN
     } else {
         1
@@ -384,7 +361,7 @@ fn put_integer(inout out: Slice[u8], inout wr: W, n: u64) {
         out
             .try_set(
             wrapping_add(wr.pos, i),
-            wrapping_u8(wrapping_add(ASCII_ZERO, x % DECIMAL_BASE))
+            wrapping_u8(wrapping_add(Ascii::Zero, x % DECIMAL_BASE))
         );
         x = x / DECIMAL_BASE;
     }
@@ -393,67 +370,67 @@ fn put_integer(inout out: Slice[u8], inout wr: W, n: u64) {
 
 fn hex(n: u64) -> u64 {
     if n < DECIMAL_BASE {
-        wrapping_add(ASCII_ZERO, n)
+        wrapping_add(Ascii::Zero, n)
     } else {
         wrapping_add(HEX_LETTER_OFFSET, n)
     }
 }
 
 fn put_string(inout out: Slice[u8], inout wr: W, in pool: Slice[u8], off: u64, len: u64) {
-    put(inout out, inout wr, ASCII_QUOTE);
+    put(inout out, inout wr, Ascii::Quote);
     for i in 0..len {
         let b = byte(in pool, wrapping_add(off, i));
-        if b == ASCII_QUOTE || b == ASCII_BACKSLASH {
-            put(inout out, inout wr, ASCII_BACKSLASH);
+        if b == Ascii::Quote || b == Ascii::Backslash {
+            put(inout out, inout wr, Ascii::Backslash);
             put(inout out, inout wr, b);
-        } else if b == ASCII_LF {
-            put(inout out, inout wr, ASCII_BACKSLASH);
-            put(inout out, inout wr, ASCII_LOWER_N);
-        } else if b == ASCII_CR {
-            put(inout out, inout wr, ASCII_BACKSLASH);
-            put(inout out, inout wr, ASCII_LOWER_R);
-        } else if b == ASCII_TAB {
-            put(inout out, inout wr, ASCII_BACKSLASH);
-            put(inout out, inout wr, ASCII_LOWER_T);
-        } else if b == ASCII_BACKSPACE {
-            put(inout out, inout wr, ASCII_BACKSLASH);
-            put(inout out, inout wr, ASCII_LOWER_B);
-        } else if b == ASCII_FF {
-            put(inout out, inout wr, ASCII_BACKSLASH);
-            put(inout out, inout wr, ASCII_LOWER_F);
-        } else if b < ASCII_SPACE {
-            put(inout out, inout wr, ASCII_BACKSLASH);
-            put(inout out, inout wr, ASCII_LOWER_U);
-            put(inout out, inout wr, ASCII_ZERO);
-            put(inout out, inout wr, ASCII_ZERO);
+        } else if b == Ascii::Lf {
+            put(inout out, inout wr, Ascii::Backslash);
+            put(inout out, inout wr, Ascii::LowerN);
+        } else if b == Ascii::Cr {
+            put(inout out, inout wr, Ascii::Backslash);
+            put(inout out, inout wr, Ascii::LowerR);
+        } else if b == Ascii::Tab {
+            put(inout out, inout wr, Ascii::Backslash);
+            put(inout out, inout wr, Ascii::LowerT);
+        } else if b == Ascii::Backspace {
+            put(inout out, inout wr, Ascii::Backslash);
+            put(inout out, inout wr, Ascii::LowerB);
+        } else if b == Ascii::Ff {
+            put(inout out, inout wr, Ascii::Backslash);
+            put(inout out, inout wr, Ascii::LowerF);
+        } else if b < Ascii::Space {
+            put(inout out, inout wr, Ascii::Backslash);
+            put(inout out, inout wr, Ascii::LowerU);
+            put(inout out, inout wr, Ascii::Zero);
+            put(inout out, inout wr, Ascii::Zero);
             put(inout out, inout wr, hex(b >> 4));
             put(inout out, inout wr, hex(b & NIBBLE_MASK));
         } else {
             put(inout out, inout wr, b);
         }
     }
-    put(inout out, inout wr, ASCII_QUOTE);
+    put(inout out, inout wr, Ascii::Quote);
 }
 
 fn write_value(inout out: Slice[u8], inout wr: W, in w: Slice[u64], in pool: Slice[u8]) {
     let tag = take(inout wr, in w);
     if tag == TAG_NULL {
-        put(inout out, inout wr, ASCII_LOWER_N);
-        put(inout out, inout wr, ASCII_LOWER_U);
-        put(inout out, inout wr, ASCII_LOWER_L);
-        put(inout out, inout wr, ASCII_LOWER_L);
+        put(inout out, inout wr, Ascii::LowerN);
+        put(inout out, inout wr, Ascii::LowerU);
+        put(inout out, inout wr, Ascii::LowerL);
+        put(inout out, inout wr, Ascii::LowerL);
     } else if tag == TAG_BOOL {
         if take(inout wr, in w) != 0 {
-            put(inout out, inout wr, ASCII_LOWER_T);
-            put(inout out, inout wr, ASCII_LOWER_R);
-            put(inout out, inout wr, ASCII_LOWER_U);
-            put(inout out, inout wr, ASCII_LOWER_E);
+            put(inout out, inout wr, Ascii::LowerT);
+            put(inout out, inout wr, Ascii::LowerR);
+            put(inout out, inout wr, Ascii::LowerU);
+            put(inout out, inout wr, Ascii::LowerE);
         } else {
-            put(inout out, inout wr, ASCII_LOWER_F);
-            put(inout out, inout wr, ASCII_LOWER_A);
-            put(inout out, inout wr, ASCII_LOWER_L);
-            put(inout out, inout wr, ASCII_LOWER_S);
-            put(inout out, inout wr, ASCII_LOWER_E);
+            put(inout out, inout wr, Ascii::LowerF);
+            put(inout out, inout wr, Ascii::LowerA);
+            put(inout out, inout wr, Ascii::LowerL);
+            put(inout out, inout wr, Ascii::LowerS);
+            put(inout out, inout wr, Ascii::LowerE);
         }
     } else if tag == TAG_U64 {
         let n = take(inout wr, in w);
@@ -461,7 +438,7 @@ fn write_value(inout out: Slice[u8], inout wr: W, in w: Slice[u64], in pool: Sli
     } else if tag == TAG_I64 {
         let v = wrapping_i64(take(inout wr, in w));
         if v < 0 {
-            put(inout out, inout wr, ASCII_MINUS);
+            put(inout out, inout wr, Ascii::Minus);
             put_integer(inout out, inout wr, wrapping_sub(0, wrapping_u64(v)));
         } else {
             put_integer(inout out, inout wr, wrapping_u64(v));
@@ -484,28 +461,28 @@ fn write_value(inout out: Slice[u8], inout wr: W, in w: Slice[u64], in pool: Sli
         }
     } else if tag == TAG_ARRAY {
         let count = take(inout wr, in w);
-        put(inout out, inout wr, ASCII_LBRACKET);
+        put(inout out, inout wr, Ascii::Lbracket);
         for i in 0..count {
             if i != 0 {
-                put(inout out, inout wr, ASCII_COMMA);
+                put(inout out, inout wr, Ascii::Comma);
             }
             write_value(inout out, inout wr, in w, in pool);
         }
-        put(inout out, inout wr, ASCII_RBRACKET);
+        put(inout out, inout wr, Ascii::Rbracket);
     } else {
         let count = take(inout wr, in w);
-        put(inout out, inout wr, ASCII_LBRACE);
+        put(inout out, inout wr, Ascii::Lbrace);
         for i in 0..count {
             if i != 0 {
-                put(inout out, inout wr, ASCII_COMMA);
+                put(inout out, inout wr, Ascii::Comma);
             }
             let off = take(inout wr, in w);
             let len = take(inout wr, in w);
             put_string(inout out, inout wr, in pool, off, len);
-            put(inout out, inout wr, ASCII_COLON);
+            put(inout out, inout wr, Ascii::Colon);
             write_value(inout out, inout wr, in w, in pool);
         }
-        put(inout out, inout wr, ASCII_RBRACE);
+        put(inout out, inout wr, Ascii::Rbrace);
     }
 }
 

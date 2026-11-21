@@ -12,10 +12,76 @@ The lane lands in several PRs. This report grows with each one.
 | Part | PR | What |
 | --- | --- | --- |
 | 1 | #1222 | type relations and exhaustiveness |
-| 2 | | expressions and inference (`expr_expected`, `call`, `apply_args`, `construct`) |
+| 2 | (this PR) | expressions and inference (`expr_expected`, `call`, `apply_args`, `construct`) |
 | 3 | | modes and places (`place`, `bind_mode`, moves, loans) |
 | 4 | | literal typing, integer-width and float checks (after SH2 lane 2, #1174) |
 | 5 | | the swap into the hybrid build (`core_typing` module) and the scoreboard row |
+
+## Part 2: expressions and inference
+
+### What changed
+
+| Area | Files |
+| --- | --- |
+| Package | `src/exprs.ves` (the expression checker) and the `core_typing_exprs` entry in `src/lib.ves` |
+| Test | `tests/self_host_check_core_typing_exprs.rs` |
+| Bazel data and timeout | `BUILD.bazel` |
+
+No Rust source changed in this part.
+
+Ported (`src/check.rs` to `exprs.ves`): `expr_expected` and `expr` for
+literals, names (locals, parameters, unit constructors, functions),
+tuples, struct and constructor literals (`construct`, with generic ADT
+inference and bound checks), field access (`field_path`), blocks with
+`let` (annotations, destructuring and `bind_mode`), `if`, `match` (arm
+joins and coverage from part 1), unary and binary operators, and calls
+(`call`, `apply`, `apply_args`, generic inference through `infer`,
+explicit type arguments and inferred results). Each recorded type goes
+through the same `types.insert` order as Rust, so a span written twice
+keeps its last type.
+
+The harness encodes each world's function table and every checked
+function's body as a pre-order expression table. A function whose body
+uses a construct the port does not have yet (loops, closures, methods,
+handlers, regions, sequences, strings and the other foreign types,
+effectful callees, intrinsics) is reported as skipped, not compared.
+
+### The differential
+
+Corpus: 283 worlds on this base. For every function the port checks, the
+test compares every expression type Rust recorded in `world.types` inside
+the function's span with the port's, and any diagnostic the port reports
+(the clean corpus has none).
+
+| Worlds differing | Functions checked | Functions skipped | Expression types compared |
+| --: | --: | --: | --: |
+| 0 | 4,818 | 7,435 | 28,034 |
+
+The test also asserts a coverage floor, so a port that skipped everything
+cannot pass.
+
+The comparison covers types, not diagnostics on bad programs: the corpus
+is clean, and mutants that fail type checking are part 4's job (literal
+typing only reruns failing functions).
+
+### Numbers
+
+None in this part. Rust's expression checking runs only inside the whole
+`Checker`, so there is no fair Rust side to time against a subset of
+functions. The timing and callgrind counts move to the swap PR, where the
+hybrid build runs the same functions both ways.
+
+### Compiler gaps
+
+No new gaps. A local named like an imported function (`infer`) shadows it
+and the call fails with E0206 ("u32 is not callable"), which is Rust's
+rule too, so it is not a gap.
+
+### What is left
+
+Parts 3 to 5. Literal typing (part 4) is unblocked now that #1219 has
+merged. Coverage grows as part 3 adds places and modes and later parts add
+the skipped constructs.
 
 ## Part 1: type relations and exhaustiveness
 

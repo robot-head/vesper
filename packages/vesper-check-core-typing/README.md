@@ -10,15 +10,20 @@ lands in several PRs; this is what has been ported so far.
 | `src/ints.ves` | `numeric::IntegerKind::{fits, default_for}` | `Lit` (sign + u64 magnitude), `fits`, `default_fits`, `lit_cmp` |
 | `src/relations.ves` | `compatible`, `effects_include`, `refine_annotation`, `unresolved`, `union_effects`, `join_types`, `infer` | same names (`union_effects` is `union_rows`) |
 | `src/patterns.ves` | `is_uninhabited`, `matrix_covered`, `Checker::irrefutable`, `Checker::coverage` | `Pats` (flat pattern table), `Matrix`, `is_uninhabited`, `matrix_covered`, `irrefutable`, `arms_cover` |
+| `src/exprs.ves` | `Checker::{expr, expr_expected, call, apply, apply_args, construct, field_path, bind_mode}` and the block, `if`, `match`, unary and binary rules | `Ck` (checker state over a pre-order expression table), `check_exprs` |
 | `src/lib.ves` | | the differential's tasks |
 
 Types are ids of the check-data arena: Rust's `clone` of a type is a copy
 here and `==` is one compare. Patterns are rows of one flat table; pattern
 0 is the wildcard that specialization fills missing payloads with.
 
-Integer literals are a sign and a 64-bit magnitude until `i128` lands (SH2
-lane 2, #1174); literal typing (`src/integer_widths/literal_typing.rs`)
-waits on it.
+Integer literals are a sign and a 64-bit magnitude for now; literal
+typing (`src/integer_widths/literal_typing.rs`) comes in a later part, on
+the `i128` support from SH2 lane 2 (#1219).
+
+The expression checker skips a function whose body uses a construct it
+does not have yet (loops, closures, methods, handlers, regions, sequences,
+strings and other foreign types, effectful callees, intrinsics).
 
 ## Tests
 
@@ -37,3 +42,9 @@ checked corpus world:
   patterns occur.
 - `unoptimized_agrees`: the JIT with the optimizer off gives the same texts.
 - `speed_relations_and_patterns` (ignored; `CHECK_HARNESS_SPEED=1`): ABBA.
+
+`tests/self_host_check_core_typing_exprs.rs`:
+
+- `expression_types_match_rust`: for every function the port checks, every
+  expression type Rust recorded in `world.types` inside the function's
+  span, with a coverage floor.
