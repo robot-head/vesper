@@ -47,6 +47,11 @@ mod ir_inline_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/optimize.rs"]
+mod optimize_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
 
@@ -68,6 +73,11 @@ mod test_runner_words;
 #[path = "../../../tests/common/inline_words.rs"]
 mod inline_words;
 
+// The AST optimizer swap's input encoder and answer readers (#1249),
+// shared with the root package's tests/self_host_optimize*.rs.
+#[path = "../../../tests/common/optimize_words.rs"]
+mod optimize_words;
+
 // Place IR words both ways (#1240), shared with tests/self_host_place_ir*.rs.
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
@@ -87,6 +97,9 @@ static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
 static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs inlined by the Vesper inliner module.
 static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Expressions the Vesper optimizer proposed for, and proposals it checked.
+static OPTIMIZE_PROPOSE_CALLS: AtomicU64 = AtomicU64::new(0);
+static OPTIMIZE_VERIFY_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 
@@ -267,6 +280,88 @@ const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
     }),
 };
 
+/// `optimize`'s producer from `modules/optimize`: `propose_rewrite` of
+/// `@vesper/optimize` on `@vesper/egraph`. The package searches, extracts
+/// and proves; the candidate is rebuilt from the returned certificate by
+/// `witness::rebuild_candidate`, the builder the Rust producer uses.
+fn vesper_propose(
+    source: &vesper::ast::Expr,
+    types: &vesper::ast::TypeMap,
+    limits: vesper::optimize::witness::WitnessLimits,
+) -> Result<vesper::optimize::Proposal, vesper::optimize::witness::WitnessError> {
+    use vesper::optimize::{Produced, Proposal};
+    let types = optimize_words::relevant_types(&[source], types);
+    let mut batch = optimize_words::Batch::new(1, true);
+    batch.propose(source, &types, limits);
+    OPTIMIZE_PROPOSE_CALLS.fetch_add(1, Relaxed);
+    let words = optimize_binding::propose_words(&batch.bytes, &batch.names);
+    let text = optimize_words::unpack_text(&words);
+    let head = text.lines().next().unwrap_or("");
+    match head {
+        "P B" => Ok(Proposal::Barrier),
+        "P U" => Ok(Proposal::Unchanged),
+        _ if head.starts_with("P E ") => Err(optimize_words::error_of(
+            head[4..].parse().expect("an error code"),
+        )),
+        _ => {
+            let (mut certificate, spent, (terms_cap, proofs_cap)) =
+                optimize_words::parse_certificate(&text);
+            // The gate charges by the vectors' capacities, as the Rust
+            // producer leaves them.
+            certificate
+                .terms
+                .reserve_exact(terms_cap.saturating_sub(certificate.terms.len()));
+            certificate
+                .proofs
+                .reserve_exact(proofs_cap.saturating_sub(certificate.proofs.len()));
+            let candidate =
+                vesper::optimize::witness::rebuild_candidate(source, &types, &certificate, limits)?;
+            Ok(Proposal::Candidate(Box::new(Produced {
+                candidate,
+                certificate,
+                limits,
+                spent,
+            })))
+        }
+    }
+}
+
+/// `optimize`'s install gate from `modules/optimize`: the certificate
+/// checker of `@vesper/optimize`, continuing the producer's budget.
+fn vesper_verify(
+    source: &vesper::ast::Expr,
+    candidate: &vesper::ast::Expr,
+    types: &vesper::ast::TypeMap,
+    certificate: &vesper::optimize::witness::RewriteCertificate,
+    limits: vesper::optimize::witness::WitnessLimits,
+    spent: &mut vesper::optimize::witness::Spent,
+) -> Result<(), vesper::optimize::witness::WitnessError> {
+    let types = optimize_words::relevant_types(&[source, candidate], types);
+    let mut batch = optimize_words::Batch::new(1, true);
+    batch.verify(
+        source,
+        candidate,
+        &types,
+        certificate,
+        (certificate.terms.capacity(), certificate.proofs.capacity()),
+        limits,
+        *spent,
+        false,
+    );
+    OPTIMIZE_VERIFY_CALLS.fetch_add(1, Relaxed);
+    let words = optimize_binding::verify_words(&batch.bytes, &batch.names);
+    let text = optimize_words::unpack_text(&words);
+    let (result, after) =
+        optimize_words::parse_verify_line(text.lines().next().expect("an R line"));
+    *spent = after;
+    result
+}
+
+const VESPER_OPTIMIZE: vesper::optimize::OptimizeTable = vesper::optimize::OptimizeTable {
+    verify: vesper_verify,
+    propose: Some(vesper_propose),
+};
+
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
     if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
@@ -292,6 +387,20 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
+        std::process::abort();
+    }
+    // `VESPER_HYBRID_RUST_PRODUCER=1` keeps the Rust producer behind the
+    // Vesper gate: the differential's check of the optimizer's accepted
+    // equal-cost ties (tests/differential.rs).
+    let table = if std::env::var_os("VESPER_HYBRID_RUST_PRODUCER").is_some_and(|v| v == "1") {
+        vesper::optimize::OptimizeTable {
+            propose: None,
+            ..VESPER_OPTIMIZE
+        }
+    } else {
+        VESPER_OPTIMIZE
+    };
+    if vesper::optimize::install_optimize(table).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
@@ -333,6 +442,11 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-inline answered {} calls from Vesper",
         IR_INLINE_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: optimize proposed for {} expressions and checked {} proposals from Vesper",
+        OPTIMIZE_PROPOSE_CALLS.load(Relaxed),
+        OPTIMIZE_VERIFY_CALLS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: place-ir round-tripped {} programs through Vesper",

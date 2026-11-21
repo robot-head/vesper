@@ -269,6 +269,7 @@ pass, ABBA, port-compiler profile, encode and decode listed separately).
 
 | Port | Lane | Ported so far | Differential | Pass alone | Hybrid swap | Report |
 |---|---|---|---|--:|---|---|
+| AST optimizer (`optimize`: search, certificates, checker) | SH3-10 (#1249) | the search and the certificate checker; candidate rebuild stays Rust | 0 of 1,614 hybrid runs (6 accepted equal-cost ties) | producer 0.68x (callgrind 0.97x), checker 1.94x (callgrind 2.06x); whole corpus 0.97-1.00x | yes (module `optimize`) | [self-host-optimize.md](../parallel-results/self-host-optimize.md) |
 | `ir_opt` (memory forwarding, `@fip` reuse) | SH3-9 (#1248) | the whole pass; thread + validate stay Rust | 0 of 666 inputs (corpus, mutants, fip cases), both modes | 0.0036x (0.0087x with encode and decode) | next (SH3-1 part 2 merged) | [self-host-ir-opt.md](../parallel-results/self-host-ir-opt.md) |
 
 **SH4 backend ports.** Each row is one backend port. Until its swap into the

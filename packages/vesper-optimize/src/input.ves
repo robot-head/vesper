@@ -250,6 +250,22 @@ pub fn read_names(inout r: Reader, in input: Str, inout t: Tree) {
     }
 }
 
+// The names of a split input (the hybrid module's, whose words are not
+// UTF-8 and so cannot be a `Str`): the count, then each name's byte length;
+// the names themselves follow one another in `text`.
+pub fn read_names_text(inout r: Reader, in b: Slice[u8], in text: Str, inout t: Tree) {
+    t.nmap.clear();
+    let count = r.word(in b);
+    let mut at: u64 = 0;
+    for i in 0..count {
+        let len = r.word(in b);
+        let end = wrapping_add(at, len);
+        let s = t.ast.names.intern(in text[at..end]);
+        t.nmap.push(s.id());
+        at = end;
+    }
+}
+
 // Expressions, children first: kind, start, end, then by kind
 //   1 Literal: literal kind (1 Int), sign, magnitude
 //   2 Name: name, string capacity

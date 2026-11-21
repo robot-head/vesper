@@ -32,6 +32,9 @@ const MODULES: &[(&str, &str, &str)] = &[
     ),
     // SH3 lane 11 (#1250): the inliner, through `ir_swap`'s `inline` hook.
     ("hybrid_ir_inline", "modules/ir_inline", "port/ir_inline.rs"),
+    // SH3 lane 10 (#1249): the AST optimizer's producer and checker,
+    // through `optimize`'s table.
+    ("hybrid_optimize", "modules/optimize", "port/optimize.rs"),
     // SH3 lane 1 (#1240): the IR swap point's identity round trip.
     ("hybrid_place_ir", "modules/place_ir", "port/place_ir.rs"),
 ];
@@ -68,6 +71,15 @@ const DIVERGENT_IR_CHECK_EDIT: (&str, &str) = (
 const DIVERGENT_IR_INLINE_EDIT: (&str, &str) = (
     "    inline_program_words(in input)\n",
     "    divergent_words(in input)\n",
+);
+
+/// The optimizer's divergence check: every island reads back as a barrier
+/// (`divergent_words` in modules/optimize), so nothing is optimized and the
+/// JIT and executables keep the arithmetic the default compiler folds.
+#[cfg(feature = "divergent-optimize")]
+const DIVERGENT_OPTIMIZE_EDIT: (&str, &str) = (
+    "    optimize_propose_split(in input, in names)\n",
+    "    divergent_words(in input, in names)\n",
 );
 
 /// The parse module's divergence check: every AST flag (`let mut`, `pub`,
@@ -120,6 +132,12 @@ fn main() {
         #[cfg(feature = "divergent-ir-inline")]
         let port = if *library == "hybrid_ir_inline" {
             port.edit(DIVERGENT_IR_INLINE_EDIT.0, DIVERGENT_IR_INLINE_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-optimize")]
+        let port = if *library == "hybrid_optimize" {
+            port.edit(DIVERGENT_OPTIMIZE_EDIT.0, DIVERGENT_OPTIMIZE_EDIT.1)
         } else {
             port
         };

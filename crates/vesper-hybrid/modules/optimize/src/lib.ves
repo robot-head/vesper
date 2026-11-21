@@ -1,0 +1,44 @@
+// @vesper/hybrid-optimize: the AST arithmetic optimizer's producer
+// (`certificate::propose_rewrite`) and install gate (`witness::
+// verify_spent`) served from Vesper in the hybrid Stage 2 build
+// (self-hosting SH3 lane 10, #1249), through `vesper::optimize`'s
+// `OptimizeTable`.
+//
+// Both take a split input (tests/common/optimize_words.rs `Batch`): the
+// little-endian words of one case, with the names' lengths only, and the
+// names' bytes as text. Both return the package's answer text packed eight
+// bytes per word (`pack_text`): `P ...` lines for `propose_words`, an
+// `R code work metadata names` line for `verify_words`.
+
+// @export abi 4
+
+use @vesper/optimize::{
+    optimize_propose_split,
+    optimize_verify_split,
+    pack_text
+};
+
+// The layout version of both entries.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn propose_words(in input: Slice[u8], in names: Str) -> ChunkSeq[u64] {
+    optimize_propose_split(in input, in names)
+}
+
+pub fn verify_words(in input: Slice[u8], in names: Str) -> ChunkSeq[u64] {
+    optimize_verify_split(in input, in names)
+}
+
+// The divergent build's answer (build.rs `divergent-optimize`): `P B`, a
+// barrier, for one case, so the optimizer only walks into children and
+// never rewrites.
+fn divergent_words(in input: Slice[u8], in names: Str) -> ChunkSeq[u64] {
+    let mut o = ChunkSeq::new[u8]();
+    o.push(80);
+    o.push(32);
+    o.push(66);
+    o.push(10);
+    pack_text(in o)
+}

@@ -40,6 +40,7 @@ use self::input::{
     read_cert,
     read_exprs,
     read_names,
+    read_names_text,
     read_types,
     tree_new
 };
@@ -209,17 +210,34 @@ fn read_budget(inout r: Reader, in b: Slice[u8]) -> Budget {
 // result and counters; code 0 is `Ok`) and, when asked, `B code dump`:
 // `build_candidate` of the certificate's output on a fresh budget.
 pub fn optimize_verify(in input: Str) -> ChunkSeq[u64] {
-    run_cases(in input, true)
+    let b = input.as_bytes();
+    run_cases(in b, in input, false, true)
+}
+
+// `optimize_verify` over a split input: the words with the names' lengths
+// only, and the names' text (`read_names_text`). The hybrid module's entry.
+pub fn optimize_verify_split(in input: Slice[u8], in names: Str) -> ChunkSeq[u64] {
+    run_cases(in input, in names, true, true)
 }
 
 // The same cases decoded only, with every result line `R 0 0 0 0`: the
 // decode cost, which the speed test subtracts.
 pub fn optimize_decode(in input: Str) -> ChunkSeq[u64] {
-    run_cases(in input, false)
+    let b = input.as_bytes();
+    run_cases(in b, in input, false, false)
 }
 
-fn run_cases(in input: Str, check: bool) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+// The names of one case: in the words (`text` is the whole input), or in
+// `text` alone when the input is split.
+fn names_of(inout r: Reader, in b: Slice[u8], in text: Str, split: bool, inout t: Tree) {
+    if split {
+        read_names_text(inout r, in b, in text, inout t);
+    } else {
+        read_names(inout r, in text, inout t);
+    }
+}
+
+fn run_cases(in b: Slice[u8], in text: Str, split: bool, check: bool) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
@@ -231,7 +249,7 @@ fn run_cases(in input: Str, check: bool) -> ChunkSeq[u64] {
     for k in 0..cases {
         let mut budget = read_budget(inout r, in b);
         let mut t = tree_new();
-        read_names(inout r, in input, inout t);
+        names_of(inout r, in b, in text, split, inout t);
         read_types(inout r, in b, inout types);
         read_exprs(inout r, in b, inout t, inout map);
         let source = mapped(in map, r.word(in b));
@@ -355,7 +373,13 @@ fn put_proof(inout o: ChunkSeq[u8], p: ProofRow) {
 // and proofs (`Q`, each `from:to:tag:rule:b0:b1:b2:len:guard:p0:p1`,
 // guard 0 for none, else the proof plus one).
 pub fn optimize_propose(in input: Str) -> ChunkSeq[u64] {
-    propose_cases(in input, 0)
+    let b = input.as_bytes();
+    propose_cases(in b, in input, false, 0)
+}
+
+// `optimize_propose` over a split input (see `optimize_verify_split`).
+pub fn optimize_propose_split(in input: Slice[u8], in names: Str) -> ChunkSeq[u64] {
+    propose_cases(in input, in names, true, 0)
 }
 
 // The same cases for the speed test: `optimize_propose_quiet` proposes but
@@ -363,17 +387,18 @@ pub fn optimize_propose(in input: Str) -> ChunkSeq[u64] {
 // nothing), and `optimize_propose_decode` only decodes (its cost is
 // subtracted).
 pub fn optimize_propose_quiet(in input: Str) -> ChunkSeq[u64] {
-    propose_cases(in input, 1)
+    let b = input.as_bytes();
+    propose_cases(in b, in input, false, 1)
 }
 
 pub fn optimize_propose_decode(in input: Str) -> ChunkSeq[u64] {
-    propose_cases(in input, 2)
+    let b = input.as_bytes();
+    propose_cases(in b, in input, false, 2)
 }
 
 // `mode` 0 writes each proposal, 1 proposes and writes `P`, 2 decodes and
 // writes `P`.
-fn propose_cases(in input: Str, mode: u8) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+fn propose_cases(in b: Slice[u8], in text: Str, split: bool, mode: u8) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
@@ -384,7 +409,7 @@ fn propose_cases(in input: Str, mode: u8) -> ChunkSeq[u64] {
     for k in 0..cases {
         let mut budget = read_budget(inout r, in b);
         let mut t = tree_new();
-        read_names(inout r, in input, inout t);
+        names_of(inout r, in b, in text, split, inout t);
         read_types(inout r, in b, inout types);
         read_exprs(inout r, in b, inout t, inout map);
         let source = mapped(in map, r.word(in b));

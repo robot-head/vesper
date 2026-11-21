@@ -978,6 +978,28 @@ vesper_package(
     deps = [":check_data_package"],
 )
 
+# The e-graph and the AST optimizer for the hybrid compiler's optimize
+# module (SH3 lane 10, #1249).
+vesper_package(
+    name = "egraph_package",
+    srcs = glob(["packages/vesper-egraph/src/**/*.ves"]),
+    manifest = "packages/vesper-egraph/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "optimize_package",
+    srcs = glob(["packages/vesper-optimize/src/**/*.ves"]),
+    manifest = "packages/vesper-optimize/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ast_package",
+        ":egraph_package",
+        ":std_arena_package",
+        ":std_intern_package",
+    ],
+)
+
 vesper_package(
     name = "std_hash_sys_package",
     srcs = glob(["packages/vesper-std/hash/sys/src/**/*.ves"]),
