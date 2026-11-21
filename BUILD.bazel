@@ -240,6 +240,14 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 16 (#1290): @vesper/ebpf-backend against src/ebpf_backend
+        # over the eBPF fixtures and the corpus; the package depends on the
+        # @vesper/ebpf port in crates/vesper-ebpf/vesper.
+        "test/self_host_ebpf_backend": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["//crates/vesper-ebpf:files"],
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -365,6 +373,8 @@ vesper_crate(
         "test/std_process": [":files"],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],
+        # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
+        "test/vsys_package_imports": ["//packages/vesper-cranelift:files"],
         # @vesper-std graph, intern, arena and hash (#1127) as a driver's dependencies.
         "test/std_arena": [":files"],
         "test/std_graph": [":files"],
@@ -686,6 +696,8 @@ vesper_crate(
         "test/self_host_place_ir": "eternal",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
+        # The eBPF backend differential (#1290) loads every corpus world.
+        "test/self_host_ebpf_backend": "long",
         "test/self_host_check_harness": "long",
         "test/self_host_check_loops_atomics": "long",
         # The tensor types differential (#1186) JIT-compiles the port and

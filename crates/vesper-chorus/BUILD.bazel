@@ -57,11 +57,11 @@ vesper_crate(
         target = VESPER_TARGET,
     )
     for module, old, new in [
-        ("util", "                return 0;\n            }\n            return 2;", "                return 2;\n            }\n            return 0;"),
+        ("util", "                return Order::Less;\n            }\n            return Order::Greater;", "                return Order::Greater;\n            }\n            return Order::Less;"),
         ("tree", "    if nr > 1 {", "    if nr > 99 {"),
         ("local", "    if n == 1 {", "    if n == 0 {"),
         ("project", "        if !involves(in c, body, c.target) {", "        if involves(in c, body, c.target) {"),
         ("explore", "            bound_hit = true;", "            bound_hit = false;"),
-        ("parse", "    if depth > 64 {", "    if depth > 100000 {"),
+        ("parse", "    if depth > Limit::Nesting {", "    if depth > 100000 {"),
     ]
 ]
