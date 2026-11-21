@@ -1,8 +1,29 @@
 // @export abi 3
+// @export vsys direct rust=crate::blake3_shim
+// | sys library Blake3 (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_std_blake3",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type Hasher;
+// |     fn vesper_blake3_new() -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_keyed(nocapture in key: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_derive_key(nocapture in context: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_update(inout h: Hasher, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
+// |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// | }
+//
+// The `.vsys` library above is @vesper-std/hash-sys's (`.vsys` imports are
+// read from the root module of a library build only, #1150), provided by
+// packages/vesper-std/hash/sys/shim.rs, which the Rust crate links as
+// `crate::blake3_shim`.
+//
 // @vesper/flux: Vesper port of the vesper-flux Z-set kernels and frontier
 // (port wave P3b lane 7, #1069), the accumulator that builds sets from
-// decoded records and the CDC batch decoder (Rust-exit wave SH6 lane 6,
-// #1401).
+// decoded records, the CDC batch decoder and the input log's frame codec
+// (Rust-exit wave SH6 lane 6, #1401).
 //
 // A Z-set crosses the boundary as one flat sequence of cells: each row is
 // `width` i64 columns followed by its i64 weight (stride width + 1), rows
@@ -38,6 +59,12 @@ use self::acc::{
     acc_new
 };
 use self::cdc::cdc_decode;
+use self::log::{
+    frame_bytes,
+    frame_decode,
+    frame_ok,
+    header_bytes
+};
 use self::wide::{
     Acc,
     acc_add,
@@ -836,4 +863,46 @@ pub fn cdc_ingest(
         inout budget,
         inout stats
     );
+}
+
+// ---------------------------------------------------------------------
+// the input log's frames (log.rs `InputLog`, module log)
+
+pub copy enum LogErr {
+    Overflow,
+    Schema,
+    Rows,
+    FrameBytes,
+    Frame,
+    Epoch,
+    Noncanonical
+}
+
+// The header of a log of inputs of these widths.
+pub fn log_header(in widths: Slice[u64]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    header_bytes(in widths)
+}
+
+// One whole frame of epoch `epoch` (see log.ves).
+pub fn log_frame(
+    epoch: u64,
+    schema_at: u64,
+    in cells: Slice[i64],
+    in counts: Slice[u64],
+    in widths: Slice[u64],
+    max_rows: u64,
+    max_frame: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[LogErr]] {
+    frame_bytes(epoch, schema_at, in cells, in counts, in widths, max_rows, max_frame)
+}
+
+// Whether a frame's payload of `len` bytes and its digest check.
+pub fn log_frame_ok(in body: Slice[u8], len: u64) -> bool eff [Ffi[Blake3]] {
+    frame_ok(in body, len)
+}
+
+// A checked payload's sets: per input its row count, then its cells.
+pub fn log_decode(in payload: Slice[u8], epoch: u64, in widths: Slice[u64], max_rows: u64)
+    -> ChunkSeq[i64] eff [Fail[LogErr]] {
+    frame_decode(in payload, epoch, in widths, max_rows)
 }

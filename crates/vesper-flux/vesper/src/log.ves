@@ -1,0 +1,259 @@
+// Module log of @vesper/flux: the frame codec of log.rs (`InputLog`). The
+// Rust side keeps the file: it reads and writes the bytes this module
+// builds and checks.
+//
+// A header is `VFLUXIL1`, version 1 (u16), flags 0 (u16), the input count
+// (u32), every width (u32), then the BLAKE3 digest of those bytes. A frame
+// is the payload length (u32), the payload (the epoch u64, then per input
+// its row count u32 and its canonical rows: i64 cells and an i64 weight)
+// and the BLAKE3 digest of "vesper.flux.input-log.frame/1", the length and
+// the payload. Every integer is little-endian.
+use self::LogErr;
+use self::util::cell;
+use @vesper-std/hash-sys::hash;
+use @vesper-std/hash::blake3::Digest;
+
+const SUM: u64 = 32;
+const U32_MAX: u64 = 4294967295;
+
+fn put_u16(inout out: ChunkSeq[u8], v: u64) {
+    out.push(wrapping_u8(v & 255));
+    out.push(wrapping_u8((v >> 8) & 255));
+}
+
+fn put_u32(inout out: ChunkSeq[u8], v: u64) {
+    put_u16(inout out, v & 65535);
+    put_u16(inout out, (v >> 16) & 65535);
+}
+
+fn put_u64(inout out: ChunkSeq[u8], v: u64) {
+    put_u32(inout out, v & U32_MAX);
+    put_u32(inout out, v >> 32);
+}
+
+fn put_digest(inout out: ChunkSeq[u8], d: Digest) {
+    put_u64(inout out, d.w0);
+    put_u64(inout out, d.w1);
+    put_u64(inout out, d.w2);
+    put_u64(inout out, d.w3);
+}
+
+fn le64(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn le32(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u32_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn same_digest(d: Digest, in s: Slice[u8], at: u64) -> bool {
+    d
+        .w0
+        == le64(in s, at)
+        && d
+        .w1
+        == le64(in s, wrapping_add(at, 8))
+        && d
+        .w2
+        == le64(in s, wrapping_add(at, 16))
+        && d
+        .w3
+        == le64(in s, wrapping_add(at, 24))
+}
+
+// The header of a log of inputs of these widths (each checked to fit a
+// u32 by the caller).
+pub fn header_bytes(in widths: Slice[u64]) -> ChunkSeq[u8] eff [Ffi[Blake3]] {
+    let n = widths.len();
+    let mut h = ChunkSeq::with_capacity[u8](
+        wrapping_add(wrapping_add(16, wrapping_mul(4, n)), SUM)
+    );
+    h.extend(in "VFLUXIL1".as_bytes());
+    put_u16(inout h, 1);
+    put_u16(inout h, 0);
+    put_u32(inout h, n);
+    for i in 0..n {
+        put_u32(
+            inout h,
+            match widths.try_get(i) {
+                Option::Some(w) => w,
+                Option::None => 0,
+            }
+        );
+    }
+    let d = hash(in h.as_slice());
+    put_digest(inout h, d);
+    h
+}
+
+// The digest of a frame whose length field and payload are
+// `frame[at..at + 4 + len]`.
+fn frame_digest(in frame: Slice[u8], at: u64, len: u64) -> Digest eff [Ffi[Blake3]] {
+    let mut msg = ChunkSeq::with_capacity[u8](wrapping_add(33, len));
+    msg.extend(in "vesper.flux.input-log.frame/1".as_bytes());
+    msg.extend(in frame[at..wrapping_add(at, wrapping_add(4, len))]);
+    hash(in msg.as_slice())
+}
+
+// One whole frame (length, payload, digest) for epoch `epoch`: input i has
+// `counts[i]` rows of `widths[i]` cells and a weight in `cells`, inputs in
+// order; input `schema_at` (the first of another width than the log's, or
+// the input count) fails with `Schema` when the loop reaches it. The errors
+// and their order are `InputLog::append`'s after its epoch and input-count
+// checks.
+pub fn frame_bytes(
+    epoch: u64,
+    schema_at: u64,
+    in cells: Slice[i64],
+    in counts: Slice[u64],
+    in widths: Slice[u64],
+    max_rows: u64,
+    max_frame: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[LogErr]] {
+    let mut out = ChunkSeq::new[u8]();
+    // The length field, written once the payload is known.
+    put_u32(inout out, 0);
+    put_u64(inout out, epoch);
+    let mut rows: u64 = 0;
+    let mut at: u64 = 0;
+    for i in 0..counts.len() {
+        if i == schema_at {
+            Fail::raise(LogErr::Schema);
+        }
+        let count = match counts.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let stride = wrapping_add(
+            match widths.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            },
+            1
+        );
+        let total = wrapping_add(rows, count);
+        if total < rows {
+            Fail::raise(LogErr::Overflow);
+        }
+        rows = total;
+        if rows > max_rows {
+            Fail::raise(LogErr::Rows);
+        }
+        if count > U32_MAX {
+            Fail::raise(LogErr::Overflow);
+        }
+        put_u32(inout out, count);
+        let n = wrapping_mul(count, stride);
+        for k in 0..n {
+            put_u64(inout out, wrapping_u64(cell(in cells, wrapping_add(at, k))));
+        }
+        at = wrapping_add(at, n);
+        if wrapping_sub(out.len(), 4) > max_frame {
+            Fail::raise(LogErr::FrameBytes);
+        }
+    }
+    let len = wrapping_sub(out.len(), 4);
+    if len > U32_MAX {
+        Fail::raise(LogErr::Overflow);
+    }
+    out.try_set(0, wrapping_u8(len & 255));
+    out.try_set(1, wrapping_u8((len >> 8) & 255));
+    out.try_set(2, wrapping_u8((len >> 16) & 255));
+    out.try_set(3, wrapping_u8((len >> 24) & 255));
+    let d = frame_digest(in out.as_slice(), 0, len);
+    put_digest(inout out, d);
+    out
+}
+
+// Whether `body` (a payload of `len` bytes, then its digest) checks.
+pub fn frame_ok(in body: Slice[u8], len: u64) -> bool eff [Ffi[Blake3]] {
+    if body.len() != wrapping_add(len, SUM) {
+        return false;
+    }
+    let mut frame = ChunkSeq::with_capacity[u8](wrapping_add(4, len));
+    put_u32(inout frame, len);
+    frame.extend(in body[0..len]);
+    let d = frame_digest(in frame.as_slice(), 0, len);
+    same_digest(d, in body, len)
+}
+
+// Decodes a checked payload of epoch `epoch` for inputs of `widths`: per
+// input its row count, then its cells (rows and weights). The errors and
+// their order are `InputLog::decode`'s.
+pub fn frame_decode(in payload: Slice[u8], epoch: u64, in widths: Slice[u64], max_rows: u64)
+    -> ChunkSeq[i64] eff [Fail[LogErr]] {
+    let n = payload.len();
+    if n < 8 {
+        Fail::raise(LogErr::Frame);
+    }
+    if le64(in payload, 0) != epoch {
+        Fail::raise(LogErr::Epoch);
+    }
+    let mut cursor: u64 = 8;
+    let mut total: u64 = 0;
+    let mut out = ChunkSeq::new[i64]();
+    for i in 0..widths.len() {
+        let width = match widths.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if wrapping_sub(n, cursor) < 4 {
+            Fail::raise(LogErr::Frame);
+        }
+        let count = le32(in payload, cursor);
+        cursor = wrapping_add(cursor, 4);
+        total = wrapping_add(total, count);
+        if total > max_rows {
+            Fail::raise(LogErr::Rows);
+        }
+        out.push(wrapping_i64(count));
+        let row_bytes = wrapping_mul(wrapping_add(width, 1), 8);
+        for r in 0..count {
+            if wrapping_sub(n, cursor) < row_bytes {
+                Fail::raise(LogErr::Frame);
+            }
+            let at = out.len();
+            for k in 0..width {
+                out.push(wrapping_i64(le64(in payload, wrapping_add(cursor, wrapping_mul(k, 8)))));
+            }
+            let weight = wrapping_i64(
+                le64(in payload, wrapping_add(cursor, wrapping_mul(width, 8)))
+            );
+            if weight == 0 {
+                Fail::raise(LogErr::Noncanonical);
+            }
+            if r > 0 {
+                // Rows strictly ascend: compare with the row before.
+                let prev = wrapping_sub(at, wrapping_add(width, 1));
+                let mut c: i64 = 0;
+                for k in 0..width {
+                    let x = cell(in out.as_slice(), wrapping_add(prev, k));
+                    let y = cell(in out.as_slice(), wrapping_add(at, k));
+                    if x != y {
+                        c = if x < y {
+                            -1
+                        } else {
+                            1
+                        };
+                        break;
+                    }
+                }
+                if c >= 0 {
+                    Fail::raise(LogErr::Noncanonical);
+                }
+            }
+            out.push(weight);
+            cursor = wrapping_add(cursor, row_bytes);
+        }
+    }
+    if cursor != n {
+        Fail::raise(LogErr::Frame);
+    }
+    out
+}

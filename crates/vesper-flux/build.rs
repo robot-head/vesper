@@ -67,4 +67,10 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "        if flags != 0 {\n",
         "        if flags > 1 {\n",
     ),
+    // log (vesper/src/log.ves): the header says version 2.
+    (
+        "log",
+        "    put_u16(inout h, 1);\n",
+        "    put_u16(inout h, 2);\n",
+    ),
 ];

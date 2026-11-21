@@ -115,6 +115,58 @@ impl Abi for FrErr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LogErr {
+    Overflow,
+    Schema,
+    Rows,
+    FrameBytes,
+    Frame,
+    Epoch,
+    Noncanonical,
+}
+
+impl Abi for LogErr {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            LogErr::Overflow => {
+                out[0] = 0;
+            }
+            LogErr::Schema => {
+                out[0] = 1;
+            }
+            LogErr::Rows => {
+                out[0] = 2;
+            }
+            LogErr::FrameBytes => {
+                out[0] = 3;
+            }
+            LogErr::Frame => {
+                out[0] = 4;
+            }
+            LogErr::Epoch => {
+                out[0] = 5;
+            }
+            LogErr::Noncanonical => {
+                out[0] = 6;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => LogErr::Overflow,
+            1 => LogErr::Schema,
+            2 => LogErr::Rows,
+            3 => LogErr::FrameBytes,
+            4 => LogErr::Frame,
+            5 => LogErr::Epoch,
+            6 => LogErr::Noncanonical,
+            tag => panic!("invalid LogErr tag {tag} from Vesper"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ZErr {
     Work,
     Rows,
@@ -263,6 +315,7 @@ pub mod repr {
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<CdcErr as Abi>::WORDS == 1);
 const _: () = assert!(<FrErr as Abi>::WORDS == 1);
+const _: () = assert!(<LogErr as Abi>::WORDS == 1);
 const _: () = assert!(<ZErr as Abi>::WORDS == 1);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
@@ -278,6 +331,10 @@ unsafe extern "C" {
     fn vesper_flux_frontier_live_holds(live: i64) -> i64;
     fn vesper_flux_frontier_retire(gens: i64, holds: i64, live: *mut u64, watermark: *mut u64, slot: i64, generation: i64, timestamp: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_valid(gens: i64, holds: i64, live: i64, slot: i64, generation: i64, timestamp: i64) -> i64;
+    fn vesper_flux_log_decode(payload: *mut u64, epoch: i64, widths: *mut u64, max_rows: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_log_frame(epoch: i64, schema_at: i64, cells: *mut u64, counts: *mut u64, widths: *mut u64, max_rows: i64, max_frame: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_log_frame_ok(body: *mut u64, len: i64) -> i64;
+    fn vesper_flux_log_header(widths: *mut u64) -> i64;
     fn vesper_flux_zacc_add(a: *mut u64, input: i64, row: *mut u64, whi: i64, wlo: i64, fail: *mut u64) -> i64;
     fn vesper_flux_zacc_finish(a: *mut u64, input: i64, fail: *mut u64) -> i64;
     fn vesper_flux_zacc_new(result: *mut u64, widths: *mut u64, max_rows: i64, k0: i64, k1: i64) -> i64;
@@ -385,6 +442,58 @@ pub fn frontier_valid(gens: &[u64], holds: &[i64], live: &[u8], slot: u64, gener
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_seq(gens, |seq_gens| vesper_port_abi::with_seq(holds, |seq_holds| vesper_port_abi::with_seq(live, |seq_live| unsafe { vesper_flux_frontier_valid(seq_gens as i64, seq_holds as i64, seq_live as i64, slot as i64, generation as i64, timestamp as i64) })));
     raw != 0
+}
+
+/// Calls `log_decode` of the Vesper library `flux` (`vesper_flux_log_decode`).
+pub fn log_decode(payload: &[u8], epoch: u64, widths: &[u64], max_rows: u64) -> Result<Vec<i64>, LogErr> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_log_decode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(payload, |view_payload| vesper_port_abi::with_slice(widths, |view_widths| unsafe { vesper_flux_log_decode(view_payload, epoch as i64, view_widths, max_rows as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<LogErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_log_decode"),
+    }
+}
+
+/// Calls `log_frame` of the Vesper library `flux` (`vesper_flux_log_frame`).
+pub fn log_frame(epoch: u64, schema_at: u64, cells: &[i64], counts: &[u64], widths: &[u64], max_rows: u64, max_frame: u64) -> Result<Vec<u8>, LogErr> {
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_log_frame` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(cells, |view_cells| vesper_port_abi::with_slice(counts, |view_counts| vesper_port_abi::with_slice(widths, |view_widths| unsafe { vesper_flux_log_frame(epoch as i64, schema_at as i64, view_cells, view_counts, view_widths, max_rows as i64, max_frame as i64, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<LogErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_log_frame"),
+    }
+}
+
+/// Calls `log_frame_ok` of the Vesper library `flux` (`vesper_flux_log_frame_ok`).
+pub fn log_frame_ok(body: &[u8], len: u64) -> bool {
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    // SAFETY: `vesper_flux_log_frame_ok` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(body, |view_body| unsafe { vesper_flux_log_frame_ok(view_body, len as i64) });
+    raw != 0
+}
+
+/// Calls `log_header` of the Vesper library `flux` (`vesper_flux_log_header`).
+pub fn log_header(widths: &[u64]) -> Vec<u8> {
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    // SAFETY: `vesper_flux_log_header` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(widths, |view_widths| unsafe { vesper_flux_log_header(view_widths) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
 /// Calls `zacc_add` of the Vesper library `flux` (`vesper_flux_zacc_add`).

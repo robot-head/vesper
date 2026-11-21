@@ -14,7 +14,7 @@ use crate::{Budget, Error, Limits};
 #[path = "../port/binding.rs"]
 pub(crate) mod binding;
 
-use binding::{CdcErr, FrErr, ZErr};
+use binding::{CdcErr, FrErr, LogErr, ZErr};
 
 fn zset_error(e: ZErr) -> Error {
     match e {
@@ -274,4 +274,87 @@ pub(crate) fn cdc_ingest(
         CdcErr::TruncatedRow => Error::Cdc("truncated row"),
     })?;
     Ok((stats[0] as usize, stats[1]))
+}
+
+fn log_error(e: LogErr) -> Error {
+    match e {
+        LogErr::Overflow => Error::Overflow,
+        LogErr::Schema => Error::Schema,
+        LogErr::Rows => Error::Limit("log rows"),
+        LogErr::FrameBytes => Error::Limit("log frame bytes"),
+        LogErr::Frame => Error::Storage("log frame"),
+        LogErr::Epoch => Error::Storage("log epoch"),
+        LogErr::Noncanonical => Error::Storage("noncanonical log rows"),
+    }
+}
+
+/// The input log's header for inputs of these widths (each fits a u32).
+pub(crate) fn log_header(widths: &[usize]) -> Vec<u8> {
+    let widths: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    binding::log_header(&widths)
+}
+
+/// One whole frame (length, payload, checksum) of `epoch`.
+pub(crate) fn log_frame(
+    epoch: u64,
+    deltas: &[ZSet],
+    widths: &[usize],
+    limits: crate::LogLimits,
+) -> Result<Vec<u8>, Error> {
+    let schema_at = deltas
+        .iter()
+        .zip(widths)
+        .position(|(d, w)| d.width != *w)
+        .unwrap_or(deltas.len());
+    let mut cells = Vec::new();
+    let mut counts = Vec::with_capacity(deltas.len());
+    let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    for d in &deltas[..schema_at] {
+        cells.extend_from_slice(&d.cells);
+        counts.push(w(d.len()));
+    }
+    // The input of another width only has to be reached.
+    counts.extend(std::iter::repeat_n(0, deltas.len() - schema_at));
+    binding::log_frame(
+        epoch,
+        w(schema_at),
+        &cells,
+        &counts,
+        &ws,
+        w(limits.max_rows_per_frame),
+        w(limits.max_frame_bytes),
+    )
+    .map_err(log_error)
+}
+
+/// Whether `body` (a payload of `len` bytes and its checksum) checks.
+pub(crate) fn log_frame_ok(body: &[u8], len: u32) -> bool {
+    binding::log_frame_ok(body, u64::from(len))
+}
+
+/// The sets of a checked payload of `epoch`.
+pub(crate) fn log_decode(
+    payload: &[u8],
+    epoch: u64,
+    widths: &[usize],
+    limits: crate::LogLimits,
+) -> Result<Vec<ZSet>, Error> {
+    let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    let out = binding::log_decode(payload, epoch, &ws, w(limits.max_rows_per_frame))
+        .map_err(log_error)?;
+    let mut at = 0;
+    Ok(widths
+        .iter()
+        .map(|width| {
+            let n = out[at] as usize * (width + 1);
+            let set = ZSet::from_cells(*width, out[at + 1..at + 1 + n].to_vec());
+            at += 1 + n;
+            set
+        })
+        .collect())
+}
+
+/// Live allocations of the port's runtime (leak checks).
+pub(crate) fn live_allocations() -> i64 {
+    binding::live_allocations()
 }

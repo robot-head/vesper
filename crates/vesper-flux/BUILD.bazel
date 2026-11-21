@@ -9,6 +9,10 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    deps = [
+        "//:std_hash_package",
+        "//:std_hash_sys_package",
+    ],
 )
 
 vesper_port_object(
@@ -37,6 +41,9 @@ vesper_crate(
     # tests/lean_model.rs kernel-checks lean/FluxDbsp.lean; Lean rejects
     # symlinked runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],
+    # src/lib.rs includes packages/vesper-std/hash/sys/shim.rs, the Rust side
+    # of the port's BLAKE3 `.vsys` import (in the root package).
+    extra_compile_data = ["//:files"],
     extra_test_data = ["//:lean"],
     # Fault injection at every scheduler step of several protocols.
     # tests/kafka.rs needs a broker (VESPER_KAFKA_HOME); without one it
@@ -68,5 +75,6 @@ vesper_crate(
         ("frontier", "lib.ves", "    let mut min = watermark;\n", "    let mut min: i64 = 0;\n"),
         ("accumulator", "acc.ves", "    if count >= a.max_rows {\n", "    if count > a.max_rows {\n"),
         ("cdc", "cdc.ves", "        if flags != 0 {\n", "        if flags > 1 {\n"),
+        ("log", "log.ves", "    put_u16(inout h, 1);\n", "    put_u16(inout h, 2);\n"),
     ]
 ]

@@ -15,6 +15,10 @@
 //!   pre-encoded batches of [`INGEST_RECORDS`] width-4 records over 1024
 //!   keys (repeats and cancellations), ingested by a fresh executor whose
 //!   circuit is its input.
+//! - `log`: the input log: [`LOG_EPOCHS`] epochs of two width-3 sets of
+//!   [`LOG_ROWS`] rows appended to a fresh log, read back, and the log
+//!   reopened (every frame verified). Point `TMPDIR` at a RAM disk so that
+//!   `sync_all` does not dominate.
 //!
 //! The two arms are two builds of this example, in separate worker
 //! processes: before #1069 replaced the Rust kernels they were the Rust
@@ -26,8 +30,8 @@
 //! both builds agree.
 //!
 //! ```text
-//! abba worker <join|example|resume|ingest>                  # one arm
-//! abba drive <join|example|resume|ingest> <rust-worker> <vesper-worker>
+//! abba worker <join|example|resume|ingest|log>                  # one arm
+//! abba drive <join|example|resume|ingest|log> <rust-worker> <vesper-worker>
 //! ```
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -46,6 +50,9 @@ const RESUME_TICKS: u64 = 16;
 /// CDC batches per `ingest` batch, and records per CDC batch.
 const INGEST_TICKS: u64 = 8;
 const INGEST_RECORDS: u64 = 4096;
+/// Epochs per `log` batch, and rows per set.
+const LOG_EPOCHS: u64 = 16;
+const LOG_ROWS: u64 = 1024;
 
 fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -302,6 +309,52 @@ fn ingest_batch(batches: &[Vec<u8>]) -> u64 {
     h
 }
 
+/// The `log` workload's epochs, built once per worker.
+fn log_inputs() -> Vec<TickInput> {
+    let mut rng = Lcg(0x10_6e57);
+    (0..LOG_EPOCHS)
+        .map(|_| TickInput {
+            deltas: (0..2)
+                .map(|_| {
+                    let entries: Vec<(Vec<i64>, i64)> = (0..LOG_ROWS)
+                        .map(|_| {
+                            let k = rng.next() as i64;
+                            (vec![k % 1000, k, -k], 1 + (k % 3))
+                        })
+                        .collect();
+                    ZSet::consolidate(3, &entries, wide()).expect("set")
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// One `log` batch: append every epoch, read each back, reopen the log.
+fn log_batch(inputs: &[TickInput], n: u64) -> u64 {
+    let path = std::env::temp_dir().join(format!("vesper-flux-abba-{}-{n}", std::process::id()));
+    let limits = vesper_flux::LogLimits {
+        max_frame_bytes: 1 << 24,
+        max_rows_per_frame: 1 << 16,
+        ..vesper_flux::LogLimits::default()
+    };
+    let mut log = vesper_flux::InputLog::create(&path, &[3, 3], limits).expect("create");
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for input in inputs {
+        log.append(input).expect("append");
+    }
+    for epoch in 0..log.len() {
+        for d in &log.read(epoch).expect("read").deltas {
+            h = digest_set(h, d);
+        }
+    }
+    drop(log);
+    let (log, recovery) = vesper_flux::InputLog::open(&path, limits).expect("open");
+    h = fnv(h, &recovery.epochs.to_le_bytes());
+    drop(log);
+    std::fs::remove_file(&path).expect("remove");
+    h
+}
+
 /// Serve batches: each stdin line `go <n>` runs batch `n` and answers with
 /// its digest.
 fn worker(workload: &str) {
@@ -309,6 +362,11 @@ fn worker(workload: &str) {
     let mut out = std::io::stdout().lock();
     let batches = if workload == "ingest" {
         ingest_batches()
+    } else {
+        Vec::new()
+    };
+    let epochs = if workload == "log" {
+        log_inputs()
     } else {
         Vec::new()
     };
@@ -323,6 +381,7 @@ fn worker(workload: &str) {
             "example" => example_batch(),
             "resume" => resume_batch(n + 1),
             "ingest" => ingest_batch(&batches),
+            "log" => log_batch(&epochs, n),
             other => panic!("unknown workload {other}"),
         };
         writeln!(out, "{digest}").expect("answer");
@@ -387,6 +446,7 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "example" => (4, EXAMPLE_RUNS * 3),
         "resume" => (4, RESUME_TICKS),
         "ingest" => (4, INGEST_TICKS),
+        "log" => (4, LOG_EPOCHS),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
@@ -466,7 +526,7 @@ fn main() {
         ["drive", workload, rust, vesper] => drive(workload, rust, vesper),
         _ => {
             eprintln!(
-                "usage: abba worker <join|example|resume|ingest> | abba drive <join|example|resume|ingest> <rust-worker> <vesper-worker>"
+                "usage: abba worker <join|example|resume|ingest|log> | abba drive <join|example|resume|ingest|log> <rust-worker> <vesper-worker>"
             );
             std::process::exit(2);
         }
