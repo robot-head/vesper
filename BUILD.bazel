@@ -835,6 +835,14 @@ vesper_package(
 )
 
 vesper_package(
+    name = "ir_inline_package",
+    srcs = glob(["packages/vesper-ir-inline/src/**/*.ves"]),
+    manifest = "packages/vesper-ir-inline/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+vesper_package(
     name = "std_hash_sys_package",
     srcs = glob(["packages/vesper-std/hash/sys/src/**/*.ves"]),
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
