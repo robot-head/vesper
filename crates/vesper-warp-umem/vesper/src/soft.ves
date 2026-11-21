@@ -174,8 +174,15 @@ impl Nic {
 
     fn nic_tx_pop_front(inout self) {
         self.nic_tx_head = wrapping_add(self.nic_tx_head, 1);
-        if self.nic_tx_head == self.nic_tx.len() {
+        let len = self.nic_tx.len();
+        if self.nic_tx_head == len {
             self.nic_tx.clear();
+            self.nic_tx_head = 0;
+        } else if wrapping_add(self.nic_tx_head, self.nic_tx_head) >= len {
+            // Drop the consumed half so a queue that never empties stays
+            // bounded (amortized O(1), like `VecDeque::pop_front`).
+            self.nic_tx.try_copy_within(self.nic_tx_head, len, 0);
+            self.nic_tx.truncate(wrapping_sub(len, self.nic_tx_head));
             self.nic_tx_head = 0;
         }
     }
@@ -440,12 +447,7 @@ fn nic_step(inout n: Nic, inout mem: Slice[u8], fill_batch: u32, tx_batch: u32, 
                 Result::Err(_) => (),
             }
         }
-        if n.ingress_head >= n.ingress_len.len() {
-            n.ingress.clear();
-            n.ingress_start.clear();
-            n.ingress_len.clear();
-            n.ingress_head = 0;
-        }
+        compact_ingress(inout n);
     }
     // 5. Faults; one that cannot apply yet waits for a later step.
     let pending = n.pending_faults();
@@ -461,6 +463,36 @@ fn nic_step(inout n: Nic, inout mem: Slice[u8], fill_batch: u32, tx_batch: u32, 
     }
     compact_faults(inout n);
     report
+}
+
+// Reclaims consumed ingress packets: all of them once the queue is empty,
+// else the consumed prefix once it is at least half the queue, so a queue
+// that never empties stays bounded (amortized O(1)).
+fn compact_ingress(inout n: Nic) {
+    let count = n.ingress_len.len();
+    let head = n.ingress_head;
+    if head >= count {
+        n.ingress.clear();
+        n.ingress_start.clear();
+        n.ingress_len.clear();
+        n.ingress_head = 0;
+        return;
+    }
+    if head == 0 || wrapping_add(head, head) < count {
+        return;
+    }
+    let base = at(in n.ingress_start, head);
+    let bytes = n.ingress.len();
+    n.ingress.try_copy_within(base, bytes, 0);
+    n.ingress.truncate(wrapping_sub(bytes, base));
+    for i in head..count {
+        let j = wrapping_sub(i, head);
+        n.ingress_start.try_set(j, wrapping_sub(at(in n.ingress_start, i), base));
+        n.ingress_len.try_set(j, at(in n.ingress_len, i));
+    }
+    n.ingress_start.truncate(wrapping_sub(count, head));
+    n.ingress_len.truncate(wrapping_sub(count, head));
+    n.ingress_head = 0;
 }
 
 fn compact_faults(inout n: Nic) {

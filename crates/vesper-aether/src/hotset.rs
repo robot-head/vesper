@@ -149,9 +149,17 @@ impl HotSet {
     pub fn decode(bytes: &[u8], expected_page_count: usize) -> Result<Self, HotSetError> {
         #[cfg(feature = "vesper-port")]
         {
-            // Room for every index the body can hold; the port checks the
-            // header's count against it.
-            let mut out = vec![0u64; bytes.len().saturating_sub(HEADER_BYTES) / 4];
+            // Room for the header's count, bounded by what the body can hold
+            // and by MAX_HOT_PAGES. This only sizes the buffer: the port
+            // rejects a bad header, a count above MAX_HOT_PAGES and a body
+            // that is not exactly the count's size before writing.
+            let declared = bytes
+                .get(12..16)
+                .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+            let room = (bytes.len().saturating_sub(HEADER_BYTES) / 4)
+                .min(MAX_HOT_PAGES)
+                .min(declared);
+            let mut out = vec![0u64; room];
             let n = crate::binding::hotset_decode(bytes, expected_page_count as u64, &mut out)
                 .map_err(HotSetError::from)?;
             Ok(Self {
