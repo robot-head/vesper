@@ -886,7 +886,7 @@ fn compile_session_with_linkage<M: Module>(
     let mut ctx = m.make_context();
     ctx.func.signature = sig;
     let mut fbctx = FunctionBuilderContext::new();
-    let (context, park) = {
+    let (context, park, wide_divisions) = {
         let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
         let block = b.create_block();
         b.append_block_params_for_function_params(block);
@@ -954,6 +954,7 @@ fn compile_session_with_linkage<M: Module>(
             forced_call_vars: None,
             discard_slot: None,
             element_writebacks: vec![],
+            wide_divisions: vec![],
             session: Some(SessionCodegen {
                 ctx: context,
                 park,
@@ -979,8 +980,9 @@ fn compile_session_with_linkage<M: Module>(
         clif::emit_violation(&mut c.b, violation);
         c.b.seal_all_blocks();
         c.b.finalize();
-        (context, park)
+        (context, park, c.wide_divisions)
     };
+    super::wide_native::fuse_wide_divisions(&mut ctx.func, &wide_divisions);
     linkage.normalize_references(&mut ctx.func);
     check_data_base_freshness(&ctx.func, context, park)?;
     text.push_str(&format!("; {name}\n{}\n", ctx.func.display()));

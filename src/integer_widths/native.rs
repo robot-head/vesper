@@ -17,6 +17,271 @@ pub(super) fn is_wide(t: &Type) -> bool {
     !matches!(t, Type::IntLiteral(_)) && IntegerKind::from_type(t).is_some_and(IntegerKind::wide)
 }
 
+/// A 128-bit division [`Codegen::wide_udivrem`] emitted: from the
+/// `brif` that starts it to the block whose parameters are its unsigned
+/// quotient and remainder. Nothing else branches into or out of it.
+#[derive(Clone, Copy)]
+pub(super) struct WideDivision {
+    /// The source operands of `/` or `%` and whether they are signed.
+    operands: (ir::Value, ir::Value, bool),
+    /// The `brif` that starts the division.
+    start: ir::Inst,
+    /// The block whose parameters are the quotient and the remainder.
+    join: ir::Block,
+}
+
+/// One division for `x / d` and `x % d` (and repeats of either): a 128-bit
+/// division whose start is dominated by the end of an earlier division of
+/// the same operands jumps straight to its own end with the earlier
+/// quotient and remainder, and Cranelift drops its now unreachable body
+/// (#1437). Each division is a single-entry, single-exit region, so
+/// skipping one leaves the dominance of every other block as it was.
+///
+/// Cranelift cannot do this itself: the division is a branchy word
+/// algorithm ([`Codegen::wide_udivrem`]), not one instruction it could
+/// number, and the two are usually in different blocks (each checked
+/// operator branches to its zero-divisor failure first).
+pub(super) fn fuse_wide_divisions(func: &mut ir::Function, divisions: &[WideDivision]) {
+    use cranelift_codegen::dominator_tree::DominatorTree;
+    use cranelift_codegen::flowgraph::ControlFlowGraph;
+    if divisions.len() < 2 {
+        return;
+    }
+    let cfg = ControlFlowGraph::with_function(func);
+    let domtree = DominatorTree::with_function(func, &cfg);
+    let mut kept: Vec<WideDivision> = vec![];
+    let mut fused = false;
+    for d in divisions {
+        let Some(block) = func.layout.inst_block(d.start) else {
+            continue;
+        };
+        if !domtree.is_reachable(block) {
+            continue;
+        }
+        let earlier = kept.iter().find(|e| {
+            e.operands.2 == d.operands.2
+                && domtree.block_dominates(e.join, block)
+                && same_value(func, &cfg, &domtree, e.operands.0, d.operands.0)
+                && same_value(func, &cfg, &domtree, e.operands.1, d.operands.1)
+        });
+        let Some(earlier) = earlier else {
+            kept.push(*d);
+            continue;
+        };
+        let params = func.dfg.block_params(earlier.join);
+        let mut args: Vec<ir::BlockArg> = vec![params[0].into(), params[1].into()];
+        // The frontend's parameters for variables live across the
+        // division: each must stand for a value already available where
+        // the division starts.
+        let mut available = true;
+        for &extra in &func.dfg.block_params(d.join)[2..] {
+            let v = passed_value(func, &cfg, &domtree, extra, 8);
+            let defined_before = match func.dfg.value_def(v) {
+                ir::ValueDef::Param(b, _) => b != d.join && domtree.block_dominates(b, block),
+                ir::ValueDef::Result(inst, _) => domtree.dominates(inst, d.start, &func.layout),
+                _ => false,
+            };
+            if !defined_before {
+                available = false;
+                break;
+            }
+            args.push(v.into());
+        }
+        if available {
+            func.dfg.replace(d.start).jump(d.join, &args);
+            fused = true;
+        } else {
+            kept.push(*d);
+        }
+    }
+    if fused {
+        // Drop the skipped bodies now, as Cranelift would, so the CLIF
+        // text shows one division.
+        let cfg = ControlFlowGraph::with_function(func);
+        let domtree = DominatorTree::with_function(func, &cfg);
+        let dead: Vec<ir::Block> = func
+            .layout
+            .blocks()
+            .filter(|&b| !domtree.is_reachable(b))
+            .collect();
+        for b in dead {
+            while let Some(inst) = func.layout.first_inst(b) {
+                func.layout.remove_inst(inst);
+            }
+            func.layout.remove_block(b);
+        }
+    }
+}
+
+/// Whether `later` holds the value `earlier` held, where `earlier`'s
+/// definition dominates `later`'s: the same value through
+/// [`passed_value`], or two loads of the same type from the same address
+/// with nothing that may write memory on any path between them (a local
+/// kept in a stack slot is reloaded at each use).
+fn same_value(
+    func: &ir::Function,
+    cfg: &cranelift_codegen::flowgraph::ControlFlowGraph,
+    domtree: &cranelift_codegen::dominator_tree::DominatorTree,
+    earlier: ir::Value,
+    later: ir::Value,
+) -> bool {
+    use ir::InstructionData as D;
+    let earlier = passed_value(func, cfg, domtree, earlier, 8);
+    let later = passed_value(func, cfg, domtree, later, 8);
+    if earlier == later {
+        return true;
+    }
+    let (ir::ValueDef::Result(first, 0), ir::ValueDef::Result(second, 0)) =
+        (func.dfg.value_def(earlier), func.dfg.value_def(later))
+    else {
+        return false;
+    };
+    let (
+        D::Load {
+            opcode: ir::Opcode::Load,
+            arg: a,
+            flags: fa,
+            offset: oa,
+        },
+        D::Load {
+            opcode: ir::Opcode::Load,
+            arg: b,
+            flags: fb,
+            offset: ob,
+        },
+    ) = (func.dfg.insts[first], func.dfg.insts[second])
+    else {
+        return false;
+    };
+    func.dfg.value_type(earlier) == func.dfg.value_type(later)
+        && oa == ob
+        && fa == fb
+        && passed_value(func, cfg, domtree, a, 8) == passed_value(func, cfg, domtree, b, 8)
+        && domtree.dominates(first, second, &func.layout)
+        && !memory_written_between(func, cfg, first, second)
+}
+
+/// Whether an instruction that may write memory (a store, a call, or one
+/// with other side effects) can run after `first` and before `second`,
+/// on some path from one to the other. `first` dominates `second`.
+fn memory_written_between(
+    func: &ir::Function,
+    cfg: &cranelift_codegen::flowgraph::ControlFlowGraph,
+    first: ir::Inst,
+    second: ir::Inst,
+) -> bool {
+    use std::collections::BTreeSet;
+    let writes = |inst: ir::Inst| {
+        let op = func.dfg.insts[inst].opcode();
+        op.can_store() || op.is_call() || op.other_side_effects()
+    };
+    let (Some(from), Some(to)) = (
+        func.layout.inst_block(first),
+        func.layout.inst_block(second),
+    ) else {
+        return true;
+    };
+    // Blocks reachable after `from`'s end, and blocks that reach `to`.
+    let mut after = BTreeSet::new();
+    let mut work: Vec<ir::Block> = cfg.succ_iter(from).collect();
+    while let Some(b) = work.pop() {
+        if after.insert(b) {
+            work.extend(cfg.succ_iter(b));
+        }
+    }
+    let mut before = BTreeSet::new();
+    let mut work: Vec<ir::Block> = cfg.pred_iter(to).map(|p| p.block).collect();
+    while let Some(b) = work.pop() {
+        if before.insert(b) {
+            work.extend(cfg.pred_iter(b).map(|p| p.block));
+        }
+    }
+    // A block on a path between them is scanned whole; `from` itself only
+    // after `first` and `to` only before `second`, unless a cycle passes
+    // through them again (only then are they on such a path).
+    let mut tail = func.layout.next_inst(first);
+    if from == to && !after.contains(&from) {
+        while let Some(inst) = tail {
+            if inst == second {
+                return false;
+            }
+            if writes(inst) {
+                return true;
+            }
+            tail = func.layout.next_inst(inst);
+        }
+        return true;
+    }
+    while let Some(inst) = tail {
+        if writes(inst) {
+            return true;
+        }
+        tail = func.layout.next_inst(inst);
+    }
+    let mut head = func.layout.prev_inst(second);
+    while let Some(inst) = head {
+        if writes(inst) {
+            return true;
+        }
+        head = func.layout.prev_inst(inst);
+    }
+    after
+        .intersection(&before)
+        .any(|&b| func.layout.block_insts(b).any(writes))
+}
+
+/// The value `v` stands for: itself, or, for a block parameter every
+/// edge passes the same value to (a variable live across a branch, which
+/// the frontend keeps as a parameter), that value, up to `depth` blocks
+/// back. A parameter passed itself on a back edge still counts, and
+/// edges from unreachable blocks do not.
+fn passed_value(
+    func: &ir::Function,
+    cfg: &cranelift_codegen::flowgraph::ControlFlowGraph,
+    domtree: &cranelift_codegen::dominator_tree::DominatorTree,
+    v: ir::Value,
+    depth: u32,
+) -> ir::Value {
+    let v = func.dfg.resolve_aliases(v);
+    let ir::ValueDef::Param(block, index) = func.dfg.value_def(v) else {
+        return v;
+    };
+    if depth == 0 || func.layout.entry_block() == Some(block) {
+        return v;
+    }
+    let mut passed = None;
+    for pred in cfg.pred_iter(block) {
+        // The frontend leaves unreachable blocks that still branch on.
+        if !domtree.is_reachable(pred.block) {
+            continue;
+        }
+        let calls = func.dfg.insts[pred.inst]
+            .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables);
+        for call in calls {
+            if call.block(&func.dfg.value_lists) != block {
+                continue;
+            }
+            let Some(ir::BlockArg::Value(arg)) = call.args(&func.dfg.value_lists).nth(index) else {
+                return v;
+            };
+            let arg = func.dfg.resolve_aliases(arg);
+            if arg == v {
+                continue;
+            }
+            let arg = passed_value(func, cfg, domtree, arg, depth - 1);
+            if arg == v {
+                continue;
+            }
+            match passed {
+                None => passed = Some(arg),
+                Some(p) if p == arg => {}
+                Some(_) => return v,
+            }
+        }
+    }
+    passed.unwrap_or(v)
+}
+
 impl<M: Module> Codegen<'_, '_, M> {
     /// The `I128` constant `n`.
     pub(super) fn wide_const(&mut self, n: i128) -> ir::Value {
@@ -189,14 +454,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         unsigned: bool,
     ) -> Result<ir::Value, String> {
         if unsigned {
-            let (q, r) = self.wide_udivrem(a, b);
+            let (q, r) = self.wide_udivrem(a, b, (a, b, false));
             return Ok(if op == "/" { q } else { r });
         }
         let na = self.wide_negative(a);
         let nb = self.wide_negative(b);
         let ua = self.wide_magnitude(a, na);
         let ub = self.wide_magnitude(b, nb);
-        let (q, r) = self.wide_udivrem(ua, ub);
+        let (q, r) = self.wide_udivrem(ua, ub, (a, b, true));
         Ok(if op == "/" {
             let negative = self.b.ins().bxor(na, nb);
             self.wide_magnitude(q, negative)
@@ -216,7 +481,16 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// - a two-word divisor: the quotient fits in one word; estimate it from
     ///   the normalized divisor's high word and the dividend halved
     ///   (Hacker's Delight 9-5), which is exact or one too large.
-    fn wide_udivrem(&mut self, n: ir::Value, d: ir::Value) -> (ir::Value, ir::Value) {
+    ///
+    /// `operands` are the source operands of `/` or `%` (before a signed
+    /// division takes magnitudes) and their signedness: a later division of
+    /// the same operands reuses this one's results ([`fuse_wide_divisions`]).
+    fn wide_udivrem(
+        &mut self,
+        n: ir::Value,
+        d: ir::Value,
+        operands: (ir::Value, ir::Value, bool),
+    ) -> (ir::Value, ir::Value) {
         let (nl, nh) = self.b.ins().isplit(n);
         let (dl, dh) = self.b.ins().isplit(d);
         let one_word = self.b.create_block();
@@ -227,7 +501,19 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.append_block_param(join, types::I128);
         self.b.append_block_param(join, types::I128);
         let wide_divisor = self.b.ins().icmp_imm(IntCC::NotEqual, dh, 0);
+        let start_block = self.b.current_block().expect("a division in a block");
         self.branch(wide_divisor, by_wide, &[], one_word, &[]);
+        let start = self
+            .b
+            .func
+            .layout
+            .last_inst(start_block)
+            .expect("the division's branch");
+        self.wide_divisions.push(WideDivision {
+            operands,
+            start,
+            join,
+        });
         self.b.switch_to_block(one_word);
         let wide_dividend = self.b.ins().icmp_imm(IntCC::NotEqual, nh, 0);
         self.branch(wide_dividend, by_word, &[], fast, &[]);
