@@ -22,6 +22,10 @@ vesper_hybrid(
             "edit_src": "modules/stack_bound/src/lib.ves",
             "edits": {"    stack_bound_words(in input)\n": "    divergent_words(in input)\n"},
         },
+        "hybrid_ir_inline": {
+            "edit_src": "modules/ir_inline/src/lib.ves",
+            "edits": {"    inline_program_words(in input)\n": "    divergent_words(in input)\n"},
+        },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
             "edits": {"    if b {\n        1\n    } else {\n        0\n    }": "    if b {\n        0\n    } else {\n        1\n    }"},
@@ -45,6 +49,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:check_layout_package",
         ],
+        # The codegen swap (#1275) emits through the Cranelift shim.
+        "hybrid_codegen": [
+            "//:codegen_base_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         "hybrid_ir_check": [
             "//:check_data_package",
             "//:ir_check_package",
@@ -53,6 +62,10 @@ vesper_hybrid(
         "hybrid_stack_bound": [
             "//:check_data_package",
             "//:check_loops_atomics_package",
+        ],
+        "hybrid_ir_inline": [
+            "//:check_data_package",
+            "//:ir_inline_package",
         ],
         # The IR swap point's identity round trip (#1240).
         "hybrid_place_ir": [
@@ -64,12 +77,20 @@ vesper_hybrid(
             "//:front_package",
             "//:std_intern_package",
         ],
+        # Test discovery (#1337) builds on @vesper/test-runner.
+        "hybrid_test_runner": [
+            "//:front_package",
+            "//:test_runner_package",
+        ],
     },
     modules = {
         "hybrid_check_layout": "modules/check_layout",
+        "hybrid_codegen": "modules/codegen",
         "hybrid_ir_check": "modules/ir_check",
+        "hybrid_ir_inline": "modules/ir_inline",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
+        "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",
     },

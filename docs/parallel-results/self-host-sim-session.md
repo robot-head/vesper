@@ -1,8 +1,9 @@
 # Self-hosting SH5 lane 19: `vesper-sim-session` in Vesper
 
 Part 1 (#1357, merged as `b647460`) ported the datagram link model. Part 2
-(below the part 1 sections) ports SHA-256 and the WAL frame codec and
-recovery scan.
+(#1380, merged as `97de64f`) ported SHA-256 and the WAL frame codec and
+recovery scan. Part 3 (#1384, merged as `ce75623`) ported the virtual
+message network `net-v1`. Part 4 ports the write-ahead log state machine.
 
 ## Part 1: the datagram link model
 
@@ -154,13 +155,127 @@ for a 50 MB binary. Rust stays the default build under the parity rule.
    and `scan_result_*` functions do not become methods. Declaring the type in
    the root module avoids this.
 
+## Part 3: the virtual message network
+
+Base: `main` at `97de64f`.
+
+### What changed
+
+- The end of `port/src/lib.ves` is `net-v1` from `src/model/net.rs`. The
+  Vesper `NetState` makes every decision: message ids, per-link delays,
+  partitions, the send-time bounds (message size, in-flight count, the
+  inbox reservation), the drop reason at send and at arrival, and the FIFO
+  order of each endpoint's inbox and waiting receivers. Its tables are flat
+  `ChunkSeq[u64]` words (delay triples, sorted partition pairs, in-flight
+  `(id, from, to)` triples, and `(endpoint, value)` pairs for inboxes and
+  waiters).
+- This is the token-slab plan. The Rust `Network` wrapper keeps only the
+  payloads, keyed by message id, so no string crosses the boundary. Send
+  passes the payload's byte length, and the wrapper builds the `Message`
+  from the id and delivery time that come back. `take_queued` returns
+  message id 0 for an empty inbox (ids start at 1), and `crash` reads the
+  inbox and waiters before clearing them, so only words and flat seqs cross.
+- `Network`'s reference accessors (`endpoint`, `endpoints`, `in_flight`,
+  `partitions`) became owned ones on both builds: `in_flight`,
+  `in_flight_to`, `inboxes`, `waiting` and `partitions`. The model snapshot
+  and the arrival handler were their only users. `Endpoint` is now private
+  to the Rust build.
+- The differential adds a `net` case: 4,000 pseudo-random sends, arrivals
+  (some of unknown ids), receives, waits, timeouts, crashes, partitions and
+  heals over four endpoints with tight bounds. After every step it records
+  the network's whole state, then checks that a clone compares equal and
+  crashes every endpoint of the copy.
+- The `net` divergent edit lets an inbox take one message past its bound. It
+  fails `bounds_are_checked_before_anything_is_retained` and changes the
+  `net` transcript.
+
+### Results
+
+| Check | Rust | Vesper |
+|---|---|---|
+| Crate tests | all pass | all pass |
+| Transcript differential (10 cases) | blessed | **0 differences** |
+
+| Measure (release, best of 5) | Rust | Vesper | Ratio |
+|---|---|---|---|
+| `net_throughput`: 10^6 operations of the `net` mix | 414 ns/op | 455 ns/op | 1.10x |
+| Link (rerun) | 46.5 ns | 65.7 ns | 1.41x |
+| SHA-256 (rerun) | 0.82 ns/byte | 13.60 ns/byte | 16.6x |
+| WAL scan (rerun) | 347 ns/frame | 4,449 ns/frame | 12.8x |
+
+The `net` benchmark also formats a log line per operation on both builds,
+which is shared work, so the network itself costs more than 1.10x. The
+Vesper tables are linear: endpoint and partition lookups scan, and removing
+from an inbox or the waiter list shifts the rest. That is fine at the
+scenario bounds (tens of endpoints and messages) and is the first thing to
+change for parity. The reruns of the part 1 and part 2 benchmarks came out
+slower than before for both builds, so this machine was noisier than for
+those parts.
+
+### More compiler gaps
+
+7. **`eq` on a `Slice` is bytes only.** `a.as_slice().eq(in b.as_slice())`
+   on `ChunkSeq[u64]` is E1525 ("'eq' reads and writes bytes"). Comparing
+   word sequences is a loop.
+
+## Part 4: the write-ahead log state machine
+
+Base: `main` at `ce75623`.
+
+### What changed
+
+- `WalState` at the end of `port/src/lib.ves` is the `Wal` of
+  `src/model/wal.rs`. It owns:
+  - the medium's bytes and LSN assignment,
+  - the volatile and in-flight regions, kept as one queue of
+    `(lsn, frame_len)` pairs whose front `in_flight` entries are the batch,
+    with their frames built at append,
+  - the record and byte bounds,
+  - flush begin, completion and failure (a failed batch is already at the
+    front of the volatile region),
+  - recovery through the part 2 scan,
+  - the crash rules: the persisted prefix is clamped to the batch, and a
+    torn tail stays below a whole frame.
+- The Rust `Wal` wrapper keeps each live record's payload, keyed by LSN,
+  so it can return `WalRecord`s.
+- `Wal`'s reference accessors became owned ones on both builds:
+  - `durable_bytes` returns a `Cow`.
+  - `volatile`, `in_flight` and `begin_flush` return owned values.
+  - `view` is now `record(index)`, its only use.
+- The differential adds a `wal_ops` case: 3,000 pseudo-random operations,
+  each followed by the log's state (the medium's digest and length, the
+  durable LSN, the recovered flag, the batch and the volatile records). The
+  operations are appends (some too large or past the bounds), flush begins,
+  completions and failures, reads, crashes with persisted prefixes and torn
+  tails, and recoveries.
+- The `log` divergent edit lets a torn tail cover the whole next frame. No
+  unit test tears a whole frame, but the `wal_ops` transcript changes.
+
+### Results
+
+| Check | Rust | Vesper |
+|---|---|---|
+| Crate tests | all pass | all pass |
+| Transcript differential (11 cases) | blessed | **0 differences** |
+
+| Measure (release, best of 5) | Rust | Vesper | Ratio |
+|---|---|---|---|
+| `wal_ops_throughput`: 10^5 operations of the `wal_ops` mix | 742 ns/op | 4,152 ns/op | 5.6x |
+| `net_throughput` (rerun) | 396 ns/op | 439 ns/op | 1.11x |
+| Link (rerun) | 47.2 ns | 51.4 ns | 1.09x |
+| SHA-256 (rerun) | 0.77 ns/byte | 11.91 ns/byte | 15.5x |
+| WAL scan (rerun) | 327 ns/frame | 2,892 ns/frame | 8.8x |
+
+The log is bound by SHA-256. Every frame carries a check, the port builds
+each frame at append (Rust builds it at flush or crash, so records that
+vanish before either are never hashed), and every recovery rescans the
+medium. A faster SHA-256 is the first step toward parity. Rust stays the
+default.
+
 ## What is left (later parts of #1342)
 
-- `model/net.rs` (`net-v1`). It is mostly ordered maps of message records
-  whose payloads are strings. The plan is a token slab: Vesper keeps the ids,
-  reservations, partitions and FIFO order, and Rust keeps the payloads.
-- The `Wal` state machine itself (part 2 ported only its codec), and a
-  faster SHA-256.
+- A faster SHA-256 (it bounds the WAL's speed), and building frames at
+  flush rather than at append.
 - `model/umem.rs` and `model/warp.rs` (3,100 lines, over the
   `vesper-warp-umem` crate).
 - `model/mod.rs` process epochs, scenario validation, the canonical-JSON

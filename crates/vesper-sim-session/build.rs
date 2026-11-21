@@ -41,4 +41,17 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "        } else if b0 == 237 {\n            (128, 159)",
         "        } else if b0 == 237 {\n            (128, 191)",
     ),
+    // net: an endpoint's inbox takes one message past its bound.
+    (
+        "net",
+        "    if wrapping_add(reserved, at(in n.queued, e)) >= n.max_inbox {",
+        "    if wrapping_add(reserved, at(in n.queued, e)) > n.max_inbox {",
+    ),
+    // log: a torn tail may cover the whole next frame (caught by the
+    // `wal_ops` transcript; no unit test tears a whole frame).
+    (
+        "log",
+        "        torn_bytes = min(torn, wrapping_sub(frame_len, 1));",
+        "        torn_bytes = min(torn, frame_len);",
+    ),
 ];

@@ -5,8 +5,10 @@
 // prelude, the arithmetic simp set, the divergence class, the ADT groups
 // with the getters of recursive structures, the effect classes and CPS
 // lifts and the `Fail` models, wrapped in `import Std`, the unused-variable
-// option and `namespace Vesper`. The functions, their fuel companions and
-// contracts are the next parts.
+// option and `namespace Vesper`. Part 2 ports the CFG extractor
+// (src/lean_ir.rs) over the lowered program from @vesper/place-ir:
+// `extract_cfg_functions`. The structured extractor, fuel companions and
+// contracts are next.
 //
 // Built on @vesper/check-data (the harness input: the world's names, types
 // and ADTs) and @vesper/lean-syntax (the printer). The extractor writes
@@ -19,6 +21,9 @@
 // - prelude.ves: the fixed declarations.
 // - head.ves: ADT groups (petgraph's Tarjan order), getters, effects.
 // - input.ves: the effect section of the input.
+// - fn_input.ves: signatures, call types and lifted closures (part 2).
+// - cfg.ves: the CFG extractor's gate and liveness.
+// - emit.ves: the CFG extractor's definitions.
 
 use @vesper/check-data::input::{
     Reader,
@@ -48,6 +53,29 @@ use self::head::{
 };
 use self::input::{
     read_effects
+};
+use self::fn_input::{
+    read_fns
+};
+use self::emit::{
+    X,
+    extract
+};
+use self::head::{
+    recursive_structs
+};
+use @vesper/place-ir::{
+    read_program
+};
+use @vesper/check-data::world::{
+    set_by_symbol
+};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at
 };
 use self::prelude::{
     arithmetic_semantics,
@@ -165,4 +193,126 @@ pub fn extract_head(in input: Str) -> ChunkSeq[u64] {
 pub fn extract_head_words(in input: Str) -> u64 {
     let b = head(in input);
     b.words.len()
+}
+
+// ----- part 2: the CFG extractor ---------------------------------------------------
+
+fn put_part(inout out: ChunkSeq[u8], in s: Slice[u8], a: u64, z: u64) {
+    out.extend(in s[a..z]);
+}
+
+fn render_part(in words: Slice[u64], a: u64, z: u64, in pool: Str) -> Result[String, LeanError] {
+    handle Fail[LeanError] in {
+        render_module(in words[a..z], in pool)
+    } with {
+        return v => Result::Ok(v),
+        raise(error, k) => Result::Err(error),
+    }
+}
+
+const ST_NONE: u64 = 0;
+const ST_ERROR: u64 = 1;
+const ST_OK: u64 = 2;
+
+// Per source function with IR (name order), `fn <name>` and what
+// `lean_ir::extract_function_nodes` gives: `none` (the structured
+// extractor's), `error: <message>`, or the definitions as a module without
+// imports (tests/self_host_lean_extract.rs `rust_cfg_text`).
+pub fn extract_cfg_functions(in input: Str) -> ChunkSeq[u64] {
+    let bytes = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in bytes);
+    let p = read_program(inout r, in bytes, in c);
+    let fx = read_fns(inout r, in bytes, in c.nmap, in c.tmap);
+    let mut b = builder(names_new());
+    b.names = c.names;
+    let mut t = c.types;
+    let wd = c.world;
+    let rec = recursive_structs(in b, in t, in wd);
+    let mut by_name: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..p.fn_count() {
+        set_by_symbol(inout by_name, p.function(i).name, n32(inc(i)));
+    }
+    let fip = wd.box_active;
+    let x = X {
+        p: p,
+        wd: wd,
+        fx: fx,
+        fip: fip,
+        rec: rec,
+        fn_by_name: by_name
+    };
+    // per function: name, status, words[wa..wz] or errs[wa..wz]
+    let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut status: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ends: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut all: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut errs: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..x.p.fn_count() {
+        let row = x.p.function(i);
+        let si = x.fx.find(row.name);
+        if si != 4294967295 && x.fx.sig(widen_u64(si)).source {
+            b.words.clear();
+            b.failed = false;
+            b.err.clear();
+            b.quiet = 0;
+            b.w(0);
+            let count_at = b.hole();
+            let mut count: u64 = 0;
+            let taken = extract(inout b, inout t, in x, i, inout count);
+            b.fill(count_at, count);
+            names.push(row.name);
+            if !taken {
+                status.push(ST_NONE);
+                starts.push(0);
+                ends.push(0);
+            } else if b.failed {
+                status.push(ST_ERROR);
+                starts.push(errs.len());
+                errs.extend(in b.err.as_slice());
+                ends.push(errs.len());
+            } else {
+                status.push(ST_OK);
+                starts.push(all.len());
+                for k in 0..b.words.len() {
+                    all.push(u64_at(in b.words, k));
+                }
+                ends.push(all.len());
+            }
+        }
+    }
+    let pool = match String::from_utf8(in b.names.text.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    };
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for k in 0..names.len() {
+        put(inout out, in "fn ");
+        b.names.write(u32_at(in names, k), inout out);
+        put(inout out, in "\n");
+        let st = u64_at(in status, k);
+        let a = u64_at(in starts, k);
+        let z = u64_at(in ends, k);
+        if st == ST_NONE {
+            put(inout out, in "none\n");
+        } else if st == ST_ERROR {
+            put(inout out, in "error: ");
+            put_part(inout out, in errs.as_slice(), a, z);
+            put(inout out, in "\n");
+        } else {
+            let rendered = render_part(in all.as_slice(), a, z, in pool.as_str());
+            match rendered {
+                Result::Ok(text) => out.extend(in text.as_bytes()),
+                Result::Err(e) => {
+                    put(inout out, in "error: ");
+                    put(inout out, in printer_error(e));
+                    put(inout out, in "\n");
+                },
+            }
+        }
+    }
+    pack_text(in out)
 }

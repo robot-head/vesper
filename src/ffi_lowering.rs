@@ -681,6 +681,42 @@ impl ForeignChecked {
             crate::native::jit_with_options(world, entry, optimize)
         })
     }
+    /// JIT-compile `entry`, whose parameters and result are each one word
+    /// and whose row holds only foreign effects, binding the foreign
+    /// symbols as [`Self::jit`] does, for a Rust host that calls it many
+    /// times: the SH4 codegen hooks of crates/vesper-codegen-swap-test
+    /// (#1275).
+    pub fn word_function(
+        &self,
+        entry: &str,
+        symbols: &[(&str, *const u8)],
+        optimize: bool,
+    ) -> Result<crate::native::WordFunction, FfiError> {
+        for call in &self.calls {
+            if self.plan.libraries[&effect_name(&call.library)].handler != Handler::Direct
+                || !symbols.iter().any(|(n, _)| *n == call.symbol)
+            {
+                return Err(FfiError::new(
+                    FfiErrorKind::UnknownForeignFunction,
+                    format!(
+                        "the JIT host binds no direct function for {}::{}",
+                        call.library, call.symbol
+                    ),
+                    Some(call.span.clone()),
+                ));
+            }
+        }
+        JIT_SYMBOLS.with(|s| {
+            *s.borrow_mut() = symbols
+                .iter()
+                .map(|(n, a)| ((*n).to_owned(), *a as usize))
+                .collect()
+        });
+        let _guard = JitGuard;
+        self.with_lowering(None, |world| {
+            crate::native::WordFunction::compile_foreign(world, entry, optimize)
+        })
+    }
     /// Run the argument-free `entry` in the evaluator (`vesper run`'s
     /// machine), with `host` standing in for every foreign call: it gets the
     /// library, the `.vsys` symbol and the arguments, may update `inout`

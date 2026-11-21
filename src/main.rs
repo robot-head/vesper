@@ -594,7 +594,7 @@ fn cli() -> Result<(), String> {
                 serde_json::to_string_pretty(&{
                     let mut program = ir::lower(&checked);
                     if opt {
-                        vesper::ir_opt::optimize(&checked.world, &mut program)?;
+                        vesper::ir_opt_policy::optimize(&checked.world, &mut program)?;
                     }
                     program
                 })

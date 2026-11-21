@@ -216,6 +216,104 @@ fn place_ir_cost() {
     );
 }
 
+/// One phase of a swap over the lowered stages, for callgrind:
+/// `PLACE_IR_PHASE` is `lower` (Rust `ir::lower_world`), `encode`,
+/// `vesper` (read + write), `decode` or `none` (setup only). Collect inside
+/// the phase only:
+///
+/// ```text
+/// PLACE_IR_PHASE=vesper PLACE_IR_STEP=10 valgrind --tool=callgrind \
+///   --toggle-collect='*place_ir_measured*' <test binary> --ignored \
+///   --exact place_ir_callgrind --nocapture
+/// ```
+///
+/// Add `--instr-atstart=no` and `PLACE_IR_GO=<file>` to skip simulating
+/// the setup (see below); docs/parallel-results/self-host-place-ir-data.md
+/// has the driver loop.
+#[test]
+#[ignore = "callgrind; PLACE_IR_PHASE"]
+fn place_ir_callgrind() {
+    let Ok(phase) = std::env::var("PLACE_IR_PHASE") else {
+        return;
+    };
+    let write = package().entry("place_ir_words", true);
+    // Lowering only (not `stages()`, whose later passes would cost hours
+    // under callgrind).
+    let quiet = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let owned: Vec<Stage> = corpus()
+        .iter()
+        .step_by(step())
+        .filter_map(|c| {
+            let w = &c.world;
+            std::panic::catch_unwind(|| vesper::ffi_lowering::drops::lower_world(w))
+                .ok()
+                .map(|program| Stage {
+                    name: c.name.clone(),
+                    world: w,
+                    program,
+                })
+        })
+        .collect();
+    std::panic::set_hook(quiet);
+    let lowered: Vec<&Stage> = owned.iter().collect();
+    let inputs: Vec<(Vec<u8>, ir_words::Pool)> = lowered
+        .iter()
+        .filter_map(|s| ir_words::program_input(s.world, &s.program))
+        .collect();
+    let outputs: Vec<Vec<u64>> = inputs.iter().map(|(i, _)| write.words(i)).collect();
+    let words: usize = outputs.iter().map(Vec::len).sum();
+    // With `PLACE_IR_GO=<file>`, wait for the file: a driver run with
+    // `--instr-atstart=no` turns instrumentation on (`callgrind_control -i
+    // on`) after the setup, which takes minutes natively, then creates it.
+    if let Ok(go) = std::env::var("PLACE_IR_GO") {
+        eprintln!("place-ir callgrind: ready");
+        while !std::path::Path::new(&go).exists() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    match phase.as_str() {
+        "lower" => place_ir_measured_lower(&lowered),
+        "encode" => place_ir_measured_encode(&lowered),
+        "vesper" => place_ir_measured_vesper(&write, &inputs),
+        "decode" => place_ir_measured_decode(&outputs, &inputs),
+        "none" => {}
+        other => panic!("unknown PLACE_IR_PHASE {other}"),
+    }
+    eprintln!(
+        "place-ir callgrind: {phase} over {} worlds ({words} output words)",
+        inputs.len()
+    );
+}
+
+#[inline(never)]
+fn place_ir_measured_lower(lowered: &[&Stage]) {
+    for s in lowered {
+        std::hint::black_box(vesper::ir::lower_world(s.world));
+    }
+}
+
+#[inline(never)]
+fn place_ir_measured_encode(lowered: &[&Stage]) {
+    for s in lowered {
+        std::hint::black_box(ir_words::program_input(s.world, &s.program));
+    }
+}
+
+#[inline(never)]
+fn place_ir_measured_vesper(write: &Entry, inputs: &[(Vec<u8>, ir_words::Pool)]) {
+    for (i, _) in inputs {
+        std::hint::black_box(write.words(i));
+    }
+}
+
+#[inline(never)]
+fn place_ir_measured_decode(outputs: &[Vec<u64>], inputs: &[(Vec<u8>, ir_words::Pool)]) {
+    for (o, (_, pool)) in outputs.iter().zip(inputs) {
+        std::hint::black_box(ir_words::decode_program(o, pool));
+    }
+}
+
 /// The pass harness with the identity pass on both sides agrees at every
 /// boundary, and catches a real difference: `ir_opt` on the Rust side
 /// against the Vesper identity must differ on some world.

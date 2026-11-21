@@ -10,6 +10,7 @@ use @vesper/check-data::types::{
 };
 use @vesper/check-data::util::{
     add,
+    n32,
     u32_at,
     u64_at,
     w
@@ -701,4 +702,20 @@ pub fn has_fail_model(in b: B, in fx: Effects) -> bool {
         }
     }
     false
+}
+
+// `recursive_structs`, by ADT index: whether the ADT is a structure in a
+// recursive group.
+pub fn recursive_structs(in b: B, in t: Types, in wd: World) -> ChunkSeq[bool] {
+    let g = graph(in b, in t, in wd);
+    let s = scc(in g);
+    let rec = recursive(in g, in s, in wd);
+    let mut out: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](wd.adts.len());
+    out.resize(wd.adts.len(), false);
+    for v in 0..g.adts.len() {
+        if is_rec(in rec, n32(v)) {
+            let ok = out.try_set(w(u32_at(in g.adts, v)), true);
+        }
+    }
+    out
 }

@@ -1165,6 +1165,20 @@ pub fn verify_spent(
     result
 }
 
+/// [`build_candidate`] of `certificate`'s output over the bound `source`,
+/// on a fresh budget of `limits`: the candidate a certificate stands for
+/// (the swap point's differential rebuilds foreign proposals with it).
+pub fn rebuild_candidate(
+    source: &Expr,
+    types: &TypeMap,
+    certificate: &RewriteCertificate,
+    limits: WitnessLimits,
+) -> Result<Expr, WitnessError> {
+    let mut budget = WitnessBudget::new(limits)?;
+    let bound = bind_source(source, types, &mut budget)?;
+    build_candidate(&bound, &certificate.terms, certificate.output, &mut budget)
+}
+
 /// Verify an untrusted certificate against the actual checked source and output.
 /// Failure never mutates either AST. This function performs no egg operation.
 pub fn verify_rewrite(

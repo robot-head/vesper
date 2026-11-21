@@ -4,6 +4,7 @@
 use super::{Checker, Env, Usage};
 use crate::ast::*;
 use crate::numeric::{Conversion, IntegerKind};
+use std::collections::BTreeSet;
 
 impl Checker<'_> {
     /// Records the contextual integer type of an unsuffixed literal operand.
@@ -24,11 +25,14 @@ impl Checker<'_> {
         }
     }
     /// Typechecks a shift amount: any integer kind, an unsuffixed literal
-    /// being a `u32`. Returns its bounds when known (a constant, or a range
-    /// from a dominating guard such as `if n < 64`).
+    /// being a `u32`. Returns its bounds when known (a constant, a mask, or
+    /// a range from a dominating guard such as `if n < 64`, through `+`,
+    /// `-`, `*`, `/` and `>>`: [`Self::operand_bounds`]).
     fn shift_amount(&mut self, e: &Expr, env: &mut Env, what: &str) -> Option<(i128, i128)> {
+        self.total_operands += 1;
         let t = self.expr_expected(e, env, Usage::Own, &Type::Infer);
-        let fact = self.integer_bounds(e, env);
+        self.total_operands -= 1;
+        let fact = self.operand_bounds(e, env);
         if let Type::IntLiteral(n) = t
             && !IntegerKind::U32.fits(n)
         {
@@ -90,6 +94,18 @@ impl Checker<'_> {
                 span,
             );
         }
+    }
+    /// Prefix `!` on an integer operand is its bitwise complement, `~`
+    /// (manuscript ch. 3, "Integer kinds"): records the span, so the module
+    /// is rewritten to `~` and checked again, and returns whether `t` is an
+    /// integer kind. A literal operand defaults like any literal (`!0` is
+    /// an `i64`).
+    pub(super) fn integer_not(&mut self, t: &Type, span: Span) -> bool {
+        if IntegerKind::from_type(t).is_none() {
+            return false;
+        }
+        self.integer_nots.insert((span.start, span.end));
+        true
     }
     /// Prefix `~`: the bitwise complement of one integer operand.
     pub(super) fn check_complement(&mut self, t: &Type, span: Span) {
@@ -254,6 +270,92 @@ pub(super) fn fact_fits(kind: IntegerKind, n: i128) -> bool {
     kind == IntegerKind::U128 || kind.fits(n)
 }
 impl Checker<'_> {
+    /// Typechecks the divisor of `/` or `%`: like a shift amount, its `+`,
+    /// `-` and `*` may be proven in range by range facts.
+    pub(super) fn divisor(&mut self, e: &Expr, env: &mut Env, goal: &Type) -> Type {
+        self.total_operands += 1;
+        let t = self.expr_expected(e, env, Usage::Own, goal);
+        self.total_operands -= 1;
+        t
+    }
+    /// Whether the divisor `e` lies on one side of zero by
+    /// [`Self::operand_bounds`].
+    pub(super) fn nonzero_divisor(&self, e: &Expr, env: &Env) -> bool {
+        self.operand_bounds(e, env)
+            .is_some_and(|(lo, hi)| lo > 0 || hi < 0)
+    }
+    /// [`Self::operand_bounds`] of the left operand of a binary operator,
+    /// read before the right operand is checked (the right operand may
+    /// write a name the left one read).
+    pub(super) fn total_operand_bounds(&self, e: &Expr, env: &Env) -> Option<(i128, i128)> {
+        self.operand_bounds(e, env)
+    }
+    /// Whether the checked `left op right` cannot overflow by range facts
+    /// that [`Self::integer_bounds`] alone does not use: `+`, `-` and `*`
+    /// inside a shift amount or a divisor, and a signed quotient whose
+    /// divisor's [`Self::operand_bounds`] exclude `-1`.
+    pub(super) fn total_operation(
+        &self,
+        op: &str,
+        kind: IntegerKind,
+        left: Option<(i128, i128)>,
+        right: &Expr,
+        env: &Env,
+    ) -> bool {
+        if op == "/" {
+            return Self::quotient_in_range(op, kind, left, self.operand_bounds(right, env));
+        }
+        self.total_operands != 0
+            && Self::bounds_in_range(op, kind, left, self.operand_bounds(right, env))
+    }
+    /// Inclusive bounds of a shift amount or a divisor:
+    /// [`Self::integer_bounds`], and for a pure `a + b`, `a - b`, `a * b`,
+    /// `a / b` and `a >> b` the interval the operands' bounds give when every
+    /// value of it lies in the expression's kind. `u128` operands have none.
+    pub(super) fn operand_bounds(&self, e: &Expr, env: &Env) -> Option<(i128, i128)> {
+        if let Some(bounds) = self.integer_bounds(e, env) {
+            return Some(bounds);
+        }
+        let ExprKind::Binary(op, a, b) = &e.kind else {
+            return None;
+        };
+        if !Self::pure_integer(e) || self.u128_expr(a, env) {
+            return None;
+        }
+        let kind = [e, a.as_ref(), b.as_ref()].into_iter().find_map(|x| {
+            self.types
+                .get(&(x.span.start, x.span.end))
+                .and_then(IntegerKind::from_type)
+        })?;
+        // An empty interval (contradictory guards, unreachable code) has no
+        // endpoints to compute with.
+        let (alo, ahi) = self.operand_bounds(a, env).filter(|(lo, hi)| lo <= hi)?;
+        let (blo, bhi) = self.operand_bounds(b, env).filter(|(lo, hi)| lo <= hi)?;
+        let corners = |f: fn(i128, i128) -> Option<i128>| {
+            let values = [(alo, blo), (alo, bhi), (ahi, blo), (ahi, bhi)]
+                .map(|(x, y)| f(x, y).filter(|v| *v >= kind.min() && *v <= kind.max()));
+            let lo = values
+                .iter()
+                .try_fold(i128::MAX, |m, v| v.map(|v| m.min(v)))?;
+            let hi = values
+                .iter()
+                .try_fold(i128::MIN, |m, v| v.map(|v| m.max(v)))?;
+            Some((lo, hi))
+        };
+        match op.as_str() {
+            "+" => corners(i128::checked_add),
+            "-" => corners(i128::checked_sub),
+            "*" => corners(i128::checked_mul),
+            // Nonnegative operands only: truncation then moves toward zero
+            // monotonically in both operands.
+            "/" if alo >= 0 && blo > 0 => Some((alo / bhi, ahi / blo)),
+            ">>" if alo >= 0 && blo >= 0 && bhi < i128::from(kind.bits()) => {
+                // `blo`/`bhi` are below the width, so the shifts are exact.
+                Some((alo >> bhi, ahi >> blo))
+            }
+            _ => None,
+        }
+    }
     /// Whether `e` is typed `u128` (by its recorded type, or a name's
     /// binding).
     pub(super) fn u128_expr(&self, e: &Expr, env: &Env) -> bool {
@@ -263,4 +365,37 @@ impl Checker<'_> {
             .is_some_and(named)
             || matches!(&e.kind, ExprKind::Name(n) if env.bindings.get(n).is_some_and(|b| named(&b.ty)))
     }
+}
+
+/// Rewrites every prefix `!` whose span is in `nots` to `~` (see
+/// [`Checker::integer_not`]). Spans are kept, so the second check reports at
+/// the source's `!`.
+pub(super) fn complement_nots(module: &Module, nots: &BTreeSet<(usize, usize)>) -> Module {
+    fn rewrite(e: &mut Expr, nots: &BTreeSet<(usize, usize)>) {
+        if let ExprKind::Unary(op, _) = &mut e.kind
+            && op == "!"
+            && nots.contains(&(e.span.start, e.span.end))
+        {
+            *op = "~".into();
+        }
+        for child in super::try_option::children(e) {
+            rewrite(child, nots);
+        }
+    }
+    let mut module = module.clone();
+    for item in &mut module.items {
+        let functions: Vec<&mut Function> = match item {
+            Item::Function(f) => vec![f],
+            Item::Impl { methods, .. } => methods.iter_mut().collect(),
+            Item::Trait(t) => t.methods.iter_mut().collect(),
+            Item::Conformance(c) => c.methods.iter_mut().collect(),
+            Item::Adt(_) | Item::Effect(_) => vec![],
+        };
+        for f in functions {
+            if let Some(body) = &mut f.body {
+                rewrite(body, nots);
+            }
+        }
+    }
+    module
 }
