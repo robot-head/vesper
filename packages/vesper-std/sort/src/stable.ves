@@ -180,4 +180,19 @@ test {
         }
         items.len() == count
     }
+
+    fn test_stable_sort_descending_many_runs() -> bool {
+        let count: u64 = 512;
+        let mut items = ChunkSeq::new[u64]();
+        for i in 0..count {
+            items.push(wrapping_sub(count, i));
+        }
+        stable_sort(inout items.as_slice_mut());
+        for i in 0..count {
+            if items.try_get(i) != Option::Some(wrapping_add(i, 1)) {
+                return false;
+            }
+        }
+        true
+    }
 }

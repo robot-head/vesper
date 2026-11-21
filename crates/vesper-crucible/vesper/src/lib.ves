@@ -3295,6 +3295,9 @@ test {
         if fuzzer.width != 1 || fuzzer.order.len() != expected.len() {
             return false;
         }
+        if budget == 0 && fuzzer.full {
+            return false;
+        }
         let expected_bytes = expected.as_bytes();
         for i in 0..expected.len() {
             let row = at(in fuzzer.order.as_slice(), i);
@@ -3543,6 +3546,7 @@ test {
     // @case empty_target(in "ab", in "", in "")
     // @case empty_needle(in "", in "XY", in "")
     // @case no_match(in "ac", in "XY", in "")
+    // @case reverse_comparison(in "XY", in "ab", in "XYZababZXY")
     fn test_solver_replaces_bytes_across_draws(
         in needle: Str,
         in replacement: Str,
@@ -4038,6 +4042,7 @@ test {
     // @case width_8_little(in "abcdefgh", 7523094288207667809, 6003950658793330775, in "WXYZPQRS")
     // @case width_8_big(in "abcdefgh", 7017280452245743464, 6293878723679703635, in "WXYZPQRS")
     // @case target_too_wide(in "a", 97, 256, in "")
+    // @case reverse_comparison(in "a", 88, 97, in "X")
     fn test_solver_encodes_integer_targets_in_byte_lanes(
         in sample: Str,
         needle: u64,
@@ -4306,6 +4311,10 @@ test {
             if !search_backtrack(inout search) {
                 break;
             }
+            let departed = wrapping_sub(first.value, 1);
+            if !atb(in search.en_slept.as_slice(), departed) {
+                return false;
+            }
         }
         explored == expected
     }
@@ -4528,6 +4537,642 @@ test {
         let clock = at(in search.pc_off.as_slice(), running);
         let length = at(in search.pc_len.as_slice(), running);
         search.clock_get(clock, length, 1) == 2
+    }
+
+    // @case newest_race_only(false, false, 0, true, false, true)
+    // @case all_races(false, true, 0, true, true, true)
+    // @case bound_backtracks_to_previous_switch(true, false, 0, true, true, true)
+    // @case happened_before_all_earlier_events(false, true, 2, true, false, false)
+    // @case happened_before_first_event_only(false, true, 1, true, false, true)
+    // @case independent_events(false, true, 0, false, false, false)
+    fn test_backtracking_uses_races_clocks_and_switches(
+        bounded: bool,
+        all: bool,
+        happens_before: u64,
+        conflict: bool,
+        first_node: bool,
+        second_node: bool
+    ) -> bool {
+        let mut search = search_new(true, bounded, 2, false);
+        let first_fp = footprint_from_masks(inout search, 0, 2, 0, false);
+        let writes: u64 = if conflict {
+            2
+        } else {
+            0
+        };
+        let second_fp = footprint_from_masks(inout search, 0, writes, 0, false);
+        let mut enabled = ChunkSeq::new[u64]();
+        enabled.push(1);
+        enabled.push(2);
+        let mut steps = ChunkSeq::new[u64]();
+        steps.push(1);
+        steps.push(first_fp);
+        steps.push(2);
+        steps.push(second_fp);
+        search_root(inout search, in enabled.as_slice(), in steps.as_slice(), none());
+        let first = search_choose(inout search);
+        if first.code != 0 || first.value != 1 {
+            return false;
+        }
+        search_child(inout search, true, in enabled.as_slice(), in steps.as_slice());
+        let second = search_choose(inout search);
+        if second.code != 0 || second.value != 1 {
+            return false;
+        }
+        let mut last_enabled = ChunkSeq::new[u64]();
+        last_enabled.push(2);
+        let mut last_steps = ChunkSeq::new[u64]();
+        last_steps.push(2);
+        last_steps.push(second_fp);
+        search_child(inout search, false, in last_enabled.as_slice(), in last_steps.as_slice());
+        let clock = search.cl_proc.len();
+        search.cl_proc.push(1);
+        search.cl_val.push(happens_before);
+        let process_start = at(in search.n_pc.as_slice(), 2);
+        search.pc_insert(process_start, 2, clock, 1, true);
+        let process_count = wrapping_sub(search.pc_proc.len(), process_start);
+        search.n_pc_len.try_set(2, process_count);
+        if all {
+            let summary = at(in search.n_sm.as_slice(), 2);
+            search.sm_insert(summary, 2, second_fp);
+            search.add_summary_points();
+        } else {
+            search.add_backtrack_points();
+        }
+        atb(in search.en_bt.as_slice(), 1)
+            == first_node
+            && atb(in search.en_bt.as_slice(), 3)
+            == second_node
+    }
+
+    // @case eight(0, 8, 6)
+    // @case four(1, 4, 6)
+    // @case two(2, 2, 6)
+    // @case exhausted_widths(3, 0, 8)
+    fn test_shrinker_zero_width_order(index: u64, width: u64, phase: u64) -> bool {
+        let initial = ChunkSeq::new[u64]();
+        let mut shrinker = shrinker_new(initial, 8);
+        shrinker.wi = index;
+        shrinker.pc = 5;
+        let started = shrinker.step_zero(5);
+        !started && shrinker.width == width && shrinker.pc == phase
+    }
+
+    fn test_shrinker_skips_a_span_that_is_already_zero() -> bool {
+        let mut initial = ChunkSeq::new[u64]();
+        initial.resize(4, 0);
+        let mut shrinker = shrinker_new(initial, 8);
+        shrinker.pc = 6;
+        shrinker.width = 2;
+        let started = shrinker.step_zero(6);
+        !started && shrinker.idx == 1 && shrinker.pc == 6 && shrinker.cand.len() == 0
+    }
+
+    fn test_shrinker_tries_next_zero_span_after_rejection() -> bool {
+        let mut initial = ChunkSeq::new[u64]();
+        initial.resize(9, 5);
+        let mut shrinker = shrinker_new(initial, 80);
+        let first = loop {
+            if !shrinker_next(inout shrinker) {
+                return false;
+            }
+            let candidate = shrinker_candidate(in shrinker);
+            if candidate.len() == 9 {
+                break candidate;
+            }
+            shrinker_record(inout shrinker, 1, in candidate.as_slice());
+        };
+        if first.try_get(0) != Option::Some(0) || first.try_get(8) != Option::Some(5) {
+            return false;
+        }
+        shrinker_record(inout shrinker, 2, in first.as_slice());
+        if !shrinker_next(inout shrinker) {
+            return false;
+        }
+        let second = shrinker_candidate(in shrinker);
+        let key = tape_key(in second.as_slice());
+        key.len == 9 && key.lo == 5 && second.try_get(0) == Option::Some(5)
+    }
+
+    // @case deletion(4, 3)
+    // @case small_value(10, 11)
+    // @case binary_value(13, 12)
+    fn test_shrinker_marks_accepted_step_as_progress(phase: u64, next: u64) -> bool {
+        let mut initial = ChunkSeq::new[u64]();
+        initial.push(9);
+        let mut shrinker = shrinker_new(initial, 8);
+        shrinker.res = true;
+        shrinker.pc = phase;
+        let started = if phase == 4 {
+            shrinker.step_delete(phase)
+        } else if phase == 10 {
+            shrinker.step_small(phase)
+        } else {
+            shrinker.step_binary(phase)
+        };
+        !started && shrinker.improved && shrinker.pc == next
+    }
+
+    // @case at_end(1, 8, 14)
+    // @case budget_exhausted(0, 1, 14)
+    // @case can_lower(0, 8, 9)
+    fn test_shrinker_small_phase_requires_index_and_budget(index: u64, budget: u64, next: u64)
+        -> bool {
+        let mut initial = ChunkSeq::new[u64]();
+        initial.push(4);
+        let mut shrinker = shrinker_new(initial, budget);
+        shrinker.i = index;
+        shrinker.pc = 8;
+        !shrinker.step_small(8) && shrinker.pc == next
+    }
+
+    // @case at_small_limit(0, 3, 3, 9)
+    // @case at_current_value(0, 3, 8, 3)
+    // @case value_removed_after_realization(1, 0, 8, 3)
+    fn test_shrinker_small_candidates_must_strictly_lower_value(
+        index: u64,
+        small: u64,
+        limit: u64,
+        value: u64
+    ) -> bool {
+        let mut initial = ChunkSeq::new[u64]();
+        initial.push(value);
+        let mut shrinker = shrinker_new(initial, 8);
+        shrinker.i = index;
+        shrinker.small = small;
+        shrinker.small_end = limit;
+        shrinker.pc = 9;
+        !shrinker.step_small(9) && shrinker.pc == 11 && shrinker.cand.len() == 0
+    }
+
+    // @case binary_setup_at_end(11, 1, 1, 3, 14)
+    // @case binary_window_empty(12, 0, 3, 3, 8)
+    // @case binary_value_removed(12, 1, 1, 3, 8)
+    // @case last_lower_delete_value(14, 1, 0, 0, 17)
+    fn test_shrinker_pass_stops_at_end(phase: u64, index: u64, lo: u64, hi: u64, next: u64)
+        -> bool {
+        let mut initial = ChunkSeq::new[u64]();
+        initial.push(9);
+        let mut shrinker = shrinker_new(initial, 8);
+        shrinker.i = index;
+        shrinker.lo = lo;
+        shrinker.hi = hi;
+        shrinker.pc = phase;
+        let started = if phase == 14 {
+            shrinker.step_lower_delete(phase)
+        } else {
+            shrinker.step_binary(phase)
+        };
+        !started && shrinker.pc == next && shrinker.cand.len() == 0
+    }
+
+    // @case reaches_end(3, 2, 8, 19, 1)
+    // @case maximum_width(10, 8, 8, 19, 2)
+    // @case above_maximum_width(12, 9, 8, 14, 0)
+    // @case past_end(3, 3, 8, 14, 0)
+    // @case budget_exhausted(3, 2, 1, 14, 0)
+    fn test_shrinker_lower_and_delete_bounds(
+        size: u64,
+        width: u64,
+        budget: u64,
+        next: u64,
+        remaining: u64
+    ) -> bool {
+        let mut initial = ChunkSeq::new[u64]();
+        initial.resize(size, 9);
+        let mut shrinker = shrinker_new(initial, budget);
+        shrinker.k = width;
+        shrinker.pc = 15;
+        let started = shrinker.step_lower_delete(15);
+        let candidate = shrinker_candidate(in shrinker);
+        started == (next == 19) && shrinker.pc == next && candidate.len() == remaining
+    }
+
+    fn test_backtrack_falls_back_to_all_enabled_processes() -> bool {
+        let mut search = search_new(true, false, 0, false);
+        let mut enabled = ChunkSeq::new[u64]();
+        enabled.push(1);
+        enabled.push(2);
+        let nexts = ChunkSeq::new[u64]();
+        search_root(inout search, in enabled.as_slice(), in nexts.as_slice(), none());
+        search.add_at(0, 3, 0, 0);
+        atb(in search.en_bt.as_slice(), 0) && atb(in search.en_bt.as_slice(), 1)
+    }
+
+    // @case first_awake_candidate(false, false, true, false)
+    // @case skips_sleeping_candidate(false, true, false, true)
+    // @case bounded_adds_all_awake_candidates(true, false, true, true)
+    fn test_backtrack_adds_only_eligible_causal_processes(
+        bounded: bool,
+        asleep: bool,
+        second: bool,
+        third: bool
+    ) -> bool {
+        let mut search = search_new(true, bounded, 1, false);
+        let mut enabled = ChunkSeq::new[u64]();
+        enabled.push(1);
+        enabled.push(2);
+        enabled.push(3);
+        enabled.push(4);
+        let nexts = ChunkSeq::new[u64]();
+        search_root(inout search, in enabled.as_slice(), in nexts.as_slice(), none());
+        search.en_slept.try_set(1, asleep);
+        search.ev_proc.push(1);
+        search.ev_proc.push(3);
+        search.ev_proc.push(3);
+        search.ev_proc.push(4);
+        search.ev_proc.push(9);
+        search.cl_proc.push(3);
+        search.cl_proc.push(4);
+        search.cl_proc.push(9);
+        search.cl_val.push(3);
+        search.cl_val.push(3);
+        search.cl_val.push(5);
+        search.add_at(0, 2, 0, 3);
+        let unique = search
+            .t3
+            .len()
+            == 2
+            && search
+            .t3
+            .try_get(0)
+            == Option::Some(2)
+            && search
+            .t3
+            .try_get(1)
+            == Option::Some(3);
+        unique
+            && !atb(in search.en_bt.as_slice(), 0)
+            && !atb(in search.en_bt.as_slice(), 3)
+            && atb(in search.en_bt.as_slice(), 1)
+            == second
+            && atb(in search.en_bt.as_slice(), 2)
+            == third
+    }
+
+    // @case prunes_preempting_choice(true, 0, 1, 1, true)
+    // @case adds_current_task_when_preempting(true, 1, 2, 0, true)
+    // @case unbounded_selects_first(false, 0, 2, 0, false)
+    fn test_picker_respects_preemption_budget(
+        bounded: bool,
+        bound: u64,
+        choice: u64,
+        pruned: u64,
+        adds_running: bool
+    ) -> bool {
+        let mut search = search_new(true, bounded, bound, false);
+        let mut enabled = ChunkSeq::new[u64]();
+        enabled.push(2);
+        enabled.push(1);
+        let nexts = ChunkSeq::new[u64]();
+        search_root(inout search, in enabled.as_slice(), in nexts.as_slice(), none());
+        search.n_running.try_set(0, 1);
+        let picked = search.pick(0, false);
+        let stats = search_stats(in search);
+        let ready = atb(in search.en_done.as_slice(), 0) && stats.bound_pruned == pruned;
+        let chosen = search.n_chosen.try_get(0) == Option::Some(choice);
+        picked == choice && chosen && ready && atb(in search.en_bt.as_slice(), 1) == adds_running
+    }
+
+    fn test_switch_marks_only_newly_running_tasks() -> bool {
+        let mut search = search_new(true, true, 1, false);
+        search.ev_proc.push(1);
+        search.ev_proc.push(1);
+        search.ev_proc.push(4611687117939015680);
+        search.n_running.push(none());
+        search.n_running.push(1);
+        search.n_running.push(1);
+        search.switches(0) && !search.switches(1) && !search.switches(2)
+    }
+
+    fn test_popping_cached_nodes_merges_child_and_clears_root_summary() -> bool {
+        let mut search = search_new(true, false, 0, true);
+        let mut root = ChunkSeq::new[u64]();
+        let mut root_steps = ChunkSeq::new[u64]();
+        root.push(2);
+        root_steps.push(2);
+        root_steps.push(0);
+        search_root(inout search, in root.as_slice(), in root_steps.as_slice(), none());
+        let first = search_choose(inout search);
+        if first.code != 0 || first.value != 2 {
+            return false;
+        }
+        let mut child = ChunkSeq::new[u64]();
+        let mut child_steps = ChunkSeq::new[u64]();
+        child.push(1);
+        child_steps.push(1);
+        child_steps.push(0);
+        search_child(inout search, false, in child.as_slice(), in child_steps.as_slice());
+        search.pop_node();
+        let merged = search
+            .sm_proc
+            .len()
+            == 2
+            && search
+            .sm_proc
+            .try_get(0)
+            == Option::Some(1)
+            && search
+            .sm_proc
+            .try_get(1)
+            == Option::Some(2);
+        search.pop_node();
+        merged && search.sm_proc.len() == 0 && search.sm_next.len() == 0
+    }
+
+    fn test_new_task_uses_inherited_clock_when_steps_are_independent() -> bool {
+        let mut search = search_new(false, false, 0, false);
+        let footprint = footprint_from_masks(inout search, 0, 0, 0, false);
+        let mut enabled = ChunkSeq::new[u64]();
+        let mut steps = ChunkSeq::new[u64]();
+        enabled.push(1);
+        steps.push(1);
+        steps.push(footprint);
+        search_root(inout search, in enabled.as_slice(), in steps.as_slice(), none());
+        let first = search_choose(inout search);
+        if first.code != 0 || first.value != 1 {
+            return false;
+        }
+        enabled.try_set(0, 2);
+        steps.try_set(0, 2);
+        search_child(inout search, false, in enabled.as_slice(), in steps.as_slice());
+        let second = search_choose(inout search);
+        let off = at(in search.ev_cl.as_slice(), 1);
+        let len = at(in search.ev_cl_len.as_slice(), 1);
+        second
+            .code
+            == 0
+            && second
+            .value
+            == 2
+            && search
+            .clock_get(off, len, 1)
+            == 1
+            && search
+            .clock_get(off, len, 2)
+            == 2
+    }
+
+    fn test_reenabled_task_keeps_earlier_clock() -> bool {
+        let mut search = search_new(false, false, 0, false);
+        let footprint = footprint_from_masks(inout search, 0, 0, 0, false);
+        let mut enabled = ChunkSeq::new[u64]();
+        let mut steps = ChunkSeq::new[u64]();
+        enabled.push(1);
+        steps.push(1);
+        steps.push(footprint);
+        search_root(inout search, in enabled.as_slice(), in steps.as_slice(), none());
+        let mut both = ChunkSeq::new[u64]();
+        both.extend(in enabled.as_slice());
+        both.push(2);
+        let mut both_steps = ChunkSeq::new[u64]();
+        both_steps.extend(in steps.as_slice());
+        both_steps.push(2);
+        both_steps.push(footprint);
+        let first = search_choose(inout search);
+        search_child(inout search, true, in both.as_slice(), in both_steps.as_slice());
+        let second = search_choose(inout search);
+        search_child(inout search, true, in enabled.as_slice(), in steps.as_slice());
+        let third = search_choose(inout search);
+        search_child(inout search, true, in both.as_slice(), in both_steps.as_slice());
+        let index = search.pc_find(3, 2);
+        if index == none() || first.value != 1 || second.value != 1 || third.value != 1 {
+            return false;
+        }
+        let off = at(in search.pc_off.as_slice(), index);
+        let len = at(in search.pc_len.as_slice(), index);
+        search.clock_get(off, len, 1) == 1
+    }
+
+    fn test_clock_insertion_keeps_zero_and_interior_keys() -> bool {
+        let mut search = search_new(true, false, 0, false);
+        search.t1_set(0, 7);
+        search.t1_set(3, 9);
+        search.t1_set(2, 8);
+        search.pc_insert(0, 0, 4, 1, false);
+        search.pc_insert(0, 3, 6, 1, false);
+        search.pc_insert(0, 2, 5, 1, false);
+        let clock = search
+            .t1
+            .len()
+            == 6
+            && search
+            .t1
+            .try_get(0)
+            == Option::Some(0)
+            && search
+            .t1
+            .try_get(2)
+            == Option::Some(2)
+            && search
+            .t1
+            .try_get(4)
+            == Option::Some(3);
+        let indices = search
+            .pc_find_in(0, 3, 0)
+            == 0
+            && search
+            .pc_find_in(0, 3, 2)
+            == 1
+            && search
+            .pc_find_in(0, 3, 3)
+            == 2;
+        clock && indices && search.pc_off.try_get(1) == Option::Some(5)
+    }
+
+    fn test_summary_starts_at_zero_and_orders_transitions_of_same_process() -> bool {
+        let mut search = search_new(true, false, 0, true);
+        search.sm_insert(0, 0, 0);
+        search.sm_insert(0, 4, 2);
+        search.sm_insert(0, 4, 5);
+        search.sm_insert(0, 4, 5);
+        let processes = search
+            .sm_proc
+            .len()
+            == 3
+            && search
+            .sm_proc
+            .try_get(0)
+            == Option::Some(0)
+            && search
+            .sm_proc
+            .try_get(1)
+            == Option::Some(4)
+            && search
+            .sm_proc
+            .try_get(2)
+            == Option::Some(4);
+        processes
+            && search
+            .sm_next
+            .try_get(0)
+            == Option::Some(0)
+            && search
+            .sm_next
+            .try_get(1)
+            == Option::Some(2)
+            && search
+            .sm_next
+            .try_get(2)
+            == Option::Some(5)
+    }
+
+    fn test_backtrack_order_sorts_enabled_positions() -> bool {
+        let mut search = search_new(true, false, 0, false);
+        let mut enabled = ChunkSeq::new[u64]();
+        enabled.push(3);
+        enabled.push(1);
+        enabled.push(4);
+        enabled.push(2);
+        let nexts = ChunkSeq::new[u64]();
+        search_root(inout search, in enabled.as_slice(), in nexts.as_slice(), none());
+        search
+            .en_ord
+            .len()
+            == 4
+            && search
+            .en_ord
+            .try_get(0)
+            == Option::Some(1)
+            && search
+            .en_ord
+            .try_get(1)
+            == Option::Some(3)
+            && search
+            .en_ord
+            .try_get(2)
+            == Option::Some(0)
+            && search
+            .en_ord
+            .try_get(3)
+            == Option::Some(2)
+    }
+
+    fn test_solver_limits_match_starts_to_eight() -> bool {
+        let mut fuzzer = fuzzer_new(0, 8, false, 0, 16);
+        let count: u64 = 10;
+        fuzzer.c_vals.resize(count, 97);
+        for i in 0..count {
+            fuzzer.lane.push(i);
+        }
+        let mut needle = ChunkSeq::new[u64]();
+        needle.push(97);
+        let starts = fuzzer.find_in_lane(0, in needle.as_slice());
+        starts
+            .len()
+            == 8
+            && starts
+            .try_get(0)
+            == Option::Some(0)
+            && starts
+            .try_get(7)
+            == Option::Some(7)
+    }
+
+    fn test_solver_clips_replacement_at_end_of_lane() -> bool {
+        let mut fuzzer = fuzzer_new(0, 8, false, 0, 16);
+        fuzzer.c_vals.push(97);
+        fuzzer.c_vals.push(98);
+        fuzzer.width = 2;
+        fuzzer.lane.push(0);
+        fuzzer.lane.push(1);
+        let mut bytes = ChunkSeq::new[u64]();
+        bytes.push(88);
+        bytes.push(89);
+        let pushed = fuzzer.push_lane(0, 1, in bytes.as_slice());
+        pushed && fuzzer.order.len() == 1 && fuzzer.row_at(0, 0) == 97 && fuzzer.row_at(0, 1) == 88
+    }
+
+    // @case edge(0, 0)
+    // @case comparison_outcome(4611686018427387904, 0)
+    // @case closeness_at_site_zero(9223372036854775808, 1)
+    fn test_one_feature_is_novel_only_once(key: u64, value: u64) -> bool {
+        let mut fuzzer = fuzzer_new(0, 4, false, 0, 0);
+        let mut feature = ChunkSeq::new[u64]();
+        feature.push(key);
+        feature.push(value);
+        let first = fuzzer_observe(inout fuzzer, 0, in feature.as_slice());
+        let repeated = fuzzer_observe(inout fuzzer, 0, in feature.as_slice());
+        let stats = fuzzer_stats(in fuzzer);
+        first == 1 && repeated == 0 && stats.features == 1
+    }
+
+    fn test_bounded_search_backtracks_to_nearest_switch() -> bool {
+        let mut search = search_new(true, true, 3, false);
+        let independent = footprint_from_masks(inout search, 0, 0, 0, false);
+        let writes = footprint_from_masks(inout search, 0, 2, 0, false);
+        let mut enabled = ChunkSeq::new[u64]();
+        enabled.push(1);
+        enabled.push(2);
+        enabled.push(3);
+        let mut steps = ChunkSeq::new[u64]();
+        steps.push(1);
+        steps.push(independent);
+        steps.push(2);
+        steps.push(writes);
+        steps.push(3);
+        steps.push(writes);
+        search_root(inout search, in enabled.as_slice(), in steps.as_slice(), none());
+        let first = search_choose(inout search);
+        if first.code != 0 || first.value != 1 {
+            return false;
+        }
+        enabled.try_set(0, 2);
+        enabled.try_set(1, 1);
+        search_child(inout search, true, in enabled.as_slice(), in steps.as_slice());
+        let second = search_choose(inout search);
+        if second.code != 0 || second.value != 2 {
+            return false;
+        }
+        search_child(inout search, true, in enabled.as_slice(), in steps.as_slice());
+        let third = search_choose(inout search);
+        if third.code != 0 || third.value != 2 {
+            return false;
+        }
+        search_child(inout search, true, in enabled.as_slice(), in steps.as_slice());
+        search.backtrack_for(3, writes, 0, 0, false);
+        !atb(in search.en_bt.as_slice(), 2)
+            && atb(in search.en_bt.as_slice(), 5)
+            && atb(in search.en_bt.as_slice(), 8)
+    }
+
+    fn test_solver_prioritizes_wide_match_before_single_byte_budget() -> bool {
+        let mut fuzzer = fuzzer_new(0, 8, false, 0, 9);
+        // The first a is a one-byte match. Eight intervening a values fill the
+        // shorter search limits, so the last a is admitted by the eight-byte pass.
+        fuzzer.c_vals.push(120);
+        fuzzer.c_vals.push(97);
+        fuzzer.c_vals.push(120);
+        let narrow_matches: u64 = 8;
+        for i in 0..narrow_matches {
+            fuzzer.c_vals.push(97);
+            fuzzer.c_vals.push(0);
+            fuzzer.c_vals.push(0);
+            fuzzer.c_vals.push(0);
+            fuzzer.c_vals.push(120);
+        }
+        let wide_offset = fuzzer.c_vals.len();
+        fuzzer.c_vals.push(97);
+        fuzzer.c_vals.resize(wrapping_add(wide_offset, 8), 0);
+        fuzzer.width = fuzzer.c_vals.len();
+        let width = fuzzer.width;
+        for i in 0..width {
+            fuzzer.lane.push(i);
+            fuzzer.c_tag.push(1);
+            fuzzer.c_max.push(255);
+        }
+        fuzzer.solve_repl(0, 97, 98);
+        let mut wide_match = false;
+        for i in 0..fuzzer.order.len() {
+            let row = at(in fuzzer.order.as_slice(), i);
+            if fuzzer.row_at(row, 1) != 97 {
+                return false;
+            }
+            if fuzzer.row_at(row, wide_offset) == 98 {
+                wide_match = true;
+            }
+        }
+        fuzzer.order.len() == 9 && wide_match
     }
 
     // @case empty(0, 0, 0, 0)

@@ -784,7 +784,7 @@ fn frontend_source_unit_tests_pass() {
 #[test]
 fn ported_crate_source_unit_tests_pass() {
     check_source_unit_tests(&[
-        ("crates/vesper-crucible/vesper/src/lib.ves", 186),
+        ("crates/vesper-crucible/vesper/src/lib.ves", 239),
         ("crates/vesper-lean-syntax/vesper/src/lib.ves", 174),
         ("crates/vesper-simpulse/vesper/src/lib.ves", 25),
     ]);

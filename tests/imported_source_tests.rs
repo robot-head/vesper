@@ -24,9 +24,9 @@ fn standard_library_packages() {
     run_suites(&[
         ("packages/vesper-std/collections", 65),
         ("packages/vesper-std/fmt", 90),
-        ("packages/vesper-std/graph", 79),
+        ("packages/vesper-std/graph", 80),
         ("packages/vesper-std/hash", 45),
-        ("packages/vesper-std/sort", 81),
+        ("packages/vesper-std/sort", 82),
         ("packages/vesper-std/tests", 3),
     ]);
 }

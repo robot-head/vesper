@@ -211,6 +211,27 @@ test {
         result.len() == 5
     }
 
+    fn test_repeated_roots_visit_the_same_neighbors_once() -> bool {
+        let leaves: u32 = 512;
+        let mut builder = graph_builder(wrapping_add(leaves, 1));
+        for i in 0..leaves {
+            builder.add_edge(0, wrapping_add(i, 1));
+        }
+        let graph = builder.build();
+        let mut roots = ChunkSeq::new[u32]();
+        roots.resize(widen_u64(leaves), 0);
+        let result = reachable_from_all(in graph, in roots.as_slice());
+        if result.len() != wrapping_add(widen_u64(leaves), 1) {
+            return false;
+        }
+        for i in 0..result.len() {
+            if result.try_get(i) != Option::Some(true) {
+                return false;
+            }
+        }
+        true
+    }
+
     // @case diamond_uses_edge_order(false, 0, in "3210")
     // @case one_branch(false, 1, in "31")
     // @case cycle_visits_once(true, 3, in "2103")
