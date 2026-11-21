@@ -1,0 +1,577 @@
+// The Lean syntax builder: writes a tree straight into the prefix-order
+// word stream that the @vesper/lean-syntax printer reads (the node tags are
+// documented in crates/vesper-lean-syntax/src/port.rs, `Enc`). Every text
+// (identifier, literal) is a symbol of the names table, so the table's
+// bytes are the printer's text pool: a text is its start and length there.
+//
+// Errors follow `src/lean_nodes.rs`: the first one wins (`fail`), and the
+// tree is still written to its end so the caller needs no early exits.
+
+use @vesper/check-data::names::{
+    Names
+};
+
+// Term tags.
+pub const T_INFER: u64 = 0;
+pub const T_REF: u64 = 1;
+pub const T_TYPE: u64 = 3;
+pub const T_NAT: u64 = 4;
+pub const T_BOOL: u64 = 5;
+pub const T_STRING: u64 = 6;
+pub const T_APP: u64 = 8;
+pub const T_FUN: u64 = 9;
+pub const T_FORALL: u64 = 10;
+pub const T_ARROW: u64 = 11;
+pub const T_PRODUCT: u64 = 12;
+pub const T_TUPLE: u64 = 13;
+pub const T_IF: u64 = 16;
+pub const T_MATCH: u64 = 17;
+pub const T_PROJECT: u64 = 18;
+pub const T_ASCRIBE: u64 = 19;
+pub const T_UNARY: u64 = 20;
+pub const T_BINARY: u64 = 21;
+pub const T_RECORD: u64 = 22;
+pub const T_UPDATE: u64 = 23;
+pub const T_DO: u64 = 24;
+pub const T_ELIMINATE: u64 = 27;
+
+// Binder kinds.
+pub const B_EXPLICIT: u64 = 0;
+pub const B_IMPLICIT: u64 = 1;
+pub const B_INSTANCE: u64 = 2;
+
+// Patterns.
+pub const P_WILD: u64 = 0;
+pub const P_BIND: u64 = 1;
+pub const P_CTOR: u64 = 2;
+pub const P_TUPLE: u64 = 3;
+pub const P_BOOL: u64 = 5;
+pub const P_STRING: u64 = 6;
+pub const P_INT: u64 = 8;
+pub const P_RECORD: u64 = 9;
+
+// Do statements.
+pub const S_LET: u64 = 0;
+pub const S_BIND: u64 = 1;
+pub const S_ASSIGN: u64 = 2;
+pub const S_EXPR: u64 = 3;
+pub const S_BIND_TYPED: u64 = 4;
+pub const S_IF: u64 = 6;
+
+// Declarations.
+pub const D_INSTANCE: u64 = 0;
+pub const D_OPTION: u64 = 1;
+pub const D_DEF: u64 = 2;
+pub const D_TYPE: u64 = 3;
+pub const D_MUTUAL_TYPES: u64 = 5;
+pub const D_NAMESPACE: u64 = 6;
+pub const D_THEOREM: u64 = 7;
+
+// Type declarations.
+pub const TD_CLASS: u64 = 0;
+pub const TD_INDUCTIVE: u64 = 1;
+pub const TD_STRUCTURE: u64 = 2;
+
+// Definition kinds.
+pub const K_DEF: u64 = 0;
+pub const K_PARTIAL: u64 = 2;
+pub const K_ABBREV: u64 = 3;
+
+// `BinaryOp` (its declaration order in vesper-lean-syntax).
+pub const OP_ADD: u64 = 0;
+pub const OP_SUB: u64 = 1;
+pub const OP_MUL: u64 = 2;
+pub const OP_DIV: u64 = 3;
+pub const OP_MOD: u64 = 4;
+pub const OP_EQ: u64 = 5;
+pub const OP_BOOL_EQ: u64 = 7;
+pub const OP_BOOL_NE: u64 = 8;
+pub const OP_LT: u64 = 9;
+pub const OP_LE: u64 = 10;
+pub const OP_GT: u64 = 11;
+pub const OP_GE: u64 = 12;
+pub const OP_AND: u64 = 13;
+pub const OP_BOOL_AND: u64 = 15;
+pub const OP_BOOL_OR: u64 = 16;
+pub const OP_IFF: u64 = 17;
+
+// `UnaryOp`.
+pub const U_NEG: u64 = 0;
+pub const U_NOT: u64 = 1;
+pub const U_BOOL_NOT: u64 = 2;
+
+pub struct B {
+    words: ChunkSeq[u64],
+    names: Names,
+    failed: bool,
+    // The first error's message.
+    err: ChunkSeq[u8],
+    // Above 0, identifier checks are deferred: the caller makes them
+    // afterwards, in Rust's evaluation order.
+    quiet: u64,
+}
+
+pub fn builder(sink names: Names) -> B {
+    B {
+        words: ChunkSeq::with_capacity[u64](4096),
+        names: names,
+        failed: false,
+        err: ChunkSeq::new[u8](),
+        quiet: 0,
+    }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn hex(d: u32) -> u8 {
+    if d < 10 {
+        wrapping_u8(wrapping_add(d, 48))
+    } else {
+        wrapping_u8(wrapping_add(d, 87))
+    }
+}
+
+impl B {
+    pub fn w(inout self, x: u64) {
+        self.words.push(x);
+    }
+
+    // A word to fill in later (a count or a size).
+    pub fn hole(inout self) -> u64 {
+        let at = self.words.len();
+        self.words.push(0);
+        at
+    }
+
+    pub fn fill(inout self, at: u64, x: u64) {
+        let ok = self.words.try_set(at, x);
+    }
+
+    // Fills `at` with the number of words written after it.
+    pub fn close(inout self, at: u64) {
+        let n = wrapping_sub(wrapping_sub(self.words.len(), at), 1);
+        self.fill(at, n);
+    }
+
+    // The text of symbol `s`.
+    pub fn sym(inout self, s: u32) {
+        let a = self.names.start(s);
+        let n = self.names.size(s);
+        self.words.push(a);
+        self.words.push(n);
+    }
+
+    pub fn intern(inout self, in s: Str) -> u32 {
+        self.names.intern(in s.as_bytes())
+    }
+
+    // A fixed text.
+    pub fn text(inout self, in s: Str) {
+        let y = self.intern(in s);
+        self.sym(y);
+    }
+
+    // The symbol spelling `prefix` then symbol `s` (then `suffix`).
+    pub fn joined(inout self, in prefix: Str, s: u32, in suffix: Str) -> u32 {
+        let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout b, in prefix);
+        self.names.write(s, inout b);
+        put(inout b, in suffix);
+        self.names.intern(in b.as_slice())
+    }
+
+    // `$arg{i}`.
+    pub fn numbered(inout self, in prefix: Str, i: u64) -> u32 {
+        let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout b, in prefix);
+        put_decimal(inout b, i);
+        self.names.intern(in b.as_slice())
+    }
+
+    pub fn fail(inout self, in message: Str) {
+        if !self.failed {
+            self.failed = true;
+            put(inout self.err, in message);
+        }
+    }
+
+    // `Ident::new`: not empty, not `_root_`, no control character (C0, DEL,
+    // C1) and none of « » U+2028 U+2029 U+202A..U+202E U+2066..U+2069
+    // U+FEFF, checked on the UTF-8 bytes.
+    pub fn valid(in self, s: u32) -> bool {
+        let n = self.names.size(s);
+        if n == 0 || self.names.spells(s, in "_root_".as_bytes()) {
+            return false;
+        }
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = self.names.byte(s, i);
+            if c < 32 || c == 127 {
+                return false;
+            }
+            if c == 194 && wrapping_add(i, 1) < n {
+                let d = self.names.byte(s, wrapping_add(i, 1));
+                if d <= 159 || d == 171 || d == 187 {
+                    return false;
+                }
+            }
+            if c == 226 && wrapping_add(i, 2) < n {
+                let d = self.names.byte(s, wrapping_add(i, 1));
+                let e = self.names.byte(s, wrapping_add(i, 2));
+                if d == 128 && e >= 168 && e <= 174 {
+                    return false;
+                }
+                if d == 129 && e >= 166 && e <= 169 {
+                    return false;
+                }
+            }
+            if c == 239 && wrapping_add(i, 2) < n {
+                if self
+                    .names
+                    .byte(s, wrapping_add(i, 1))
+                    == 187
+                    && self
+                    .names
+                    .byte(s, wrapping_add(i, 2))
+                    == 191 {
+                    return false;
+                }
+            }
+            i = wrapping_add(i, 1);
+        }
+        true
+    }
+
+    // `ident`/`source_name`'s error: "unsupported Lean <what> {s:?}: ...".
+    pub fn check(inout self, s: u32, in what: Str) {
+        if self.failed || self.quiet > 0 || self.valid(s) {
+            return;
+        }
+        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout m, in "unsupported Lean ");
+        put(inout m, in what);
+        put(inout m, in " \"");
+        let n = self.names.size(s);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = self.names.byte(s, i);
+            let cp = self.escaped_at(s, i);
+            if c == 34 {
+                put(inout m, in "\\\"");
+            } else if c == 92 {
+                put(inout m, in "\\\\");
+            } else if c == 10 {
+                put(inout m, in "\\n");
+            } else if c == 13 {
+                put(inout m, in "\\r");
+            } else if c == 9 {
+                put(inout m, in "\\t");
+            } else if c == 0 {
+                put(inout m, in "\\0");
+            } else if c < 32 || c == 127 {
+                put_escape(inout m, widen_u32(c));
+            } else if cp != 0 {
+                put_escape(inout m, cp);
+                i = wrapping_add(
+                    i,
+                    if cp < 2048 {
+                        1
+                    } else {
+                        2
+                    }
+                );
+            } else {
+                m.push(c);
+            }
+            i = wrapping_add(i, 1);
+        }
+        put(
+            inout m,
+            in "\": identifier is empty, reserved _root_, or contains an unsupported delimiter/control"
+        );
+        self.failed = true;
+        self.err = m;
+    }
+
+    // The code point of the sequence at byte `i` of `s` when Rust's `Debug`
+    // escapes it and `Ident::new` refuses it (C1 controls, U+2028..U+202E,
+    // U+2066..U+2069, U+FEFF), else 0.
+    fn escaped_at(in self, s: u32, i: u64) -> u32 {
+        let n = self.names.size(s);
+        let c = self.names.byte(s, i);
+        if c == 194 && wrapping_add(i, 1) < n {
+            let d = self.names.byte(s, wrapping_add(i, 1));
+            if d <= 159 {
+                return widen_u32(d);
+            }
+        }
+        if (c == 226 || c == 239) && wrapping_add(i, 2) < n {
+            let d = widen_u32(self.names.byte(s, wrapping_add(i, 1)));
+            let e = widen_u32(self.names.byte(s, wrapping_add(i, 2)));
+            let cp = ((widen_u32(c) & 15) << 12) | ((d & 63) << 6) | (e & 63);
+            if (cp >= 8232 && cp <= 8238) || (cp >= 8294 && cp <= 8297) || cp == 65279 {
+                return cp;
+            }
+        }
+        0
+    }
+
+    // A source identifier (`ident`).
+    pub fn ident(inout self, s: u32) {
+        self.check(s, in "identifier");
+        self.sym(s);
+    }
+
+    // A one-component source name (`source_name`).
+    pub fn name(inout self, s: u32) {
+        self.check(s, in "name");
+        self.w(0);
+        self.w(1);
+        self.sym(s);
+    }
+
+    // A fixed one-component name.
+    pub fn name_fixed(inout self, in s: Str) {
+        self.w(0);
+        self.w(1);
+        self.text(in s);
+    }
+
+    // `Name::qualified([ident(a), ident(b)])`.
+    pub fn name2(inout self, a: u32, b: u32) {
+        self.check(a, in "identifier");
+        self.check(b, in "identifier");
+        self.w(0);
+        self.w(2);
+        self.sym(a);
+        self.sym(b);
+    }
+
+    // `source_ref`.
+    pub fn sref(inout self, s: u32) {
+        self.w(T_REF);
+        self.name(s);
+    }
+
+    // `named`: a fixed unrooted reference.
+    pub fn named(inout self, in s: Str) {
+        self.w(T_REF);
+        self.name_fixed(in s);
+    }
+
+    // `global(&[a])`, rooted.
+    pub fn global(inout self, in a: Str) {
+        self.w(T_REF);
+        self.w(1);
+        self.w(1);
+        self.text(in a);
+    }
+
+    pub fn global2(inout self, in a: Str, in b: Str) {
+        self.w(T_REF);
+        self.w(1);
+        self.w(2);
+        self.text(in a);
+        self.text(in b);
+    }
+
+    // `Sort::Type(0)`.
+    pub fn type0(inout self) {
+        self.w(T_TYPE);
+        self.w(0);
+    }
+
+    // `Type → Type`.
+    pub fn monad_ty(inout self) {
+        self.w(T_ARROW);
+        self.type0();
+        self.type0();
+    }
+
+    // An application of `n` arguments: write the function after this, then
+    // `args()` with the mark, then each argument after `arg()`.
+    pub fn app(inout self, n: u64) -> u64 {
+        self.w(T_APP);
+        self.w(n);
+        self.hole()
+    }
+
+    pub fn args(inout self, mark: u64) {
+        self.close(mark);
+    }
+
+    pub fn arg(inout self) {
+        self.w(0);
+    }
+
+    // A named argument `(name := ...)`; write the value after it.
+    pub fn named_arg(inout self, in name: Str) {
+        self.w(1);
+        self.text(in name);
+    }
+
+    // `app(named(f), [named(a)])` and longer, for fixed names.
+    pub fn app_named(inout self, in f: Str, in a: Str) {
+        let m = self.app(1);
+        self.named(in f);
+        self.args(m);
+        self.arg();
+        self.named(in a);
+    }
+
+    // A binder with a fixed name; write its type after it.
+    pub fn binder(inout self, kind: u64, in name: Str) {
+        self.w(kind);
+        self.w(1);
+        self.text(in name);
+    }
+
+    // An anonymous instance binder; write its type after it.
+    pub fn instance_binder(inout self) {
+        self.w(B_INSTANCE);
+        self.w(0);
+    }
+
+    // `implicit(name, Type)`.
+    pub fn implicit_type(inout self, in name: Str) {
+        self.binder(B_IMPLICIT, in name);
+        self.type0();
+    }
+
+    // `[Monad m]`.
+    pub fn monad_instance(inout self) {
+        self.instance_binder();
+        self.app_named_global(in "Monad", in "m");
+    }
+
+    // `app(global(&[f]), [named(a)])`.
+    pub fn app_named_global(inout self, in f: Str, in a: Str) {
+        let m = self.app(1);
+        self.global(in f);
+        self.args(m);
+        self.arg();
+        self.named(in a);
+    }
+
+    // `inferred`: a lambda over `n` fixed names, each `_`-typed; write the
+    // names with `lambda_name`, then the body.
+    pub fn lambda(inout self, n: u64) {
+        self.w(T_FUN);
+        self.w(n);
+    }
+
+    pub fn lambda_name(inout self, in name: Str) {
+        self.binder(B_EXPLICIT, in name);
+        self.w(T_INFER);
+    }
+
+    pub fn lambda_sym(inout self, s: u32) {
+        self.w(B_EXPLICIT);
+        self.w(1);
+        self.ident(s);
+        self.w(T_INFER);
+    }
+
+    pub fn binary(inout self, op: u64) {
+        self.w(T_BINARY);
+        self.w(op);
+    }
+
+    pub fn nat(inout self, in digits: Str) {
+        self.w(T_NAT);
+        self.text(in digits);
+    }
+
+    // The words written since `mark`, removed from the stream.
+    pub fn cut(inout self, mark: u64) -> ChunkSeq[u64] {
+        let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for i in mark..self.words.len() {
+            match self.words.try_get(i) {
+                Option::Some(x) => out.push(x),
+                Option::None => {},
+            }
+        }
+        self.words.truncate(mark);
+        out
+    }
+
+    pub fn paste(inout self, in s: ChunkSeq[u64]) {
+        for i in 0..s.len() {
+            match s.try_get(i) {
+                Option::Some(x) => self.words.push(x),
+                Option::None => {},
+            }
+        }
+    }
+
+    // The encoded words, for the printer.
+    pub fn slice_len(in self) -> u64 {
+        self.words.len()
+    }
+
+    // ----- terms as word ranges (the structured extractor, part 3) -----
+
+    pub fn at(in self) -> u64 {
+        self.words.len()
+    }
+
+    // The words written since mark `m`, as a term.
+    pub fn since(in self, m: u64) -> T {
+        T {
+            a: m,
+            n: wrapping_sub(self.words.len(), m)
+        }
+    }
+
+    // Writes a copy of `t`.
+    pub fn put(inout self, t: T) {
+        for i in 0..t.n {
+            let x = match self.words.try_get(wrapping_add(t.a, i)) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            self.words.push(x);
+        }
+    }
+}
+
+// A subtree written earlier: words[a..a+n] of the builder. Composing terms
+// copies their words, so a range stays valid for the builder's lifetime.
+pub copy struct T {
+    a: u64,
+    n: u64,
+}
+
+// `\u{hex}`, lower case, no leading zeros.
+fn put_escape(inout m: ChunkSeq[u8], x: u32) {
+    put(inout m, in "\\u{");
+    let mut shift: u32 = 28;
+    let mut started = false;
+    loop {
+        let d = wrapping_shr_u32(x, shift) & 15;
+        if d != 0 || started || shift == 0 {
+            m.push(hex(d));
+            started = true;
+        }
+        if shift == 0 {
+            break;
+        }
+        shift = wrapping_sub(shift, 4);
+    }
+    put(inout m, in "}");
+}
+
+pub fn put_decimal(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_decimal(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}

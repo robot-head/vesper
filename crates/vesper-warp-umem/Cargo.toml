@@ -2,6 +2,7 @@
 name = "vesper-warp-umem"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Warp linear UMEM frames, AF_XDP four-ring model, software NIC and conservation auditor (design section 35)"
 publish = false
 

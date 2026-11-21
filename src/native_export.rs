@@ -1256,19 +1256,19 @@ fn compile_exports<M: Module>(
             ));
         }
     }
-    let mut program = crate::ffi_lowering::drops::lower_world(world);
+    let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     super::wide_native::refine_wide_tuples(&mut program);
     if optimize {
-        crate::ir_opt::optimize(world, &mut program)?;
-        crate::ir_inline::inline(world, &mut program, &crate::ir_inline::Budget::default());
+        crate::ir_swap::optimize(world, &mut program)?;
+        crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default());
     } else {
         crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }
     crate::fip::elaborate_non_fip_drops(world, &mut program);
     if optimize {
         // Native only, never the verified backend (Stage 1 perf lane 3).
-        crate::bounds_hoist::run(&mut program);
+        crate::ir_swap::hoist(&mut program);
     }
     // Exported symbols keep the failure-record ABI that foreign callers and
     // the v2 glue use; internal calls use the register conventions of [`NativeAbi`] (#935).

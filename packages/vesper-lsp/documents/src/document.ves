@@ -1,0 +1,633 @@
+// `DocumentStore` of crates/vesper-lsp/src/document.rs: transactional,
+// bounded, UTF-16 in-memory documents over the span port's line table.
+//
+// The data design is flat: every URI and text lives in one `String` arena
+// (`pool`) and a document is a row of offsets, lengths, its version and
+// revision. A change builds its candidate texts in scratch strings and
+// appends the accepted one to the arena, so a refused change leaves every
+// row as it was (Rust keeps the old `Arc<str>` the same way). The arena is
+// compacted when its dead bytes outgrow the live ones.
+use @vesper/span::{
+    Limits,
+    Position,
+    Range,
+    line_table,
+    span
+};
+use @vesper/span::Error as SpanError;
+
+// `StoreError`, variant for variant (prefixed: variants share one
+// namespace).
+pub copy enum StoreError {
+    SInvalidLimits,
+    SInvalidUri,
+    SAlreadyOpen,
+    SNotOpen,
+    SVersion,
+    SDocumentLimit,
+    STotalLimit,
+    SChangeLimit,
+    SWorkLimit,
+    SRevisionOverflow,
+    SRangeLength,
+    SAllocation,
+    SIndex(SpanError)
+}
+
+// `StoreLimits`.
+pub copy struct StoreLimits {
+    max_document_bytes: u64,
+    max_documents: u64,
+    max_total_bytes: u64,
+    max_uri_bytes: u64,
+    max_changes: u64,
+    max_work: u64,
+    index: Limits
+}
+
+// `size_of::<Line>()` of vesper-span: two `usize`s.
+const LINE_SIZE: u64 = 16;
+const U64_MAX: u64 = 18446744073709551615;
+const MIB: u64 = 1048576;
+// Compact the arena once it holds more than this many dead bytes and more
+// dead than live ones.
+const COMPACT_SLACK: u64 = 65536;
+
+pub struct Store {
+    l: StoreLimits,
+    pool: String,
+    uri_off: ChunkSeq[u64],
+    uri_len: ChunkSeq[u64],
+    text_off: ChunkSeq[u64],
+    text_len: ChunkSeq[u64],
+    versions: ChunkSeq[i64],
+    revs: ChunkSeq[u64],
+    total: u64,
+    revision: u64,
+    live: u64
+}
+
+// One `ContentChange`: an optional range, an optional range length and the
+// text.
+pub struct Change {
+    has_range: bool,
+    range: Range,
+    has_len: bool,
+    len: u64,
+    text: String
+}
+
+fn w(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn hard_index() -> Limits {
+    Limits {
+        max_source_bytes: 1048576,
+        max_lines: 262145,
+        max_metadata_bytes: 16777216,
+        max_work: 67108864,
+        max_edits: 4096,
+        max_output_bytes: 2097152,
+        max_diagnostics: 4096,
+        max_labels: 16384,
+        max_fixes: 4096,
+        max_text_bytes: 2097152
+    }
+}
+
+fn index_valid(in l: Limits) -> bool {
+    let h = hard_index();
+    l
+        .max_source_bytes
+        <= h
+        .max_source_bytes
+        && l
+        .max_lines
+        <= h
+        .max_lines
+        && l
+        .max_metadata_bytes
+        <= h
+        .max_metadata_bytes
+        && l
+        .max_work
+        <= h
+        .max_work
+        && l
+        .max_edits
+        <= h
+        .max_edits
+        && l
+        .max_output_bytes
+        <= h
+        .max_output_bytes
+        && l
+        .max_diagnostics
+        <= h
+        .max_diagnostics
+        && l
+        .max_labels
+        <= h
+        .max_labels
+        && l
+        .max_fixes
+        <= h
+        .max_fixes
+        && l
+        .max_text_bytes
+        <= h
+        .max_text_bytes
+}
+
+// `StoreLimits::validate`.
+fn validate(l: StoreLimits) -> Unit eff [Fail[StoreError]] {
+    if !index_valid(in l.index) {
+        Fail::raise(StoreError::SIndex(SpanError::InvalidLimits));
+    }
+    if l
+        .max_document_bytes
+        > MIB
+        || l
+        .max_document_bytes
+        > widen_u64(l.index.max_source_bytes)
+        || l
+        .max_documents
+        > 256
+        || l
+        .max_total_bytes
+        > 16
+        * MIB
+        || l
+        .max_uri_bytes
+        > 16384
+        || l
+        .max_changes
+        > 4096
+        || l
+        .max_work
+        > 128
+        * MIB {
+        Fail::raise(StoreError::SInvalidLimits);
+    }
+}
+
+// `DocumentStore::new`.
+pub fn store_new(l: StoreLimits) -> Store eff [Fail[StoreError]] {
+    validate(l);
+    Store {
+        l: l,
+        pool: String::new(),
+        uri_off: ChunkSeq::new(),
+        uri_len: ChunkSeq::new(),
+        text_off: ChunkSeq::new(),
+        text_len: ChunkSeq::new(),
+        versions: ChunkSeq::new(),
+        revs: ChunkSeq::new(),
+        total: 0,
+        revision: 0,
+        live: 0
+    }
+}
+
+// `Work`: a per-mutation allowance.
+copy struct Work {
+    left: u64
+}
+
+fn spend(inout k: Work, n: u64) -> Unit eff [Fail[StoreError]] {
+    if n > k.left {
+        Fail::raise(StoreError::SWorkLimit);
+    }
+    k.left = wrapping_sub(k.left, n);
+}
+
+fn mul(a: u64, b: u64) -> u64 eff [Fail[StoreError]] {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        Fail::raise(StoreError::SWorkLimit);
+    }
+    lo
+}
+
+// `char::is_control` over UTF-8: C0 controls, DEL and the C1 controls
+// (U+0080 to U+009F, encoded `C2 80` to `C2 9F`).
+fn has_control(in u: Str) -> bool {
+    let b = u.as_bytes();
+    let n = b.len();
+    for i in 0..n {
+        let c = match b.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        if c < 32 || c == 127 {
+            return true;
+        }
+        if c == 194 {
+            let d = match b.try_get(wrapping_add(i, 1)) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            if d >= 128 && d < 160 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `valid_uri`.
+fn valid_uri(in s: Store, in uri: Str) -> bool {
+    !(uri.len() == 0 || uri.len() > s.l.max_uri_bytes || has_control(in uri))
+}
+
+// `lookup_work`.
+fn lookup_work(in s: Store) -> u64 eff [Fail[StoreError]] {
+    if s.l.max_uri_bytes == U64_MAX {
+        Fail::raise(StoreError::SWorkLimit);
+    }
+    mul(s.uri_off.len(), wrapping_add(s.l.max_uri_bytes, 1))
+}
+
+// The row of `uri`, or the number of rows.
+fn find(in s: Store, in uri: Str) -> u64 {
+    let n = s.uri_off.len();
+    let p = s.pool.as_bytes();
+    for i in 0..n {
+        let a = w(in s.uri_off, i);
+        let b = wrapping_add(a, w(in s.uri_len, i));
+        if p[a..b].eq(in uri.as_bytes()) {
+            return i;
+        }
+    }
+    n
+}
+
+// `lookup`.
+fn lookup(in s: Store, in uri: Str) -> u64 eff [Fail[StoreError]] {
+    if !valid_uri(in s, in uri) {
+        Fail::raise(StoreError::SInvalidUri);
+    }
+    let mut k = Work {
+        left: s.l.max_work
+    };
+    spend(inout k, uri.len());
+    spend(inout k, lookup_work(in s));
+    let at = find(in s, in uri);
+    if at == s.uri_off.len() {
+        Fail::raise(StoreError::SNotOpen);
+    }
+    at
+}
+
+fn next_revision(in s: Store) -> u64 eff [Fail[StoreError]] {
+    if s.revision == U64_MAX {
+        Fail::raise(StoreError::SRevisionOverflow);
+    }
+    wrapping_add(s.revision, 1)
+}
+
+// `text_size`: the store's total with a text of `n` bytes in place of one
+// of `old`.
+fn text_size(in s: Store, n: u64, old: u64) -> u64 eff [Fail[StoreError]] {
+    if n > s.l.max_document_bytes {
+        Fail::raise(StoreError::SDocumentLimit);
+    }
+    if old > s.total {
+        Fail::raise(StoreError::STotalLimit);
+    }
+    let rest = wrapping_sub(s.total, old);
+    if n > wrapping_sub(U64_MAX, rest) {
+        Fail::raise(StoreError::STotalLimit);
+    }
+    let total = wrapping_add(rest, n);
+    if total > s.l.max_total_bytes {
+        Fail::raise(StoreError::STotalLimit);
+    }
+    total
+}
+
+// `LineIndex::new`, kept only for its refusals.
+fn index_lines(in text: Str, l: StoreLimits) -> ChunkSeq[u64] eff [Fail[StoreError]] {
+    let r: Result[ChunkSeq[u64], SpanError] = handle Fail[SpanError] in {
+        lines_ok(line_table(in text, in l.index, narrow_usize(LINE_SIZE)))
+    } with {
+        return v => v,
+        raise(e, resume) => lines_err(e),
+    };
+    match r {
+        Result::Ok(t) => t,
+        Result::Err(e) => Fail::raise(StoreError::SIndex(e)),
+    }
+}
+
+fn span_of(in text: Str, in lines: ChunkSeq[u64], l: StoreLimits, r: Range)
+    -> (u64, u64) eff [Fail[StoreError]] {
+    let got: Result[(u64, u64), SpanError] = handle Fail[SpanError] in {
+        let b = span(in text, in lines[0..lines.len()], l.index.max_work, r);
+        span_ok(widen_u64(b.start), widen_u64(b.end))
+    } with {
+        return v => v,
+        raise(e, resume) => span_err(e),
+    };
+    match got {
+        Result::Ok(x) => x,
+        Result::Err(e) => Fail::raise(StoreError::SIndex(e)),
+    }
+}
+
+// The UTF-16 length of `t`.
+fn utf16_len(in t: Str) -> u64 {
+    let b = t.as_bytes();
+    let mut n: u64 = 0;
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        if c < 128 || c >= 192 {
+            n = if c >= 240 {
+                wrapping_add(n, 2)
+            } else {
+                wrapping_add(n, 1)
+            };
+        }
+    }
+    n
+}
+
+fn append(inout s: Store, in t: Str) -> u64 {
+    let at = s.pool.len();
+    s.pool.push_str(in t);
+    at
+}
+
+// Rewrites the arena with only the live URIs and texts.
+fn compact(inout s: Store) {
+    let mut pool = String::new();
+    for i in 0..s.uri_off.len() {
+        let ua = w(in s.uri_off, i);
+        let ub = wrapping_add(ua, w(in s.uri_len, i));
+        let ta = w(in s.text_off, i);
+        let tb = wrapping_add(ta, w(in s.text_len, i));
+        let nu = pool.len();
+        pool.push_str(in s.pool[ua..ub]);
+        let nt = pool.len();
+        pool.push_str(in s.pool[ta..tb]);
+        let _ = s.uri_off.try_set(i, nu);
+        let _ = s.text_off.try_set(i, nt);
+    }
+    s.live = pool.len();
+    s.pool = pool;
+}
+
+fn maybe_compact(inout s: Store) {
+    let dead = wrapping_sub(s.pool.len(), s.live);
+    if dead > COMPACT_SLACK && dead > s.live {
+        compact(inout s);
+    }
+}
+
+// `open`.
+pub fn store_open(inout s: Store, in uri: Str, version: i64, in text: Str)
+    -> u64 eff [Fail[StoreError]] {
+    if !valid_uri(in s, in uri) {
+        Fail::raise(StoreError::SInvalidUri);
+    }
+    let mut k = Work {
+        left: s.l.max_work
+    };
+    spend(inout k, uri.len());
+    spend(inout k, lookup_work(in s));
+    if find(in s, in uri) != s.uri_off.len() {
+        Fail::raise(StoreError::SAlreadyOpen);
+    }
+    if s.uri_off.len() >= s.l.max_documents {
+        Fail::raise(StoreError::SDocumentLimit);
+    }
+    let total = text_size(in s, text.len(), 0);
+    let revision = next_revision(in s);
+    spend(inout k, mul(text.len(), 3));
+    let lines = index_lines(in text, s.l);
+    let ua = append(inout s, in uri);
+    let ta = append(inout s, in text);
+    s.uri_off.push(ua);
+    s.uri_len.push(uri.len());
+    s.text_off.push(ta);
+    s.text_len.push(text.len());
+    s.versions.push(version);
+    s.revs.push(revision);
+    s.live = wrapping_add(s.live, wrapping_add(uri.len(), text.len()));
+    s.total = total;
+    s.revision = revision;
+    wrapping_sub(s.uri_off.len(), 1)
+}
+
+// A copy of the text of row `at`.
+fn text_copy(in s: Store, at: u64) -> String {
+    let a = w(in s.text_off, at);
+    let b = wrapping_add(a, w(in s.text_len, at));
+    let mut t = String::new();
+    t.push_str(in s.pool[a..b]);
+    t
+}
+
+// `change`: every change applies to the candidate before it; nothing is
+// committed until all succeed.
+pub fn store_change(inout s: Store, in uri: Str, version: i64, in changes: ChunkSeq[Change])
+    -> u64 eff [Fail[StoreError]] {
+    let at = lookup(in s, in uri);
+    let old_version = match s.versions.try_get(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let old_len = w(in s.text_len, at);
+    if version <= old_version {
+        Fail::raise(StoreError::SVersion);
+    }
+    if changes.len() > s.l.max_changes {
+        Fail::raise(StoreError::SChangeLimit);
+    }
+    let revision = next_revision(in s);
+    let mut k = Work {
+        left: s.l.max_work
+    };
+    spend(inout k, uri.len());
+    spend(inout k, lookup_work(in s));
+    spend(inout k, mul(old_len, 2));
+    let mut text = text_copy(in s, at);
+    let mut lines = index_lines(in text, s.l);
+    let mut total = s.total;
+    for i in 0..changes.len() {
+        match changes.try_get(i) {
+            Option::Some(c) => {
+                spend(inout k, 1);
+                let mut start: u64 = 0;
+                let mut end = text.len();
+                if c.has_range {
+                    spend(inout k, mul(text.len(), 2));
+                    let (a, b) = span_of(in text, in lines, s.l, c.range);
+                    if c.has_len {
+                        spend(inout k, wrapping_sub(b, a));
+                        if utf16_len(in text[a..b]) != c.len {
+                            Fail::raise(StoreError::SRangeLength);
+                        }
+                    }
+                    start = a;
+                    end = b;
+                } else if c.has_len {
+                    Fail::raise(StoreError::SRangeLength);
+                }
+                let keep = wrapping_sub(text.len(), wrapping_sub(end, start));
+                if c.text.len() > wrapping_sub(U64_MAX, keep) {
+                    Fail::raise(StoreError::SDocumentLimit);
+                }
+                let n = wrapping_add(keep, c.text.len());
+                total = text_size(in s, n, old_len);
+                spend(inout k, mul(n, 4));
+                let mut next = String::new();
+                next.push_str(in text[0..start]);
+                next.push_str(in c.text);
+                next.push_str(in text[end..text.len()]);
+                lines = index_lines(in next, s.l);
+                text = next;
+            }
+            Option::None => {}
+        }
+    }
+    let ta = append(inout s, in text);
+    let _ = s.text_off.try_set(at, ta);
+    let _ = s.text_len.try_set(at, text.len());
+    let _ = s.versions.try_set(at, version);
+    let _ = s.revs.try_set(at, revision);
+    s.live = wrapping_add(wrapping_sub(s.live, old_len), text.len());
+    s.total = total;
+    s.revision = revision;
+    maybe_compact(inout s);
+    at
+}
+
+fn remove_u64(inout v: ChunkSeq[u64], at: u64) {
+    let n = v.len();
+    for i in at..wrapping_sub(n, 1) {
+        let _ = v.try_set(i, w(in v, wrapping_add(i, 1)));
+    }
+    v.truncate(wrapping_sub(n, 1));
+}
+
+fn remove_i64(inout v: ChunkSeq[i64], at: u64) {
+    let n = v.len();
+    for i in at..wrapping_sub(n, 1) {
+        let x = match v.try_get(wrapping_add(i, 1)) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let _ = v.try_set(i, x);
+    }
+    v.truncate(wrapping_sub(n, 1));
+}
+
+// The closed document `close` returns: its version, revision and text.
+pub struct Closed {
+    version: i64,
+    revision: u64,
+    text: String
+}
+
+// `close`.
+pub fn store_close(inout s: Store, in uri: Str) -> Closed eff [Fail[StoreError]] {
+    let at = lookup(in s, in uri);
+    let revision = next_revision(in s);
+    let closed = Closed {
+        version: match s.versions.try_get(at) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        },
+        revision: w(in s.revs, at),
+        text: text_copy(in s, at)
+    };
+    let len = w(in s.text_len, at);
+    s.live = wrapping_sub(s.live, wrapping_add(len, w(in s.uri_len, at)));
+    remove_u64(inout s.uri_off, at);
+    remove_u64(inout s.uri_len, at);
+    remove_u64(inout s.text_off, at);
+    remove_u64(inout s.text_len, at);
+    remove_i64(inout s.versions, at);
+    remove_u64(inout s.revs, at);
+    s.total = wrapping_sub(s.total, len);
+    s.revision = revision;
+    maybe_compact(inout s);
+    closed
+}
+
+// `get`: the row of `uri`, or `None`.
+pub fn store_get(in s: Store, in uri: Str) -> Option[u64] {
+    if !valid_uri(in s, in uri) {
+        return Option::None;
+    }
+    let at = find(in s, in uri);
+    if at == s.uri_off.len() {
+        Option::None
+    } else {
+        Option::Some(at)
+    }
+}
+
+pub fn doc_version(in s: Store, at: u64) -> i64 {
+    match s.versions.try_get(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn doc_revision(in s: Store, at: u64) -> u64 {
+    w(in s.revs, at)
+}
+
+// The text of row `at`, appended to `out`.
+pub fn doc_text(in s: Store, at: u64, inout out: ChunkSeq[u8]) {
+    let a = w(in s.text_off, at);
+    let b = wrapping_add(a, w(in s.text_len, at));
+    let p = s.pool.as_bytes();
+    out.extend(in p[a..b]);
+}
+
+pub fn store_len(in s: Store) -> u64 {
+    s.uri_off.len()
+}
+
+pub fn store_total(in s: Store) -> u64 {
+    s.total
+}
+
+pub fn store_revision(in s: Store) -> u64 {
+    s.revision
+}
+
+// Forces the store revision, as the Rust unit test does to reach
+// `RevisionOverflow`.
+pub fn store_set_revision(inout s: Store, r: u64) {
+    s.revision = r;
+}
+
+// Typed constructors: a handle body or clause that builds a Result or
+// Option with a variant constructor leaves the other type parameter
+// uninferred (`_`), which the native layout refuses (report, gap 2).
+fn lines_ok(sink v: ChunkSeq[u64]) -> Result[ChunkSeq[u64], SpanError] {
+    Result::Ok(v)
+}
+
+fn lines_err(e: SpanError) -> Result[ChunkSeq[u64], SpanError] {
+    Result::Err(e)
+}
+
+fn span_ok(start: u64, end: u64) -> Result[(u64, u64), SpanError] {
+    Result::Ok((start, end))
+}
+
+fn span_err(e: SpanError) -> Result[(u64, u64), SpanError] {
+    Result::Err(e)
+}

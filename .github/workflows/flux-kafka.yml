@@ -27,20 +27,21 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
+    # Cargo.toml/Cargo.lock are left out here on purpose (#1321): nearly every
+    # PR touches the lock file, and these integration lanes then queued behind
+    # the account's job limit. Pushes to main still run on those changes.
     paths:
       - 'crates/vesper-flux/**'
       - 'crates/vesper-quarry/**'
       - 'crates/vesper-loom-cas/**'
       - 'crates/vesper-simpulse/**'
       - '.github/workflows/flux-kafka.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
 
 permissions:
   contents: read
 
 concurrency:
-  group: flux-kafka-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: flux-kafka-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: true
 
 env:

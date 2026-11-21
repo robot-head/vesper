@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en" data-vesper-theme="dusk">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Language guide · Vesper</title>
+    <meta name="description" content="Learn Vesper through small programs covering control flow, ownership, field loans, effects, closures, generics, traits, tests, and user-defined sugar.">
+    <meta name="theme-color" content="#101111">
+    <link rel="canonical" href="https://vesper-lang.org/language.html">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+    <link rel="stylesheet" href="site.css">
+    <noscript><style>.theme { display: none; }</style></noscript>
+  </head>
+  <body>
+    <a class="skip" href="#guide">Skip to language guide</a>
+    <header class="nav">
+      <div class="wrap reader-bar">
+        <a class="brand" href="index.html" aria-label="Vesper home"><img data-brand-mark src="brand/vesper-mark-dusk.svg" width="34" height="34" alt="">vesper</a>
+        <a href="docs/index.html">Documentation</a>
+        <label class="theme" title="Switch between dusk and dawn"><input type="checkbox" id="theme-toggle" role="switch" aria-label="Dawn theme"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"></path></svg></label>
+      </div>
+    </header>
+    <main class="wrap reader" id="guide">
+      <div class="reader-intro">
+        <h1>Vesper language guide</h1>
+        <p class="lead">Start with a function that returns the larger of two numbers. You can run each example on its own, including the later programs that commit a transaction, handle a failure, and test a function with several inputs.</p>
+        <p><a class="inline-link" href="tour/index.html">New to Vesper? Take the 50-step tour.</a></p>
+      </div>
+      <nav class="contents" aria-labelledby="contents-title">
+        <h2 id="contents-title">On this page</h2>
+        <a href="#functions">Functions and bindings</a>
+        <a href="#loops">Loops and ranges</a>
+        <a href="#patterns">Enums and pattern matching</a>
+        <a href="#ownership">Ownership modes</a>
+        <a href="#places">Parameter modes and field loans</a>
+        <a href="#effects">Checked arithmetic and effects</a>
+        <a href="#results">Propagating a Result</a>
+        <a href="#resumptions">Resuming an operation</a>
+        <a href="#closures">Closures and captures</a>
+        <a href="#generics">Generics and trait bounds</a>
+        <a href="#models">Traits and named models</a>
+        <a href="#tests">Table-driven test sugar</a>
+        <a href="#sugar">Define your own sugar</a>
+      </nav>
+      <div class="reader-body">
+        <section id="functions">
+          <h2>Functions and bindings</h2>
+          <p>A function declares its parameter types in parentheses and its result type after <code>-&gt;</code>. The last expression in its body supplies the result. Here both branches of <code>if</code> produce an integer. The caller can use the entire expression as a value.</p>
+          <pre tabindex="0"><code data-lang="vesper">fn larger(left: i64, right: i64) -&gt; i64 {
+    if left &gt; right { left } else { right }
+}
+
+fn main() -&gt; i64 {
+    let high = larger(12, 9);
+    larger(high, 15)
+}</code></pre>
+          <p><code>i64</code> is a signed 64-bit integer. The compiler infers the type of <code>high</code> from the call. The semicolon ends the binding, and the final call returns <code>15</code> from <code>main</code>.</p>
+          <h3>What the shell sees</h3>
+          <p><code>vesper run</code> prints the value of <code>main</code>. For a native executable, <code>main</code> can return an integer or <code>Unit</code>. On Linux, the shell sees the low eight bits of an integer result after a normal exit. Choose <code>0</code> for success and a small positive status for failure when writing a command-line tool.</p>
+          <p>The Fibonacci example returns <code>55</code> for <code>fib(10)</code>. Its overflow handler returns <code>-1</code>. If that handler runs, the evaluator prints <code>-1</code> and the native executable gives the Linux shell status <code>255</code>. <a href="tour/read-an-exit-status.html">Try both commands.</a> <a href="https://man7.org/linux/man-pages/man2/waitpid.2.html">Linux exit status reference</a>.</p>
+          <!-- figure:exit -->
+          <h3>Run the example</h3>
+          <ol>
+            <li>Clone the repository and build the compiler. <a href="index.html#guide">Build Vesper from source.</a></li>
+            <li>Save the example as <code>lesson.ves</code> in the repository root.</li>
+            <li>From that directory, run both commands below. <code>check</code> checks the source. <code>run</code> evaluates <code>main</code> and prints <code>15</code>.</li>
+          </ol>
+          <pre tabindex="0"><code data-lang="sh">cargo run --locked -p vesper -- check lesson.ves
+cargo run --locked -p vesper -- run lesson.ves</code></pre>
+        </section>
+        <section id="loops">
+          <h2>Loops and ranges</h2>
+          <p>Use <code>let mut</code> for a local you intend to update. This loop adds the integers from one through four. The <code>u64</code> annotation makes the accumulator an unsigned 64-bit integer.</p>
+          <pre tabindex="0"><code data-lang="vesper">fn main() -&gt; u64 {
+    let mut total: u64 = 0;
+    for n in 1..=4 {
+        total = wrapping_add(total, n);
+    }
+    total
+}</code></pre>
+          <p>The inclusive range <code>1..=4</code> gives a total of <code>10</code>. Change the range to <code>1..4</code> and the loop stops before four, giving <code>6</code>. Removing <code>mut</code> makes the assignment to <code>total</code> a checker error.</p>
+          <p>Use <code>continue</code> to skip the rest of an iteration and <code>break</code> to leave the innermost loop. When you need the loop itself to yield a value, use <code>loop { … }</code> and supply the value with <code>break value</code>. <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/loops/control.ves">See nested loops and early returns.</a></p>
+        </section>
+        <section id="patterns">
+          <h2>Enums and pattern matching</h2>
+          <p>An enum describes a value that takes one of several forms, called variants. Each variant can carry its own data. Use <code>match</code> to choose an arm and bind the payload in the same step.</p>
+          <pre tabindex="0"><code data-lang="vesper">copy enum Reading {
+    Missing,
+    Sample(i64)
+}
+
+fn value_or(in reading: Reading, fallback: i64) -&gt; i64 {
+    match reading {
+        Reading::Missing =&gt; fallback,
+        Reading::Sample(n) =&gt; n,
+    }
+}
+
+fn main() -&gt; i64 { value_or(Reading::Sample(17), 0) }</code></pre>
+          <p><code>Reading::Sample(17)</code> selects the second arm and binds <code>n</code> to <code>17</code>. Pass <code>Reading::Missing</code> to select the fallback. The checker requires the arms to cover every possible input. A final <code>_</code> matches any remaining value. Naming each variant lets the checker point out matches that need attention when you add another variant.</p>
+          <p>The built-in <code>Option[T]</code> uses this same pattern for values that may be absent. Match <code>Some(x)</code> to use the payload and <code>None</code> to handle its absence. <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/verified_codegen/enums.ves">See patterns with nested records and optional values.</a></p>
+        </section>
+        <section id="ownership">
+          <h2>Ownership modes</h2>
+          <p>A transaction must finish even if its caller takes an early return. Declaring it <code>linear</code> makes the owner account for it on every path. Use the ownership mode that matches the lifetime of your value.</p>
+          <dl>
+            <dt><code>copy</code></dt><dd>You can duplicate or discard the value. Use it for data such as the integer reading above.</dd>
+            <dt><code>affine</code></dt><dd>You can transfer ownership or let the value drop. After a move, only the new owner can use it.</dd>
+            <dt><code>linear</code></dt><dd>You must account for the value at scope exit. Consume it locally, pass ownership to a callee, or return it to your caller.</dd>
+          </dl>
+          <pre tabindex="0"><code data-lang="vesper">linear struct WriteTxn { wal_slot: u64 }
+
+impl WriteTxn {
+    fn commit(sink self) -&gt; u64 {
+        let WriteTxn { wal_slot } = self;
+        wal_slot
+    }
+}
+
+fn main() -&gt; u64 {
+    let tx = WriteTxn { wal_slot: 42 };
+    tx.commit()
+}</code></pre>
+          <p><code>sink self</code> transfers the transaction to <code>commit</code>. Destructuring <code>self</code> consumes the record and binds its slot number. The caller receives <code>42</code>. A second call on <code>tx</code> would use a moved value. Replacing the first call with a literal <code>42</code> would leave the transaction live at scope exit.</p>
+          <!-- figure:ownership -->
+          <p>The full example also defines <code>abort(sink self)</code>. An application can choose either outcome while satisfying the same ownership rule. <a href="examples/transaction.ves">Read the complete transaction example.</a></p>
+        </section>
+        <section id="places">
+          <h2>Parameter modes and field loans</h2>
+          <p>A parameter mode describes the access a callee receives. Use <code>in</code> for a shared read, <code>inout</code> for exclusive access to update a place, and <code>sink</code> to take ownership. A <em>place</em> is a storage location such as a variable or one of its fields.</p>
+          <pre tabindex="0"><code data-lang="vesper">copy struct Broker { index: u64, metrics: u64, config: u64 }
+
+fn append(inout broker.{index, metrics}: Broker, in config: u64) {
+    broker.index = wrapping_add(broker.index, config);
+    broker.metrics = wrapping_add(broker.metrics, 1);
+}
+
+fn main() -&gt; u64 {
+    let mut broker = Broker { index: 1, metrics: 0, config: 41 };
+    append(inout broker, in broker.config);
+    broker.index
+}</code></pre>
+          <!-- figure:broker -->
+          <p>Read the call together with the signature. The projection <code>.{index, metrics}</code> restricts the exclusive loan to those two fields. The separate argument reads <code>broker.config</code>, a disjoint field. After the call, <code>index</code> is <code>42</code> and <code>metrics</code> is <code>1</code>.</p>
+          <p>Inside <code>append</code>, change the first assignment’s destination to <code>broker.config</code>. The checker reports <code>E0304</code> because <code>config</code> falls outside the declared projection. Restore the assignment to <code>broker.index</code> to make this call valid again. To give a helper permission to update a field, name that field in its <code>inout</code> projection. <a href="examples/projections.ves">Read the field projection example.</a></p>
+        </section>
+        <section id="effects">
+          <h2>Checked arithmetic and effects</h2>
+          <p>A function’s effect row, written <code>eff […]</code>, lists effects that its caller must handle or pass on. Dividing a constant by a caller-supplied integer can raise <code>Fail[RuntimeError]</code> when the divisor is zero. Put a handler around the call to choose a recovery value.</p>
+          <pre tabindex="0"><code data-lang="vesper">fn divide(divisor: i64) -&gt; i64 eff [Fail[RuntimeError]] {
+    84 / divisor
+}
+
+fn main() -&gt; i64 {
+    handle Fail[RuntimeError] in {
+        divide(0)
+    } with {
+        return value =&gt; value,
+        raise(error, _) =&gt; match error {
+            RuntimeError::DivisionByZero =&gt; 42,
+            RuntimeError::IndexOutOfBounds =&gt; 0,
+        },
+    }
+}</code></pre>
+          <p><code>divide(0)</code> reaches the <code>raise</code> clause and returns <code>42</code> through the division-by-zero arm. Try <code>divide(4)</code> to take the ordinary <code>return</code> clause and get <code>21</code>. Since the handler covers the failure, <code>main</code> can omit that effect from its own signature. <a href="examples/checked_math.ves">Read the checked division example.</a></p>
+          <p>Overflow uses a different effect, <code>Fail[ArithOverflow]</code>. For example, adding two arbitrary <code>i64</code> values with <code>+</code> can overflow. Use checked addition when the caller should decide how to recover. Use <code>wrapping_add</code> when modular arithmetic is part of the algorithm, as it is for the broker’s counters. <a href="https://github.com/robot-head/vesper/blob/main/examples/fibonacci.ves">See checked addition in a recursive function.</a></p>
+        </section>
+        <section id="results">
+          <h2>Propagating a Result</h2>
+          <p>Return <code>Result[T, E]</code> when you want your caller to receive either a value of type <code>T</code> or an error of type <code>E</code>. A caller can match both variants, or apply <code>?</code> to continue with the value from <code>Ok</code>. On <code>Err</code>, the operator performs <code>Fail[E]</code> with the error payload.</p>
+          <pre tabindex="0"><code data-lang="vesper">fn port(n: i64) -&gt; Result[i64, i64] {
+    if n &lt; 1 { Err(n) } else { Ok(n) }
+}
+
+fn main() -&gt; i64 {
+    handle Fail[i64] in {
+        port(0)?
+    } with {
+        return value =&gt; value,
+        raise(error, _) =&gt; 8080,
+    }
+}</code></pre>
+          <p><code>port(0)</code> returns <code>Err(0)</code>. Applying <code>?</code> routes that payload to the handler, which supplies the default port <code>8080</code>. With <code>port(443)?</code>, the handled block yields <code>443</code>.</p>
+          <p>Account for live linear resources before propagating a failure. If a transaction is live at <code>validate()?</code>, the error path could skip a later commit. The checker reports that the failure would discard the transaction. Validate before opening the transaction, or match the result and consume the transaction on each path. <a href="https://github.com/robot-head/vesper/blob/main/examples/rejected/error_unwind.ves">Read the rejected transaction.</a></p>
+        </section>
+        <section id="resumptions">
+          <h2>Resuming an operation</h2>
+          <p>A handler can supply an answer to an operation and let the computation continue from the call. Declare a <code>linear effect</code> for a handler that must resume exactly once. Here <code>Ask</code> requests an integer, and the handler chooses the answer locally.</p>
+          <pre tabindex="0"><code data-lang="vesper">linear effect Ask {
+    fn ask() -&gt; i64;
+}
+
+fn main() -&gt; i64 {
+    handle Ask in {
+        wrapping_add(Ask::ask(), 1)
+    } with {
+        return value =&gt; value,
+        ask(resume) =&gt; {
+            let answer = resume(20);
+            wrapping_mul(answer, 2)
+        },
+    }
+}</code></pre>
+          <!-- figure:resume -->
+          <p>At <code>Ask::ask()</code>, control passes to the <code>ask</code> clause. Calling <code>resume(20)</code> supplies <code>20</code> at that point. The addition produces <code>21</code>, which passes through the return clause and becomes the result of <code>resume</code>. The handler then doubles <code>21</code>, so <code>main</code> returns <code>42</code>. <a href="https://github.com/robot-head/vesper/blob/main/examples/resumptions.ves">See the same handler with checked arithmetic.</a></p>
+        </section>
+        <section id="closures">
+          <h2>Closures and captures</h2>
+          <p>A closure combines a function with values from the scope where you create it. In <code>offset</code>, <code>value</code> is a parameter and <code>amount</code> is a capture. Returning the closure lets the caller reuse that particular offset.</p>
+          <pre tabindex="0"><code data-lang="vesper">fn offset(sink amount: i64) -&gt; fn @copy (i64) -&gt; i64 {
+    |value| wrapping_add(value, amount)
+}
+
+fn main() -&gt; i64 {
+    let add_ten = offset(10);
+    add_ten(add_ten(2))
+}</code></pre>
+          <p>The return type describes a copyable function that takes an <code>i64</code> and returns an <code>i64</code>. Its only capture is a copyable integer. Both calls add the captured <code>10</code>. The inner call returns <code>12</code> and the outer call returns <code>22</code>.</p>
+          <p>If the body uses checked <code>+</code>, the returned function type also needs <code>eff [Fail[ArithOverflow]]</code>. The addition runs when the caller invokes the closure. Wrap that invocation in a handler, or include the effect in the caller’s row. <a href="https://github.com/robot-head/vesper/blob/main/examples/closures.ves">Read the example that composes two checked closures.</a></p>
+        </section>
+        <section id="generics">
+          <h2>Generics and trait bounds</h2>
+          <p>Introduce a type parameter in square brackets to write one function that works with several types. State the operations its body needs. This version of <code>larger</code> needs to compare two borrowed values and copy the selected value into the result.</p>
+          <pre tabindex="0"><code data-lang="vesper">fn larger[T: mod copy](in a: T, in b: T) -&gt; T where T: Ord {
+    match a.cmp(b) {
+        Less =&gt; b,
+        _ =&gt; a
+    }
+}
+
+fn main() -&gt; i64 { larger(12, 9) }</code></pre>
+          <p><code>T: mod copy</code> constrains ownership. The <code>where T: Ord</code> bound makes the ordering method <code>cmp</code> available. When <code>a</code> sorts before <code>b</code>, the first arm returns <code>b</code>. Otherwise the function returns <code>a</code>, including on a tie. The integer call yields <code>12</code>.</p>
+          <p>The caller can also supply a copyable record with an <code>Ord</code> implementation. The same comparison then uses the record’s ordering. <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/bounded_generics/max.ves">See one generic function called with integers, booleans, and points.</a></p>
+        </section>
+        <section id="models">
+          <h2>Traits and named models</h2>
+          <p>A trait groups operations under a common signature. An <code>impl</code> supplies the canonical implementation for a type. If a point has more than one meaningful score, give the alternative implementation a name with <code>model</code>.</p>
+          <pre tabindex="0"><code data-lang="vesper">struct Point { x: i64, y: i64 }
+
+trait Score {
+    type Out: mod copy;
+    fn score(in self) -&gt; Self::Out;
+}
+
+impl Score for Point {
+    type Out = i64;
+    fn score(in self) -&gt; i64 { wrapping_add(self.x, self.y) }
+}
+
+model ByX: Score for Point {
+    type Out = i64;
+    fn score(in self) -&gt; i64 { self.x }
+}
+
+fn main() -&gt; i64 {
+    let p = Point { x: 3, y: 4 };
+    let sum = p.score();
+    let x = { use model ByX; p.score() };
+    wrapping_add(sum, x)
+}</code></pre>
+          <p><code>Out</code> is an associated type. Each implementation chooses the concrete type returned by <code>score</code>. Here both choose <code>i64</code>. The first <code>p.score()</code> uses the canonical implementation and returns <code>7</code>. Inside the block, <code>use model ByX</code> selects the implementation that returns <code>3</code>. Adding the two scores yields <code>10</code>.</p>
+          <p>For a single explicit call, write <code>ByX::score(p)</code>. A block-local selection is convenient when several calls in the block should share a model. <a href="https://github.com/robot-head/vesper/blob/main/examples/traits/shapes.ves">Read the example with nested model selections.</a></p>
+        </section>
+        <section id="tests">
+          <h2>Table-driven test sugar</h2>
+          <p>Test cases are syntactic sugar. Each <code>// @case</code> row gives one invocation of the same test function its own name and arguments. Place a <code>test</code> block beside the function it exercises. The test can call private functions in the same module. Use one <code>// @case</code> comment per set of arguments so the report identifies which input failed.</p>
+          <pre tabindex="0"><code data-lang="vesper">fn larger(left: i64, right: i64) -&gt; i64 {
+    if left &gt; right { left } else { right }
+}
+
+test {
+    // @case descending(12, 9, 12)
+    // @case ascending(9, 12, 12)
+    // @case tie(7, 7, 7)
+    fn test_larger(a: i64, b: i64, expected: i64) -&gt; bool {
+        larger(a, b) == expected
+    }
+}</code></pre>
+          <p>Save this example as <code>lesson.ves</code> and run the first command below to execute all three rows. The second command selects the tie case. Change the expected value in that row to <code>8</code> to see a failure reported for <code>test_larger::tie</code>.</p>
+          <pre tabindex="0"><code data-lang="sh">cargo run --locked -p vesper -- test lesson.ves
+cargo run --locked -p vesper -- test lesson.ves --filter test_larger::tie</code></pre>
+          <p>To try the same techniques in larger programs, use the repository examples. The specification gives the formal rules for each feature. <a href="https://github.com/robot-head/vesper/tree/main/examples">Example programs</a> · <a href="vesper-specification.pdf">Language specification (PDF)</a></p>
+        </section>
+        <section id="sugar">
+          <h2>Define your own sugar</h2>
+          <p>A source macro gives an expression a new spelling. Here <code>$x: expr</code> accepts one expression, and <code>quote</code> supplies the code that replaces the call.</p>
+          <pre tabindex="0"><code data-lang="vesper">macro addone($x: expr) -&gt; expr {
+    quote { wrapping_add($x, 1) }
+}
+fn main() -&gt; i64 { addone!(41) }</code></pre>
+          <p>Save this as <code>lesson.ves</code>. Format the macro itself, then expand it to ordinary Vesper before running it. These commands use the compiler built in the repository and a POSIX shell.</p>
+          <pre tabindex="0"><code data-lang="sh">target/debug/vesper fmt lesson.ves
+target/debug/vesper fmt --check lesson.ves
+target/debug/vesper forge expand lesson.ves &gt; expanded.ves
+target/debug/vesper run expanded.ves</code></pre>
+          <!-- diagram:macro-substitution -->
+          <!-- figure:guide-expansion -->
+          <p>The second formatting pass accepts the first pass’s output. The expansion calls <code>wrapping_add(41, 1)</code> and prints <code>42</code> when run. The manuscript also proposes a <code>sugar</code> declaration for forms such as a guard with an <code>else</code> clause. <a href="docs/chapter-07.html#section-7-5">Read the design for extensible syntax.</a></p>
+        </section>
+      </div>
+    </main>
+    <footer><div class="wrap footer-bar"><a href="index.html">Vesper home</a><a href="#contents-title">Back to contents</a></div></footer>
+    <script type="module" src="site.js"></script>
+  </body>
+</html>

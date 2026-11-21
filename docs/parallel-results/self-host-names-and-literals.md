@@ -189,6 +189,16 @@ kind test to existing name checks and at most two tokens of lookahead at a
    `tests/oracle42_acceptance.rs`) maps that class to E0209. The Lean
    class can be renamed in a guarded follow-up.
 
+## CI notes
+
+- The lane changes the parser and the AST, so `Test all targets` misses the
+  remote cache for nearly every test, and the root `BUILD.bazel` change also
+  runs the Lean replay suite. A cold run passed 1,518 of 1,559 tests with no
+  failure before it reached BuildBuddy's one-hour limit (invocation
+  3f403911). A second run reuses the cached results.
+- `//:test/self_host_ir_inline` (from #1274) ran past the 900 s `long`
+  timeout, like the differentials #1362 moved, so it is `eternal` too.
+
 ## What is left
 
 The gaps above. SH2 and SH3 ports may now use `effect`, `handle`, `sink` and

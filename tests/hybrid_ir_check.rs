@@ -99,8 +99,12 @@ fn differential_cases(
          {rust_only} left to Rust, {:.1} s)",
         start.elapsed().as_secs_f64()
     );
+    // Under Bazel's sampling (CHECK_HARNESS_STRIDE, #1381) the unoptimized
+    // slice compares only a dozen cases, so one more world left to Rust
+    // moves the share by 8 points: allow a fifth there, a tenth otherwise.
+    let floor = if cases < 50 { 5 } else { 10 };
     assert!(
-        rust_only * 10 < cases,
+        rust_only * floor < cases,
         "{rust_only} cases left to Rust against {cases} compared"
     );
     (bad, diags, cases)
@@ -231,6 +235,55 @@ fn main() -> u64 { handle Fail[RuntimeError] in { body() } with { return x => x,
     let program = vesper::ir::lower_world(w);
     assert!(check_words::ir_input(w, &program).is_none());
     assert_eq!(vesper::ir_check::validate(w, &program), vec![]);
+}
+
+/// Lent closures and lent function parameters (#1261): calling a lent
+/// `fn` parameter reads it, and a lent closure borrows its captures. The
+/// programs of tests/closure_modes.rs that use them check clean in Rust and
+/// in Vesper (`lent_parameters_pass_on` and a lent closure literal).
+#[test]
+fn lent_functions_match_rust() {
+    let state = "struct State { slots: ChunkSeq[u32], n: u64 }
+fn fresh(n: u64) -> State {
+    let mut s = State { slots: ChunkSeq::new[u32](), n: n };
+    let mut i: u64 = 0;
+    loop {
+        if i >= n % 4 {
+            break;
+        }
+        s.slots.push(wrapping_u32(i));
+        i = wrapping_add(i, 1);
+    }
+    s
+}
+";
+    let words = package().entry("check_ir_words", true);
+    for body in [
+        "fn apply(f: fn(u64) -> u64) -> u64 { f(1) }
+fn twice(f: fn(u64) -> u64) -> u64 { wrapping_add(apply(f), apply(|x: u64| f(f(x)))) }
+fn main() -> u64 {
+    let s = fresh(5);
+    wrapping_add(twice(|x: u64| wrapping_add(x, s.slots.len())), twice(|x: u64| wrapping_add(x, s.n)))
+}",
+        "fn apply(f: fn(u64) -> u64) -> u64 { wrapping_add(f(1), f(2)) }
+fn main() -> u64 { let s = fresh(3); apply(|x: u64| wrapping_add(x, s.n)) }",
+    ] {
+        let source = format!("{state}{body}");
+        let parsed = vesper::parser::parse(&source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let w = &checked.world;
+        let program = vesper::ir::lower_world(w);
+        let rust = vesper::ir_check::validate(w, &program);
+        assert_eq!(rust, vec![], "{body}");
+        let input = check_words::ir_input(w, &program).expect("encodable");
+        assert_eq!(
+            check_words::decode_diagnostics(&words.words(&input)),
+            rust,
+            "{body}"
+        );
+    }
 }
 
 /// ABBA: `validate` in Rust against the Vesper check with its input

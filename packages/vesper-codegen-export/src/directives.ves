@@ -1,0 +1,870 @@
+// `@export` directives (src/native_export/directives.rs): the line
+// comments of a library's root module that name the export ABI version,
+// generic instances and `.vsys` imports.
+//
+// `parse_directives` reads them as Rust's `Directives::parse` does and
+// writes a canonical dump (or the error). The `.vsys` descriptor parse
+// (`vesper_ffi::sys::parse`, which names the library and its symbols) stays
+// in Rust: a `vsys` body is dumped as its text, with `@TARGET@` and `@ABI@`
+// filled in from the target values the input carries.
+//
+// Instance type arguments are parsed here: names with type arguments,
+// tuples, `()` and integer literals, displayed with @vesper/check-data's
+// `display` (vesper-core's `Display`).
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    inc,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::types::{
+    Types,
+    display,
+    types_new
+};
+use self::text::{
+    copy_of,
+    nl,
+    put,
+    put_seq,
+    put_u64,
+    same_str
+};
+
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const NONE32: u32 = 4294967295;
+
+fn is_space(c: u8) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12
+}
+
+fn lower(c: u8) -> u8 {
+    if c >= 65 && c <= 90 {
+        wrapping_add(c, 32)
+    } else {
+        c
+    }
+}
+
+fn alnum(c: u8) -> bool {
+    c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122
+}
+
+// `s[a..e]` as its own bytes.
+fn sub(in s: ChunkSeq[u8], a: u64, e: u64) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    for i in a..e {
+        o.push(u8_at(in s, i));
+    }
+    o
+}
+
+// `str::trim` (ASCII whitespace).
+fn trim(in s: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut a: u64 = 0;
+    let mut e = s.len();
+    loop {
+        if a >= e || !is_space(u8_at(in s, a)) {
+            break;
+        }
+        a = inc(a);
+    }
+    loop {
+        if e <= a || !is_space(u8_at(in s, wrapping_sub(e, 1))) {
+            break;
+        }
+        e = wrapping_sub(e, 1);
+    }
+    sub(in s, a, e)
+}
+
+fn trim_start(in s: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut a: u64 = 0;
+    loop {
+        if a >= s.len() || !is_space(u8_at(in s, a)) {
+            break;
+        }
+        a = inc(a);
+    }
+    sub(in s, a, s.len())
+}
+
+fn starts_with(in s: ChunkSeq[u8], in p: Str) -> bool {
+    let b = p.as_bytes();
+    if s.len() < b.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if u8_at(in s, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+fn after(in s: ChunkSeq[u8], in p: Str) -> ChunkSeq[u8] {
+    let b = p.as_bytes();
+    let n = b.len();
+    sub(in s, n, s.len())
+}
+
+// `split_whitespace`: the words of `s`, as (start, end) pairs.
+fn words(in s: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    let mut i: u64 = 0;
+    let n = s.len();
+    loop {
+        loop {
+            if i >= n || !is_space(u8_at(in s, i)) {
+                break;
+            }
+            i = inc(i);
+        }
+        if i >= n {
+            break;
+        }
+        let a = i;
+        loop {
+            if i >= n || is_space(u8_at(in s, i)) {
+                break;
+            }
+            i = inc(i);
+        }
+        out.push(a);
+        out.push(i);
+    }
+    out
+}
+
+fn word(in s: ChunkSeq[u8], in ws: ChunkSeq[u64], k: u64) -> ChunkSeq[u8] {
+    let a = u64_at(in ws, wrapping_mul(k, 2));
+    let e = u64_at(in ws, inc(wrapping_mul(k, 2)));
+    sub(in s, a, e)
+}
+
+// ----- instance type arguments ------------------------------------------------
+
+// `Parser::primitive`: a scalar name other than `Unit` and `Never`.
+fn primitive(in n: ChunkSeq[u8]) -> bool {
+    same_str(in n, "u8")
+        || same_str(in n, "u16")
+        || same_str(in n, "u32")
+        || same_str(in n, "u64")
+        || same_str(in n, "usize")
+        || same_str(in n, "u128")
+        || same_str(in n, "i8")
+        || same_str(in n, "i16")
+        || same_str(in n, "i32")
+        || same_str(in n, "i64")
+        || same_str(in n, "isize")
+        || same_str(in n, "i128")
+        || same_str(in n, "f32")
+        || same_str(in n, "f64")
+        || same_str(in n, "bool")
+}
+
+struct TyParser {
+    s: ChunkSeq[u8],
+    pos: u64,
+    bad: bool,
+    // names parsed as row variables
+    rows: ChunkSeq[u32],
+}
+
+impl TyParser {
+    fn peek(in self) -> u8 {
+        u8_at(in self.s, self.pos)
+    }
+
+    fn at_end(in self) -> bool {
+        self.pos >= self.s.len()
+    }
+
+    fn skip(inout self) {
+        loop {
+            if self.at_end() || !is_space(self.peek()) {
+                break;
+            }
+            self.pos = inc(self.pos);
+        }
+    }
+
+    // A comma-separated list up to `close` (consumed), a trailing comma
+    // allowed. `args` parses type arguments (`type_args_inner`), else
+    // tuple items. Sets `bad` on a malformed list.
+    fn list(
+        inout self,
+        inout names: Names,
+        inout t: Types,
+        close: u8,
+        args: bool,
+        inout items: ChunkSeq[u32]
+    ) {
+        loop {
+            self.skip();
+            if self.at_end() {
+                self.bad = true;
+                return;
+            }
+            if self.peek() == close {
+                self.pos = inc(self.pos);
+                return;
+            }
+            let ty = if args {
+                self.arg(inout names, inout t)
+            } else {
+                self.ty(inout names, inout t)
+            };
+            if self.bad {
+                return;
+            }
+            items.push(ty);
+            self.skip();
+            if self.at_end() {
+                self.bad = true;
+                return;
+            }
+            let c = self.peek();
+            if c == close {
+                self.pos = inc(self.pos);
+                return;
+            }
+            if c != 44 {
+                self.bad = true;
+                return;
+            }
+            self.pos = inc(self.pos);
+        }
+    }
+
+    // The identifier at the cursor (consumed), or empty.
+    fn ident(inout self) -> ChunkSeq[u8] {
+        let a = self.pos;
+        loop {
+            if self.at_end() {
+                break;
+            }
+            let d = self.peek();
+            if !(alnum(d) || d == 95) {
+                break;
+            }
+            self.pos = inc(self.pos);
+        }
+        sub(in self.s, a, self.pos)
+    }
+
+    // One type argument: a row variable (a lower-case name that is not a
+    // scalar), a decimal lane count, or a type.
+    fn arg(inout self, inout names: Names, inout t: Types) -> u32 {
+        self.skip();
+        let c = self.peek();
+        if c >= 48 && c <= 57 {
+            let digits = self.ident();
+            let ok = true;
+            for i in 0..digits.len() {
+                let d = u8_at(in digits, i);
+                if d < 48 || d > 57 {
+                    self.bad = true;
+                }
+            }
+            return t.named0(names.intern(in digits.as_slice()));
+        }
+        if c >= 97 && c <= 122 || c == 95 {
+            let save = self.pos;
+            let id = self.ident();
+            if !primitive(in id) {
+                self.skip();
+                if !self
+                    .at_end()
+                    && (self.peek() == 58 || self.peek() == 124 || self.peek() == 91) {
+                    // Labeled rows, `E | r` rows and paths are not ported.
+                    self.bad = true;
+                    return 0;
+                }
+                let name = names.intern(in id.as_slice());
+                self.rows.push(name);
+                return t.named0(name);
+            }
+            self.pos = save;
+        }
+        self.ty(inout names, inout t)
+    }
+
+    // A type: a tuple, or an upper-case or scalar name with arguments.
+    fn ty(inout self, inout names: Names, inout t: Types) -> u32 {
+        self.skip();
+        if self.at_end() {
+            self.bad = true;
+            return 0;
+        }
+        let c = self.peek();
+        if c == 40 {
+            self.pos = inc(self.pos);
+            let mut items = ChunkSeq::new[u32]();
+            self.list(inout names, inout t, 41, false, inout items);
+            return t.tuple(in items);
+        }
+        let id = self.ident();
+        if id.len() == 0 {
+            self.bad = true;
+            return 0;
+        }
+        let first = u8_at(in id, 0);
+        if !(first >= 65 && first <= 90 || primitive(in id)) {
+            self.bad = true;
+            return 0;
+        }
+        let name = names.intern(in id.as_slice());
+        self.skip();
+        if !self.at_end() && self.peek() == 91 {
+            self.pos = inc(self.pos);
+            let mut items = ChunkSeq::new[u32]();
+            self.list(inout names, inout t, 93, true, inout items);
+            return t.named(name, in items);
+        }
+        t.named0(name)
+    }
+}
+
+fn is_row(in rows: ChunkSeq[u32], in t: Types, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind != K_NAMED || n.n != 0 {
+        return false;
+    }
+    for i in 0..rows.len() {
+        if u32_at(in rows, i) == n.name {
+            return true;
+        }
+    }
+    false
+}
+
+// vesper-core's `Display` of the parsed type.
+fn show(in t: Types, in names: Names, in rows: ChunkSeq[u32], ty: u32, inout o: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    if is_row(in rows, in t, ty) {
+        put(inout o, "eff Effects { instances: [], tail: Some(\"");
+        names.write(n.name, inout o);
+        put(inout o, "\") }");
+    } else if n.kind == K_LIT {
+        put_u64(inout o, wrapping_u64(n.lit));
+    } else if n.kind == K_NAMED {
+        names.write(n.name, inout o);
+        if n.n > 0 {
+            put(inout o, "[");
+            for i in 0..w(n.n) {
+                if i > 0 {
+                    put(inout o, ", ");
+                }
+                show(in t, in names, in rows, t.arg(ty, i), inout o);
+            }
+            put(inout o, "]");
+        }
+    } else {
+        put(inout o, "(");
+        for i in 0..w(n.n) {
+            if i > 0 {
+                put(inout o, ", ");
+            }
+            show(in t, in names, in rows, t.arg(ty, i), inout o);
+        }
+        put(inout o, ")");
+    }
+}
+
+// The Rust spelling `mangle(ty)`.
+fn mangle(in t: Types, in names: Names, in rows: ChunkSeq[u32], ty: u32, inout o: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    if n.kind == K_NAMED && !is_row(in rows, in t, ty) {
+        let mut b = ChunkSeq::new[u8]();
+        names.write(n.name, inout b);
+        for i in 0..b.len() {
+            o.push(lower(u8_at(in b, i)));
+        }
+        if n.n > 0 {
+            o.push(95);
+            for i in 0..w(n.n) {
+                if i > 0 {
+                    o.push(95);
+                }
+                mangle(in t, in names, in rows, t.arg(ty, i), inout o);
+            }
+        }
+    } else if n.kind == K_TUPLE && n.n == 0 {
+        put(inout o, "unit");
+    } else if n.kind == K_TUPLE {
+        put(inout o, "tuple");
+        for i in 0..w(n.n) {
+            o.push(95);
+            mangle(in t, in names, in rows, t.arg(ty, i), inout o);
+        }
+    } else {
+        let mut b = ChunkSeq::new[u8]();
+        show(in t, in names, in rows, ty, inout b);
+        for i in 0..b.len() {
+            let c = u8_at(in b, i);
+            if alnum(c) {
+                o.push(lower(c));
+            } else {
+                o.push(95);
+            }
+        }
+    }
+}
+
+fn is_ident(in n: ChunkSeq[u8]) -> bool {
+    if n.len() == 0 {
+        return false;
+    }
+    let c = u8_at(in n, 0);
+    if !(c >= 97 && c <= 122 || c == 95) {
+        return false;
+    }
+    for i in 0..n.len() {
+        let d = u8_at(in n, i);
+        if !(alnum(d) || d == 95) {
+            return false;
+        }
+    }
+    true
+}
+
+fn find(in s: ChunkSeq[u8], c: u8) -> u64 {
+    for i in 0..s.len() {
+        if u8_at(in s, i) == c {
+            return i;
+        }
+    }
+    s.len()
+}
+
+// `parse_instance`: writes the instance's dump line (`instance <name|->
+// <function> <spelling> <alias>`) to `o`, or the error to `err`.
+pub fn parse_instance(
+    in text: ChunkSeq[u8],
+    inout names: Names,
+    inout t: Types,
+    inout o: ChunkSeq[u8],
+    inout err: ChunkSeq[u8]
+) {
+    let eq = find(in text, 61);
+    let mut has_name = false;
+    let mut name = ChunkSeq::new[u8]();
+    let mut rest = ChunkSeq::new[u8]();
+    if eq < text.len() {
+        has_name = true;
+        name = trim(in sub(in text, 0, eq));
+        rest = trim(in sub(in text, inc(eq), text.len()));
+    } else {
+        rest = trim(in text);
+    }
+    put(inout err, "instance '");
+    put_seq(inout err, in text);
+    put(inout err, "': ");
+    if has_name && !is_ident(in name) {
+        put(inout err, "expected a lowercase export name before '='");
+        return;
+    }
+    let open = find(in rest, 91);
+    if open >= rest.len() || u8_at(in rest, wrapping_sub(rest.len(), 1)) != 93 {
+        put(inout err, "expected f[T, ..]");
+        return;
+    }
+    let function = trim(in sub(in rest, 0, open));
+    let mut ok = function.len() > 0;
+    for i in 0..function.len() {
+        let c = u8_at(in function, i);
+        if !(alnum(c) || c == 95) {
+            ok = false;
+        }
+    }
+    if !ok {
+        put(inout err, "expected a function name");
+        return;
+    }
+    let args = sub(in rest, inc(open), wrapping_sub(rest.len(), 1));
+    let mut p = TyParser {
+        s: args,
+        pos: 0,
+        bad: false,
+        rows: ChunkSeq::new[u32](),
+    };
+    let mut items = ChunkSeq::new[u32]();
+    // The arguments parse as those of a probe type `Probe[args]`.
+    p.s.push(93);
+    p.list(inout names, inout t, 93, true, inout items);
+    p.skip();
+    if p.bad || !p.at_end() || items.len() == 0 {
+        put(inout err, "the type arguments do not parse");
+        return;
+    }
+    err.clear();
+    put(inout o, "instance ");
+    if has_name {
+        put_seq(inout o, in name);
+    } else {
+        put(inout o, "-");
+    }
+    put(inout o, " ");
+    put_seq(inout o, in function);
+    put(inout o, " ");
+    put_seq(inout o, in function);
+    put(inout o, "[");
+    for i in 0..items.len() {
+        if i > 0 {
+            put(inout o, ", ");
+        }
+        show(in t, in names, in p.rows, u32_at(in items, i), inout o);
+    }
+    put(inout o, "] ");
+    if has_name {
+        put_seq(inout o, in name);
+    } else {
+        put_seq(inout o, in function);
+        for i in 0..items.len() {
+            put(inout o, "__");
+            mangle(in t, in names, in p.rows, u32_at(in items, i), inout o);
+        }
+    }
+    nl(inout o);
+}
+
+// ----- directives -------------------------------------------------------------
+
+// Reads the input: the source, then the `@TARGET@` and `@ABI@` values and
+// the error `vsys_target` gives (empty when it succeeds), each a byte
+// length word and the bytes padded to a word.
+fn read_bytes(in b: Slice[u8], inout pos: u64) -> ChunkSeq[u8] {
+    let len = match b.try_read_u64_le(pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    let start = wrapping_add(pos, 8);
+    let mut o = ChunkSeq::with_capacity[u8](len);
+    for i in 0..len {
+        let c = match b.try_get(wrapping_add(start, i)) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        o.push(c);
+    }
+    pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    o
+}
+
+// `text.replace(from, to)` for a literal `from`.
+fn replace(in s: ChunkSeq[u8], in from: Str, in to: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let f = from.as_bytes();
+    let n = f.len();
+    let mut o = ChunkSeq::with_capacity[u8](s.len());
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            break;
+        }
+        let mut hit = wrapping_add(i, n) <= s.len();
+        if hit {
+            for k in 0..n {
+                let c = match f.try_get(k) {
+                    Option::Some(c) => c,
+                    Option::None => 0,
+                };
+                if u8_at(in s, wrapping_add(i, k)) != c {
+                    hit = false;
+                    break;
+                }
+            }
+        }
+        if hit {
+            o.extend(in to.as_slice());
+            i = wrapping_add(i, n);
+        } else {
+            o.push(u8_at(in s, i));
+            i = inc(i);
+        }
+    }
+    o
+}
+
+// `Directives::parse(source, target)` as a dump: `abi`, `options`, then one
+// line per instance, `.vsys` link and `.vsys` import in order of
+// appearance within each kind; or `error <message>`.
+pub fn parse_directives(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut pos: u64 = 0;
+    let source = read_bytes(in b, inout pos);
+    let triple = read_bytes(in b, inout pos);
+    let abi_value = read_bytes(in b, inout pos);
+    let target_error = read_bytes(in b, inout pos);
+    let mut names = names_new();
+    let mut t = types_new(inout names);
+    let mut abi: u64 = 0;
+    let mut options = false;
+    let mut instances = ChunkSeq::new[u8]();
+    let mut links = ChunkSeq::new[u8]();
+    let mut link_names = ChunkSeq::new[u32]();
+    let mut vsys = ChunkSeq::new[u8]();
+    let mut err = ChunkSeq::new[u8]();
+    // The lines of `source` (`str::lines`: a trailing `\r` is dropped).
+    let mut starts = ChunkSeq::new[u64]();
+    let mut ends = ChunkSeq::new[u64]();
+    let mut a: u64 = 0;
+    for i in 0..source.len() {
+        if u8_at(in source, i) == 10 {
+            starts.push(a);
+            ends.push(i);
+            a = inc(i);
+        }
+    }
+    if a < source.len() {
+        starts.push(a);
+        ends.push(source.len());
+    }
+    let count = starts.len();
+    let mut li: u64 = 0;
+    loop {
+        if li >= count || err.len() > 0 {
+            break;
+        }
+        let la = u64_at(in starts, li);
+        let mut le = u64_at(in ends, li);
+        if le > la && u8_at(in source, wrapping_sub(le, 1)) == 13 {
+            le = wrapping_sub(le, 1);
+        }
+        li = inc(li);
+        let line = trim_start(in sub(in source, la, le));
+        if !starts_with(in line, "// @export") {
+            continue;
+        }
+        let rest = trim(in after(in line, "// @export"));
+        if starts_with(in rest, "abi") {
+            let spec = after(in rest, "abi");
+            let ws = words(in spec);
+            let nw = ws.len() / 2;
+            let version = if nw > 0 {
+                word(in spec, in ws, 0)
+            } else {
+                ChunkSeq::new[u8]()
+            };
+            for k in 1..nw {
+                let wd = word(in spec, in ws, k);
+                if same_str(in wd, "options") && !options {
+                    options = true;
+                } else {
+                    put(inout err, "@export abi: unknown option '");
+                    put_seq(inout err, in wd);
+                    put(inout err, "' (expected options)");
+                    break;
+                }
+            }
+            if err.len() > 0 {
+                break;
+            }
+            if same_str(in version, "3") && abi == 0 {
+                abi = 3;
+            } else if same_str(in version, "4") && abi == 0 {
+                abi = 4;
+            } else if same_str(in version, "3") || same_str(in version, "4") {
+                put(inout err, "@export abi: the ABI is named twice");
+            } else {
+                put(inout err, "@export abi: expected 3 or 4, found '");
+                put_seq(inout err, in version);
+                put(inout err, "' (v1 and v2 follow from the forms a library uses)");
+            }
+        } else if starts_with(in rest, "instance ") {
+            parse_instance(
+                in trim(in after(in rest, "instance ")),
+                inout names,
+                inout t,
+                inout instances,
+                inout err
+            );
+        } else if starts_with(in rest, "vsys") && is_link(in after(in rest, "vsys")) {
+            let spec = after(in rest, "vsys");
+            let ws = words(in spec);
+            let library = word(in spec, in ws, 0);
+            // 0 none, 1 direct, 2 isolated(mpk)
+            let mut handler: u8 = 0;
+            let mut rust = ChunkSeq::new[u8]();
+            let mut has_rust = false;
+            for k in 1..ws.len() / 2 {
+                let wd = word(in spec, in ws, k);
+                if same_str(in wd, "direct") && handler == 0 {
+                    handler = 1;
+                } else if same_str(in wd, "isolated(mpk)") && handler == 0 {
+                    handler = 2;
+                } else if starts_with(in wd, "rust=") && wd.len() > 5 && !has_rust {
+                    rust = after(in wd, "rust=");
+                    has_rust = true;
+                } else {
+                    put(inout err, "@export vsys ");
+                    put_seq(inout err, in library);
+                    put(inout err, ": unknown option '");
+                    put_seq(inout err, in wd);
+                    put(inout err, "'");
+                    break;
+                }
+            }
+            if err.len() > 0 {
+                break;
+            }
+            let lib = names.intern(in library.as_slice());
+            for k in 0..link_names.len() {
+                if u32_at(in link_names, k) == lib {
+                    put(inout err, "@export vsys ");
+                    put_seq(inout err, in library);
+                    put(inout err, ": named twice");
+                }
+            }
+            if err.len() > 0 {
+                break;
+            }
+            link_names.push(lib);
+            put(inout links, "link ");
+            put_seq(inout links, in library);
+            if handler == 1 {
+                put(inout links, " direct ");
+            } else if handler == 2 {
+                put(inout links, " isolated(mpk) ");
+            } else {
+                put(inout links, " - ");
+            }
+            if has_rust {
+                put_seq(inout links, in rust);
+            } else {
+                put(inout links, "-");
+            }
+            nl(inout links);
+        } else if starts_with(in rest, "vsys") {
+            let spec = after(in rest, "vsys");
+            let ws = words(in spec);
+            let nw = ws.len() / 2;
+            let first = if nw > 0 {
+                word(in spec, in ws, 0)
+            } else {
+                ChunkSeq::new[u8]()
+            };
+            let mut handler = ChunkSeq::new[u8]();
+            if same_str(in first, "direct") || same_str(in first, "isolated(mpk)") {
+                handler = copy_of(in first);
+            } else {
+                put(inout err, "@export vsys: expected direct or isolated(mpk), found ");
+                if nw > 0 {
+                    put_seq(inout err, in first);
+                } else {
+                    put(inout err, "nothing");
+                }
+                break;
+            }
+            let mut rust = ChunkSeq::new[u8]();
+            let mut has_rust = false;
+            for k in 1..nw {
+                let wd = word(in spec, in ws, k);
+                if starts_with(in wd, "rust=") && wd.len() > 5 {
+                    rust = after(in wd, "rust=");
+                    has_rust = true;
+                } else {
+                    put(inout err, "@export vsys: unknown option '");
+                    put_seq(inout err, in wd);
+                    put(inout err, "'");
+                    break;
+                }
+            }
+            if err.len() > 0 {
+                break;
+            }
+            let mut body = ChunkSeq::new[u8]();
+            loop {
+                if li >= count {
+                    break;
+                }
+                let ba = u64_at(in starts, li);
+                let mut be = u64_at(in ends, li);
+                if be > ba && u8_at(in source, wrapping_sub(be, 1)) == 13 {
+                    be = wrapping_sub(be, 1);
+                }
+                let next = trim_start(in sub(in source, ba, be));
+                if !starts_with(in next, "// |") {
+                    break;
+                }
+                let mut text = after(in next, "// |");
+                if text.len() > 0 && u8_at(in text, 0) == 32 {
+                    text = sub(in text, 1, text.len());
+                }
+                body.extend(in text.as_slice());
+                body.push(10);
+                li = inc(li);
+            }
+            if target_error.len() > 0 {
+                put(inout err, "@export vsys: ");
+                put_seq(inout err, in target_error);
+                break;
+            }
+            let filled = replace(in replace(in body, "@TARGET@", in triple), "@ABI@", in abi_value);
+            put(inout vsys, "vsys ");
+            put_seq(inout vsys, in handler);
+            put(inout vsys, " ");
+            if has_rust {
+                put_seq(inout vsys, in rust);
+            } else {
+                put(inout vsys, "-");
+            }
+            put(inout vsys, " ");
+            put_u64(inout vsys, filled.len());
+            nl(inout vsys);
+            put_seq(inout vsys, in filled);
+        } else {
+            put(inout err, "unknown directive '// @export ");
+            put_seq(inout err, in rest);
+            put(inout err, "' (expected abi, instance or vsys)");
+        }
+    }
+    let mut o = ChunkSeq::new[u8]();
+    if err.len() > 0 {
+        put(inout o, "error ");
+        put_seq(inout o, in err);
+        nl(inout o);
+    } else {
+        put(inout o, "abi ");
+        if abi == 0 {
+            put(inout o, "none");
+        } else {
+            put_u64(inout o, abi);
+        }
+        put(inout o, "\noptions ");
+        if options {
+            put(inout o, "1");
+        } else {
+            put(inout o, "0");
+        }
+        nl(inout o);
+        put_seq(inout o, in instances);
+        put_seq(inout o, in links);
+        put_seq(inout o, in vsys);
+    }
+    pack_text(in o)
+}
+
+// Whether a `vsys` spec is a link (`vsys <Library> ..`): its first word
+// starts with an upper-case letter.
+fn is_link(in spec: ChunkSeq[u8]) -> bool {
+    let ws = words(in spec);
+    if ws.len() == 0 {
+        return false;
+    }
+    let c = u8_at(in spec, u64_at(in ws, 0));
+    c >= 65 && c <= 90
+}

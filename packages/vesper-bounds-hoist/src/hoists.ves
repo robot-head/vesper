@@ -1,0 +1,701 @@
+// Sequence headers read once (src/bounds_hoist.rs `stable_views` and
+// `header_hoists`, port gaps lane 7 and port speed lane 3): which
+// receiver places a loop, or the whole function, can read with their
+// `{len, data}` words once.
+//
+// A hoist is a row (`Hoist`); its reads are (hoist, value) pairs in
+// `Hoists.reads`, printed sorted and each once.
+
+use self::fun::{
+    Arg,
+    Blk,
+    Fun,
+    Ins,
+    add,
+    calls_out,
+    has,
+    has_receiver,
+    inc,
+    insert,
+    is_hoisted,
+    keeps_length,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::graph::{
+    Graph,
+    graph,
+    natural_loop,
+    no_cut,
+    outside_preds
+};
+use self::rules::{
+    all_blocks,
+    stable_place
+};
+use self::text::{
+    Keys,
+    keys_new,
+    put,
+    put_u64
+};
+use self::plans::{
+    sort_u64
+};
+
+const NONE32: u32 = 4294967295;
+const OP_READ: u8 = 3;
+const OP_BIND: u8 = 4;
+const OP_CALL: u8 = 9;
+const OP_SEQ: u8 = 10;
+const OP_INDIRECT: u8 = 13;
+const OP_CLOSURE: u8 = 14;
+const OP_HANDLE: u8 = 15;
+const T_BRANCH: u8 = 2;
+const P_IN: u8 = 0;
+const P_INOUT: u8 = 1;
+const S_GUARD: u64 = 18;
+const C_PATH: u64 = 1;
+const C_RAISE: u64 = 2;
+const TY_SEQ: u64 = 4;
+const TY_SLICE: u64 = 8;
+const TY_TEXT: u64 = 16;
+const TY_NEVER: u64 = 32;
+
+pub copy struct Hoist {
+    pre: u32,
+    place: u32,
+    ty: u32,
+    entry: bool,
+}
+
+// Uses of each value (`value_users`): users[u0[v]..u0[v]+un[v]], each a
+// block << 32 | 1 + instruction index (0 for the terminator).
+pub struct Users {
+    u0: ChunkSeq[u32],
+    un: ChunkSeq[u32],
+    rows: ChunkSeq[u64],
+}
+
+fn users_of(in f: Fun) -> Users {
+    // the largest value used
+    let mut maxv: u64 = 0;
+    for x in 0..f.pool.len() {
+        let v = w(f.at(x));
+        if v > maxv {
+            maxv = v;
+        }
+    }
+    for b in 0..f.nblocks() {
+        let k = f.block(b);
+        if w(k.tv) > maxv {
+            maxv = w(k.tv);
+        }
+    }
+    let n = add(maxv, 1);
+    let mut count: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    count.resize(n, 0);
+    // pairs (value, row) in program order
+    let mut pv: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut pr: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for b in 0..f.nblocks() {
+        let k = f.block(b);
+        for j in 0..w(k.ic) {
+            let x = add(w(k.i0), j);
+            let i = f.inst(x);
+            for u in 0..w(i.un) {
+                pv.push(f.at(add(w(i.u0), u)));
+                pr.push(wrapping_shl_u64(b, 32) | inc(x));
+            }
+        }
+        // terminator uses
+        if k.term == 0 || k.term == 2 || k.term == 3 {
+            pv.push(k.tv);
+            pr.push(wrapping_shl_u64(b, 32));
+        } else if k.term == 1 {
+            for j in 0..w(k.tn) {
+                pv.push(f.at(add(w(k.t0), j)));
+                pr.push(wrapping_shl_u64(b, 32));
+            }
+        }
+    }
+    for q in 0..pv.len() {
+        let v = w(u32_at(in pv, q));
+        let ok = count.try_set(v, wrapping_add(u32_at(in count, v), 1));
+    }
+    let mut u0: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    let mut total: u32 = 0;
+    for v in 0..n {
+        u0.push(total);
+        total = wrapping_add(total, u32_at(in count, v));
+    }
+    let mut fill: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    fill.resize(n, 0);
+    let mut rows: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](w(total));
+    rows.resize(w(total), 0);
+    for q in 0..pv.len() {
+        let v = w(u32_at(in pv, q));
+        let at = add(w(u32_at(in u0, v)), w(u32_at(in fill, v)));
+        let ok = rows.try_set(at, u64_at(in pr, q));
+        let ok2 = fill.try_set(v, wrapping_add(u32_at(in fill, v), 1));
+    }
+    Users {
+        u0: u0,
+        un: count,
+        rows: rows
+    }
+}
+
+// `only_access_receivers`: whether every use of `read` is the receiver,
+// lent as `pass`, of a length-keeping access of `place` (or the sequence of
+// a bounds guard), in `blocks` when `within`.
+fn only_access_receivers(
+    in f: Fun,
+    in us: Users,
+    read: u32,
+    pass: u8,
+    place: u32,
+    within: bool,
+    in blocks: ChunkSeq[u32]
+) -> bool {
+    let n = w(u32_at(in us.un, w(read)));
+    if n == 0 {
+        return false;
+    }
+    let a0 = w(u32_at(in us.u0, w(read)));
+    for q in 0..n {
+        let row = u64_at(in us.rows, add(a0, q));
+        let b = n32(row >> 32);
+        let x = row & 4294967295;
+        if within && !has(in blocks, b) {
+            return false;
+        }
+        if x == 0 {
+            return false;
+        }
+        let u = f.inst(wrapping_sub(x, 1));
+        if u.op != OP_SEQ {
+            return false;
+        }
+        if u.sub == S_GUARD {
+            for j in 0..w(u.gn) {
+                let a = f.arg(add(w(u.g0), j));
+                if a.value == read && !(a.pass == P_IN && a.place == place) {
+                    return false;
+                }
+            }
+            continue;
+        }
+        if !has_receiver(u.sub) || !(keeps_length(u.sub) || is_hoisted(u.sub)) || u.gn == 0 {
+            return false;
+        }
+        let first = f.arg(w(u.g0));
+        if !(first.value == read && first.pass == pass && first.place == place) {
+            return false;
+        }
+        for j in 1..w(u.gn) {
+            if f.arg(add(w(u.g0), j)).value == read {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+pub struct Hoists {
+    rows: ChunkSeq[Hoist],
+    // (hoist << 32 | value)
+    reads: ChunkSeq[u64],
+}
+
+fn hoists_new() -> Hoists {
+    Hoists {
+        rows: ChunkSeq::new[Hoist](),
+        reads: ChunkSeq::new[u64]()
+    }
+}
+
+fn row(in h: Hoists, k: u64) -> Hoist {
+    match h.rows.try_get(k) {
+        Option::Some(x) => x,
+        Option::None => Hoist {
+            pre: 0,
+            place: 0,
+            ty: 0,
+            entry: false
+        },
+    }
+}
+
+// Whether a closure, handler, indirect call or effect operation (a call of
+// a path other than `Fail::raise`) is in the function.
+fn opaque_calls(in f: Fun) -> bool {
+    for x in 0..f.insts.len() {
+        let i = f.inst(x);
+        if i.op == OP_CLOSURE || i.op == OP_HANDLE || i.op == OP_INDIRECT {
+            return true;
+        }
+        if i.op == OP_CALL && (i.sub & C_PATH) != 0 && (i.sub & C_RAISE) == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether a `handle` is in the function (a handler body shares its names).
+fn has_handle(in f: Fun) -> bool {
+    for x in 0..f.insts.len() {
+        if f.inst(x).op == OP_HANDLE {
+            return true;
+        }
+    }
+    false
+}
+
+fn seq_like(flags: u64) -> bool {
+    (flags & (TY_SEQ | TY_SLICE)) != 0 && (flags & TY_TEXT) == 0
+}
+
+// `stable_views`.
+fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
+    if f.nblocks() == 0 {
+        return;
+    }
+    // Code this function cannot see runs: whole `in`/`inout` sequence
+    // parameters keep no entry view then.
+    let opaque = opaque_calls(in f);
+    // Only a handler shares the function's names, so under an `in` borrow
+    // a sequence field stays fixed whatever else runs (#1330).
+    let handles = has_handle(in f);
+    let all = all_blocks(in f);
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let roots = copy_places(in f);
+    for p in 0..f.params.len() {
+        let q = f.param(p);
+        if opaque || !(q.pass == P_IN || q.pass == P_INOUT) || !seq_like(q.flags) {
+            continue;
+        }
+        let place = roots.lookup_root(q.name);
+        if place == NONE32 {
+            continue;
+        }
+        if (q.flags & TY_SLICE) == 0 && !stable_place(in f, in all, place) {
+            continue;
+        }
+        let k = out.rows.len();
+        let mut any = false;
+        for x in 0..f.insts.len() {
+            let i = f.inst(x);
+            if i.op != OP_READ || i.place != place {
+                continue;
+            }
+            let pass = wrapping_u8(i.sub);
+            if (pass == P_IN || pass == P_INOUT)
+                && only_access_receivers(in f, in us, i.dest, pass, place, false, in none) {
+                out.reads.push(wrapping_shl_u64(k, 32) | w(i.dest));
+                any = true;
+            }
+        }
+        if any {
+            out
+                .rows
+                .push(
+                Hoist {
+                    pre: 0,
+                    place: place,
+                    ty: q.tyname,
+                    entry: true
+                }
+            );
+        }
+    }
+    // Sequence fields of `in` parameters, by [root, path..] key.
+    let mut keys = keys_new();
+    let mut kplace: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut kty: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    // (key << 32 | value)
+    let mut kreads: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for p in 0..f.params.len() {
+        let q = f.param(p);
+        if q.pass != P_IN || handles {
+            continue;
+        }
+        let mut rebound = false;
+        for x in 0..f.insts.len() {
+            if f.binds(f.inst(x), q.name) {
+                rebound = true;
+                break;
+            }
+        }
+        if rebound {
+            continue;
+        }
+        for x in 0..f.insts.len() {
+            let i = f.inst(x);
+            if i
+                .op
+                != OP_READ
+                || f
+                .depth(i.place)
+                <= 1
+                || f
+                .root_of(i.place)
+                != q
+                .name
+                || i
+                .sub
+                != 0 {
+                continue;
+            }
+            if (i.flags & TY_SEQ) == 0 || (i.flags & TY_TEXT) != 0 {
+                continue;
+            }
+            if !only_access_receivers(in f, in us, i.dest, P_IN, i.place, false, in none) {
+                continue;
+            }
+            buf.clear();
+            put_path_key(in f, i.place, inout buf);
+            let mut key: u64 = 18446744073709551615;
+            for z in 0..keys.count() {
+                if keys.equals(z, in buf) {
+                    key = z;
+                }
+            }
+            if key == 18446744073709551615 {
+                key = keys.add_key(in buf);
+                kplace.push(i.place);
+                kty.push(i.tyname);
+            }
+            kreads.push(wrapping_shl_u64(key, 32) | w(i.dest));
+        }
+    }
+    let order = keys.sorted();
+    for z in 0..order.len() {
+        let key = w(u32_at(in order, z));
+        let k = out.rows.len();
+        out
+            .rows
+            .push(
+            Hoist {
+                pre: 0,
+                place: u32_at(in kplace, key),
+                ty: u32_at(in kty, key),
+                entry: true
+            }
+        );
+        for q in 0..kreads.len() {
+            let r = u64_at(in kreads, q);
+            if (r >> 32) == key {
+                out.reads.push(wrapping_shl_u64(k, 32) | (r & 4294967295));
+            }
+        }
+    }
+}
+
+// A key that orders like `Vec<String>` of the root and fields: each name,
+// then a 0 byte, so a shorter list orders first.
+fn put_path_key(in f: Fun, p: u32, inout o: ChunkSeq[u8]) {
+    if f.depth(p) > 1 {
+        put_path_key(in f, u32_at(in f.pparent, w(p)), inout o);
+    }
+    f.put_name(u32_at(in f.plast, w(p)), inout o);
+    o.push(0);
+}
+
+// The place ids of whole roots.
+pub struct Roots {
+    roots: ChunkSeq[u32],
+}
+
+impl Roots {
+    fn lookup_root(in self, name: u32) -> u32 {
+        match self.roots.try_get(w(name)) {
+            Option::Some(x) => x,
+            Option::None => NONE32,
+        }
+    }
+}
+
+fn copy_places(in f: Fun) -> Roots {
+    let mut roots: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](f.nlen.len());
+    roots.resize(f.nlen.len(), NONE32);
+    for p in 1..f.pparent.len() {
+        if u32_at(in f.pdepth, p) == 1 {
+            let ok = roots.try_set(w(u32_at(in f.plast, p)), n32(p));
+        }
+    }
+    Roots {
+        roots: roots
+    }
+}
+
+// `header_hoists`.
+fn header_hoists(in f: Fun, in us: Users, inout out: Hoists) {
+    if f.cslots.len() > 0 {
+        return;
+    }
+    for b in 0..f.nblocks() {
+        if f.join_slots(b) {
+            return;
+        }
+    }
+    let g = graph(in f, in no_cut());
+    stable_views(in f, in us, inout out);
+    let nviews = out.rows.len();
+    // Found hoists: rows with their loop size, reads as (row << 32 | value).
+    let mut found = hoists_new();
+    let mut flen: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for j in 0..g.order.len() {
+        let h = u32_at(in g.order, j);
+        let blocks = natural_loop(in g, h);
+        let mut back = false;
+        for k in 0..g.npreds(w(h)) {
+            if has(in blocks, g.pred(w(h), k)) {
+                back = true;
+            }
+        }
+        if !back {
+            continue;
+        }
+        let outside = outside_preds(in g, h, in blocks);
+        if outside.len() != 1 {
+            continue;
+        }
+        let pre = u32_at(in outside, 0);
+        let mut entered = false;
+        for bi in 0..blocks.len() {
+            let b = u32_at(in blocks, bi);
+            if b == h {
+                continue;
+            }
+            for k in 0..g.npreds(w(b)) {
+                if !has(in blocks, g.pred(w(b), k)) {
+                    entered = true;
+                }
+            }
+        }
+        if entered {
+            continue;
+        }
+        // The fast copy of a versioned loop shares the preheader.
+        let mut both = copy_set(in blocks);
+        let pk = f.block(w(pre));
+        if pk.term == T_BRANCH && (pk.yes == h || pk.no == h) {
+            let other = if pk.yes == h {
+                pk.no
+            } else {
+                pk.yes
+            };
+            let twin = natural_loop(in g, other);
+            let mut disjoint = true;
+            for q in 0..twin.len() {
+                if has(in blocks, u32_at(in twin, q)) {
+                    disjoint = false;
+                }
+            }
+            let tout = outside_preds(in g, other, in twin);
+            if disjoint && tout.len() == 1 && u32_at(in tout, 0) == pre {
+                for q in 0..twin.len() {
+                    let new = insert(inout both, u32_at(in twin, q));
+                }
+            }
+        }
+        let mut skip = false;
+        let mut calls = false;
+        for bi in 0..both.len() {
+            let k = f.block(w(u32_at(in both, bi)));
+            for jj in 0..w(k.ic) {
+                let i = f.inst(add(w(k.i0), jj));
+                let never = (i.flags & TY_NEVER) != 0;
+                if i.op == OP_CLOSURE || i.op == OP_HANDLE || i.op == OP_INDIRECT {
+                    skip = true;
+                }
+                if i.op == OP_CALL && (i.sub & C_PATH) != 0 && !never {
+                    skip = true;
+                }
+                if calls_out(i) && !never {
+                    calls = true;
+                }
+            }
+        }
+        if skip {
+            continue;
+        }
+        let mut keys = keys_new();
+        let mut kplace: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut kty: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut kreads: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for bi in 0..blocks.len() {
+            let k = f.block(w(u32_at(in blocks, bi)));
+            for jj in 0..w(k.ic) {
+                let i = f.inst(add(w(k.i0), jj));
+                if i.op != OP_READ {
+                    continue;
+                }
+                let pass = wrapping_u8(i.sub);
+                if !(pass == P_IN || (pass == P_INOUT && !calls)) {
+                    continue;
+                }
+                if !seq_like(i.flags) {
+                    continue;
+                }
+                let mut viewed = false;
+                for q in 0..nviews {
+                    if row(in out, q).place == i.place {
+                        viewed = true;
+                    }
+                }
+                if viewed {
+                    continue;
+                }
+                if !only_access_receivers(in f, in us, i.dest, pass, i.place, true, in both)
+                    || !stable_place(in f, in both, i.place) {
+                    continue;
+                }
+                buf.clear();
+                f.put_place(i.place, inout buf);
+                let mut key: u64 = 18446744073709551615;
+                for z in 0..keys.count() {
+                    if keys.equals(z, in buf) {
+                        key = z;
+                    }
+                }
+                if key == 18446744073709551615 {
+                    key = keys.add_key(in buf);
+                    kplace.push(i.place);
+                    kty.push(i.tyname);
+                }
+                kreads.push(wrapping_shl_u64(key, 32) | w(i.dest));
+            }
+        }
+        if calls && keys.count() > 1 {
+            continue;
+        }
+        let order = keys.sorted();
+        for z in 0..order.len() {
+            let key = w(u32_at(in order, z));
+            let r = found.rows.len();
+            found
+                .rows
+                .push(
+                Hoist {
+                    pre: pre,
+                    place: u32_at(in kplace, key),
+                    ty: u32_at(in kty, key),
+                    entry: false
+                }
+            );
+            flen.push(blocks.len());
+            for q in 0..kreads.len() {
+                let x = u64_at(in kreads, q);
+                if (x >> 32) == key {
+                    found.reads.push(wrapping_shl_u64(r, 32) | (x & 4294967295));
+                }
+            }
+        }
+    }
+    // Outermost loop first (a stable sort by size, descending); a read an
+    // enclosing loop claimed is skipped.
+    let mut sorted: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for r in 0..found.rows.len() {
+        // descending size, then the found order
+        let inv = wrapping_sub(4294967295, u64_at(in flen, r));
+        sorted.push(wrapping_shl_u64(inv, 32) | r);
+    }
+    sort_u64(inout sorted);
+    let mut claimed: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut mine: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for z in 0..sorted.len() {
+        let r = u64_at(in sorted, z) & 4294967295;
+        let hoist = row(in found, r);
+        mine.clear();
+        for q in 0..found.reads.len() {
+            let x = u64_at(in found.reads, q);
+            if (x >> 32) == r && !has(in claimed, n32(x & 4294967295)) {
+                let new = insert(inout mine, n32(x & 4294967295));
+            }
+        }
+        if mine.len() == 0 {
+            continue;
+        }
+        for q in 0..mine.len() {
+            let new = insert(inout claimed, u32_at(in mine, q));
+        }
+        let mut target: u64 = 18446744073709551615;
+        for q in 0..out.rows.len() {
+            let o = row(in out, q);
+            if o.pre == hoist.pre && o.place == hoist.place && target == 18446744073709551615 {
+                target = q;
+            }
+        }
+        if target == 18446744073709551615 {
+            target = out.rows.len();
+            out.rows.push(hoist);
+        }
+        for q in 0..mine.len() {
+            out.reads.push(wrapping_shl_u64(target, 32) | w(u32_at(in mine, q)));
+        }
+    }
+}
+
+fn copy_set(in a: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut o: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](a.len());
+    for i in 0..a.len() {
+        o.push(u32_at(in a, i));
+    }
+    o
+}
+
+// One line per hoist: `pre=P place=X ty=T reads=a,b entry=0|1`.
+fn put_hoists(in f: Fun, in h: Hoists, inout o: ChunkSeq[u8]) {
+    let mut reads: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..h.rows.len() {
+        let x = row(in h, k);
+        put(inout o, "pre=");
+        put_u64(inout o, w(x.pre));
+        put(inout o, " place=");
+        f.put_place(x.place, inout o);
+        put(inout o, " ty=");
+        f.put_name(x.ty, inout o);
+        put(inout o, " reads=");
+        reads.clear();
+        for q in 0..h.reads.len() {
+            let r = u64_at(in h.reads, q);
+            if (r >> 32) == k {
+                let new = insert(inout reads, n32(r & 4294967295));
+            }
+        }
+        for q in 0..reads.len() {
+            if q > 0 {
+                o.push(44);
+            }
+            put_u64(inout o, w(u32_at(in reads, q)));
+        }
+        put(inout o, " entry=");
+        if x.entry {
+            o.push(49);
+        } else {
+            o.push(48);
+        }
+        o.push(10);
+    }
+}
+
+pub fn stable_views_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let us = users_of(in f);
+    let mut h = hoists_new();
+    stable_views(in f, in us, inout h);
+    put_hoists(in f, in h, inout o);
+}
+
+pub fn header_hoists_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let us = users_of(in f);
+    let mut h = hoists_new();
+    header_hoists(in f, in us, inout h);
+    put_hoists(in f, in h, inout o);
+}

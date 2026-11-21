@@ -222,7 +222,7 @@ pub fn rd_der(inout s: S, in w: Slice[u64]) -> u64 {
     mkl(inout s, d_node(), g, st, 0, from)
 }
 
-fn rd_conformance(inout s: S, in w: Slice[u64], id: u64) {
+pub fn rd_conformance(inout s: S, in w: Slice[u64], id: u64) {
     let pkg = rd(inout s, in w);
     let params = rd_slist(inout s, in w);
     let tr = rd_tref(inout s, in w);

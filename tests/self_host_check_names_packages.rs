@@ -939,10 +939,6 @@ fn corpus_packages() -> Vec<PathBuf> {
     out
 }
 
-fn under_bazel() -> bool {
-    std::env::var_os("TEST_SRCDIR").is_some()
-}
-
 /// Every corpus package assembles to the same program, names and
 /// diagnostics in Vesper as in Rust.
 #[test]
@@ -967,8 +963,9 @@ fn corpus_packages_assemble_like_rust() {
         failures.len(),
         dirs.len()
     );
-    // Bazel sees the root package's fixtures, examples and packages only.
-    let floor = if under_bazel() { 20 } else { 60 };
+    // Bazel's test data holds the same corpus (BUILD.bazel), crate ports
+    // included: they are most of the value enum users.
+    let floor = 75;
     assert!(compared >= floor, "{compared} packages compared");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -1096,6 +1093,29 @@ fn every_assembler_diagnostic_matches_rust() {
                 (
                     "s.ves",
                     "struct W[K] { k: K }\nimpl [K: Show[self::Missing]] W[K] { fn a(self) -> u64 { 1 }\nfn b(self) -> u64 { 2 } }\nfn rep(x: u64) -> u64 { let a = [top(); 2]; match x { 1 | 2 => top(), _ => 0 } }\n",
+                ),
+            ],
+        ),
+        // Constants and value enums (#1239): imports of constants and of
+        // whole value enums (typed and untyped), re-exported enums, root
+        // re-exports under new names, qualified members, member patterns,
+        // and E0112/E0113 for a private enum, an enum name both declared
+        // and imported, and one local name imported from two enums.
+        (
+            "values",
+            &[
+                (
+                    "lib.ves",
+                    "use self::codes::{Ascii, LIMIT, Mode, Hidden, TABLE};\nuse self::codes::{Ascii};\nuse self::other::{Ascii as A2};\npub use self::codes::{LIMIT as CAP, Ascii as Byte};\nuse self::chain::{Ascii as Again};\nuse self::other::{Ascii};\nenum Local: u8 { X = 1 }\nuse self::codes::{Local};\nfn f(x: u8) -> u64 { match x { Ascii::Colon => 1, A2::Q => 2, Again::Digit0 => 3, _ => 0 } }\nfn g() -> u8 { Ascii::Colon }\nfn h() -> u64 { LIMIT }\nfn k() -> u8 { self::codes::Ascii::Digit0 }\nfn m() -> u64 { Mode::B }\nfn t(x: u64) -> u64 { match x { TABLE => 1, LIMIT => 2, _ => 0 } }\nfn q() -> u64 { self::codes::LIMIT }\n",
+                ),
+                (
+                    "codes.ves",
+                    "pub enum Ascii: u8 { Colon = 58, Digit0 = 48 }\npub const LIMIT: u64 = 10;\npub enum Mode: _ { A, B }\nenum Hidden: u8 { Z = 1 }\npub const TABLE: u64 = LIMIT * 2;\npub enum Local: u8 { Y = 2 }\nfn own(x: u8) -> u8 { match x { Ascii::Colon => Ascii::Digit0, _ => Hidden::Z } }\n",
+                ),
+                ("other.ves", "pub enum Ascii: u8 { Q = 1 }\n"),
+                (
+                    "chain.ves",
+                    "pub use self::codes::{Ascii};\nfn c() -> u64 { CAP }\nfn d() -> u8 { super::codes::Ascii::Nope }\n",
                 ),
             ],
         ),

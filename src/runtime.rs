@@ -3287,6 +3287,13 @@ fn unary(op: &str, v: Value) -> Result<Value, Fault> {
     if let Some(result) = float_unary(op, &v) {
         return result;
     }
+    // Prefix `!` on an integer is its complement (the checker rewrites it
+    // to `~`; a world evaluated unchecked may still spell it `!`).
+    let op = if op == "!" && !matches!(v, Value::Bool(_)) {
+        "~"
+    } else {
+        op
+    };
     Ok(match (op, v) {
         ("-", Value::Float(n)) => Value::Float(-n),
         ("-", Value::Float32(n)) => Value::Float32(-n),

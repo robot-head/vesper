@@ -90,7 +90,6 @@ pub copy struct Known {
     i32_: u32,
     i64_: u32,
     isize_: u32,
-    // The two-word kinds (`numeric::WIDE_INTEGER_KINDS`).
     i128_: u32,
     u128_: u32,
     f32_: u32,
@@ -173,11 +172,16 @@ impl Known {
             || s
             == self
             .isize_
-            || self
-            .is_wide(s)
+            || s
+            == self
+            .i128_
+            || s
+            == self
+            .u128_
     }
 
-    // `numeric::is_wide_name`: `i128` or `u128`.
+    // `numeric::is_wide_name`: the two-word integers (#1174), which
+    // `is_integer` also includes.
     pub fn is_wide(self, s: u32) -> bool {
         s == self.i128_ || s == self.u128_
     }
@@ -186,6 +190,8 @@ impl Known {
     pub fn is_scalar(self, s: u32) -> bool {
         self
             .is_integer(s)
+            || self
+            .is_wide(s)
             || s
             == self
             .f32_

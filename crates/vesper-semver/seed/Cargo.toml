@@ -2,6 +2,7 @@
 name = "vesper-semver-seed"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Frozen Rust seed copy of vesper-semver for the compiler's own dependency closure"
 autotests = false
 autoexamples = false

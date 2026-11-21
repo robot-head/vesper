@@ -1,0 +1,834 @@
+// The Rust binding generator of `vesper build --lib` for export ABI v1
+// (src/native_export/binding.rs), and the pieces every version shares:
+// identifiers, type spellings, the copy types' `Abi` impls, C types and
+// scalar conversions. Text is byte for byte the Rust generator's.
+
+use @vesper/check-data::util::{
+    inc,
+    u8_at,
+    w
+};
+use self::iface::{
+    FieldRow,
+    FnRow,
+    Iface,
+    ParamRow,
+    VarRow
+};
+use self::text::{
+    StrSet,
+    copy_of,
+    nl,
+    put,
+    put_seq,
+    put_u64,
+    same_str,
+    str_set,
+    text
+};
+
+// `AbiType` kinds, passing modes and mirrors (iface.ves).
+const K_SCALAR: u8 = 0;
+const K_TUPLE: u8 = 1;
+const K_NAMED: u8 = 2;
+const K_SEQ: u8 = 3;
+const K_SLICE: u8 = 4;
+const K_BOX: u8 = 5;
+const K_STR: u8 = 6;
+const K_OBJECT: u8 = 7;
+const K_EXTERN: u8 = 8;
+const P_IN: u8 = 1;
+const P_INOUT: u8 = 2;
+const P_SINK: u8 = 3;
+const M_REPR_C: u8 = 1;
+
+const NONE32: u32 = 4294967295;
+
+// The interface and the binding options.
+pub struct Gen {
+    i: Iface,
+    // `types_path` followed by `::`, or empty
+    tp: ChunkSeq[u8],
+    has_tp: bool,
+}
+
+pub fn gen_new(sink i: Iface) -> Gen {
+    let mut tp = ChunkSeq::new[u8]();
+    let has_tp = i.types_path != 0;
+    if has_tp {
+        i.names.write(wrapping_sub(i.types_path, 1), inout tp);
+        put(inout tp, "::");
+    }
+    Gen {
+        i: i,
+        tp: tp,
+        has_tp: has_tp,
+    }
+}
+
+// Rust's strict and reserved keywords the generator escapes (`r#`).
+pub fn is_keyword(in b: ChunkSeq[u8]) -> bool {
+    same_str(in b, "as")
+        || same_str(in b, "async")
+        || same_str(in b, "await")
+        || same_str(in b, "break")
+        || same_str(in b, "const")
+        || same_str(in b, "continue")
+        || same_str(in b, "crate")
+        || same_str(in b, "dyn")
+        || same_str(in b, "else")
+        || same_str(in b, "enum")
+        || same_str(in b, "extern")
+        || same_str(in b, "false")
+        || same_str(in b, "fn")
+        || same_str(in b, "for")
+        || same_str(in b, "gen")
+        || same_str(in b, "if")
+        || same_str(in b, "impl")
+        || same_str(in b, "in")
+        || same_str(in b, "let")
+        || same_str(in b, "loop")
+        || same_str(in b, "match")
+        || same_str(in b, "mod")
+        || same_str(in b, "move")
+        || same_str(in b, "mut")
+        || same_str(in b, "pub")
+        || same_str(in b, "ref")
+        || same_str(in b, "return")
+        || same_str(in b, "self")
+        || same_str(in b, "Self")
+        || same_str(in b, "static")
+        || same_str(in b, "struct")
+        || same_str(in b, "super")
+        || same_str(in b, "trait")
+        || same_str(in b, "true")
+        || same_str(in b, "type")
+        || same_str(in b, "unsafe")
+        || same_str(in b, "use")
+        || same_str(in b, "where")
+        || same_str(in b, "while")
+}
+
+// `ident`: the name, `r#`-escaped when it is a keyword.
+pub fn put_ident(inout o: ChunkSeq[u8], in name: ChunkSeq[u8]) {
+    if is_keyword(in name) {
+        put(inout o, "r#");
+    }
+    put_seq(inout o, in name);
+}
+
+impl Gen {
+    pub fn name(in self, s: u32) -> ChunkSeq[u8] {
+        let mut o = ChunkSeq::new[u8]();
+        self.i.names.write(s, inout o);
+        o
+    }
+
+    pub fn put_name(in self, inout o: ChunkSeq[u8], s: u32) {
+        self.i.names.write(s, inout o);
+    }
+
+    pub fn put_ident_sym(in self, inout o: ChunkSeq[u8], s: u32) {
+        let n = self.name(s);
+        put_ident(inout o, in n);
+    }
+
+    // `camel`: `a_bc_d` -> `ABcD`.
+    pub fn put_camel(in self, inout o: ChunkSeq[u8], s: u32) {
+        let n = self.name(s);
+        let mut start = true;
+        for k in 0..n.len() {
+            let c = u8_at(in n, k);
+            if c == 95 {
+                start = true;
+            } else if start {
+                start = false;
+                if c >= 97 && c <= 122 {
+                    o.push(wrapping_sub(c, 32));
+                } else {
+                    o.push(c);
+                }
+            } else {
+                o.push(c);
+            }
+        }
+    }
+
+    // `snake` (binding_v2.rs): `AbC` -> `ab_c`.
+    pub fn put_snake(in self, inout o: ChunkSeq[u8], s: u32) {
+        let n = self.name(s);
+        for k in 0..n.len() {
+            let c = u8_at(in n, k);
+            if c >= 65 && c <= 90 {
+                if k > 0 {
+                    o.push(95);
+                }
+                o.push(wrapping_add(c, 32));
+            } else {
+                o.push(c);
+            }
+        }
+    }
+
+    // `rust_type(ty, path)`.
+    pub fn rust_type(in self, t: u32, in path: ChunkSeq[u8], inout o: ChunkSeq[u8]) {
+        let n = self.i.node(t);
+        let k = n.kind;
+        if k == K_SCALAR {
+            if n.name == self.i.known.unit {
+                put(inout o, "()");
+            } else {
+                self.put_name(inout o, n.name);
+            }
+        } else if k == K_TUPLE {
+            let e = self.i.array_elem(t);
+            if e != NONE32 {
+                put(inout o, "[");
+                self.rust_type(e, in path, inout o);
+                put(inout o, "; ");
+                put_u64(inout o, n.n);
+                put(inout o, "]");
+            } else if n.n == 1 {
+                put(inout o, "(");
+                self.rust_type(self.i.kid(t, 0), in path, inout o);
+                put(inout o, ",)");
+            } else {
+                put(inout o, "(");
+                for j in 0..n.n {
+                    if j > 0 {
+                        put(inout o, ", ");
+                    }
+                    self.rust_type(self.i.kid(t, j), in path, inout o);
+                }
+                put(inout o, ")");
+            }
+        } else if k == K_NAMED {
+            if n.name == self.i.known.option || n.name == self.i.known.result {
+                self.put_name(inout o, n.name);
+                put(inout o, "<");
+                for j in 0..n.n {
+                    if j > 0 {
+                        put(inout o, ", ");
+                    }
+                    self.rust_type(self.i.kid(t, j), in path, inout o);
+                }
+                put(inout o, ">");
+            } else if n.name == self.i.known.arith || n.name == self.i.known.runtime_error {
+                put(inout o, "vesper_port_abi::");
+                self.put_name(inout o, n.name);
+            } else {
+                put_seq(inout o, in path);
+                self.put_name(inout o, n.name);
+            }
+        } else if k == K_SEQ {
+            put(inout o, "Vec<");
+            self.rust_type(self.i.kid(t, 0), in path, inout o);
+            put(inout o, ">");
+        } else if k == K_SLICE {
+            put(inout o, "[");
+            self.rust_type(self.i.kid(t, 0), in path, inout o);
+            put(inout o, "]");
+        } else if k == K_BOX {
+            put(inout o, "Box<");
+            self.rust_type(self.i.kid(t, 0), in path, inout o);
+            put(inout o, ">");
+        } else if k == K_STR {
+            if n.owned {
+                put(inout o, "String");
+            } else {
+                put(inout o, "str");
+            }
+        } else if k == K_OBJECT {
+            put(inout o, "vesper_port_abi::OpaqueObject<'static>");
+        } else {
+            self.put_name(inout o, n.name);
+            put(inout o, "<'static>");
+        }
+    }
+
+    // `rust_type(ty, types_path)` as its own string.
+    pub fn rt(in self, t: u32) -> ChunkSeq[u8] {
+        let mut o = ChunkSeq::new[u8]();
+        self.rust_type(t, in self.tp, inout o);
+        o
+    }
+
+    // `error_variant`.
+    pub fn error_variant(in self, t: u32, inout o: ChunkSeq[u8]) {
+        let n = self.i.node(t);
+        let k = n.kind;
+        if k == K_NAMED {
+            self.put_name(inout o, n.name);
+            for j in 0..n.n {
+                self.error_variant(self.i.kid(t, j), inout o);
+            }
+        } else if k == K_SCALAR {
+            self.put_camel(inout o, n.name);
+        } else if k == K_TUPLE {
+            let e = self.i.array_elem(t);
+            if e != NONE32 {
+                put(inout o, "Array");
+                put_u64(inout o, n.n);
+                self.error_variant(e, inout o);
+            } else {
+                put(inout o, "Tuple");
+                for j in 0..n.n {
+                    self.error_variant(self.i.kid(t, j), inout o);
+                }
+            }
+        } else if k == K_SEQ {
+            put(inout o, "Seq");
+            self.error_variant(self.i.kid(t, 0), inout o);
+        } else if k == K_SLICE {
+            put(inout o, "Slice");
+            self.error_variant(self.i.kid(t, 0), inout o);
+        } else if k == K_BOX {
+            put(inout o, "Box");
+            self.error_variant(self.i.kid(t, 0), inout o);
+        } else if k == K_STR {
+            if n.owned {
+                put(inout o, "String");
+            } else {
+                put(inout o, "Str");
+            }
+        } else if k == K_OBJECT {
+            put(inout o, "Object");
+        } else {
+            self.put_name(inout o, n.name);
+        }
+    }
+
+    // `variant_shape(v, types_path, public_fields)`.
+    pub fn variant_shape(in self, v: VarRow, public: bool, inout o: ChunkSeq[u8]) {
+        if v.fc == 0 {
+            return;
+        }
+        if self.i.positional(v) {
+            put(inout o, "(");
+            for j in 0..v.fc {
+                if j > 0 {
+                    put(inout o, ", ");
+                }
+                if public {
+                    put(inout o, "pub ");
+                }
+                let f = self.i.field(wrapping_add(v.f0, j));
+                self.rust_type(f.ty, in self.tp, inout o);
+            }
+            put(inout o, ")");
+        } else {
+            put(inout o, " { ");
+            for j in 0..v.fc {
+                if j > 0 {
+                    put(inout o, ", ");
+                }
+                if public {
+                    put(inout o, "pub ");
+                }
+                let f = self.i.field(wrapping_add(v.f0, j));
+                self.put_ident_sym(inout o, f.name);
+                put(inout o, ": ");
+                self.rust_type(f.ty, in self.tp, inout o);
+            }
+            put(inout o, " }");
+        }
+    }
+
+    // `bind_pattern`.
+    pub fn bind_pattern(in self, v: VarRow, inout o: ChunkSeq[u8]) {
+        if v.fc == 0 {
+            return;
+        }
+        if self.i.positional(v) {
+            put(inout o, "(");
+            for j in 0..v.fc {
+                if j > 0 {
+                    put(inout o, ", ");
+                }
+                put(inout o, "f");
+                put_u64(inout o, j);
+            }
+            put(inout o, ")");
+        } else {
+            put(inout o, " { ");
+            for j in 0..v.fc {
+                if j > 0 {
+                    put(inout o, ", ");
+                }
+                let f = self.i.field(wrapping_add(v.f0, j));
+                self.put_ident_sym(inout o, f.name);
+                put(inout o, ": f");
+                put_u64(inout o, j);
+            }
+            put(inout o, " }");
+        }
+    }
+
+    // `construct`.
+    pub fn construct(in self, v: VarRow, inout o: ChunkSeq[u8]) {
+        if v.fc == 0 {
+            return;
+        }
+        let pos = self.i.positional(v);
+        if pos {
+            put(inout o, "(");
+        } else {
+            put(inout o, " { ");
+        }
+        for j in 0..v.fc {
+            if j > 0 {
+                put(inout o, ", ");
+            }
+            let f = self.i.field(wrapping_add(v.f0, j));
+            if !pos {
+                self.put_ident_sym(inout o, f.name);
+                put(inout o, ": ");
+            }
+            put(inout o, "Abi::get(&words[");
+            put_u64(inout o, f.offset);
+            put(inout o, "..])");
+        }
+        if pos {
+            put(inout o, ")");
+        } else {
+            put(inout o, " }");
+        }
+    }
+
+    // `write_copy_types` over the declarations with `handle == handles`
+    // (v1 passes every one: it has no handles).
+    pub fn write_copy_types(in self, inout out: ChunkSeq[u8], all: bool) {
+        for di in 0..self.i.decls.len() {
+            let d = self.i.decl(di);
+            if !all && d.is_handle {
+                continue;
+            }
+            if !self.has_tp {
+                put(inout out, "#[derive(Debug, Clone, Copy, PartialEq)]\n");
+                if d.is_enum {
+                    put(inout out, "pub enum ");
+                    self.put_name(inout out, d.name);
+                    put(inout out, " {\n");
+                    for vi in 0..d.vn {
+                        let v = self.i.var(wrapping_add(d.v0, vi));
+                        put(inout out, "    ");
+                        self.put_name(inout out, v.name);
+                        self.variant_shape(v, false, inout out);
+                        put(inout out, ",\n");
+                    }
+                    put(inout out, "}\n\n");
+                } else {
+                    let v = self.i.var(d.v0);
+                    put(inout out, "pub struct ");
+                    self.put_name(inout out, d.name);
+                    self.variant_shape(v, true, inout out);
+                    if self.i.positional(v) || v.fc == 0 {
+                        put(inout out, ";");
+                    }
+                    put(inout out, "\n\n");
+                }
+            }
+            let mut full = copy_of(in self.tp);
+            self.put_name(inout full, d.name);
+            put(inout out, "impl Abi for ");
+            put_seq(inout out, in full);
+            put(inout out, " {\n    const WORDS: usize = ");
+            put_u64(inout out, d.words);
+            put(inout out, ";\n");
+            put(inout out, "    fn put(&self, out: &mut [u64]) {\n");
+            if d.is_enum {
+                put(inout out, "        match self {\n");
+                for vi in 0..d.vn {
+                    let v = self.i.var(wrapping_add(d.v0, vi));
+                    put(inout out, "            ");
+                    put_seq(inout out, in full);
+                    put(inout out, "::");
+                    self.put_name(inout out, v.name);
+                    self.bind_pattern(v, inout out);
+                    put(inout out, " => {\n                out[0] = ");
+                    put_u64(inout out, vi);
+                    put(inout out, ";\n");
+                    for j in 0..v.fc {
+                        let f = self.i.field(wrapping_add(v.f0, j));
+                        put(inout out, "                Abi::put(f");
+                        put_u64(inout out, j);
+                        put(inout out, ", &mut out[");
+                        put_u64(inout out, f.offset);
+                        put(inout out, "..]);\n");
+                    }
+                    put(inout out, "            }\n");
+                }
+                put(inout out, "        }\n    }\n");
+            } else {
+                let v = self.i.var(d.v0);
+                for j in 0..v.fc {
+                    let f = self.i.field(wrapping_add(v.f0, j));
+                    put(inout out, "        Abi::put(&self.");
+                    self.put_ident_sym(inout out, f.name);
+                    put(inout out, ", &mut out[");
+                    put_u64(inout out, f.offset);
+                    put(inout out, "..]);\n");
+                }
+                put(inout out, "    }\n");
+            }
+            put(inout out, "    fn get(words: &[u64]) -> Self {\n");
+            if d.is_enum {
+                put(inout out, "        match words[0] {\n");
+                for vi in 0..d.vn {
+                    let v = self.i.var(wrapping_add(d.v0, vi));
+                    put(inout out, "            ");
+                    put_u64(inout out, vi);
+                    put(inout out, " => ");
+                    put_seq(inout out, in full);
+                    put(inout out, "::");
+                    self.put_name(inout out, v.name);
+                    self.construct(v, inout out);
+                    put(inout out, ",\n");
+                }
+                put(inout out, "            tag => panic!(\"invalid ");
+                self.put_name(inout out, d.name);
+                put(inout out, " tag {tag} from Vesper\"),\n");
+                put(inout out, "        }\n    }\n}\n\n");
+            } else {
+                put(inout out, "        ");
+                put_seq(inout out, in full);
+                self.construct(self.i.var(d.v0), inout out);
+                put(inout out, "\n    }\n}\n\n");
+            }
+        }
+    }
+
+    // `float`: f64 or f32 scalars travel in float registers.
+    pub fn float(in self, t: u32) -> bool {
+        let n = self.i.node(t);
+        n.kind == K_SCALAR && (n.name == self.i.known.f64 || n.name == self.i.known.f32)
+    }
+
+    // `c_type(ty, pointer)`.
+    pub fn c_type(in self, t: u32, pointer: bool, inout o: ChunkSeq[u8]) {
+        if pointer {
+            put(inout o, "*mut u64");
+        } else if self.float(t) {
+            self.put_name(inout o, self.i.node(t).name);
+        } else {
+            put(inout o, "i64");
+        }
+    }
+
+    // `result_c_type`.
+    pub fn result_c_type(in self, f: FnRow, inout o: ChunkSeq[u8]) {
+        if f.result_pointer {
+            put(inout o, "i64");
+        } else {
+            self.c_type(f.result, false, inout o);
+        }
+    }
+
+    // `scalar_in(name, ty)`.
+    pub fn scalar_in(in self, in name: ChunkSeq[u8], t: u32, inout o: ChunkSeq[u8]) {
+        let n = self.i.node(t);
+        if self.float(t) {
+            put_seq(inout o, in name);
+        } else if n.kind == K_SCALAR && n.name == self.i.known.unit {
+            put(inout o, "{ let () = ");
+            put_seq(inout o, in name);
+            put(inout o, "; 0 }");
+        } else {
+            put_seq(inout o, in name);
+            put(inout o, " as i64");
+        }
+    }
+
+    // `scalar_out(raw, ty)`.
+    pub fn scalar_out(in self, in raw: ChunkSeq[u8], t: u32, inout o: ChunkSeq[u8]) {
+        let n = self.i.node(t);
+        if n.kind != K_SCALAR {
+            put_seq(inout o, in raw);
+            return;
+        }
+        let k = self.i.known;
+        if n.name == k.f64 || n.name == k.f32 || n.name == k.i64 {
+            put_seq(inout o, in raw);
+        } else if n.name == k.bool {
+            put_seq(inout o, in raw);
+            put(inout o, " != 0");
+        } else if n.name == k.unit {
+            put(inout o, "{ let _ = ");
+            put_seq(inout o, in raw);
+            put(inout o, "; }");
+        } else {
+            put_seq(inout o, in raw);
+            put(inout o, " as ");
+            self.put_name(inout o, n.name);
+        }
+    }
+
+    // The header comment both generators start with.
+    pub fn header(in self, inout out: ChunkSeq[u8]) {
+        put(inout out, "// @generated by `vesper build --lib` (");
+        self.put_name(inout out, self.i.abi);
+        put(inout out, ") for library `");
+        self.put_name(inout out, self.i.library);
+        put(inout out, "`.\n// Do not edit: regenerate it from the Vesper source.\n\n");
+    }
+
+    // One `fn symbol(params) -> ret;` line of the extern block.
+    pub fn extern_line(in self, f: FnRow, inout out: ChunkSeq[u8]) {
+        put(inout out, "    fn ");
+        self.put_name(inout out, f.symbol);
+        put(inout out, "(");
+        let mut first = true;
+        if f.result_pointer {
+            put(inout out, "result: *mut u64");
+            first = false;
+        }
+        for j in 0..f.pn {
+            let p = self.i.param(wrapping_add(f.p0, j));
+            if !first {
+                put(inout out, ", ");
+            }
+            first = false;
+            self.put_ident_sym(inout out, p.name);
+            put(inout out, ": ");
+            self.c_type(p.ty, p.pointer, inout out);
+        }
+        if f.fail != 0 {
+            if !first {
+                put(inout out, ", ");
+            }
+            put(inout out, "fail: *mut u64");
+        }
+        put(inout out, ") -> ");
+        self.result_c_type(f, inout out);
+        put(inout out, ";\n");
+    }
+
+    // The `checked` word-count asserts, in `BTreeSet` order.
+    pub fn word_asserts(in self, in checked: StrSet, inout out: ChunkSeq[u8]) {
+        for k in 0..checked.len() {
+            put(inout out, "const _: () = assert!(<");
+            checked.write(k, inout out);
+            put(inout out, " as Abi>::WORDS == ");
+            put_u64(inout out, checked.val(k));
+            put(inout out, ");\n");
+        }
+    }
+
+    // `/// The errors `f` can raise, in status order.` and the enum, when
+    // `f` has several errors and no types path; returns the error type's
+    // spelling (empty when `f` raises nothing).
+    pub fn error_type(in self, f: FnRow, v2: bool, inout out: ChunkSeq[u8]) -> ChunkSeq[u8] {
+        let mut e = ChunkSeq::new[u8]();
+        if f.en == 0 {
+            return e;
+        }
+        if f.en == 1 {
+            self.rust_type(self.i.err(f.e0), in self.tp, inout e);
+            return e;
+        }
+        if self.has_tp {
+            put_seq(inout e, in self.tp);
+            self.put_camel(inout e, f.name);
+            put(inout e, "Error");
+            return e;
+        }
+        self.put_camel(inout e, f.name);
+        put(inout e, "Error");
+        put(inout out, "/// The errors `");
+        self.put_name(inout out, f.name);
+        put(
+            inout out,
+            "` can raise, in status order.\n#[derive(Debug, Clone, Copy, PartialEq)]\npub enum "
+        );
+        put_seq(inout out, in e);
+        put(inout out, " {\n");
+        for j in 0..f.en {
+            let t = self.i.err(wrapping_add(f.e0, j));
+            put(inout out, "    ");
+            self.error_variant(t, inout out);
+            put(inout out, "(");
+            self.rust_type(t, in self.tp, inout out);
+            put(inout out, "),\n");
+        }
+        put(inout out, "}\n\n");
+        e
+    }
+
+    // The `match fail[0]` (or plain `produce`) tail of a wrapper.
+    pub fn result_tail(
+        in self,
+        f: FnRow,
+        in error: ChunkSeq[u8],
+        in fail: ChunkSeq[u8],
+        in produce: ChunkSeq[u8],
+        inout out: ChunkSeq[u8]
+    ) {
+        if f.en == 0 {
+            put(inout out, "    ");
+            put_seq(inout out, in produce);
+            nl(inout out);
+            return;
+        }
+        put(inout out, "    match ");
+        put_seq(inout out, in fail);
+        put(inout out, "[0] {\n");
+        put(inout out, "        0 => Ok(");
+        put_seq(inout out, in produce);
+        put(inout out, "),\n");
+        for j in 0..f.en {
+            let t = self.i.err(wrapping_add(f.e0, j));
+            put(inout out, "        ");
+            put_u64(inout out, inc(j));
+            put(inout out, " => Err(");
+            if f.en != 1 {
+                put_seq(inout out, in error);
+                put(inout out, "::");
+                self.error_variant(t, inout out);
+                put(inout out, "(");
+            }
+            put(inout out, "<");
+            self.rust_type(t, in self.tp, inout out);
+            put(inout out, " as Abi>::get(&");
+            put_seq(inout out, in fail);
+            put(inout out, "[1..])");
+            if f.en != 1 {
+                put(inout out, ")");
+            }
+            put(inout out, "),\n");
+        }
+        put(inout out, "        status => panic!(\"invalid failure status {status} from ");
+        self.put_name(inout out, f.symbol);
+        put(inout out, "\"),\n");
+        put(inout out, "    }\n");
+    }
+}
+
+// `rust_binding` for a v1 library.
+pub fn binding_v1(in g: Gen, inout out: ChunkSeq[u8]) {
+    g.header(inout out);
+    put(
+        inout out,
+        "#![allow(clippy::all, unused_imports, unused_mut, non_snake_case, dead_code)]\n\nuse vesper_port_abi::Abi;\n\n"
+    );
+    g.write_copy_types(inout out, true);
+    let mut checked = str_set();
+    for fi in 0..g.i.fns.len() {
+        let f = g.i.func(fi);
+        checked.insert_pair(in g.rt(f.result), f.result_words);
+    }
+    for di in 0..g.i.decls.len() {
+        let d = g.i.decl(di);
+        let mut full = copy_of(in g.tp);
+        g.put_name(inout full, d.name);
+        checked.insert_pair(in full, d.words);
+    }
+    g.word_asserts(in checked, inout out);
+    put(inout out, "\nunsafe extern \"C\" {\n");
+    for fi in 0..g.i.fns.len() {
+        g.extern_line(g.i.func(fi), inout out);
+    }
+    put(inout out, "}\n");
+    for fi in 0..g.i.fns.len() {
+        let f = g.i.func(fi);
+        nl(inout out);
+        let value = g.rt(f.result);
+        let error = g.error_type(f, false, inout out);
+        put(inout out, "/// Calls `");
+        g.put_name(inout out, f.name);
+        put(inout out, "` of the Vesper library `");
+        g.put_name(inout out, g.i.library);
+        put(inout out, "` (`");
+        g.put_name(inout out, f.symbol);
+        put(inout out, "`).\n");
+        put(inout out, "pub fn ");
+        g.put_ident_sym(inout out, f.name);
+        put(inout out, "(");
+        for j in 0..f.pn {
+            let p = g.i.param(wrapping_add(f.p0, j));
+            if j > 0 {
+                put(inout out, ", ");
+            }
+            g.put_ident_sym(inout out, p.name);
+            put(inout out, ": ");
+            g.rust_type(p.ty, in g.tp, inout out);
+        }
+        put(inout out, ") -> ");
+        if f.en != 0 {
+            put(inout out, "Result<");
+            put_seq(inout out, in value);
+            put(inout out, ", ");
+            put_seq(inout out, in error);
+            put(inout out, ">");
+        } else {
+            put_seq(inout out, in value);
+        }
+        put(inout out, " {\n");
+        let mut args = ChunkSeq::new[u8]();
+        let mut first = true;
+        if f.result_pointer {
+            put(inout out, "    let mut result = [0u64; ");
+            put_u64(inout out, f.result_words);
+            put(inout out, "];\n");
+            put(inout args, "result.as_mut_ptr()");
+            first = false;
+        }
+        for j in 0..f.pn {
+            let p = g.i.param(wrapping_add(f.p0, j));
+            let mut n = ChunkSeq::new[u8]();
+            g.put_ident_sym(inout n, p.name);
+            if !first {
+                put(inout args, ", ");
+            }
+            first = false;
+            if p.pointer {
+                put(inout out, "    let mut arg_");
+                g.put_name(inout out, p.name);
+                put(inout out, " = [0u64; <");
+                g.rust_type(p.ty, in g.tp, inout out);
+                put(inout out, " as Abi>::WORDS];\n    Abi::put(&");
+                put_seq(inout out, in n);
+                put(inout out, ", &mut arg_");
+                g.put_name(inout out, p.name);
+                put(inout out, ");\n");
+                put(inout args, "arg_");
+                g.put_name(inout args, p.name);
+                put(inout args, ".as_mut_ptr()");
+            } else {
+                g.scalar_in(in n, p.ty, inout args);
+            }
+        }
+        if f.fail != 0 {
+            put(inout out, "    let mut fail = [0u64; ");
+            put_u64(inout out, wrapping_sub(f.fail, 1));
+            put(inout out, "];\n");
+            if !first {
+                put(inout args, ", ");
+            }
+            put(inout args, "fail.as_mut_ptr()");
+        }
+        put(inout out, "    // SAFETY: `");
+        g.put_name(inout out, f.symbol);
+        put(
+            inout out,
+            "` has exactly this signature in the export ABI; every\n    // pointer is a live, writable buffer of the size the ABI requires.\n    "
+        );
+        if !f.result_pointer {
+            put(inout out, "let raw = ");
+        }
+        put(inout out, "unsafe { ");
+        g.put_name(inout out, f.symbol);
+        put(inout out, "(");
+        put_seq(inout out, in args);
+        put(inout out, ") };\n");
+        let mut produce = ChunkSeq::new[u8]();
+        if f.result_pointer {
+            put(inout produce, "<");
+            put_seq(inout produce, in value);
+            put(inout produce, " as Abi>::get(&result)");
+        } else {
+            g.scalar_out(in text("raw"), f.result, inout produce);
+        }
+        g.result_tail(f, in error, in text("fail"), in produce, inout out);
+        put(inout out, "}\n");
+    }
+}

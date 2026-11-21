@@ -347,7 +347,7 @@ fn align8(n: u32) -> Result<u32, String> {
 /// uses), so shadowing locals and local closures add no call edges.
 type References = BTreeSet<(usize, usize, String)>;
 fn function_references(world: &World) -> References {
-    crate::ffi_lowering::drops::lower_world(world)
+    crate::ir_swap::lower(world)
         .functions
         .values()
         .flat_map(|f| {
@@ -853,19 +853,19 @@ fn compile_session_with_linkage<M: Module>(
     linkage: super::DefinitionLinkage,
 ) -> Result<(FuncId, String), String> {
     let instances: InstanceMap = super::instances(world, &plan.entry)?;
-    let mut program = crate::ffi_lowering::drops::lower_world(world);
+    let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     super::wide_native::refine_wide_tuples(&mut program);
     if optimize {
-        crate::ir_opt::optimize(world, &mut program)?;
-        crate::ir_inline::inline(world, &mut program, &crate::ir_inline::Budget::default());
+        crate::ir_swap::optimize(world, &mut program)?;
+        crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default());
     } else {
         crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }
     crate::fip::elaborate_non_fip_drops(world, &mut program);
     if optimize {
         // Native only, never the verified backend (Stage 1 perf lane 3).
-        crate::bounds_hoist::run(&mut program);
+        crate::ir_swap::hoist(&mut program);
     }
     let ids = super::declare_instances(m, world, &plan.entry, &instances, linkage)?;
     let mut text =
@@ -937,6 +937,8 @@ fn compile_session_with_linkage<M: Module>(
             caller_slot: None,
             reuse_slots: BTreeMap::new(),
             register_locals: BTreeSet::new(),
+            bound_params: BTreeSet::new(),
+            scalar_enums: Default::default(),
             split: BTreeMap::new(),
             current_call_slot: None,
             in_fip_fn: world.functions.get(&plan.entry).is_some_and(|f| f.fip),

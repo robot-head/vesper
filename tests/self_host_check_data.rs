@@ -317,6 +317,37 @@ fn world_lookups_match_rust() {
     assert_eq!(bad, 0);
 }
 
+/// A world whose types hold `i128` and `u128` (#1174), which no corpus
+/// program uses yet.
+const WIDE_WORLD: &str = "copy struct W { lo: u8, x: i128, y: u128 }
+copy enum E { A(i128), B(u8, u128), C }
+struct G[T] { v: T, n: i128 }
+fn f(a: i128, b: u128, w: W) -> (u8, i128) { (w.lo, a) }
+fn g(e: E) -> i128 { match e { E::A(x) => x, E::B(_, _) => 0, E::C => 1, } }
+fn h(sink g: G[u128]) -> u128 { g.v }
+fn k(a: i128, b: i128) -> i128 eff [Fail[ArithOverflow]] { a + b }
+fn main() -> i64 { 0 }";
+
+/// Both tasks agree on `i128` and `u128`: they are copy scalars
+/// (`Known::is_scalar`, SH5 lane 6, #1329).
+#[test]
+fn wide_integers_match_rust() {
+    let parsed = vesper::parser::parse(WIDE_WORLD);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let checked = vesper::check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let w = &checked.world;
+    let types = check_data().entry("check_data_types", true);
+    assert_eq!(
+        first_difference(&rust_types(w), &types.text(&types_input(w))),
+        None
+    );
+    let world = check_data().entry("check_data_world", true);
+    let rust = rust_world(w);
+    assert_eq!(first_difference(&rust, &world.text(&world_input(w))), None);
+    assert!(rust.contains("M 0"), "{rust}");
+}
+
 /// The same tasks with the optimizer off: the JIT must agree with itself.
 #[test]
 fn unoptimized_jit_agrees() {

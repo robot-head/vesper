@@ -1,0 +1,419 @@
+// `parse_envelope` of crates/vesper-lsp/src/transport.rs over the serde
+// port's token tape (`IndexedJson`): the strict JSON-RPC 2.0 / LSP
+// envelope profile, checked before anything is materialized.
+//
+// Rust then materializes the body with serde_json, which refuses a number
+// whose binary64 value overflows (`number out of range`) and, for an id or
+// an error code, reads `-0` as a float. `json_numbers` and `int_value`
+// reproduce those two outcomes; nothing else of the body is copied: the
+// envelope names its parts by token.
+use @vesper/serde::{
+    Doc,
+    Error,
+    ErrorKind,
+    Kind,
+    Limits,
+    Token,
+    doc_field,
+    doc_new,
+    doc_parse,
+    string_decode,
+    string_equals
+};
+use @vesper/serde::index::{
+    tok
+};
+use self::numbers::number_out_of_range;
+use self::limits::{
+    Perr,
+    Plimits,
+    bound,
+    byte,
+    validate
+};
+
+// `Envelope`'s variant.
+pub const ENV_REQUEST: u64 = 0;
+pub const ENV_NOTIFICATION: u64 = 1;
+pub const ENV_RESPONSE: u64 = 2;
+
+// `Option<Id>`: none (a null response id), an integer or a string.
+pub const ID_NONE: u64 = 0;
+pub const ID_INT: u64 = 1;
+pub const ID_STRING: u64 = 2;
+
+// No token.
+pub const NO_TOKEN: u64 = 18446744073709551615;
+
+// A parsed envelope: its variant and its parts as token indices into the
+// body's tape (`NO_TOKEN` when absent).
+pub copy struct Env {
+    kind: u64,
+    id_tag: u64,
+    id_int: i64,
+    id: u64,
+    method: u64,
+    params: u64,
+    result: u64,
+    error: u64,
+    code: i64,
+    message: u64,
+    data: u64
+}
+
+// `indexed_error`.
+fn indexed_error(e: Error) -> Perr {
+    match e.kind {
+        ErrorKind::DuplicateKey => Perr::PDuplicateJsonKey,
+        ErrorKind::Utf8 => Perr::PUtf8,
+        ErrorKind::InputLimit => Perr::PJsonLimit,
+        ErrorKind::DepthLimit => Perr::PJsonLimit,
+        ErrorKind::TokenLimit => Perr::PJsonLimit,
+        ErrorKind::StringLimit => Perr::PJsonLimit,
+        ErrorKind::WorkLimit => Perr::PJsonLimit,
+        ErrorKind::AllocationLimit => Perr::PJsonLimit,
+        ErrorKind::AllocationFailed => Perr::PAllocation,
+        _ => Perr::PJson,
+    }
+}
+
+fn parse_doc(inout doc: Doc, in body: Slice[u8], l: Limits) -> Option[Error] {
+    handle Fail[Error] in {
+        doc_parse(inout doc, in body, l);
+        no_error()
+    } with {
+        return v => v,
+        raise(e, resume) => some_error(e),
+    }
+}
+
+// `get`: the value token of `name` in the object at `index`.
+fn get(in doc: Doc, in body: Slice[u8], index: u64, in name: Str, l: Plimits)
+    -> u64 eff [Fail[Perr]] {
+    let found: Result[Option[u64], Error] = handle Fail[Error] in {
+        field_ok(doc_field(in doc, in body, index, in name.as_bytes(), l.max_json_work))
+    } with {
+        return v => v,
+        raise(e, resume) => field_err(e),
+    };
+    match found {
+        Result::Ok(Option::Some(i)) => i,
+        Result::Ok(Option::None) => NO_TOKEN,
+        Result::Err(e) => Fail::raise(indexed_error(e)),
+    }
+}
+
+fn token(in doc: Doc, i: u64) -> Token {
+    tok(in doc.tokens, i)
+}
+
+// A string token's content (between its quotes) equals `text`.
+fn equals(in doc: Doc, in body: Slice[u8], i: u64, in text: Str) -> bool {
+    let t = token(in doc, i);
+    string_equals(in body[wrapping_add(t.start, 1)..wrapping_sub(t.end, 1)], in text.as_bytes())
+}
+
+// `raw().parse::<i32>()` of a number token: `None` past `i32` (a JSON
+// number token is `-?digits` here or has a fraction or exponent).
+fn parse_i32(in body: Slice[u8], t: Token) -> Option[i64] {
+    let mut i = t.start;
+    let mut neg = false;
+    if byte(in body, i) == 45 {
+        neg = true;
+        i = wrapping_add(i, 1);
+    }
+    if i >= t.end {
+        return Option::None;
+    }
+    let mut v: i64 = 0;
+    loop {
+        if i >= t.end {
+            break;
+        }
+        let c = byte(in body, i);
+        if c < 48 || c > 57 {
+            return Option::None;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), wrapping_i64(widen_u64(wrapping_sub(c, 48))));
+        if v > 2147483648 {
+            return Option::None;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if neg {
+        Option::Some(wrapping_sub(0, v))
+    } else if v > 2147483647 {
+        Option::None
+    } else {
+        Option::Some(v)
+    }
+}
+
+// `node_id`.
+fn node_id(in doc: Doc, in body: Slice[u8], i: u64, nullable: bool, l: Plimits)
+    -> Unit eff [Fail[Perr]] {
+    let t = token(in doc, i);
+    match t.kind {
+        Kind::Null => {
+            if !nullable {
+                Fail::raise(Perr::PInvalidId);
+            }
+        }
+        Kind::Number => {
+            match parse_i32(in body, t) {
+                Option::Some(v) => {}
+                Option::None => Fail::raise(Perr::PInvalidId),
+            }
+        }
+        Kind::String => bound(t.decoded_len, l.max_id_bytes, Perr::PInvalidId),
+        _ => Fail::raise(Perr::PInvalidId),
+    }
+}
+
+fn is_member(in doc: Doc, in body: Slice[u8], i: u64) -> bool {
+    equals(in doc, in body, i, "jsonrpc")
+        || equals(in doc, in body, i, "id")
+        || equals(in doc, in body, i, "method")
+        || equals(in doc, in body, i, "params")
+        || equals(in doc, in body, i, "result")
+        || equals(in doc, in body, i, "error")
+}
+
+fn is_error_member(in doc: Doc, in body: Slice[u8], i: u64) -> bool {
+    equals(in doc, in body, i, "code")
+        || equals(in doc, in body, i, "message")
+        || equals(in doc, in body, i, "data")
+}
+
+// The keys of the object at `index` (each key token).
+fn check_keys(in doc: Doc, in body: Slice[u8], index: u64, error: bool) -> Unit eff [Fail[Perr]] {
+    let end = token(in doc, index).next;
+    let mut i = wrapping_add(index, 1);
+    loop {
+        if i >= end {
+            break;
+        }
+        let ok = if error {
+            is_error_member(in doc, in body, i)
+        } else {
+            is_member(in doc, in body, i)
+        };
+        if !ok {
+            Fail::raise(Perr::PInvalidEnvelope);
+        }
+        i = token(in doc, wrapping_add(i, 1)).next;
+    }
+}
+
+fn present(i: u64) -> bool {
+    i != NO_TOKEN
+}
+
+fn kind_of(in doc: Doc, i: u64) -> Kind {
+    token(in doc, i).kind
+}
+
+fn is_container(k: Kind) -> bool {
+    match k {
+        Kind::Object => true,
+        Kind::Array => true,
+        _ => false,
+    }
+}
+
+// `preflight_envelope`, returning the parts it looked up.
+fn preflight(in doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff [Fail[Perr]] {
+    if kind_of(in doc, 0) != Kind::Object {
+        Fail::raise(Perr::PInvalidEnvelope);
+    }
+    let version = get(in doc, in body, 0, "jsonrpc", l);
+    if !present(version) {
+        Fail::raise(Perr::PInvalidEnvelope);
+    }
+    if kind_of(in doc, version) != Kind::String || !equals(in doc, in body, version, "2.0") {
+        Fail::raise(Perr::PInvalidEnvelope);
+    }
+    check_keys(in doc, in body, 0, false);
+    let id = get(in doc, in body, 0, "id", l);
+    let method = get(in doc, in body, 0, "method", l);
+    let params = get(in doc, in body, 0, "params", l);
+    let result = get(in doc, in body, 0, "result", l);
+    let error = get(in doc, in body, 0, "error", l);
+    let mut env = Env {
+        kind: ENV_RESPONSE,
+        id_tag: ID_NONE,
+        id_int: 0,
+        id: id,
+        method: method,
+        params: params,
+        result: result,
+        error: error,
+        code: 0,
+        message: NO_TOKEN,
+        data: NO_TOKEN
+    };
+    if present(method) {
+        if kind_of(in doc, method) != Kind::String {
+            Fail::raise(Perr::PInvalidEnvelope);
+        }
+        let len = token(in doc, method).decoded_len;
+        if len == 0 || len > l.max_method_bytes {
+            Fail::raise(Perr::PInvalidEnvelope);
+        }
+        if present(result) || present(error) {
+            Fail::raise(Perr::PInvalidEnvelope);
+        }
+        if present(id) {
+            node_id(in doc, in body, id, false, l);
+            env.kind = ENV_REQUEST;
+        } else {
+            env.kind = ENV_NOTIFICATION;
+        }
+        if present(params) && !is_container(kind_of(in doc, params)) {
+            Fail::raise(Perr::PInvalidEnvelope);
+        }
+    } else {
+        if present(params) || present(result) == present(error) {
+            Fail::raise(Perr::PInvalidEnvelope);
+        }
+        if !present(id) {
+            Fail::raise(Perr::PInvalidId);
+        }
+        node_id(in doc, in body, id, true, l);
+        if present(error) {
+            if kind_of(in doc, error) != Kind::Object {
+                Fail::raise(Perr::PInvalidEnvelope);
+            }
+            check_keys(in doc, in body, error, true);
+            let code = get(in doc, in body, error, "code", l);
+            if !present(code) {
+                Fail::raise(Perr::PInvalidEnvelope);
+            }
+            if kind_of(in doc, code) != Kind::Number {
+                Fail::raise(Perr::PInvalidEnvelope);
+            }
+            match parse_i32(in body, token(in doc, code)) {
+                Option::Some(v) => {
+                    env.code = v;
+                }
+                Option::None => Fail::raise(Perr::PInvalidEnvelope),
+            }
+            let message = get(in doc, in body, error, "message", l);
+            if !present(message) || kind_of(in doc, message) != Kind::String {
+                Fail::raise(Perr::PInvalidEnvelope);
+            }
+            env.message = message;
+            env.data = get(in doc, in body, error, "data", l);
+        }
+    }
+    env
+}
+
+// serde_json reads an integer token `-0` as the float -0.0, which has no
+// `as_i64`.
+fn negative_zero(in body: Slice[u8], t: Token) -> bool {
+    wrapping_sub(t.end, t.start)
+        == 2
+        && byte(in body, t.start)
+        == 45
+        && byte(in body, wrapping_add(t.start, 1))
+        == 48
+}
+
+// serde_json refuses a number its reader takes out of range
+// (numbers.ves). Integers that fit a u64 never are.
+fn json_numbers(in doc: Doc, in body: Slice[u8]) -> Unit eff [Fail[Perr]] {
+    for i in 0..doc.tokens.len() {
+        let t = token(in doc, i);
+        if t.kind == Kind::Number && number_out_of_range(in body[t.start..t.end]) {
+            Fail::raise(Perr::PJson);
+        }
+    }
+}
+
+// `parse_envelope`: the envelope of `body`, with its tape in `doc`.
+pub fn parse_envelope(inout doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff [Fail[Perr]] {
+    validate(l);
+    bound(body.len(), l.max_body_bytes, Perr::PBodyLimit);
+    let sl = Limits {
+        max_input_bytes: l.max_body_bytes,
+        max_depth: l.max_json_depth,
+        max_tokens: l.max_json_nodes,
+        max_string_bytes: l.max_json_string_bytes,
+        max_total_string_bytes: l.max_json_total_string_bytes,
+        max_work: l.max_json_work,
+        max_index_bytes: l.max_json_index_bytes
+    };
+    match parse_doc(inout doc, in body, sl) {
+        Option::Some(e) => Fail::raise(indexed_error(e)),
+        Option::None => {}
+    }
+    let mut env = preflight(in doc, in body, l);
+    json_numbers(in doc, in body);
+    if present(env.id) {
+        let t = token(in doc, env.id);
+        match t.kind {
+            Kind::String => {
+                env.id_tag = ID_STRING;
+            }
+            Kind::Number => {
+                if negative_zero(in body, t) {
+                    Fail::raise(Perr::PInvalidId);
+                }
+                env.id_tag = ID_INT;
+                env.id_int = match parse_i32(in body, t) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+            }
+            _ => {}
+        }
+    }
+    if present(env.error) {
+        if negative_zero(in body, token(in doc, get(in doc, in body, env.error, "code", l))) {
+            Fail::raise(Perr::PInvalidEnvelope);
+        }
+    }
+    env
+}
+
+// The decoded text of the string token `i`, appended to `out`.
+pub fn decoded(in doc: Doc, in body: Slice[u8], i: u64, inout out: ChunkSeq[u8]) {
+    let t = token(in doc, i);
+    let at = out.len();
+    out.resize(wrapping_add(at, t.decoded_len), 0);
+    let n = string_decode(
+        in body[wrapping_add(t.start, 1)..wrapping_sub(t.end, 1)],
+        inout out[at..out.len()]
+    );
+    out.truncate(wrapping_add(at, n));
+}
+
+// The raw bytes `start .. end` of token `i`.
+pub fn raw_span(in doc: Doc, i: u64) -> (u64, u64) {
+    let t = token(in doc, i);
+    (t.start, t.end)
+}
+
+pub fn new_doc() -> Doc {
+    doc_new()
+}
+
+// Typed constructors: a handle body or clause that builds a Result or
+// Option with a variant constructor leaves the other type parameter
+// uninferred (`_`), which the native layout refuses (report, gap 2).
+fn no_error() -> Option[Error] {
+    Option::None
+}
+
+fn some_error(e: Error) -> Option[Error] {
+    Option::Some(e)
+}
+
+fn field_ok(v: Option[u64]) -> Result[Option[u64], Error] {
+    Result::Ok(v)
+}
+
+fn field_err(e: Error) -> Result[Option[u64], Error] {
+    Result::Err(e)
+}

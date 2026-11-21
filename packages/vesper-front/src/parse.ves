@@ -2049,7 +2049,7 @@ fn use_item(inout p: P) {
 
 fn use_name(inout p: P) {
     let k = kind(in p);
-    if k == k_lower() || k == k_upper() || contextual_name(k) {
+    if k == k_lower() || k == k_upper() || at_contextual_name(in p) {
         bump(inout p);
     } else {
         err(inout p, in "expected an imported item name");
@@ -2057,7 +2057,7 @@ fn use_name(inout p: P) {
     if at_word(in p, 0, w_as()) {
         bump(inout p);
         let k2 = kind(in p);
-        if k2 == k_lower() || k2 == k_upper() || contextual_name(k2) {
+        if k2 == k_lower() || k2 == k_upper() || at_contextual_name(in p) {
             bump(inout p);
         } else {
             err(inout p, in "expected a name after `as`");

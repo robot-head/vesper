@@ -1,0 +1,19 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// The codegen swap of the hybrid Stage 2 build (self-hosting SH4 lane 1,
+// #1275): the census lowering family (allocation, byte copies, zeroing,
+// tags and pattern diamonds) emitted in Vesper through the lent Cranelift
+// builder. `vesper build --lib` exports `aggregate` as
+// `vesper_hybrid_codegen_aggregate`, and crates/vesper-hybrid installs it as
+// the `aggregate` hook of `vesper::codegen_swap`. The `.vsys` library comes
+// from @vesper/cranelift's manifest; the directive only names the Rust
+// crate that defines its symbols.
+use @vesper/codegen-base::{
+    aggregate_hook
+};
+
+// One request of the `aggregate` family: `call` is the address of the
+// lent call. Returns 1 when it emitted the request, 0 to leave it to Rust.
+pub fn aggregate(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    aggregate_hook(call)
+}

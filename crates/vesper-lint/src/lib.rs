@@ -85,6 +85,26 @@ pub struct Limits {
     pub work: usize,
     pub call_depth: usize,
 }
+/// The ceilings of [`Limits`].
+pub const MAX_FUNCTIONS: usize = 256;
+pub const MAX_ACTIONS: usize = 16384;
+pub const MAX_WORK: usize = 1_000_000;
+pub const MAX_CALL_DEPTH: usize = 64;
+/// The per-function and per-type sizes [`analyze`] checks.
+const MAX_EFFECTS: usize = 64;
+const MAX_PARAMS: usize = 128;
+const MAX_GENERICS: usize = 64;
+const MAX_STRUCT_FIELDS: usize = 128;
+const MAX_SUBSTITUTIONS: usize = 64;
+const MAX_PROJECTION_DEPTH: usize = 32;
+const MAX_TYPE_DEPTH: usize = 32;
+const MAX_TYPE_NODES: usize = 512;
+const MAX_TYPE_ARGS: usize = 512;
+const MAX_EFFECT_ARGS: usize = 64;
+/// The limits of [`apply_edits`].
+const MAX_EDITS: usize = 8192;
+const MAX_EDIT_BYTES: usize = 262144;
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -162,13 +182,13 @@ pub fn analyze(program: &CheckedProgram, limits: Limits) -> Result<LintReport, L
 #[cfg_attr(vesper_port, allow(dead_code))]
 fn analyze_rust(program: &CheckedProgram, limits: Limits) -> Result<LintReport, LintError> {
     if limits.functions == 0
-        || limits.functions > 256
+        || limits.functions > MAX_FUNCTIONS
         || limits.actions == 0
-        || limits.actions > 16384
+        || limits.actions > MAX_ACTIONS
         || limits.work == 0
-        || limits.work > 1_000_000
+        || limits.work > MAX_WORK
         || limits.call_depth == 0
-        || limits.call_depth > 64
+        || limits.call_depth > MAX_CALL_DEPTH
     {
         return Err(LintError("invalid lint limits"));
     }
@@ -181,12 +201,12 @@ fn analyze_rust(program: &CheckedProgram, limits: Limits) -> Result<LintReport, 
             .checked_add(f.actions.len())
             .ok_or(LintError("action count overflow"))?;
         if count > limits.actions
-            || f.declaration.effects.instances.len() > 64
-            || f.parameters.len() > 128
+            || f.declaration.effects.instances.len() > MAX_EFFECTS
+            || f.parameters.len() > MAX_PARAMS
         {
             return Err(LintError("fact limit"));
         }
-        if f.declaration.params.len() > 128 || f.declaration.generics.len() > 64 {
+        if f.declaration.params.len() > MAX_PARAMS || f.declaration.generics.len() > MAX_GENERICS {
             return Err(LintError("signature size limit"));
         }
         validate_type(&f.declaration.result)?;
@@ -195,7 +215,7 @@ fn analyze_rust(program: &CheckedProgram, limits: Limits) -> Result<LintReport, 
         }
         for parameter in &f.parameters {
             validate_type(&parameter.parameter.ty)?;
-            if parameter.struct_fields.len() > 128 {
+            if parameter.struct_fields.len() > MAX_STRUCT_FIELDS {
                 return Err(LintError("struct field limit"));
             }
         }
@@ -206,7 +226,7 @@ fn analyze_rust(program: &CheckedProgram, limits: Limits) -> Result<LintReport, 
             match action {
                 Action::Perform(effect) => validate_effect(effect)?,
                 Action::Call { substitutions, .. } => {
-                    if substitutions.len() > 64 {
+                    if substitutions.len() > MAX_SUBSTITUTIONS {
                         return Err(LintError("substitution limit"));
                     }
                     for ty in substitutions.values() {
@@ -214,7 +234,7 @@ fn analyze_rust(program: &CheckedProgram, limits: Limits) -> Result<LintReport, 
                     }
                 }
                 Action::Access { path, .. } => {
-                    if path.len() > 32 {
+                    if path.len() > MAX_PROJECTION_DEPTH {
                         return Err(LintError("projection depth limit"));
                     }
                 }
@@ -269,12 +289,12 @@ fn validate_type(ty: &Type) -> Result<(), LintError> {
     let mut nodes = 0usize;
     while let Some((ty, depth)) = stack.pop() {
         nodes += 1;
-        if depth > 32 || nodes > 512 {
+        if depth > MAX_TYPE_DEPTH || nodes > MAX_TYPE_NODES {
             return Err(LintError("type complexity limit"));
         }
         match ty {
             Type::Named(_, args) | Type::Tuple(args) => {
-                if args.len() > 512 {
+                if args.len() > MAX_TYPE_ARGS {
                     return Err(LintError("type arity limit"));
                 }
                 for ty in args {
@@ -287,7 +307,7 @@ fn validate_type(ty: &Type) -> Result<(), LintError> {
                 effects,
                 ..
             } => {
-                if params.len() > 128 || effects.instances.len() > 64 {
+                if params.len() > MAX_PARAMS || effects.instances.len() > MAX_EFFECTS {
                     return Err(LintError("arrow shape limit"));
                 }
                 for (_, t) in params {
@@ -295,7 +315,7 @@ fn validate_type(ty: &Type) -> Result<(), LintError> {
                 }
                 stack.push((result, depth + 1));
                 for e in &effects.instances {
-                    if e.args.len() > 64 {
+                    if e.args.len() > MAX_EFFECT_ARGS {
                         return Err(LintError("nested effect arity limit"));
                     }
                     for t in &e.args {
@@ -304,11 +324,11 @@ fn validate_type(ty: &Type) -> Result<(), LintError> {
                 }
             }
             Type::Row(effects) => {
-                if effects.instances.len() > 64 {
+                if effects.instances.len() > MAX_EFFECTS {
                     return Err(LintError("row shape limit"));
                 }
                 for e in &effects.instances {
-                    if e.args.len() > 64 {
+                    if e.args.len() > MAX_EFFECT_ARGS {
                         return Err(LintError("nested effect arity limit"));
                     }
                     for t in &e.args {
@@ -322,7 +342,7 @@ fn validate_type(ty: &Type) -> Result<(), LintError> {
     Ok(())
 }
 fn validate_effect(effect: &Effect) -> Result<(), LintError> {
-    if effect.args.len() > 64 {
+    if effect.args.len() > MAX_EFFECT_ARGS {
         return Err(LintError("effect arity limit"));
     }
     for ty in &effect.args {
@@ -567,7 +587,7 @@ fn apply_edits_rust(
     edits: &[SourceEdit],
     max_bytes: usize,
 ) -> Result<String, LintError> {
-    if edits.len() > 8192 || source.len() > max_bytes || max_bytes > 262144 {
+    if edits.len() > MAX_EDITS || source.len() > max_bytes || max_bytes > MAX_EDIT_BYTES {
         return Err(LintError("source/edit byte limit"));
     }
     let mut ordered: Vec<_> = edits.iter().collect();

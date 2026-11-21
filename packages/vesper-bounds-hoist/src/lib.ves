@@ -1,0 +1,103 @@
+// @vesper/bounds-hoist: the analyses of `src/bounds_hoist.rs` and
+// `src/bounds_hoist/facts.rs` (bounds-check hoisting, a native-path Place
+// IR pass) in Vesper (self-hosting SH3 lane 12, #1251).
+//
+// The pass versions counted loops so their element accesses run unchecked
+// behind one guard, versions loops bounded by a compared end, drops checks
+// that a comparison or a checked access dominates, and finds the sequence
+// headers a loop (or the whole function) can read once. Every one of those
+// is a decision on the function as it stands; this package makes each one
+// on the same IR and writes the text `bounds_hoist::Step::decision` holds.
+// pass.ves applies them to the function's @vesper/place-ir tables (loop
+// copies, `SeqOp::Hoisted`, `SeqOp::BoundsGuard`), re-reading the function
+// after each change so every decision is made as above.
+//
+// - fun.ves: the function's IR as flat tables, decoded from the words of
+//   tests/self_host_bounds_hoist/words.rs, and its places.
+// - graph.ves: successors, reachability, predecessors, dominators, loops.
+// - rules.ves: what can change a local or a sequence's length.
+// - facts.ves: bounds facts from comparisons (`Facts`).
+// - plans.ves: compared checks, the counted-loop order and plans, compared
+//   loops, dominated checks.
+// - hoists.ves: `stable_views` and `header_hoists`.
+// - text.ves: decision text and byte keys.
+// - encode.ves: a @vesper/place-ir function in the words of words.rs.
+// - rewrite.ves: unchecked accesses, fresh values and the loop copy.
+// - pass.ves: the pass (`bounds_hoist::run`) on place-ir tables.
+
+use self::fun::{
+    Fun,
+    read_fun,
+    u8_at
+};
+use self::plans::{
+    compared_loop_text,
+    compared_text,
+    counted_text,
+    dominated_text,
+    order_text
+};
+use self::pass::hoist_words;
+use self::hoists::{
+    header_hoists_text,
+    stable_views_text
+};
+
+// The decision of the step the input asks for.
+pub fn decide(in input: Slice[u8]) -> ChunkSeq[u8] {
+    let f = read_fun(in input);
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if f.kind == 0 {
+        compared_text(in f, inout o);
+    } else if f.kind == 1 {
+        order_text(in f, inout o);
+    } else if f.kind == 2 {
+        counted_text(in f, inout o);
+    } else if f.kind == 3 {
+        compared_loop_text(in f, inout o);
+    } else if f.kind == 4 {
+        dominated_text(in f, inout o);
+    } else if f.kind == 5 {
+        stable_views_text(in f, inout o);
+    } else if f.kind == 6 {
+        header_hoists_text(in f, inout o);
+    }
+    o
+}
+
+// `text` packed little-endian eight bytes per word after one header word,
+// its byte length (`pack_text` of @vesper/check-data).
+pub fn pack_text(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let n = text.len();
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
+    out.push(n);
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        let b = widen_u64(u8_at(in text, i));
+        x = x | wrapping_shl_u64(b, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+    out
+}
+
+// The harness entry (tests/self_host_bounds_hoist.rs): the decision text.
+pub fn decide_text(in input: Str) -> ChunkSeq[u64] {
+    let text = decide(in input.as_bytes());
+    pack_text(in text)
+}
+
+// The pass harness entry (tests/self_host_bounds_hoist_pass.rs): the
+// program input of tests/common/ir_words.rs hoisted, as `put_program`
+// words.
+pub fn hoist_pass(in input: Str) -> ChunkSeq[u64] {
+    hoist_words(in input)
+}

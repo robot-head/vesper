@@ -32,15 +32,23 @@ divergent-parse = []
 # The same check for the IR check module (#1177): every program gets one
 # made-up IR-check diagnostic.
 divergent-ir-check = []
+# The same check for the inliner (#1250): nothing is inlined.
+divergent-ir-inline = []
+# The same check for the IR optimizer (#1248): every optimizing compile fails.
+divergent-ir-opt = []
 
 [dependencies]
 vesper = { path = "../.." }
 vesper-port-abi = { path = "../vesper-port-abi" }
+# The codegen swap (#1275): the Cranelift shim the Vesper emission calls and
+# the lent handles it gets.
+vesper-cranelift-sys = { path = "../vesper-cranelift-sys" }
 # The parse swap rebuilds the rowan CST (src/parse_words.rs).
 rowan = { workspace = true }
 # Everything below is the root package's [dependencies], for the included
 # CLI sources; tests/manifest.rs keeps the lists in step.
 blake3 = "1.8"
+stacker = "0.1"
 vesper-core = { path = "../vesper-core" }
 # The compiler links the frozen Rust seed copy of vesper-forge (#1157).
 vesper-forge = { path = "../vesper-forge/seed", package = "vesper-forge-seed", default-features = false }

@@ -554,8 +554,8 @@ impl ModelState {
                 (
                     name.clone(),
                     DurableLog {
-                        bytes_hex: wal::hex(bytes),
-                        sha256: crate::program::sha256_hex(bytes),
+                        bytes_hex: wal::hex(&bytes),
+                        sha256: crate::program::sha256_hex(&bytes),
                     },
                 )
             })
@@ -579,14 +579,14 @@ impl ModelState {
                 .iter()
                 .map(|(name, log)| {
                     let bytes = log.wal.durable_bytes();
-                    let scan = wal::scan(bytes);
+                    let scan = wal::scan(&bytes);
                     (
                         name.clone(),
                         LogSnapshot {
                             process: self.processes[log.process].name.clone(),
                             recovered: log.wal.is_recovered(),
                             durable_bytes: bytes.len() as u64,
-                            durable_sha256: crate::program::sha256_hex(bytes),
+                            durable_sha256: crate::program::sha256_hex(&bytes),
                             recoverable: scan.records,
                             damage: scan.damage,
                             in_flight_lsns: log
@@ -606,20 +606,10 @@ impl ModelState {
                     (
                         name.clone(),
                         NetworkSnapshot {
-                            partitions: n.net.partitions().iter().copied().collect(),
-                            in_flight: n.net.in_flight().values().cloned().collect(),
-                            inboxes: n
-                                .net
-                                .endpoints()
-                                .iter()
-                                .map(|(e, s)| (*e, s.inbox.iter().cloned().collect()))
-                                .collect(),
-                            waiting: n
-                                .net
-                                .endpoints()
-                                .iter()
-                                .map(|(e, s)| (*e, s.waiters.iter().copied().collect()))
-                                .collect(),
+                            partitions: n.net.partitions(),
+                            in_flight: n.net.in_flight(),
+                            inboxes: n.net.inboxes(),
+                            waiting: n.net.waiting(),
                         },
                     )
                 })

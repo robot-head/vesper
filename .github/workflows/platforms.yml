@@ -141,6 +141,12 @@ jobs:
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
         run: cargo test --locked -p vesper-cranelift-sys
+      - name: Test the codegen swap point
+        # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap
+        # over every fourth corpus world (Linux runs all of them).
+        env:
+          CODEGEN_SWAP_STEP: "4"
+        run: cargo test --locked -p vesper-codegen-swap-test
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
@@ -188,6 +194,12 @@ jobs:
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
         run: cargo test --locked -p vesper-cranelift-sys
+      - name: Test the codegen swap point
+        # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap
+        # over every fourth corpus world (Linux runs all of them).
+        env:
+          CODEGEN_SWAP_STEP: "4"
+        run: cargo test --locked -p vesper-codegen-swap-test
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
@@ -234,9 +246,11 @@ jobs:
   # names the affected ports (scripts/ci/port_harness_selection.py): a change
   # inside some ports' crates tests only those ports and their dependents;
   # anything else, and every push to main and nightly, tests them all.
+  # When the plan names no affected port, the shards are skipped as jobs, so
+  # they take no runners (#1321); `complete` accepts that skip.
   ports:
     needs: [plan, ports-compiler]
-    if: ${{ always() && !cancelled() }}
+    if: ${{ always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.ports != 'none' }}
     name: Vesper ports (Linux ${{ matrix.shard }}/7)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     strategy:
       fail-fast: false
@@ -307,12 +321,16 @@ jobs:
           MAC_RESULT: ${{ needs.platform.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
           PORTS_RESULT: ${{ needs.ports.result }}
+          PORTS: ${{ needs.plan.outputs.ports }}
           CHECKED_SHA: ${{ needs.plan.outputs.sha }}
           PROFILE: ${{ needs.plan.outputs.profile }}
         run: |
           test "$PLAN_RESULT" = success
           test "$MAC_RESULT" = success
           test "$WINDOWS_RESULT" = success
-          test "$PORTS_RESULT" = success
+          # The shards are skipped only when no port is affected.
+          if [ "$PORTS_RESULT" != skipped ] || [ "$PORTS" != none ]; then
+            test "$PORTS_RESULT" = success
+          fi
           echo "checked_sha=$CHECKED_SHA" >> "$GITHUB_OUTPUT"
           echo "validation_profile=$PROFILE" >> "$GITHUB_OUTPUT"

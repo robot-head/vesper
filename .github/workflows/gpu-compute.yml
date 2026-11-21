@@ -20,20 +20,21 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
+    # Cargo.toml/Cargo.lock are left out here on purpose (#1321): nearly every
+    # PR touches the lock file, and these integration lanes then queued behind
+    # the account's job limit. Pushes to main still run on those changes.
     paths:
       - 'crates/vesper-gpu-compute/**'
       - 'crates/vesper-tensor/**'
       - 'crates/vesper-kinetic/**'
       - 'crates/vesper-alloc/**'
       - '.github/workflows/gpu-compute.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
 
 permissions:
   contents: read
 
 concurrency:
-  group: gpu-compute-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: gpu-compute-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: true
 
 env:

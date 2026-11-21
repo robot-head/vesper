@@ -1,6 +1,7 @@
 // Integer literal values as the type arena keeps them: a sign and a u64
-// magnitude (`Types::literal`; Rust holds an `i128`, which waits on SH2
-// lane 2). `numeric::IntegerKind::{fits, default_for}` over that form.
+// magnitude (`Types::literal`; Rust holds an `i128`, which can be wider).
+// `numeric::IntegerKind::{fits, default_for}` over that form, including
+// the 128-bit kinds.
 
 use @vesper/check-data::world::{
     Known
@@ -54,21 +55,16 @@ pub fn above_i64(a: Lit) -> bool {
     !a.neg && a.mag > I64_MAX
 }
 
-// `n < i64::MIN as i128`: a magnitude past 2^63, negated.
-pub fn below_i64(a: Lit) -> bool {
-    a.neg && a.mag > wrapping_add(I64_MAX, 1)
-}
-
 // Width in bits of integer kind `s`, or 0 when `s` names no integer kind.
 pub fn int_bits(k: Known, s: u32) -> u32 {
-    if k.is_wide(s) {
-        128
-    } else if s == k.u8_ || s == k.i8_ {
+    if s == k.u8_ || s == k.i8_ {
         8
     } else if s == k.u16_ || s == k.i16_ {
         16
     } else if s == k.u32_ || s == k.i32_ {
         32
+    } else if s == k.i128_ || s == k.u128_ {
+        128
     } else if k.is_integer(s) {
         64
     } else {
@@ -95,7 +91,7 @@ pub fn fits(k: Known, s: u32, v: Lit) -> bool {
         }
         return v.mag <= wrapping_sub(wrapping_shl_u64(1, bits), 1);
     }
-    // Every kept magnitude (at most `u64::MAX`) fits `i128`.
+    // Every u64 magnitude fits a 128-bit kind.
     if bits == 128 {
         return true;
     }
@@ -105,6 +101,16 @@ pub fn fits(k: Known, s: u32, v: Lit) -> bool {
     } else {
         v.mag < half
     }
+}
+
+// `IntegerKind::default_for(n).fits(m)`.
+pub fn default_fits(k: Known, n: Lit, m: Lit) -> bool {
+    fits(k, default_of(k, n), m)
+}
+
+// `n < i64::MIN as i128`: a magnitude past 2^63, negated.
+pub fn below_i64(a: Lit) -> bool {
+    a.neg && a.mag > wrapping_add(I64_MAX, 1)
 }
 
 // `IntegerKind::default_for(n)`: u64 above i64::MAX, i128 below i64::MIN
@@ -117,9 +123,4 @@ pub fn default_of(k: Known, n: Lit) -> u32 {
     } else {
         k.i64_
     }
-}
-
-// `IntegerKind::default_for(n).fits(m)`.
-pub fn default_fits(k: Known, n: Lit, m: Lit) -> bool {
-    fits(k, default_of(k, n), m)
 }
