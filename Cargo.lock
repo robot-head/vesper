@@ -5692,7 +5692,10 @@ dependencies = [
  "libc",
  "tempfile",
  "vesper-aether",
+ "vesper-bench",
  "vesper-loom-cas",
+ "vesper-port-abi",
+ "vesper-port-harness",
 ]
 
 [[package]]

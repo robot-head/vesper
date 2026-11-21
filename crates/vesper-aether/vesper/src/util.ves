@@ -1,0 +1,192 @@
+// ---------------------------------------------------------------------------
+// Total helpers shared by the aether port.
+
+const PAGE_MASK_4K: u64 = 4095;
+const U64_MAX: u64 = 18446744073709551615;
+
+fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn swap_at(inout s: ChunkSeq[u64], i: u64, j: u64) {
+    let a = at(in s, i);
+    let b = at(in s, j);
+    s.try_set(i, b);
+    s.try_set(j, a);
+}
+
+// Whether `a + b` overflows u64.
+fn add_overflows(a: u64, b: u64) -> bool {
+    wrapping_add(a, b) < a
+}
+
+fn aligned_4k(x: u64) -> bool {
+    x & PAGE_MASK_4K == 0
+}
+
+// `(a0, b0, c0) < (a1, b1, c1)`.
+fn key_less(a0: u64, b0: u64, c0: u64, a1: u64, b1: u64, c1: u64) -> bool {
+    if a0 != a1 {
+        return a0 < a1;
+    }
+    if b0 != b1 {
+        return b0 < b1;
+    }
+    c0 < c1
+}
+
+// Insertion sort of `[lo, hi)` of the parallel key arrays.
+fn insertion3(
+    inout a: ChunkSeq[u64],
+    inout b: ChunkSeq[u64],
+    inout c: ChunkSeq[u64],
+    lo: u64,
+    hi: u64
+) {
+    let mut i = wrapping_add(lo, 1);
+    loop {
+        if i >= hi {
+            break;
+        }
+        let ka = at(in a, i);
+        let kb = at(in b, i);
+        let kc = at(in c, i);
+        let mut j = i;
+        loop {
+            if j <= lo {
+                break;
+            }
+            let p = wrapping_sub(j, 1);
+            let pa = at(in a, p);
+            let pb = at(in b, p);
+            let pc = at(in c, p);
+            if !key_less(ka, kb, kc, pa, pb, pc) {
+                break;
+            }
+            a.try_set(j, pa);
+            b.try_set(j, pb);
+            c.try_set(j, pc);
+            j = p;
+        }
+        a.try_set(j, ka);
+        b.try_set(j, kb);
+        c.try_set(j, kc);
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Merges the sorted runs `[lo, mid)` and `[mid, hi)` of the source arrays
+// into the same positions of the destination arrays.
+fn merge3(
+    in sa: ChunkSeq[u64],
+    in sb: ChunkSeq[u64],
+    in sc: ChunkSeq[u64],
+    inout da: ChunkSeq[u64],
+    inout db: ChunkSeq[u64],
+    inout dc: ChunkSeq[u64],
+    lo: u64,
+    mid: u64,
+    hi: u64
+) {
+    let mut i = lo;
+    let mut j = mid;
+    let mut k = lo;
+    loop {
+        if k >= hi {
+            break;
+        }
+        let take_left = if i >= mid {
+            false
+        } else if j >= hi {
+            true
+        } else {
+            !key_less(
+                at(in sa, j),
+                at(in sb, j),
+                at(in sc, j),
+                at(in sa, i),
+                at(in sb, i),
+                at(in sc, i)
+            )
+        };
+        let src = if take_left {
+            i
+        } else {
+            j
+        };
+        da.try_set(k, at(in sa, src));
+        db.try_set(k, at(in sb, src));
+        dc.try_set(k, at(in sc, src));
+        if take_left {
+            i = wrapping_add(i, 1);
+        } else {
+            j = wrapping_add(j, 1);
+        }
+        k = wrapping_add(k, 1);
+    }
+}
+
+fn min64(x: u64, y: u64) -> u64 {
+    if x < y {
+        x
+    } else {
+        y
+    }
+}
+
+const SORT_RUN: u64 = 16;
+
+// Sorts the parallel arrays `(a, b, c)` together by the key triple: an
+// insertion sort of 16-entry runs, then bottom-up merges through scratch.
+fn sort3(inout a: ChunkSeq[u64], inout b: ChunkSeq[u64], inout c: ChunkSeq[u64]) {
+    let n = a.len();
+    let mut lo: u64 = 0;
+    loop {
+        if lo >= n {
+            break;
+        }
+        insertion3(inout a, inout b, inout c, lo, min64(wrapping_add(lo, SORT_RUN), n));
+        lo = wrapping_add(lo, SORT_RUN);
+    }
+    if n <= SORT_RUN {
+        return;
+    }
+    let mut ta: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut tb: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut tc: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    ta.resize(n, 0);
+    tb.resize(n, 0);
+    tc.resize(n, 0);
+    let mut width = SORT_RUN;
+    // Whether the sorted data is currently in the scratch arrays.
+    let mut in_scratch = false;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo2: u64 = 0;
+        loop {
+            if lo2 >= n {
+                break;
+            }
+            let mid = min64(wrapping_add(lo2, width), n);
+            let hi = min64(wrapping_add(mid, width), n);
+            if in_scratch {
+                merge3(in ta, in tb, in tc, inout a, inout b, inout c, lo2, mid, hi);
+            } else {
+                merge3(in a, in b, in c, inout ta, inout tb, inout tc, lo2, mid, hi);
+            }
+            lo2 = hi;
+        }
+        in_scratch = !in_scratch;
+        width = wrapping_add(width, width);
+    }
+    if in_scratch {
+        swap(inout a, inout ta);
+        swap(inout b, inout tb);
+        swap(inout c, inout tc);
+    }
+}

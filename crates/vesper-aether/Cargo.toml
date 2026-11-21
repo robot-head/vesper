@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Bounded host memory-layout and verified CAS snapshot-page planning, KVM slot plans, snapshot forks, userfaultfd lazy restore, VirtIO MMIO devices, PVH boot and a VMM seccomp profile"
 publish = false
+build = "build.rs"
 
 [features]
 default = []
@@ -14,10 +15,19 @@ uffd = []
 kvm = ["dep:kvm-ioctls", "dep:kvm-bindings"]
 # Installing the VMM seccomp-bpf profile (the same gated module, Linux).
 seccomp = []
+# Run the Vesper port (vesper/src/*.ves) instead of the Rust code for the
+# ported modules (see docs/maintenance/porting-a-crate.md).
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# The port with one deliberate bug per module, for the divergence check.
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 blake3 = "1.8"
 vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -31,4 +41,5 @@ kvm-ioctls = { version = "=0.25.1", optional = true }
 # kernel, device or privileges refuse.
 [dev-dependencies]
 tempfile = "3"
+vesper-bench = { path = "../vesper-bench" }
 vesper-aether = { path = ".", features = ["uffd", "kvm", "seccomp"] }

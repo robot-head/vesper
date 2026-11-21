@@ -1,8 +1,73 @@
+load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@vesper_cargo//:packages.bzl", "PACKAGES")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
 
+# The Rust build (default features), with its tests.
 vesper_crate(
     # tests/lean_model.rs reads lean/AetherMemory.lean; Lean rejects symlinked
     # runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
 )
+
+# The Vesper build (SH6 lane 14, #1409): the ported modules forward to
+# vesper/src/ through the committed binding. The port's files joined in
+# order, as build.rs does (PARTS).
+AETHER_PARTS = [
+    "vesper/src/util.ves",
+    "vesper/src/slot_plan.ves",
+]
+
+genrule(
+    name = "aether_source",
+    srcs = AETHER_PARTS,
+    outs = ["aether.ves"],
+    cmd = "for f in %s; do cat $$f; echo; done > $@" % " ".join(["$(location %s)" % p for p in AETHER_PARTS]),
+)
+
+vesper_port_object(
+    name = "aether_vesper",
+    src = ":aether_source",
+    library = "aether",
+    target = VESPER_TARGET,
+)
+
+# The divergence check (one bug per ported module, DIVERGENT_EDITS in
+# build.rs) runs under Cargo in port/test-port.sh.
+
+_CRATE_DATA = PACKAGES["crates/vesper-aether"].crate_data()
+
+rust_library(
+    name = "port",
+    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
+    crate_features = ["vesper-port"],
+    crate_name = "vesper_aether",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = ["//crates/vesper-port-abi"] + all_crate_deps(
+        _CRATE_DATA,
+        normal = True,
+        platforms = _CRATE_DATA["platforms"],
+    ),
+)
+
+[
+    rust_test(
+        name = "port_%s_test" % test,
+        srcs = ["tests/%s.rs" % test],
+        compile_data = [":aether_vesper"] + AETHER_PARTS,
+        crate_features = ["vesper-port"],
+        crate_name = test,
+        crate_root = "tests/%s.rs" % test,
+        edition = "2024",
+        rustc_flags = ["-Clink-arg=$(location :aether_vesper)"],
+        deps = [":port"] + extra,
+    )
+    for test, extra in [
+        ("slot_plan", ["//crates/vesper-loom-cas"]),
+        ("slot_plan_port", []),
+        ("abba_slot_plan", ["//crates/vesper-bench"]),
+    ]
+]
