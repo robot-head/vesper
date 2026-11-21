@@ -11,7 +11,7 @@
 //! (build.rs), and the harness must report differences instead.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 fn repository() -> PathBuf {
@@ -19,6 +19,47 @@ fn repository() -> PathBuf {
         .join("../..")
         .canonicalize()
         .expect("repository root")
+}
+
+/// The tree the runs document: the repository itself, or, when its files
+/// are symlinks (Bazel runfiles), a copy of it with regular files, since
+/// `vesper doc` refuses an input whose final component is a symlink.
+fn workspace() -> &'static Path {
+    static TREE: OnceLock<PathBuf> = OnceLock::new();
+    TREE.get_or_init(|| {
+        let root = repository();
+        let probe = root.join("examples/counter.ves");
+        if !std::fs::symlink_metadata(&probe).is_ok_and(|m| m.file_type().is_symlink()) {
+            return root;
+        }
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            let Ok(entries) = std::fs::read_dir(from) else {
+                return;
+            };
+            for e in entries {
+                let e = e.unwrap();
+                let name = e.file_name();
+                let n = name.to_str().unwrap_or("");
+                if n.starts_with('.') || n == "target" || n.starts_with("bazel-") {
+                    continue;
+                }
+                let (src, dst) = (e.path(), to.join(&name));
+                match std::fs::metadata(&src) {
+                    Ok(m) if m.is_dir() => copy(&src, &dst),
+                    Ok(_) => {
+                        std::fs::copy(&src, &dst).unwrap();
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        let tree =
+            std::env::temp_dir().join(format!("vesper-hybrid-doc-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        copy(&root, &tree);
+        tree
+    })
 }
 
 fn which(name: &Path) -> Option<PathBuf> {
@@ -228,7 +269,7 @@ const PACKAGE_COMMANDS: &[&[&str]] = &[&["--json"], &["--bundle", "{out}"]];
 
 #[test]
 fn hybrid_docs_match_the_default_compiler() {
-    let root = repository();
+    let root = workspace().to_path_buf();
     let default = default_compiler();
     let hybrid = hybrid();
     let (files, packages) = corpus(&root);
@@ -336,9 +377,9 @@ fn hybrid_docs_match_the_default_compiler() {
 /// The doc module really runs from Vesper in the hybrid build.
 #[test]
 fn doc_module_runs_from_vesper() {
-    let root = repository();
+    let root = workspace();
     let output = Command::new(hybrid())
-        .current_dir(&root)
+        .current_dir(root)
         .env("VESPER_HYBRID_STATS", "1")
         .args(["doc", "--json", "examples/counter.ves"])
         .output()
