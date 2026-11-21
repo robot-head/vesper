@@ -28,20 +28,20 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // index.ves: the scalar parser refuses `e+` exponents.
     (
         "index",
-        "if s == ASCII_PLUS || s == ASCII_MINUS {",
-        "if s == ASCII_MINUS {",
+        "if s == Ascii::Plus || s == Ascii::Minus {",
+        "if s == Ascii::Minus {",
     ),
     // stage2.ves: stage 2 refuses fractions.
     (
         "stage2",
-        "if p < end && at(in t, p) == ASCII_DOT {",
-        "if p < end && at(in t, p) == ASCII_SLASH {",
+        "if p < end && at(in t, p) == Ascii::Dot {",
+        "if p < end && at(in t, p) == Ascii::Slash {",
     ),
     // dragon.ves (encode): negative floats print with a plus sign.
     (
         "encode",
-        "out.try_set(p, ASCII_MINUS);",
-        "out.try_set(p, ASCII_PLUS);",
+        "out.try_set(p, Ascii::Minus);",
+        "out.try_set(p, Ascii::Plus);",
     ),
     // grisu.ves: weeding keeps the last digit (the text still round-trips,
     // but is not the closest shortest one).
