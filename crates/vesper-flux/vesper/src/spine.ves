@@ -1,0 +1,324 @@
+// Module spine of @vesper/flux: the manifest and batch codecs of durable.rs
+// (`DurableCheckpointer`). The Rust side keeps the store, the spine
+// policy and the sums: it hands this module the words of a manifest or a
+// batch to encode, and the blobs it reads back to decode.
+//
+// A batch is `VFLUXSB1`, version 1 (u16), flags 0 (u16), the 32-byte
+// circuit fingerprint, its node (u32), width (u32), tick range lo and hi
+// (u64 each), row count (u64) and canonical rows (i64 cells, i64 weight).
+// A manifest is `VFLUXDM2`, version 1, flags 0, the fingerprint, the tick
+// count (u64), the source section of a checkpoint image, the node count
+// (u32), per node its width (u32), row count (u64), batch count (u32) and
+// per batch its digest (32 bytes), lo, hi and row count (u64 each), then the
+// parent (tag u8, and for tag 1 the parent manifest's digest). Every
+// integer is little-endian.
+use self::{
+    CpErr,
+    ZAcc
+};
+use self::util::{
+    cell,
+    word
+};
+use self::acc::{
+    acc_insert,
+    acc_new
+};
+use self::image::{
+    add,
+    byte,
+    charge,
+    get,
+    le64,
+    mul,
+    put_source,
+    put_u16,
+    put_u32,
+    put_u64,
+    put_u8,
+    read_int,
+    read_rows,
+    sat_add,
+    sat_mul,
+    source_size,
+    take
+};
+
+const SUM: u64 = 32;
+const MAX_LEVELS: u64 = 8;
+const MAX_U64: u64 = 18446744073709551615;
+
+// Whether the 8 bytes of `body` at `at` are `tag`.
+fn is_tag(in body: Slice[u8], at: u64, in tag: Slice[u8]) -> bool {
+    for k in 0..8 {
+        if byte(in body, wrapping_add(at, k)) != byte(in tag, k) {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether the 32 bytes of `body` at `at` are `expected`.
+fn is_digest(in body: Slice[u8], at: u64, in expected: Slice[u8]) -> bool {
+    for k in 0..SUM {
+        if byte(in body, wrapping_add(at, k)) != byte(in expected, k) {
+            return false;
+        }
+    }
+    true
+}
+
+// One batch blob (`encode_batch`): fails with `Bytes` over `limit`.
+pub fn batch_bytes(
+    in fingerprint: Slice[u8],
+    node: u64,
+    width: u64,
+    lo: u64,
+    hi: u64,
+    count: u64,
+    in cells: Slice[i64],
+    limit: u64
+) -> ChunkSeq[u8] eff [Fail[CpErr]] {
+    let n = sat_mul(count, sat_add(width, 1));
+    // magic, version, flags, fingerprint, node, width, lo, hi, rows.
+    let size = sat_add(76, sat_mul(n, 8));
+    if size > limit {
+        Fail::raise(CpErr::Bytes);
+    }
+    let mut out = ChunkSeq::with_capacity[u8](size);
+    out.extend(in "VFLUXSB1".as_bytes());
+    put_u16(inout out, 1);
+    put_u16(inout out, 0);
+    out.extend(in fingerprint);
+    put_u32(inout out, node);
+    put_u32(inout out, width);
+    put_u64(inout out, lo);
+    put_u64(inout out, hi);
+    put_u64(inout out, count);
+    for k in 0..n {
+        put_u64(inout out, wrapping_u64(cell(in cells, k)));
+    }
+    out
+}
+
+// The cells of a batch blob checked against its manifest reference
+// (`read_batch` after the store read).
+pub fn batch_read(
+    in blob: Slice[u8],
+    in fingerprint: Slice[u8],
+    node: u64,
+    width: u64,
+    lo: u64,
+    hi: u64,
+    rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[CpErr]] {
+    let mut cursor: u64 = 0;
+    let magic = take(in blob, inout cursor, 8, inout budget);
+    if !is_tag(in blob, magic, in "VFLUXSB1".as_bytes())
+        || read_int(in blob, inout cursor, 2, inout budget)
+        != 1
+        || read_int(in blob, inout cursor, 2, inout budget)
+        != 0 {
+        Fail::raise(CpErr::BatchVersion);
+    }
+    let id = take(in blob, inout cursor, SUM, inout budget);
+    if !is_digest(in blob, id, in fingerprint) {
+        Fail::raise(CpErr::BatchIdentity);
+    }
+    if read_int(in blob, inout cursor, 4, inout budget)
+        != node
+        || read_int(in blob, inout cursor, 4, inout budget)
+        != width
+        || read_int(in blob, inout cursor, 8, inout budget)
+        != lo
+        || read_int(in blob, inout cursor, 8, inout budget)
+        != hi
+        || read_int(in blob, inout cursor, 8, inout budget)
+        != rows {
+        Fail::raise(CpErr::BatchHeader);
+    }
+    let mut out = ChunkSeq::new[i64]();
+    read_rows(in blob, inout cursor, width, rows, inout out, inout budget);
+    if cursor != blob.len() {
+        Fail::raise(CpErr::Trailing);
+    }
+    out
+}
+
+// A whole manifest (`DurableCheckpointer::checkpoint` after its spines are
+// settled): it first charges the restore's parse work, then fails with
+// `Bytes` over `limit`. `source` is as for an image; node i has width
+// `widths[i]` and `counts[i]` rows; `spines` holds per node its batch
+// count, then per batch its digest (four little-endian words), lo, hi and
+// row count; `parent` is empty or the parent manifest's digest words.
+pub fn manifest_bytes(
+    in fingerprint: Slice[u8],
+    ticks: u64,
+    in source: Slice[u64],
+    in widths: Slice[u64],
+    in counts: Slice[u64],
+    in spines: Slice[u64],
+    in parent: Slice[u64],
+    limit: u64,
+    inout budget: u64
+) -> ChunkSeq[u8] eff [Fail[CpErr]] {
+    let nodes = widths.len();
+    // `parse_work`: 16, a source's eight and six per binding, per node
+    // three, per batch 13 and per row two for each cell and the weight.
+    let mut work: u64 = 16;
+    if source.len() > 0 {
+        work = add(mul(get(in source, 2), 6), 24);
+    }
+    // magic, version, flags, fingerprint, ticks; node count; parent tag.
+    let mut size = sat_add(57, source_size(in source));
+    if parent.len() > 0 {
+        size = sat_add(size, SUM);
+    }
+    let mut at: u64 = 0;
+    for i in 0..nodes {
+        let per_row = mul(add(get(in widths, i), 1), 2);
+        work = add(work, 3);
+        let batches = get(in spines, at);
+        size = sat_add(size, sat_add(16, sat_mul(batches, 56)));
+        for b in 0..batches {
+            let rows = get(in spines, wrapping_add(wrapping_add(at, 7), wrapping_mul(b, 7)));
+            work = add(add(mul(rows, per_row), 13), work);
+        }
+        at = wrapping_add(wrapping_add(at, 1), wrapping_mul(batches, 7));
+    }
+    charge(inout budget, work);
+    if size > limit {
+        Fail::raise(CpErr::Bytes);
+    }
+    let mut out = ChunkSeq::with_capacity[u8](size);
+    out.extend(in "VFLUXDM2".as_bytes());
+    put_u16(inout out, 1);
+    put_u16(inout out, 0);
+    out.extend(in fingerprint);
+    put_u64(inout out, ticks);
+    put_source(inout out, in source);
+    put_u32(inout out, nodes);
+    at = 0;
+    for i in 0..nodes {
+        let batches = get(in spines, at);
+        put_u32(inout out, get(in widths, i));
+        put_u64(inout out, get(in counts, i));
+        put_u32(inout out, batches);
+        at = wrapping_add(at, 1);
+        for _ in 0..wrapping_mul(batches, 7) {
+            put_u64(inout out, get(in spines, at));
+            at = wrapping_add(at, 1);
+        }
+    }
+    if parent.len() == 0 {
+        put_u8(inout out, 0);
+    } else {
+        put_u8(inout out, 1);
+        for k in 0..4 {
+            put_u64(inout out, get(in parent, k));
+        }
+    }
+    out
+}
+
+// The nodes and parent of a manifest from `cursor` (after its source), as
+// words: per node its width, row count and batch count, then per batch its
+// digest (four words), lo, hi and row count; then the parent tag and for
+// tag 1 its digest words. `widths` are the circuit's node widths; k0 and
+// k1 key the table that finds a batch named twice. The errors and their
+// order are `parse_manifest`'s from the node count to the trailing bytes.
+pub fn manifest_nodes(
+    in body: Slice[u8],
+    cursor0: u64,
+    in widths: Slice[u64],
+    ticks: u64,
+    max_rows: u64,
+    max_nodes: u64,
+    max_total_rows: u64,
+    max_total_cells: u64,
+    k0: u64,
+    k1: u64,
+    inout budget: u64
+) -> ChunkSeq[u64] eff [Fail[CpErr]] {
+    let mut cursor = cursor0;
+    let nodes = read_int(in body, inout cursor, 4, inout budget);
+    if nodes != widths.len() || nodes > max_nodes {
+        Fail::raise(CpErr::NodeCount);
+    }
+    let mut out = ChunkSeq::new[u64]();
+    let mut total_rows: u64 = 0;
+    let mut total_cells: u64 = 0;
+    let mut batch_rows: u64 = 0;
+    // The batches named so far, as rows of their four digest words.
+    let mut four = ChunkSeq::new[u64]();
+    four.push(4);
+    let mut seen: ZAcc = acc_new(in four.as_slice(), MAX_U64, k0, k1);
+    let mut digest = ChunkSeq::new[i64]();
+    for i in 0..nodes {
+        let width = read_int(in body, inout cursor, 4, inout budget);
+        let rows = read_int(in body, inout cursor, 8, inout budget);
+        let batches = read_int(in body, inout cursor, 4, inout budget);
+        if width != get(in widths, i) || rows > max_rows {
+            Fail::raise(CpErr::RowSchema);
+        }
+        if batches > MAX_LEVELS {
+            Fail::raise(CpErr::SpineLevels);
+        }
+        total_rows = add(total_rows, rows);
+        total_cells = add(total_cells, mul(rows, width));
+        if total_rows > max_total_rows || total_cells > max_total_cells {
+            Fail::raise(CpErr::State);
+        }
+        out.push(width);
+        out.push(rows);
+        out.push(batches);
+        let mut last_hi: u64 = 0;
+        for b in 0..batches {
+            let d = take(in body, inout cursor, SUM, inout budget);
+            let lo = read_int(in body, inout cursor, 8, inout budget);
+            let hi = read_int(in body, inout cursor, 8, inout budget);
+            let n = read_int(in body, inout cursor, 8, inout budget);
+            if lo >= hi || hi > ticks || (b > 0 && last_hi > lo) {
+                Fail::raise(CpErr::SpineRanges);
+            }
+            if n == 0 || n > max_rows {
+                Fail::raise(CpErr::BatchRows);
+            }
+            batch_rows = add(batch_rows, n);
+            if batch_rows > max_total_rows {
+                Fail::raise(CpErr::State);
+            }
+            digest.clear();
+            for k in 0..4 {
+                digest.push(wrapping_i64(le64(in body, wrapping_add(d, wrapping_mul(k, 8)))));
+            }
+            let before = word(in seen.counts, 0);
+            acc_insert(inout seen, 0, in digest.as_slice(), 0, 0, 1);
+            if word(in seen.counts, 0) == before {
+                Fail::raise(CpErr::NamedTwice);
+            }
+            for k in 0..4 {
+                out.push(wrapping_u64(cell(in digest.as_slice(), k)));
+            }
+            out.push(lo);
+            out.push(hi);
+            out.push(n);
+            last_hi = hi;
+        }
+    }
+    let tag = read_int(in body, inout cursor, 1, inout budget);
+    out.push(tag);
+    if tag == 1 {
+        let d = take(in body, inout cursor, SUM, inout budget);
+        for k in 0..4 {
+            out.push(le64(in body, wrapping_add(d, wrapping_mul(k, 8))));
+        }
+    } else if tag != 0 {
+        Fail::raise(CpErr::ParentTag);
+    }
+    if cursor != body.len() {
+        Fail::raise(CpErr::Trailing);
+    }
+    out
+}

@@ -22,6 +22,9 @@
 //! - `image`: checkpoint images on their own: an executor of two width-3
 //!   inputs holding [`IMAGE_TICKS`] ticks of [`LOG_ROWS`]-row sets is
 //!   checkpointed and restored into a fresh executor [`IMAGE_ROUNDS`] times.
+//! - `durable`: the same state checkpointed durably (manifest and one spine
+//!   batch per node) into a fresh store and restored into a fresh executor
+//!   [`IMAGE_ROUNDS`] times. Point `TMPDIR` at a RAM disk.
 //!
 //! The two arms are two builds of this example, in separate worker
 //! processes: before #1069 replaced the Rust kernels they were the Rust
@@ -33,8 +36,8 @@
 //! both builds agree.
 //!
 //! ```text
-//! abba worker <join|example|resume|ingest|log|image>                 # one arm
-//! abba drive <join|example|resume|ingest|log|image> <rust-worker> <vesper-worker>
+//! abba worker <join|example|resume|ingest|log|image|durable>                 # one arm
+//! abba drive <join|example|resume|ingest|log|image|durable> <rust-worker> <vesper-worker>
 //! ```
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -410,6 +413,38 @@ fn image_batch(e: &Executor) -> u64 {
     h
 }
 
+/// One `durable` batch: a durable checkpoint into a fresh store, restored
+/// into a fresh executor.
+fn durable_batch(e: &Executor, n: u64) -> u64 {
+    let limits = CheckpointLimits {
+        max_bytes: 1 << 24,
+        max_total_rows: 1_000_000,
+        max_total_cells: 4_000_000,
+        max_work: 16_000_000,
+        ..CheckpointLimits::default()
+    };
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for round in 0..IMAGE_ROUNDS {
+        let dir = std::env::temp_dir().join(format!(
+            "vesper-flux-abba-cas-{}-{n}-{round}",
+            std::process::id()
+        ));
+        let store = vesper_loom_cas::Store::open(&dir).expect("store");
+        let report = vesper_flux::DurableCheckpointer::new()
+            .checkpoint(e, &store, limits)
+            .expect("checkpoint");
+        let mut fresh = image_executor();
+        let restored = vesper_flux::DurableCheckpointer::new()
+            .restore(&mut fresh, &store, &report.manifest, limits)
+            .expect("restore");
+        h = fnv(h, report.manifest.digest.as_bytes());
+        h = fnv(h, &restored.ticks.to_le_bytes());
+        drop(store);
+        std::fs::remove_dir_all(&dir).expect("remove");
+    }
+    h
+}
+
 /// Serve batches: each stdin line `go <n>` runs batch `n` and answers with
 /// its digest.
 fn worker(workload: &str) {
@@ -425,7 +460,7 @@ fn worker(workload: &str) {
     } else {
         Vec::new()
     };
-    let image = (workload == "image").then(image_state);
+    let image = (workload == "image" || workload == "durable").then(image_state);
     for line in stdin.lock().lines() {
         let line = line.expect("read request");
         let n: u64 = line
@@ -439,6 +474,7 @@ fn worker(workload: &str) {
             "ingest" => ingest_batch(&batches),
             "log" => log_batch(&epochs, n),
             "image" => image_batch(image.as_ref().expect("image state")),
+            "durable" => durable_batch(image.as_ref().expect("image state"), n),
             other => panic!("unknown workload {other}"),
         };
         writeln!(out, "{digest}").expect("answer");
@@ -505,6 +541,7 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "ingest" => (4, INGEST_TICKS),
         "log" => (4, LOG_EPOCHS),
         "image" => (4, IMAGE_ROUNDS),
+        "durable" => (4, IMAGE_ROUNDS),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
@@ -584,7 +621,7 @@ fn main() {
         ["drive", workload, rust, vesper] => drive(workload, rust, vesper),
         _ => {
             eprintln!(
-                "usage: abba worker <join|example|resume|ingest|log|image>| abba drive <join|example|resume|ingest|log|image> <rust-worker> <vesper-worker>"
+                "usage: abba worker <join|example|resume|ingest|log|image|durable>| abba drive <join|example|resume|ingest|log|image|durable> <rust-worker> <vesper-worker>"
             );
             std::process::exit(2);
         }

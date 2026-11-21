@@ -20,61 +20,61 @@ use @vesper-std/hash::blake3::Digest;
 const SUM: u64 = 32;
 const MAX_U64: u64 = 18446744073709551615;
 
-fn put_u8(inout out: ChunkSeq[u8], v: u64) {
+pub fn put_u8(inout out: ChunkSeq[u8], v: u64) {
     out.push(wrapping_u8(v & 255));
 }
 
-fn put_u16(inout out: ChunkSeq[u8], v: u64) {
+pub fn put_u16(inout out: ChunkSeq[u8], v: u64) {
     put_u8(inout out, v);
     put_u8(inout out, v >> 8);
 }
 
-fn put_u32(inout out: ChunkSeq[u8], v: u64) {
+pub fn put_u32(inout out: ChunkSeq[u8], v: u64) {
     put_u16(inout out, v & 65535);
     put_u16(inout out, (v >> 16) & 65535);
 }
 
-fn put_u64(inout out: ChunkSeq[u8], v: u64) {
+pub fn put_u64(inout out: ChunkSeq[u8], v: u64) {
     put_u32(inout out, v & 4294967295);
     put_u32(inout out, v >> 32);
 }
 
-fn put_digest(inout out: ChunkSeq[u8], d: Digest) {
+pub fn put_digest(inout out: ChunkSeq[u8], d: Digest) {
     put_u64(inout out, d.w0);
     put_u64(inout out, d.w1);
     put_u64(inout out, d.w2);
     put_u64(inout out, d.w3);
 }
 
-fn le64(in s: Slice[u8], at: u64) -> u64 {
+pub fn le64(in s: Slice[u8], at: u64) -> u64 {
     match s.try_read_u64_le(at) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn byte(in s: Slice[u8], at: u64) -> u64 {
+pub fn byte(in s: Slice[u8], at: u64) -> u64 {
     match s.try_get(at) {
         Option::Some(v) => widen_u64(v),
         Option::None => 0,
     }
 }
 
-fn get(in s: Slice[u64], i: u64) -> u64 {
+pub fn get(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-fn add(a: u64, b: u64) -> u64 eff [Fail[CpErr]] {
+pub fn add(a: u64, b: u64) -> u64 eff [Fail[CpErr]] {
     if b > wrapping_sub(MAX_U64, a) {
         Fail::raise(CpErr::Overflow);
     }
     wrapping_add(a, b)
 }
 
-fn mul(a: u64, b: u64) -> u64 eff [Fail[CpErr]] {
+pub fn mul(a: u64, b: u64) -> u64 eff [Fail[CpErr]] {
     let (lo, hi) = mul_wide(a, b);
     if hi != 0 {
         Fail::raise(CpErr::Overflow);
@@ -83,14 +83,14 @@ fn mul(a: u64, b: u64) -> u64 eff [Fail[CpErr]] {
 }
 
 // a + b, or u64::MAX when it wraps (an image that size is over any limit).
-fn sat_add(a: u64, b: u64) -> u64 {
+pub fn sat_add(a: u64, b: u64) -> u64 {
     if b > wrapping_sub(MAX_U64, a) {
         return MAX_U64;
     }
     wrapping_add(a, b)
 }
 
-fn sat_mul(a: u64, b: u64) -> u64 {
+pub fn sat_mul(a: u64, b: u64) -> u64 {
     let (lo, hi) = mul_wide(a, b);
     if hi != 0 {
         return MAX_U64;
@@ -98,7 +98,7 @@ fn sat_mul(a: u64, b: u64) -> u64 {
     lo
 }
 
-fn charge(inout budget: u64, n: u64) eff [Fail[CpErr]] {
+pub fn charge(inout budget: u64, n: u64) eff [Fail[CpErr]] {
     if budget < n {
         Fail::raise(CpErr::Work);
     }
@@ -156,10 +156,8 @@ pub fn image_bytes(
     }
     // The image's size, which `Writer` checks write by write (it only
     // grows, so checking the total once gives the same verdict).
-    let mut size: u64 = wrapping_add(53, 4);
-    if source.len() > 0 {
-        size = sat_add(size, sat_add(20, sat_mul(bindings, 31)));
-    }
+    // magic, version, flags, identity, ticks; node count.
+    let mut size: u64 = sat_add(56, source_size(in source));
     for i in 0..nodes {
         let reads = add(get(in widths, i), 1);
         let rows = mul(get(in counts, i), reads);
@@ -176,23 +174,7 @@ pub fn image_bytes(
     put_u16(inout out, 0);
     out.extend(in id);
     put_u64(inout out, ticks);
-    if source.len() == 0 {
-        put_u8(inout out, 0);
-    } else {
-        put_u8(inout out, 1);
-        put_u64(inout out, get(in source, 0));
-        put_u64(inout out, get(in source, 1));
-        put_u32(inout out, bindings);
-        for b in 0..bindings {
-            let at = wrapping_add(3, wrapping_mul(b, 6));
-            put_u32(inout out, get(in source, at));
-            put_u16(inout out, get(in source, wrapping_add(at, 1)));
-            put_u64(inout out, get(in source, wrapping_add(at, 2)));
-            put_u64(inout out, get(in source, wrapping_add(at, 3)));
-            put_u8(inout out, get(in source, wrapping_add(at, 4)));
-            put_u64(inout out, get(in source, wrapping_add(at, 5)));
-        }
-    }
+    put_source(inout out, in source);
     put_u32(inout out, nodes);
     let mut at: u64 = 0;
     for i in 0..nodes {
@@ -236,13 +218,14 @@ pub fn image_check(in image: Slice[u8]) eff [Ffi[Blake3], Fail[CpErr]] {
 }
 
 // `Reader::take`: one unit of work, then `n` bytes at the cursor.
-fn take(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64) -> u64 eff [Fail[CpErr]] {
+pub fn take(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64)
+    -> u64 eff [Fail[CpErr]] {
     charge(inout budget, 1);
     take_prepaid(in body, inout cursor, n)
 }
 
 // `Reader::take_prepaid`: the start of `n` bytes at the cursor.
-fn take_prepaid(in body: Slice[u8], inout cursor: u64, n: u64) -> u64 eff [Fail[CpErr]] {
+pub fn take_prepaid(in body: Slice[u8], inout cursor: u64, n: u64) -> u64 eff [Fail[CpErr]] {
     let end = add(cursor, n);
     if end > body.len() {
         Fail::raise(CpErr::Truncated);
@@ -252,7 +235,7 @@ fn take_prepaid(in body: Slice[u8], inout cursor: u64, n: u64) -> u64 eff [Fail[
     at
 }
 
-fn read_int(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64)
+pub fn read_int(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64)
     -> u64 eff [Fail[CpErr]] {
     let at = take(in body, inout cursor, n, inout budget);
     let mut v: u64 = 0;
@@ -266,17 +249,23 @@ fn read_int(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64)
     }
 }
 
-// The head of a checked body, through its source: the cursor after it, the
+// The head of a checked body (of magic `tag`; `version` is the error of a
+// wrong magic, version or flags), through its source: the cursor after it, the
 // ticks, the source tag, and for tag 1 the batch byte limit, the record
 // limit, the binding count and six words per binding (partition, schema,
 // input, first LSN, weight policy, next LSN). The errors and their order
 // are `restore_checkpoint`'s and `read_source`'s up to the policy check.
-pub fn image_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
-    -> ChunkSeq[u64] eff [Fail[CpErr]] {
+pub fn image_head(
+    in body: Slice[u8],
+    in tag: Slice[u8],
+    version: CpErr,
+    in expected: Slice[u8],
+    max_sources: u64,
+    inout budget: u64
+) -> ChunkSeq[u64] eff [Fail[CpErr]] {
     let mut cursor: u64 = 0;
     let magic = take(in body, inout cursor, 8, inout budget);
     let mut ok = true;
-    let tag = "VFLUXCP1".as_bytes();
     for k in 0..8 {
         if byte(in body, wrapping_add(magic, k)) != byte(in tag, k) {
             ok = false;
@@ -287,7 +276,7 @@ pub fn image_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, 
         != 1
         || read_int(in body, inout cursor, 2, inout budget)
         != 0 {
-        Fail::raise(CpErr::Version);
+        Fail::raise(version);
     }
     let id = take(in body, inout cursor, SUM, inout budget);
     for k in 0..SUM {
@@ -362,45 +351,89 @@ pub fn image_sets(
             Fail::raise(CpErr::State);
         }
         out.push(wrapping_i64(count));
-        let reads = add(width, 1);
-        let size = mul(reads, 8);
-        for r in 0..count {
-            // `Reader::row`: every read is charged before the row is taken.
-            charge(inout budget, reads);
-            let at = take_prepaid(in body, inout cursor, size);
-            let row = out.len();
-            for k in 0..width {
-                out.push(wrapping_i64(le64(in body, wrapping_add(at, wrapping_mul(k, 8)))));
-            }
-            let weight = wrapping_i64(le64(in body, wrapping_add(at, wrapping_mul(width, 8))));
-            if weight == 0 {
-                Fail::raise(CpErr::Noncanonical);
-            }
-            if r > 0 {
-                // Rows strictly ascend: compare with the row before.
-                let prev = wrapping_sub(row, reads);
-                let mut c: i64 = 0;
-                for k in 0..width {
-                    let x = cell(in out.as_slice(), wrapping_add(prev, k));
-                    let y = cell(in out.as_slice(), wrapping_add(row, k));
-                    if x != y {
-                        c = if x < y {
-                            -1
-                        } else {
-                            1
-                        };
-                        break;
-                    }
-                }
-                if c >= 0 {
-                    Fail::raise(CpErr::Noncanonical);
-                }
-            }
-            out.push(weight);
-        }
+        read_rows(in body, inout cursor, width, count, inout out, inout budget);
     }
     if cursor != body.len() {
         Fail::raise(CpErr::Trailing);
     }
     out
+}
+
+// `count` canonical rows of `width` cells and a weight at the cursor, onto
+// `out` (`Reader::row` per row, then the canonical-order check).
+pub fn read_rows(
+    in body: Slice[u8],
+    inout cursor: u64,
+    width: u64,
+    count: u64,
+    inout out: ChunkSeq[i64],
+    inout budget: u64
+) eff [Fail[CpErr]] {
+    let reads = add(width, 1);
+    let size = mul(reads, 8);
+    for r in 0..count {
+        // `Reader::row`: every read is charged before the row is taken.
+        charge(inout budget, reads);
+        let at = take_prepaid(in body, inout cursor, size);
+        let row = out.len();
+        for k in 0..width {
+            out.push(wrapping_i64(le64(in body, wrapping_add(at, wrapping_mul(k, 8)))));
+        }
+        let weight = wrapping_i64(le64(in body, wrapping_add(at, wrapping_mul(width, 8))));
+        if weight == 0 {
+            Fail::raise(CpErr::Noncanonical);
+        }
+        if r > 0 {
+            // Rows strictly ascend: compare with the row before.
+            let prev = wrapping_sub(row, reads);
+            let mut c: i64 = 0;
+            for k in 0..width {
+                let x = cell(in out.as_slice(), wrapping_add(prev, k));
+                let y = cell(in out.as_slice(), wrapping_add(row, k));
+                if x != y {
+                    c = if x < y {
+                        -1
+                    } else {
+                        1
+                    };
+                    break;
+                }
+            }
+            if c >= 0 {
+                Fail::raise(CpErr::Noncanonical);
+            }
+        }
+        out.push(weight);
+    }
+}
+
+// The source section of `source` (empty for none, else the two policy
+// limits, the binding count and six words per binding).
+pub fn put_source(inout out: ChunkSeq[u8], in source: Slice[u64]) {
+    let n = get(in source, 2);
+    if source.len() == 0 {
+        put_u8(inout out, 0);
+    } else {
+        put_u8(inout out, 1);
+        put_u64(inout out, get(in source, 0));
+        put_u64(inout out, get(in source, 1));
+        put_u32(inout out, n);
+        for b in 0..n {
+            let at = wrapping_add(3, wrapping_mul(b, 6));
+            put_u32(inout out, get(in source, at));
+            put_u16(inout out, get(in source, wrapping_add(at, 1)));
+            put_u64(inout out, get(in source, wrapping_add(at, 2)));
+            put_u64(inout out, get(in source, wrapping_add(at, 3)));
+            put_u8(inout out, get(in source, wrapping_add(at, 4)));
+            put_u64(inout out, get(in source, wrapping_add(at, 5)));
+        }
+    }
+}
+
+// The size of that section, saturating.
+pub fn source_size(in source: Slice[u64]) -> u64 {
+    if source.len() == 0 {
+        return 1;
+    }
+    sat_add(21, sat_mul(get(in source, 2), 31))
 }

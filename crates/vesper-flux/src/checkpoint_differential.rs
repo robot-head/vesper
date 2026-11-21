@@ -316,3 +316,249 @@ fn checkpoint_codec_matches_the_rust_codec() {
         );
     }
 }
+
+fn view(p: &super::durable::ParsedManifest) -> String {
+    format!("{} {:?} {:?} {:?}", p.ticks, p.source, p.nodes, p.parent)
+}
+
+/// Seeded spines for `e`'s nodes: up to three batches each, in increasing
+/// tick ranges (sometimes not), with random digests (sometimes repeated).
+fn spines(rng: &mut Rng, e: &Executor) -> Vec<Vec<super::durable::BatchRef>> {
+    use super::durable::{BatchRef, blob_id};
+    let mut named = Vec::new();
+    e.prior
+        .iter()
+        .map(|_| {
+            let mut hi = 0u64;
+            let count = if rng.below(30) == 0 { 9 } else { rng.below(4) };
+            (0..count)
+                .map(|_| {
+                    let lo = if rng.below(12) == 0 {
+                        hi.saturating_sub(1)
+                    } else {
+                        hi
+                    };
+                    hi = lo + 1 + rng.below(2);
+                    if rng.below(16) == 0 {
+                        hi = lo;
+                    }
+                    let digest: [u8; 32] = if !named.is_empty() && rng.below(12) == 0 {
+                        named[rng.below(named.len() as u64) as usize]
+                    } else {
+                        std::array::from_fn(|_| rng.below(256) as u8)
+                    };
+                    named.push(digest);
+                    let rows = match rng.below(10) {
+                        0 => 0,
+                        1 => e.circuit.limits.max_rows + 1,
+                        _ => 1 + rng.below(40) as usize,
+                    };
+                    BatchRef {
+                        id: blob_id(digest),
+                        lo,
+                        hi,
+                        rows,
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn mutate(rng: &mut Rng, blob: &[u8]) -> Vec<u8> {
+    let mut v = blob.to_vec();
+    match rng.below(6) {
+        0 | 1 => {}
+        2 => {
+            // Mostly in the head.
+            let span = if rng.below(2) == 0 { 140 } else { usize::MAX };
+            let i = rng.below(v.len().min(span) as u64) as usize;
+            v[i] = match rng.below(3) {
+                0 => v[i] ^ (1 << rng.below(8)),
+                1 => 0,
+                _ => rng.below(256) as u8,
+            };
+        }
+        3 => v.truncate(rng.below(v.len() as u64) as usize),
+        4 => v.extend((0..1 + rng.below(9)).map(|_| rng.below(256) as u8)),
+        _ => {
+            if let Some(last) = v.last_mut() {
+                *last = rng.below(3) as u8;
+            }
+        }
+    }
+    v
+}
+
+#[test]
+fn durable_codecs_match_the_rust_codecs() {
+    use super::durable::{BatchRef, blob_id, decode_batch, decode_manifest, encode_manifest};
+    use crate::Budget;
+    let mut errors = std::collections::BTreeMap::<String, usize>::new();
+    let mut note = |what: &str, r: &Result<(), Error>| {
+        let key = match r {
+            Ok(()) => format!("{what} ok"),
+            Err(e) => format!("{what} {e:?}"),
+        };
+        *errors.entry(key).or_default() += 1;
+    };
+    for seed in 0..1500u64 {
+        let mut rng = Rng(seed ^ 0xD0_5EED);
+        let e = executor(seed, true);
+        let full = CheckpointLimits::default();
+        let fingerprint = super::identity(
+            &e.circuit,
+            e.source.as_ref(),
+            full,
+            &mut full.budget(&e.circuit),
+        )
+        .unwrap();
+        // Manifests: encode under seeded limits and budgets, then decode
+        // seeded mutations of the valid one.
+        let sp = spines(&mut rng, &e);
+        let parent = (rng.below(2) == 0).then(|| blob_id(std::array::from_fn(|i| i as u8)));
+        let mut valid = None;
+        for round in 0..3 {
+            let l = if round == 0 {
+                full
+            } else {
+                limits(&mut rng, 600)
+            };
+            let work = if round == 2 {
+                rng.below(400) as usize
+            } else {
+                1 << 20
+            };
+            let (mut a, mut b) = (Budget { remaining: work }, Budget { remaining: work });
+            let port = encode_manifest(&e, &fingerprint, &sp, parent.as_ref(), l, &mut a);
+            let refr =
+                reference::encode_manifest(&e, &fingerprint, &sp, parent.as_ref(), l, &mut b);
+            assert_eq!(port, refr, "seed {seed}");
+            if port.is_ok() {
+                assert_eq!(a.remaining, b.remaining, "seed {seed}");
+            }
+            note(
+                "manifest write",
+                &port.as_ref().map(|_| ()).map_err(Clone::clone),
+            );
+            if round == 0 {
+                valid = port.ok();
+            }
+        }
+        let valid = valid.unwrap();
+        for _ in 0..6 {
+            let blob = mutate(&mut rng, &valid);
+            let l = if rng.below(3) == 0 {
+                limits(&mut rng, 600)
+            } else {
+                full
+            };
+            let work = if rng.below(4) == 0 {
+                rng.below(200) as usize
+            } else {
+                1 << 20
+            };
+            let (mut a, mut b) = (Budget { remaining: work }, Budget { remaining: work });
+            let port = decode_manifest(&blob, &e.circuit, &fingerprint, l, &mut a);
+            let refr = reference::decode_manifest(&blob, &e.circuit, &fingerprint, l, &mut b);
+            match (&port, &refr) {
+                (Ok(p), Ok(r)) => {
+                    assert_eq!(view(p), view(r), "seed {seed}");
+                    assert_eq!(a.remaining, b.remaining, "seed {seed}");
+                }
+                (Err(p), Err(r)) => assert_eq!(p, r, "seed {seed}"),
+                _ => panic!("seed {seed}: {:?} vs {:?}", port.is_ok(), refr.is_ok()),
+            }
+            note("manifest read", &port.map(|_| ()));
+        }
+        // Batches: each node's integral, encoded under seeded byte limits,
+        // then decoded from seeded mutations against seeded references.
+        for (node, set) in e.prior.iter().enumerate() {
+            let lo = rng.below(3);
+            let hi = lo + 1 + rng.below(3);
+            let mut l = full;
+            if rng.below(4) == 0 {
+                l.max_bytes = 64 + rng.below(300) as usize;
+            }
+            let port = super::durable::encode_batch(&fingerprint, node, lo, hi, set, l);
+            let refr = reference::encode_batch(&fingerprint, node, lo, hi, set, l);
+            assert_eq!(port, refr, "seed {seed}");
+            note(
+                "batch write",
+                &port.as_ref().map(|_| ()).map_err(Clone::clone),
+            );
+            let Ok(blob) = port
+                .or_else(|_| super::durable::encode_batch(&fingerprint, node, lo, hi, set, full))
+            else {
+                unreachable!()
+            };
+            for _ in 0..3 {
+                let bad = mutate(&mut rng, &blob);
+                let mut b = BatchRef {
+                    id: blob_id([0; 32]),
+                    lo,
+                    hi,
+                    rows: set.len(),
+                };
+                let (mut n, mut w) = (node, set.width);
+                match rng.below(8) {
+                    0 => b.lo += 1,
+                    1 => b.hi += 1,
+                    2 => b.rows += 1,
+                    3 => n += 1,
+                    4 => w += 1,
+                    _ => {}
+                }
+                let fp = if rng.below(10) == 0 {
+                    [7; 32]
+                } else {
+                    fingerprint
+                };
+                let work = if rng.below(4) == 0 {
+                    rng.below(200) as usize
+                } else {
+                    1 << 20
+                };
+                let (mut x, mut y) = (Budget { remaining: work }, Budget { remaining: work });
+                let port = decode_batch(&bad, &b, &fp, n, w, &mut x);
+                let refr = reference::decode_batch(&bad, &b, &fp, n, w, &mut y);
+                assert_eq!(port, refr, "seed {seed}");
+                if port.is_ok() {
+                    assert_eq!(x.remaining, y.remaining, "seed {seed}");
+                }
+                note("batch read", &port.map(|_| ()));
+            }
+        }
+    }
+    for want in [
+        "manifest write ok",
+        "manifest write Limit(\"work\")",
+        "manifest write Limit(\"checkpoint bytes\")",
+        "manifest read ok",
+        "manifest read Limit(\"work\")",
+        "manifest read Limit(\"checkpoint state\")",
+        "manifest read Checkpoint(\"manifest version\")",
+        "manifest read Checkpoint(\"identity\")",
+        "manifest read Checkpoint(\"truncated\")",
+        "manifest read Checkpoint(\"node count\")",
+        "manifest read Checkpoint(\"row schema\")",
+        "manifest read Checkpoint(\"spine levels\")",
+        "manifest read Checkpoint(\"spine ranges\")",
+        "manifest read Checkpoint(\"batch rows\")",
+        "manifest read Checkpoint(\"batch named twice\")",
+        "manifest read Checkpoint(\"parent tag\")",
+        "manifest read Checkpoint(\"trailing bytes\")",
+        "batch write ok",
+        "batch write Limit(\"checkpoint bytes\")",
+        "batch read ok",
+        "batch read Limit(\"work\")",
+        "batch read Checkpoint(\"batch version\")",
+        "batch read Checkpoint(\"batch identity\")",
+        "batch read Checkpoint(\"batch header\")",
+        "batch read Checkpoint(\"truncated\")",
+        "batch read Checkpoint(\"noncanonical rows\")",
+        "batch read Checkpoint(\"trailing bytes\")",
+    ] {
+        assert!(errors.contains_key(want), "{want} never occurs: {errors:?}");
+    }
+}

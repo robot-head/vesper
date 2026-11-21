@@ -72,6 +72,12 @@ use self::image::{
     image_head,
     image_sets
 };
+use self::spine::{
+    batch_bytes,
+    batch_read,
+    manifest_bytes,
+    manifest_nodes
+};
 use self::wide::{
     Acc,
     acc_add,
@@ -932,7 +938,16 @@ pub copy enum CpErr {
     RowSchema,
     State,
     Noncanonical,
-    Trailing
+    Trailing,
+    ManifestVersion,
+    BatchVersion,
+    BatchIdentity,
+    BatchHeader,
+    SpineLevels,
+    SpineRanges,
+    BatchRows,
+    NamedTwice,
+    ParentTag
 }
 
 // The execution identity digest of a circuit's flattened words.
@@ -963,7 +978,14 @@ pub fn cp_check(in image: Slice[u8]) eff [Ffi[Blake3], Fail[CpErr]] {
 // A checked body's head through its source.
 pub fn cp_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
     -> ChunkSeq[u64] eff [Fail[CpErr]] {
-    image_head(in body, in expected, max_sources, inout budget)
+    image_head(
+        in body,
+        in "VFLUXCP1".as_bytes(),
+        CpErr::Version,
+        in expected,
+        max_sources,
+        inout budget
+    )
 }
 
 // A checked body's node sets from `cursor`.
@@ -985,6 +1007,104 @@ pub fn cp_sets(
         max_nodes,
         max_total_rows,
         max_total_cells,
+        inout budget
+    )
+}
+
+// ---------------------------------------------------------------------
+// durable checkpoints (durable.rs, module spine)
+
+// One spine batch blob (see spine.ves).
+pub fn dur_batch(
+    in fingerprint: Slice[u8],
+    node: u64,
+    width: u64,
+    lo: u64,
+    hi: u64,
+    count: u64,
+    in cells: Slice[i64],
+    limit: u64
+) -> ChunkSeq[u8] eff [Fail[CpErr]] {
+    batch_bytes(in fingerprint, node, width, lo, hi, count, in cells, limit)
+}
+
+// A batch blob's cells, checked against its manifest reference.
+pub fn dur_batch_read(
+    in blob: Slice[u8],
+    in fingerprint: Slice[u8],
+    node: u64,
+    width: u64,
+    lo: u64,
+    hi: u64,
+    rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[CpErr]] {
+    batch_read(in blob, in fingerprint, node, width, lo, hi, rows, inout budget)
+}
+
+// A whole manifest blob.
+pub fn dur_manifest(
+    in fingerprint: Slice[u8],
+    ticks: u64,
+    in source: Slice[u64],
+    in widths: Slice[u64],
+    in counts: Slice[u64],
+    in spines: Slice[u64],
+    in parent: Slice[u64],
+    limit: u64,
+    inout budget: u64
+) -> ChunkSeq[u8] eff [Fail[CpErr]] {
+    manifest_bytes(
+        in fingerprint,
+        ticks,
+        in source,
+        in widths,
+        in counts,
+        in spines,
+        in parent,
+        limit,
+        inout budget
+    )
+}
+
+// A manifest's head through its source.
+pub fn dur_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
+    -> ChunkSeq[u64] eff [Fail[CpErr]] {
+    image_head(
+        in body,
+        in "VFLUXDM2".as_bytes(),
+        CpErr::ManifestVersion,
+        in expected,
+        max_sources,
+        inout budget
+    )
+}
+
+// A manifest's nodes and parent from `cursor`.
+pub fn dur_nodes(
+    in body: Slice[u8],
+    cursor: u64,
+    in widths: Slice[u64],
+    ticks: u64,
+    max_rows: u64,
+    max_nodes: u64,
+    max_total_rows: u64,
+    max_total_cells: u64,
+    k0: u64,
+    k1: u64,
+    inout budget: u64
+) -> ChunkSeq[u64] eff [Fail[CpErr]] {
+    manifest_nodes(
+        in body,
+        cursor,
+        in widths,
+        ticks,
+        max_rows,
+        max_nodes,
+        max_total_rows,
+        max_total_cells,
+        k0,
+        k1,
         inout budget
     )
 }

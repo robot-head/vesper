@@ -10,8 +10,6 @@ use super::{
 };
 use crate::{Budget, Error, Limits, ZSet, port};
 
-#[path = "checkpoint_codec.rs"]
-mod codec;
 #[cfg(test)]
 #[path = "checkpoint_differential.rs"]
 mod differential;

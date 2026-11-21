@@ -109,9 +109,6 @@ Stacked on part 2 (in the same PR, #1447: one crate).
   policy between `cp_head` and `cp_sets` (so every error keeps its place),
   and keeps `validate_state`, which calls the Vesper kernels. The Rust
   writer, reader, identity hasher and image loops are deleted from it.
-- `checkpoint_codec.rs` holds the byte `Writer`, `Reader` and the source
-  section's codec, which `durable.rs` still encodes manifests and batches
-  with (its codec is part 4).
 - `checkpoint_reference.rs` keeps the deleted Rust codec as the reference
   of the new differential test `checkpoint_differential.rs`.
 
@@ -125,6 +122,39 @@ The `image` workload checkpoints an executor of two width-3 inputs holding
 8 ticks of 1,024-row sets and restores the image into a fresh executor, 8
 times per batch. The Rust arm is `main` at `468dced`. The divergent edit
 `image` keeps a checkpoint row of weight 0.
+
+## Part 4: the Flux durable checkpoint codecs
+
+In the same PR as parts 2 and 3 (#1447).
+
+### What changed
+
+- `durable.rs`'s manifest and spine-batch codecs run in Vesper:
+  `vesper/src/spine.ves`, exported as `dur_batch` (a batch blob and its
+  byte limit), `dur_batch_read` (a batch checked against its manifest
+  reference), `dur_manifest` (the restore parse-work reservation, the byte
+  limit and the manifest), `dur_head` (the manifest head through its
+  source, shared with the image's `image_head`) and `dur_nodes` (node
+  schemas, spine levels and ranges, batch rows, totals, the parent and the
+  trailing bytes; a batch named twice is found through the accumulator's
+  keyed table). `durable.rs` keeps the store, the spine policy (appends,
+  geometric merges, the fold that keeps a manifest restorable) and the sums,
+  which use the Vesper accumulator. The Rust `Writer`, `Reader`, source
+  codec, `parse_work` and blob loops are deleted.
+- The deleted Rust codecs join `checkpoint_reference.rs`; a second
+  differential test compares them.
+- `tests/port_memory.rs` adds durable checkpoints, a restore and a refused
+  restore to its leak cycle.
+
+### Flip-gate verdict
+
+| Module | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
+|---|---|---|---|---|
+| durable manifest and batch codecs (`durable` workload) | 0 differences over 1,500 seeded executors: 4,500 manifest writes under seeded limits and budgets, 9,000 manifest reads of seeded spines (bad ranges, zero and oversized batches, repeated digests, nine levels) and mutations, and batch writes and reads against wrong references and mutated blobs, comparing bytes, errors, decoded state and the work left; every codec error occurs | all 15 test binaries pass | **0.86x** (0.812x..0.900x) | flipped |
+
+The `durable` workload checkpoints the `image` state durably into a fresh
+store on `/dev/shm` and restores it into a fresh executor, 8 times per
+batch. The divergent edit `spine` accepts a manifest batch of 0 rows.
 
 ## Quarry planner, re-measured (not flipped)
 
@@ -187,7 +217,7 @@ Flux (Rust still in `src/`):
 | Code | Lines | Plan |
 |---|--:|---|
 | `log.rs` (the file side of the input log) | ~250 | file I/O moves to `@vesper-std/fs` once lane 13's direct libc imports land |
-| `durable.rs` (manifest and spine batch encoding, spine merges) and `checkpoint_codec.rs` | 709 + 186 | part 4 |
+| `durable.rs` (store I/O, spine policy) | ~600 | with the cluster driver, which shares its store and GC |
 | `checkpoint.rs` (identity words, policy rebuild, state validation) | ~390 | with `circuit.rs` |
 | `circuit.rs` (builder, differentiation, staging) | 741 | with the cluster driver |
 | `cluster.rs` (multi-worker driver) | 3,314 | later part (`in dyn EpochSource`, `inout dyn CommitSink`) |

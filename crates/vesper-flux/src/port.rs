@@ -371,6 +371,15 @@ fn cp_error(e: CpErr) -> Error {
         CpErr::State => Error::Limit("checkpoint state"),
         CpErr::Noncanonical => Error::Checkpoint("noncanonical rows"),
         CpErr::Trailing => Error::Checkpoint("trailing bytes"),
+        CpErr::ManifestVersion => Error::Checkpoint("manifest version"),
+        CpErr::BatchVersion => Error::Checkpoint("batch version"),
+        CpErr::BatchIdentity => Error::Checkpoint("batch identity"),
+        CpErr::BatchHeader => Error::Checkpoint("batch header"),
+        CpErr::SpineLevels => Error::Checkpoint("spine levels"),
+        CpErr::SpineRanges => Error::Checkpoint("spine ranges"),
+        CpErr::BatchRows => Error::Checkpoint("batch rows"),
+        CpErr::NamedTwice => Error::Checkpoint("batch named twice"),
+        CpErr::ParentTag => Error::Checkpoint("parent tag"),
     }
 }
 
@@ -468,6 +477,123 @@ pub(crate) fn cp_sets(
             set
         })
         .collect())
+}
+
+/// One durable spine batch blob of `set` (see `vesper/src/spine.ves`).
+pub(crate) fn dur_batch(
+    fingerprint: &[u8; 32],
+    node: usize,
+    lo: u64,
+    hi: u64,
+    set: &ZSet,
+    limit: usize,
+) -> Result<Vec<u8>, Error> {
+    binding::dur_batch(
+        fingerprint,
+        w(node),
+        w(set.width),
+        lo,
+        hi,
+        w(set.len()),
+        &set.cells,
+        w(limit),
+    )
+    .map_err(cp_error)
+}
+
+/// The set a batch blob holds, checked against its manifest reference.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dur_batch_read(
+    blob: &[u8],
+    fingerprint: &[u8; 32],
+    node: usize,
+    width: usize,
+    lo: u64,
+    hi: u64,
+    rows: usize,
+    budget: &mut Budget,
+) -> Result<ZSet, Error> {
+    let cells = with_budget(budget, |left| {
+        binding::dur_batch_read(blob, fingerprint, w(node), w(width), lo, hi, w(rows), left)
+    })?;
+    Ok(ZSet::from_cells(width, cells))
+}
+
+/// A whole manifest blob: `spines` holds per node its batch count, then
+/// per batch its digest (four little-endian words), lo, hi and row count;
+/// `parent` is empty or the parent manifest's digest words.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dur_manifest(
+    fingerprint: &[u8; 32],
+    ticks: u64,
+    source: &[u64],
+    sets: &[ZSet],
+    spines: &[u64],
+    parent: &[u64],
+    limit: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u8>, Error> {
+    let widths: Vec<u64> = sets.iter().map(|s| w(s.width)).collect();
+    let counts: Vec<u64> = sets.iter().map(|s| w(s.len())).collect();
+    with_budget(budget, |left| {
+        binding::dur_manifest(
+            fingerprint,
+            ticks,
+            source,
+            &widths,
+            &counts,
+            spines,
+            parent,
+            w(limit),
+            left,
+        )
+    })
+}
+
+/// A manifest's head through its source (as [`cp_head`]).
+pub(crate) fn dur_head(
+    body: &[u8],
+    expected: &[u8; 32],
+    max_sources: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u64>, Error> {
+    with_budget(budget, |left| {
+        binding::dur_head(body, expected, w(max_sources), left)
+    })
+}
+
+/// A manifest's nodes and parent from `cursor`, as words (see
+/// `manifest_nodes` in `vesper/src/spine.ves`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dur_nodes(
+    body: &[u8],
+    cursor: u64,
+    widths: &[usize],
+    ticks: u64,
+    max_rows: usize,
+    max_nodes: usize,
+    max_total_rows: usize,
+    max_total_cells: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u64>, Error> {
+    use std::hash::BuildHasher;
+    let keys = std::hash::RandomState::new();
+    let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    with_budget(budget, |left| {
+        binding::dur_nodes(
+            body,
+            cursor,
+            &ws,
+            ticks,
+            w(max_rows),
+            w(max_nodes),
+            w(max_total_rows),
+            w(max_total_cells),
+            keys.hash_one(0u64),
+            keys.hash_one(1u64),
+            left,
+        )
+    })
 }
 
 /// Live allocations of the port's runtime (leak checks).

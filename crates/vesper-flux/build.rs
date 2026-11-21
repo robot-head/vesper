@@ -79,4 +79,10 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "            if weight == 0 {\n                Fail::raise(CpErr::Noncanonical);\n",
         "            if false {\n                Fail::raise(CpErr::Noncanonical);\n",
     ),
+    // spine (vesper/src/spine.ves): a manifest batch of 0 rows is accepted.
+    (
+        "spine",
+        "            if n == 0 || n > max_rows {\n",
+        "            if n > max_rows {\n",
+    ),
 ];

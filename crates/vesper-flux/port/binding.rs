@@ -94,6 +94,15 @@ pub enum CpErr {
     State,
     Noncanonical,
     Trailing,
+    ManifestVersion,
+    BatchVersion,
+    BatchIdentity,
+    BatchHeader,
+    SpineLevels,
+    SpineRanges,
+    BatchRows,
+    NamedTwice,
+    ParentTag,
 }
 
 impl Abi for CpErr {
@@ -145,6 +154,33 @@ impl Abi for CpErr {
             CpErr::Trailing => {
                 out[0] = 14;
             }
+            CpErr::ManifestVersion => {
+                out[0] = 15;
+            }
+            CpErr::BatchVersion => {
+                out[0] = 16;
+            }
+            CpErr::BatchIdentity => {
+                out[0] = 17;
+            }
+            CpErr::BatchHeader => {
+                out[0] = 18;
+            }
+            CpErr::SpineLevels => {
+                out[0] = 19;
+            }
+            CpErr::SpineRanges => {
+                out[0] = 20;
+            }
+            CpErr::BatchRows => {
+                out[0] = 21;
+            }
+            CpErr::NamedTwice => {
+                out[0] = 22;
+            }
+            CpErr::ParentTag => {
+                out[0] = 23;
+            }
         }
     }
     fn get(words: &[u64]) -> Self {
@@ -164,6 +200,15 @@ impl Abi for CpErr {
             12 => CpErr::State,
             13 => CpErr::Noncanonical,
             14 => CpErr::Trailing,
+            15 => CpErr::ManifestVersion,
+            16 => CpErr::BatchVersion,
+            17 => CpErr::BatchIdentity,
+            18 => CpErr::BatchHeader,
+            19 => CpErr::SpineLevels,
+            20 => CpErr::SpineRanges,
+            21 => CpErr::BatchRows,
+            22 => CpErr::NamedTwice,
+            23 => CpErr::ParentTag,
             tag => panic!("invalid CpErr tag {tag} from Vesper"),
         }
     }
@@ -424,6 +469,11 @@ unsafe extern "C" {
     fn vesper_flux_cp_identity(words: *mut u64, budget: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_cp_image(id: *mut u64, ticks: i64, source: *mut u64, widths: *mut u64, counts: *mut u64, cells: *mut u64, limit: i64, budget: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_cp_sets(body: *mut u64, cursor: i64, widths: *mut u64, max_rows: i64, max_nodes: i64, max_total_rows: i64, max_total_cells: i64, budget: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_dur_batch(fingerprint: *mut u64, node: i64, width: i64, lo: i64, hi: i64, count: i64, cells: *mut u64, limit: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_dur_batch_read(blob: *mut u64, fingerprint: *mut u64, node: i64, width: i64, lo: i64, hi: i64, rows: i64, budget: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_dur_head(body: *mut u64, expected: *mut u64, max_sources: i64, budget: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_dur_manifest(fingerprint: *mut u64, ticks: i64, source: *mut u64, widths: *mut u64, counts: *mut u64, spines: *mut u64, parent: *mut u64, limit: i64, budget: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_dur_nodes(body: *mut u64, cursor: i64, widths: *mut u64, ticks: i64, max_rows: i64, max_nodes: i64, max_total_rows: i64, max_total_cells: i64, k0: i64, k1: i64, budget: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_acquire(gens: *mut u64, holds: *mut u64, live: *mut u64, capacity: i64, watermark: *mut u64, timestamp: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_advance(gens: *mut u64, holds: *mut u64, live: i64, watermark: *mut u64, slot: i64, generation: i64, timestamp: i64, next: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_live_holds(live: i64) -> i64;
@@ -558,6 +608,88 @@ pub fn cp_sets(body: &[u8], cursor: u64, widths: &[u64], max_rows: u64, max_node
         0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
         1 => Err(<CpErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_flux_cp_sets"),
+    }
+}
+
+/// Calls `dur_batch` of the Vesper library `flux` (`vesper_flux_dur_batch`).
+pub fn dur_batch(fingerprint: &[u8], node: u64, width: u64, lo: u64, hi: u64, count: u64, cells: &[i64], limit: u64) -> Result<Vec<u8>, CpErr> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_dur_batch` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(fingerprint, |view_fingerprint| vesper_port_abi::with_slice(cells, |view_cells| unsafe { vesper_flux_dur_batch(view_fingerprint, node as i64, width as i64, lo as i64, hi as i64, count as i64, view_cells, limit as i64, fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_dur_batch"),
+    }
+}
+
+/// Calls `dur_batch_read` of the Vesper library `flux` (`vesper_flux_dur_batch_read`).
+pub fn dur_batch_read(blob: &[u8], fingerprint: &[u8], node: u64, width: u64, lo: u64, hi: u64, rows: u64, budget: &mut u64) -> Result<Vec<i64>, CpErr> {
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_dur_batch_read` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(blob, |view_blob| vesper_port_abi::with_slice(fingerprint, |view_fingerprint| unsafe { vesper_flux_dur_batch_read(view_blob, view_fingerprint, node as i64, width as i64, lo as i64, hi as i64, rows as i64, arg_budget.as_mut_ptr(), fail.as_mut_ptr()) }));
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_dur_batch_read"),
+    }
+}
+
+/// Calls `dur_head` of the Vesper library `flux` (`vesper_flux_dur_head`).
+pub fn dur_head(body: &[u8], expected: &[u8], max_sources: u64, budget: &mut u64) -> Result<Vec<u64>, CpErr> {
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_dur_head` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(body, |view_body| vesper_port_abi::with_slice(expected, |view_expected| unsafe { vesper_flux_dur_head(view_body, view_expected, max_sources as i64, arg_budget.as_mut_ptr(), fail.as_mut_ptr()) }));
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_dur_head"),
+    }
+}
+
+/// Calls `dur_manifest` of the Vesper library `flux` (`vesper_flux_dur_manifest`).
+pub fn dur_manifest(fingerprint: &[u8], ticks: u64, source: &[u64], widths: &[u64], counts: &[u64], spines: &[u64], parent: &[u64], limit: u64, budget: &mut u64) -> Result<Vec<u8>, CpErr> {
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_dur_manifest` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(fingerprint, |view_fingerprint| vesper_port_abi::with_slice(source, |view_source| vesper_port_abi::with_slice(widths, |view_widths| vesper_port_abi::with_slice(counts, |view_counts| vesper_port_abi::with_slice(spines, |view_spines| vesper_port_abi::with_slice(parent, |view_parent| unsafe { vesper_flux_dur_manifest(view_fingerprint, ticks as i64, view_source, view_widths, view_counts, view_spines, view_parent, limit as i64, arg_budget.as_mut_ptr(), fail.as_mut_ptr()) }))))));
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_dur_manifest"),
+    }
+}
+
+/// Calls `dur_nodes` of the Vesper library `flux` (`vesper_flux_dur_nodes`).
+pub fn dur_nodes(body: &[u8], cursor: u64, widths: &[u64], ticks: u64, max_rows: u64, max_nodes: u64, max_total_rows: u64, max_total_cells: u64, k0: u64, k1: u64, budget: &mut u64) -> Result<Vec<u64>, CpErr> {
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_dur_nodes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(body, |view_body| vesper_port_abi::with_slice(widths, |view_widths| unsafe { vesper_flux_dur_nodes(view_body, cursor as i64, view_widths, ticks as i64, max_rows as i64, max_nodes as i64, max_total_rows as i64, max_total_cells as i64, k0 as i64, k1 as i64, arg_budget.as_mut_ptr(), fail.as_mut_ptr()) }));
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_dur_nodes"),
     }
 }
 

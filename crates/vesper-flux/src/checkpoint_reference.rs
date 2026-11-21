@@ -1,12 +1,18 @@
-//! The Rust checkpoint image codec that `vesper/src/image.ves` replaced,
-//! kept as the reference of the differential test in `checkpoint.rs` (the
-//! Aura pattern). Only the codec is here: state validation is shared.
-use super::super::cdc::{SourceState, WeightPolicy};
+//! The Rust checkpoint codecs that `vesper/src/image.ves` and
+//! `vesper/src/spine.ves` replaced (the in-memory image, and the durable
+//! manifests and batches), kept as the reference of the differential tests
+//! in `checkpoint_differential.rs` (the Aura pattern). Only the codecs are
+//! here: state validation and the spine policy are shared.
+use super::super::cdc::{CdcPolicy, SourceBinding, SourceState, WeightPolicy};
 use super::super::{Circuit, DOp, Executor, Field, Op, Predicate};
-use super::codec::{Reader, Writer, read_source, write_source};
+use super::durable::{
+    BATCH_MAGIC, BatchRef, MANIFEST_MAGIC, MAX_SPINE_LEVELS, ParsedManifest, blob_id,
+};
 use super::{CheckpointLimits, validate_state};
 use crate::{Budget, Error, ZSet};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use vesper_loom_cas::ObjectId;
 
 const MAGIC: &[u8; 8] = b"VFLUXCP1";
 const VERSION: u16 = 1;
@@ -340,4 +346,426 @@ pub(crate) fn restore(
     e.source = source;
     e.lineage = super::super::fresh_lineage();
     Ok(())
+}
+
+// The byte writer and reader, and the source section.
+pub(crate) struct Writer {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) limit: usize,
+}
+impl Writer {
+    pub(crate) fn put(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let end = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .ok_or(Error::Overflow)?;
+        if end > self.limit {
+            return Err(Error::Limit("checkpoint bytes"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(())
+    }
+    pub(crate) fn u8(&mut self, n: u8) -> Result<(), Error> {
+        self.put(&[n])
+    }
+    pub(crate) fn u16(&mut self, n: u16) -> Result<(), Error> {
+        self.put(&n.to_le_bytes())
+    }
+    pub(crate) fn u32(&mut self, n: u32) -> Result<(), Error> {
+        self.put(&n.to_le_bytes())
+    }
+    pub(crate) fn u64(&mut self, n: u64) -> Result<(), Error> {
+        self.put(&n.to_le_bytes())
+    }
+    pub(crate) fn usize(&mut self, n: usize) -> Result<(), Error> {
+        self.u64(u64::try_from(n).map_err(|_| Error::Overflow)?)
+    }
+    pub(crate) fn i64(&mut self, n: i64) -> Result<(), Error> {
+        self.put(&n.to_le_bytes())
+    }
+}
+pub(crate) struct Reader<'a, 'b> {
+    pub(crate) bytes: &'a [u8],
+    pub(crate) cursor: usize,
+    pub(crate) budget: &'b mut Budget,
+}
+impl<'a> Reader<'a, '_> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
+        self.budget.charge(1)?;
+        self.take_prepaid(n)
+    }
+    pub(crate) fn take_prepaid(&mut self, n: usize) -> Result<&'a [u8], Error> {
+        let end = self.cursor.checked_add(n).ok_or(Error::Overflow)?;
+        let bytes = self
+            .bytes
+            .get(self.cursor..end)
+            .ok_or(Error::Checkpoint("truncated"))?;
+        self.cursor = end;
+        Ok(bytes)
+    }
+    /// Charge all scalar reads and validate the complete encoded row before
+    /// allocating its vector; no partial row growth precedes those checks.
+    pub(crate) fn row(&mut self, width: usize) -> Result<(Vec<i64>, i64), Error> {
+        let reads = width.checked_add(1).ok_or(Error::Overflow)?;
+        self.budget.charge(reads)?;
+        let size = reads.checked_mul(8).ok_or(Error::Overflow)?;
+        let bytes = self.take_prepaid(size)?;
+        let cells = width.checked_mul(8).ok_or(Error::Overflow)?;
+        let row = bytes[..cells]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|cell| i64::from_le_bytes(*cell))
+            .collect();
+        let weight = i64::from_le_bytes(
+            bytes[cells..]
+                .try_into()
+                .map_err(|_| Error::Checkpoint("weight"))?,
+        );
+        Ok((row, weight))
+    }
+    pub(crate) fn u8(&mut self) -> Result<u8, Error> {
+        Ok(self.take(1)?[0])
+    }
+    pub(crate) fn u16(&mut self) -> Result<u16, Error> {
+        Ok(u16::from_le_bytes(
+            self.take(2)?
+                .try_into()
+                .map_err(|_| Error::Checkpoint("u16"))?,
+        ))
+    }
+    pub(crate) fn u32(&mut self) -> Result<u32, Error> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?
+                .try_into()
+                .map_err(|_| Error::Checkpoint("u32"))?,
+        ))
+    }
+    pub(crate) fn u64(&mut self) -> Result<u64, Error> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?
+                .try_into()
+                .map_err(|_| Error::Checkpoint("u64"))?,
+        ))
+    }
+    pub(crate) fn usize(&mut self) -> Result<usize, Error> {
+        usize::try_from(self.u64()?).map_err(|_| Error::Overflow)
+    }
+}
+
+pub(crate) fn write_source(w: &mut Writer, source: Option<&SourceState>) -> Result<(), Error> {
+    match source {
+        None => w.u8(0)?,
+        Some(s) => {
+            w.u8(1)?;
+            w.usize(s.policy.max_batch_bytes)?;
+            w.usize(s.policy.max_records)?;
+            w.u32(u32::try_from(s.policy.bindings.len()).map_err(|_| Error::Overflow)?)?;
+            for (b, next) in s.policy.bindings.iter().zip(&s.next) {
+                w.u32(b.partition_id)?;
+                w.u16(b.schema_id)?;
+                w.usize(b.input)?;
+                w.u64(b.first_lsn)?;
+                w.u8(match b.weights {
+                    WeightPolicy::Unit => 0,
+                    WeightPolicy::NonZero => 1,
+                })?;
+                w.u64(*next)?;
+            }
+        }
+    }
+    Ok(())
+}
+pub(crate) fn read_source(
+    r: &mut Reader<'_, '_>,
+    circuit: &Circuit,
+    limits: CheckpointLimits,
+) -> Result<Option<SourceState>, Error> {
+    let source = match r.u8()? {
+        0 => None,
+        1 => {
+            let max_batch_bytes = r.usize()?;
+            let max_records = r.usize()?;
+            let count = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
+            if count > limits.max_sources || count > 1024 {
+                return Err(Error::Limit("checkpoint sources"));
+            }
+            let mut bindings = Vec::new();
+            let mut next = Vec::new();
+            for _ in 0..count {
+                let partition_id = r.u32()?;
+                let schema_id = r.u16()?;
+                let input = r.usize()?;
+                let first_lsn = r.u64()?;
+                let weights = match r.u8()? {
+                    0 => WeightPolicy::Unit,
+                    1 => WeightPolicy::NonZero,
+                    _ => return Err(Error::Checkpoint("weight policy")),
+                };
+                let next_lsn = r.u64()?;
+                bindings.push(SourceBinding {
+                    partition_id,
+                    schema_id,
+                    input,
+                    first_lsn,
+                    weights,
+                });
+                next.push(next_lsn);
+            }
+            let policy = CdcPolicy {
+                bindings,
+                max_batch_bytes,
+                max_records,
+            };
+            policy.validate(circuit)?;
+            Some(SourceState { policy, next })
+        }
+        _ => return Err(Error::Checkpoint("source tag")),
+    };
+    Ok(source)
+}
+
+// The durable codecs (durable.rs).
+const DURABLE_VERSION: u16 = 1;
+
+pub(crate) fn encode_batch(
+    fingerprint: &[u8; 32],
+    node: usize,
+    lo: u64,
+    hi: u64,
+    set: &ZSet,
+    limits: CheckpointLimits,
+) -> Result<Vec<u8>, Error> {
+    let mut w = Writer {
+        bytes: Vec::new(),
+        limit: limits.max_bytes,
+    };
+    w.put(BATCH_MAGIC)?;
+    w.u16(DURABLE_VERSION)?;
+    w.u16(0)?;
+    w.put(fingerprint)?;
+    w.u32(u32::try_from(node).map_err(|_| Error::Overflow)?)?;
+    w.u32(u32::try_from(set.width).map_err(|_| Error::Overflow)?)?;
+    w.u64(lo)?;
+    w.u64(hi)?;
+    w.usize(set.len())?;
+    for (row, weight) in set.entries() {
+        for value in row {
+            w.i64(*value)?;
+        }
+        w.i64(weight)?;
+    }
+    Ok(w.bytes)
+}
+
+pub(crate) fn decode_batch(
+    blob: &[u8],
+    b: &BatchRef,
+    fingerprint: &[u8; 32],
+    node: usize,
+    width: usize,
+    budget: &mut Budget,
+) -> Result<ZSet, Error> {
+    let mut r = Reader {
+        bytes: blob,
+        cursor: 0,
+        budget,
+    };
+    if r.take(8)? != BATCH_MAGIC || r.u16()? != DURABLE_VERSION || r.u16()? != 0 {
+        return Err(Error::Checkpoint("batch version"));
+    }
+    if r.take(32)? != fingerprint {
+        return Err(Error::Checkpoint("batch identity"));
+    }
+    if usize::try_from(r.u32()?).map_err(|_| Error::Overflow)? != node
+        || usize::try_from(r.u32()?).map_err(|_| Error::Overflow)? != width
+        || r.u64()? != b.lo
+        || r.u64()? != b.hi
+        || r.usize()? != b.rows
+    {
+        return Err(Error::Checkpoint("batch header"));
+    }
+    let mut set = BTreeMap::new();
+    for _ in 0..b.rows {
+        let (row, weight) = r.row(width)?;
+        if weight == 0 || set.last_key_value().is_some_and(|(last, _)| last >= &row) {
+            return Err(Error::Checkpoint("noncanonical rows"));
+        }
+        set.insert(row, weight);
+    }
+    if r.cursor != blob.len() {
+        return Err(Error::Checkpoint("trailing bytes"));
+    }
+    Ok(ZSet::from_rows(width, set))
+}
+
+/// Upper bound of the charged reads of [`DurableCheckpointer::restore`]'s
+/// parser and spine sums for these spines.
+fn durable_parse_work(exec: &Executor, spines: &[Vec<BatchRef>]) -> Result<usize, Error> {
+    let mut work = 16usize;
+    if let Some(source) = &exec.source {
+        work = source
+            .policy
+            .bindings
+            .len()
+            .checked_mul(6)
+            .and_then(|n| n.checked_add(work + 8))
+            .ok_or(Error::Overflow)?;
+    }
+    for (set, spine) in exec.prior.iter().zip(spines) {
+        // Per node: width, rows, batch count; per reference: four reads; per
+        // batch: nine header reads; per row: width + 1 reads and width + 1
+        // accumulator charges.
+        let per_row = set
+            .width
+            .checked_add(1)
+            .and_then(|n| n.checked_mul(2))
+            .ok_or(Error::Overflow)?;
+        work = work.checked_add(3).ok_or(Error::Overflow)?;
+        for b in spine {
+            work = b
+                .rows
+                .checked_mul(per_row)
+                .and_then(|n| n.checked_add(13))
+                .and_then(|n| n.checked_add(work))
+                .ok_or(Error::Overflow)?;
+        }
+    }
+    Ok(work)
+}
+
+pub(crate) fn decode_manifest(
+    image: &[u8],
+    c: &Circuit,
+    fingerprint: &[u8; 32],
+    limits: CheckpointLimits,
+    budget: &mut Budget,
+) -> Result<ParsedManifest, Error> {
+    let mut r = Reader {
+        bytes: image,
+        cursor: 0,
+        budget,
+    };
+    if r.take(8)? != MANIFEST_MAGIC || r.u16()? != DURABLE_VERSION || r.u16()? != 0 {
+        return Err(Error::Checkpoint("manifest version"));
+    }
+    if r.take(32)? != fingerprint {
+        return Err(Error::Checkpoint("identity"));
+    }
+    let ticks = r.u64()?;
+    let source = read_source(&mut r, c, limits)?;
+    let count = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
+    if count != c.nodes.len() || count > limits.max_nodes {
+        return Err(Error::Checkpoint("node count"));
+    }
+    let mut nodes = Vec::with_capacity(count);
+    let (mut total_rows, mut total_cells, mut batch_rows) = (0usize, 0usize, 0usize);
+    let mut seen = BTreeSet::new();
+    for n in &c.nodes {
+        let width = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
+        let rows = r.usize()?;
+        let batches = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
+        if width != n.width || rows > c.limits.max_rows {
+            return Err(Error::Checkpoint("row schema"));
+        }
+        if batches > MAX_SPINE_LEVELS {
+            return Err(Error::Checkpoint("spine levels"));
+        }
+        total_rows = total_rows.checked_add(rows).ok_or(Error::Overflow)?;
+        total_cells = total_cells
+            .checked_add(rows.checked_mul(width).ok_or(Error::Overflow)?)
+            .ok_or(Error::Overflow)?;
+        if total_rows > limits.max_total_rows || total_cells > limits.max_total_cells {
+            return Err(Error::Limit("checkpoint state"));
+        }
+        let mut spine: Vec<BatchRef> = Vec::with_capacity(batches);
+        for _ in 0..batches {
+            let digest: [u8; 32] = r
+                .take(32)?
+                .try_into()
+                .map_err(|_| Error::Checkpoint("digest"))?;
+            let lo = r.u64()?;
+            let hi = r.u64()?;
+            let rows = r.usize()?;
+            if lo >= hi || hi > ticks || spine.last().is_some_and(|p| p.hi > lo) {
+                return Err(Error::Checkpoint("spine ranges"));
+            }
+            if rows == 0 || rows > c.limits.max_rows {
+                return Err(Error::Checkpoint("batch rows"));
+            }
+            batch_rows = batch_rows.checked_add(rows).ok_or(Error::Overflow)?;
+            if batch_rows > limits.max_total_rows {
+                return Err(Error::Limit("checkpoint state"));
+            }
+            let id = blob_id(digest);
+            // Batches are bound to node and range, so no object can be named twice.
+            if !seen.insert(id) {
+                return Err(Error::Checkpoint("batch named twice"));
+            }
+            spine.push(BatchRef { id, lo, hi, rows });
+        }
+        nodes.push((width, rows, spine));
+    }
+    let parent = match r.u8()? {
+        0 => None,
+        1 => Some(blob_id(
+            r.take(32)?
+                .try_into()
+                .map_err(|_| Error::Checkpoint("digest"))?,
+        )),
+        _ => return Err(Error::Checkpoint("parent tag")),
+    };
+    if r.cursor != image.len() {
+        return Err(Error::Checkpoint("trailing bytes"));
+    }
+    Ok(ParsedManifest {
+        ticks,
+        source,
+        nodes,
+        parent,
+    })
+}
+
+pub(crate) fn encode_manifest(
+    exec: &Executor,
+    fingerprint: &[u8; 32],
+    spines: &[Vec<BatchRef>],
+    parent: Option<&ObjectId>,
+    limits: CheckpointLimits,
+    budget: &mut Budget,
+) -> Result<Vec<u8>, Error> {
+    // Reserve the restore parse work, so a successful checkpoint is
+    // restorable under the same limits (as the in-memory image does).
+    budget.charge(durable_parse_work(exec, spines)?)?;
+    let mut w = Writer {
+        bytes: Vec::new(),
+        limit: limits.max_bytes,
+    };
+    w.put(MANIFEST_MAGIC)?;
+    w.u16(DURABLE_VERSION)?;
+    w.u16(0)?;
+    w.put(fingerprint)?;
+    w.u64(exec.ticks)?;
+    write_source(&mut w, exec.source.as_ref())?;
+    w.u32(u32::try_from(exec.prior.len()).map_err(|_| Error::Overflow)?)?;
+    for (set, spine) in exec.prior.iter().zip(spines) {
+        w.u32(u32::try_from(set.width).map_err(|_| Error::Overflow)?)?;
+        w.usize(set.len())?;
+        w.u32(u32::try_from(spine.len()).map_err(|_| Error::Overflow)?)?;
+        for b in spine {
+            w.put(b.id.digest.as_bytes())?;
+            w.u64(b.lo)?;
+            w.u64(b.hi)?;
+            w.usize(b.rows)?;
+        }
+    }
+    match parent {
+        Some(p) => {
+            w.u8(1)?;
+            w.put(p.digest.as_bytes())?;
+        }
+        None => w.u8(0)?,
+    }
+    Ok(w.bytes)
 }

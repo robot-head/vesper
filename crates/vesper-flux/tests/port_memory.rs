@@ -1,6 +1,7 @@
 //! The Vesper port frees everything it allocates: after warm-up, repeated
 //! CDC ingest (accepted and rejected batches), circuit ticks, checkpoints
-//! and restores, and input-log appends, reads and reopens leave no live
+//! and restores (in memory and durable, with a corrupted manifest
+//! refused), and input-log appends, reads and reopens leave no live
 //! port allocation behind. Its own test binary, so no other test allocates
 //! concurrently.
 use vesper_flux::{
@@ -77,6 +78,32 @@ fn cycle(dir: &std::path::Path, round: u64) {
     restored
         .restore_checkpoint(&image, CheckpointLimits::default())
         .unwrap();
+    let store = vesper_loom_cas::Store::open(dir.join(format!("cas-{round}"))).unwrap();
+    let mut ckpt = vesper_flux::DurableCheckpointer::new();
+    ckpt.checkpoint(&e, &store, CheckpointLimits::default())
+        .unwrap();
+    let report = ckpt
+        .checkpoint(&e, &store, CheckpointLimits::default())
+        .unwrap();
+    let mut restored = executor();
+    vesper_flux::DurableCheckpointer::new()
+        .restore(
+            &mut restored,
+            &store,
+            &report.manifest,
+            CheckpointLimits::default(),
+        )
+        .unwrap();
+    let bad = vesper_flux::DurableCheckpointer::new().restore(
+        &mut executor(),
+        &store,
+        &report.manifest,
+        CheckpointLimits {
+            max_work: 3,
+            ..CheckpointLimits::default()
+        },
+    );
+    assert!(bad.is_err());
     let path = dir.join(format!("log-{round}"));
     let mut log = InputLog::create(&path, &[3], LogLimits::default()).unwrap();
     for delta in &inputs {
