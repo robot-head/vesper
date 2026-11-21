@@ -1315,14 +1315,7 @@ fn compile_exports<M: Module>(
         define_wide_entry(m, export, *inner, sig)?;
     }
     if interface.is_v2() {
-        // SH4 swap point (#1275): the `export` hook may emit the glue.
-        match crate::codegen_swap::installed().export {
-            Some(hook) => match hook(&mut *m, world, interface) {
-                Some(r) => r?,
-                None => glue::define(m, world, interface)?,
-            },
-            None => glue::define(m, world, interface)?,
-        }
+        glue::define(m, world, interface)?;
     }
     Ok(clif)
 }

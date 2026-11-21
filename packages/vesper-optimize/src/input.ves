@@ -164,11 +164,14 @@ pub fn add_expr(inout t: Tree, n: ExprNode, cap1: u64, cap2: u64) -> u32 {
 // magnitude form).
 pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
     let neg = v < 0;
-    let magnitude = if neg {
-        wrapping_u64(wrapping_neg_i128(v))
-    } else {
-        wrapping_u64(v)
-    };
+    // `i128::MIN` negates to itself; its magnitude 2^127 is that bit pattern.
+    let m = wrapping_u128(
+        if neg {
+            wrapping_neg_i128(v)
+        } else {
+            v
+        }
+    );
     let l = t
         .ast
         .lits
@@ -176,7 +179,8 @@ pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
         Lit {
             kind: 1,
             neg: neg,
-            bits: magnitude
+            bits: wrapping_u64(m),
+            hi: wrapping_u64(m >> 64)
         }
     );
     add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
@@ -269,6 +273,7 @@ pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: Ch
             let lk = wrapping_u8(r.word(in b));
             let neg = r.word(in b) != 0;
             let bits = r.word(in b);
+            let hi = r.word(in b);
             let l = t
                 .ast
                 .lits
@@ -276,7 +281,8 @@ pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: Ch
                 Lit {
                     kind: lk,
                     neg: neg,
-                    bits: bits
+                    bits: bits,
+                    hi: hi
                 }
             );
             add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)

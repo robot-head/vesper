@@ -107,7 +107,7 @@ impl Ast {
         match &e.kind {
             ExprKind::Literal(l) => {
                 let k = match l {
-                    Literal::Int(_) => 1,
+                    Literal::Int(_) | Literal::WideInt(_) => 1,
                     Literal::Float(_) => 2,
                     Literal::Bool(_) => 3,
                     Literal::String(_) => 4,

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 260" width="560" height="260" role="img" aria-labelledby="title description">
+  <title id="title">Two loans into one Broker</title>
+  <desc id="description">The exclusive loan reaches index and metrics. A separate shared loan reaches config. No field appears in both loans.</desc>
+  <defs><marker id="teal" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="#83dacc"/></marker><marker id="gold" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="#ffbf7f"/></marker><marker id="red" viewBox="0 0 9 9" markerWidth="7" markerHeight="7" refX="8" refY="4.5" orient="auto"><path d="M0 0 L9 4.5 L0 9 Z" fill="#ff9fae"/></marker></defs>
+  <rect width="560" height="260" fill="#111a25" rx="10"/>
+  <g font-family="system-ui, sans-serif">
+  <text x="30" y="38" text-anchor="start" font-size="19" font-weight="500" fill="#bac7d6">Parameters of append</text>
+  <text x="371" y="38" text-anchor="start" font-size="19" font-weight="500" fill="#bac7d6">Broker fields</text>
+  <rect x="28" y="71" width="170" height="56" rx="8" fill="#1b2735" stroke="#ffbf7f" stroke-width="1.6"/>
+  <text x="113" y="106" text-anchor="middle" font-size="21" font-weight="500" fill="#ffbf7f">inout · write</text>
+  <rect x="28" y="186" width="170" height="52" rx="8" fill="#1b2735" stroke="#83dacc" stroke-width="1.6"/>
+  <text x="113" y="219" text-anchor="middle" font-size="21" font-weight="500" fill="#83dacc">in · read</text>
+  <path d="M198 99 H251 V83 H351" fill="none" stroke="#ffbf7f" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <path d="M251 99 V148 H351" fill="none" stroke="#ffbf7f" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#gold)"/>
+  <path d="M198 212 H351" fill="none" stroke="#83dacc" stroke-width="2.5" stroke-linejoin="round" marker-end="url(#teal)" stroke-dasharray="5 5"/>
+  <rect x="362" y="57" width="167" height="50" rx="8" fill="#1b2735" stroke="#536479" stroke-width="1.6"/>
+  <text x="445" y="89" text-anchor="middle" font-size="21" font-weight="500" fill="#e8edf5">index</text>
+  <rect x="362" y="122" width="167" height="50" rx="8" fill="#1b2735" stroke="#536479" stroke-width="1.6"/>
+  <text x="445" y="154" text-anchor="middle" font-size="21" font-weight="500" fill="#e8edf5">metrics</text>
+  <rect x="362" y="187" width="167" height="50" rx="8" fill="#1b2735" stroke="#536479" stroke-width="1.6"/>
+  <text x="445" y="219" text-anchor="middle" font-size="21" font-weight="500" fill="#e8edf5">config</text>
+  </g>
+</svg>

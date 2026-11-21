@@ -1273,3 +1273,263 @@ pub fn wal_state_crash(inout w: WalState, persisted: u64, torn: u64) -> WalCrash
         torn_bytes: torn_bytes
     }
 }
+
+// ---------------------------------------------------------------------------
+// Part 6: the Warp QUIC wire codec (src/model/umem.rs and warp.rs): the
+// short header, the fixed-width ACK frame (RFC 9000 §19.3 fields as
+// big-endian integers) and the peer's ACK range bookkeeping.
+
+// QUIC short header: flags byte, 8-byte DCID, 4-byte truncated PN.
+const SHORT_HEADER_BYTES: u64 = 13;
+// Error codes delivered to source as `Err(code)`; 0 is success here.
+const QUIC_OK: u32 = 0;
+const ERR_TRUNCATED: u32 = 1;
+const ERR_LONG_HEADER: u32 = 2;
+const ERR_FIXED_BIT: u32 = 3;
+const ERR_NOT_ACK: u32 = 4;
+const ERR_BAD_ACK: u32 = 5;
+// Header bits: the long-header form bit and the fixed bit.
+const FORM_BIT: u8 = 128;
+const FIXED_BIT: u8 = 64;
+const DCID_AT: u64 = 1;
+const PN_AT: u64 = 9;
+// Packet numbers are below 2^62 (RFC 9000 §12.3).
+const MAX_PACKET_NUMBER: u64 = 4611686018427387903;
+const ACK_FRAME_TYPE: u8 = 2;
+// Type, largest, delay, range count, first range.
+const ACK_FRAME_FIXED_BYTES: u32 = 29;
+// Each additional ACK range: gap and length.
+const ACK_RANGE_BYTES: u64 = 16;
+// RFC 9000 §19.3.1: the next largest is the previous smallest - gap - 2.
+const ACK_GAP_BIAS: u64 = 2;
+
+// `(code, first_byte, dcid, truncated pn)` of a short header; `code` is
+// QUIC_OK or the error.
+pub fn parse_short_header(in bytes: Slice[u8]) -> (u32, u8, u64, u32) {
+    if bytes.len() < SHORT_HEADER_BYTES {
+        return (ERR_TRUNCATED, 0, 0, 0);
+    }
+    let first = match bytes.try_get(0) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    };
+    if first & FORM_BIT != 0 {
+        return (ERR_LONG_HEADER, 0, 0, 0);
+    }
+    if first & FIXED_BIT == 0 {
+        return (ERR_FIXED_BIT, 0, 0, 0);
+    }
+    let dcid = match bytes.try_read_u64_be(DCID_AT) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let pn = match bytes.try_read_u32_be(PN_AT) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    (QUIC_OK, first, dcid, pn)
+}
+
+// A datagram whose payload starts with an ACK frame, as words:
+// `[code, dcid, largest, ack_delay_ns, lo0, hi0, lo1, hi1, ...]` with the
+// ranges largest first, or just `[code]` for an error.
+pub fn parse_ack(in bytes: Slice[u8]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let (code, _, dcid, _) = parse_short_header(in bytes);
+    if code != QUIC_OK {
+        out.push(widen_u64(code));
+        return out;
+    }
+    let n = bytes.len();
+    let kind = match bytes.try_get(SHORT_HEADER_BYTES) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    };
+    if n <= SHORT_HEADER_BYTES || kind != ACK_FRAME_TYPE {
+        out.push(widen_u64(ERR_NOT_ACK));
+        return out;
+    }
+    let payload_len = wrapping_sub(n, SHORT_HEADER_BYTES);
+    // The fixed fields, at offsets from the frame type.
+    let base = wrapping_add(SHORT_HEADER_BYTES, 1);
+    let fixed = widen_u64(ACK_FRAME_FIXED_BYTES);
+    if payload_len < fixed {
+        out.push(widen_u64(ERR_BAD_ACK));
+        return out;
+    }
+    let largest = be64(in bytes, base);
+    let ack_delay_ns = be64(in bytes, wrapping_add(base, 8));
+    let count = match bytes.try_read_u32_be(wrapping_add(base, 16)) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    };
+    let first = be64(in bytes, wrapping_add(base, 20));
+    if largest > MAX_PACKET_NUMBER || first > largest {
+        out.push(widen_u64(ERR_BAD_ACK));
+        return out;
+    }
+    let mut hi = largest;
+    let mut lo = wrapping_sub(hi, first);
+    if wrapping_mul(count, ACK_RANGE_BYTES) > payload_len {
+        out.push(widen_u64(ERR_BAD_ACK));
+        return out;
+    }
+    let mut ranges: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    ranges.push(lo);
+    ranges.push(hi);
+    let mut at_byte = wrapping_add(SHORT_HEADER_BYTES, fixed);
+    for _ in 0..count {
+        if wrapping_add(at_byte, ACK_RANGE_BYTES) > n {
+            out.push(widen_u64(ERR_BAD_ACK));
+            return out;
+        }
+        let gap = be64(in bytes, at_byte);
+        let len = be64(in bytes, wrapping_add(at_byte, 8));
+        at_byte = wrapping_add(at_byte, ACK_RANGE_BYTES);
+        if gap > lo || wrapping_sub(lo, gap) < ACK_GAP_BIAS {
+            out.push(widen_u64(ERR_BAD_ACK));
+            return out;
+        }
+        hi = wrapping_sub(wrapping_sub(lo, gap), ACK_GAP_BIAS);
+        if len > hi {
+            out.push(widen_u64(ERR_BAD_ACK));
+            return out;
+        }
+        lo = wrapping_sub(hi, len);
+        ranges.push(lo);
+        ranges.push(hi);
+    }
+    out.push(widen_u64(QUIC_OK));
+    out.push(dcid);
+    out.push(largest);
+    out.push(ack_delay_ns);
+    out.extend(in ranges.as_slice());
+    out
+}
+
+fn be64(in bytes: Slice[u8], at: u64) -> u64 {
+    match bytes.try_read_u64_be(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn push_be64(inout out: ChunkSeq[u8], v: u64) {
+    let at = out.len();
+    out.resize(wrapping_add(at, 8), 0);
+    out.try_write_u64_be(at, v);
+}
+
+// Encode an ACK frame for `(lo, hi)` word pairs given largest first,
+// disjoint and separated by at least one missing packet number (at least
+// one pair).
+pub fn ack_frame_bytes(in ranges: Slice[u64], ack_delay_ns: u64) -> ChunkSeq[u8] {
+    let pairs = ranges.len() / PAIR_WORDS;
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.push(ACK_FRAME_TYPE);
+    let lo0 = word_of(in ranges, 0);
+    let hi0 = word_of(in ranges, 1);
+    push_be64(inout out, hi0);
+    push_be64(inout out, ack_delay_ns);
+    let at = out.len();
+    out.resize(wrapping_add(at, 4), 0);
+    out.try_write_u32_be(at, wrapping_u32(wrapping_sub(pairs, 1)));
+    push_be64(inout out, wrapping_sub(hi0, lo0));
+    let mut prev_lo = lo0;
+    for i in 1..pairs {
+        let lo = word_of(in ranges, wrapping_mul(i, PAIR_WORDS));
+        let hi = word_of(in ranges, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1));
+        push_be64(inout out, wrapping_sub(wrapping_sub(prev_lo, hi), ACK_GAP_BIAS));
+        push_be64(inout out, wrapping_sub(hi, lo));
+        prev_lo = lo;
+    }
+    out
+}
+
+fn word_of(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// The bytes of a datagram's materialised head.
+pub fn short_header(first_byte: u8, dcid: u64, pkt_num: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](SHORT_HEADER_BYTES);
+    out.push(first_byte);
+    push_be64(inout out, dcid);
+    // Truncation to the low 32 bits is the wire encoding (4-byte PN field).
+    let at = out.len();
+    out.resize(wrapping_add(at, 4), 0);
+    out.try_write_u32_be(at, wrapping_u32(pkt_num));
+    out
+}
+
+// Bytes of an ACK datagram carrying `ranges` ranges.
+pub fn ack_datagram_len(ranges: u32) -> u32 {
+    let extra = if ranges > 0 {
+        wrapping_sub(ranges, 1)
+    } else {
+        0
+    };
+    wrapping_add(
+        wrapping_add(wrapping_u32(SHORT_HEADER_BYTES), ACK_FRAME_FIXED_BYTES),
+        wrapping_mul(wrapping_u32(ACK_RANGE_BYTES), extra)
+    )
+}
+
+// Add `pn` to `(lo, hi)` word pairs kept largest first, merging
+// neighbours, and keep at most `max` ranges (the oldest are forgotten).
+pub fn record_pn(in ranges: Slice[u64], pn: u64, max: u64) -> ChunkSeq[u64] {
+    let pairs = ranges.len() / PAIR_WORDS;
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
+        wrapping_add(ranges.len(), PAIR_WORDS)
+    );
+    for i in 0..pairs {
+        let lo = word_of(in ranges, wrapping_mul(i, PAIR_WORDS));
+        let hi = word_of(in ranges, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1));
+        if lo <= pn && pn <= hi {
+            out.extend(in ranges);
+            return out;
+        }
+    }
+    // Insert (pn, pn) before the first range whose high end is below it,
+    // merging as the Rust sort-and-fold does: a range absorbs the next one
+    // when the next one's high end is at least its low end minus one.
+    let mut inserted = false;
+    for i in 0..wrapping_add(pairs, 1) {
+        let (lo, hi) = if i < pairs {
+            (
+                word_of(in ranges, wrapping_mul(i, PAIR_WORDS)),
+                word_of(in ranges, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1))
+            )
+        } else {
+            (0, 0)
+        };
+        if !inserted && (i == pairs || hi < pn) {
+            merge_range(inout out, pn, pn);
+            inserted = true;
+        }
+        if i < pairs {
+            merge_range(inout out, lo, hi);
+        }
+    }
+    let keep = wrapping_mul(min(max, out.len() / PAIR_WORDS), PAIR_WORDS);
+    out.truncate(keep);
+    out
+}
+
+// Append `(lo, hi)` to ranges kept largest first, merging it into the last
+// range when `hi + 1 >= last.lo`.
+fn merge_range(inout out: ChunkSeq[u64], lo: u64, hi: u64) {
+    let n = out.len();
+    if n >= PAIR_WORDS {
+        let last_lo = at(in out, wrapping_sub(n, PAIR_WORDS));
+        if wrapping_add(hi, 1) >= last_lo {
+            out.try_set(wrapping_sub(n, PAIR_WORDS), min(last_lo, lo));
+            return;
+        }
+    }
+    out.push(lo);
+    out.push(hi);
+}

@@ -1,0 +1,2004 @@
+// The fusion engine: the part of egglog 3 that `vesper-fusion` runs, with
+// proofs.
+//
+// A program is egglog text: `(sort S)`, `(constructor Name (Args..) Out
+// :cost n)`, `(rewrite lhs rhs)` and `(let name expr)` commands. The engine
+// parses it, builds the bindings as e-nodes, saturates the rewrites for a
+// bounded number of iterations (egglog's `(run n)`), extracts the cheapest
+// term of the root binding with egglog's tree-cost extractor, and, when
+// asked, explains why the root binding equals the extracted term as a chain
+// of rewrite steps (rule, direction, position, substitution) that
+// `witness::check` in the Rust crate replays.
+//
+// The e-graph keeps explanations the way egg does:
+//
+// - Every distinct term is its own e-node id (`n_*`). Adding an e-node
+//   whose original children are those of an existing id returns that id
+//   (the `o_*` table); adding one that is only congruent to an existing
+//   e-node makes a new id and unions it with that e-node, justified by
+//   congruence (the `k_*` table, keyed by canonical children).
+// - Unions build a proof forest (`pf_parent`, `pf_just`) over ids: the edge
+//   added by `union(a, b)` re-roots `a`'s tree at `a` and points `a` at `b`.
+//   An edge is justified by congruence or by one rule application (`a_*`),
+//   which records the rule, the instantiated left side `L`, the right side
+//   `R` and the substitution's ids.
+// - `explain(a, b)` walks the forest path between two ids of one class. A
+//   rule edge is one step at the current position; a congruence edge
+//   explains each pair of children one position deeper. Every congruence
+//   edge's children were joined by older edges, so the recursion ends.
+
+use self::util::{
+    at32,
+    copy32,
+    copy64,
+    at64,
+    at8,
+    ati,
+    filled32,
+    filled64,
+    finish,
+    fold,
+    inc,
+    n32,
+    sat_add,
+    w
+};
+
+pub const NONE: u32 = 4294967295;
+const MAX_COST: u64 = 18446744073709551615;
+
+// S-expression kinds.
+const SX_LIST: u8 = 0;
+const SX_ATOM: u8 = 1;
+const SX_STR: u8 = 2;
+
+// Operators: literals, then constructor k as OP_CTOR + k.
+const OP_INT: u32 = 0;
+const OP_STR: u32 = 1;
+const OP_CTOR: u32 = 2;
+
+// Sorts: the two base sorts, then the declared ones.
+const S_I64: u32 = 0;
+const S_STRING: u32 = 1;
+const S_ANY: u32 = 4294967294;
+
+// Pattern kinds.
+const P_VAR: u8 = 0;
+const P_INT: u8 = 1;
+const P_STR: u8 = 2;
+const P_APP: u8 = 3;
+
+// Proof-forest justification of a congruence edge (otherwise the
+// application index).
+const J_CONGR: u32 = 4294967295;
+
+// Error codes (the Rust side words them).
+pub const E_SYNTAX: u64 = 1;
+pub const E_COMMAND: u64 = 2;
+pub const E_SORT: u64 = 3;
+pub const E_CTOR: u64 = 4;
+pub const E_ARITY: u64 = 5;
+pub const E_TYPE: u64 = 6;
+pub const E_UNBOUND: u64 = 7;
+pub const E_DUP: u64 = 8;
+pub const E_ROOT: u64 = 9;
+pub const E_NODES: u64 = 10;
+pub const E_STEPS: u64 = 11;
+pub const E_NOTERM: u64 = 13;
+pub const E_INT: u64 = 14;
+pub const E_VAR: u64 = 15;
+pub const E_LHS: u64 = 16;
+
+// Bounds: e-nodes in one graph, steps in one explanation.
+const MAX_NODES: u64 = 2097152;
+const MAX_STEPS: u64 = 262144;
+
+pub struct Eng {
+    // The program text, then the keywords and the root name.
+    text: ChunkSeq[u8],
+    prog_len: u64,
+    err: u64,
+    err_at: u64,
+    // S-expressions: kind, byte range (a string's contents), children as a
+    // first-child / next-sibling list.
+    sx_kind: ChunkSeq[u8],
+    sx_start: ChunkSeq[u32],
+    sx_len: ChunkSeq[u32],
+    sx_first: ChunkSeq[u32],
+    sx_next: ChunkSeq[u32],
+    sx_last: ChunkSeq[u32],
+    sx_count: ChunkSeq[u32],
+    // Symbols (byte ranges of `text`), hashed, and what each names.
+    sym_start: ChunkSeq[u32],
+    sym_len: ChunkSeq[u32],
+    sym_hash: ChunkSeq[u64],
+    sym_slots: ChunkSeq[u32],
+    sym_mask: u64,
+    sym_sort: ChunkSeq[u32],
+    sym_ctor: ChunkSeq[u32],
+    sym_let: ChunkSeq[u32],
+    kw_sort: u32,
+    kw_constructor: u32,
+    kw_rewrite: u32,
+    kw_let: u32,
+    kw_cost: u32,
+    nsorts: u32,
+    // Constructors.
+    c_sym: ChunkSeq[u32],
+    c_out: ChunkSeq[u32],
+    c_cost: ChunkSeq[u64],
+    c_arg_start: ChunkSeq[u32],
+    c_arg_len: ChunkSeq[u32],
+    c_args: ChunkSeq[u32],
+    // Patterns.
+    p_kind: ChunkSeq[u8],
+    p_val: ChunkSeq[i64],
+    p_kstart: ChunkSeq[u32],
+    p_klen: ChunkSeq[u32],
+    p_kids: ChunkSeq[u32],
+    // Rules: sides, variables (symbols), in program order.
+    r_lhs: ChunkSeq[u32],
+    r_rhs: ChunkSeq[u32],
+    r_nv: ChunkSeq[u32],
+    r_vstart: ChunkSeq[u32],
+    r_vsym: ChunkSeq[u32],
+    // The rule being read: its variables and their sorts.
+    v_sym: ChunkSeq[u32],
+    v_sort: ChunkSeq[u32],
+    // E-nodes: operator, data, original children.
+    n_op: ChunkSeq[u32],
+    n_data: ChunkSeq[i64],
+    n_kstart: ChunkSeq[u32],
+    n_klen: ChunkSeq[u32],
+    n_kids: ChunkSeq[u32],
+    // Union-find with class sizes.
+    uf: ChunkSeq[u32],
+    uf_size: ChunkSeq[u32],
+    // Proof forest.
+    pf_parent: ChunkSeq[u32],
+    pf_just: ChunkSeq[u32],
+    // Hash tables of ids (0 empty, else id + 1): original and canonical keys.
+    o_slots: ChunkSeq[u32],
+    o_mask: u64,
+    o_count: u64,
+    k_slots: ChunkSeq[u32],
+    k_mask: u64,
+    k_count: u64,
+    // Rule applications.
+    a_rule: ChunkSeq[u32],
+    a_l: ChunkSeq[u32],
+    a_r: ChunkSeq[u32],
+    a_sstart: ChunkSeq[u32],
+    a_sub: ChunkSeq[u32],
+    // The rebuilt view: per class root its distinct canonical e-nodes
+    // (cl_nodes[cl_start[c] ..][.. cl_len[c]]); `roots` ascending.
+    cl_start: ChunkSeq[u32],
+    cl_len: ChunkSeq[u32],
+    cl_nodes: ChunkSeq[u32],
+    roots: ChunkSeq[u32],
+    reps: ChunkSeq[u32],
+    // Extraction: per class root.
+    best_cost: ChunkSeq[u64],
+    best_rank: ChunkSeq[u64],
+    best_node: ChunkSeq[u32],
+    x_slot: ChunkSeq[u32],
+    x_words: ChunkSeq[u64],
+    x_count: u64,
+    // Explanations.
+    stamp: ChunkSeq[u64],
+    token: u64,
+    t_slot: ChunkSeq[u32],
+    settled: ChunkSeq[u8],
+    t_words: ChunkSeq[u64],
+    t_count: u64,
+    st_words: ChunkSeq[u64],
+    st_count: u64,
+    path: ChunkSeq[u32],
+    iterations: u64
+}
+
+pub fn eng_new(in program: Str) -> Eng {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    text.extend(in program.as_bytes());
+    let prog_len = text.len();
+    Eng {
+        text: text,
+        prog_len: prog_len,
+        err: 0,
+        err_at: 0,
+        sx_kind: ChunkSeq::new[u8](),
+        sx_start: ChunkSeq::new[u32](),
+        sx_len: ChunkSeq::new[u32](),
+        sx_first: ChunkSeq::new[u32](),
+        sx_next: ChunkSeq::new[u32](),
+        sx_last: ChunkSeq::new[u32](),
+        sx_count: ChunkSeq::new[u32](),
+        sym_start: ChunkSeq::new[u32](),
+        sym_len: ChunkSeq::new[u32](),
+        sym_hash: ChunkSeq::new[u64](),
+        sym_slots: filled32(256, 0),
+        sym_mask: 255,
+        sym_sort: ChunkSeq::new[u32](),
+        sym_ctor: ChunkSeq::new[u32](),
+        sym_let: ChunkSeq::new[u32](),
+        kw_sort: 0,
+        kw_constructor: 0,
+        kw_rewrite: 0,
+        kw_let: 0,
+        kw_cost: 0,
+        nsorts: 2,
+        c_sym: ChunkSeq::new[u32](),
+        c_out: ChunkSeq::new[u32](),
+        c_cost: ChunkSeq::new[u64](),
+        c_arg_start: ChunkSeq::new[u32](),
+        c_arg_len: ChunkSeq::new[u32](),
+        c_args: ChunkSeq::new[u32](),
+        p_kind: ChunkSeq::new[u8](),
+        p_val: ChunkSeq::new[i64](),
+        p_kstart: ChunkSeq::new[u32](),
+        p_klen: ChunkSeq::new[u32](),
+        p_kids: ChunkSeq::new[u32](),
+        r_lhs: ChunkSeq::new[u32](),
+        r_rhs: ChunkSeq::new[u32](),
+        r_nv: ChunkSeq::new[u32](),
+        r_vstart: ChunkSeq::new[u32](),
+        r_vsym: ChunkSeq::new[u32](),
+        v_sym: ChunkSeq::new[u32](),
+        v_sort: ChunkSeq::new[u32](),
+        n_op: ChunkSeq::new[u32](),
+        n_data: ChunkSeq::new[i64](),
+        n_kstart: ChunkSeq::new[u32](),
+        n_klen: ChunkSeq::new[u32](),
+        n_kids: ChunkSeq::new[u32](),
+        uf: ChunkSeq::new[u32](),
+        uf_size: ChunkSeq::new[u32](),
+        pf_parent: ChunkSeq::new[u32](),
+        pf_just: ChunkSeq::new[u32](),
+        o_slots: filled32(1024, 0),
+        o_mask: 1023,
+        o_count: 0,
+        k_slots: filled32(1024, 0),
+        k_mask: 1023,
+        k_count: 0,
+        a_rule: ChunkSeq::new[u32](),
+        a_l: ChunkSeq::new[u32](),
+        a_r: ChunkSeq::new[u32](),
+        a_sstart: ChunkSeq::new[u32](),
+        a_sub: ChunkSeq::new[u32](),
+        cl_start: ChunkSeq::new[u32](),
+        cl_len: ChunkSeq::new[u32](),
+        cl_nodes: ChunkSeq::new[u32](),
+        roots: ChunkSeq::new[u32](),
+        reps: ChunkSeq::new[u32](),
+        best_cost: ChunkSeq::new[u64](),
+        best_rank: ChunkSeq::new[u64](),
+        best_node: ChunkSeq::new[u32](),
+        x_slot: ChunkSeq::new[u32](),
+        x_words: ChunkSeq::new[u64](),
+        x_count: 0,
+        stamp: ChunkSeq::new[u64](),
+        token: 0,
+        t_slot: ChunkSeq::new[u32](),
+        settled: ChunkSeq::new[u8](),
+        t_words: ChunkSeq::new[u64](),
+        t_count: 0,
+        st_words: ChunkSeq::new[u64](),
+        st_count: 0,
+        path: ChunkSeq::new[u32](),
+        iterations: 0
+    }
+}
+
+fn is_space(b: u8) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn is_delim(b: u8) -> bool {
+    is_space(b) || b == 40 || b == 41 || b == 34 || b == 59
+}
+
+impl Eng {
+    pub fn failed(in self) -> bool {
+        self.err != 0
+    }
+
+    pub fn error(in self) -> u64 {
+        self.err
+    }
+
+    pub fn error_at(in self) -> u64 {
+        self.err_at
+    }
+
+    fn fail(inout self, code: u64, at: u64) {
+        if self.err == 0 {
+            self.err = code;
+            self.err_at = at;
+        }
+    }
+
+    fn sx_at(in self, sx: u32) -> u64 {
+        w(at32(in self.sx_start, w(sx)))
+    }
+
+    // ------------------------------------------------------------ symbols
+
+    fn range_hash(in self, start: u64, len: u64) -> u64 {
+        let mut h: u64 = 14695981039346656037;
+        for i in 0..len {
+            h = fold(h, widen_u64(at8(in self.text, wrapping_add(start, i))));
+        }
+        finish(h)
+    }
+
+    fn range_eq(in self, a: u64, b: u64, len: u64) -> bool {
+        for i in 0..len {
+            if at8(in self.text, wrapping_add(a, i)) != at8(in self.text, wrapping_add(b, i)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn sym_grow(inout self) {
+        let cap = wrapping_mul(wrapping_add(self.sym_mask, 1), 2);
+        let mut slots = filled32(cap, 0);
+        let mask = wrapping_sub(cap, 1);
+        for s in 0..self.sym_start.len() {
+            let mut i = at64(in self.sym_hash, s) & mask;
+            loop {
+                if at32(in slots, i) == 0 {
+                    slots.try_set(i, wrapping_add(n32(s), 1));
+                    break;
+                }
+                i = inc(i) & mask;
+            }
+        }
+        self.sym_slots = slots;
+        self.sym_mask = mask;
+    }
+
+    // The symbol spelled by text[start .. start + len].
+    fn intern(inout self, start: u64, len: u64) -> u32 {
+        let h = self.range_hash(start, len);
+        let mut i = h & self.sym_mask;
+        loop {
+            let s = at32(in self.sym_slots, i);
+            if s == 0 {
+                break;
+            }
+            let id = wrapping_sub(s, 1);
+            if at64(in self.sym_hash, w(id)) == h && w(at32(in self.sym_len, w(id))) == len {
+                let at = w(at32(in self.sym_start, w(id)));
+                if self.range_eq(at, start, len) {
+                    // A spelling interned from outside the program (a
+                    // keyword) points at its program occurrence once there is
+                    // one, so every range the output names is the program's.
+                    if at >= self.prog_len && start < self.prog_len {
+                        self.sym_start.try_set(w(id), n32(start));
+                    }
+                    return id;
+                }
+            }
+            i = inc(i) & self.sym_mask;
+        }
+        let id = n32(self.sym_start.len());
+        self.sym_start.push(n32(start));
+        self.sym_len.push(n32(len));
+        self.sym_hash.push(h);
+        self.sym_sort.push(NONE);
+        self.sym_ctor.push(NONE);
+        self.sym_let.push(NONE);
+        self.sym_slots.try_set(i, wrapping_add(id, 1));
+        if wrapping_mul(self.sym_start.len(), 2) > self.sym_mask {
+            self.sym_grow();
+        }
+        id
+    }
+
+    // Interns a spelling that is not in the program, appending it to `text`.
+    fn intern_extra(inout self, in s: Str) -> u32 {
+        let start = self.text.len();
+        self.text.extend(in s.as_bytes());
+        let len = wrapping_sub(self.text.len(), start);
+        self.intern(start, len)
+    }
+
+    fn sym_of(inout self, sx: u32) -> u32 {
+        let s = self.sx_at(sx);
+        let l = w(at32(in self.sx_len, w(sx)));
+        self.intern(s, l)
+    }
+
+    pub fn sym_range(in self, s: u32) -> (u64, u64) {
+        (w(at32(in self.sym_start, w(s))), w(at32(in self.sym_len, w(s))))
+    }
+
+    // ------------------------------------------------------------ s-expressions
+
+    fn sx_new(inout self, kind: u8, start: u64, len: u64) -> u32 {
+        let id = n32(self.sx_kind.len());
+        self.sx_kind.push(kind);
+        self.sx_start.push(n32(start));
+        self.sx_len.push(n32(len));
+        self.sx_first.push(NONE);
+        self.sx_next.push(NONE);
+        self.sx_last.push(NONE);
+        self.sx_count.push(0);
+        id
+    }
+
+    fn sx_append(inout self, parent: u32, child: u32) {
+        let last = at32(in self.sx_last, w(parent));
+        if last == NONE {
+            self.sx_first.try_set(w(parent), child);
+        } else {
+            self.sx_next.try_set(w(last), child);
+        }
+        self.sx_last.try_set(w(parent), child);
+        let c = at32(in self.sx_count, w(parent));
+        self.sx_count.try_set(w(parent), wrapping_add(c, 1));
+    }
+
+    // The program's s-expressions under list 0.
+    fn parse_sx(inout self) {
+        let root = self.sx_new(SX_LIST, 0, 0);
+        let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        stack.push(root);
+        let n = self.prog_len;
+        let mut i: u64 = 0;
+        loop {
+            if i >= n || self.err != 0 {
+                break;
+            }
+            let b = at8(in self.text, i);
+            let top = at32(in stack, wrapping_sub(stack.len(), 1));
+            if b == 59 {
+                loop {
+                    if i >= n || at8(in self.text, i) == 10 {
+                        break;
+                    }
+                    i = inc(i);
+                }
+            } else if b == 40 {
+                let l = self.sx_new(SX_LIST, i, 0);
+                self.sx_append(top, l);
+                stack.push(l);
+                i = inc(i);
+            } else if b == 41 {
+                if stack.len() <= 1 {
+                    self.fail(E_SYNTAX, i);
+                    break;
+                }
+                stack.truncate(wrapping_sub(stack.len(), 1));
+                i = inc(i);
+            } else if b == 34 {
+                let start = inc(i);
+                let mut j = start;
+                loop {
+                    if j >= n {
+                        break;
+                    }
+                    let c = at8(in self.text, j);
+                    if c == 34 {
+                        break;
+                    }
+                    if c == 92 {
+                        self.fail(E_SYNTAX, j);
+                        break;
+                    }
+                    j = inc(j);
+                }
+                if self.err != 0 {
+                    break;
+                }
+                if j >= n {
+                    self.fail(E_SYNTAX, i);
+                    break;
+                }
+                let s = self.sx_new(SX_STR, start, wrapping_sub(j, start));
+                self.sx_append(top, s);
+                i = inc(j);
+            } else if is_space(b) {
+                i = inc(i);
+            } else {
+                let start = i;
+                loop {
+                    if i >= n || is_delim(at8(in self.text, i)) {
+                        break;
+                    }
+                    i = inc(i);
+                }
+                let a = self.sx_new(SX_ATOM, start, wrapping_sub(i, start));
+                self.sx_append(top, a);
+            }
+        }
+        if self.err == 0 && stack.len() != 1 {
+            self.fail(E_SYNTAX, n);
+        }
+    }
+
+    fn kid(in self, sx: u32, k: u64) -> u32 {
+        let mut c = at32(in self.sx_first, w(sx));
+        for _i in 0..k {
+            if c == NONE {
+                return NONE;
+            }
+            c = at32(in self.sx_next, w(c));
+        }
+        c
+    }
+
+    fn count(in self, sx: u32) -> u64 {
+        w(at32(in self.sx_count, w(sx)))
+    }
+
+    fn kind(in self, sx: u32) -> u8 {
+        at8(in self.sx_kind, w(sx))
+    }
+
+    // An atom's integer value: (is an integer, value, overflowed).
+    fn int_atom(in self, sx: u32) -> (bool, i64, bool) {
+        let s = self.sx_at(sx);
+        let l = w(at32(in self.sx_len, w(sx)));
+        let mut i: u64 = 0;
+        let neg = at8(in self.text, s) == 45;
+        if neg {
+            i = 1;
+        }
+        if i >= l {
+            return (false, 0, false);
+        }
+        let mut v: u64 = 0;
+        let mut over = false;
+        loop {
+            if i >= l {
+                break;
+            }
+            let d = at8(in self.text, wrapping_add(s, i));
+            if d < 48 || d > 57 {
+                return (false, 0, false);
+            }
+            let nv = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(d, 48)));
+            if v > 1844674407370955161 || nv < v {
+                over = true;
+            }
+            v = nv;
+            i = inc(i);
+        }
+        if neg {
+            if v > 9223372036854775808 {
+                over = true;
+            }
+            (true, wrapping_i64(wrapping_sub(0, v)), over)
+        } else {
+            if v > 9223372036854775807 {
+                over = true;
+            }
+            (true, wrapping_i64(v), over)
+        }
+    }
+
+    // ------------------------------------------------------------ commands
+
+    fn sort_of_atom(inout self, sx: u32) -> u32 {
+        if self.kind(sx) != SX_ATOM {
+            self.fail(E_SORT, self.sx_at(sx));
+            return NONE;
+        }
+        let s = self.sym_of(sx);
+        let k = at32(in self.sym_sort, w(s));
+        if k == NONE {
+            self.fail(E_SORT, self.sx_at(sx));
+        }
+        k
+    }
+
+    fn command_sort(inout self, cmd: u32) {
+        let name = self.kid(cmd, 1);
+        if self.count(cmd) != 2 || self.kind(name) != SX_ATOM {
+            self.fail(E_COMMAND, self.sx_at(cmd));
+            return;
+        }
+        let s = self.sym_of(name);
+        if at32(in self.sym_sort, w(s)) != NONE {
+            self.fail(E_DUP, self.sx_at(name));
+            return;
+        }
+        self.sym_sort.try_set(w(s), self.nsorts);
+        self.nsorts = wrapping_add(self.nsorts, 1);
+    }
+
+    fn command_constructor(inout self, cmd: u32) {
+        let n = self.count(cmd);
+        let name = self.kid(cmd, 1);
+        let args = self.kid(cmd, 2);
+        let out = self.kid(cmd, 3);
+        if (n != 4 && n != 6) || self.kind(name) != SX_ATOM || self.kind(args) != SX_LIST {
+            self.fail(E_COMMAND, self.sx_at(cmd));
+            return;
+        }
+        let mut cost: u64 = 1;
+        if n == 6 {
+            let kw = self.kid(cmd, 4);
+            let val = self.kid(cmd, 5);
+            if self
+                .kind(kw)
+                != SX_ATOM
+                || self
+                .sym_of(kw)
+                != self
+                .kw_cost
+                || self
+                .kind(val)
+                != SX_ATOM {
+                self.fail(E_COMMAND, self.sx_at(kw));
+                return;
+            }
+            let (is_int, v, over) = self.int_atom(val);
+            if !is_int || over || v < 0 {
+                self.fail(E_INT, self.sx_at(val));
+                return;
+            }
+            cost = wrapping_u64(v);
+        }
+        let s = self.sym_of(name);
+        if at32(in self.sym_ctor, w(s)) != NONE {
+            self.fail(E_DUP, self.sx_at(name));
+            return;
+        }
+        let start = n32(self.c_args.len());
+        let na = self.count(args);
+        let mut a = at32(in self.sx_first, w(args));
+        for _i in 0..na {
+            let k = self.sort_of_atom(a);
+            if self.err != 0 {
+                return;
+            }
+            self.c_args.push(k);
+            a = at32(in self.sx_next, w(a));
+        }
+        let o = self.sort_of_atom(out);
+        if self.err != 0 {
+            return;
+        }
+        if o == S_I64 || o == S_STRING {
+            self.fail(E_TYPE, self.sx_at(out));
+            return;
+        }
+        let id = n32(self.c_sym.len());
+        self.c_sym.push(s);
+        self.c_out.push(o);
+        self.c_cost.push(cost);
+        self.c_arg_start.push(start);
+        self.c_arg_len.push(n32(na));
+        self.sym_ctor.try_set(w(s), id);
+    }
+
+    fn ctor_arg(in self, c: u32, i: u64) -> u32 {
+        at32(in self.c_args, wrapping_add(w(at32(in self.c_arg_start, w(c))), i))
+    }
+
+    fn ctor_of(inout self, list: u32) -> u32 {
+        let head = at32(in self.sx_first, w(list));
+        if head == NONE || self.kind(head) != SX_ATOM {
+            self.fail(E_CTOR, self.sx_at(list));
+            return NONE;
+        }
+        let s = self.sym_of(head);
+        let c = at32(in self.sym_ctor, w(s));
+        if c == NONE {
+            self.fail(E_CTOR, self.sx_at(head));
+            return NONE;
+        }
+        if wrapping_add(w(at32(in self.c_arg_len, w(c))), 1) != self.count(list) {
+            self.fail(E_ARITY, self.sx_at(list));
+            return NONE;
+        }
+        c
+    }
+
+    fn node_sort(in self, n: u32) -> u32 {
+        let op = at32(in self.n_op, w(n));
+        if op == OP_INT {
+            S_I64
+        } else if op == OP_STR {
+            S_STRING
+        } else {
+            at32(in self.c_out, w(wrapping_sub(op, OP_CTOR)))
+        }
+    }
+
+    // Builds a binding body as e-nodes; `want` is the sort its position
+    // needs (S_ANY at the top).
+    fn expr(inout self, sx: u32, want: u32) -> u32 {
+        let k = self.kind(sx);
+        let mut n: u32 = NONE;
+        if k == SX_STR {
+            let s = self.sym_of(sx);
+            let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            n = self.add(OP_STR, widen_i64(s), in kids);
+        } else if k == SX_ATOM {
+            let (is_int, v, over) = self.int_atom(sx);
+            if is_int {
+                if over {
+                    self.fail(E_INT, self.sx_at(sx));
+                    return NONE;
+                }
+                let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                n = self.add(OP_INT, v, in kids);
+            } else {
+                let s = self.sym_of(sx);
+                n = at32(in self.sym_let, w(s));
+                if n == NONE {
+                    self.fail(E_UNBOUND, self.sx_at(sx));
+                    return NONE;
+                }
+            }
+        } else {
+            let c = self.ctor_of(sx);
+            if self.err != 0 {
+                return NONE;
+            }
+            let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let mut a = at32(in self.sx_next, w(at32(in self.sx_first, w(sx))));
+            let na = w(at32(in self.c_arg_len, w(c)));
+            for i in 0..na {
+                let x = self.expr(a, self.ctor_arg(c, i));
+                if self.err != 0 {
+                    return NONE;
+                }
+                kids.push(x);
+                a = at32(in self.sx_next, w(a));
+            }
+            n = self.add(wrapping_add(OP_CTOR, c), 0, in kids);
+        }
+        if self.err != 0 {
+            return NONE;
+        }
+        if want != S_ANY && self.node_sort(n) != want {
+            self.fail(E_TYPE, self.sx_at(sx));
+            return NONE;
+        }
+        n
+    }
+
+    fn command_let(inout self, cmd: u32) {
+        let name = self.kid(cmd, 1);
+        let body = self.kid(cmd, 2);
+        if self.count(cmd) != 3 || self.kind(name) != SX_ATOM {
+            self.fail(E_COMMAND, self.sx_at(cmd));
+            return;
+        }
+        let s = self.sym_of(name);
+        if at32(in self.sym_let, w(s)) != NONE {
+            self.fail(E_DUP, self.sx_at(name));
+            return;
+        }
+        let n = self.expr(body, S_ANY);
+        if self.err != 0 {
+            return;
+        }
+        self.sym_let.try_set(w(s), n);
+    }
+
+    fn pat_new(inout self, kind: u8, val: i64) -> u32 {
+        let id = n32(self.p_kind.len());
+        self.p_kind.push(kind);
+        self.p_val.push(val);
+        self.p_kstart.push(0);
+        self.p_klen.push(0);
+        id
+    }
+
+    // A pattern; returns (pattern, sort). New variables are allowed on the
+    // left side only.
+    fn pat(inout self, sx: u32, want: u32, fresh: bool) -> (u32, u32) {
+        let k = self.kind(sx);
+        if k == SX_STR {
+            let s = self.sym_of(sx);
+            if want != S_ANY && want != S_STRING {
+                self.fail(E_TYPE, self.sx_at(sx));
+            }
+            return (self.pat_new(P_STR, widen_i64(s)), S_STRING);
+        }
+        if k == SX_ATOM {
+            let (is_int, v, over) = self.int_atom(sx);
+            if is_int {
+                if over {
+                    self.fail(E_INT, self.sx_at(sx));
+                }
+                if want != S_ANY && want != S_I64 {
+                    self.fail(E_TYPE, self.sx_at(sx));
+                }
+                return (self.pat_new(P_INT, v), S_I64);
+            }
+            if want == S_ANY {
+                self.fail(E_LHS, self.sx_at(sx));
+                return (NONE, NONE);
+            }
+            let s = self.sym_of(sx);
+            let mut found: u64 = self.v_sym.len();
+            for i in 0..self.v_sym.len() {
+                if at32(in self.v_sym, i) == s {
+                    found = i;
+                }
+            }
+            if found == self.v_sym.len() {
+                if !fresh {
+                    self.fail(E_VAR, self.sx_at(sx));
+                    return (NONE, NONE);
+                }
+                self.v_sym.push(s);
+                self.v_sort.push(want);
+            } else if at32(in self.v_sort, found) != want {
+                self.fail(E_TYPE, self.sx_at(sx));
+                return (NONE, NONE);
+            }
+            return (self.pat_new(P_VAR, wrapping_i64(found)), want);
+        }
+        let c = self.ctor_of(sx);
+        if self.err != 0 {
+            return (NONE, NONE);
+        }
+        let out = at32(in self.c_out, w(c));
+        if want != S_ANY && want != out {
+            self.fail(E_TYPE, self.sx_at(sx));
+            return (NONE, NONE);
+        }
+        let na = w(at32(in self.c_arg_len, w(c)));
+        let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut a = at32(in self.sx_next, w(at32(in self.sx_first, w(sx))));
+        for i in 0..na {
+            let (p, _s) = self.pat(a, self.ctor_arg(c, i), fresh);
+            if self.err != 0 {
+                return (NONE, NONE);
+            }
+            kids.push(p);
+            a = at32(in self.sx_next, w(a));
+        }
+        let id = self.pat_new(P_APP, widen_i64(wrapping_add(OP_CTOR, c)));
+        self.p_kstart.try_set(w(id), n32(self.p_kids.len()));
+        self.p_klen.try_set(w(id), n32(na));
+        for i in 0..na {
+            self.p_kids.push(at32(in kids, i));
+        }
+        (id, out)
+    }
+
+    fn command_rewrite(inout self, cmd: u32) {
+        let lhs = self.kid(cmd, 1);
+        let rhs = self.kid(cmd, 2);
+        if self.count(cmd) != 3 {
+            self.fail(E_COMMAND, self.sx_at(cmd));
+            return;
+        }
+        if self.kind(lhs) != SX_LIST {
+            self.fail(E_LHS, self.sx_at(lhs));
+            return;
+        }
+        self.v_sym.clear();
+        self.v_sort.clear();
+        let (l, sort) = self.pat(lhs, S_ANY, true);
+        if self.err != 0 {
+            return;
+        }
+        let (r, _s) = self.pat(rhs, sort, false);
+        if self.err != 0 {
+            return;
+        }
+        self.r_lhs.push(l);
+        self.r_rhs.push(r);
+        self.r_nv.push(n32(self.v_sym.len()));
+        self.r_vstart.push(n32(self.r_vsym.len()));
+        for i in 0..self.v_sym.len() {
+            self.r_vsym.push(at32(in self.v_sym, i));
+        }
+    }
+
+    // Parses and runs every command of the program.
+    pub fn load(inout self) {
+        self.kw_sort = self.intern_extra(in "sort");
+        self.kw_constructor = self.intern_extra(in "constructor");
+        self.kw_rewrite = self.intern_extra(in "rewrite");
+        self.kw_let = self.intern_extra(in "let");
+        self.kw_cost = self.intern_extra(in ":cost");
+        let i64s = self.intern_extra(in "i64");
+        let strs = self.intern_extra(in "String");
+        self.sym_sort.try_set(w(i64s), S_I64);
+        self.sym_sort.try_set(w(strs), S_STRING);
+        self.parse_sx();
+        if self.err != 0 {
+            return;
+        }
+        let mut cmd = at32(in self.sx_first, 0);
+        loop {
+            if cmd == NONE || self.err != 0 {
+                break;
+            }
+            let head = at32(in self.sx_first, w(cmd));
+            if self.kind(cmd) != SX_LIST || head == NONE || self.kind(head) != SX_ATOM {
+                self.fail(E_COMMAND, self.sx_at(cmd));
+                break;
+            }
+            let h = self.sym_of(head);
+            if h == self.kw_sort {
+                self.command_sort(cmd);
+            } else if h == self.kw_constructor {
+                self.command_constructor(cmd);
+            } else if h == self.kw_rewrite {
+                self.command_rewrite(cmd);
+            } else if h == self.kw_let {
+                self.command_let(cmd);
+            } else {
+                self.fail(E_COMMAND, self.sx_at(cmd));
+            }
+            cmd = at32(in self.sx_next, w(cmd));
+        }
+    }
+
+    // The e-node a binding names, or NONE.
+    pub fn binding(inout self, in name: Str) -> u32 {
+        let s = self.intern_extra(in name);
+        at32(in self.sym_let, w(s))
+    }
+
+    // ------------------------------------------------------------ e-graph
+
+    pub fn find(in self, x: u32) -> u32 {
+        let mut c = x;
+        loop {
+            let p = at32(in self.uf, w(c));
+            if p == c {
+                return c;
+            }
+            c = p;
+        }
+    }
+
+    fn kid_of(in self, n: u32, i: u64) -> u32 {
+        at32(in self.n_kids, wrapping_add(w(at32(in self.n_kstart, w(n))), i))
+    }
+
+    fn klen(in self, n: u32) -> u64 {
+        w(at32(in self.n_klen, w(n)))
+    }
+
+    fn key_hash(in self, n: u32, canon: bool) -> u64 {
+        let mut h = fold(14695981039346656037, w(at32(in self.n_op, w(n))));
+        h = fold(h, wrapping_u64(ati(in self.n_data, w(n))));
+        for i in 0..self.klen(n) {
+            let mut k = self.kid_of(n, i);
+            if canon {
+                k = self.find(k);
+            }
+            h = fold(h, w(k));
+        }
+        finish(h)
+    }
+
+    fn key_eq(in self, a: u32, b: u32, canon: bool) -> bool {
+        if at32(in self.n_op, w(a)) != at32(in self.n_op, w(b)) {
+            return false;
+        }
+        if ati(in self.n_data, w(a)) != ati(in self.n_data, w(b)) {
+            return false;
+        }
+        let l = self.klen(a);
+        if l != self.klen(b) {
+            return false;
+        }
+        for i in 0..l {
+            let mut x = self.kid_of(a, i);
+            let mut y = self.kid_of(b, i);
+            if canon {
+                x = self.find(x);
+                y = self.find(y);
+            }
+            if x != y {
+                return false;
+            }
+        }
+        true
+    }
+
+    // Probes the original (canon false) or canonical table for an id other
+    // than `n` with `n`'s key: (slot index, found id or NONE).
+    fn probe(in self, n: u32, canon: bool) -> (u64, u32) {
+        let h = self.key_hash(n, canon);
+        let mask = if canon {
+            self.k_mask
+        } else {
+            self.o_mask
+        };
+        let mut i = h & mask;
+        loop {
+            let s = if canon {
+                at32(in self.k_slots, i)
+            } else {
+                at32(in self.o_slots, i)
+            };
+            if s == 0 {
+                return (i, NONE);
+            }
+            let id = wrapping_sub(s, 1);
+            if id != n && self.key_eq(id, n, canon) {
+                return (i, id);
+            }
+            i = inc(i) & mask;
+        }
+    }
+
+    fn table_put(inout self, n: u32, canon: bool) {
+        let (i, found) = self.probe(n, canon);
+        if found != NONE {
+            return;
+        }
+        if canon {
+            self.k_slots.try_set(i, wrapping_add(n, 1));
+            self.k_count = inc(self.k_count);
+            if wrapping_mul(self.k_count, 2) > self.k_mask {
+                self.table_grow(true);
+            }
+        } else {
+            self.o_slots.try_set(i, wrapping_add(n, 1));
+            self.o_count = inc(self.o_count);
+            if wrapping_mul(self.o_count, 2) > self.o_mask {
+                self.table_grow(false);
+            }
+        }
+    }
+
+    // Doubles a table and re-inserts every id it held.
+    fn table_grow(inout self, canon: bool) {
+        let old: ChunkSeq[u32] = if canon {
+            copy32(in self.k_slots)
+        } else {
+            copy32(in self.o_slots)
+        };
+        let cap = wrapping_mul(old.len(), 2);
+        if canon {
+            self.k_slots = filled32(cap, 0);
+            self.k_mask = wrapping_sub(cap, 1);
+            self.k_count = 0;
+        } else {
+            self.o_slots = filled32(cap, 0);
+            self.o_mask = wrapping_sub(cap, 1);
+            self.o_count = 0;
+        }
+        for i in 0..old.len() {
+            let s = at32(in old, i);
+            if s != 0 {
+                self.table_put(wrapping_sub(s, 1), canon);
+            }
+        }
+    }
+
+    fn table_clear(inout self, canon: bool, cap: u64) {
+        if canon {
+            self.k_slots = filled32(cap, 0);
+            self.k_mask = wrapping_sub(cap, 1);
+            self.k_count = 0;
+        } else {
+            self.o_slots = filled32(cap, 0);
+            self.o_mask = wrapping_sub(cap, 1);
+            self.o_count = 0;
+        }
+    }
+
+    fn push_node(inout self, op: u32, data: i64, in kids: ChunkSeq[u32]) -> u32 {
+        let id = n32(self.n_op.len());
+        self.n_op.push(op);
+        self.n_data.push(data);
+        self.n_kstart.push(n32(self.n_kids.len()));
+        self.n_klen.push(n32(kids.len()));
+        for i in 0..kids.len() {
+            self.n_kids.push(at32(in kids, i));
+        }
+        id
+    }
+
+    fn pop_node(inout self, id: u32) {
+        let ks = w(at32(in self.n_kstart, w(id)));
+        self.n_op.truncate(w(id));
+        self.n_data.truncate(w(id));
+        self.n_kstart.truncate(w(id));
+        self.n_klen.truncate(w(id));
+        self.n_kids.truncate(ks);
+    }
+
+    // The id of the term op(data, kids..), adding it if it is new.
+    pub fn add(inout self, op: u32, data: i64, in kids: ChunkSeq[u32]) -> u32 {
+        let id = self.push_node(op, data, in kids);
+        let (_i, same) = self.probe(id, false);
+        if same != NONE {
+            self.pop_node(id);
+            return same;
+        }
+        if self.n_op.len() > MAX_NODES {
+            self.fail(E_NODES, 0);
+        }
+        self.uf.push(id);
+        self.uf_size.push(1);
+        self.pf_parent.push(NONE);
+        self.pf_just.push(0);
+        self.table_put(id, false);
+        let (_j, e) = self.probe(id, true);
+        if e != NONE {
+            self.union(id, e, J_CONGR);
+        } else {
+            self.table_put(id, true);
+        }
+        id
+    }
+
+    // Re-roots `x`'s proof tree at `x`.
+    fn reroot(inout self, x: u32) {
+        let mut prev: u32 = NONE;
+        let mut prev_j: u32 = 0;
+        let mut cur = x;
+        loop {
+            if cur == NONE {
+                break;
+            }
+            let next = at32(in self.pf_parent, w(cur));
+            let nj = at32(in self.pf_just, w(cur));
+            self.pf_parent.try_set(w(cur), prev);
+            self.pf_just.try_set(w(cur), prev_j);
+            prev = cur;
+            prev_j = nj;
+            cur = next;
+        }
+    }
+
+    // Unions the classes of `a` and `b`; false if they were one class.
+    fn union(inout self, a: u32, b: u32, just: u32) -> bool {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra == rb {
+            return false;
+        }
+        let sa = at32(in self.uf_size, w(ra));
+        let sb = at32(in self.uf_size, w(rb));
+        if sa < sb {
+            self.uf.try_set(w(ra), rb);
+            self.uf_size.try_set(w(rb), wrapping_add(sa, sb));
+        } else {
+            self.uf.try_set(w(rb), ra);
+            self.uf_size.try_set(w(ra), wrapping_add(sa, sb));
+        }
+        self.reroot(a);
+        self.pf_parent.try_set(w(a), b);
+        self.pf_just.try_set(w(a), just);
+        true
+    }
+
+    // Restores congruence closure (unions justified by congruence until no
+    // two classes hold e-nodes with one canonical key), then builds the
+    // per-class e-node lists.
+    pub fn rebuild(inout self) {
+        let n = self.n_op.len();
+        let mut cap: u64 = 1024;
+        loop {
+            if cap > wrapping_mul(n, 2) {
+                break;
+            }
+            cap = wrapping_mul(cap, 2);
+        }
+        let mut is_rep: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        loop {
+            self.table_clear(true, cap);
+            is_rep.clear();
+            is_rep.resize(n, 0);
+            let mut changed = false;
+            for i in 0..n {
+                let id = n32(i);
+                let (slot, e) = self.probe(id, true);
+                if e == NONE {
+                    self.k_slots.try_set(slot, wrapping_add(id, 1));
+                    self.k_count = inc(self.k_count);
+                    is_rep.try_set(i, 1);
+                } else if self.find(e) != self.find(id) {
+                    self.union(id, e, J_CONGR);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Per class root: its representative e-nodes in id order.
+        self.cl_len.clear();
+        self.cl_len.resize(n, 0);
+        self.cl_start.clear();
+        self.cl_start.resize(n, 0);
+        self.reps.clear();
+        for i in 0..n {
+            if at8(in is_rep, i) == 1 {
+                let r = w(self.find(n32(i)));
+                self.cl_len.try_set(r, wrapping_add(at32(in self.cl_len, r), 1));
+                self.reps.push(n32(i));
+            }
+        }
+        self.roots.clear();
+        let mut at: u32 = 0;
+        for i in 0..n {
+            if self.find(n32(i)) == n32(i) {
+                self.roots.push(n32(i));
+            }
+            self.cl_start.try_set(i, at);
+            at = wrapping_add(at, at32(in self.cl_len, i));
+        }
+        self.cl_nodes.clear();
+        self.cl_nodes.resize(w(at), 0);
+        let mut fill = filled32(n, 0);
+        for i in 0..self.reps.len() {
+            let id = at32(in self.reps, i);
+            let r = w(self.find(id));
+            let k = at32(in fill, r);
+            self.cl_nodes.try_set(wrapping_add(w(at32(in self.cl_start, r)), w(k)), id);
+            fill.try_set(r, wrapping_add(k, 1));
+        }
+    }
+
+    // ------------------------------------------------------------ e-matching
+
+    // Every extension of the substitutions `inp` (rows of `nv` class ids,
+    // NONE unbound) under which pattern `p` matches class `c`.
+    fn match_pat(in self, p: u32, c: u32, nv: u64, in inp: ChunkSeq[u32]) -> ChunkSeq[u32] {
+        let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let kind = at8(in self.p_kind, w(p));
+        let val = ati(in self.p_val, w(p));
+        if kind == P_VAR {
+            let v = wrapping_u64(val);
+            let mut i: u64 = 0;
+            loop {
+                if i >= inp.len() {
+                    break;
+                }
+                let cur = at32(in inp, wrapping_add(i, v));
+                if cur == NONE || self.find(cur) == c {
+                    for j in 0..nv {
+                        if j == v {
+                            out.push(c);
+                        } else {
+                            out.push(at32(in inp, wrapping_add(i, j)));
+                        }
+                    }
+                }
+                i = wrapping_add(i, nv);
+            }
+            return out;
+        }
+        if kind == P_INT || kind == P_STR {
+            let op = if kind == P_INT {
+                OP_INT
+            } else {
+                OP_STR
+            };
+            if at32(in self.n_op, w(c)) == op && ati(in self.n_data, w(c)) == val {
+                for i in 0..inp.len() {
+                    out.push(at32(in inp, i));
+                }
+            }
+            return out;
+        }
+        let op = wrapping_u32(val);
+        let pk = w(at32(in self.p_kstart, w(p)));
+        let pl = w(at32(in self.p_klen, w(p)));
+        let cs = w(at32(in self.cl_start, w(c)));
+        let cl = w(at32(in self.cl_len, w(c)));
+        let mut i: u64 = 0;
+        loop {
+            if i >= inp.len() {
+                break;
+            }
+            for j in 0..cl {
+                let m = at32(in self.cl_nodes, wrapping_add(cs, j));
+                if at32(in self.n_op, w(m)) == op && self.klen(m) == pl {
+                    let mut cur: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                    for v in 0..nv {
+                        cur.push(at32(in inp, wrapping_add(i, v)));
+                    }
+                    for k in 0..pl {
+                        if cur.len() == 0 {
+                            break;
+                        }
+                        let kp = at32(in self.p_kids, wrapping_add(pk, k));
+                        let kc = self.find(self.kid_of(m, k));
+                        cur = self.match_pat(kp, kc, nv, in cur);
+                    }
+                    for x in 0..cur.len() {
+                        out.push(at32(in cur, x));
+                    }
+                }
+            }
+            i = wrapping_add(i, nv);
+        }
+        out
+    }
+
+    // The class of pattern `p` under substitution `sub[at ..]`, if every
+    // e-node of the instance already exists, else NONE.
+    fn lookup_inst(inout self, p: u32, in sub: ChunkSeq[u32], at: u64) -> u32 {
+        let kind = at8(in self.p_kind, w(p));
+        let val = ati(in self.p_val, w(p));
+        if kind == P_VAR {
+            return self.find(at32(in sub, wrapping_add(at, wrapping_u64(val))));
+        }
+        let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut op = OP_INT;
+        let mut data = val;
+        if kind == P_STR {
+            op = OP_STR;
+        } else if kind == P_APP {
+            op = wrapping_u32(val);
+            data = 0;
+            let pk = w(at32(in self.p_kstart, w(p)));
+            for k in 0..w(at32(in self.p_klen, w(p))) {
+                let c = self.lookup_inst(at32(in self.p_kids, wrapping_add(pk, k)), in sub, at);
+                if c == NONE {
+                    return NONE;
+                }
+                kids.push(c);
+            }
+        }
+        let id = self.push_node(op, data, in kids);
+        let (_i, e) = self.probe(id, true);
+        self.pop_node(id);
+        if e == NONE {
+            NONE
+        } else {
+            self.find(e)
+        }
+    }
+
+    // Adds the instance of pattern `p` under `sub[at ..]` (variables are
+    // the ids recorded at search time).
+    fn inst(inout self, p: u32, in sub: ChunkSeq[u32], at: u64) -> u32 {
+        let kind = at8(in self.p_kind, w(p));
+        let val = ati(in self.p_val, w(p));
+        if kind == P_VAR {
+            return at32(in sub, wrapping_add(at, wrapping_u64(val)));
+        }
+        let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        if kind == P_INT {
+            return self.add(OP_INT, val, in kids);
+        }
+        if kind == P_STR {
+            return self.add(OP_STR, val, in kids);
+        }
+        let pk = w(at32(in self.p_kstart, w(p)));
+        for k in 0..w(at32(in self.p_klen, w(p))) {
+            let c = self.inst(at32(in self.p_kids, wrapping_add(pk, k)), in sub, at);
+            kids.push(c);
+        }
+        self.add(wrapping_u32(val), 0, in kids)
+    }
+
+    // One iteration of egglog's `(run n)`: every rule searched on the
+    // rebuilt graph, then every match applied, then a rebuild. Returns the
+    // number of unions the rules made.
+    fn step(inout self) -> u64 {
+        // Matches: rule, class, then the rule's substitution row.
+        let mut found: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for r in 0..self.r_lhs.len() {
+            let nv = w(at32(in self.r_nv, r));
+            let width = if nv == 0 {
+                1
+            } else {
+                nv
+            };
+            let lhs = at32(in self.r_lhs, r);
+            for ci in 0..self.roots.len() {
+                let c = at32(in self.roots, ci);
+                let mut start: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                for _v in 0..width {
+                    start.push(NONE);
+                }
+                let subs = self.match_pat(lhs, c, width, in start);
+                let mut i: u64 = 0;
+                loop {
+                    if i >= subs.len() {
+                        break;
+                    }
+                    found.push(n32(r));
+                    found.push(c);
+                    for v in 0..nv {
+                        found.push(at32(in subs, wrapping_add(i, v)));
+                    }
+                    i = wrapping_add(i, width);
+                }
+            }
+        }
+        // Matches whose right side is already in the matched class are
+        // skipped. Every lookup runs before this iteration's first union,
+        // while the canonical table is exact.
+        let mut fresh: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut i: u64 = 0;
+        loop {
+            if i >= found.len() {
+                break;
+            }
+            let r = at32(in found, i);
+            let c = at32(in found, inc(i));
+            let at = wrapping_add(i, 2);
+            i = wrapping_add(at, w(at32(in self.r_nv, w(r))));
+            let rhs = at32(in self.r_rhs, w(r));
+            if self.lookup_inst(rhs, in found, at) == c {
+                fresh.push(0);
+            } else {
+                fresh.push(1);
+            }
+        }
+        let mut unions: u64 = 0;
+        let mut k: u64 = 0;
+        i = 0;
+        loop {
+            if i >= found.len() || self.err != 0 {
+                break;
+            }
+            let r = at32(in found, i);
+            let at = wrapping_add(i, 2);
+            let nv = w(at32(in self.r_nv, w(r)));
+            i = wrapping_add(at, nv);
+            let todo = at8(in fresh, k);
+            k = inc(k);
+            if todo == 0 {
+                continue;
+            }
+            let rhs = at32(in self.r_rhs, w(r));
+            let l = self.inst(at32(in self.r_lhs, w(r)), in found, at);
+            let rr = self.inst(rhs, in found, at);
+            if self.err != 0 {
+                break;
+            }
+            let app = n32(self.a_rule.len());
+            self.a_rule.push(r);
+            self.a_l.push(l);
+            self.a_r.push(rr);
+            self.a_sstart.push(n32(self.a_sub.len()));
+            for v in 0..nv {
+                self.a_sub.push(at32(in found, wrapping_add(at, v)));
+            }
+            if self.union(l, rr, app) {
+                unions = inc(unions);
+            }
+        }
+        self.rebuild();
+        unions
+    }
+
+    // Saturates for at most `limit` iterations.
+    pub fn run(inout self, limit: u64) {
+        self.rebuild();
+        for _i in 0..limit {
+            if self.err != 0 {
+                break;
+            }
+            self.iterations = inc(self.iterations);
+            if self.step() == 0 {
+                break;
+            }
+        }
+    }
+
+    pub fn iteration_count(in self) -> u64 {
+        self.iterations
+    }
+
+    pub fn node_count(in self) -> u64 {
+        self.n_op.len()
+    }
+
+    // ------------------------------------------------------------ extraction
+
+    // The class cost of a child: base values cost 1 and have rank 0.
+    fn child_cost(in self, c: u32) -> (u64, u64) {
+        let op = at32(in self.n_op, w(c));
+        if (op == OP_INT || op == OP_STR) && self.find(c) == c {
+            return (1, 0);
+        }
+        (at64(in self.best_cost, w(c)), at64(in self.best_rank, w(c)))
+    }
+
+    // An e-node's tree cost from its children's best costs (MAX if a child
+    // has none yet) and the highest rank among its children.
+    fn node_cost(in self, m: u32) -> (u64, u64) {
+        let op = at32(in self.n_op, w(m));
+        let mut cost = at64(in self.c_cost, w(wrapping_sub(op, OP_CTOR)));
+        let mut rank: u64 = 0;
+        for k in 0..self.klen(m) {
+            let (cc, cr) = self.child_cost(self.find(self.kid_of(m, k)));
+            if cc == MAX_COST {
+                return (MAX_COST, 0);
+            }
+            cost = sat_add(cost, cc);
+            if cr > rank {
+                rank = cr;
+            }
+        }
+        (cost, rank)
+    }
+
+    // The constructors egglog's extractor visits, in its order: a
+    // breadth-first walk of the sorts from the root's sort, each sort's
+    // constructors in declaration order (`compute_costs_from_rootsorts`).
+    fn extraction_order(in self, root_sort: u32) -> ChunkSeq[u32] {
+        let nc = self.c_sym.len();
+        let mut seen = filled32(w(self.nsorts), 0);
+        let mut taken = filled32(nc, 0);
+        let mut queue: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut funcs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        queue.push(root_sort);
+        seen.try_set(w(root_sort), 1);
+        let mut q: u64 = 0;
+        loop {
+            if q >= queue.len() {
+                break;
+            }
+            let sort = at32(in queue, q);
+            q = inc(q);
+            for k in 0..nc {
+                if at32(in self.c_out, k) != sort || at32(in taken, k) == 1 {
+                    continue;
+                }
+                let na = w(at32(in self.c_arg_len, k));
+                for i in 0..na {
+                    let a = self.ctor_arg(n32(k), i);
+                    if at32(in seen, w(a)) == 0 {
+                        seen.try_set(w(a), 1);
+                        if a != S_I64 && a != S_STRING {
+                            queue.push(a);
+                        }
+                    }
+                }
+                taken.try_set(k, 1);
+                funcs.push(n32(k));
+            }
+        }
+        funcs
+    }
+
+    // egglog's extractor: Bellman-Ford over the constructors in
+    // `extraction_order` (each constructor's e-nodes in id order), ranking
+    // each class by when its cost last improved; a class's chosen e-node is
+    // the first of least cost whose children all rank below the class.
+    pub fn extract_costs(inout self, root: u32) {
+        let n = self.n_op.len();
+        self.best_cost = filled64(n, MAX_COST);
+        self.best_rank = filled64(n, 0);
+        self.best_node = filled32(n, NONE);
+        let funcs = self.extraction_order(self.node_sort(root));
+        let nc = self.c_sym.len();
+        // Position of each constructor in the order (NONE if unreachable).
+        let mut pos = filled32(nc, NONE);
+        for i in 0..funcs.len() {
+            pos.try_set(w(at32(in funcs, i)), n32(i));
+        }
+        let nf = funcs.len();
+        let mut cnt = filled32(inc(nf), 0);
+        for i in 0..self.reps.len() {
+            let op = at32(in self.n_op, w(at32(in self.reps, i)));
+            if op >= OP_CTOR {
+                let p = at32(in pos, w(wrapping_sub(op, OP_CTOR)));
+                if p != NONE {
+                    cnt.try_set(inc(w(p)), wrapping_add(at32(in cnt, inc(w(p))), 1));
+                }
+            }
+        }
+        for k in 0..nf {
+            cnt.try_set(inc(k), wrapping_add(at32(in cnt, inc(k)), at32(in cnt, k)));
+        }
+        let mut order = filled32(w(at32(in cnt, nf)), 0);
+        for i in 0..self.reps.len() {
+            let id = at32(in self.reps, i);
+            let op = at32(in self.n_op, w(id));
+            if op >= OP_CTOR {
+                let p = at32(in pos, w(wrapping_sub(op, OP_CTOR)));
+                if p != NONE {
+                    let at = at32(in cnt, w(p));
+                    order.try_set(w(at), id);
+                    cnt.try_set(w(p), wrapping_add(at, 1));
+                }
+            }
+        }
+        let mut rank: u64 = 0;
+        loop {
+            let mut changed = false;
+            for i in 0..order.len() {
+                let m = at32(in order, i);
+                let (cost, _r) = self.node_cost(m);
+                if cost == MAX_COST {
+                    continue;
+                }
+                let c = w(self.find(m));
+                if cost < at64(in self.best_cost, c) {
+                    self.best_cost.try_set(c, cost);
+                    rank = inc(rank);
+                    self.best_rank.try_set(c, rank);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for i in 0..order.len() {
+            let m = at32(in order, i);
+            let c = w(self.find(m));
+            if at32(in self.best_node, c) != NONE {
+                continue;
+            }
+            let (cost, r) = self.node_cost(m);
+            if cost
+                != MAX_COST
+                && cost
+                == at64(in self.best_cost, c)
+                && at64(in self.best_rank, c)
+                > r {
+                self.best_node.try_set(c, m);
+            }
+        }
+    }
+
+    pub fn cost_of(in self, n: u32) -> u64 {
+        let (c, _r) = self.child_cost(self.find(n));
+        c
+    }
+
+    fn push_term_word(inout self, x: bool, word: u64) {
+        if x {
+            self.x_words.push(word);
+        } else {
+            self.t_words.push(word);
+        }
+    }
+
+    // Writes one arena node: kind (0 integer, 1 string, 2 constructor),
+    // two words (the value; a string's or constructor name's byte range),
+    // then the children's slots.
+    fn write_node(inout self, x: bool, op: u32, data: i64, in kids: ChunkSeq[u32]) {
+        if op == OP_INT {
+            self.push_term_word(x, 0);
+            self.push_term_word(x, wrapping_u64(data));
+            self.push_term_word(x, 0);
+        } else if op == OP_STR {
+            let (s, l) = self.sym_range(wrapping_u32(data));
+            self.push_term_word(x, 1);
+            self.push_term_word(x, s);
+            self.push_term_word(x, l);
+        } else {
+            let (s, l) = self.sym_range(at32(in self.c_sym, w(wrapping_sub(op, OP_CTOR))));
+            self.push_term_word(x, 2);
+            self.push_term_word(x, s);
+            self.push_term_word(x, l);
+        }
+        self.push_term_word(x, kids.len());
+        for i in 0..kids.len() {
+            self.push_term_word(x, w(at32(in kids, i)));
+        }
+    }
+
+    // The extracted term of class `c` as arena slots (children first, in
+    // order); returns the slot.
+    // The extracted e-node of class `c`: the literal itself or the chosen
+    // e-node.
+    fn chosen(in self, c: u32) -> u32 {
+        let op = at32(in self.n_op, w(c));
+        if op == OP_INT || op == OP_STR {
+            c
+        } else {
+            at32(in self.best_node, w(c))
+        }
+    }
+
+    // The extracted term of class `c` as arena slots (children first, in
+    // order); returns the slot. An explicit stack keeps deep terms off the
+    // native stack.
+    pub fn emit_extracted(inout self, c: u32) -> u32 {
+        if self.x_slot.len() == 0 {
+            self.x_slot = filled32(self.n_op.len(), NONE);
+        }
+        let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        stack.push(c);
+        loop {
+            if stack.len() == 0 {
+                break;
+            }
+            let top = at32(in stack, wrapping_sub(stack.len(), 1));
+            if at32(in self.x_slot, w(top)) != NONE {
+                stack.truncate(wrapping_sub(stack.len(), 1));
+                continue;
+            }
+            let m = self.chosen(top);
+            let mut ready = true;
+            let mut k = self.klen(m);
+            loop {
+                if k == 0 {
+                    break;
+                }
+                k = wrapping_sub(k, 1);
+                let kc = self.find(self.kid_of(m, k));
+                if at32(in self.x_slot, w(kc)) == NONE {
+                    stack.push(kc);
+                    ready = false;
+                }
+            }
+            if !ready {
+                continue;
+            }
+            let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for j in 0..self.klen(m) {
+                let kc = self.find(self.kid_of(m, j));
+                kids.push(at32(in self.x_slot, w(kc)));
+            }
+            self.write_node(true, at32(in self.n_op, w(m)), ati(in self.n_data, w(m)), in kids);
+            let slot = n32(self.x_count);
+            self.x_count = inc(self.x_count);
+            self.x_slot.try_set(w(top), slot);
+            stack.truncate(wrapping_sub(stack.len(), 1));
+        }
+        at32(in self.x_slot, w(c))
+    }
+
+    pub fn has_extraction(in self, c: u32) -> bool {
+        let op = at32(in self.n_op, w(c));
+        op == OP_INT || op == OP_STR || at32(in self.best_node, w(c)) != NONE
+    }
+
+    pub fn extracted_words(in self) -> ChunkSeq[u64] {
+        copy64(in self.x_words)
+    }
+
+    pub fn extracted_count(in self) -> u64 {
+        self.x_count
+    }
+
+    // ------------------------------------------------------------ explanations
+
+    // The witness arena slot of id `n`'s term (children first; an explicit
+    // stack keeps deep terms off the native stack).
+    fn term_slot(inout self, n: u32) -> u32 {
+        if self.t_slot.len() < self.n_op.len() {
+            self.t_slot.resize(self.n_op.len(), NONE);
+        }
+        let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        stack.push(n);
+        loop {
+            if stack.len() == 0 {
+                break;
+            }
+            let top = at32(in stack, wrapping_sub(stack.len(), 1));
+            if at32(in self.t_slot, w(top)) != NONE {
+                stack.truncate(wrapping_sub(stack.len(), 1));
+                continue;
+            }
+            let mut ready = true;
+            let mut k = self.klen(top);
+            loop {
+                if k == 0 {
+                    break;
+                }
+                k = wrapping_sub(k, 1);
+                let kid = self.kid_of(top, k);
+                if at32(in self.t_slot, w(kid)) == NONE {
+                    stack.push(kid);
+                    ready = false;
+                }
+            }
+            if !ready {
+                continue;
+            }
+            let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for j in 0..self.klen(top) {
+                kids.push(at32(in self.t_slot, w(self.kid_of(top, j))));
+            }
+            self
+                .write_node(
+                false,
+                at32(in self.n_op, w(top)),
+                ati(in self.n_data, w(top)),
+                in kids
+            );
+            let slot = n32(self.t_count);
+            self.t_count = inc(self.t_count);
+            self.t_slot.try_set(w(top), slot);
+            stack.truncate(wrapping_sub(stack.len(), 1));
+        }
+        at32(in self.t_slot, w(n))
+    }
+
+    // One step: rule, direction (0 forward, 1 backward), the path, then the
+    // substitution as (variable name range, term slot) pairs.
+    fn emit_step(inout self, app: u32, forward: bool) {
+        if self.st_count >= MAX_STEPS {
+            self.fail(E_STEPS, 0);
+            return;
+        }
+        let r = at32(in self.a_rule, w(app));
+        let nv = w(at32(in self.r_nv, w(r)));
+        let vs = w(at32(in self.r_vstart, w(r)));
+        let ss = w(at32(in self.a_sstart, w(app)));
+        let mut slots: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for v in 0..nv {
+            let s = self.term_slot(at32(in self.a_sub, wrapping_add(ss, v)));
+            slots.push(s);
+        }
+        self.st_words.push(w(r));
+        self
+            .st_words
+            .push(
+            if forward {
+                0
+            } else {
+                1
+            }
+        );
+        self.st_words.push(self.path.len());
+        for i in 0..self.path.len() {
+            self.st_words.push(w(at32(in self.path, i)));
+        }
+        self.st_words.push(nv);
+        for v in 0..nv {
+            let (s, l) = self.sym_range(at32(in self.r_vsym, wrapping_add(vs, v)));
+            self.st_words.push(s);
+            self.st_words.push(l);
+            self.st_words.push(w(at32(in slots, v)));
+        }
+        self.st_count = inc(self.st_count);
+    }
+
+    // Crosses the proof-forest edge between `x` and its parent: from `x` to
+    // the parent when `up`, else from the parent to `x`.
+    fn cross(inout self, x: u32, up: bool) {
+        let px = at32(in self.pf_parent, w(x));
+        let j = at32(in self.pf_just, w(x));
+        let src = if up {
+            x
+        } else {
+            px
+        };
+        let dst = if up {
+            px
+        } else {
+            x
+        };
+        if j == J_CONGR {
+            for i in 0..self.klen(src) {
+                if self.err != 0 {
+                    return;
+                }
+                self.path.push(n32(i));
+                self.explain(self.kid_of(src, i), self.kid_of(dst, i));
+                self.path.truncate(wrapping_sub(self.path.len(), 1));
+            }
+        } else {
+            self.emit_step(j, at32(in self.a_l, w(j)) == src);
+        }
+    }
+
+    // Steps that rewrite term(a) into term(b) at the current path; `a` and
+    // `b` are ids of one class.
+    pub fn explain(inout self, a: u32, b: u32) {
+        if a == b || self.err != 0 {
+            return;
+        }
+        if self.stamp.len() < self.n_op.len() {
+            self.stamp.resize(self.n_op.len(), 0);
+        }
+        self.token = inc(self.token);
+        let t = self.token;
+        let mut x = a;
+        loop {
+            self.stamp.try_set(w(x), t);
+            let p = at32(in self.pf_parent, w(x));
+            if p == NONE {
+                break;
+            }
+            x = p;
+        }
+        let mut down: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut y = b;
+        loop {
+            if at64(in self.stamp, w(y)) == t {
+                break;
+            }
+            down.push(y);
+            y = at32(in self.pf_parent, w(y));
+        }
+        let lca = y;
+        let mut u = a;
+        loop {
+            if u == lca || self.err != 0 {
+                break;
+            }
+            let p = at32(in self.pf_parent, w(u));
+            self.cross(u, true);
+            u = p;
+        }
+        let mut k = down.len();
+        loop {
+            if k == 0 || self.err != 0 {
+                break;
+            }
+            k = wrapping_sub(k, 1);
+            self.cross(at32(in down, k), false);
+        }
+    }
+
+    // Steps from term(n) to the extracted term of n's class.
+    // Per id: whether its term already is the extracted term of its class
+    // (it is its class's chosen e-node and every child is settled).
+    // Original children precede their parents, so one pass in id order.
+    pub fn settle(inout self) {
+        let n = self.n_op.len();
+        self.settled = ChunkSeq::with_capacity[u8](n);
+        for i in 0..n {
+            let id = n32(i);
+            let mut ok = self.chosen(self.find(id)) == id;
+            for k in 0..self.klen(id) {
+                if ok && at8(in self.settled, w(self.kid_of(id, k))) == 0 {
+                    ok = false;
+                }
+            }
+            self
+                .settled
+                .push(
+                if ok {
+                    1
+                } else {
+                    0
+                }
+            );
+        }
+    }
+
+    // Steps from term(n) to the extracted term of n's class. A settled
+    // subterm needs none and is not walked, so shared unchanged subgraphs
+    // are not expanded into trees.
+    pub fn explain_extracted(inout self, n: u32) {
+        if self.err != 0 || at8(in self.settled, w(n)) == 1 {
+            return;
+        }
+        let c = self.find(n);
+        let op = at32(in self.n_op, w(c));
+        if op == OP_INT || op == OP_STR {
+            return;
+        }
+        let e = at32(in self.best_node, w(c));
+        self.explain(n, e);
+        for i in 0..self.klen(e) {
+            if self.err != 0 {
+                return;
+            }
+            self.path.push(n32(i));
+            self.explain_extracted(self.kid_of(e, i));
+            self.path.truncate(wrapping_sub(self.path.len(), 1));
+        }
+    }
+
+    pub fn source_slot(inout self, n: u32) -> u32 {
+        self.term_slot(n)
+    }
+
+    pub fn term_words(in self) -> ChunkSeq[u64] {
+        copy64(in self.t_words)
+    }
+
+    pub fn term_count(in self) -> u64 {
+        self.t_count
+    }
+
+    pub fn step_words(in self) -> ChunkSeq[u64] {
+        copy64(in self.st_words)
+    }
+
+    pub fn step_count(in self) -> u64 {
+        self.st_count
+    }
+
+    pub fn rule_count(in self) -> u64 {
+        self.r_lhs.len()
+    }
+}

@@ -103,11 +103,24 @@ pub fn fits(k: Known, s: u32, v: Lit) -> bool {
     }
 }
 
-// `IntegerKind::default_for(n).fits(m)`: u64 above i64::MAX, else i64.
+// `IntegerKind::default_for(n).fits(m)`.
 pub fn default_fits(k: Known, n: Lit, m: Lit) -> bool {
+    fits(k, default_of(k, n), m)
+}
+
+// `n < i64::MIN as i128`: a magnitude past 2^63, negated.
+pub fn below_i64(a: Lit) -> bool {
+    a.neg && a.mag > wrapping_add(I64_MAX, 1)
+}
+
+// `IntegerKind::default_for(n)`: u64 above i64::MAX, i128 below i64::MIN
+// (a kept magnitude never passes u64::MAX), else i64.
+pub fn default_of(k: Known, n: Lit) -> u32 {
     if above_i64(n) {
-        fits(k, k.u64_, m)
+        k.u64_
+    } else if below_i64(n) {
+        k.i128_
     } else {
-        fits(k, k.i64_, m)
+        k.i64_
     }
 }

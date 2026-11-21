@@ -10,5 +10,9 @@ vesper_crate(
         "//:files",
         "//packages/vesper-cranelift:files",
     ],
-    test_timeouts = {"test/self_host_codegen_swap": "long"},
+    test_timeouts = {
+        "test/self_host_codegen_swap": "long",
+        # SH4 lane 6 (#1280): scalar emission from @vesper/codegen-scalar.
+        "test/self_host_codegen_scalar_emit": "long",
+    },
 )

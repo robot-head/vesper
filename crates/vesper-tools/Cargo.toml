@@ -8,12 +8,24 @@ description = "Vesper tool subcommands outside the compiler binary: `vesper <too
 
 # One binary per tool; `vesper <tool>` finds it beside `vesper` or on PATH.
 [[bin]]
+name = "vesper-attest"
+path = "src/bin/vesper-attest.rs"
+
+[[bin]]
 name = "vesper-audit"
 path = "src/bin/vesper-audit.rs"
 
 [[bin]]
 name = "vesper-bench"
 path = "src/bin/vesper-bench.rs"
+
+[[bin]]
+name = "vesper-cas"
+path = "src/bin/vesper-cas.rs"
+
+[[bin]]
+name = "vesper-fuzz"
+path = "src/bin/vesper-fuzz.rs"
 
 [[bin]]
 name = "vesper-grammar"
@@ -24,8 +36,20 @@ name = "vesper-json"
 path = "src/bin/vesper-json.rs"
 
 [[bin]]
+name = "vesper-migrate"
+path = "src/bin/vesper-migrate.rs"
+
+[[bin]]
 name = "vesper-publish"
 path = "src/bin/vesper-publish.rs"
+
+[[bin]]
+name = "vesper-refute"
+path = "src/bin/vesper-refute.rs"
+
+[[bin]]
+name = "vesper-replay"
+path = "src/bin/vesper-replay.rs"
 
 [[bin]]
 name = "vesper-resolve"
@@ -36,8 +60,24 @@ name = "vesper-sbom"
 path = "src/bin/vesper-sbom.rs"
 
 [[bin]]
+name = "vesper-semver"
+path = "src/bin/vesper-semver.rs"
+
+[[bin]]
+name = "vesper-simd"
+path = "src/bin/vesper-simd.rs"
+
+[[bin]]
 name = "vesper-tee"
 path = "src/bin/vesper-tee.rs"
+
+[[bin]]
+name = "vesper-top"
+path = "src/bin/vesper-top.rs"
+
+[[bin]]
+name = "vesper-traceparent"
+path = "src/bin/vesper-traceparent.rs"
 
 [dependencies]
 # Compiler services (checking, native batches, interfaces, proof replay).
@@ -63,7 +103,17 @@ vesper-loom-solver = { path = "../vesper-loom-solver/seed", package = "vesper-lo
 vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
 vesper-semver = { path = "../vesper-semver/seed", package = "vesper-semver-seed" }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-fmt = { path = "../vesper-fmt/seed", package = "vesper-fmt-seed" }
+vesper-ffi = { path = "../vesper-ffi" }
+vesper-chrono = { path = "../vesper-chrono" }
+vesper-beacon = { path = "../vesper-beacon/seed", package = "vesper-beacon-seed" }
+vesper-crucible = { path = "../vesper-crucible/seed", package = "vesper-crucible-seed" }
+# Only the tools link these (SH6 lane 3, #1398): they left the compiler's
+# closure, so their Rust can flip before Stage 2.
+vesper-simd = { path = "../vesper-simd" }
+vesper-migrate = { path = "../vesper-migrate" }
 vesper-loom-trust = { path = "../vesper-loom-trust" }
+vesper-loom-admission = { path = "../vesper-loom-admission" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
