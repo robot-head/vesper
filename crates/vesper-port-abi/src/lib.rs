@@ -101,6 +101,26 @@ integer!(
     i8 => 8; i16 => 8; i32 => 8; i64 => 8; isize => 8
 );
 
+// `i128` and `u128` (SH4 lane 3, #1277) are two words, low word first, as
+// in Vesper's layout; a sequence element is those 16 bytes. The words are
+// eight-byte aligned, so they are copied, never borrowed as a Rust `u128`
+// (16-byte aligned since Rust 1.77).
+macro_rules! wide {
+    ($($t:ty),*) => {$(
+        impl Abi for $t {
+            const WORDS: usize = 2;
+            fn put(&self, out: &mut [u64]) {
+                out[0] = *self as u64;
+                out[1] = (*self >> 64) as u64;
+            }
+            fn get(words: &[u64]) -> Self {
+                ((u128::from(words[1]) << 64) | u128::from(words[0])) as $t
+            }
+        }
+    )*};
+}
+wide!(u128, i128);
+
 impl Abi for bool {
     const WORDS: usize = 1;
     const STRIDE: usize = 1;
@@ -307,6 +327,23 @@ mod tests {
         let mut words = [0u64; 16];
         value.put(&mut words);
         assert_eq!(T::get(&words), value);
+    }
+
+    #[test]
+    fn wide_integers_are_two_words_low_first() {
+        assert_eq!(<u128 as Abi>::WORDS, 2);
+        assert_eq!(<i128 as Abi>::STRIDE, 16);
+        assert_eq!(<Option<i128> as Abi>::WORDS, 3);
+        let mut words = [0u64; 2];
+        (-2i128).put(&mut words);
+        assert_eq!(words, [u64::MAX - 1, u64::MAX]);
+        ((7u128 << 64) | 9).put(&mut words);
+        assert_eq!(words, [9, 7]);
+        for v in [0i128, 1, -1, i128::MIN, i128::MAX, 1 << 64, -(1 << 64)] {
+            round_trip(v);
+            round_trip(v as u128);
+        }
+        round_trip((1u8, -3i128, u128::MAX));
     }
 
     #[test]

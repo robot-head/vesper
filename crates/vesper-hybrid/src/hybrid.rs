@@ -40,6 +40,21 @@ mod codegen_binding;
 #[path = "../port/codegen_calls.rs"]
 mod codegen_calls_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/test_runner.rs"]
+mod test_runner_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/ir_inline.rs"]
+mod ir_inline_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/place_ir.rs"]
+mod place_ir_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -47,6 +62,20 @@ mod parse_words;
 // the root package's tests/hybrid_layout.rs and tests/hybrid_ir_check.rs.
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+
+// The test-discovery swap's input encoders and result decoders (#1337),
+// shared with the root package's tests/self_host_test_runner.rs.
+#[path = "../../../tests/common/test_runner_words.rs"]
+mod test_runner_words;
+
+// The inliner swap's encoder and decoder (#1250), shared with the root
+// package's tests/self_host_ir_inline.rs.
+#[path = "../../../tests/common/inline_words.rs"]
+mod inline_words;
+
+// Place IR words both ways (#1240), shared with tests/self_host_place_ir*.rs.
+#[path = "../../../tests/common/ir_words.rs"]
+mod ir_words;
 
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -62,6 +91,12 @@ static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// `call` requests the Vesper codegen_calls module emitted, and declined.
 static CALLS_EMITTED: AtomicU64 = AtomicU64::new(0);
 static CALLS_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Sources whose tests the Vesper test-runner module discovered.
+static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs inlined by the Vesper inliner module.
+static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs the IR swap point's identity hooks sent through Vesper.
+static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -119,6 +154,10 @@ const VESPER_LAYOUT: vesper::layout::LayoutTable = vesper::layout::LayoutTable {
 /// stays in Rust.
 const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrCheckTable {
     validate: |world, program| {
+        // `ir_input` refuses what `@vesper/ir-check` does not cover yet,
+        // among them every world with element view matches (#1221): those
+        // go to `rust_validate` (test: `element_views_stay_on_rust` in
+        // tests/hybrid_ir_check.rs).
         let Some(input) = check_words::ir_input(world, program) else {
             return vesper::ir_check::rust_validate(world, program);
         };
@@ -193,6 +232,79 @@ fn vesper_call(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, St
     }
 }
 
+/// `vesper::test_discovery::TestDiscoveryTable` from `modules/test_runner`:
+/// `@case` rows and test discovery of `@vesper/test-runner`.
+const VESPER_TEST_DISCOVERY: vesper::test_discovery::TestDiscoveryTable =
+    vesper::test_discovery::TestDiscoveryTable {
+        case_rows: |source, module| {
+            let input = test_runner_words::case_rows_input(source, module);
+            test_runner_words::decode_case_rows(
+                source,
+                &test_runner_binding::case_rows_words(&input),
+            )
+        },
+        discover: |source, items, cases| {
+            TEST_RUNNER_CALLS.fetch_add(1, Relaxed);
+            let input = test_runner_words::discover_input(source, items, cases);
+            test_runner_words::decode_discover(&test_runner_binding::discover_words(&input))
+        },
+    };
+
+/// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
+/// `@vesper/ir-inline`. The package decides and splices; the hook encodes
+/// the world's answers and the program, and reads the report and the
+/// inlined program back (`inline_words::decode_program`).
+fn vesper_inline(
+    world: &vesper::check::World,
+    program: &mut vesper::ir::Program,
+    budget: &vesper::ir_inline::Budget,
+) -> vesper::ir_inline::Report {
+    let input = inline_words::inline_input(world, program, budget);
+    IR_INLINE_CALLS.fetch_add(1, Relaxed);
+    let words = ir_inline_binding::inline_words(&input.bytes);
+    let (report, inlined) = inline_words::decode_program(&words, &input.tables, program);
+    *program = inlined;
+    report
+}
+
+/// `program` read into `@vesper/place-ir` tables and written back, in
+/// place: the identity Vesper pass. A program the format cannot encode
+/// stays as Rust made it.
+fn place_ir_round_trip(world: Option<&vesper::check::World>, program: &mut vesper::ir::Program) {
+    if let Some(p) = ir_words::through_vesper(world, program, place_ir_binding::round_trip_words) {
+        PLACE_IR_CALLS.fetch_add(1, Relaxed);
+        *program = p;
+    }
+}
+
+/// `vesper::ir_swap::IrPasses` for the hybrid: each native IR pass in Rust,
+/// then the program through `modules/place_ir` and back, proving the round
+/// trip inside `vesper check`/`build`. SH3 lanes 9-13 replace a hook with
+/// their Vesper pass.
+const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
+    lower: Some(|world| {
+        let mut program = vesper::ir::lower_world(world);
+        place_ir_round_trip(Some(world), &mut program);
+        program
+    }),
+    opt: Some(|world, program| {
+        let n = vesper::ir_opt::optimize(world, program)?;
+        place_ir_round_trip(Some(world), program);
+        Ok(n)
+    }),
+    // SH3 lane 11 (#1250): the inliner of `@vesper/ir-inline`.
+    inline: Some(|world, program, budget| {
+        let report = vesper_inline(world, program, budget);
+        place_ir_round_trip(Some(world), program);
+        report
+    }),
+    hoist: Some(|program| {
+        let n = vesper::bounds_hoist::run(program);
+        place_ir_round_trip(None, program);
+        n
+    }),
+};
+
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
     if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
@@ -213,6 +325,12 @@ extern "C" fn install() {
         ..Default::default()
     };
     if vesper::codegen_swap::install(hooks).is_err() {
+        std::process::abort();
+    }
+    if vesper::test_discovery::install_test_discovery(VESPER_TEST_DISCOVERY).is_err() {
+        std::process::abort();
+    }
+    if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
@@ -251,6 +369,18 @@ extern "C" fn report() {
         "vesper-hybrid: codegen_calls emitted {} calls from Vesper ({} declined)",
         CALLS_EMITTED.load(Relaxed),
         CALLS_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: test-runner answered {} calls from Vesper",
+        TEST_RUNNER_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: ir-inline answered {} calls from Vesper",
+        IR_INLINE_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: place-ir round-tripped {} programs through Vesper",
+        PLACE_IR_CALLS.load(Relaxed)
     );
 }
 

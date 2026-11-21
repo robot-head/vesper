@@ -1,0 +1,201 @@
+// @vesper/ebpf-backend: the compiler's eBPF target (src/ebpf_backend.rs,
+// src/ebpf_backend/{surface,lower}.rs) in Vesper, on the @vesper/ebpf port
+// (self-hosting SH4 lane 16, #1290).
+//
+// - asm.ves: the part of `vesper_ebpf::Asm` the backend uses (labels,
+//   fixups, maps, subprograms, line info).
+// - extra.ves: the task section after the Place IR program: options,
+//   source, ADT spans, `world.functions` and `world.effects`.
+// - backend.ves: `Surface::analyze` and `lower`.
+//
+// The entry `ebpf_backend_words` reads the harness input (check-data's
+// context, the @vesper/place-ir program, the task section) and returns
+// the result as words (tests/self_host_ebpf_backend.rs decodes them):
+//
+// - status 0, the assembled program: action (0 XDP, 1 tc), the program
+//   name, n instructions (code | dst << 8 | src << 12 | off << 16 |
+//   imm << 32), n maps (name, kind, key, value, max, flags), n map
+//   relocations (slot, map), n subprograms (name, slot), n lines (slot,
+//   text, line, col), n frames (name, bytes), n loops (name), n map
+//   bindings (effect, index);
+// - status 1, `Unsupported`: rule, function, has span, s0, s1, message;
+// - status 2, `Asm`: message.
+//
+// A string is its byte count and the bytes packed little-endian into
+// words. Verification and ELF emission stay with `vesper_ebpf` (the
+// @vesper/ebpf port has both; the harness runs the Rust verifier on the
+// decoded program so verifier results are compared as well).
+
+use @vesper/check-data::util::{
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/place-ir::{
+    read_program
+};
+use @vesper/ebpf::insn::{
+    RawInsn
+};
+use self::asm::{
+    LineRow,
+    MapRow,
+    slot_at
+};
+use self::extra::{
+    read_extra
+};
+use self::backend::{
+    G,
+    analyze,
+    g_new,
+    lower
+};
+
+fn put_bytes(inout o: ChunkSeq[u64], in b: ChunkSeq[u8]) {
+    let n = b.len();
+    o.push(n);
+    let mut word: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        word = word | wrapping_shl_u64(widen_u64(u8_at(in b, i)), wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            o.push(word);
+            word = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        o.push(word);
+    }
+}
+
+fn put_sym(inout o: ChunkSeq[u64], in names: Names, s: u32) {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    names.write(s, inout b);
+    put_bytes(inout o, in b);
+}
+
+fn put_range(inout o: ChunkSeq[u64], in src: ChunkSeq[u8], a: u64, z: u64) {
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in a..z {
+        b.push(u8_at(in src, i));
+    }
+    put_bytes(inout o, in b);
+}
+
+fn pack(r: RawInsn) -> u64 {
+    let code = widen_u64(r.code);
+    let regs = wrapping_shl_u64(widen_u64(r.dst), 8) | wrapping_shl_u64(widen_u64(r.src), 12);
+    let off = wrapping_shl_u64(widen_u64(wrapping_u16(r.off)), 16);
+    let imm = wrapping_shl_u64(widen_u64(wrapping_u32(r.imm)), 32);
+    code | regs | off | imm
+}
+
+fn put_ok(inout o: ChunkSeq[u64], in g: G, in names: Names, in source: ChunkSeq[u8]) {
+    o.push(0);
+    o.push(widen_u64(g.action));
+    put_bytes(inout o, in g.name);
+
+    o.push(g.asm.slots.len());
+    for i in 0..g.asm.slots.len() {
+        o.push(pack(slot_at(in g.asm.slots, i)));
+    }
+    o.push(g.asm.maps.len());
+    for i in 0..g.asm.maps.len() {
+        match g.asm.maps.try_get(i) {
+            Option::Some(m) => {
+                put_sym(inout o, in names, m.name);
+                o.push(widen_u64(m.kind));
+                o.push(w(m.key));
+                o.push(w(m.value));
+                o.push(w(m.max));
+                o.push(w(m.flags));
+            },
+            Option::None => (),
+        }
+    }
+    let nr = g.asm.relocs.len() / 2;
+    o.push(nr);
+    for i in 0..wrapping_mul(nr, 2) {
+        o.push(u64_at(in g.asm.relocs, i));
+    }
+    o.push(g.asm.fn_names.len());
+    for i in 0..g.asm.fn_names.len() {
+        put_sym(inout o, in names, u32_at(in g.asm.fn_names, i));
+        o.push(g.asm.resolve(u64_at(in g.asm.fn_labels, i)));
+    }
+    o.push(g.asm.lines.len());
+    for i in 0..g.asm.lines.len() {
+        match g.asm.lines.try_get(i) {
+            Option::Some(l) => {
+                o.push(l.slot);
+                put_range(inout o, in source, l.ta, l.tb);
+                o.push(w(l.line));
+                o.push(w(l.col));
+            },
+            Option::None => (),
+        }
+    }
+    o.push(g.functions.len());
+    for i in 0..g.functions.len() {
+        put_sym(inout o, in names, u32_at(in g.functions, i));
+        o.push(w(u32_at(in g.frames, i)));
+    }
+    o.push(g.loops.len());
+    for i in 0..g.loops.len() {
+        put_sym(inout o, in names, u32_at(in g.loops, i));
+    }
+    o.push(g.map_effects.len());
+    for i in 0..g.map_effects.len() {
+        put_sym(inout o, in names, u32_at(in g.map_effects, i));
+        o.push(i);
+    }
+}
+
+fn put_err(inout o: ChunkSeq[u64], in g: G, in names: Names) {
+    o.push(widen_u64(g.err));
+    if g.err == 1 {
+        o.push(widen_u64(g.err_rule));
+        put_sym(inout o, in names, g.err_fn);
+        o
+            .push(
+            if g.err_has_span {
+                1
+            } else {
+                0
+            }
+        );
+        o.push(g.err_s0);
+        o.push(g.err_s1);
+    }
+    put_bytes(inout o, in g.msg);
+}
+
+// The harness entry: input words to result words.
+pub fn ebpf_backend_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let x = read_extra(inout r, in b, inout c.types, inout c.names);
+    let mut g = g_new();
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if analyze(inout g, inout c, in p, in x) && lower(inout g, inout c, in p, in x) {
+        put_ok(inout o, in g, in c.names, in x.source);
+    } else {
+        put_err(inout o, in g, in c.names);
+    }
+    o
+}

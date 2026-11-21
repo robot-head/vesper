@@ -13,6 +13,10 @@ use self::state::{
     St,
     at32,
     at64,
+    const_of,
+    const_prefix,
+    join_path,
+    kind_value,
     emit,
     err,
     find_module,
@@ -305,7 +309,16 @@ pub fn use_module(inout s: St, cur: u32, u: u32, inout shown: String) -> u32 {
 // names. Returns the item key (or `no_key()`) and its kind.
 pub fn lookup(inout s: St, tm: u32, name: u32, same: bool, in shown: String, start: u32, end: u32)
     -> (u64, u8) {
-    let k = pair(tm, name);
+    // A constant `NAME` (or a value enum member `E::M`) is the function
+    // `const$NAME`.
+    let mut item = name;
+    if !s.item_kind.contains_key(pair(tm, name)) {
+        let c = const_of(inout s, name);
+        if s.item_kind.contains_key(pair(tm, c)) {
+            item = c;
+        }
+    }
+    let k = pair(tm, item);
     match s.item_kind.get(k) {
         Option::Some(kind) => {
             if !same && !s.public.contains_key(k) {
@@ -324,9 +337,10 @@ pub fn lookup(inout s: St, tm: u32, name: u32, same: bool, in shown: String, sta
         },
         Option::None => {},
     }
-    match s.reexp_key.get(k) {
+    let rk = pair(tm, name);
+    match s.reexp_key.get(rk) {
         Option::Some(target) => {
-            let kind = match s.reexp_kind.get(k) {
+            let kind = match s.reexp_kind.get(rk) {
                 Option::Some(x) => x,
                 Option::None => 0,
             };
@@ -364,6 +378,117 @@ pub fn local_of(in s: St, n: u64) -> u32 {
     }
 }
 
+// Inserts member `member` with item key `key` into `s.grp_m`/`s.grp_k`,
+// keeping them in the members' byte order.
+fn grp_insert(inout s: St, member: u32, key: u64) {
+    s.grp_m.push(member);
+    s.grp_k.push(key);
+    let mut j = wrapping_sub(s.grp_m.len(), 1);
+    loop {
+        if j == 0 {
+            break;
+        }
+        let a = at32(in s.grp_m, wrapping_sub(j, 1));
+        if !sym_less(in s, member, a) {
+            break;
+        }
+        let ka = at64(in s.grp_k, wrapping_sub(j, 1));
+        s.grp_m.try_set(j, a);
+        s.grp_k.try_set(j, ka);
+        s.grp_m.try_set(wrapping_sub(j, 1), member);
+        s.grp_k.try_set(wrapping_sub(j, 1), key);
+        j = wrapping_sub(j, 1);
+    }
+}
+
+// `Resolver::group`: the members of a value enum `name` of module `tm`,
+// declared there (and `pub`, unless the lookup comes from that module) or
+// re-exported by it, into `s.grp_m` (member names, in byte order) and
+// `s.grp_k` (their constants' item keys). Returns 0 when the module has no
+// value enum of that name, 1 with the members, 2 with a pending error.
+pub fn group(inout s: St, tm: u32, name: u32, same: bool, in shown: String, start: u32, end: u32)
+    -> u8 {
+    s.grp_m.clear();
+    s.grp_k.clear();
+    match s.grp_head.get(pair(tm, name)) {
+        Option::Some(first) => {
+            let mut r = first;
+            loop {
+                if r == none() {
+                    break;
+                }
+                let item = at32(in s.grp_item, w(r));
+                if !same && !s.public.contains_key(pair(tm, item)) {
+                    err(inout s, private_item(), start, end);
+                    let mut msg = String::new();
+                    msg.push_str(in "value enum '");
+                    push_sym(in s, name, inout msg);
+                    msg.push_str(in "' is private to module ");
+                    msg.push_str(in shown);
+                    s.err_msg.push_str(in msg);
+                    s.err_help.push_str(in "mark the enum `pub` to export it");
+                    s.err_has_help = true;
+                    s.grp_m.clear();
+                    s.grp_k.clear();
+                    return 2;
+                }
+                let member = at32(in s.grp_member, w(r));
+                grp_insert(inout s, member, pair(tm, item));
+                r = at32(in s.grp_next, w(r));
+            }
+            return 1;
+        },
+        Option::None => {},
+    }
+    // Re-exported members `name::M` (listed by their head `name`).
+    let mut r = match s.rx_head.get(pair(tm, name)) {
+        Option::Some(x) => x,
+        Option::None => none(),
+    };
+    if r == none() {
+        return 0;
+    }
+    let pn = wrapping_add(sym_len(in s, name), 2);
+    loop {
+        if r == none() {
+            break;
+        }
+        let local = at32(in s.rx_local, w(r));
+        let member = sym_slice(inout s, local, pn, sym_len(in s, local));
+        let key = at64_key(in s, pair(tm, local));
+        grp_insert(inout s, member, key);
+        r = at32(in s.rx_next, w(r));
+    }
+    if s.grp_m.len() == 0 {
+        0
+    } else {
+        1
+    }
+}
+
+// Records the re-export of `local` by module `m`.
+fn reexp_add(inout s: St, m: u32, local: u32, target: u64, kind: u8) {
+    let key = pair(m, local);
+    s.reexp_key.insert(key, target);
+    s.reexp_kind.insert(key, kind);
+    // A path local `E::M` is listed under its head `E` for `group`.
+    let cut = sym_path_split(in s, local);
+    if cut < sym_len(in s, local) {
+        let head = sym_slice(inout s, local, 0, cut);
+        let hk = pair(m, head);
+        let next = match s.rx_head.get(hk) {
+            Option::Some(x) => x,
+            Option::None => none(),
+        };
+        s.rx_head.insert(hk, n32(s.rx_local.len()));
+        s.rx_local.push(local);
+        s.rx_next.push(next);
+    }
+    if m == s.root_mod {
+        s.root_reexports.push(local);
+    }
+}
+
 // `Resolver::reexports`: every module's `pub use` names, resolved to the
 // items they re-export, following chains to a fixed point. Names that do
 // not resolve are reported when the module's imports are bound.
@@ -392,7 +517,7 @@ pub fn reexports(inout s: St) {
                             let local = local_of(in s, n);
                             let key = pair(n32(m), local);
                             if !s.reexp_key.contains_key(key) {
-                                let (found, kind) = lookup(
+                                let g = group(
                                     inout s,
                                     tm,
                                     at32(in s.un_name, n),
@@ -402,13 +527,33 @@ pub fn reexports(inout s: St) {
                                     at32(in s.un_end, n)
                                 );
                                 s.err_code = 0;
-                                if found != no_key() {
-                                    s.reexp_key.insert(key, found);
-                                    s.reexp_kind.insert(key, kind);
-                                    if n32(m) == s.root_mod {
-                                        s.root_reexports.push(local);
+                                if g == 1 {
+                                    // A value enum re-exports each member
+                                    // `E::M`.
+                                    for i in 0..s.grp_m.len() {
+                                        let member = at32(in s.grp_m, i);
+                                        let target = at64(in s.grp_k, i);
+                                        let ml = join_path(inout s, local, member);
+                                        if !s.reexp_key.contains_key(pair(n32(m), ml)) {
+                                            reexp_add(inout s, n32(m), ml, target, kind_value());
+                                            changed = true;
+                                        }
                                     }
-                                    changed = true;
+                                } else {
+                                    let (found, kind) = lookup(
+                                        inout s,
+                                        tm,
+                                        at32(in s.un_name, n),
+                                        same,
+                                        in shown,
+                                        at32(in s.un_start, n),
+                                        at32(in s.un_end, n)
+                                    );
+                                    s.err_code = 0;
+                                    if found != no_key() {
+                                        reexp_add(inout s, n32(m), local, found, kind);
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
@@ -453,8 +598,14 @@ pub fn overrides(inout s: St) {
     }
     let file = at32(in s.mod_file, w(r));
     for i in 0..order.len() {
-        let local = at32(in order, i);
-        let item = at64_key(in s, pair(r, local));
+        let written = at32(in order, i);
+        let item = at64_key(in s, pair(r, written));
+        // A constant keeps its function prefix under its new name.
+        let local = if sym_starts(in s, lo(item), in const_prefix()) {
+            const_of(inout s, written)
+        } else {
+            written
+        };
         if hi(item) == r && lo(item) == local {
             continue;
         }
@@ -603,6 +754,20 @@ pub fn qualified(inout s: St, cur: u32, path: u32, start: u32, end: u32) -> u32 
     }
     let same = module == cur;
     let item = at32(in segs, wrapping_add(first, j));
+    // `m::E::M` names the member `M` of the value enum `E` of `m`.
+    if wrapping_add(j, 2) == rest {
+        let g = group(inout s, module, item, same, in shown, start, end);
+        s.err_code = 0;
+        if g == 1 {
+            let member = at32(in segs, wrapping_add(first, inc(j)));
+            for i in 0..s.grp_m.len() {
+                if at32(in s.grp_m, i) == member {
+                    let key = at64(in s.grp_k, i);
+                    return name_of(inout s, key);
+                }
+            }
+        }
+    }
     let (key, kind) = lookup(inout s, module, item, same, in shown, start, end);
     if key == no_key() {
         let c = sym_byte(in s, item, 0);

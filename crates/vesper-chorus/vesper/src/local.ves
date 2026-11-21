@@ -26,8 +26,30 @@ use self::util::{
     sym_cmp,
     tb_str,
     tb_sym,
-    tb_u64
+    tb_u64,
+    Br,
+    Fnv,
+    LTag,
+    Order,
+    Wire
 };
+
+// Input records (lib.ves) past their tag word: Send/Recv `1|2 peer label
+// payload` has its label at 2 and its payload at 4 and is 6 words;
+// Select/Offer `3|4 peer n (label payload)*n` has `n` at 2 and 3 words
+// before its branches.
+enum Rec: _ {
+    MsgLabel = 2,
+    MsgPayload = 4,
+    Msg = 6,
+    ChoiceArms = 2,
+    ChoiceHead = 3
+}
+
+// The interning table's first size.
+const MIN_SLOTS: u64 = 256;
+// The unfoldings `unfold` tries before it gives up (a Rec of a Rec ..).
+const MAX_UNFOLD: u64 = 64;
 
 pub fn lt(in c: C, n: u64) -> u64 {
     sw(in c.lt, n)
@@ -49,12 +71,12 @@ pub fn lkn(in c: C, n: u64) -> u64 {
 }
 // Field `f` (0 label, 1 payload, 2 next) of branch `i` of node `n`.
 pub fn lbr(in c: C, n: u64, i: u64, f: u64) -> u64 {
-    sw(in c.lk, add(add(sw(in c.lks, n), wrapping_mul(i, 3)), f))
+    sw(in c.lk, add(add(sw(in c.lks, n), wrapping_mul(i, Br::Words)), f))
 }
 
 // The continuation of a Send, Recv or Action node.
 pub fn lnext(in c: C, n: u64) -> u64 {
-    if lt(in c, n) == 5 {
+    if lt(in c, n) == LTag::Action {
         lb(in c, n)
     } else {
         ld(in c, n)
@@ -62,12 +84,12 @@ pub fn lnext(in c: C, n: u64) -> u64 {
 }
 
 fn mix(h: u64, x: u64) -> u64 {
-    wrapping_mul(h ^ x, 1099511628211)
+    wrapping_mul(h ^ x, Fnv::Prime)
 }
 
 fn grow(inout c: C) {
     let cap = if c.l_mask == 0 {
-        256
+        MIN_SLOTS
     } else {
         wrapping_mul(inc(c.l_mask), 2)
     };
@@ -90,7 +112,7 @@ fn grow(inout c: C) {
 
 fn same_kids(in c: C, m: u64, from: u64) -> bool {
     let len = wrapping_sub(c.tmp.len(), from);
-    if wrapping_mul(sw(in c.lkn, m), 3) != len {
+    if wrapping_mul(sw(in c.lkn, m), Br::Words) != len {
         return false;
     }
     let base = sw(in c.lks, m);
@@ -109,7 +131,7 @@ pub fn mkl(inout c: C, tag: u64, a: u64, b: u64, cc: u64, d: u64, from: u64) -> 
         grow(inout c);
     }
     let n = c.tmp.len();
-    let mut h = mix(mix(mix(mix(mix(14695981039346656037, tag), a), b), cc), d);
+    let mut h = mix(mix(mix(mix(mix(Fnv::Offset, tag), a), b), cc), d);
     let mut i = from;
     loop {
         if i >= n {
@@ -153,7 +175,7 @@ pub fn mkl(inout c: C, tag: u64, a: u64, b: u64, cc: u64, d: u64, from: u64) -> 
     c.lh.push(h);
     let h25 = c.lk.len();
     c.lks.push(h25);
-    c.lkn.push(wrapping_sub(n, from) / 3);
+    c.lkn.push(wrapping_sub(n, from) / Br::Words);
     c.lu.push(none());
     i = from;
     loop {
@@ -171,37 +193,37 @@ pub fn mkl(inout c: C, tag: u64, a: u64, b: u64, cc: u64, d: u64, from: u64) -> 
 
 pub fn l_init(inout c: C) {
     let f = c.tmp.len();
-    c.l_end = mkl(inout c, 8, 0, 0, 0, 0, f);
+    c.l_end = mkl(inout c, LTag::End, 0, 0, 0, 0, f);
 }
 
 pub fn l_msg(inout c: C, send: bool, peer: u64, label: u64, payload: u64, next: u64) -> u64 {
     let f = c.tmp.len();
     let tag: u64 = if send {
-        1
+        LTag::Send
     } else {
-        2
+        LTag::Recv
     };
     mkl(inout c, tag, peer, label, payload, next, f)
 }
 
 pub fn l_action(inout c: C, name: u64, next: u64) -> u64 {
     let f = c.tmp.len();
-    mkl(inout c, 5, name, next, 0, 0, f)
+    mkl(inout c, LTag::Action, name, next, 0, 0, f)
 }
 
 pub fn l_rec(inout c: C, var: u64, body: u64) -> u64 {
     let f = c.tmp.len();
-    mkl(inout c, 6, var, body, 0, 0, f)
+    mkl(inout c, LTag::Rec, var, body, 0, 0, f)
 }
 
 pub fn l_var(inout c: C, var: u64) -> u64 {
     let f = c.tmp.len();
-    mkl(inout c, 7, var, 0, 0, 0, f)
+    mkl(inout c, LTag::Var, var, 0, 0, 0, f)
 }
 
 fn copy_triple(inout c: C, dst: u64, src: u64) {
-    let three: u64 = 3;
-    for k in 0..three {
+    let words: u64 = Br::Words;
+    for k in 0..words {
         let v = sw(in c.tmp, add(src, k));
         setw(inout c.tmp, add(dst, k), v);
     }
@@ -237,17 +259,17 @@ fn merge_pass(inout c: C, src: u64, dst: u64, n: u64, w: u64) {
             } else if j >= hi {
                 false
             } else {
-                let x = sw(in c.tmp, add(src, wrapping_mul(i, 3)));
-                let y = sw(in c.tmp, add(src, wrapping_mul(j, 3)));
-                sym_cmp(in c, y, x) == 0
+                let x = sw(in c.tmp, add(src, wrapping_mul(i, Br::Words)));
+                let y = sw(in c.tmp, add(src, wrapping_mul(j, Br::Words)));
+                sym_cmp(in c, y, x) == Order::Less
             };
-            let to = add(dst, wrapping_mul(k, 3));
+            let to = add(dst, wrapping_mul(k, Br::Words));
             if take_right {
-                let at = add(src, wrapping_mul(j, 3));
+                let at = add(src, wrapping_mul(j, Br::Words));
                 copy_triple(inout c, to, at);
                 j = inc(j);
             } else {
-                let at = add(src, wrapping_mul(i, 3));
+                let at = add(src, wrapping_mul(i, Br::Words));
                 copy_triple(inout c, to, at);
                 i = inc(i);
             }
@@ -260,7 +282,7 @@ fn merge_pass(inout c: C, src: u64, dst: u64, n: u64, w: u64) {
 // Sorts the `n` triples at `from` by label (stable, O(n log n)), using
 // `3 n` scratch words past them.
 fn sort_triples(inout c: C, from: u64, n: u64) {
-    let words = wrapping_mul(n, 3);
+    let words = wrapping_mul(n, Br::Words);
     let buf = add(from, words);
     for _k in 0..words {
         c.tmp.push(0);
@@ -291,19 +313,19 @@ fn sort_triples(inout c: C, from: u64, n: u64) {
 // Send/Recv when there is one, else a Select/Offer sorted by label
 // (stable).
 pub fn choice(inout c: C, send: bool, peer: u64, from: u64) -> u64 {
-    let n = wrapping_sub(c.tmp.len(), from) / 3;
+    let n = wrapping_sub(c.tmp.len(), from) / Br::Words;
     if n == 1 {
         let l = sw(in c.tmp, from);
         let p = sw(in c.tmp, inc(from));
-        let nx = sw(in c.tmp, add(from, 2));
+        let nx = sw(in c.tmp, add(from, Br::Next));
         c.tmp.truncate(from);
         return l_msg(inout c, send, peer, l, p, nx);
     }
     sort_triples(inout c, from, n);
     let tag: u64 = if send {
-        3
+        LTag::Select
     } else {
-        4
+        LTag::Offer
     };
     mkl(inout c, tag, peer, 0, 0, 0, from)
 }
@@ -311,19 +333,19 @@ pub fn choice(inout c: C, send: bool, peer: u64, from: u64) -> u64 {
 // `LocalType::mentions`: whether `var` occurs free in `t`.
 pub fn mentions(in c: C, t: u64, var: u64) -> bool {
     let tag = lt(in c, t);
-    if tag == 7 {
+    if tag == LTag::Var {
         la(in c, t) == var
-    } else if tag == 8 {
+    } else if tag == LTag::End {
         false
-    } else if tag == 1 || tag == 2 {
+    } else if tag == LTag::Send || tag == LTag::Recv {
         mentions(in c, ld(in c, t), var)
-    } else if tag == 5 {
+    } else if tag == LTag::Action {
         mentions(in c, lb(in c, t), var)
-    } else if tag == 6 {
+    } else if tag == LTag::Rec {
         la(in c, t) != var && mentions(in c, lb(in c, t), var)
     } else {
         for i in 0..lkn(in c, t) {
-            if mentions(in c, lbr(in c, t, i, 2), var) {
+            if mentions(in c, lbr(in c, t, i, Br::Next), var) {
                 return true;
             }
         }
@@ -334,15 +356,15 @@ pub fn mentions(in c: C, t: u64, var: u64) -> bool {
 // `LocalType::subst`: `wv` for the free occurrences of `var` in `t`.
 pub fn subst(inout c: C, t: u64, var: u64, wv: u64) -> u64 {
     let tag = lt(in c, t);
-    if tag == 7 {
+    if tag == LTag::Var {
         if la(in c, t) == var {
             wv
         } else {
             t
         }
-    } else if tag == 8 {
+    } else if tag == LTag::End {
         t
-    } else if tag == 1 || tag == 2 {
+    } else if tag == LTag::Send || tag == LTag::Recv {
         let h27 = ld(in c, t);
         let nx = subst(inout c, h27, var, wv);
         let f = c.tmp.len();
@@ -350,12 +372,12 @@ pub fn subst(inout c: C, t: u64, var: u64, wv: u64) -> u64 {
         let h29 = lb(in c, t);
         let h30 = lc(in c, t);
         mkl(inout c, tag, h28, h29, h30, nx, f)
-    } else if tag == 5 {
+    } else if tag == LTag::Action {
         let h31 = lb(in c, t);
         let nx = subst(inout c, h31, var, wv);
         let h32 = la(in c, t);
         l_action(inout c, h32, nx)
-    } else if tag == 6 {
+    } else if tag == LTag::Rec {
         if la(in c, t) == var {
             t
         } else {
@@ -368,16 +390,16 @@ pub fn subst(inout c: C, t: u64, var: u64, wv: u64) -> u64 {
         let f = c.tmp.len();
         let n = lkn(in c, t);
         for i in 0..n {
-            let h35 = lbr(in c, t, i, 0);
+            let h35 = lbr(in c, t, i, Br::Label);
             c.tmp.push(h35);
-            let h36 = lbr(in c, t, i, 1);
+            let h36 = lbr(in c, t, i, Br::Payload);
             c.tmp.push(h36);
             c.tmp.push(0);
         }
         for i in 0..n {
-            let h37 = lbr(in c, t, i, 2);
+            let h37 = lbr(in c, t, i, Br::Next);
             let nx = subst(inout c, h37, var, wv);
-            setw(inout c.tmp, add(add(f, wrapping_mul(i, 3)), 2), nx);
+            setw(inout c.tmp, add(add(f, wrapping_mul(i, Br::Words)), Br::Next), nx);
         }
         let h38 = la(in c, t);
         mkl(inout c, tag, h38, 0, 0, 0, f)
@@ -391,8 +413,8 @@ pub fn unfold(inout c: C, t: u64) -> u64 {
         return m;
     }
     let mut x = t;
-    for _ in 0..64 {
-        if lt(in c, x) != 6 {
+    for _ in 0..MAX_UNFOLD {
+        if lt(in c, x) != LTag::Rec {
             setw(inout c.lu, t, x);
             return x;
         }
@@ -407,7 +429,7 @@ pub fn unfold(inout c: C, t: u64) -> u64 {
 // The de Bruijn form of `t` under the binders on `dbe`.
 fn de_bruijn(inout c: C, t: u64) -> u64 {
     let tag = lt(in c, t);
-    if tag == 7 {
+    if tag == LTag::Var {
         let v = la(in c, t);
         let n = c.dbe.len();
         let mut i: u64 = 0;
@@ -429,7 +451,7 @@ fn de_bruijn(inout c: C, t: u64) -> u64 {
         tb_sym(inout c, v);
         let y = intern_tb(inout c);
         l_var(inout c, y)
-    } else if tag == 6 {
+    } else if tag == LTag::Rec {
         let h41 = la(in c, t);
         c.dbe.push(h41);
         let h42 = lb(in c, t);
@@ -437,9 +459,9 @@ fn de_bruijn(inout c: C, t: u64) -> u64 {
         let _ = c.dbe.pop();
         let e = intern_str(inout c, "");
         l_rec(inout c, e, b)
-    } else if tag == 8 {
+    } else if tag == LTag::End {
         t
-    } else if tag == 1 || tag == 2 {
+    } else if tag == LTag::Send || tag == LTag::Recv {
         let h43 = ld(in c, t);
         let nx = de_bruijn(inout c, h43);
         let f = c.tmp.len();
@@ -447,7 +469,7 @@ fn de_bruijn(inout c: C, t: u64) -> u64 {
         let h45 = lb(in c, t);
         let h46 = lc(in c, t);
         mkl(inout c, tag, h44, h45, h46, nx, f)
-    } else if tag == 5 {
+    } else if tag == LTag::Action {
         let h47 = lb(in c, t);
         let nx = de_bruijn(inout c, h47);
         let h48 = la(in c, t);
@@ -456,16 +478,16 @@ fn de_bruijn(inout c: C, t: u64) -> u64 {
         let f = c.tmp.len();
         let n = lkn(in c, t);
         for i in 0..n {
-            let h49 = lbr(in c, t, i, 0);
+            let h49 = lbr(in c, t, i, Br::Label);
             c.tmp.push(h49);
-            let h50 = lbr(in c, t, i, 1);
+            let h50 = lbr(in c, t, i, Br::Payload);
             c.tmp.push(h50);
             c.tmp.push(0);
         }
         for i in 0..n {
-            let h51 = lbr(in c, t, i, 2);
+            let h51 = lbr(in c, t, i, Br::Next);
             let nx = de_bruijn(inout c, h51);
-            setw(inout c.tmp, add(add(f, wrapping_mul(i, 3)), 2), nx);
+            setw(inout c.tmp, add(add(f, wrapping_mul(i, Br::Words)), Br::Next), nx);
         }
         let h52 = la(in c, t);
         mkl(inout c, tag, h52, 0, 0, 0, f)
@@ -486,7 +508,7 @@ fn labels(inout c: C, t: u64) {
         if i > 0 {
             tb_str(inout c, "|");
         }
-        let h53 = lbr(in c, t, i, 0);
+        let h53 = lbr(in c, t, i, Br::Label);
         tb_sym(inout c, h53);
     }
 }
@@ -497,37 +519,37 @@ pub fn summary(inout c: C, t: u64) -> u64 {
     let h54 = la(in c, t);
     let peer = role_sym(inout c, h54);
     c.tb.clear();
-    if tag == 1 {
+    if tag == LTag::Send {
         tb_str(inout c, "send ");
         let h55 = lb(in c, t);
         tb_sym(inout c, h55);
         tb_str(inout c, " to ");
         tb_sym(inout c, peer);
-    } else if tag == 2 {
+    } else if tag == LTag::Recv {
         tb_str(inout c, "receive ");
         let h56 = lb(in c, t);
         tb_sym(inout c, h56);
         tb_str(inout c, " from ");
         tb_sym(inout c, peer);
-    } else if tag == 3 {
+    } else if tag == LTag::Select {
         tb_str(inout c, "select ");
         labels(inout c, t);
         tb_str(inout c, " with ");
         tb_sym(inout c, peer);
-    } else if tag == 4 {
+    } else if tag == LTag::Offer {
         tb_str(inout c, "offer ");
         labels(inout c, t);
         tb_str(inout c, " from ");
         tb_sym(inout c, peer);
-    } else if tag == 5 {
+    } else if tag == LTag::Action {
         tb_str(inout c, "local action ");
         let h57 = la(in c, t);
         tb_sym(inout c, h57);
-    } else if tag == 6 {
+    } else if tag == LTag::Rec {
         tb_str(inout c, "loop ");
         let h58 = la(in c, t);
         tb_sym(inout c, h58);
-    } else if tag == 7 {
+    } else if tag == LTag::Var {
         tb_str(inout c, "continue ");
         let h59 = la(in c, t);
         tb_sym(inout c, h59);
@@ -540,7 +562,7 @@ pub fn summary(inout c: C, t: u64) -> u64 {
 // Writes `t` in postorder to `out`.
 pub fn emit_l(inout c: C, t: u64) {
     let tag = lt(in c, t);
-    if tag == 1 || tag == 2 {
+    if tag == LTag::Send || tag == LTag::Recv {
         let h60 = ld(in c, t);
         emit_l(inout c, h60);
         c.out.push(tag);
@@ -550,10 +572,10 @@ pub fn emit_l(inout c: C, t: u64) {
         c.out.push(h62);
         let h63 = lc(in c, t);
         c.out.push(h63);
-    } else if tag == 3 || tag == 4 {
+    } else if tag == LTag::Select || tag == LTag::Offer {
         let n = lkn(in c, t);
         for i in 0..n {
-            let h64 = lbr(in c, t, i, 2);
+            let h64 = lbr(in c, t, i, Br::Next);
             emit_l(inout c, h64);
         }
         c.out.push(tag);
@@ -561,23 +583,23 @@ pub fn emit_l(inout c: C, t: u64) {
         c.out.push(h65);
         c.out.push(n);
         for i in 0..n {
-            let h66 = lbr(in c, t, i, 0);
+            let h66 = lbr(in c, t, i, Br::Label);
             c.out.push(h66);
-            let h67 = lbr(in c, t, i, 1);
+            let h67 = lbr(in c, t, i, Br::Payload);
             c.out.push(h67);
         }
-    } else if tag == 5 || tag == 6 {
+    } else if tag == LTag::Action || tag == LTag::Rec {
         let h68 = lb(in c, t);
         emit_l(inout c, h68);
         c.out.push(tag);
         let h69 = la(in c, t);
         c.out.push(h69);
-    } else if tag == 7 {
-        c.out.push(7);
+    } else if tag == LTag::Var {
+        c.out.push(LTag::Var);
         let h70 = la(in c, t);
         c.out.push(h70);
     } else {
-        c.out.push(8);
+        c.out.push(LTag::End);
     }
 }
 
@@ -602,34 +624,34 @@ pub fn read_local(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64, len: u
             break;
         }
         let tag = iw(in w, i);
-        if tag == 8 {
+        if tag == LTag::End {
             let h71 = c.l_end;
             c.vs.push(h71);
             i = inc(i);
-        } else if tag == 7 {
+        } else if tag == LTag::Var {
             let y = str_at(inout c, in w, in t, inc(i));
             let n = l_var(inout c, y);
             c.vs.push(n);
-            i = add(i, 3);
-        } else if tag == 5 || tag == 6 {
+            i = add(i, Wire::Named);
+        } else if tag == LTag::Action || tag == LTag::Rec {
             let y = str_at(inout c, in w, in t, inc(i));
             let nx = pop_vs(inout c);
             let f = c.tmp.len();
             let n = mkl(inout c, tag, y, nx, 0, 0, f);
             c.vs.push(n);
-            i = add(i, 3);
-        } else if tag == 1 || tag == 2 {
+            i = add(i, Wire::Named);
+        } else if tag == LTag::Send || tag == LTag::Recv {
             let peer = iw(in w, inc(i));
-            let l = str_at(inout c, in w, in t, add(i, 2));
-            let p = str_at(inout c, in w, in t, add(i, 4));
+            let l = str_at(inout c, in w, in t, add(i, Rec::MsgLabel));
+            let p = str_at(inout c, in w, in t, add(i, Rec::MsgPayload));
             let nx = pop_vs(inout c);
             let f = c.tmp.len();
             let n = mkl(inout c, tag, peer, l, p, nx, f);
             c.vs.push(n);
-            i = add(i, 6);
+            i = add(i, Rec::Msg);
         } else {
             let peer = iw(in w, inc(i));
-            let nb = iw(in w, add(i, 2));
+            let nb = iw(in w, add(i, Rec::ChoiceArms));
             let vl = c.vs.len();
             let b0 = if nb > wrapping_sub(vl, base) {
                 base
@@ -637,10 +659,10 @@ pub fn read_local(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64, len: u
                 wrapping_sub(vl, nb)
             };
             let f = c.tmp.len();
-            let mut q = add(i, 3);
+            let mut q = add(i, Rec::ChoiceHead);
             for k in 0..nb {
                 let l = str_at(inout c, in w, in t, q);
-                let p = str_at(inout c, in w, in t, add(q, 2));
+                let p = str_at(inout c, in w, in t, add(q, Wire::Str));
                 c.tmp.push(l);
                 c.tmp.push(p);
                 let x = if add(b0, k) < vl {
@@ -649,7 +671,7 @@ pub fn read_local(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64, len: u
                     c.l_end
                 };
                 c.tmp.push(x);
-                q = add(q, 4);
+                q = add(q, Wire::Branch);
             }
             c.vs.truncate(b0);
             let n = mkl(inout c, tag, peer, 0, 0, 0, f);
@@ -692,13 +714,13 @@ pub fn are_dual(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
 fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
     let tx = lt(in c, x);
     let ty = lt(in c, y);
-    if tx == 8 && ty == 8 {
+    if tx == LTag::End && ty == LTag::End {
         return true;
     }
-    if tx == 7 && ty == 7 {
+    if tx == LTag::Var && ty == LTag::Var {
         return var_pair(in c, la(in c, x), la(in c, y));
     }
-    if tx == 6 && ty == 6 {
+    if tx == LTag::Rec && ty == LTag::Rec {
         let h72 = la(in c, x);
         c.dvx.push(h72);
         let h73 = la(in c, y);
@@ -710,7 +732,7 @@ fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
         let _ = c.dvy.pop();
         return r;
     }
-    if (tx == 1 && ty == 2) || (tx == 2 && ty == 1) {
+    if (tx == LTag::Send && ty == LTag::Recv) || (tx == LTag::Recv && ty == LTag::Send) {
         if la(in c, x)
             != b
             || la(in c, y)
@@ -725,7 +747,7 @@ fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
         let h77 = ld(in c, y);
         return dual_in(inout c, a, h76, b, h77);
     }
-    if (tx == 3 && ty == 4) || (tx == 4 && ty == 3) {
+    if (tx == LTag::Select && ty == LTag::Offer) || (tx == LTag::Offer && ty == LTag::Select) {
         if la(in c, x) != b || la(in c, y) != a {
             return false;
         }
@@ -734,25 +756,25 @@ fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
             return false;
         }
         for i in 0..n {
-            if lbr(in c, x, i, 0)
-                != lbr(in c, y, i, 0)
-                || lbr(in c, x, i, 1)
-                != lbr(in c, y, i, 1) {
+            if lbr(in c, x, i, Br::Label)
+                != lbr(in c, y, i, Br::Label)
+                || lbr(in c, x, i, Br::Payload)
+                != lbr(in c, y, i, Br::Payload) {
                 return false;
             }
-            let h78 = lbr(in c, x, i, 2);
-            let h79 = lbr(in c, y, i, 2);
+            let h78 = lbr(in c, x, i, Br::Next);
+            let h79 = lbr(in c, y, i, Br::Next);
             if !dual_in(inout c, a, h78, b, h79) {
                 return false;
             }
         }
         return true;
     }
-    if tx == 5 {
+    if tx == LTag::Action {
         let h80 = lb(in c, x);
         return dual_in(inout c, a, h80, b, y);
     }
-    if ty == 5 {
+    if ty == LTag::Action {
         let h81 = lb(in c, y);
         return dual_in(inout c, a, x, b, h81);
     }

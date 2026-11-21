@@ -1125,6 +1125,60 @@ pub(super) fn verify_with_budget(
     )
 }
 
+/// The spent counters of a cumulative budget, so a swapped-in checker (the
+/// hybrid build's `optimize` module, self-hosting SH3 lane 10, #1249) can
+/// continue the producer's budget across the language boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Spent {
+    pub work: usize,
+    pub metadata: usize,
+    pub names: usize,
+}
+
+impl WitnessBudget {
+    pub(super) fn spent(&self) -> Spent {
+        Spent {
+            work: self.work,
+            metadata: self.metadata,
+            names: self.names,
+        }
+    }
+}
+
+/// [`verify_with_budget`] on a budget of `limits` that has already spent
+/// `spent`, which is updated to what the budget spent by the end. This is
+/// the Rust entry of the `optimize` swap point (`super::OptimizeTable`).
+pub fn verify_spent(
+    source: &Expr,
+    candidate: &Expr,
+    types: &TypeMap,
+    certificate: &RewriteCertificate,
+    limits: WitnessLimits,
+    spent: &mut Spent,
+) -> Result<(), WitnessError> {
+    let mut budget = WitnessBudget::new(limits)?;
+    budget.work = spent.work;
+    budget.metadata = spent.metadata;
+    budget.names = spent.names;
+    let result = verify_with_budget(source, candidate, types, certificate, &mut budget);
+    *spent = budget.spent();
+    result
+}
+
+/// [`build_candidate`] of `certificate`'s output over the bound `source`,
+/// on a fresh budget of `limits`: the candidate a certificate stands for
+/// (the swap point's differential rebuilds foreign proposals with it).
+pub fn rebuild_candidate(
+    source: &Expr,
+    types: &TypeMap,
+    certificate: &RewriteCertificate,
+    limits: WitnessLimits,
+) -> Result<Expr, WitnessError> {
+    let mut budget = WitnessBudget::new(limits)?;
+    let bound = bind_source(source, types, &mut budget)?;
+    build_candidate(&bound, &certificate.terms, certificate.output, &mut budget)
+}
+
 /// Verify an untrusted certificate against the actual checked source and output.
 /// Failure never mutates either AST. This function performs no egg operation.
 pub fn verify_rewrite(

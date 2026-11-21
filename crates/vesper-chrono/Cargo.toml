@@ -2,6 +2,7 @@
 name = "vesper-chrono"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Chrono flight recording, reverse watchpoints, obligation lineage, replay bundles, hardware branch-trace decoding and activation checkpoints (design section 31)"
 publish = false
 

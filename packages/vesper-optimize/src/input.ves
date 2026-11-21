@@ -1,0 +1,505 @@
+// The decoded inputs of the checker: the expressions, the expression types
+// and a certificate, as tests/self_host_optimize.rs (and later the hybrid
+// build's `optimize` module) encodes them, little-endian u64 words in one
+// `Str`.
+//
+// Expressions live in an `@vesper/ast` `Ast` (ExprNode, Lit, ArgNode and
+// lists), with two side columns for what the Rust checker charges and an
+// AST does not keep: the capacity of a `Name` or `Binary` string (a `Call`'s
+// type-argument capacity) and a `Call`'s argument capacity.
+
+use @vesper/ast::{
+    Ast,
+    ArgNode,
+    ExprNode,
+    ListRef,
+    Lit,
+    TypeNode,
+    ast_new,
+    none
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    Symbol
+};
+
+pub struct Reader {
+    pos: u64
+}
+
+impl Reader {
+    pub fn word(inout self, in b: Slice[u8]) -> u64 {
+        let x = match b.try_read_u64_le(self.pos) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        self.pos = wrapping_add(self.pos, 8);
+        x
+    }
+
+    pub fn word32(inout self, in b: Slice[u8]) -> u32 {
+        wrapping_u32(self.word(in b))
+    }
+}
+
+// The expressions of one case.
+pub struct Tree {
+    ast: Ast,
+    // Per expression: the `Name`/`Binary` string capacity, or a `Call`'s
+    // type-argument vector capacity.
+    cap1: ChunkSeq[u64],
+    // Per expression: a `Call`'s argument vector capacity.
+    cap2: ChunkSeq[u64],
+    // Input name index -> symbol.
+    nmap: ChunkSeq[u32]
+}
+
+// One `TypeMap` entry, reduced to what the checker asks: codes 1-4 are
+// `u8`, `u32`, `u64`, `i64` (`IntegerKind` 0-3 plus one), 5 is
+// `Type::IntLiteral`, 6 any other type.
+pub copy struct TypeRow {
+    start: u32,
+    end: u32,
+    code: u8
+}
+
+// A certificate term (`Term`): `kind` is the `IntegerKind` position, `tag`
+// 0 Const (`value`), 1 InputVar (`a`), 2 Checked and 3 Wrapping (`op` 0 Add,
+// 1 Sub, 2 Mul; children `a`, `b`). Unused fields are zero.
+pub copy struct TermRow {
+    kind: u8,
+    tag: u8,
+    op: u8,
+    value: i128,
+    a: u32,
+    b: u32
+}
+
+// A proof step (`Equality`): `tag` 0 Refl, 1 Rule (`rule`, bindings
+// `b0`-`b2`, `len`, `guard` when `has_guard`), 2 Congruence (`p0`, `p1`),
+// 3 Symmetry (`p0`), 4 Transitivity (`p0`, `p1`).
+pub copy struct ProofRow {
+    from: u32,
+    to: u32,
+    tag: u8,
+    rule: u32,
+    b0: u32,
+    b1: u32,
+    b2: u32,
+    len: u32,
+    has_guard: bool,
+    guard: u32,
+    p0: u32,
+    p1: u32
+}
+
+// `RewriteCertificate`, with the capacities of its two vectors.
+pub struct Cert {
+    schema_version: u64,
+    arithmetic_version: u64,
+    terms_cap: u64,
+    proofs_cap: u64,
+    input: u32,
+    output: u32,
+    conclusion: u32,
+    terms: ChunkSeq[TermRow],
+    proofs: ChunkSeq[ProofRow]
+}
+
+pub fn cap_at(in s: ChunkSeq[u64], i: u32) -> u64 {
+    match s.try_get(widen_u64(i)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn push_list(inout a: Ast, in words: ChunkSeq[u32]) -> u32 {
+    let n = words.len();
+    if n == 0 {
+        return 0;
+    }
+    let first = wrapping_u32(a.pool.len());
+    for i in 0..n {
+        match words.try_get(i) {
+            Option::Some(v) => a.pool.push(v),
+            Option::None => {}
+        }
+    }
+    let r = a
+        .lists
+        .alloc(
+        ListRef {
+            first: first,
+            len: wrapping_u32(n)
+        }
+    );
+    r.raw()
+}
+
+fn node(kind: u8, start: u32, end: u32, a: u32, b: u32, c: u32) -> ExprNode {
+    ExprNode {
+        kind: kind,
+        start: start,
+        end: end,
+        a: a,
+        b: b,
+        c: c,
+        d: 0,
+        e: 0
+    }
+}
+
+// Appends an expression to the tree with its two capacities; returns its
+// index.
+pub fn add_expr(inout t: Tree, n: ExprNode, cap1: u64, cap2: u64) -> u32 {
+    let i = t.ast.exprs.alloc(n);
+    t.cap1.push(cap1);
+    t.cap2.push(cap2);
+    i.raw()
+}
+
+// An integer literal node with the value `v` (in the AST's sign and
+// magnitude form).
+pub fn add_int(inout t: Tree, v: i128, start: u32, end: u32) -> u32 {
+    let neg = v < 0;
+    let magnitude = if neg {
+        wrapping_u64(wrapping_neg_i128(v))
+    } else {
+        wrapping_u64(v)
+    };
+    let l = t
+        .ast
+        .lits
+        .alloc(
+        Lit {
+            kind: 1,
+            neg: neg,
+            bits: magnitude
+        }
+    );
+    add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
+}
+
+pub fn add_name(inout t: Tree, sym: u32, len: u64, start: u32, end: u32) -> u32 {
+    add_expr(inout t, node(2, start, end, sym, 0, 0), len, 0)
+}
+
+pub fn add_binary(inout t: Tree, op: u32, cap: u64, left: u32, right: u32, start: u32, end: u32)
+    -> u32 {
+    add_expr(inout t, node(11, start, end, op, left, right), cap, 0)
+}
+
+// A two-argument call `callee(in left, in right)` with no type arguments.
+pub fn add_call2(inout t: Tree, callee: u32, left: u32, right: u32, start: u32, end: u32) -> u32 {
+    let x = t
+        .ast
+        .args
+        .alloc(
+        ArgNode {
+            pass: 0,
+            explicit: false,
+            expr: left
+        }
+    );
+    let y = t
+        .ast
+        .args
+        .alloc(
+        ArgNode {
+            pass: 0,
+            explicit: false,
+            expr: right
+        }
+    );
+    let mut words = ChunkSeq::new[u32]();
+    words.push(x.raw());
+    words.push(y.raw());
+    let args = push_list(inout t.ast, in words);
+    add_expr(inout t, node(6, start, end, callee, 0, args), 0, 2)
+}
+
+pub fn tree_new() -> Tree {
+    Tree {
+        ast: ast_new(),
+        cap1: ChunkSeq::new[u64](),
+        cap2: ChunkSeq::new[u64](),
+        nmap: ChunkSeq::new[u32]()
+    }
+}
+
+pub fn sym_of(in t: Tree, x: u64) -> u32 {
+    match t.nmap.try_get(x) {
+        Option::Some(v) => v,
+        Option::None => none(),
+    }
+}
+
+// Names: a count, then each name's byte length and bytes, padded to words.
+pub fn read_names(inout r: Reader, in input: Str, inout t: Tree) {
+    let b = input.as_bytes();
+    t.nmap.clear();
+    let count = r.word(in b);
+    for i in 0..count {
+        let len = r.word(in b);
+        let start = r.pos;
+        let s = t.ast.names.intern(in input[start..wrapping_add(start, len)]);
+        t.nmap.push(s.id());
+        r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    }
+}
+
+// Expressions, children first: kind, start, end, then by kind
+//   1 Literal: literal kind (1 Int), sign, magnitude
+//   2 Name: name, string capacity
+//   6 Call: callee, type count, type capacity, argument count, argument
+//     capacity, then per argument pass, explicit, expression
+//  11 Binary: operator name, string capacity, left, right
+// and nothing for every other kind. Expression words are input indices,
+// read through `map` (input index -> tree index).
+pub fn read_exprs(inout r: Reader, in b: Slice[u8], inout t: Tree, inout map: ChunkSeq[u32]) {
+    map.clear();
+    let count = r.word(in b);
+    for i in 0..count {
+        let kind = wrapping_u8(r.word(in b));
+        let start = r.word32(in b);
+        let end = r.word32(in b);
+        let id = if kind == 1 {
+            let lk = wrapping_u8(r.word(in b));
+            let neg = r.word(in b) != 0;
+            let bits = r.word(in b);
+            let l = t
+                .ast
+                .lits
+                .alloc(
+                Lit {
+                    kind: lk,
+                    neg: neg,
+                    bits: bits
+                }
+            );
+            add_expr(inout t, node(1, start, end, l.raw(), 0, 0), 0, 0)
+        } else if kind == 2 {
+            let s = sym_of(in t, r.word(in b));
+            let cap = r.word(in b);
+            add_expr(inout t, node(2, start, end, s, 0, 0), cap, 0)
+        } else if kind == 6 {
+            let callee = mapped(in map, r.word(in b));
+            let ntypes = r.word(in b);
+            let tcap = r.word(in b);
+            let nargs = r.word(in b);
+            let acap = r.word(in b);
+            let mut tw = ChunkSeq::new[u32]();
+            for j in 0..ntypes {
+                let ty = t
+                    .ast
+                    .types
+                    .alloc(
+                    TypeNode {
+                        kind: 5,
+                        a: 0,
+                        b: 0,
+                        c: 0,
+                        d: 0
+                    }
+                );
+                tw.push(ty.raw());
+            }
+            let types = push_list(inout t.ast, in tw);
+            let mut aw = ChunkSeq::new[u32]();
+            for j in 0..nargs {
+                let pass = wrapping_u8(r.word(in b));
+                let explicit = r.word(in b) != 0;
+                let e = mapped(in map, r.word(in b));
+                let x = t
+                    .ast
+                    .args
+                    .alloc(
+                    ArgNode {
+                        pass: pass,
+                        explicit: explicit,
+                        expr: e
+                    }
+                );
+                aw.push(x.raw());
+            }
+            let args = push_list(inout t.ast, in aw);
+            add_expr(inout t, node(6, start, end, callee, types, args), tcap, acap)
+        } else if kind == 11 {
+            let op = sym_of(in t, r.word(in b));
+            let cap = r.word(in b);
+            let left = mapped(in map, r.word(in b));
+            let right = mapped(in map, r.word(in b));
+            add_expr(inout t, node(11, start, end, op, left, right), cap, 0)
+        } else {
+            add_expr(inout t, node(kind, start, end, none(), none(), none()), 0, 0)
+        };
+        map.push(id);
+    }
+}
+
+pub fn mapped(in map: ChunkSeq[u32], x: u64) -> u32 {
+    match map.try_get(x) {
+        Option::Some(v) => v,
+        Option::None => none(),
+    }
+}
+
+// Types: a count, then (start, end, code) rows in `TypeMap` order.
+pub fn read_types(inout r: Reader, in b: Slice[u8], inout types: ChunkSeq[TypeRow]) {
+    types.clear();
+    let count = r.word(in b);
+    for i in 0..count {
+        let start = r.word32(in b);
+        let end = r.word32(in b);
+        let code = wrapping_u8(r.word(in b));
+        types
+            .push(
+            TypeRow {
+                start: start,
+                end: end,
+                code: code
+            }
+        );
+    }
+}
+
+// The code of the type at span `start..end`, or 0 when the map has none.
+pub fn type_code(in types: ChunkSeq[TypeRow], start: u32, end: u32) -> u8 {
+    let mut lo: u64 = 0;
+    let mut hi = types.len();
+    loop {
+        if lo >= hi {
+            return 0;
+        }
+        let mid = wrapping_add(lo, (wrapping_sub(hi, lo)) >> 1);
+        let row = match types.try_get(mid) {
+            Option::Some(v) => v,
+            Option::None => return 0,
+        };
+        if row.start == start && row.end == end {
+            return row.code;
+        }
+        if row.start < start || (row.start == start && row.end < end) {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+fn wide(lo: u64, hi: u64) -> i128 {
+    wrapping_shl_i128(widen_i128(wrapping_i64(hi)), 64) | widen_i128(lo)
+}
+
+// The certificate: versions, the two capacities, input, output,
+// conclusion; the terms (kind, tag, then Const low and high words, an
+// InputVar's variable, or an operation's op and children; five words
+// each); the proofs (from, to, tag and six words each).
+pub fn read_cert(inout r: Reader, in b: Slice[u8], inout c: Cert) {
+    c.schema_version = r.word(in b);
+    c.arithmetic_version = r.word(in b);
+    c.terms_cap = r.word(in b);
+    c.proofs_cap = r.word(in b);
+    c.input = r.word32(in b);
+    c.output = r.word32(in b);
+    c.conclusion = r.word32(in b);
+    c.terms.clear();
+    let nterms = r.word(in b);
+    for i in 0..nterms {
+        let kind = wrapping_u8(r.word(in b));
+        let tag = wrapping_u8(r.word(in b));
+        let w1 = r.word(in b);
+        let w2 = r.word(in b);
+        let w3 = r.word(in b);
+        let row = if tag == 0 {
+            TermRow {
+                kind: kind,
+                tag: 0,
+                op: 0,
+                value: wide(w1, w2),
+                a: 0,
+                b: 0
+            }
+        } else if tag == 1 {
+            TermRow {
+                kind: kind,
+                tag: 1,
+                op: 0,
+                value: 0,
+                a: wrapping_u32(w1),
+                b: 0
+            }
+        } else {
+            TermRow {
+                kind: kind,
+                tag: tag,
+                op: wrapping_u8(w1),
+                value: 0,
+                a: wrapping_u32(w2),
+                b: wrapping_u32(w3)
+            }
+        };
+        c.terms.push(row);
+    }
+    c.proofs.clear();
+    let nproofs = r.word(in b);
+    for i in 0..nproofs {
+        let from = r.word32(in b);
+        let to = r.word32(in b);
+        let tag = wrapping_u8(r.word(in b));
+        let w1 = r.word32(in b);
+        let w2 = r.word32(in b);
+        let w3 = r.word32(in b);
+        let w4 = r.word32(in b);
+        let w5 = r.word32(in b);
+        let w6 = r.word(in b);
+        let row = if tag == 1 {
+            ProofRow {
+                from: from,
+                to: to,
+                tag: 1,
+                rule: w1,
+                b0: w2,
+                b1: w3,
+                b2: w4,
+                len: w5,
+                has_guard: w6 != 0,
+                guard: wrapping_u32(wrapping_sub(w6, 1)),
+                p0: 0,
+                p1: 0
+            }
+        } else {
+            ProofRow {
+                from: from,
+                to: to,
+                tag: tag,
+                rule: 0,
+                b0: 0,
+                b1: 0,
+                b2: 0,
+                len: 0,
+                has_guard: false,
+                guard: 0,
+                p0: w1,
+                p1: w2
+            }
+        };
+        c.proofs.push(row);
+    }
+}
+
+pub fn cert_new() -> Cert {
+    Cert {
+        schema_version: 0,
+        arithmetic_version: 0,
+        terms_cap: 0,
+        proofs_cap: 0,
+        input: 0,
+        output: 0,
+        conclusion: 0,
+        terms: ChunkSeq::new[TermRow](),
+        proofs: ChunkSeq::new[ProofRow]()
+    }
+}

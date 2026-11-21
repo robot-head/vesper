@@ -17,6 +17,7 @@
 //! everything after it is discarded and truncated from the medium. Nothing
 //! here touches a real file, clock or random source.
 use serde::{Deserialize, Serialize};
+#[cfg(not(feature = "vesper-port"))]
 use sha2::{Digest, Sha256};
 
 pub const FRAME_HEADER_BYTES: usize = 20;
@@ -29,6 +30,11 @@ pub struct WalRecord {
     pub payload: String,
 }
 impl WalRecord {
+    #[cfg(feature = "vesper-port")]
+    pub fn frame(&self) -> Vec<u8> {
+        crate::port::wal_frame(self.lsn, &self.payload)
+    }
+    #[cfg(not(feature = "vesper-port"))]
     pub fn frame(&self) -> Vec<u8> {
         let payload = self.payload.as_bytes();
         let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
@@ -43,6 +49,7 @@ impl WalRecord {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn check(lsn: u64, payload: &[u8]) -> [u8; 8] {
     let mut hasher = Sha256::new();
     hasher.update(lsn.to_le_bytes());
@@ -79,6 +86,42 @@ pub struct Recovery {
 
 /// Scan a medium with the `wal-frame-v1` policy. This never fails: damage is
 /// reported and the valid prefix is returned.
+#[cfg(feature = "vesper-port")]
+pub fn scan(bytes: &[u8]) -> Recovery {
+    let result = crate::port::wal_scan(bytes);
+    let records = crate::port::scan_result_records(&result)
+        .chunks_exact(3)
+        .map(|r| {
+            let (start, len) = (r[1] as usize, r[2] as usize);
+            WalRecord {
+                lsn: r[0],
+                payload: std::str::from_utf8(&bytes[start..start + len])
+                    .expect("the port validated the payload")
+                    .into(),
+            }
+        })
+        .collect();
+    let valid_bytes = crate::port::scan_result_valid_bytes(&result) as usize;
+    let damage = match crate::port::scan_result_damage(&result) {
+        (0, _, _) => None,
+        (1, _, _) => Some(TailDamage::TornHeader),
+        (2, _, _) => Some(TailDamage::TornPayload),
+        (3, _, _) => Some(TailDamage::BadCheck),
+        (4, expected, found) => Some(TailDamage::OutOfOrder { expected, found }),
+        (5, _, _) => Some(TailDamage::BadPayload),
+        (other, _, _) => panic!("invalid tail damage {other} from Vesper"),
+    };
+    Recovery {
+        records,
+        valid_bytes,
+        discarded_bytes: bytes.len() - valid_bytes,
+        damage,
+    }
+}
+
+/// Scan a medium with the `wal-frame-v1` policy. This never fails: damage is
+/// reported and the valid prefix is returned.
+#[cfg(not(feature = "vesper-port"))]
 pub fn scan(bytes: &[u8]) -> Recovery {
     let mut records = vec![];
     let mut offset = 0;
