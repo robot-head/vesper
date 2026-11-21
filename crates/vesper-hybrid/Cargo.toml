@@ -32,6 +32,8 @@ divergent-parse = []
 # The same check for the IR check module (#1177): every program gets one
 # made-up IR-check diagnostic.
 divergent-ir-check = []
+# The same check for the inliner (#1250): nothing is inlined.
+divergent-ir-inline = []
 
 [dependencies]
 vesper = { path = "../.." }

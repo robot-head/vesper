@@ -30,6 +30,11 @@ mod check_layout_binding;
 #[path = "../port/ir_check.rs"]
 mod ir_check_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/ir_inline.rs"]
+mod ir_inline_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -37,6 +42,11 @@ mod parse_words;
 // the root package's tests/hybrid_layout.rs and tests/hybrid_ir_check.rs.
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+
+// The inliner swap's encoder and decoder (#1250), shared with the root
+// package's tests/self_host_ir_inline.rs.
+#[path = "../../../tests/common/inline_words.rs"]
+mod inline_words;
 
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -46,6 +56,8 @@ static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs checked by the Vesper IR-check module.
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs inlined by the Vesper inliner module.
+static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -115,6 +127,23 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
     },
 };
 
+/// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
+/// `@vesper/ir-inline`. The package decides and splices; the hook encodes
+/// the world's answers and the program, and reads the report and the
+/// inlined program back (`inline_words::decode_program`).
+fn vesper_inline(
+    world: &vesper::check::World,
+    program: &mut vesper::ir::Program,
+    budget: &vesper::ir_inline::Budget,
+) -> vesper::ir_inline::Report {
+    let input = inline_words::inline_input(world, program, budget);
+    IR_INLINE_CALLS.fetch_add(1, Relaxed);
+    let words = ir_inline_binding::inline_words(&input.bytes);
+    let (report, inlined) = inline_words::decode_program(&words, &input.tables, program);
+    *program = inlined;
+    report
+}
+
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
     if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
@@ -127,6 +156,15 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
+        std::process::abort();
+    }
+    // SH3 IR lanes add their hooks to this one table (`ir_swap::install`
+    // takes the first call only).
+    let passes = vesper::ir_swap::IrPasses {
+        inline: Some(vesper_inline),
+        ..Default::default()
+    };
+    if vesper::ir_swap::install(passes).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
@@ -155,6 +193,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-check answered {} calls from Vesper",
         IR_CHECK_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: ir-inline answered {} calls from Vesper",
+        IR_INLINE_CALLS.load(Relaxed)
     );
 }
 
