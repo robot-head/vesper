@@ -1,0 +1,1110 @@
+// @vesper/driver: the compile path of the `vesper` CLI in Vesper
+// (self-hosting SH5 lane 12, #1335). It is the argument parser and the
+// option validation of `vesper check`, `run`, `jit`, `build` and `emit`
+// (`cli()` in src/main.rs up to the first file access), with every error
+// message byte for byte, plus the pure parts of the build: the object path
+// beside the executable and the record the hybrid's Rust passes read.
+//
+// Arguments are one byte arena (`Args`): every argument after the program
+// name, end to end, and the end offset of each. Option values live in the
+// `Options` text arena as spans.
+use @vesper-std/fmt::{
+    parse_u64
+};
+
+// ---------------------------------------------------------------------------
+// Commands.
+
+pub fn cmd_none() -> u32 {
+    0
+}
+
+pub fn cmd_check() -> u32 {
+    1
+}
+
+pub fn cmd_run() -> u32 {
+    2
+}
+
+pub fn cmd_jit() -> u32 {
+    3
+}
+
+pub fn cmd_build() -> u32 {
+    4
+}
+
+pub fn cmd_emit() -> u32 {
+    5
+}
+
+// Parse outcomes.
+pub fn parsed_ok() -> u32 {
+    0
+}
+
+pub fn parsed_error() -> u32 {
+    1
+}
+
+// `--help` among the options: print the CLI's help and succeed.
+pub fn parsed_help() -> u32 {
+    2
+}
+
+// Option slots: each is one span of `Options::text`, or absent.
+pub fn slot_input() -> u64 {
+    0
+}
+
+pub fn slot_output() -> u64 {
+    1
+}
+
+pub fn slot_format() -> u64 {
+    2
+}
+
+pub fn slot_entry() -> u64 {
+    3
+}
+
+pub fn slot_target() -> u64 {
+    4
+}
+
+pub fn slot_linker() -> u64 {
+    5
+}
+
+pub fn slot_package() -> u64 {
+    6
+}
+
+pub fn slot_policy() -> u64 {
+    7
+}
+
+pub fn slot_codegen() -> u64 {
+    8
+}
+
+pub fn slot_lib_name() -> u64 {
+    9
+}
+
+pub fn slot_interface() -> u64 {
+    10
+}
+
+pub fn slot_rust_binding() -> u64 {
+    11
+}
+
+pub fn slot_rust_types() -> u64 {
+    12
+}
+
+pub fn slot_count() -> u64 {
+    13
+}
+
+// List kinds (`Options::items`).
+pub fn list_link_search() -> u64 {
+    0
+}
+
+pub fn list_instance() -> u64 {
+    1
+}
+
+// Verifier bits, in `NativeVerifier` order.
+pub fn verify_const_time() -> u64 {
+    1
+}
+
+pub fn verify_stack() -> u64 {
+    2
+}
+
+pub fn verify_realtime() -> u64 {
+    4
+}
+
+pub fn verify_detfloat() -> u64 {
+    8
+}
+
+pub fn verify_all() -> u64 {
+    15
+}
+
+// The default fuel (`--fuel`).
+pub fn default_fuel() -> u64 {
+    10000000
+}
+
+// An absent span.
+fn none_start() -> u64 {
+    18446744073709551615
+}
+
+// ---------------------------------------------------------------------------
+// Arguments.
+
+pub struct Args {
+    pub bytes: ChunkSeq[u8],
+    pub ends: ChunkSeq[u64],
+}
+
+pub fn args_new() -> Args {
+    Args {
+        bytes: ChunkSeq::new[u8](),
+        ends: ChunkSeq::new[u64](),
+    }
+}
+
+pub fn args_push(inout a: Args, in arg: Slice[u8]) {
+    a.bytes.extend(in arg);
+    a.ends.push(a.bytes.len());
+}
+
+pub fn args_count(in a: Args) -> u64 {
+    a.ends.len()
+}
+
+pub fn arg_start(in a: Args, i: u64) -> u64 {
+    if i == 0 {
+        return 0;
+    }
+    word(in a.ends.as_slice(), wrapping_sub(i, 1))
+}
+
+pub fn arg_end(in a: Args, i: u64) -> u64 {
+    word(in a.ends.as_slice(), i)
+}
+
+fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// Whether `s` is exactly `t`.
+pub fn eq(in s: Slice[u8], in t: Str) -> bool {
+    let b = t.as_bytes();
+    if s.len() != b.len() {
+        return false;
+    }
+    for i in 0..s.len() {
+        if at(in s, i) != at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn starts_with(in s: Slice[u8], in t: Str) -> bool {
+    let b = t.as_bytes();
+    if s.len() < b.len() {
+        return false;
+    }
+    for i in 0..b.len() {
+        if at(in s, i) != at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Options.
+
+pub struct Options {
+    pub command: u32,
+    // Option values: `starts[k]..ends[k]` of `text` for slot `k`, or
+    // `starts[k] == none_start()`.
+    pub text: ChunkSeq[u8],
+    pub starts: ChunkSeq[u64],
+    pub ends: ChunkSeq[u64],
+    // Repeated options in order: kind and span over `text`.
+    pub item_kind: ChunkSeq[u64],
+    pub item_start: ChunkSeq[u64],
+    pub item_end: ChunkSeq[u64],
+    pub include_tests: bool,
+    pub json: bool,
+    pub optimize: bool,
+    pub tee: bool,
+    pub lib: bool,
+    pub verifiers: u64,
+    pub fuel: u64,
+}
+
+fn options_new(command: u32) -> Options {
+    let mut o = Options {
+        command: command,
+        text: ChunkSeq::new[u8](),
+        starts: ChunkSeq::new[u64](),
+        ends: ChunkSeq::new[u64](),
+        item_kind: ChunkSeq::new[u64](),
+        item_start: ChunkSeq::new[u64](),
+        item_end: ChunkSeq::new[u64](),
+        include_tests: false,
+        json: false,
+        optimize: true,
+        tee: false,
+        lib: false,
+        verifiers: 0,
+        fuel: default_fuel(),
+    };
+    for _ in 0..slot_count() {
+        o.starts.push(none_start());
+        o.ends.push(0);
+    }
+    set_str(inout o, slot_format(), in "ir");
+    set_str(inout o, slot_entry(), in "main");
+    set_str(inout o, slot_linker(), in "cc");
+    o
+}
+
+fn set(inout o: Options, k: u64, in v: Slice[u8]) {
+    let start = o.text.len();
+    o.text.extend(in v);
+    let end = o.text.len();
+    let a = o.starts.try_set(k, start);
+    let b = o.ends.try_set(k, end);
+}
+
+fn set_str(inout o: Options, k: u64, in v: Str) {
+    set(inout o, k, in v.as_bytes());
+}
+
+fn add_item(inout o: Options, kind: u64, in v: Slice[u8]) {
+    let start = o.text.len();
+    o.text.extend(in v);
+    o.item_kind.push(kind);
+    o.item_start.push(start);
+    o.item_end.push(o.text.len());
+}
+
+pub fn has(in o: Options, k: u64) -> bool {
+    word(in o.starts.as_slice(), k) != none_start()
+}
+
+pub fn value_start(in o: Options, k: u64) -> u64 {
+    word(in o.starts.as_slice(), k)
+}
+
+pub fn value_end(in o: Options, k: u64) -> u64 {
+    word(in o.ends.as_slice(), k)
+}
+
+// Whether slot `k` holds exactly `t` (false when absent).
+pub fn is(in o: Options, k: u64, in t: Str) -> bool {
+    if !has(in o, k) {
+        return false;
+    }
+    let a = value_start(in o, k);
+    let b = value_end(in o, k);
+    eq(in o.text[a..b], in t)
+}
+
+pub fn item_count(in o: Options) -> u64 {
+    o.item_kind.len()
+}
+
+// Whether the library flags beyond `--lib` were given (`any_option`).
+pub fn lib_any_option(in o: Options) -> bool {
+    if has(in o, slot_lib_name()) || has(in o, slot_interface()) {
+        return true;
+    }
+    if has(in o, slot_rust_binding()) || has(in o, slot_rust_types()) {
+        return true;
+    }
+    for i in 0..item_count(in o) {
+        if word(in o.item_kind.as_slice(), i) == list_instance() {
+            return true;
+        }
+    }
+    false
+}
+
+// `build --lib` or any library option: the export path.
+pub fn lib_mode(in o: Options) -> bool {
+    o.lib || lib_any_option(in o)
+}
+
+// The native-output commands: `build`, or `emit --emit object/clif`.
+pub fn native_output(in o: Options) -> bool {
+    if o.command == cmd_build() {
+        return true;
+    }
+    o
+        .command
+        == cmd_emit()
+        && (is(in o, slot_format(), in "object") || is(in o, slot_format(), in "clif"))
+}
+
+// Whether a verifier flag or policy, `--tee` or `--codegen` was given (the
+// options the export path and the `.vsys` path refuse).
+pub fn exclusive(in o: Options) -> bool {
+    o.verifiers != 0 || has(in o, slot_policy()) || o.tee || has(in o, slot_codegen())
+}
+
+// ---------------------------------------------------------------------------
+// Parsing.
+
+pub struct Parsed {
+    pub status: u32,
+    pub message: ChunkSeq[u8],
+    pub options: Options,
+}
+
+fn failed(sink o: Options, in m: Slice[u8]) -> Parsed {
+    let mut message: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    message.extend(in m);
+    Parsed {
+        status: parsed_error(),
+        message: message,
+        options: o,
+    }
+}
+
+fn fail_str(sink o: Options, in m: Str) -> Parsed {
+    failed(o, in m.as_bytes())
+}
+
+// The compile command `cmd` names, or `cmd_none()`.
+pub fn command_code(in cmd: Slice[u8]) -> u32 {
+    if eq(in cmd, in "check") {
+        return cmd_check();
+    }
+    if eq(in cmd, in "run") {
+        return cmd_run();
+    }
+    if eq(in cmd, in "jit") {
+        return cmd_jit();
+    }
+    if eq(in cmd, in "build") {
+        return cmd_build();
+    }
+    if eq(in cmd, in "emit") {
+        return cmd_emit();
+    }
+    cmd_none()
+}
+
+// `--verify-<name>`'s verifier bit, or 0.
+fn verifier_flag(in a: Slice[u8]) -> u64 {
+    if !starts_with(in a, in "--verify-") {
+        return 0;
+    }
+    verifier_bit(in a[9..a.len()])
+}
+
+fn verifier_bit(in name: Slice[u8]) -> u64 {
+    if eq(in name, in "const-time") {
+        return verify_const_time();
+    }
+    if eq(in name, in "stack") {
+        return verify_stack();
+    }
+    if eq(in name, in "realtime") {
+        return verify_realtime();
+    }
+    if eq(in name, in "detfloat") {
+        return verify_detfloat();
+    }
+    0
+}
+
+// The length of the Unicode `White_Space` character at `s[i..]` (Rust's
+// `str::trim`), or 0.
+fn space_at(in s: Slice[u8], i: u64) -> u64 {
+    let b = at(in s, i);
+    if (b >= 9 && b <= 13) || b == 32 {
+        return 1;
+    }
+    let n = s.len();
+    if b == 194 && wrapping_add(i, 1) < n {
+        let c = at(in s, wrapping_add(i, 1));
+        if c == 133 || c == 160 {
+            return 2;
+        }
+        return 0;
+    }
+    if wrapping_add(i, 2) >= n {
+        return 0;
+    }
+    let c = at(in s, wrapping_add(i, 1));
+    let d = at(in s, wrapping_add(i, 2));
+    // U+1680
+    if b == 225 && c == 154 && d == 128 {
+        return 3;
+    }
+    // U+2000..U+200A, U+2028, U+2029, U+202F
+    if b == 226 && c == 128 && ((d >= 128 && d <= 138) || d == 168 || d == 169 || d == 175) {
+        return 3;
+    }
+    // U+205F
+    if b == 226 && c == 129 && d == 159 {
+        return 3;
+    }
+    // U+3000
+    if b == 227 && c == 128 && d == 128 {
+        return 3;
+    }
+    0
+}
+
+// Whether a `White_Space` character ends at `s[..j]`; its length, or 0.
+fn space_before(in s: Slice[u8], j: u64) -> u64 {
+    if j >= 1 && space_at(in s, wrapping_sub(j, 1)) == 1 {
+        return 1;
+    }
+    if j >= 2 && space_at(in s, wrapping_sub(j, 2)) == 2 {
+        return 2;
+    }
+    if j >= 3 && space_at(in s, wrapping_sub(j, 3)) == 3 {
+        return 3;
+    }
+    0
+}
+
+// `--verify=<list>`: comma-separated names or `all`, each trimmed.
+// Returns the bits, or appends the error message to `err` and returns 0
+// with `err` non-empty.
+fn verifier_list(in list: Slice[u8], inout err: ChunkSeq[u8]) -> u64 {
+    let mut bits: u64 = 0;
+    let n = list.len();
+    let mut start: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i < n && at(in list, i) != 44 {
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        // One item: list[start..i], trimmed.
+        let mut a = start;
+        let mut b = i;
+        loop {
+            if a >= b {
+                break;
+            }
+            let k = space_at(in list[0..b], a);
+            if k == 0 {
+                break;
+            }
+            a = wrapping_add(a, k);
+        }
+        loop {
+            if b <= a {
+                break;
+            }
+            let k = space_before(in list[a..b], wrapping_sub(b, a));
+            if k == 0 {
+                break;
+            }
+            b = wrapping_sub(b, k);
+        }
+        let item = list[a..b];
+        if eq(in item, in "all") {
+            bits = bits | verify_all();
+        } else {
+            let v = verifier_bit(in item);
+            if v == 0 {
+                err.extend(in "unknown verifier '".as_bytes());
+                err.extend(in item);
+                err
+                    .extend(
+                    in "'; expected const-time, stack, realtime, detfloat or all".as_bytes()
+                );
+                return 0;
+            }
+            bits = bits | v;
+        }
+        if i >= n {
+            break;
+        }
+        i = wrapping_add(i, 1);
+        start = i;
+    }
+    bits
+}
+
+// Rust's `u64::from_str`: an optional `+`, then one or more digits, in
+// range.
+fn parse_fuel(in s: Slice[u8]) -> Option[u64] {
+    let mut from: u64 = 0;
+    if s.len() > 1 && at(in s, 0) == 43 {
+        from = 1;
+    }
+    match parse_u64(in s[from..s.len()]) {
+        Result::Ok(v) => Option::Some(v),
+        Result::Err(_) => Option::None,
+    }
+}
+
+// The slot an option with a value fills, its kind of list, and its
+// missing-value message; `slot_count()` when `a` takes no value.
+fn value_slot(in a: Slice[u8]) -> u64 {
+    if eq(in a, in "-o") {
+        return slot_output();
+    }
+    if eq(in a, in "--emit") {
+        return slot_format();
+    }
+    if eq(in a, in "--entry") {
+        return slot_entry();
+    }
+    if eq(in a, in "--verify-policy") {
+        return slot_policy();
+    }
+    if eq(in a, in "--codegen") {
+        return slot_codegen();
+    }
+    if eq(in a, in "--target") {
+        return slot_target();
+    }
+    if eq(in a, in "--linker") {
+        return slot_linker();
+    }
+    if eq(in a, in "--package") {
+        return slot_package();
+    }
+    slot_count()
+}
+
+fn missing_value(k: u64) -> Str {
+    if k == slot_output() {
+        return "-o requires a path";
+    }
+    if k == slot_format() {
+        return "--emit requires a format";
+    }
+    if k == slot_entry() {
+        return "--entry requires a name";
+    }
+    if k == slot_policy() {
+        return "--verify-policy requires a path";
+    }
+    if k == slot_codegen() {
+        return "--codegen requires a backend";
+    }
+    if k == slot_target() {
+        return "--target requires a target triple";
+    }
+    if k == slot_linker() {
+        return "--linker requires a path";
+    }
+    "--package requires a package namespace"
+}
+
+// The library flags (`LibFlags::flag`): 1 for `--lib`, 2 for a flag with a
+// value, 0 otherwise. `k` gets the slot, or `slot_count()` for
+// `--instance`.
+fn lib_flag(in a: Slice[u8], inout k: u64) -> u64 {
+    if eq(in a, in "--lib") {
+        return 1;
+    }
+    if eq(in a, in "--lib-name") {
+        k = slot_lib_name();
+        return 2;
+    }
+    if eq(in a, in "--interface") {
+        k = slot_interface();
+        return 2;
+    }
+    if eq(in a, in "--rust-binding") {
+        k = slot_rust_binding();
+        return 2;
+    }
+    if eq(in a, in "--rust-types") {
+        k = slot_rust_types();
+        return 2;
+    }
+    if eq(in a, in "--instance") {
+        k = slot_count();
+        return 2;
+    }
+    0
+}
+
+fn lib_what(k: u64) -> Str {
+    if k == slot_lib_name() {
+        return "a library name";
+    }
+    if k == slot_interface() || k == slot_rust_binding() {
+        return "a path";
+    }
+    if k == slot_rust_types() {
+        return "a Rust module path";
+    }
+    "an instance such as f[u64]"
+}
+
+// Parse the arguments after the program name: `args` argument 0 is the
+// command, which must be a compile command. Errors come in the order the
+// Rust CLI finds them: each argument in turn, then the cross-option checks.
+pub fn parse(in args: Args) -> Parsed {
+    let n = args_count(in args);
+    let command = command_code(in args.bytes[0..arg_end(in args, 0)]);
+    let mut o = options_new(command);
+    let mut input_seen = false;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        let a0 = arg_start(in args, i);
+        let a1 = arg_end(in args, i);
+        let a = args.bytes[a0..a1];
+        i = wrapping_add(i, 1);
+        let bit = verifier_flag(in a);
+        if bit != 0 {
+            o.verifiers = o.verifiers | bit;
+            continue;
+        }
+        if starts_with(in a, in "--verify=") {
+            let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            let bits = verifier_list(in a[9..a.len()], inout err);
+            if err.len() != 0 {
+                return failed(o, in err.as_slice());
+            }
+            o.verifiers = o.verifiers | bits;
+            continue;
+        }
+        let k = value_slot(in a);
+        if k != slot_count() {
+            if i >= n {
+                return fail_str(o, in missing_value(k));
+            }
+            let v0 = arg_start(in args, i);
+            let v1 = arg_end(in args, i);
+            i = wrapping_add(i, 1);
+            set(inout o, k, in args.bytes[v0..v1]);
+            continue;
+        }
+        if eq(in a, in "--include-tests") {
+            o.include_tests = true;
+            continue;
+        }
+        if eq(in a, in "--fuel") {
+            if i >= n {
+                return fail_str(o, in "--fuel requires a positive integer");
+            }
+            let v0 = arg_start(in args, i);
+            let v1 = arg_end(in args, i);
+            i = wrapping_add(i, 1);
+            match parse_fuel(in args.bytes[v0..v1]) {
+                Option::Some(f) => {
+                    o.fuel = f;
+                },
+                Option::None => {
+                    return fail_str(o, in "invalid fuel value");
+                },
+            }
+            continue;
+        }
+        if eq(in a, in "--json") {
+            o.json = true;
+            continue;
+        }
+        if eq(in a, in "--no-opt") {
+            o.optimize = false;
+            continue;
+        }
+        if eq(in a, in "--tee") {
+            o.tee = true;
+            continue;
+        }
+        if eq(in a, in "--link-search") {
+            if i >= n {
+                return fail_str(o, in "--link-search requires a directory");
+            }
+            let v0 = arg_start(in args, i);
+            let v1 = arg_end(in args, i);
+            i = wrapping_add(i, 1);
+            add_item(inout o, list_link_search(), in args.bytes[v0..v1]);
+            continue;
+        }
+        if eq(in a, in "--help") || eq(in a, in "-h") {
+            return Parsed {
+                status: parsed_help(),
+                message: ChunkSeq::new[u8](),
+                options: o,
+            };
+        }
+        let mut lk = slot_count();
+        let lf = lib_flag(in a, inout lk);
+        if lf == 1 {
+            o.lib = true;
+            continue;
+        }
+        if lf == 2 {
+            if i >= n {
+                let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                m.extend(in a);
+                m.extend(in " requires ".as_bytes());
+                m.extend(in lib_what(lk).as_bytes());
+                return failed(o, in m.as_slice());
+            }
+            let v0 = arg_start(in args, i);
+            let v1 = arg_end(in args, i);
+            i = wrapping_add(i, 1);
+            if lk == slot_count() {
+                add_item(inout o, list_instance(), in args.bytes[v0..v1]);
+            } else {
+                set(inout o, lk, in args.bytes[v0..v1]);
+            }
+            continue;
+        }
+        if a.len() > 0 && at(in a, 0) == 45 {
+            let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            m.extend(in "unknown option '".as_bytes());
+            m.extend(in a);
+            m.extend(in "'".as_bytes());
+            return failed(o, in m.as_slice());
+        }
+        if input_seen {
+            return fail_str(o, in "only one input module is supported");
+        }
+        input_seen = true;
+        set(inout o, slot_input(), in a);
+    }
+    validate(o)
+}
+
+// The checks after the argument loop, in the Rust CLI's order.
+fn validate(sink o: Options) -> Parsed {
+    let c = o.command;
+    if o.include_tests && !(c == cmd_check() || c == cmd_run() || c == cmd_jit()) {
+        return fail_str(o, in "--include-tests requires check, run, or jit");
+    }
+    let native = native_output(in o);
+    if has(in o, slot_target()) && !native {
+        return fail_str(o, in "--target requires build or emit --emit object/clif");
+    }
+    if (o.verifiers != 0 || has(in o, slot_policy())) && !native {
+        return fail_str(o, in "--verify flags require build or emit --emit object/clif");
+    }
+    if has(in o, slot_policy()) && o.verifiers == 0 {
+        return fail_str(o, in "--verify-policy requires --verify=<list> or a --verify-<name> flag");
+    }
+    if has(in o, slot_codegen()) && c != cmd_build() {
+        return fail_str(o, in "--codegen requires build");
+    }
+    if o.tee && c != cmd_build() {
+        return fail_str(o, in "--tee requires build");
+    }
+    if has(in o, slot_package()) && !(c == cmd_emit() && is(in o, slot_format(), in "interface")) {
+        return fail_str(o, in "--package requires emit --emit interface");
+    }
+    if !has(in o, slot_input()) {
+        return fail_str(o, in "missing source file; see --help");
+    }
+    Parsed {
+        status: parsed_ok(),
+        message: ChunkSeq::new[u8](),
+        options: o,
+    }
+}
+
+// The checks that need to know the input is a package directory, run
+// before it is loaded. Appends the message to `err` when one fails.
+pub fn package_checks(in o: Options, inout err: ChunkSeq[u8]) {
+    if o.command == cmd_emit() && is(in o, slot_format(), in "cst") {
+        err.extend(in "--emit cst takes one source file, not a package".as_bytes());
+        return;
+    }
+    if is(in o, slot_target(), in "bpf") {
+        err.extend(in "--target bpf takes one source file, not a package".as_bytes());
+    }
+}
+
+// `LibFlags::job`'s checks before the export path compiles (instances are
+// parsed by the Rust pass). Appends the message to `err` when one fails.
+pub fn lib_job_checks(in o: Options, inout err: ChunkSeq[u8]) {
+    if o.command != cmd_build() || !o.lib {
+        err
+            .extend(
+            in "--lib-name, --interface, --rust-binding and --instance require build --lib"
+                .as_bytes()
+        );
+        return;
+    }
+    if exclusive(in o) {
+        err
+            .extend(
+            in "--verify, --verify-policy, --tee and --codegen do not apply to build --lib yet"
+                .as_bytes()
+        );
+        return;
+    }
+    if has(in o, slot_rust_types()) && !has(in o, slot_rust_binding()) {
+        err.extend(in "--rust-types requires --rust-binding".as_bytes());
+        return;
+    }
+    if !has(in o, slot_output()) {
+        err.extend(in "build --lib requires -o <object path>".as_bytes());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paths.
+
+fn is_separator(b: u8, windows: bool) -> bool {
+    b == 47 || (windows && b == 92)
+}
+
+// The file name of `path` (Rust's `Path::file_name`): the last component
+// after trailing separators and `.` components, as a span; `found` is
+// false for an empty path, a root, `.` or `..`.
+pub struct Span {
+    pub found: bool,
+    pub start: u64,
+    pub end: u64,
+}
+
+fn file_name(in path: Slice[u8], windows: bool) -> Span {
+    let mut end = path.len();
+    loop {
+        if end == 0 {
+            break;
+        }
+        let b = at(in path, wrapping_sub(end, 1));
+        if is_separator(b, windows) {
+            end = wrapping_sub(end, 1);
+            continue;
+        }
+        let lone = end == 1 || is_separator(at(in path, wrapping_sub(end, 2)), windows);
+        // A `.` component is dropped, except a leading one (the current
+        // directory), which has no file name either.
+        if b == 46 && lone {
+            if end == 1 {
+                end = 0;
+                break;
+            }
+            end = wrapping_sub(end, 1);
+            continue;
+        }
+        break;
+    }
+    let mut start = end;
+    loop {
+        if start == 0 || is_separator(at(in path, wrapping_sub(start, 1)), windows) {
+            break;
+        }
+        start = wrapping_sub(start, 1);
+    }
+    let dotdot = wrapping_sub(end, start)
+        == 2
+        && at(in path, start)
+        == 46
+        && at(in path, wrapping_add(start, 1))
+        == 46;
+    Span {
+        found: end > start && !dotdot,
+        start: start,
+        end: end,
+    }
+}
+
+// The offset of the last `.` of `path[name]` that splits a stem from an
+// extension (`Path::file_stem`), or `name.end` when there is none (no
+// `.`, or only a leading one).
+fn extension_dot(in path: Slice[u8], name: Span) -> u64 {
+    let mut j = name.end;
+    loop {
+        if j <= wrapping_add(name.start, 1) {
+            return name.end;
+        }
+        j = wrapping_sub(j, 1);
+        if at(in path, j) == 46 {
+            return j;
+        }
+    }
+}
+
+// `Path::set_extension`: the path cut after the file stem, then `.` and
+// `ext` (unchanged when there is no file name).
+fn set_extension(in path: Slice[u8], in ext: Slice[u8], windows: bool) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let name = file_name(in path, windows);
+    if !name.found {
+        out.extend(in path);
+        return out;
+    }
+    let stem_end = extension_dot(in path, name);
+    out.extend(in path[0..stem_end]);
+    if ext.len() > 0 {
+        out.push(46);
+        out.extend(in ext);
+    }
+    out
+}
+
+// `Path::new(path).with_extension(ext)` for a path without a Windows
+// prefix: the old extension's bytes are dropped from the end of the path
+// (wherever the file name ends), then `set_extension` runs on the rest.
+pub fn with_extension(in path: Slice[u8], in ext: Str, windows: bool) -> ChunkSeq[u8] {
+    let name = file_name(in path, windows);
+    let mut keep = path.len();
+    if name.found {
+        let dot = extension_dot(in path, name);
+        if dot != name.end {
+            let old = wrapping_sub(wrapping_sub(name.end, dot), 1);
+            keep = wrapping_sub(path.len(), old);
+        }
+    }
+    set_extension(in path[0..keep], in ext.as_bytes(), windows)
+}
+
+// ---------------------------------------------------------------------------
+// The record the hybrid's Rust passes read (`Session::decode` in
+// crates/vesper-hybrid/src/driver.rs): little-endian words, then bytes.
+//
+//     command, flags (include_tests 1, json 2, optimize 4, tee 8, lib 16),
+//     verifiers, fuel,
+//     for each slot: present (0/1), length, bytes
+//     item count, then each: kind, length, bytes
+
+pub fn record_format() -> u64 {
+    1
+}
+
+fn push_word(inout out: ChunkSeq[u8], v: u64) {
+    let mut x = v;
+    for _ in 0..8 {
+        out.push(wrapping_u8(x & 255));
+        x = wrapping_shr_u64(x, 8);
+    }
+}
+
+fn push_bytes(inout out: ChunkSeq[u8], in b: Slice[u8]) {
+    push_word(inout out, b.len());
+    out.extend(in b);
+}
+
+pub fn record(in o: Options) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_word(inout out, widen_u64(o.command));
+    let mut flags: u64 = 0;
+    if o.include_tests {
+        flags = flags | 1;
+    }
+    if o.json {
+        flags = flags | 2;
+    }
+    if o.optimize {
+        flags = flags | 4;
+    }
+    if o.tee {
+        flags = flags | 8;
+    }
+    if o.lib {
+        flags = flags | 16;
+    }
+    push_word(inout out, flags);
+    push_word(inout out, o.verifiers);
+    push_word(inout out, o.fuel);
+    for k in 0..slot_count() {
+        if has(in o, k) {
+            push_word(inout out, 1);
+            let a = value_start(in o, k);
+            let b = value_end(in o, k);
+            push_bytes(inout out, in o.text[a..b]);
+        } else {
+            push_word(inout out, 0);
+            push_word(inout out, 0);
+        }
+    }
+    let n = item_count(in o);
+    push_word(inout out, n);
+    for i in 0..n {
+        push_word(inout out, word(in o.item_kind.as_slice(), i));
+        let a = word(in o.item_start.as_slice(), i);
+        let b = word(in o.item_end.as_slice(), i);
+        push_bytes(inout out, in o.text[a..b]);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Test entries (tests/self_host_driver.rs calls them in the JIT, one `in Str`
+// each, and reads the `ChunkSeq[u64]` back).
+
+// Append `b` as its length, then its bytes packed little-endian, eight to a
+// word.
+fn pack(inout out: ChunkSeq[u64], in b: Slice[u8]) {
+    out.push(b.len());
+    let mut w: u64 = 0;
+    let mut k: u64 = 0;
+    for i in 0..b.len() {
+        w = w | wrapping_shl_u64(widen_u64(at(in b, i)), wrapping_u32(wrapping_mul(k, 8)));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(w);
+            w = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(w);
+    }
+}
+
+// The arguments of `input`, separated by NUL bytes.
+fn split_args(in input: Slice[u8]) -> Args {
+    let mut a = args_new();
+    let mut start: u64 = 0;
+    for i in 0..input.len() {
+        if at(in input, i) == 0 {
+            args_push(inout a, in input[start..i]);
+            start = wrapping_add(i, 1);
+        }
+    }
+    args_push(inout a, in input[start..input.len()]);
+    a
+}
+
+// `parse` of NUL-separated arguments (the command first): the status, the
+// packed message, then the packed record (empty unless the status is ok).
+pub fn parse_text(in input: Str) -> ChunkSeq[u64] {
+    let a = split_args(in input.as_bytes());
+    let p = parse(in a);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(widen_u64(p.status));
+    pack(inout out, in p.message.as_slice());
+    if p.status == parsed_ok() {
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        package_checks(in p.options, inout err);
+        pack(inout out, in err.as_slice());
+        let mut lib: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        lib_job_checks(in p.options, inout lib);
+        pack(inout out, in lib.as_slice());
+        let r = record(in p.options);
+        pack(inout out, in r.as_slice());
+    }
+    out
+}
+
+// `with_extension(path, "vesper.o")`: the first byte of `input` is `w`
+// for Windows separators or `u`, the rest is the path.
+pub fn with_extension_text(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let windows = at(in b, 0) == 119;
+    let p = with_extension(in b[1..b.len()], in "vesper.o", windows);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    pack(inout out, in p.as_slice());
+    out
+}

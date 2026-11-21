@@ -1,0 +1,18 @@
+// @vesper/driver-commands's import (self-hosting SH5 lane 13, #1336): the
+// hybrid compiler's Rust, crates/vesper-hybrid/src/commands.rs (`host`).
+// Text comes back with the copy-out protocol of @vesper-std: a call
+// returns the length `n` (negative for none) and copies only when `buf`
+// is big enough.
+sys library HybridCommands (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_hybrid",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    fn hc_print(stream: u32, nocapture in text: CSlice[u8]) -> ForeignVal[Unit];
+    fn hc_help() -> ForeignVal[Unit];
+    fn hc_text(which: u32, index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
+    fn hc_count(which: u32) -> ForeignVal[u64];
+    fn hc_io_error(word: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
+    fn hc_simd_compile(profile: u32) -> ForeignVal[i64];
+    fn hc_simd_scan(nocapture in data: CSlice[u8], delimiter: u32) -> ForeignVal[u64];
+}

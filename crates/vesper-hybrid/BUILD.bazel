@@ -41,6 +41,16 @@ vesper_hybrid(
             "//:check_data_package",
             "//:check_layout_package",
         ],
+        # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
+        # The command layers (#1336) add @vesper/driver-commands.
+        "hybrid_driver": [
+            "//:driver_commands_package",
+            "//:driver_package",
+            "//:std_env_package",
+            "//:std_fmt_package",
+            "//:std_fs_package",
+            "//:std_process_package",
+        ],
         "hybrid_ir_check": [
             "//:check_data_package",
             "//:ir_check_package",
@@ -53,6 +63,7 @@ vesper_hybrid(
     },
     modules = {
         "hybrid_check_layout": "modules/check_layout",
+        "hybrid_driver": "modules/driver",
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
@@ -60,6 +71,14 @@ vesper_hybrid(
     test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
     test_path_binaries = {
         "test/differential": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        "test/driver": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        "test/self_host_cli_commands": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],

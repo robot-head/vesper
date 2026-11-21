@@ -293,6 +293,8 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 12 (#1335): @vesper/driver against the CLI.
+        "test/self_host_driver": glob(["packages/**"]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -743,6 +745,66 @@ vesper_package(
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":std_hash_package"],
+)
+
+# @vesper-std/fs, process, env and fmt and @vesper/driver as dependencies of
+# the hybrid compiler's driver module (self-hosting SH5 lane 12, #1335). The
+# I/O packages carry their `.vsys` imports (`[package] vsys`, #1150).
+vesper_package(
+    name = "std_fmt_package",
+    srcs = glob(["packages/vesper-std/fmt/src/**/*.ves"]),
+    manifest = "packages/vesper-std/fmt/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "std_fs_package",
+    srcs = glob(["packages/vesper-std/fs/src/**/*.ves"]),
+    manifest = "packages/vesper-std/fs/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-std/fs/fs.vsys"],
+)
+
+vesper_package(
+    name = "std_process_package",
+    srcs = glob(["packages/vesper-std/process/src/**/*.ves"]),
+    manifest = "packages/vesper-std/process/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-std/process/process.vsys"],
+    deps = [":std_fs_package"],
+)
+
+vesper_package(
+    name = "std_env_package",
+    srcs = glob(["packages/vesper-std/env/src/**/*.ves"]),
+    manifest = "packages/vesper-std/env/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-std/env/env.vsys"],
+    deps = [":std_fs_package"],
+)
+
+vesper_package(
+    name = "driver_package",
+    srcs = glob(["packages/vesper-driver/src/**/*.ves"]),
+    manifest = "packages/vesper-driver/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":std_fmt_package"],
+)
+
+# @vesper/driver-commands, the command layers the hybrid's driver hands on
+# (self-hosting SH5 lane 13, #1336), with its `HybridCommands` import.
+vesper_package(
+    name = "driver_commands_package",
+    srcs = glob(["packages/vesper-driver-commands/src/**/*.ves"]),
+    manifest = "packages/vesper-driver-commands/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-driver-commands/commands.vsys"],
+    deps = [
+        ":driver_package",
+        ":std_fmt_package",
+        ":std_fs_package",
+        "//crates/vesper-beacon:port_package",
+    ],
 )
 
 filegroup(

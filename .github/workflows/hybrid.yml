@@ -28,6 +28,9 @@ on:
       - 'packages/vesper-check-data/**'
       - 'packages/vesper-check-layout/**'
       - 'packages/vesper-ir-check/**'
+      - 'packages/vesper-driver/**'
+      - 'packages/vesper-driver-commands/**'
+      - 'crates/vesper-beacon/vesper/**'
       - 'tests/common/check_words.rs'
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
@@ -45,6 +48,9 @@ on:
       - 'packages/vesper-check-data/**'
       - 'packages/vesper-check-layout/**'
       - 'packages/vesper-ir-check/**'
+      - 'packages/vesper-driver/**'
+      - 'packages/vesper-driver-commands/**'
+      - 'crates/vesper-beacon/vesper/**'
       - 'tests/common/check_words.rs'
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
@@ -95,6 +101,12 @@ jobs:
           echo "VESPER_DEFAULT_COMPILER=$GITHUB_WORKSPACE/target/debug/$exe" >> "$GITHUB_ENV"
       - name: Build and test the hybrid compiler
         run: cargo test --locked -p vesper-hybrid -- --nocapture
+      - name: The CLI suites on the hybrid (its main is the Vesper driver)
+        # SH5 lane 12 (#1335): every tests/*cli*.rs suite of the root package
+        # with the hybrid binary in place of target/debug/vesper. It builds
+        # every CLI suite, so pull requests skip it (#1321).
+        if: github.event_name != 'pull_request'
+        run: crates/vesper-hybrid/cli-suites.sh
       - name: The differential harness catches a divergent layout
         # The pilot's word arithmetic and the whole layout (#1177) are both
         # wrong; a wrong layout cannot compile the pilot test's program, so
