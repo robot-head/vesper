@@ -90,9 +90,17 @@ pub enum Order: _ {
     Greater
 }
 
-// The ASCII bytes of package names, capabilities, paths and versions.
+// The ASCII bytes of package names, capabilities, paths, versions and
+// license expressions.
 pub enum Ascii: _ {
     Nul = 0x00,
+    Tab = 0x09,
+    Lf = 0x0a,
+    FormFeed = 0x0c,
+    Cr = 0x0d,
+    Space = 0x20,
+    LParen = 0x28,
+    RParen = 0x29,
     Plus = 0x2b,
     Comma = 0x2c,
     Minus = 0x2d,
