@@ -1,12 +1,74 @@
-//! The port-backed build against the frozen Rust seed copy (port wave P3a
-//! lane 8, #1043): every ported parser and the policy check give the same
-//! result, success or the same typed error, on the vendor samples and on
-//! 4,000 mutations of each. Only the port-backed package runs it (the
-//! seed package has no second build to compare with).
+//! The Vesper build against the last Rust implementation (SH6 lane 8,
+//! #1403; the differential of port wave P3a lane 8, #1043): every ported
+//! parser and the policy check give the same result, success or the same
+//! typed error, on the vendor samples and on 4,000 mutations of each.
+//!
+//! The Rust parsers were deleted when the port became the only build, so
+//! each test folds the `Debug` text of every result, in order, into a
+//! SHA-256 digest and compares it with the digest the Rust build gave on
+//! the same inputs, recorded in `tests/data/port_differential.sha256` at
+//! the last commit with the Rust implementation (see the lane report,
+//! docs/parallel-results/rust-exit-aegis.md). The inputs are generated
+//! from fixed seeds, so the digest covers exactly the cases the paired
+//! differential compared. `AEGIS_DIFFERENTIAL_RECORD=1` prints the
+//! digests instead of checking them.
 
 use std::path::PathBuf;
 use vesper_aegis as port;
-use vesper_aegis_rust as rust;
+
+/// The results of one test, in order.
+struct Results {
+    name: &'static str,
+    digest: ring::digest::Context,
+    cases: u64,
+}
+
+impl Results {
+    fn new(name: &'static str) -> Self {
+        Results {
+            name,
+            digest: ring::digest::Context::new(&ring::digest::SHA256),
+            cases: 0,
+        }
+    }
+
+    /// Fold in one result; whether it is a success.
+    fn add(&mut self, what: &str, result: impl std::fmt::Debug) -> bool {
+        let text = format!("{what}: {result:?}\n");
+        self.digest.update(text.as_bytes());
+        self.cases += 1;
+        !text.starts_with(&format!("{what}: Err"))
+    }
+
+    /// Compare with the digest the Rust build recorded.
+    fn check(self) {
+        let hex: String = self
+            .digest
+            .finish()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let line = format!("{} {} {}", self.name, self.cases, hex);
+        if std::env::var_os("AEGIS_DIFFERENTIAL_RECORD").is_some() {
+            println!("{line}");
+            return;
+        }
+        let recorded = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/port_differential.sha256"),
+        )
+        .expect("the recorded digests");
+        let want = recorded
+            .lines()
+            .find(|l| l.split(' ').next() == Some(self.name))
+            .unwrap_or_else(|| panic!("no recorded digest for {}", self.name));
+        assert_eq!(
+            line, want,
+            "{}: the Vesper build differs from the Rust build's results",
+            self.name
+        );
+    }
+}
 
 fn data(path: &str) -> Vec<u8> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -74,72 +136,31 @@ fn mutate(rng: &mut SplitMix, seed: &[u8]) -> Vec<u8> {
     v
 }
 
-fn same<A: std::fmt::Debug, B: std::fmt::Debug>(what: &str, input: &[u8], a: A, b: B) -> bool {
-    let (a, b) = (format!("{a:?}"), format!("{b:?}"));
-    assert_eq!(a, b, "{what} differs on {} bytes", input.len());
-    !a.starts_with("Err")
+fn snp(r: &mut Results, b: &[u8]) -> bool {
+    r.add("SnpReport::parse", port::snp::SnpReport::parse(b))
 }
 
-fn snp(b: &[u8]) -> bool {
-    same(
-        "SnpReport::parse",
-        b,
-        port::snp::SnpReport::parse(b),
-        rust::snp::SnpReport::parse(b),
-    )
+fn tdx(r: &mut Results, b: &[u8]) -> bool {
+    r.add("TdxQuote::parse_padded", port::tdx::TdxQuote::parse_padded(b));
+    r.add("TdxQuote::parse_prefix", port::tdx::TdxQuote::parse_prefix(b));
+    r.add("TdxQuote::parse", port::tdx::TdxQuote::parse(b))
 }
 
-fn tdx(b: &[u8]) -> bool {
-    same(
-        "TdxQuote::parse_padded",
-        b,
-        port::tdx::TdxQuote::parse_padded(b),
-        rust::tdx::TdxQuote::parse_padded(b),
-    );
-    same(
-        "TdxQuote::parse_prefix",
-        b,
-        port::tdx::TdxQuote::parse_prefix(b),
-        rust::tdx::TdxQuote::parse_prefix(b),
-    );
-    same(
-        "TdxQuote::parse",
-        b,
-        port::tdx::TdxQuote::parse(b),
-        rust::tdx::TdxQuote::parse(b),
-    )
-}
-
-fn sgx(b: &[u8]) -> bool {
-    same(
-        "SgxQuote::parse_padded",
-        b,
-        port::sgx::SgxQuote::parse_padded(b),
-        rust::sgx::SgxQuote::parse_padded(b),
-    );
-    same(
-        "SgxQuote::parse_prefix",
-        b,
-        port::sgx::SgxQuote::parse_prefix(b),
-        rust::sgx::SgxQuote::parse_prefix(b),
-    );
-    same(
-        "SgxQuote::parse",
-        b,
-        port::sgx::SgxQuote::parse(b),
-        rust::sgx::SgxQuote::parse(b),
-    )
+fn sgx(r: &mut Results, b: &[u8]) -> bool {
+    r.add("SgxQuote::parse_padded", port::sgx::SgxQuote::parse_padded(b));
+    r.add("SgxQuote::parse_prefix", port::sgx::SgxQuote::parse_prefix(b));
+    r.add("SgxQuote::parse", port::sgx::SgxQuote::parse(b))
 }
 
 /// Every parser that accepted at least one mutation did so (the mutations
-/// reach past the first field), and both builds agreed on every input.
-fn sweep(name: &str, seeds: &[Vec<u8>], check: fn(&[u8]) -> bool) {
+/// reach past the first field); every result goes into `r`.
+fn sweep(r: &mut Results, name: &str, seeds: &[Vec<u8>], check: fn(&mut Results, &[u8]) -> bool) {
     let mut rng = SplitMix(0xAE61_5000 ^ name.len() as u64);
     let mut accepted = 0;
     for seed in seeds {
-        assert!(check(seed), "{name}: the vendor sample parses");
+        assert!(check(r, seed), "{name}: the vendor sample parses");
         for _ in 0..4000 {
-            accepted += usize::from(check(&mutate(&mut rng, seed)));
+            accepted += usize::from(check(r, &mutate(&mut rng, seed)));
         }
     }
     assert!(
@@ -158,7 +179,8 @@ fn snp_reports_agree() {
         data("snp-oak/turin_report.bin"),
         data("snp-trustee/test-vlek-report.bin"),
     ];
-    sweep("snp", &seeds, snp);
+    let mut r = Results::new("snp_reports_agree");
+    sweep(&mut r, "snp", &seeds, snp);
     // Version 6 on Venice, with and without nonzero reserved ETCB bits.
     let mut v6 = seeds[0].clone();
     v6[0..4].copy_from_slice(&6u32.to_le_bytes());
@@ -167,17 +189,13 @@ fn snp_reports_agree() {
     for at in [0x220, 0x240, 0x260] {
         v6[at..at + 14].copy_from_slice(&[3; 14]);
     }
-    assert!(snp(&v6));
+    assert!(snp(&mut r, &v6));
     v6[0x220 + 20] = 1;
-    assert!(!snp(&v6));
+    assert!(!snp(&mut r, &v6));
     for b in [[0u8; 32], [7; 32]] {
-        same(
-            "SnpEtcb::parse",
-            &b,
-            port::snp::SnpEtcb::parse(b),
-            rust::snp::SnpEtcb::parse(b),
-        );
+        r.add("SnpEtcb::parse", port::snp::SnpEtcb::parse(b));
     }
+    r.check();
 }
 
 #[test]
@@ -193,11 +211,13 @@ fn tdx_quotes_agree() {
     let seeds: Vec<Vec<u8>> = seeds
         .into_iter()
         .map(|q| {
-            let (_, used) = rust::tdx::TdxQuote::parse_prefix(&q).unwrap();
+            let (_, used) = port::tdx::TdxQuote::parse_prefix(&q).unwrap();
             q[..used].to_vec()
         })
         .collect();
-    sweep("tdx", &seeds, tdx);
+    let mut r = Results::new("tdx_quotes_agree");
+    sweep(&mut r, "tdx", &seeds, tdx);
+    r.check();
 }
 
 #[test]
@@ -208,11 +228,13 @@ fn sgx_quotes_agree() {
     ]
     .into_iter()
     .map(|q| {
-        let (_, used) = rust::sgx::SgxQuote::parse_prefix(&q).unwrap();
+        let (_, used) = port::sgx::SgxQuote::parse_prefix(&q).unwrap();
         q[..used].to_vec()
     })
     .collect();
-    sweep("sgx", &seeds, sgx);
+    let mut r = Results::new("sgx_quotes_agree");
+    sweep(&mut r, "sgx", &seeds, sgx);
+    r.check();
 }
 
 #[test]
@@ -228,23 +250,21 @@ fn claims_wire_agrees() {
         b
     };
     let seeds: Vec<Vec<u8>> = (1..=3).map(|t| wire(t, 7)).collect();
-    sweep("claims wire", &seeds, |b| {
-        same(
+    let mut r = Results::new("claims_wire_agrees");
+    sweep(&mut r, "claims wire", &seeds, |r, b| {
+        r.add(
             "AegisAttestationClaimsWire::decode",
-            b,
             port::AegisAttestationClaimsWire::decode(b),
-            rust::AegisAttestationClaimsWire::decode(b),
         )
     });
     for (tag, flags) in [(0, 0), (4, 0), (1, 8), (2, 1 << 31)] {
         let b = wire(tag, flags);
-        assert!(!same(
+        assert!(!r.add(
             "AegisAttestationClaimsWire::decode",
-            &b,
             port::AegisAttestationClaimsWire::decode(&b),
-            rust::AegisAttestationClaimsWire::decode(&b),
         ));
     }
+    r.check();
 }
 
 #[test]
@@ -260,6 +280,7 @@ fn timestamps_agree() {
     .map(|s| s.as_bytes().to_vec())
     .collect();
     let mut rng = SplitMix(0x7135);
+    let mut r = Results::new("timestamps_agree");
     let mut accepted = 0;
     for seed in &seeds {
         for i in 0..20_000 {
@@ -282,18 +303,17 @@ fn timestamps_agree() {
             let Ok(s) = std::str::from_utf8(&m) else {
                 continue;
             };
-            let (a, b) = (
-                port::time::iso8601_utc_to_unix(s),
-                rust::time::iso8601_utc_to_unix(s),
-            );
-            assert_eq!(a, b, "{s}");
+            let a = port::time::iso8601_utc_to_unix(s);
+            r.add(s, a);
             accepted += usize::from(a.is_some());
         }
     }
     assert!(accepted > 1000);
+    r.check();
 }
 
-/// One claims/policy pair, built in both crates from the same draws.
+/// One claims/policy pair, built from the draws (a macro, as it was when
+/// it built the pair in both crates).
 macro_rules! policy_case {
     ($k:ident, $r:expr) => {{
         use $k::claims::{SnpTcbVersion, SupplyChainEvidence, TeeArch};
@@ -370,11 +390,11 @@ macro_rules! policy_case {
 fn policy_decisions_agree() {
     let mut rng = SplitMix(0x9011C7);
     let mut outcomes = std::collections::BTreeSet::new();
+    let mut results = Results::new("policy_decisions_agree");
     for _ in 0..200_000 {
         let r: Vec<u64> = (0..22).map(|_| rng.next()).collect();
         let a = policy_case!(port, &r);
-        let b = policy_case!(rust, &r);
-        assert_eq!(a, b, "draws {r:?}");
+        results.add("verify_attestation_claims", &a);
         outcomes.insert(
             a.split(['(', ' ', '{'])
                 .next()
@@ -402,10 +422,5 @@ fn policy_decisions_agree() {
             "never reached {want}"
         );
     }
-}
-
-#[test]
-fn the_builds_are_distinct() {
-    assert_eq!(port::IMPLEMENTATION, "vesper");
-    assert_eq!(rust::IMPLEMENTATION, "rust");
+    results.check();
 }

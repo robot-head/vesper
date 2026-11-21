@@ -1,0 +1,10 @@
+# SHA-256 of the Debug text of every result, in order, per test of
+# tests/port_differential.rs: test name, results, digest. Recorded from the
+# Rust build (vesper-aegis-seed) at a8570f2857d85dfb8fdbbdda74977b41f478c49d, the last commit with the Rust
+# parsers and policy check (SH6 lane 8, #1403).
+claims_wire_agrees 12007 6f3bf4f3c7787bc9001437cae781b3f5a1812da26f607f66160667430c714702
+policy_decisions_agree 200000 13c42a662cc5a465cafb9e5b9db6a008a38e933a199d73ca08764448f553352b
+sgx_quotes_agree 24006 fb592a3759e144acb09fc5585b95ddadb458701af9703886c15744056251934b
+snp_reports_agree 20009 67a582ba766dac9d2303eb91a82b3301a3c29875b65b4ecddcec0157ffe9290f
+tdx_quotes_agree 72018 eeb18412f9a752a38397cf1e7091ee25f160a65af7e63c63b7bddf9b192ff0d9
+timestamps_agree 87519 b090b07b32317822e1abfeac53dfb25747b458cef518e341597e3b037ec5eb18
