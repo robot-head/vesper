@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use vesper::ast::{Effects, ExprKind, Literal, Mode, Pass, Pattern, PatternKind, Type};
 use vesper::check::{Place, World};
-use vesper::ir::{Argument, FunctionIr, Instruction, Op, Program, Terminator};
+use vesper::ir::{Argument, Block, FunctionIr, Instruction, Op, Program, Terminator};
 use vesper::ir_inline::{Budget, Refusal};
 
 // Type facts (bits of a type's first word).
@@ -139,6 +139,11 @@ pub struct Tables {
     /// Debug text of every copied-but-unread part -> index.
     pub opaque: HashMap<String, u64>,
     pub opaque_list: Vec<String>,
+    /// Per opaque index, the first instruction with that key: what
+    /// [`decode_program`] copies the unread parts from.
+    pub templates: Vec<Option<Instruction>>,
+    /// The literal behind each `lit` opaque index of a pattern.
+    pub literals: HashMap<u64, Literal>,
 }
 
 impl Tables {
@@ -379,6 +384,7 @@ impl<'w> Enc<'w> {
                 self.put(4);
                 self.literal(l);
                 let o = self.t.opaque(format!("lit {l:?}"));
+                self.t.literals.entry(o).or_insert_with(|| l.clone());
                 self.put(o);
             }
         }
@@ -414,6 +420,13 @@ impl<'w> Enc<'w> {
             .is_some_and(|vars| !vars.is_empty());
         self.put(i.fallible as u64 | if generic_call { I_GENERIC_CALL } else { 0 });
         let o = self.t.opaque(opaque_key(i));
+        let slot = o as usize;
+        if self.t.templates.len() <= slot {
+            self.t.templates.resize(slot + 1, None);
+        }
+        if self.t.templates[slot].is_none() {
+            self.t.templates[slot] = Some(i.clone());
+        }
         self.put(o);
         match &i.op {
             Op::Constant(l) => {
@@ -936,6 +949,356 @@ pub fn decode_report(words: &[u64], tables: &Tables) -> Decoded {
         d.sizes.insert(n, (size, next() as usize));
     }
     d
+}
+
+// ----------------------------------------------------------------- program
+
+/// Reads mode 3's output (`inline_entry` of packages/vesper-ir-inline):
+/// the report's length and words, then `put_program_words`. Returns Rust's
+/// `Report` (its public fields) and the inlined program.
+///
+/// The words carry each function's locals, value types and blocks; every
+/// other field (parameters, bounds, captures, the `fip` side tables) is
+/// `input`'s, since the inliner never changes them. An instruction's parts
+/// the inliner copies without reading (operators, literals, sequence and
+/// vector operations, call types, handled expressions) come from the first
+/// input instruction with the same opaque index. State tokens are threaded
+/// again with `ir::thread_tokens`, as `ir_inline::inline` does when it
+/// changed anything.
+pub fn decode_program(
+    words: &[u64],
+    tables: &Tables,
+    input: &Program,
+) -> (vesper::ir_inline::Report, Program) {
+    let n = words.first().copied().unwrap_or(0) as usize;
+    let d = decode_report(&words[1..1 + n], tables);
+    let mut report = vesper::ir_inline::Report::default();
+    report.sites = d.sites;
+    report.callees = d.callees;
+    report.added = d.added;
+    report.inlined_into = d.inlined_into;
+    report.refused = d.refused;
+    report.partial = d.partial;
+    report.folded = d.folded;
+    report.growth = d.growth;
+    report.constants = d.constants;
+    if report.sites == 0 && report.constants == 0 {
+        return (report, input.clone());
+    }
+    let mut r = Reader {
+        w: &words[1 + n..],
+        at: 0,
+        names: vec![],
+        tables,
+    };
+    for _ in 0..r.next() {
+        let len = r.next() as usize;
+        let mut bytes = Vec::with_capacity(len);
+        for k in 0..len.div_ceil(8) {
+            bytes.extend(r.next().to_le_bytes());
+            if k == len.div_ceil(8) - 1 {
+                bytes.truncate(len);
+            }
+        }
+        r.names
+            .push(String::from_utf8(bytes).expect("names are UTF-8"));
+    }
+    let mut program = Program::default();
+    for _ in 0..r.next() {
+        let name = r.name();
+        let mut f = input.functions[&name].clone();
+        f.locals = (0..r.next()).map(|_| (r.name(), r.ty())).collect();
+        f.values = (0..r.next()).map(|_| (r.next() as u32, r.ty())).collect();
+        f.blocks = (0..r.next()).map(|_| r.block()).collect();
+        program.functions.insert(name, f);
+    }
+    vesper::ir::thread_tokens(&mut program);
+    (report, program)
+}
+
+struct Reader<'a> {
+    w: &'a [u64],
+    at: usize,
+    names: Vec<String>,
+    tables: &'a Tables,
+}
+
+impl Reader<'_> {
+    fn next(&mut self) -> u64 {
+        let x = self.w[self.at];
+        self.at += 1;
+        x
+    }
+
+    fn name(&mut self) -> String {
+        let i = self.next() as usize;
+        self.names[i].clone()
+    }
+
+    fn ty(&mut self) -> Type {
+        let i = self.next() as usize;
+        self.tables.type_list[i].clone()
+    }
+
+    fn path(&mut self) -> Vec<String> {
+        (0..self.next()).map(|_| self.name()).collect()
+    }
+
+    fn pass(&mut self) -> Pass {
+        match self.next() {
+            0 => Pass::In,
+            1 => Pass::Inout,
+            _ => Pass::Sink,
+        }
+    }
+
+    fn pattern(&mut self) -> Pattern {
+        let kind = match self.next() {
+            0 => PatternKind::Wild,
+            1 => PatternKind::Bind(self.name()),
+            2 => PatternKind::Tuple((0..self.next()).map(|_| self.pattern()).collect()),
+            3 => {
+                let name = self.name();
+                let named = self.next() != 0;
+                let fields = (0..self.next())
+                    .map(|_| (self.name(), self.pattern()))
+                    .collect();
+                PatternKind::Constructor {
+                    name,
+                    fields,
+                    named,
+                }
+            }
+            _ => {
+                self.at += 3;
+                let o = self.next();
+                PatternKind::Literal(self.tables.literals[&o].clone())
+            }
+        };
+        let start = self.next() as usize;
+        let end = self.next() as usize;
+        Pattern {
+            kind,
+            span: start..end,
+        }
+    }
+
+    fn args(&mut self) -> Vec<Argument> {
+        (0..self.next())
+            .map(|_| {
+                let value = self.next() as u32;
+                let pass = self.pass();
+                let place = (self.next() != 0).then(|| Place {
+                    root: self.name(),
+                    path: self.path(),
+                });
+                Argument { pass, value, place }
+            })
+            .collect()
+    }
+
+    fn values(&mut self) -> Vec<u32> {
+        (0..self.next()).map(|_| self.next() as u32).collect()
+    }
+
+    fn instruction(&mut self) -> Instruction {
+        let dest = self.next() as u32;
+        let ty = self.ty();
+        let start = self.next() as usize;
+        let end = self.next() as usize;
+        let fallible = self.next() & I_FALLIBLE != 0;
+        let opq = self.next();
+        let template = self
+            .tables
+            .templates
+            .get(opq as usize)
+            .and_then(|t| t.as_ref())
+            .map(|t| t.op.clone());
+        let tag = self.next();
+        let op = match (tag, template) {
+            (0, t) => {
+                self.at += 3;
+                match t {
+                    Some(op @ Op::Constant(_)) => op,
+                    _ => Op::Constant(self.tables.literals[&opq].clone()),
+                }
+            }
+            (1, _) => Op::Unit,
+            (2, _) => Op::Loop,
+            (
+                3,
+                Some(Op::Read {
+                    pass, projections, ..
+                }),
+            ) => Op::Read {
+                root: self.name(),
+                path: self.path(),
+                pass,
+                projections,
+            },
+            (4, _) => {
+                let value = self.next() as u32;
+                Op::Bind {
+                    value,
+                    pattern: self.pattern(),
+                }
+            }
+            (5, Some(Op::Write { op, .. })) => {
+                let value = self.next() as u32;
+                let place = std::iter::once(self.name())
+                    .chain(self.path())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                Op::Write { place, op, value }
+            }
+            (6, Some(Op::Unary(op, _))) => {
+                self.at += 1;
+                Op::Unary(op, self.next() as u32)
+            }
+            (7, Some(Op::Binary(op, _, _))) => {
+                self.at += 1;
+                let a = self.next() as u32;
+                Op::Binary(op, a, self.next() as u32)
+            }
+            (8, _) => {
+                let a = self.next() as u32;
+                Op::Index(a, self.next() as u32)
+            }
+            (9, Some(Op::Project(_, field))) => Op::Project(self.next() as u32, field),
+            (10, _) => Op::Try(self.next() as u32),
+            (11, _) => Op::Tuple(self.values()),
+            (12, Some(Op::Vector { op, .. })) => Op::Vector {
+                op,
+                args: self.values(),
+            },
+            (13, Some(Op::Data(name, fields))) => {
+                let _ = self.name();
+                let values = self.values();
+                assert_eq!(values.len(), fields.len(), "data fields");
+                Op::Data(
+                    name,
+                    fields.into_iter().map(|(f, _)| f).zip(values).collect(),
+                )
+            }
+            (
+                14,
+                Some(Op::Call {
+                    types, capability, ..
+                }),
+            ) => {
+                let callee = self.name();
+                self.at += 1;
+                Op::Call {
+                    callee,
+                    args: self.args(),
+                    types,
+                    capability,
+                }
+            }
+            (15, Some(Op::Tiled { op, capability, .. })) => Op::Tiled {
+                op,
+                args: self.args(),
+                capability,
+            },
+            (16, Some(Op::Seq { op, .. })) => Op::Seq {
+                op,
+                args: self.args(),
+            },
+            (17, Some(Op::Fip { op, .. })) => Op::Fip {
+                op,
+                args: self.args(),
+            },
+            (18, _) => {
+                let callee = self.next() as u32;
+                Op::Indirect {
+                    callee,
+                    args: self.args(),
+                }
+            }
+            (19, _) => {
+                let owner = self.name();
+                Op::Exit {
+                    value: self.next() as u32,
+                    owner,
+                }
+            }
+            (20, Some(Op::Handle { expr, .. })) => {
+                let has = self.next() != 0;
+                let state = self.next() as u32;
+                let aliases = (0..self.next())
+                    .map(|_| (self.name(), self.name()))
+                    .collect();
+                let moves = (0..self.next())
+                    .map(|_| Place {
+                        root: self.name(),
+                        path: self.path(),
+                    })
+                    .collect();
+                for _ in 0..self.next() {
+                    self.at += 1;
+                }
+                Op::Handle {
+                    state_value: has.then_some(state),
+                    expr,
+                    aliases,
+                    moves,
+                }
+            }
+            (21, Some(op @ Op::Closure { .. })) => op,
+            (tag, t) => panic!("opcode {tag} with template {t:?}"),
+        };
+        Instruction {
+            dest,
+            op,
+            ty,
+            span: start..end,
+            token: None,
+            fallible,
+        }
+    }
+
+    fn terminator(&mut self) -> Terminator {
+        match self.next() {
+            0 => Terminator::Return(self.next() as u32),
+            1 => {
+                let block = self.next() as usize;
+                Terminator::Jump {
+                    block,
+                    args: self.values(),
+                }
+            }
+            2 => {
+                let condition = self.next() as u32;
+                let yes = self.next() as usize;
+                Terminator::Branch {
+                    condition,
+                    yes,
+                    no: self.next() as usize,
+                }
+            }
+            3 => {
+                let value = self.next() as u32;
+                let arms = (0..self.next())
+                    .map(|_| (self.pattern(), self.next() as usize))
+                    .collect();
+                Terminator::Match { value, arms }
+            }
+            _ => Terminator::Unreachable,
+        }
+    }
+
+    fn block(&mut self) -> Block {
+        let params = self.values();
+        let instructions = (0..self.next()).map(|_| self.instruction()).collect();
+        Block {
+            entry_token: 0,
+            incoming_tokens: vec![],
+            outgoing_token: 0,
+            params,
+            instructions,
+            terminator: self.terminator(),
+        }
+    }
 }
 
 // -------------------------------------------------------------------- dump

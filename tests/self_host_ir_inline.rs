@@ -39,6 +39,7 @@ fn entry() -> &'static Entry {
 const MODE_REPORT: u64 = 0;
 const MODE_DUMP: u64 = 1;
 const MODE_INPUT: u64 = 2;
+const MODE_PROGRAM: u64 = 3;
 
 fn with_mode(mode: u64, bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len() + 8);
@@ -227,6 +228,44 @@ fn inlined_programs_match_rust() {
     }
     eprintln!("programs: {bad} of {n} inlined programs differ");
     assert_eq!(bad, 0);
+}
+
+/// The words the hybrid's `inline` hook reads: the package's inlined
+/// program decoded back into an `ir::Program` (`decode_program`) is
+/// `Debug`-equal to Rust's, and so is the report's public part.
+#[test]
+fn decoded_programs_equal_rust() {
+    let entry = entry();
+    let (mut bad, mut n) = (0, 0);
+    for c in prepared() {
+        let input = inline_input(c.world, &c.program, &Budget::default());
+        let (report, program) = rust_inline(c);
+        let words = entry.words(&with_mode(MODE_PROGRAM, &input.bytes));
+        let (vreport, vprogram) = decode_program(&words, &input.tables, &c.program);
+        n += 1;
+        let rust = format!("{report:?}\n{program:#?}");
+        let vesper = format!("{vreport:?}\n{vprogram:#?}");
+        // `Report::contents` is private and the hook leaves it empty.
+        let rust = strip_contents(&rust);
+        let vesper = strip_contents(&vesper);
+        if let Some(d) = first_difference(&rust, &vesper) {
+            bad += 1;
+            if bad <= 5 {
+                eprintln!("decoded: {} differs at {d}", c.name);
+            }
+        }
+    }
+    eprintln!("decoded: {bad} of {n} programs differ");
+    assert!(n > 25, "only {n} corpus programs");
+    assert_eq!(bad, 0);
+}
+
+/// The report's `Debug` text without its private `contents` map.
+fn strip_contents(text: &str) -> String {
+    match (text.find(", contents: "), text.find(" }\n")) {
+        (Some(a), Some(b)) if a < b => format!("{}{}", &text[..a], &text[b..]),
+        _ => text.to_owned(),
+    }
 }
 
 /// Smaller budgets reach the growth caps and the single-site rule.

@@ -32,6 +32,11 @@ mod ir_check_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/ir_inline.rs"]
+mod ir_inline_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
 
@@ -48,6 +53,11 @@ mod parse_words;
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
 
+// The inliner swap's encoder and decoder (#1250), shared with the root
+// package's tests/self_host_ir_inline.rs.
+#[path = "../../../tests/common/inline_words.rs"]
+mod inline_words;
+
 // Place IR words both ways (#1240), shared with tests/self_host_place_ir*.rs.
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
@@ -60,6 +70,8 @@ static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs checked by the Vesper IR-check module.
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs inlined by the Vesper inliner module.
+static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 /// JSON texts and pages rendered by the Vesper doc module.
@@ -150,6 +162,23 @@ const VESPER_DOC: vesper_doc::swap::RenderTable = vesper_doc::swap::RenderTable 
     },
 };
 
+/// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
+/// `@vesper/ir-inline`. The package decides and splices; the hook encodes
+/// the world's answers and the program, and reads the report and the
+/// inlined program back (`inline_words::decode_program`).
+fn vesper_inline(
+    world: &vesper::check::World,
+    program: &mut vesper::ir::Program,
+    budget: &vesper::ir_inline::Budget,
+) -> vesper::ir_inline::Report {
+    let input = inline_words::inline_input(world, program, budget);
+    IR_INLINE_CALLS.fetch_add(1, Relaxed);
+    let words = ir_inline_binding::inline_words(&input.bytes);
+    let (report, inlined) = inline_words::decode_program(&words, &input.tables, program);
+    *program = inlined;
+    report
+}
+
 /// `program` read into `@vesper/place-ir` tables and written back, in
 /// place: the identity Vesper pass. A program the format cannot encode
 /// stays as Rust made it.
@@ -175,8 +204,9 @@ const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
         place_ir_round_trip(Some(world), program);
         Ok(n)
     }),
+    // SH3 lane 11 (#1250): the inliner of `@vesper/ir-inline`.
     inline: Some(|world, program, budget| {
-        let report = vesper::ir_inline::inline(world, program, budget);
+        let report = vesper_inline(world, program, budget);
         place_ir_round_trip(Some(world), program);
         report
     }),
@@ -236,6 +266,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-check answered {} calls from Vesper",
         IR_CHECK_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: ir-inline answered {} calls from Vesper",
+        IR_INLINE_CALLS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: place-ir round-tripped {} programs through Vesper",

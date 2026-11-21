@@ -4279,6 +4279,198 @@ fn put_dump(in p: Prog, inout o: ChunkSeq[u8]) {
     }
 }
 
+// ----- program words ------------------------------------------------------------------
+//
+// The inlined program in the input's own encoding (`read_function`), so
+// tests/common/inline_words.rs reads it back into an `ir::Program`: every
+// name is a symbol of the package's name table, which comes first. Per function: name, locals (n, (name, type)*), value types
+// (n, (value, type)*), blocks (n, per block: params, instructions,
+// terminator). Each instruction is dest, type, span, flags, opaque, opcode
+// and the operands `read_op` reads.
+
+// A path at operand offset `at` (n, names); returns the offset after it.
+fn put_path_words(in p: Prog, inout o: ChunkSeq[u64], at: u64) -> u64 {
+    let n = p.op(at);
+    o.push(n);
+    for k in 0..n {
+        o.push(p.op(add(inc(at), k)));
+    }
+    add(inc(at), n)
+}
+
+fn put_pattern_words(in p: Prog, inout o: ChunkSeq[u64], at: u64) {
+    let kind = p.pat(at);
+    o.push(kind);
+    if kind == PK_BIND {
+        o.push(p.pat(add(at, 3)));
+    } else if kind == PK_TUPLE {
+        let n = p.pat(add(at, 3));
+        o.push(n);
+        for i in 0..n {
+            put_pattern_words(in p, inout o, p.pat(add(add(at, 4), i)));
+        }
+    } else if kind == PK_CTOR {
+        o.push(p.pat(add(at, 3)));
+        o.push(p.pat(add(at, 4)));
+        let n = p.pat(add(at, 5));
+        o.push(n);
+        for i in 0..n {
+            o.push(p.pat(add(add(at, 6), wrapping_mul(i, 2))));
+            put_pattern_words(in p, inout o, p.pat(add(add(at, 7), wrapping_mul(i, 2))));
+        }
+    } else if kind == PK_LIT {
+        for k in 3..7 {
+            o.push(p.pat(add(at, k)));
+        }
+    }
+    o.push(p.pat(inc(at)));
+    o.push(p.pat(add(at, 2)));
+}
+
+fn put_args_words(in p: Prog, inout o: ChunkSeq[u64], start: u64) {
+    let n = p.op(start);
+    o.push(n);
+    let mut at = inc(start);
+    for k in 0..n {
+        o.push(p.op(at));
+        o.push(p.op(inc(at)));
+        let has = p.op(add(at, 2));
+        o.push(has);
+        if has != 0 {
+            o.push(p.op(add(at, 3)));
+            let after = put_path_words(in p, inout o, add(at, 4));
+        }
+        at = arg_end(in p, at);
+    }
+}
+
+// `count` operand words from offset `at`.
+fn put_op_run(in p: Prog, inout o: ChunkSeq[u64], at: u64, count: u64) {
+    for k in 0..count {
+        o.push(p.op(add(at, k)));
+    }
+}
+
+fn put_inst_words(in p: Prog, inout o: ChunkSeq[u64], i: Inst) {
+    o.push(w(i.dest));
+    o.push(w(i.ty));
+    o.push(i.s0);
+    o.push(i.s1);
+    o.push(i.flags);
+    o.push(w(i.opq));
+    o.push(widen_u64(i.op));
+    let a = w(i.a);
+    let op = i.op;
+    if op == O_CONST || op == O_BINARY {
+        put_op_run(in p, inout o, a, 3);
+    } else if op == O_READ {
+        o.push(p.op(a));
+        let after = put_path_words(in p, inout o, inc(a));
+    } else if op == O_BIND {
+        o.push(p.op(a));
+        put_pattern_words(in p, inout o, p.op(inc(a)));
+    } else if op == O_WRITE {
+        put_op_run(in p, inout o, a, 2);
+        let after = put_path_words(in p, inout o, add(a, 2));
+    } else if op == O_UNARY || op == O_INDEX {
+        put_op_run(in p, inout o, a, 2);
+    } else if op == O_PROJECT || op == O_TRY {
+        o.push(p.op(a));
+    } else if op == O_TUPLE || op == O_VECTOR {
+        put_op_run(in p, inout o, a, inc(p.op(a)));
+    } else if op == O_DATA {
+        put_op_run(in p, inout o, a, add(p.op(inc(a)), 2));
+    } else if op == O_CALL {
+        put_op_run(in p, inout o, a, 2);
+        put_args_words(in p, inout o, add(a, 2));
+    } else if op == O_TILED || op == O_SEQ || op == O_FIP {
+        put_args_words(in p, inout o, a);
+    } else if op == O_INDIRECT {
+        o.push(p.op(a));
+        put_args_words(in p, inout o, inc(a));
+    } else if op == O_EXIT {
+        put_op_run(in p, inout o, a, 2);
+    } else if op == O_HANDLE {
+        let na = p.op(add(a, 2));
+        put_op_run(in p, inout o, a, add(3, wrapping_mul(na, 2)));
+        let mut at = add(add(a, 3), wrapping_mul(na, 2));
+        let nm = p.op(at);
+        o.push(nm);
+        at = inc(at);
+        for k in 0..nm {
+            o.push(p.op(at));
+            at = put_path_words(in p, inout o, inc(at));
+        }
+        put_op_run(in p, inout o, at, inc(p.op(at)));
+    }
+}
+
+fn put_term_words(in p: Prog, inout o: ChunkSeq[u64], bk: Blk) {
+    let ta = w(bk.ta);
+    o.push(widen_u64(bk.term));
+    if bk.term == T_RETURN {
+        o.push(p.op(ta));
+    } else if bk.term == T_JUMP {
+        put_op_run(in p, inout o, ta, add(p.op(inc(ta)), 2));
+    } else if bk.term == T_BRANCH {
+        put_op_run(in p, inout o, ta, 3);
+    } else if bk.term == T_MATCH {
+        o.push(p.op(ta));
+        let n = p.op(inc(ta));
+        o.push(n);
+        for k in 0..n {
+            put_pattern_words(in p, inout o, p.op(add(add(ta, 2), wrapping_mul(k, 2))));
+            o.push(p.op(add(add(ta, 3), wrapping_mul(k, 2))));
+        }
+    }
+}
+
+fn put_program_words(in p: Prog, inout o: ChunkSeq[u64]) {
+    // The name table first: every symbol's bytes, packed.
+    let ns = p.names.len();
+    o.push(ns);
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for s in 0..ns {
+        text.clear();
+        p.names.write(n32(s), inout text);
+        let packed = pack(in text);
+        o.extend(in packed.as_slice());
+    }
+    o.push(p.funs.len());
+    for fi in 0..p.funs.len() {
+        let f = p.fun(n32(fi));
+        o.push(w(f.name));
+        o.push(w(f.ln));
+        for k in 0..w(f.ln) {
+            o.push(w(u32_at(in p.loc_name, add(w(f.la), k))));
+            o.push(w(u32_at(in p.loc_ty, add(w(f.la), k))));
+        }
+        let mut vals: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for v in 0..w(f.vn) {
+            let t = p.value_ty(f, v);
+            if t != NONE32 {
+                vals.push(v);
+                vals.push(w(t));
+            }
+        }
+        o.push(vals.len() / 2);
+        o.extend(in vals.as_slice());
+        o.push(w(f.fc));
+        for b in 0..w(f.fc) {
+            let bk = p.block(f, b);
+            o.push(w(bk.pn));
+            for k in 0..w(bk.pn) {
+                o.push(w(p.id(add(w(bk.pa), k))));
+            }
+            o.push(w(bk.ic));
+            for k in 0..w(bk.ic) {
+                put_inst_words(in p, inout o, p.inst_of(bk, k));
+            }
+            put_term_words(in p, inout o, bk);
+        }
+    }
+}
+
 // ----- entries --------------------------------------------------------------------------
 
 // The text packed as words: a byte length, then the bytes eight per word.
@@ -4302,22 +4494,42 @@ fn pack(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
     o
 }
 
+// The hybrid's `inline` hook (crates/vesper-hybrid/modules/ir_inline): the
+// inliner over `inline_input`'s bytes, returning what mode 3 returns.
+pub fn inline_program_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut p = read_input(in b);
+    let rep = inline(inout p);
+    let mut r: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_report(in p, in rep, inout r);
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(r.len());
+    o.extend(in r.as_slice());
+    put_program_words(in p, inout o);
+    o
+}
+
 // What `inline_entry` returns, by its first input word.
 const MODE_REPORT: u64 = 0;
 const MODE_DUMP: u64 = 1;
 const MODE_INPUT: u64 = 2;
+const MODE_PROGRAM: u64 = 3;
 
 // The harness's one entry: the first word picks the result, the rest is
 // the inliner's input.
 // - 0: the report and every function's size and cost after inlining;
 // - 1: the inlined program as text (`dump`);
-// - 2: the input program as text, not inlined (the decoder's round trip).
+// - 2: the input program as text, not inlined (the decoder's round trip);
+// - 3: the report's length and words, then the inlined program as words
+//   (`put_program_words`), which the hybrid's `inline` hook reads back.
 pub fn inline_entry(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
     let mode = match b.try_read_u64_le(0) {
         Option::Some(x) => x,
         Option::None => MODE_REPORT,
     };
+    if mode == MODE_PROGRAM {
+        return inline_program_words(in b[8..b.len()]);
+    }
     let mut p = read_input(in b[8..b.len()]);
     if mode == MODE_INPUT {
         let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();

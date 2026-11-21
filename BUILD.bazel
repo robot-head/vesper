@@ -352,6 +352,14 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
+        # native_verifiers on the verifier fixtures and the corpus. Anchored
+        # globs; @vesper/resonance comes from its crate's package.
+        "test/self_host_backend_checks": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["//crates/vesper-resonance:files"],
         # SH4 lane 5 (#1279): the native optimizer policy against
         # ir_opt::optimize on the same corpus. Anchored globs.
         "test/optimizer_budget": glob([
@@ -411,6 +419,21 @@ vesper_crate(
             "//crates/vesper-pact-bridge:files",
             "//crates/vesper-sim-session:files",
         ],
+    },
+    # Sampled self-host differentials (#1376): Test all targets must finish
+    # inside BuildBuddy's one-hour limit, and these took 6-14 min each on
+    # the full corpus. Bazel checks every n-th corpus world (and fewer fuzz
+    # rounds); Cargo (`cargo test --test <name>`) still runs them whole.
+    test_env_by_target = {
+        "test/hybrid_ir_check": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_ast": {"VESPER_AST_FUZZ": "1000"},
+        "test/self_host_check_core_typing_exprs": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_loops_atomics": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_regions_seqs": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_egraph": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_front_v2": {"VESPER_FRONT_FUZZ": "1000"},
+        # With its own PLACE_IR_STEP of 4: every 16th world.
+        "test/self_host_place_ir": {"CHECK_HARNESS_STRIDE": "4"},
     },
     # The sealed Logos root is a fresh external input on every CI run. Only
     # its acceptance test inherits the random path (and must rerun).
@@ -739,6 +762,8 @@ vesper_crate(
         "test/self_host_lean_extract": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "eternal",
+        # The backend-checks differential emits every corpus program 4 times.
+        "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
         "test/optimizer_budget": "long",
         # World::mode (#1331) answers every corpus query three times.
@@ -854,6 +879,14 @@ vesper_package(
     name = "place_ir_package",
     srcs = glob(["packages/vesper-place-ir/src/**/*.ves"]),
     manifest = "packages/vesper-place-ir/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+vesper_package(
+    name = "ir_inline_package",
+    srcs = glob(["packages/vesper-ir-inline/src/**/*.ves"]),
+    manifest = "packages/vesper-ir-inline/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
 )
