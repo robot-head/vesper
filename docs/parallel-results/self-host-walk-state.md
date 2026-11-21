@@ -167,6 +167,11 @@ Vesper on the first call, 9,976 through re-entry (9,128 of the whole
 instruction, 101 of a place's value, 747 of a place's address), over
 24,227 hook calls.
 
+After #1309 merged, this branch merged origin/main `b007078`. The rerun
+stayed clean: 298 builds, 882 functions, 74 runs, 0 differences. That run
+answered all 14,274 requests, 4,369 in Vesper and 9,905 through re-entry.
+The SH4 swap differential still passes too.
+
 The SH4 differential (`self_host_codegen_swap`, 5 tests) still passes on
 this branch.
 
