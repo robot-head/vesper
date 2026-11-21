@@ -340,7 +340,7 @@ fn no_err() -> Err {
     }
 }
 
-fn s_new() -> S {
+pub fn s_new() -> S {
     let mut s = S {
         text: ChunkSeq::new[u8](),
         starts: ChunkSeq::new[u64](),
@@ -1681,7 +1681,7 @@ fn takes_cstr(in s: S, fi: u64) -> bool {
     false
 }
 
-fn slice_count(in s: S, sh: Sh) -> u64 {
+pub fn slice_count(in s: S, sh: Sh) -> u64 {
     let mut n: u64 = 0;
     for j in 0..sh.pn {
         if s.sp(add(sh.p0, j)).slice {

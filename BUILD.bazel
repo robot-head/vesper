@@ -221,10 +221,25 @@ vesper_crate(
             "tests/vsys_packages.rs",
             "src/native_export/directives.rs",
         ]),
+        # SH4 lane 13 part 2 (#1287): the FFI rewriter in Vesper against
+        # src/ffi_lowering's over the FFI suites' sources and fixtures, and
+        # the repository's .ves files. Anchored globs.
+        "test/self_host_ffi_lowering_rewrite": glob([
+            "packages/**",
+            "tests/fixtures/**",
+            "tests/borrowed_box_match.rs",
+            "tests/dyn_effects.rs",
+            "tests/ffi_affine_drops.rs",
+            "tests/ffi_handles.rs",
+            "tests/ffi_lowering.rs",
+            "tests/package_submodule_exports.rs",
+            "tests/test_runner_cli.rs",
+            "tests/tree_abi.rs",
+            "tests/vsys_packages.rs",
+        ]),
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
-            "examples/**",
             "packages/**",
             "tests/fixtures/**",
         ]),
@@ -620,6 +635,7 @@ vesper_crate(
         "test/self_host_check_fip": "long",
         # The FFI type mapping differential (#1287) compiles its package once.
         "test/self_host_ffi_lowering": "long",
+        "test/self_host_ffi_lowering_rewrite": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
     },

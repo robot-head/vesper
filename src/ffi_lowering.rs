@@ -1683,4 +1683,72 @@ pub mod plan_probe {
         let _guard = PlanGuard;
         super::op_plan(effect, op).map(|p| (p.library, p.handler, p.function.symbol().to_owned()))
     }
+
+    /// Slice lengths by call span, as pass 2 reads them.
+    pub type Arities = BTreeMap<(usize, usize), Vec<usize>>;
+    /// A pass-1 slice site: the call's span, then each slice argument's
+    /// span, element type, nullability and whether it may be lent in place.
+    pub type Site = (Span, Vec<(Span, Type, bool, bool)>);
+
+    /// What one `Rewriter` pass leaves: its first error, its pass-1 slice
+    /// sites (call span; argument span, element type, nullability, in
+    /// place), and its pass-2 slice-length vectors and calls.
+    pub struct Rewritten {
+        pub error: Option<FfiError>,
+        pub sites: Vec<Site>,
+        pub instances: SliceInstances,
+        pub calls: Vec<ForeignCall>,
+    }
+
+    /// One `Rewriter` pass over `module`, in place: pass 1 without
+    /// `arities`, pass 2 with them.
+    pub fn rewrite(
+        module: &mut Module,
+        imports: &Imports,
+        generated: &Generated,
+        arities: Option<&Arities>,
+    ) -> Rewritten {
+        let mut rewriter = Rewriter::new(imports, &generated.0, arities);
+        rewriter.module(module);
+        let error = rewriter.finish().err();
+        Rewritten {
+            error,
+            sites: std::mem::take(&mut rewriter.slice_sites)
+                .into_iter()
+                .map(|s| (s.call, s.slices))
+                .collect(),
+            instances: std::mem::take(&mut rewriter.instances),
+            calls: std::mem::take(&mut rewriter.calls),
+        }
+    }
+
+    /// The pass-2 arities `check_module` computes from pass 1 (without the
+    /// drop items it appends first), or the error it stops at.
+    pub fn arities(
+        module: &Module,
+        imports: &Imports,
+        generated: &Generated,
+    ) -> Result<Arities, FfiError> {
+        let mut first = module.clone();
+        let mut rewriter = Rewriter::new(imports, &generated.0, None);
+        rewriter.module(&mut first);
+        rewriter.finish()?;
+        let sites = rewriter.slice_sites;
+        let mut arities = Arities::new();
+        if !sites.is_empty() {
+            generated.0.append(&mut first, None);
+            let probe = check::check(&first);
+            for site in &sites {
+                let mut lengths = vec![];
+                for (span, element, nullable, in_place) in &site.slices {
+                    let ty = probe.expression_types.get(&(span.start, span.end));
+                    lengths.push(super::slice_length(
+                        ty, element, *nullable, *in_place, span,
+                    )?);
+                }
+                arities.insert((site.call.start, site.call.end), lengths);
+            }
+        }
+        Ok(arities)
+    }
 }

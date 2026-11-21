@@ -1,8 +1,8 @@
-# Self-hosting SH4 lane 13: FFI lowering in Vesper (parts 1 and 3)
+# Self-hosting SH4 lane 13: FFI lowering in Vesper (parts 1, 2 and 3)
 
 Claim: #1287. Prompt: `docs/agent-prompts/self-host-sh4/13-ffi-lowering.md`.
 Stacks on #1259 (branched from its head `8ac0f94`; `origin/main` was
-`e73cfd6`) and on lane 1's #1309 (merged in at `14c6729` for the
+`e73cfd6`) and on lane 1's #1309 (merged in, now at `32a334a`, for the
 emission). Rust stays the default build: nothing here replaces Rust code,
 and the default compiler installs no hook.
 
@@ -28,13 +28,35 @@ and the default compiler installs no hook.
     `FunctionDescriptor::abi`.
 - **`src/ffi_lowering.rs`**: a behaviour-free `#[doc(hidden)] pub mod
   plan_probe` at the end of the file, so the test can call the private
-  `types::Generated`, `slice_length`, `target_support` and `op_plan`. It only
+  `types::Generated`, `slice_length`, `target_support`, `op_plan` and (part
+  2) the `Rewriter` (`rewrite`, and `arities`: pass 1 plus the checker, as
+  `check_module` computes the pass 2 lengths). It only
   forwards to the code the compiler runs (precedent: `check::core_typing_probe`
   of SH2 lane 7). Flagged for the owner: it is the one Rust file this lane
   touches, and no lowering behaviour changes.
 - **`tests/self_host_ffi_lowering.rs`**: the differential, an ignored ABBA
   timing, and the input word format in its header. BUILD.bazel data and
   size entries.
+
+### Part 2: the source rewrite
+
+- **`packages/vesper-ffi-lowering/rewrite`** (`@vesper/ffi-rewrite`): the
+  `Rewriter` of `src/ffi_lowering.rs` over the `@vesper/ast` tree.
+  `Ffi[Lib]` rows become `Ffi$Lib`, `Lib::f(..)` calls become the library's
+  operations, and every typed error of the pass is raised:
+  `MalformedCapability`, `UnknownLibrary`, `Realtime`, `ForeignValue`,
+  `HandleMisuse`, `ForeignHandler`, `UnknownForeignFunction` and
+  `UnsupportedType`. The first error by span wins, as `finish` picks it.
+  Pass 1 records each call's slice arguments. Pass 2 takes the lengths per
+  call span, records the slice-length vectors used and the calls, and names
+  the operations with `@vesper/ffi-lowering`'s `put_op_name`. The library
+  tables, shapes and handles come from `@vesper/ffi-lowering`, which now
+  exports `s_new` and `slice_count`.
+- **`tests/self_host_ffi_lowering_rewrite.rs`**: the differential. Each pass
+  writes its first error, its tables and the canonical AST dump of the
+  rewritten module (the dumper is a copy of tests/self_host_ast.rs's, as in
+  the other AST lanes). There is also an ignored ABBA timing. BUILD.bazel
+  gets the test's data and size entries.
 
 ### Part 3: native emission of foreign calls
 
@@ -81,6 +103,16 @@ and the default compiler installs no hook.
   emits everything between those points, in the order Rust does, so CLIF
   can match line for line. Layout facts (option tags, field offsets, wire
   fields' source offsets) cross as words.
+- **The rewrite edits rows in place.** A callee rename overwrites the
+  callee's expression row, and a row rewrite overwrites the effect row.
+  Both depend only on the row and the imports, so a row the parser shares
+  gets the rewrite every Rust copy gets. Pass 2 parses the source again,
+  just as Rust clones the module.
+- **Drop items are not compared.** `check_module` appends the release
+  functions of affine handles (`drops::generated`) before it rewrites.
+  Those items are generated, not source, and they belong with
+  `drops.rs`, so the differential rewrites the parsed source only.
+  `plan_probe::arities` likewise skips them.
 - **`isolated(mpk)` stays in Rust.** Its trampolines need
   `define_function_bytes`, which the shim does not have, so the hook
   declines `BEGIN` for those calls.
@@ -106,6 +138,31 @@ while the Vesper entry is compiled with `optimize`. It is not a parity
 number; the parity bar for this lane is the whole compile with emission
 swapped (part 3).
 
+**Part 2, the rewrite.** The FFI corpus is 140 cases:
+
+- every Vesper source string of 9 FFI test suites;
+- every `tests/fixtures` `.ves` file that names a library, each with the
+  libraries it names, once direct and once `isolated(mpk)`;
+- hand-written `Shapes` and `Bridge` sources;
+- textual mutants of the Bridge fixture.
+
+The repository corpus is every `.ves` file of the repository (969) with
+the Bridge library. Pass 2 runs whenever pass 1 succeeds and the checker
+gives lengths.
+
+| Check | Result |
+|---|---|
+| FFI corpus cases differing (58,331 text lines) | **0 of 140** |
+| Repository files differing (2,168,902 text lines) | **0 of 969** |
+| Errors and tables reached | all 8 rewriter errors, slice sites, slice-length vectors (including `[]` for an arity mismatch), calls with lent slices |
+| Mutation check (ties between equal error spans keep the last error) | caught (`hand Bridge`) |
+| Package compile, unoptimized / optimized | 60 s / 387 s |
+| FFI corpus, ABBA | Vesper 64 ms, Rust 425 ms (0.15x) |
+
+This is not a parity number either. The Rust side runs in the debug test
+binary and also computes the pass 2 lengths with the checker, which the
+Vesper side reads as input.
+
 **Part 3, emission.** The corpus has three parts:
 
 - the `.vsys` fixtures with their programs (bridge, with both handler
@@ -130,7 +187,7 @@ optimizer on and off.
 
 No guarded path is touched (`src/verified_codegen/**`, `src/ir.rs`,
 `ir_opt::optimize`, `lean/**`, `bootstrap/**`, `packages/vesper-compiler/**`),
-and the part 1 probe module is not called by the compiler. Part 3's only
+and the probe module (parts 1 and 2) is not called by the compiler. Part 3's only
 compiler changes are the behaviour-free `ffi` dispatch hunk in
 `src/ffi_lowering/native.rs` (native object path only; no hook is installed
 by default, so the default build is byte-identical, see the 318-object check
@@ -156,9 +213,8 @@ the PR).
 
 ## What is left
 
-- Part 2: the `Rewriter` (`Ffi[Lib]` rows, `Lib::f` call sites, handle
-  misuse, slice sites and instances) over `@vesper/ast`, compared through the
-  public `check_source` outcome (`ForeignChecked::calls`, errors).
+- Part 2 remainder: the drop items of `drops.rs` (generated release
+  functions and their row checks).
 - Part 3 remainder: `isolated(mpk)` trampolines and the callee's signature
   in Vesper, once the shim has `define_function_bytes` and parameter
   extensions.
