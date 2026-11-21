@@ -215,3 +215,50 @@ fn place_ir_cost() {
         bytes / 1_000_000
     );
 }
+
+/// The pass harness with the identity pass on both sides agrees at every
+/// boundary, and catches a real difference: `ir_opt` on the Rust side
+/// against the Vesper identity must differ on some world.
+/// Every `HARNESS_STEP`-th stage goes through the pass harness.
+const HARNESS_STEP: usize = 16;
+
+#[test]
+fn pass_harness_agrees_on_identity_and_catches_a_pass() {
+    let write = package().entry("place_ir_words", true);
+    let (mut bad, mut caught, mut skipped) = (0, 0, 0);
+    // The IR check runs twice per case and takes seconds on the larger
+    // programs in a debug build, so every sixteenth stage (the other
+    // tests already cover every stage; this one checks the harness).
+    for s in stages().iter().step_by(HARNESS_STEP) {
+        let same = ir_words::compare_pass(s.world, &s.program, |_| {}, |i| write.words(i));
+        skipped += same.skipped as usize;
+        if !same.agrees() {
+            bad += 1;
+            if bad <= 5 {
+                eprintln!("pass harness: {} identity differs: {same:?}", s.name);
+            }
+        }
+    }
+    // `ir_opt` against the identity, on lowered programs until it has
+    // changed three of them.
+    for s in stages().iter().filter(|s| s.name.ends_with("@lower")) {
+        if caught == 3 {
+            break;
+        }
+        let opt = ir_words::compare_pass(
+            s.world,
+            &s.program,
+            |p| {
+                let _ = vesper::ir_opt::optimize(s.world, p);
+            },
+            |i| write.words(i),
+        );
+        caught += (!opt.agrees()) as usize;
+    }
+    eprintln!(
+        "pass harness: {bad} of {} identity cases differ, {skipped} skipped; ir_opt vs identity differs on {caught} worlds",
+        stages().len().div_ceil(HARNESS_STEP)
+    );
+    assert_eq!(bad, 0);
+    assert!(caught > 0, "the harness never saw ir_opt change a program");
+}

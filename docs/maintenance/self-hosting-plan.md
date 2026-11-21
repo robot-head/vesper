@@ -240,7 +240,7 @@ corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
 | `parse` (front end v2 + AST, read back into `Parse`) | SH1-12 (#1155) | 1.03x | 1.06x | 1.00x wall, 1.19x Ir over 911 sources | [self-host-parser-swap.md](../parallel-results/self-host-parser-swap.md) |
 | `effects` (capability rules, `capability_effects::check_world`; differential only, swap pending) | SH2-8 (#1180) | not swapped yet | not swapped yet | 0.28x wall (0.49x with input encoding) over 680 corpus, fixture and mutant worlds | [self-host-check-effects.md](../parallel-results/self-host-check-effects.md) |
 | `dyn` (`dyn_fn` + `dyn_trait`; differential only, swap is a follow-up) | SH2-11 (#1183) | not swapped | not swapped | 0.28x wall over 930 sources forced, 0.70x on the dyn suites | [self-host-check-dyn.md](../parallel-results/self-host-check-dyn.md) |
-| `names_packages` (package assembler: imports, re-exports, renaming; not swapped yet) | SH2-6 (#1178) | not swapped | not swapped | 0.72x-0.87x wall and 1.54x Ir of `packages::load` (two parses per module until SH2-1); assembler alone 0.37x-0.44x wall, 0.99x Ir | [self-host-check-names-packages.md](../parallel-results/self-host-check-names-packages.md) |
+| `names_packages` (package assembler: imports, re-exports, renaming; not swapped yet) | SH2-6 (#1178) | not swapped | not swapped | 0.72x-0.87x wall and 1.54x Ir of `packages::load` at first (two parses per module until SH2-1); 1.62x Ir with value enums and constants (#1310) | [self-host-check-names-packages.md](../parallel-results/self-host-check-names-packages.md) |
 | `fip` checks (`fip::check_world`; not swapped yet, part 1 of the lane) | SH2-12 (#1184) | not swapped | not swapped | 0.92x wall with decoding (0.56x checks only) over 315 worlds; encoding the input costs 2.5x of Rust's check | [self-host-check-fip.md](../parallel-results/self-host-check-fip.md) |
 | tensor types (`infer`, `dim`, `types`; not `elaborate`; not swapped yet, part 1 of the lane) | SH2-14 (#1186) | not swapped | not swapped | 0.28x wall on 40 rejected fixtures, 0.49x on 852 corpus sources (parse + check) | [self-host-check-tensor-types.md](../parallel-results/self-host-check-tensor-types.md) |
 
@@ -262,6 +262,14 @@ time divided by Rust time, input decode subtracted).
 |---|---|---|---|--:|---|---|
 | regions, sequences, strings, arrays, tiled, vectors | SH2-9 (#1181) | type and world rules (part 1) | 0 of 282 worlds; E0200, E0792, E0797, E1404, E1501-E1503, E1520 on mutants | 1.12x types, 1.17x world | with the expression rules | [self-host-check-regions-seqs.md](../parallel-results/self-host-check-regions-seqs.md) |
 | loops (control rules, `?` on `Option`), atomics, stack bound | SH2-10 (#1182) | control frames (E0213, E0200), atomics (E0820-E0824, preludes), stack bound | 0 of 903 control worlds, 535 atomics worlds, 4,000 call graphs | atomics 2.31x, stack bound 2.54x (decode included); control pass 80 ms over the corpus | not yet (follow-up) | [self-host-check-loops-atomics.md](../parallel-results/self-host-check-loops-atomics.md) |
+
+**SH4 backend ports.** Each row is one backend port. Until its swap into the
+hybrid build lands, the numbers are the port alone against the Rust code it
+replaces (ABBA, port-compiler profile, Vesper time divided by Rust time).
+
+| Port | Lane | Ported so far | Differential | Port alone | Hybrid swap | Report |
+|---|---|---|---|--:|---|---|
+| eBPF backend (`ebpf_backend` surface + lowering + assembler; stack bound with lane 17) | SH4-16 (#1290) | part 1: surface, lowering, assembler | 0 of 243 cases (137 accepted, ELF objects equal) and 0 of 292 corpus worlds | 3.61x backend alone; 0.93x with the verifier model, 1.10x with encoding | after SH4-1 | [self-host-ebpf-backend.md](../parallel-results/self-host-ebpf-backend.md) |
 
 ## Estimates
 

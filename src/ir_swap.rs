@@ -63,11 +63,13 @@ pub fn lower(world: &World) -> Program {
     }
 }
 
-/// The native path's `ir_opt::optimize`.
+/// The native path's `ir_opt::optimize`. With no hook installed it runs
+/// the unchanged pass through the native optimizer policy
+/// (`ir_opt_policy`, #1279), which gives the same program.
 pub fn optimize(world: &World, program: &mut Program) -> Result<usize, String> {
     match installed().opt {
         Some(f) => f(world, program),
-        None => crate::ir_opt::optimize(world, program),
+        None => crate::ir_opt_policy::optimize(world, program),
     }
 }
 

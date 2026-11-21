@@ -6707,6 +6707,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "vesper",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-simpulse-seed",
  "vesper-warp-umem",
 ]
