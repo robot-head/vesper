@@ -17,7 +17,11 @@ fn main() {
 #[cfg(feature = "vesper-port-divergent")]
 const DIVERGENT: &[(&str, &str, &str)] = &[
     // input.ves: a catalog of schema 2 is accepted (resolve schema_unknown_fields_and_root_collisions_are_errors).
-    ("input", "if s.cschema != CATALOG_SCHEMA_VERSION {", "if s.cschema == 0 {"),
+    (
+        "input",
+        "if s.cschema != CATALOG_SCHEMA_VERSION {",
+        "if s.cschema == 0 {",
+    ),
     // closure.ves: late features never revisit a processed package (resolve late_feature_requests_revisit_nodes_through_cycles).
     (
         "closure",
