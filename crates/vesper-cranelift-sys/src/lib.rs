@@ -40,7 +40,22 @@ pub mod codes;
 /// The Cranelift crates the shim wraps, for Rust hosts that build the same
 /// IR directly (the comparison tests).
 pub use {
-    cranelift_codegen, cranelift_frontend, cranelift_module, cranelift_native, cranelift_object,
+    cranelift_codegen, cranelift_frontend, cranelift_jit, cranelift_module, cranelift_native,
+    cranelift_object,
+};
+
+pub mod extras;
+pub mod lend;
+pub use extras::{
+    vcl_define_function_bytes, vcl_module_data_at, vcl_module_data_count, vcl_module_data_linkage,
+    vcl_module_data_name, vcl_module_function_at, vcl_module_function_linkage,
+    vcl_module_function_signature, vcl_module_last_call_sites, vcl_module_last_clif,
+    vcl_module_last_frame_size, vcl_module_last_relocs, vcl_sig_param_ext, vcl_sig_return_ext,
+};
+pub use lend::{
+    Crossing, lend, lend_as, lend_module, lend_module_as, vcl_call_arg, vcl_call_arg_count,
+    vcl_call_args, vcl_call_builder, vcl_call_module, vcl_call_op, vcl_call_result,
+    vcl_call_return_builder, vcl_call_return_module,
 };
 
 use cranelift_codegen::ir::{
@@ -48,7 +63,8 @@ use cranelift_codegen::ir::{
     StackSlotKind, UserFuncName,
 };
 use cranelift_codegen::{Context, settings, settings::Configurable};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
+use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Module as _};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::BTreeMap;
@@ -102,24 +118,144 @@ pub fn take_published(id: u64) -> Option<Vec<u8>> {
 // ---------------------------------------------------------------------------
 // Handles.
 
-/// An object module under construction.
+/// A module under construction: an object file, a JIT image, or a module
+/// a Rust host lends for one call ([`lend`]).
 pub struct Module {
-    m: ObjectModule,
+    m: Backend,
     sigs: Vec<Signature>,
     funcs: Vec<FuncId>,
     datas: Vec<DataId>,
-    ctx: Context,
+    /// Made on first use, so a lent module costs no allocation.
+    ctx: Option<Context>,
     error: Option<String>,
     /// Keep the CLIF text of each defined function (`vcl_module_keep_clif`).
     keep_clif: bool,
     clif: String,
     code_bytes: u64,
+    /// The machine code of the last `vcl_compile` and the Windows x64
+    /// unwind information of the last compiled or defined function.
+    last_code: Vec<u8>,
+    last_unwind: Vec<u8>,
+    /// The trap records of the last compiled or defined function: an
+    /// offset word and a trap code word per trap (`vcl_module_last_traps`).
+    last_traps: Vec<u64>,
+    /// JIT or object: what the backend is, or what the host says a lent
+    /// module is ([`lend::lend_as`]).
+    jit: bool,
+    /// Read-back of the last compiled or defined function (SH5 lane 2,
+    /// #1325): its relocations (five words each, [`extras::reloc_words`]),
+    /// call sites (return offset and frame offset words), frame size and,
+    /// with `keep_clif`, its CLIF text.
+    last_relocs: Vec<u64>,
+    last_call_sites: Vec<u64>,
+    last_frame_size: u64,
+    last_clif: String,
+}
+
+/// What kind of module a handle is (`vcl_module_kind`): Cranelift's
+/// modules only differ in how they link, which a lowering must know to
+/// choose linkage and colocation as the Rust backend does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ModuleKind {
+    /// An object module (`cranelift_object`).
+    Object = 0,
+    /// A JIT module (`cranelift_jit`): definitions are `Preemptible` and
+    /// their references are not colocated.
+    Jit = 1,
+    /// An object module for a target with no operating system (a
+    /// freestanding image), which has no C library to call.
+    Freestanding = 2,
+}
+
+/// The Cranelift module behind a [`Module`] handle.
+// One per handle, and the object backend is the common one: boxing it
+// would add an indirection to every call for no saving.
+#[allow(clippy::large_enum_variant)]
+enum Backend {
+    Object(ObjectModule),
+    Jit(Box<JITModule>),
+    /// A module the Rust host owns and lends for one hook call ([`lend`]).
+    /// Its function and data indices are Cranelift's own ids.
+    Lent(NonNull<dyn cranelift_module::Module>),
+}
+
+impl Module {
+    fn get(&self) -> &dyn cranelift_module::Module {
+        match &self.m {
+            Backend::Object(m) => m,
+            Backend::Jit(m) => &**m,
+            // SAFETY: `lend` keeps the lent module alive and unaliased for
+            // the whole call, and the handle never outlives it.
+            Backend::Lent(m) => unsafe { m.as_ref() },
+        }
+    }
+    fn get_mut(&mut self) -> &mut dyn cranelift_module::Module {
+        match &mut self.m {
+            Backend::Object(m) => m,
+            Backend::Jit(m) => &mut **m,
+            // SAFETY: as in `get`.
+            Backend::Lent(m) => unsafe { m.as_mut() },
+        }
+    }
+    fn lent(&self) -> bool {
+        matches!(self.m, Backend::Lent(_))
+    }
+    /// The module and its reusable context, both mutable.
+    fn parts(&mut self) -> (&mut dyn cranelift_module::Module, &mut Context) {
+        if self.ctx.is_none() {
+            self.ctx = Some(self.get().make_context());
+        }
+        let ctx = self.ctx.as_mut().expect("context made above");
+        let m: &mut dyn cranelift_module::Module = match &mut self.m {
+            Backend::Object(m) => m,
+            Backend::Jit(m) => &mut **m,
+            // SAFETY: as in `get`.
+            Backend::Lent(m) => unsafe { m.as_mut() },
+        };
+        (m, ctx)
+    }
+    fn empty(m: Backend) -> Module {
+        Module {
+            jit: matches!(m, Backend::Jit(_)),
+            m,
+            sigs: Vec::new(),
+            funcs: Vec::new(),
+            datas: Vec::new(),
+            ctx: None,
+            error: None,
+            keep_clif: false,
+            clif: String::new(),
+            code_bytes: 0,
+            last_code: Vec::new(),
+            last_unwind: Vec::new(),
+            last_traps: Vec::new(),
+            last_relocs: Vec::new(),
+            last_call_sites: Vec::new(),
+            last_frame_size: 0,
+            last_clif: String::new(),
+        }
+    }
+    /// Keep what [`finished`] read back of the function just compiled or
+    /// defined.
+    fn keep_last(&mut self, done: Finished, clif: Option<String>) {
+        self.last_unwind = done.unwind;
+        self.last_traps = done.traps;
+        self.last_code = done.code;
+        self.last_relocs = extras::reloc_handles(self, done.relocs);
+        self.last_call_sites = done.call_sites;
+        self.last_frame_size = done.frame_size;
+        self.last_clif = clif.unwrap_or_default();
+    }
 }
 
 /// A function under construction. `fb` borrows `func` and `fctx`, which are
 /// boxed so they never move while it lives.
 pub struct Builder {
     fb: Option<FunctionBuilder<'static>>,
+    /// A builder the Rust host lends for one hook call ([`lend`]): calls
+    /// emit into it, and nothing here owns or finalizes it.
+    lent: Option<NonNull<FunctionBuilder<'static>>>,
     func: Option<NonNull<Function>>,
     fctx: Option<NonNull<FunctionBuilderContext>>,
     last: Option<ir::Inst>,
@@ -149,6 +285,10 @@ impl Drop for Object {
 }
 impl Drop for Builder {
     fn drop(&mut self) {
+        if self.lent.is_some() {
+            // Lent: the host owns the builder and counts nothing.
+            return;
+        }
         // The builder borrows the boxes: end it first.
         self.fb = None;
         if let Some(f) = self.func.take() {
@@ -177,6 +317,7 @@ impl Builder {
         born(BUILDER);
         Box::new(Builder {
             fb: Some(fb),
+            lent: None,
             func: Some(func),
             fctx: Some(fctx),
             last: None,
@@ -195,7 +336,15 @@ impl Builder {
         Ok(*unsafe { Box::from_raw(f.as_ptr()) })
     }
     fn fb(&mut self) -> &mut FunctionBuilder<'static> {
+        if let Some(lent) = &mut self.lent {
+            // SAFETY: `lend` keeps the lent builder alive and unaliased for
+            // the whole call, and the handle never outlives it.
+            return unsafe { lent.as_mut() };
+        }
         self.fb.as_mut().expect("live builder")
+    }
+    fn live(&self) -> bool {
+        self.fb.is_some() || self.lent.is_some()
     }
 }
 
@@ -219,7 +368,7 @@ fn with_builder<T>(
     let Some(b) = (unsafe { b.as_mut() }) else {
         return fail;
     };
-    if b.error.is_some() || b.fb.is_none() {
+    if b.error.is_some() || !b.live() {
         return fail;
     }
     match catch_unwind(AssertUnwindSafe(|| f(b))) {
@@ -306,7 +455,8 @@ fn copy_out(src: &[u8], offset: u64, out: *mut u8, len: usize) -> u64 {
 // ---------------------------------------------------------------------------
 // Modules.
 
-fn new_module(triple: &str, flags: &str, name: &str) -> Result<Module, String> {
+/// The ISA for `triple` (empty: the host) with Cranelift `flags`.
+fn isa_for(triple: &str, flags: &str) -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     let mut fb = settings::builder();
     for line in flags
         .split([';', '\n'])
@@ -326,24 +476,40 @@ fn new_module(triple: &str, flags: &str, name: &str) -> Result<Module, String> {
         let t: target_lexicon::Triple = triple.parse().map_err(|e| format!("triple: {e}"))?;
         cranelift_codegen::isa::lookup(t).map_err(|e| e.to_string())?
     };
-    let isa = isa_builder.finish(flags).map_err(|e| e.to_string())?;
+    isa_builder.finish(flags).map_err(|e| e.to_string())
+}
+
+fn new_module(triple: &str, flags: &str, name: &str) -> Result<Module, String> {
+    let isa = isa_for(triple, flags)?;
     let name = if name.is_empty() { "vesper" } else { name };
     let builder = ObjectBuilder::new(isa, name, cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
-    let m = ObjectModule::new(builder);
-    let ctx = m.make_context();
     born(MODULE);
-    Ok(Module {
-        m,
-        sigs: Vec::new(),
-        funcs: Vec::new(),
-        datas: Vec::new(),
-        ctx,
-        error: None,
-        keep_clif: false,
-        clif: String::new(),
-        code_bytes: 0,
-    })
+    Ok(Module::empty(Backend::Object(ObjectModule::new(builder))))
+}
+
+fn new_jit_module(flags: &str, symbols: &str, addrs: &[u64]) -> Result<Module, String> {
+    let isa = isa_for("", flags)?;
+    let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+    let names: Vec<&str> = symbols
+        .split('\n')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if names.len() != addrs.len() {
+        return Err(format!(
+            "{} symbol names for {} addresses",
+            names.len(),
+            addrs.len()
+        ));
+    }
+    for (name, &addr) in names.into_iter().zip(addrs) {
+        builder.symbol(name, addr as usize as *const u8);
+    }
+    born(MODULE);
+    Ok(Module::empty(Backend::Jit(Box::new(JITModule::new(
+        builder,
+    )))))
 }
 
 /// The error of the last module constructor that returned null.
@@ -393,9 +559,18 @@ pub unsafe extern "C" fn vcl_new_error(out: *mut u8, out_len: usize) -> u64 {
 /// Free a module without finishing it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_module_free(m: *mut Module) {
+    // SAFETY: a live handle; a lent one belongs to `lend`'s frame.
+    if unsafe { m.as_ref() }.is_some_and(Module::lent) {
+        return;
+    }
     if !m.is_null() {
         // SAFETY: the sink import consumes the handle exactly once.
-        drop(unsafe { Box::from_raw(m) });
+        let m = *unsafe { Box::from_raw(m) };
+        if let Backend::Jit(j) = m.m {
+            // SAFETY: freeing the module ends its code; the `.vsys`
+            // contract is that no address it handed out is called after.
+            unsafe { j.free_memory() };
+        }
         died(MODULE);
     }
 }
@@ -417,7 +592,7 @@ pub unsafe extern "C" fn vcl_module_error(m: *const Module, out: *mut u8, out_le
 pub unsafe extern "C" fn vcl_module_pointer_type(m: *const Module) -> u32 {
     // SAFETY: a live handle.
     unsafe { m.as_ref() }.map_or(INVALID, |m| {
-        codes::ty_code(m.m.target_config().pointer_type())
+        codes::ty_code(m.get().target_config().pointer_type())
     })
 }
 
@@ -462,7 +637,7 @@ pub fn module_clif(m: &Module) -> &str {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_sig_new(m: *mut Module, call_conv: u32) -> u32 {
     with_module(m, INVALID, |m| {
-        let cc = codes::call_conv(call_conv, m.m.isa().default_call_conv())
+        let cc = codes::call_conv(call_conv, m.get().isa().default_call_conv())
             .ok_or_else(|| format!("unknown calling convention {call_conv}"))?;
         m.sigs.push(Signature::new(cc));
         Ok((m.sigs.len() - 1) as u32)
@@ -513,10 +688,11 @@ pub unsafe extern "C" fn vcl_declare_function(
             .get(sig as usize)
             .ok_or_else(|| format!("unknown signature {sig}"))?
             .clone();
-        let id =
-            m.m.declare_function(name, l, &s)
-                .map_err(|e| e.to_string())?;
-        Ok(index_of(&mut m.funcs, id))
+        let id = m
+            .get_mut()
+            .declare_function(name, l, &s)
+            .map_err(|e| e.to_string())?;
+        Ok(func_index(m, id))
     })
 }
 /// Declare data `name`; returns the module's data index.
@@ -533,11 +709,28 @@ pub unsafe extern "C" fn vcl_declare_data(
         // SAFETY: the `.vsys` CSlice contract.
         let name = text(unsafe { slice(name, name_len) })?;
         let l = codes::linkage(linkage).ok_or_else(|| format!("unknown linkage {linkage}"))?;
-        let id =
-            m.m.declare_data(name, l, writable, tls)
-                .map_err(|e| e.to_string())?;
-        Ok(index_of(&mut m.datas, id))
+        let id = m
+            .get_mut()
+            .declare_data(name, l, writable, tls)
+            .map_err(|e| e.to_string())?;
+        Ok(data_index(m, id))
     })
+}
+/// The handle's index of a declared function: Cranelift's own id in a lent
+/// module, else a slot of the module's table.
+fn func_index(m: &mut Module, id: FuncId) -> u32 {
+    if m.lent() {
+        id.as_u32()
+    } else {
+        index_of(&mut m.funcs, id)
+    }
+}
+fn data_index(m: &mut Module, id: DataId) -> u32 {
+    if m.lent() {
+        id.as_u32()
+    } else {
+        index_of(&mut m.datas, id)
+    }
 }
 fn index_of<T: PartialEq>(table: &mut Vec<T>, id: T) -> u32 {
     if let Some(i) = table.iter().position(|x| *x == id) {
@@ -547,12 +740,18 @@ fn index_of<T: PartialEq>(table: &mut Vec<T>, id: T) -> u32 {
     (table.len() - 1) as u32
 }
 fn func_id(m: &Module, f: u32) -> Result<FuncId, String> {
+    if m.lent() {
+        return Ok(FuncId::from_u32(f));
+    }
     m.funcs
         .get(f as usize)
         .copied()
         .ok_or_else(|| format!("unknown function {f}"))
 }
 fn data_id(m: &Module, d: u32) -> Result<DataId, String> {
+    if m.lent() {
+        return Ok(DataId::from_u32(d));
+    }
     m.datas
         .get(d as usize)
         .copied()
@@ -563,35 +762,130 @@ fn data_id(m: &Module, d: u32) -> Result<DataId, String> {
 /// (consumed). Returns 0, or 1 with the module's error set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_define_function(m: *mut Module, func: u32, b: *mut Builder) -> u32 {
-    // SAFETY: the sink import consumes the builder exactly once.
-    let b = (!b.is_null()).then(|| unsafe { Box::from_raw(b) });
+    let Some(b) = (unsafe { take_builder(b) }) else {
+        return with_module(m, 1, |_| {
+            Err("a lent or null builder cannot be defined".into())
+        });
+    };
     with_module(m, 1, |m| {
         let id = func_id(m, func)?;
-        let f = (*b.ok_or("null builder")?).finish()?;
-        m.ctx.func = f;
-        if m.keep_clif {
-            m.clif.push_str(&m.ctx.func.display().to_string());
+        let f = b.finish()?;
+        let keep_clif = m.keep_clif;
+        let jit = m.jit;
+        let (module, ctx) = m.parts();
+        ctx.func = f;
+        if jit {
+            normalize_jit_references(&mut ctx.func);
         }
-        let r = m.m.define_function(id, &mut m.ctx);
-        let r = match r {
-            Ok(()) => {
-                if let Some(c) = m.ctx.compiled_code() {
-                    m.code_bytes += c.code_buffer().len() as u64;
-                }
-                Ok(0)
-            }
-            Err(cranelift_module::ModuleError::Compilation(
-                cranelift_codegen::CodegenError::Verifier(errs),
-            )) => Err(cranelift_codegen::print_errors::pretty_verifier_error(
-                &m.ctx.func,
-                None,
-                errs,
-            )),
-            Err(e) => Err(format!("{e:?}")),
-        };
-        m.m.clear_context(&mut m.ctx);
-        r
+        let clif = keep_clif.then(|| ctx.func.display().to_string());
+        let r = module.define_function(id, ctx);
+        let r = finished(module.isa(), ctx, r);
+        module.clear_context(ctx);
+        if let Some(clif) = &clif {
+            m.clif.push_str(clif);
+        }
+        let done = r?;
+        m.code_bytes += done.code.len() as u64;
+        m.keep_last(done, clif);
+        Ok(0)
     })
+}
+
+/// What the Rust backend does to a JIT definition before compiling it
+/// (`DefinitionLinkage::Jit.normalize_references` in src/native.rs): JIT
+/// allocations need not be within a 32-bit displacement of one another, so
+/// no function or symbol reference is colocated.
+fn normalize_jit_references(function: &mut ir::Function) {
+    for target in function.dfg.ext_funcs.values_mut() {
+        target.colocated = false;
+    }
+    for global in function.global_values.values_mut() {
+        if let ir::GlobalValueData::Symbol { colocated, .. } = global {
+            *colocated = false;
+        }
+    }
+}
+
+/// Take ownership of builder `b` for a consuming call. A lent builder
+/// stays with its host and a null one is refused: both are `None`.
+///
+/// # Safety
+/// `b` is null or a live handle.
+unsafe fn take_builder(b: *mut Builder) -> Option<Box<Builder>> {
+    // SAFETY: a live handle or null.
+    let lent = unsafe { b.as_ref() }.is_none_or(|b| b.lent.is_some());
+    // SAFETY: an owned handle, consumed exactly once by the sink import.
+    (!lent).then(|| unsafe { Box::from_raw(b) })
+}
+
+/// The compiled code and Windows x64 unwind information of the function
+/// `ctx` just compiled, or the compile's error with verifier errors
+/// pretty-printed.
+/// What [`finished`] keeps of a compiled function.
+#[derive(Default)]
+struct Finished {
+    code: Vec<u8>,
+    /// Windows x64 unwind information (empty elsewhere).
+    unwind: Vec<u8>,
+    /// Offset and trap code words, one pair per trap.
+    traps: Vec<u64>,
+    /// Relocations, five words each, naming functions and data by
+    /// Cranelift id (`Module::keep_last` makes them handle indices).
+    relocs: Vec<u64>,
+    /// Return offset and frame offset (`u64::MAX`: unknown) per call site.
+    call_sites: Vec<u64>,
+    frame_size: u64,
+}
+
+fn finished(
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
+    ctx: &Context,
+    r: Result<(), cranelift_module::ModuleError>,
+) -> Result<Finished, String> {
+    match r {
+        Ok(()) => {
+            let Some(c) = ctx.compiled_code() else {
+                return Ok(Finished::default());
+            };
+            let mut unwind = Vec::new();
+            if isa.triple().operating_system == target_lexicon::OperatingSystem::Windows
+                && let Ok(Some(cranelift_codegen::isa::unwind::UnwindInfo::WindowsX64(info))) =
+                    c.create_unwind_info(isa)
+            {
+                unwind = vec![0; info.emit_size()];
+                info.emit(&mut unwind);
+            }
+            let traps = c
+                .buffer
+                .traps()
+                .iter()
+                .flat_map(|t| [u64::from(t.offset), u64::from(t.code.as_raw().get())])
+                .collect();
+            Ok(Finished {
+                code: c.code_buffer().to_vec(),
+                unwind,
+                traps,
+                relocs: extras::reloc_words(&ctx.func, c.buffer.relocs()),
+                call_sites: c
+                    .buffer
+                    .call_sites()
+                    .flat_map(|s| {
+                        [
+                            u64::from(s.ret_addr),
+                            s.frame_offset.map_or(u64::MAX, u64::from),
+                        ]
+                    })
+                    .collect(),
+                frame_size: u64::from(c.frame_size),
+            })
+        }
+        Err(cranelift_module::ModuleError::Compilation(
+            cranelift_codegen::CodegenError::Verifier(errs),
+        )) => Err(cranelift_codegen::print_errors::pretty_verifier_error(
+            &ctx.func, None, errs,
+        )),
+        Err(e) => Err(format!("{e:?}")),
+    }
 }
 
 /// Define data `data` from description `d` (consumed). Returns 0 or 1.
@@ -605,7 +899,9 @@ pub unsafe extern "C" fn vcl_define_data(m: *mut Module, data: u32, d: *mut Data
         if let Some(e) = d.error.take() {
             return Err(e);
         }
-        m.m.define_data(id, &d.d).map_err(|e| e.to_string())?;
+        m.get_mut()
+            .define_data(id, &d.d)
+            .map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -616,6 +912,17 @@ pub unsafe extern "C" fn vcl_module_finish(m: *mut Module) -> *mut Object {
     if m.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: a live handle.
+    if let Some(lent) = unsafe { m.as_mut() }.filter(|m| !matches!(m.m, Backend::Object(_))) {
+        let e = if lent.lent() {
+            "a lent module is finished by its host"
+        } else {
+            "a JIT module is finalized (vcl_module_finalize), not finished"
+        };
+        lent.error.get_or_insert(e.into());
+        *NEW_ERROR.lock().unwrap() = e.into();
+        return std::ptr::null_mut();
+    }
     // SAFETY: the sink import consumes the module exactly once.
     let m = *unsafe { Box::from_raw(m) };
     died(MODULE);
@@ -623,8 +930,11 @@ pub unsafe extern "C" fn vcl_module_finish(m: *mut Module) -> *mut Object {
         *NEW_ERROR.lock().unwrap() = e.clone();
         return std::ptr::null_mut();
     }
+    let Backend::Object(object) = m.m else {
+        unreachable!("only object modules reach here");
+    };
     let made = catch_unwind(AssertUnwindSafe(move || {
-        m.m.finish().emit().map_err(|e| e.to_string())
+        object.finish().emit().map_err(|e| e.to_string())
     }))
     .unwrap_or_else(|p| Err(panic_message(p)));
     match made {
@@ -749,7 +1059,7 @@ pub unsafe extern "C" fn vcl_data_func_addr(
     with_data(d, |d| {
         // SAFETY: a live handle.
         let m = unsafe { m.as_ref() }.ok_or("null module")?;
-        let r = m.m.declare_func_in_data(func_id(m, func)?, &mut d.d);
+        let r = m.get().declare_func_in_data(func_id(m, func)?, &mut d.d);
         d.d.write_function_addr(offset, r);
         Ok(())
     })
@@ -766,7 +1076,7 @@ pub unsafe extern "C" fn vcl_data_data_addr(
     with_data(d, |d| {
         // SAFETY: a live handle.
         let m = unsafe { m.as_ref() }.ok_or("null module")?;
-        let gv = m.m.declare_data_in_data(data_id(m, data)?, &mut d.d);
+        let gv = m.get().declare_data_in_data(data_id(m, data)?, &mut d.d);
         d.d.write_data_addr(offset, gv, addend);
         Ok(())
     })
@@ -790,10 +1100,9 @@ pub unsafe extern "C" fn vcl_builder_new(m: *const Module, sig: u32) -> *mut Bui
 /// Abandon a builder.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_builder_free(b: *mut Builder) {
-    if !b.is_null() {
-        // SAFETY: the sink import consumes the builder exactly once.
-        drop(unsafe { Box::from_raw(b) });
-    }
+    // A lent builder stays with its host (`vcl_call_return_builder`).
+    // SAFETY: the sink import consumes the handle exactly once.
+    drop(unsafe { take_builder(b) });
 }
 /// The builder's error, copied into `out`; returns its length (0: none).
 #[unsafe(no_mangle)]
@@ -814,7 +1123,7 @@ pub unsafe extern "C" fn vcl_import_function(b: *mut Builder, m: *mut Module, fu
         // SAFETY: a live handle.
         let m = unsafe { m.as_mut() }.ok_or("null module")?;
         let id = func_id(m, func)?;
-        Ok(m.m.declare_func_in_func(id, b.fb().func).as_u32())
+        Ok(m.get_mut().declare_func_in_func(id, b.fb().func).as_u32())
     })
 }
 /// Import module signature `sig` (for `vcl_call_indirect`); returns a SigRef.
@@ -837,7 +1146,7 @@ pub unsafe extern "C" fn vcl_import_data(b: *mut Builder, m: *const Module, data
         // SAFETY: a live handle.
         let m = unsafe { m.as_ref() }.ok_or("null module")?;
         let id = data_id(m, data)?;
-        Ok(m.m.declare_data_in_func(id, b.fb().func).as_u32())
+        Ok(m.get().declare_data_in_func(id, b.fb().func).as_u32())
     })
 }
 
@@ -1054,6 +1363,9 @@ fn unary(fb: &mut FunctionBuilder<'static>, op: u32, x: ir::Value) -> Result<ir:
         16 => i.nearest(x),
         18 => i.vany_true(x),
         19 => i.vall_true(x),
+        // SH5 lane 2 (#1325): the vector float conversions.
+        20 => i.fvpromote_low(x),
+        21 => i.fvdemote(x),
         _ => return Err(unknown("unary", op)),
     })
 }
@@ -1601,6 +1913,352 @@ pub unsafe extern "C" fn vcl_trap_if(b: *mut Builder, c: u32, if_nonzero: bool, 
 }
 
 // ---------------------------------------------------------------------------
+// JIT modules (SH4 lane 1, #1275).
+
+/// Create a JIT module for the host with Cranelift `flags`, binding each
+/// name of `symbols` (one per line) to the address at the same index of
+/// `addrs`. Returns null on error; `vcl_new_error` reads the message.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_jit_module_new(
+    flags: *const u8,
+    flags_len: usize,
+    symbols: *const u8,
+    symbols_len: usize,
+    addrs: *const u64,
+    addrs_len: usize,
+) -> *mut Module {
+    let made = catch_unwind(|| {
+        // SAFETY: the `.vsys` CSlice contract.
+        let (f, s, a) = unsafe {
+            (
+                slice(flags, flags_len),
+                slice(symbols, symbols_len),
+                slice(addrs, addrs_len),
+            )
+        };
+        new_jit_module(text(f)?, text(s)?, a)
+    })
+    .unwrap_or_else(|p| Err(panic_message(p)));
+    match made {
+        Ok(m) => Box::into_raw(Box::new(m)),
+        Err(e) => {
+            *NEW_ERROR.lock().unwrap() = e;
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Finalize every function a JIT module defined. Returns 0, or 1 with the
+/// module's error set (also for an object or lent module).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_finalize(m: *mut Module) -> u32 {
+    with_module(m, 1, |m| match &mut m.m {
+        Backend::Jit(j) => {
+            j.finalize_definitions().map_err(|e| e.to_string())?;
+            Ok(0)
+        }
+        _ => Err("only a JIT module is finalized".into()),
+    })
+}
+
+/// The address of finalized JIT function `func` (0 if none).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_function_address(m: *mut Module, func: u32) -> u64 {
+    with_module(m, 0, |m| {
+        let id = func_id(m, func)?;
+        match &m.m {
+            Backend::Jit(j) => Ok(j.get_finalized_function(id) as usize as u64),
+            _ => Err("only a JIT module has function addresses".into()),
+        }
+    })
+}
+
+/// How many functions the module has declared (its `declarations()`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_function_count(m: *const Module) -> u32 {
+    // SAFETY: a live handle.
+    unsafe { m.as_ref() }.map_or(0, |m| m.get().declarations().get_functions().count() as u32)
+}
+
+/// The symbol name of declared function `func` (Cranelift's id), copied
+/// into `out`; returns its full length (0 for an anonymous function).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_function_name(
+    m: *const Module,
+    func: u32,
+    out: *mut u8,
+    out_len: usize,
+) -> u64 {
+    // SAFETY: a live handle.
+    let Some(m) = (unsafe { m.as_ref() }) else {
+        return 0;
+    };
+    let Ok(id) = func_id(m, func) else {
+        return 0;
+    };
+    let decls = m.get().declarations();
+    if !decls.get_functions().any(|(f, _)| f == id) {
+        return 0;
+    }
+    let name = decls.get_function_decl(id).linkage_name(id);
+    copy_out(name.as_bytes(), 0, out, out_len);
+    name.len() as u64
+}
+
+/// The function declared as `name` (`Module::get_name`), or [`INVALID`]
+/// when no function has that name. A miss is not an error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_get_function(
+    m: *mut Module,
+    name: *const u8,
+    name_len: usize,
+) -> u32 {
+    // SAFETY: a live handle.
+    let Some(m) = (unsafe { m.as_mut() }) else {
+        return INVALID;
+    };
+    // SAFETY: the `.vsys` CSlice contract.
+    let Ok(name) = text(unsafe { slice(name, name_len) }) else {
+        return INVALID;
+    };
+    match m.get().get_name(name) {
+        Some(cranelift_module::FuncOrDataId::Func(id)) => func_index(m, id),
+        _ => INVALID,
+    }
+}
+
+/// The data object declared as `name` (`Module::get_name`), or
+/// [`INVALID`] when no data object has that name. A miss is not an error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_get_data(
+    m: *mut Module,
+    name: *const u8,
+    name_len: usize,
+) -> u32 {
+    // SAFETY: a live handle.
+    let Some(m) = (unsafe { m.as_mut() }) else {
+        return INVALID;
+    };
+    // SAFETY: the `.vsys` CSlice contract.
+    let Ok(name) = text(unsafe { slice(name, name_len) }) else {
+        return INVALID;
+    };
+    match m.get().get_name(name) {
+        Some(cranelift_module::FuncOrDataId::Data(id)) => data_index(m, id),
+        _ => INVALID,
+    }
+}
+
+/// The module's [`ModuleKind`]: JIT, object, or object for a target with
+/// no operating system.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_kind(m: *const Module) -> u32 {
+    // SAFETY: a live handle.
+    let Some(m) = (unsafe { m.as_ref() }) else {
+        return INVALID;
+    };
+    let kind = if m.jit {
+        ModuleKind::Jit
+    } else if m.get().isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+        ModuleKind::Freestanding
+    } else {
+        ModuleKind::Object
+    };
+    kind as u32
+}
+
+/// Compile the finished builder `b` (consumed) for the module's ISA without
+/// defining it (`Context::compile` with a default `ControlPlane`), as the
+/// verifiers and freestanding images do. Returns the code size, or
+/// `u64::MAX` with the module's error set; `vcl_module_last_code` reads it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_compile(m: *mut Module, b: *mut Builder) -> u64 {
+    let Some(b) = (unsafe { take_builder(b) }) else {
+        return with_module(m, u64::MAX, |_| {
+            Err("a lent or null builder cannot be compiled".into())
+        });
+    };
+    with_module(m, u64::MAX, |m| {
+        let f = b.finish()?;
+        let clif = m.keep_clif.then(|| f.display().to_string());
+        let (module, ctx) = m.parts();
+        ctx.func = f;
+        let isa = module.isa();
+        let r = ctx
+            .compile(
+                isa,
+                &mut cranelift_codegen::control::ControlPlane::default(),
+            )
+            .map(|_| ())
+            .map_err(|e| cranelift_module::ModuleError::Compilation(e.inner));
+        let r = finished(isa, ctx, r);
+        module.clear_context(ctx);
+        let done = r?;
+        m.keep_last(done, clif);
+        Ok(m.last_code.len() as u64)
+    })
+}
+
+/// Copy the last `vcl_compile`'s code from `offset` into `out`; returns its
+/// full length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_last_code(
+    m: *const Module,
+    offset: u64,
+    out: *mut u8,
+    out_len: usize,
+) -> u64 {
+    // SAFETY: a live handle.
+    let Some(m) = (unsafe { m.as_ref() }) else {
+        return 0;
+    };
+    copy_out(&m.last_code, offset, out, out_len);
+    m.last_code.len() as u64
+}
+
+/// Copy the Windows x64 unwind information (`UNWIND_INFO` bytes) of the
+/// last function compiled or defined into `out`; returns its full length,
+/// 0 on other targets.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_last_unwind(
+    m: *const Module,
+    out: *mut u8,
+    out_len: usize,
+) -> u64 {
+    // SAFETY: a live handle.
+    let Some(m) = (unsafe { m.as_ref() }) else {
+        return 0;
+    };
+    copy_out(&m.last_unwind, 0, out, out_len);
+    m.last_unwind.len() as u64
+}
+
+/// Copy the trap records of the last compiled or defined function into
+/// `out`, two words per trap: the code offset and the trap code
+/// (`TrapCode::as_raw`), as `MachBufferFinalized::traps` lists them.
+/// Returns how many words there are.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_last_traps(
+    m: *const Module,
+    out: *mut u64,
+    out_len: usize,
+) -> u64 {
+    // SAFETY: a live handle.
+    let Some(m) = (unsafe { m.as_ref() }) else {
+        return 0;
+    };
+    // SAFETY: the `.vsys` CSlice contract.
+    let out = unsafe { slice_mut(out, out_len) };
+    let n = out.len().min(m.last_traps.len());
+    out[..n].copy_from_slice(&m.last_traps[..n]);
+    m.last_traps.len() as u64
+}
+
+/// Import data `data` into the function, with `colocated` set as the
+/// caller says (`vcl_import_data` keeps the module's choice). RISC-V
+/// objects need non-colocated data references: cranelift-object cannot
+/// emit `R_RISCV_PCREL_HI20`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_import_data_colocated(
+    b: *mut Builder,
+    m: *const Module,
+    data: u32,
+    colocated: bool,
+) -> u32 {
+    with_builder(b, INVALID, |b| {
+        // SAFETY: a live handle.
+        let m = unsafe { m.as_ref() }.ok_or("null module")?;
+        let id = data_id(m, data)?;
+        let fb = b.fb();
+        let gv = m.get().declare_data_in_func(id, fb.func);
+        if let ir::GlobalValueData::Symbol { colocated: c, .. } = &mut fb.func.global_values[gv] {
+            *c = colocated;
+        }
+        Ok(gv.as_u32())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Builder extras the compiler uses (SH4 lane 1, #1275).
+
+/// Attach source location `loc` to the instructions emitted from now on.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_set_srcloc(b: *mut Builder, loc: u32) {
+    with_builder(b, (), |b| {
+        b.fb().set_srcloc(ir::SourceLoc::new(loc));
+        Ok(())
+    })
+}
+/// Mark `blk` cold (laid out last).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_set_cold_block(b: *mut Builder, blk: u32) {
+    with_builder(b, (), |b| {
+        b.fb().set_cold_block(block(blk));
+        Ok(())
+    })
+}
+/// The block being emitted into (`INVALID` if none).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_current_block(b: *mut Builder) -> u32 {
+    with_builder(b, INVALID, |b| {
+        Ok(b.fb().current_block().map_or(INVALID, |blk| blk.as_u32()))
+    })
+}
+/// Name the function `UserFuncName::user(namespace, index)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_set_func_name(b: *mut Builder, namespace: u32, index: u32) {
+    with_builder(b, (), |b| {
+        b.fb().func.name = UserFuncName::user(namespace, index);
+        Ok(())
+    })
+}
+/// `vcl_import_function`, then set the import's `colocated` flag (its
+/// `ExtFuncData`); returns the FuncRef.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_import_function_colocated(
+    b: *mut Builder,
+    m: *mut Module,
+    func: u32,
+    colocated: bool,
+) -> u32 {
+    with_builder(b, INVALID, |b| {
+        // SAFETY: a live handle.
+        let m = unsafe { m.as_mut() }.ok_or("null module")?;
+        let id = func_id(m, func)?;
+        let fb = b.fb();
+        let r = m.get_mut().declare_func_in_func(id, fb.func);
+        fb.func.dfg.ext_funcs[r].colocated = colocated;
+        Ok(r.as_u32())
+    })
+}
+/// A `cranelift_frontend::Switch` on `x`: jump to `blocks[i]` when `x`
+/// equals `indices[i]`, else to `otherwise`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_switch(
+    b: *mut Builder,
+    x: u32,
+    otherwise: u32,
+    indices: *const u64,
+    indices_len: usize,
+    blocks: *const u32,
+    blocks_len: usize,
+) {
+    // SAFETY: the `.vsys` CSlice contract.
+    let (indices, blocks) = unsafe { (slice(indices, indices_len), slice(blocks, blocks_len)) };
+    with_builder(b, (), |b| {
+        if indices.len() != blocks.len() {
+            return Err("switch indices and blocks differ in length".into());
+        }
+        let mut s = Switch::new();
+        for (&i, &blk) in indices.iter().zip(blocks) {
+            s.set_entry(u128::from(i), block(blk));
+        }
+        s.emit(b.fb(), value(x), block(otherwise));
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Batches.
 
 /// The `vcl_emit` instruction kinds (the low byte of an instruction's first
@@ -1667,7 +2325,7 @@ fn emit(b: &mut Builder, code: &[u64], out: &mut [u32]) -> Result<u32, String> {
                 Ok(value(w as u32))
             }
         };
-        let fb = b.fb.as_mut().expect("live builder");
+        let fb = b.fb();
         let (v, width) = match kind {
             batch::ICONST => (Some(iconst(fb, t, arg(1)? as i64)?), 2),
             batch::BINARY => (Some(binary(fb, op, val(1, out)?, val(2, out)?)?), 3),
@@ -1804,5 +2462,47 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_trap,
         vcl_trap_if,
         vcl_emit,
+        vcl_jit_module_new,
+        vcl_module_finalize,
+        vcl_function_address,
+        vcl_module_function_count,
+        vcl_module_function_name,
+        vcl_module_get_function,
+        vcl_module_get_data,
+        vcl_module_kind,
+        vcl_compile,
+        vcl_module_last_code,
+        vcl_module_last_unwind,
+        vcl_module_last_traps,
+        vcl_import_data_colocated,
+        vcl_set_srcloc,
+        vcl_set_cold_block,
+        vcl_current_block,
+        vcl_set_func_name,
+        vcl_import_function_colocated,
+        vcl_switch,
+        vcl_call_op,
+        vcl_call_arg_count,
+        vcl_call_arg,
+        vcl_call_args,
+        vcl_call_result,
+        vcl_call_builder,
+        vcl_call_module,
+        vcl_call_return_builder,
+        vcl_call_return_module,
+        vcl_sig_param_ext,
+        vcl_sig_return_ext,
+        vcl_define_function_bytes,
+        vcl_module_function_at,
+        vcl_module_function_linkage,
+        vcl_module_function_signature,
+        vcl_module_data_count,
+        vcl_module_data_at,
+        vcl_module_data_name,
+        vcl_module_data_linkage,
+        vcl_module_last_clif,
+        vcl_module_last_relocs,
+        vcl_module_last_call_sites,
+        vcl_module_last_frame_size,
     ]
 }
