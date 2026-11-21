@@ -5,6 +5,16 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Reference-evaluator Vesper source sessions under the deterministic SimPulse kernel"
 publish = false
+build = "build.rs"
+
+# Under `vesper-port`, build.rs links the Vesper port in port/ (self-hosting
+# wave SH5 lane 19, #1342) and the datagram link model forwards to it. Rust
+# stays the default build until the port reaches parity
+# (docs/parallel-results/self-host-sim-session.md).
+[features]
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# A deliberately wrong Vesper build: the port test run must fail.
+vesper-port-divergent = ["vesper-port"]
 
 [[bin]]
 name = "vesper-sim"
@@ -17,3 +27,7 @@ vesper-warp-umem = { path = "../vesper-warp-umem" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }

@@ -27,6 +27,8 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/stack_bound",
         "port/stack_bound.rs",
     ),
+    // SH3 lane 1 (#1240): the IR swap point's identity round trip.
+    ("hybrid_place_ir", "modules/place_ir", "port/place_ir.rs"),
 ];
 
 /// The divergence check of the differential harness: the enum tag word

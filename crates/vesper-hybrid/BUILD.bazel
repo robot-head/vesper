@@ -54,6 +54,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:check_loops_atomics_package",
         ],
+        # The IR swap point's identity round trip (#1240).
+        "hybrid_place_ir": [
+            "//:check_data_package",
+            "//:place_ir_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -65,6 +70,7 @@ vesper_hybrid(
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
+        "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",
     },
     test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
