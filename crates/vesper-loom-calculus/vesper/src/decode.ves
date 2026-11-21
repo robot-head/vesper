@@ -18,6 +18,8 @@ use self::{
     Ver
 };
 use self::util::{
+    Order,
+    SortKind,
     add,
     bytes_ord,
     inc,
@@ -154,7 +156,7 @@ pub fn decode_tables(inout l: L) {
         l.idx.push(i);
         l.rank.push(0);
     }
-    sort(inout l, 0);
+    sort(inout l, SortKind::Strings);
     let mut k: u64 = 0;
     for j in 0..nocc {
         let occ = sw(in l.idx, j);
@@ -166,7 +168,7 @@ pub fn decode_tables(inout l: L) {
         } else {
             let prev = sw(in l.rocc, wrapping_sub(k, 1));
             let pb = add(1, add(prev, prev));
-            bytes_ord(in l, sw(in l.inw, pb), sw(in l.inw, inc(pb)), off, len) == 1
+            bytes_ord(in l, sw(in l.inw, pb), sw(in l.inw, inc(pb)), off, len) == Order::Equal
         };
         if !same {
             l.rocc.push(occ);

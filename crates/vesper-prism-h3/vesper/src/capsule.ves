@@ -22,9 +22,11 @@ use self::varint::{
 // UTF-8 reason.
 const CLOSE_CODE_LEN: u64 = 4;
 // CapsuleReader modes.
-const MODE_HEADER: u64 = 0;
-const MODE_SKIP: u64 = 2;
-const MODE_VALUE: u64 = 3;
+enum Mode: u64 {
+    Header = 0,
+    Skip = 2,
+    Value = 3,
+}
 // Well-formed UTF-8 (Unicode Table 3-7, RFC 3629 §4): continuation bytes,
 // the lead-byte ranges of 2-, 3- and 4-byte sequences, and the narrower
 // second-byte ranges after E0 (no overlong forms), ED (no surrogates), F0
@@ -63,7 +65,7 @@ pub fn capsule_reader_new(max_value: u64) -> CapsuleReaderCore {
     CapsuleReaderCore {
         buf: ChunkSeq::new[u8](),
         head: 0,
-        mode: MODE_HEADER,
+        mode: Mode::Header,
         remaining: 0,
         ty: 0,
         len: 0,
@@ -85,7 +87,7 @@ pub fn capsule_buffered(in r: CapsuleReaderCore) -> u64 {
 }
 
 pub fn capsule_at_boundary(in r: CapsuleReaderCore) -> bool {
-    r.mode == MODE_HEADER && r.head >= r.buf.len()
+    r.mode == Mode::Header && r.head >= r.buf.len()
 }
 
 fn cont(in s: Slice[u8], i: u64) -> bool {
@@ -195,7 +197,7 @@ pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleErr
     r.out.clear();
     loop {
         let avail = wrapping_sub(r.buf.len(), r.head);
-        if r.mode == MODE_HEADER {
+        if r.mode == Mode::Header {
             let t = match vdec(in r.buf.as_slice(), r.head) {
                 Option::Some(n) => n,
                 Option::None => return Result::Ok(CapsuleOut::None),
@@ -221,22 +223,22 @@ pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleErr
                         }
                     );
                 }
-                r.mode = MODE_VALUE;
+                r.mode = Mode::Value;
                 r.ty = ty;
                 r.len = len;
             } else {
-                r.mode = MODE_SKIP;
+                r.mode = Mode::Skip;
                 r.remaining = len;
                 return Result::Ok(CapsuleOut::Unknown(ty));
             }
-        } else if r.mode == MODE_SKIP {
+        } else if r.mode == Mode::Skip {
             let n = min64(r.remaining, avail);
             r.head = wrapping_add(r.head, n);
             r.remaining = wrapping_sub(r.remaining, n);
             if r.remaining > 0 {
                 return Result::Ok(CapsuleOut::None);
             }
-            r.mode = MODE_HEADER;
+            r.mode = Mode::Header;
         } else {
             if avail < r.len {
                 return Result::Ok(CapsuleOut::None);
@@ -244,7 +246,7 @@ pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleErr
             let lo = r.head;
             let hi = wrapping_add(lo, r.len);
             r.head = hi;
-            r.mode = MODE_HEADER;
+            r.mode = Mode::Header;
             return parse_value(r.ty, in r.buf[lo..hi], inout r.out);
         }
     }

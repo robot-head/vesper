@@ -11,28 +11,13 @@ use self::apply::{
     word
 };
 use self::codes::{
-    b_children,
-    b_disconnect_counter,
-    b_properties,
-    b_subscription_counter,
-    b_subscriptions,
-    b_text,
-    i_bound,
-    i_event,
-    i_insert_detached,
-    i_insert_position,
-    i_move_position,
-    i_parent_mismatch,
-    i_property,
-    i_redundant,
-    i_remove_position,
-    i_subscribed,
-    k_container,
-    max_u64,
-    none_id,
-    op_insert_child,
-    op_remove_child,
-    v_text
+    Budget,
+    Invalid,
+    OpTag,
+    ValueTag,
+    WidgetKind,
+    MAX_U64,
+    NONE_ID
 };
 use self::recording::{
     child_edge,
@@ -103,22 +88,22 @@ pub fn patch_bind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
         Option::None => (),
     }
     let i = widget_index(in s, widget);
-    if i == none_id() {
+    if i == NONE_ID {
         return stale_widget();
     }
-    if widget_slot(in s, widget, property) != none_id() {
-        return invalid(i_bound());
+    if widget_slot(in s, widget, property) != NONE_ID {
+        return invalid(Invalid::Bound);
     }
     if widget_slot_count(in s, widget) >= lim.properties {
-        return budget(b_properties());
+        return budget(Budget::Properties);
     }
     if !property_valid(rwidget(in s.widgets, i).kind, property, vtag, payload) {
-        return invalid(i_property());
+        return invalid(Invalid::Property);
     }
-    if vtag == v_text() && tlen > lim.text {
-        return budget(b_text());
+    if vtag == ValueTag::Text && tlen > lim.text {
+        return budget(Budget::Text);
     }
-    let at = if vtag == v_text() {
+    let at = if vtag == ValueTag::Text {
         push_text(inout s, in text, tstart, tlen)
     } else {
         0
@@ -133,7 +118,7 @@ pub fn patch_bind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
             tag: vtag,
             payload: payload,
             tstart: at,
-            tlen: if vtag == v_text() {
+            tlen: if vtag == ValueTag::Text {
                 tlen
             } else {
                 0
@@ -156,31 +141,31 @@ pub fn patch_set_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
     let tstart = word(in w, base, 5);
     let tlen = word(in w, base, 6);
     let k = slot_index(in s, slot);
-    if k == none_id() {
+    if k == NONE_ID {
         return Option::Some(BackendFault::StaleSlot);
     }
     let old = rslot(in s.slots, k);
     let i = widget_index(in s, old.widget);
-    if i == none_id() {
+    if i == NONE_ID {
         return stale_widget();
     }
     if !property_valid(rwidget(in s.widgets, i).kind, old.property, vtag, payload) {
-        return invalid(i_property());
+        return invalid(Invalid::Property);
     }
-    if vtag == v_text() && tlen > lim.text {
-        return budget(b_text());
+    if vtag == ValueTag::Text && tlen > lim.text {
+        return budget(Budget::Text);
     }
     let same = if old.tag != vtag {
         false
-    } else if vtag != v_text() {
+    } else if vtag != ValueTag::Text {
         old.payload == payload
     } else {
         same_text(in s, old, in text, tstart, tlen)
     };
     if same {
-        return invalid(i_redundant());
+        return invalid(Invalid::Redundant);
     }
-    let at = if vtag == v_text() {
+    let at = if vtag == ValueTag::Text {
         push_text(inout s, in text, tstart, tlen)
     } else {
         0
@@ -196,7 +181,7 @@ pub fn patch_set_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
             tag: vtag,
             payload: payload,
             tstart: at,
-            tlen: if vtag == v_text() {
+            tlen: if vtag == ValueTag::Text {
                 tlen
             } else {
                 0
@@ -218,7 +203,7 @@ pub fn patch_unbind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64,
     let k = slot_index(in s, slot);
     let owner = rslot(in s.slots, k);
     if k
-        == none_id()
+        == NONE_ID
         || !session_ok(in s, widget_session)
         || owner
         .widget
@@ -228,7 +213,7 @@ pub fn patch_unbind_slot(inout s: RState, lim: Lim, in w: Slice[u64], base: u64,
         != property {
         return Option::Some(BackendFault::StaleSlot);
     }
-    if widget_index(in s, widget) == none_id() {
+    if widget_index(in s, widget) == NONE_ID {
         return stale_widget();
     }
     s.slive.try_set(k, false);
@@ -252,17 +237,17 @@ pub fn patch_subscribe(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
         Option::None => (),
     }
     let i = widget_index(in s, widget);
-    if i == none_id() {
+    if i == NONE_ID {
         return stale_widget();
     }
-    if widget_sub(in s, widget, event) != none_id() {
-        return invalid(i_subscribed());
+    if widget_sub(in s, widget, event) != NONE_ID {
+        return invalid(Invalid::Subscribed);
     }
     if widget_sub_count(in s, widget) >= lim.subscriptions {
-        return budget(b_subscriptions());
+        return budget(Budget::Subscriptions);
     }
     if !event_valid(rwidget(in s.widgets, i).kind, event) {
-        return invalid(i_event());
+        return invalid(Invalid::Event);
     }
     s
         .subs
@@ -276,8 +261,8 @@ pub fn patch_subscribe(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, i
     );
     s.blive.push(true);
     s.nsubs = inc(s.nsubs);
-    if s.created == max_u64() {
-        return budget(b_subscription_counter());
+    if s.created == MAX_U64 {
+        return budget(Budget::SubscriptionCounter);
     }
     s.created = inc(s.created);
     record(inout s, lim, op(EV_SUBSCRIBED, sub, 0, 0, 0))
@@ -290,17 +275,17 @@ pub fn patch_disconnect(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, 
     }
     let sub = word(in w, base, 2);
     let k = sub_index(in s, sub);
-    if k == none_id() {
+    if k == NONE_ID {
         return Option::Some(BackendFault::StaleSubscription);
     }
     let v = rsub(in s.subs, k);
     s.blive.try_set(k, false);
     s.nsubs = dec(s.nsubs);
-    if widget_index(in s, v.widget) == none_id() {
+    if widget_index(in s, v.widget) == NONE_ID {
         return stale_widget();
     }
-    if s.disconnected == max_u64() {
-        return budget(b_disconnect_counter());
+    if s.disconnected == MAX_U64 {
+        return budget(Budget::DisconnectCounter);
     }
     s.disconnected = inc(s.disconnected);
     record(inout s, lim, op(EV_DISCONNECTED, sub, 0, 0, 0))
@@ -318,22 +303,22 @@ pub fn patch_children(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
     let parent = word(in w, base, 2);
     let child = word(in w, base, 4);
     let index = word(in w, base, 5);
-    if tag == op_remove_child() {
-        if widget_index(in s, parent) == none_id() {
+    if tag == OpTag::RemoveChild {
+        if widget_index(in s, parent) == NONE_ID {
             return stale_widget();
         }
         let at = child_edge(in s, parent, index);
-        if at == none_id() || redge(in s.edges, at).child != child {
-            return invalid(i_remove_position());
+        if at == NONE_ID || redge(in s.edges, at).child != child {
+            return invalid(Invalid::RemovePosition);
         }
         remove_edge(inout s, at);
         let c = widget_index(in s, child);
-        if c == none_id() {
+        if c == NONE_ID {
             return stale_widget();
         }
         let cw = rwidget(in s.widgets, c);
         if !cw.has_parent || cw.parent != parent {
-            return invalid(i_parent_mismatch());
+            return invalid(Invalid::ParentMismatch);
         }
         set_widget(
             inout s,
@@ -347,31 +332,31 @@ pub fn patch_children(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
             }
         );
         record(inout s, lim, op(EV_CHILD_REMOVED, parent, child, index, 0))
-    } else if tag == op_insert_child() {
+    } else if tag == OpTag::InsertChild {
         let c = widget_index(in s, child);
-        if c == none_id() {
+        if c == NONE_ID {
             return stale_widget();
         }
         let cw = rwidget(in s.widgets, c);
         if parent == child || (s.has_root && s.root == child) || cw.has_parent {
-            return invalid(i_insert_detached());
+            return invalid(Invalid::InsertDetached);
         }
         let pi = widget_index(in s, parent);
-        if pi == none_id() {
+        if pi == NONE_ID {
             return stale_widget();
         }
         let (count, at) = child_scan(in s, parent, index);
-        if rwidget(in s.widgets, pi).kind != k_container() || index > count {
-            return invalid(i_insert_position());
+        if rwidget(in s.widgets, pi).kind != WidgetKind::Container || index > count {
+            return invalid(Invalid::InsertPosition);
         }
         if count >= lim.children {
-            return budget(b_children());
+            return budget(Budget::Children);
         }
         let e = Edge {
             parent: parent,
             child: child
         };
-        if at == none_id() {
+        if at == NONE_ID {
             s.edges.push(e);
         } else {
             insert_edge(inout s, at, e);
@@ -390,12 +375,12 @@ pub fn patch_children(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
         record(inout s, lim, op(EV_CHILD_INSERTED, parent, child, index, 0))
     } else {
         let to = word(in w, base, 6);
-        if widget_index(in s, parent) == none_id() {
+        if widget_index(in s, parent) == NONE_ID {
             return stale_widget();
         }
         let (count, at) = child_scan(in s, parent, index);
-        if at == none_id() || redge(in s.edges, at).child != child || to >= count {
-            return invalid(i_move_position());
+        if at == NONE_ID || redge(in s.edges, at).child != child || to >= count {
+            return invalid(Invalid::MovePosition);
         }
         let dest = move_target(in s, parent, at, to);
         move_edge(inout s, at, dest);

@@ -203,6 +203,11 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        "test/self_host_check_core_typing_exprs": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 12 (#1184): @vesper/check-fip against
         # fip::check_world on the same corpus, its checker cases and mutants.
         "test/self_host_check_fip": glob([
@@ -535,6 +540,7 @@ vesper_crate(
         "test/self_host_check_names_packages": "long",
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
+        "test/self_host_check_core_typing_exprs": "long",
         "test/self_host_check_fip": "long",
     },
 )

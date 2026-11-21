@@ -30,33 +30,41 @@ use self::priority::{
 
 // SETTINGS identifiers (RFC 9114 §7.2.4.1, RFC 9204 §5, RFC 9220 §3,
 // RFC 9297 §2.1.1, RFC 9218 §2.1 and the WebTransport drafts; src/frame.rs).
-const SETTINGS_QPACK_MAX_TABLE_CAPACITY: u64 = 0x01;
-const SETTINGS_MAX_FIELD_SECTION_SIZE: u64 = 0x06;
-const SETTINGS_QPACK_BLOCKED_STREAMS: u64 = 0x07;
-const SETTINGS_ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
-const SETTINGS_NO_RFC7540_PRIORITIES: u64 = 0x09;
-const SETTINGS_H3_DATAGRAM: u64 = 0x33;
-const SETTINGS_ENABLE_WEBTRANSPORT: u64 = 0x2b603742;
-const SETTINGS_WEBTRANSPORT_MAX_SESSIONS_DRAFT07: u64 = 0xc671706a;
-const SETTINGS_WT_MAX_SESSIONS: u64 = 0x14e9cd29;
-// A reserved setting (0x1f * 7 + 0x21) sent as grease (§7.2.4.1).
-const GREASE_SETTING: u64 = 0xfa;
+enum Setting: u64 {
+    QpackMaxTableCapacity = 0x01,
+    MaxFieldSectionSize = 0x06,
+    QpackBlockedStreams = 0x07,
+    EnableConnectProtocol = 0x08,
+    NoRfc7540Priorities = 0x09,
+    H3Datagram = 0x33,
+    EnableWebtransport = 0x2b603742,
+    WebtransportMaxSessionsDraft07 = 0xc671706a,
+    WtMaxSessions = 0x14e9cd29,
+    // A reserved setting (0x1f * 7 + 0x21) sent as grease (§7.2.4.1).
+    Grease = 0xfa,
+}
 // HTTP/2 frame types with no HTTP/3 meaning (§7.2.8, §11.2.1).
-const H2_PRIORITY: u64 = 0x02;
-const H2_PING: u64 = 0x06;
-const H2_WINDOW_UPDATE: u64 = 0x08;
-const H2_CONTINUATION: u64 = 0x09;
+enum H2Frame: u64 {
+    Priority = 0x02,
+    Ping = 0x06,
+    WindowUpdate = 0x08,
+    Continuation = 0x09,
+}
 // HTTP/2 settings that must not appear (§7.2.4.1, §11.2.2): 0x00 and
 // SETTINGS_ENABLE_PUSH (0x02) through SETTINGS_MAX_FRAME_SIZE (0x05).
-const H2_SETTINGS_RESERVED: u64 = 0x00;
-const H2_SETTINGS_ENABLE_PUSH: u64 = 0x02;
-const H2_SETTINGS_MAX_FRAME_SIZE: u64 = 0x05;
+enum H2Setting: u64 {
+    Reserved = 0x00,
+    EnablePush = 0x02,
+    MaxFrameSize = 0x05,
+}
 // FrameReader modes.
-const MODE_HEADER: u64 = 0;
-const MODE_DATA: u64 = 1;
-const MODE_SKIP: u64 = 2;
-const MODE_PAYLOAD: u64 = 3;
-const MODE_OPAQUE: u64 = 4;
+enum Mode: u64 {
+    Header = 0,
+    Data = 1,
+    Skip = 2,
+    Payload = 3,
+    Opaque = 4,
+}
 
 fn data_type() -> u64 {
     0
@@ -91,13 +99,18 @@ fn webtransport_stream_type() -> u64 {
 }
 
 fn is_http2_frame(ty: u64) -> bool {
-    ty == H2_PRIORITY || ty == H2_PING || ty == H2_WINDOW_UPDATE || ty == H2_CONTINUATION
+    ty
+        == H2Frame::Priority
+        || ty
+        == H2Frame::Ping
+        || ty
+        == H2Frame::WindowUpdate
+        || ty
+        == H2Frame::Continuation
 }
 
 fn is_http2_setting(id: u64) -> bool {
-    id
-        == H2_SETTINGS_RESERVED
-        || (id >= H2_SETTINGS_ENABLE_PUSH && id <= H2_SETTINGS_MAX_FRAME_SIZE)
+    id == H2Setting::Reserved || (id >= H2Setting::EnablePush && id <= H2Setting::MaxFrameSize)
 }
 
 pub fn settings_default() -> Settings {
@@ -165,36 +178,34 @@ pub fn settings_parse(in p: Slice[u8]) -> Result[Settings, FrameError] {
             return Result::Err(FrameError::BadSetting(id));
         }
         seen.push(id);
-        if id == SETTINGS_QPACK_MAX_TABLE_CAPACITY {
+        if id == Setting::QpackMaxTableCapacity {
             s.qpack_max_table_capacity = value;
-        } else if id == SETTINGS_QPACK_BLOCKED_STREAMS {
+        } else if id == Setting::QpackBlockedStreams {
             s.qpack_blocked_streams = value;
-        } else if id == SETTINGS_MAX_FIELD_SECTION_SIZE {
+        } else if id == Setting::MaxFieldSectionSize {
             s.max_field_section_size = Option::Some(value);
         } else if id
-            == SETTINGS_ENABLE_CONNECT_PROTOCOL
+            == Setting::EnableConnectProtocol
             || id
-            == SETTINGS_H3_DATAGRAM
+            == Setting::H3Datagram
             || id
-            == SETTINGS_NO_RFC7540_PRIORITIES
+            == Setting::NoRfc7540Priorities
             || id
-            == SETTINGS_ENABLE_WEBTRANSPORT {
+            == Setting::EnableWebtransport {
             let f = match flag(id, value) {
                 Result::Ok(f) => f,
                 Result::Err(e) => return Result::Err(e),
             };
-            if id == SETTINGS_ENABLE_CONNECT_PROTOCOL {
+            if id == Setting::EnableConnectProtocol {
                 s.enable_connect_protocol = f;
-            } else if id == SETTINGS_H3_DATAGRAM {
+            } else if id == Setting::H3Datagram {
                 s.h3_datagram = f;
-            } else if id == SETTINGS_NO_RFC7540_PRIORITIES {
+            } else if id == Setting::NoRfc7540Priorities {
                 s.no_rfc7540_priorities = f;
             } else if f {
                 s.webtransport_max_sessions = sessions_at_least(s.webtransport_max_sessions, 1);
             }
-        } else if (
-            id == SETTINGS_WEBTRANSPORT_MAX_SESSIONS_DRAFT07 || id == SETTINGS_WT_MAX_SESSIONS
-        )
+        } else if (id == Setting::WebtransportMaxSessionsDraft07 || id == Setting::WtMaxSessions)
             && value
             > 0 {
             s.webtransport_max_sessions = sessions_at_least(s.webtransport_max_sessions, value);
@@ -228,32 +239,27 @@ pub fn settings_write(s: Settings, inout out: ChunkSeq[u8]) -> bool {
     let mut p = ChunkSeq::new[u8]();
     let mut ok = put_setting(
         inout p,
-        SETTINGS_QPACK_MAX_TABLE_CAPACITY,
+        Setting::QpackMaxTableCapacity,
         Option::Some(s.qpack_max_table_capacity)
     );
-    ok = put_setting(inout p, SETTINGS_QPACK_BLOCKED_STREAMS, Option::Some(s.qpack_blocked_streams))
+    ok = put_setting(inout p, Setting::QpackBlockedStreams, Option::Some(s.qpack_blocked_streams))
         && ok;
-    ok = put_setting(inout p, SETTINGS_MAX_FIELD_SECTION_SIZE, s.max_field_section_size) && ok;
-    ok = put_setting(inout p, SETTINGS_ENABLE_CONNECT_PROTOCOL, on(s.enable_connect_protocol))
-        && ok;
-    ok = put_setting(inout p, SETTINGS_H3_DATAGRAM, on(s.h3_datagram)) && ok;
-    ok = put_setting(inout p, SETTINGS_NO_RFC7540_PRIORITIES, on(s.no_rfc7540_priorities)) && ok;
+    ok = put_setting(inout p, Setting::MaxFieldSectionSize, s.max_field_section_size) && ok;
+    ok = put_setting(inout p, Setting::EnableConnectProtocol, on(s.enable_connect_protocol)) && ok;
+    ok = put_setting(inout p, Setting::H3Datagram, on(s.h3_datagram)) && ok;
+    ok = put_setting(inout p, Setting::NoRfc7540Priorities, on(s.no_rfc7540_priorities)) && ok;
     let wt = match s.webtransport_max_sessions {
         Option::Some(_n) => on(true),
         Option::None => Option::None,
     };
-    ok = put_setting(inout p, SETTINGS_ENABLE_WEBTRANSPORT, wt) && ok;
-    ok = put_setting(
-        inout p,
-        SETTINGS_WEBTRANSPORT_MAX_SESSIONS_DRAFT07,
-        s.webtransport_max_sessions
-    )
+    ok = put_setting(inout p, Setting::EnableWebtransport, wt) && ok;
+    ok = put_setting(inout p, Setting::WebtransportMaxSessionsDraft07, s.webtransport_max_sessions)
         && ok;
-    ok = put_setting(inout p, SETTINGS_WT_MAX_SESSIONS, s.webtransport_max_sessions) && ok;
+    ok = put_setting(inout p, Setting::WtMaxSessions, s.webtransport_max_sessions) && ok;
     ok = put_setting(
         inout p,
-        GREASE_SETTING,
-        Option::Some(wrapping_sub(GREASE_SETTING, GREASE_SETTING))
+        Setting::Grease,
+        Option::Some(wrapping_sub(Setting::Grease, Setting::Grease))
     )
         && ok;
     put_record(inout out, settings_type(), in p.as_slice()) && ok
@@ -267,7 +273,7 @@ pub fn reader_new(max_payload: u64, webtransport: bool) -> FrameReaderCore {
     FrameReaderCore {
         buf: ChunkSeq::new[u8](),
         head: 0,
-        mode: MODE_HEADER,
+        mode: Mode::Header,
         remaining: 0,
         ty: 0,
         len: 0,
@@ -290,7 +296,7 @@ pub fn reader_buffered(in r: FrameReaderCore) -> u64 {
 }
 
 pub fn reader_at_boundary(in r: FrameReaderCore) -> bool {
-    r.mode == MODE_HEADER && r.head >= r.buf.len()
+    r.mode == Mode::Header && r.head >= r.buf.len()
 }
 
 // `take_rest`: the unread bytes, moved to `out`.
@@ -373,7 +379,7 @@ pub fn reader_next(inout r: FrameReaderCore) -> Result[FrameOut, FrameError] {
     r.out.clear();
     loop {
         let avail = wrapping_sub(r.buf.len(), r.head);
-        if r.mode == MODE_HEADER {
+        if r.mode == Mode::Header {
             let t = match vdec(in r.buf.as_slice(), r.head) {
                 Option::Some(n) => n,
                 Option::None => return Result::Ok(FrameOut::None),
@@ -389,14 +395,14 @@ pub fn reader_next(inout r: FrameReaderCore) -> Result[FrameOut, FrameError] {
                 return Result::Err(FrameError::Http2Frame(ty));
             }
             if ty == webtransport_stream_type() && r.webtransport {
-                r.mode = MODE_OPAQUE;
+                r.mode = Mode::Opaque;
                 return Result::Ok(FrameOut::WebTransportStream(len));
             }
             if ty == data_type() {
                 if len == 0 {
                     return Result::Ok(FrameOut::Data);
                 }
-                r.mode = MODE_DATA;
+                r.mode = Mode::Data;
                 r.remaining = len;
             } else if buffered_type(ty) {
                 if len > r.max_payload {
@@ -407,15 +413,15 @@ pub fn reader_next(inout r: FrameReaderCore) -> Result[FrameOut, FrameError] {
                         }
                     );
                 }
-                r.mode = MODE_PAYLOAD;
+                r.mode = Mode::Payload;
                 r.ty = ty;
                 r.len = len;
             } else {
-                r.mode = MODE_SKIP;
+                r.mode = Mode::Skip;
                 r.remaining = len;
                 return Result::Ok(FrameOut::Unknown(ty));
             }
-        } else if r.mode == MODE_DATA {
+        } else if r.mode == Mode::Data {
             if avail == 0 {
                 return Result::Ok(FrameOut::None);
             }
@@ -426,25 +432,25 @@ pub fn reader_next(inout r: FrameReaderCore) -> Result[FrameOut, FrameError] {
             r.head = hi;
             r.remaining = wrapping_sub(r.remaining, n);
             if r.remaining == 0 {
-                r.mode = MODE_HEADER;
+                r.mode = Mode::Header;
             }
             return Result::Ok(FrameOut::Data);
-        } else if r.mode == MODE_SKIP {
+        } else if r.mode == Mode::Skip {
             let n = min64(r.remaining, avail);
             r.head = wrapping_add(r.head, n);
             r.remaining = wrapping_sub(r.remaining, n);
             if r.remaining > 0 {
                 return Result::Ok(FrameOut::None);
             }
-            r.mode = MODE_HEADER;
-        } else if r.mode == MODE_PAYLOAD {
+            r.mode = Mode::Header;
+        } else if r.mode == Mode::Payload {
             if avail < r.len {
                 return Result::Ok(FrameOut::None);
             }
             let lo = r.head;
             let hi = wrapping_add(lo, r.len);
             r.head = hi;
-            r.mode = MODE_HEADER;
+            r.mode = Mode::Header;
             return parse_payload(r.ty, in r.buf[lo..hi], inout r.out);
         } else {
             return Result::Err(FrameError::Malformed);
