@@ -172,9 +172,15 @@ constant checked by a test. The fingerprint needs Loom to hand a build
 identity to the package (the compiler's own identity replaces `rustc -vV`).
 
 **Gap 8: CPU feature detection.** forge-runner's `HostIdentity` records
-`is_x86_feature_detected!` results. Vesper has no `cpuid`. Workaround:
-`getauxval(AT_HWCAP/AT_HWCAP2)` on Linux, `sysctlbyname("hw.optional.*")`
-on macOS, `IsProcessorFeaturePresent` on Windows, all non-variadic C.
+`is_x86_feature_detected!` results (AVX, AVX2, BMI1/2, AVX-512 subsets and
+others). Vesper has no `cpuid`. On AArch64, `getauxval(AT_HWCAP/AT_HWCAP2)`
+(Linux) and `sysctlbyname("hw.optional.*")` (macOS) cover the probes. On
+x86_64 they do not: Linux's x86 `AT_HWCAP2` exposes only RING3MWAIT and
+FSGSBASE, and `IsProcessorFeaturePresent` on Windows lacks most AVX-512
+bits. So x86_64 stays an unresolved gap: it needs a `cpuid` (and `xgetbv`)
+intrinsic in the language or an out-of-line assembly routine, which ties in
+with lane 13's assembly files for the fiber ABI. Reading `/proc/cpuinfo`
+flags would cover Linux only.
 
 **Gap 9: packaging `libwasmtime` and BLAKE3's C library.** A `.vsys`
 library is linked by name with `--link-search`, but nothing builds C sources
@@ -196,11 +202,18 @@ should be one shared package (for example `packages/vesper-blake3`), not two.
   itself over libc (`fstatat`, `readdir` sorted, renumbered metadata hashes)
   under the preopens' permission rules. That is the largest single piece of
   sandbox work.
-* *Only static store limits.* `wasmtime_store_limiter` takes fixed maxima,
-  with no callback, so the sandbox's peak-memory report and its typed
-  denial reasons have to come from `wasmtime_memory_size` after the call and
-  from the trap. Whether that reproduces every `SandboxError` variant the
-  tests check is open.
+* *Only static, per-object store limits.* `wasmtime_store_limiter` takes
+  fixed maxima for each memory and each table, with no callback. The Rust
+  sandbox's `Limiter` enforces *aggregate* budgets across all of an
+  instance's memories and tables (`limiter_aggregates_across_memories` in
+  `host.rs` tests it), so two memories each under the per-memory maximum
+  could together exceed today's budget without a denial. Reading sizes
+  after the call cannot restore enforcement. This is an unresolved port
+  blocker: it needs a limiter callback in the C API (an upstream change),
+  a custom `wasmtime_config_host_memory_creator_set` memory creator that
+  counts every allocation (also a C callback, gap 1), or an owner decision
+  to accept per-object limits. The peak-memory report and typed denial
+  reasons fall out of whichever enforcement path is chosen.
 * *No `tokio`.* The wall-clock backstop becomes
   `wasmtime_context_fuel_async_yield_interval` plus a
   `wasmtime_call_future_poll` loop that checks the clock between polls, on
