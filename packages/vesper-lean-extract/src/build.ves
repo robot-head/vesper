@@ -33,6 +33,7 @@ pub const T_BINARY: u64 = 21;
 pub const T_RECORD: u64 = 22;
 pub const T_UPDATE: u64 = 23;
 pub const T_DO: u64 = 24;
+pub const T_ELIMINATE: u64 = 27;
 
 // Binder kinds.
 pub const B_EXPLICIT: u64 = 0;
@@ -47,10 +48,15 @@ pub const P_TUPLE: u64 = 3;
 pub const P_BOOL: u64 = 5;
 pub const P_STRING: u64 = 6;
 pub const P_INT: u64 = 8;
+pub const P_RECORD: u64 = 9;
 
 // Do statements.
 pub const S_LET: u64 = 0;
 pub const S_BIND: u64 = 1;
+pub const S_ASSIGN: u64 = 2;
+pub const S_EXPR: u64 = 3;
+pub const S_BIND_TYPED: u64 = 4;
+pub const S_IF: u64 = 6;
 
 // Declarations.
 pub const D_INSTANCE: u64 = 0;
@@ -91,6 +97,7 @@ pub const OP_IFF: u64 = 17;
 
 // `UnaryOp`.
 pub const U_NEG: u64 = 0;
+pub const U_NOT: u64 = 1;
 pub const U_BOOL_NOT: u64 = 2;
 
 pub struct B {
@@ -509,6 +516,38 @@ impl B {
     pub fn slice_len(in self) -> u64 {
         self.words.len()
     }
+
+    // ----- terms as word ranges (the structured extractor, part 3) -----
+
+    pub fn at(in self) -> u64 {
+        self.words.len()
+    }
+
+    // The words written since mark `m`, as a term.
+    pub fn since(in self, m: u64) -> T {
+        T {
+            a: m,
+            n: wrapping_sub(self.words.len(), m)
+        }
+    }
+
+    // Writes a copy of `t`.
+    pub fn put(inout self, t: T) {
+        for i in 0..t.n {
+            let x = match self.words.try_get(wrapping_add(t.a, i)) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            self.words.push(x);
+        }
+    }
+}
+
+// A subtree written earlier: words[a..a+n] of the builder. Composing terms
+// copies their words, so a range stays valid for the builder's lifetime.
+pub copy struct T {
+    a: u64,
+    n: u64,
 }
 
 // `\u{hex}`, lower case, no leading zeros.

@@ -26,6 +26,10 @@ vesper_hybrid(
             "edit_src": "modules/ir_inline/src/lib.ves",
             "edits": {"    inline_program_words(in input)\n": "    divergent_words(in input)\n"},
         },
+        "hybrid_ir_opt": {
+            "edit_src": "modules/ir_opt/src/lib.ves",
+            "edits": {"    ir_opt_words(in input)\n": "    divergent_words(in input)\n"},
+        },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
             "edits": {"    if b {\n        1\n    } else {\n        0\n    }": "    if b {\n        0\n    } else {\n        1\n    }"},
@@ -54,6 +58,11 @@ vesper_hybrid(
             "//:codegen_base_package",
             "//packages/vesper-cranelift:cranelift_package",
         ],
+        # The export glue (#1286) emits through the Cranelift shim too.
+        "hybrid_codegen_export": [
+            "//:codegen_export_glue_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         "hybrid_ir_check": [
             "//:check_data_package",
             "//:ir_check_package",
@@ -67,8 +76,20 @@ vesper_hybrid(
             "//:check_data_package",
             "//:ir_inline_package",
         ],
+        "hybrid_ir_opt": [
+            "//:check_data_package",
+            "//:egraph_package",
+            "//:ir_opt_package",
+            "//:place_ir_package",
+        ],
         # The IR swap point's identity round trip (#1240).
         "hybrid_place_ir": [
+            "//:check_data_package",
+            "//:place_ir_package",
+        ],
+        # The IR swap point's `hoist` hook (#1251).
+        "hybrid_bounds_hoist": [
+            "//:bounds_hoist_package",
             "//:check_data_package",
             "//:place_ir_package",
         ],
@@ -86,16 +107,74 @@ vesper_hybrid(
     modules = {
         "hybrid_check_layout": "modules/check_layout",
         "hybrid_codegen": "modules/codegen",
+        "hybrid_codegen_export": "modules/codegen_export",
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_ir_inline": "modules/ir_inline",
+        "hybrid_ir_opt": "modules/ir_opt",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
         "hybrid_stack_bound": "modules/stack_bound",
+        "hybrid_bounds_hoist": "modules/bounds_hoist",
+    },
+    # The export glue swap (#1286) builds every library a port crate links
+    # (tests/self_host_codegen_export/ports.rs) with both compilers.
+    test_data_by_target = {
+        "test/codegen_export": [
+            "//:files",
+            "//crates/vesper-aegis:files",
+            "//crates/vesper-alloc:files",
+            "//crates/vesper-aura:files",
+            "//crates/vesper-beacon:files",
+            "//crates/vesper-bench:files",
+            "//crates/vesper-chorus:files",
+            "//crates/vesper-crucible:files",
+            "//crates/vesper-diagnostics:files",
+            "//crates/vesper-ebpf:files",
+            "//crates/vesper-flux:files",
+            "//crates/vesper-fmt:files",
+            "//crates/vesper-forge:files",
+            "//crates/vesper-grammar:files",
+            "//crates/vesper-highlight:files",
+            "//crates/vesper-hybrid:files",
+            "//crates/vesper-ignis:files",
+            "//crates/vesper-kinetic:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-lint:files",
+            "//crates/vesper-loom-audit:files",
+            "//crates/vesper-loom-calculus:files",
+            "//crates/vesper-loom-solver:files",
+            "//crates/vesper-pact:files",
+            "//crates/vesper-port-build:files",
+            "//crates/vesper-port-pilot:files",
+            "//crates/vesper-prism:files",
+            # vesper/target/ is outside :files (no **/target/** glob).
+            "//crates/vesper-prism:target_package",
+            "//crates/vesper-prism-h3:files",
+            "//crates/vesper-quarry:files",
+            "//crates/vesper-resonance:files",
+            "//crates/vesper-semver:files",
+            "//crates/vesper-serde:files",
+            "//crates/vesper-silicon:files",
+            "//crates/vesper-simpulse:files",
+            "//crates/vesper-span:files",
+            "//crates/vesper-std-driver:files",
+            "//crates/vesper-tensor:files",
+            "//crates/vesper-warp:files",
+            "//crates/vesper-warp-bbr:files",
+            "//crates/vesper-warp-tcp:files",
+            "//crates/vesper-warp-wheel:files",
+        ],
     },
     test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
+    # 51 libraries, each built by both compilers.
+    test_timeouts = {"test/codegen_export": "long"},
     test_path_binaries = {
+        "test/codegen_export": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
         "test/differential": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",

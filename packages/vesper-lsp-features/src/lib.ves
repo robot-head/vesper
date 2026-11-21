@@ -1,0 +1,420 @@
+// @vesper/lsp-features: the editor features of `vesper lsp` (src/lsp/**)
+// in Vesper (self-hosting wave SH5 lane 17, #1340). Rust stays the
+// default; tests/self_host_lsp_features.rs compares these entries with the
+// Rust server.
+//
+// - nav.ves: navigation (src/lsp/navigation.rs): the lexical index,
+//   document symbols, workspace symbols and definition.
+// - json.ves: serde_json's compact writer for those responses.
+//
+// Every entry takes the harness input (little-endian words, then text)
+// and returns its answer packed by `pack`: `R` and the JSON-RPC result,
+// `E` and the JSON-RPC error object the session sends, or `D` for a
+// definition left to the documentation-link fallback (not ported yet).
+
+use @vesper/span::{
+    Limits
+};
+use @vesper/span::Error as SpanError;
+use self::json::{
+    put,
+    put_bytes,
+    put_u64,
+    put_string,
+    pack
+};
+use self::nav::{
+    Ix,
+    MAX_DOCUMENTS,
+    MAX_OUTPUT_BYTES,
+    MAX_QUERY_BYTES,
+    MAX_SYMBOLS,
+    MAX_URI_BYTES,
+    ERR_NONE,
+    ERR_DOCUMENTS_QUERY,
+    ERR_OUTPUT_BYTES,
+    ERR_SYMBOLS,
+    ERR_URI_BYTES,
+    ERR_POSITION,
+    ERR_INVALID_SPAN,
+    cursor,
+    decl_count,
+    decl_kind,
+    decl_name,
+    decl_name_len,
+    decl_selection,
+    decl_span,
+    in_doc_comment,
+    index_new,
+    ix_contains,
+    ix_err,
+    ix_span_err,
+    node_target,
+    put_error,
+    put_name_string,
+    put_source_range,
+    reindex
+};
+
+copy struct Reader {
+    pos: u64
+}
+
+fn word(in b: Slice[u8], inout r: Reader) -> u64 {
+    let x = match b.try_read_u64_le(r.pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    r.pos = wrapping_add(r.pos, 8);
+    x
+}
+
+// The ten words of `vesper_span::Limits`, in field order.
+fn read_index(in b: Slice[u8], inout r: Reader) -> Limits {
+    Limits {
+        max_source_bytes: narrow_usize(word(in b, inout r)),
+        max_lines: narrow_usize(word(in b, inout r)),
+        max_metadata_bytes: narrow_usize(word(in b, inout r)),
+        max_work: narrow_usize(word(in b, inout r)),
+        max_edits: narrow_usize(word(in b, inout r)),
+        max_output_bytes: narrow_usize(word(in b, inout r)),
+        max_diagnostics: narrow_usize(word(in b, inout r)),
+        max_labels: narrow_usize(word(in b, inout r)),
+        max_fixes: narrow_usize(word(in b, inout r)),
+        max_text_bytes: narrow_usize(word(in b, inout r))
+    }
+}
+
+// The input text `off .. off + len` as a `String` (the harness writes only
+// UTF-8 there).
+fn text_at(in b: Slice[u8], off: u64, len: u64) -> String {
+    match String::from_utf8(in b[off..wrapping_add(off, len)]) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    }
+}
+
+fn error(code: u64, e: SpanError) -> ChunkSeq[u64] {
+    let mut o = ChunkSeq::new[u8]();
+    o.push(69);
+    put_error(inout o, code, e);
+    pack(in o.as_slice())
+}
+
+fn plain_error(code: u64) -> ChunkSeq[u64] {
+    error(code, SpanError::InvalidLimits)
+}
+
+fn uri_ok(in uri: Str) -> bool {
+    uri.len() != 0 && uri.len() <= MAX_URI_BYTES
+}
+
+// One `document_symbols` value: `{"kind","name","range","selectionRange"}`,
+// or with `legacy` the session's `SymbolInformation` form
+// `{"kind","location":{"range","uri"},"name"}` (the full range).
+fn symbol(inout v: ChunkSeq[u8], inout x: Ix, i: u64, in uri: Str, legacy: bool) -> bool {
+    let (s, e) = decl_span(in x, i);
+    put(inout v, in "{\"kind\":");
+    put_u64(inout v, decl_kind(in x, i));
+    if legacy {
+        put(inout v, in ",\"location\":{\"range\":");
+        if !put_source_range(inout v, inout x, s, e) {
+            return false;
+        }
+        put(inout v, in ",\"uri\":");
+        put_string(inout v, in uri.as_bytes());
+        put(inout v, in "},\"name\":");
+        put_name_string(inout v, in x, decl_name(in x, i));
+        v.push(125);
+        return true;
+    }
+    put(inout v, in ",\"name\":");
+    put_name_string(inout v, in x, decl_name(in x, i));
+    put(inout v, in ",\"range\":");
+    if !put_source_range(inout v, inout x, s, e) {
+        return false;
+    }
+    let (ss, se) = decl_selection(in x, i);
+    put(inout v, in ",\"selectionRange\":");
+    if !put_source_range(inout v, inout x, ss, se) {
+        return false;
+    }
+    v.push(125);
+    true
+}
+
+// Task "symbols": the ten index-limit words, the shape (1 hierarchical, 0
+// the legacy `SymbolInformation`), the URI length and the source length,
+// then the URI and the source. `textDocument/documentSymbol`.
+pub fn lsp_document_symbols(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let l = read_index(in b, inout r);
+    let hierarchical = word(in b, inout r) == 1;
+    let uri_len = word(in b, inout r);
+    let src_len = word(in b, inout r);
+    let uri = text_at(in b, r.pos, uri_len);
+    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
+    let mut x = index_new(src, in l);
+    if ix_err(in x) != ERR_NONE {
+        return error(ix_err(in x), ix_span_err(in x));
+    }
+    let mut remaining = MAX_OUTPUT_BYTES;
+    let mut total: u64 = 2;
+    let mut out = ChunkSeq::new[u8]();
+    out.push(82);
+    out.push(91);
+    let mut legacy = ChunkSeq::new[u8]();
+    legacy.push(82);
+    legacy.push(91);
+    for i in 0..decl_count(in x) {
+        if decl_name_len(in x, i) > remaining {
+            return plain_error(ERR_OUTPUT_BYTES);
+        }
+        let mut v = ChunkSeq::new[u8]();
+        if !symbol(inout v, inout x, i, in uri, false) {
+            return error(ix_err(in x), ix_span_err(in x));
+        }
+        let n = v.len();
+        if n >= remaining {
+            return plain_error(ERR_OUTPUT_BYTES);
+        }
+        remaining = wrapping_sub(remaining, wrapping_add(n, 1));
+        if i > 0 {
+            out.push(44);
+            legacy.push(44);
+            total = wrapping_add(total, 1);
+        }
+        total = wrapping_add(total, n);
+        put_bytes(inout out, in v.as_slice());
+        if !hierarchical {
+            let mut f = ChunkSeq::new[u8]();
+            if !symbol(inout f, inout x, i, in uri, true) {
+                return error(ix_err(in x), ix_span_err(in x));
+            }
+            put_bytes(inout legacy, in f.as_slice());
+        }
+    }
+    if total > MAX_OUTPUT_BYTES {
+        return plain_error(ERR_OUTPUT_BYTES);
+    }
+    out.push(93);
+    legacy.push(93);
+    if hierarchical {
+        pack(in out.as_slice())
+    } else {
+        pack(in legacy.as_slice())
+    }
+}
+
+// The answer to one definition request on `x` (after the URI check),
+// appended to `out`.
+fn definition_answer(inout out: ChunkSeq[u8], inout x: Ix, in uri: Str, line: u32, character: u32) {
+    if ix_err(in x) != ERR_NONE {
+        put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+        return;
+    }
+    let mut at: u64 = 0;
+    if !cursor(inout x, line, character, inout at) {
+        put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+        return;
+    }
+    let t = node_target(in x, at);
+    if t == 0 {
+        if in_doc_comment(in x, at) {
+            out.push(68);
+        } else {
+            put(inout out, in "Rnull");
+        }
+        return;
+    }
+    let span = wrapping_sub(t, 1);
+    let mut v = ChunkSeq::new[u8]();
+    put(inout v, in "{\"range\":");
+    if !put_source_range(inout v, inout x, span >> 32, span & 4294967295) {
+        put_error_answer(inout out, ix_err(in x), ix_span_err(in x));
+        return;
+    }
+    put(inout v, in ",\"uri\":");
+    put_string(inout v, in uri.as_bytes());
+    v.push(125);
+    if v.len() > MAX_OUTPUT_BYTES {
+        put_error_answer(inout out, ERR_OUTPUT_BYTES, SpanError::InvalidLimits);
+        return;
+    }
+    out.push(82);
+    put_bytes(inout out, in v.as_slice());
+}
+
+fn put_error_answer(inout out: ChunkSeq[u8], code: u64, e: SpanError) {
+    out.push(69);
+    put_error(inout out, code, e);
+}
+
+// Task "definition": the ten index-limit words, the line and UTF-16
+// character of the cursor, the URI length and the source length, then the
+// URI and the source. `textDocument/definition`.
+pub fn lsp_definition(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let l = read_index(in b, inout r);
+    let line = wrapping_u32(word(in b, inout r));
+    let character = wrapping_u32(word(in b, inout r));
+    let uri_len = word(in b, inout r);
+    let src_len = word(in b, inout r);
+    let uri = text_at(in b, r.pos, uri_len);
+    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
+    if !uri_ok(in uri) {
+        return plain_error(ERR_URI_BYTES);
+    }
+    let mut x = index_new(src, in l);
+    let mut out = ChunkSeq::new[u8]();
+    definition_answer(inout out, inout x, in uri, line, character);
+    pack(in out.as_slice())
+}
+
+// Task "definitions": `definition` for many cursors on one document whose
+// parse is kept, as the server keeps its checked snapshot: the index is
+// rebuilt (lexed and traversed) for every request, as Rust does. The input
+// is the ten index-limit words, the URI length, the source length and the
+// cursor count, then a line and a character per cursor, then the URI and
+// the source. The answers are joined by newlines.
+pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let l = read_index(in b, inout r);
+    let uri_len = word(in b, inout r);
+    let src_len = word(in b, inout r);
+    let n = word(in b, inout r);
+    let mut cursors = ChunkSeq::new[u64]();
+    for i in 0..wrapping_add(n, n) {
+        cursors.push(word(in b, inout r));
+    }
+    let uri = text_at(in b, r.pos, uri_len);
+    let src = text_at(in b, wrapping_add(r.pos, uri_len), src_len);
+    let mut out = ChunkSeq::new[u8]();
+    let mut x = index_new(src, in l);
+    for i in 0..n {
+        if i > 0 {
+            out.push(10);
+            if ix_err(in x)
+                == ERR_NONE
+                || ix_err(in x)
+                == ERR_POSITION
+                || ix_err(in x)
+                == ERR_INVALID_SPAN {
+                reindex(inout x);
+            }
+        }
+        if !uri_ok(in uri) {
+            put_error_answer(inout out, ERR_URI_BYTES, SpanError::InvalidLimits);
+            continue;
+        }
+        let line = match cursors.try_get(wrapping_add(i, i)) {
+            Option::Some(v) => wrapping_u32(v),
+            Option::None => 0,
+        };
+        let character = match cursors.try_get(wrapping_add(wrapping_add(i, i), 1)) {
+            Option::Some(v) => wrapping_u32(v),
+            Option::None => 0,
+        };
+        definition_answer(inout out, inout x, in uri, line, character);
+    }
+    pack(in out.as_slice())
+}
+
+// Task "workspace": the ten index-limit words, the query length and the
+// document count, then per document its URI length and source length,
+// then the query and each document's URI and source, in the store's
+// order. `workspace/symbol`.
+pub fn lsp_workspace_symbols(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let l = read_index(in b, inout r);
+    let query_len = word(in b, inout r);
+    let docs = word(in b, inout r);
+    let mut lens = ChunkSeq::new[u64]();
+    for i in 0..wrapping_add(docs, docs) {
+        lens.push(word(in b, inout r));
+    }
+    if docs > MAX_DOCUMENTS || query_len > MAX_QUERY_BYTES {
+        return plain_error(ERR_DOCUMENTS_QUERY);
+    }
+    let q = b[r.pos..wrapping_add(r.pos, query_len)];
+    let mut at = wrapping_add(r.pos, query_len);
+    let mut remaining = MAX_OUTPUT_BYTES;
+    let mut total: u64 = 2;
+    let mut count: u64 = 0;
+    let mut out = ChunkSeq::new[u8]();
+    out.push(82);
+    out.push(91);
+    for d in 0..docs {
+        let uri_len = match lens.try_get(wrapping_add(d, d)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let src_len = match lens.try_get(wrapping_add(wrapping_add(d, d), 1)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let uri = text_at(in b, at, uri_len);
+        let src = text_at(in b, wrapping_add(at, uri_len), src_len);
+        at = wrapping_add(wrapping_add(at, uri_len), src_len);
+        if !uri_ok(in uri) {
+            return plain_error(ERR_URI_BYTES);
+        }
+        let mut x = index_new(src, in l);
+        if ix_err(in x) != ERR_NONE {
+            return error(ix_err(in x), ix_span_err(in x));
+        }
+        for i in 0..decl_count(in x) {
+            if !ix_contains(in x, i, in q) {
+                continue;
+            }
+            if count >= MAX_SYMBOLS {
+                return plain_error(ERR_SYMBOLS);
+            }
+            if wrapping_add(decl_name_len(in x, i), uri.len()) > remaining {
+                return plain_error(ERR_OUTPUT_BYTES);
+            }
+            let mut v = ChunkSeq::new[u8]();
+            let (ss, se) = decl_selection(in x, i);
+            put(inout v, in "{\"kind\":");
+            put_u64(inout v, decl_kind(in x, i));
+            put(inout v, in ",\"location\":{\"range\":");
+            if !put_source_range(inout v, inout x, ss, se) {
+                return error(ix_err(in x), ix_span_err(in x));
+            }
+            put(inout v, in ",\"uri\":");
+            put_string(inout v, in uri.as_bytes());
+            put(inout v, in "},\"name\":");
+            put_name_string(inout v, in x, decl_name(in x, i));
+            v.push(125);
+            let n = v.len();
+            if n >= remaining {
+                return plain_error(ERR_OUTPUT_BYTES);
+            }
+            remaining = wrapping_sub(remaining, wrapping_add(n, 1));
+            if count > 0 {
+                out.push(44);
+                total = wrapping_add(total, 1);
+            }
+            total = wrapping_add(total, n);
+            put_bytes(inout out, in v.as_slice());
+            count = wrapping_add(count, 1);
+        }
+    }
+    if total > MAX_OUTPUT_BYTES {
+        return plain_error(ERR_OUTPUT_BYTES);
+    }
+    out.push(93);
+    pack(in out.as_slice())
+}

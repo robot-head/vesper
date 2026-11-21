@@ -14,11 +14,14 @@
 //! the native backend reads after the pass, are compared on the pass's input
 //! and on its output.
 //!
-//! The rewrite (loop versioning, `SeqOp::Hoisted`) stays in Rust until lane
-//! 1's IR writer (#1259) lands; each step's input is Rust's rewrite of the
-//! previous one, so every decision on every intermediate IR is covered.
+//! Each step's input is Rust's rewrite of the previous one, so every
+//! decision on every intermediate IR is covered. The port's own rewrite
+//! (loop versioning, `SeqOp::Hoisted`) is compared with `bounds_hoist::run`
+//! in tests/self_host_bounds_hoist_pass.rs.
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "self_host_bounds_hoist/corpus.rs"]
+mod corpus;
 #[path = "self_host_bounds_hoist/words.rs"]
 mod words;
 
@@ -33,57 +36,13 @@ fn package() -> &'static Package {
     P.get_or_init(|| Package::load("packages/vesper-bounds-hoist"))
 }
 
-/// A corpus world's program at the bounds-hoisting boundary of the native
-/// optimize pipeline (`native::compile_with` before `bounds_hoist::run`).
-fn at_hoist(world: &vesper::check::World) -> Option<Program> {
-    let mut program = vesper::ffi_lowering::drops::lower_world(world);
-    vesper::ir_opt::optimize(world, &mut program).ok()?;
-    vesper::ir_inline::inline(world, &mut program, &vesper::ir_inline::Budget::default());
-    vesper::fip::elaborate_non_fip_drops(world, &mut program);
-    Some(program)
-}
-
-thread_local! {
-    /// Set while this thread lowers a world: its panics are expected.
-    static QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Installs, once, a panic hook that is silent on a thread lowering a world
-/// and the previous hook everywhere else, so parallel tests never race on
-/// swapping hooks.
-fn quiet_panics() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            if !QUIET.get() {
-                previous(info);
-            }
-        }));
-    });
-}
-
 /// The corpus programs at the hoisting boundary, by world name, every
-/// `stride`th world; each world is lowered once, on first use.
+/// `stride`th world.
 fn programs(stride: usize) -> Vec<(&'static str, &'static Program)> {
-    static P: OnceLock<Vec<OnceLock<Option<Program>>>> = OnceLock::new();
-    let slots = P.get_or_init(|| corpus().iter().map(|_| OnceLock::new()).collect());
-    let mut out = vec![];
-    for (c, slot) in corpus().iter().zip(slots).step_by(stride) {
-        let p = slot.get_or_init(|| {
-            quiet_panics();
-            QUIET.set(true);
-            let p = std::panic::catch_unwind(|| at_hoist(&c.world))
-                .ok()
-                .flatten();
-            QUIET.set(false);
-            p
-        });
-        if let Some(p) = p {
-            out.push((c.name.as_str(), p));
-        }
-    }
-    out
+    corpus::programs(stride)
+        .into_iter()
+        .map(|(c, p)| (c.name.as_str(), p))
+        .collect()
 }
 
 /// Every step of the pass on `f`, with the function each was decided on.

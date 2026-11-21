@@ -55,8 +55,8 @@ filegroup(
         ),
         (
             "gate",
-            "if k == K_SEMI || k == K_COMMA {\n            counter = 0;",
-            "if k == K_SEMI {\n            counter = 0;",
+            "const MAX_CHAIN: u64 = 160;",
+            "const MAX_CHAIN: u64 = 16;",
         ),
         (
             "layout",

@@ -356,6 +356,39 @@ pub fn module_keep_clif(inout m: Module, keep: bool) eff [Ffi[Cranelift]] {
 pub fn module_code_bytes(in m: Module) -> u64 eff [Ffi[Cranelift]] {
     Cranelift::vcl_module_code_bytes(in m)
 }
+// The CLIF text of every function defined since `module_keep_clif(m,
+// true)`, in definition order (SH4 lane 14).
+pub fn module_clif(in m: Module) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = Cranelift::vcl_module_clif(in m, 0, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_clif(in m, 0, inout out.as_slice_mut());
+    out
+}
+// The module's first error (empty if none).
+pub fn module_error_text(in m: Module) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = Cranelift::vcl_module_error(in m, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_error(in m, inout out.as_slice_mut());
+    out
+}
+// The error of the last `module_new` that returned None.
+pub fn new_error_text() -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let n = new_error_len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_new_error(inout out.as_slice_mut());
+    out
+}
 pub fn sig_new(inout m: Module, call_conv: u32) -> SigId eff [Ffi[Cranelift]] {
     SigId {
         id: Cranelift::vcl_sig_new(inout m, call_conv)

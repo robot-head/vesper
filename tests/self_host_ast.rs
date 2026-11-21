@@ -81,6 +81,7 @@ fn b(v: bool) -> u8 {
 fn lit(l: &Literal) -> String {
     match l {
         Literal::Int(n) => format!("int {n}"),
+        Literal::WideInt(n) => format!("int {n}"),
         Literal::Float(f) => format!("float {:#018x}", f.to_bits()),
         Literal::Bool(v) => format!("bool {v}"),
         Literal::String(s) => format!("str {}", q(s)),
@@ -1015,6 +1016,19 @@ fn desugarings_and_limits_match_the_rust_ast() {
         "fn f() { let x = ; let y = ; } fn g() { let c = ; }",
         "fn f(x i64) { let y = ; } fn good() {}",
         "fn f(let: u8, if: u8) { x.match; s.impl } fn (+) {} fn f[]() {} struct {} enum { A } effect {}",
+        // Contextual `effect`, `handle`, `sink` and `inout` (#1244).
+        "fn effect() {} fn handle(x: u64) -> u64 { x } struct S { sink: u64, inout: u8, effect: u8, handle: u8 }",
+        "fn f(sink: u64, inout: u64, sink s: S, inout inout: u64, sink sink: S) { g(sink, inout); g(sink x, inout y); g(sink.a, sink(1), sink[0], sink - 1); }",
+        "fn f() { let effect = 1; let handle = effect; handle = 2; let s = S { sink, handle: 1 }; s.handle(); for sink in 0..2 {} match x { effect => effect } }",
+        "fn f() { handle E in { 0 } with { return x => x } handle(1); let h = handle; }",
+        "fn f() { g(sink S { a }, inout self.x, sink 1, sink if a { b } else { c }, sink { 1 }) }",
+        // Literals past u64::MAX (#1244).
+        "fn f() { 18446744073709551616; 340282366920938463463374607431768211455; 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff; 340282366920938463463374607431768211456 }",
+        "fn f() { -170141183460469231731687303715884105728; - -170141183460469231731687303715884105728; -340282366920938463463374607431768211455; -18446744073709551616 }",
+        "fn f(x: i128) { match x { -170141183460469231731687303715884105728 => 1, -170141183460469231731687303715884105729 => 2, 340282366920938463463374607431768211455 => 3, -18446744073709551617 => 4, _ => 0 } }",
+        "const A: i128 = -170141183460469231731687303715884105728; const B: u128 = 340282366920938463463374607431768211455; const C: i128 = 18446744073709551616; const D: i128 = -C; fn f() -> i128 { match A { A => 1, C => 2, _ => 3 } }",
+        "enum W: i128 { A = 18446744073709551616, B, C = -18446744073709551616, D, E = -1, F, G = 170141183460469231731687303715884105727 } enum U: u128 { A = 340282366920938463463374607431768211455 }",
+        "fn f() { region r(18446744073709551616) { 1 } }",
     ]
     .iter()
     .map(|s| s.to_string())

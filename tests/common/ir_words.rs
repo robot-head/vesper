@@ -24,14 +24,16 @@
 //! index, the Vesper tables carry the index and (for the operation enums)
 //! the `Debug` text as a name, so a pass can tell `Get` from `Push`. A
 //! Vesper pass can copy, move and drop pool references but not make new
-//! payloads; a lane that must (bounds hoisting makes `SeqOp::Hoisted`)
-//! adds a structured pool kind.
+//! payloads, except the structured pool kinds of [`made_payload`]
+//! (bounds hoisting's `SeqOp::Hoisted` and `SeqOp::BoundsGuard`), which
+//! it appends after the input's entries.
 //!
 //! The program section (every name a name index, every type a type index
 //! of the stream's own tables; `opt` is 0 for none, else index + 1):
 //!
 //! ```text
 //! pool:   n, n x (kind, label name)          kind: 0 seq 1 vector 2 tiled 3 fip 4 expr
+//!                                            (5 hoisted, 6 guard: label a number)
 //! paths:  n, n x (k, k names)                path 0 is the empty path
 //! fns:    n, n x function
 //! function: name, header, blocks, trailer
@@ -287,6 +289,12 @@ impl Tables {
                 self.raw(3);
                 self.name(s);
                 self.raw(0);
+            }
+            // A literal past `i128::MAX`: two raw words, like an Int.
+            Literal::WideInt(n) => {
+                self.raw(4);
+                self.raw(*n as u64);
+                self.raw((*n >> 64) as u64);
             }
         }
     }
@@ -942,6 +950,42 @@ pub fn program_words(program: &Program) -> Option<(Vec<u64>, Pool)> {
     Some((out, t.pool))
 }
 
+// ------------------------------------------------------- made payloads
+//
+// SH3 lane 12 (#1251, bounds hoisting): the pool kinds a Vesper pass
+// creates rather than keeps. Their label is a number, not a name:
+//
+// - 5, `SeqOp::Hoisted(access)`: label 0 `Get`, 1 `Set`, 2 `TryGet`,
+//   3 `TrySet`.
+// - 6, `SeqOp::BoundsGuard`: label bit 0 `inclusive`, bit 1
+//   `form.negated`, bits 8..16 `form.plus`, bits 16..24 `form.minus`.
+//
+// packages/vesper-bounds-hoist/src/encode.ves (`POOL_HOISTED`,
+// `POOL_GUARD`) writes them. The input encoding never has them.
+
+/// The payload a Vesper pass made for pool `kind` with `label`, or `None`
+/// for an entry of the input pool.
+fn made_payload(kind: u64, label: u64) -> Option<Payload> {
+    use vesper::seq::{Access, IndexForm};
+    match kind {
+        5 => Some(Payload::Seq(SeqOp::Hoisted(match label {
+            0 => Access::Get,
+            1 => Access::Set,
+            2 => Access::TryGet,
+            _ => Access::TrySet,
+        }))),
+        6 => Some(Payload::Seq(SeqOp::BoundsGuard {
+            inclusive: label & 1 != 0,
+            form: IndexForm {
+                negated: label & 2 != 0,
+                plus: (label >> 8) as u8,
+                minus: (label >> 16) as u8,
+            },
+        })),
+        _ => None,
+    }
+}
+
 // ------------------------------------------------------------------ decoder
 
 fn pass_of(x: u64) -> Pass {
@@ -968,8 +1012,11 @@ struct Dec<'a> {
     paths: Vec<Vec<String>>,
     pool: &'a Pool,
     /// Pool indices of the stream, mapped to `pool` (the entries a Vesper
-    /// pass kept, which it may have reordered).
+    /// pass kept, which it may have reordered). An index past `pool` is
+    /// an entry of `made`.
     pool_map: Vec<usize>,
+    /// Payloads a Vesper pass made itself ([`made_payload`]).
+    made: Vec<Payload>,
 }
 
 impl Dec<'_> {
@@ -1012,9 +1059,12 @@ impl Dec<'_> {
     fn payload(&mut self) -> Payload {
         let i = self.next() as usize;
         let at = self.pool_map.get(i).copied().unwrap_or(usize::MAX);
+        let n = self.pool.items.len();
+        let made = at.checked_sub(n).and_then(|j| self.made.get(j));
         self.pool
             .items
             .get(at)
+            .or(made)
             .cloned()
             .unwrap_or(Payload::Fip(FipOp::BoxNew))
     }
@@ -1042,6 +1092,11 @@ impl Dec<'_> {
                 let b = self.next() != 0;
                 self.next();
                 Literal::Bool(b)
+            }
+            4 => {
+                let lo = self.next() as u128;
+                let hi = self.next() as u128;
+                Literal::WideInt(hi << 64 | lo)
             }
             _ => {
                 let s = self.name();
@@ -1617,14 +1672,22 @@ pub fn decode_program(words: &[u64], pool: &Pool) -> Program {
         paths: vec![],
         pool,
         pool_map: vec![],
+        made: vec![],
     };
     // The pool: each entry's kind and label, matched to the input pool by
-    // position (a Vesper pass keeps the input's pool and appends nothing).
+    // position (a Vesper pass keeps the input's pool and appends only the
+    // entries of [`made_payload`]).
     let np = d.count();
     for i in 0..np {
-        d.next();
-        d.next();
-        d.pool_map.push(i);
+        let kind = d.next();
+        let label = d.next();
+        match made_payload(kind, label) {
+            Some(p) => {
+                d.pool_map.push(pool.items.len() + d.made.len());
+                d.made.push(p);
+            }
+            None => d.pool_map.push(i),
+        }
     }
     let n = d.count();
     for _ in 0..n {

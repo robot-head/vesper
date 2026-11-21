@@ -5275,6 +5275,8 @@ impl Checker<'_> {
 pub fn literal_type(l: &Literal) -> Type {
     match l {
         Literal::Int(n) => Type::IntLiteral(*n),
+        // Above `i128::MAX` only `u128` holds the literal.
+        Literal::WideInt(_) => Type::named("u128"),
         Literal::Float(_) => Type::named("f64"),
         Literal::Bool(_) => Type::named("bool"),
         Literal::String(_) => Type::named("String"),

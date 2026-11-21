@@ -1,17 +1,16 @@
 // SHA-256 (FIPS 180-4), for the WAL frame checks and the identity digests
-// (program.rs `sha256_hex`, wal.rs `check`). Words are held in u64 and
-// masked to 32 bits, so every step is total.
+// (program.rs `sha256_hex`, wal.rs `check`). Words are `u32` with wrapping
+// adds and total rotates; the state and the message schedule are fixed
+// arrays, so a block reads no sequence after its 64 message bytes.
 
-const MASK32: u64 = 4294967295;
 const BLOCK_BYTES: u64 = 64;
-const ROUNDS: u64 = 64;
 const DIGEST_WORDS: u64 = 8;
 // The padding marker byte and the length of the trailing bit count.
 const PAD_MARKER: u8 = 128;
 const LENGTH_BYTES: u64 = 8;
 const BITS_PER_BYTE: u64 = 8;
 
-const K: [u64; 64] = [
+const K: [u32; 64] = [
     1116352408,
     1899447441,
     3049323471,
@@ -78,7 +77,7 @@ const K: [u64; 64] = [
     3329325298
 ];
 
-const H0: [u64; 8] = [
+const H0: [u32; 8] = [
     1779033703,
     3144134277,
     1013904242,
@@ -89,130 +88,77 @@ const H0: [u64; 8] = [
     1541459225
 ];
 
-fn k_at(i: u64) -> u64 {
-    if i < 64 {
-        K[i]
-    } else {
-        0
-    }
-}
-
-fn h0_at(i: u64) -> u64 {
-    if i < 8 {
-        H0[i]
-    } else {
-        0
-    }
-}
-
-fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
-    match s.try_get(i) {
+// The big-endian word at `at` of `bytes`, 0 past the end.
+fn be32(in bytes: Slice[u8], at: u64) -> u32 {
+    match bytes.try_read_u32_be(at) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
-// Rotate a 32-bit word right by `n` (0 < n < 32).
-fn rotr(x: u64, n: u64) -> u64 {
-    (wrapping_shr_u64(x, wrapping_u32(n)) | wrapping_shl_u64(x, wrapping_u32(wrapping_sub(32, n))))
-        & MASK32
-}
-
-fn add32(a: u64, b: u64) -> u64 {
-    wrapping_add(a, b) & MASK32
-}
-
-// The big-endian word at `at` of `bytes`, 0 past the end.
-fn be32(in bytes: Slice[u8], at: u64) -> u64 {
-    match bytes.try_read_u32_be(at) {
-        Option::Some(v) => widen_u64(v),
-        Option::None => 0,
+// The state after compressing the 64-byte block at `base` of `bytes`.
+fn compress(h: [u32; 8], in bytes: Slice[u8], base: u64) -> [u32; 8] {
+    let mut w: [u32; 64] = [0; 64];
+    for t in 0..16 {
+        w[t] = be32(in bytes, wrapping_add(base, wrapping_mul(t, 4)));
     }
-}
-
-fn be32_seq(in bytes: ChunkSeq[u8], at: u64) -> u64 {
-    match bytes.try_read_u32_be(at) {
-        Option::Some(v) => widen_u64(v),
-        Option::None => 0,
+    for i in 16..64 {
+        let w15 = w[i - 15];
+        let w2 = w[i - 2];
+        let s0 = rotate_right(w15, 7) ^ rotate_right(w15, 18) ^ (w15 >> 3);
+        let s1 = rotate_right(w2, 17) ^ rotate_right(w2, 19) ^ (w2 >> 10);
+        w[i] = wrapping_add(wrapping_add(w[i - 16], s0), wrapping_add(w[i - 7], s1));
     }
-}
-
-// One compression of the 16 words already in `w[0..16]`.
-fn compress(inout h: ChunkSeq[u64], inout w: ChunkSeq[u64]) {
-    for i in 16..ROUNDS {
-        let w15 = word(in w, wrapping_sub(i, 15));
-        let w2 = word(in w, wrapping_sub(i, 2));
-        let s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >> 3);
-        let s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >> 10);
-        let v = add32(
-            add32(word(in w, wrapping_sub(i, 16)), s0),
-            add32(word(in w, wrapping_sub(i, 7)), s1)
-        );
-        w.try_set(i, v);
-    }
-    let mut a = word(in h, 0);
-    let mut b = word(in h, 1);
-    let mut c = word(in h, 2);
-    let mut d = word(in h, 3);
-    let mut e = word(in h, 4);
-    let mut f = word(in h, 5);
-    let mut g = word(in h, 6);
-    let mut hh = word(in h, 7);
-    for i in 0..ROUNDS {
-        let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-        let ch = (e & f) ^ ((e ^ MASK32) & g);
-        let t1 = add32(add32(add32(hh, s1), add32(ch, k_at(i))), word(in w, i));
-        let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+    let mut a = h[0];
+    let mut b = h[1];
+    let mut c = h[2];
+    let mut d = h[3];
+    let mut e = h[4];
+    let mut f = h[5];
+    let mut g = h[6];
+    let mut hh = h[7];
+    for i in 0..64 {
+        let s1 = rotate_right(e, 6) ^ rotate_right(e, 11) ^ rotate_right(e, 25);
+        let ch = (e & f) ^ (~e & g);
+        let t1 = wrapping_add(wrapping_add(wrapping_add(hh, s1), wrapping_add(ch, K[i])), w[i]);
+        let s0 = rotate_right(a, 2) ^ rotate_right(a, 13) ^ rotate_right(a, 22);
         let maj = (a & b) ^ (a & c) ^ (b & c);
-        let t2 = add32(s0, maj);
+        let t2 = wrapping_add(s0, maj);
         hh = g;
         g = f;
         f = e;
-        e = add32(d, t1);
+        e = wrapping_add(d, t1);
         d = c;
         c = b;
         b = a;
-        a = add32(t1, t2);
+        a = wrapping_add(t1, t2);
     }
-    h.try_set(0, add32(word(in h, 0), a));
-    h.try_set(1, add32(word(in h, 1), b));
-    h.try_set(2, add32(word(in h, 2), c));
-    h.try_set(3, add32(word(in h, 3), d));
-    h.try_set(4, add32(word(in h, 4), e));
-    h.try_set(5, add32(word(in h, 5), f));
-    h.try_set(6, add32(word(in h, 6), g));
-    h.try_set(7, add32(word(in h, 7), hh));
+    [
+        wrapping_add(h[0], a),
+        wrapping_add(h[1], b),
+        wrapping_add(h[2], c),
+        wrapping_add(h[3], d),
+        wrapping_add(h[4], e),
+        wrapping_add(h[5], f),
+        wrapping_add(h[6], g),
+        wrapping_add(h[7], hh)
+    ]
 }
 
 // The SHA-256 digest of `bytes`, 32 bytes.
 pub fn sha256_digest(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     let n = bytes.len();
-    let mut h: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](DIGEST_WORDS);
-    for i in 0..DIGEST_WORDS {
-        h.push(h0_at(i));
-    }
-    let mut w: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](ROUNDS);
-    w.resize(ROUNDS, 0);
+    let mut h: [u32; 8] = H0;
     let full = n / BLOCK_BYTES;
     for block in 0..full {
-        let base = wrapping_mul(block, BLOCK_BYTES);
-        for t in 0..16 {
-            w.try_set(t, be32(in bytes, wrapping_add(base, wrapping_mul(t, 4))));
-        }
-        compress(inout h, inout w);
+        h = compress(h, in bytes, wrapping_mul(block, BLOCK_BYTES));
     }
     // The tail, the marker byte, zeros and the 64-bit bit length: one or
     // two blocks.
     let done = wrapping_mul(full, BLOCK_BYTES);
     let rest = wrapping_sub(n, done);
     let mut tail: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_mul(BLOCK_BYTES, 2));
-    for i in 0..rest {
-        let b = match bytes.try_get(wrapping_add(done, i)) {
-            Option::Some(b) => b,
-            Option::None => 0,
-        };
-        tail.push(b);
-    }
+    tail.extend(in bytes[done..n]);
     tail.push(PAD_MARKER);
     let tail_len = if wrapping_add(rest, wrapping_add(1, LENGTH_BYTES)) > BLOCK_BYTES {
         wrapping_mul(BLOCK_BYTES, 2)
@@ -223,16 +169,14 @@ pub fn sha256_digest(in bytes: Slice[u8]) -> ChunkSeq[u8] {
     tail.try_write_u64_be(wrapping_sub(tail_len, LENGTH_BYTES), wrapping_mul(n, BITS_PER_BYTE));
     let blocks = tail_len / BLOCK_BYTES;
     for block in 0..blocks {
-        let base = wrapping_mul(block, BLOCK_BYTES);
-        for t in 0..16 {
-            w.try_set(t, be32_seq(in tail, wrapping_add(base, wrapping_mul(t, 4))));
-        }
-        compress(inout h, inout w);
+        h = compress(h, in tail.as_slice(), wrapping_mul(block, BLOCK_BYTES));
     }
     let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](32);
     out.resize(32, 0);
     for i in 0..DIGEST_WORDS {
-        out.try_write_u32_be(wrapping_mul(i, 4), wrapping_u32(word(in h, i)));
+        if i < 8 {
+            out.try_write_u32_be(wrapping_mul(i, 4), h[i]);
+        }
     }
     out
 }

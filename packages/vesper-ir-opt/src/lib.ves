@@ -49,8 +49,14 @@ const S_OK: u8 = 0;
 
 const MODE_OPTIMIZE: u64 = 0;
 
+// The harness's entry (tests/self_host_ir_opt.rs passes a `Str`).
 pub fn ir_opt_entry(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+    ir_opt_words(in input.as_bytes())
+}
+
+// The same over bytes, for the hybrid build's `opt` hook
+// (crates/vesper-hybrid/modules/ir_opt).
+pub fn ir_opt_words(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
