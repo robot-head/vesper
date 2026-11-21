@@ -8,6 +8,8 @@ enum TokenKind {
     Number(u64),
     Punct(u8),
     Arrow,
+    /// `...`: the start of a variadic function's variadic arguments.
+    Ellipsis,
     Eof,
 }
 #[derive(Debug, Clone)]
@@ -125,6 +127,10 @@ fn lex(source: &str, limits: Limits) -> Result<Vec<Token>, Error> {
             b'-' if bytes.get(at + 1) == Some(&b'>') => {
                 at += 2;
                 TokenKind::Arrow
+            }
+            b'.' if bytes.get(at + 1) == Some(&b'.') && bytes.get(at + 2) == Some(&b'.') => {
+                at += 3;
+                TokenKind::Ellipsis
             }
             c @ (b'{' | b'}' | b'(' | b')' | b'[' | b']' | b',' | b';' | b':' | b'=') => {
                 at += 1;
@@ -460,9 +466,29 @@ impl Parser {
         let symbol = self.word()?;
         self.expect(b'(')?;
         let mut parameters = vec![];
+        // `fn f(fixed.., ..., variadic..)`: the parameters after `...` are
+        // the variadic arguments every call passes (C's `...`).
+        let mut variadic: Option<usize> = None;
         while !self.eat(b')') {
             if parameters.len() >= self.limits.parameters {
                 return Err(self.error(ErrorKind::Limit, "function parameter budget exceeded"));
+            }
+            if self.token().kind == TokenKind::Ellipsis {
+                if variadic.is_some() || parameters.is_empty() {
+                    return Err(self.error(
+                        ErrorKind::Syntax,
+                        "`...` comes once, after at least one fixed parameter",
+                    ));
+                }
+                self.bump();
+                if !self.eat(b',') || self.peek_punct(0) == Some(b')') {
+                    return Err(self.error(
+                        ErrorKind::Syntax,
+                        "`...` must be followed by the variadic parameters every call passes",
+                    ));
+                }
+                variadic = Some(parameters.len());
+                continue;
             }
             let span_start = self.token().span.start;
             let nocapture = if self.is_word("nocapture") {
@@ -616,6 +642,7 @@ impl Parser {
             parameters,
             result,
             errno,
+            variadic,
         })
     }
     /// The type after `nocapture <access> name:`: a slice, a single pointee,
@@ -772,6 +799,8 @@ struct RawFunction {
     parameters: Vec<(String, RawParameterType)>,
     result: RawType,
     errno: bool,
+    /// Index of the first variadic parameter (after `...`).
+    variadic: Option<usize>,
 }
 fn scalar(name: &str) -> Option<Scalar> {
     Some(match name {
@@ -1071,7 +1100,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
     let mut functions = vec![];
     for f in raw_functions {
         let mut parameters = vec![];
-        for (name, ty) in f.parameters {
+        for (index, (name, ty)) in f.parameters.into_iter().enumerate() {
             let ty = match ty {
                 RawParameterType::Value(t) => {
                     let t = resolve(t, &enums, &extern_types)?;
@@ -1143,6 +1172,26 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                 },
                 RawParameterType::CStr => ParameterType::CStr,
             };
+            // A variadic argument occupies one 8-byte slot on every target
+            // (Apple arm64 passes them all on the stack), so it is declared
+            // at its promoted, word-sized type.
+            if f.variadic.is_some_and(|v| index >= v) {
+                let word = match &ty {
+                    ParameterType::Value(ValueType::Scalar(s)) => s.bits() == 64,
+                    ParameterType::Value(_) => false,
+                    _ => true,
+                };
+                if !word {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        0..0,
+                        format!(
+                            "variadic parameter `{name}` of `{}` must be word-sized: declare an `int` argument as i64 (C promotes it), or pass a pointer",
+                            f.symbol
+                        ),
+                    ));
+                }
+            }
             parameters.push(ParameterDescriptor { name, ty });
         }
         // A refused C string skips the call, so it must not take a handle
@@ -1175,6 +1224,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
             result: resolve(f.result, &enums, &extern_types)?,
             convention: target.convention(),
             errno: f.errno,
+            variadic: f.variadic,
         });
     }
     functions.sort_by(|a, b| a.symbol.cmp(&b.symbol));

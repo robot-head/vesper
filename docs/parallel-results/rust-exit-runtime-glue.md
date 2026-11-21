@@ -60,7 +60,7 @@ matching lowering is in `src/ffi_lowering*`, which SH4 lane 13 (#1287, PR
 |---|---|---|---|---|---|
 | G1 | **No reads through a foreign pointer.** A result can be an address (`ForeignVal[u64]`), but Vesper cannot read the memory behind it, and there is no `CStr` result. | `fn getenv(nocapture in key: CStr) -> ForeignVal[CStr];` | `unknown foreign type 'CStr'; aggregates/handles are unsupported` | `getenv`, `readdir`'s `struct dirent *`, `environ`/`_NSGetEnviron`, `strerror`; io_uring rings | parser: this lane; lowering: SH4 lane 13 |
 | G2 | **No arrays of C strings.** `posix_spawn`/`execve` take `char *const argv[]` (NULL-terminated). | `fn execv(nocapture in path: CStr, nocapture in argv: CSlice[CStr]) -> ForeignVal[i32] errno;` | `unknown slice element 'CStr'; declare it as a wire struct` | `@vesper-std/process` spawn (argv, envp) | parser: this lane; lowering: SH4 lane 13 |
-| G3 | **No variadic functions.** | `fn fcntl(fd: i32, cmd: i32, ...) -> ForeignVal[i32] errno;` | `unsupported token (variadics, attributes and imperative code are forbidden)` | `fcntl`, `ioctl`, `syscall` (pkeys, `close_range`), and `open` with a mode. On Apple arm64 variadic arguments go on the stack, so declaring `open(path, flags, mode)` as a fixed 3-argument function passes a garbage mode there. The lowering can pad the fixed registers so the variadic tail lands at `[sp]`. | parser: this lane; lowering: SH4 lane 13 |
+| G3 | **No variadic functions.** *Fixed in this PR* (asked by SH6 lane 14, #1422): `fn fcntl(fd: i32, cmd: i32, ..., arg: i64)`; see "Variadic functions" below. | `fn fcntl(fd: i32, cmd: i32, ...) -> ForeignVal[i32] errno;` | was: `unsupported token (variadics, attributes and imperative code are forbidden)` | `fcntl`, `ioctl`, `syscall` (pkeys, `close_range`), `open` with a mode, `snprintf` | done: parser in `crates/vesper-ffi`, two small lowering hunks in `src/ffi_lowering/` (SH4 lane 13's port must mirror them) |
 | G4 | **No target-conditional imports or constants.** `O_CREAT` is `0o100` on Linux and `0x200` on macOS; `struct stat`, `struct dirent` and `kevent` layouts differ per target; the language has no `cfg`. | `[package] vsys = ["fs.vsys"]` takes one file for every target; the `.vsys` text only substitutes `@TARGET@` and `@ABI@`. | one layout and one set of constants for every target | `@vesper-std/fs` (flags, `stat`), Pulse (`epoll_event` is packed on x86_64 only) | `src/packages.rs` (`[package] vsys` per target, e.g. an `@OS@` token in the path): SH2 lane 6 follow-ups (#1178) |
 | G5 | **`vesper jit`, `run` and `test` bind only `vesper_std_host`.** `host_symbols` refuses every other link name before running. | a package whose `.vsys` says `name = "c"`, run with `vesper jit` | `library LibC links 'c', which this vesper does not host; link it into an executable with vesper build` | every std test (`tests/std_*.rs` run in the JIT and the evaluator) once the std packages import libc | `src/vsys_commands.rs` `host_symbols` (resolve `name = "c"` with `dlsym(RTLD_DEFAULT, …)` / `GetProcAddress`); no active owner, small, but it adds Rust to the compiler, so it waits for the std-host PR that needs it |
 | G6 | **Foreign symbols collide with the AOT runtime's libc imports.** The sequence runtime imports `write`, `exit`, `malloc` and `free` with all-`i64` signatures; a `.vsys` that declares `write(fd: i32, …)` fails to build. | `fn write(fd: i32, nocapture in buf: CSlice[u8]) -> ForeignVal[i64] errno;` | `Codegen: foreign symbol 'write': … signature … is incompatible with previous declaration` (works with `fd: i64`) | `exit(i32)`, `write`, `free` in the std packages | `src/seq/aot_runtime.rs` (SH4 lane 9, #1283) or the foreign-import declaration in `src/ffi_lowering/native.rs` (SH4 lane 13) |
@@ -69,6 +69,38 @@ matching lowering is in `src/ffi_lowering*`, which SH4 lane 13 (#1287, PR
 | G9 | **No buffers that outlive a call.** Every pointer parameter must be `nocapture`. | `fn io_uring_submit(in ring: CSlice[u8]) -> ForeignVal[i32];` | `borrowed 'in' pointer parameters must be declared 'nocapture'; capturing foreign pointers are unsupported` | io_uring SQEs, IOCP `OVERLAPPED` and AFD poll buffers, `kevent` udata | parser: this lane; a pinned-buffer type in the language (manuscript change) |
 | G10 | **No assembly in a build.** Vesper has no inline assembly, and a Loom package cannot carry an assembly file for the build to assemble and link. | context switch (`switch.rs`: 4 `global_asm!`, 3 `naked_asm!`), FP environment, `wrpkru`/`rdpkru`, `cpuid`, the SVE and RVV kernels (24 `asm!`) | none can be written | fiber-abi, `isolation::hw`, `vesper-simd` | a manifest field (`[package] objects` or `asm`) read by `src/packages.rs` and passed to the linker by `vesper build`: no active owner; manuscript change |
 | G11 | **`vesper build` of an executable with `.vsys` imports refuses Windows.** | `vesper build --target x86_64-pc-windows-msvc` of the libc probe | `executables with .vsys imports link with cc only; Windows targets are not supported yet` | the std packages on the Windows required check | `src/vsys_commands.rs` `build`: no active owner |
+
+## Variadic functions (G3, fixed here)
+
+- **Syntax.** `fn f(fixed.., ..., variadic..)`: the parameters after `...`
+  are the variadic arguments every call passes. At least one fixed
+  parameter comes first and at least one variadic one follows. Each
+  variadic parameter must be word-sized (a 64-bit integer, a pointer, a
+  `CStr`, a handle, a slice); an `int` is declared `i64`, which C's
+  `va_arg(ap, int)` reads correctly on every little-endian target.
+- **ABI.** `FunctionDescriptor::abi()` reports `variadic: Some(Variadic {
+  first, padding })`. SysV x86_64, AAPCS64 Linux and Win64 pass variadic
+  words like fixed ones (`padding = 0`). Apple arm64 reads every variadic
+  argument from the stack, so `padding` zero words fill `x0`-`x7` after the
+  fixed words and the variadic words land at `[sp]`, in 8-byte slots.
+- **Lowering.** The native call inserts the zero words
+  (`src/ffi_lowering/native.rs`, 7 lines) and the evaluator's host does the
+  same, with its word limit raised from 8 to 10
+  (`src/ffi_lowering/eval_host.rs`). The descriptor's canonical text gains
+  `variadic/from <n>` only for variadic functions, so every existing
+  library keeps its identity.
+- **Tests.** `crates/vesper-ffi/tests/sys_variadic.rs` (6: syntax,
+  word-size rule, Apple padding, identity). `tests/vsys_variadic.rs` (2,
+  Unix): libc's `snprintf(buf, n, "%ld:%ld", a, b)` in the JIT (optimizer on
+  and off) and the evaluator, and an executable that sets `O_NONBLOCK` on a
+  pipe with `fcntl(F_SETFL)` and reads it back. Both pass on Linux x86_64;
+  the macOS (AArch64) required check runs the Apple path.
+- **Manuscript.** One bullet, "Variadic Functions", after "C Strings and
+  OS Error Codes" in §16.3.
+- **Limit.** No floating-point variadic arguments (`.vsys` has no float
+  parameters). On SysV x86_64 the call leaves `%al` (the vector-register
+  count a variadic callee may read) unset; callees use it only to decide
+  whether to spill `xmm` registers, so integer-only calls are correct.
 
 Smaller notes found on the way (no fix needed by this lane):
 
