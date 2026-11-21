@@ -1153,6 +1153,14 @@ pub fn block_of_word(w: u64) -> Block {
 pub fn block_word(blk: Block) -> u64 {
     widen_u64(blk.id)
 }
+pub fn slot_of_word(w: u64) -> Slot {
+    Slot {
+        id: wrapping_u32(w)
+    }
+}
+pub fn slot_word(slot: Slot) -> u64 {
+    widen_u64(slot.id)
+}
 // A type code word (`codegen_swap::ty_code`).
 pub fn ty_of_word(w: u64) -> Ty {
     Ty {
