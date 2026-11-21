@@ -188,6 +188,27 @@ pub struct PackageVsys {
 }
 
 impl PackageVsys {
+    /// The type names the library declares (its extern types, wire structs
+    /// and enums), each paired with the library's name. Only the names
+    /// matter, and they do not depend on the target, so the host target
+    /// fills the placeholders. A library that does not parse declares no
+    /// names here; [`Assembled::imports`] reports its error.
+    fn type_names(&self) -> Vec<(String, String)> {
+        let Ok(source) = self.source_for(None) else {
+            return vec![];
+        };
+        let Ok(d) = vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default()) else {
+            return vec![];
+        };
+        let library = d.name().to_owned();
+        d.extern_types()
+            .iter()
+            .map(|t| t.name().to_owned())
+            .chain(d.wire_structs().iter().map(|w| w.name().to_owned()))
+            .chain(d.enums().iter().map(|e| e.name().to_owned()))
+            .map(|n| (n, library.clone()))
+            .collect()
+    }
     /// The `.vsys` source for an object of `target` (the host when `None`):
     /// `@TARGET@` and `@ABI@` replaced by its triple and calling convention.
     pub fn source_for(&self, target: Option<&str>) -> Result<String, String> {
@@ -242,6 +263,10 @@ struct Package {
     /// Dependency name -> package index.
     deps: BTreeMap<String, usize>,
     modules: Vec<ModuleSource>,
+    /// The type names (extern types, wire structs and enums) the `.vsys`
+    /// libraries in this package's manifest declare, each with its
+    /// library: a `use` of the package's root may name them (§16.3).
+    foreign_types: BTreeMap<String, String>,
 }
 /// (package index, module path).
 type ModuleKey = (usize, Vec<String>);
@@ -585,7 +610,7 @@ impl Loader<'_> {
                 ),
             ));
         }
-        self.package_vsys(dir, &shown, &manifest_shown, &manifest)?;
+        let foreign_types = self.package_vsys(dir, &shown, &manifest_shown, &manifest)?;
         let index = self.packages.len();
         self.packages.push(Package {
             name: name.clone(),
@@ -593,6 +618,7 @@ impl Loader<'_> {
             display: shown.clone(),
             deps: BTreeMap::new(),
             modules,
+            foreign_types,
         });
         self.by_path.insert(canonical.clone(), index);
         stack.push((canonical, name.as_str().to_owned()));
@@ -667,15 +693,17 @@ impl Loader<'_> {
     }
 
     /// Read the `.vsys` files `[package] vsys` names: relative paths inside
-    /// the package directory, each read once.
+    /// the package directory, each read once. Returns the type names the
+    /// libraries declare, each with its library.
     fn package_vsys(
         &mut self,
         dir: &Path,
         shown: &Path,
         manifest_shown: &str,
         manifest: &Manifest,
-    ) -> Result<(), String> {
+    ) -> Result<BTreeMap<String, String>, String> {
         let mut seen = BTreeSet::new();
+        let mut types = BTreeMap::new();
         for path in &manifest.package.vsys {
             let bad = |why: &str| {
                 manifest_error(INVALID_PACKAGE, format!("package.vsys '{path}': {why}"))
@@ -709,13 +737,15 @@ impl Loader<'_> {
                 continue;
             }
             let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-            self.vsys.push(PackageVsys {
+            let v = PackageVsys {
                 package: manifest.package.name.as_str().to_owned(),
                 display: display(&normalize(&shown.join(relative))),
                 text,
-            });
+            };
+            types.extend(v.type_names());
+            self.vsys.push(v);
         }
-        Ok(())
+        Ok(types)
     }
 
     fn add_file(&mut self, display: String, text: String) -> usize {
@@ -757,8 +787,14 @@ impl Loader<'_> {
         if let Some(t) = resolver.tables.get(&(root, vec![])) {
             hidden.extend(t.items.iter().map(|(n, k)| (n.clone(), *k)));
         }
+        // A `.vsys` type keeps its global name, so a re-export of one hides
+        // nothing.
         if let Some(r) = resolver.reexported.get(&(root, vec![])) {
-            hidden.extend(r.iter().map(|(n, (_, k))| (n.clone(), *k)));
+            hidden.extend(
+                r.iter()
+                    .filter(|(_, (key, _))| !resolver.is_foreign(key))
+                    .map(|(n, (_, k))| (n.clone(), *k)),
+            );
         }
         // Enum variants keep their names; record each one's owning enum so a
         // module may use it only when it declares or imports that enum.
@@ -954,7 +990,9 @@ impl Loader<'_> {
                                 );
                             }
                             _ => {
-                                if u.public {
+                                // A `.vsys` type is not a source item, so a
+                                // root module does not export it.
+                                if u.public && !resolver.is_foreign(&key) {
                                     exported.push(target.clone());
                                 }
                                 names.insert(local, (target, kind));
@@ -1132,6 +1170,9 @@ impl<'a> Resolver<'a> {
     /// The internal name of an item: its root re-export name, its plain
     /// name in the root package's root module, else the mangled name.
     fn name_of(&self, key: &ItemKey) -> String {
+        if self.is_foreign(key) {
+            return key.2.clone();
+        }
         if let Some(n) = self.renamed.get(key) {
             return n.clone();
         }
@@ -1140,6 +1181,16 @@ impl<'a> Resolver<'a> {
             return item.clone();
         }
         mangled(self.packages[*pkg].name.as_str(), path, item)
+    }
+    /// Whether `key` names a type of one of its package's `.vsys`
+    /// libraries rather than a source item: it keeps its global name.
+    fn is_foreign(&self, (pkg, path, item): &ItemKey) -> bool {
+        path.is_empty()
+            && self.packages[*pkg].foreign_types.contains_key(item)
+            && !self
+                .tables
+                .get(&(*pkg, vec![]))
+                .is_some_and(|t| t.items.contains_key(item))
     }
     /// The display name `@scope/name::m::item`.
     fn shown(&self, (pkg, path, item): &ItemKey) -> String {
@@ -1275,6 +1326,13 @@ impl<'a> Resolver<'a> {
         }
         if let Some((target, kind)) = self.reexported.get(&key).and_then(|r| r.get(name)) {
             return Ok((target.clone(), *kind));
+        }
+        // A type a `.vsys` library of the package declares (manuscript
+        // §16.3): its name is global, so every importer names one type.
+        if path.is_empty() && self.packages[pkg].foreign_types.contains_key(name) {
+            // Generated as a struct or enum, so a type and a constructor,
+            // like a source struct or enum.
+            return Ok(((pkg, vec![], name.to_owned()), Kind::Both));
         }
         let d = Diagnostic::new(
             UNKNOWN_IMPORT,
