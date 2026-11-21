@@ -366,6 +366,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH5 lane 8 (#1331): memoized World::mode against the original on
+        # every corpus world. Anchored globs.
+        "test/world_mode_speed": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -727,6 +734,8 @@ vesper_crate(
         "test/optimizer_budget": "long",
         # The wasm/emit optimizer input (#1332) over the corpus.
         "test/optimizer_build_time": "long",
+        # World::mode (#1331) answers every corpus query three times.
+        "test/world_mode_speed": "long",
     },
 )
 

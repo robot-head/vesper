@@ -5,7 +5,7 @@
 
 use vesper_port_abi::Abi;
 
-impl Abi for crate::model::link::port::LinkParams {
+impl Abi for crate::port::LinkParams {
     const WORDS: usize = 13;
     fn put(&self, out: &mut [u64]) {
         Abi::put(&self.base_delay_ns, &mut out[0..]);
@@ -23,23 +23,23 @@ impl Abi for crate::model::link::port::LinkParams {
         Abi::put(&self.rate_bytes_per_sec, &mut out[12..]);
     }
     fn get(words: &[u64]) -> Self {
-        crate::model::link::port::LinkParams { base_delay_ns: Abi::get(&words[0..]), has_gilbert_elliott: Abi::get(&words[1..]), good_to_bad_ppm: Abi::get(&words[2..]), bad_to_good_ppm: Abi::get(&words[3..]), loss_good_ppm: Abi::get(&words[4..]), loss_bad_ppm: Abi::get(&words[5..]), loss_ppm: Abi::get(&words[6..]), duplicate_ppm: Abi::get(&words[7..]), has_reorder: Abi::get(&words[8..]), reorder_ppm: Abi::get(&words[9..]), reorder_extra_delay_ns: Abi::get(&words[10..]), buffer_packets: Abi::get(&words[11..]), rate_bytes_per_sec: Abi::get(&words[12..]) }
+        crate::port::LinkParams { base_delay_ns: Abi::get(&words[0..]), has_gilbert_elliott: Abi::get(&words[1..]), good_to_bad_ppm: Abi::get(&words[2..]), bad_to_good_ppm: Abi::get(&words[3..]), loss_good_ppm: Abi::get(&words[4..]), loss_bad_ppm: Abi::get(&words[5..]), loss_ppm: Abi::get(&words[6..]), duplicate_ppm: Abi::get(&words[7..]), has_reorder: Abi::get(&words[8..]), reorder_ppm: Abi::get(&words[9..]), reorder_extra_delay_ns: Abi::get(&words[10..]), buffer_packets: Abi::get(&words[11..]), rate_bytes_per_sec: Abi::get(&words[12..]) }
     }
 }
 
-impl Abi for crate::model::link::port::TransmitOutcome {
+impl Abi for crate::port::TransmitOutcome {
     const WORDS: usize = 5;
     fn put(&self, out: &mut [u64]) {
         match self {
-            crate::model::link::port::TransmitOutcome::TimeOverflow => {
+            crate::port::TransmitOutcome::TimeOverflow => {
                 out[0] = 0;
             }
-            crate::model::link::port::TransmitOutcome::Lost(f0, f1) => {
+            crate::port::TransmitOutcome::Lost(f0, f1) => {
                 out[0] = 1;
                 Abi::put(f0, &mut out[1..]);
                 Abi::put(f1, &mut out[2..]);
             }
-            crate::model::link::port::TransmitOutcome::Delivered(f0, f1, f2, f3) => {
+            crate::port::TransmitOutcome::Delivered(f0, f1, f2, f3) => {
                 out[0] = 2;
                 Abi::put(f0, &mut out[1..]);
                 Abi::put(f1, &mut out[2..]);
@@ -50,9 +50,9 @@ impl Abi for crate::model::link::port::TransmitOutcome {
     }
     fn get(words: &[u64]) -> Self {
         match words[0] {
-            0 => crate::model::link::port::TransmitOutcome::TimeOverflow,
-            1 => crate::model::link::port::TransmitOutcome::Lost(Abi::get(&words[1..]), Abi::get(&words[2..])),
-            2 => crate::model::link::port::TransmitOutcome::Delivered(Abi::get(&words[1..]), Abi::get(&words[2..]), Abi::get(&words[3..]), Abi::get(&words[4..])),
+            0 => crate::port::TransmitOutcome::TimeOverflow,
+            1 => crate::port::TransmitOutcome::Lost(Abi::get(&words[1..]), Abi::get(&words[2..])),
+            2 => crate::port::TransmitOutcome::Delivered(Abi::get(&words[1..]), Abi::get(&words[2..]), Abi::get(&words[3..]), Abi::get(&words[4..])),
             tag => panic!("invalid TransmitOutcome tag {tag} from Vesper"),
         }
     }
@@ -105,9 +105,9 @@ pub struct LinkStateRef<'a> {
 }
 
 impl<'a> LinkStateRef<'a> {
-    pub fn params(&self) -> crate::model::link::port::LinkParams {
+    pub fn params(&self) -> crate::port::LinkParams {
         let w: &'a [u64] = self.words;
-        <crate::model::link::port::LinkParams as Abi>::get(&w[0..])
+        <crate::port::LinkParams as Abi>::get(&w[0..])
     }
     pub fn rng(&self) -> u64 {
         let w: &'a [u64] = self.words;
@@ -127,9 +127,79 @@ impl<'a> LinkStateRef<'a> {
     }
 }
 
+/// Owned handle of a Vesper `vesper__sim_2session__wal__ScanResult` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_sim_vesper__sim_2session__wal__ScanResult_drop`.
+pub struct vesper__sim_2session__wal__ScanResult {
+    words: [u64; 5],
+}
+
+impl vesper__sim_2session__wal__ScanResult {
+    /// # Safety
+    /// `words` must hold a `vesper__sim_2session__wal__ScanResult` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 5];
+        owned.copy_from_slice(&words[..5]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> vesper__sim_2session__wal__ScanResultRef<'_> {
+        vesper__sim_2session__wal__ScanResultRef { words: &self.words }
+    }
+}
+
+impl Drop for vesper__sim_2session__wal__ScanResult {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_sim_vesper__sim_2session__wal__ScanResult_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for vesper__sim_2session__wal__ScanResult {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("vesper__sim_2session__wal__ScanResult { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for vesper__sim_2session__wal__ScanResult {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for vesper__sim_2session__wal__ScanResult {}
+
+/// A borrowed view of a Vesper `vesper__sim_2session__wal__ScanResult` value, read in place.
+#[derive(Clone, Copy)]
+pub struct vesper__sim_2session__wal__ScanResultRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> vesper__sim_2session__wal__ScanResultRef<'a> {
+    pub fn records(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
+    }
+    pub fn valid_bytes(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[1..])
+    }
+    pub fn damage(&self) -> u8 {
+        let w: &'a [u64] = self.words;
+        <u8 as Abi>::get(&w[2..])
+    }
+    pub fn expected(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[3..])
+    }
+    pub fn found(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[4..])
+    }
+}
+
+const _: () = assert!(<(u8, u64, u64) as Abi>::WORDS == 3);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
-const _: () = assert!(<crate::model::link::port::LinkParams as Abi>::WORDS == 13);
-const _: () = assert!(<crate::model::link::port::TransmitOutcome as Abi>::WORDS == 5);
+const _: () = assert!(<crate::port::LinkParams as Abi>::WORDS == 13);
+const _: () = assert!(<crate::port::TransmitOutcome as Abi>::WORDS == 5);
 const _: () = assert!(<u32 as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
@@ -138,6 +208,7 @@ unsafe extern "C" {
     fn vesper_sim_seq_free(seq: i64) -> i64;
     fn vesper_sim_live_allocations() -> i64;
     fn vesper_sim_LinkState_drop(value: *mut u64) -> i64;
+    fn vesper_sim_vesper__sim_2session__wal__ScanResult_drop(value: *mut u64) -> i64;
     fn vesper_sim_link_state_clone(result: *mut u64, l: *mut u64) -> i64;
     fn vesper_sim_link_state_duplicates(l: *mut u64) -> i64;
     fn vesper_sim_link_state_in_bad_state(l: *mut u64) -> i64;
@@ -147,10 +218,16 @@ unsafe extern "C" {
     fn vesper_sim_link_state_service_ns(l: *mut u64, bytes: i64) -> i64;
     fn vesper_sim_link_state_transmit(result: *mut u64, l: *mut u64, now_ns: i64, at_ns: i64, bytes: i64) -> i64;
     fn vesper_sim_name_seed(seed: i64, name: *mut u64) -> i64;
+    fn vesper_sim_scan_result_damage(result: *mut u64, s: *mut u64) -> i64;
+    fn vesper_sim_scan_result_records(s: *mut u64) -> i64;
+    fn vesper_sim_scan_result_valid_bytes(s: *mut u64) -> i64;
+    fn vesper_sim_sha256(bytes: *mut u64) -> i64;
     fn vesper_sim_splitmix_chance(state: *mut u64, ppm: i64) -> i64;
     fn vesper_sim_splitmix_next(state: *mut u64) -> i64;
     fn vesper_sim_stationary_bad_ppm(good_to_bad_ppm: i64, bad_to_good_ppm: i64) -> i64;
     fn vesper_sim_stationary_loss_ppm(good_to_bad_ppm: i64, bad_to_good_ppm: i64, loss_good_ppm: i64, loss_bad_ppm: i64) -> i64;
+    fn vesper_sim_wal_frame(lsn: i64, payload: *mut u64) -> i64;
+    fn vesper_sim_wal_scan(result: *mut u64, bytes: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `sim`.
@@ -196,9 +273,9 @@ pub fn link_state_in_bad_state(l: &LinkState) -> bool {
 }
 
 /// Calls `link_state_new` of the Vesper library `sim` (`vesper_sim_link_state_new`).
-pub fn link_state_new(params: crate::model::link::port::LinkParams, seed: u64, name: &str) -> LinkState {
+pub fn link_state_new(params: crate::port::LinkParams, seed: u64, name: &str) -> LinkState {
     let mut result = [0u64; 17];
-    let mut arg_params = [0u64; <crate::model::link::port::LinkParams as Abi>::WORDS];
+    let mut arg_params = [0u64; <crate::port::LinkParams as Abi>::WORDS];
     Abi::put(&params, &mut arg_params);
     // SAFETY: `vesper_sim_link_state_new` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
@@ -239,13 +316,13 @@ pub fn link_state_service_ns(l: &LinkState, bytes: u32) -> u64 {
 }
 
 /// Calls `link_state_transmit` of the Vesper library `sim` (`vesper_sim_link_state_transmit`).
-pub fn link_state_transmit(l: &mut LinkState, now_ns: u64, at_ns: u64, bytes: u32) -> crate::model::link::port::TransmitOutcome {
+pub fn link_state_transmit(l: &mut LinkState, now_ns: u64, at_ns: u64, bytes: u32) -> crate::port::TransmitOutcome {
     let mut result = [0u64; 5];
     // SAFETY: `vesper_sim_link_state_transmit` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_sim_link_state_transmit(result.as_mut_ptr(), l.words.as_mut_ptr(), now_ns as i64, at_ns as i64, bytes as i64) };
-    <crate::model::link::port::TransmitOutcome as Abi>::get(&result[0..])
+    <crate::port::TransmitOutcome as Abi>::get(&result[0..])
 }
 
 /// Calls `name_seed` of the Vesper library `sim` (`vesper_sim_name_seed`).
@@ -255,6 +332,46 @@ pub fn name_seed(seed: u64, name: &str) -> u64 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_str(name, |view_name| unsafe { vesper_sim_name_seed(seed as i64, view_name) });
     raw as u64
+}
+
+/// Calls `scan_result_damage` of the Vesper library `sim` (`vesper_sim_scan_result_damage`).
+pub fn scan_result_damage(s: &vesper__sim_2session__wal__ScanResult) -> (u8, u64, u64) {
+    let mut result = [0u64; 3];
+    let mut arg_s = s.words;
+    // SAFETY: `vesper_sim_scan_result_damage` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_scan_result_damage(result.as_mut_ptr(), arg_s.as_mut_ptr()) };
+    <(u8, u64, u64) as Abi>::get(&result[0..])
+}
+
+/// Calls `scan_result_records` of the Vesper library `sim` (`vesper_sim_scan_result_records`).
+pub fn scan_result_records(s: &vesper__sim_2session__wal__ScanResult) -> Vec<u64> {
+    let mut arg_s = s.words;
+    // SAFETY: `vesper_sim_scan_result_records` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_scan_result_records(arg_s.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `scan_result_valid_bytes` of the Vesper library `sim` (`vesper_sim_scan_result_valid_bytes`).
+pub fn scan_result_valid_bytes(s: &vesper__sim_2session__wal__ScanResult) -> u64 {
+    let mut arg_s = s.words;
+    // SAFETY: `vesper_sim_scan_result_valid_bytes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_scan_result_valid_bytes(arg_s.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `sha256` of the Vesper library `sim` (`vesper_sim_sha256`).
+pub fn sha256(bytes: &[u8]) -> Vec<u8> {
+    // SAFETY: `vesper_sim_sha256` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_sim_sha256(view_bytes) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
 /// Calls `splitmix_chance` of the Vesper library `sim` (`vesper_sim_splitmix_chance`).
@@ -299,6 +416,25 @@ pub fn stationary_loss_ppm(good_to_bad_ppm: u32, bad_to_good_ppm: u32, loss_good
     raw as u32
 }
 
+/// Calls `wal_frame` of the Vesper library `sim` (`vesper_sim_wal_frame`).
+pub fn wal_frame(lsn: u64, payload: &str) -> Vec<u8> {
+    // SAFETY: `vesper_sim_wal_frame` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(payload, |view_payload| unsafe { vesper_sim_wal_frame(lsn as i64, view_payload) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `wal_scan` of the Vesper library `sim` (`vesper_sim_wal_scan`).
+pub fn wal_scan(bytes: &[u8]) -> vesper__sim_2session__wal__ScanResult {
+    let mut result = [0u64; 5];
+    // SAFETY: `vesper_sim_wal_scan` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_sim_wal_scan(result.as_mut_ptr(), view_bytes) });
+    unsafe { vesper__sim_2session__wal__ScanResult::from_words(&result[0..]) }
+}
+
 impl LinkState {
     /// `link_state_clone` (`vesper_sim_link_state_clone`).
     pub fn clone(&self) -> LinkState {
@@ -316,7 +452,7 @@ impl LinkState {
     }
 
     /// `link_state_new` (`vesper_sim_link_state_new`).
-    pub fn new(params: crate::model::link::port::LinkParams, seed: u64, name: &str) -> LinkState {
+    pub fn new(params: crate::port::LinkParams, seed: u64, name: &str) -> LinkState {
         link_state_new(params, seed, name)
     }
 
@@ -336,7 +472,7 @@ impl LinkState {
     }
 
     /// `link_state_transmit` (`vesper_sim_link_state_transmit`).
-    pub fn transmit(&mut self, now_ns: u64, at_ns: u64, bytes: u32) -> crate::model::link::port::TransmitOutcome {
+    pub fn transmit(&mut self, now_ns: u64, at_ns: u64, bytes: u32) -> crate::port::TransmitOutcome {
         link_state_transmit(self, now_ns, at_ns, bytes)
     }
 }
