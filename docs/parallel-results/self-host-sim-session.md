@@ -1,8 +1,8 @@
 # Self-hosting SH5 lane 19: `vesper-sim-session` in Vesper
 
 Part 1 (#1357, merged as `b647460`) ported the datagram link model. Part 2
-(below the part 1 sections) ports SHA-256 and the WAL frame codec and
-recovery scan.
+(#1380, merged as `97de64f`) ported SHA-256 and the WAL frame codec and
+recovery scan. Part 3 ports the virtual message network `net-v1`.
 
 ## Part 1: the datagram link model
 
@@ -154,11 +154,71 @@ for a 50 MB binary. Rust stays the default build under the parity rule.
    and `scan_result_*` functions do not become methods. Declaring the type in
    the root module avoids this.
 
+## Part 3: the virtual message network
+
+Base: `main` at `97de64f`.
+
+### What changed
+
+- The end of `port/src/lib.ves` is `net-v1` from `src/model/net.rs`. The
+  Vesper `NetState` makes every decision: message ids, per-link delays,
+  partitions, the send-time bounds (message size, in-flight count, the
+  inbox reservation), the drop reason at send and at arrival, and the FIFO
+  order of each endpoint's inbox and waiting receivers. Its tables are flat
+  `ChunkSeq[u64]` words (delay triples, sorted partition pairs, in-flight
+  `(id, from, to)` triples, and `(endpoint, value)` pairs for inboxes and
+  waiters).
+- This is the token-slab plan. The Rust `Network` wrapper keeps only the
+  payloads, keyed by message id, so no string crosses the boundary. Send
+  passes the payload's byte length, and the wrapper builds the `Message`
+  from the id and delivery time that come back. `take_queued` returns
+  message id 0 for an empty inbox (ids start at 1), and `crash` reads the
+  inbox and waiters before clearing them, so only words and flat seqs cross.
+- `Network`'s reference accessors (`endpoint`, `endpoints`, `in_flight`,
+  `partitions`) became owned ones on both builds: `in_flight`,
+  `in_flight_to`, `inboxes`, `waiting` and `partitions`. The model snapshot
+  and the arrival handler were their only users. `Endpoint` is now private
+  to the Rust build.
+- The differential adds a `net` case: 4,000 pseudo-random sends, arrivals
+  (some of unknown ids), receives, waits, timeouts, crashes, partitions and
+  heals over four endpoints with tight bounds. After every step it records
+  the network's whole state, then checks that a clone compares equal and
+  crashes every endpoint of the copy.
+- The `net` divergent edit lets an inbox take one message past its bound. It
+  fails `bounds_are_checked_before_anything_is_retained` and changes the
+  `net` transcript.
+
+### Results
+
+| Check | Rust | Vesper |
+|---|---|---|
+| Crate tests | all pass | all pass |
+| Transcript differential (10 cases) | blessed | **0 differences** |
+
+| Measure (release, best of 5) | Rust | Vesper | Ratio |
+|---|---|---|---|
+| `net_throughput`: 10^6 operations of the `net` mix | 414 ns/op | 455 ns/op | 1.10x |
+| Link (rerun) | 46.5 ns | 65.7 ns | 1.41x |
+| SHA-256 (rerun) | 0.82 ns/byte | 13.60 ns/byte | 16.6x |
+| WAL scan (rerun) | 347 ns/frame | 4,449 ns/frame | 12.8x |
+
+The `net` benchmark also formats a log line per operation on both builds,
+which is shared work, so the network itself costs more than 1.10x. The
+Vesper tables are linear: endpoint and partition lookups scan, and removing
+from an inbox or the waiter list shifts the rest. That is fine at the
+scenario bounds (tens of endpoints and messages) and is the first thing to
+change for parity. The reruns of the part 1 and part 2 benchmarks came out
+slower than before for both builds, so this machine was noisier than for
+those parts.
+
+### More compiler gaps
+
+7. **`eq` on a `Slice` is bytes only.** `a.as_slice().eq(in b.as_slice())`
+   on `ChunkSeq[u64]` is E1525 ("'eq' reads and writes bytes"). Comparing
+   word sequences is a loop.
+
 ## What is left (later parts of #1342)
 
-- `model/net.rs` (`net-v1`). It is mostly ordered maps of message records
-  whose payloads are strings. The plan is a token slab: Vesper keeps the ids,
-  reservations, partitions and FIFO order, and Rust keeps the payloads.
 - The `Wal` state machine itself (part 2 ported only its codec), and a
   faster SHA-256.
 - `model/umem.rs` and `model/warp.rs` (3,100 lines, over the

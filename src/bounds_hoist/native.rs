@@ -194,6 +194,27 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(receiver)
     }
 
+    /// Reads a sequence or slice field of an invariant aggregate (an `in`
+    /// parameter of the function, lent on to a specialized callee, #1330)
+    /// where a specialized callee's graph begins: the handle word and the
+    /// header words are read-only memory for the whole call, so Cranelift
+    /// moves them out of the caller's loops.
+    pub(crate) fn seq_invariant_field_view(
+        &mut self,
+        place: &crate::check::Place,
+        ty: &Type,
+    ) -> Result<ir::Value, String> {
+        let e = ir_place_expr(place, 0..0);
+        let address = self.address(&e)?;
+        let receiver = if seq::is_slice_type(ty) {
+            address
+        } else {
+            self.invariant_word(address, 0)
+        };
+        self.invariant_headers.insert(receiver);
+        Ok(receiver)
+    }
+
     /// A header word of an invariant view or handle. The memory is valid
     /// and unchanged for the whole call (a borrowed view lives in the
     /// caller, and a sequence's header block outlives every view of it), so

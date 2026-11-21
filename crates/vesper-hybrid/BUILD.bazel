@@ -63,6 +63,11 @@ vesper_hybrid(
             "//:front_package",
             "//:std_intern_package",
         ],
+        # Test discovery (#1337) builds on @vesper/test-runner.
+        "hybrid_test_runner": [
+            "//:front_package",
+            "//:test_runner_package",
+        ],
     },
     modules = {
         "hybrid_check_layout": "modules/check_layout",
@@ -70,6 +75,7 @@ vesper_hybrid(
         "hybrid_ir_inline": "modules/ir_inline",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
+        "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
     },
     test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},

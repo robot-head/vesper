@@ -89,7 +89,8 @@ compiles the package, and then creates the `PLACE_IR_GO` file:
 ```sh
 PLACE_IR_PHASE=$ph PLACE_IR_STEP=10 PLACE_IR_GO=$go valgrind --tool=callgrind \
   --instr-atstart=no [--toggle-collect='*place_ir_measured*'] \
-  <self_host_place_ir test binary> --ignored --exact place_ir_callgrind &
+  <self_host_place_ir test binary> --ignored --exact place_ir_callgrind \
+  --nocapture --test-threads 1 &
 # wait for "place-ir callgrind: ready" on stderr, then
 callgrind_control -i on $!; touch $go
 ```

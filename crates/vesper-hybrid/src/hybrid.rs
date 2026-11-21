@@ -32,6 +32,11 @@ mod ir_check_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/test_runner.rs"]
+mod test_runner_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/ir_inline.rs"]
 mod ir_inline_binding;
 
@@ -47,6 +52,11 @@ mod parse_words;
 // the root package's tests/hybrid_layout.rs and tests/hybrid_ir_check.rs.
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+
+// The test-discovery swap's input encoders and result decoders (#1337),
+// shared with the root package's tests/self_host_test_runner.rs.
+#[path = "../../../tests/common/test_runner_words.rs"]
+mod test_runner_words;
 
 // The inliner swap's encoder and decoder (#1250), shared with the root
 // package's tests/self_host_ir_inline.rs.
@@ -65,6 +75,8 @@ static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs checked by the Vesper IR-check module.
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Sources whose tests the Vesper test-runner module discovered.
+static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs inlined by the Vesper inliner module.
 static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
@@ -138,6 +150,24 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
     },
 };
 
+/// `vesper::test_discovery::TestDiscoveryTable` from `modules/test_runner`:
+/// `@case` rows and test discovery of `@vesper/test-runner`.
+const VESPER_TEST_DISCOVERY: vesper::test_discovery::TestDiscoveryTable =
+    vesper::test_discovery::TestDiscoveryTable {
+        case_rows: |source, module| {
+            let input = test_runner_words::case_rows_input(source, module);
+            test_runner_words::decode_case_rows(
+                source,
+                &test_runner_binding::case_rows_words(&input),
+            )
+        },
+        discover: |source, items, cases| {
+            TEST_RUNNER_CALLS.fetch_add(1, Relaxed);
+            let input = test_runner_words::discover_input(source, items, cases);
+            test_runner_words::decode_discover(&test_runner_binding::discover_words(&input))
+        },
+    };
+
 /// `ir_swap`'s `inline` hook from `modules/ir_inline`: the inliner of
 /// `@vesper/ir-inline`. The package decides and splices; the hook encodes
 /// the world's answers and the program, and reads the report and the
@@ -207,6 +237,9 @@ extern "C" fn install() {
     if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
         std::process::abort();
     }
+    if vesper::test_discovery::install_test_discovery(VESPER_TEST_DISCOVERY).is_err() {
+        std::process::abort();
+    }
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
         std::process::abort();
     }
@@ -236,6 +269,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-check answered {} calls from Vesper",
         IR_CHECK_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: test-runner answered {} calls from Vesper",
+        TEST_RUNNER_CALLS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: ir-inline answered {} calls from Vesper",

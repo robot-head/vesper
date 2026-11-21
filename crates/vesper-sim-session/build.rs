@@ -41,4 +41,10 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "        } else if b0 == 237 {\n            (128, 159)",
         "        } else if b0 == 237 {\n            (128, 191)",
     ),
+    // net: an endpoint's inbox takes one message past its bound.
+    (
+        "net",
+        "    if wrapping_add(reserved, at(in n.queued, e)) >= n.max_inbox {",
+        "    if wrapping_add(reserved, at(in n.queued, e)) > n.max_inbox {",
+    ),
 ];

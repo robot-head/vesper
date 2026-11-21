@@ -60,6 +60,7 @@ pub mod seq;
 pub mod stack_bound;
 pub mod strings;
 pub mod tensor_types;
+pub mod test_discovery;
 pub mod tiled;
 pub mod tooling;
 pub mod trace_effects;

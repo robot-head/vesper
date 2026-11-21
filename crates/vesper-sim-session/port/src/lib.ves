@@ -2,7 +2,8 @@
 // models (self-hosting wave SH5 lane 19, #1342), part 1.
 //
 // Part 2 adds SHA-256 (sha256.ves) and the WAL frame codec and recovery
-// scan (wal.ves, src/model/wal.rs).
+// scan (wal.ves, src/model/wal.rs). Part 3 adds the virtual message network
+// `net-v1` (src/model/net.rs), at the end of this file.
 //
 // Ported in part 1: the datagram link model `datagram-v1` (src/model/link.rs): the
 // SplitMix64 generator, the FNV-1a name seeds, the Gilbert-Elliott chain and
@@ -384,4 +385,481 @@ pub fn scan_result_valid_bytes(in s: ScanResult) -> u64 {
 
 pub fn scan_result_damage(in s: ScanResult) -> (u8, u64, u64) {
     (s.damage, s.expected, s.found)
+}
+
+// ---------------------------------------------------------------------------
+// Part 3: the virtual message network `net-v1` (src/model/net.rs).
+//
+// The Vesper state owns every decision: message ids, link delays,
+// partitions, the send-time bounds and reservations, and the FIFO order of
+// each endpoint's inbox and waiting receivers. The Rust wrapper keeps the
+// payloads, keyed by message id, so no string crosses the boundary.
+
+// Drop reasons, in the order of `DropReason` in net.rs.
+const DROP_PARTITIONED: u8 = 0;
+const DROP_DESTINATION_DOWN: u8 = 1;
+// Words per entry of the flat tables below.
+const DELAY_WORDS: u64 = 3;
+const PAIR_WORDS: u64 = 2;
+const FLIGHT_WORDS: u64 = 3;
+// What `net_state_take_queued` returns for an empty inbox. Message ids
+// start at 1.
+const NO_MESSAGE: u64 = 0;
+
+// What a send did (`Result<Sent, NetError>`), without the payload.
+copy enum SendOutcome {
+    // The payload's byte length.
+    TooLarge(u64),
+    InFlightFull,
+    InboxFull,
+    // The message id and its delivery time.
+    InFlight(u64, u64),
+    // The message id, its delivery time and the drop reason.
+    Dropped(u64, u64, u8)
+}
+
+// What an arrival did (`Option<Arrival>`), without the message.
+copy enum ArriveOutcome {
+    Unknown,
+    // Handed to this waiting receive request.
+    Delivered(u64),
+    Queued,
+    Dropped(u8)
+}
+
+// The network. Endpoint tables are parallel to `endpoints` (ascending).
+struct NetState {
+    max_in_flight: u64,
+    max_inbox: u64,
+    max_message_bytes: u64,
+    default_delay_ns: u64,
+    next_message: u64,
+    // (from, to, delay_ns) triples, ascending by (from, to).
+    delays: ChunkSeq[u64],
+    endpoints: ChunkSeq[u64],
+    // Messages in flight to each endpoint.
+    reserved: ChunkSeq[u64],
+    // Messages in each endpoint's inbox.
+    queued: ChunkSeq[u64],
+    // (min, max) endpoint pairs, ascending.
+    partitions: ChunkSeq[u64],
+    // (id, from, to) triples, ascending by id.
+    flight: ChunkSeq[u64],
+    // (endpoint, id) pairs, oldest first.
+    inbox: ChunkSeq[u64],
+    // (endpoint, request) pairs, oldest first.
+    waiters: ChunkSeq[u64]
+}
+
+fn copy_words(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](s.len());
+    out.extend(in s.as_slice());
+    out
+}
+
+fn same_words(in a: ChunkSeq[u64], in b: ChunkSeq[u64]) -> bool {
+    let n = a.len();
+    if n != b.len() {
+        return false;
+    }
+    for i in 0..n {
+        if at(in a, i) != at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Remove the `width` words at `start`, keeping the order of the rest.
+fn remove_words(inout s: ChunkSeq[u64], start: u64, width: u64) {
+    let n = s.len();
+    for i in wrapping_add(start, width)..n {
+        s.try_set(wrapping_sub(i, width), at(in s, i));
+    }
+    s.truncate(wrapping_sub(n, width));
+}
+
+fn min(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// The index of `endpoint` in `endpoints`, or its length when unknown.
+fn endpoint_index(in n: NetState, endpoint: u64) -> u64 {
+    let count = n.endpoints.len();
+    for i in 0..count {
+        if at(in n.endpoints, i) == endpoint {
+            return i;
+        }
+    }
+    count
+}
+
+// The word offset of the (min, max) pair in `partitions`, or where it
+// would go, and whether it is there.
+fn partition_at(in n: NetState, a: u64, b: u64) -> (u64, bool) {
+    let lo = min(a, b);
+    let hi = max(a, b);
+    let len = n.partitions.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            return (len, false);
+        }
+        let x = at(in n.partitions, i);
+        let y = at(in n.partitions, wrapping_add(i, 1));
+        if x == lo && y == hi {
+            return (i, true);
+        }
+        if x > lo || (x == lo && y > hi) {
+            return (i, false);
+        }
+        i = wrapping_add(i, PAIR_WORDS);
+    }
+}
+
+// Words `delays` as (from, to, delay_ns) triples ascending by (from, to)
+// and `endpoints` ascending, as the Rust maps iterate.
+pub fn net_state_new(
+    max_in_flight: u64,
+    max_inbox: u64,
+    max_message_bytes: u64,
+    default_delay_ns: u64,
+    in delays: Slice[u64],
+    in endpoints: Slice[u64]
+) -> NetState {
+    let count = endpoints.len();
+    let mut d: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](delays.len());
+    d.extend(in delays);
+    let mut e: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](count);
+    e.extend(in endpoints);
+    let mut reserved: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](count);
+    let mut queued: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](count);
+    for _ in 0..count {
+        reserved.push(0);
+        queued.push(0);
+    }
+    NetState {
+        max_in_flight: max_in_flight,
+        max_inbox: max_inbox,
+        max_message_bytes: max_message_bytes,
+        default_delay_ns: default_delay_ns,
+        next_message: 1,
+        delays: d,
+        endpoints: e,
+        reserved: reserved,
+        queued: queued,
+        partitions: ChunkSeq::new[u64](),
+        flight: ChunkSeq::new[u64](),
+        inbox: ChunkSeq::new[u64](),
+        waiters: ChunkSeq::new[u64]()
+    }
+}
+
+pub fn net_state_clone(in n: NetState) -> NetState {
+    NetState {
+        max_in_flight: n.max_in_flight,
+        max_inbox: n.max_inbox,
+        max_message_bytes: n.max_message_bytes,
+        default_delay_ns: n.default_delay_ns,
+        next_message: n.next_message,
+        delays: copy_words(in n.delays),
+        endpoints: copy_words(in n.endpoints),
+        reserved: copy_words(in n.reserved),
+        queued: copy_words(in n.queued),
+        partitions: copy_words(in n.partitions),
+        flight: copy_words(in n.flight),
+        inbox: copy_words(in n.inbox),
+        waiters: copy_words(in n.waiters)
+    }
+}
+
+pub fn net_state_same(in a: NetState, in b: NetState) -> bool {
+    let limits_a = (a.max_in_flight, a.max_inbox, a.max_message_bytes);
+    let limits_b = (b.max_in_flight, b.max_inbox, b.max_message_bytes);
+    if limits_a != limits_b {
+        return false;
+    }
+    if a.default_delay_ns != b.default_delay_ns || a.next_message != b.next_message {
+        return false;
+    }
+    same_words(in a.delays, in b.delays)
+        && same_words(in a.endpoints, in b.endpoints)
+        && same_words(in a.reserved, in b.reserved)
+        && same_words(in a.queued, in b.queued)
+        && same_words(in a.partitions, in b.partitions)
+        && same_words(in a.flight, in b.flight)
+        && same_words(in a.inbox, in b.inbox)
+        && same_words(in a.waiters, in b.waiters)
+}
+
+pub fn net_state_has_endpoint(in n: NetState, endpoint: u64) -> bool {
+    endpoint_index(in n, endpoint) < n.endpoints.len()
+}
+
+pub fn net_state_is_partitioned(in n: NetState, a: u64, b: u64) -> bool {
+    let (_, found) = partition_at(in n, a, b);
+    found
+}
+
+pub fn net_state_delay(in n: NetState, from: u64, to: u64) -> u64 {
+    let len = n.delays.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            return n.default_delay_ns;
+        }
+        if at(in n.delays, i) == from && at(in n.delays, wrapping_add(i, 1)) == to {
+            return at(in n.delays, wrapping_add(i, 2));
+        }
+        i = wrapping_add(i, DELAY_WORDS);
+    }
+}
+
+// Returns whether the partition is new.
+pub fn net_state_partition(inout n: NetState, a: u64, b: u64) -> bool {
+    let (index, found) = partition_at(in n, a, b);
+    if found {
+        return false;
+    }
+    let len = n.partitions.len();
+    n.partitions.push(0);
+    n.partitions.push(0);
+    let mut i = len;
+    loop {
+        if i <= index {
+            break;
+        }
+        let from = wrapping_sub(i, PAIR_WORDS);
+        n.partitions.try_set(i, at(in n.partitions, from));
+        n.partitions.try_set(wrapping_add(i, 1), at(in n.partitions, wrapping_add(from, 1)));
+        i = from;
+    }
+    n.partitions.try_set(index, min(a, b));
+    n.partitions.try_set(wrapping_add(index, 1), max(a, b));
+    true
+}
+
+// Returns whether a partition was removed.
+pub fn net_state_heal(inout n: NetState, a: u64, b: u64) -> bool {
+    let (index, found) = partition_at(in n, a, b);
+    if found {
+        remove_words(inout n.partitions, index, PAIR_WORDS);
+    }
+    found
+}
+
+// Validate the bounds and either put the message in flight or drop it.
+// `to` must be a known endpoint; `destination_up` is its process state.
+pub fn net_state_send(
+    inout n: NetState,
+    from: u64,
+    to: u64,
+    bytes: u64,
+    now_ns: u64,
+    destination_up: bool
+) -> SendOutcome {
+    if bytes > n.max_message_bytes {
+        return SendOutcome::TooLarge(bytes);
+    }
+    let id = n.next_message;
+    let delay = net_state_delay(in n, from, to);
+    let deliver_at_ns = if now_ns > wrapping_sub(U64_MAX, delay) {
+        U64_MAX
+    } else {
+        wrapping_add(now_ns, delay)
+    };
+    if net_state_is_partitioned(in n, from, to) {
+        n.next_message = wrapping_add(id, 1);
+        return SendOutcome::Dropped(id, deliver_at_ns, DROP_PARTITIONED);
+    }
+    if !destination_up {
+        n.next_message = wrapping_add(id, 1);
+        return SendOutcome::Dropped(id, deliver_at_ns, DROP_DESTINATION_DOWN);
+    }
+    if n.flight.len() / FLIGHT_WORDS >= n.max_in_flight {
+        return SendOutcome::InFlightFull;
+    }
+    let e = endpoint_index(in n, to);
+    let reserved = at(in n.reserved, e);
+    if wrapping_add(reserved, at(in n.queued, e)) >= n.max_inbox {
+        return SendOutcome::InboxFull;
+    }
+    n.next_message = wrapping_add(id, 1);
+    n.reserved.try_set(e, wrapping_add(reserved, 1));
+    n.flight.push(id);
+    n.flight.push(from);
+    n.flight.push(to);
+    SendOutcome::InFlight(id, deliver_at_ns)
+}
+
+// The message's link delay elapsed.
+pub fn net_state_arrive(inout n: NetState, id: u64, destination_up: bool) -> ArriveOutcome {
+    let len = n.flight.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            return ArriveOutcome::Unknown;
+        }
+        if at(in n.flight, i) == id {
+            break;
+        }
+        i = wrapping_add(i, FLIGHT_WORDS);
+    }
+    let from = at(in n.flight, wrapping_add(i, 1));
+    let to = at(in n.flight, wrapping_add(i, 2));
+    remove_words(inout n.flight, i, FLIGHT_WORDS);
+    let e = endpoint_index(in n, to);
+    n.reserved.try_set(e, wrapping_sub(at(in n.reserved, e), 1));
+    if net_state_is_partitioned(in n, from, to) {
+        return ArriveOutcome::Dropped(DROP_PARTITIONED);
+    }
+    if !destination_up {
+        return ArriveOutcome::Dropped(DROP_DESTINATION_DOWN);
+    }
+    let w = first_of(in n.waiters, to);
+    if w < n.waiters.len() {
+        let request = at(in n.waiters, wrapping_add(w, 1));
+        remove_words(inout n.waiters, w, PAIR_WORDS);
+        return ArriveOutcome::Delivered(request);
+    }
+    n.inbox.push(to);
+    n.inbox.push(id);
+    n.queued.try_set(e, wrapping_add(at(in n.queued, e), 1));
+    ArriveOutcome::Queued
+}
+
+// The word offset of `endpoint`'s oldest (endpoint, value) pair, or the
+// length when it has none.
+fn first_of(in pairs: ChunkSeq[u64], endpoint: u64) -> u64 {
+    let len = pairs.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len || at(in pairs, i) == endpoint {
+            return i;
+        }
+        i = wrapping_add(i, PAIR_WORDS);
+    }
+}
+
+// The values of `endpoint`'s pairs, oldest first.
+fn values_of(in pairs: ChunkSeq[u64], endpoint: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let len = pairs.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            return out;
+        }
+        if at(in pairs, i) == endpoint {
+            out.push(at(in pairs, wrapping_add(i, 1)));
+        }
+        i = wrapping_add(i, PAIR_WORDS);
+    }
+}
+
+// Take the oldest queued message id, or NO_MESSAGE.
+pub fn net_state_take_queued(inout n: NetState, endpoint: u64) -> u64 {
+    let i = first_of(in n.inbox, endpoint);
+    if i >= n.inbox.len() {
+        return NO_MESSAGE;
+    }
+    let id = at(in n.inbox, wrapping_add(i, 1));
+    remove_words(inout n.inbox, i, PAIR_WORDS);
+    let e = endpoint_index(in n, endpoint);
+    n.queued.try_set(e, wrapping_sub(at(in n.queued, e), 1));
+    id
+}
+
+pub fn net_state_wait(inout n: NetState, endpoint: u64, request: u64) {
+    n.waiters.push(endpoint);
+    n.waiters.push(request);
+}
+
+// Remove a waiting request (for a timeout). Returns whether it waited.
+pub fn net_state_cancel_wait(inout n: NetState, endpoint: u64, request: u64) -> bool {
+    let len = n.waiters.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            return false;
+        }
+        if at(in n.waiters, i) == endpoint && at(in n.waiters, wrapping_add(i, 1)) == request {
+            remove_words(inout n.waiters, i, PAIR_WORDS);
+            return true;
+        }
+        i = wrapping_add(i, PAIR_WORDS);
+    }
+}
+
+// Crash: drop the endpoint's inbox and waiters (read them first with
+// `net_state_inbox` and `net_state_waiting`).
+pub fn net_state_crash(inout n: NetState, endpoint: u64) {
+    let mut keep: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n.inbox.len());
+    let len = n.inbox.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        if at(in n.inbox, i) != endpoint {
+            keep.push(at(in n.inbox, i));
+            keep.push(at(in n.inbox, wrapping_add(i, 1)));
+        }
+        i = wrapping_add(i, PAIR_WORDS);
+    }
+    n.inbox = keep;
+    let mut kept: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n.waiters.len());
+    let wlen = n.waiters.len();
+    let mut j: u64 = 0;
+    loop {
+        if j >= wlen {
+            break;
+        }
+        if at(in n.waiters, j) != endpoint {
+            kept.push(at(in n.waiters, j));
+            kept.push(at(in n.waiters, wrapping_add(j, 1)));
+        }
+        j = wrapping_add(j, PAIR_WORDS);
+    }
+    n.waiters = kept;
+    let e = endpoint_index(in n, endpoint);
+    n.queued.try_set(e, 0);
+}
+
+// Endpoint ids, ascending.
+pub fn net_state_endpoints(in n: NetState) -> ChunkSeq[u64] {
+    copy_words(in n.endpoints)
+}
+
+// (min, max) pairs, ascending.
+pub fn net_state_partitions(in n: NetState) -> ChunkSeq[u64] {
+    copy_words(in n.partitions)
+}
+
+// In-flight message ids, ascending.
+pub fn net_state_in_flight(in n: NetState) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n.flight.len() / FLIGHT_WORDS);
+    let len = n.flight.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            return out;
+        }
+        out.push(at(in n.flight, i));
+        i = wrapping_add(i, FLIGHT_WORDS);
+    }
+}
+
+// `endpoint`'s queued message ids, oldest first.
+pub fn net_state_inbox(in n: NetState, endpoint: u64) -> ChunkSeq[u64] {
+    values_of(in n.inbox, endpoint)
+}
+
+// `endpoint`'s waiting requests, oldest first.
+pub fn net_state_waiting(in n: NetState, endpoint: u64) -> ChunkSeq[u64] {
+    values_of(in n.waiters, endpoint)
 }
