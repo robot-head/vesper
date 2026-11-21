@@ -323,8 +323,10 @@ pub fn profile_of(effect: &Effect) -> Option<Profile> {
 pub fn row_profiles(effects: &Effects) -> Vec<Profile> {
     effects.instances.iter().filter_map(profile_of).collect()
 }
-/// Diagnostic for a malformed `Isa` row entry.
-pub(crate) fn isa_row_entry(effect: &Effect, span: Span) -> Option<Diagnostic> {
+/// Diagnostic for a malformed `Isa` row entry. Public for the self-hosting
+/// differential (SH2 lane 9, #1181).
+#[doc(hidden)]
+pub fn isa_row_entry(effect: &Effect, span: Span) -> Option<Diagnostic> {
     if profile_of(effect).is_some() {
         return None;
     }

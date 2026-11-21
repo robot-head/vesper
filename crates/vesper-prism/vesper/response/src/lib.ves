@@ -1,3 +1,6 @@
+use self::ascii::{
+    Ascii
+};
 // Vesper port of the fixed-length HTTP/1.1 response encoder of
 // crates/vesper-prism (`ResponseBuilder` in src/response.rs, port wave P1
 // lane 14, #911).
@@ -8,13 +11,6 @@
 // before a field is retained or output is allocated.
 
 // ASCII bytes this module compares against (constants are per module).
-const SPACE: u8 = 32;
-const DIGIT_0: u8 = 48;
-const DIGIT_9: u8 = 57;
-const UPPER_A: u8 = 65;
-const UPPER_Z: u8 = 90;
-const LOWER_A: u8 = 97;
-const LOWER_Z: u8 = 122;
 // 'a' - 'A': adding it lowercases an ASCII capital.
 const ASCII_CASE_OFFSET: u8 = 32;
 
@@ -88,13 +84,13 @@ fn byte(in s: Slice[u8], i: u64) -> u8 {
 }
 
 fn is_alnum(b: u8) -> bool {
-    (b >= DIGIT_0 && b <= DIGIT_9)
-        || (b >= UPPER_A && b <= UPPER_Z)
-        || (b >= LOWER_A && b <= LOWER_Z)
+    (b >= Ascii::Digit0 && b <= Ascii::Digit9)
+        || (b >= Ascii::UpperA && b <= Ascii::UpperZ)
+        || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
 }
 
 fn lower(b: u8) -> u8 {
-    if b >= UPPER_A && b <= UPPER_Z {
+    if b >= Ascii::UpperA && b <= Ascii::UpperZ {
         wrapping_add(b, ASCII_CASE_OFFSET)
     } else {
         b
@@ -201,7 +197,7 @@ fn push_decimal(inout out: ChunkSeq[u8], value: u64) {
     let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut rest = value;
     loop {
-        digits.push(wrapping_u8(wrapping_add(rest % 10, widen_u64(DIGIT_0))));
+        digits.push(wrapping_u8(wrapping_add(rest % 10, widen_u64(Ascii::Digit0))));
         rest = rest / 10;
         if rest == 0 {
             break;
@@ -481,7 +477,7 @@ pub fn response_plan_finish(in p: ResponsePlan, in body: Slice[u8])
     );
     push_text(inout out, "HTTP/1.1 ");
     push_decimal(inout out, p.status);
-    out.push(SPACE);
+    out.push(Ascii::Space);
     push_reason(inout out, p.status);
     push_text(inout out, "\r\n");
     let mut name_at: u64 = 0;

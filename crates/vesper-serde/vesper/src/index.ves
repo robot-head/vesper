@@ -10,6 +10,10 @@ use self::{
     Limits,
     Token
 };
+use self::ascii::{
+    Ascii,
+    Utf8
+};
 
 // `at` past the end: no byte has this value.
 const NO_BYTE: u64 = 256;
@@ -17,33 +21,9 @@ const NO_BYTE: u64 = 256;
 const NO_CHAR: u64 = 0x110000;
 const U64_MAX: u64 = 0xffffffffffffffff;
 // UTF-8 (Unicode Table 3-7).
-const UTF8_CONT_MASK: u64 = 0xc0;
-const UTF8_CONT: u64 = 0x80;
-const UTF8_CONT_HI: u64 = 0xbf;
-const UTF8_LEAD2_LO: u64 = 0xc2;
-const UTF8_LEAD2_HI: u64 = 0xdf;
-const UTF8_LEAD3_LO: u64 = 0xe0;
-const UTF8_LEAD3_HI: u64 = 0xef;
-const UTF8_E0_SECOND_LO: u64 = 0xa0;
-const UTF8_SURROGATE_LEAD: u64 = 0xed;
-const UTF8_ED_SECOND_HI: u64 = 0x9f;
-const UTF8_LEAD4_LO: u64 = 0xf0;
-const UTF8_LEAD4_HI: u64 = 0xf4;
-const UTF8_F0_SECOND_LO: u64 = 0x90;
-const UTF8_F4_SECOND_HI: u64 = 0x8f;
 // Tag bits of 2-, 3- and 4-byte leads, and the payload masks of a
 // continuation byte and of each lead.
-const UTF8_LEAD2_TAG: u64 = 0xc0;
-const UTF8_LEAD3_TAG: u64 = 0xe0;
-const UTF8_LEAD4_TAG: u64 = 0xf0;
-const UTF8_CONT_PAYLOAD: u64 = 0x3f;
-const UTF8_LEAD2_PAYLOAD: u64 = 0x1f;
-const UTF8_LEAD3_PAYLOAD: u64 = 0x0f;
-const UTF8_LEAD4_PAYLOAD: u64 = 0x07;
 // The first code point that needs 2, 3 and 4 bytes.
-const UTF8_TWO_BYTE_MIN: u64 = 0x80;
-const UTF8_THREE_BYTE_MIN: u64 = 0x800;
-const UTF8_FOUR_BYTE_MIN: u64 = 0x10000;
 // Any byte of a word with its high bit set is not ASCII.
 const ASCII_WORD_HIGH_BITS: u64 = 0x8080808080808080;
 const WORD_BYTES: u64 = 8;
@@ -62,8 +42,6 @@ const NOT_HEX: u64 = 16;
 const HEX_LOWER_OFFSET: u64 = 0x57;
 const HEX_UPPER_OFFSET: u64 = 0x37;
 // Control characters JSON names with a letter escape.
-const ASCII_BACKSPACE: u64 = 0x08;
-const ASCII_FF: u64 = 0x0c;
 // Work units per character compared in a duplicate-key or field-name
 // check (src/index.rs).
 const COMPARE_STEP_WORK: u64 = 24;
@@ -73,38 +51,6 @@ const MAX_COMPARE_STEPS: u64 = 768614336404564650;
 // (`size_of::<u32>()`).
 const TOKEN_BYTES: u64 = 48;
 const ENTRY_BYTES: u64 = 4;
-const ASCII_TAB: u64 = 0x09;
-const ASCII_LF: u64 = 0x0a;
-const ASCII_CR: u64 = 0x0d;
-const ASCII_SPACE: u64 = 0x20;
-const ASCII_QUOTE: u64 = 0x22;
-const ASCII_PLUS: u64 = 0x2b;
-const ASCII_COMMA: u64 = 0x2c;
-const ASCII_MINUS: u64 = 0x2d;
-const ASCII_DOT: u64 = 0x2e;
-const ASCII_SLASH: u64 = 0x2f;
-const ASCII_ZERO: u64 = 0x30;
-const ASCII_ONE: u64 = 0x31;
-const ASCII_NINE: u64 = 0x39;
-const ASCII_COLON: u64 = 0x3a;
-const ASCII_UPPER_A: u64 = 0x41;
-const ASCII_UPPER_E: u64 = 0x45;
-const ASCII_UPPER_F: u64 = 0x46;
-const ASCII_LBRACKET: u64 = 0x5b;
-const ASCII_BACKSLASH: u64 = 0x5c;
-const ASCII_RBRACKET: u64 = 0x5d;
-const ASCII_LOWER_A: u64 = 0x61;
-const ASCII_LOWER_B: u64 = 0x62;
-const ASCII_LOWER_E: u64 = 0x65;
-const ASCII_LOWER_F: u64 = 0x66;
-const ASCII_LOWER_L: u64 = 0x6c;
-const ASCII_LOWER_N: u64 = 0x6e;
-const ASCII_LOWER_R: u64 = 0x72;
-const ASCII_LOWER_S: u64 = 0x73;
-const ASCII_LOWER_T: u64 = 0x74;
-const ASCII_LOWER_U: u64 = 0x75;
-const ASCII_LBRACE: u64 = 0x7b;
-const ASCII_RBRACE: u64 = 0x7d;
 
 pub fn raise(kind: ErrorKind, offset: u64) -> Unit eff [Fail[Error]] {
     Fail::raise(
@@ -163,7 +109,7 @@ pub fn tok(in toks: ChunkSeq[Token], i: u64) -> Token {
 // -------------------------------------------------------------------
 
 fn cont(in t: Slice[u8], p: u64, to: u64) -> bool {
-    p < to && at(in t, p) & UTF8_CONT_MASK == UTF8_CONT
+    p < to && at(in t, p) & Utf8::ContMask == Utf8::Cont
 }
 
 fn in_range(in t: Slice[u8], p: u64, to: u64, lo: u64, hi: u64) -> bool {
@@ -196,18 +142,18 @@ pub fn utf8_valid_up_to(in t: Slice[u8], from: u64, to: u64) -> u64 {
             return to;
         }
         let b = at(in t, p);
-        if b < UTF8_TWO_BYTE_MIN {
+        if b < Utf8::TwoByteMin {
             p = wrapping_add(p, 1);
-        } else if b >= UTF8_LEAD2_LO && b <= UTF8_LEAD2_HI {
+        } else if b >= Utf8::Lead2Lo && b <= Utf8::Lead2Hi {
             if !cont(in t, wrapping_add(p, 1), to) {
                 return p;
             }
             p = wrapping_add(p, 2);
-        } else if b >= UTF8_LEAD3_LO && b <= UTF8_LEAD3_HI {
-            let ok1 = if b == UTF8_LEAD3_LO {
-                in_range(in t, wrapping_add(p, 1), to, UTF8_E0_SECOND_LO, UTF8_CONT_HI)
-            } else if b == UTF8_SURROGATE_LEAD {
-                in_range(in t, wrapping_add(p, 1), to, UTF8_CONT, UTF8_ED_SECOND_HI)
+        } else if b >= Utf8::Lead3Lo && b <= Utf8::Lead3Hi {
+            let ok1 = if b == Utf8::Lead3Lo {
+                in_range(in t, wrapping_add(p, 1), to, Utf8::E0SecondLo, Utf8::ContHi)
+            } else if b == Utf8::SurrogateLead {
+                in_range(in t, wrapping_add(p, 1), to, Utf8::Cont, Utf8::EdSecondHi)
             } else {
                 cont(in t, wrapping_add(p, 1), to)
             };
@@ -215,11 +161,11 @@ pub fn utf8_valid_up_to(in t: Slice[u8], from: u64, to: u64) -> u64 {
                 return p;
             }
             p = wrapping_add(p, 3);
-        } else if b >= UTF8_LEAD4_LO && b <= UTF8_LEAD4_HI {
-            let ok1 = if b == UTF8_LEAD4_LO {
-                in_range(in t, wrapping_add(p, 1), to, UTF8_F0_SECOND_LO, UTF8_CONT_HI)
-            } else if b == UTF8_LEAD4_HI {
-                in_range(in t, wrapping_add(p, 1), to, UTF8_CONT, UTF8_F4_SECOND_HI)
+        } else if b >= Utf8::Lead4Lo && b <= Utf8::Lead4Hi {
+            let ok1 = if b == Utf8::Lead4Lo {
+                in_range(in t, wrapping_add(p, 1), to, Utf8::F0SecondLo, Utf8::ContHi)
+            } else if b == Utf8::Lead4Hi {
+                in_range(in t, wrapping_add(p, 1), to, Utf8::Cont, Utf8::F4SecondHi)
             } else {
                 cont(in t, wrapping_add(p, 1), to)
             };
@@ -237,23 +183,23 @@ pub fn utf8_valid_up_to(in t: Slice[u8], from: u64, to: u64) -> u64 {
 // The Unicode scalar starting at `p` of valid UTF-8, and its length.
 pub fn utf8_char(in t: Slice[u8], p: u64) -> (u64, u64) {
     let b = at(in t, p);
-    if b < UTF8_TWO_BYTE_MIN {
+    if b < Utf8::TwoByteMin {
         (b, 1)
-    } else if b < UTF8_LEAD3_LO {
-        (((b & UTF8_LEAD2_PAYLOAD) << 6) | (at(in t, wrapping_add(p, 1)) & UTF8_CONT_PAYLOAD), 2)
-    } else if b < UTF8_LEAD4_LO {
+    } else if b < Utf8::Lead3Lo {
+        (((b & Utf8::Lead2Payload) << 6) | (at(in t, wrapping_add(p, 1)) & Utf8::ContPayload), 2)
+    } else if b < Utf8::Lead4Lo {
         (
-            ((b & UTF8_LEAD3_PAYLOAD) << 12) | (
-                (at(in t, wrapping_add(p, 1)) & UTF8_CONT_PAYLOAD) << 6
-            ) | (at(in t, wrapping_add(p, 2)) & UTF8_CONT_PAYLOAD),
+            ((b & Utf8::Lead3Payload) << 12) | (
+                (at(in t, wrapping_add(p, 1)) & Utf8::ContPayload) << 6
+            ) | (at(in t, wrapping_add(p, 2)) & Utf8::ContPayload),
             3
         )
     } else {
         (
-            ((b & UTF8_LEAD4_PAYLOAD) << 18) | (
-                (at(in t, wrapping_add(p, 1)) & UTF8_CONT_PAYLOAD) << 12
-            ) | ((at(in t, wrapping_add(p, 2)) & UTF8_CONT_PAYLOAD) << 6) | (
-                at(in t, wrapping_add(p, 3)) & UTF8_CONT_PAYLOAD
+            ((b & Utf8::Lead4Payload) << 18) | (
+                (at(in t, wrapping_add(p, 1)) & Utf8::ContPayload) << 12
+            ) | ((at(in t, wrapping_add(p, 2)) & Utf8::ContPayload) << 6) | (
+                at(in t, wrapping_add(p, 3)) & Utf8::ContPayload
             ),
             4
         )
@@ -261,11 +207,11 @@ pub fn utf8_char(in t: Slice[u8], p: u64) -> (u64, u64) {
 }
 
 pub fn utf8_len(c: u64) -> u64 {
-    if c < UTF8_TWO_BYTE_MIN {
+    if c < Utf8::TwoByteMin {
         1
-    } else if c < UTF8_THREE_BYTE_MIN {
+    } else if c < Utf8::ThreeByteMin {
         2
-    } else if c < UTF8_FOUR_BYTE_MIN {
+    } else if c < Utf8::FourByteMin {
         3
     } else {
         4
@@ -299,11 +245,11 @@ fn esc_fail(kind: u64, at: u64, budget: u64) -> Esc {
 }
 
 fn hex_digit(b: u64) -> u64 {
-    if b >= ASCII_ZERO && b <= ASCII_NINE {
-        wrapping_sub(b, ASCII_ZERO)
-    } else if b >= ASCII_LOWER_A && b <= ASCII_LOWER_F {
+    if b >= Ascii::Zero && b <= Ascii::Nine {
+        wrapping_sub(b, Ascii::Zero)
+    } else if b >= Ascii::LowerA && b <= Ascii::LowerF {
         wrapping_sub(b, HEX_LOWER_OFFSET)
-    } else if b >= ASCII_UPPER_A && b <= ASCII_UPPER_F {
+    } else if b >= Ascii::UpperA && b <= Ascii::UpperF {
         wrapping_sub(b, HEX_UPPER_OFFSET)
     } else {
         NOT_HEX
@@ -335,30 +281,30 @@ pub fn escape_body(in t: Slice[u8], pos0: u64, mode: u64, budget0: u64) -> Esc {
         return esc_fail(1, pos0, budget);
     }
     let mut pos = wrapping_add(pos0, 1);
-    let code: u64 = if b == ASCII_QUOTE {
-        ASCII_QUOTE
-    } else if b == ASCII_BACKSLASH {
-        ASCII_BACKSLASH
-    } else if b == ASCII_SLASH {
-        ASCII_SLASH
-    } else if b == ASCII_LOWER_B {
-        ASCII_BACKSPACE
-    } else if b == ASCII_LOWER_F {
-        ASCII_FF
-    } else if b == ASCII_LOWER_N {
-        ASCII_LF
-    } else if b == ASCII_LOWER_R {
-        ASCII_CR
-    } else if b == ASCII_LOWER_T {
-        ASCII_TAB
-    } else if b == ASCII_LOWER_U {
+    let code: u64 = if b == Ascii::Quote {
+        Ascii::Quote
+    } else if b == Ascii::Backslash {
+        Ascii::Backslash
+    } else if b == Ascii::Slash {
+        Ascii::Slash
+    } else if b == Ascii::LowerB {
+        Ascii::Backspace
+    } else if b == Ascii::LowerF {
+        Ascii::Ff
+    } else if b == Ascii::LowerN {
+        Ascii::Lf
+    } else if b == Ascii::LowerR {
+        Ascii::Cr
+    } else if b == Ascii::LowerT {
+        Ascii::Tab
+    } else if b == Ascii::LowerU {
         let (hi, bad) = hex4(in t, pos);
         if bad != U64_MAX {
             return esc_fail(1, bad, budget);
         }
         pos = wrapping_add(pos, HEX_ESCAPE_DIGITS);
         if hi >= HIGH_SURROGATE_FIRST && hi <= HIGH_SURROGATE_LAST {
-            if at(in t, pos) == ASCII_BACKSLASH {
+            if at(in t, pos) == Ascii::Backslash {
                 if mode == 1 {
                     if budget == 0 {
                         return esc_fail(2, pos, budget);
@@ -368,7 +314,10 @@ pub fn escape_body(in t: Slice[u8], pos0: u64, mode: u64, budget0: u64) -> Esc {
                     return esc_fail(2, budget, budget);
                 }
             }
-            if at(in t, pos) != ASCII_BACKSLASH || at(in t, wrapping_add(pos, 1)) != ASCII_LOWER_U {
+            if at(in t, pos)
+                != Ascii::Backslash
+                || at(in t, wrapping_add(pos, 1))
+                != Ascii::LowerU {
                 return esc_fail(1, pos, budget);
             }
             pos = wrapping_add(pos, 2);
@@ -383,7 +332,7 @@ pub fn escape_body(in t: Slice[u8], pos0: u64, mode: u64, budget0: u64) -> Esc {
             wrapping_sub(
                 wrapping_add(
                     wrapping_add(
-                        UTF8_FOUR_BYTE_MIN,
+                        Utf8::FourByteMin,
                         wrapping_sub(hi, HIGH_SURROGATE_FIRST) << SURROGATE_BITS
                     ),
                     lo
@@ -417,7 +366,7 @@ pub fn next_decoded(in t: Slice[u8], pos: u64, end: u64) -> (u64, u64) {
     }
     let (c, n) = utf8_char(in t, pos);
     let after = wrapping_add(pos, n);
-    if c != ASCII_BACKSLASH {
+    if c != Ascii::Backslash {
         return (c, after);
     }
     let e = escape_body(in t, after, 0, 0);
@@ -455,23 +404,27 @@ pub fn strings_equal(in raw: Slice[u8], in text: Slice[u8]) -> bool {
 
 // UTF-8 encode `c` at `scratch[pos..]`; returns the position after it.
 pub fn put_utf8(inout out: Slice[u8], pos: u64, c: u64) -> u64 {
-    if c < UTF8_TWO_BYTE_MIN {
+    if c < Utf8::TwoByteMin {
         out.try_set(pos, wrapping_u8(c));
         wrapping_add(pos, 1)
-    } else if c < UTF8_THREE_BYTE_MIN {
-        out.try_set(pos, wrapping_u8(UTF8_LEAD2_TAG | (c >> 6)));
-        out.try_set(wrapping_add(pos, 1), wrapping_u8(UTF8_CONT | (c & UTF8_CONT_PAYLOAD)));
+    } else if c < Utf8::ThreeByteMin {
+        out.try_set(pos, wrapping_u8(Utf8::Lead2Tag | (c >> 6)));
+        out.try_set(wrapping_add(pos, 1), wrapping_u8(Utf8::Cont | (c & Utf8::ContPayload)));
         wrapping_add(pos, 2)
-    } else if c < UTF8_FOUR_BYTE_MIN {
-        out.try_set(pos, wrapping_u8(UTF8_LEAD3_TAG | (c >> 12)));
-        out.try_set(wrapping_add(pos, 1), wrapping_u8(UTF8_CONT | ((c >> 6) & UTF8_CONT_PAYLOAD)));
-        out.try_set(wrapping_add(pos, 2), wrapping_u8(UTF8_CONT | (c & UTF8_CONT_PAYLOAD)));
+    } else if c < Utf8::FourByteMin {
+        out.try_set(pos, wrapping_u8(Utf8::Lead3Tag | (c >> 12)));
+        out.try_set(wrapping_add(pos, 1), wrapping_u8(Utf8::Cont | ((c >> 6) & Utf8::ContPayload)));
+        out.try_set(wrapping_add(pos, 2), wrapping_u8(Utf8::Cont | (c & Utf8::ContPayload)));
         wrapping_add(pos, 3)
     } else {
-        out.try_set(pos, wrapping_u8(UTF8_LEAD4_TAG | (c >> 18)));
-        out.try_set(wrapping_add(pos, 1), wrapping_u8(UTF8_CONT | ((c >> 12) & UTF8_CONT_PAYLOAD)));
-        out.try_set(wrapping_add(pos, 2), wrapping_u8(UTF8_CONT | ((c >> 6) & UTF8_CONT_PAYLOAD)));
-        out.try_set(wrapping_add(pos, 3), wrapping_u8(UTF8_CONT | (c & UTF8_CONT_PAYLOAD)));
+        out.try_set(pos, wrapping_u8(Utf8::Lead4Tag | (c >> 18)));
+        out
+            .try_set(
+            wrapping_add(pos, 1),
+            wrapping_u8(Utf8::Cont | ((c >> 12) & Utf8::ContPayload))
+        );
+        out.try_set(wrapping_add(pos, 2), wrapping_u8(Utf8::Cont | ((c >> 6) & Utf8::ContPayload)));
+        out.try_set(wrapping_add(pos, 3), wrapping_u8(Utf8::Cont | (c & Utf8::ContPayload)));
         wrapping_add(pos, 4)
     }
 }
@@ -526,14 +479,14 @@ fn raw_compare_steps(in t: Slice[u8], a0: u64, a1: u64, b0: u64, b1: u64) -> u64
         if boundary == 0 || boundary >= shorter {
             break;
         }
-        if at(in t, wrapping_add(a0, boundary)) & UTF8_CONT_MASK != UTF8_CONT {
+        if at(in t, wrapping_add(a0, boundary)) & Utf8::ContMask != Utf8::Cont {
             break;
         }
         boundary = wrapping_sub(boundary, 1);
     }
     let mut steps: u64 = 1;
     for i in 0..boundary {
-        if at(in t, wrapping_add(a0, i)) & UTF8_CONT_MASK != UTF8_CONT {
+        if at(in t, wrapping_add(a0, i)) & Utf8::ContMask != Utf8::Cont {
             steps = wrapping_add(steps, 1);
         }
     }
@@ -678,7 +631,7 @@ fn op(inout p: P, in t: Slice[u8], b: u64) -> Unit eff [Fail[Error]] {
 fn ws(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
     loop {
         let b = at(in t, p.pos);
-        if b == ASCII_SPACE || b == ASCII_CR || b == ASCII_LF || b == ASCII_TAB {
+        if b == Ascii::Space || b == Ascii::Cr || b == Ascii::Lf || b == Ascii::Tab {
             step(inout p);
         } else {
             break;
@@ -710,7 +663,7 @@ fn push(inout p: P, inout toks: ChunkSeq[Token], kind: Kind, depth: u64) -> u64 
 }
 
 fn is_digit(b: u64) -> bool {
-    b >= ASCII_ZERO && b <= ASCII_NINE
+    b >= Ascii::Zero && b <= Ascii::Nine
 }
 
 fn digits(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
@@ -723,19 +676,19 @@ fn digits(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
 }
 
 fn number(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
-    if at(in t, p.pos) == ASCII_MINUS {
+    if at(in t, p.pos) == Ascii::Minus {
         step(inout p);
     }
     let b = at(in t, p.pos);
-    if b == ASCII_ZERO {
+    if b == Ascii::Zero {
         step(inout p);
-    } else if b >= ASCII_ONE && b <= ASCII_NINE {
+    } else if b >= Ascii::One && b <= Ascii::Nine {
         step(inout p);
         digits(inout p, in t);
     } else {
         perr(in p, ErrorKind::Number);
     }
-    if at(in t, p.pos) == ASCII_DOT {
+    if at(in t, p.pos) == Ascii::Dot {
         step(inout p);
         if !is_digit(at(in t, p.pos)) {
             perr(in p, ErrorKind::Number);
@@ -743,10 +696,10 @@ fn number(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
         digits(inout p, in t);
     }
     let e = at(in t, p.pos);
-    if e == ASCII_LOWER_E || e == ASCII_UPPER_E {
+    if e == Ascii::LowerE || e == Ascii::UpperE {
         step(inout p);
         let s = at(in t, p.pos);
-        if s == ASCII_PLUS || s == ASCII_MINUS {
+        if s == Ascii::Plus || s == Ascii::Minus {
             step(inout p);
         }
         if !is_digit(at(in t, p.pos)) {
@@ -758,16 +711,16 @@ fn number(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
 
 fn string(inout p: P, inout toks: ChunkSeq[Token], in t: Slice[u8], index: u64)
     -> Unit eff [Fail[Error]] {
-    expect(inout p, in t, ASCII_QUOTE);
+    expect(inout p, in t, Ascii::Quote);
     let mut decoded: u64 = 0;
     let mut escaped = false;
     loop {
         let b = at(in t, p.pos);
-        if b == ASCII_QUOTE {
+        if b == Ascii::Quote {
             entry(inout p);
             step(inout p);
             break;
-        } else if b == ASCII_BACKSLASH {
+        } else if b == Ascii::Backslash {
             escaped = true;
             entry(inout p);
             step(inout p);
@@ -783,7 +736,7 @@ fn string(inout p: P, inout toks: ChunkSeq[Token], in t: Slice[u8], index: u64)
             let consumed = wrapping_sub(p.pos, old);
             tick(inout p, consumed);
             decoded = wrapping_add(decoded, utf8_len(e.code));
-        } else if b < ASCII_SPACE || b == NO_BYTE {
+        } else if b < Ascii::Space || b == NO_BYTE {
             perr(in p, ErrorKind::Syntax);
         } else {
             step(inout p);
@@ -805,21 +758,21 @@ fn string(inout p: P, inout toks: ChunkSeq[Token], in t: Slice[u8], index: u64)
 
 fn literal(inout p: P, in t: Slice[u8], kind: u64) -> Unit eff [Fail[Error]] {
     if kind == 0 {
-        expect(inout p, in t, ASCII_LOWER_N);
-        expect(inout p, in t, ASCII_LOWER_U);
-        expect(inout p, in t, ASCII_LOWER_L);
-        expect(inout p, in t, ASCII_LOWER_L);
+        expect(inout p, in t, Ascii::LowerN);
+        expect(inout p, in t, Ascii::LowerU);
+        expect(inout p, in t, Ascii::LowerL);
+        expect(inout p, in t, Ascii::LowerL);
     } else if kind == 1 {
-        expect(inout p, in t, ASCII_LOWER_T);
-        expect(inout p, in t, ASCII_LOWER_R);
-        expect(inout p, in t, ASCII_LOWER_U);
-        expect(inout p, in t, ASCII_LOWER_E);
+        expect(inout p, in t, Ascii::LowerT);
+        expect(inout p, in t, Ascii::LowerR);
+        expect(inout p, in t, Ascii::LowerU);
+        expect(inout p, in t, Ascii::LowerE);
     } else {
-        expect(inout p, in t, ASCII_LOWER_F);
-        expect(inout p, in t, ASCII_LOWER_A);
-        expect(inout p, in t, ASCII_LOWER_L);
-        expect(inout p, in t, ASCII_LOWER_S);
-        expect(inout p, in t, ASCII_LOWER_E);
+        expect(inout p, in t, Ascii::LowerF);
+        expect(inout p, in t, Ascii::LowerA);
+        expect(inout p, in t, Ascii::LowerL);
+        expect(inout p, in t, Ascii::LowerS);
+        expect(inout p, in t, Ascii::LowerE);
     }
 }
 
@@ -834,9 +787,9 @@ fn container(
     step(inout p);
     ws(inout p, in t);
     let close: u64 = if object {
-        ASCII_RBRACE
+        Ascii::Rbrace
     } else {
-        ASCII_RBRACKET
+        Ascii::Rbracket
     };
     if at(in t, p.pos) == close {
         op(inout p, in t, close);
@@ -844,7 +797,7 @@ fn container(
     }
     loop {
         if object {
-            if at(in t, p.pos) != ASCII_QUOTE {
+            if at(in t, p.pos) != Ascii::Quote {
                 perr(in p, ErrorKind::Syntax);
             }
             let key = toks.len();
@@ -855,7 +808,7 @@ fn container(
             check_duplicate(in toks, in t, wrapping_add(index, 1), key, inout work, max_work, here);
             p.work = work;
             ws(inout p, in t);
-            op(inout p, in t, ASCII_COLON);
+            op(inout p, in t, Ascii::Colon);
             ws(inout p, in t);
         }
         value(inout p, inout toks, in t, wrapping_add(depth, 1));
@@ -864,7 +817,7 @@ fn container(
             op(inout p, in t, close);
             return ();
         }
-        op(inout p, in t, ASCII_COMMA);
+        op(inout p, in t, Ascii::Comma);
         ws(inout p, in t);
     }
 }
@@ -872,38 +825,38 @@ fn container(
 fn value(inout p: P, inout toks: ChunkSeq[Token], in t: Slice[u8], depth: u64)
     -> Unit eff [Fail[Error]] {
     let b = at(in t, p.pos);
-    let kind = if b == ASCII_LOWER_N {
+    let kind = if b == Ascii::LowerN {
         Kind::Null
-    } else if b == ASCII_LOWER_T || b == ASCII_LOWER_F {
+    } else if b == Ascii::LowerT || b == Ascii::LowerF {
         Kind::Bool
-    } else if b == ASCII_MINUS || is_digit(b) {
+    } else if b == Ascii::Minus || is_digit(b) {
         Kind::Number
-    } else if b == ASCII_QUOTE {
+    } else if b == Ascii::Quote {
         Kind::String
-    } else if b == ASCII_LBRACKET {
+    } else if b == Ascii::Lbracket {
         Kind::Array
-    } else if b == ASCII_LBRACE {
+    } else if b == Ascii::Lbrace {
         Kind::Object
     } else {
         perr(in p, ErrorKind::Syntax);
         Kind::Null
     };
-    let nested = b == ASCII_LBRACKET || b == ASCII_LBRACE;
+    let nested = b == Ascii::Lbracket || b == Ascii::Lbrace;
     if nested && (depth >= p.lim.max_depth || depth >= hard_depth()) {
         perr(in p, ErrorKind::DepthLimit);
     }
     let index = push(inout p, inout toks, kind, depth);
     entry(inout p);
-    if b == ASCII_LOWER_N {
+    if b == Ascii::LowerN {
         literal(inout p, in t, 0);
-    } else if b == ASCII_LOWER_T {
+    } else if b == Ascii::LowerT {
         literal(inout p, in t, 1);
-    } else if b == ASCII_LOWER_F {
+    } else if b == Ascii::LowerF {
         literal(inout p, in t, 2);
-    } else if b == ASCII_QUOTE {
+    } else if b == Ascii::Quote {
         string(inout p, inout toks, in t, index);
     } else if nested {
-        container(inout p, inout toks, in t, index, depth, b == ASCII_LBRACE);
+        container(inout p, inout toks, in t, index, depth, b == Ascii::Lbrace);
     } else {
         number(inout p, in t);
     }

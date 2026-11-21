@@ -358,9 +358,8 @@ pub(crate) fn secret_prelude(module: &Module) -> Module {
     if source.is_empty() {
         return Module::default();
     }
-    // Pad so that every prelude span lies after the module's spans.
-    let padded = format!("{}{source}", " ".repeat(end + 1));
-    let parsed = crate::parser::parse(&padded);
+    // Every prelude span lies after the module's spans.
+    let parsed = crate::integer_widths::parse_at(&source, end + 1);
     debug_assert!(
         parsed.diagnostics.is_empty(),
         "secret prelude: {:?}",

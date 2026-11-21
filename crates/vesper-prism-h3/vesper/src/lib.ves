@@ -77,9 +77,11 @@ use self::decoder::{
     dec_cancel_stream,
     dec_take_decoder_stream
 };
+use self::wire::{
+    ENTRY_OVERHEAD
+};
 
 // RFC 9204 §3.2.1: the per-entry overhead (MaxEntries is capacity / 32).
-const ENTRY_OVERHEAD: u64 = 32;
 
 pub copy enum HuffmanError {
     Eos,

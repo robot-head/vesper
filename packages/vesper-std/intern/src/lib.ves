@@ -52,7 +52,11 @@ pub struct Interner {
 // The hash `intern` uses (FNV-1a over 8-byte words and the tail, then
 // mixed), so callers can key side tables by text the same way.
 pub fn hash_str(in s: Str) -> u64 {
-    let b = s.as_bytes();
+    hash_bytes(in s.as_bytes())
+}
+
+// `hash_str` of the bytes of a view (`Interner::lookup_view`).
+pub fn hash_bytes(in b: Slice[u8]) -> u64 {
     let n = b.len();
     let mut h: u64 = 14695981039346656037;
     let mut i: u64 = 0;
@@ -141,16 +145,15 @@ impl Interner {
         (a, b)
     }
 
-    // Whether symbol `id` spells `s`.
-    fn spells(in self, id: u64, in s: Str) -> bool {
+    // Whether symbol `id` spells the bytes `q`.
+    fn spells(in self, id: u64, in q: Slice[u8]) -> bool {
         let (a, b) = self.range(id);
-        if wrapping_sub(b, a) != s.len() {
+        if wrapping_sub(b, a) != q.len() {
             false
         } else {
             let t = self.text.as_bytes();
-            let q = s.as_bytes();
             let mut i: u64 = 0;
-            let n = s.len();
+            let n = q.len();
             loop {
                 if wrapping_add(i, 8) > n {
                     break;
@@ -190,7 +193,7 @@ impl Interner {
 
     // The slot for `s` with hash `h`: the slot holding its symbol, or the
     // empty slot where it would go.
-    fn probe(in self, in s: Str, h: u64) -> u64 {
+    fn probe(in self, in s: Slice[u8], h: u64) -> u64 {
         let mut i = h & self.mask;
         loop {
             let v = match self.slots.try_get(i) {
@@ -214,8 +217,14 @@ impl Interner {
 
     // The symbol for `s`, if it was interned.
     pub fn lookup(in self, in s: Str) -> Option[Symbol] {
-        let h = hash_str(in s);
-        let i = self.probe(in s, h);
+        self.lookup_view(in s.as_bytes())
+    }
+
+    // The symbol whose text is the bytes `b` (a view of any buffer, such as
+    // a segment of a name), if it was interned: nothing is copied.
+    pub fn lookup_view(in self, in b: Slice[u8]) -> Option[Symbol] {
+        let h = hash_bytes(in b);
+        let i = self.probe(in b, h);
         match self.slots.try_get(i) {
             Option::Some(v) => if v == 0 {
                 Option::None
@@ -265,7 +274,7 @@ impl Interner {
     // The symbol for `s`, interning it if it is new.
     pub fn intern(inout self, in s: Str) -> Symbol {
         let h = hash_str(in s);
-        let i = self.probe(in s, h);
+        let i = self.probe(in s.as_bytes(), h);
         let v = match self.slots.try_get(i) {
             Option::Some(x) => x,
             Option::None => 0,
@@ -307,7 +316,7 @@ impl Interner {
         if widen_u64(sym.id) >= self.hashes.len() {
             false
         } else {
-            self.spells(widen_u64(sym.id), in s)
+            self.spells(widen_u64(sym.id), in s.as_bytes())
         }
     }
 
@@ -321,6 +330,19 @@ impl Interner {
             out.push_str(in self.text[a..b]);
             true
         }
+    }
+
+    // The symbol spelled by bytes `from..to` of `sym`'s text (the last `::`
+    // segment of a path, say), if it was interned. The bytes are read in
+    // place; `None` for a symbol this interner did not hand out or a range
+    // past its text.
+    pub fn lookup_span(in self, sym: Symbol, from: u64, to: u64) -> Option[Symbol] {
+        let (a, b) = self.range(widen_u64(sym.id));
+        if widen_u64(sym.id) >= self.hashes.len() || from > to || to > wrapping_sub(b, a) {
+            return Option::None;
+        }
+        let t = self.text.as_bytes();
+        self.lookup_view(in t[wrapping_add(a, from)..wrapping_add(a, to)])
     }
 
     // The byte range of `sym` in `text_bytes`, for reading it in place.
@@ -373,7 +395,7 @@ test {
         let mut table = interner_new();
         let sym = table.intern(in stored);
         // Use the stored hash for both strings to exercise collision handling.
-        let vacant = table.probe(in different, hash_str(in stored));
+        let vacant = table.probe(in different.as_bytes(), hash_str(in stored));
         table.slots.try_get(vacant) == Option::Some(0) && !table.symbol_eq(sym, in different)
     }
 
@@ -536,5 +558,41 @@ test {
             }
         }
         table.len() == len
+    }
+
+    // The last `::` segment of an interned path is looked up in place,
+    // with no copy, and a byte view of another buffer finds the same
+    // symbol.
+    // @case segment(in "std::seq::push", in "push", true)
+    // @case whole(in "push", in "push", true)
+    // @case missing(in "std::seq::pop", in "push", false)
+    fn test_lookup_segment(in path: Str, in seg: Str, found: bool) -> bool {
+        let mut t = interner_new();
+        let want = t.intern(in seg);
+        let p = t.intern(in path);
+        let b = path.as_bytes();
+        let mut at: u64 = 0;
+        for i in 1..b.len() {
+            if b
+                .try_get(i)
+                == Option::Some(58)
+                && b
+                .try_get(wrapping_sub(i, 1))
+                == Option::Some(58) {
+                at = wrapping_add(i, 1);
+            }
+        }
+        let hit = t.lookup_span(p, at, path.len());
+        let view = t.lookup_view(in b[at..b.len()]);
+        hit
+            == view
+            && (hit == Option::Some(want))
+            == found
+            && t
+            .lookup_span(p, 1, 0)
+            == Option::None
+            && t
+            .lookup_span(p, 0, wrapping_add(path.len(), 1))
+            == Option::None
     }
 }

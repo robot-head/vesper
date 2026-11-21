@@ -43,7 +43,7 @@ filegroup(
     for module, old, new in [
         ("input", "s.m_pdepth = rd(inout s.l);", "s.m_pdepth = wrapping_add(rd(inout s.l), 1);"),
         ("license", "ok: left.ok && right.ok,", "ok: left.ok || right.ok,"),
-        ("check", "if !p.has_fixed || prec_ord(in s.l, p.fixed, r.intro) == 2 {", "if !p.has_fixed {"),
+        ("check", "if !p.has_fixed || prec_ord(in s.l, p.fixed, r.intro) == Order::Greater {", "if !p.has_fixed {"),
         ("paths", "if shorter(in s, nat_at, n, p) {", "if !shorter(in s, nat_at, n, p) {"),
         ("report", "if affected && x.sev >= s.minsev {", "if affected {"),
         ("util", "    pre_ord(in l, x.pre, y.pre)\n}", "    1\n}"),

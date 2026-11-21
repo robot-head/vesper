@@ -65,7 +65,7 @@ fn update_max_inflight(inout b: Bbrv3) {
 }
 
 fn probe_rtt_cwnd_bound(inout b: Bbrv3) -> u64 {
-    let bdp = bdp_multiple(inout b, PROBE_RTT_CWND_GAIN);
+    let bdp = bdp_multiple(inout b, Gain::ProbeRttCwnd);
     let bound = min(bdp, b.probe_rtt_cwnd);
     max(bound, min_pipe_cwnd(in b))
 }
@@ -104,8 +104,8 @@ pub fn inflight_at_loss(size: u64, tx_in_flight: u64, lost: u64) -> u64 {
     let inflight_prev = sat_sub(tx_in_flight, size);
     let lost_prev = sat_sub(lost, size);
     // numerator = inflight_prev * 20 - lost_prev * 1000, in 128 bits.
-    let (l1, h1) = mul_wide(inflight_prev, LOSS_THRESH);
-    let (l2, h2) = mul_wide(lost_prev, GAIN_UNIT);
+    let (l1, h1) = mul_wide(inflight_prev, Gain::LossThresh);
+    let (l2, h2) = mul_wide(lost_prev, Gain::Unit);
     let positive = h1 > h2 || (h1 == h2 && l1 > l2);
     let lost_prefix = if positive {
         let borrow: u64 = if l1 < l2 {
@@ -115,7 +115,7 @@ pub fn inflight_at_loss(size: u64, tx_in_flight: u64, lost: u64) -> u64 {
         };
         let lo = wrapping_sub(l1, l2);
         let hi = wrapping_sub(wrapping_sub(h1, h2), borrow);
-        div_wide_sat(hi, lo, GAIN_UNIT_MINUS_LOSS_THRESH)
+        div_wide_sat(hi, lo, Gain::UnitMinusLossThresh)
     } else {
         0
     };
@@ -152,7 +152,8 @@ pub fn bbrv3_check_probe_rtt_done(inout b: Bbrv3, now_ns: u64) {
 // `IsInflightTooHigh()`: the loss rate exceeds LossThresh (2%), or any
 // loss without selective ACKs.
 pub fn bbrv3_is_inflight_too_high(has_selective_acks: bool, lost: u64, tx_in_flight: u64) -> bool {
-    product_gt(lost, GAIN_UNIT, tx_in_flight, LOSS_THRESH) || (lost > 0 && !has_selective_acks)
+    product_gt(lost, Gain::Unit, tx_in_flight, Gain::LossThresh)
+        || (lost > 0 && !has_selective_acks)
 }
 
 pub fn bbrv3_raise_inflight_longterm_slope(inout b: Bbrv3) {

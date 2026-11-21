@@ -22,26 +22,26 @@ fn init_pacing_rate(inout b: Bbrv3) {
         Option::Some(s) => if s > 0 {
             s
         } else {
-            DEFAULT_SRTT_NS
+            Nanos::DefaultSrtt
         },
-        Option::None => DEFAULT_SRTT_NS,
+        Option::None => Nanos::DefaultSrtt,
     };
     // initial_cwnd is at most u32::MAX, so the product is exact in u64.
-    let nominal = div(wrapping_mul(b.initial_cwnd, NANOS_PER_SEC), srtt);
-    let rate = mul_div_sat(nominal, STARTUP_PACING_GAIN, GAIN_UNIT);
+    let nominal = div(wrapping_mul(b.initial_cwnd, Nanos::PerSec), srtt);
+    let rate = mul_div_sat(nominal, Gain::StartupPacing, Gain::Unit);
     b.pacing_rate = max(rate, 1);
 }
 
 fn enter_startup(inout b: Bbrv3) {
     b.bbr_state = BbrState::Startup;
-    b.pacing_gain = STARTUP_PACING_GAIN;
-    b.cwnd_gain = DEFAULT_CWND_GAIN;
+    b.pacing_gain = Gain::StartupPacing;
+    b.cwnd_gain = Gain::DefaultCwnd;
 }
 
 fn enter_drain(inout b: Bbrv3) {
     b.bbr_state = BbrState::Drain;
-    b.pacing_gain = DRAIN_PACING_GAIN;
-    b.cwnd_gain = DEFAULT_CWND_GAIN;
+    b.pacing_gain = Gain::DrainPacing;
+    b.cwnd_gain = Gain::DefaultCwnd;
     b.drain_start_round = b.round_count;
 }
 
@@ -50,7 +50,7 @@ fn handle_restart_from_idle(inout b: Bbrv3, now_ns: u64) {
         b.idle_restart = true;
         b.extra_acked_interval_start_ns = now_ns;
         if is_probe_bw(in b) {
-            set_pacing_rate_with_gain(inout b, UNIT_PACING_GAIN);
+            set_pacing_rate_with_gain(inout b, Gain::UnitPacing);
         } else if b.bbr_state == BbrState::ProbeRtt {
             check_probe_rtt_done(inout b, now_ns);
         }
@@ -137,8 +137,8 @@ fn init_lower_bounds(inout b: Bbrv3) {
 }
 
 fn loss_lower_bounds(inout b: Bbrv3) {
-    b.bw_shortterm = max(b.bw_latest, mul_gain(b.bw_shortterm, BETA));
-    b.inflight_shortterm = max(b.inflight_latest, mul_gain(b.inflight_shortterm, BETA));
+    b.bw_shortterm = max(b.bw_latest, mul_gain(b.bw_shortterm, Gain::Beta));
+    b.inflight_shortterm = max(b.inflight_latest, mul_gain(b.inflight_shortterm, Gain::Beta));
 }
 
 fn reset_short_term_model(inout b: Bbrv3) {
@@ -211,7 +211,7 @@ fn check_full_bw_reached(inout b: Bbrv3) {
         return;
     }
     // rate * 1.0 >= full_bw * 1.25, exactly.
-    if !product_gt(b.full_bw, FULL_BW_GROWTH, b.rs.delivery_rate, GAIN_UNIT) {
+    if !product_gt(b.full_bw, Gain::FullBwGrowth, b.rs.delivery_rate, Gain::Unit) {
         reset_full_bw(inout b);
         b.full_bw = b.rs.delivery_rate;
         return;
@@ -249,7 +249,7 @@ fn check_startup_high_loss(inout b: Bbrv3) {
 
 fn check_drain_done(inout b: Bbrv3, now_ns: u64) {
     if b.bbr_state == BbrState::Drain {
-        let target = inflight_with_gain(inout b, UNIT_PACING_GAIN);
+        let target = inflight_with_gain(inout b, Gain::UnitPacing);
         let drained = b.inflight <= target;
         if drained || b.round_count > sat_add(b.drain_start_round, 3) {
             enter_probe_bw(inout b, now_ns);
@@ -258,6 +258,6 @@ fn check_drain_done(inout b: Bbrv3, now_ns: u64) {
 }
 
 fn enter_probe_bw(inout b: Bbrv3, now_ns: u64) {
-    b.cwnd_gain = DEFAULT_CWND_GAIN;
+    b.cwnd_gain = Gain::DefaultCwnd;
     start_probe_bw_down(inout b, now_ns);
 }

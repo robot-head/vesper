@@ -42,6 +42,7 @@ use self::concrete::{
     endian
 };
 use self::helpers::{
+    Helper,
     allowed
 };
 use self::insn::{
@@ -57,46 +58,27 @@ use self::insn::{
     decode_slots
 };
 use self::program::{
+    MapType,
     ProgramType
 };
 
-// Kernel UAPI values (src/helpers.rs, src/interp.rs, src/verifier.rs).
-// Helper ids, `enum bpf_func_id`.
-const MAP_LOOKUP_ELEM: u64 = 1;
-const MAP_UPDATE_ELEM: u64 = 2;
-const MAP_DELETE_ELEM: u64 = 3;
-const KTIME_GET_NS: u64 = 5;
-const GET_PRANDOM_U32: u64 = 7;
-const GET_SMP_PROCESSOR_ID: u64 = 8;
-const TAIL_CALL: u64 = 12;
-const GET_CURRENT_PID_TGID: u64 = 14;
-const GET_CURRENT_UID_GID: u64 = 15;
-const GET_CURRENT_COMM: u64 = 16;
-const XDP_ADJUST_HEAD: u64 = 44;
-const SK_LOOKUP_TCP: u64 = 84;
-const SK_RELEASE: u64 = 86;
-const RINGBUF_OUTPUT: u64 = 130;
-const RINGBUF_RESERVE: u64 = 131;
-const RINGBUF_SUBMIT: u64 = 132;
-const RINGBUF_DISCARD: u64 = 133;
-const LOOP: u64 = 181;
-
-// `enum bpf_map_type`.
-const BPF_MAP_TYPE_ARRAY: u64 = 2;
-const BPF_MAP_TYPE_PROG_ARRAY: u64 = 3;
-const BPF_MAP_TYPE_PERCPU_ARRAY: u64 = 6;
-const BPF_MAP_TYPE_RINGBUF: u64 = 27;
+// Kernel UAPI values (src/helpers.rs, src/interp.rs, src/verifier.rs); helper
+// ids are `Helper` (helpers.ves) and map types `MapType` (program.ves).
 
 // `bpf_map_update_elem` flags (BPF_ANY is 0).
-const BPF_NOEXIST: u64 = 1;
-const BPF_EXIST: u64 = 2;
+enum UpdateFlag: u64 {
+    NoExist = 1,
+    Exist = 2,
+}
 
 // errno values a helper returns negated.
-const ENOENT: u64 = 2;
-const E2BIG: u64 = 7;
-const EAGAIN: u64 = 11;
-const EEXIST: u64 = 17;
-const EINVAL: u64 = 22;
+enum Errno: u64 {
+    NoEnt = 2,
+    TooBig = 7,
+    Again = 11,
+    Exist = 17,
+    Inval = 22,
+}
 
 // Limits: registers r0..r10, the stack of one frame, call frames,
 // `MAX_TAIL_CALL_CNT` and `BPF_MAX_LOOPS` (1 << 23).
@@ -133,20 +115,24 @@ const SOCK_TUPLE_IPV4: u64 = 12;
 const IRQ_FLAGS: u64 = 582;
 
 // `struct xdp_md` field offsets.
-const XDP_DATA: u64 = 0;
-const XDP_DATA_END: u64 = 4;
-const XDP_INGRESS_IFINDEX: u64 = 12;
-const XDP_RX_QUEUE_INDEX: u64 = 16;
+enum XdpMd: u64 {
+    Data = 0,
+    DataEnd = 4,
+    IngressIfindex = 12,
+    RxQueueIndex = 16,
+}
 const LOOPBACK_IFINDEX: u64 = 1;
 
 // `struct __sk_buff` field offsets.
-const SKB_MARK: u64 = 8;
-const SKB_PRIORITY: u64 = 32;
-const SKB_TC_INDEX: u64 = 44;
-const SKB_CB: u64 = 48;
-const SKB_TC_CLASSID: u64 = 72;
-const SKB_DATA: u64 = 76;
-const SKB_DATA_END: u64 = 80;
+enum SkBuff: u64 {
+    Mark = 8,
+    Priority = 32,
+    TcIndex = 44,
+    Cb = 48,
+    TcClassid = 72,
+    Data = 76,
+    DataEnd = 80,
+}
 // Tracepoint records start with 8 bytes of common fields.
 const TRACE_COMMON_BYTES: u64 = 8;
 
@@ -156,17 +142,21 @@ const FNV_PRIME: u64 = 1099511628211;
 const XORSHIFT64_STAR_MUL: u64 = 2685821657736338717;
 
 // Region kinds (`I.rt` word 0).
-const KIND_CTX: u64 = 0;
-const KIND_PACKET: u64 = 1;
-const KIND_STACK: u64 = 2;
-const KIND_MAP_VALUE: u64 = 3;
-const KIND_RING: u64 = 4;
-const KIND_SOCKET: u64 = 5;
+enum Region: u64 {
+    Ctx = 0,
+    Packet = 1,
+    Stack = 2,
+    MapValue = 3,
+    Ring = 4,
+    Socket = 5,
+}
 
 // Program types as `ptype` carries them.
-const PT_XDP: u64 = 0;
-const PT_SCHED_CLS: u64 = 1;
-const PT_TRACEPOINT: u64 = 2;
+enum PType: u64 {
+    Xdp = 0,
+    SchedCls = 1,
+    Tracepoint = 2,
+}
 
 pub copy struct IErr {
     code: u64,
@@ -384,11 +374,11 @@ fn jump(pc: u64, off: u64) -> u64 {
 }
 
 fn ptype_of(t: u64) -> ProgramType {
-    if t == PT_XDP {
+    if t == PType::Xdp {
         ProgramType::Xdp
-    } else if t == PT_SCHED_CLS {
+    } else if t == PType::SchedCls {
         ProgramType::SchedCls
-    } else if t == PT_TRACEPOINT {
+    } else if t == PType::Tracepoint {
         ProgramType::Tracepoint
     } else {
         ProgramType::Kprobe
@@ -571,10 +561,10 @@ fn resolve(in i: I, pc: u64, x: Val, off: u64, n: u64) -> u64 eff [Fail[IErr]] {
         access(pc, 3, at, n, len);
     }
     let kind = rt(in i, p, 0);
-    if kind == KIND_PACKET && at < i.data_off {
+    if kind == Region::Packet && at < i.data_off {
         access(pc, 4, 0, 0, 0);
     }
-    if kind == KIND_SOCKET {
+    if kind == Region::Socket {
         access(pc, 5, 0, 0, 0);
     }
     at
@@ -612,29 +602,29 @@ fn pkt_ptr(in i: I, end: bool) -> Val {
 // from the context.
 fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
     let t = i.ptype;
-    if t == PT_XDP {
-        if at == XDP_DATA {
+    if t == PType::Xdp {
+        if at == XdpMd::Data {
             return pkt_ptr(in i, false);
         }
-        if at == XDP_DATA_END {
+        if at == XdpMd::DataEnd {
             return pkt_ptr(in i, true);
         }
-        if at == XDP_INGRESS_IFINDEX {
+        if at == XdpMd::IngressIfindex {
             return scalar(LOOPBACK_IFINDEX);
         }
-        if at == XDP_RX_QUEUE_INDEX {
+        if at == XdpMd::RxQueueIndex {
             return scalar(0);
         }
         access(pc, 6, at, n, 0);
     }
-    if t == PT_SCHED_CLS {
-        if at == SKB_DATA && n == 4 {
+    if t == PType::SchedCls {
+        if at == SkBuff::Data && n == 4 {
             return pkt_ptr(in i, false);
         }
-        if at == SKB_DATA_END && n == 4 {
+        if at == SkBuff::DataEnd && n == 4 {
             return pkt_ptr(in i, true);
         }
-        if at < SKB_DATA {
+        if at < SkBuff::Data {
             return Val {
                 v: 0,
                 p: plain()
@@ -642,7 +632,7 @@ fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
         }
         access(pc, 6, at, n, 0);
     }
-    if t == PT_TRACEPOINT && at < TRACE_COMMON_BYTES {
+    if t == PType::Tracepoint && at < TRACE_COMMON_BYTES {
         access(pc, 6, at, n, 0);
     }
     Val {
@@ -653,30 +643,30 @@ fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
 
 fn skb_writable(at: u64) -> bool {
     at
-        == SKB_MARK
+        == SkBuff::Mark
         || at
-        == SKB_PRIORITY
+        == SkBuff::Priority
         || at
-        == SKB_TC_INDEX
+        == SkBuff::TcIndex
         || at
-        == SKB_CB
+        == SkBuff::Cb
         || at
-        == add(SKB_CB, 4)
+        == add(SkBuff::Cb, 4)
         || at
-        == add(SKB_CB, 8)
+        == add(SkBuff::Cb, 8)
         || at
-        == add(SKB_CB, 12)
+        == add(SkBuff::Cb, 12)
         || at
-        == add(SKB_CB, 16)
+        == add(SkBuff::Cb, 16)
         || at
-        == SKB_TC_CLASSID
+        == SkBuff::TcClassid
 }
 
 fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]] {
     let at = resolve(in i, pc, x, off, n);
     let p = x.p;
-    if rt(in i, p, 0) == KIND_CTX {
-        let writable = i.ptype == PT_SCHED_CLS && n == 4 && skb_writable(at) && v.p == none();
+    if rt(in i, p, 0) == Region::Ctx {
+        let writable = i.ptype == PType::SchedCls && n == 4 && skb_writable(at) && v.p == none();
         if !writable {
             access(pc, 7, at, n, 0);
         }
@@ -696,7 +686,7 @@ fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]]
 }
 
 fn new_stack(inout i: I) -> Val {
-    let r = alloc(inout i, KIND_STACK, STACK_BYTES, false);
+    let r = alloc(inout i, Region::Stack, STACK_BYTES, false);
     Val {
         v: add(rt(in i, r, 1), STACK_BYTES),
         p: r
@@ -717,7 +707,7 @@ fn mword(in i: I, m: u64, f: u64) -> u64 {
 }
 
 fn is_array_kind(t: u64) -> bool {
-    t == BPF_MAP_TYPE_ARRAY || t == BPF_MAP_TYPE_PERCPU_ARRAY || t == BPF_MAP_TYPE_PROG_ARRAY
+    t == MapType::Array || t == MapType::PercpuArray || t == MapType::ProgArray
 }
 
 fn map_of(in i: I, pc: u64, x: Val) -> u64 eff [Fail[IErr]] {
@@ -951,7 +941,7 @@ fn karg(in i: I, pc: u64, a: u64) -> Val eff [Fail[IErr]] {
 fn kslot(in i: I, pc: u64, code: u64) -> u64 eff [Fail[IErr]] {
     let p = karg(in i, pc, 0);
     let at = resolve(in i, pc, p, 0, 8);
-    if rt(in i, p.p, 0) != KIND_STACK {
+    if rt(in i, p.p, 0) != Region::Stack {
         raise(4, pc, 6, code, 0, 0);
     }
     at
@@ -998,10 +988,10 @@ fn call_kfunc(inout i: I, pc: u64, code: u64) -> Val eff [Fail[IErr]] {
         let mut kst: u64 = 0;
         let mut ret: u64 = 0;
         if start > end {
-            ret = neg(EINVAL);
+            ret = neg(Errno::Inval);
         } else if wrapping_i64(sub(wrapping_u64(end), wrapping_u64(start)))
             > wrapping_i64(BPF_MAX_LOOPS) {
-            ret = neg(E2BIG);
+            ret = neg(Errno::TooBig);
         } else {
             kst = pack(sub(wrapping_u64(start), 1), wrapping_u64(end));
         }
@@ -1044,7 +1034,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
     -> Val eff [Fail[IErr]] {
     let m = map_of(in i, pc, a0);
     let t = mword(in i, m, 0);
-    if t == BPF_MAP_TYPE_RINGBUF {
+    if t == MapType::Ringbuf {
         bad(pc, 8);
     }
     let ks = mword(in i, m, 1);
@@ -1055,7 +1045,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
     } else {
         sub(gw(in i.tab, slot), 2)
     };
-    if id == MAP_LOOKUP_ELEM {
+    if id == Helper::MapLookupElem {
         if e == none() {
             return scalar(0);
         }
@@ -1065,35 +1055,35 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
             p: r
         };
     }
-    if id == MAP_UPDATE_ELEM {
+    if id == Helper::MapUpdateElem {
         let vs = mword(in i, m, 2);
         let val = read_mem(inout i, pc, a2, vs);
         let exists = e != none();
         let flags = a3.v;
-        if flags > BPF_EXIST {
-            return ret_err(EINVAL);
+        if flags > UpdateFlag::Exist {
+            return ret_err(Errno::Inval);
         }
         if is_array_kind(t) {
             if !exists {
-                return ret_err(E2BIG);
+                return ret_err(Errno::TooBig);
             }
-            if flags == BPF_NOEXIST {
-                return ret_err(EEXIST);
+            if flags == UpdateFlag::NoExist {
+                return ret_err(Errno::Exist);
             }
-        } else if flags == BPF_NOEXIST && exists {
-            return ret_err(EEXIST);
-        } else if flags == BPF_EXIST && !exists {
-            return ret_err(ENOENT);
+        } else if flags == UpdateFlag::NoExist && exists {
+            return ret_err(Errno::Exist);
+        } else if flags == UpdateFlag::Exist && !exists {
+            return ret_err(Errno::NoEnt);
         }
         if !exists && gw(in i.counts, m) >= mword(in i, m, 3) {
-            return ret_err(E2BIG);
+            return ret_err(Errno::TooBig);
         }
         if exists {
             let r = gw(in i.ent, add(mul(e, 4), 3));
             i.mem.try_copy_from(rt(in i, r, 2), in val.as_slice());
             return scalar(0);
         }
-        let r = alloc(inout i, KIND_MAP_VALUE, vs, true);
+        let r = alloc(inout i, Region::MapValue, vs, true);
         i.mem.try_copy_from(rt(in i, r, 2), in val.as_slice());
         insert(inout i, m, in key, r);
         return scalar(0);
@@ -1102,7 +1092,7 @@ fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
         remove(inout i, m, slot);
         return scalar(0);
     }
-    ret_err(ENOENT)
+    ret_err(Errno::NoEnt)
 }
 
 fn take_held(inout i: I, r: u64) -> bool {
@@ -1127,13 +1117,13 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
     let a1 = peek(in i, 2);
     let a2 = peek(in i, 3);
     let a3 = peek(in i, 4);
-    if id == MAP_LOOKUP_ELEM || id == MAP_UPDATE_ELEM || id == MAP_DELETE_ELEM {
+    if id == Helper::MapLookupElem || id == Helper::MapUpdateElem || id == Helper::MapDeleteElem {
         return map_elem(inout i, pc, id, a0, a1, a2, a3);
     }
-    if id == KTIME_GET_NS {
+    if id == Helper::KtimeGetNs {
         return scalar(gw(in i.cfg, 1));
     }
-    if id == GET_PRANDOM_U32 {
+    if id == Helper::GetPrandomU32 {
         let mut x = i.prandom;
         x = x ^ shr(x, 12);
         x = x ^ shl(x, 25);
@@ -1141,10 +1131,10 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         i.prandom = x;
         return scalar(shr(mul(x, XORSHIFT64_STAR_MUL), 32) & low32());
     }
-    if id == GET_SMP_PROCESSOR_ID {
+    if id == Helper::GetSmpProcessorId {
         return scalar(gw(in i.cfg, 0));
     }
-    if id == XDP_ADJUST_HEAD {
+    if id == Helper::XdpAdjustHead {
         let delta = sext_const(a1.v & low32(), 32);
         if i.pkt == none() {
             bad(pc, 9);
@@ -1152,22 +1142,22 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         let len = rt(in i, i.pkt, 3);
         let nw = add(i.data_off, delta);
         if wrapping_i64(nw) < 0 || wrapping_i64(sub(len, nw)) < wrapping_i64(ETH_HLEN) {
-            return ret_err(EINVAL);
+            return ret_err(Errno::Inval);
         }
         i.data_off = nw;
         return scalar(0);
     }
-    if id == RINGBUF_RESERVE {
+    if id == Helper::RingbufReserve {
         let m = map_of(in i, pc, a0);
         let size = a1.v;
-        if mword(in i, m, 0) != BPF_MAP_TYPE_RINGBUF {
+        if mword(in i, m, 0) != MapType::Ringbuf {
             bad(pc, 10);
         }
         let res = reserve(inout i, m, size);
         if res.v == none() {
             return scalar(0);
         }
-        let r = alloc(inout i, KIND_RING, size, true);
+        let r = alloc(inout i, Region::Ring, size, true);
         set_rt(inout i, r, 5, m);
         set_rt(inout i, r, 6, res.p);
         set_rt(inout i, r, 7, res.v);
@@ -1177,7 +1167,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
             p: r
         };
     }
-    if id == RINGBUF_SUBMIT || id == RINGBUF_DISCARD {
+    if id == Helper::RingbufSubmit || id == Helper::RingbufDiscard {
         let r = a0.p;
         if r == none() {
             bad(pc, 11);
@@ -1195,7 +1185,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
             bad(pc, 13);
         }
         take_held(inout i, r);
-        if rt(in i, r, 0) != KIND_RING {
+        if rt(in i, r, 0) != Region::Ring {
             bad(pc, 11);
         }
         let m = rt(in i, r, 5);
@@ -1205,26 +1195,26 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         let pay_at = rt(in i, r, 6);
         let hdr_at = rt(in i, r, 7);
         ring_log(inout i, m, pay_at, in payload);
-        commit(inout i, m, hdr_at, id == RINGBUF_DISCARD);
+        commit(inout i, m, hdr_at, id == Helper::RingbufDiscard);
         set_rt(inout i, r, 4, 0);
         return scalar(0);
     }
-    if id == RINGBUF_OUTPUT {
+    if id == Helper::RingbufOutput {
         let m = map_of(in i, pc, a0);
         let size = a2.v;
         let bytes = read_mem(inout i, pc, a1, size);
-        if mword(in i, m, 0) != BPF_MAP_TYPE_RINGBUF {
+        if mword(in i, m, 0) != MapType::Ringbuf {
             bad(pc, 14);
         }
         let res = reserve(inout i, m, size);
         if res.v == none() {
-            return ret_err(EAGAIN);
+            return ret_err(Errno::Again);
         }
         ring_log(inout i, m, res.p, in bytes);
         commit(inout i, m, res.v, false);
         return scalar(0);
     }
-    if id == SK_LOOKUP_TCP {
+    if id == Helper::SkLookupTcp {
         let size = a2.v;
         let tuple = read_mem(inout i, pc, a1, size);
         if size != SOCK_TUPLE_IPV4 {
@@ -1249,14 +1239,14 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         if !hit {
             return scalar(0);
         }
-        let r = alloc(inout i, KIND_SOCKET, 8, true);
+        let r = alloc(inout i, Region::Socket, 8, true);
         i.held.push(r);
         return Val {
             v: rt(in i, r, 1),
             p: r
         };
     }
-    if id == SK_RELEASE {
+    if id == Helper::SkRelease {
         let r = a0.p;
         if r == none() {
             bad(pc, 15);
@@ -1267,13 +1257,13 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         set_rt(inout i, r, 4, 0);
         return scalar(0);
     }
-    if id == GET_CURRENT_PID_TGID {
+    if id == Helper::GetCurrentPidTgid {
         return scalar(shl(gw(in i.cfg, 5), 32) | gw(in i.cfg, 4));
     }
-    if id == GET_CURRENT_UID_GID {
+    if id == Helper::GetCurrentUidGid {
         return scalar(shl(gw(in i.cfg, 7), 32) | gw(in i.cfg, 6));
     }
-    if id == GET_CURRENT_COMM {
+    if id == Helper::GetCurrentComm {
         let size = a1.v;
         if size == 0 {
             bad(pc, 17);
@@ -1303,7 +1293,7 @@ fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
         };
         let r = a0.p;
         let kind = rt(in i, r, 0);
-        if !(kind == KIND_STACK || kind == KIND_MAP_VALUE || kind == KIND_RING) {
+        if !(kind == Region::Stack || kind == Region::MapValue || kind == Region::Ring) {
             bad(pc, 18);
         }
         let m = add(rt(in i, r, 2), at);
@@ -1635,7 +1625,7 @@ fn exec(
                     v: 0,
                     p: plain()
                 };
-                if rt(in i, p.p, 0) == KIND_CTX {
+                if rt(in i, p.p, 0) == Region::Ctx {
                     v = ctx_read(in i, pc, at, n);
                 }
                 if v.p == plain() {
@@ -1696,7 +1686,7 @@ fn exec(
                 let n = size_bytes(size);
                 let at = resolve(in i, pc, p, off16(off), n);
                 let kind = rt(in i, p.p, 0);
-                if kind == KIND_CTX || kind == KIND_PACKET {
+                if kind == Region::Ctx || kind == Region::Packet {
                     access(pc, 9, 0, 0, 0);
                 }
                 let m = add(rt(in i, p.p, 2), at);
@@ -1794,7 +1784,7 @@ fn exec(
                     },
                     CallTarget::Helper(id) => {
                         let hid = imm_bits(id);
-                        if hid == LOOP {
+                        if hid == Helper::Loop {
                             let n = get(in i, pc, 1).v;
                             let cb = get(in i, pc, 2);
                             let arg = get(in i, pc, 3);
@@ -1802,7 +1792,7 @@ fn exec(
                                 bad(pc, 2);
                             }
                             if n > BPF_MAX_LOOPS {
-                                set(inout i, 0, scalar(neg(E2BIG)));
+                                set(inout i, 0, scalar(neg(Errno::TooBig)));
                                 uninit(inout i, 1, 5);
                             } else if n == 0 {
                                 set(inout i, 0, scalar(0));
@@ -1822,10 +1812,10 @@ fn exec(
                                 set(inout i, 2, arg);
                                 to = entry;
                             }
-                        } else if hid == TAIL_CALL {
+                        } else if hid == Helper::TailCall {
                             let m = map_of(in i, pc, get(in i, pc, 2));
                             let index = get(in i, pc, 3).v & low32();
-                            if mword(in i, m, 0) != BPF_MAP_TYPE_PROG_ARRAY {
+                            if mword(in i, m, 0) != MapType::ProgArray {
                                 bad(pc, 3);
                             }
                             uninit(inout i, 0, 5);
@@ -2232,7 +2222,7 @@ pub fn new_env(in maps: Slice[u64]) -> RunOut {
         if is_array_kind(t) && t != 3 {
             let vs = mword(in i, m, 2);
             for k in 0..mword(in i, m, 3) {
-                let r = alloc(inout i, KIND_MAP_VALUE, vs, true);
+                let r = alloc(inout i, Region::MapValue, vs, true);
                 let key = le32_bytes(k);
                 insert(inout i, m, in key, r);
             }
@@ -2311,7 +2301,7 @@ pub fn run_program(
         i.cmaps.push(m);
     }
     if input <= 1 {
-        let r = alloc(inout i, KIND_PACKET, add(HEADROOM, pkt.len()), true);
+        let r = alloc(inout i, Region::Packet, add(HEADROOM, pkt.len()), true);
         i.mem.try_copy_from(add(rt(in i, r, 2), HEADROOM), in pkt);
         i.pkt = r;
     }
@@ -2322,7 +2312,7 @@ pub fn run_program(
     } else {
         ctxb.len()
     };
-    let c = alloc(inout i, KIND_CTX, clen, true);
+    let c = alloc(inout i, Region::Ctx, clen, true);
     if input != 0 {
         i.mem.try_copy_from(rt(in i, c, 2), in ctxb);
     }

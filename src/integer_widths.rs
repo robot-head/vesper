@@ -94,8 +94,7 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
     if source.is_empty() {
         return Module::default();
     }
-    let padded = format!("{}{source}", " ".repeat(end + 1));
-    let parsed = crate::parser::parse(&padded);
+    let parsed = parse_at(&source, end + 1);
     debug_assert!(
         parsed.diagnostics.is_empty(),
         "byte-order prelude: {:?}",
@@ -111,6 +110,53 @@ pub(crate) fn holds_wide(t: &Type) -> bool {
         Type::Tuple(ts) => ts.iter().any(holds_wide),
         _ => false,
     }
+}
+
+/// Parses generated `source` as if it began at byte `base` of a larger
+/// file: every span of the result (module and diagnostics) is `base` plus
+/// its offset in `source`. Preludes and generated wrappers used to pad
+/// `source` with `base` spaces instead, so once a package's assembled
+/// module passed the parser's 1 MiB input limit they parsed to nothing and
+/// every builtin they declare went unknown (SH3 lane 7, #1246).
+pub(crate) fn parse_at(source: &str, base: usize) -> crate::parser::Parse {
+    fn shift(v: &mut serde_json::Value, by: usize) {
+        match v {
+            serde_json::Value::Object(m) => {
+                // AST spans serialize as `{"start": n, "end": m}`; nothing
+                // else in the AST has exactly those two fields (as in
+                // `pact_frontend::mono`).
+                let span = (m.len() == 2)
+                    .then(|| Some((m.get("start")?.as_u64()?, m.get("end")?.as_u64()?)))
+                    .flatten();
+                if let Some((start, end)) = span {
+                    m.insert("start".into(), (start as usize + by).into());
+                    m.insert("end".into(), (end as usize + by).into());
+                } else {
+                    m.values_mut().for_each(|v| shift(v, by));
+                }
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(|v| shift(v, by)),
+            _ => {}
+        }
+    }
+    fn shifted<T: serde::Serialize + serde::de::DeserializeOwned>(x: T, by: usize) -> T {
+        let mut v = serde_json::to_value(&x).expect("AST serializes");
+        shift(&mut v, by);
+        serde_json::from_value(v).expect("shifted AST deserializes")
+    }
+    let mut parsed = crate::parser::parse(source);
+    if base != 0 {
+        parsed.module = shifted(std::mem::take(&mut parsed.module), base);
+        parsed.diagnostics = shifted(std::mem::take(&mut parsed.diagnostics), base);
+    }
+    // The padded parse this replaces, wherever it still fits the parser's
+    // limits: both must give the same module.
+    #[cfg(debug_assertions)]
+    if base > 0 && base + source.len() < 256 * 1024 {
+        let padded = crate::parser::parse(&format!("{}{source}", " ".repeat(base)));
+        debug_assert_eq!(padded.module, parsed.module, "parse_at({base})");
+    }
+    parsed
 }
 
 /// The largest span end in `module`.
