@@ -1,4 +1,5 @@
-//! The Vesper build of the Z-set kernels and the frontier: thin adapters
+//! The Vesper build of the Z-set kernels, the frontier, the accumulator
+//! and the CDC decoder: thin adapters
 //! from the crate's types to the Vesper library `flux` (`vesper/`, port wave
 //! P3b lane 7, #1069) through the generated binding (`port/binding.rs`).
 //! A set's cells are lent in place; each kernel returns the new set's cells.
@@ -13,7 +14,7 @@ use crate::{Budget, Error, Limits};
 #[path = "../port/binding.rs"]
 pub(crate) mod binding;
 
-use binding::{FrErr, ZErr};
+use binding::{CdcErr, FrErr, ZErr};
 
 fn zset_error(e: ZErr) -> Error {
     match e {
@@ -187,4 +188,80 @@ pub(crate) fn join(
         )
     })?;
     Ok(ZSet::from_cells(a.width + b.width, out))
+}
+
+/// The Vesper accumulator of every input's rows (`zset::Accumulator`).
+pub(crate) struct Acc(pub(crate) binding::ZAcc);
+impl Acc {
+    pub(crate) fn new(widths: &[usize], max_rows: usize) -> Self {
+        let widths: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+        Self(binding::zacc_new(&widths, w(max_rows)))
+    }
+    pub(crate) fn add(&mut self, input: usize, row: &[i64], weight: i128) -> Result<(), Error> {
+        binding::zacc_add(
+            &mut self.0,
+            w(input),
+            row,
+            (weight >> 64) as i64,
+            weight as u64,
+        )
+        .map_err(zset_error)
+    }
+    pub(crate) fn finish(&self, input: usize) -> Result<Vec<i64>, Error> {
+        binding::zacc_finish(&self.0, w(input)).map_err(zset_error)
+    }
+}
+
+/// `Executor::ingest_cdc`'s record loop over a nonempty batch within the
+/// byte limit: every record is checked and added to `acc`, and `next`
+/// advances. Returns the record count and the largest event time.
+pub(crate) fn cdc_ingest(
+    acc: &mut crate::zset::Accumulator,
+    bytes: &[u8],
+    policy: &crate::CdcPolicy,
+    inputs: &[usize],
+    next: &mut Vec<u64>,
+    budget: &mut Budget,
+) -> Result<(usize, i64), Error> {
+    let parts: Vec<u64> = policy
+        .bindings
+        .iter()
+        .map(|b| u64::from(b.partition_id))
+        .collect();
+    let mut binds = Vec::with_capacity(4 * policy.bindings.len());
+    for b in &policy.bindings {
+        binds.extend([
+            u64::from(b.schema_id),
+            w(b.input),
+            u64::from(b.weights == crate::WeightPolicy::Unit),
+            w(inputs[b.input]),
+        ]);
+    }
+    let mut left = w(budget.remaining);
+    let mut stats = Vec::with_capacity(2);
+    let out = binding::cdc_ingest(
+        &mut acc.acc.0,
+        bytes,
+        &parts,
+        &binds,
+        next,
+        w(policy.max_records),
+        &mut left,
+        &mut stats,
+    );
+    budget.remaining = left as usize;
+    out.map_err(|e| match e {
+        CdcErr::Work => Error::Limit("work"),
+        CdcErr::Rows => Error::Limit("rows"),
+        CdcErr::Overflow => Error::Overflow,
+        CdcErr::Records => Error::Limit("CDC records"),
+        CdcErr::TruncatedHeader => Error::Cdc("truncated header"),
+        CdcErr::Partition => Error::Cdc("partition"),
+        CdcErr::Schema => Error::Cdc("schema"),
+        CdcErr::Flags => Error::Cdc("reserved flags"),
+        CdcErr::Weight => Error::Cdc("weight"),
+        CdcErr::Offset => Error::Cdc("source offset"),
+        CdcErr::TruncatedRow => Error::Cdc("truncated row"),
+    })?;
+    Ok((stats[0] as usize, stats[1]))
 }

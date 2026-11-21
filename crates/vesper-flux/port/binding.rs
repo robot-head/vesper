@@ -6,6 +6,78 @@
 use vesper_port_abi::Abi;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CdcErr {
+    Work,
+    Rows,
+    Overflow,
+    Records,
+    TruncatedHeader,
+    Partition,
+    Schema,
+    Flags,
+    Weight,
+    Offset,
+    TruncatedRow,
+}
+
+impl Abi for CdcErr {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            CdcErr::Work => {
+                out[0] = 0;
+            }
+            CdcErr::Rows => {
+                out[0] = 1;
+            }
+            CdcErr::Overflow => {
+                out[0] = 2;
+            }
+            CdcErr::Records => {
+                out[0] = 3;
+            }
+            CdcErr::TruncatedHeader => {
+                out[0] = 4;
+            }
+            CdcErr::Partition => {
+                out[0] = 5;
+            }
+            CdcErr::Schema => {
+                out[0] = 6;
+            }
+            CdcErr::Flags => {
+                out[0] = 7;
+            }
+            CdcErr::Weight => {
+                out[0] = 8;
+            }
+            CdcErr::Offset => {
+                out[0] = 9;
+            }
+            CdcErr::TruncatedRow => {
+                out[0] = 10;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => CdcErr::Work,
+            1 => CdcErr::Rows,
+            2 => CdcErr::Overflow,
+            3 => CdcErr::Records,
+            4 => CdcErr::TruncatedHeader,
+            5 => CdcErr::Partition,
+            6 => CdcErr::Schema,
+            7 => CdcErr::Flags,
+            8 => CdcErr::Weight,
+            9 => CdcErr::Offset,
+            10 => CdcErr::TruncatedRow,
+            tag => panic!("invalid CdcErr tag {tag} from Vesper"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FrErr {
     Regression,
     Holds,
@@ -89,6 +161,91 @@ impl Abi for ZErr {
     }
 }
 
+/// Owned handle of a Vesper `ZAcc` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_flux_ZAcc_drop`.
+pub struct ZAcc {
+    words: [u64; 9],
+}
+
+impl ZAcc {
+    /// # Safety
+    /// `words` must hold a `ZAcc` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 9];
+        owned.copy_from_slice(&words[..9]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> ZAccRef<'_> {
+        ZAccRef { words: &self.words }
+    }
+}
+
+impl Drop for ZAcc {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_flux_ZAcc_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for ZAcc {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ZAcc { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for ZAcc {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for ZAcc {}
+
+/// A borrowed view of a Vesper `ZAcc` value, read in place.
+#[derive(Clone, Copy)]
+pub struct ZAccRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> ZAccRef<'a> {
+    pub fn widths(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
+    }
+    pub fn max_rows(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[1..])
+    }
+    pub fn counts(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
+    }
+    pub fn tags(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
+    }
+    pub fn offs(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
+    pub fn rows(&self) -> vesper_port_abi::SeqRef<'a, i64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
+    }
+    pub fn his(&self) -> vesper_port_abi::SeqRef<'a, i64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[6]) }
+    }
+    pub fn los(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[7]) }
+    }
+    pub fn table(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[8]) }
+    }
+}
+
 /// `#[repr(C)]` mirrors of the library's copy structs in the Vesper word
 /// layout (export ABI v3): `in`/`inout` parameters and slices of them are
 /// lent to Vesper in place.
@@ -96,6 +253,7 @@ pub mod repr {
 }
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
+const _: () = assert!(<CdcErr as Abi>::WORDS == 1);
 const _: () = assert!(<FrErr as Abi>::WORDS == 1);
 const _: () = assert!(<ZErr as Abi>::WORDS == 1);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
@@ -105,11 +263,16 @@ unsafe extern "C" {
     fn vesper_flux_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_flux_seq_free(seq: i64) -> i64;
     fn vesper_flux_live_allocations() -> i64;
+    fn vesper_flux_ZAcc_drop(value: *mut u64) -> i64;
+    fn vesper_flux_cdc_ingest(a: *mut u64, bytes: *mut u64, parts: *mut u64, binds: *mut u64, next: *mut u64, max_records: i64, budget: *mut u64, stats: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_acquire(gens: *mut u64, holds: *mut u64, live: *mut u64, capacity: i64, watermark: *mut u64, timestamp: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_advance(gens: *mut u64, holds: *mut u64, live: i64, watermark: *mut u64, slot: i64, generation: i64, timestamp: i64, next: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_live_holds(live: i64) -> i64;
     fn vesper_flux_frontier_retire(gens: i64, holds: i64, live: *mut u64, watermark: *mut u64, slot: i64, generation: i64, timestamp: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_valid(gens: i64, holds: i64, live: i64, slot: i64, generation: i64, timestamp: i64) -> i64;
+    fn vesper_flux_zacc_add(a: *mut u64, input: i64, row: *mut u64, whi: i64, wlo: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_zacc_finish(a: *mut u64, input: i64, fail: *mut u64) -> i64;
+    fn vesper_flux_zacc_new(result: *mut u64, widths: *mut u64, max_rows: i64) -> i64;
     fn vesper_flux_zs_consolidate(width: i64, cells: *mut u64, n: i64, max_columns: i64, max_rows: i64, budget: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_zs_copy_check(width: i64, n: i64, max_columns: i64, max_rows: i64, budget: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_zs_filter(width: i64, a: *mut u64, n: i64, kind: i64, column: i64, value: i64, max_columns: i64, max_rows: i64, budget: *mut u64, fail: *mut u64) -> i64;
@@ -128,6 +291,23 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_flux_live_allocations() }
+}
+
+/// Calls `cdc_ingest` of the Vesper library `flux` (`vesper_flux_cdc_ingest`).
+pub fn cdc_ingest(a: &mut ZAcc, bytes: &[u8], parts: &[u64], binds: &[u64], next: &mut Vec<u64>, max_records: u64, budget: &mut u64, stats: &mut Vec<i64>) -> Result<(), CdcErr> {
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_cdc_ingest` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(bytes, |view_bytes| vesper_port_abi::with_slice(parts, |view_parts| vesper_port_abi::with_slice(binds, |view_binds| vesper_port_abi::with_seq_mut(RUNTIME, next, |seq_next| vesper_port_abi::with_seq_mut(RUNTIME, stats, |seq_stats| unsafe { vesper_flux_cdc_ingest(a.words.as_mut_ptr(), view_bytes, view_parts, view_binds, seq_next, max_records as i64, arg_budget.as_mut_ptr(), seq_stats, fail.as_mut_ptr()) })))));
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<CdcErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_cdc_ingest"),
+    }
 }
 
 /// Calls `frontier_acquire` of the Vesper library `flux` (`vesper_flux_frontier_acquire`).
@@ -197,6 +377,44 @@ pub fn frontier_valid(gens: &[u64], holds: &[i64], live: &[u8], slot: u64, gener
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_seq(gens, |seq_gens| vesper_port_abi::with_seq(holds, |seq_holds| vesper_port_abi::with_seq(live, |seq_live| unsafe { vesper_flux_frontier_valid(seq_gens as i64, seq_holds as i64, seq_live as i64, slot as i64, generation as i64, timestamp as i64) })));
     raw != 0
+}
+
+/// Calls `zacc_add` of the Vesper library `flux` (`vesper_flux_zacc_add`).
+pub fn zacc_add(a: &mut ZAcc, input: u64, row: &[i64], whi: i64, wlo: u64) -> Result<(), ZErr> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_zacc_add` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(row, |view_row| unsafe { vesper_flux_zacc_add(a.words.as_mut_ptr(), input as i64, view_row, whi as i64, wlo as i64, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<ZErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_zacc_add"),
+    }
+}
+
+/// Calls `zacc_finish` of the Vesper library `flux` (`vesper_flux_zacc_finish`).
+pub fn zacc_finish(a: &ZAcc, input: u64) -> Result<Vec<i64>, ZErr> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_zacc_finish` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_flux_zacc_finish(a.words.as_ptr().cast_mut(), input as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<ZErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_zacc_finish"),
+    }
+}
+
+/// Calls `zacc_new` of the Vesper library `flux` (`vesper_flux_zacc_new`).
+pub fn zacc_new(widths: &[u64], max_rows: u64) -> ZAcc {
+    let mut result = [0u64; 9];
+    // SAFETY: `vesper_flux_zacc_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(widths, |view_widths| unsafe { vesper_flux_zacc_new(result.as_mut_ptr(), view_widths, max_rows as i64) });
+    unsafe { ZAcc::from_words(&result[0..]) }
 }
 
 /// Calls `zs_consolidate` of the Vesper library `flux` (`vesper_flux_zs_consolidate`).
