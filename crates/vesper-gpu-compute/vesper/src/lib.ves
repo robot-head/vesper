@@ -533,10 +533,8 @@ fn c_string(in s: Scratch, at: u64) -> ChunkSeq[u8] eff [Fail[RuntimeError], Fai
     out
 }
 
-fn contains(in hay: Slice[u8], in needle: Slice[u8]) -> bool eff [
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+fn contains(in hay: Slice[u8], in needle: Slice[u8])
+    -> bool eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     if needle.len() == 0 {
         return true;
     }
@@ -560,7 +558,8 @@ fn contains(in hay: Slice[u8], in needle: Slice[u8]) -> bool eff [
 
 // VkPhysicalDeviceProperties2 at 0 chained to VkPhysicalDeviceDriverProperties
 // at 840, filled for `physical`.
-fn properties(physical: u64) -> Scratch eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
+fn properties(physical: u64)
+    -> Scratch eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut s = scratch(1376);
     header(inout s, 0, st_properties_2());
     put64(inout s, 8, addr(in s, 840));
@@ -600,12 +599,8 @@ fn p_driver_info() -> u64 {
     1116
 }
 
-fn timeline_supported(physical: u64) -> bool eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+fn timeline_supported(physical: u64)
+    -> bool eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut s = scratch(264);
     header(inout s, 0, st_features_2());
     put64(inout s, 8, addr(in s, 240));
@@ -619,12 +614,8 @@ fn timeline_supported(physical: u64) -> bool eff [
 }
 
 // The first queue family with compute, or None.
-fn compute_family(physical: u64) -> Option[u64] eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+fn compute_family(physical: u64)
+    -> Option[u64] eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut count: u32 = 0;
     Vk::vkGetPhysicalDeviceQueueFamilyProperties(physical, inout count, 0);
     let n = widen_u64(count);
@@ -645,7 +636,8 @@ fn compute_family(physical: u64) -> Option[u64] eff [
     found
 }
 
-fn create_instance() -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+fn create_instance()
+    -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut version: u32 = 0;
     check(Vk::vkEnumerateInstanceVersion(inout version), c_enumerate_instance_version());
     if version < api_1_2() {
@@ -676,13 +668,8 @@ fn create_instance() -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeE
 // Loads nothing (the loader is linked), creates an instance and opens the
 // first physical device with a compute queue and Vulkan 1.2 timeline
 // semaphores whose name contains `wanted` (any device when it is empty).
-pub fn open(in wanted: Str) -> Dev eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[GpuErr],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+pub fn open(in wanted: Str)
+    -> Dev eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     let instance = create_instance();
     handle Fail[GpuErr] in {
         open_on(instance, in wanted)
@@ -695,18 +682,10 @@ pub fn open(in wanted: Str) -> Dev eff [
     }
 }
 
-fn open_on(instance: u64, in wanted: Str) -> Dev eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[GpuErr],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+fn open_on(instance: u64, in wanted: Str)
+    -> Dev eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut count: u32 = 0;
-    check(
-        Vk::vkEnumeratePhysicalDevices(instance, inout count, 0),
-        c_enumerate_physical_devices()
-    );
+    check(Vk::vkEnumeratePhysicalDevices(instance, inout count, 0), c_enumerate_physical_devices());
     let mut list = scratch(wrapping_add(widen_u64(count) * 8, 8));
     check(
         Vk::vkEnumeratePhysicalDevices(instance, inout count, list.base),
@@ -719,7 +698,9 @@ fn open_on(instance: u64, in wanted: Str) -> Dev eff [
         let p = properties(physical);
         let api = get32(in p, p_api_version());
         let name = c_string(in p, p_device_name());
-        let fits = api >= api_1_2() && contains(in name.as_slice(), in wanted.as_bytes())
+        let fits = api
+            >= api_1_2()
+            && contains(in name.as_slice(), in wanted.as_bytes())
             && timeline_supported(physical);
         if fits {
             match compute_family(physical) {
@@ -814,12 +795,8 @@ pub fn wait_idle(in d: Dev) eff [Ffi[Vk]] {
 
 // The device name, the driver name and the driver info, each followed by a
 // NUL byte.
-pub fn device_strings(in d: Dev) -> ChunkSeq[u8] eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+pub fn device_strings(in d: Dev)
+    -> ChunkSeq[u8] eff [Ffi[Vk], Ffi[LibC], Fail[RuntimeError], Fail[ArithOverflow]] {
     let p = properties(d.physical);
     let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let name = c_string(in p, p_device_name());
@@ -871,13 +848,8 @@ pub fn wait_value(in d: Dev, value: u64) eff [
 
 // A zero-filled storage buffer of `bytes` bytes rounded up to 4, mapped
 // host-visible and coherent.
-pub fn buffer_new(in d: Dev, bytes: u64) -> Buf eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[GpuErr],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+pub fn buffer_new(in d: Dev, bytes: u64)
+    -> Buf eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     if bytes == 0 {
         return raise(shape(), s_zero_buffer(), 0);
     }
@@ -983,13 +955,8 @@ pub fn buffer_free(in d: Dev, in b: Buf) eff [Ffi[Vk]] {
 // A compute pipeline for entry point `entry` of the SPIR-V module `spirv`
 // (little-endian words), binding `bindings` storage buffers at
 // group 0, bindings 0.., and an immediate block of `imm` bytes.
-pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, imm: u64) -> Kern eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[GpuErr],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+pub fn kernel_new(in d: Dev, in spirv: Slice[u8], in entry: Str, bindings: u64, imm: u64)
+    -> Kern eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     if bindings == 0 || bindings > max_bindings() {
         return raise(limit(), l_bindings(), 0);
     }
@@ -1094,13 +1061,8 @@ pub fn kernel_free(in d: Dev, in k: Kern) eff [Ffi[Vk]] {
 }
 
 // Starts recording a one-time-submit command buffer from a transient pool.
-pub fn rec_new(in d: Dev) -> Rec eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[GpuErr],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+pub fn rec_new(in d: Dev)
+    -> Rec eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     // VkCommandPoolCreateInfo at 0, VkCommandBufferAllocateInfo at 24,
     // VkCommandBufferBeginInfo at 56.
     let mut s = scratch(88);
@@ -1141,13 +1103,8 @@ pub fn rec_new(in d: Dev) -> Rec eff [
     }
 }
 
-fn descriptor_set(in d: Dev, inout r: Rec, in k: Kern) -> u64 eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[GpuErr],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+fn descriptor_set(in d: Dev, inout r: Rec, in k: Kern)
+    -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     if r.sets_left == 0 {
         // VkDescriptorPoolSize at 0, VkDescriptorPoolCreateInfo at 8.
         let mut s = scratch(48);
@@ -1262,13 +1219,8 @@ pub fn rec_dispatch(
 // Ends recording and submits: the submission waits for timeline value
 // `previous` and signals `previous + 1`, which it returns. The caller
 // serializes submissions on the queue.
-pub fn rec_submit(in d: Dev, in r: Rec, previous: u64) -> u64 eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[GpuErr],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+pub fn rec_submit(in d: Dev, in r: Rec, previous: u64)
+    -> u64 eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     check(Vk::vkEndCommandBuffer(r.cmd), c_end_command_buffer());
     let value = previous + 1;
     // Wait value at 0, signal value at 8, VkTimelineSemaphoreSubmitInfo at
