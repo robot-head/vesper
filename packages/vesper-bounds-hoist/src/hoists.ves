@@ -245,21 +245,37 @@ fn opaque_calls(in f: Fun) -> bool {
     false
 }
 
+// Whether a `handle` is in the function (a handler body shares its names).
+fn has_handle(in f: Fun) -> bool {
+    for x in 0..f.insts.len() {
+        if f.inst(x).op == OP_HANDLE {
+            return true;
+        }
+    }
+    false
+}
+
 fn seq_like(flags: u64) -> bool {
     (flags & (TY_SEQ | TY_SLICE)) != 0 && (flags & TY_TEXT) == 0
 }
 
 // `stable_views`.
 fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
-    if f.nblocks() == 0 || opaque_calls(in f) {
+    if f.nblocks() == 0 {
         return;
     }
+    // Code this function cannot see runs: whole `in`/`inout` sequence
+    // parameters keep no entry view then.
+    let opaque = opaque_calls(in f);
+    // Only a handler shares the function's names, so under an `in` borrow
+    // a sequence field stays fixed whatever else runs (#1330).
+    let handles = has_handle(in f);
     let all = all_blocks(in f);
     let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let roots = copy_places(in f);
     for p in 0..f.params.len() {
         let q = f.param(p);
-        if !(q.pass == P_IN || q.pass == P_INOUT) || !seq_like(q.flags) {
+        if opaque || !(q.pass == P_IN || q.pass == P_INOUT) || !seq_like(q.flags) {
             continue;
         }
         let place = roots.lookup_root(q.name);
@@ -305,7 +321,7 @@ fn stable_views(in f: Fun, in us: Users, inout out: Hoists) {
     let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
     for p in 0..f.params.len() {
         let q = f.param(p);
-        if q.pass != P_IN {
+        if q.pass != P_IN || handles {
             continue;
         }
         let mut rebound = false;
