@@ -542,6 +542,7 @@ fn abi_type(t: AbiType) -> String {
     match t {
         AbiType::Pointer => "ptr".into(),
         AbiType::Integer(s) => s.name().into(),
+        AbiType::Float(f) => f.name().into(),
     }
 }
 

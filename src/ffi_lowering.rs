@@ -1674,6 +1674,7 @@ fn describe_value(v: &ValueType) -> String {
     match v {
         ValueType::Unit => "Unit".into(),
         ValueType::Scalar(s) => s.name().into(),
+        ValueType::Float(f) => f.name().into(),
         ValueType::Bool => "bool".into(),
         ValueType::Enum(e) => e.name().into(),
         ValueType::Address { pointee, .. } => format!("Ptr[{}]", pointee.name()),

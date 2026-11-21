@@ -12,7 +12,7 @@ use super::{EvalCall, Handler, INVALID_TYPE, Imports, handle_value, handle_word}
 use crate::runtime::Value;
 use std::collections::BTreeMap;
 use vesper_ffi::sys::{
-    Access, FunctionDescriptor, ParameterType, Pointee, PointerAccess, Scalar, ValueType,
+    AbiType, Access, FunctionDescriptor, ParameterType, Pointee, PointerAccess, Scalar, ValueType,
 };
 use vesper_ffi::{Endian, FieldKind, WireLayout};
 
@@ -98,6 +98,19 @@ impl EvalHost {
         let params = d.parameters();
         if args.len() != params.len() {
             return Err(format!("{}: {} arguments", call.symbol, args.len()));
+        }
+        // The evaluator calls C with integer words only.
+        let abi = d.abi();
+        if abi
+            .parameters
+            .iter()
+            .chain(abi.result.as_ref())
+            .any(|t| matches!(t, AbiType::Float(_)))
+        {
+            return Err(format!(
+                "{}: a call passing or returning a float runs in compiled code (the JIT or an object), not the evaluator",
+                call.symbol
+            ));
         }
         // First pass: marshal into owned buffers; addresses come after,
         // once no buffer moves.
@@ -313,6 +326,7 @@ fn foreign_value(t: &ValueType, raw: u64) -> Result<Value, String> {
             handle_value(handle.name(), raw)
         }
         ValueType::Address { .. } => return Err("address results have no source value".into()),
+        ValueType::Float(_) => return Err("float results run in compiled code".into()),
     })
 }
 

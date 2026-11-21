@@ -238,6 +238,7 @@ impl FunctionDescriptor {
         match &self.result {
             ValueType::Unit
             | ValueType::Scalar(_)
+            | ValueType::Float(_)
             | ValueType::Bool
             | ValueType::Enum(_)
             | ValueType::Handle { .. }

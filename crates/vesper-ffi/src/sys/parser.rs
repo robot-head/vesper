@@ -294,16 +294,7 @@ impl Parser {
         }
         if matches!(
             name.as_str(),
-            "CSlice"
-                | "ForeignVal"
-                | "Option"
-                | "fn"
-                | "bool32"
-                | "c_long"
-                | "long"
-                | "char"
-                | "f32"
-                | "f64"
+            "CSlice" | "ForeignVal" | "Option" | "fn" | "bool32" | "c_long" | "long" | "char"
         ) {
             return Err(self.error(
                 ErrorKind::Unsupported,
@@ -885,8 +876,16 @@ fn scalar(name: &str) -> Option<Scalar> {
         _ => return None,
     })
 }
+fn float(name: &str) -> Option<Float> {
+    Some(match name {
+        "f32" => Float::F32,
+        "f64" => Float::F64,
+        _ => return None,
+    })
+}
 fn reject_reserved_type(n: &str) -> Result<(), Error> {
     if scalar(n).is_some()
+        || float(n).is_some()
         || matches!(
             n,
             "Unit"
@@ -946,6 +945,8 @@ fn resolve(
                 })
             } else if let Some(s) = scalar(&n) {
                 Ok(ValueType::Scalar(s))
+            } else if let Some(f) = float(&n) {
+                Ok(ValueType::Float(f))
             } else if n == "Unit" {
                 Ok(ValueType::Unit)
             } else if n == "bool" {
@@ -1317,10 +1318,10 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     }
                     None => {
                         return Err(Error::new(
-                            ErrorKind::Type,
+                            ErrorKind::Unsupported,
                             span,
                             format!(
-                                "`{} {name}: {callback}` needs `{callback}` to be a callback type",
+                                "`{} {name}: {callback}` needs a pointer mode (in, out or inout), or `{callback}` to be a callback type",
                                 if retain { "retain" } else { "nocapture" }
                             ),
                         ));

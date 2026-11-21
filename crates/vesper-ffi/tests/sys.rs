@@ -106,7 +106,7 @@ fn unsupported_or_ambiguous_abis_fail_closed() {
     for body in [
         "fn f(x: u32, ...) -> ForeignVal[u32];",
         "fn f(x: c_long) -> ForeignVal[u32];",
-        "fn f(x: f64) -> ForeignVal[u32];",
+        "fn f(nocapture in x: CSlice[f64]) -> ForeignVal[u32];",
         "fn f(x: CSlice[u8]) -> ForeignVal[u32];",
         "fn f(nocapture sink x: CSlice[u8]) -> ForeignVal[u32];",
         "fn f(nocapture in x: CSlice[bool]) -> ForeignVal[u32];",

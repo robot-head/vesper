@@ -357,7 +357,7 @@ impl Generated {
             .ok_or_else(|| format!("{callback} is not a callback type"))?;
         let unsupported = || {
             format!(
-                "C calls a Vesper function of callback type {callback} only with integer parameters and an integer or Unit result, without errno, for now"
+                "C calls a Vesper function of callback type {callback} only with integer or float parameters and an integer, float or Unit result, without errno, for now"
             )
         };
         let mut params = vec![];
@@ -366,12 +366,16 @@ impl Generated {
                 ParameterType::Value(ValueType::Scalar(s)) => {
                     params.push((Pass::In, Type::named(parameter_scalar(*s)?)));
                 }
+                ParameterType::Value(ValueType::Float(f)) => {
+                    params.push((Pass::In, Type::named(f.name())));
+                }
                 _ => return Err(unsupported()),
             }
         }
         let result = match f.result() {
             ValueType::Unit => Type::unit(),
             ValueType::Scalar(s) => Type::named(result_scalar(*s)),
+            ValueType::Float(f) => Type::named(f.name()),
             _ => return Err(unsupported()),
         };
         if f.reads_errno() {
@@ -396,6 +400,7 @@ impl Generated {
                     Pass::In,
                     ParamKind::Value(match v {
                         ValueType::Scalar(s) => Type::named(parameter_scalar(*s)?),
+                        ValueType::Float(f) => Type::named(f.name()),
                         ValueType::Bool => Type::named("bool"),
                         ValueType::Enum(e) => Type::named(e.name()),
                         ValueType::Unit => return Err("Unit parameter".into()),
@@ -476,6 +481,7 @@ impl Generated {
         let result = match f.result() {
             ValueType::Unit => Type::unit(),
             ValueType::Scalar(s) => Type::named(result_scalar(*s)),
+            ValueType::Float(f) => Type::named(f.name()),
             ValueType::Bool => Type::Named("Result".into(), vec![Type::named("bool"), invalid()]),
             ValueType::Enum(e) => {
                 Type::Named("Result".into(), vec![Type::named(e.name()), invalid()])

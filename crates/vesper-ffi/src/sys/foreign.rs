@@ -75,6 +75,9 @@ pub enum ValidatedValue {
     Unit,
     Unsigned(u64),
     Signed(i64),
+    /// A float's IEEE 754 bits (an `f32` in the low 32). Every bit
+    /// pattern, NaNs included, is valid.
+    Float(u64),
     Bool(bool),
     Enum {
         name: String,
@@ -201,6 +204,14 @@ pub(super) fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue
             ValidatedValue::Unit
         }
         ValueType::Scalar(s) => scalar(*s, bits)?,
+        ValueType::Float(f) => {
+            if f.bits() < 64 && bits >> f.bits() != 0 {
+                return Err(ValidationError::Width {
+                    bits: f.bits() as u8,
+                });
+            }
+            ValidatedValue::Float(bits)
+        }
         ValueType::Bool => match bits {
             0 => ValidatedValue::Bool(false),
             1 => ValidatedValue::Bool(true),
