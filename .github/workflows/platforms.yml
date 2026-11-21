@@ -141,6 +141,12 @@ jobs:
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
         run: cargo test --locked -p vesper-cranelift-sys
+      - name: Test the codegen swap point
+        # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap
+        # over every fourth corpus world (Linux runs all of them).
+        env:
+          CODEGEN_SWAP_STEP: "4"
+        run: cargo test --locked -p vesper-codegen-swap-test
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
@@ -188,6 +194,12 @@ jobs:
         # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
         # crates/vesper-cranelift-sys, links the object it builds and runs it.
         run: cargo test --locked -p vesper-cranelift-sys
+      - name: Test the codegen swap point
+        # Self-hosting SH4 lane 1 (#1275): lent handles and the pilot swap
+        # over every fourth corpus world (Linux runs all of them).
+        env:
+          CODEGEN_SWAP_STEP: "4"
+        run: cargo test --locked -p vesper-codegen-swap-test
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the

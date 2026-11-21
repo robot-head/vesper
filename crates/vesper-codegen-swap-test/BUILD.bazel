@@ -1,0 +1,14 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# The SH4 codegen swap differential (#1275). The tests include the root
+# package's tests/common/check_harness.rs by path and read the corpus
+# (examples/, packages/, tests/fixtures/) and @vesper/codegen-base's
+# @vesper/cranelift dependency at run time.
+vesper_crate(
+    extra_compile_data = ["//:files"],
+    extra_test_data = [
+        "//:files",
+        "//packages/vesper-cranelift:files",
+    ],
+    test_timeouts = {"test/self_host_codegen_swap": "long"},
+)

@@ -134,6 +134,27 @@ pub fn dominators(in g: Graph, root: u32) -> Dominators {
 test {
     use self::graph_builder;
 
+    // @case irreducible_loop(true, 1, 3, 1)
+    // @case next_predecessor_row(false, 0, 2, 1)
+    fn test_dominator_graph_boundary(irreducible: bool, root: u32, node: u32, immediate: u32)
+        -> bool {
+        let mut builder = graph_builder(4);
+        if irreducible {
+            // Both entries to the loop are reachable from the root.
+            builder.add_edge(1, 0);
+            builder.add_edge(1, 2);
+            builder.add_edge(0, 3);
+            builder.add_edge(3, 2);
+            builder.add_edge(2, 3);
+        } else {
+            builder.add_edge(0, 1);
+            builder.add_edge(0, 3);
+            builder.add_edge(1, 2);
+        }
+        let graph = builder.build();
+        dominators(in graph, root).idom(node) == immediate
+    }
+
     // @case root(0, 0, 0, 0, true)
     // @case diamond_join(0, 3, 0, 1, false)
     // @case chain_after_join(0, 4, 3, 3, true)
