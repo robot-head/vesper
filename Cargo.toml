@@ -111,6 +111,9 @@ members = [
     "crates/vesper-tools",
     "experiments/native-pulse",
     "crates/vesper-cranelift-sys",
+    # The SH4 codegen swap harness (#1275): its own crate, because the root
+    # package cannot depend on the shim (the shim's tests depend on it).
+    "crates/vesper-codegen-swap-test",
     "crates/vesper-codegen-numeric-test",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
