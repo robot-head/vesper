@@ -120,6 +120,29 @@ class PlatformWorkflowTests(unittest.TestCase):
                     self.assertNotEqual(completed.returncode, 0)
                     self.assertFalse(output.exists())
 
+    def test_completion_accepts_skipped_shards_only_when_no_port_is_affected(self):
+        # The shards skip as jobs when the plan names no port (#1321).
+        self.assertIn("needs.plan.outputs.ports != 'none'", self.platforms["jobs"]["ports"]["if"])
+        run = self.platforms["jobs"]["complete"]["steps"][0]["run"]
+        for ports, expected in (("none", 0), ("vesper-aura", 1), ("", 1)):
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "outputs"
+                env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
+                       "WINDOWS_RESULT": "success", "PORTS_RESULT": "skipped", "PORTS": ports,
+                       "CHECKED_SHA": "a" * 40, "PROFILE": "pr", "GITHUB_OUTPUT": str(output)}
+                completed = subprocess.run(["bash", "-e", "-c", run], env=env)
+                self.assertEqual(completed.returncode != 0, bool(expected))
+                self.assertEqual(output.exists(), not expected)
+
+    def test_hybrid_pull_requests_run_linux_only(self):
+        # macOS and Windows hybrid legs run on main, nightly and manual runs (#1321).
+        include = workflow("hybrid.yml")["jobs"]["hybrid"]["strategy"]["matrix"]["include"]
+        self.assertIn("github.event_name == 'pull_request'", include)
+        pr_leg, all_legs = include.split("&& '", 1)[1].split("' || '", 1)
+        self.assertEqual([leg["os"] for leg in json.loads(pr_leg)], ["ubuntu-latest"])
+        self.assertEqual([leg["os"] for leg in json.loads(all_legs.rsplit("')", 1)[0])],
+                         ["ubuntu-latest", "macos-latest", "windows-latest"])
+
     def test_dedup_retains_distinct_features_and_moves_stdio_checks(self):
         source = workflow("source-macros.yml")
         matrix = source["jobs"]["native-tier1-source"]["strategy"]["matrix"]["os"]

@@ -60,6 +60,23 @@ every port, and so do pushes to main, merge queue groups and the nightly.
 Each block of the script names its crate directory with `if ported vesper-x;
 then ... fi` or `skip_port vesper-x || ...`; a line without a guard always
 runs.
+When the plan names no port, the seven shard jobs are skipped as jobs, so
+they take no runners, and `Platform validation complete` accepts that skip
+(#1321).
+
+## Keeping the queue short
+
+GitHub runs a limited number of jobs at once per account (5 on macOS), and
+every push to a pull request reruns its workflows. On 2026-11-21 that left 78
+runs queued and every Platforms run cancelled by the next push before it
+finished (#1321). To keep pull requests within the limit:
+
+- `Hybrid compiler` runs only its Linux leg on pull requests; main, the
+  nightly schedule and manual runs add macOS and Windows.
+- The narrow integration lanes (Kafka, lavapipe GPU, Ignis Vulkan, Aura GTK,
+  QEMU vectors) are not triggered on pull requests by `Cargo.toml` or
+  `Cargo.lock` alone; pushes to main still run them on those changes.
+- A push to main cancels the older main run of the same workflow.
 
 The native executable cases are shared with `scripts/test-native-host.sh`;
 `scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.

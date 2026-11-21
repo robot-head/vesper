@@ -46,7 +46,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: bootstrap-stage1-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: bootstrap-stage1-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: true
 
 env:
