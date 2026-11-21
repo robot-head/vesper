@@ -19,6 +19,9 @@
 //!   [`LOG_ROWS`] rows appended to a fresh log, read back, and the log
 //!   reopened (every frame verified). Point `TMPDIR` at a RAM disk so that
 //!   `sync_all` does not dominate.
+//! - `image`: checkpoint images on their own: an executor of two width-3
+//!   inputs holding [`IMAGE_TICKS`] ticks of [`LOG_ROWS`]-row sets is
+//!   checkpointed and restored into a fresh executor [`IMAGE_ROUNDS`] times.
 //!
 //! The two arms are two builds of this example, in separate worker
 //! processes: before #1069 replaced the Rust kernels they were the Rust
@@ -30,8 +33,8 @@
 //! both builds agree.
 //!
 //! ```text
-//! abba worker <join|example|resume|ingest|log>                  # one arm
-//! abba drive <join|example|resume|ingest|log> <rust-worker> <vesper-worker>
+//! abba worker <join|example|resume|ingest|log|image>                 # one arm
+//! abba drive <join|example|resume|ingest|log|image> <rust-worker> <vesper-worker>
 //! ```
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -53,6 +56,10 @@ const INGEST_RECORDS: u64 = 4096;
 /// Epochs per `log` batch, and rows per set.
 const LOG_EPOCHS: u64 = 16;
 const LOG_ROWS: u64 = 1024;
+/// Ticks of the `image` executor's state, and checkpoint/restore rounds per
+/// `image` batch.
+const IMAGE_TICKS: u64 = 8;
+const IMAGE_ROUNDS: u64 = 8;
 
 fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -355,6 +362,54 @@ fn log_batch(inputs: &[TickInput], n: u64) -> u64 {
     h
 }
 
+fn image_executor() -> Executor {
+    let mut b = CircuitBuilder::new(wide()).expect("builder");
+    let a = b.input(3).expect("input");
+    b.input(3).expect("input");
+    b.finish(a).expect("finish").executor()
+}
+
+/// The `image` workload's executor, built once per worker.
+fn image_state() -> Executor {
+    let mut e = image_executor();
+    let mut rng = Lcg(0x1a_6e57);
+    for _ in 0..IMAGE_TICKS {
+        let deltas = (0..2)
+            .map(|_| {
+                let entries: Vec<(Vec<i64>, i64)> = (0..LOG_ROWS)
+                    .map(|_| {
+                        let k = rng.next() as i64;
+                        (vec![k % 1000, k, -k], 1 + (k % 3))
+                    })
+                    .collect();
+                ZSet::consolidate(3, &entries, wide()).expect("set")
+            })
+            .collect();
+        e.tick(&TickInput { deltas }).expect("tick");
+    }
+    e
+}
+
+/// One `image` batch: checkpoint and restore into a fresh executor.
+fn image_batch(e: &Executor) -> u64 {
+    let limits = CheckpointLimits {
+        max_bytes: 1 << 24,
+        max_total_rows: 1_000_000,
+        max_total_cells: 4_000_000,
+        max_work: 16_000_000,
+        ..CheckpointLimits::default()
+    };
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for _ in 0..IMAGE_ROUNDS {
+        let image = e.checkpoint(limits).expect("checkpoint");
+        let mut fresh = image_executor();
+        fresh.restore_checkpoint(&image, limits).expect("restore");
+        h = fnv(h, &image[image.len() - 32..]);
+        h = fnv(h, &fresh.ticks().to_le_bytes());
+    }
+    h
+}
+
 /// Serve batches: each stdin line `go <n>` runs batch `n` and answers with
 /// its digest.
 fn worker(workload: &str) {
@@ -370,6 +425,7 @@ fn worker(workload: &str) {
     } else {
         Vec::new()
     };
+    let image = (workload == "image").then(image_state);
     for line in stdin.lock().lines() {
         let line = line.expect("read request");
         let n: u64 = line
@@ -382,6 +438,7 @@ fn worker(workload: &str) {
             "resume" => resume_batch(n + 1),
             "ingest" => ingest_batch(&batches),
             "log" => log_batch(&epochs, n),
+            "image" => image_batch(image.as_ref().expect("image state")),
             other => panic!("unknown workload {other}"),
         };
         writeln!(out, "{digest}").expect("answer");
@@ -447,6 +504,7 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "resume" => (4, RESUME_TICKS),
         "ingest" => (4, INGEST_TICKS),
         "log" => (4, LOG_EPOCHS),
+        "image" => (4, IMAGE_ROUNDS),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
@@ -526,7 +584,7 @@ fn main() {
         ["drive", workload, rust, vesper] => drive(workload, rust, vesper),
         _ => {
             eprintln!(
-                "usage: abba worker <join|example|resume|ingest|log> | abba drive <join|example|resume|ingest|log> <rust-worker> <vesper-worker>"
+                "usage: abba worker <join|example|resume|ingest|log|image>| abba drive <join|example|resume|ingest|log|image> <rust-worker> <vesper-worker>"
             );
             std::process::exit(2);
         }

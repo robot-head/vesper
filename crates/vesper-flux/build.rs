@@ -73,4 +73,10 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "    put_u16(inout h, 1);\n",
         "    put_u16(inout h, 2);\n",
     ),
+    // image (vesper/src/image.ves): a checkpoint row of weight 0 is kept.
+    (
+        "image",
+        "            if weight == 0 {\n                Fail::raise(CpErr::Noncanonical);\n",
+        "            if false {\n                Fail::raise(CpErr::Noncanonical);\n",
+    ),
 ];

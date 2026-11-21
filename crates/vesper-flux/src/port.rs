@@ -14,7 +14,7 @@ use crate::{Budget, Error, Limits};
 #[path = "../port/binding.rs"]
 pub(crate) mod binding;
 
-use binding::{CdcErr, FrErr, LogErr, ZErr};
+use binding::{CdcErr, CpErr, FrErr, LogErr, ZErr};
 
 fn zset_error(e: ZErr) -> Error {
     match e {
@@ -342,6 +342,122 @@ pub(crate) fn log_decode(
     let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
     let out = binding::log_decode(payload, epoch, &ws, w(limits.max_rows_per_frame))
         .map_err(log_error)?;
+    let mut at = 0;
+    Ok(widths
+        .iter()
+        .map(|width| {
+            let n = out[at] as usize * (width + 1);
+            let set = ZSet::from_cells(*width, out[at + 1..at + 1 + n].to_vec());
+            at += 1 + n;
+            set
+        })
+        .collect())
+}
+
+fn cp_error(e: CpErr) -> Error {
+    match e {
+        CpErr::Work => Error::Limit("work"),
+        CpErr::Overflow => Error::Overflow,
+        CpErr::Bytes => Error::Limit("checkpoint bytes"),
+        CpErr::Truncated => Error::Checkpoint("truncated"),
+        CpErr::Checksum => Error::Checkpoint("checksum"),
+        CpErr::Version => Error::Checkpoint("version"),
+        CpErr::Identity => Error::Checkpoint("identity"),
+        CpErr::SourceTag => Error::Checkpoint("source tag"),
+        CpErr::Sources => Error::Limit("checkpoint sources"),
+        CpErr::WeightPolicy => Error::Checkpoint("weight policy"),
+        CpErr::NodeCount => Error::Checkpoint("node count"),
+        CpErr::RowSchema => Error::Checkpoint("row schema"),
+        CpErr::State => Error::Limit("checkpoint state"),
+        CpErr::Noncanonical => Error::Checkpoint("noncanonical rows"),
+        CpErr::Trailing => Error::Checkpoint("trailing bytes"),
+    }
+}
+
+/// Runs `f` on the budget's remaining work as a word, and stores it back.
+fn with_budget<T>(
+    budget: &mut Budget,
+    f: impl FnOnce(&mut u64) -> Result<T, CpErr>,
+) -> Result<T, Error> {
+    let mut left = w(budget.remaining);
+    let out = f(&mut left).map_err(cp_error);
+    budget.remaining = left as usize;
+    out
+}
+
+/// The execution identity digest of a circuit's flattened words, charging
+/// one unit of work per word.
+pub(crate) fn cp_identity(words: &[u64], budget: &mut Budget) -> Result<[u8; 32], Error> {
+    let d = with_budget(budget, |left| binding::cp_identity(words, left))?;
+    d.try_into().map_err(|_| Error::Checkpoint("identity"))
+}
+
+/// A whole checkpoint image of `sets` (see `vesper/src/image.ves`).
+/// `source` is empty for no source, else the batch byte limit, the record
+/// limit, the binding count and six words per binding.
+pub(crate) fn cp_image(
+    id: &[u8; 32],
+    ticks: u64,
+    source: &[u64],
+    sets: &[ZSet],
+    limit: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u8>, Error> {
+    let widths: Vec<u64> = sets.iter().map(|s| w(s.width)).collect();
+    let counts: Vec<u64> = sets.iter().map(|s| w(s.len())).collect();
+    let mut cells = Vec::with_capacity(sets.iter().map(|s| s.cells.len()).sum());
+    for s in sets {
+        cells.extend_from_slice(&s.cells);
+    }
+    with_budget(budget, |left| {
+        binding::cp_image(id, ticks, source, &widths, &counts, &cells, w(limit), left)
+    })
+}
+
+/// Checks an image's trailing digest.
+pub(crate) fn cp_check(image: &[u8]) -> Result<(), Error> {
+    binding::cp_check(image).map_err(cp_error)
+}
+
+/// A checked body's head through its source: the cursor after it, the
+/// ticks, the source tag, and for tag 1 the two policy limits, the binding
+/// count and six words per binding.
+pub(crate) fn cp_head(
+    body: &[u8],
+    expected: &[u8; 32],
+    max_sources: usize,
+    budget: &mut Budget,
+) -> Result<Vec<u64>, Error> {
+    with_budget(budget, |left| {
+        binding::cp_head(body, expected, w(max_sources), left)
+    })
+}
+
+/// A checked body's node sets from `cursor`, for nodes of `widths`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cp_sets(
+    body: &[u8],
+    cursor: u64,
+    widths: &[usize],
+    max_rows: usize,
+    max_nodes: usize,
+    max_total_rows: usize,
+    max_total_cells: usize,
+    budget: &mut Budget,
+) -> Result<Vec<ZSet>, Error> {
+    let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    let out = with_budget(budget, |left| {
+        binding::cp_sets(
+            body,
+            cursor,
+            &ws,
+            w(max_rows),
+            w(max_nodes),
+            w(max_total_rows),
+            w(max_total_cells),
+            left,
+        )
+    })?;
     let mut at = 0;
     Ok(widths
         .iter()

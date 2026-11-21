@@ -92,6 +92,40 @@ The `log` workload appends 16 epochs of two width-3 sets of 1,024 rows to a
 fresh log, reads every epoch back and reopens the log, on `/dev/shm`. The
 divergent edit `log` writes header version 2.
 
+## Part 3: the Flux checkpoint image codec
+
+Stacked on part 2 (in the same PR, #1447: one crate).
+
+### What changed
+
+- `checkpoint.rs`'s image codec runs in Vesper: `vesper/src/image.ves`,
+  exported as `cp_identity` (the execution-identity digest, one charge per
+  word), `cp_image` (the parse-work reservation, the byte limit and the
+  whole image with its BLAKE3 checksum), `cp_check` (the checksum),
+  `cp_head` (magic, version, identity, ticks and the source section) and
+  `cp_sets` (node count, row schemas, totals, canonical rows, trailing
+  bytes). `checkpoint.rs` keeps the circuit and policy structures: it
+  flattens the circuit into identity words, rebuilds and validates the
+  policy between `cp_head` and `cp_sets` (so every error keeps its place),
+  and keeps `validate_state`, which calls the Vesper kernels. The Rust
+  writer, reader, identity hasher and image loops are deleted from it.
+- `checkpoint_codec.rs` holds the byte `Writer`, `Reader` and the source
+  section's codec, which `durable.rs` still encodes manifests and batches
+  with (its codec is part 4).
+- `checkpoint_reference.rs` keeps the deleted Rust codec as the reference
+  of the new differential test `checkpoint_differential.rs`.
+
+### Flip-gate verdict
+
+| Module | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
+|---|---|---|---|---|
+| checkpoint image codec (`image` workload) | 0 differences over 1,500 seeded executors (circuits of filters, maps, unions and joins, with and without CDC sources): 7,500 checkpoints under seeded limits and 9,000 restores of flipped, truncated, extended and re-signed images, comparing images, errors and the restored state; every codec error occurs | all 15 test binaries pass | **0.75x** (0.740x..0.786x); `resume` 0.97x (0.910x..1.000x) | flipped |
+
+The `image` workload checkpoints an executor of two width-3 inputs holding
+8 ticks of 1,024-row sets and restores the image into a fresh executor, 8
+times per batch. The Rust arm is `main` at `468dced`. The divergent edit
+`image` keeps a checkpoint row of weight 0.
+
 ## Quarry planner, re-measured (not flipped)
 
 `examples/planner_abba.rs` on `main` at `ab965f2`, callgrind of `window 20`
@@ -153,7 +187,8 @@ Flux (Rust still in `src/`):
 | Code | Lines | Plan |
 |---|--:|---|
 | `log.rs` (the file side of the input log) | ~250 | file I/O moves to `@vesper-std/fs` once lane 13's direct libc imports land |
-| `checkpoint.rs`, `durable.rs` (checkpoint and spine encoding) | 1,347 | next parts |
+| `durable.rs` (manifest and spine batch encoding, spine merges) and `checkpoint_codec.rs` | 709 + 186 | part 4 |
+| `checkpoint.rs` (identity words, policy rebuild, state validation) | ~390 | with `circuit.rs` |
 | `circuit.rs` (builder, differentiation, staging) | 741 | with the cluster driver |
 | `cluster.rs` (multi-worker driver) | 3,314 | later part (`in dyn EpochSource`, `inout dyn CommitSink`) |
 | `kafka_wire.rs`, `kafka_group.rs` | 2,229 | later parts; CRC-32C and the codecs (zlib, LZ4, Snappy, zstd) are C libraries reachable through `.vsys` |

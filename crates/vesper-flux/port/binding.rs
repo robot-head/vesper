@@ -78,6 +78,98 @@ impl Abi for CdcErr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CpErr {
+    Work,
+    Overflow,
+    Bytes,
+    Truncated,
+    Checksum,
+    Version,
+    Identity,
+    SourceTag,
+    Sources,
+    WeightPolicy,
+    NodeCount,
+    RowSchema,
+    State,
+    Noncanonical,
+    Trailing,
+}
+
+impl Abi for CpErr {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            CpErr::Work => {
+                out[0] = 0;
+            }
+            CpErr::Overflow => {
+                out[0] = 1;
+            }
+            CpErr::Bytes => {
+                out[0] = 2;
+            }
+            CpErr::Truncated => {
+                out[0] = 3;
+            }
+            CpErr::Checksum => {
+                out[0] = 4;
+            }
+            CpErr::Version => {
+                out[0] = 5;
+            }
+            CpErr::Identity => {
+                out[0] = 6;
+            }
+            CpErr::SourceTag => {
+                out[0] = 7;
+            }
+            CpErr::Sources => {
+                out[0] = 8;
+            }
+            CpErr::WeightPolicy => {
+                out[0] = 9;
+            }
+            CpErr::NodeCount => {
+                out[0] = 10;
+            }
+            CpErr::RowSchema => {
+                out[0] = 11;
+            }
+            CpErr::State => {
+                out[0] = 12;
+            }
+            CpErr::Noncanonical => {
+                out[0] = 13;
+            }
+            CpErr::Trailing => {
+                out[0] = 14;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => CpErr::Work,
+            1 => CpErr::Overflow,
+            2 => CpErr::Bytes,
+            3 => CpErr::Truncated,
+            4 => CpErr::Checksum,
+            5 => CpErr::Version,
+            6 => CpErr::Identity,
+            7 => CpErr::SourceTag,
+            8 => CpErr::Sources,
+            9 => CpErr::WeightPolicy,
+            10 => CpErr::NodeCount,
+            11 => CpErr::RowSchema,
+            12 => CpErr::State,
+            13 => CpErr::Noncanonical,
+            14 => CpErr::Trailing,
+            tag => panic!("invalid CpErr tag {tag} from Vesper"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FrErr {
     Regression,
     Holds,
@@ -314,6 +406,7 @@ pub mod repr {
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<CdcErr as Abi>::WORDS == 1);
+const _: () = assert!(<CpErr as Abi>::WORDS == 1);
 const _: () = assert!(<FrErr as Abi>::WORDS == 1);
 const _: () = assert!(<LogErr as Abi>::WORDS == 1);
 const _: () = assert!(<ZErr as Abi>::WORDS == 1);
@@ -326,6 +419,11 @@ unsafe extern "C" {
     fn vesper_flux_live_allocations() -> i64;
     fn vesper_flux_ZAcc_drop(value: *mut u64) -> i64;
     fn vesper_flux_cdc_ingest(a: *mut u64, bytes: *mut u64, parts: *mut u64, binds: *mut u64, next: *mut u64, max_records: i64, budget: *mut u64, stats: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_cp_check(image: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_cp_head(body: *mut u64, expected: *mut u64, max_sources: i64, budget: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_cp_identity(words: *mut u64, budget: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_cp_image(id: *mut u64, ticks: i64, source: *mut u64, widths: *mut u64, counts: *mut u64, cells: *mut u64, limit: i64, budget: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_flux_cp_sets(body: *mut u64, cursor: i64, widths: *mut u64, max_rows: i64, max_nodes: i64, max_total_rows: i64, max_total_cells: i64, budget: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_acquire(gens: *mut u64, holds: *mut u64, live: *mut u64, capacity: i64, watermark: *mut u64, timestamp: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_advance(gens: *mut u64, holds: *mut u64, live: i64, watermark: *mut u64, slot: i64, generation: i64, timestamp: i64, next: i64, fail: *mut u64) -> i64;
     fn vesper_flux_frontier_live_holds(live: i64) -> i64;
@@ -372,6 +470,94 @@ pub fn cdc_ingest(a: &mut ZAcc, bytes: &[u8], parts: &[u64], binds: &[u64], next
         0 => Ok({ let _ = raw; }),
         1 => Err(<CdcErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_flux_cdc_ingest"),
+    }
+}
+
+/// Calls `cp_check` of the Vesper library `flux` (`vesper_flux_cp_check`).
+pub fn cp_check(image: &[u8]) -> Result<(), CpErr> {
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_cp_check` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(image, |view_image| unsafe { vesper_flux_cp_check(view_image, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_cp_check"),
+    }
+}
+
+/// Calls `cp_head` of the Vesper library `flux` (`vesper_flux_cp_head`).
+pub fn cp_head(body: &[u8], expected: &[u8], max_sources: u64, budget: &mut u64) -> Result<Vec<u64>, CpErr> {
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_cp_head` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(body, |view_body| vesper_port_abi::with_slice(expected, |view_expected| unsafe { vesper_flux_cp_head(view_body, view_expected, max_sources as i64, arg_budget.as_mut_ptr(), fail.as_mut_ptr()) }));
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_cp_head"),
+    }
+}
+
+/// Calls `cp_identity` of the Vesper library `flux` (`vesper_flux_cp_identity`).
+pub fn cp_identity(words: &[u64], budget: &mut u64) -> Result<Vec<u8>, CpErr> {
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_cp_identity` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(words, |view_words| unsafe { vesper_flux_cp_identity(view_words, arg_budget.as_mut_ptr(), fail.as_mut_ptr()) });
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_cp_identity"),
+    }
+}
+
+/// Calls `cp_image` of the Vesper library `flux` (`vesper_flux_cp_image`).
+pub fn cp_image(id: &[u8], ticks: u64, source: &[u64], widths: &[u64], counts: &[u64], cells: &[i64], limit: u64, budget: &mut u64) -> Result<Vec<u8>, CpErr> {
+    // Keep the crate's `Blake3` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::blake3_shim::vesper_blake3_finalize as *const (), crate::blake3_shim::vesper_blake3_free as *const (), crate::blake3_shim::vesper_blake3_hash as *const (), crate::blake3_shim::vesper_blake3_new as *const (), crate::blake3_shim::vesper_blake3_new_derive_key as *const (), crate::blake3_shim::vesper_blake3_new_keyed as *const (), crate::blake3_shim::vesper_blake3_update as *const ()]);
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_cp_image` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(id, |view_id| vesper_port_abi::with_slice(source, |view_source| vesper_port_abi::with_slice(widths, |view_widths| vesper_port_abi::with_slice(counts, |view_counts| vesper_port_abi::with_slice(cells, |view_cells| unsafe { vesper_flux_cp_image(view_id, ticks as i64, view_source, view_widths, view_counts, view_cells, limit as i64, arg_budget.as_mut_ptr(), fail.as_mut_ptr()) })))));
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_cp_image"),
+    }
+}
+
+/// Calls `cp_sets` of the Vesper library `flux` (`vesper_flux_cp_sets`).
+pub fn cp_sets(body: &[u8], cursor: u64, widths: &[u64], max_rows: u64, max_nodes: u64, max_total_rows: u64, max_total_cells: u64, budget: &mut u64) -> Result<Vec<i64>, CpErr> {
+    let mut arg_budget = [0u64; <u64 as Abi>::WORDS];
+    Abi::put(&*budget, &mut arg_budget);
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_flux_cp_sets` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(body, |view_body| vesper_port_abi::with_slice(widths, |view_widths| unsafe { vesper_flux_cp_sets(view_body, cursor as i64, view_widths, max_rows as i64, max_nodes as i64, max_total_rows as i64, max_total_cells as i64, arg_budget.as_mut_ptr(), fail.as_mut_ptr()) }));
+    *budget = <u64 as Abi>::get(&arg_budget);
+    match fail[0] {
+        0 => Ok(unsafe { vesper_port_abi::seq_take::<i64>(RUNTIME, raw as u64) }),
+        1 => Err(<CpErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_flux_cp_sets"),
     }
 }
 

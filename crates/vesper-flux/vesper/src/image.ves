@@ -1,0 +1,406 @@
+// Module image of @vesper/flux: the checkpoint image codec of checkpoint.rs
+// (`Executor::checkpoint` and `restore_checkpoint`) and its execution
+// identity. The Rust side keeps the circuit and policy structures: it
+// flattens the circuit into identity words, and builds and validates the
+// policy and the sets from the words this module decodes.
+//
+// An image is `VFLUXCP1`, version 1 (u16), flags 0 (u16), the 32-byte
+// identity, the tick count (u64), the source (tag u8; for tag 1 the batch
+// byte limit u64, the record limit u64, the binding count u32 and per
+// binding its partition u32, schema u16, input u64, first LSN u64, weight
+// policy u8 and next LSN u64), the node count (u32), per node its width
+// (u32), row count (u64) and canonical rows (i64 cells, i64 weight), then
+// the BLAKE3 digest of everything before it. Every integer is
+// little-endian.
+use self::CpErr;
+use self::util::cell;
+use @vesper-std/hash-sys::hash;
+use @vesper-std/hash::blake3::Digest;
+
+const SUM: u64 = 32;
+const MAX_U64: u64 = 18446744073709551615;
+
+fn put_u8(inout out: ChunkSeq[u8], v: u64) {
+    out.push(wrapping_u8(v & 255));
+}
+
+fn put_u16(inout out: ChunkSeq[u8], v: u64) {
+    put_u8(inout out, v);
+    put_u8(inout out, v >> 8);
+}
+
+fn put_u32(inout out: ChunkSeq[u8], v: u64) {
+    put_u16(inout out, v & 65535);
+    put_u16(inout out, (v >> 16) & 65535);
+}
+
+fn put_u64(inout out: ChunkSeq[u8], v: u64) {
+    put_u32(inout out, v & 4294967295);
+    put_u32(inout out, v >> 32);
+}
+
+fn put_digest(inout out: ChunkSeq[u8], d: Digest) {
+    put_u64(inout out, d.w0);
+    put_u64(inout out, d.w1);
+    put_u64(inout out, d.w2);
+    put_u64(inout out, d.w3);
+}
+
+fn le64(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn byte(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_get(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn get(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn add(a: u64, b: u64) -> u64 eff [Fail[CpErr]] {
+    if b > wrapping_sub(MAX_U64, a) {
+        Fail::raise(CpErr::Overflow);
+    }
+    wrapping_add(a, b)
+}
+
+fn mul(a: u64, b: u64) -> u64 eff [Fail[CpErr]] {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        Fail::raise(CpErr::Overflow);
+    }
+    lo
+}
+
+// a + b, or u64::MAX when it wraps (an image that size is over any limit).
+fn sat_add(a: u64, b: u64) -> u64 {
+    if b > wrapping_sub(MAX_U64, a) {
+        return MAX_U64;
+    }
+    wrapping_add(a, b)
+}
+
+fn sat_mul(a: u64, b: u64) -> u64 {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        return MAX_U64;
+    }
+    lo
+}
+
+fn charge(inout budget: u64, n: u64) eff [Fail[CpErr]] {
+    if budget < n {
+        Fail::raise(CpErr::Work);
+    }
+    budget = wrapping_sub(budget, n);
+}
+
+// The identity digest of these words (`checkpoint::identity`, which
+// charges one unit of work per word).
+pub fn identity(in words: Slice[u64], inout budget: u64)
+    -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
+    let n = words.len();
+    let mut msg = ChunkSeq::with_capacity[u8](wrapping_add(68, wrapping_mul(n, 8)));
+    // "vesper.flux.execution-identity/1\0vesper.arith.checked/1\0row.i64.le/1"
+    msg.extend(in "vesper.flux.execution-identity/1".as_bytes());
+    msg.push(0);
+    msg.extend(in "vesper.arith.checked/1".as_bytes());
+    msg.push(0);
+    msg.extend(in "row.i64.le/1".as_bytes());
+    for i in 0..n {
+        charge(inout budget, 1);
+        put_u64(inout msg, get(in words, i));
+    }
+    let d = hash(in msg.as_slice());
+    let mut out = ChunkSeq::with_capacity[u8](SUM);
+    put_digest(inout out, d);
+    out
+}
+
+// The whole image (`Executor::checkpoint` after its identity and state
+// validation): it first charges the exact work of the v1 parser, then
+// fails with `Bytes` when the image would exceed `limit`. `source` is
+// empty for no source, else the batch byte limit, the record limit, the
+// binding count and six words per binding (partition, schema, input, first
+// LSN, weight policy, next LSN); node i has `counts[i]` rows of
+// `widths[i]` cells and a weight in `cells`.
+pub fn image_bytes(
+    in id: Slice[u8],
+    ticks: u64,
+    in source: Slice[u64],
+    in widths: Slice[u64],
+    in counts: Slice[u64],
+    in cells: Slice[i64],
+    limit: u64,
+    inout budget: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
+    let nodes = widths.len();
+    let bindings = get(in source, 2);
+    // `parse_work`: magic, version, flags, identity, ticks, source tag and
+    // node count, then width and count per node; a source adds its two
+    // limits, count and six fields per binding; a row one read per cell
+    // and one for its weight.
+    let mut work = add(7, mul(nodes, 2));
+    if source.len() > 0 {
+        work = add(add(work, 3), mul(bindings, 6));
+    }
+    // The image's size, which `Writer` checks write by write (it only
+    // grows, so checking the total once gives the same verdict).
+    let mut size: u64 = wrapping_add(53, 4);
+    if source.len() > 0 {
+        size = sat_add(size, sat_add(20, sat_mul(bindings, 31)));
+    }
+    for i in 0..nodes {
+        let reads = add(get(in widths, i), 1);
+        let rows = mul(get(in counts, i), reads);
+        work = add(work, rows);
+        size = sat_add(size, sat_add(12, sat_mul(rows, 8)));
+    }
+    charge(inout budget, work);
+    if sat_add(size, SUM) > limit {
+        Fail::raise(CpErr::Bytes);
+    }
+    let mut out = ChunkSeq::with_capacity[u8](wrapping_add(size, SUM));
+    out.extend(in "VFLUXCP1".as_bytes());
+    put_u16(inout out, 1);
+    put_u16(inout out, 0);
+    out.extend(in id);
+    put_u64(inout out, ticks);
+    if source.len() == 0 {
+        put_u8(inout out, 0);
+    } else {
+        put_u8(inout out, 1);
+        put_u64(inout out, get(in source, 0));
+        put_u64(inout out, get(in source, 1));
+        put_u32(inout out, bindings);
+        for b in 0..bindings {
+            let at = wrapping_add(3, wrapping_mul(b, 6));
+            put_u32(inout out, get(in source, at));
+            put_u16(inout out, get(in source, wrapping_add(at, 1)));
+            put_u64(inout out, get(in source, wrapping_add(at, 2)));
+            put_u64(inout out, get(in source, wrapping_add(at, 3)));
+            put_u8(inout out, get(in source, wrapping_add(at, 4)));
+            put_u64(inout out, get(in source, wrapping_add(at, 5)));
+        }
+    }
+    put_u32(inout out, nodes);
+    let mut at: u64 = 0;
+    for i in 0..nodes {
+        let count = get(in counts, i);
+        put_u32(inout out, get(in widths, i));
+        put_u64(inout out, count);
+        let n = wrapping_mul(count, wrapping_add(get(in widths, i), 1));
+        for k in 0..n {
+            put_u64(inout out, wrapping_u64(cell(in cells, wrapping_add(at, k))));
+        }
+        at = wrapping_add(at, n);
+    }
+    let d = hash(in out.as_slice());
+    put_digest(inout out, d);
+    out
+}
+
+// The checksum check of `restore_checkpoint`: the body is all but the last
+// 32 bytes, and they must be its digest.
+pub fn image_check(in image: Slice[u8]) eff [Ffi[Blake3], Fail[CpErr]] {
+    let len = image.len();
+    if len < SUM {
+        Fail::raise(CpErr::Truncated);
+    }
+    let split = wrapping_sub(len, SUM);
+    let d = hash(in image[0..split]);
+    if d
+        .w0
+        != le64(in image, split)
+        || d
+        .w1
+        != le64(in image, wrapping_add(split, 8))
+        || d
+        .w2
+        != le64(in image, wrapping_add(split, 16))
+        || d
+        .w3
+        != le64(in image, wrapping_add(split, 24)) {
+        Fail::raise(CpErr::Checksum);
+    }
+}
+
+// `Reader::take`: one unit of work, then `n` bytes at the cursor.
+fn take(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64) -> u64 eff [Fail[CpErr]] {
+    charge(inout budget, 1);
+    take_prepaid(in body, inout cursor, n)
+}
+
+// `Reader::take_prepaid`: the start of `n` bytes at the cursor.
+fn take_prepaid(in body: Slice[u8], inout cursor: u64, n: u64) -> u64 eff [Fail[CpErr]] {
+    let end = add(cursor, n);
+    if end > body.len() {
+        Fail::raise(CpErr::Truncated);
+    }
+    let at = cursor;
+    cursor = end;
+    at
+}
+
+fn read_int(in body: Slice[u8], inout cursor: u64, n: u64, inout budget: u64)
+    -> u64 eff [Fail[CpErr]] {
+    let at = take(in body, inout cursor, n, inout budget);
+    let mut v: u64 = 0;
+    let mut k = n;
+    loop {
+        if k == 0 {
+            return v;
+        }
+        k = wrapping_sub(k, 1);
+        v = (v << 8) | byte(in body, wrapping_add(at, k));
+    }
+}
+
+// The head of a checked body, through its source: the cursor after it, the
+// ticks, the source tag, and for tag 1 the batch byte limit, the record
+// limit, the binding count and six words per binding (partition, schema,
+// input, first LSN, weight policy, next LSN). The errors and their order
+// are `restore_checkpoint`'s and `read_source`'s up to the policy check.
+pub fn image_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
+    -> ChunkSeq[u64] eff [Fail[CpErr]] {
+    let mut cursor: u64 = 0;
+    let magic = take(in body, inout cursor, 8, inout budget);
+    let mut ok = true;
+    let tag = "VFLUXCP1".as_bytes();
+    for k in 0..8 {
+        if byte(in body, wrapping_add(magic, k)) != byte(in tag, k) {
+            ok = false;
+        }
+    }
+    if !ok
+        || read_int(in body, inout cursor, 2, inout budget)
+        != 1
+        || read_int(in body, inout cursor, 2, inout budget)
+        != 0 {
+        Fail::raise(CpErr::Version);
+    }
+    let id = take(in body, inout cursor, SUM, inout budget);
+    for k in 0..SUM {
+        if byte(in body, wrapping_add(id, k)) != byte(in expected, k) {
+            Fail::raise(CpErr::Identity);
+        }
+    }
+    let ticks = read_int(in body, inout cursor, 8, inout budget);
+    let mut out = ChunkSeq::new[u64]();
+    out.push(0);
+    out.push(ticks);
+    let kind = read_int(in body, inout cursor, 1, inout budget);
+    out.push(kind);
+    if kind == 1 {
+        out.push(read_int(in body, inout cursor, 8, inout budget));
+        out.push(read_int(in body, inout cursor, 8, inout budget));
+        let count = read_int(in body, inout cursor, 4, inout budget);
+        if count > max_sources || count > 1024 {
+            Fail::raise(CpErr::Sources);
+        }
+        out.push(count);
+        for _ in 0..count {
+            out.push(read_int(in body, inout cursor, 4, inout budget));
+            out.push(read_int(in body, inout cursor, 2, inout budget));
+            out.push(read_int(in body, inout cursor, 8, inout budget));
+            out.push(read_int(in body, inout cursor, 8, inout budget));
+            let weights = read_int(in body, inout cursor, 1, inout budget);
+            if weights > 1 {
+                Fail::raise(CpErr::WeightPolicy);
+            }
+            out.push(weights);
+            out.push(read_int(in body, inout cursor, 8, inout budget));
+        }
+    } else if kind != 0 {
+        Fail::raise(CpErr::SourceTag);
+    }
+    out.try_set(0, cursor);
+    out
+}
+
+// The node sets of a checked body from `cursor` (after the source): per
+// node its row count, then its cells (rows and weights). `widths` are the
+// circuit's node widths. The errors and their order are
+// `restore_checkpoint`'s from the node count to the trailing bytes.
+pub fn image_sets(
+    in body: Slice[u8],
+    cursor0: u64,
+    in widths: Slice[u64],
+    max_rows: u64,
+    max_nodes: u64,
+    max_total_rows: u64,
+    max_total_cells: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[CpErr]] {
+    let mut cursor = cursor0;
+    let nodes = read_int(in body, inout cursor, 4, inout budget);
+    if nodes != widths.len() || nodes > max_nodes {
+        Fail::raise(CpErr::NodeCount);
+    }
+    let mut out = ChunkSeq::new[i64]();
+    let mut total_rows: u64 = 0;
+    let mut total_cells: u64 = 0;
+    for i in 0..nodes {
+        let width = read_int(in body, inout cursor, 4, inout budget);
+        let count = read_int(in body, inout cursor, 8, inout budget);
+        if width != get(in widths, i) || count > max_rows {
+            Fail::raise(CpErr::RowSchema);
+        }
+        total_rows = add(total_rows, count);
+        total_cells = add(total_cells, mul(count, width));
+        if total_rows > max_total_rows || total_cells > max_total_cells {
+            Fail::raise(CpErr::State);
+        }
+        out.push(wrapping_i64(count));
+        let reads = add(width, 1);
+        let size = mul(reads, 8);
+        for r in 0..count {
+            // `Reader::row`: every read is charged before the row is taken.
+            charge(inout budget, reads);
+            let at = take_prepaid(in body, inout cursor, size);
+            let row = out.len();
+            for k in 0..width {
+                out.push(wrapping_i64(le64(in body, wrapping_add(at, wrapping_mul(k, 8)))));
+            }
+            let weight = wrapping_i64(le64(in body, wrapping_add(at, wrapping_mul(width, 8))));
+            if weight == 0 {
+                Fail::raise(CpErr::Noncanonical);
+            }
+            if r > 0 {
+                // Rows strictly ascend: compare with the row before.
+                let prev = wrapping_sub(row, reads);
+                let mut c: i64 = 0;
+                for k in 0..width {
+                    let x = cell(in out.as_slice(), wrapping_add(prev, k));
+                    let y = cell(in out.as_slice(), wrapping_add(row, k));
+                    if x != y {
+                        c = if x < y {
+                            -1
+                        } else {
+                            1
+                        };
+                        break;
+                    }
+                }
+                if c >= 0 {
+                    Fail::raise(CpErr::Noncanonical);
+                }
+            }
+            out.push(weight);
+        }
+    }
+    if cursor != body.len() {
+        Fail::raise(CpErr::Trailing);
+    }
+    out
+}

@@ -65,6 +65,13 @@ use self::log::{
     frame_ok,
     header_bytes
 };
+use self::image::{
+    identity,
+    image_bytes,
+    image_check,
+    image_head,
+    image_sets
+};
 use self::wide::{
     Acc,
     acc_add,
@@ -905,4 +912,79 @@ pub fn log_frame_ok(in body: Slice[u8], len: u64) -> bool eff [Ffi[Blake3]] {
 pub fn log_decode(in payload: Slice[u8], epoch: u64, in widths: Slice[u64], max_rows: u64)
     -> ChunkSeq[i64] eff [Fail[LogErr]] {
     frame_decode(in payload, epoch, in widths, max_rows)
+}
+
+// ---------------------------------------------------------------------
+// checkpoint images (checkpoint.rs, module image)
+
+pub copy enum CpErr {
+    Work,
+    Overflow,
+    Bytes,
+    Truncated,
+    Checksum,
+    Version,
+    Identity,
+    SourceTag,
+    Sources,
+    WeightPolicy,
+    NodeCount,
+    RowSchema,
+    State,
+    Noncanonical,
+    Trailing
+}
+
+// The execution identity digest of a circuit's flattened words.
+pub fn cp_identity(in words: Slice[u64], inout budget: u64)
+    -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
+    identity(in words, inout budget)
+}
+
+// A whole checkpoint image (see image.ves).
+pub fn cp_image(
+    in id: Slice[u8],
+    ticks: u64,
+    in source: Slice[u64],
+    in widths: Slice[u64],
+    in counts: Slice[u64],
+    in cells: Slice[i64],
+    limit: u64,
+    inout budget: u64
+) -> ChunkSeq[u8] eff [Ffi[Blake3], Fail[CpErr]] {
+    image_bytes(in id, ticks, in source, in widths, in counts, in cells, limit, inout budget)
+}
+
+// Checks an image's trailing digest.
+pub fn cp_check(in image: Slice[u8]) eff [Ffi[Blake3], Fail[CpErr]] {
+    image_check(in image)
+}
+
+// A checked body's head through its source.
+pub fn cp_head(in body: Slice[u8], in expected: Slice[u8], max_sources: u64, inout budget: u64)
+    -> ChunkSeq[u64] eff [Fail[CpErr]] {
+    image_head(in body, in expected, max_sources, inout budget)
+}
+
+// A checked body's node sets from `cursor`.
+pub fn cp_sets(
+    in body: Slice[u8],
+    cursor: u64,
+    in widths: Slice[u64],
+    max_rows: u64,
+    max_nodes: u64,
+    max_total_rows: u64,
+    max_total_cells: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[CpErr]] {
+    image_sets(
+        in body,
+        cursor,
+        in widths,
+        max_rows,
+        max_nodes,
+        max_total_rows,
+        max_total_cells,
+        inout budget
+    )
 }

@@ -76,5 +76,6 @@ vesper_crate(
         ("accumulator", "acc.ves", "    if count >= a.max_rows {\n", "    if count > a.max_rows {\n"),
         ("cdc", "cdc.ves", "        if flags != 0 {\n", "        if flags > 1 {\n"),
         ("log", "log.ves", "    put_u16(inout h, 1);\n", "    put_u16(inout h, 2);\n"),
+        ("image", "image.ves", "            if weight == 0 {\n                Fail::raise(CpErr::Noncanonical);\n", "            if false {\n                Fail::raise(CpErr::Noncanonical);\n"),
     ]
 ]

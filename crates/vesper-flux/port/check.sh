@@ -18,7 +18,8 @@ consolidate consolidation_and_sums_match_the_rust_build frontier_operations_matc
 join circuit_ticks_and_batches_match_the_rust_build consolidation_and_sums_match_the_rust_build
 frontier frontier_operations_match_the_rust_build circuit_ticks_and_batches_match_the_rust_build
 CHECKS
-# The accumulator, the CDC decoder and the input log: the library's
+# The accumulator, the CDC decoder, the input log and the checkpoint
+# image: the library's
 # differential tests
 # against the Rust code they replaced.
 while read -r kernel failing passing; do
@@ -29,5 +30,6 @@ done <<'CHECKS'
 accumulator differential::accumulator_matches_the_rust_accumulator frontier::tests::stale_and_generation_exhaustion_preserve_holds
 cdc differential::cdc_decoder_matches_the_rust_loop differential::accumulator_matches_the_rust_accumulator
 log differential::input_log_codec_matches_the_rust_codec differential::cdc_decoder_matches_the_rust_loop
+image circuit::checkpoint::differential::checkpoint_codec_matches_the_rust_codec differential::input_log_codec_matches_the_rust_codec
 CHECKS
 unset VESPER_FLUX_DIVERGE

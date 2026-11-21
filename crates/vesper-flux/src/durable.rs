@@ -29,10 +29,8 @@
 //! of the integrals it last wrote (twice the state in memory) to compute the
 //! appended batches.
 use super::super::{Circuit, Executor};
-use super::{
-    CheckpointLimits, Reader, Writer, count_rows, identity, read_source, validate_state,
-    write_source,
-};
+use super::codec::{Reader, Writer, read_source, write_source};
+use super::{CheckpointLimits, count_rows, identity, validate_state};
 use crate::zset::Accumulator;
 use crate::{Budget, Error, Limits, ZSet};
 use std::collections::{BTreeMap, BTreeSet};
