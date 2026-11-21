@@ -1246,6 +1246,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::codegen_swap::hook(crate::codegen_swap::Family::Ffi).is_none() {
             return Ok(None);
         }
+        // Apple arm64 pads a variadic call's argument registers with zero
+        // words (`sys::Variadic`), which the steps do not carry.
+        if plan.function.abi().variadic.is_some_and(|v| v.padding > 0) {
+            return Ok(None);
+        }
         let descriptors = plan.function.parameters();
         let handler = match plan.handler {
             Handler::Direct => 0,

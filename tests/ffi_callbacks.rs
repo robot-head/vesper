@@ -225,3 +225,24 @@ pub fn main() -> i64 eff [Ffi[Dl]] {{
     let v = checked.evaluate("main", |call| host.call(call)).unwrap();
     assert_eq!(v.to_string(), "409");
 }
+
+/// An export library's binding keeps the Rust shim's symbols linked by
+/// their C names: two `#[link_name = "lookup"]` aliases retain `lookup`
+/// once, and a callback type's call retains nothing.
+#[test]
+fn export_bindings_retain_link_names() {
+    let source = "// @export vsys direct rust=crate::loader\n\
+        // | sys library Loader (target = \"@TARGET@\", abi = \"@ABI@\", link = \"static\", name = \"loader\",\n\
+        // |     artifact = \"blake3:0000000000000000000000000000000000000000000000000000000000000000\") {\n\
+        // |     callback Add(a: u64, b: u64) -> ForeignVal[u64];\n\
+        // |     #[link_name = \"lookup\"]\n\
+        // |     fn lookup_add(nocapture in name: CStr) -> ForeignVal[Option[Add]];\n\
+        // |     #[link_name = \"lookup\"]\n\
+        // |     fn lookup_scale(nocapture in name: CStr) -> ForeignVal[Option[Add]];\n\
+        // |     fn apply(in f: Add, x: u64) -> ForeignVal[u64];\n\
+        // | }\n\
+        pub fn go() -> u64 { 1 }\n";
+    let d = vesper::native::export::Directives::parse(source, Some(target().0)).unwrap();
+    assert_eq!(d.vsys.len(), 1);
+    assert_eq!(d.vsys[0].symbols, ["apply", "lookup"]);
+}
