@@ -1521,6 +1521,8 @@ pub struct Flow {
     reservable: ChunkSeq[u32],
     // The values a `match` terminator inspects (`scrutinees`), sorted.
     scrutinees: ChunkSeq[u32],
+    // The function values `f` calls indirectly (`callees`, #1242), sorted.
+    callees: ChunkSeq[u32],
     origins: Origins,
     // local consume witnesses: id -> span, cleared per block
     lc_has: ChunkSeq[u8],
@@ -1537,6 +1539,7 @@ pub fn flow_new() -> Flow {
         external: ChunkSeq::new[u32](),
         reservable: ChunkSeq::new[u32](),
         scrutinees: ChunkSeq::new[u32](),
+        callees: ChunkSeq::new[u32](),
         origins: origins_new(),
         lc_has: ChunkSeq::new[u8](),
         lc0: ChunkSeq::new[u64](),
@@ -1881,6 +1884,11 @@ impl Flow {
 
     fn scrutinee(in self, id: u32) -> bool {
         sorted_contains(in self.scrutinees, id)
+    }
+
+    // Whether `f` calls the value `id` (`callees`).
+    fn callee(in self, id: u32) -> bool {
+        sorted_contains(in self.callees, id)
     }
 
     fn reserved(in self, id: u32) -> bool {
@@ -2404,6 +2412,26 @@ impl Flow {
                     pass = P_IN;
                 }
             }
+            // Calling a borrowed slot's function value that is not `copy`
+            // reads it (a lent function parameter, §4.2).
+            if pass == P_SINK && np == 1 && p.op(add(a, 4)) == 0 && self.callee(i.dest) {
+                let si = s.find_slot(p.rank_of(root));
+                let tn = t.node(i.ty);
+                if si
+                    < 9223372036854775808
+                    && s
+                    .slot_at(si)
+                    .pass
+                    != P_SINK
+                    && tn
+                    .kind
+                    == K_FN
+                    && tn
+                    .mode
+                    != M_COPY {
+                    pass = P_IN;
+                }
+            }
             if s.find_slot(p.rank_of(root)) < 9223372036854775808 || !is_fn {
                 for j in 0..np {
                     let path = n32(p.op(add(add(a, 4), j)));
@@ -2579,7 +2607,32 @@ impl Flow {
                 < 9223372036854775808
                 && self
                 .row_effectful(in t, in p, s.val_at(at).ty);
-            self.consume(inout s, inout t, in names, in wd, callee, s0, s1);
+            let lent = if at < 9223372036854775808 {
+                let v = s.val_at(at);
+                let tn = t.node(v.ty);
+                !v.owned && tn.kind == K_FN && tn.mode != M_COPY
+            } else {
+                false
+            };
+            if lent {
+                // A lent function parameter is read by its call (§4.2).
+                let v = s.val_at(at);
+                s
+                    .set_val_at(
+                    at,
+                    ValS {
+                        id: v.id,
+                        ty: v.ty,
+                        owned: v.owned,
+                        consumed: true,
+                        lpass: 255,
+                        la: 0,
+                        ln: 0
+                    }
+                );
+            } else {
+                self.consume(inout s, inout t, in names, in wd, callee, s0, s1);
+            }
             self.activate(in s, inout t, in names, k, in p, inc(a), s0, s1);
             self.args(inout s, inout t, in names, in wd, in p, inc(a), s0, s1);
             if effectful {
@@ -2941,6 +2994,19 @@ impl Flow {
             if bk.term == 3 {
                 let n = p.op(w(bk.ta));
                 let x = set_insert(inout self.scrutinees, n32(p.op(add(inc(w(bk.ta)), n))));
+            }
+        }
+        // `callees`: the function values `f` calls. Calling a borrowed slot
+        // of a function type that is not `copy` (a lent function
+        // parameter, §4.2) reads it.
+        self.callees.clear();
+        for bi in 0..w(f.bc) {
+            let bk = p.block(add(w(f.b0), bi));
+            for ii in 0..w(bk.ic) {
+                let ins = p.inst(add(w(bk.i0), ii));
+                if ins.op == OP_INDIRECT {
+                    let x = set_insert(inout self.callees, n32(p.op(w(ins.a))));
+                }
             }
         }
         self.origins_build(in names, in p, f);
