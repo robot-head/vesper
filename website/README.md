@@ -18,6 +18,8 @@ Serve `website/dist` using any static HTTP server. The build includes the three 
 
 The [language guide](language.html) is a standalone HTML page. Its table of contents links directly to worked examples. Edit the guide in place and run the website checks to validate its links and section IDs.
 
+Edit the [guided tour](tour.md) to update the lessons at `/tour/`. Use a level-one heading for each subject and a level-two heading for each step. Fence listings with `~~~vesper` or `~~~sh`. The build generates a static page per step with a contents menu and previous and next links.
+
 The documentation homepage is published at `/docs/`. Edit the lessons in [the eight documentation parts](docs/). Use a level-one heading for a chapter or appendix and a level-two heading for each numbered section. Keep the manuscript number before each plain-language heading. Blank lines separate paragraphs, backticks mark inline code, and four spaces indent a code or trace block.
 
 The build produces static chapter pages, an in-page search index, and sitemap entries. It reads the printed numbers and PDF destination labels from `docs/manuscript/content.typ` and checks for missing lessons. The contents, chapters, and PDF links work without JavaScript.

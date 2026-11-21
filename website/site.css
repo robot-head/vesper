@@ -224,6 +224,17 @@ footer { border-top: 1px solid var(--line); }
 .reader-body pre { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; }
 .reader-body dl { display: grid; grid-template-columns: auto 1fr; gap: 10px 18px; }
 .reader-body dd { margin: 0; color: var(--muted); }
+.pair pre, .lesson pre { background: var(--surface); border: 1px solid var(--line); border-radius: 5px; }
+.pair pre { padding: 12px; margin-block: .8rem; }
+.tour { max-width: 72ch; padding-block: clamp(24px, 4vw, 56px); }
+.tour h1 { font-size: clamp(36px, 5vw, 60px); }
+.tour-contents summary { cursor: pointer; width: fit-content; color: var(--ink); }
+.tour-contents nav { display: block; max-height: 50vh; overflow: auto; padding: .5rem 1rem; border-left: 2px solid var(--line); }
+.tour-contents ul { list-style: none; padding-left: 0; }
+.tour-contents ol { padding-left: 2.5rem; margin: .4rem 0 1rem; }
+.tour-contents [aria-current] { font-weight: bold; color: var(--ink); }
+.lesson > * { margin: 1.2rem 0; }
+.tour .neighbors { margin-top: 2rem; }
 @media (max-width: 760px) {
   .reader { display: block; }
   .reader-intro { padding-bottom: 24px; }

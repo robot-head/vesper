@@ -1,23 +1,12 @@
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { highlight, highlightListings } from './highlight.mjs';
+import { buildTour } from './tour.mjs';
 import { buildDocs } from './docs.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(root, 'dist');
-const escape = s => s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
-const token = /\/\/[^\n]*|\b(?:linear|copy|affine|struct|impl|fn|let|sink|inout|in|eff|handle|with|return|match|if|else)\b|\b(?:u64|i64|Fail|RuntimeError|WriteTxn|Broker|ArithOverflow)\b|\b\d+\b/g;
-function highlight(source) {
-  let html = '', end = 0;
-  for (const m of source.matchAll(token)) {
-    html += escape(source.slice(end, m.index));
-    const kind = m[0].startsWith('//') ? 'comment' : /^\d/.test(m[0]) ? 'number' : /^(linear|sink)$/.test(m[0]) ? 'linear' : m[0] === 'inout' ? 'place' : /^(in|eff|handle|with)$/.test(m[0]) ? 'effect' : /^[A-Z]|^[ui]\d/.test(m[0]) ? 'type' : 'keyword';
-    html += `<span class="tok-${kind}">${escape(m[0])}</span>`;
-    end = m.index + m[0].length;
-  }
-  return html + escape(source.slice(end));
-}
-
 await mkdir(out, { recursive: true });
 let html = await readFile(resolve(root, 'index.html'), 'utf8');
 for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
@@ -32,15 +21,18 @@ for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
   await writeFile(resolve(out, 'examples', file), source + '\n');
 }
 if (/<!-- source:/.test(html)) throw new Error('Unresolved source inclusion');
-await writeFile(resolve(out, 'index.html'), html);
+await writeFile(resolve(out, 'index.html'), highlightListings(html));
+const guide = await readFile(resolve(root, 'language.html'), 'utf8');
+await writeFile(resolve(out, 'language.html'), highlightListings(guide));
 const chapters = await buildDocs(root, out);
+const tour = await buildTour(root, out);
 for (const file of ['search.js', 'docs.css']) {
   await cp(resolve(root, 'docs', file), resolve(out, 'docs', file));
 }
 const sitemap = await readFile(resolve(root, 'sitemap.xml'), 'utf8');
-const chapterUrls = chapters.map(path => `  <url><loc>https://vesper-lang.org/${path}</loc></url>`).join('\n');
+const chapterUrls = [...chapters, ...tour].map(path => `  <url><loc>https://vesper-lang.org/${path.replace(/index\.html$/, '')}</loc></url>`).join('\n');
 await writeFile(resolve(out, 'sitemap.xml'), sitemap.replace('</urlset>', `${chapterUrls}\n</urlset>`));
-for (const path of ['language.html', 'assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
+for (const path of ['assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
   await cp(resolve(root, path), resolve(out, path), { recursive: true });
 }
 try { await cp(resolve(root, 'share.jpg'), resolve(out, 'share.jpg')); } catch (e) { if (e.code !== 'ENOENT') throw e; }

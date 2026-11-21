@@ -63,8 +63,8 @@ function readLessons(source, part, outline, covered) {
   return chapters;
 }
 
-function page(file, title, description, body) {
-  const script = file === 'index.html' ? '<script defer src="search.js"></script>' : '';
+export function page(file, title, description, body, directory = 'docs') {
+  const script = directory === 'docs' && file === 'index.html' ? '<script defer src="search.js"></script>' : '';
   return `<!doctype html>
 <html lang="en" data-vesper-theme="dusk">
 <head>
@@ -73,11 +73,11 @@ function page(file, title, description, body) {
   <title>${escape(title)} · Vesper documentation</title>
   <meta name="description" content="${escape(description)}">
   <meta name="theme-color" content="#101111">
-  <link rel="canonical" href="https://vesper-lang.org/docs/${file === 'index.html' ? '' : file}">
+  <link rel="canonical" href="https://vesper-lang.org/${directory}/${file === 'index.html' ? '' : file}">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
   <link rel="stylesheet" href="../site.css">
-  <link rel="stylesheet" href="docs.css">
+  <link rel="stylesheet" href="../docs/docs.css">
   <noscript><style>.theme { display: none; }</style></noscript>
   ${script}
 </head>
@@ -85,12 +85,12 @@ function page(file, title, description, body) {
   <a class="skip" href="#main">Skip to content</a>
   <header class="nav"><div class="wrap reader-bar docs-bar">
     <a class="brand" href="../index.html" aria-label="Vesper home"><img data-brand-mark src="../brand/vesper-mark-dusk.svg" width="34" height="34" alt="">vesper</a>
-    <a class="docs-home" href="index.html">Docs</a>
+    <a class="docs-home" href="../docs/index.html">Docs</a>
     <a href="../language.html">Language guide</a>
     <label class="theme" title="Switch between dusk and dawn"><input type="checkbox" id="theme-toggle" role="switch" aria-label="Dawn theme"><span aria-hidden="true">◐</span></label>
   </div></header>
   ${body}
-  <footer><div class="wrap footer-bar"><a href="index.html">Documentation home</a><a href="#main">Back to top</a></div></footer>
+  <footer><div class="wrap footer-bar"><a href="../docs/index.html">Documentation home</a><a href="#main">Back to top</a></div></footer>
   <script type="module" src="../site.js"></script>
 </body></html>\n`;
 }
@@ -145,7 +145,7 @@ function homepage(chapters) {
   const body = `<main class="wrap docs-index" id="main">
     <header class="docs-intro"><h1>Vesper documentation</h1>
       <p class="lead">Run a program in the language guide, or look up a concept from the specification. The chapter guides cover the compiler, runtime, and proposed platform designs.</p>
-      <div class="actions"><a class="button primary" href="../language.html">Start the language guide</a><a class="button" href="../vesper-specification.pdf">Read the specification (PDF)</a></div>
+      <div class="actions"><a class="button primary" href="../language.html">Start the language guide</a><a class="button" href="../tour/index.html">Take the guided tour</a><a class="button" href="../vesper-specification.pdf">Read the specification (PDF)</a></div>
     </header>
     <div class="docs-search" hidden>
       <label for="topic-query">Find a concept</label>

@@ -36,7 +36,7 @@
       <div class="wrap nav-bar">
         <a class="brand" href="#top" aria-label="Vesper home"><img data-brand-mark src="brand/vesper-mark-dusk.svg" width="34" height="34" alt="">vesper</a>
         <nav id="navigation" aria-label="Main navigation">
-          <a href="#language">Source tour</a>
+          <a href="tour/index.html">Language tour</a>
           <a href="docs/index.html">Documentation</a>
           <a href="#learn">Rust comparison</a>
           <a href="#compiler">Compiler</a>
@@ -56,7 +56,7 @@
           <h1 id="hero-title">Ownership and effects<br><em>in systems code</em></h1>
           <p class="lead">Vesper is a systems language without a garbage collector. A function declares which resources it consumes, which fields it may change, and which effects it may perform. The compiler checks those declarations at each call.</p>
           <div class="actions">
-            <a class="button primary" href="#guide">Get started <svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg></a>
+            <a class="button primary" href="tour/index.html">Take the tour <svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg></a>
             <a class="button" href="#learn">Compare with Rust <svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg></a>
           </div>
         </div>
@@ -102,7 +102,7 @@
         <p class="eyebrow section-label">Language comparison</p>
         <div class="section-head">
           <h2>How Vesper and Rust check a call</h2>
-          <p>Compare a transaction, a field update, and a division that can fail.</p>
+          <p>What happens if you open a transaction and forget to commit it? Follow the same mistake through both compilers.</p>
         </div>
         <div class="compare-box">
           <div role="tablist" class="tab-bar" aria-label="Compare Vesper and Rust">
@@ -114,14 +114,22 @@
             <h3>Must every transaction finish?</h3>
             <div class="pair">
               <article>
-                <h4>Rust</h4>
-                <code>fn commit(self) -&gt; u64</code>
-                <p>A consuming method takes ownership. Rust also permits the caller to let the transaction go out of scope. Libraries often use <code>Drop</code> to roll back an unfinished transaction.</p>
+                <h4>Rust · compiles</h4>
+                <pre tabindex="0"><code data-lang="rust">struct WriteTxn;
+fn main() {
+    let _tx = WriteTxn;
+    // Forgot to commit or abort.
+}</code></pre>
+                <p>This program exits successfully. The transaction goes out of scope and its type has no cleanup code. Libraries often use <code>Drop</code> to roll back an unfinished transaction.</p>
               </article>
               <article>
-                <h4>Vesper</h4>
-                <code>fn commit(sink self) -&gt; u64</code>
-                <p>Declare <code>WriteTxn</code> as <code>linear</code>. Every returning path must consume it. In the example, the caller commits or aborts. Leaving the value unused is a compile-time error.</p>
+                <h4>Vesper · rejected at scope exit</h4>
+                <pre tabindex="0"><code data-lang="vesper">linear struct WriteTxn {}
+fn main() {
+    let tx = WriteTxn {};
+    // Forgot to commit or abort.
+}</code></pre>
+                <p>The checker reports <code>E0302</code> because <code>tx</code> is still live. Give the type a consuming method and call it before returning. <a href="language.html#ownership">See the complete fix with <code>tx.commit()</code>.</a></p>
                 <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/self_host_check/linear_drop.ves" class="evidence">See an unconsumed linear value ↗</a>
               </article>
             </div>
@@ -131,12 +139,12 @@
             <div class="pair">
               <article>
                 <h4>Rust</h4>
-                <code>index: &amp;mut u64, metrics: &amp;mut u64</code>
+                <pre tabindex="0"><code data-lang="rust">index: &amp;mut u64, metrics: &amp;mut u64</code></pre>
                 <p>Rust can borrow separate struct fields at the same time. A helper taking <code>&amp;mut Broker</code> borrows the whole record, so a common API passes the individual field references instead.</p>
               </article>
               <article>
                 <h4>Vesper</h4>
-                <code>inout broker.{index, metrics}: Broker</code>
+                <pre tabindex="0"><code data-lang="vesper">inout broker.{index, metrics}: Broker</code></pre>
                 <p>Name the writable fields in the parameter. The caller passes the record and can lend <code>broker.config</code> separately because the checker can see that the places are disjoint.</p>
                 <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/self_host_check/inout_overlap.ves" class="evidence">See an overlapping mutable loan ↗</a>
               </article>
@@ -147,12 +155,12 @@
             <div class="pair">
               <article>
                 <h4>Rust</h4>
-                <code>fn divide(d: i64) -&gt; Result&lt;i64, MathError&gt;</code>
+                <pre tabindex="0"><code data-lang="rust">fn divide(d: i64) -&gt; Result&lt;i64, MathError&gt;</code></pre>
                 <p>An API can return <code>Result</code> and let callers propagate errors with <code>?</code>. Integer division by zero panics, so a fallible API typically checks the divisor or uses <code>checked_div</code>.</p>
               </article>
               <article>
                 <h4>Vesper</h4>
-                <code>fn divide(divisor: i64) -&gt; i64 eff [Fail[RuntimeError]]</code>
+                <pre tabindex="0"><code data-lang="vesper">fn divide(divisor: i64) -&gt; i64 eff [Fail[RuntimeError]]</code></pre>
                 <p>The division declares <code>Fail[RuntimeError]</code> in its effect row. A caller can propagate that effect or install a lexical handler. The example handles division by zero and supplies a fallback value.</p>
                 <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/self_host_check/effect_missing.ves" class="evidence">See an undeclared effect ↗</a>
               </article>
@@ -237,7 +245,7 @@
           <article>
             <code>vesper build</code>
             <h3>Compile to native code</h3>
-            <p>The native backend lowers supported programs through Cranelift. Use <code>vesper run</code> to execute with the reference evaluator, or <code>vesper jit</code> to run native code.</p>
+            <p>Vesper uses Cranelift to turn a checked program into machine code. That skips LLVM’s optimization pipeline during native builds. Cranelift prioritizes quick code generation, which helps when you edit and rerun a program. Build time and executable speed depend on the workload. <a href="https://cranelift.dev/">Cranelift’s performance trade-offs</a>.</p>
           </article>
           <article>
             <code>vesper emit --emit lean</code>
