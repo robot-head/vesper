@@ -27,12 +27,13 @@ use vesper_serde::{EncodeLimits, Value, encode_into};
 use vesper_serde::{FloatLimits, IndexedJson, Limits, SimdParser};
 
 const EPOCHS: usize = 9;
-const WORKLOADS: [(&str, usize); 5] = [
+const WORKLOADS: [(&str, usize); 6] = [
     ("parse_scalar", 20),
     ("parse_simd", 20),
     ("f64_decode", 20),
     ("f64_encode", 20),
     ("tiles", 20),
+    ("encode_doc", 20),
 ];
 
 fn document(items: usize) -> Vec<u8> {
@@ -150,6 +151,41 @@ fn workload(name: &str) -> Box<dyn FnMut() -> usize> {
             };
             Box::new(move || encode_into(&Value::Array(values), &mut out, lim).unwrap())
         }
+        "encode_doc" => {
+            // A mixed document: objects of strings (with escapes and
+            // non-ASCII), integers, floats, booleans, null and nested arrays.
+            let texts: Vec<String> = (0..2_000)
+                .map(|i| format!("user \"{i}\" \u{fc}n\u{ef}c\u{f8}d\u{e9}\n{}", "lorem ipsum ".repeat(1 + i % 4)))
+                .collect();
+            let texts: &'static [String] = texts.leak();
+            let leaf: &'static [Value<'static>] =
+                vec![Value::U64(1), Value::U64(2), Value::Null, Value::Bool(true)].leak();
+            let items: Vec<Value<'static>> = texts
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let fields: &'static [(&'static str, Value<'static>)] = vec![
+                        ("id", Value::U64(i as u64)),
+                        ("delta", Value::I64(-(i as i64) * 7)),
+                        ("name", Value::String(t.as_str())),
+                        ("score", Value::F64(i as f64 * 0.25 + 0.5)),
+                        ("active", Value::Bool(i % 2 == 0)),
+                        ("nested", Value::Array(leaf)),
+                    ]
+                    .leak();
+                    Value::Object(fields)
+                })
+                .collect();
+            let items: &'static [Value<'static>] = items.leak();
+            let mut out = vec![0u8; 4 << 20];
+            let lim = EncodeLimits {
+                max_output_bytes: 4 << 20,
+                max_tokens: 1 << 20,
+                max_work: usize::MAX / 4,
+                ..EncodeLimits::default()
+            };
+            Box::new(move || encode_into(&Value::Array(items), &mut out, lim).unwrap())
+        }
         "tiles" => {
             let ndjson = telemetry(5_000);
             let mut ingestor = TelemetryIngestor::new(limits());
@@ -189,7 +225,12 @@ fn main() {
         Some("window") => println!("{}", window(&args[2], args[3].parse().unwrap())),
         Some("driver") => {
             let (a, b) = (&args[2], &args[3]);
+            // Optional trailing workload names run only those workloads.
+            let only = &args[4..];
             for (name, reps) in WORKLOADS {
+                if !only.is_empty() && !only.iter().any(|o| o == name) {
+                    continue;
+                }
                 let mut pairs = Vec::new();
                 let mut ratios = Vec::new();
                 for _ in 0..EPOCHS {

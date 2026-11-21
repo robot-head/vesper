@@ -133,34 +133,100 @@ fn string_bytes(inout c: Check, n: u64) -> Unit eff [Fail[Error]] {
 }
 
 fn escaped_width(b: u64) -> u64 {
-    if b
-        == Ascii::Quote
-        || b
-        == Ascii::Backslash
-        || b
-        == Ascii::Lf
-        || b
-        == Ascii::Cr
-        || b
-        == Ascii::Tab
-        || b
-        == Ascii::Backspace
-        || b
-        == Ascii::Ff {
+    // Plain bytes first: they are almost every byte.
+    if b >= Ascii::Space {
+        if b == Ascii::Quote || b == Ascii::Backslash {
+            ESCAPE_LEN
+        } else {
+            1
+        }
+    } else if b == Ascii::Lf || b == Ascii::Cr || b == Ascii::Tab || b == Ascii::Backspace || b == Ascii::Ff {
         ESCAPE_LEN
-    } else if b < Ascii::Space {
-        UNICODE_ESCAPE_LEN
     } else {
-        1
+        UNICODE_ESCAPE_LEN
+    }
+}
+
+// SWAR over eight pool bytes (little-endian): `ONES` repeats 0x01 and
+// `HIGHS` 0x80 in every byte; the three repeats are the bytes a string
+// escapes below 0x80 (controls below 0x20, `"` and `\\`). Bytes from 0x80
+// are written unchanged.
+const ONES: u64 = 0x0101010101010101;
+const HIGHS: u64 = 0x8080808080808080;
+const SPACES: u64 = 0x2020202020202020;
+const QUOTES: u64 = 0x2222222222222222;
+const BACKSLASHES: u64 = 0x5c5c5c5c5c5c5c5c;
+const WORD_BYTES: u64 = 8;
+
+// Whether one of the eight bytes of `x` is escaped (exact: the borrow of
+// `x - n` only starts at a byte that is below `n`).
+fn word_escapes(x: u64) -> bool {
+    let not_x = x ^ U64_MAX;
+    let control = wrapping_sub(x, SPACES) & not_x;
+    let q = x ^ QUOTES;
+    let quote = wrapping_sub(q, ONES) & (q ^ U64_MAX);
+    let k = x ^ BACKSLASHES;
+    let backslash = wrapping_sub(k, ONES) & (k ^ U64_MAX);
+    (control | quote | backslash) & HIGHS != 0
+}
+
+// The `r < 8` pool bytes at `p` as a word whose other bytes are plain
+// (`A`), when the pool holds a whole word at `p`; else `None`.
+const PLAIN_FILL: u64 = 0x4141414141414141;
+fn tail_word(in pool: Slice[u8], p: u64, r: u64) -> Option[u64] {
+    match pool.try_read_u64_le(p) {
+        Option::Some(x) => {
+            let keep = wrapping_sub(bit_shl(1, wrapping_mul(r, WORD_BYTES)), 1);
+            Option::Some((x & keep) | (PLAIN_FILL & (keep ^ U64_MAX)))
+        }
+        Option::None => Option::None,
+    }
+}
+
+// The pool word at `p` (every caller has `p + 8 <= pool.len()`).
+fn pool_word(in pool: Slice[u8], p: u64) -> u64 {
+    match pool.try_read_u64_le(p) {
+        Option::Some(x) => x,
+        Option::None => 0,
     }
 }
 
 fn string(inout c: Check, in pool: Slice[u8], off: u64, len: u64) -> u64 eff [Fail[Error]] {
     string_bytes(inout c, len);
     charge(inout c, len);
-    let mut size: u64 = DELIMITERS_LEN;
-    for i in 0..len {
-        size = add(size, escaped_width(byte(in pool, wrapping_add(off, i))));
+    // Plain bytes are one byte each; only escaped bytes are widened, and
+    // a word of eight plain bytes is skipped at once.
+    let mut size: u64 = add(DELIMITERS_LEN, len);
+    let end = wrapping_add(off, len);
+    let mut p = off;
+    loop {
+        if wrapping_add(p, WORD_BYTES) > end || end > pool.len() {
+            break;
+        }
+        if word_escapes(pool_word(in pool, p)) {
+            for k in 0..WORD_BYTES {
+                size = add(size, wrapping_sub(escaped_width(byte(in pool, wrapping_add(p, k))), 1));
+            }
+        }
+        p = wrapping_add(p, WORD_BYTES);
+    }
+    if p < end {
+        // A short tail with no escaped byte needs no byte loop.
+        match tail_word(in pool, p, wrapping_sub(end, p)) {
+            Option::Some(x) => {
+                if !word_escapes(x) {
+                    return size;
+                }
+            }
+            Option::None => {}
+        }
+    }
+    loop {
+        if p >= end {
+            break;
+        }
+        size = add(size, wrapping_sub(escaped_width(byte(in pool, p)), 1));
+        p = wrapping_add(p, 1);
     }
     size
 }
@@ -188,13 +254,17 @@ fn digits(n: u64) -> u64 {
 // `FLOAT_FORMAT_PASS_WORK`, FLOAT_TEXT_BYTES^2 + FLOAT_TEXT_BYTES).
 const FLOAT_FORMAT_PASS_WORK: u64 = 262656;
 
+fn slices_equal(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    a.eq(in b)
+}
+
 fn same_bytes(in pool: Slice[u8], a: u64, b: u64, n: u64) -> bool {
-    for i in 0..n {
-        if byte(in pool, wrapping_add(a, i)) != byte(in pool, wrapping_add(b, i)) {
-            return false;
-        }
+    let a_end = wrapping_add(a, n);
+    let b_end = wrapping_add(b, n);
+    if a_end < a || b_end < b || a_end > pool.len() || b_end > pool.len() {
+        return n == 0;
     }
-    true
+    slices_equal(in pool[a..a_end], in pool[b..b_end])
 }
 
 // `Check::value`: the encoded size of the value at the cursor.
@@ -343,6 +413,17 @@ fn put(inout out: Slice[u8], inout wr: W, b: u64) {
     wr.pos = wrapping_add(wr.pos, 1);
 }
 
+// `null`, `true` and the `alse` of `false` as little-endian u32 words.
+const NULL_WORD: u32 = 0x6c6c756e;
+const TRUE_WORD: u32 = 0x65757274;
+const ALSE_WORD: u32 = 0x65736c61;
+
+// Four literal bytes at once.
+fn put_word4(inout out: Slice[u8], inout wr: W, x: u32) {
+    out.try_write_u32_le(wr.pos, x);
+    wr.pos = wrapping_add(wr.pos, 4);
+}
+
 fn take(inout wr: W, in w: Slice[u64]) -> u64 {
     let v = word(in w, wr.at);
     wr.at = wrapping_add(wr.at, 1);
@@ -378,9 +459,39 @@ fn hex(n: u64) -> u64 {
 
 fn put_string(inout out: Slice[u8], inout wr: W, in pool: Slice[u8], off: u64, len: u64) {
     put(inout out, inout wr, Ascii::Quote);
-    for i in 0..len {
-        let b = byte(in pool, wrapping_add(off, i));
-        if b == Ascii::Quote || b == Ascii::Backslash {
+    let end = wrapping_add(off, len);
+    let mut p = off;
+    loop {
+        // Eight plain bytes are written as one word.
+        if wrapping_add(p, WORD_BYTES) <= end && end <= pool.len() {
+            let x = pool_word(in pool, p);
+            if !word_escapes(x) {
+                out.try_write_u64_le(wr.pos, x);
+                wr.pos = wrapping_add(wr.pos, WORD_BYTES);
+                p = wrapping_add(p, WORD_BYTES);
+                continue;
+            }
+        } else if p < end && end <= pool.len() {
+            // A short plain tail is copied in one block.
+            match tail_word(in pool, p, wrapping_sub(end, p)) {
+                Option::Some(x) => {
+                    if !word_escapes(x) {
+                        out.try_copy_from(wr.pos, in pool[p..end]);
+                        wr.pos = wrapping_add(wr.pos, wrapping_sub(end, p));
+                        break;
+                    }
+                }
+                Option::None => {}
+            }
+        }
+        if p >= end {
+            break;
+        }
+        let b = byte(in pool, p);
+        p = wrapping_add(p, 1);
+        if b >= Ascii::Space && b != Ascii::Quote && b != Ascii::Backslash {
+            put(inout out, inout wr, b);
+        } else if b == Ascii::Quote || b == Ascii::Backslash {
             put(inout out, inout wr, Ascii::Backslash);
             put(inout out, inout wr, b);
         } else if b == Ascii::Lf {
@@ -415,22 +526,13 @@ fn put_string(inout out: Slice[u8], inout wr: W, in pool: Slice[u8], off: u64, l
 fn write_value(inout out: Slice[u8], inout wr: W, in w: Slice[u64], in pool: Slice[u8]) {
     let tag = take(inout wr, in w);
     if tag == TAG_NULL {
-        put(inout out, inout wr, Ascii::LowerN);
-        put(inout out, inout wr, Ascii::LowerU);
-        put(inout out, inout wr, Ascii::LowerL);
-        put(inout out, inout wr, Ascii::LowerL);
+        put_word4(inout out, inout wr, NULL_WORD);
     } else if tag == TAG_BOOL {
         if take(inout wr, in w) != 0 {
-            put(inout out, inout wr, Ascii::LowerT);
-            put(inout out, inout wr, Ascii::LowerR);
-            put(inout out, inout wr, Ascii::LowerU);
-            put(inout out, inout wr, Ascii::LowerE);
+            put_word4(inout out, inout wr, TRUE_WORD);
         } else {
             put(inout out, inout wr, Ascii::LowerF);
-            put(inout out, inout wr, Ascii::LowerA);
-            put(inout out, inout wr, Ascii::LowerL);
-            put(inout out, inout wr, Ascii::LowerS);
-            put(inout out, inout wr, Ascii::LowerE);
+            put_word4(inout out, inout wr, ALSE_WORD);
         }
     } else if tag == TAG_U64 {
         let n = take(inout wr, in w);
@@ -456,9 +558,11 @@ fn write_value(inout out: Slice[u8], inout wr: W, in w: Slice[u64], in pool: Sli
         let len = take(inout wr, in w);
         let n = take(inout wr, in w);
         wr.at = wrapping_add(wr.at, wrapping_mul(n, RAW_TOKEN_WORDS));
-        for i in 0..len {
-            put(inout out, inout wr, byte(in pool, wrapping_add(off, i)));
+        let end = wrapping_add(off, len);
+        if len != 0 && end <= pool.len() {
+            out.try_copy_from(wr.pos, in pool[off..end]);
         }
+        wr.pos = wrapping_add(wr.pos, len);
     } else if tag == TAG_ARRAY {
         let count = take(inout wr, in w);
         put(inout out, inout wr, Ascii::Lbracket);
