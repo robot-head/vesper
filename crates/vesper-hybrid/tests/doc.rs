@@ -315,7 +315,7 @@ fn hybrid_docs_match_the_default_compiler() {
         h.as_secs_f64() / d.as_secs_f64(),
         mismatches.len()
     );
-    assert!(ok > 100, "only {ok} runs documented anything");
+    assert!(ok * stride() > 100, "only {ok} runs documented anything");
     if cfg!(feature = "divergent-doc") {
         assert!(
             !mismatches.is_empty(),

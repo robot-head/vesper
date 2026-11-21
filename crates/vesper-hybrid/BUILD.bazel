@@ -67,7 +67,12 @@ vesper_hybrid(
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
     },
-    test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
+    # The doc differential (#1338) runs every 8th file and package here;
+    # Cargo (the Hybrid compiler workflow) runs them all.
+    test_env = {
+        "VESPER_DEFAULT_COMPILER": "vesper",
+        "VESPER_DOC_STRIDE": "8",
+    },
     test_path_binaries = {
         "test/differential": [
             ":bin/vesper-hybrid",
