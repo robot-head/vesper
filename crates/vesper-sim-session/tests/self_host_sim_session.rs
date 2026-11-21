@@ -211,6 +211,67 @@ fn net_transcript() -> String {
     log.join("\n")
 }
 
+/// Steps a write-ahead log through `n` pseudo-random appends (some too
+/// large or past the bounds), flush begins, completions, failures, reads,
+/// crashes with persisted prefixes and torn tails, and recoveries. With
+/// `states`, each line also holds the log's whole state after the step.
+fn wal_ops(n: u64, states: bool) -> Vec<String> {
+    use vesper_sim_session::model::wal::{Wal, WalLimits};
+    let mut wal = Wal::new(WalLimits {
+        max_records: 24,
+        max_bytes: 900,
+        max_record_bytes: 40,
+    });
+    let mut rng = 0xa11_u64;
+    let mut draw = |m: u64| {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (rng >> 33) % m
+    };
+    let mut log = vec![];
+    for step in 0..n {
+        let line = match draw(20) {
+            0..=6 => {
+                let payload: String = "{\"k\":\"é\"}"
+                    .chars()
+                    .cycle()
+                    .take(draw(46) as usize)
+                    .collect();
+                format!("append {:?}", wal.append(payload))
+            }
+            7 | 8 => format!("begin {:?}", wal.begin_flush(step)),
+            9 | 10 => format!("complete {:?}", wal.complete_flush()),
+            11 => format!("fail {:?}", wal.fail_flush()),
+            12 | 13 => format!("read {:?}", wal.record(draw(30) as usize)),
+            14 => format!("crash {:?}", wal.crash(draw(6), draw(40))),
+            15..=17 => format!("recover {:?}", wal.recover()),
+            18 => format!(
+                "check {:?}",
+                wal.check_append(&"x".repeat(draw(50) as usize))
+            ),
+            _ => format!("check flush {:?}", wal.check_flush()),
+        };
+        if states {
+            let durable = wal.durable_bytes();
+            log.push(format!(
+                "{line} | {} {} {} {} {:?} {:?}",
+                hex(&Sha256::digest(&durable)),
+                durable.len(),
+                wal.durable_lsn(),
+                wal.is_recovered(),
+                wal.in_flight(),
+                wal.volatile()
+            ));
+        } else {
+            log.push(line);
+        }
+    }
+    let copy = wal.clone();
+    assert_eq!(copy, wal);
+    log
+}
+
 fn raw_frame(lsn: u64, payload: &[u8]) -> Vec<u8> {
     let mut input = lsn.to_le_bytes().to_vec();
     input.extend_from_slice(payload);
@@ -262,6 +323,12 @@ fn transcripts_match_the_rust_build() {
     match golden.iter().find(|(n, _)| *n == "wal_codec") {
         Some((_, expected)) if *expected == codec => {}
         expected => differences.push(format!("wal_codec: {codec}, expected {expected:?}")),
+    }
+    let wal = hex(&Sha256::digest(wal_ops(3_000, true).join("\n").as_bytes()));
+    blessed.push_str(&format!("wal_ops {wal}\n"));
+    match golden.iter().find(|(n, _)| *n == "wal_ops") {
+        Some((_, expected)) if *expected == wal => {}
+        expected => differences.push(format!("wal_ops: {wal}, expected {expected:?}")),
     }
     let net = hex(&Sha256::digest(net_transcript().as_bytes()));
     blessed.push_str(&format!("net {net}\n"));
@@ -411,6 +478,27 @@ fn net_throughput() {
     }
     eprintln!(
         "net: {:.1} ns per operation (best of 5), checksum {check}",
+        best.as_nanos() as f64 / n as f64
+    );
+}
+
+/// The WAL state machine alone: 10^5 operations of the `wal_ops` mix.
+/// `cargo test --release --test self_host_sim_session -- --ignored
+/// --nocapture`, with and without `--features vesper-port`.
+#[test]
+#[ignore = "timing; run by hand in release"]
+fn wal_ops_throughput() {
+    let n = 100_000u64;
+    let mut best = std::time::Duration::MAX;
+    let mut check = 0;
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let log = wal_ops(n, false);
+        best = best.min(start.elapsed());
+        check = log.iter().map(String::len).sum::<usize>();
+    }
+    eprintln!(
+        "wal_ops: {:.1} ns per operation (best of 5), checksum {check}",
         best.as_nanos() as f64 / n as f64
     );
 }

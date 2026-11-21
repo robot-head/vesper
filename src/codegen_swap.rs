@@ -48,7 +48,7 @@
 //! | `numeric` | the same | [`INSTRUCTION`] for `Op::Vector` and `Op::Tiled` |
 //! | `drops` (fip) | the same | [`INSTRUCTION`] for `Op::Fip` |
 //! | `ffi` | the same | [`INSTRUCTION`] for a call of a foreign (`.vsys`) effect operation |
-//! | `export` | `native_export::compile_exports`, the v2 glue | the whole glue over a lent module ([`ExportHook`]) |
+//! | `export` | `native_export::glue::define`, after the sequence runtime and `vesper_box_alloc` | the rest of the v2 glue over a lent module ([`ExportHook`]) |
 //! | `freestanding` | `native_freestanding::build_image` | whole image ([`FreestandingHook`]) |
 //! | `wasm` | `wasm_backend::compile` | whole component ([`WasmHook`]) |
 //! | `ebpf` | `ebpf_backend::compile_world` | whole program ([`EbpfHook`]) |
@@ -129,8 +129,10 @@ pub struct Lent<'a, 'f> {
 /// A family hook (see the module documentation for the protocol).
 pub type Hook = for<'a, 'f> fn(&mut Lent<'a, 'f>) -> Result<bool, String>;
 
-/// The export glue hook: `native_export::glue::define` over the lent
-/// module (`vesper_cranelift_sys::lend_module`); `None` declines.
+/// The export glue hook, called by `native_export::glue::define` over the
+/// lent module (`vesper_cranelift_sys::lend_module`) once the sequence
+/// runtime and `vesper_box_alloc` are defined. The hook finds those by name
+/// and must not redefine them. `None` declines.
 pub type ExportHook = fn(
     &mut dyn Module,
     &World,

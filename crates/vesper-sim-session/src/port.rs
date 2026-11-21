@@ -46,6 +46,27 @@ pub enum ArriveOutcome {
     Dropped(u8),
 }
 
+/// `Result<u64, WalError>` from the WAL state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalResult {
+    Ok(u64),
+    NotRecovered,
+    AlreadyRecovered,
+    FlushInFlight,
+    NoFlushInFlight,
+    RecordTooLarge(u64, u64),
+    LogFull(u64, u64),
+}
+
+/// `CrashApplied`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalCrash {
+    pub volatile_lost: u64,
+    pub in_flight_records: u64,
+    pub persisted_records: u64,
+    pub torn_bytes: u64,
+}
+
 pub use port_binding::*;
 
 #[rustfmt::skip]

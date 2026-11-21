@@ -3,7 +3,8 @@
 //
 // Part 2 adds SHA-256 (sha256.ves) and the WAL frame codec and recovery
 // scan (wal.ves, src/model/wal.rs). Part 3 adds the virtual message network
-// `net-v1` (src/model/net.rs), at the end of this file.
+// `net-v1` (src/model/net.rs), and part 4 the WAL state machine (`Wal` in
+// src/model/wal.rs), at the end of this file.
 //
 // Ported in part 1: the datagram link model `datagram-v1` (src/model/link.rs): the
 // SplitMix64 generator, the FNV-1a name seeds, the Gilbert-Elliott chain and
@@ -862,4 +863,413 @@ pub fn net_state_inbox(in n: NetState, endpoint: u64) -> ChunkSeq[u64] {
 // `endpoint`'s waiting requests, oldest first.
 pub fn net_state_waiting(in n: NetState, endpoint: u64) -> ChunkSeq[u64] {
     values_of(in n.waiters, endpoint)
+}
+
+// ---------------------------------------------------------------------------
+// Part 4: the write-ahead log state machine (`Wal` in src/model/wal.rs).
+//
+// The Vesper state owns the medium's bytes, LSN assignment, the volatile and
+// in-flight regions (as their frames, built at append), the bounds, flush
+// completion and failure, and crash clamping with torn tails. The Rust
+// wrapper keeps each live record's payload string, keyed by LSN.
+
+// The frame header: length, LSN and check.
+const WAL_FRAME_HEADER_BYTES: u64 = 20;
+const U32_MAX: u64 = 4294967295;
+// What `wal_state_view_lsn` returns past the end of the view. LSNs start
+// at 1.
+const NO_LSN: u64 = 0;
+
+// `Result<u64, WalError>`: the value is the LSN for an append, the batch
+// size for a flush, and 0 otherwise.
+copy enum WalResult {
+    Ok(u64),
+    NotRecovered,
+    AlreadyRecovered,
+    FlushInFlight,
+    NoFlushInFlight,
+    // The payload's bytes and the limit.
+    RecordTooLarge(u64, u64),
+    // The records and framed bytes the append would reach.
+    LogFull(u64, u64)
+}
+
+// What a crash did (`CrashApplied`).
+copy struct WalCrash {
+    volatile_lost: u64,
+    in_flight_records: u64,
+    persisted_records: u64,
+    torn_bytes: u64
+}
+
+struct WalState {
+    max_records: u64,
+    max_bytes: u64,
+    max_record_bytes: u64,
+    // The simulated medium.
+    durable: ChunkSeq[u8],
+    // LSNs of the durable records visible to this epoch.
+    view: ChunkSeq[u64],
+    // (lsn, frame_len) pairs: the in-flight batch, then the volatile region.
+    pending: ChunkSeq[u64],
+    // The frames of `pending`, concatenated.
+    frames: ChunkSeq[u8],
+    // How many records at the front of `pending` are in flight.
+    in_flight: u64,
+    flushing: bool,
+    request: u64,
+    next_lsn: u64,
+    recovered: bool,
+    // Bumped by every crash.
+    generation: u64
+}
+
+// A recovery: whether the log was open for it, and the scan.
+struct WalRecovery {
+    ok: bool,
+    scan: ScanResult
+}
+
+fn byte_of(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn copy_bytes(in s: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](s.len());
+    out.extend(in s.as_slice());
+    out
+}
+
+fn same_bytes(in a: ChunkSeq[u8], in b: ChunkSeq[u8]) -> bool {
+    a.as_slice().eq(in b.as_slice())
+}
+
+// Append `frames[start..end]` to the medium.
+fn persist(inout w: WalState, start: u64, end: u64) {
+    for i in start..end {
+        w.durable.push(byte_of(in w.frames, i));
+    }
+}
+
+// Bytes of the first `count` pending frames.
+fn pending_bytes(in w: WalState, count: u64) -> u64 {
+    let mut total: u64 = 0;
+    for i in 0..count {
+        total = wrapping_add(total, at(in w.pending, wrapping_add(wrapping_mul(i, PAIR_WORDS), 1)));
+    }
+    total
+}
+
+// Drop the first `count` pending records and their frames.
+fn drop_pending(inout w: WalState, count: u64) {
+    let bytes = pending_bytes(in w, count);
+    let n = w.frames.len();
+    for i in bytes..n {
+        w.frames.try_set(wrapping_sub(i, bytes), byte_of(in w.frames, i));
+    }
+    w.frames.truncate(wrapping_sub(n, bytes));
+    remove_words(inout w.pending, 0, wrapping_mul(count, PAIR_WORDS));
+}
+
+fn pending_count(in w: WalState) -> u64 {
+    w.pending.len() / PAIR_WORDS
+}
+
+pub fn wal_state_new(max_records: u64, max_bytes: u64, max_record_bytes: u64) -> WalState {
+    WalState {
+        max_records: max_records,
+        max_bytes: max_bytes,
+        max_record_bytes: max_record_bytes,
+        durable: ChunkSeq::new[u8](),
+        view: ChunkSeq::new[u64](),
+        pending: ChunkSeq::new[u64](),
+        frames: ChunkSeq::new[u8](),
+        in_flight: 0,
+        flushing: false,
+        request: 0,
+        next_lsn: 1,
+        recovered: false,
+        generation: 0
+    }
+}
+
+pub fn wal_state_clone(in w: WalState) -> WalState {
+    WalState {
+        max_records: w.max_records,
+        max_bytes: w.max_bytes,
+        max_record_bytes: w.max_record_bytes,
+        durable: copy_bytes(in w.durable),
+        view: copy_words(in w.view),
+        pending: copy_words(in w.pending),
+        frames: copy_bytes(in w.frames),
+        in_flight: w.in_flight,
+        flushing: w.flushing,
+        request: w.request,
+        next_lsn: w.next_lsn,
+        recovered: w.recovered,
+        generation: w.generation
+    }
+}
+
+pub fn wal_state_same(in a: WalState, in b: WalState) -> bool {
+    let limits_a = (a.max_records, a.max_bytes, a.max_record_bytes);
+    let limits_b = (b.max_records, b.max_bytes, b.max_record_bytes);
+    if limits_a != limits_b {
+        return false;
+    }
+    let flush_a = (a.in_flight, a.flushing, a.request);
+    let flush_b = (b.in_flight, b.flushing, b.request);
+    if flush_a != flush_b {
+        return false;
+    }
+    let epoch_a = (a.next_lsn, a.recovered, a.generation);
+    let epoch_b = (b.next_lsn, b.recovered, b.generation);
+    if epoch_a != epoch_b {
+        return false;
+    }
+    same_bytes(in a.durable, in b.durable)
+        && same_words(in a.view, in b.view)
+        && same_words(in a.pending, in b.pending)
+        && same_bytes(in a.frames, in b.frames)
+}
+
+pub fn wal_state_durable(in w: WalState) -> ChunkSeq[u8] {
+    copy_bytes(in w.durable)
+}
+
+pub fn wal_state_durable_len(in w: WalState) -> u64 {
+    w.durable.len()
+}
+
+pub fn wal_state_generation(in w: WalState) -> u64 {
+    w.generation
+}
+
+pub fn wal_state_is_recovered(in w: WalState) -> bool {
+    w.recovered
+}
+
+// Highest durable LSN visible to this epoch, or 0.
+pub fn wal_state_durable_lsn(in w: WalState) -> u64 {
+    let n = w.view.len();
+    if n == 0 {
+        0
+    } else {
+        at(in w.view, wrapping_sub(n, 1))
+    }
+}
+
+pub fn wal_state_view_len(in w: WalState) -> u64 {
+    w.view.len()
+}
+
+// The LSN of the `index`th visible durable record, or NO_LSN.
+pub fn wal_state_view_lsn(in w: WalState, index: u64) -> u64 {
+    match w.view.try_get(index) {
+        Option::Some(lsn) => lsn,
+        Option::None => NO_LSN,
+    }
+}
+
+pub fn wal_state_view_lsns(in w: WalState) -> ChunkSeq[u64] {
+    copy_words(in w.view)
+}
+
+// LSNs of the in-flight batch, oldest first; empty without a flush.
+pub fn wal_state_in_flight_lsns(in w: WalState) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](w.in_flight);
+    for i in 0..w.in_flight {
+        out.push(at(in w.pending, wrapping_mul(i, PAIR_WORDS)));
+    }
+    out
+}
+
+pub fn wal_state_is_flushing(in w: WalState) -> bool {
+    w.flushing
+}
+
+pub fn wal_state_request(in w: WalState) -> u64 {
+    w.request
+}
+
+// LSNs of the volatile region, oldest first.
+pub fn wal_state_volatile_lsns(in w: WalState) -> ChunkSeq[u64] {
+    let count = pending_count(in w);
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_sub(count, w.in_flight));
+    for i in w.in_flight..count {
+        out.push(at(in w.pending, wrapping_mul(i, PAIR_WORDS)));
+    }
+    out
+}
+
+// Open the log for this epoch: scan, truncate damage, and continue LSNs
+// after the last valid record.
+pub fn wal_state_recover(inout w: WalState) -> WalRecovery {
+    let scan = scan_bytes(in w.durable.as_slice());
+    if w.recovered {
+        return WalRecovery {
+            ok: false,
+            scan: scan
+        };
+    }
+    w.durable.truncate(scan.valid_bytes);
+    w.view.clear();
+    let triples = scan.records.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= triples {
+            break;
+        }
+        w.view.push(at(in scan.records, i));
+        i = wrapping_add(i, 3);
+    }
+    w.next_lsn = wrapping_add(wal_state_durable_lsn(in w), 1);
+    w.recovered = true;
+    WalRecovery {
+        ok: true,
+        scan: scan
+    }
+}
+
+pub fn wal_recovery_ok(in r: WalRecovery) -> bool {
+    r.ok
+}
+
+// (lsn, start, len) triples of the recovered records, with ranges into
+// the medium after recovery.
+pub fn wal_recovery_records(in r: WalRecovery) -> ChunkSeq[u64] {
+    scan_result_records(in r.scan)
+}
+
+pub fn wal_recovery_valid_bytes(in r: WalRecovery) -> u64 {
+    r.scan.valid_bytes
+}
+
+pub fn wal_recovery_damage(in r: WalRecovery) -> (u8, u64, u64) {
+    scan_result_damage(in r.scan)
+}
+
+// Check that a payload of `len` bytes can be appended without exceeding a
+// bound.
+pub fn wal_state_check_append(in w: WalState, len: u64) -> WalResult {
+    if !w.recovered {
+        return WalResult::NotRecovered;
+    }
+    if len > w.max_record_bytes || len > U32_MAX {
+        return WalResult::RecordTooLarge(len, w.max_record_bytes);
+    }
+    let records = wrapping_add(wrapping_add(w.view.len(), pending_count(in w)), 1);
+    let used = wrapping_add(w.durable.len(), w.frames.len());
+    let bytes = wrapping_add(wrapping_add(used, WAL_FRAME_HEADER_BYTES), len);
+    if records > w.max_records || bytes > w.max_bytes {
+        return WalResult::LogFull(records, bytes);
+    }
+    WalResult::Ok(0)
+}
+
+// Append to the volatile region; the result holds the assigned LSN.
+pub fn wal_state_append(inout w: WalState, in payload: Str) -> WalResult {
+    let bytes = payload.as_bytes();
+    match wal_state_check_append(in w, bytes.len()) {
+        WalResult::Ok(_) => {},
+        other => {
+            return other;
+        },
+    }
+    let lsn = w.next_lsn;
+    w.next_lsn = wrapping_add(lsn, 1);
+    let frame = frame_bytes(lsn, in bytes);
+    w.pending.push(lsn);
+    w.pending.push(frame.len());
+    w.frames.extend(in frame.as_slice());
+    WalResult::Ok(lsn)
+}
+
+pub fn wal_state_check_flush(in w: WalState) -> WalResult {
+    if !w.recovered {
+        return WalResult::NotRecovered;
+    }
+    if w.flushing {
+        return WalResult::FlushInFlight;
+    }
+    WalResult::Ok(0)
+}
+
+// Move every volatile record into the in-flight batch.
+pub fn wal_state_begin_flush(inout w: WalState, request: u64) -> WalResult {
+    match wal_state_check_flush(in w) {
+        WalResult::Ok(_) => {},
+        other => {
+            return other;
+        },
+    }
+    w.in_flight = pending_count(in w);
+    w.flushing = true;
+    w.request = request;
+    WalResult::Ok(w.in_flight)
+}
+
+// The device acknowledged the flush: the batch becomes durable.
+pub fn wal_state_complete_flush(inout w: WalState) -> WalResult {
+    if !w.flushing {
+        return WalResult::NoFlushInFlight;
+    }
+    let count = w.in_flight;
+    persist(inout w, 0, pending_bytes(in w, count));
+    for i in 0..count {
+        w.view.push(at(in w.pending, wrapping_mul(i, PAIR_WORDS)));
+    }
+    drop_pending(inout w, count);
+    w.in_flight = 0;
+    w.flushing = false;
+    WalResult::Ok(count)
+}
+
+// The device reported failure: the batch returns, oldest first, to the
+// front of the volatile region (it is already there in `pending`).
+pub fn wal_state_fail_flush(inout w: WalState) -> WalResult {
+    if !w.flushing {
+        return WalResult::NoFlushInFlight;
+    }
+    let count = w.in_flight;
+    w.in_flight = 0;
+    w.flushing = false;
+    WalResult::Ok(count)
+}
+
+// Process crash: volatile records vanish; the first `persisted` in-flight
+// records reach the medium whole and, if a further record exists, `torn`
+// bytes of its frame (clamped below the full frame) follow.
+pub fn wal_state_crash(inout w: WalState, persisted: u64, torn: u64) -> WalCrash {
+    let in_flight = if w.flushing {
+        w.in_flight
+    } else {
+        0
+    };
+    let persisted = min(persisted, in_flight);
+    let whole = pending_bytes(in w, persisted);
+    persist(inout w, 0, whole);
+    let mut torn_bytes: u64 = 0;
+    if persisted < in_flight && torn > 0 {
+        let frame_len = at(in w.pending, wrapping_add(wrapping_mul(persisted, PAIR_WORDS), 1));
+        torn_bytes = min(torn, wrapping_sub(frame_len, 1));
+        persist(inout w, whole, wrapping_add(whole, torn_bytes));
+    }
+    let volatile_lost = wrapping_sub(pending_count(in w), in_flight);
+    w.pending.clear();
+    w.frames.clear();
+    w.view.clear();
+    w.in_flight = 0;
+    w.flushing = false;
+    w.recovered = false;
+    w.generation = wrapping_add(w.generation, 1);
+    WalCrash {
+        volatile_lost: volatile_lost,
+        in_flight_records: in_flight,
+        persisted_records: persisted,
+        torn_bytes: torn_bytes
+    }
 }
