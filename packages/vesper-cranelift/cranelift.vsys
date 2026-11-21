@@ -96,6 +96,7 @@ sys library Cranelift (
     fn vcl_module_function_count(in m: Module) -> ForeignVal[u32];
     fn vcl_module_function_name(in m: Module, func: u32, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
     fn vcl_module_get_function(inout m: Module, nocapture in name: CSlice[u8]) -> ForeignVal[u32];
+    fn vcl_module_get_data(inout m: Module, nocapture in name: CSlice[u8]) -> ForeignVal[u32];
     fn vcl_module_kind(in m: Module) -> ForeignVal[u32];
     fn vcl_compile(inout m: Module, sink b: Builder) -> ForeignVal[u64];
     fn vcl_module_last_code(in m: Module, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];

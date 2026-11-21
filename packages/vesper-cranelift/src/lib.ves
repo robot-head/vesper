@@ -97,6 +97,7 @@
 // |     fn vcl_module_function_count(in m: Module) -> ForeignVal[u32];
 // |     fn vcl_module_function_name(in m: Module, func: u32, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
 // |     fn vcl_module_get_function(inout m: Module, nocapture in name: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcl_module_get_data(inout m: Module, nocapture in name: CSlice[u8]) -> ForeignVal[u32];
 // |     fn vcl_module_kind(in m: Module) -> ForeignVal[u32];
 // |     fn vcl_compile(inout m: Module, sink b: Builder) -> ForeignVal[u64];
 // |     fn vcl_module_last_code(in m: Module, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
@@ -1032,6 +1033,19 @@ pub fn module_get_function(inout m: Module, in name: Slice[u8])
     } else {
         Some(
             FuncId {
+                id: id
+            }
+        )
+    }
+}
+// The data object declared as `name` (`Module::get_name`), if there is one.
+pub fn module_get_data(inout m: Module, in name: Slice[u8]) -> Option[DataId] eff [Ffi[Cranelift]] {
+    let id = Cranelift::vcl_module_get_data(inout m, in name);
+    if id == invalid() {
+        None
+    } else {
+        Some(
+            DataId {
                 id: id
             }
         )
