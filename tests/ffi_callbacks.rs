@@ -154,3 +154,74 @@ fn callback_handles_are_opaque_and_isolation_refuses_them() {
     assert_eq!(e.kind, FfiErrorKind::IsolationUnavailable, "{e}");
     assert!(e.message.contains("E0835"), "{e}");
 }
+
+unsafe extern "C" {
+    fn dlopen(path: *const std::ffi::c_char, flags: i32) -> *mut std::ffi::c_void;
+    fn dlsym(handle: *mut std::ffi::c_void, name: *const std::ffi::c_char)
+    -> *mut std::ffi::c_void;
+}
+
+/// An optional library (graphics gap 7) needs no new link mode: a package
+/// declares the loader it already has (`dlopen`/`dlsym` in libc) and one
+/// typed `#[link_name = "dlsym"]` lookup per entry point, so nothing about
+/// the library is resolved at link time, and a missing library or symbol
+/// is a `None` the program handles.
+#[test]
+fn optional_libraries_load_through_dlopen() {
+    if !host_jit() || cfg!(windows) {
+        return;
+    }
+    let (t, a) = target();
+    let libc_name = if cfg!(target_os = "macos") {
+        "/usr/lib/libSystem.B.dylib"
+    } else {
+        "libc.so.6"
+    };
+    let vsys = format!(
+        "sys library Dl (target = \"{t}\", abi = \"{a}\", link = \"dynamic\", name = \"c\", \
+         artifact = \"blake3:{}\") {{
+    affine extern type Library;
+    callback Abs(x: i64) -> ForeignVal[i64];
+    fn dlopen(nocapture in path: CStr, flags: i32) -> ForeignVal[Option[Library]];
+    #[link_name = \"dlsym\"]
+    fn load_abs(in library: Library, nocapture in name: CStr) -> ForeignVal[Option[Abs]];
+}}\n",
+        "0".repeat(64)
+    );
+    let source = format!(
+        "\
+fn abs_from(path: Slice[u8]) -> i64 eff [Ffi[Dl]] {{
+    // RTLD_NOW = 2.
+    match Dl::dlopen(in path, 2) {{
+        Result::Ok(Option::Some(library)) => match Dl::load_abs(in library, in \"labs\".as_bytes()) {{
+            Result::Ok(Option::Some(f)) => Dl::Abs(f, -41),
+            _ => -2,
+        }},
+        _ => -1,
+    }}
+}}
+pub fn main() -> i64 eff [Ffi[Dl]] {{
+    let found = abs_from(\"{libc_name}\".as_bytes());
+    let missing = abs_from(\"libvesper-no-such-library.so\".as_bytes());
+    wrapping_add(wrapping_mul(found, 10), missing)
+}}
+"
+    );
+    let mut imports = Imports::new();
+    imports.add(&vsys, Handler::Direct).unwrap();
+    let checked =
+        ffi_lowering::check_source(&source, &imports).unwrap_or_else(|e| panic!("{e:#?}"));
+    let symbols = [
+        ("dlopen", dlopen as *const u8),
+        ("dlsym", dlsym as *const u8),
+    ];
+    for optimize in [true, false] {
+        let v = checked
+            .jit_with_options("main", &symbols, optimize)
+            .unwrap();
+        assert_eq!(v.to_string(), "409", "optimize {optimize}");
+    }
+    let host = ffi_lowering::EvalHost::new(&imports, &symbols).unwrap();
+    let v = checked.evaluate("main", |call| host.call(call)).unwrap();
+    assert_eq!(v.to_string(), "409");
+}
