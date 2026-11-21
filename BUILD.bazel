@@ -359,6 +359,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH5 lane 8 (#1331): memoized World::mode against the original on
+        # every corpus world. Anchored globs.
+        "test/world_mode_speed": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH5 lane 15 (#1338): @vesper/doc against the Rust doc
         # renderers; the package reads JSON through @vesper/serde.
         "test/self_host_doc": glob([
@@ -734,6 +741,8 @@ vesper_crate(
         "test/self_host_optimize": "eternal",
         # The optimizer policy (#1279) optimizes every corpus world three times.
         "test/optimizer_budget": "long",
+        # World::mode (#1331) answers every corpus query three times.
+        "test/world_mode_speed": "long",
     },
 )
 
