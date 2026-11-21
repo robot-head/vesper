@@ -1,0 +1,9 @@
+[package]
+name = "@vesper/codegen-freestanding-runtime"
+version = "0.1.0"
+edition = "2026"
+# The runtime object is emitted through @vesper/cranelift's `.vsys` library.
+capability_ceiling = ["Fail", "Alloc", "Ffi"]
+
+[dependencies]
+"@vesper/cranelift" = { version = "^0.1", path = "../../vesper-cranelift" }

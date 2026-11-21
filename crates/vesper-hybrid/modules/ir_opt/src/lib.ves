@@ -1,0 +1,36 @@
+// @vesper/hybrid-ir-opt: `vesper::ir_opt::optimize` served from Vesper in
+// the hybrid Stage 2 build (self-hosting SH3 lane 9, #1248), through the
+// `opt` hook of `vesper::ir_swap`.
+//
+// `opt_words` takes the pass's input as little-endian words (the Place IR
+// input of `ir_words::program_input`, the mode and the `@fip` reuse facts;
+// written by `prepare` in tests/common/ir_opt_words.rs) and returns the
+// status, the count, the new `BoxReuse` payloads and the optimized program
+// as words, which `finish` reads back into a Rust `Program`.
+
+// @export abi 4
+
+use @vesper/ir-opt::{
+    ir_opt_words
+};
+
+// The layout version of `opt_words`.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn opt_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    ir_opt_words(in input)
+}
+
+// The divergent build's stream (build.rs `divergent-ir-opt`): status 1
+// ("read lacks state evidence") for every program, so every compile that
+// optimizes fails where the default compiler succeeds.
+fn divergent_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(1);
+    o.push(0);
+    o.push(0);
+    o.push(0);
+    o
+}
