@@ -715,6 +715,14 @@ vesper_package(
 )
 
 vesper_package(
+    name = "check_loops_atomics_package",
+    srcs = glob(["packages/vesper-check-loops-atomics/src/**/*.ves"]),
+    manifest = "packages/vesper-check-loops-atomics/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+vesper_package(
     name = "ir_check_package",
     srcs = glob(["packages/vesper-ir-check/src/**/*.ves"]),
     manifest = "packages/vesper-ir-check/Loom.toml",
