@@ -1,0 +1,17 @@
+[package]
+name = "vesper-codegen-swap-test"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "The lowering differential of the SH4 codegen swap point: Rust vs hooked builds compared per function, as objects and as JIT runs (#1275)"
+publish = false
+
+# Self-hosting SH4 lane 1 (#1275). The harness lends the native backend's
+# Cranelift builder to Vesper hooks through vesper-cranelift-sys, whose own
+# tests depend on the root package, so it cannot be a dependency of the
+# root package's tests (Bazel reports the cycle). Port lanes 6-17 add their
+# family's test under tests/ and use this library unchanged.
+
+[dependencies]
+vesper = { path = "../.." }
+vesper-cranelift-sys = { path = "../vesper-cranelift-sys" }

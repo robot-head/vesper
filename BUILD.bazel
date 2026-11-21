@@ -203,6 +203,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 8 (#1282): the aggregate decisions of native lowering in
+        # Vesper against src/native_aggregates.rs over the same corpus.
+        "test/self_host_codegen_aggregates": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
@@ -584,6 +591,7 @@ vesper_crate(
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
         "test/self_host_place_ir": "long",
+        "test/self_host_codegen_aggregates": "long",
         "test/self_host_check_harness": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
@@ -705,6 +713,16 @@ vesper_package(
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":std_hash_package"],
+)
+
+# The codegen base as a dependency of the hybrid compiler's codegen module
+# (self-hosting SH4 lane 1, #1275); @vesper/cranelift is in its own package.
+vesper_package(
+    name = "codegen_base_package",
+    srcs = glob(["packages/vesper-codegen-base/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-base/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
 )
 
 filegroup(

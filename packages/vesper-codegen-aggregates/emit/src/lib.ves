@@ -1,0 +1,644 @@
+// @vesper/codegen-aggregates-emit: native emission of aggregates, patterns,
+// equality, drops and fip (self-hosting SH4 lane 8, #1282, part 2).
+//
+// The Rust `Codegen` lends its builder and module to the `drops` hook for
+// one request (src/codegen_swap.rs). The first request ported is
+// `codegen_swap::drops::DROP_BOX`, `Codegen::drop_box_value`: the drop glue
+// of a value that owns boxes (src/native.rs `emit_drop_box_value`,
+// `emit_drop_box_inline`, `declare_or_define_drop_helper` and
+// `emit_fip_box_free`). The request carries the value and, after it, the
+// value's type with the ADTs it reaches as a check-data input (the test's
+// glue appends them: `check_words::layout_input`).
+//
+// Every block, instruction, import and declaration is made in the order
+// the Rust emitter makes them, so the CLIF text and the object bytes are
+// the same. Before it emits anything the hook checks that it can emit the
+// whole drop, and declines when it cannot; the Rust code then emits it:
+//
+// - a type that reaches a boxed trait object (`Box[dyn T]`, the dyn
+//   runtime's drop) or that check-layout cannot lay out;
+// - a freestanding object (the Rust code reports that a box needs a
+//   runtime);
+//
+// An object module's first box free defines the AOT box runtime's
+// `vesper_box_free` and its live counter (`fip::aot_runtime`).
+
+use @vesper/cranelift::{
+    Block,
+    DataId,
+    FuncId,
+    SigId,
+    Ty,
+    Value,
+    append_block_params_for_function_params,
+    block_param,
+    builder_new,
+    call_arg,
+    call_arg_count,
+    call_builder,
+    call_conv_default,
+    call_module,
+    call_op,
+    call_return_builder,
+    call_return_module,
+    cc_eq,
+    create_block,
+    data_align,
+    data_new,
+    data_zeroinit,
+    declare_data,
+    declare_function,
+    define_data,
+    define_function,
+    import_data,
+    import_function,
+    ins_brif0,
+    ins_call,
+    ins_iadd_imm,
+    ins_atomic_rmw,
+    ins_iconst,
+    ins_icmp_imm,
+    ins_jump0,
+    ins_load,
+    ins_return,
+    ins_symbol_value,
+    linkage_import,
+    linkage_local,
+    linkage_preemptible,
+    mem_trusted,
+    module_freestanding,
+    module_get_data,
+    module_get_function,
+    module_jit,
+    module_kind,
+    module_pointer_type,
+    seal_all_blocks,
+    sig_new,
+    sig_param,
+    switch_to_block,
+    ty_i64,
+    vals1,
+    value_of_word
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/check-data::types::{
+    default_type,
+    display
+};
+use @vesper/check-data::util::{
+    add,
+    u32_at,
+    w
+};
+use @vesper/check-layout::{
+    Layouts,
+    layout_of,
+    layouts_new
+};
+use @vesper/codegen-aggregates::{
+    contains_box,
+    is_box,
+    type_is_recursive
+};
+
+// The request protocol (src/codegen_swap.rs): the answer of a hook.
+pub const HANDLED: u64 = 1;
+pub const DECLINED: u64 = 0;
+
+// The `drops` family's ops (`codegen_swap::drops`).
+pub const DROP_BOX: u32 = 1;
+
+// `MemFlags::new()`.
+const PLAIN: u32 = 0;
+const NONE32: u32 = 4294967295;
+// check-data's type kinds and check-layout's layout kinds.
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const L_SCALAR: u8 = 0;
+const L_PRODUCT: u8 = 1;
+// FNV-1a, 64 bits (`native::fnv1a64`).
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+// `AtomicRmwOp::Add` (`ins_atomic_rmw`).
+const RMW_ADD: u32 = 1;
+// The AOT box runtime's live counter: 8 bytes, aligned to 8.
+const LIVE_SIZE: u64 = 8;
+// A box free decrements the live count.
+const LIVE_DECREMENT: i64 = -1;
+// The enum tag is the first word.
+const TAG_OFFSET: i32 = 0;
+
+// What one request shares: the layouts it built and the lent module's kind.
+pub struct St {
+    ls: Layouts,
+    kind: u32,
+}
+
+// The layout of `ty`, or NONE32 when check-layout refuses it.
+fn lay(inout st: St, inout c: Ctx, ty: u32) -> u32 {
+    layout_of(inout st.ls, inout c.types, inout c.names, in c.world, ty)
+}
+
+// `dyn_trait::is_boxed`, or a `dyn` anywhere inside `ty`: the dyn runtime's
+// drop stays in Rust.
+fn mentions_dyn(in c: Ctx, ty: u32, depth: u64) -> bool {
+    if depth > 256 {
+        return true;
+    }
+    let n = c.types.node(ty);
+    if n.kind == K_NAMED && n.name == c.world.k.dyn_ {
+        return true;
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+        for i in 0..w(n.n) {
+            if mentions_dyn(in c, c.types.arg(ty, i), wrapping_add(depth, 1)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `declare_or_define_drop_helper`'s symbol: `__vesper_drop_` and the
+// FNV-1a hash of the type's text, as 16 hex digits.
+fn helper_name(in c: Ctx, ty: u32) -> ChunkSeq[u8] {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    display(in c.types, in c.names, ty, inout text);
+    let mut h = FNV_OFFSET;
+    for i in 0..text.len() {
+        let byte = match text.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ widen_u64(byte), FNV_PRIME);
+    }
+    // The hex digits, lowest first.
+    let mut hex: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut x = h;
+    for k in 0..16 {
+        let d = wrapping_u8(x & 15);
+        if d < 10 {
+            hex.push(wrapping_add(d, 48));
+        } else {
+            hex.push(wrapping_add(d, 87));
+        }
+        x = x >> 4;
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.extend(in "__vesper_drop_".as_bytes());
+    for k in 0..16 {
+        match hex.try_get(wrapping_sub(15, k)) {
+            Option::Some(d) => out.push(d),
+            Option::None => {}
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The check before emission: whether the hook can emit the whole drop.
+
+// `emit_drop_box_value` of `ty` can be emitted; `seen` holds the recursive
+// types whose helper is checked or being checked.
+fn value_ok(inout st: St, inout c: Ctx, inout m: Module, ty0: u32, inout seen: ChunkSeq[u32])
+    -> bool eff [Ffi[Cranelift]] {
+    let ty = default_type(inout c.types, ty0);
+    if mentions_dyn(in c, ty, 0) {
+        return false;
+    }
+    if !contains_box(inout c, ty) {
+        return true;
+    }
+    if type_is_recursive(inout c, ty) {
+        for i in 0..seen.len() {
+            if u32_at(in seen, i) == ty {
+                return true;
+            }
+        }
+        let name = helper_name(in c, ty);
+        match module_get_function(inout m, in name.as_slice()) {
+            Option::Some(id) => return true,
+            Option::None => {}
+        }
+        seen.push(ty);
+        let l = lay(inout st, inout c, ty);
+        if l == NONE32 || (!st.ls.aggregate(l) && !is_box(in c, ty)) {
+            return false;
+        }
+    }
+    inline_ok(inout st, inout c, inout m, ty, inout seen)
+}
+
+fn free_ok(inout st: St, inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    if st.kind == module_jit() {
+        return true;
+    }
+    if st.kind == module_freestanding() {
+        return false;
+    }
+    true
+}
+
+// A field or box content `ty` that holds a box loads as a pointer
+// (aggregate) or as a box (`helper_load`).
+fn load_ok(inout st: St, inout c: Ctx, ty: u32) -> bool {
+    let l = lay(inout st, inout c, ty);
+    l != NONE32 && (st.ls.aggregate(l) || is_box(in c, ty))
+}
+
+fn inline_ok(inout st: St, inout c: Ctx, inout m: Module, ty: u32, inout seen: ChunkSeq[u32])
+    -> bool eff [Ffi[Cranelift]] {
+    if !contains_box(inout c, ty) {
+        return true;
+    }
+    if is_box(in c, ty) {
+        let inner = c.types.arg(ty, 0);
+        if contains_box(inout c, inner) {
+            if !load_ok(inout st, inout c, inner)
+                || !value_ok(inout st, inout c, inout m, inner, inout seen) {
+                return false;
+            }
+        }
+        return free_ok(inout st, inout m);
+    }
+    let l = lay(inout st, inout c, ty);
+    if l == NONE32 {
+        return false;
+    }
+    let node = st.ls.node(l);
+    if node.kind == L_SCALAR {
+        return true;
+    }
+    if node.kind == L_PRODUCT {
+        for i in 0..w(node.n) {
+            let f = st.ls.lfield(add(w(node.a), i));
+            if contains_box(inout c, f.ty) {
+                if !load_ok(inout st, inout c, f.ty)
+                    || !value_ok(inout st, inout c, inout m, f.ty, inout seen) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    for v in 0..w(node.n) {
+        let var = st.ls.lvariant(add(w(node.a), v));
+        for i in 0..w(var.fc) {
+            let f = st.ls.lfield(add(w(var.fa), i));
+            if contains_box(inout c, f.ty) {
+                if !load_ok(inout st, inout c, f.ty)
+                    || !value_ok(inout st, inout c, inout m, f.ty, inout seen) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// The emission (src/native.rs).
+
+// `helper_load`: an aggregate is its address; a box is loaded.
+fn helper_load(inout st: St, inout c: Ctx, inout b: Builder, ptr: Value, ty: u32)
+    -> Value eff [Ffi[Cranelift]] {
+    let l = lay(inout st, inout c, ty);
+    if st.ls.aggregate(l) {
+        ptr
+    } else {
+        ins_load(inout b, ty_i64(), PLAIN, ptr, 0)
+    }
+}
+
+// `emit_fip_box_free`.
+fn box_free(inout st: St, inout b: Builder, inout m: Module, ptr: Value) eff [Ffi[Cranelift]] {
+    let id = if st.kind == module_jit() {
+        let sig = sig_new(inout m, call_conv_default());
+        sig_param(inout m, sig, ty_i64());
+        declare_function(inout m, in "vesper_box_free".as_bytes(), linkage_import(), sig)
+    } else {
+        declare_or_define_free(inout m)
+    };
+    let f = import_function(inout b, inout m, id);
+    let args = vals1(ptr);
+    let call = ins_call(inout b, f, in args.as_slice());
+}
+
+// `fip::aot_runtime::live_counter`: the `vesper_box_live` counter.
+fn live_counter(inout m: Module) -> DataId eff [Ffi[Cranelift]] {
+    match module_get_data(inout m, in "vesper_box_live".as_bytes()) {
+        Option::Some(id) => return id,
+        Option::None => {}
+    }
+    let id = declare_data(inout m, in "vesper_box_live".as_bytes(), linkage_local(), true);
+    match data_new() {
+        Option::Some(nd) => {
+            let mut d = nd;
+            data_zeroinit(inout d, LIVE_SIZE);
+            data_align(inout d, LIVE_SIZE);
+            let ok = define_data(inout m, id, d);
+        }
+        Option::None => {}
+    }
+    id
+}
+
+// `fip::aot_runtime::declare_or_define_free`: the object's
+// `vesper_box_free`, a null test, libc `free` and the live count's
+// decrement.
+fn declare_or_define_free(inout m: Module) -> FuncId eff [Ffi[Cranelift]] {
+    match module_get_function(inout m, in "vesper_box_free".as_bytes()) {
+        Option::Some(id) => return id,
+        Option::None => {}
+    }
+    let live = live_counter(inout m);
+    let sig = sig_new(inout m, call_conv_default());
+    sig_param(inout m, sig, ty_i64());
+    let libc_free = declare_function(inout m, in "free".as_bytes(), linkage_import(), sig);
+    let id = declare_function(inout m, in "vesper_box_free".as_bytes(), linkage_local(), sig);
+    match builder_new(in m, sig) {
+        Option::Some(nb) => {
+            let mut fb = nb;
+            let entry = create_block(inout fb);
+            let do_free = create_block(inout fb);
+            let done = create_block(inout fb);
+            let n = append_block_params_for_function_params(inout fb, entry);
+            switch_to_block(inout fb, entry);
+            let ptr = block_param(inout fb, entry, 0);
+            let is_null = ins_icmp_imm(inout fb, cc_eq(), ptr, 0);
+            ins_brif0(inout fb, is_null, done, do_free);
+            switch_to_block(inout fb, do_free);
+            let f = import_function(inout fb, inout m, libc_free);
+            let args = vals1(ptr);
+            let call = ins_call(inout fb, f, in args.as_slice());
+            let gv = import_data(inout fb, in m, live);
+            let address = ins_symbol_value(inout fb, ty_i64(), gv);
+            let delta = ins_iconst(inout fb, ty_i64(), LIVE_DECREMENT);
+            let old = ins_atomic_rmw(inout fb, RMW_ADD, ty_i64(), mem_trusted(), address, delta);
+            ins_jump0(inout fb, done);
+            switch_to_block(inout fb, done);
+            let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            ins_return(inout fb, in none.as_slice());
+            seal_all_blocks(inout fb);
+            let ok = define_function(inout m, id, fb);
+        }
+        Option::None => {}
+    }
+    id
+}
+
+// `emit_drop_box_value`.
+fn drop_value(
+    inout st: St,
+    inout c: Ctx,
+    inout b: Builder,
+    inout m: Module,
+    val: Value,
+    ty0: u32
+) eff [Ffi[Cranelift]] {
+    let ty = default_type(inout c.types, ty0);
+    if !contains_box(inout c, ty) {
+        return;
+    }
+    if type_is_recursive(inout c, ty) {
+        let id = drop_helper(inout st, inout c, inout m, ty);
+        let f = import_function(inout b, inout m, id);
+        let args = vals1(val);
+        let call = ins_call(inout b, f, in args.as_slice());
+        return;
+    }
+    drop_inline(inout st, inout c, inout b, inout m, val, ty);
+}
+
+// `declare_or_define_drop_helper`.
+fn drop_helper(inout st: St, inout c: Ctx, inout m: Module, ty: u32)
+    -> FuncId eff [Ffi[Cranelift]] {
+    let name = helper_name(in c, ty);
+    match module_get_function(inout m, in name.as_slice()) {
+        Option::Some(id) => return id,
+        Option::None => {}
+    }
+    let l = lay(inout st, inout c, ty);
+    let arg_ty = if st.ls.aggregate(l) {
+        module_pointer_type(in m)
+    } else {
+        ty_i64()
+    };
+    let sig = sig_new(inout m, call_conv_default());
+    sig_param(inout m, sig, arg_ty);
+    let linkage = if st.kind == module_jit() {
+        linkage_preemptible()
+    } else {
+        linkage_local()
+    };
+    let id = declare_function(inout m, in name.as_slice(), linkage, sig);
+    match builder_new(in m, sig) {
+        Option::Some(nb) => {
+            let mut hb = nb;
+            let entry = create_block(inout hb);
+            let n = append_block_params_for_function_params(inout hb, entry);
+            switch_to_block(inout hb, entry);
+            let val = block_param(inout hb, entry, 0);
+            drop_inline(inout st, inout c, inout hb, inout m, val, ty);
+            let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            ins_return(inout hb, in none.as_slice());
+            seal_all_blocks(inout hb);
+            let ok = define_function(inout m, id, hb);
+        }
+        Option::None => {}
+    }
+    id
+}
+
+// The null test of `emit_drop_box_inline`: `done` and `non_null` blocks,
+// a branch to `done` on a null `val`, and emission continues in
+// `non_null`. Returns `done`.
+fn open_null_test(inout b: Builder, val: Value) -> Block eff [Ffi[Cranelift]] {
+    let non_null = create_block(inout b);
+    let done = create_block(inout b);
+    let is_null = ins_icmp_imm(inout b, cc_eq(), val, 0);
+    ins_brif0(inout b, is_null, done, non_null);
+    switch_to_block(inout b, non_null);
+    done
+}
+
+// The box fields of one product or variant, each loaded and dropped.
+fn drop_fields(
+    inout st: St,
+    inout c: Ctx,
+    inout b: Builder,
+    inout m: Module,
+    val: Value,
+    fa: u64,
+    fc: u64
+) eff [Ffi[Cranelift]] {
+    for i in 0..fc {
+        let f = st.ls.lfield(add(fa, i));
+        if contains_box(inout c, f.ty) {
+            let ptr = ins_iadd_imm(inout b, val, widen_i64(f.offset));
+            let fv = helper_load(inout st, inout c, inout b, ptr, f.ty);
+            drop_value(inout st, inout c, inout b, inout m, fv, f.ty);
+        }
+    }
+}
+
+fn has_box_field(inout st: St, inout c: Ctx, fa: u64, fc: u64) -> bool {
+    for i in 0..fc {
+        let f = st.ls.lfield(add(fa, i));
+        if contains_box(inout c, f.ty) {
+            return true;
+        }
+    }
+    false
+}
+
+// `emit_drop_box_inline`.
+fn drop_inline(
+    inout st: St,
+    inout c: Ctx,
+    inout b: Builder,
+    inout m: Module,
+    val: Value,
+    ty: u32
+) eff [Ffi[Cranelift]] {
+    if !contains_box(inout c, ty) {
+        return;
+    }
+    if is_box(in c, ty) {
+        let inner = c.types.arg(ty, 0);
+        if contains_box(inout c, inner) {
+            let done = open_null_test(inout b, val);
+            let inner_val = helper_load(inout st, inout c, inout b, val, inner);
+            drop_value(inout st, inout c, inout b, inout m, inner_val, inner);
+            box_free(inout st, inout b, inout m, val);
+            ins_jump0(inout b, done);
+            switch_to_block(inout b, done);
+            return;
+        }
+        box_free(inout st, inout b, inout m, val);
+        return;
+    }
+    let l = lay(inout st, inout c, ty);
+    let node = st.ls.node(l);
+    if node.kind == L_SCALAR {
+        return;
+    }
+    if node.kind == L_PRODUCT {
+        if !has_box_field(inout st, inout c, w(node.a), w(node.n)) {
+            return;
+        }
+        let done = open_null_test(inout b, val);
+        drop_fields(inout st, inout c, inout b, inout m, val, w(node.a), w(node.n));
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, done);
+        return;
+    }
+    // An enum: the variants with box fields, tested in order.
+    let mut boxed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for v in 0..w(node.n) {
+        let var = st.ls.lvariant(add(w(node.a), v));
+        if has_box_field(inout st, inout c, w(var.fa), w(var.fc)) {
+            boxed.push(v);
+        }
+    }
+    if boxed.len() == 0 {
+        return;
+    }
+    let done = open_null_test(inout b, val);
+    let tag = ins_load(inout b, ty_i64(), PLAIN, val, TAG_OFFSET);
+    let mut check = create_block(inout b);
+    ins_jump0(inout b, check);
+    for k in 0..boxed.len() {
+        let v = match boxed.try_get(k) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        switch_to_block(inout b, check);
+        let is_var = ins_icmp_imm(inout b, cc_eq(), tag, wrapping_i64(v));
+        let this_var = create_block(inout b);
+        let next = if wrapping_add(k, 1) < boxed.len() {
+            create_block(inout b)
+        } else {
+            done
+        };
+        ins_brif0(inout b, is_var, this_var, next);
+        switch_to_block(inout b, this_var);
+        let var = st.ls.lvariant(add(w(node.a), v));
+        drop_fields(inout st, inout c, inout b, inout m, val, w(var.fa), w(var.fc));
+        ins_jump0(inout b, done);
+        check = next;
+    }
+    switch_to_block(inout b, done);
+}
+
+// ---------------------------------------------------------------------------
+// The hook.
+
+// The request's type input: argument 1 is its byte length, arguments 2..
+// its bytes, eight to a word, little-endian.
+fn request_bytes(call: u64) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let len = call_arg(call, 1);
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](len);
+    let n = call_arg_count(call);
+    for i in 2..n {
+        let mut x = call_arg(call, i);
+        for k in 0..8 {
+            if out.len() < len {
+                out.push(wrapping_u8(x & 255));
+            }
+            x = x >> 8;
+        }
+    }
+    out
+}
+
+fn drops(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
+    if call_op(call) != DROP_BOX || call_arg_count(call) < 2 {
+        return DECLINED;
+    }
+    let bytes = request_bytes(call);
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in bytes.as_slice());
+    let ty = u32_at(in c.tmap, r.word(in bytes.as_slice()));
+    let mut st = St {
+        ls: layouts_new(),
+        kind: module_kind(in m),
+    };
+    // The AOT box runtime needs a 64-bit target.
+    if st.kind != module_jit() && module_pointer_type(in m).code != ty_i64().code {
+        return DECLINED;
+    }
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if !value_ok(inout st, inout c, inout m, ty, inout seen) {
+        return DECLINED;
+    }
+    let val = value_of_word(call_arg(call, 0));
+    drop_value(inout st, inout c, inout b, inout m, val, ty);
+    HANDLED
+}
+
+// The `drops` hook over the lent handles.
+pub fn drops_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut b = match call_builder(call) {
+        Some(b) => b,
+        None => return DECLINED,
+    };
+    let mut m = match call_module(call) {
+        Some(m) => m,
+        None => {
+            call_return_builder(call, b);
+            return DECLINED;
+        }
+    };
+    let handled = drops(call, inout b, inout m);
+    call_return_module(call, m);
+    call_return_builder(call, b);
+    handled
+}

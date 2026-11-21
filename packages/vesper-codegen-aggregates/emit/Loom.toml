@@ -1,0 +1,13 @@
+[package]
+name = "@vesper/codegen-aggregates-emit"
+version = "0.1.0"
+edition = "2026"
+# Every emission reaches Cranelift through @vesper/cranelift's `.vsys`
+# library. The lowering decisions stay in the pure @vesper/codegen-aggregates.
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/cranelift" = { version = "^0.1", path = "../../vesper-cranelift" }
+"@vesper/check-data" = { version = "^0.1", path = "../../vesper-check-data" }
+"@vesper/check-layout" = { version = "^0.1", path = "../../vesper-check-layout" }
+"@vesper/codegen-aggregates" = { version = "^0.1", path = ".." }
