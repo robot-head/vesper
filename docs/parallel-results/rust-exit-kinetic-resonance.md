@@ -139,10 +139,68 @@ gain. `vesper fmt --check` and `cargo fmt --check` are clean.
    parse. The existing port writes `st[(Pid::HasPrevious)]` for the same
    reason.
 
+## Part 2: Resonance graph under 1.5x
+
+Base `main` at `c46c3a61` (part 1 merged). Port rewrites only, in
+`crates/vesper-resonance/vesper/src/graph.ves`. No compiler change, no Rust
+behaviour change, no new export.
+
+### Measurements
+
+Same harness and host as part 1, three runs of 9 epochs each:
+
+| Workload | Part 1 | Part 2, median per run (range over all runs) |
+|---|--:|--:|
+| `kernel` (unchanged) | 1.11x | 1.10x, 1.05x, 1.06x (0.87-1.28) |
+| `graph` | 1.89x (1.77-2.17) | **1.10x, 1.10x, 1.08x (0.90-1.36)** |
+
+Both workloads now meet the 1.5x bar at the upper end of the range.
+Callgrind (500 blocks of the graph): the port runs 265M instructions where
+it ran 357M; the Rust build runs 192M. The rest is mostly the input sums
+(scalar, where the Rust build's are AVX: gap 2).
+
+### What changed
+
+1. **The schedule is resolved once.** `run_block` used to read every op's
+   inputs from the schedule words with total `get` calls, push their buffer
+   indices into a sequence and multiply them by the block length, and the
+   delay-line helpers divided to bounds-check the line index on every call.
+   `g_render` now builds a plan (`plan`): per op, the processor's word
+   offset, the output's slab offset, the line steps with the lines'
+   metadata offsets, the inputs' slab offsets and the feeds. `run_block`
+   walks it with plain indexing and passes the inputs to the processors as
+   a slice of the plan. Lines the schedule names but the slab does not have
+   are dropped from the plan, as `DelaySlab::read`/`write` skip them. The
+   line steps (`line_steps`, `line_read`, `line_write`) declare only
+   `Fail[RuntimeError]`, so they stay out of `run_block` (gap 3).
+2. **The source is a copy.** Sample t of a source is a function of the
+   residue `(t * 7919 + 31 * seed) % 97`, and the next sample's residue is
+   the last one plus 62 (7919 mod 97) while the sum does not wrap. 62 and 97
+   are coprime, so the residues form one cycle. `source_table` lays the
+   cycle's samples out in order (97 + block of them, computed by the same
+   expression as before), with each residue's position in the cycle in
+   front, so a block of a source is one `copy_from`. When the sum would
+   wrap inside the block, the source falls back to the per-sample residue.
+
+### Checks
+
+`crates/vesper-resonance/port/test-port.sh` passes in full (all tests of
+the three builds, including the bit-for-bit differential; the seven
+divergence checks; the realtime verifier proof on x86_64 and aarch64 with
+its positive control). The graph's divergent edit in `build.rs` moved with
+the call it edits. `vesper fmt --check` is clean.
+
+### Compiler gap found in this part
+
+5. **Manual unrolling doubles the instruction count.** Unrolling the
+   two-input sum by four (`let k1 = wrapping_add(k, 1); ... x[k1] ...`) took
+   it from 130M to 252M instructions. Each indexed access with a computed
+   index reloads the slice's base and length and checks the bounds on its
+   own; nothing is shared between the four. The plain `for k in 0..s.len()`
+   loop stays.
+
 ## What is left
 
-- **Resonance graph to 1.5x:** gaps 2 and 3 above, or a further port rewrite
-  of the schedule loop.
 - **Resonance flip** (seed pattern, the compiler links it through
   `native_verifiers`): the port becomes the default build of
   `vesper-resonance` and the Rust engine stays in `seed/`. The Rust
