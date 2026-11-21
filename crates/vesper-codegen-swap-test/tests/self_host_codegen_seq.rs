@@ -8,7 +8,7 @@
 //! every object and every sampled JIT run must equal the Rust build's, and
 //! the objects for the other native targets (Windows, where no fault
 //! message is written, and AArch64) must be byte-identical too.
-//! `CODEGEN_SEQ_STEP=n` compares every n-th world (default 1).
+//! `CODEGEN_SEQ_STEP=n` compares every n-th world (default 1 under Cargo, 4 under Bazel).
 #[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
 
@@ -48,12 +48,18 @@ fn counted(lent: &mut Lent<'_, '_>) -> Result<bool, String> {
     Ok(handled)
 }
 
+/// Every `step()`-th world: `CODEGEN_SEQ_STEP`, else 1 under Cargo and 4
+/// under Bazel, whose CI run shares one time limit with the whole suite.
 fn step() -> usize {
     std::env::var("CODEGEN_SEQ_STEP")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1)
-        .max(1)
+        .filter(|n| *n > 0)
+        .unwrap_or(if std::env::var_os("TEST_SRCDIR").is_some() {
+            4
+        } else {
+            1
+        })
 }
 
 fn big_stack<R: Send>(f: impl FnOnce() -> R + Send) -> R {

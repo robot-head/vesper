@@ -17,7 +17,7 @@
 //! Programs: each corpus world lowered as the native backend does, with
 //! optimize on (lowering, `ir_opt`, inliner, drop elaboration, bounds
 //! hoisting) and off (`fip_reuse_pass`, drop elaboration).
-//! `CODEGEN_SEQ_STEP=n` runs every n-th world (default 1).
+//! `CODEGEN_SEQ_STEP=n` runs every n-th world (default 1 under Cargo, 4 under Bazel).
 #[path = "common/check_harness.rs"]
 mod check_harness;
 #[path = "common/check_words.rs"]
@@ -38,12 +38,18 @@ fn package() -> &'static Package {
     P.get_or_init(|| Package::load("packages/vesper-codegen-seq"))
 }
 
+/// Every `step()`-th world: `CODEGEN_SEQ_STEP`, else 1 under Cargo and 4
+/// under Bazel, whose CI run shares one time limit with the whole suite.
 fn step() -> usize {
     std::env::var("CODEGEN_SEQ_STEP")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(1)
+        .unwrap_or(if std::env::var_os("TEST_SRCDIR").is_some() {
+            4
+        } else {
+            1
+        })
 }
 
 /// One program native code is emitted from.
