@@ -204,13 +204,23 @@ pub fn compare(
 pub static HANDLED: AtomicU64 = AtomicU64::new(0);
 pub static DECLINED: AtomicU64 = AtomicU64::new(0);
 
+/// The shim's kind of the module a request lends (`Lent::jit`).
+pub fn kind(lent: &Lent<'_, '_>) -> vesper_cranelift_sys::ModuleKind {
+    if lent.jit {
+        vesper_cranelift_sys::ModuleKind::Jit
+    } else {
+        vesper_cranelift_sys::ModuleKind::Object
+    }
+}
+
 /// Runs one request through the Vesper hook `f` (a `fn(call: u64) -> u64`
 /// word function) over the shim's lent handles.
 pub fn vesper_hook(
     lent: &mut Lent<'_, '_>,
     f: &vesper::native::WordFunction,
 ) -> Result<bool, String> {
-    let (answer, crossing) = vesper_cranelift_sys::lend(
+    let (answer, crossing) = vesper_cranelift_sys::lend_as(
+        kind(lent),
         lent.builder,
         &mut *lent.module,
         lent.op,

@@ -95,9 +95,13 @@ sys library Cranelift (
     fn vcl_function_address(inout m: Module, func: u32) -> ForeignVal[u64];
     fn vcl_module_function_count(in m: Module) -> ForeignVal[u32];
     fn vcl_module_function_name(in m: Module, func: u32, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+    fn vcl_module_get_function(inout m: Module, nocapture in name: CSlice[u8]) -> ForeignVal[u32];
+    fn vcl_module_kind(in m: Module) -> ForeignVal[u32];
     fn vcl_compile(inout m: Module, sink b: Builder) -> ForeignVal[u64];
     fn vcl_module_last_code(in m: Module, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
     fn vcl_module_last_unwind(in m: Module, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+    fn vcl_module_last_traps(in m: Module, nocapture inout out: CSlice[u64]) -> ForeignVal[u64];
+    fn vcl_import_data_colocated(inout b: Builder, in m: Module, data: u32, colocated: bool) -> ForeignVal[u32];
     fn vcl_set_srcloc(inout b: Builder, loc: u32) -> ForeignVal[Unit];
     fn vcl_set_cold_block(inout b: Builder, blk: u32) -> ForeignVal[Unit];
     fn vcl_current_block(inout b: Builder) -> ForeignVal[u32];

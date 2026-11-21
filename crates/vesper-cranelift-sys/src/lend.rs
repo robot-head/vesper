@@ -28,7 +28,7 @@
 //! `vcl_module_finish`, `vcl_module_free`) refuse or ignore them, and
 //! nothing is counted in [`crate::live_handles`]. A failed call poisons the
 //! lent builder or module as usual; `lend` reports the error.
-use crate::{Backend, Builder, Module, slice_mut};
+use crate::{Backend, Builder, Module, ModuleKind, slice_mut};
 use cranelift_frontend::FunctionBuilder;
 use std::ptr::NonNull;
 
@@ -65,6 +65,7 @@ pub struct Crossing {
 /// Lend `fb` and `m` to `hook` for one call of request `op` with `args`.
 /// `hook` gets the [`Call`]'s address and returns the host's answer
 /// (whether it handled the request); [`Crossing`] says what it emitted.
+/// The module is lent as an object module ([`lend_as`] says otherwise).
 pub fn lend<R>(
     fb: &mut FunctionBuilder<'_>,
     m: &mut dyn cranelift_module::Module,
@@ -72,7 +73,23 @@ pub fn lend<R>(
     args: &[u64],
     hook: impl FnOnce(u64) -> R,
 ) -> (R, Crossing) {
-    lend_parts(Some(fb), m, op, args, hook)
+    lend_parts(Some(fb), ModuleKind::Object, m, op, args, hook)
+}
+
+/// [`lend`] of a module of `kind`: [`ModuleKind::Jit`] makes
+/// `vcl_module_kind` answer JIT and `vcl_define_function` normalize
+/// references as the Rust backend's JIT definitions do. (A freestanding
+/// object module is told apart by its target, so `kind` is
+/// [`ModuleKind::Object`] for one.)
+pub fn lend_as<R>(
+    kind: ModuleKind,
+    fb: &mut FunctionBuilder<'_>,
+    m: &mut dyn cranelift_module::Module,
+    op: u32,
+    args: &[u64],
+    hook: impl FnOnce(u64) -> R,
+) -> (R, Crossing) {
+    lend_parts(Some(fb), kind, m, op, args, hook)
 }
 
 /// [`lend`] with no builder: a module-level request (data, declarations,
@@ -83,11 +100,23 @@ pub fn lend_module<R>(
     args: &[u64],
     hook: impl FnOnce(u64) -> R,
 ) -> (R, Crossing) {
-    lend_parts(None, m, op, args, hook)
+    lend_parts(None, ModuleKind::Object, m, op, args, hook)
+}
+
+/// [`lend_module`] of a module of `kind` (see [`lend_as`]).
+pub fn lend_module_as<R>(
+    kind: ModuleKind,
+    m: &mut dyn cranelift_module::Module,
+    op: u32,
+    args: &[u64],
+    hook: impl FnOnce(u64) -> R,
+) -> (R, Crossing) {
+    lend_parts(None, kind, m, op, args, hook)
 }
 
 fn lend_parts<R>(
     fb: Option<&mut FunctionBuilder<'_>>,
+    kind: ModuleKind,
     m: &mut dyn cranelift_module::Module,
     op: u32,
     args: &[u64],
@@ -113,6 +142,7 @@ fn lend_parts<R>(
         >(NonNull::from(m))
     };
     let mut module = Module::empty(Backend::Lent(m));
+    module.jit = kind == ModuleKind::Jit;
     let mut call = Call {
         magic: MAGIC,
         op,

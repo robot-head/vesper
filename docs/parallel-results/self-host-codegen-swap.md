@@ -52,7 +52,21 @@ default compiler installs a hook.
 - Module extras: `vcl_module_function_count` and `vcl_module_function_name`
   (`declarations()`), and `vcl_compile` with `vcl_module_last_code` and
   `vcl_module_last_unwind` (code bytes and Windows x64 unwind info).
-- 23 new `.vsys` imports with typed wrappers in `packages/vesper-cranelift`.
+- For the family lanes (lanes 8 and 14):
+  - `vcl_module_get_function` is `Module::get_name`. A miss returns
+    `INVALID` without setting an error.
+  - `vcl_module_kind` returns object, JIT, or freestanding (an object for
+    an OS-less target). A host lends a module as JIT with `lend_as` or
+    `lend_module_as`. `codegen_swap` passes `Lent::jit` from the module
+    type of `define_instances`.
+  - `vcl_define_function` into a JIT module applies the Rust backend's
+    `DefinitionLinkage::Jit.normalize_references`: references are not
+    colocated.
+  - `vcl_module_last_traps` returns the trap records of the last compile,
+    as offset and code words.
+  - `vcl_import_data_colocated` is a data import with an explicit
+    colocated flag, which RISC-V freestanding objects need.
+- 27 new `.vsys` imports with typed wrappers in `packages/vesper-cranelift`.
   The `.vsys` text is now also a file, `cranelift.vsys`, named by the
   manifest's `[package] vsys` field, so packages that depend on it get the
   library (`tests/header.rs` checks that it matches the directive).

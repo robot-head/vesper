@@ -128,9 +128,18 @@ uint32_t vcl_module_finalize(vcl_module *m);
 uint64_t vcl_function_address(vcl_module *m, uint32_t func);
 uint32_t vcl_module_function_count(const vcl_module *m);
 uint64_t vcl_module_function_name(const vcl_module *m, uint32_t func, uint8_t *out, size_t out_len);
+/* The function declared as `name`, or UINT32_MAX. */
+uint32_t vcl_module_get_function(vcl_module *m, const uint8_t *name, size_t name_len);
+/* 0 object, 1 JIT, 2 object for a target with no operating system. */
+uint32_t vcl_module_kind(const vcl_module *m);
 uint64_t vcl_compile(vcl_module *m, vcl_builder *b);
 uint64_t vcl_module_last_code(const vcl_module *m, uint64_t offset, uint8_t *out, size_t out_len);
 uint64_t vcl_module_last_unwind(const vcl_module *m, uint8_t *out, size_t out_len);
+/* Trap records of the last compiled or defined function: offset and code
+ * words per trap. Returns the word count. */
+uint64_t vcl_module_last_traps(const vcl_module *m, uint64_t *out, size_t out_len);
+/* vcl_import_data with an explicit colocated flag. */
+uint32_t vcl_import_data_colocated(vcl_builder *b, const vcl_module *m, uint32_t data, bool colocated);
 
 /* Builder extras. */
 void vcl_set_srcloc(vcl_builder *b, uint32_t loc);

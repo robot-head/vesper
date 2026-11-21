@@ -203,6 +203,36 @@ fn ir_check_origin_limits_match_rust() {
     assert_eq!(bad, 0);
 }
 
+/// Element view matches (#1221) are not in `@vesper/ir-check` yet, so the
+/// hybrid build leaves their programs to Rust: `ir_input` refuses them, and
+/// the Rust check of the valid linear-element program reports nothing.
+#[test]
+fn element_views_stay_on_rust() {
+    let source = "linear struct Ticket { id: u64 }
+fn id(in t: Ticket) -> u64 { t.id }
+fn stamp(inout t: Ticket) { t.id = wrapping_add(t.id, 10); }
+fn body() -> u64 eff [Fail[RuntimeError]] {
+    let mut s = ChunkSeq::new[Ticket]();
+    s.push(Ticket { id: 1 });
+    match s.try_get_mut(0) { Some(t) => stamp(inout t), None => {} }
+    let seen = match s.try_get(0) { Some(t) => id(in t), None => 0 };
+    let back = match s.pop() { Some(Ticket { id }) => id, None => 0 };
+    ChunkSeq::finish(sink s);
+    wrapping_add(wrapping_mul(seen, 100), back)
+}
+fn main() -> u64 { handle Fail[RuntimeError] in { body() } with { return x => x, raise(e, k) => 999, } }
+";
+    let parsed = vesper::parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let checked = vesper::check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let w = &checked.world;
+    assert!(!w.element_views.is_empty(), "no element views recorded");
+    let program = vesper::ir::lower_world(w);
+    assert!(check_words::ir_input(w, &program).is_none());
+    assert_eq!(vesper::ir_check::validate(w, &program), vec![]);
+}
+
 /// ABBA: `validate` in Rust against the Vesper check with its input
 /// encoding and result decoding (the hybrid build's cost per call).
 #[test]
