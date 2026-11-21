@@ -257,75 +257,19 @@ fn optimize_text(text: &str) -> Vec<Visit> {
     optimize_module(parsed.module)
 }
 
-/// One corpus world's visits: parsed (or loaded) and checked once, unlike
-/// [`corpus`], which keeps only the world.
-fn corpus_visits(path: &std::path::Path, package: bool) -> Vec<Visit> {
-    std::panic::catch_unwind(|| {
-        let module = if package {
-            let a = vesper::packages::load(path).ok()?;
-            if !a.ok() {
-                return None;
-            }
-            a.module
-        } else {
-            let src = std::fs::read_to_string(path).ok()?;
-            if src.len() > 1 << 20 {
-                return None;
-            }
-            let parsed = vesper::parser::parse(&src);
-            if !parsed.diagnostics.is_empty() {
-                return None;
-            }
-            parsed.module
-        };
-        SAMPLING.set((true, 0, 0));
-        let visits = optimize_module(module);
-        SAMPLING.set((false, 0, 0));
-        Some(visits)
-    })
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| {
-        SAMPLING.set((false, 0, 0));
-        take_visits();
-        vec![]
-    })
-}
-
-/// Every corpus world's visits, in corpus order, over a few worker threads.
+/// Every corpus world's visits, in corpus order (each world parsed and
+/// checked once, on a few threads; see [`map_checked_corpus`]).
 fn all_corpus_visits() -> Vec<Visit> {
-    let (files, pkgs) = corpus_paths();
-    let worlds: Vec<_> = files
-        .into_iter()
-        .map(|p| (p, false))
-        .chain(pkgs.into_iter().map(|p| (p, true)))
-        .collect();
-    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
-    let quiet = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let mut per_world: Vec<(usize, Vec<Visit>)> = std::thread::scope(|scope| {
-        let worlds = &worlds;
-        let handles: Vec<_> = (0..workers)
-            .map(|w| {
-                std::thread::Builder::new()
-                    .stack_size(256 << 20)
-                    .spawn_scoped(scope, move || {
-                        (w..worlds.len())
-                            .step_by(workers)
-                            .map(|i| (i, corpus_visits(&worlds[i].0, worlds[i].1)))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap()
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap())
-            .collect()
-    });
-    std::panic::set_hook(quiet);
-    per_world.sort_by_key(|(i, _)| *i);
-    per_world.into_iter().flat_map(|(_, v)| v).collect()
+    map_checked_corpus(|mut module, types| {
+        take_visits();
+        SAMPLING.set((true, 0, 0));
+        optimize::optimize(&mut module, types);
+        SAMPLING.set((false, 0, 0));
+        take_visits()
+    })
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// Every visit of the corpus, the fixtures and the generated islands,

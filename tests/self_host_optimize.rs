@@ -17,7 +17,7 @@ mod check_harness;
 
 use check_harness::*;
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use vesper::ast::{Arg, Expr, ExprKind, Literal, Pass, Type, TypeMap};
 use vesper::numeric::IntegerKind;
 use vesper::optimize::witness::{
@@ -48,9 +48,14 @@ struct Recorded {
     after: Spent,
 }
 
-fn records() -> &'static Mutex<Vec<Recorded>> {
-    static RECORDS: OnceLock<Mutex<Vec<Recorded>>> = OnceLock::new();
-    RECORDS.get_or_init(|| Mutex::new(Vec::new()))
+thread_local! {
+    /// This thread's proposals since the last [`take_records`]: each corpus
+    /// worker records its own, so the merged order is the corpus order.
+    static RECORDS: std::cell::RefCell<Vec<Recorded>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_records() -> Vec<Recorded> {
+    RECORDS.with(|r| std::mem::take(&mut *r.borrow_mut()))
 }
 
 /// The spans of every node of `e`.
@@ -101,11 +106,12 @@ fn recording_verify(
         spent: *spent,
     };
     let result = witness::verify_spent(source, candidate, types, certificate, limits, spent);
-    records().lock().unwrap().push(Recorded {
+    let record = Recorded {
         check,
         result,
         after: *spent,
-    });
+    };
+    RECORDS.with(|r| r.borrow_mut().push(record));
     result
 }
 
@@ -224,10 +230,10 @@ fn optimize_module(module: &vesper::ast::Module) -> usize {
     if !checked.diagnostics.is_empty() {
         return 0;
     }
-    let before = records().lock().unwrap().len();
+    let before = RECORDS.with(|r| r.borrow().len());
     let mut m = module.clone();
     optimize::optimize(&mut m, &checked.expression_types);
-    records().lock().unwrap().len() - before
+    RECORDS.with(|r| r.borrow().len()) - before
 }
 
 fn optimize_text(text: &str) -> usize {
@@ -247,14 +253,23 @@ fn proposals() -> &'static (Vec<Recorded>, [usize; 3]) {
         let start = std::time::Instant::now();
         // `OPTIMIZE_SKIP_CORPUS=1` (callgrind runs) keeps the fixtures and
         // the generated islands only.
-        let corpus_count: usize = if std::env::var_os("OPTIMIZE_SKIP_CORPUS").is_some() {
-            0
+        // Each world is parsed and checked once, on a few threads.
+        let mut all: Vec<Recorded> = if std::env::var_os("OPTIMIZE_SKIP_CORPUS").is_some() {
+            vec![]
         } else {
-            corpus().iter().map(|c| optimize_module(&c.module)).sum()
+            map_checked_corpus(|mut module, types| {
+                take_records();
+                optimize::optimize(&mut module, types);
+                take_records()
+            })
+            .into_iter()
+            .flatten()
+            .collect()
         };
+        let corpus_count = all.len();
         let fixture_count: usize = FIXTURES.iter().map(|t| optimize_text(t)).sum();
         let generated_count: usize = generated().iter().map(|t| optimize_text(t)).sum();
-        let all = std::mem::take(&mut *records().lock().unwrap());
+        all.extend(take_records());
         eprintln!("recorded the proposals in {:?}", start.elapsed());
         (all, [corpus_count, fixture_count, generated_count])
     })

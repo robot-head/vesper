@@ -213,7 +213,7 @@ E0200) each failed on this package alone.
 | E-graph driver hooks | `packages/vesper-egraph/src/run.ves`: `matches_new`, `search_rule`, `apply_one`, `guard_holds` made `pub`; `Matches::{mark, range, val}` (additive) |
 | Swap point | `src/optimize.rs`: `OptimizeTable::propose` (`Option<ProposeFn>`), `Proposal`, `Produced`, `propose_rust`; `visit` uses an installed producer with the installed gate, else runs exactly as before |
 | Candidate rebuild | `src/optimize/witness.rs`: `rebuild_candidate` (additive) |
-| Test | `tests/self_host_optimize_search.rs` (new); `tests/common/check_harness.rs` makes `corpus_paths` public |
+| Test | `tests/self_host_optimize_search.rs` (new); `tests/common/check_harness.rs` adds `map_checked_corpus`, which `tests/self_host_optimize.rs` uses too |
 | Bazel data and timeout | `BUILD.bazel` |
 
 `@vesper/egraph` is SH3 lane 8's package. The Rust producer drives egg's
@@ -250,18 +250,18 @@ capacities.
 
 | Source | Visits |
 | --- | --: |
-| every checked corpus world: every candidate and error, every 64th barrier and unchanged visit (`OPTIMIZE_SAMPLE_STEP`) | 14,590 |
+| every checked corpus world: every candidate and error, every 64th barrier and unchanged visit (`OPTIMIZE_SAMPLE_STEP`) | 15,998 |
 | the fixtures of `optimize/certificate.rs` and `adversarial_tests.rs` | 48 |
 | 600 generated islands (depth 5 and depth 8) | 1,200 |
 
 | Outcome | Visits |
 | --- | --: |
-| barrier | 12,321 |
-| unchanged | 3,089 |
-| error | 69 |
-| candidate | 359 |
+| barrier | 13,474 |
+| unchanged | 3,339 |
+| error | 70 |
+| candidate | 363 |
 
-Result: 15,742 identical, 96 different only in search order, 0
+Result: 17,146 identical, 100 different only in search order, 0
 differences. The JIT with the optimizer off gives the same answers
 (`unoptimized_agrees`).
 
@@ -277,9 +277,14 @@ with its operands swapped. That tie passes when Rust's candidate has the
 source's size. There is no egg hash-order emulation, as agreed.
 
 The whole corpus makes about 900,000 visits, nearly all barriers and
-unchanged leaves. The sample keeps the debug test at about 11 minutes: 3.5
-recording the corpus on 4 threads (each world parsed and checked once),
-and 7.5 compiling the package and answering in Vesper.
+unchanged leaves. The sample keeps the debug test at about 6 minutes on 4
+cores: 4.5 recording the corpus (`check_harness::map_checked_corpus`
+parses and checks each world once, on worker threads) and 1.5 compiling
+the package and answering in Vesper. Part 1's test now records its
+proposals the same way: 12 minutes down to under 6.
+
+The speed numbers below were taken over the 15,838 visits of the corpus
+before main grew to these 17,246.
 
 ### Numbers
 
