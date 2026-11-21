@@ -229,6 +229,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 10 (#1284): @vesper/codegen-control's session
+        # plans and handler keys against the Rust compiler on the same corpus.
+        "test/self_host_codegen_control": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -558,6 +565,8 @@ vesper_crate(
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
         "test/self_host_check_fip": "long",
+        # Loads every corpus world and runs about 1,900 session plans.
+        "test/self_host_codegen_control": "long",
     },
 )
 
