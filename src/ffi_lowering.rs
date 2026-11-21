@@ -1470,3 +1470,172 @@ fn describe_value(v: &ValueType) -> String {
         }
     }
 }
+
+/// The `.vsys` type mapping and call plans, unchanged, for the differential
+/// of their Vesper port (self-hosting SH4 lane 13, #1287,
+/// `tests/self_host_ffi_lowering.rs`). Not an API: every function calls the
+/// Rust code the compiler runs, and nothing here changes what it does.
+#[doc(hidden)]
+pub mod plan_probe {
+    use super::*;
+
+    /// How one foreign parameter maps to source (`types::ParamKind`).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Kind {
+        Value(Type),
+        Slice {
+            element: Type,
+            nullable: bool,
+            in_place: bool,
+        },
+    }
+    /// The slice-length vectors used per (library, symbol).
+    pub type SliceInstances = BTreeMap<(String, String), BTreeSet<Vec<usize>>>;
+    /// One function's source signature, or why it has none.
+    pub type Shape = Result<(Vec<(String, Pass, Kind)>, Type), String>;
+
+    /// The declarations `check_module` generates for `imports`.
+    pub struct Generated(types::Generated);
+
+    /// `types::Generated::new`.
+    pub fn generated(imports: &Imports) -> Result<Generated, FfiError> {
+        types::Generated::new(imports).map(Generated)
+    }
+
+    impl Generated {
+        /// Every function's shape, by library then symbol.
+        pub fn shapes(&self, imports: &Imports) -> Vec<(String, String, Shape)> {
+            let mut out = vec![];
+            for (library, import) in &imports.libraries {
+                for f in import.descriptor.functions() {
+                    let shape = self.0.shape(library, f).map(|s| {
+                        let params = s
+                            .params
+                            .iter()
+                            .map(|p| {
+                                let kind = match &p.kind {
+                                    ParamKind::Value(t) => Kind::Value(t.clone()),
+                                    ParamKind::Slice {
+                                        element,
+                                        nullable,
+                                        in_place,
+                                    } => Kind::Slice {
+                                        element: element.clone(),
+                                        nullable: *nullable,
+                                        in_place: *in_place,
+                                    },
+                                };
+                                (p.name.clone(), p.pass, kind)
+                            })
+                            .collect();
+                        (params, s.result.clone())
+                    });
+                    out.push((library.clone(), f.symbol().to_owned(), shape));
+                }
+            }
+            out
+        }
+        /// `types::Generated::append` onto an empty module: pass 1 with
+        /// `instances: None`, pass 2 with the slice-length vectors used per
+        /// (library, symbol).
+        pub fn declarations(
+            &self,
+            instances: Option<&SliceInstances>,
+        ) -> Vec<Item> {
+            let mut module = Module::default();
+            self.0.append(&mut module, instances);
+            module.items
+        }
+        pub fn is_handle(&self, name: &str) -> bool {
+            self.0.is_handle(name)
+        }
+        pub fn check_collisions(&self, module: &Module) -> Result<(), FfiError> {
+            self.0.check_collisions(module)
+        }
+        pub fn demangle(&self, message: &str) -> String {
+            self.0.demangle(message)
+        }
+    }
+
+    /// `types::op_name`.
+    pub fn op_name(symbol: &str, lengths: &[usize]) -> String {
+        types::op_name(symbol, lengths)
+    }
+
+    /// The slice-length marker of a source `Slice` lent in place.
+    pub const SOURCE_SLICE: usize = super::SOURCE_SLICE;
+
+    /// `slice_length`: the arity a pass-1 argument type gives a slice.
+    pub fn slice_length(
+        ty: Option<&Type>,
+        element: &Type,
+        nullable: bool,
+        in_place: bool,
+        span: &Span,
+    ) -> Result<usize, FfiError> {
+        super::slice_length(ty, element, nullable, in_place, span)
+    }
+
+    /// `target_support` of each imported library for `target`.
+    pub fn target_support(imports: &Imports, target: &str) -> Vec<(String, Result<(), FfiError>)> {
+        let triple: target_lexicon::Triple = match target.parse() {
+            Ok(t) => t,
+            Err(e) => {
+                return vec![(
+                    String::new(),
+                    Err(FfiError::new(
+                        FfiErrorKind::Codegen,
+                        format!("invalid target: {e}"),
+                        None,
+                    )),
+                )];
+            }
+        };
+        imports
+            .libraries
+            .iter()
+            .map(|(name, import)| {
+                let library = LibraryPlan {
+                    name: name.clone(),
+                    handler: import.handler,
+                    descriptor: import.descriptor.clone(),
+                };
+                (name.clone(), super::target_support(&library, &triple))
+            })
+            .collect()
+    }
+
+    /// `op_plan` of operation `op` of `effect`, with the plan
+    /// `ForeignChecked::object` installs for `target` (libraries the target
+    /// cannot call are blocked): (library, handler, symbol), or the error.
+    pub fn op_plan(
+        imports: &Imports,
+        target: Option<&str>,
+        effect: &str,
+        op: &str,
+    ) -> Result<(String, Handler, String), String> {
+        let mut plan = Plan::default();
+        for (name, import) in &imports.libraries {
+            plan.libraries.insert(
+                effect_name(name),
+                LibraryPlan {
+                    name: name.clone(),
+                    handler: import.handler,
+                    descriptor: import.descriptor.clone(),
+                },
+            );
+        }
+        if let Some(target) = target {
+            let triple: target_lexicon::Triple =
+                target.parse().map_err(|e| format!("invalid target: {e}"))?;
+            for library in plan.libraries.values() {
+                if let Err(e) = super::target_support(library, &triple) {
+                    plan.blocked.insert(library.name.clone(), e);
+                }
+            }
+        }
+        PLAN.with(|p| *p.borrow_mut() = Some(Rc::new(plan)));
+        let _guard = PlanGuard;
+        super::op_plan(effect, op).map(|p| (p.library, p.handler, p.function.symbol().to_owned()))
+    }
+}
