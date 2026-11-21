@@ -1,6 +1,7 @@
 # Rust exit, SH6 lane 15: graphics and GUI on C APIs (#1410)
 
-Part 1 of 5: the audit. Base: `main` at `ab965f2a` (2026-11-21).
+Parts 1 and 2 of 5: the audit, and the `vesper-gpu-compute` runtime in
+Vesper. Base: `main` at `ab965f2a` (2026-11-21).
 
 The four pieces this lane owns were classed "stays Rust" because they talk to
 a C library. This audit lists, for each one, what it needs from the OS or the
@@ -294,13 +295,61 @@ thread primitive.
   `Fail[RuntimeError]`, and a native entry must handle every effect. The
   probes wrap `main` in `handle Fail[..]`.
 
+## Part 2: the `vesper-gpu-compute` runtime in Vesper
+
+`crates/vesper-gpu-compute/vesper/` is a Loom package (`@vesper/gpu-compute`)
+that implements the runtime: open the device, buffers, kernels, recordings,
+submissions and timeline waits. It calls the Vulkan loader and libc
+directly, through `vk.vsys` (47 core 1.2 entry points) and `libc.vsys`
+(`calloc`, `free`, `memcpy`, `bcopy`, `memset`), with no Rust in between.
+Every create-info struct is built as a byte image in Vesper and copied
+into `calloc`ed C memory. Its offsets are the Vulkan headers' LP64 layout,
+checked with `offsetof` against the 1.3.275 headers. The package does no
+work that ash did not do: no extensions, callbacks or floats by value.
+
+- **Build switch.** The feature `vesper-port` builds the package with
+  `vesper build --lib` (`build.rs`, `vesper-port-harness`), links it and the
+  system libvulkan, and selects `src/runtime_port.rs`. That module keeps the
+  crate's public API and its ownership rules (`Arc` owners, the queue lock,
+  `busy_until`, the leak counter), and it forwards each Vulkan operation to
+  the binding (`port/binding.rs`, generated and checked by the harness).
+  Without the feature, the crate builds the Rust runtime over ash, as before.
+- **Differential.** All 23 crate tests and the 2 `vesper-kinetic-gpu` tests
+  pass against both builds on lavapipe with `VESPER_GPU_REQUIRE=1`. Under
+  `VK_LAYER_KHRONOS_validation` the Vesper build reports 0 validation
+  errors. `.github/workflows/gpu-compute.yml` now runs clippy, the tests and
+  the validation-layer run for the Vesper build as well.
+- **Speed.** `examples/runtime_bench.rs` opens a device, compiles one
+  kernel, then runs 200 rounds of: write 16 KiB, record 4 dispatches,
+  submit, wait, read back. `port/abba.py` alternates the two release
+  binaries A B B A in fresh processes. The result for 10 pairs on lavapipe
+  is Vesper/Rust = **1.034, 95% interval [0.987, 1.081]**, and both builds
+  print the same result digest. The runtime is within the 1.5x bar.
+
+### Flip-gate verdict
+
+| Module | Differential | ABBA (Vesper/Rust) | Verdict |
+|---|---|---|---|
+| `vesper-gpu-compute` runtime (`src/runtime.rs`, 1,093 lines) | 0 differences: 25 of 25 tests pass in both builds, and 0 validation-layer errors | 1.034 [0.987, 1.081] | passes the bar; **flip held back by gap 7** |
+
+The flip is held back because the Vesper build links libvulkan at link
+time. The default build has to link on macOS, Windows and the hermetic
+Bazel host, and none of them has a Vulkan loader. The Rust build `dlopen`s
+the loader and reports the device as unavailable there. Making the Vesper
+build the default needs gap 7 (an optional library, or `dlopen` plus gap
+3's calls through a function pointer). Until then the Vesper runtime is the
+tested non-default build, and `src/runtime.rs` stays. Nothing is deleted
+in this part.
+
+The rest of the crate remains Rust: `shader.rs` (naga, replaced by
+committed SPIR-V at the flip), and `tensor.rs` and `broadphase.rs`. The
+last two are host-side orchestration over the runtime and port next.
+
 ## Plan for the remaining parts
 
-1. **Part 2: `vesper-gpu-compute` in Vesper.** A Loom package
-   `crates/vesper-gpu-compute/vesper/` over a Vulkan `.vsys` and a libc
-   `.vsys`, the committed SPIR-V and manifest, and the Rust crate reduced to
-   its build script and binding (the Aura pattern, #977). The Rust tests run
-   against the Vesper build, compared with the Rust build, until the flip.
+1. **Part 2b: the rest of `vesper-gpu-compute`.** `tensor.rs` and
+   `broadphase.rs` in Vesper over the runtime, then the committed SPIR-V
+   and manifest in place of naga. The flip waits for gap 7.
 2. **Part 3: `vesper-ignis-vulkan`.** The core paths (barriers, timelines,
    formats, depth/stencil, split barriers, ranges, ownership) first, binding
    with ordinary descriptor sets. Presentation over libxcb. Sync fds and the
@@ -311,16 +360,21 @@ thread primitive.
    tiny-skia subset, with OpenType outlines and the PNG writer, under the
    seed pattern.
 5. Each flip runs the flip gate (lane 1) and updates the crate's row in
-   `scripts/rust-census.py`. Part 1 deletes nothing, so the census rows are
-   unchanged.
+   `scripts/rust-census.py`. Parts 1 and 2 delete nothing, so the census
+   rows are unchanged.
 
 ## Checks run
 
 - `cargo build --release --bin vesper` at `ab965f2a`.
+- Part 2: `cargo test -p vesper-gpu-compute -p vesper-kinetic-gpu`, with
+  and without `--features vesper-gpu-compute/vesper-port`, on lavapipe with
+  `VESPER_GPU_REQUIRE=1` (25 passed each), and again under the Khronos
+  validation layer for the Vesper build (0 validation errors).
+  `cargo +1.100.0 clippy --all-targets -D warnings` with and without the
+  feature, `cargo +1.100.0 fmt --check`, and the ABBA run above.
 - The Vulkan probe: `vesper check`, `vesper build`, and a run on lavapipe
   (Mesa 25.2.8, loader 1.3.275).
 - The GTK probe: `vesper build --link-search <dir>` and a run under Xvfb
   (GTK 4.14.5).
 - The gap repros above, each with `vesper check` or `vesper build`.
 
-Part 1 changes no code, so no Rust tests were run.
