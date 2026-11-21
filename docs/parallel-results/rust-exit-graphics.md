@@ -69,8 +69,8 @@ Vesper to call a function pointer, floats by value, or threads (gaps 1-3 and
   uploads are bytes, and `f32` data is encoded with `to_bits`.
 - `bytemuck` only casts `f32`/`u32` slices to bytes, which Vesper does with
   `to_bits` and byte writes.
-- Shaders: 11 WGSL kernels compiled with naga at run time. Tests compile only
-  the bundled kernels. `strip_workgroup_layout` post-processes the SPIR-V
+- Shaders: 11 WGSL kernels compiled with naga at run time. The runtime tests
+  also compile a few inline WGSL strings (see "Shaders" below). `strip_workgroup_layout` post-processes the SPIR-V
   words, which is plain integer work and ports directly.
 - CPU references: the tests compare with `vesper-tensor` (llama decoder,
   quant) and `vesper-kinetic` (LBVH broadphase). Both have Vesper ports under
@@ -162,16 +162,25 @@ Vesper to call a function pointer, floats by value, or threads (gaps 1-3 and
 
 ## Shaders: precompiled SPIR-V, no naga shim
 
-Every WGSL source either crate compiles is bundled in the crate, and no test
-compiles WGSL from elsewhere. The port therefore precompiles each entry point
-to SPIR-V 1.3 with the same naga version (30.0.2) and the same options, and
-checks the `.spv` files into the crate. A manifest beside them records the
-reflection data the Rust code reads from the naga module today: bindings,
-their kinds and the workgroup size. A regeneration script runs `naga-cli`
-(pinned, installed with `cargo install`; it is a development tool, not
-repository Rust). CI checks that the committed words equal what the Rust
-crate produces, until the Rust crate is deleted. No naga shim goes into
-lane 17's crate.
+Both crates compile WGSL only at known places. ignis-vulkan's tests use only
+the four bundled shaders. gpu-compute bundles 11 kernels, and its runtime
+tests add a few inline WGSL strings: an `add` kernel, an out-of-bounds
+kernel, and malformed modules that check naga's errors and the binding
+interface (`tests/runtime.rs`). The port therefore precompiles every entry
+point it runs, the inline test kernels included, to SPIR-V 1.3. It uses the
+same naga version (30.0.2), the same options and the same
+`strip_workgroup_layout` pass, and checks the words into the crate. A
+manifest beside them records what the Rust code reads from the naga module
+today: storage bindings, immediate bytes and the workgroup size. The Vesper
+runtime checks the binding interface again on the SPIR-V itself
+(`OpEntryPoint` execution model, `DescriptorSet`/`Binding` decorations,
+storage classes), so the interface error tests keep a Vesper counterpart.
+WGSL parse and validation errors are naga's own behaviour. They become
+checks of the regeneration step. That step runs `naga-cli` (pinned and
+installed with `cargo install`, a development tool rather than repository
+Rust). Until the Rust crate is deleted, CI also checks that the committed
+words equal what the Rust crate produces. No naga shim goes into lane 17's
+crate.
 
 ## Compiler gaps
 
