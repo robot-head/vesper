@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 use vesper::proof_commands::{self, LeanToolchain, Stage};
-use vesper::{check, lean, parser};
+use vesper::{check, lean};
 use vesper_fmt::{Limits, ProofLimits, format_for_verification};
 use vesper_loom_cas::{DerivationInputs, Domain, Store, blob_id};
 
@@ -1174,7 +1174,8 @@ fn contract_bindings(
 fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     let source = read_source(&options.source)?;
     let proofs = options.proofs.as_deref().map(read_source).transpose()?;
-    let parsed = parser::parse(&source);
+    let (_, parsed) = vesper::forge_frontend::parse_compiler_source(&source, false)
+        .map_err(|d| Failure::new("expand", format!("{}: {}", d.code, d.message)))?;
     if let Some(diag) = parsed.diagnostics.first() {
         return Err(Failure::new(
             "parse",

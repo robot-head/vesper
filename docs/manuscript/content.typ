@@ -1473,7 +1473,27 @@ pub fn derive_wire_hash(in schema: AdtSchema) -> Result[CstItem, MacroDiag] {
 
 User-extensible syntax usually forces a trade-off that conflicts with verified systems programming. Unstructured token-tree macros (`macro_rules!`) preserve import-free lexing at the cost of mandatory `!` call-site sigils, opaque interiors where canonical formatters bail out, and silent mutation or consumption of caller variables (`my_macro!(x)` expanding to `&mut x` or `drop(x)`). Conversely, dynamic parser-table extensions (#link("https://arxiv.org/abs/2001.10490")[Lean 4 `syntax`], Agda mixfix) couple Stage 1 parsing to transitive module imports. That coupling defeats the import-free parsing goal (#link(<ch-2-1>)[Section 2.1]), the snippet-level *Chroma* Tier 0 highlighting target (#link(<ch-20>)[Chapter 21]), and comment-preserving *Stylus* formatting (#link(<ch-18>)[Chapter 19]).
 
-Vesper proposes to address both problems through *Skeletal Enforestation* (`sugar`, Tier 0 of Vesper Forge), adapting #link("https://gopiandcode.uk/pdfs/rhombus-oopsla23.pdf")[Rhombus Shrubbery enforestation] to Vesper's LL(2) grammar and four-mode place calculus. Stylus implements import-free surface parsing and formatting of these slots using the disambiguation rules in #link(<ch-2-2>)[Section 2.2]. Forge binding, enforestation, and execution of user-defined sugar remain design proposals. The table compares the intended properties:
+Vesper proposes to address both problems through *Skeletal Enforestation* (`sugar`, Tier 0 of Vesper Forge), adapting #link("https://gopiandcode.uk/pdfs/rhombus-oopsla23.pdf")[Rhombus Shrubbery enforestation] to Vesper's LL(2) grammar and four-mode place calculus. Stylus implements import-free surface parsing and formatting of these slots using the disambiguation rules in #link(<ch-2-2>)[Section 2.2]. The compiler resolves user-defined rules and expands them to core expressions, statements, or items before type checking and execution. Modules can combine sugar with the supported expression-macro profile. For example, `vesper run` prints `42` for this module. The sugar selects the right operand and the expression macro returns it.
+
+#_compact-listing[
+```rust
+macro keep($value: expr) -> expr {
+    quote {
+        $value
+    }
+}
+sugar second: infix(`.+`, additive, left) {
+    rule ($left:expr .+ $right:expr) => {
+        keep!($right)
+    }
+}
+fn main() -> i64 {
+    10 .+ 42
+}
+```
+]
+
+The table compares the intended properties:
 
 #figure(
   table(
@@ -1628,11 +1648,13 @@ pub fn ingest_packet(
 
 `defer` binds the rest of the block as a `scope` hole rather than `stmts`. A `scope` hole is the one exit-aware mechanism `sugar` needs from the compiler: Stage 2 runs the spliced statements so that a `return`, a `break` out of the hole, or an unhandled `Fail` produces an `Exit` value instead of leaving the expansion, and `Exit::resume` then performs that exit after the template's own code has run. The cleanup therefore runs on every exit path, and a `linear` value released in `$cleanup` passes the exhaustion check on early exits too. A `stmts` hole, by contrast, runs only on fallthrough.
 
+The compiler supports the single-resume protocol shown above. Nested cleanups run in reverse order on fallthrough, explicit returns, loop exits, and concrete unlabelled `Fail` effects. It diagnoses scopes with an open effect row, a labelled `Fail`, or another potentially abortive user effect. In a function returning `Option` that also declares `Fail`, write an explicit `match` to distinguish an early return from an effect exit.
+
 
 === 7.6 Standard Library Sugar Catalog (`std/*`)
 <ch-6-std-sugar>
 
-The standard library sugars proposed here have two jobs. They move ad hoc syntax out of the compiler core, and they remove the ceremony around Vesper's substructural guardrails: `linear` unwinds, `out` slot initialization, `Region` closures, `Pulse::scope` fork-join, `@ lifo` guards, and `@0` ghost proofs. Each one expands under `[WF-SugarPass]` and `[T-SugarEffectHonesty]` (#link(<ch-6-sugar>)[Section 7.5]), so none can hide a mutation or a capability. Like the rest of `sugar`, the catalog is a design proposal; no `std` module ships these rules yet.
+The standard library sugars proposed here have two jobs. They move ad hoc syntax out of the compiler core, and they remove the ceremony around Vesper's substructural guardrails: `linear` unwinds, `out` slot initialization, `Region` closures, `Pulse::scope` fork-join, `@ lifo` guards, and `@0` ghost proofs. Each one expands under `[WF-SugarPass]` and `[T-SugarEffectHonesty]` (#link(<ch-6-sugar>)[Section 7.5]), so none can hide a mutation or a capability. The catalog remains a design proposal; no `std` module ships these rules yet.
 
 #figure(
   table(

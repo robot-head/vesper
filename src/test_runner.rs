@@ -313,8 +313,10 @@ impl TestCase {
     }
 }
 
-fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), String> {
-    let parsed = parser::parse_for_tests(source);
+fn prepare_tests(
+    source: &mut String,
+    parsed: parser::Parse,
+) -> Result<(parser::Parse, Vec<TestCase>), String> {
     if let Some(d) = parsed.diagnostics.first() {
         return Err(test_diagnostic(
             source,
@@ -424,6 +426,7 @@ fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), 
             lowered.diagnostics.len(),
         ));
     }
+    lowered.module.sugar_origins = parsed.module.sugar_origins.clone();
     let first_wrapper = parsed.module.items.len();
     for (test, index) in tests.iter().zip(first_wrapper..) {
         let wrapper = &test.wrapper;
@@ -943,7 +946,9 @@ fn checked_for_mutation(
     source: &str,
     negative: &BTreeSet<String>,
 ) -> Result<check::Checked, String> {
-    let (parsed, cases) = prepare_tests(&mut source.to_owned())?;
+    let (expanded, parsed) = vesper::forge_frontend::parse_compiler_source(source, true)
+        .map_err(|d| format!("{}: {}", d.code, d.message))?;
+    let (parsed, cases) = prepare_tests(&mut expanded.into_owned(), parsed)?;
     let world = check::check(&without_negative_tests(parsed.module, negative));
     if let Some(diagnostic) = world.diagnostics.first() {
         return Err(test_diagnostic(
@@ -1115,8 +1120,17 @@ struct TestSource {
 
 impl TestSource {
     fn prepare(display: String, source: &mut String) -> Result<(parser::Parse, Self), String> {
+        let parsed = parser::parse_for_tests(source);
+        Self::prepare_parsed(display, source, parsed)
+    }
+
+    fn prepare_parsed(
+        display: String,
+        source: &mut String,
+        parsed: parser::Parse,
+    ) -> Result<(parser::Parse, Self), String> {
         let original = source.clone();
-        let (parsed, cases) = prepare_tests(source)?;
+        let (parsed, cases) = prepare_tests(source, parsed)?;
         let tests = discover_tests(&original, &parsed.module.items, &cases)?;
         Ok((
             parsed,
@@ -1180,8 +1194,12 @@ fn test_host(imports: &Imports) -> Result<EvalHost, String> {
 
 impl TestProgram {
     fn standalone(display: String, source: String) -> Result<Self, Box<FileUnitTests>> {
-        let mut expanded = source.clone();
-        match TestSource::prepare(display.clone(), &mut expanded) {
+        let prepared = vesper::forge_frontend::parse_compiler_source(&source, true)
+            .map_err(|d| format!("{}: {}", d.code, d.message))
+            .and_then(|(text, parsed)| {
+                TestSource::prepare_parsed(display.clone(), &mut text.into_owned(), parsed)
+            });
+        match prepared {
             Ok((parsed, file)) => Ok(Self {
                 module: parsed.module,
                 files: vec![file],
@@ -1234,15 +1252,10 @@ impl TestProgram {
     fn package(target: &PackageTarget, replacement: Option<(&Path, &str)>) -> Result<Self, String> {
         let mut files = Vec::new();
         let mut found = target.file.is_none();
-        let mut parse_root = |path: &Path| {
-            let mut source = match replacement {
-                Some((replaced, text)) if path == replaced => text.to_owned(),
-                _ => read_source(path)?,
-            };
+        let mut parse_root = |path: &Path, source: &mut String| {
             if target.file.as_deref().is_some_and(|file| file != path) {
                 files.push(None);
-                let parsed = parser::parse(&source);
-                return Ok((source, parsed));
+                return Ok(parser::parse(source));
             }
             found = true;
             let display = path
@@ -1252,19 +1265,12 @@ impl TestProgram {
                 .map(|part| part.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            let (parsed, tested) = TestSource::prepare(display, &mut source)
+            let (parsed, tested) = TestSource::prepare(display, source)
                 .map_err(|error| format!("{}: {error}", path.display()))?;
             files.push(Some(tested));
-            Ok((source, parsed))
+            Ok(parsed)
         };
-        let assembled = match replacement {
-            Some(replacement) => packages::load_with_dependency_replacement(
-                &target.root,
-                &mut parse_root,
-                replacement,
-            )?,
-            None => packages::load_with_root_parser(&target.root, &mut parse_root)?,
-        };
+        let assembled = packages::load_test_sources(&target.root, replacement, &mut parse_root)?;
         if let Some((path, d)) = assembled.manifest_errors.first() {
             return Err(format!("{path}: {} {}", d.code, d.message));
         }
@@ -1285,7 +1291,7 @@ impl TestProgram {
                 let tests = root_package_files
                     .iter()
                     .position(|&id| id == index)
-                    .and_then(|i| files[i].as_ref());
+                    .and_then(|i| files.get(i)?.as_ref());
                 return Err(format!(
                     "{}: {}",
                     file.display,

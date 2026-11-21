@@ -61,7 +61,11 @@ fn macro_tokens_in_groups(syntax: &SyntaxNode) -> bool {
             && !token.parent_ancestors().any(|n| {
                 matches!(
                     n.kind(),
-                    parser::SUGAR_GROUP | parser::SUGAR_TEMPLATE | parser::SUGAR_PATTERN
+                    parser::SUGAR_GROUP
+                        | parser::SUGAR_TEMPLATE
+                        | parser::SUGAR_PATTERN
+                        | parser::SURFACE_MACRO_CALL
+                        | parser::SURFACE_MACRO_DECL
                 )
             })
         {
@@ -106,17 +110,42 @@ pub(super) fn syntax(
                 .ok_or(Error::Overflow)?,
         )?;
     }
-    let surface =
-        parser::parse_surface_with_limits(source, parse_limits()).map_err(|_| Error::TokenLimit)?;
+    // Bound validation before entering the surface parser. Bill its profile
+    // only for real macro syntax; a sugar token tree may itself spell `macro`.
+    let macro_limits = opaque
+        .then(|| macro_source::profile_limits(source, tokens, limits))
+        .transpose()?;
+    let surface = if let Some(mut macros) = macro_limits {
+        macros.max_work = macros.max_work.min(work.max - work.used);
+        parser::parse_surface_with_macro_limits(source, parse_limits(), macros)
+    } else {
+        parser::parse_surface_with_limits(source, parse_limits())
+    }
+    .map_err(|_| Error::TokenLimit)?;
+    let syntax = surface.syntax();
+    if let Some(macros) = macro_limits
+        && syntax.descendants().any(|node| {
+            matches!(
+                node.kind(),
+                parser::SURFACE_MACRO_DECL | parser::SURFACE_MACRO_CALL
+            )
+        })
+    {
+        macro_source::charge_profile(tokens, macros, work)?;
+    }
+    let has_sugar = syntax
+        .descendants()
+        .any(|n| parser::is_sugar_node(n.kind()));
     if let Some(d) = surface.diagnostics.first() {
-        if opaque {
+        // The batch macro parser skips test-only items. A mixed-module error
+        // there must not be accepted through its recovery CST.
+        if opaque && !has_sugar && !test_block {
             return Ok((macro_source::syntax(source, tokens, limits, work)?, profile));
         }
         return Err(core_error.unwrap_or(Error::Syntax {
             offset: d.span.start,
         }));
     }
-    let syntax = surface.syntax();
     let significant: Vec<_> = tokens
         .iter()
         .filter(|t| !matches!(t.kind, K::Whitespace | K::Eof))
@@ -124,7 +153,15 @@ pub(super) fn syntax(
     let ordinal = |offset: usize| significant.partition_point(|t| t.span.end <= offset);
     let nodes: Vec<_> = syntax
         .descendants()
-        .filter(|n| parser::is_sugar_node(n.kind()))
+        .filter(|n| {
+            parser::is_sugar_node(n.kind())
+                || matches!(
+                    n.kind(),
+                    parser::SURFACE_MACRO_DECL
+                        | parser::SURFACE_MACRO_CALL
+                        | parser::SURFACE_MACRO_ARG
+                )
+        })
         .map(|n| {
             let range = n.text_range();
             (
@@ -134,8 +171,13 @@ pub(super) fn syntax(
             )
         })
         .collect();
-    if opaque && (nodes.is_empty() || !macro_tokens_in_groups(&syntax)) {
-        return Ok((macro_source::syntax(source, tokens, limits, work)?, profile));
+    if opaque {
+        if !has_sugar {
+            return Ok((macro_source::syntax(source, tokens, limits, work)?, profile));
+        }
+        if !macro_tokens_in_groups(&syntax) {
+            return Err(Error::OpaqueMacro);
+        }
     }
     if nodes.is_empty()
         && let Some(error) = core_error

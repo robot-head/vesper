@@ -1331,11 +1331,12 @@ pub fn compile_source_with(
     options: &LibraryOptions<'_>,
     instances: &[Instance],
 ) -> Result<Library, ExportError> {
-    let parsed = crate::parser::parse(source);
+    let (expanded, parsed) = crate::forge_frontend::parse_compiler_source(source, false)
+        .map_err(|d| diagnostics(path, &[d], "expansion"))?;
     if !parsed.diagnostics.is_empty() {
         return Err(diagnostics(path, &parsed.diagnostics, "syntax"));
     }
-    compile_module(path, parsed.module, source, options, instances, None)
+    compile_module(path, parsed.module, &expanded, options, instances, None)
 }
 
 fn diagnostics(path: &str, ds: &[crate::ast::Diagnostic], what: &str) -> ExportError {

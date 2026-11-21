@@ -44,28 +44,41 @@ fn macro_error(error: macro_source::Error) -> Error {
     }
 }
 
+pub(super) fn profile_limits(
+    source: &str,
+    tokens: &[Token],
+    limits: Limits,
+) -> Result<macro_source::Limits, Error> {
+    Ok(macro_source::Limits {
+        max_source_bytes: limits.max_input_bytes.min(1024 * 1024),
+        max_tokens: limits.max_tokens.min(MACRO_MAX_TOKENS),
+        max_depth: limits.max_depth.min(24),
+        max_work: allowance(source, tokens)?,
+        ..Default::default()
+    })
+}
+
+pub(super) fn charge_profile(
+    tokens: &[Token],
+    profile: macro_source::Limits,
+    work: &mut Work,
+) -> Result<(), Error> {
+    if tokens.len() > profile.max_tokens {
+        return Err(Error::TokenLimit);
+    }
+    work.charge(profile.max_work)
+}
+
 pub(super) fn syntax(
     source: &str,
     tokens: &[Token],
     limits: Limits,
     work: &mut Work,
 ) -> Result<SyntaxNode, Error> {
-    if tokens.len() > limits.max_tokens.min(MACRO_MAX_TOKENS) {
-        return Err(Error::TokenLimit);
-    }
-    let stage = allowance(source, tokens)?;
-    work.charge(stage)?;
-    let parsed = macro_source::parse(
-        source,
-        macro_source::Limits {
-            max_source_bytes: limits.max_input_bytes.min(1024 * 1024),
-            max_tokens: limits.max_tokens.min(MACRO_MAX_TOKENS),
-            max_depth: limits.max_depth.min(24),
-            max_work: stage,
-            ..Default::default()
-        },
-    )
-    .map_err(macro_error)?;
+    let profile = profile_limits(source, tokens, limits)?;
+    charge_profile(tokens, profile, work)?;
+    let stage = profile.max_work;
+    let parsed = macro_source::parse(source, profile).map_err(macro_error)?;
     // A bare quote-spelled ordinary identifier is not enough to opt into a
     // profile that would otherwise permit formatting opaque payloads.
     if parsed.definitions().is_empty() {

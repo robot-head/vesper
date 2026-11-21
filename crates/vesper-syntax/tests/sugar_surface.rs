@@ -183,3 +183,29 @@ fn bracket_heads_keep_token_trees_and_indexed_header_expressions() {
             .any(|node| node.kind() == parser::SUGAR_GROUP && node.text() == "[i]")
     );
 }
+
+#[test]
+fn expression_macros_and_sugar_share_original_source_ranges() {
+    let source = "sugar inc: infix(`.+`, additive, left) { rule ($a:expr .+ $b:expr) => { keep!($a) } }\nfn f() { keep!(value .+ delta) }\nmacro keep($x:expr) -> expr { quote { $x } }";
+    let root = surface(source);
+    let call = root
+        .descendants()
+        .find(|n| n.kind() == parser::SURFACE_MACRO_CALL)
+        .unwrap();
+    assert_eq!(call.text(), "keep!(value .+ delta)");
+    let arg = call
+        .children()
+        .find(|n| n.kind() == parser::SURFACE_MACRO_ARG)
+        .unwrap();
+    assert_eq!(arg.text(), "value .+ delta");
+    assert!(arg.descendants().any(|n| n.kind() == parser::DOTTED_EXPR));
+    let decl = root
+        .descendants()
+        .find(|n| n.kind() == parser::SURFACE_MACRO_DECL)
+        .unwrap();
+    let span = decl.text_range();
+    assert_eq!(
+        &source[usize::from(span.start())..usize::from(span.end())],
+        "macro keep($x:expr) -> expr { quote { $x } }"
+    );
+}

@@ -118,3 +118,79 @@ fn test_only_items_receive_the_same_sugar_layout() {
     assert!(output.contains("tag{"), "{output}");
     assert!(output.contains("x |> process(_)"), "{output}");
 }
+
+#[test]
+fn mixed_expression_macros_keep_their_profile_and_unexpanded_sugar_arguments() {
+    let declarations =
+        "macro keep($x:expr)->expr{quote{$x}}\nsugar twice:tag{rule(twice{$x:expr})=>{keep!($x)}}";
+    let source =
+        format!("{declarations}\nfn main(){{let first=keep!(bytes\"a\");keep!(first .+ next)}}");
+    let out = formatted(&source);
+    for expected in ["keep!(bytes\"a\")", "keep!(first .+ next)", "keep!($x)"] {
+        assert!(out.contains(expected), "{out}");
+    }
+    for expr in [
+        "unknown!(bytes\"a\")",
+        "keep!(x,y)",
+        "keep!(keep!(x))",
+        "keep!(x,)",
+        "keep!{x}",
+        "keep!(1+2)",
+    ] {
+        let source = format!("{declarations}\nfn main(){{{expr}}}");
+        assert!(
+            format_source(&source, Limits::default()).is_err(),
+            "{source}"
+        );
+    }
+    let inactive = "macro keep($x:expr)->expr{quote{$x}} test {
+        sugar thing:tag{rule(thing{$x:expr})=>{$x}} fn bad(){keep!()} }";
+    assert!(format_source(inactive, Limits::default()).is_err());
+    for invalid in [
+        "macro keep($x:pat)->expr{quote{$x}}",
+        "macro keep($x:expr)->pat{quote{$x}}",
+        "macro keep($x:expr)->expr{quote{$wrong}}",
+        "macro keep($x:expr)->expr{quote{keep!($x)}}",
+        "macro keep($x:expr)->expr{quote{$x .+ x}}",
+    ] {
+        let source = format!("{invalid}\nsugar thing:tag{{rule(thing{{$x:expr}})=>{{$x}}}}");
+        assert!(
+            format_source(&source, Limits::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn macros_inside_sugar_templates_validate_names_arity_and_spliced_arguments() {
+    let prefix = "macro keep($x:expr)->expr{quote{$x}}\nsugar wrap:expr{rule(wrap $..xs:args)=>{";
+    let dynamic = format!("{prefix}keep!($..xs)}}}}");
+    assert!(formatted(&dynamic).contains("keep!($..xs)"));
+    for invalid in [
+        "unknown!($..xs)",
+        "keep!()",
+        "keep!(1,2)",
+        "keep!(keep!(1))",
+        "keep!{opaque}",
+    ] {
+        let source = format!("{prefix}{invalid}}}}}");
+        assert!(
+            format_source(&source, Limits::default()).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn expression_macro_token_budget_applies_only_to_real_macros() {
+    let raw = format!(
+        "sugar words:tag{{rule(words{{$x:expr}})=>{{macro;quote;{}}}}}",
+        "x; ".repeat(3000)
+    );
+    assert!(format_source(&raw, Limits::default()).is_ok());
+    let mixed = format!("macro keep($x:expr)->expr{{quote{{$x}}}}\n{raw}");
+    assert_eq!(
+        format_source(&mixed, Limits::default()).unwrap_err(),
+        vesper_fmt::Error::TokenLimit
+    );
+}

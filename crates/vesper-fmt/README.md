@@ -56,8 +56,10 @@ tagged literals, and pipeline and dotted operators. For example, it keeps
 groups can contain tokens that acquire their meaning when a rule is expanded.
 Formatting checks that the sugar nodes still cover the same tokens after
 reparsing. The port-backed formatter uses this shared Rust surface parser for
-sugar. Execution, rule binding and expansion are separate compiler work. The
-expression-macro profile above still requires a complete module of its own.
+both sugar and modules that mix sugar with expression-macro declarations.
+The compiler matches rules and checks their expansions when running a program.
+Stylus preserves the declarations and call sites so the formatted file can
+still be edited and compiled as written.
 See the [manuscript, sections 2.2, 7.5 and 19](../../docs/manuscript/content.typ).
 
 Default source formatting still rejects invalid or incomplete buffers. The

@@ -27,6 +27,8 @@ pub const BLOCK: SyntaxKind = SyntaxKind(205);
 pub const ERROR_NODE: SyntaxKind = SyntaxKind(206);
 pub const INCOMPLETE: SyntaxKind = SyntaxKind(207);
 mod macro_driver;
+mod surface_macro;
+pub use surface_macro::{SURFACE_MACRO_ARG, SURFACE_MACRO_CALL, SURFACE_MACRO_DECL};
 mod recovery_driver;
 mod scope;
 mod sugar_decl;
@@ -44,6 +46,8 @@ pub const SUGAR_PATTERN: SyntaxKind = SyntaxKind(214);
 pub const SUGAR_TEMPLATE: SyntaxKind = SyntaxKind(215);
 pub const SUGAR_CONTINUATION: SyntaxKind = SyntaxKind(216);
 pub const SUGAR_HOLE: SyntaxKind = SyntaxKind(217);
+/// A pattern-position sugar use, distinct from a declaration's rule pattern.
+pub const SUGAR_PAT: SyntaxKind = SyntaxKind(218);
 
 pub fn is_sugar_node(kind: SyntaxKind) -> bool {
     matches!(
@@ -58,6 +62,7 @@ pub fn is_sugar_node(kind: SyntaxKind) -> bool {
             | SUGAR_TEMPLATE
             | SUGAR_CONTINUATION
             | SUGAR_HOLE
+            | SUGAR_PAT
             | SUGAR_OPERATOR
             | PIPE_EXPR
             | DOTTED_EXPR
@@ -82,7 +87,46 @@ pub fn parse_surface_with_limits(
     source: &str,
     limits: ParseLimits,
 ) -> Result<SurfaceParse, lexer::LexLimit> {
-    let parsed = parse_module_with_limits(source, limits, true, true)?;
+    parse_surface_with_macro_limits(source, limits, surface_macro_limits(limits))
+}
+
+fn surface_macro_limits(limits: ParseLimits) -> crate::macro_source::Limits {
+    let defaults = crate::macro_source::Limits::default();
+    crate::macro_source::Limits {
+        max_source_bytes: limits
+            .max_source_bytes
+            .min(crate::macro_source::Limits::HARD.max_source_bytes),
+        max_tokens: limits
+            .max_tokens
+            .min(crate::macro_source::Limits::HARD.max_tokens),
+        max_depth: limits.max_depth.min(defaults.max_depth),
+        ..defaults
+    }
+}
+
+/// Internal syntax scopes for hygiene, including macro argument expressions.
+/// Only a subsequent strict parse provides an executable module.
+pub(crate) fn parse_expansion_scopes(
+    source: &str,
+    limits: ParseLimits,
+    include_tests: bool,
+) -> Result<Parse, lexer::LexLimit> {
+    parse_module_with_limits(
+        source,
+        limits,
+        include_tests,
+        Some(surface_macro_limits(limits)),
+    )
+}
+
+/// Parse a surface module with a separate resource budget for validating
+/// fixed-profile expression macros. Pure sugar and core modules do not consume it.
+pub fn parse_surface_with_macro_limits(
+    source: &str,
+    limits: ParseLimits,
+    macros: crate::macro_source::Limits,
+) -> Result<SurfaceParse, lexer::LexLimit> {
+    let parsed = parse_module_with_limits(source, limits, true, Some(macros))?;
     Ok(SurfaceParse {
         green: parsed.green,
         diagnostics: parsed.diagnostics,
@@ -210,7 +254,7 @@ pub fn parse_for_tests(source: &str) -> Parse {
 }
 
 fn parse_module(source: &str, include_tests: bool) -> Parse {
-    match parse_module_with_limits(source, ParseLimits::default(), include_tests, false) {
+    match parse_module_with_limits(source, ParseLimits::default(), include_tests, None) {
         Ok(parsed) => parsed,
         Err(mut limit) => {
             let retained = lexer::prefix_boundary(source, ParseLimits::default().max_source_bytes);
@@ -233,14 +277,30 @@ fn parse_module(source: &str, include_tests: bool) -> Parse {
 /// Token/diagnostic/depth exhaustion returns an empty AST and E0003 with the
 /// complete byte-bounded source preserved losslessly in balanced CST nodes.
 pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lexer::LexLimit> {
-    parse_module_with_limits(source, limits, false, false)
+    parse_module_with_limits(source, limits, false, None)
 }
 
 fn parse_module_with_limits(
     source: &str,
     limits: ParseLimits,
     include_tests: bool,
+    macros: Option<crate::macro_source::Limits>,
+) -> Result<Parse, lexer::LexLimit> {
+    parse_module_profile(source, limits, include_tests, macros.is_some(), macros)
+}
+
+/// A typed sugar hole is detached from its macro declarations. Check its
+/// grammar here; the whole-module surface pass owns macro identity and arity.
+pub(crate) fn parse_sugar_fragment(source: &str) -> Result<Parse, lexer::LexLimit> {
+    parse_module_profile(source, ParseLimits::default(), false, true, None)
+}
+
+fn parse_module_profile(
+    source: &str,
+    limits: ParseLimits,
+    include_tests: bool,
     surface: bool,
+    macros: Option<crate::macro_source::Limits>,
 ) -> Result<Parse, lexer::LexLimit> {
     let lex_limits = lexer::LexLimits {
         max_source_bytes: limits.max_source_bytes,
@@ -347,9 +407,24 @@ fn parse_module_with_limits(
     if !surface {
         lower_const_uses(&mut module);
     }
+    let green = p.builder.finish();
+    if let Some(macros) = macros
+        && p.diagnostics.is_empty()
+        && (source.contains('!') || source.contains("macro"))
+    {
+        let syntax = SyntaxNode::new_root(green.clone());
+        if let Err(error) = crate::macro_source::validate_surface(source, p.tokens, &syntax, macros)
+        {
+            p.diagnostics.push(Diagnostic::new(
+                "E0002",
+                error.to_string(),
+                error.span.unwrap_or(0..0),
+            ));
+        }
+    }
     Ok(Parse {
         module,
-        green: p.builder.finish(),
+        green,
         diagnostics: p.diagnostics,
     })
 }
@@ -978,6 +1053,10 @@ impl Parser<'_> {
     }
 
     fn item(&mut self) -> Option<Item> {
+        if self.surface && self.at_word(0, "macro") && self.nth(2) == K::LParen {
+            self.surface_macro_decl();
+            return None;
+        }
         if self.surface
             && (self.at_word(0, "sugar")
                 || (self.at_word(0, "pub") && self.at_word(1, "sugar"))
@@ -3087,6 +3166,7 @@ impl Parser<'_> {
                     );
                     ExprKind::Name(self.bump())
                 }
+                K::Lower if self.surface && self.nth(1) == K::Bang => self.surface_macro_call(),
                 _ if self.at_tagged_literal() => self.tagged_literal(),
                 _ if self.at_path_root() => {
                     // `self::m::f`, `super::m::T { .. }`, `@scope/name::m::E::V`.
@@ -3313,7 +3393,10 @@ impl Parser<'_> {
         self.builder.start_node(PATTERN);
         let start = self.start();
         let negative = self.eat(K::Minus);
-        let kind = if let Some(l) = self.literal() {
+        let kind = if !negative && self.surface && self.at_pattern_phrase() {
+            self.pattern_phrase();
+            PatternKind::Wild
+        } else if let Some(l) = self.literal() {
             PatternKind::Literal(if negative {
                 match l {
                     Literal::Int(n) => Literal::Int(-n),

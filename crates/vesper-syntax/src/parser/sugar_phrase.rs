@@ -110,6 +110,60 @@ impl Parser<'_> {
         }
     }
 
+    /// A lowercase core pattern is already complete after its identifier.
+    /// Additional pattern operands, an argument list, or a spaced token group
+    /// select a surface pattern; delimiters such as `in` or `=>` belong to
+    /// the surrounding loop or arm.
+    pub(super) fn at_pattern_phrase(&self) -> bool {
+        if self.no_struct || !head_word(self.kind()) || self.at_word(0, "_") {
+            return false;
+        }
+        match self.nth(1) {
+            K::LBrace | K::String => {
+                self.tokens[self.index(0)].span.end < self.tokens[self.index(1)].span.start
+            }
+            k => {
+                head_word(k)
+                    || matches!(
+                        k,
+                        K::Upper | K::LParen | K::Int | K::Float | K::True | K::False
+                    )
+            }
+        }
+    }
+
+    pub(super) fn pattern_phrase(&mut self) {
+        self.trivia();
+        self.builder.start_node(SUGAR_PAT);
+        self.bump();
+        loop {
+            match self.kind() {
+                K::LBrace => {
+                    self.sugar_group();
+                    break;
+                }
+                K::LParen => {
+                    self.bump();
+                    self.pattern_list(K::RParen);
+                    self.expect(K::RParen);
+                }
+                k if head_word(k)
+                    || matches!(
+                        k,
+                        K::Upper | K::Int | K::Float | K::String | K::True | K::False | K::Minus
+                    ) =>
+                {
+                    let outer = self.no_struct;
+                    self.no_struct = true;
+                    self.pattern();
+                    self.no_struct = outer;
+                }
+                _ => break,
+            }
+        }
+        self.builder.finish_node();
+    }
+
     pub(super) fn sugar_group(&mut self) {
         let Some(end) = closing(self.kind()) else {
             self.error("expected a sugar token group");

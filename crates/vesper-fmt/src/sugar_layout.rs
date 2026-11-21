@@ -97,7 +97,13 @@ impl Layout<'_, '_> {
                         self.join(i + 1, Gap::Space);
                     }
                 }
-                K::LBrace | K::String if i > range.start && prev == Some(K::Lower) => {
+                K::LBrace | K::String
+                    if i > range.start
+                        && matches!(
+                            prev,
+                            Some(K::Lower | K::State | K::With | K::Eff | K::Linear)
+                        ) =>
+                {
                     let gap = if self.atoms[i].glued {
                         Gap::None
                     } else {

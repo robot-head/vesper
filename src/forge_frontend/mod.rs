@@ -3,11 +3,16 @@
 pub mod authority;
 pub mod lower;
 pub mod provenance;
+mod sugar;
+pub use sugar::{
+    CompilerInput, check_compiler_source, original_diagnostic, parse_compiler_input,
+    parse_compiler_source, parse_expanded_sugar,
+};
 
 use crate::{
     ast::{Diagnostic, Item, Span},
     ir, ir_check,
-    tooling::frontend::{AnalysisFailure, AnalysisLimits, CheckedSource, check_source},
+    tooling::frontend::{AnalysisFailure, AnalysisLimits, CheckedSource, check_source_with_sugar},
 };
 use authority::{AuthorityLimits, SourceBindings};
 use lower::{LowerLimits, LoweredBody, SegmentOrigin};
@@ -698,6 +703,32 @@ pub fn expand_source(
             "source macro input byte limit exceeded",
         ));
     }
+    // The existing Forge grammar has its own diagnostics and resource stages.
+    // Only modules declaring sugar need preprocessing at this entry point.
+    let expanded = if source.contains("sugar") {
+        vesper_syntax::sugar_expand::expand_sugar_mapped(source).map_err(|d| {
+            let mut error = failure(Stage::Expand, &d.message);
+            error.diagnostics.push(d);
+            error
+        })?
+    } else {
+        None
+    };
+    let input = expanded
+        .as_ref()
+        .map_or(std::borrow::Cow::Borrowed(source), |e| {
+            sugar::macro_test_input(&e.source, false)
+        });
+    compile_macros(&input, config, limits, expanded.as_ref(), Some(source))
+}
+
+fn compile_macros(
+    source: &str,
+    config: &CompileConfig,
+    limits: CompileLimits,
+    sugar: Option<&vesper_syntax::sugar_expand::ExpandedSugar>,
+    original: Option<&str>,
+) -> Result<ExpandedChecked, CompileFailure> {
     let mut total = Work {
         remaining: limits.max_work,
     };
@@ -881,12 +912,26 @@ pub fn expand_source(
         generated,
     } = render(&parsed, &bodies, &origins, limits, &mut overhead)?;
     total.reserve()?; // complete normal frontend/nominal/type checking allowance
-    let checked = check_source(
+    let regions = match sugar {
+        Some(expansion) => sugar::project_regions(&expansion.regions, &map, &mut overhead)?,
+        None => vec![],
+    };
+    let source_document = original.unwrap_or(source);
+    let map = if let (Some(sugar), Some(original)) = (sugar, original) {
+        for site in origins.values_mut() {
+            site.span = sugar.original_span(site.span.clone());
+        }
+        sugar::compose_maps(sugar, &map, original, &expanded, limits, &mut overhead)?
+    } else {
+        map
+    };
+    let checked = check_source_with_sugar(
         &expanded,
         AnalysisLimits {
             max_source_bytes: limits.max_expanded_bytes,
             ..Default::default()
         },
+        regions,
     )
     .map_err(|error| {
         let stage = match &error {
@@ -897,7 +942,17 @@ pub fn expand_source(
         CompileFailure {
             stage,
             message: error.to_string(),
-            origins: provenance::diagnostic_origins(&map, error.diagnostics()),
+            origins: error
+                .diagnostics()
+                .iter()
+                .map(|d| {
+                    if matches!(d.code.as_str(), "E0143" | "E0144") {
+                        None
+                    } else {
+                        provenance::origin_of(&map, &d.span)
+                    }
+                })
+                .collect(),
             diagnostics: error.diagnostics().to_vec(),
             expanded_source: Some(Arc::clone(&expanded)),
         }
@@ -1006,7 +1061,7 @@ pub fn expand_source(
     }
     let provenance = build_provenance(
         &config.package,
-        source,
+        source_document,
         &expanded,
         &origins,
         generated,
@@ -1015,8 +1070,12 @@ pub fn expand_source(
     )?;
     encoded_size(&provenance, limits.max_metadata_bytes)?;
     Ok(ExpandedChecked {
-        original: Arc::from(source),
-        original_hash: parsed.source_hash(),
+        original: Arc::from(source_document),
+        original_hash: if sugar.is_some() && original.is_some() {
+            *blake3::hash(source_document.as_bytes()).as_bytes()
+        } else {
+            parsed.source_hash()
+        },
         package: config.package.clone(),
         checked,
         program,
