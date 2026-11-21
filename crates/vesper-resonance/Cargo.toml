@@ -2,6 +2,7 @@
 name = "vesper-resonance"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Resonance (design §32): transitive realtime confinement, delay-compensated DSP graphs, wait-free SPSC retirement and realtime kernels"
 publish = false
 build = "build.rs"

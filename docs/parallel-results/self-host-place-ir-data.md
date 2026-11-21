@@ -71,9 +71,51 @@ subtract encode + decode (about 1.1x of lowering here) from its pass time,
 and the ABI v4 tree input (docs/parallel-results/self-host-tree-abi.md) is
 how that cost goes away.
 
-The tests default to every fourth world (`PLACE_IR_STEP`, 432 programs),
+The tests default to every fourth world (`PLACE_IR_STEP`, 432 programs; the
+pass harness test takes every sixteenth of those),
 because running the passes over the whole corpus takes over half an hour in a
 debug build. `PLACE_IR_STEP=1` runs every world (the numbers above).
+
+### Instruction counts (callgrind)
+
+Here the swap is measured in instructions over every tenth corpus world, at the
+`lower` boundary: 31 worlds and 1.9 M output words (`PLACE_IR_STEP=10`). The
+measurement is the ignored test `place_ir_callgrind` in an optimized test
+build (`--profile port-compiler`). It runs one phase per process under
+`--instr-atstart=no`. The driver turns instrumentation on
+(`callgrind_control -i on`) only after the setup, which loads the corpus and
+compiles the package, and then creates the `PLACE_IR_GO` file:
+
+```sh
+PLACE_IR_PHASE=$ph PLACE_IR_STEP=10 PLACE_IR_GO=$go valgrind --tool=callgrind \
+  --instr-atstart=no [--toggle-collect='*place_ir_measured*'] \
+  <self_host_place_ir test binary> --ignored --exact place_ir_callgrind \
+  --nocapture --test-threads 1 &
+# wait for "place-ir callgrind: ready" on stderr, then
+callgrind_control -i on $!; touch $go
+```
+
+The Rust phases are counted inside the measured function
+(`--toggle-collect`). The Vesper phase runs in JIT code, where callgrind's
+function toggle sees nothing, so it is the whole run after setup minus a
+`PLACE_IR_PHASE=none` run (127.6 M Ir). Lowering and decode measured both ways
+agree within 0.1%.
+
+| Step | Ir | vs `ir::lower_world` |
+|---|--:|--:|
+| `ir::lower_world` (Rust) | 844,146,457 | 1.00x |
+| Encode world + program (Rust) | 1,119,033,067 | 1.33x |
+| Vesper read + write | 200,354,139 | 0.24x |
+| Decode (Rust) | 363,326,516 | 0.43x |
+| Whole swap (encode + Vesper + decode) | 1,682,713,722 | 1.99x |
+
+The instruction counts tell the same story as the wall clock, at a higher
+level. The Vesper tables are cheap, and the Rust word encoding is the cost,
+mostly the world section that check-data reads first. On this input a
+Vesper IR pass pays about 2x a lowering in instructions before it does any
+work. That overhead is the boundary's, not the pass's. Removing it is the
+job of the ABI v4 tree input, or of passes that stay in Vesper tables
+between each other instead of round-tripping every pass.
 
 ## Stage 1 guard
 
@@ -95,12 +137,32 @@ works around:
 - check-data's type literal is a sign and a 64-bit magnitude, so a program
   with a wider literal type would stay in Rust (none in the corpus).
 
+## Part 2: the pass harness and the hybrid identity hooks
+
+- `ir_words::compare_pass(world, input, rust, vesper)`: the harness lanes
+  9-13 call with their pass. It runs the Rust pass and the Vesper pass (input
+  bytes to `put_program` words) on the same input and compares the outputs'
+  canonical dumps, `Debug` equality and, below `IR_CHECK_CAP` (20,000)
+  instructions, `ir_check::validate` on each. (One inlined package took the
+  IR check 247 s, hence the cap.) `through_vesper` and `program_only_input`
+  are the building blocks (a pass without a world, like hoisting, gets an
+  empty world section).
+- `tests/self_host_place_ir.rs` `pass_harness_agrees_on_identity_and_catches_a_pass`:
+  the identity on both sides agrees, and `ir_opt` against the identity is
+  caught (it differs on the worlds it changes).
+- `tests/self_host_place_ir_jit.rs`: every corpus `main` through the native
+  JIT with optimize on and off, in two child processes: Rust passes, and
+  `ir_swap` identity hooks that send the program through `@vesper/place-ir`
+  after every pass (lowering, `ir_opt`, the inliner, hoisting). 352 runs
+  (176 mains, 286 returning a value) give the same results.
+- The hybrid build installs the same identity hooks
+  (`crates/vesper-hybrid/modules/place_ir`, `VESPER_IR_PASSES` in
+  src/hybrid.rs). The hybrid differential harness (538 files x check / IR /
+  object) finds 0 differences against the default compiler, and
+  `VESPER_HYBRID_STATS=1` counts the round trips. Lanes 9-13 replace a hook
+  with their Vesper pass. No divergent feature was added for this module:
+  the pass harness's `ir_opt` check covers that the comparison can fail.
+
 ## What is left
 
-- Part 2: the pass harness (a Rust pass and a Vesper pass on the same
-  input, comparing the dump and decoded words, `@vesper/ir-check` on the
-  Vesper output, and JIT runs with optimize on and off), the hybrid
-  `place_ir` module with an identity hook installed through `ir_swap`
-  (proving the round trip inside `vesper check`/`build` over the hybrid
-  differential corpus), and callgrind numbers.
 - Structured payload kinds when a lane needs to make new operations.

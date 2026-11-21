@@ -1,0 +1,200 @@
+// Decision text: numbers, block lists, 128-bit constants, and byte keys
+// compared and sorted the way Rust orders `String`s.
+
+use self::fun::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+pub fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+pub fn put_bool(inout o: ChunkSeq[u8], b: bool) {
+    if b {
+        put(inout o, "true");
+    } else {
+        put(inout o, "false");
+    }
+}
+
+// The decimal digits of the 128-bit magnitude (hi, lo).
+pub fn put_u128(inout o: ChunkSeq[u8], lo: u64, hi: u64) {
+    if hi == 0 {
+        put_u64(inout o, lo);
+        return;
+    }
+    // Long division by 10 on 32-bit limbs.
+    let mut limbs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    limbs.push(hi >> 32);
+    limbs.push(hi & 4294967295);
+    limbs.push(lo >> 32);
+    limbs.push(lo & 4294967295);
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    loop {
+        let mut zero = true;
+        for i in 0..4 {
+            if u64_at(in limbs, i) != 0 {
+                zero = false;
+            }
+        }
+        if zero {
+            break;
+        }
+        let mut rem: u64 = 0;
+        for i in 0..4 {
+            let cur = wrapping_add(wrapping_shl_u64(rem, 32), u64_at(in limbs, i));
+            let ok = limbs.try_set(i, cur / 10);
+            rem = cur % 10;
+        }
+        digits.push(wrapping_u8(wrapping_add(rem, 48)));
+    }
+    let mut k = digits.len();
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+        o.push(u8_at(in digits, k));
+    }
+}
+
+// A signed 128-bit constant: `-` when `neg`.
+pub fn put_i128(inout o: ChunkSeq[u8], neg: bool, lo: u64, hi: u64) {
+    if neg {
+        o.push(45);
+    }
+    put_u128(inout o, lo, hi);
+}
+
+// `a,b,c`.
+pub fn put_blocks(inout o: ChunkSeq[u8], in s: ChunkSeq[u32]) {
+    for i in 0..s.len() {
+        if i > 0 {
+            o.push(44);
+        }
+        put_u64(inout o, w(u32_at(in s, i)));
+    }
+}
+
+// Byte keys: key k is bytes[starts[k]..starts[k]+lens[k]].
+pub struct Keys {
+    bytes: ChunkSeq[u8],
+    starts: ChunkSeq[u64],
+    lens: ChunkSeq[u64],
+}
+
+pub fn keys_new() -> Keys {
+    Keys {
+        bytes: ChunkSeq::new[u8](),
+        starts: ChunkSeq::new[u64](),
+        lens: ChunkSeq::new[u64]()
+    }
+}
+
+impl Keys {
+    pub fn count(in self) -> u64 {
+        self.starts.len()
+    }
+
+    // Adds `key` and returns its index.
+    pub fn add_key(inout self, in key: ChunkSeq[u8]) -> u64 {
+        let k = self.starts.len();
+        self.starts.push(self.bytes.len());
+        self.lens.push(key.len());
+        for i in 0..key.len() {
+            self.bytes.push(u8_at(in key, i));
+        }
+        k
+    }
+
+    pub fn put_key(in self, k: u64, inout o: ChunkSeq[u8]) {
+        let a = u64_at(in self.starts, k);
+        for i in 0..u64_at(in self.lens, k) {
+            o.push(u8_at(in self.bytes, add(a, i)));
+        }
+    }
+
+    // -1, 0 or 1: key `a` against key `b`, bytewise, a proper prefix first.
+    pub fn cmp(in self, a: u64, b: u64) -> i64 {
+        let sa = u64_at(in self.starts, a);
+        let sb = u64_at(in self.starts, b);
+        let la = u64_at(in self.lens, a);
+        let lb = u64_at(in self.lens, b);
+        let n = if la < lb {
+            la
+        } else {
+            lb
+        };
+        for i in 0..n {
+            let x = u8_at(in self.bytes, add(sa, i));
+            let y = u8_at(in self.bytes, add(sb, i));
+            if x < y {
+                return -1;
+            }
+            if x > y {
+                return 1;
+            }
+        }
+        if la < lb {
+            return -1;
+        }
+        if la > lb {
+            return 1;
+        }
+        0
+    }
+
+    // Whether key `a` spells `s`.
+    pub fn equals(in self, a: u64, in s: ChunkSeq[u8]) -> bool {
+        let sa = u64_at(in self.starts, a);
+        if u64_at(in self.lens, a) != s.len() {
+            return false;
+        }
+        for i in 0..s.len() {
+            if u8_at(in self.bytes, add(sa, i)) != u8_at(in s, i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // The key indices in ascending key order (stable).
+    pub fn sorted(in self) -> ChunkSeq[u32] {
+        let mut order: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for k in 0..self.starts.len() {
+            order.push(n32(k));
+        }
+        // Insertion sort: the lists here are a loop's receivers or a form's
+        // few terms.
+        for i in 1..order.len() {
+            let x = u32_at(in order, i);
+            let mut j = i;
+            loop {
+                if j == 0 {
+                    break;
+                }
+                let y = u32_at(in order, wrapping_sub(j, 1));
+                if self.cmp(w(y), w(x)) <= 0 {
+                    break;
+                }
+                let ok = order.try_set(j, y);
+                j = wrapping_sub(j, 1);
+            }
+            let ok = order.try_set(j, x);
+        }
+        order
+    }
+}

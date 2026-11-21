@@ -1,32 +1,31 @@
-// Copy only the selected source, preserving its original whitespace.
 const themeButton = document.getElementById('theme-toggle');
 themeButton.addEventListener('change', () => {
   const theme = themeButton.checked ? 'dawn' : 'dusk';
   document.documentElement.dataset.vesperTheme = theme;
-  document.querySelector('meta[name="theme-color"]').content = theme === 'dusk' ? '#0B0E17' : '#F2EFE9';
+  document.querySelector('meta[name="theme-color"]').content = theme === 'dusk' ? '#101111' : '#f7f5f0';
   for (const mark of document.querySelectorAll('[data-brand-mark]')) {
-    const markTheme = mark.closest('footer, .app') ? 'dusk' : theme;
-    mark.src = `brand/vesper-mark-${markTheme}.svg`;
+    mark.src = mark.src.replace(/vesper-mark-(?:dusk|dawn)\.svg$/, `vesper-mark-${theme}.svg`);
   }
 });
 
 for (const button of document.querySelectorAll('[data-copy]')) {
+  const originalLabel = button.textContent;
   button.addEventListener('click', async () => {
     const target = document.getElementById(button.dataset.copy);
     const source = target.querySelector('code')?.textContent ?? target.textContent;
     try {
       await navigator.clipboard.writeText(source);
       button.textContent = 'Copied';
-      document.getElementById('copy-status').textContent = 'Source copied to clipboard.';
+      document.getElementById('copy-status').textContent = 'Copied to clipboard.';
     } catch {
-      button.textContent = 'Select source';
+      button.textContent = 'Text selected';
       const range = document.createRange();
       range.selectNodeContents(target);
       const selection = window.getSelection();
       selection.removeAllRanges();
       selection.addRange(range);
-      document.getElementById('copy-status').textContent = 'Source selected. Use your keyboard to copy it.';
+      document.getElementById('copy-status').textContent = 'Clipboard unavailable. The text is selected. Press Ctrl+C or Command+C to copy it.';
     }
-    setTimeout(() => { button.textContent = 'Copy source'; }, 2200);
+    setTimeout(() => { button.textContent = originalLabel; }, 2200);
   });
 }

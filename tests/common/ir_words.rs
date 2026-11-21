@@ -803,7 +803,7 @@ impl Tables {
         out
     }
 
-    fn label_names(&mut self) {
+    pub fn label_names(&mut self) {
         let labels: Vec<String> = self.pool.items.iter().map(Payload::label).collect();
         for l in labels {
             self.enc.name(&l);
@@ -884,6 +884,36 @@ pub fn program_input(w: &World, program: &Program) -> Option<(Vec<u8>, Pool)> {
     let section = t.section();
     let world = t.enc.world(w);
     Some((t.enc.finish(&world, &section), t.pool))
+}
+
+/// [`program_input`] with an empty world section, for a pass that takes
+/// no world (bounds hoisting) and for the identity round trip.
+pub fn program_only_input(program: &Program) -> Option<(Vec<u8>, Pool)> {
+    if !program.functions.values().all(function_fits) {
+        return None;
+    }
+    let mut t = Tables::of(program);
+    t.label_names();
+    let section = t.section();
+    // box_active, then empty ADT, effect, expression-type and span tables.
+    let world = [0, 0, 0, 0, 0, 0];
+    Some((t.enc.finish(&world, &section), t.pool))
+}
+
+/// `program` through a Vesper pass `call` (input bytes to output words) and
+/// back: the identity hook of the IR swap point when `call` is
+/// `place_ir_round_trip`. With `world` the input carries it; `None` when
+/// the program cannot be encoded (the caller keeps the Rust program).
+pub fn through_vesper(
+    world: Option<&World>,
+    program: &Program,
+    call: impl FnOnce(&[u8]) -> Vec<u64>,
+) -> Option<Program> {
+    let (input, pool) = match world {
+        Some(w) => program_input(w, program)?,
+        None => program_only_input(program)?,
+    };
+    Some(decode_program(&call(&input), &pool))
 }
 
 /// The words `put_program` writes, made by Rust: names, types (no world),
@@ -1717,4 +1747,89 @@ pub fn dump(program: &Program) -> String {
     let mut t = Tables::of(program);
     t.label_names();
     t.dump()
+}
+
+// ------------------------------------------------------------------ pass harness
+
+/// What [`compare_pass`] found; `None` fields agree.
+#[derive(Debug, Default)]
+pub struct PassOutcome {
+    /// The first differing line of the two outputs' canonical dumps.
+    pub dump: Option<String>,
+    /// The outputs are not `Debug`-equal (the dump can hide nothing the
+    /// words carry, so this only fires with `dump`, or on a payload).
+    pub debug: bool,
+    /// `ir_check::validate` disagrees on the two outputs.
+    pub ir_check: bool,
+    /// The input could not be encoded; nothing was compared.
+    pub skipped: bool,
+}
+
+impl PassOutcome {
+    pub fn agrees(&self) -> bool {
+        self.dump.is_none() && !self.debug && !self.ir_check
+    }
+}
+
+fn first_line_difference(a: &str, b: &str) -> Option<String> {
+    let (x, y): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
+    (0..x.len().max(y.len())).find_map(|i| {
+        let (p, q) = (x.get(i).copied(), y.get(i).copied());
+        (p != q).then(|| {
+            format!(
+                "line {}:\n  rust:   {}\n  vesper: {}",
+                i + 1,
+                p.unwrap_or("<end>"),
+                q.unwrap_or("<end>")
+            )
+        })
+    })
+}
+
+/// Programs with more instructions than this skip [`compare_pass`]'s IR
+/// check.
+pub const IR_CHECK_CAP: usize = 20_000;
+
+/// The instructions of `p`.
+pub fn instructions(p: &Program) -> usize {
+    p.functions
+        .values()
+        .flat_map(|f| &f.blocks)
+        .map(|b| b.instructions.len())
+        .sum()
+}
+
+/// The pass harness of the SH3 IR lanes: runs the Rust pass `rust` and the
+/// Vesper pass `vesper` (input bytes of [`program_input`] to the words of
+/// `put_program`) on the same `input`, and compares the outputs: their
+/// canonical dumps, `Debug` equality, and the IR check's diagnostics on
+/// each below [`IR_CHECK_CAP`] instructions (`@vesper/ir-check` runs
+/// through `ir_check::validate` in the hybrid build). JIT results go through the swap point instead
+/// (tests/self_host_place_ir_jit.rs).
+pub fn compare_pass(
+    world: &World,
+    input: &Program,
+    rust: impl FnOnce(&mut Program),
+    vesper: impl FnOnce(&[u8]) -> Vec<u64>,
+) -> PassOutcome {
+    let Some(theirs) = through_vesper(Some(world), input, vesper) else {
+        return PassOutcome {
+            skipped: true,
+            ..PassOutcome::default()
+        };
+    };
+    let mut ours = input.clone();
+    rust(&mut ours);
+    let dump = first_line_difference(&dump(&ours), &dump(&theirs));
+    let debug = format!("{ours:?}") != format!("{theirs:?}");
+    // The IR check of a large optimized package can take minutes (one
+    // inlined package: 247 s), so it runs only below the cap.
+    let ir_check = instructions(input) <= IR_CHECK_CAP
+        && vesper::ir_check::validate(world, &ours) != vesper::ir_check::validate(world, &theirs);
+    PassOutcome {
+        dump,
+        debug,
+        ir_check,
+        skipped: false,
+    }
 }

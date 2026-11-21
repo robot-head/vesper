@@ -606,20 +606,10 @@ impl ModelState {
                     (
                         name.clone(),
                         NetworkSnapshot {
-                            partitions: n.net.partitions().iter().copied().collect(),
-                            in_flight: n.net.in_flight().values().cloned().collect(),
-                            inboxes: n
-                                .net
-                                .endpoints()
-                                .iter()
-                                .map(|(e, s)| (*e, s.inbox.iter().cloned().collect()))
-                                .collect(),
-                            waiting: n
-                                .net
-                                .endpoints()
-                                .iter()
-                                .map(|(e, s)| (*e, s.waiters.iter().copied().collect()))
-                                .collect(),
+                            partitions: n.net.partitions(),
+                            in_flight: n.net.in_flight(),
+                            inboxes: n.net.inboxes(),
+                            waiting: n.net.waiting(),
                         },
                     )
                 })

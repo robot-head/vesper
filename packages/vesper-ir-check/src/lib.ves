@@ -2390,6 +2390,12 @@ impl Flow {
         let mut lpass: u8 = 255;
         let mut loan_from: u64 = 0;
         let mut loan_n: u64 = 0;
+        // Element view matches (`match s.try_get(i)`, #1221) are not
+        // ported: the encoder (`program_encodable` in
+        // tests/common/check_words.rs) refuses every world with element
+        // views, and the hybrid build runs `rust_validate` for it, so no
+        // `try_get` payload reaches this checker. Test:
+        // `element_views_stay_on_rust` in tests/hybrid_ir_check.rs.
         if i.op == OP_READ {
             let root = n32(p.op(a));
             let read_pass = wrapping_u8(p.op(inc(a)));

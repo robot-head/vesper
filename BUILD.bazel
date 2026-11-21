@@ -184,6 +184,12 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Loops, atomics and the stack bound (SH2 lane 10, #1182).
+        "test/self_host_check_loops_atomics": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH2 lane 5 (#1177): @vesper/check-layout and @vesper/ir-check over
         # the same corpus.
         "test/hybrid_layout": glob([
@@ -196,9 +202,78 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 12 (#1286): the export ABI's binding generator
+        # and directives in Vesper, over every library a port crate links
+        # (built with the vesper binary from each crate's own files).
+        "test/self_host_codegen_export": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "tests/**/*.ves",
+        ]) + [
+            "//crates/vesper-aegis:files",
+            "//crates/vesper-alloc:files",
+            "//crates/vesper-aura:files",
+            "//crates/vesper-beacon:files",
+            "//crates/vesper-bench:files",
+            "//crates/vesper-chorus:files",
+            "//crates/vesper-crucible:files",
+            "//crates/vesper-diagnostics:files",
+            "//crates/vesper-ebpf:files",
+            "//crates/vesper-flux:files",
+            "//crates/vesper-fmt:files",
+            "//crates/vesper-forge:files",
+            "//crates/vesper-grammar:files",
+            "//crates/vesper-highlight:files",
+            "//crates/vesper-hybrid:files",
+            "//crates/vesper-ignis:files",
+            "//crates/vesper-kinetic:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-lint:files",
+            "//crates/vesper-loom-audit:files",
+            "//crates/vesper-loom-calculus:files",
+            "//crates/vesper-loom-solver:files",
+            "//crates/vesper-pact:files",
+            "//crates/vesper-port-build:files",
+            "//crates/vesper-port-pilot:files",
+            "//crates/vesper-prism:files",
+            # vesper/target/ is outside :files (no **/target/** glob).
+            "//crates/vesper-prism:target_package",
+            "//crates/vesper-prism-h3:files",
+            "//crates/vesper-quarry:files",
+            "//crates/vesper-resonance:files",
+            "//crates/vesper-semver:files",
+            "//crates/vesper-serde:files",
+            "//crates/vesper-silicon:files",
+            "//crates/vesper-simpulse:files",
+            "//crates/vesper-span:files",
+            "//crates/vesper-std-driver:files",
+            "//crates/vesper-tensor:files",
+            "//crates/vesper-warp:files",
+            "//crates/vesper-warp-bbr:files",
+            "//crates/vesper-warp-tcp:files",
+            "//crates/vesper-warp-wheel:files",
+        ],
+        # SH3 lane 11 (#1250): the inliner differential on the same corpus.
+        "test/self_host_ir_inline": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH3 lane 1 (#1240): @vesper/place-ir round trips over the same
         # corpus at every native IR pass boundary.
         "test/self_host_place_ir": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        "test/self_host_place_ir_jit": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH3 lane 13 (#1252): @vesper/place-ir-lower against
+        # `ir::lower_world` over the same corpus.
+        "test/self_host_ir_lower": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -217,6 +292,20 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH3 lane 12 (#1251): bounds hoisting on the same corpus.
+        "test/self_host_bounds_hoist": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH4 lane 16 (#1290): @vesper/ebpf-backend against src/ebpf_backend
+        # over the eBPF fixtures and the corpus; the package depends on the
+        # @vesper/ebpf port in crates/vesper-ebpf/vesper.
+        "test/self_host_ebpf_backend": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["//crates/vesper-ebpf:files"],
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -231,12 +320,51 @@ vesper_crate(
             "tests/dyn_fn.rs",
         ]),
         # Self-hosting SH2 lane 6 (#1178): the package assembler over every
-        # Loom package the root package declares. Anchored globs.
+        # Loom package of the repository (anchored globs), the crate ports'
+        # included: they are most of the value enum users (#1310).
         "test/self_host_check_names_packages": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
-        ]),
+        ]) + [
+            "//crates/vesper-aegis:files",
+            "//crates/vesper-alloc:files",
+            "//crates/vesper-aura:files",
+            "//crates/vesper-beacon:files",
+            "//crates/vesper-bench:files",
+            "//crates/vesper-chorus:files",
+            "//crates/vesper-crucible:files",
+            "//crates/vesper-diagnostics:files",
+            "//crates/vesper-doc:files",
+            "//crates/vesper-ebpf:files",
+            "//crates/vesper-flux:files",
+            "//crates/vesper-fmt:files",
+            "//crates/vesper-forge:files",
+            "//crates/vesper-grammar:files",
+            "//crates/vesper-highlight:files",
+            "//crates/vesper-ignis:files",
+            "//crates/vesper-kinetic:files",
+            "//crates/vesper-lean-syntax:files",
+            "//crates/vesper-lint:files",
+            "//crates/vesper-loom-audit:files",
+            "//crates/vesper-loom-calculus:files",
+            "//crates/vesper-loom-solver:files",
+            "//crates/vesper-pact:files",
+            "//crates/vesper-port-build:files",
+            "//crates/vesper-prism:files",
+            "//crates/vesper-prism-h3:files",
+            "//crates/vesper-quarry:files",
+            "//crates/vesper-resonance:files",
+            "//crates/vesper-semver:files",
+            "//crates/vesper-serde:files",
+            "//crates/vesper-silicon:files",
+            "//crates/vesper-simpulse:files",
+            "//crates/vesper-span:files",
+            "//crates/vesper-std-driver:files",
+            "//crates/vesper-tensor:files",
+            "//crates/vesper-warp:files",
+            "//crates/vesper-warp-bbr:files",
+        ],
         # Self-hosting SH2 lane 7 (#1179): core typing on the same corpus.
         "test/self_host_check_core_typing": glob([
             "examples/**",
@@ -261,9 +389,82 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 18 (#1341): @vesper/lean-extract against
+        # lean::extract on the same corpus; it imports @vesper/lean-syntax.
+        "test/self_host_lean_extract": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+            # The Vesper programs of the Lean and tiled tests (part 2).
+            "tests/lean*.rs",
+            "tests/tiled.rs",
+        ]) + ["//crates/vesper-lean-syntax:files"],
         # Self-hosting SH3 lane 8 (#1247): @vesper/egraph against egg and
         # egglog on the same corpus. Anchored globs.
         "test/self_host_egraph": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH3 lane 9 (#1248): @vesper/ir-opt against ir_opt on
+        # the same corpus. Anchored globs.
+        "test/self_host_ir_opt": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH3 lane 10 (#1249): the optimizer's certificate
+        # checker over every proposal of the same corpus. Anchored globs.
+        "test/self_host_optimize": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Part 2: the search that produces those proposals, ported to
+        # @vesper/egraph, over the same corpus.
+        "test/self_host_optimize_search": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH5 lane 14 (#1337): @vesper/test-runner against
+        # test_discovery on the repository's .ves files, the runner's test
+        # suites and mutants. Anchored globs.
+        "test/self_host_test_runner": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/test_runner.rs",
+            "tests/anvil_cli.rs",
+            "tests/imported_source_tests.rs",
+            "tests/test_runner_cli.rs",
+        ]) + ["//crates/vesper-syntax:files"],
+        # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
+        # native_verifiers on the verifier fixtures and the corpus. Anchored
+        # globs; @vesper/resonance comes from its crate's package.
+        "test/self_host_backend_checks": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["//crates/vesper-resonance:files"],
+        # SH4 lane 5 (#1279): the native optimizer policy against
+        # ir_opt::optimize on the same corpus. Anchored globs.
+        "test/optimizer_budget": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH5 lane 9 (#1332): the policy on the wasm/emit input
+        # (ir::lower_world) against ir_opt::optimize. Anchored globs.
+        "test/optimizer_build_time": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH5 lane 8 (#1331): memoized World::mode against the original on
+        # every corpus world. Anchored globs.
+        "test/world_mode_speed": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -275,6 +476,8 @@ vesper_crate(
         "test/std_process": [":files"],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],
+        # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
+        "test/vsys_package_imports": ["//packages/vesper-cranelift:files"],
         # @vesper-std graph, intern, arena and hash (#1127) as a driver's dependencies.
         "test/std_arena": [":files"],
         "test/std_graph": [":files"],
@@ -301,6 +504,22 @@ vesper_crate(
             "//crates/vesper-pact-bridge:files",
             "//crates/vesper-sim-session:files",
         ],
+    },
+    # Sampled self-host differentials (#1376): Test all targets must finish
+    # inside BuildBuddy's one-hour limit, and these took 6-14 min each on
+    # the full corpus. Bazel checks every n-th corpus world (and fewer fuzz
+    # rounds); Cargo (`cargo test --test <name>`) still runs them whole.
+    test_env_by_target = {
+        "test/hybrid_ir_check": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_ast": {"VESPER_AST_FUZZ": "1000"},
+        "test/self_host_check_core_typing_exprs": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_loops_atomics": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_regions_seqs": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_egraph": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_front_v2": {"VESPER_FRONT_FUZZ": "1000"},
+        "test/self_host_lean_extract": {"CHECK_HARNESS_STRIDE": "4"},
+        # With its own PLACE_IR_STEP of 4: every 16th world.
+        "test/self_host_place_ir": {"CHECK_HARNESS_STRIDE": "4"},
     },
     # The sealed Logos root is a fresh external input on every CI run. Only
     # its acceptance test inherits the random path (and must rerun).
@@ -590,14 +809,27 @@ vesper_crate(
         "test/self_host_check_data": "long",
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
-        "test/self_host_place_ir": "long",
+        "test/self_host_ir_inline": "long",
+        # Four round-trip tests and the pass harness share one stage build;
+        # past 900 s on a busy runner.
+        "test/self_host_place_ir": "eternal",
+        # Builds 51 port libraries with the vesper binary.
+        "test/self_host_codegen_export": "long",
+        "test/self_host_place_ir_jit": "long",
+        "test/self_host_ir_lower": "long",
+        # The eBPF backend differential (#1290) loads every corpus world.
+        "test/self_host_ebpf_backend": "long",
         "test/self_host_codegen_seq": "long",
         "test/self_host_check_harness": "long",
+        # The loops and atomics differential (#1182) passed 900 s on loaded CI.
+        "test/self_host_check_loops_atomics": "eternal",
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
         "test/self_host_check_tensor_types": "eternal",
         # The region and sequence rules differential (#1181): ~7 min debug.
         "test/self_host_check_regions_seqs": "long",
+        # The bounds-hoist differential also passed 900 s on loaded CI.
+        "test/self_host_bounds_hoist": "eternal",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
         # The package assembler differential (#1178) compiles the AST package.
@@ -610,6 +842,25 @@ vesper_crate(
         "test/self_host_check_fip": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
+        # The ir_opt differential (#1248) runs Rust's egglog on a corpus slice;
+        # it ran past 900 s on loaded CI (unoptimized).
+        "test/self_host_ir_opt": "eternal",
+        # The Lean head differential (#1341) checks every corpus world.
+        "test/self_host_lean_extract": "long",
+        # The optimizer differential (#1249) checks every corpus world.
+        "test/self_host_optimize": "eternal",
+        "test/self_host_optimize_search": "eternal",
+        # The test runner discovery differential (#1337) JIT-compiles the port
+        # and runs the corpus and its mutants: 5-10 min in a debug build.
+        "test/self_host_test_runner": "long",
+        # The backend-checks differential emits every corpus program 4 times.
+        "test/self_host_backend_checks": "long",
+        # The optimizer policy (#1279) optimizes every corpus world three times.
+        "test/optimizer_budget": "long",
+        # The wasm/emit optimizer input (#1332) over the corpus.
+        "test/optimizer_build_time": "long",
+        # World::mode (#1331) answers every corpus query three times.
+        "test/world_mode_speed": "long",
     },
 )
 
@@ -669,6 +920,16 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# Test discovery of `vesper test` as the hybrid compiler's test_runner
+# module (self-hosting SH5 lane 14, #1337).
+vesper_package(
+    name = "test_runner_package",
+    srcs = glob(["packages/vesper-test-runner/src/**/*.ves"]),
+    manifest = "packages/vesper-test-runner/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":front_package"],
+)
+
 vesper_package(
     name = "ast_package",
     srcs = glob(["packages/vesper-ast/src/**/*.ves"]),
@@ -703,6 +964,24 @@ vesper_package(
     name = "ir_check_package",
     srcs = glob(["packages/vesper-ir-check/src/**/*.ves"]),
     manifest = "packages/vesper-ir-check/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+# Place IR tables for the hybrid compiler's place_ir module (SH3 lane 1,
+# #1240).
+vesper_package(
+    name = "place_ir_package",
+    srcs = glob(["packages/vesper-place-ir/src/**/*.ves"]),
+    manifest = "packages/vesper-place-ir/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+vesper_package(
+    name = "ir_inline_package",
+    srcs = glob(["packages/vesper-ir-inline/src/**/*.ves"]),
+    manifest = "packages/vesper-ir-inline/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
 )

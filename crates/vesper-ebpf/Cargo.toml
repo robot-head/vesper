@@ -2,6 +2,7 @@
 name = "vesper-ebpf"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper eBPF: instruction codec, pre-flight abstract verifier, BPF ELF emission, userspace interpreter and the XDP SYN-flood mitigator (design section 27)"
 publish = false
 build = "build.rs"

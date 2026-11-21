@@ -104,6 +104,82 @@ fn relative(p: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// `f` of every corpus program that parses and checks with no diagnostics
+/// (the programs of [`corpus`]), given the module and its expression types,
+/// in corpus order. Each program is parsed and checked once, on a few
+/// worker threads, and nothing is kept: for tests that need the checker's
+/// types, which [`corpus`] does not keep. A panic in parse, check or `f`
+/// skips the program.
+#[allow(dead_code)]
+pub fn map_checked_corpus<T: Send>(
+    f: impl Fn(vesper::ast::Module, &vesper::ast::TypeMap) -> T + Sync,
+) -> Vec<T> {
+    let (files, pkgs) = corpus_paths();
+    let programs: Vec<(PathBuf, bool)> = files
+        .into_iter()
+        .map(|p| (p, false))
+        .chain(pkgs.into_iter().map(|p| (p, true)))
+        .collect();
+    let one = |path: &Path, package: bool| -> Option<T> {
+        let module = if package {
+            let a = packages::load(path).ok()?;
+            if !a.ok() {
+                return None;
+            }
+            a.module
+        } else {
+            let src = std::fs::read_to_string(path).ok()?;
+            if src.len() > 1 << 20 {
+                return None;
+            }
+            let parsed = vesper::parser::parse(&src);
+            if !parsed.diagnostics.is_empty() {
+                return None;
+            }
+            parsed.module
+        };
+        let checked = check::check(&module);
+        if !checked.diagnostics.is_empty() {
+            return None;
+        }
+        Some(f(module, &checked.expression_types))
+    };
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    let quiet = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut out: Vec<(usize, T)> = std::thread::scope(|scope| {
+        let (programs, one) = (&programs, &one);
+        let handles: Vec<_> = (0..workers)
+            .map(|w| {
+                std::thread::Builder::new()
+                    .stack_size(256 << 20)
+                    .spawn_scoped(scope, move || {
+                        (w..programs.len())
+                            .step_by(workers)
+                            .filter_map(|i| {
+                                let (p, package) = &programs[i];
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    one(p, *package)
+                                }))
+                                .ok()
+                                .flatten()
+                                .map(|t| (i, t))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap()
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    std::panic::set_hook(quiet);
+    out.sort_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, t)| t).collect()
+}
+
 /// Every corpus program that parses and checks with no diagnostics, loaded
 /// once per test binary. Under Bazel the corpus is what the test's data
 /// declares (the root package's files), so its size differs from Cargo's.

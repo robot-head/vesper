@@ -5,9 +5,9 @@
 //! operators, shifts, rotations, comparisons and the bit counts are single
 //! Cranelift instructions. The overflow checks of `vesper.arith.checked/1`
 //! split the operands into 64-bit words where Cranelift has no 128-bit
-//! form (`umulhi`), and division is a loop over the dividend's bits with a
-//! one-instruction fast path when both operands fit in 64 bits: Cranelift
-//! has no 128-bit divide on x86-64 or AArch64.
+//! form (`umulhi`), and division is the word algorithm on 64-bit `udiv`
+//! ([`Codegen::wide_udivrem`]): Cranelift has no 128-bit divide on x86-64
+//! or AArch64.
 use super::*;
 use crate::integer_widths::BitOp;
 use crate::numeric::{Conversion, IntegerKind};
@@ -204,55 +204,194 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.wide_magnitude(r, na)
         })
     }
-    /// Unsigned quotient and remainder of two `I128` values, `d != 0`.
+    /// Unsigned quotient and remainder of two `I128` values, `d != 0`
+    /// (SH4 lane 3, #1277). Cranelift has no 128-bit divide on x86-64 or
+    /// AArch64, so this is the word algorithm Rust's `u128` division uses,
+    /// built on 64-bit `udiv`:
+    ///
+    /// - both operands fit in one word: one `udiv` and one `urem`;
+    /// - a one-word divisor: the high word by `udiv`, then the two-word
+    ///   remainder by 32-bit digits when the divisor is below 2^32, else
+    ///   by [`Self::wide_div_words`];
+    /// - a two-word divisor: the quotient fits in one word; estimate it from
+    ///   the normalized divisor's high word and the dividend halved
+    ///   (Hacker's Delight 9-5), which is exact or one too large.
     fn wide_udivrem(&mut self, n: ir::Value, d: ir::Value) -> (ir::Value, ir::Value) {
         let (nl, nh) = self.b.ins().isplit(n);
         let (dl, dh) = self.b.ins().isplit(d);
-        let high = self.b.ins().bor(nh, dh);
-        let small = self.b.ins().icmp_imm(IntCC::Equal, high, 0);
+        let one_word = self.b.create_block();
         let fast = self.b.create_block();
-        let slow = self.b.create_block();
-        let head = self.b.create_block();
-        let step = self.b.create_block();
+        let by_word = self.b.create_block();
+        let by_wide = self.b.create_block();
         let join = self.b.create_block();
         self.b.append_block_param(join, types::I128);
         self.b.append_block_param(join, types::I128);
-        self.branch(small, fast, &[], slow, &[]);
-        // Both operands fit in 64 bits: one `udiv` and one `urem`.
+        let wide_divisor = self.b.ins().icmp_imm(IntCC::NotEqual, dh, 0);
+        self.branch(wide_divisor, by_wide, &[], one_word, &[]);
+        self.b.switch_to_block(one_word);
+        let wide_dividend = self.b.ins().icmp_imm(IntCC::NotEqual, nh, 0);
+        self.branch(wide_dividend, by_word, &[], fast, &[]);
+        // Both operands fit in 64 bits: one `udiv`.
         self.b.switch_to_block(fast);
-        let q = self.b.ins().udiv(nl, dl);
-        let r = self.b.ins().urem(nl, dl);
+        let (q, r) = self.word_divrem(nl, dl);
         let q = self.b.ins().uextend(types::I128, q);
         let r = self.b.ins().uextend(types::I128, r);
         self.jump(join, &[q.into(), r.into()]);
-        // Restoring division, one dividend bit per iteration from the top.
-        self.b.switch_to_block(slow);
-        let zero = self.wide_const(0);
-        let start = self.b.ins().iconst(types::I64, 128);
-        self.jump(head, &[start.into(), zero.into(), zero.into()]);
-        self.b.switch_to_block(head);
-        let i = self.b.append_block_param(head, types::I64);
-        let q = self.b.append_block_param(head, types::I128);
-        let r = self.b.append_block_param(head, types::I128);
-        let done = self.b.ins().icmp_imm(IntCC::Equal, i, 0);
-        self.branch(done, join, &[q.into(), r.into()], step, &[]);
-        self.b.switch_to_block(step);
-        let i = self.b.ins().iadd_imm(i, -1);
-        let bit = self.b.ins().ushr(n, i);
-        let one = self.wide_const(1);
-        let bit = self.b.ins().band(bit, one);
-        let r = self.b.ins().ishl_imm(r, 1);
-        let r = self.b.ins().bor(r, bit);
-        let fits = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, r, d);
+        // A one-word divisor: `nh / dl`, then `(nh % dl, nl) / dl`, whose
+        // high word is below the divisor. A divisor below 2^32 (powers of
+        // ten, small radixes) divides the low word one 32-bit digit at a
+        // time with no estimate to correct.
+        self.b.switch_to_block(by_word);
+        let (qh, rh) = self.word_divrem(nh, dl);
+        let short = self.b.create_block();
+        let long = self.b.create_block();
+        let small = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThan, dl, 1i64 << 32);
+        self.branch(small, short, &[], long, &[]);
+        self.b.switch_to_block(short);
+        let digit = self.b.ins().ushr_imm(nl, 32);
+        let top = self.b.ins().ishl_imm(rh, 32);
+        let top = self.b.ins().bor(top, digit);
+        let (q1, r1) = self.word_divrem(top, dl);
+        let digit = self.b.ins().band_imm(nl, (1i64 << 32) - 1);
+        let next = self.b.ins().ishl_imm(r1, 32);
+        let next = self.b.ins().bor(next, digit);
+        let (q0, r) = self.word_divrem(next, dl);
+        let ql = self.b.ins().ishl_imm(q1, 32);
+        let ql = self.b.ins().bor(ql, q0);
+        let q = self.b.ins().iconcat(ql, qh);
+        let r = self.b.ins().uextend(types::I128, r);
+        self.jump(join, &[q.into(), r.into()]);
+        self.b.switch_to_block(long);
+        let (ql, r) = self.wide_div_words(rh, nl, dl);
+        let q = self.b.ins().iconcat(ql, qh);
+        let r = self.b.ins().uextend(types::I128, r);
+        self.jump(join, &[q.into(), r.into()]);
+        // A two-word divisor: `s` normalizes it, `v1` is its top 64 bits.
+        // `(n >> 1) / v1` has a high word below `v1`, and its quotient
+        // shifted back by `63 - s` is the quotient or one more, after the
+        // decrement below; one compare corrects it.
+        self.b.switch_to_block(by_wide);
+        let s = self.b.ins().clz(dh);
+        let up = self.b.ins().ishl(dh, s);
+        let down = self.shr_complement(dl, s);
+        let v1 = self.b.ins().bor(up, down);
+        let half = self.b.ins().ushr_imm(n, 1);
+        let (hl, hh) = self.b.ins().isplit(half);
+        let (q1, _) = self.wide_div_words(hh, hl, v1);
+        let back = self.b.ins().irsub_imm(s, 63);
+        let q0 = self.b.ins().ushr(q1, back);
+        let nonzero = self.b.ins().icmp_imm(IntCC::NotEqual, q0, 0);
+        let nonzero = self.b.ins().uextend(types::I64, nonzero);
+        let q0 = self.b.ins().isub(q0, nonzero);
+        let wq = self.b.ins().uextend(types::I128, q0);
+        let p = self.b.ins().imul(wq, d);
+        let r = self.b.ins().isub(n, p);
+        let over = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, r, d);
         let less = self.b.ins().isub(r, d);
-        let r = self.b.ins().select(fits, less, r);
-        let set = self.b.ins().ishl(one, i);
-        let with = self.b.ins().bor(q, set);
-        let q = self.b.ins().select(fits, with, q);
-        self.jump(head, &[i.into(), q.into(), r.into()]);
+        let r = self.b.ins().select(over, less, r);
+        let over = self.b.ins().uextend(types::I64, over);
+        let q0 = self.b.ins().iadd(q0, over);
+        let q = self.b.ins().uextend(types::I128, q0);
+        self.jump(join, &[q.into(), r.into()]);
         self.b.switch_to_block(join);
         let params = self.b.block_params(join);
         (params[0], params[1])
+    }
+    /// One-word quotient and remainder, `d != 0`: one `udiv`, the
+    /// remainder from the product (a second `udiv` costs tens of cycles).
+    fn word_divrem(&mut self, n: ir::Value, d: ir::Value) -> (ir::Value, ir::Value) {
+        let q = self.b.ins().udiv(n, d);
+        let p = self.b.ins().imul(q, d);
+        let r = self.b.ins().isub(n, p);
+        (q, r)
+    }
+    /// `x >> (64 - s)` for `s` in `0..64`, as 0 when `s` is 0 (a 64-bit
+    /// `ushr` takes its amount modulo 64).
+    fn shr_complement(&mut self, x: ir::Value, s: ir::Value) -> ir::Value {
+        let amount = self.b.ins().irsub_imm(s, 64);
+        let shifted = self.b.ins().ushr(x, amount);
+        let neg = self.b.ins().ineg(s);
+        let mask = self.b.ins().sshr_imm(neg, 63);
+        self.b.ins().band(shifted, mask)
+    }
+    /// Quotient and remainder of the two-word `(u1, u0)` by the one-word
+    /// `v` when `u1 < v`, so the quotient fits in one word: Knuth's
+    /// algorithm D on 32-bit digits with 64-bit `udiv` (Hacker's Delight
+    /// `divlu`, 9-3). Each quotient digit estimate is at most two too
+    /// large; the two corrections are selects, so the code is straight.
+    fn wide_div_words(
+        &mut self,
+        u1: ir::Value,
+        u0: ir::Value,
+        v: ir::Value,
+    ) -> (ir::Value, ir::Value) {
+        const DIGIT: i64 = 1 << 32;
+        const DIGIT_MASK: i64 = DIGIT - 1;
+        let s = self.b.ins().clz(v);
+        let v = self.b.ins().ishl(v, s);
+        let vn1 = self.b.ins().ushr_imm(v, 32);
+        let vn0 = self.b.ins().band_imm(v, DIGIT_MASK);
+        let up = self.b.ins().ishl(u1, s);
+        let down = self.shr_complement(u0, s);
+        let un32 = self.b.ins().bor(up, down);
+        let un10 = self.b.ins().ishl(u0, s);
+        let un1 = self.b.ins().ushr_imm(un10, 32);
+        let un0 = self.b.ins().band_imm(un10, DIGIT_MASK);
+        let q1 = self.quotient_digit(un32, un1, vn1, vn0);
+        // un21 = un32 * 2^32 + un1 - q1 * v, modulo 2^64.
+        let high = self.b.ins().ishl_imm(un32, 32);
+        let high = self.b.ins().bor(high, un1);
+        let qv = self.b.ins().imul(q1, v);
+        let un21 = self.b.ins().isub(high, qv);
+        let q0 = self.quotient_digit(un21, un0, vn1, vn0);
+        let low = self.b.ins().ishl_imm(un21, 32);
+        let low = self.b.ins().bor(low, un0);
+        let qv = self.b.ins().imul(q0, v);
+        let r = self.b.ins().isub(low, qv);
+        let r = self.b.ins().ushr(r, s);
+        let q = self.b.ins().ishl_imm(q1, 32);
+        let q = self.b.ins().bor(q, q0);
+        (q, r)
+    }
+    /// One quotient digit of [`Self::wide_div_words`]: `top / vn1`, lowered
+    /// by at most two while it is a full digit or `q * vn0` exceeds
+    /// `rhat * 2^32 + next` (the second step only while `rhat` is still
+    /// below one digit, as `divlu`'s loop).
+    fn quotient_digit(
+        &mut self,
+        top: ir::Value,
+        next: ir::Value,
+        vn1: ir::Value,
+        vn0: ir::Value,
+    ) -> ir::Value {
+        const DIGIT: i64 = 1 << 32;
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let (mut q, mut rhat) = self.word_divrem(top, vn1);
+        let mut live = None;
+        for _ in 0..2 {
+            let full = self
+                .b
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, q, DIGIT);
+            let lhs = self.b.ins().imul(q, vn0);
+            let rhs = self.b.ins().ishl_imm(rhat, 32);
+            let rhs = self.b.ins().bor(rhs, next);
+            let big = self.b.ins().icmp(IntCC::UnsignedGreaterThan, lhs, rhs);
+            let mut step = self.b.ins().bor(full, big);
+            if let Some(live) = live {
+                step = self.b.ins().band(step, live);
+            }
+            let by = self.b.ins().uextend(types::I64, step);
+            q = self.b.ins().isub(q, by);
+            let add = self.b.ins().select(step, vn1, zero);
+            rhat = self.b.ins().iadd(rhat, add);
+            let small = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, rhat, DIGIT);
+            live = Some(self.b.ins().band(step, small));
+        }
+        q
     }
     /// The nonnegative constant `v` holds, if an `iconst` defines it, as
     /// seen through the reductions `coerce` applies to a literal (`band_imm`
@@ -432,5 +571,157 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
         })
+    }
+}
+
+/// Give every tuple that holds a 128-bit element its 128-bit element type
+/// (#1270).
+///
+/// The checker types an integer literal from the binding it flows into, so
+/// in `let t: [i128; 3] = [1, 2, 5]` each element is an `i128` constant,
+/// but the tuple expression itself keeps its literal type, which defaults to
+/// `(i64, i64, i64)`. The evaluator never reads that type; native code lays
+/// the tuple out by it, so it stored three one-word elements that the
+/// binding's `[i128; 3]` layout then read as two-word ones. This pass
+/// widens the type of each `Op::Tuple` (and of the block parameters that
+/// receive one) from its operands, to a fixed point, before lowering. It
+/// only changes an element whose operand is 128-bit and whose recorded type
+/// is a narrower integer, so every other program is unchanged.
+pub(super) fn refine_wide_tuples(program: &mut crate::ir::Program) {
+    for f in program.functions.values_mut() {
+        refine_function(f);
+    }
+}
+
+fn refine_function(f: &mut crate::ir::FunctionIr) {
+    use crate::ir::{Op, Terminator};
+    // Cheap exit: nothing to refine without a 128-bit value.
+    if !f.values.values().chain(f.locals.values()).any(holds_wide) {
+        return;
+    }
+    loop {
+        let mut changed = false;
+        for b in 0..f.blocks.len() {
+            for i in 0..f.blocks[b].instructions.len() {
+                let inst = &f.blocks[b].instructions[i];
+                // A local takes its type from its initializer, so a
+                // refined tuple widens the local it binds; a whole read of
+                // the local carries the binding's checked type.
+                match &inst.op {
+                    Op::Bind { pattern, value } => {
+                        if let Some(actual) = f.values.get(value).cloned() {
+                            changed |= widen_pattern(&mut f.locals, pattern, &actual);
+                        }
+                        continue;
+                    }
+                    Op::Read {
+                        root,
+                        path,
+                        projections,
+                        ..
+                    } if path.is_empty() && projections.is_empty() => {
+                        if let Some(t) = f.locals.get(root).and_then(|d| widen(d, &inst.ty)) {
+                            f.locals.insert(root.clone(), t);
+                            changed = true;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+                let Op::Tuple(ids) = &inst.op else {
+                    continue;
+                };
+                let actual = Type::Tuple(
+                    ids.iter()
+                        .map(|id| f.values.get(id).cloned().unwrap_or(Type::Infer))
+                        .collect(),
+                );
+                if let Some(t) = widen(&inst.ty, &actual) {
+                    let dest = inst.dest;
+                    f.blocks[b].instructions[i].ty = t.clone();
+                    f.values.insert(dest, t);
+                    changed = true;
+                }
+            }
+            if let Terminator::Jump { block, args } = &f.blocks[b].terminator {
+                let (block, args) = (*block, args.clone());
+                for (param, arg) in f.blocks[block].params.clone().into_iter().zip(args) {
+                    let (Some(declared), Some(actual)) = (f.values.get(&param), f.values.get(&arg))
+                    else {
+                        continue;
+                    };
+                    if let Some(t) = widen(declared, actual) {
+                        f.values.insert(param, t);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            return;
+        }
+    }
+}
+
+/// Widen the locals that `pattern` binds from the bound value's `actual`
+/// type; whether any changed.
+fn widen_pattern(
+    locals: &mut std::collections::BTreeMap<String, Type>,
+    pattern: &Pattern,
+    actual: &Type,
+) -> bool {
+    match (&pattern.kind, actual) {
+        (PatternKind::Bind(name), actual) => {
+            match locals.get(name).and_then(|d| widen(d, actual)) {
+                Some(t) => {
+                    locals.insert(name.clone(), t);
+                    true
+                }
+                None => false,
+            }
+        }
+        (PatternKind::Tuple(ps), Type::Tuple(ts)) if ps.len() == ts.len() => ps
+            .iter()
+            .zip(ts)
+            .fold(false, |any, (p, t)| widen_pattern(locals, p, t) | any),
+        _ => false,
+    }
+}
+
+/// Whether `t` is, or is a tuple that holds, a 128-bit integer.
+fn holds_wide(t: &Type) -> bool {
+    match t {
+        Type::Tuple(ts) => ts.iter().any(holds_wide),
+        t => is_wide(t),
+    }
+}
+
+/// `declared` with each narrower integer element that `actual` holds as a
+/// 128-bit integer replaced by it, or `None` when nothing changes.
+fn widen(declared: &Type, actual: &Type) -> Option<Type> {
+    match (declared, actual) {
+        (Type::Tuple(ds), Type::Tuple(acts)) if ds.len() == acts.len() => {
+            let mut any = false;
+            let ts = ds
+                .iter()
+                .zip(acts)
+                .map(|(d, a)| match widen(d, a) {
+                    Some(t) => {
+                        any = true;
+                        t
+                    }
+                    None => d.clone(),
+                })
+                .collect();
+            any.then_some(Type::Tuple(ts))
+        }
+        (d, a)
+            if is_wide(a)
+                && !is_wide(d)
+                && (matches!(d, Type::IntLiteral(_)) || IntegerKind::from_type(d).is_some()) =>
+        {
+            Some(a.clone())
+        }
+        _ => None,
     }
 }

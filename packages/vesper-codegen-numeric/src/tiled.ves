@@ -1,0 +1,718 @@
+// The TiledSeq runtime of AOT executables (src/tiled/aot_runtime.rs),
+// transliterated function by function: nine `vesper_tiled_*` entry points
+// and three helpers as local functions of the module, over libc and the
+// region runtime's `vesper_region_alloc` (regions.ves, defined first).
+
+// The sequence record: field offsets and size in bytes.
+const T_W: i32 = 0;
+const T_STRIDE: i32 = 8;
+const T_COLD_W: i32 = 16;
+const T_LEN: i32 = 24;
+const T_CAP: i32 = 32;
+const T_HOT_RAW: i32 = 40;
+const T_HOT_PTR: i32 = 48;
+const T_COLD_PTR: i32 = 56;
+const T_REGION_ID: i32 = 64;
+const T_CHARGED: i32 = 72;
+const T_ROW_CHARGE: i32 = 80;
+const T_HOT_BYTES: i32 = 88;
+const T_RECORD_BYTES: i64 = 96;
+
+// Exit status of an executable after a tiled fault.
+pub const TILED_FAULT_STATUS: i64 = 71;
+// The trap code after a fault call (`TrapCode::unwrap_user(1)`).
+const TILED_TRAP: u32 = 1;
+
+// Faults (the discriminants of `Fault`).
+const TF_INVALID: i64 = 0;
+const TF_BOUNDS: i64 = 1;
+const TF_MEMORY: i64 = 2;
+const TILED_FAULTS: u32 = 3;
+
+fn tiled_fault_text(i: u32) -> Str {
+    if i == 0 {
+        "invalid TiledSeq handle or width"
+    } else if i == 1 {
+        "TiledSeq index out of bounds"
+    } else {
+        "out of memory allocating TiledSeq buffer"
+    }
+}
+
+struct TiledImports {
+    malloc: FuncId,
+    realloc: FuncId,
+    free: FuncId,
+    memset: FuncId,
+    memmove: FuncId,
+    write: FuncId,
+    exit: FuncId,
+    region_alloc: FuncId,
+    fault: FuncId,
+    ensure_tiles: FuncId,
+    charge_region: FuncId,
+    messages: ChunkSeq[u32],
+    lengths: ChunkSeq[i64],
+}
+
+// `define` after the region runtime: `region_alloc` is its
+// `vesper_region_alloc`, which a second declaration of the same name finds.
+pub fn define_tiled_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    let mut messages: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut lengths: ChunkSeq[i64] = ChunkSeq::new[i64]();
+    for i in 0..TILED_FAULTS {
+        let text = rt_text(in "vesper: native tiled fault: ", in tiled_fault_text(i));
+        let name = rt_numbered(in "vesper_tiled_msg_", i);
+        match rt_message(inout m, in name.as_slice(), in text.as_slice()) {
+            Some(id) => {
+                messages.push(id.id);
+                lengths.push(wrapping_i64(text.len()));
+            },
+            None => return false,
+        }
+    }
+    let region_alloc = rt_local(inout m, in "vesper_region_alloc".as_bytes(), 2, true);
+    let im = TiledImports {
+        malloc: rt_import(inout m, in "malloc".as_bytes(), 1, true),
+        realloc: rt_import(inout m, in "realloc".as_bytes(), 2, true),
+        free: rt_import(inout m, in "free".as_bytes(), 1, false),
+        memset: rt_import(inout m, in "memset".as_bytes(), 3, true),
+        memmove: rt_import(inout m, in "memmove".as_bytes(), 3, true),
+        write: rt_import(inout m, in "write".as_bytes(), 3, true),
+        exit: rt_import(inout m, in "exit".as_bytes(), 1, false),
+        region_alloc,
+        fault: rt_local(inout m, in "vesper_tiled_fault".as_bytes(), 1, false),
+        ensure_tiles: rt_local(inout m, in "vesper_tiled_ensure_tiles".as_bytes(), 2, false),
+        charge_region: rt_local(inout m, in "vesper_tiled_charge_region".as_bytes(), 2, false),
+        messages,
+        lengths,
+    };
+    if !tl_compile(inout m, in im, im.fault, 1, false, 100) {
+        return false;
+    }
+    if !tl_compile(inout m, in im, im.charge_region, 2, false, 101) {
+        return false;
+    }
+    if !tl_compile(inout m, in im, im.ensure_tiles, 2, false, 102) {
+        return false;
+    }
+    for i in 0..9 {
+        let params = tiled_function_params(i);
+        let id = rt_local(inout m, in tiled_function_name(i).as_bytes(), params, true);
+        if !tl_compile(inout m, in im, id, params, true, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn tiled_function_name(i: u32) -> Str {
+    if i == 0 {
+        "vesper_tiled_new"
+    } else if i == 1 {
+        "vesper_tiled_len"
+    } else if i == 2 {
+        "vesper_tiled_tile_count"
+    } else if i == 3 {
+        "vesper_tiled_push_begin"
+    } else if i == 4 {
+        "vesper_tiled_hot_load"
+    } else if i == 5 {
+        "vesper_tiled_hot_store"
+    } else if i == 6 {
+        "vesper_tiled_cold_load"
+    } else if i == 7 {
+        "vesper_tiled_cold_store"
+    } else {
+        "vesper_tiled_tile_col_ptr"
+    }
+}
+fn tiled_function_params(i: u32) -> u32 {
+    if i == 0 || i == 5 {
+        5
+    } else if i == 4 || i == 7 {
+        4
+    } else if i == 6 || i == 8 {
+        3
+    } else {
+        1
+    }
+}
+
+// `compile`: a fresh function whose entry block is sealed at once; `which`
+// is 0-8 for the entry points in `define` order and 100-102 for the fault,
+// charge and ensure helpers.
+fn tl_compile(inout m: Module, in im: TiledImports, id: FuncId, params: u32, ret: bool, which: u32)
+    -> bool eff [Ffi[Cranelift]] {
+    let sig = rt_sig(inout m, params, ret);
+    let mut b = match builder_new(in m, sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let entry = rt_entry(inout b, true);
+    let a0 = block_param(inout b, entry, 0);
+    let a1 = if params > 1 {
+        block_param(inout b, entry, 1)
+    } else {
+        a0
+    };
+    let a2 = if params > 2 {
+        block_param(inout b, entry, 2)
+    } else {
+        a0
+    };
+    let a3 = if params > 3 {
+        block_param(inout b, entry, 3)
+    } else {
+        a0
+    };
+    let a4 = if params > 4 {
+        block_param(inout b, entry, 4)
+    } else {
+        a0
+    };
+    if which == 100 {
+        tl_fault(inout b, inout m, in im, a0);
+    } else if which == 101 {
+        tl_charge_region(inout b, inout m, in im, a0, a1);
+    } else if which == 102 {
+        tl_ensure_tiles(inout b, inout m, in im, a0, a1);
+    } else if which == 0 {
+        tl_new(inout b, inout m, in im, a0, a1, a2, a3, a4);
+    } else if which == 1 {
+        tl_len(inout b, inout m, in im, a0);
+    } else if which == 2 {
+        tl_tile_count(inout b, inout m, in im, a0);
+    } else if which == 3 {
+        tl_push_begin(inout b, inout m, in im, a0);
+    } else if which == 4 {
+        tl_hot_load(inout b, inout m, in im, a0, a1, a2, a3);
+    } else if which == 5 {
+        tl_hot_store(inout b, inout m, in im, a0, a1, a2, a3, a4);
+    } else if which == 6 {
+        let ptr = tl_cold_ptr(inout b, inout m, in im, a0, a1, a2);
+        let word = tl_ld(inout b, ptr, 0);
+        ins_return1(inout b, word);
+    } else if which == 7 {
+        let ptr = tl_cold_ptr(inout b, inout m, in im, a0, a1, a2);
+        ins_store(inout b, 0, a3, ptr, 0);
+        let zero = rt_k(inout b, 0);
+        ins_return1(inout b, zero);
+    } else {
+        tl_tile_col_ptr(inout b, inout m, in im, a0, a1, a2);
+    }
+    rt_finish(inout m, id, b)
+}
+
+// `load(types::I64, MemFlags::new(), p, off)` and its store.
+fn tl_ld(inout b: Builder, p: Value, off: i32) -> Value eff [Ffi[Cranelift]] {
+    ins_load(inout b, ty_i64(), 0, p, off)
+}
+fn tl_st(inout b: Builder, v: Value, p: Value, off: i32) eff [Ffi[Cranelift]] {
+    ins_store(inout b, 0, v, p, off);
+}
+fn tl_return0(inout b: Builder) eff [Ffi[Cranelift]] {
+    let nothing = no_vals();
+    ins_return(inout b, in nothing.as_slice());
+}
+
+fn tl_trigger_fault(inout b: Builder, inout m: Module, in im: TiledImports, f: i64) eff [
+    Ffi[Cranelift]
+] {
+    let code = rt_k(inout b, f);
+    let args = vals1(code);
+    rt_call(inout b, inout m, im.fault, in args.as_slice());
+    ins_trap(inout b, trap_user(TILED_TRAP));
+}
+
+fn tl_check_non_null(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    ptr: Value,
+    fault: i64
+) eff [Ffi[Cranelift]] {
+    let bad = ins_icmp_imm(inout b, cc_eq(), ptr, 0);
+    let fail = create_block(inout b);
+    let ok = create_block(inout b);
+    ins_brif0(inout b, bad, fail, ok);
+    switch_to_block(inout b, fail);
+    tl_trigger_fault(inout b, inout m, in im, fault);
+    switch_to_block(inout b, ok);
+}
+
+fn tl_fault(inout b: Builder, inout m: Module, in im: TiledImports, code: Value) eff [
+    Ffi[Cranelift]
+] {
+    let fd = rt_k(inout b, 2);
+    let done = create_block(inout b);
+    for i in 0..TILED_FAULTS {
+        let at = widen_u64(i);
+        let data = match im.messages.try_get(at) {
+            Some(x) => DataId {
+                id: x
+            },
+            None => return,
+        };
+        let len = match im.lengths.try_get(at) {
+            Some(x) => x,
+            None => return,
+        };
+        let matches = ins_icmp_imm(inout b, cc_eq(), code, widen_i64(i));
+        let hit = create_block(inout b);
+        let miss = create_block(inout b);
+        ins_brif0(inout b, matches, hit, miss);
+        switch_to_block(inout b, hit);
+        let gv = import_data(inout b, in m, data);
+        let ptr = ins_global_value(inout b, ty_i64(), gv);
+        let n = rt_k(inout b, len);
+        let args = vals3(fd, ptr, n);
+        rt_call(inout b, inout m, im.write, in args.as_slice());
+        ins_jump0(inout b, done);
+        switch_to_block(inout b, miss);
+    }
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    let status = rt_k(inout b, TILED_FAULT_STATUS);
+    let sargs = vals1(status);
+    rt_call(inout b, inout m, im.exit, in sargs.as_slice());
+    ins_trap(inout b, trap_user(TILED_TRAP));
+}
+
+fn tl_checked_mul(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    lhs: Value,
+    rhs: Value,
+    fault: i64
+) -> Value eff [Ffi[Cranelift]] {
+    let rhs_nonzero = ins_icmp_imm(inout b, cc_ne(), rhs, 0);
+    let check_blk = create_block(inout b);
+    let ok_blk = create_block(inout b);
+    ins_brif0(inout b, rhs_nonzero, check_blk, ok_blk);
+    switch_to_block(inout b, check_blk);
+    let max_u64 = rt_k(inout b, -1);
+    let limit = ins_udiv(inout b, max_u64, rhs);
+    let overflow = ins_icmp(inout b, cc_ugt(), lhs, limit);
+    let fail_blk = create_block(inout b);
+    ins_brif0(inout b, overflow, fail_blk, ok_blk);
+    switch_to_block(inout b, fail_blk);
+    tl_trigger_fault(inout b, inout m, in im, fault);
+    switch_to_block(inout b, ok_blk);
+    ins_imul(inout b, lhs, rhs)
+}
+
+// `checked_add_imm_or_fault` for `imm` = 63, the one use.
+fn tl_checked_add63(inout b: Builder, inout m: Module, in im: TiledImports, lhs: Value, fault: i64)
+    -> Value eff [Ffi[Cranelift]] {
+    // (u64::MAX - 63) as i64
+    let overflow = ins_icmp_imm(inout b, cc_ugt(), lhs, -64);
+    let fail_blk = create_block(inout b);
+    let ok_blk = create_block(inout b);
+    ins_brif0(inout b, overflow, fail_blk, ok_blk);
+    switch_to_block(inout b, fail_blk);
+    tl_trigger_fault(inout b, inout m, in im, fault);
+    switch_to_block(inout b, ok_blk);
+    ins_iadd_imm(inout b, lhs, 63)
+}
+
+fn tl_checked_shl3(inout b: Builder, inout m: Module, in im: TiledImports, val: Value, fault: i64)
+    -> Value eff [Ffi[Cranelift]] {
+    // (u64::MAX >> 3) as i64
+    let overflow = ins_icmp_imm(inout b, cc_ugt(), val, 2305843009213693951);
+    let fail_blk = create_block(inout b);
+    let ok_blk = create_block(inout b);
+    ins_brif0(inout b, overflow, fail_blk, ok_blk);
+    switch_to_block(inout b, fail_blk);
+    tl_trigger_fault(inout b, inout m, in im, fault);
+    switch_to_block(inout b, ok_blk);
+    ins_ishl_imm(inout b, val, 3)
+}
+
+fn tl_safe_div_ceil(inout b: Builder, n: Value, w: Value) -> Value eff [Ffi[Cranelift]] {
+    let is_zero = ins_icmp_imm(inout b, cc_eq(), n, 0);
+    let zero_blk = create_block(inout b);
+    let nz_blk = create_block(inout b);
+    let done_blk = create_block(inout b);
+    append_block_param(inout b, done_blk, ty_i64());
+    ins_brif0(inout b, is_zero, zero_blk, nz_blk);
+    switch_to_block(inout b, zero_blk);
+    let z = rt_k(inout b, 0);
+    let zargs = vals1(z);
+    ins_jump(inout b, done_blk, in zargs.as_slice());
+    switch_to_block(inout b, nz_blk);
+    let n_m1 = ins_iadd_imm(inout b, n, -1);
+    let q = ins_udiv(inout b, n_m1, w);
+    let res = ins_iadd_imm(inout b, q, 1);
+    let rargs = vals1(res);
+    ins_jump(inout b, done_blk, in rargs.as_slice());
+    switch_to_block(inout b, done_blk);
+    block_param(inout b, done_blk, 0)
+}
+
+fn tl_charge_region(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    seq: Value,
+    rows: Value
+) eff [Ffi[Cranelift]] {
+    let rid = tl_ld(inout b, seq, T_REGION_ID);
+    let no_reg = ins_icmp_imm(inout b, cc_eq(), rid, 0);
+    let done = create_block(inout b);
+    let active = create_block(inout b);
+    ins_brif0(inout b, no_reg, done, active);
+    switch_to_block(inout b, active);
+    let row_charge = tl_ld(inout b, seq, T_ROW_CHARGE);
+    let target = tl_checked_mul(inout b, inout m, in im, rows, row_charge, TF_MEMORY);
+    let charged = tl_ld(inout b, seq, T_CHARGED);
+    let need = ins_icmp(inout b, cc_ugt(), target, charged);
+    let do_alloc = create_block(inout b);
+    ins_brif0(inout b, need, do_alloc, done);
+    switch_to_block(inout b, do_alloc);
+    let delta = ins_isub(inout b, target, charged);
+    let args = vals2(rid, delta);
+    rt_call(inout b, inout m, im.region_alloc, in args.as_slice());
+    tl_st(inout b, target, seq, T_CHARGED);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    tl_return0(inout b);
+}
+
+fn tl_ensure_tiles(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    seq: Value,
+    needed: Value
+) eff [Ffi[Cranelift]] {
+    let cap = tl_ld(inout b, seq, T_CAP);
+    let ok = ins_icmp(inout b, cc_ule(), needed, cap);
+    let done = create_block(inout b);
+    let grow = create_block(inout b);
+    ins_brif0(inout b, ok, done, grow);
+    switch_to_block(inout b, grow);
+
+    let one = rt_k(inout b, 1);
+    let cap_nonzero = ins_icmp_imm(inout b, cc_ne(), cap, 0);
+    let base_cap = ins_select(inout b, cap_nonzero, cap, one);
+    // (u64::MAX >> 1) as i64
+    let half_max = rt_k(inout b, 9223372036854775807);
+    let can_double = ins_icmp(inout b, cc_ule(), base_cap, half_max);
+    let shifted = ins_ishl_imm(inout b, base_cap, 1);
+    let doubled = ins_select(inout b, can_double, shifted, needed);
+    let use_doubled = ins_icmp(inout b, cc_uge(), doubled, needed);
+    let new_tiles = ins_select(inout b, use_doubled, doubled, needed);
+
+    let stride = tl_ld(inout b, seq, T_STRIDE);
+    let new_hot_bytes = tl_checked_mul(inout b, inout m, in im, new_tiles, stride, TF_MEMORY);
+    let alloc_bytes = tl_checked_add63(inout b, inout m, in im, new_hot_bytes, TF_MEMORY);
+    let margs = vals1(alloc_bytes);
+    let new_raw = rt_call1(inout b, inout m, im.malloc, in margs.as_slice());
+    tl_check_non_null(inout b, inout m, in im, new_raw, TF_MEMORY);
+    let zero = rt_k(inout b, 0);
+    let sargs = vals3(new_raw, zero, alloc_bytes);
+    rt_call(inout b, inout m, im.memset, in sargs.as_slice());
+
+    let raw_plus = ins_iadd_imm(inout b, new_raw, 63);
+    let mask = rt_k(inout b, -64);
+    let new_aligned = ins_band(inout b, raw_plus, mask);
+
+    let old_raw = tl_ld(inout b, seq, T_HOT_RAW);
+    let old_aligned = tl_ld(inout b, seq, T_HOT_PTR);
+    let old_bytes = tl_ld(inout b, seq, T_HOT_BYTES);
+    let has_old = ins_icmp_imm(inout b, cc_ne(), old_raw, 0);
+    let copy_old = create_block(inout b);
+    let after_copy = create_block(inout b);
+    ins_brif0(inout b, has_old, copy_old, after_copy);
+    switch_to_block(inout b, copy_old);
+    let mvargs = vals3(new_aligned, old_aligned, old_bytes);
+    rt_call(inout b, inout m, im.memmove, in mvargs.as_slice());
+    let fargs = vals1(old_raw);
+    rt_call(inout b, inout m, im.free, in fargs.as_slice());
+    ins_jump0(inout b, after_copy);
+    switch_to_block(inout b, after_copy);
+
+    tl_st(inout b, new_raw, seq, T_HOT_RAW);
+    tl_st(inout b, new_aligned, seq, T_HOT_PTR);
+    tl_st(inout b, new_hot_bytes, seq, T_HOT_BYTES);
+
+    let w = tl_ld(inout b, seq, T_W);
+    let cold_w = tl_ld(inout b, seq, T_COLD_W);
+    let has_cold = ins_icmp_imm(inout b, cc_ne(), cold_w, 0);
+    let grow_cold = create_block(inout b);
+    let finish = create_block(inout b);
+    ins_brif0(inout b, has_cold, grow_cold, finish);
+    switch_to_block(inout b, grow_cold);
+    let old_rows = ins_imul(inout b, cap, w);
+    let old_cold_bytes = ins_imul(inout b, old_rows, cold_w);
+    let old_cold_bytes = ins_ishl_imm(inout b, old_cold_bytes, 3);
+    let new_rows = tl_checked_mul(inout b, inout m, in im, new_tiles, w, TF_MEMORY);
+    let new_cold_words = tl_checked_mul(inout b, inout m, in im, new_rows, cold_w, TF_MEMORY);
+    let new_cold_bytes = tl_checked_shl3(inout b, inout m, in im, new_cold_words, TF_MEMORY);
+    let old_cold = tl_ld(inout b, seq, T_COLD_PTR);
+    let rargs = vals2(old_cold, new_cold_bytes);
+    let new_cold = rt_call1(inout b, inout m, im.realloc, in rargs.as_slice());
+    tl_check_non_null(inout b, inout m, in im, new_cold, TF_MEMORY);
+    let tail = ins_iadd(inout b, new_cold, old_cold_bytes);
+    let delta_cold = ins_isub(inout b, new_cold_bytes, old_cold_bytes);
+    let targs = vals3(tail, zero, delta_cold);
+    rt_call(inout b, inout m, im.memset, in targs.as_slice());
+    tl_st(inout b, new_cold, seq, T_COLD_PTR);
+    ins_jump0(inout b, finish);
+
+    switch_to_block(inout b, finish);
+    tl_st(inout b, new_tiles, seq, T_CAP);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    tl_return0(inout b);
+}
+
+fn tl_new(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    w: Value,
+    stride: Value,
+    cold_w: Value,
+    rid: Value,
+    cap: Value
+) eff [Ffi[Cranelift]] {
+    let bad_w = ins_icmp_imm(inout b, cc_eq(), w, 0);
+    let fail = create_block(inout b);
+    let ok = create_block(inout b);
+    ins_brif0(inout b, bad_w, fail, ok);
+    switch_to_block(inout b, fail);
+    tl_trigger_fault(inout b, inout m, in im, TF_INVALID);
+    switch_to_block(inout b, ok);
+
+    let sz = rt_k(inout b, T_RECORD_BYTES);
+    let margs = vals1(sz);
+    let seq = rt_call1(inout b, inout m, im.malloc, in margs.as_slice());
+    tl_check_non_null(inout b, inout m, in im, seq, TF_MEMORY);
+    let zero = rt_k(inout b, 0);
+    let sargs = vals3(seq, zero, sz);
+    rt_call(inout b, inout m, im.memset, in sargs.as_slice());
+
+    let w_minus_1 = ins_iadd_imm(inout b, w, -1);
+    let numerator = ins_iadd(inout b, stride, w_minus_1);
+    let hot_per_row = ins_udiv(inout b, numerator, w);
+    let cold_bytes = ins_ishl_imm(inout b, cold_w, 3);
+    let sum = ins_iadd(inout b, hot_per_row, cold_bytes);
+    let eight = rt_k(inout b, 8);
+    let ge8 = ins_icmp_imm(inout b, cc_uge(), sum, 8);
+    let row_charge = ins_select(inout b, ge8, sum, eight);
+
+    tl_st(inout b, w, seq, T_W);
+    tl_st(inout b, stride, seq, T_STRIDE);
+    tl_st(inout b, cold_w, seq, T_COLD_W);
+    tl_st(inout b, rid, seq, T_REGION_ID);
+    tl_st(inout b, row_charge, seq, T_ROW_CHARGE);
+
+    let has_cap = ins_icmp_imm(inout b, cc_ne(), cap, 0);
+    let init_cap = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, has_cap, init_cap, done);
+    switch_to_block(inout b, init_cap);
+    let cargs = vals2(seq, cap);
+    rt_call(inout b, inout m, im.charge_region, in cargs.as_slice());
+    let tiles = tl_safe_div_ceil(inout b, cap, w);
+    let eargs = vals2(seq, tiles);
+    rt_call(inout b, inout m, im.ensure_tiles, in eargs.as_slice());
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    ins_return1(inout b, seq);
+}
+
+fn tl_len(inout b: Builder, inout m: Module, in im: TiledImports, seq: Value) eff [Ffi[Cranelift]] {
+    tl_check_non_null(inout b, inout m, in im, seq, TF_INVALID);
+    let len = tl_ld(inout b, seq, T_LEN);
+    ins_return1(inout b, len);
+}
+
+fn tl_tile_count(inout b: Builder, inout m: Module, in im: TiledImports, seq: Value) eff [
+    Ffi[Cranelift]
+] {
+    tl_check_non_null(inout b, inout m, in im, seq, TF_INVALID);
+    let len = tl_ld(inout b, seq, T_LEN);
+    let w = tl_ld(inout b, seq, T_W);
+    let tiles = tl_safe_div_ceil(inout b, len, w);
+    ins_return1(inout b, tiles);
+}
+
+fn tl_push_begin(inout b: Builder, inout m: Module, in im: TiledImports, seq: Value) eff [
+    Ffi[Cranelift]
+] {
+    tl_check_non_null(inout b, inout m, in im, seq, TF_INVALID);
+    let row = tl_ld(inout b, seq, T_LEN);
+    let max_u64 = rt_k(inout b, -1);
+    let at_max = ins_icmp(inout b, cc_eq(), row, max_u64);
+    let ok_len = create_block(inout b);
+    let fail_len = create_block(inout b);
+    ins_brif0(inout b, at_max, fail_len, ok_len);
+    switch_to_block(inout b, fail_len);
+    tl_trigger_fault(inout b, inout m, in im, TF_MEMORY);
+    switch_to_block(inout b, ok_len);
+    let next_len = ins_iadd_imm(inout b, row, 1);
+    let cargs = vals2(seq, next_len);
+    rt_call(inout b, inout m, im.charge_region, in cargs.as_slice());
+    let w = tl_ld(inout b, seq, T_W);
+    let tiles = tl_safe_div_ceil(inout b, next_len, w);
+    let eargs = vals2(seq, tiles);
+    rt_call(inout b, inout m, im.ensure_tiles, in eargs.as_slice());
+    tl_st(inout b, next_len, seq, T_LEN);
+    ins_return1(inout b, row);
+}
+
+// The row bounds check shared by the hot and cold pointers.
+fn tl_row_check(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    seq: Value,
+    row: Value
+) eff [Ffi[Cranelift]] {
+    tl_check_non_null(inout b, inout m, in im, seq, TF_INVALID);
+    let len = tl_ld(inout b, seq, T_LEN);
+    let in_bounds = ins_icmp(inout b, cc_ult(), row, len);
+    let ok = create_block(inout b);
+    let fail = create_block(inout b);
+    ins_brif0(inout b, in_bounds, ok, fail);
+    switch_to_block(inout b, fail);
+    tl_trigger_fault(inout b, inout m, in im, TF_BOUNDS);
+    switch_to_block(inout b, ok);
+}
+
+fn tl_hot_ptr(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    seq: Value,
+    row: Value,
+    col_off: Value,
+    eb: Value
+) -> Value eff [Ffi[Cranelift]] {
+    tl_row_check(inout b, inout m, in im, seq, row);
+    let w = tl_ld(inout b, seq, T_W);
+    let tile = ins_udiv(inout b, row, w);
+    let lane = ins_urem(inout b, row, w);
+    let stride = tl_ld(inout b, seq, T_STRIDE);
+    let base_tile = ins_imul(inout b, tile, stride);
+    let lane_off = ins_imul(inout b, lane, eb);
+    let t1 = ins_iadd(inout b, base_tile, col_off);
+    let off = ins_iadd(inout b, t1, lane_off);
+    let hot_ptr = tl_ld(inout b, seq, T_HOT_PTR);
+    ins_iadd(inout b, hot_ptr, off)
+}
+
+fn tl_hot_load(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    seq: Value,
+    row: Value,
+    col_off: Value,
+    eb: Value
+) eff [Ffi[Cranelift]] {
+    let ptr = tl_hot_ptr(inout b, inout m, in im, seq, row, col_off, eb);
+    let is1 = ins_icmp_imm(inout b, cc_eq(), eb, 1);
+    let b1 = create_block(inout b);
+    let not1 = create_block(inout b);
+    ins_brif0(inout b, is1, b1, not1);
+    switch_to_block(inout b, b1);
+    let v1 = ins_uload8(inout b, ty_i64(), 0, ptr, 0);
+    ins_return1(inout b, v1);
+
+    switch_to_block(inout b, not1);
+    let is4 = ins_icmp_imm(inout b, cc_eq(), eb, 4);
+    let b4 = create_block(inout b);
+    let b8 = create_block(inout b);
+    ins_brif0(inout b, is4, b4, b8);
+    switch_to_block(inout b, b4);
+    let v4 = ins_uload32(inout b, 0, ptr, 0);
+    ins_return1(inout b, v4);
+
+    switch_to_block(inout b, b8);
+    let v8 = tl_ld(inout b, ptr, 0);
+    ins_return1(inout b, v8);
+}
+
+fn tl_hot_store(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    seq: Value,
+    row: Value,
+    col_off: Value,
+    eb: Value,
+    val: Value
+) eff [Ffi[Cranelift]] {
+    let ptr = tl_hot_ptr(inout b, inout m, in im, seq, row, col_off, eb);
+    let zero = rt_k(inout b, 0);
+    let is1 = ins_icmp_imm(inout b, cc_eq(), eb, 1);
+    let b1 = create_block(inout b);
+    let not1 = create_block(inout b);
+    ins_brif0(inout b, is1, b1, not1);
+    switch_to_block(inout b, b1);
+    ins_istore8(inout b, 0, val, ptr, 0);
+    ins_return1(inout b, zero);
+
+    switch_to_block(inout b, not1);
+    let is4 = ins_icmp_imm(inout b, cc_eq(), eb, 4);
+    let b4 = create_block(inout b);
+    let b8 = create_block(inout b);
+    ins_brif0(inout b, is4, b4, b8);
+    switch_to_block(inout b, b4);
+    ins_istore32(inout b, 0, val, ptr, 0);
+    ins_return1(inout b, zero);
+
+    switch_to_block(inout b, b8);
+    tl_st(inout b, val, ptr, 0);
+    ins_return1(inout b, zero);
+}
+
+fn tl_cold_ptr(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    seq: Value,
+    row: Value,
+    word_off: Value
+) -> Value eff [Ffi[Cranelift]] {
+    tl_row_check(inout b, inout m, in im, seq, row);
+    let cold_w = tl_ld(inout b, seq, T_COLD_W);
+    let row_off = ins_imul(inout b, row, cold_w);
+    let idx = ins_iadd(inout b, row_off, word_off);
+    let byte_off = ins_ishl_imm(inout b, idx, 3);
+    let cold_ptr = tl_ld(inout b, seq, T_COLD_PTR);
+    ins_iadd(inout b, cold_ptr, byte_off)
+}
+
+fn tl_tile_col_ptr(
+    inout b: Builder,
+    inout m: Module,
+    in im: TiledImports,
+    seq: Value,
+    tile_idx: Value,
+    col_off: Value
+) eff [Ffi[Cranelift]] {
+    tl_check_non_null(inout b, inout m, in im, seq, TF_INVALID);
+    let len = tl_ld(inout b, seq, T_LEN);
+    let w = tl_ld(inout b, seq, T_W);
+    let tile_count = tl_safe_div_ceil(inout b, len, w);
+    let ok_b = create_block(inout b);
+    let fail_b = create_block(inout b);
+    let valid = ins_icmp(inout b, cc_ult(), tile_idx, tile_count);
+    ins_brif0(inout b, valid, ok_b, fail_b);
+    switch_to_block(inout b, fail_b);
+    tl_trigger_fault(inout b, inout m, in im, TF_BOUNDS);
+    switch_to_block(inout b, ok_b);
+
+    let stride = tl_ld(inout b, seq, T_STRIDE);
+    let tile_off = ins_imul(inout b, tile_idx, stride);
+    let off = ins_iadd(inout b, tile_off, col_off);
+    let hot_ptr = tl_ld(inout b, seq, T_HOT_PTR);
+    let ptr = ins_iadd(inout b, hot_ptr, off);
+    ins_return1(inout b, ptr);
+}

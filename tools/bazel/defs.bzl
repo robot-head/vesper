@@ -106,6 +106,7 @@ def vesper_crate(
         build_script_data = [],
         build_script_env = {},
         test_env = {},
+        test_env_by_target = {},
         test_env_inherit = {},
         test_shards = {},
         test_path_binaries = {},
@@ -135,6 +136,8 @@ def vesper_crate(
         by integration tests, such as another package's embedded fixtures.
       test_data_by_target: target name to complete runtime data labels; overrides
         test_data and extra_test_data for that target.
+      test_env_by_target: target name to extra run-time environment for that
+        test alone, such as the sampling steps of a slow differential.
       test_env_inherit: target name to client environment variables it needs.
       test_exec_properties: target name to remote execution platform properties.
       test_shards: target name to shard count; the test must implement Bazel sharding.
@@ -279,7 +282,7 @@ def vesper_crate(
             test = ":" + inner,
             cwd = rel_dir,
             copy_cwd = label in copy_test_cwd,
-            env = test_env,
+            env = dict(test_env, **test_env_by_target.get(label, {})),
             env_inherit = test_env_inherit.get(label, []),
             shard_count = test_shards.get(label, 0),
             exec_properties = test_exec_properties.get(label, {}),

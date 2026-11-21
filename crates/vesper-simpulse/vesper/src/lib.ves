@@ -18,18 +18,68 @@
 // build's `BTreeMap`; an entry whose completion is no longer pending is
 // stale and is dropped when it reaches the top.
 //
-// Codes shared with the wrapper:
-// - `Ret.code`: 0 ok, 1 UnknownTask, 2 UnknownCompletion, 3 TaskFinished,
-//   4 TaskStillRunning, 5 InvalidToken, 6 ForeignToken, 7 IdExhausted,
-//   8 ClockOverflow, 9 RoundOverflow, 10 ReplayMismatch (`value` is the id
-//   or the event index; `kernel_mismatch` is the event computed).
-// - Task state: 0 Ready, 1 Running, 2 Sleeping, 3 WaitingIo, 4 Finished.
-// - Wake reason: 0 Start, 1 Yield, 2 Timer, 3 Io.
-// - I/O result: 0 Success (`rv` bytes), 1 Error (`rv` is the i32 code
-//   sign-extended), 2 Cancelled.
-// - Event kind: 0 Spawn, 1 Dispatch, 2 Yield, 3 Sleep, 4 SubmitIo,
-//   5 ClockAdvance, 6 TimerElapsed, 7 IoCompleted, 8 CancelRequested,
-//   9 Finish. Unused fields are 0, so equal events are equal words.
+// Codes shared with the wrapper are the value enums below: `Code`,
+// `State`, `Wake`, `EvKind` and `Cancel`. The kernel only carries the I/O
+// result `rk` (0 Success with `rv` bytes, 1 Error with the i32 code
+// sign-extended in `rv`, 2 Cancelled), which the wrapper encodes.
+
+// `Ret.code`: ok, or the error (`value` is the id or the event index;
+// `kernel_mismatch` is the event computed).
+enum Code: _ {
+    Ok,
+    UnknownTask,
+    UnknownCompletion,
+    TaskFinished,
+    TaskStillRunning,
+    InvalidToken,
+    ForeignToken,
+    IdExhausted,
+    ClockOverflow,
+    RoundOverflow,
+    ReplayMismatch
+}
+
+// Task states; `None` is the `St.kind` of an unknown task.
+enum State: _ {
+    Ready,
+    Running,
+    Sleeping,
+    WaitingIo,
+    Finished,
+    None
+}
+
+// Wake reasons.
+enum Wake: _ {
+    Start,
+    Yield,
+    Timer,
+    Io
+}
+
+// Event kinds. Unused fields are 0, so equal events are equal words.
+enum EvKind: _ {
+    Spawn,
+    Dispatch,
+    Yield,
+    Sleep,
+    SubmitIo,
+    ClockAdvance,
+    TimerElapsed,
+    IoCompleted,
+    CancelRequested,
+    Finish
+}
+
+// `kernel_cancel_requested`.
+enum Cancel: _ {
+    No,
+    Yes,
+    UnknownTask
+}
+
+// `Ev.b` of a SubmitIo whose completion is scheduled.
+const SUBMIT_SCHEDULED: u64 = 1;
 
 // A trace event. `a` is the time (`at_ns`, `deadline_ns`, the scheduled
 // time of SubmitIo, `from_ns`), `b` the round of Dispatch, `to_ns` of
@@ -65,7 +115,7 @@ pub copy struct Next {
     cancel: bool
 }
 
-// `task_state`: `kind` 5 is None.
+// `task_state`: `kind` is a `State`.
 pub copy struct St {
     kind: u64,
     completion: u64,
@@ -128,9 +178,7 @@ pub struct Kernel {
 // ---------------------------------------------------------------------------
 // Helpers.
 
-fn max_u64() -> u64 {
-    18446744073709551615
-}
+const MAX_U64: u64 = 18446744073709551615;
 
 fn at(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
@@ -169,7 +217,7 @@ fn rem(a: u64, b: u64) -> u64 {
 
 fn ok(value: u64) -> Ret {
     Ret {
-        code: 0,
+        code: Code::Ok,
         value: value
     }
 }
@@ -239,7 +287,7 @@ fn fen_prefix(in t: Slice[u64], pos: u64) -> u64 {
     }
 }
 
-// Add `d` (wrapping, so `max_u64()` subtracts one) at `pos`.
+// Add `d` (wrapping, so `MAX_U64` subtracts one) at `pos`.
 fn fen_add(inout t: ChunkSeq[u64], pos: u64, d: u64) {
     let n = t.len();
     let mut i = pos;
@@ -309,7 +357,7 @@ fn empty_kernel(seed: u64, replay: bool, sink expected: ChunkSeq[Ev]) -> Kernel 
         expected: expected,
         out: ChunkSeq::new[Ev](),
         batch: ChunkSeq::new[Ev](),
-        mismatch: ev(0, 0, 0, 0, 0),
+        mismatch: ev(EvKind::Spawn, 0, 0, 0, 0),
         t_state: ChunkSeq::new[u64](),
         t_completion: ChunkSeq::new[u64](),
         t_deadline: ChunkSeq::new[u64](),
@@ -361,11 +409,18 @@ impl Kernel {
     // The token check: 0, or the error code (ForeignToken, InvalidToken).
     fn token_fault(in self, task: u64, own: bool) -> u64 {
         if !own {
-            6
-        } else if self.running != task || !self.known(task) || self.state_of(task) != 1 {
-            5
+            Code::ForeignToken
+        } else if self
+            .running
+            != task
+            || !self
+            .known(task)
+            || self
+            .state_of(task)
+            != State::Running {
+            Code::InvalidToken
         } else {
-            0
+            Code::Ok
         }
     }
 
@@ -395,7 +450,7 @@ impl Kernel {
             let index = wrapping_add(self.cursor, i);
             let actual = match self.batch.try_get(i) {
                 Option::Some(e) => e,
-                Option::None => ev(0, 0, 0, 0, 0),
+                Option::None => ev(EvKind::Spawn, 0, 0, 0, 0),
             };
             let same = match self.expected.try_get(index) {
                 Option::Some(e) => e == actual,
@@ -403,7 +458,7 @@ impl Kernel {
             };
             if !same {
                 self.mismatch = actual;
-                break err(10, index);
+                break err(Code::ReplayMismatch, index);
             }
             i = inc(i);
         }
@@ -441,8 +496,8 @@ impl Kernel {
 
     fn set_state(inout self, task: u64, to: u64) {
         let i = dec(task);
-        self.mark(task, to == 0);
-        if to == 4 {
+        self.mark(task, to == State::Ready);
+        if to == State::Finished {
             self.finished_n = inc(self.finished_n);
         }
         self.t_state.try_set(i, to);
@@ -457,7 +512,7 @@ impl Kernel {
             let d = if ready {
                 1
             } else {
-                max_u64()
+                MAX_U64
             };
             fen_add(inout self.f_ready, task, d);
             self.ready_total = wrapping_add(self.ready_total, d);
@@ -468,7 +523,7 @@ impl Kernel {
             let d = if cand {
                 1
             } else {
-                max_u64()
+                MAX_U64
             };
             fen_add(inout self.f_cand, task, d);
             self.cand_total = wrapping_add(self.cand_total, d);
@@ -606,30 +661,30 @@ impl Kernel {
         rv: u64
     ) -> Ret {
         let completion = self.next_completion;
-        if completion == max_u64() {
-            return err(7, 0);
+        if completion == MAX_U64 {
+            return err(Code::IdExhausted, 0);
         }
         let token = self.token_fault(task, own);
-        if token != 0 {
+        if token != Code::Ok {
             return err(token, task);
         }
         if scheduled && !io {
-            self.one(ev(3, task, completion, time, 0));
+            self.one(ev(EvKind::Sleep, task, completion, time, 0));
         } else if scheduled {
-            self.one(ev_io(4, task, completion, time, 1, rk, rv));
+            self.one(ev_io(EvKind::SubmitIo, task, completion, time, SUBMIT_SCHEDULED, rk, rv));
         } else {
-            self.one(ev(4, task, completion, 0, 0));
+            self.one(ev(EvKind::SubmitIo, task, completion, 0, 0));
         }
         let fault = self.batch_fault();
-        if fault.code != 0 {
+        if fault.code != Code::Ok {
             return fault;
         }
         let i = dec(task);
         if scheduled && !io {
-            self.set_state(task, 2);
+            self.set_state(task, State::Sleeping);
             self.t_deadline.try_set(i, time);
         } else {
-            self.set_state(task, 3);
+            self.set_state(task, State::WaitingIo);
             self.t_deadline.try_set(i, 0);
         }
         self.t_completion.try_set(i, completion);
@@ -677,7 +732,7 @@ pub fn kernel_now_ns(in k: Kernel) -> u64 {
 pub fn kernel_task_state(in k: Kernel, task: u64) -> St {
     if !k.known(task) {
         return St {
-            kind: 5,
+            kind: State::None,
             completion: 0,
             deadline: 0
         };
@@ -690,14 +745,13 @@ pub fn kernel_task_state(in k: Kernel, task: u64) -> St {
     }
 }
 
-// 0 false, 1 true, 2 unknown task.
 pub fn kernel_cancel_requested(in k: Kernel, task: u64) -> u64 {
     if !k.known(task) {
-        2
+        Cancel::UnknownTask
     } else if atb(in k.t_cancel.as_slice(), dec(task)) {
-        1
+        Cancel::Yes
     } else {
-        0
+        Cancel::No
     }
 }
 
@@ -726,16 +780,16 @@ pub fn kernel_mismatch(in k: Kernel) -> Ev {
 pub fn kernel_spawn(inout k: Kernel) -> Ret {
     k.begin();
     let task = k.next_task;
-    if task == max_u64() {
-        return err(7, 0);
+    if task == MAX_U64 {
+        return err(Code::IdExhausted, 0);
     }
     let now = k.now;
-    k.one(ev(0, task, 0, now, 0));
+    k.one(ev(EvKind::Spawn, task, 0, now, 0));
     let fault = k.batch_fault();
-    if fault.code != 0 {
+    if fault.code != Code::Ok {
         return fault;
     }
-    k.t_state.push(0);
+    k.t_state.push(State::Ready);
     fen_push(inout k.f_ready, 1);
     fen_push(inout k.f_cand, 1);
     k.in_ready.push(true);
@@ -744,7 +798,7 @@ pub fn kernel_spawn(inout k: Kernel) -> Ret {
     k.cand_total = inc(k.cand_total);
     k.t_completion.push(0);
     k.t_deadline.push(0);
-    k.t_wake.push(0);
+    k.t_wake.push(Wake::Start);
     k.t_wake_completion.push(0);
     k.t_wake_rk.push(0);
     k.t_wake_rv.push(0);
@@ -758,17 +812,17 @@ pub fn kernel_spawn(inout k: Kernel) -> Ret {
 pub fn kernel_yield_task(inout k: Kernel, task: u64, own: bool) -> Ret {
     k.begin();
     let token = k.token_fault(task, own);
-    if token != 0 {
+    if token != Code::Ok {
         return err(token, task);
     }
     let now = k.now;
-    k.one(ev(2, task, 0, now, 0));
+    k.one(ev(EvKind::Yield, task, 0, now, 0));
     let fault = k.batch_fault();
-    if fault.code != 0 {
+    if fault.code != Code::Ok {
         return fault;
     }
-    k.set_state(task, 0);
-    k.set_wake(task, 1, 0, 0, 0);
+    k.set_state(task, State::Ready);
+    k.set_wake(task, Wake::Yield, 0, 0, 0);
     k.running = 0;
     k.commit();
     ok(0)
@@ -777,16 +831,16 @@ pub fn kernel_yield_task(inout k: Kernel, task: u64, own: bool) -> Ret {
 pub fn kernel_finish(inout k: Kernel, task: u64, own: bool) -> Ret {
     k.begin();
     let token = k.token_fault(task, own);
-    if token != 0 {
+    if token != Code::Ok {
         return err(token, task);
     }
     let now = k.now;
-    k.one(ev(9, task, 0, now, 0));
+    k.one(ev(EvKind::Finish, task, 0, now, 0));
     let fault = k.batch_fault();
-    if fault.code != 0 {
+    if fault.code != Code::Ok {
         return fault;
     }
-    k.set_state(task, 4);
+    k.set_state(task, State::Finished);
     k.running = 0;
     k.commit();
     ok(0)
@@ -796,7 +850,7 @@ pub fn kernel_sleep(inout k: Kernel, task: u64, own: bool, duration_ns: u64) -> 
     k.begin();
     let deadline = wrapping_add(k.now, duration_ns);
     if deadline < k.now {
-        return err(8, 0);
+        return err(Code::ClockOverflow, 0);
     }
     k.park(task, own, true, false, deadline, 0, 0)
 }
@@ -811,7 +865,7 @@ pub fn kernel_schedule_io(inout k: Kernel, task: u64, own: bool, delay_ns: u64, 
     k.begin();
     let deadline = wrapping_add(k.now, delay_ns);
     if deadline < k.now {
-        return err(8, 0);
+        return err(Code::ClockOverflow, 0);
     }
     k.park(task, own, true, true, deadline, rk, rv)
 }
@@ -820,18 +874,18 @@ pub fn kernel_schedule_io(inout k: Kernel, task: u64, own: bool, delay_ns: u64, 
 pub fn kernel_request_cancel(inout k: Kernel, task: u64) -> Ret {
     k.begin();
     if !k.known(task) {
-        return err(1, task);
+        return err(Code::UnknownTask, task);
     }
-    if k.state_of(task) == 4 {
-        return err(3, task);
+    if k.state_of(task) == State::Finished {
+        return err(Code::TaskFinished, task);
     }
     if atb(in k.t_cancel.as_slice(), dec(task)) {
         return ok(0);
     }
     let now = k.now;
-    k.one(ev(8, task, 0, now, 0));
+    k.one(ev(EvKind::CancelRequested, task, 0, now, 0));
     let fault = k.batch_fault();
-    if fault.code != 0 {
+    if fault.code != Code::Ok {
         return fault;
     }
     k.t_cancel.try_set(dec(task), true);
@@ -842,22 +896,22 @@ pub fn kernel_request_cancel(inout k: Kernel, task: u64) -> Ret {
 pub fn kernel_complete_io(inout k: Kernel, completion: u64, rk: u64, rv: u64) -> Ret {
     k.begin();
     if completion == 0 || completion >= k.next_completion {
-        return err(2, completion);
+        return err(Code::UnknownCompletion, completion);
     }
     let task = k.pending_task(completion);
-    if task == 0 || k.state_of(task) != 3 || k.task_completion(task) != completion {
-        return err(2, completion);
+    if task == 0 || k.state_of(task) != State::WaitingIo || k.task_completion(task) != completion {
+        return err(Code::UnknownCompletion, completion);
     }
     let now = k.now;
-    k.one(ev_io(7, task, completion, now, 0, rk, rv));
+    k.one(ev_io(EvKind::IoCompleted, task, completion, now, 0, rk, rv));
     let fault = k.batch_fault();
-    if fault.code != 0 {
+    if fault.code != Code::Ok {
         return fault;
     }
     k.p_task.try_set(dec(completion), 0);
     k.pending_n = dec(k.pending_n);
-    k.set_state(task, 0);
-    k.set_wake(task, 3, completion, rk, rv);
+    k.set_state(task, State::Ready);
+    k.set_wake(task, Wake::Io, completion, rk, rv);
     k.commit();
     ok(0)
 }
@@ -867,16 +921,16 @@ pub fn kernel_complete_io(inout k: Kernel, completion: u64, rk: u64, rv: u64) ->
 pub fn kernel_next_task(inout k: Kernel) -> Next {
     k.begin();
     let mut next = Next {
-        code: 0,
+        code: Code::Ok,
         task: 0,
-        wk: 0,
+        wk: Wake::Start,
         wc: 0,
         wrk: 0,
         wrv: 0,
         cancel: false
     };
     if k.running != 0 {
-        next.code = 4;
+        next.code = Code::TaskStillRunning;
         next.task = k.running;
         return next;
     }
@@ -908,7 +962,7 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
     }
     if now != k.now {
         let from = k.now;
-        k.batch.push(ev(5, 0, 0, from, now));
+        k.batch.push(ev(EvKind::ClockAdvance, 0, 0, from, now));
     }
     let n_due = k.due.len();
     for i in 0..n_due {
@@ -918,9 +972,9 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
         if atb(in k.p_io.as_slice(), j) {
             let rk = at(in k.p_rk.as_slice(), j);
             let rv = at(in k.p_rv.as_slice(), j);
-            k.batch.push(ev_io(7, task, c, now, 0, rk, rv));
+            k.batch.push(ev_io(EvKind::IoCompleted, task, c, now, 0, rk, rv));
         } else {
-            k.batch.push(ev(6, task, c, now, 0));
+            k.batch.push(ev(EvKind::TimerElapsed, task, c, now, 0));
         }
         // Runnable for this dispatch; undone if it is rejected.
         k.mark(task, true);
@@ -928,10 +982,10 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
     let mut round = k.round;
     let reset = k.ready_total > 0 && k.cand_total == 0;
     if reset {
-        if round == max_u64() {
+        if round == MAX_U64 {
             k.unwake_due();
             k.restore_due();
-            next.code = 9;
+            next.code = Code::RoundOverflow;
             return next;
         }
         round = inc(round);
@@ -959,10 +1013,10 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
         } else {
             fen_select(in k.f_cand.as_slice(), index)
         };
-        k.batch.push(ev(1, selected, 0, now, round));
+        k.batch.push(ev(EvKind::Dispatch, selected, 0, now, round));
     }
     let fault = k.batch_fault();
-    if fault.code != 0 {
+    if fault.code != Code::Ok {
         k.unwake_due();
         k.restore_due();
         next.code = fault.code;
@@ -979,11 +1033,11 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
         let rv = at(in k.p_rv.as_slice(), j);
         k.p_task.try_set(j, 0);
         k.pending_n = dec(k.pending_n);
-        k.set_state(task, 0);
+        k.set_state(task, State::Ready);
         if io {
-            k.set_wake(task, 3, c, rk, rv);
+            k.set_wake(task, Wake::Io, c, rk, rv);
         } else {
-            k.set_wake(task, 2, c, 0, 0);
+            k.set_wake(task, Wake::Timer, c, 0, 0);
         }
     }
     k.due.clear();
@@ -1000,7 +1054,7 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
         k.seen_list.push(selected);
         k.mark(selected, false);
         k.running = selected;
-        k.set_state(selected, 1);
+        k.set_state(selected, State::Running);
         next.task = selected;
         next.wk = at(in k.t_wake.as_slice(), i);
         next.wc = at(in k.t_wake_completion.as_slice(), i);

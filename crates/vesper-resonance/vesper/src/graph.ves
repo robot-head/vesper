@@ -8,6 +8,13 @@
 // built-in processors (a deterministic source, `MixGain` and `LatentMix`)
 // entirely in Vesper, for the differential test and the ABBA benchmark.
 use self::pdc::{
+    Header,
+    Input,
+    InputKind,
+    Line,
+    Op,
+    PdcCode,
+    Words,
     p_compile
 };
 use self::seqs::{
@@ -15,6 +22,8 @@ use self::seqs::{
     get
 };
 use self::slab::{
+    SlabWords,
+    Totals,
     s_advance,
     s_delays,
     s_read,
@@ -36,7 +45,24 @@ trait DspProcessor {
     ) eff [Fail[RuntimeError], Fail[ArithOverflow]];
 }
 
-// The test graphs' deterministic source (tests/pdc.rs `Generator`).
+// The test graphs' deterministic source (tests/pdc.rs `Generator`): sample t
+// is ((t * GEN_STEP + seed * GEN_SEED_STEP) % GEN_MODULUS) / GEN_MODULUS -
+// 0.5.
+const GEN_STEP: u64 = 7919;
+const GEN_SEED_STEP: u64 = 31;
+const GEN_MODULUS: u64 = 97;
+const GEN_SCALE: f32 = 97.0;
+const GEN_BIAS: f32 = 0.5;
+
+// A processor's kind in `kinds` (two words per node: kind, parameter).
+enum Kind: _ {
+    Source,
+    Latent,
+    Gain
+}
+
+const KIND_WORDS: u64 = 2;
+
 struct Source {
     seed: u64,
     t: u64
@@ -51,8 +77,9 @@ impl DspProcessor for Source {
         inout out: ChunkSeq[u32]
     ) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
         for k in 0..block {
-            let x = wrapping_add(wrapping_mul(self.t, 7919), wrapping_mul(self.seed, 31)) % 97;
-            out.set(k, to_bits_f32(nearest_f32(x) / 97.0 - 0.5));
+            let step = wrapping_mul(self.t, GEN_STEP);
+            let x = wrapping_add(step, wrapping_mul(self.seed, GEN_SEED_STEP)) % GEN_MODULUS;
+            out.set(k, to_bits_f32(nearest_f32(x) / GEN_SCALE - GEN_BIAS));
             self.t = wrapping_add(self.t, 1);
         }
     }
@@ -139,16 +166,16 @@ fn zeros(n: u64) -> ChunkSeq[u32] {
     s
 }
 
-// One processor per node: `kinds` holds two words per node, the kind (0
-// source with seed, 1 latent with the node's latency, 2 gain with f32 bits)
-// and its parameter.
+// One processor per node: `kinds` holds KIND_WORDS words per node, the
+// `Kind` (a source with its seed, a latent mix with the node's latency, a
+// gain with f32 bits) and its parameter.
 fn processors(in kinds: Slice[u64], in g: Slice[u64], n: u64, block: u64)
     -> ChunkSeq[Box[dyn DspProcessor]] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut procs: ChunkSeq[Box[dyn DspProcessor]] = ChunkSeq::new();
     for i in 0..n {
-        let kind = at(in kinds, i * 2);
-        let p = at(in kinds, i * 2 + 1);
-        if kind == 0 {
+        let kind = at(in kinds, i * KIND_WORDS);
+        let p = at(in kinds, i * KIND_WORDS + 1);
+        if kind == Kind::Source {
             procs
                 .push(
                 Box::new[dyn DspProcessor](
@@ -158,8 +185,8 @@ fn processors(in kinds: Slice[u64], in g: Slice[u64], n: u64, block: u64)
                     }
                 )
             );
-        } else if kind == 1 {
-            let delay = at(in g, i * 4 + 1);
+        } else if kind == Kind::Latent {
+            let delay = at(in g, i * Words::Node + 1);
             procs
                 .push(
                 Box::new[dyn DspProcessor](
@@ -186,7 +213,7 @@ fn processors(in kinds: Slice[u64], in g: Slice[u64], n: u64, block: u64)
 }
 
 // The run state: the schedule words, the block buffers and the packed delay
-// lines (the layout of `DelaySlab`, metadata five words per line).
+// lines (the layout of `DelaySlab`, `SlabWords::Line` metadata words per line).
 struct Run {
     sched: ChunkSeq[u64],
     slab: ChunkSeq[u32],
@@ -204,21 +231,21 @@ fn run_block(inout r: Run, inout procs: ChunkSeq[Box[dyn DspProcessor]]) eff [
     Fail[ArithOverflow]
 ] {
     let block = r.block;
-    let nops = get(in r.sched, 2);
-    let mut k: u64 = 4;
+    let nops = get(in r.sched, Header::OpCount);
+    let mut k: u64 = Words::Header;
     for o in 0..nops {
-        let spec = get(in r.sched, k + 1);
-        let output = get(in r.sched, k + 2);
-        let count = get(in r.sched, k + 5);
-        k = k + 6;
+        let spec = get(in r.sched, k + Op::Spec);
+        let output = get(in r.sched, k + Op::Output);
+        let count = get(in r.sched, k + Op::InputCount);
+        k = k + Words::Op;
         r.ins.clear();
         for j in 0..count {
             let kind = get(in r.sched, k);
-            let buffer = get(in r.sched, k + 3);
-            let has_line = get(in r.sched, k + 4);
-            let line = get(in r.sched, k + 5);
-            let scratch = get(in r.sched, k + 6);
-            if kind == 0 && has_line == 1 {
+            let buffer = get(in r.sched, k + Input::Buffer);
+            let has_line = get(in r.sched, k + Input::HasLine);
+            let line = get(in r.sched, k + Input::Line);
+            let scratch = get(in r.sched, k + Input::Scratch);
+            if kind == InputKind::Forward && has_line == 1 {
                 s_write(
                     inout r.lines.as_slice(),
                     0,
@@ -235,7 +262,7 @@ fn run_block(inout r: Run, inout procs: ChunkSeq[Box[dyn DspProcessor]]) eff [
                 );
                 r.slab.copy_from(scratch * block, in r.scratch.as_slice());
                 r.ins.push(scratch);
-            } else if kind == 1 {
+            } else if kind == InputKind::Feedback {
                 s_read(
                     in r.lines.as_slice(),
                     0,
@@ -248,7 +275,7 @@ fn run_block(inout r: Run, inout procs: ChunkSeq[Box[dyn DspProcessor]]) eff [
             } else {
                 r.ins.push(buffer);
             }
-            k = k + 7;
+            k = k + Words::Input;
         }
         procs[spec].process(in r.slab, in r.ins, block, inout r.out);
         r.slab.copy_from(output * block, in r.out.as_slice());
@@ -285,36 +312,36 @@ pub fn g_render(
 ) -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
     let sched = p_compile(in g, n);
     let mut result: ChunkSeq[u64] = ChunkSeq::new();
-    if get(in sched, 0) != 0 {
-        result.push(get(in sched, 0));
+    if get(in sched, Header::Status) != PdcCode::Ok {
+        result.push(get(in sched, Header::Status));
         return result;
     }
-    let buffers = get(in sched, 1);
-    let nlines = get(in sched, 3);
+    let buffers = get(in sched, Header::BufferCount);
+    let nlines = get(in sched, Header::LineCount);
     let mut delays: ChunkSeq[u32] = ChunkSeq::new();
     // Lines follow the ops; find the op of the sink on the way.
-    let mut k: u64 = 4;
+    let mut k: u64 = Words::Header;
     let mut sink_buffer: u64 = 0;
-    for o in 0..get(in sched, 2) {
-        if get(in sched, k + 1) == sink_node {
-            sink_buffer = get(in sched, k + 2);
+    for o in 0..get(in sched, Header::OpCount) {
+        if get(in sched, k + Op::Spec) == sink_node {
+            sink_buffer = get(in sched, k + Op::Output);
         }
-        k = k + 6 + get(in sched, k + 5) * 7;
+        k = k + Words::Op + get(in sched, k + Op::InputCount) * Words::Input;
         k = k + 1 + get(in sched, k);
     }
     for l in 0..nlines {
-        delays.push(narrow_u32(get(in sched, k + l * 3 + 1)));
+        delays.push(narrow_u32(get(in sched, k + l * Words::Line + Line::Delay)));
     }
     let layout = s_delays(in delays.as_slice(), block);
     let mut slots: ChunkSeq[u64] = ChunkSeq::new();
-    let meta = nlines * 5;
+    let meta = nlines * SlabWords::Line;
     for w in 0..meta {
         slots.push(get(in layout, w));
     }
     let mut r = Run {
         sched: sched,
         slab: zeros(buffers * block),
-        lines: zeros(get(in layout, nlines * 5 + 1)),
+        lines: zeros(get(in layout, meta + Totals::Length)),
         slots: slots,
         ins: ChunkSeq::new(),
         out: zeros(block),
@@ -323,7 +350,7 @@ pub fn g_render(
     };
     let mut procs = processors(in kinds, in g, n, block);
     run_blocks(inout r, inout procs, blocks);
-    result.push(0);
+    result.push(PdcCode::Ok);
     for i in 0..block {
         result.push(widen_u64(r.slab[sink_buffer * block + i]));
     }
