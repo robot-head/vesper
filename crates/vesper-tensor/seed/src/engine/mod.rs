@@ -3,3 +3,4 @@
 //! self-hosting Stage 2; SH6 lane 11, #1406).
 
 pub(crate) mod gguf;
+pub(crate) mod tokenizer;
