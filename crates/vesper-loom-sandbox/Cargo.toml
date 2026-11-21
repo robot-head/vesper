@@ -2,6 +2,7 @@
 name = "vesper-loom-sandbox"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Hermetic Wasmtime component host for Vesper build steps and Forge macros"
 publish = false
 

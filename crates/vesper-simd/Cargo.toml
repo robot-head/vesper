@@ -2,6 +2,7 @@
 name = "vesper-simd"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Checked Baseline128 JIT byte scanner and explicitly targeted SIMD objects"
 publish = false
 
