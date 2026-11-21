@@ -69,8 +69,7 @@ const TCB_HIGH_SKIP: u64 = 4;
 // AegisAttestationClaimsWire::decode. Words: tee_arch_tag, tcb_svn,
 // enclave_flags. Bytes: mr_enclave_sha384, loom_lock_blake3,
 // olean_spec_mif, chan_binding_prefix.
-pub fn decode_wire(in b: Slice[u8], inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn decode_wire(in b: Slice[u8], inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
     let mut r = rd(0, b.len(), FORMAT_CLAIMS_WIRE);
     let tag = rd_u16(in b, inout r, 122);
     if tag < ARCH_TDX || tag > ARCH_CCA {

@@ -50,13 +50,8 @@ pub fn max_sig_data() -> u64 {
 }
 
 // A length-prefixed byte string: its length goes to `w`, its bytes to `d`.
-pub fn blob(
-    in b: Slice[u8],
-    inout r: Rd,
-    n: u64,
-    field: u64,
-    inout w: Slice[u64]
-) -> Unit eff [Fail[AErr]] {
+pub fn blob(in b: Slice[u8], inout r: Rd, n: u64, field: u64, inout w: Slice[u64])
+    -> Unit eff [Fail[AErr]] {
     put(inout w, n);
     arr(in b, inout r, n, field, inout w);
 }
@@ -64,8 +59,7 @@ pub fn blob(
 // QeReportBody::parse (the 384-byte SGX report of the Quoting Enclave).
 // Words: misc_select, isv_prod_id, isv_svn. Bytes: cpu_svn, attributes,
 // mr_enclave, mr_signer, report_data.
-pub fn qe_report(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn qe_report(in b: Slice[u8], inout r: Rd, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
     arr(in b, inout r, 16, 43, inout w);
     put(inout w, rd_u32(in b, inout r, 44));
     reserved(in b, inout r, 28, 45);
@@ -83,8 +77,7 @@ pub fn qe_report(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
 // TdReportBody::parse. Words: seam_attributes, td_attributes, xfam.
 // Bytes: tee_tcb_svn, mr_seam, mr_signer_seam, mr_td, mr_config_id,
 // mr_owner, mr_owner_config, rtmr0..3, report_data.
-pub fn td_body(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn td_body(in b: Slice[u8], inout r: Rd, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
     arr(in b, inout r, 16, 55, inout w);
     arr(in b, inout r, 48, 56, inout w);
     arr(in b, inout r, 48, 57, inout w);
@@ -103,8 +96,7 @@ pub fn td_body(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
 }
 
 // Td15ExFields::parse. Words: vm_index. Bytes: the nine arrays after it.
-pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
     let at = take(inout r, 1, 70);
     let vm_index = match b.try_get(at) {
         Option::Some(x) => widen_u64(x),
@@ -134,8 +126,7 @@ pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
 // user_data, the body bytes, tee_tcb_svn2 and mr_service_td (types 3 and
 // 4), the type 4 bytes, quote_signature, attestation_key, the QE report
 // bytes, qe_report_signature, qe_auth_data, the PEM chain.
-pub fn parse(in b: Slice[u8], mode: u64, inout w: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
     let mut r = rd(0, b.len(), FORMAT_TDX_QUOTE_V4);
     let version = rd_u16(in b, inout r, 80);
     let att_key_type = rd_u16(in b, inout r, 81);

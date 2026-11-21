@@ -65,20 +65,17 @@ pub fn snp_etcb_parse(in b: Slice[u8], inout w: Slice[u64]) -> Unit eff [Fail[AE
 
 // TdxQuote::parse (mode 0), parse_padded (1) and parse_prefix (2): the
 // bytes the quote occupies.
-pub fn tdx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn tdx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
     tdx_parse_impl(in b, mode, inout w)
 }
 
 // SgxQuote::parse (mode 0), parse_padded (1) and parse_prefix (2).
-pub fn sgx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn sgx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
     sgx_parse_impl(in b, mode, inout w)
 }
 
 // AegisAttestationClaimsWire::decode.
-pub fn claims_wire_decode(in b: Slice[u8], inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn claims_wire_decode(in b: Slice[u8], inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
     decode_wire(in b, inout w)
 }
 

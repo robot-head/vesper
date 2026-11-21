@@ -38,8 +38,7 @@ const FORMAT_SGX_QUOTE_V3: u64 = 1;
 // SgxReportBody::parse. Words: misc_select, isv_prod_id, isv_svn,
 // config_svn. Bytes: cpu_svn, isv_ext_prod_id, attributes, mr_enclave,
 // mr_signer, config_id, isv_family_id, report_data.
-pub fn report_body(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
-    -> Unit eff [Fail[AErr]] {
+pub fn report_body(in b: Slice[u8], inout r: Rd, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
     arr(in b, inout r, 16, 105, inout w);
     put(inout w, rd_u32(in b, inout r, 106));
     reserved(in b, inout r, 12, 107);
@@ -67,8 +66,7 @@ pub fn report_body(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
 // bytes as received), quote_signature, attestation_key, the raw QE report
 // (384 bytes), the QE report bytes, qe_report_signature, qe_auth_data, the
 // PEM chain.
-pub fn parse(in b: Slice[u8], mode: u64, inout w: Slice[u64])
-    -> u64 eff [Fail[AErr]] {
+pub fn parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
     let mut r = rd(0, b.len(), FORMAT_SGX_QUOTE_V3);
     let version = rd_u16(in b, inout r, 80);
     if version != SGX_QUOTE_VERSION {

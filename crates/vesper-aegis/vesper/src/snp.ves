@@ -92,8 +92,7 @@ pub fn parse_etcb(in b: Slice[u8], inout w: Slice[u64]) -> Unit eff [Fail[AErr]]
 // author_key_digest, report_id, report_id_ma, cpuid, chip_id,
 // current_version, committed_version, the three ETCBs' SVNs (if present),
 // signature_r_s.
-pub fn parse(in b: Slice[u8], inout w: Slice[u64], inout d: Slice[u8])
-    -> Unit eff [Fail[AErr]] {
+pub fn parse(in b: Slice[u8], inout w: Slice[u64], inout d: Slice[u8]) -> Unit eff [Fail[AErr]] {
     if b.len() >= SNP_REPORT_LEN {
         parse_whole(in b, inout w, inout d);
     } else {
