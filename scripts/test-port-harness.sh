@@ -300,3 +300,4 @@ skip_port vesper-fmt || sh crates/vesper-fmt/port/test-port.sh  # self-hosting S
 skip_port vesper-highlight || sh crates/vesper-highlight/port/test-port.sh  # self-hosting SH1 lane 11 (#1154): vesper-highlight tier 0, all three builds, the differential test and one divergence check per ported area
 skip_port vesper-forge || sh crates/vesper-forge/port/test-port.sh  # self-hosting SH1 lane 14 (#1157): vesper-forge hygiene core, both builds, the differential test and one divergence check per ported area
 skip_port vesper-lint || sh crates/vesper-lint/port/test-port.sh  # self-hosting SH1 lane 13 (#1156): vesper-lint, all three builds, the differential test and one divergence check per ported area
+skip_port vesper-sim-session || sh crates/vesper-sim-session/port/test-port.sh  # self-hosting SH5 lane 19 (#1342): vesper-sim-session, both builds, the transcript differential and the divergence check

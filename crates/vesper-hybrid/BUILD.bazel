@@ -54,6 +54,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:ir_check_package",
         ],
+        # The IR swap point's identity round trip (#1240).
+        "hybrid_place_ir": [
+            "//:check_data_package",
+            "//:place_ir_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -66,6 +71,7 @@ vesper_hybrid(
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
+        "hybrid_place_ir": "modules/place_ir",
     },
     # The doc differential (#1338) runs every 8th file and package here;
     # Cargo (the Hybrid compiler workflow) runs them all.
