@@ -4,13 +4,10 @@
 // result says so and the Rust wrapper asks `str::parse`, which is the
 // Fallback path of the Rust build too.
 use self::Decoded;
+use self::ascii::{
+    Ascii
+};
 
-const ASCII_PLUS: u64 = 0x2b;
-const ASCII_MINUS: u64 = 0x2d;
-const ASCII_DOT: u64 = 0x2e;
-const ASCII_ZERO: u64 = 0x30;
-const ASCII_UPPER_E: u64 = 0x45;
-const ASCII_LOWER_E: u64 = 0x65;
 const DECIMAL_BASE: u64 = 10;
 const EXP_BASE: i64 = 10;
 // `digit_at` past the digits.
@@ -99,7 +96,7 @@ const MANTISSA_BITS: u64 = 52;
 fn digit_at(in text: Slice[u8], p: u64) -> u64 {
     match text.try_get(p) {
         Option::Some(c) => {
-            let d = wrapping_sub(widen_u64(c), ASCII_ZERO);
+            let d = wrapping_sub(widen_u64(c), Ascii::Zero);
             if d < DECIMAL_BASE {
                 d
             } else {
@@ -171,7 +168,7 @@ fn not_number() -> Decimal {
 fn decimal(in text: Slice[u8]) -> Decimal {
     let n = text.len();
     let mut p: u64 = 0;
-    let negative = byte_at(in text, 0) == ASCII_MINUS;
+    let negative = byte_at(in text, 0) == Ascii::Minus;
     if negative {
         p = 1;
     }
@@ -183,12 +180,12 @@ fn decimal(in text: Slice[u8]) -> Decimal {
     if int_end == int_start {
         return not_number();
     }
-    if wrapping_sub(int_end, int_start) > 1 && byte_at(in text, int_start) == ASCII_ZERO {
+    if wrapping_sub(int_end, int_start) > 1 && byte_at(in text, int_start) == Ascii::Zero {
         return not_number();
     }
     let mut frac_start = p;
     let mut frac_end = p;
-    if byte_at(in text, p) == ASCII_DOT {
+    if byte_at(in text, p) == Ascii::Dot {
         p = wrapping_add(p, 1);
         frac_start = p;
         let (p2, w2) = digits_from(in text, p, w);
@@ -201,14 +198,14 @@ fn decimal(in text: Slice[u8]) -> Decimal {
     }
     let mut e: i64 = 0;
     let c = byte_at(in text, p);
-    if c == ASCII_LOWER_E || c == ASCII_UPPER_E {
+    if c == Ascii::LowerE || c == Ascii::UpperE {
         p = wrapping_add(p, 1);
         let mut exp_negative = false;
         let s = byte_at(in text, p);
-        if s == ASCII_MINUS {
+        if s == Ascii::Minus {
             p = wrapping_add(p, 1);
             exp_negative = true;
-        } else if s == ASCII_PLUS {
+        } else if s == Ascii::Plus {
             p = wrapping_add(p, 1);
         }
         let exp_start = p;

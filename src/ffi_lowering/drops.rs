@@ -85,9 +85,8 @@ pub(super) fn generated(
                  match o {{ Some(h) => {library}::{symbol}(h), None => () }}\n\
              }}\n"
         );
-        let text = format!("{}{text}", " ".repeat(base));
-        base = text.len() + 1;
-        let parsed = crate::parser::parse(&text);
+        let parsed = crate::integer_widths::parse_at(&text, base);
+        base += text.len() + 1;
         debug_assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         for (item, ty) in parsed.module.items.into_iter().zip([
             Type::Named(h.to_owned(), vec![]),
@@ -542,33 +541,79 @@ pub fn is_drop_function(name: &str) -> bool {
 /// graph and the closures and handled bodies nested in its source span.
 /// Native instance discovery walks source bodies, which never name them.
 pub fn drop_callees(world: &World, program: &Program, name: &str) -> Vec<String> {
-    let Some(src) = world.functions.get(name) else {
-        return vec![];
-    };
-    let span = src.span.clone();
-    let nested = |graph: &str| {
-        let Some(rest) = graph.strip_prefix('$') else {
-            return false;
-        };
-        let mut parts = rest.rsplitn(3, '_');
-        let (Some(end), Some(start)) = (parts.next(), parts.next()) else {
-            return false;
-        };
-        matches!((start.parse::<usize>(), end.parse::<usize>()), (Ok(s), Ok(e)) if s >= span.start && e <= span.end)
-    };
-    let mut out = vec![];
-    for f in program.functions.values() {
-        if f.name != name && !nested(&f.name) {
-            continue;
+    DropCallees::new(program).of(world, name)
+}
+
+/// [`drop_callees`] for every function of one program, indexed once:
+/// asking per instance scanned every function of the program each time,
+/// quadratic in its size (SH3 lane 7, #1246: 20,800 functions took 7 of
+/// 9 s of an unoptimized JIT build there).
+pub struct DropCallees {
+    /// Drop callees of each graph, by graph name, in first-call order.
+    calls: BTreeMap<String, Vec<String>>,
+    /// Nested graphs (`$<name>_<start>_<end>`) with drop calls, as
+    /// `(start, end, graph)` sorted by start.
+    nested: Vec<(usize, usize, String)>,
+}
+
+impl DropCallees {
+    pub fn new(program: &Program) -> Self {
+        let mut calls = BTreeMap::new();
+        let mut nested = vec![];
+        for f in program.functions.values() {
+            let mut out: Vec<String> = vec![];
+            for i in f.blocks.iter().flat_map(|b| &b.instructions) {
+                if let Op::Call { callee, .. } = &i.op
+                    && callee.starts_with(DROP_PREFIX)
+                    && !out.contains(callee)
+                {
+                    out.push(callee.clone());
+                }
+            }
+            if out.is_empty() {
+                continue;
+            }
+            if let Some(rest) = f.name.strip_prefix('$') {
+                let mut parts = rest.rsplitn(3, '_');
+                if let (Some(end), Some(start)) = (parts.next(), parts.next())
+                    && let (Ok(s), Ok(e)) = (start.parse::<usize>(), end.parse::<usize>())
+                {
+                    nested.push((s, e, f.name.clone()));
+                }
+            }
+            calls.insert(f.name.clone(), out);
         }
-        for i in f.blocks.iter().flat_map(|b| &b.instructions) {
-            if let Op::Call { callee, .. } = &i.op
-                && callee.starts_with(DROP_PREFIX)
-                && !out.contains(callee)
-            {
-                out.push(callee.clone());
+        nested.sort();
+        Self { calls, nested }
+    }
+
+    /// The drop functions `name`'s graph and the graphs nested in its
+    /// span call, in program order (as [`drop_callees`] lists them).
+    pub fn of(&self, world: &World, name: &str) -> Vec<String> {
+        let Some(src) = world.functions.get(name) else {
+            return vec![];
+        };
+        let span = src.span.clone();
+        let first = self.nested.partition_point(|(s, _, _)| *s < span.start);
+        let mut graphs: Vec<&str> = self.nested[first..]
+            .iter()
+            .take_while(|(s, _, _)| *s <= span.end)
+            .filter(|(_, e, _)| *e <= span.end)
+            .map(|(_, _, g)| g.as_str())
+            .collect();
+        if self.calls.contains_key(name) {
+            graphs.push(name);
+        }
+        graphs.sort_unstable();
+        graphs.dedup();
+        let mut out: Vec<String> = vec![];
+        for g in graphs {
+            for callee in &self.calls[g] {
+                if !out.contains(callee) {
+                    out.push(callee.clone());
+                }
             }
         }
+        out
     }
-    out
 }
