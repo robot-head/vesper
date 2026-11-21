@@ -498,7 +498,13 @@ fn register_locals(
     // Loop-weighted counts: `in` loans to real impure calls, and every
     // other read or write of each name.
     let cyclic = aggregates::cyclic_blocks(f);
-    let weight = |b: usize| if cyclic.contains(&b) { aggregates::LOOP_WEIGHT } else { 1 };
+    let weight = |b: usize| {
+        if cyclic.contains(&b) {
+            aggregates::LOOP_WEIGHT
+        } else {
+            1
+        }
+    };
     let mut lent_in: BTreeMap<String, usize> = BTreeMap::new();
     let mut touched: BTreeMap<String, usize> = BTreeMap::new();
     for (b, inst) in f
@@ -4438,9 +4444,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                     ..
                 } = &inst.op
                     && path.is_empty()
-                    && self.vars.get(root).is_some_and(|v| {
-                        self.scalar_enums.invariant_roots.contains(&v.as_u32())
-                    })
+                    && self
+                        .vars
+                        .get(root)
+                        .is_some_and(|v| self.scalar_enums.invariant_roots.contains(&v.as_u32()))
                 {
                     self.scalar_enums.invariant_pointers.insert(value);
                 }
@@ -4502,7 +4509,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             } else {
                                 values[id]
                             };
-                            let shape = scalar_join.as_ref().ok_or("native enum words lack a shape")?;
+                            let shape = scalar_join
+                                .as_ref()
+                                .ok_or("native enum words lack a shape")?;
                             self.enum_words(value, shape)?
                         }
                     };
@@ -7131,8 +7140,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.inline_depth += 1;
             // An enum result the caller keeps as words reaches the join as
             // its words, not through storage (#1330).
-            let words = scalar_request
-                .filter(|s| into.is_none() && aggregates::enum_shape(self.world, &f.result).as_ref() == Some(s));
+            let words = scalar_request.filter(|s| {
+                into.is_none() && aggregates::enum_shape(self.world, &f.result).as_ref() == Some(s)
+            });
             let mut joined_words = None;
             let result = (|| {
                 let join = self.b.create_block();
@@ -7163,7 +7173,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.b.switch_to_block(join);
                 if words.is_some() {
                     joined_words = Some(self.b.block_params(join).to_vec());
-                    return Ok::<_, String>(self.b.ins().iconst(self.m.target_config().pointer_type(), 0));
+                    return Ok::<_, String>(
+                        self.b
+                            .ins()
+                            .iconst(self.m.target_config().pointer_type(), 0),
+                    );
                 }
                 Ok::<_, String>(self.b.block_params(join)[0])
             })();

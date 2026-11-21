@@ -1437,6 +1437,10 @@ pub(super) fn split_sources(
 /// field of every variant. A constructor becomes its tag constant and its
 /// field values, a block parameter becomes one parameter per word, a local
 /// one local per word, and a `match` tests the tag.
+/// One field of a variant in an [`EnumShape`]: its name, its word index and
+/// its byte offset in the enum's storage.
+pub(super) type EnumField = (String, usize, i32);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct EnumShape {
     /// The word types: the tag (`u64`) first, then each variant's fields in
@@ -1444,13 +1448,13 @@ pub(super) struct EnumShape {
     pub(super) words: Vec<Type>,
     /// Each variant in layout order: its name and its fields' names, words
     /// and byte offsets in the enum's storage.
-    pub(super) variants: Vec<(String, Vec<(String, usize, i32)>)>,
+    pub(super) variants: Vec<(String, Vec<EnumField>)>,
 }
 
 impl EnumShape {
     /// The index and fields of variant `name` (a `Type::Variant` or a bare
     /// variant name).
-    fn variant(&self, name: &str) -> Option<(usize, &[(String, usize, i32)])> {
+    fn variant(&self, name: &str) -> Option<(usize, &[EnumField])> {
         let short = name.rsplit("::").next()?;
         self.variants
             .iter()
@@ -1682,7 +1686,9 @@ pub(super) fn scalar_enums(
                 Some(Def::Inst(b, i)) => match &inst(*b, *i).op {
                     Op::Data(name, fields) => shape.variant(name).is_some_and(|(_, fs)| {
                         fs.len() == fields.len()
-                            && fs.iter().all(|(n, _, _)| fields.iter().any(|(m, _)| m == n))
+                            && fs
+                                .iter()
+                                .all(|(n, _, _)| fields.iter().any(|(m, _)| m == n))
                     }),
                     Op::Read { root, .. } => cl.get(root) == Some(shape),
                     Op::Call { callee, .. } => specialized(callee),
@@ -1788,11 +1794,12 @@ pub(super) fn scalar_enums(
         .values
         .keys()
         .copied()
-        .chain(
-            f.blocks
+        .chain(f.blocks.iter().flat_map(|b| {
+            b.params
                 .iter()
-                .flat_map(|b| b.params.iter().copied().chain(b.instructions.iter().map(|i| i.dest))),
-        )
+                .copied()
+                .chain(b.instructions.iter().map(|i| i.dest))
+        }))
         .max()
         .map_or(0, |m| m + 1);
     let mut fresh = |t: &Type, values: &mut BTreeMap<ValueId, Type>| {
@@ -1823,9 +1830,17 @@ pub(super) fn scalar_enums(
                         })
                         .collect()
                 }
-                _ => shape.words.iter().map(|t| fresh(t, &mut g.values)).collect(),
+                _ => shape
+                    .words
+                    .iter()
+                    .map(|t| fresh(t, &mut g.values))
+                    .collect(),
             },
-            _ => shape.words.iter().map(|t| fresh(t, &mut g.values)).collect(),
+            _ => shape
+                .words
+                .iter()
+                .map(|t| fresh(t, &mut g.values))
+                .collect(),
         };
         words.insert(*v, ws);
     }
