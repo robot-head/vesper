@@ -152,6 +152,10 @@ extern "C" fn report() {
         "vesper-hybrid: ir-check answered {} calls from Vesper",
         IR_CHECK_CALLS.load(Relaxed)
     );
+    eprintln!(
+        "vesper-hybrid: the driver ran {} passes from Vesper",
+        crate::driver::PASSES.load(Relaxed)
+    );
 }
 
 // Run `install` before `main` (the platform's static-constructor section).
