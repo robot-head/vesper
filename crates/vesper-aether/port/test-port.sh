@@ -34,3 +34,6 @@ expect slot_plan accepts_adjacent_aligned_slots overlap_check_matches_pairwise_d
 expect slot_plan_port verify_matches_the_rust_verifier
 # pvh: a segment may end one byte past the file.
 expect pvh_port truncations_and_bit_flips_match
+# hotset: equal indices count as increasing.
+expect hotset_port decode_matches_on_valid_and_mutated_encodings -- runs_match
+expect hotset encoded_form_is_validated -- runs_coalesce_and_split_at_the_batch_size

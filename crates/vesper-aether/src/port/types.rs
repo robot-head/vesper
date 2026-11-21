@@ -148,3 +148,32 @@ impl From<PvhFault> for crate::pvh::PvhError {
         }
     }
 }
+
+/// `HotSetError` as the Vesper code returns it (the index as u64).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HotFault {
+    OutOfRange { index: u64 },
+    TooMany,
+    BadBatch,
+    Truncated,
+    BadMagic,
+    TrailingBytes,
+    NotCanonical,
+}
+
+impl From<HotFault> for crate::hotset::HotSetError {
+    fn from(e: HotFault) -> Self {
+        use crate::hotset::HotSetError as H;
+        match e {
+            HotFault::OutOfRange { index } => H::OutOfRange {
+                index: usize::try_from(index).unwrap_or(usize::MAX),
+            },
+            HotFault::TooMany => H::TooMany,
+            HotFault::BadBatch => H::BadBatch,
+            HotFault::Truncated => H::Truncated,
+            HotFault::BadMagic => H::BadMagic,
+            HotFault::TrailingBytes => H::TrailingBytes,
+            HotFault::NotCanonical => H::NotCanonical,
+        }
+    }
+}

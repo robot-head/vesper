@@ -285,7 +285,7 @@ a stack slot and is tested again at each `match`, and live values spill
 across loop bodies (a 3 KB frame in the audit). That is gap G10 below. The
 port is ready to flip once G10 closes; re-run the ABBA test then.
 
-## Part 2b: `vesper-aether` slot plans and PVH parsing in Vesper (no flip yet)
+## Part 2b: `vesper-aether` slot plans, PVH parsing and hot sets in Vesper (no flip yet)
 
 `slot_plan` (the KVM memory-slot plan verifier and the cross-VM host
 check) is Vesper (`crates/vesper-aether/vesper/src/{util,slot_plan}.ves`)
@@ -326,6 +326,16 @@ body alone costs 5.7x the Rust instructions. Reading fields through
 `try_read_u64_le` and returning segments in a caller buffer (instead of
 an `inout ChunkSeq`, which allocates a sequence per call) took it down
 from 17x.
+
+`hotset::HotSet::decode` (the untrusted on-disk form) and `runs` (the
+prefetch batches) are Vesper (`vesper/src/hotset.ves`), with the Rust kept
+as `decode_reference` and `runs_reference`. The hotset and hotset_store
+tests pass on the port, `tests/hotset_port.rs` compares both builds on
+5,000 random sets and 5,000 mutated encodings, and the divergence check
+(equal indices count as increasing) fails both. ABBA (`tests/abba_hotset.rs`:
+decode a 1,000-page set, then build its runs) is 1.9x ([1.87, 1.93]), the
+closest yet. Part of the gap is copying pages between the crate's `usize`
+and the port's `u64` at the boundary, which a safe-code crate cannot avoid.
 
 ## Compiler gaps (for the coordinator)
 

@@ -7,7 +7,7 @@
 
 /// The files of the port, in order.
 #[cfg(feature = "vesper-port")]
-const PARTS: &[&str] = &["util", "slot_plan", "pvh"];
+const PARTS: &[&str] = &["util", "slot_plan", "pvh", "hotset"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -47,5 +47,10 @@ const DIVERGENT_EDITS: &[(&str, &str)] = &[
     (
         "        if add_overflows(offset, filesz) || wrapping_add(offset, filesz) > n {",
         "        if add_overflows(offset, filesz) || wrapping_add(offset, filesz) > wrapping_add(n, 1) {",
+    ),
+    // hotset: equal indices count as increasing.
+    (
+        "        if have && last >= i {",
+        "        if have && last > i {",
     ),
 ];

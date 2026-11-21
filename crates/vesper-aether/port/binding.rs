@@ -5,6 +5,48 @@
 
 use vesper_port_abi::Abi;
 
+impl Abi for crate::port_types::HotFault {
+    const WORDS: usize = 2;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port_types::HotFault::OutOfRange { index: f0 } => {
+                out[0] = 0;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port_types::HotFault::TooMany => {
+                out[0] = 1;
+            }
+            crate::port_types::HotFault::BadBatch => {
+                out[0] = 2;
+            }
+            crate::port_types::HotFault::Truncated => {
+                out[0] = 3;
+            }
+            crate::port_types::HotFault::BadMagic => {
+                out[0] = 4;
+            }
+            crate::port_types::HotFault::TrailingBytes => {
+                out[0] = 5;
+            }
+            crate::port_types::HotFault::NotCanonical => {
+                out[0] = 6;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port_types::HotFault::OutOfRange { index: Abi::get(&words[1..]) },
+            1 => crate::port_types::HotFault::TooMany,
+            2 => crate::port_types::HotFault::BadBatch,
+            3 => crate::port_types::HotFault::Truncated,
+            4 => crate::port_types::HotFault::BadMagic,
+            5 => crate::port_types::HotFault::TrailingBytes,
+            6 => crate::port_types::HotFault::NotCanonical,
+            tag => panic!("invalid HotFault tag {tag} from Vesper"),
+        }
+    }
+}
+
 impl Abi for crate::port_types::KvmHostLimits {
     const WORDS: usize = 3;
     fn put(&self, out: &mut [u64]) {
@@ -218,6 +260,8 @@ impl Abi for crate::port_types::SlotError {
 
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
 const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
+const _: () = assert!(<Result<u64, crate::port_types::HotFault> as Abi>::WORDS == 3);
+const _: () = assert!(<crate::port_types::HotFault as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port_types::KvmHostLimits as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::PlannedRegion as Abi>::WORDS == 5);
 const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
@@ -227,6 +271,8 @@ unsafe extern "C" {
     fn vesper_aether_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_aether_seq_free(seq: i64) -> i64;
     fn vesper_aether_live_allocations() -> i64;
+    fn vesper_aether_hotset_decode(result: *mut u64, bytes: *mut u64, expected: i64, pages: *mut u64) -> i64;
+    fn vesper_aether_hotset_runs(result: *mut u64, pages: *mut u64, batch: i64, out: *mut u64) -> i64;
     fn vesper_aether_pvh_parse(result: *mut u64, elf: *mut u64, ram: *mut u64, out: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify(result: *mut u64, regions: *mut u64, limits: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify_cross_vm(result: *mut u64, vm_ids: *mut u64, regions: *mut u64, region_vm: *mut u64) -> i64;
@@ -242,6 +288,26 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_aether_live_allocations() }
+}
+
+/// Calls `hotset_decode` of the Vesper library `aether` (`vesper_aether_hotset_decode`).
+pub fn hotset_decode(bytes: &[u8], expected: u64, pages: &mut [u64]) -> Result<u64, crate::port_types::HotFault> {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_aether_hotset_decode` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(bytes, |view_bytes| vesper_port_abi::with_slice_mut(pages, |view_pages| unsafe { vesper_aether_hotset_decode(result.as_mut_ptr(), view_bytes, expected as i64, view_pages) }));
+    <Result<u64, crate::port_types::HotFault> as Abi>::get(&result[0..])
+}
+
+/// Calls `hotset_runs` of the Vesper library `aether` (`vesper_aether_hotset_runs`).
+pub fn hotset_runs(pages: &[u64], batch: u64, out: &mut [u64]) -> Result<u64, crate::port_types::HotFault> {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_aether_hotset_runs` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(pages, |view_pages| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_hotset_runs(result.as_mut_ptr(), view_pages, batch as i64, view_out) }));
+    <Result<u64, crate::port_types::HotFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `pvh_parse` of the Vesper library `aether` (`vesper_aether_pvh_parse`).
