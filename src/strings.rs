@@ -411,8 +411,7 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
         })
         .collect();
     let end = after.max(crate::integer_widths::module_end(module));
-    let padded = format!("{}{PRELUDE}", " ".repeat(end + 1));
-    let mut parsed = crate::parser::parse(&padded);
+    let mut parsed = crate::integer_widths::parse_at(PRELUDE, end + 1);
     debug_assert!(
         parsed.diagnostics.is_empty(),
         "string prelude: {:?}",

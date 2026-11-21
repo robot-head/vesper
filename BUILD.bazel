@@ -177,6 +177,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
+        # vector rules over the same corpus. Anchored globs.
+        "test/self_host_check_regions_seqs": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -229,6 +236,8 @@ vesper_crate(
         "test/std_intern": [":files"],
         # SH2 lane 1 (#1173): collections and arenas of values that are not copy.
         "test/owning_collections": [":files"],
+        # SH3 lane 3 (#1242): collection view callbacks (lent closures).
+        "test/closure_modes_collections": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([
@@ -534,6 +543,8 @@ vesper_crate(
         # The checker data differential (#1176) checks every corpus world.
         "test/self_host_check_data": "long",
         "test/self_host_check_harness": "long",
+        # The region and sequence rules differential (#1181): ~7 min debug.
+        "test/self_host_check_regions_seqs": "long",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
         # The package assembler differential (#1178) compiles the AST package.

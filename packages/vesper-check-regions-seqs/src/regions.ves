@@ -1,0 +1,399 @@
+// The type rules of src/regions.rs: region rows, `RegionBox[r, T]` and
+// `Watermark[r]` handles, `normalize`, `validate_type`, `display`,
+// `source_label` and `mismatch`. Started from the census sample
+// (docs/parallel-results/self-host-census.md), now on @vesper/check-data.
+// The expression half (`check_world`'s rewind flow and the checker methods
+// of src/regions/check.rs) walks the AST: a later PR of #1181.
+
+use @vesper/check-data::util::{
+    add,
+    inc32,
+    push_decimal,
+    u32_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    EffNode,
+    Types,
+    Vars,
+    display
+};
+use @vesper/check-data::world::{
+    Known
+};
+use @vesper/check-data::diag::{
+    Diags
+};
+
+const NONE32: u32 = 4294967295;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+
+// `region_row(label)`: `eff [label: Region]`.
+pub fn region_row(inout t: Types, k: Known, label: u32) -> u32 {
+    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    es
+        .push(
+        EffNode {
+            label: inc32(label),
+            name: k.region,
+            a: 0,
+            n: 0
+        }
+    );
+    let row = t.mk_row(in es, in args, 0);
+    t.row_type(row)
+}
+
+pub fn box_type(inout t: Types, k: Known, label: u32, payload: u32) -> u32 {
+    let r = region_row(inout t, k, label);
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    args.push(r);
+    args.push(payload);
+    t.named(k.region_box, in args)
+}
+
+pub fn watermark_type(inout t: Types, k: Known, label: u32) -> u32 {
+    let r = region_row(inout t, k, label);
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    args.push(r);
+    t.named(k.watermark, in args)
+}
+
+// `row_label`: label symbol + 1, or 0.
+pub fn row_label(in t: Types, k: Known, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind != K_ROW {
+        return 0;
+    }
+    let row = t.row(n.r2);
+    if row.tail != 0 || row.n != 1 {
+        return 0;
+    }
+    let e = t.effect_at(w(row.a));
+    if e.label != 0 && e.name == k.region && e.n == 0 {
+        e.label
+    } else {
+        0
+    }
+}
+
+// `box_parts`: the label + 1 (0 = none); the payload is argument 1.
+pub fn box_label(in t: Types, k: Known, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind != K_NAMED || n.name != k.region_box || n.n != 2 {
+        return 0;
+    }
+    row_label(in t, k, t.arg(ty, 0))
+}
+
+pub fn watermark_label(in t: Types, k: Known, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind != K_NAMED || n.name != k.watermark || n.n != 1 {
+        return 0;
+    }
+    row_label(in t, k, t.arg(ty, 0))
+}
+
+// `tiled::seq_region_label`: label + 1, or 0.
+pub fn seq_region_label(in t: Types, k: Known, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind != K_NAMED || n.name != k.tiled_seq || n.n != 2 {
+        return 0;
+    }
+    row_label(in t, k, t.arg(ty, 1))
+}
+
+pub fn is_handle_name(k: Known, s: u32) -> bool {
+    s == k.region_box || s == k.watermark
+}
+
+// `is_handle_type`.
+pub fn is_handle_type(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && is_handle_name(k, n.name)
+}
+
+// `source_name`: symbol + 1, or 0.
+fn source_name(in t: Types, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind == K_NAMED && n.n == 0 {
+        return inc32(n.name);
+    }
+    if n.kind == K_ROW {
+        let row = t.row(n.r2);
+        if row.n == 0 && row.tail != 0 {
+            return row.tail;
+        }
+    }
+    0
+}
+
+// `normalize(t, labels)`: `labels` maps source label symbols to capability
+// identity symbols.
+pub fn normalize(inout t: Types, k: Known, ty: u32, in labels: Vars) -> u32 {
+    let n = t.node(ty);
+    if n.kind == K_NAMED {
+        if n.n == 0 {
+            return ty;
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        for i in 0..w(n.n) {
+            let a = u32_at(in t.items, add(w(n.a), i));
+            let x = normalize(inout t, k, a, in labels);
+            args.push(x);
+        }
+        let slot: u64 = if is_handle_name(k, n.name) {
+            0
+        } else if n.name == k.tiled_seq && n.n == 2 {
+            1
+        } else {
+            9
+        };
+        if slot != 9 {
+            let src = source_name(in t, u32_at(in args, slot));
+            if src != 0 {
+                let cap = labels.get(wrapping_sub(src, 1));
+                if cap != NONE32 {
+                    let r = region_row(inout t, k, cap);
+                    let ok = args.try_set(slot, r);
+                }
+            }
+        }
+        return t.named(n.name, in args);
+    }
+    if n.kind == K_TUPLE {
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        for i in 0..w(n.n) {
+            let a = u32_at(in t.items, add(w(n.a), i));
+            let x = normalize(inout t, k, a, in labels);
+            args.push(x);
+        }
+        return t.tuple(in args);
+    }
+    if n.kind == K_FN {
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
+        for i in 0..w(n.n) {
+            let at = add(w(n.a), i);
+            passes.push(u8_at(in t.passes, at));
+            let x = normalize(inout t, k, u32_at(in t.items, at), in labels);
+            args.push(x);
+        }
+        let result = normalize(inout t, k, n.r, in labels);
+        return t.mk_with(K_FN, n.mode, 0, in args, in passes, result, n.r2, 0);
+    }
+    ty
+}
+
+// `source_label`: "region@N" for `$capN`, "region of f" for `$fncap:f:i`,
+// "region" for other `$` identities, else the label.
+fn source_label(in names: Names, label: u32, inout out: ChunkSeq[u8]) {
+    if names.has_prefix(label, in "$cap".as_bytes()) {
+        out.extend(in "region@".as_bytes());
+        let a = names.start(label);
+        let b = names.end(label);
+        for i in add(a, 4)..b {
+            out.push(u8_at(in names.text, i));
+        }
+        return;
+    }
+    if names.has_prefix(label, in "$fncap:".as_bytes()) {
+        out.extend(in "region of ".as_bytes());
+        let a = add(names.start(label), 7);
+        let b = names.end(label);
+        // `rsplit_once(':')`: up to the last ':', or all of it.
+        let mut cut = b;
+        let mut i = b;
+        loop {
+            if i <= a {
+                break;
+            }
+            i = wrapping_sub(i, 1);
+            if u8_at(in names.text, i) == 58 {
+                cut = i;
+                break;
+            }
+        }
+        for j in a..cut {
+            out.push(u8_at(in names.text, j));
+        }
+        return;
+    }
+    if names.has_prefix(label, in "$".as_bytes()) {
+        out.extend(in "region".as_bytes());
+        return;
+    }
+    names.write(label, inout out);
+}
+
+// `regions::display`.
+pub fn region_display(in t: Types, in names: Names, k: Known, ty: u32, inout out: ChunkSeq[u8]) {
+    let label = row_label(in t, k, ty);
+    if label != 0 {
+        source_label(in names, wrapping_sub(label, 1), inout out);
+        return;
+    }
+    let n = t.node(ty);
+    if n.kind == K_ROW {
+        let src = source_name(in t, ty);
+        if src != 0 {
+            names.write(wrapping_sub(src, 1), inout out);
+            return;
+        }
+    }
+    if n.kind == K_NAMED && n.n > 0 {
+        names.write(n.name, inout out);
+        out.push(91);
+        for i in 0..w(n.n) {
+            if i > 0 {
+                out.extend(in ", ".as_bytes());
+            }
+            region_display(in t, in names, k, t.arg(ty, i), inout out);
+        }
+        out.push(93);
+        return;
+    }
+    if n.kind == K_TUPLE {
+        out.push(40);
+        for i in 0..w(n.n) {
+            if i > 0 {
+                out.extend(in ", ".as_bytes());
+            }
+            region_display(in t, in names, k, t.arg(ty, i), inout out);
+        }
+        out.push(41);
+        return;
+    }
+    display(in t, in names, ty, inout out);
+}
+
+// `validate_type`: false when `ty` is not a region type (Rust `None`);
+// otherwise its diagnostics are appended to `d`.
+pub fn validate_type(
+    in t: Types,
+    in names: Names,
+    k: Known,
+    ty: u32,
+    start: u64,
+    stop: u64,
+    inout d: Diags
+) -> bool {
+    let n = t.node(ty);
+    if n.kind != K_NAMED {
+        return false;
+    }
+    if n.name == k.tiled_seq && n.n == 2 {
+        let arg = t.arg(ty, 1);
+        if row_label(in t, k, arg) == 0 {
+            let c = d.open("E0797");
+            let m = d.text.len();
+            d.text.extend(in "the second argument of ".as_bytes());
+            names.write(n.name, inout d.text);
+            d.text.extend(in " must name a region capability in scope, found ".as_bytes());
+            region_display(in t, in names, k, arg, inout d.text);
+            d
+                .close(
+                c,
+                m,
+                "bind one with `region r { ... }` or declare `eff [r: Region]`",
+                start,
+                stop
+            );
+        }
+        return true;
+    }
+    if !is_handle_name(k, n.name) {
+        return false;
+    }
+    let arity: u32 = if n.name == k.region_box {
+        2
+    } else {
+        1
+    };
+    if n.n != arity {
+        let c = d.open("E0797");
+        let m = d.text.len();
+        names.write(n.name, inout d.text);
+        d.text.extend(in " expects ".as_bytes());
+        push_decimal(inout d.text, w(arity));
+        d.text.extend(in " type arguments, found ".as_bytes());
+        push_decimal(inout d.text, w(n.n));
+        if n.name == k.region_box {
+            d.close(c, m, "write RegionBox[r, T] for a T allocated in region r", start, stop);
+        } else {
+            d.close(c, m, "write Watermark[r] for a checkpoint of region r", start, stop);
+        }
+    } else if row_label(in t, k, t.arg(ty, 0)) == 0 {
+        let c = d.open("E0797");
+        let m = d.text.len();
+        d.text.extend(in "the first argument of ".as_bytes());
+        names.write(n.name, inout d.text);
+        d.text.extend(in " must name a region capability in scope, found ".as_bytes());
+        region_display(in t, in names, k, t.arg(ty, 0), inout d.text);
+        d.close(c, m, "bind one with `region r { ... }` or declare `eff [r: Region]`", start, stop);
+    }
+    true
+}
+
+fn mentions(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_NAMED {
+        if is_handle_name(k, n.name) || (n.name == k.tiled_seq && n.n == 2) {
+            return true;
+        }
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if mentions(in t, k, t.arg(ty, i)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn differ(a: u32, b: u32) -> bool {
+    a != 0 && b != 0 && a != b
+}
+
+// `mismatch`: false when neither side involves regions.
+pub fn mismatch(
+    in t: Types,
+    in names: Names,
+    k: Known,
+    expected: u32,
+    actual: u32,
+    start: u64,
+    stop: u64,
+    inout d: Diags
+) -> bool {
+    if !mentions(in t, k, expected) && !mentions(in t, k, actual) {
+        return false;
+    }
+    let cross = differ(box_label(in t, k, expected), box_label(in t, k, actual))
+        || differ(watermark_label(in t, k, expected), watermark_label(in t, k, actual))
+        || differ(seq_region_label(in t, k, expected), seq_region_label(in t, k, actual));
+    let c = if cross {
+        d.open("E0792")
+    } else {
+        d.open("E0200")
+    };
+    let m = d.text.len();
+    d.text.extend(in "expected ".as_bytes());
+    region_display(in t, in names, k, expected, inout d.text);
+    d.text.extend(in ", found ".as_bytes());
+    region_display(in t, in names, k, actual, inout d.text);
+    if cross {
+        d.text.extend(in ": a region reference belongs to the region that allocated it".as_bytes());
+    }
+    d.close(c, m, "", start, stop);
+    true
+}
