@@ -34,10 +34,9 @@
 //! Linear owners are Rust host-library discipline, not the Vesper source
 //! typing rules for `linear struct`.
 
-// The seed build has no unsafe code at all; the port-backed build allows
-// it only in the generated binding.
-#![cfg_attr(not(vesper_port), forbid(unsafe_code))]
-#![cfg_attr(vesper_port, deny(unsafe_code))]
+// Unsafe code is allowed only in the generated binding to the Vesper
+// port.
+#![deny(unsafe_code)]
 
 pub mod amd;
 pub mod cca;
@@ -51,40 +50,31 @@ pub mod host;
 pub mod intel;
 mod linear;
 pub mod policy;
-// The port-backed package `vesper-aegis` forwards the quote, report and
-// claims parsers, the timestamp parser and the policy check to the Vesper
-// port in vesper/ through src/port.rs; the seed package `vesper-aegis-seed`
-// (the compiler's copy) keeps the Rust code.
-#[cfg(vesper_port)]
+// The quote, report and claims parsers, the timestamp parser and the
+// policy check are Vesper (vesper/, the Loom package @vesper/aegis); the
+// Rust items forward to it through src/port.rs (SH6 lane 8, #1403: the
+// Rust implementations were deleted when the port became the only build).
 mod port;
 // Generated and committed, but kept outside src/ so formatters, which
 // check every file under src/, never reflow it (see the porting recipe).
-#[cfg(vesper_port)]
 #[allow(unsafe_code, dead_code)]
 #[rustfmt::skip]
 #[path = "../port/binding.rs"]
 mod port_binding;
-#[cfg(not(vesper_port))]
-mod reader;
 pub mod roots;
 pub mod sgx;
 pub mod snp;
 pub mod tdx;
 pub mod time;
 
-/// Which build this is: `"vesper"` for the port-backed package
-/// `vesper-aegis`, `"rust"` for the seed copy `vesper-aegis-seed` that the
-/// compiler links.
-pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+/// Which build this is: always `"vesper"`, the Vesper port (the Rust
+/// parsers were deleted; the name stays for callers that report it).
+pub const IMPLEMENTATION: &str = "vesper";
 
-/// Live sequence allocations of the Vesper port (for leak tests); always 0
-/// in the Rust build.
+/// Live sequence allocations of the Vesper port (for leak tests).
 #[doc(hidden)]
 pub fn port_live_allocations() -> i64 {
-    #[cfg(vesper_port)]
-    return port_binding::live_allocations();
-    #[cfg(not(vesper_port))]
-    0
+    port_binding::live_allocations()
 }
 
 pub use chain::{Curve, EcPublicKey, TrustRoot};

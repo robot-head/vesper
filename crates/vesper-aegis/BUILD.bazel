@@ -1,11 +1,10 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md;
-# port wave P3a lane 8, #1043): build.rs links the object built here from the
-# Loom package in vesper/ and checks port/binding.rs against the generated
-# binding. The compiler links the Rust seed copy, //crates/vesper-aegis/seed,
-# instead, and so does every other dependent until the port reaches parity.
+# The port-backed package (port wave P3a lane 8, #1043): build.rs links the
+# object built here from the Loom package in vesper/ and checks
+# port/binding.rs against the generated binding. The port is the only build
+# of the parsers and the policy check (SH6 lane 8, #1403); there is no seed.
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
@@ -65,28 +64,4 @@ vesper_crate(
     # them as outside --root, so the model test runs in a copy of regular files.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
-)
-
-# The seed package (seed/) builds these same Rust sources without the port.
-exports_files(glob([
-    "src/**/*.rs",
-    "tests/**/*.rs",
-]))
-
-filegroup(
-    name = "rust_srcs",
-    srcs = glob(["src/**/*.rs"]),
-    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
-)
-
-filegroup(
-    name = "roots",
-    srcs = glob(["roots/**"]),
-    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
-)
-
-filegroup(
-    name = "test_data",
-    srcs = glob(["tests/data/**"]),
-    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
 )

@@ -141,14 +141,26 @@ fn snp(r: &mut Results, b: &[u8]) -> bool {
 }
 
 fn tdx(r: &mut Results, b: &[u8]) -> bool {
-    r.add("TdxQuote::parse_padded", port::tdx::TdxQuote::parse_padded(b));
-    r.add("TdxQuote::parse_prefix", port::tdx::TdxQuote::parse_prefix(b));
+    r.add(
+        "TdxQuote::parse_padded",
+        port::tdx::TdxQuote::parse_padded(b),
+    );
+    r.add(
+        "TdxQuote::parse_prefix",
+        port::tdx::TdxQuote::parse_prefix(b),
+    );
     r.add("TdxQuote::parse", port::tdx::TdxQuote::parse(b))
 }
 
 fn sgx(r: &mut Results, b: &[u8]) -> bool {
-    r.add("SgxQuote::parse_padded", port::sgx::SgxQuote::parse_padded(b));
-    r.add("SgxQuote::parse_prefix", port::sgx::SgxQuote::parse_prefix(b));
+    r.add(
+        "SgxQuote::parse_padded",
+        port::sgx::SgxQuote::parse_padded(b),
+    );
+    r.add(
+        "SgxQuote::parse_prefix",
+        port::sgx::SgxQuote::parse_prefix(b),
+    );
     r.add("SgxQuote::parse", port::sgx::SgxQuote::parse(b))
 }
 

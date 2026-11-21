@@ -29,18 +29,12 @@ use crate::chain::{
     Curve, EcPublicKey, RevocationScope, TrustRoot, pem_certificates, verify_chain_with_crls,
 };
 use crate::claims::ct_eq;
-#[cfg(not(vesper_port))]
-use crate::error::Format;
 use crate::error::{AttestError, ParseError};
 use crate::intel::{
     ComponentJson, PckExtensions, QeIdentity, TCB_INFO_VERSION, TCB_TYPE, TcbStatus, TdxCollateral,
     TdxTcbEvaluation, all_ge, check_embedded_root, check_window, collateral, date, evaluate_qe,
     hex_array, parse_pck_extensions, push_unique, svn16, verify_signed,
 };
-#[cfg(not(vesper_port))]
-use crate::reader::Reader;
-#[cfg(not(vesper_port))]
-use crate::tdx::{CERT_DATA_PCK_CHAIN_PEM, MAX_SIG_DATA_LEN};
 use crate::tdx::{QeReportBody, TdxQuote};
 use serde::Deserialize;
 
@@ -90,40 +84,6 @@ pub struct SgxReportBody {
 }
 
 impl SgxReportBody {
-    #[cfg(not(vesper_port))]
-    fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
-        let cpu_svn = r.array("body.cpu_svn")?;
-        let misc_select = r.u32("body.misc_select")?;
-        r.reserved(12, "body.reserved1")?;
-        let isv_ext_prod_id = r.array("body.isv_ext_prod_id")?;
-        let attributes = r.array("body.attributes")?;
-        let mr_enclave = r.array("body.mr_enclave")?;
-        r.reserved(32, "body.reserved2")?;
-        let mr_signer = r.array("body.mr_signer")?;
-        r.reserved(32, "body.reserved3")?;
-        let config_id = r.array("body.config_id")?;
-        let isv_prod_id = r.u16("body.isv_prod_id")?;
-        let isv_svn = r.u16("body.isv_svn")?;
-        let config_svn = r.u16("body.config_svn")?;
-        r.reserved(42, "body.reserved4")?;
-        let isv_family_id = r.array("body.isv_family_id")?;
-        let report_data = r.array("body.report_data")?;
-        Ok(SgxReportBody {
-            cpu_svn,
-            misc_select,
-            isv_ext_prod_id,
-            attributes,
-            mr_enclave,
-            mr_signer,
-            config_id,
-            isv_prod_id,
-            isv_svn,
-            config_svn,
-            isv_family_id,
-            report_data,
-        })
-    }
-
     /// `SGX_FLAGS_DEBUG` is set.
     pub fn is_debug(&self) -> bool {
         self.attributes[0] & SGX_FLAGS_DEBUG != 0
@@ -153,27 +113,23 @@ pub struct SgxQuote {
 
 impl SgxQuote {
     /// Bounds-checked parse; the input must contain exactly one quote.
-    #[cfg(vesper_port)]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         Ok(Self::parse_port(bytes, crate::port::TAIL_EXACT)?.0)
     }
 
     /// Parse from a fixed-size quote buffer: bytes after the quote's
     /// declared length must all be zero.
-    #[cfg(vesper_port)]
     pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
         Ok(Self::parse_port(bytes, crate::port::TAIL_PADDED)?.0)
     }
 
     /// Parse one quote from the start of `bytes`; returns it and the number
     /// of bytes it occupies.
-    #[cfg(vesper_port)]
     pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
         Self::parse_port(bytes, crate::port::TAIL_PREFIX)
     }
 
     /// `mode`: 0 exact, 1 zero padded, 2 prefix (vesper/src/reader.ves).
-    #[cfg(vesper_port)]
     fn parse_port(bytes: &[u8], mode: u64) -> Result<(Self, usize), ParseError> {
         let (used, p) =
             crate::port::parse(bytes, |w, _| crate::port::vesper::sgx_parse(bytes, mode, w))?;
@@ -217,109 +173,6 @@ impl SgxQuote {
             signed_bytes,
         };
         Ok((quote, used as usize))
-    }
-
-    /// Bounds-checked parse; the input must contain exactly one quote.
-    #[cfg(not(vesper_port))]
-    pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        let (quote, used) = Self::parse_prefix(bytes)?;
-        if used != bytes.len() {
-            return Err(ParseError::TrailingBytes {
-                format: Format::SgxQuoteV3,
-                extra: bytes.len() - used,
-            });
-        }
-        Ok(quote)
-    }
-
-    /// Parse from a fixed-size quote buffer: bytes after the quote's
-    /// declared length must all be zero.
-    #[cfg(not(vesper_port))]
-    pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
-        let (quote, used) = Self::parse_prefix(bytes)?;
-        if bytes[used..].iter().any(|&b| b != 0) {
-            return Err(ParseError::TrailingBytes {
-                format: Format::SgxQuoteV3,
-                extra: bytes.len() - used,
-            });
-        }
-        Ok(quote)
-    }
-
-    /// Parse one quote from the start of `bytes`; returns it and the number
-    /// of bytes it occupies.
-    #[cfg(not(vesper_port))]
-    pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
-        let mut r = Reader::new(bytes, Format::SgxQuoteV3);
-        let version = r.u16("header.version")?;
-        if version != SGX_QUOTE_VERSION {
-            return Err(unsupported("header.version", version.into()));
-        }
-        let att_key_type = r.u16("header.att_key_type")?;
-        if att_key_type != SGX_ATT_KEY_ECDSA_P256 {
-            return Err(unsupported("header.att_key_type", att_key_type.into()));
-        }
-        // `att_key_data_0`: reserved for ECDSA-256 attestation keys (the
-        // TEE type of quote v4 lives here; SGX is 0).
-        r.reserved(4, "header.att_key_data_0")?;
-        let header = SgxQuoteHeader {
-            version,
-            att_key_type,
-            qe_svn: r.u16("header.qe_svn")?,
-            pce_svn: r.u16("header.pce_svn")?,
-            qe_vendor_id: r.array("header.qe_vendor_id")?,
-            user_data: r.array("header.user_data")?,
-        };
-        let body = SgxReportBody::parse(&mut r)?;
-        debug_assert_eq!(r.position(), SGX_SIGNED_LEN);
-        let signed_bytes = bytes[..SGX_SIGNED_LEN].to_vec();
-
-        let sig_len = r.u32("signature_data_len")? as usize;
-        if sig_len > MAX_SIG_DATA_LEN {
-            return Err(ParseError::OverBudget {
-                format: Format::SgxQuoteV3,
-                field: "signature_data_len",
-                limit: MAX_SIG_DATA_LEN,
-                value: sig_len as u64,
-            });
-        }
-        let sig = r.take(sig_len, "signature_data")?;
-        let used = r.position();
-
-        let mut s = Reader::new(sig, Format::SgxQuoteV3);
-        let quote_signature = s.array("quote_signature")?;
-        let attestation_key = s.array("attestation_key")?;
-        let qe_report_raw = s.take(SGX_REPORT_BODY_LEN, "qe_report")?.to_vec();
-        let qe_report = {
-            let mut q = Reader::new(&qe_report_raw, Format::SgxQuoteV3);
-            QeReportBody::parse_from(&mut q)?
-        };
-        let qe_report_signature = s.array("qe_report_signature")?;
-        let auth_len = s.u16("qe_auth_data.size")? as usize;
-        let qe_auth_data = s.take(auth_len, "qe_auth_data")?.to_vec();
-        let cert_type = s.u16("cert_data.type")?;
-        if cert_type != CERT_DATA_PCK_CHAIN_PEM {
-            return Err(unsupported("cert_data.type", cert_type.into()));
-        }
-        let cert_size = s.u32("cert_data.size")? as usize;
-        let pck_chain_pem = s.take(cert_size, "cert_data")?.to_vec();
-        s.finish()?;
-
-        Ok((
-            SgxQuote {
-                header,
-                body,
-                quote_signature,
-                attestation_key,
-                qe_report,
-                qe_report_raw,
-                qe_report_signature,
-                qe_auth_data,
-                pck_chain_pem,
-                signed_bytes,
-            },
-            used,
-        ))
     }
 }
 
@@ -682,14 +535,5 @@ impl SgxEnclavePolicy {
             });
         }
         Ok(())
-    }
-}
-
-#[cfg(not(vesper_port))]
-fn unsupported(field: &'static str, value: u64) -> ParseError {
-    ParseError::UnsupportedValue {
-        format: Format::SgxQuoteV3,
-        field,
-        value,
     }
 }

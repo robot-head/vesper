@@ -276,7 +276,7 @@ skip_port vesper-serde || sh crates/vesper-serde/port/check.sh  # port P1 lane 1
 fi
 # Shard 5: aegis through bench.
 if part 5; then
-skip_port vesper-aegis || sh crates/vesper-aegis/port/check.sh  # port P3a lane 8 (#1043): vesper-aegis, both builds and one divergence check per ported module
+skip_port vesper-aegis || sh crates/vesper-aegis/port/check.sh  # port P3a lane 8 (#1043): vesper-aegis, the port (the only build, SH6 lane 8 #1403) and one divergence check per ported module
 skip_port vesper-loom-audit || sh crates/vesper-loom-audit/port/test-port.sh  # port wave P3a lane 4 (#1039): vesper-loom-audit, both builds and the divergence check
 skip_port vesper-bench || sh crates/vesper-bench/port/check.sh  # port P3a lane 5 (#1040): vesper-bench, both builds and one divergence check per ported module
 fi

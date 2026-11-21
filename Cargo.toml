@@ -75,7 +75,6 @@ members = [
     "crates/vesper-warp-tcp",
     "crates/vesper-chorus",
     "crates/vesper-aegis",
-    "crates/vesper-aegis/seed",
     "crates/vesper-resonance",
     "crates/vesper-resonance/seed",
     "crates/vesper-warp-tls",
@@ -190,7 +189,6 @@ default-members = [
     "crates/vesper-warp-tcp",
     "crates/vesper-chorus",
     "crates/vesper-aegis",
-    "crates/vesper-aegis/seed",
     "crates/vesper-resonance",
     "crates/vesper-resonance/seed",
     "crates/vesper-warp-tls",
@@ -361,7 +359,9 @@ wit-parser = "=0.261.0"
 # as `vesper-<tool>` binaries (crates/vesper-tools, SH0 lane 2), so these
 # seed copies left the compiler's closure. The CLI tests still check results
 # against them.
-vesper-aegis = { path = "crates/vesper-aegis/seed", package = "vesper-aegis-seed" }
+# vesper-aegis has no seed: its parsers and policy check are Vesper only
+# (SH6 lane 8, #1403).
+vesper-aegis = { path = "crates/vesper-aegis" }
 vesper-bench = { path = "crates/vesper-bench/seed", package = "vesper-bench-seed" }
 vesper-nexus = { path = "crates/vesper-nexus" }
 # HostCall drives the JIT-compiled front end v2 in tests/self_host_front_v2.rs (#1147).
