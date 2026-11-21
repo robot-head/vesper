@@ -177,6 +177,18 @@ impl Port {
                 if let Some(types) = &self.types_path {
                     command.args(["--rust-types", types]);
                 }
+                // The CPU features the Rust half is compiled for (baseline
+                // by default, every host feature under
+                // `-C target-cpu=native`): the port's object uses the same.
+                // x86-64's baseline list adds nothing, so a default build
+                // runs the same command as before.
+                if let Ok(features) = std::env::var("CARGO_CFG_TARGET_FEATURE")
+                    && features
+                        .split(',')
+                        .any(|f| !matches!(f, "" | "fxsr" | "sse" | "sse2" | "x87"))
+                {
+                    command.arg("--target-features").arg(features);
+                }
                 run(&mut command, &compiler)?;
                 Some(binding)
             }
