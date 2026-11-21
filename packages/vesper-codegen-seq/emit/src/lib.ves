@@ -1,0 +1,692 @@
+// @vesper/codegen-seq-emit: native emission of sequences, bytes and
+// strings (self-hosting SH4 lane 9, #1283, part 2).
+//
+// The Rust `Codegen` lends its builder and module to the `seq` hook for one
+// request (src/codegen_swap.rs). The first request ported is
+// `codegen_swap::seq::RUNTIME`: the AOT sequence runtime
+// (src/seq/aot_runtime.rs), defined into the lent module with fresh
+// builders of its own. Every instruction, block, import and declaration is
+// made in the order the Rust emitter makes them, so the object bytes are
+// the same.
+//
+// `seq_hook` declines every other request, `INSTRUCTION` included, and the
+// Rust code emits those.
+
+use @vesper/cranelift::{
+    Block,
+    DataId,
+    FuncId,
+    SigId,
+    Value,
+    append_block_param,
+    append_block_params_for_function_params,
+    block_of_word,
+    block_param,
+    builder_new,
+    call_arg,
+    call_builder,
+    call_conv_default,
+    call_module,
+    call_op,
+    call_return_builder,
+    call_return_module,
+    cc_eq,
+    cc_ne,
+    cc_ugt,
+    cc_ule,
+    create_block,
+    data_align,
+    data_define,
+    data_new,
+    data_zeroinit,
+    declare_data,
+    declare_function,
+    define_data,
+    define_function,
+    import_data,
+    import_function,
+    inst_result,
+    ins_atomic_rmw,
+    ins_band,
+    ins_bor,
+    ins_brif,
+    ins_brif0,
+    ins_call,
+    ins_iadd_imm,
+    ins_iconst,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_imul,
+    ins_jump,
+    ins_jump0,
+    ins_load,
+    ins_overflow,
+    ins_return1,
+    ins_select,
+    ins_store,
+    ins_symbol_value,
+    ins_trap,
+    ins_udiv,
+    ins_umax,
+    linkage_import,
+    linkage_local,
+    mem_trusted,
+    seal_all_blocks,
+    seal_block,
+    sig_new,
+    sig_param,
+    sig_return,
+    switch_to_block,
+    trap_user,
+    ty_i64,
+    vals1,
+    vals2,
+    vals3
+};
+
+// The request protocol (src/codegen_swap.rs): the answer of a hook.
+pub const HANDLED: u64 = 1;
+pub const DECLINED: u64 = 0;
+
+// The `seq` family's helper ops (`codegen_swap::seq`).
+pub const RUNTIME: u32 = 1;
+
+// `MemFlags::new()`.
+const PLAIN: u32 = 0;
+// The shim's `AtomicRmwOp::Add` and `umul_overflow` codes.
+const ATOMIC_ADD: u32 = 1;
+const UMUL_OVERFLOW: u32 = 5;
+// The user trap after a call that does not return (`TrapCode::user(1)`).
+const UNREACHABLE: u32 = 1;
+// The header's words: `{len, cap, data}`.
+const LEN: i32 = 0;
+const CAP: i32 = 8;
+const DATA: i32 = 16;
+// The runtime's data is word aligned.
+const WORD_ALIGN: u64 = 8;
+// The fault message's file descriptor (stderr).
+const STDERR: i64 = 2;
+// The first capacity growth gives at least this many elements.
+const MIN_CAP: i64 = 4;
+// Bytes counts are at most `isize::MAX`.
+const MAX_BYTES: i64 = 9223372036854775807;
+
+// What the runtime's functions share: the imports and data declared before
+// them, and the runtime's constants (`codegen_swap::seq::runtime_args`).
+copy struct Rt {
+    malloc: FuncId,
+    realloc: FuncId,
+    fault: FuncId,
+    live: DataId,
+    empty: DataId,
+    inline_bytes: i64,
+    new_inline_bytes: i64,
+    prefix: i64,
+    status: i64,
+    header: i64,
+}
+
+// The fault messages, by code (0: out of memory, 1: an interval fault,
+// 2: a string interval off a char boundary).
+const MESSAGES: u64 = 3;
+fn message(code: u64) -> Str {
+    if code == 0 {
+        "vesper: native ChunkSeq fault: out of memory\n"
+    } else if code == 1 {
+        "vesper: native ChunkSeq fault: slice interval out of bounds\n"
+    } else {
+        "vesper: native String fault: interval is not on char boundaries\n"
+    }
+}
+fn message_name(code: u64) -> Str {
+    if code == 0 {
+        "vesper_seq_fault_message_0"
+    } else if code == 1 {
+        "vesper_seq_fault_message_1"
+    } else {
+        "vesper_seq_fault_message_2"
+    }
+}
+
+fn no_values() -> ChunkSeq[u32] {
+    ChunkSeq::new[u32]()
+}
+
+// ---------------------------------------------------------------------------
+// Declarations.
+
+// A signature of `params` 64-bit parameters and, with `ret`, one 64-bit
+// result, in the target's default calling convention (`make_signature`).
+fn sig(inout m: Module, params: u64, ret: bool) -> SigId eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    for _ in 0..params {
+        sig_param(inout m, s, ty_i64());
+    }
+    if ret {
+        sig_return(inout m, s, ty_i64());
+    }
+    s
+}
+fn import(inout m: Module, in name: Str, params: u64, ret: bool) -> FuncId eff [Ffi[Cranelift]] {
+    let s = sig(inout m, params, ret);
+    declare_function(inout m, in name.as_bytes(), linkage_import(), s)
+}
+fn local(inout m: Module, in name: Str, params: u64) -> FuncId eff [Ffi[Cranelift]] {
+    let s = sig(inout m, params, true);
+    declare_function(inout m, in name.as_bytes(), linkage_local(), s)
+}
+
+// ---------------------------------------------------------------------------
+// Function bodies (`aot_runtime::compile` and its helpers).
+
+// A builder for a function of `params` 64-bit parameters returning one,
+// positioned in its sealed entry block (block 0).
+fn begin(inout m: Module, params: u64) -> Option[Builder] eff [Ffi[Cranelift]] {
+    let s = sig(inout m, params, true);
+    let mut b = match builder_new(in m, s) {
+        Some(b) => b,
+        None => return None,
+    };
+    let entry = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    seal_block(inout b, entry);
+    Some(b)
+}
+// Parameter `i` of the function being built.
+fn arg(inout b: Builder, i: u32) -> Value eff [Ffi[Cranelift]] {
+    block_param(inout b, block_of_word(0), i)
+}
+// Seal every block and define `id` from `b`.
+fn finish(inout m: Module, id: FuncId, sink b: Builder) -> bool eff [Ffi[Cranelift]] {
+    let mut b = b;
+    seal_all_blocks(inout b);
+    define_function(inout m, id, b)
+}
+
+fn iconst(inout b: Builder, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_iconst(inout b, ty_i64(), imm)
+}
+// A call of `f`, imported into the function again (as `declare_func_in_func`
+// does for each Rust call).
+fn call(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32]) eff [Ffi[Cranelift]] {
+    let r = import_function(inout b, inout m, f);
+    ins_call(inout b, r, in args);
+}
+fn call1(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32])
+    -> Value eff [Ffi[Cranelift]] {
+    call(inout b, inout m, f, in args);
+    inst_result(inout b, 0)
+}
+fn data_address(inout b: Builder, in m: Module, d: DataId) -> Value eff [Ffi[Cranelift]] {
+    let gv = import_data(inout b, in m, d);
+    ins_symbol_value(inout b, ty_i64(), gv)
+}
+fn ret(inout b: Builder, v: Value) eff [Ffi[Cranelift]] {
+    ins_return1(inout b, v);
+}
+
+// Call the fault function with code 0 and trap after it.
+fn fault(inout b: Builder, inout m: Module, rt: Rt) eff [Ffi[Cranelift]] {
+    let code = iconst(inout b, 0);
+    let args = vals1(code);
+    call(inout b, inout m, rt.fault, in args.as_slice());
+    ins_trap(inout b, trap_user(UNREACHABLE));
+}
+
+// Fault when `ptr` is null.
+fn non_null(inout b: Builder, inout m: Module, rt: Rt, ptr: Value) eff [Ffi[Cranelift]] {
+    let null = ins_icmp_imm(inout b, cc_eq(), ptr, 0);
+    let fail = create_block(inout b);
+    let ok = create_block(inout b);
+    ins_brif0(inout b, null, fail, ok);
+    switch_to_block(inout b, fail);
+    fault(inout b, inout m, rt);
+    switch_to_block(inout b, ok);
+}
+
+// Add `delta` to the live-allocation counter.
+fn count(inout b: Builder, inout m: Module, rt: Rt, delta: i64) eff [Ffi[Cranelift]] {
+    let d = iconst(inout b, delta);
+    let address = data_address(inout b, in m, rt.live);
+    ins_atomic_rmw(inout b, ATOMIC_ADD, ty_i64(), mem_trusted(), address, d);
+}
+
+// `cap * max(stride, 1)`, faulting on overflow past `isize::MAX`.
+fn checked_bytes(inout b: Builder, inout m: Module, rt: Rt, cap: Value, stride: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let one = iconst(inout b, 1);
+    let unit = ins_umax(inout b, stride, one);
+    let bytes = ins_overflow(inout b, UMUL_OVERFLOW, cap, unit);
+    let overflow = inst_result(inout b, 1);
+    let huge = ins_icmp_imm(inout b, cc_ugt(), bytes, MAX_BYTES);
+    let bad = ins_bor(inout b, overflow, huge);
+    let fail = create_block(inout b);
+    let ok = create_block(inout b);
+    ins_brif0(inout b, bad, fail, ok);
+    switch_to_block(inout b, fail);
+    fault(inout b, inout m, rt);
+    switch_to_block(inout b, ok);
+    bytes
+}
+
+// A separate element buffer of `bytes` bytes, `prefix` bytes into its
+// `malloc` block, counted as one live allocation.
+fn buffer(inout b: Builder, inout m: Module, rt: Rt, bytes: Value) -> Value eff [Ffi[Cranelift]] {
+    let total = ins_iadd_imm(inout b, bytes, rt.prefix);
+    let args = vals1(total);
+    let block = call1(inout b, inout m, rt.malloc, in args.as_slice());
+    non_null(inout b, inout m, rt, block);
+    count(inout b, inout m, rt, 1);
+    ins_iadd_imm(inout b, block, rt.prefix)
+}
+
+// Whether `{cap, data}` of the header at `header` is a separate buffer the
+// runtime owns: not borrowed, not absent, not the header's inline elements.
+fn separate_buffer(inout b: Builder, rt: Rt, header: Value, cap: Value, data: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let present = ins_icmp_imm(inout b, cc_ne(), data, 0);
+    let owned = ins_icmp_imm(inout b, cc_ne(), cap, 0);
+    let after = ins_iadd_imm(inout b, header, rt.header);
+    let apart = ins_icmp(inout b, cc_ne(), data, after);
+    let both = ins_band(inout b, present, owned);
+    ins_band(inout b, both, apart)
+}
+
+// ---------------------------------------------------------------------------
+// The runtime's functions.
+
+// `vesper_seq_fault(code)`: write message `code` to stderr (not on
+// Windows), exit with the fault status.
+fn define_fault(
+    inout m: Module,
+    rt: Rt,
+    exit: FuncId,
+    write: FuncId,
+    messages: bool,
+    d0: DataId,
+    d1: DataId,
+    d2: DataId
+) -> bool eff [Ffi[Cranelift]] {
+    let mut b = match begin(inout m, 1) {
+        Some(b) => b,
+        None => return false,
+    };
+    if messages {
+        let code_arg = arg(inout b, 0);
+        let mut ptr = data_address(inout b, in m, d0);
+        let mut len = iconst(inout b, wrapping_i64(message(0).len()));
+        for code in 1..MESSAGES {
+            let this = data_address(
+                inout b,
+                in m,
+                if code == 1 {
+                    d1
+                } else {
+                    d2
+                }
+            );
+            let this_len = iconst(inout b, wrapping_i64(message(code).len()));
+            let is = ins_icmp_imm(inout b, cc_eq(), code_arg, wrapping_i64(code));
+            ptr = ins_select(inout b, is, this, ptr);
+            len = ins_select(inout b, is, this_len, len);
+        }
+        let fd = iconst(inout b, STDERR);
+        let args = vals3(fd, ptr, len);
+        call(inout b, inout m, write, in args.as_slice());
+    }
+    let status = iconst(inout b, rt.status);
+    let args = vals1(status);
+    call(inout b, inout m, exit, in args.as_slice());
+    ins_trap(inout b, trap_user(UNREACHABLE));
+    finish(inout m, rt.fault, b)
+}
+
+// `vesper_seq_new(cap, stride)`: a bare header and, for `cap > 0`, a
+// separate buffer.
+fn define_new(inout m: Module, rt: Rt, id: FuncId) -> bool eff [Ffi[Cranelift]] {
+    let mut b = match begin(inout m, 2) {
+        Some(b) => b,
+        None => return false,
+    };
+    let cap = arg(inout b, 0);
+    let stride = arg(inout b, 1);
+    let header_bytes = iconst(inout b, rt.header);
+    let args = vals1(header_bytes);
+    let header = call1(inout b, inout m, rt.malloc, in args.as_slice());
+    non_null(inout b, inout m, rt, header);
+    count(inout b, inout m, rt, 1);
+    let zero = iconst(inout b, 0);
+    ins_store(inout b, PLAIN, zero, header, LEN);
+    ins_store(inout b, PLAIN, cap, header, CAP);
+    ins_store(inout b, PLAIN, zero, header, DATA);
+    let empty = ins_icmp_imm(inout b, cc_eq(), cap, 0);
+    let alloc = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, empty, done, alloc);
+    switch_to_block(inout b, alloc);
+    let bytes = checked_bytes(inout b, inout m, rt, cap, stride);
+    let data = buffer(inout b, inout m, rt, bytes);
+    ins_store(inout b, PLAIN, data, header, DATA);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    ret(inout b, header);
+    finish(inout m, id, b)
+}
+
+// `vesper_seq_make(cap, stride)`: one block holding the header and, up to
+// `inline_bytes`, the elements; capacity 0 is the shared empty header.
+fn define_make(inout m: Module, rt: Rt, id: FuncId, new: FuncId) -> bool eff [Ffi[Cranelift]] {
+    let mut b = match begin(inout m, 2) {
+        Some(b) => b,
+        None => return false,
+    };
+    let cap = arg(inout b, 0);
+    let stride = arg(inout b, 1);
+    let none = ins_icmp_imm(inout b, cc_eq(), cap, 0);
+    let empty_block = create_block(inout b);
+    let some = create_block(inout b);
+    ins_brif0(inout b, none, empty_block, some);
+    switch_to_block(inout b, empty_block);
+    let shared = data_address(inout b, in m, rt.empty);
+    ret(inout b, shared);
+    switch_to_block(inout b, some);
+    let bytes = checked_bytes(inout b, inout m, rt, cap, stride);
+    let fits = ins_icmp_imm(inout b, cc_ule(), bytes, rt.inline_bytes);
+    let inline = create_block(inout b);
+    let split = create_block(inout b);
+    ins_brif0(inout b, fits, inline, split);
+    switch_to_block(inout b, inline);
+    let total = ins_iadd_imm(inout b, bytes, rt.header);
+    let args = vals1(total);
+    let header = call1(inout b, inout m, rt.malloc, in args.as_slice());
+    non_null(inout b, inout m, rt, header);
+    count(inout b, inout m, rt, 1);
+    let zero = iconst(inout b, 0);
+    let data = ins_iadd_imm(inout b, header, rt.header);
+    ins_store(inout b, PLAIN, zero, header, LEN);
+    ins_store(inout b, PLAIN, cap, header, CAP);
+    ins_store(inout b, PLAIN, data, header, DATA);
+    ret(inout b, header);
+    switch_to_block(inout b, split);
+    let args = vals2(cap, stride);
+    let separate = call1(inout b, inout m, new, in args.as_slice());
+    ret(inout b, separate);
+    finish(inout m, id, b)
+}
+
+// `vesper_seq_grow(header, stride, needed)`: room for `needed` elements;
+// returns the header to use afterwards.
+fn define_grow(inout m: Module, rt: Rt, id: FuncId, make: FuncId, memcpy: FuncId)
+    -> bool eff [Ffi[Cranelift]] {
+    let mut b = match begin(inout m, 3) {
+        Some(b) => b,
+        None => return false,
+    };
+    let header = arg(inout b, 0);
+    let stride = arg(inout b, 1);
+    let needed = arg(inout b, 2);
+    let shared = data_address(inout b, in m, rt.empty);
+    let is_empty = ins_icmp(inout b, cc_eq(), header, shared);
+    let fresh_header = create_block(inout b);
+    let in_place = create_block(inout b);
+    ins_brif0(inout b, is_empty, fresh_header, in_place);
+    switch_to_block(inout b, fresh_header);
+    let one = iconst(inout b, 1);
+    let unit = ins_umax(inout b, stride, one);
+    let room = iconst(inout b, rt.new_inline_bytes);
+    let room = ins_udiv(inout b, room, unit);
+    let four = iconst(inout b, MIN_CAP);
+    let floor = ins_umax(inout b, room, four);
+    let first_cap = ins_umax(inout b, floor, needed);
+    let args = vals2(first_cap, stride);
+    let made = call1(inout b, inout m, make, in args.as_slice());
+    ret(inout b, made);
+    switch_to_block(inout b, in_place);
+    let cap = ins_load(inout b, ty_i64(), PLAIN, header, CAP);
+    let data = ins_load(inout b, ty_i64(), PLAIN, header, DATA);
+    // new_cap = max(needed, max(4, cap * 2)), saturating.
+    let two = iconst(inout b, 2);
+    let doubled = ins_overflow(inout b, UMUL_OVERFLOW, cap, two);
+    let wrapped = inst_result(inout b, 1);
+    let max = iconst(inout b, -1);
+    let doubled = ins_select(inout b, wrapped, max, doubled);
+    let four = iconst(inout b, MIN_CAP);
+    let floor = ins_umax(inout b, doubled, four);
+    let new_cap = ins_umax(inout b, floor, needed);
+    let bytes = checked_bytes(inout b, inout m, rt, new_cap, stride);
+    let owned = separate_buffer(inout b, rt, header, cap, data);
+    let resize = create_block(inout b);
+    let fresh_block = create_block(inout b);
+    let joined = create_block(inout b);
+    let grown = append_block_param(inout b, joined, ty_i64());
+    ins_brif0(inout b, owned, resize, fresh_block);
+    // A separate buffer the runtime allocated: resize it in place.
+    switch_to_block(inout b, resize);
+    let base = ins_iadd_imm(inout b, data, wrapping_sub(0, rt.prefix));
+    let total = ins_iadd_imm(inout b, bytes, rt.prefix);
+    let args = vals2(base, total);
+    let resized = call1(inout b, inout m, rt.realloc, in args.as_slice());
+    non_null(inout b, inout m, rt, resized);
+    let resized = ins_iadd_imm(inout b, resized, rt.prefix);
+    let to_join = vals1(resized);
+    ins_jump(inout b, joined, in to_join.as_slice());
+    // No buffer, inline elements or borrowed bytes: a fresh buffer, with
+    // the old elements copied over.
+    switch_to_block(inout b, fresh_block);
+    let fresh = buffer(inout b, inout m, rt, bytes);
+    let len = ins_load(inout b, ty_i64(), PLAIN, header, LEN);
+    let one = iconst(inout b, 1);
+    let unit = ins_umax(inout b, stride, one);
+    let used = ins_imul(inout b, len, unit);
+    let has_data = ins_icmp_imm(inout b, cc_ne(), data, 0);
+    let copy_old = create_block(inout b);
+    let none = no_values();
+    let with_fresh = vals1(fresh);
+    ins_brif(inout b, has_data, copy_old, in none.as_slice(), joined, in with_fresh.as_slice());
+    switch_to_block(inout b, copy_old);
+    let args = vals3(fresh, data, used);
+    call(inout b, inout m, memcpy, in args.as_slice());
+    ins_jump(inout b, joined, in with_fresh.as_slice());
+    switch_to_block(inout b, joined);
+    ins_store(inout b, PLAIN, new_cap, header, CAP);
+    ins_store(inout b, PLAIN, grown, header, DATA);
+    ret(inout b, header);
+    finish(inout m, id, b)
+}
+
+// `vesper_seq_free(header)`: free a header and the buffer it owns; the
+// shared empty header is never freed.
+fn define_free(inout m: Module, rt: Rt, id: FuncId, free: FuncId) -> bool eff [Ffi[Cranelift]] {
+    let mut b = match begin(inout m, 1) {
+        Some(b) => b,
+        None => return false,
+    };
+    let header = arg(inout b, 0);
+    let shared = data_address(inout b, in m, rt.empty);
+    let is_empty = ins_icmp(inout b, cc_eq(), header, shared);
+    let skip = create_block(inout b);
+    let owned_header = create_block(inout b);
+    ins_brif0(inout b, is_empty, skip, owned_header);
+    switch_to_block(inout b, skip);
+    let nothing = iconst(inout b, 0);
+    ret(inout b, nothing);
+    switch_to_block(inout b, owned_header);
+    let cap = ins_load(inout b, ty_i64(), PLAIN, header, CAP);
+    let data = ins_load(inout b, ty_i64(), PLAIN, header, DATA);
+    let owned = separate_buffer(inout b, rt, header, cap, data);
+    let free_data = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, owned, free_data, done);
+    switch_to_block(inout b, free_data);
+    let base = ins_iadd_imm(inout b, data, wrapping_sub(0, rt.prefix));
+    let args = vals1(base);
+    call(inout b, inout m, free, in args.as_slice());
+    count(inout b, inout m, rt, -1);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    let args = vals1(header);
+    call(inout b, inout m, free, in args.as_slice());
+    count(inout b, inout m, rt, -1);
+    let zero = iconst(inout b, 0);
+    ret(inout b, zero);
+    finish(inout m, id, b)
+}
+
+// `vesper_str_release(value)`: free the buffer an inline `String` value
+// owns; borrowed bytes stay.
+fn define_release_str(inout m: Module, rt: Rt, id: FuncId, free: FuncId)
+    -> bool eff [Ffi[Cranelift]] {
+    let mut b = match begin(inout m, 1) {
+        Some(b) => b,
+        None => return false,
+    };
+    let value = arg(inout b, 0);
+    let data = ins_load(inout b, ty_i64(), PLAIN, value, DATA);
+    let cap = ins_load(inout b, ty_i64(), PLAIN, value, CAP);
+    let present = ins_icmp_imm(inout b, cc_ne(), data, 0);
+    let owned = ins_icmp_imm(inout b, cc_ne(), cap, 0);
+    let has_data = ins_band(inout b, present, owned);
+    let free_data = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, has_data, free_data, done);
+    switch_to_block(inout b, free_data);
+    let base = ins_iadd_imm(inout b, data, wrapping_sub(0, rt.prefix));
+    let args = vals1(base);
+    call(inout b, inout m, free, in args.as_slice());
+    count(inout b, inout m, rt, -1);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    let zero = iconst(inout b, 0);
+    ret(inout b, zero);
+    finish(inout m, id, b)
+}
+
+// ---------------------------------------------------------------------------
+// The whole runtime (`aot_runtime::define`, after its `defined` and
+// pointer-type checks, which the Rust caller makes).
+
+fn define_runtime(call: u64, inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    let windows = call_arg(call, 0) != 0;
+    let live = declare_data(inout m, in "vesper_seq_live".as_bytes(), linkage_local(), true);
+    let mut zero_word = match data_new() {
+        Some(d) => d,
+        None => return false,
+    };
+    data_zeroinit(inout zero_word, 8);
+    data_align(inout zero_word, WORD_ALIGN);
+    if !define_data(inout m, live, zero_word) {
+        return false;
+    }
+    let empty = declare_data(inout m, in "vesper_seq_empty".as_bytes(), linkage_local(), false);
+    let header = wrapping_i64(call_arg(call, 5));
+    let mut empty_header = match data_new() {
+        Some(d) => d,
+        None => return false,
+    };
+    let mut zeros: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_u64(header));
+    for _ in 0..wrapping_u64(header) {
+        zeros.push(0);
+    }
+    data_define(inout empty_header, in zeros.as_slice());
+    data_align(inout empty_header, WORD_ALIGN);
+    if !define_data(inout m, empty, empty_header) {
+        return false;
+    }
+    let malloc = import(inout m, in "malloc", 1, true);
+    let realloc = import(inout m, in "realloc", 2, true);
+    let fault = local(inout m, in "vesper_seq_fault", 1);
+    let rt = Rt {
+        malloc: malloc,
+        realloc: realloc,
+        fault: fault,
+        live: live,
+        empty: empty,
+        inline_bytes: wrapping_i64(call_arg(call, 1)),
+        new_inline_bytes: wrapping_i64(call_arg(call, 2)),
+        prefix: wrapping_i64(call_arg(call, 3)),
+        status: wrapping_i64(call_arg(call, 4)),
+        header: header,
+    };
+    let exit = import(inout m, in "exit", 1, false);
+    let mut write = exit;
+    let mut d0 = live;
+    let mut d1 = live;
+    let mut d2 = live;
+    if !windows {
+        write = import(inout m, in "write", 3, true);
+        for code in 0..MESSAGES {
+            let name = message_name(code);
+            let id = declare_data(inout m, in name.as_bytes(), linkage_local(), false);
+            if code == 0 {
+                d0 = id;
+            } else if code == 1 {
+                d1 = id;
+            } else {
+                d2 = id;
+            }
+            let mut d = match data_new() {
+                Some(d) => d,
+                None => return false,
+            };
+            let text = message(code);
+            data_define(inout d, in text.as_bytes());
+            if !define_data(inout m, id, d) {
+                return false;
+            }
+        }
+    }
+    if !define_fault(inout m, rt, exit, write, !windows, d0, d1, d2) {
+        return false;
+    }
+    let memcpy = import(inout m, in "memcpy", 3, true);
+    let free = import(inout m, in "free", 1, false);
+    let new = local(inout m, in "vesper_seq_new", 2);
+    if !define_new(inout m, rt, new) {
+        return false;
+    }
+    let make = local(inout m, in "vesper_seq_make", 2);
+    if !define_make(inout m, rt, make, new) {
+        return false;
+    }
+    let grow = local(inout m, in "vesper_seq_grow", 3);
+    if !define_grow(inout m, rt, grow, make, memcpy) {
+        return false;
+    }
+    let release = local(inout m, in "vesper_seq_free", 1);
+    if !define_free(inout m, rt, release, free) {
+        return false;
+    }
+    let release_str = local(inout m, in "vesper_str_release", 1);
+    define_release_str(inout m, rt, release_str, free)
+}
+
+// One `seq` request on the lent handles.
+fn seq(call: u64, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
+    if call_op(call) == RUNTIME {
+        // A failed definition leaves its error on the module, which the
+        // host reports.
+        define_runtime(call, inout m);
+        return HANDLED;
+    }
+    DECLINED
+}
+
+// The `seq` hook.
+pub fn seq_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let b = match call_builder(call) {
+        Some(b) => b,
+        None => return DECLINED,
+    };
+    let mut m = match call_module(call) {
+        Some(m) => m,
+        None => {
+            call_return_builder(call, b);
+            return DECLINED;
+        }
+    };
+    let handled = seq(call, inout m);
+    call_return_module(call, m);
+    call_return_builder(call, b);
+    handled
+}
