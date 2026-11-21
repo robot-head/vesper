@@ -81,6 +81,12 @@ Use a unique case name within the function. A test fails if it returns `false`,
 returns an `Err` variant, or raises a runtime error. Reports identify each case
 as `function::case` and use the comment's source location. Use `--filter` to
 select rows or `--mutate` to run them against mutations of the code under test.
+Use `--mutant-offset` and `--max-mutants` to run a window of the zero-based
+mutant indices reported for the same source and test selection.
+Use `--mutate-dependency FILE` to replay a package suite against mutations
+in one dependency source file.
+Use `--no-opt` with `--mutate` to run the unit baseline and mutant replay
+in the evaluator with optimization disabled.
 Anvil's `@test` attributes also work inside a test block, including
 `@test_case(...)` pins for property tests.
 

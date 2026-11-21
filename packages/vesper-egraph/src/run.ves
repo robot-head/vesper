@@ -1,0 +1,424 @@
+// Search, application and the two saturation drivers.
+//
+// `run_egg` is egg 0.10's `Runner::run` as `src/optimize/certificate.rs`
+// configures it: every rule searched on the rebuilt graph (a cap on matches
+// per rule, as its `BoundedScheduler` has), then every rule's matches
+// applied in rule order (each one instantiates the right side and unions it
+// with the matched class, egg's default `apply_matches`), then a rebuild.
+// The hook stops the run when the root class holds a leaf of the wanted
+// kind (certificate.rs's `root_has_leaf`), the limits are egg's iteration
+// and node limits, and the cap checks are the `RecordingApplier`'s. Every
+// successful union is recorded with the bindings of the rule's class
+// variables, which is what certificate.rs replays into proofs.
+//
+// `run_rounds` is egglog's `(run n)` over rules without limits: each round
+// searches every rule on the rebuilt graph, applies the matches, and
+// rebuilds; it stops early when a round changes nothing.
+
+use self::util::{
+    at32,
+    at8,
+    ati,
+    at64,
+    filled32,
+    inc,
+    n32,
+    w
+};
+use self::graph::{
+    EGraph
+};
+use self::rules::{
+    Rules
+};
+
+const NONE: u32 = 4294967295;
+
+const P_VAR: u8 = 0;
+const D_VAR: u8 = 1;
+const I_BIND: u32 = 1;
+const B_CONST: u32 = 0;
+const B_BIND: u32 = 1;
+const G_TOTAL: u8 = 1;
+const G_REL: u8 = 2;
+
+// Why a run stopped.
+pub const STOP_SATURATED: u8 = 1;
+pub const STOP_ITERATIONS: u8 = 2;
+pub const STOP_NODES: u8 = 3;
+// The hook found a leaf in the root class.
+pub const STOP_HOOK: u8 = 4;
+// A cap was hit: matches of one rule, ids or records.
+pub const STOP_FAILED: u8 = 5;
+
+// The limits and the hook of `run_egg`.
+pub copy struct Config {
+    iter_limit: u64,
+    node_limit: u64,
+    // A rule's search fails once it reaches this many matches.
+    match_limit: u64,
+    // An application fails when the ids plus `reserve` pass `raw_cap`, or
+    // when `record_cap` records exist.
+    raw_cap: u64,
+    reserve: u64,
+    record_cap: u64,
+    // The hook: stop when the root class holds a constant `const_op` with
+    // data in lo..=hi, or a variable `input_op` with data below `vars`.
+    hook: bool,
+    const_op: u32,
+    input_op: u32,
+    lo: i64,
+    hi: i64,
+    vars: i64
+}
+
+// The matches of one search pass: for each rule a range of matches; for
+// each match its class, its class variables and its data variables.
+pub struct Matches {
+    rule_start: ChunkSeq[u64],
+    eclass: ChunkSeq[u32],
+    vals: ChunkSeq[u32],
+    val_start: ChunkSeq[u64],
+    dvals: ChunkSeq[i64],
+    dval_start: ChunkSeq[u64]
+}
+
+fn matches_new() -> Matches {
+    Matches {
+        rule_start: ChunkSeq::new[u64](),
+        eclass: ChunkSeq::new[u32](),
+        vals: ChunkSeq::new[u32](),
+        val_start: ChunkSeq::new[u64](),
+        dvals: ChunkSeq::new[i64](),
+        dval_start: ChunkSeq::new[u64]()
+    }
+}
+
+// The applications that unioned something: rule, number of bindings, then
+// the bindings (the class of each class variable, as matched).
+pub struct Records {
+    words: ChunkSeq[u32],
+    count: u64
+}
+
+pub fn records_new() -> Records {
+    Records {
+        words: ChunkSeq::new[u32](),
+        count: 0
+    }
+}
+
+impl Records {
+    pub fn len(in self) -> u64 {
+        self.count
+    }
+
+    pub fn word_count(in self) -> u64 {
+        self.words.len()
+    }
+
+    pub fn word(in self, i: u64) -> u32 {
+        at32(in self.words, i)
+    }
+}
+
+// The search state of one program run: registers and data registers.
+struct Machine {
+    regs: ChunkSeq[u32],
+    dregs: ChunkSeq[i64],
+    left: u64
+}
+
+// egg's `Machine::run` from instruction `pc` of rule `r`'s program. Returns
+// false once the match limit is reached.
+fn run_from(
+    in g: EGraph,
+    in rules: Rules,
+    r: u64,
+    pc: u64,
+    end: u64,
+    inout m: Machine,
+    inout out: Matches
+) -> bool {
+    if pc >= end {
+        // yield: one substitution
+        out.eclass.push(at32(in m.regs, 0));
+        out.val_start.push(out.vals.len());
+        out.dval_start.push(out.dvals.len());
+        for v in 0..rules.nvars_of(r) {
+            out.vals.push(at32(in m.regs, rules.var_reg(r, v)));
+        }
+        for d in 0..rules.ndvars_of(r) {
+            out.dvals.push(ati(in m.dregs, d));
+        }
+        m.left = wrapping_sub(m.left, 1);
+        return m.left != 0;
+    }
+    let kind = rules.instr(pc, 0);
+    let i = w(rules.instr(pc, 1));
+    let o = w(rules.instr(pc, 2));
+    if kind == I_BIND {
+        let op = rules.instr(pc, 3);
+        let dmode = rules.instr(pc, 4);
+        let dix = w(rules.instr(pc, 5));
+        let data = rules.instr_data(pc);
+        let c = g.find(at32(in m.regs, i));
+        let s = g.class_start(c);
+        let n = g.class_len(c);
+        let a = widen_u64(g.arity_of(op));
+        for k in s..wrapping_add(s, n) {
+            if g.node_op(k) != op {
+                continue;
+            }
+            let d = g.node_data(k);
+            if dmode == B_CONST {
+                if d != data {
+                    continue;
+                }
+            } else if dmode == B_BIND {
+                m.dregs.try_set(dix, d);
+            } else if ati(in m.dregs, dix) != d {
+                continue;
+            }
+            for j in 0..a {
+                m.regs.try_set(wrapping_add(o, j), g.node_child(k, j));
+            }
+            if !run_from(in g, in rules, r, inc(pc), end, inout m, inout out) {
+                return false;
+            }
+        }
+        return true;
+    }
+    // Compare
+    if g.find(at32(in m.regs, i)) != g.find(at32(in m.regs, o)) {
+        return true;
+    }
+    run_from(in g, in rules, r, inc(pc), end, inout m, inout out)
+}
+
+// Searches rule `r` over every class in ascending id order, appending at
+// most `limit` matches. Returns the number found.
+fn search_rule(in g: EGraph, in rules: Rules, r: u64, limit: u64, inout out: Matches) -> u64 {
+    let (start, len) = rules.prog(r);
+    let end = wrapping_add(start, len);
+    let mut m = Machine {
+        regs: filled32(rules.nregs_of(r), 0),
+        dregs: ChunkSeq::with_capacity[i64](rules.ndvars_of(r)),
+        left: limit
+    };
+    m.dregs.resize(rules.ndvars_of(r), 0);
+    let before = out.eclass.len();
+    if limit == 0 {
+        return 0;
+    }
+    for x in 0..g.live_count() {
+        m.regs.try_set(0, g.live_at(x));
+        if !run_from(in g, in rules, r, start, end, inout m, inout out) {
+            break;
+        }
+    }
+    wrapping_sub(out.eclass.len(), before)
+}
+
+// Searches every rule; false when one reached `limit` matches.
+fn search_all(in g: EGraph, in rules: Rules, limit: u64, inout out: Matches) -> bool {
+    let mut ok = true;
+    for r in 0..rules.count() {
+        out.rule_start.push(out.eclass.len());
+        let found = search_rule(in g, in rules, r, limit, inout out);
+        if found >= limit {
+            ok = false;
+        }
+    }
+    out.rule_start.push(out.eclass.len());
+    ok
+}
+
+// Instantiates the right side of rule `r` for match `mi` (egg's
+// `apply_pat`) and unions it with the matched class. Returns whether the
+// union merged two classes.
+fn apply_one(
+    inout g: EGraph,
+    in rules: Rules,
+    r: u64,
+    in ms: Matches,
+    mi: u64,
+    inout ids: ChunkSeq[u32]
+) -> bool {
+    let vs = at64(in ms.val_start, mi);
+    let ds = at64(in ms.dval_start, mi);
+    let (start, len) = rules.rhs(r);
+    ids.clear();
+    let mut last: u32 = 0;
+    for k in start..wrapping_add(start, len) {
+        let (kind, a, dmode, dval, c0, c1) = rules.pnode(k);
+        let id = if kind == P_VAR {
+            at32(in ms.vals, wrapping_add(vs, w(a)))
+        } else {
+            let data = if dmode == D_VAR {
+                ati(in ms.dvals, wrapping_add(ds, wrapping_u64(dval)))
+            } else {
+                dval
+            };
+            let ar = g.arity_of(a);
+            let x0 = if ar >= 1 {
+                at32(in ids, wrapping_sub(w(c0), start))
+            } else {
+                0
+            };
+            let x1 = if ar >= 2 {
+                at32(in ids, wrapping_sub(w(c1), start))
+            } else {
+                0
+            };
+            g.add(a, data, x0, x1)
+        };
+        ids.push(id);
+        last = id;
+    }
+    let class = at32(in ms.eclass, mi);
+    g.union(class, last)
+}
+
+fn guard_holds(in g: EGraph, in rules: Rules, r: u64, in ms: Matches, mi: u64) -> bool {
+    let (kind, g0, g1) = rules.guard_of(r);
+    if kind == G_TOTAL {
+        let v = at32(in ms.vals, wrapping_add(at64(in ms.val_start, mi), w(g0)));
+        return g.has_leaf(v);
+    }
+    if kind == G_REL {
+        let ds = at64(in ms.dval_start, mi);
+        let a = ati(in ms.dvals, wrapping_add(ds, w(g0)));
+        let b = ati(in ms.dvals, wrapping_add(ds, w(g1)));
+        return rules.rel_has(a, b);
+    }
+    true
+}
+
+fn root_has_leaf(in g: EGraph, root: u32, c: Config) -> bool {
+    let r = g.find(root);
+    let s = g.class_start(r);
+    for k in s..wrapping_add(s, g.class_len(r)) {
+        let op = g.node_op(k);
+        let d = g.node_data(k);
+        if op == c.const_op && d >= c.lo && d <= c.hi {
+            return true;
+        }
+        if op == c.input_op && d >= 0 && d < c.vars {
+            return true;
+        }
+    }
+    false
+}
+
+// One iteration of egg's `Runner::run_one`; 0 to go on, else a STOP_*.
+fn run_one(inout g: EGraph, in rules: Rules, c: Config, root: u32, done: u64, inout rec: Records)
+    -> u8 {
+    if g.memo_len() > c.node_limit {
+        return STOP_NODES;
+    }
+    if done >= c.iter_limit {
+        return STOP_ITERATIONS;
+    }
+    let nodes0 = g.memo_len();
+    let classes0 = g.class_count();
+    if c.hook && root_has_leaf(in g, root, c) {
+        return STOP_HOOK;
+    }
+    let mut ms = matches_new();
+    if !search_all(in g, in rules, c.match_limit, inout ms) {
+        return STOP_FAILED;
+    }
+    let mut applied: u64 = 0;
+    let mut stop: u8 = 0;
+    let mut ids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for r in 0..rules.count() {
+        let a = at64(in ms.rule_start, r);
+        let b = at64(in ms.rule_start, inc(r));
+        for mi in a..b {
+            // The RecordingApplier's caps come before the rule's condition.
+            if wrapping_add(g.raw_len(), c.reserve) > c.raw_cap || rec.count >= c.record_cap {
+                return STOP_FAILED;
+            }
+            if !guard_holds(in g, in rules, r, in ms, mi) {
+                continue;
+            }
+            if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
+                applied = inc(applied);
+                rec.words.push(n32(r));
+                let nv = rules.nvars_of(r);
+                rec.words.push(n32(nv));
+                let vs = at64(in ms.val_start, mi);
+                for v in 0..nv {
+                    rec.words.push(at32(in ms.vals, wrapping_add(vs, v)));
+                }
+                rec.count = inc(rec.count);
+            }
+        }
+        if g.memo_len() > c.node_limit {
+            stop = STOP_NODES;
+            break;
+        }
+    }
+    g.rebuild();
+    if stop != 0 {
+        return stop;
+    }
+    if applied == 0 && g.memo_len() == nodes0 && g.class_count() == classes0 {
+        return STOP_SATURATED;
+    }
+    0
+}
+
+// egg's `Runner::run` from a graph holding the root's expression. Returns
+// why it stopped and how many iterations ran (egg's `iterations.len()`).
+pub fn run_egg(inout g: EGraph, in rules: Rules, c: Config, root: u32, inout rec: Records)
+    -> (u8, u64) {
+    g.rebuild();
+    let mut iters: u64 = 0;
+    loop {
+        let stop = run_one(inout g, in rules, c, root, iters, inout rec);
+        iters = inc(iters);
+        if stop != 0 {
+            return (stop, iters);
+        }
+        if g.memo_len() > c.node_limit {
+            return (STOP_NODES, iters);
+        }
+        if iters >= c.iter_limit {
+            return (STOP_ITERATIONS, iters);
+        }
+    }
+}
+
+// egglog's `(run n)`: at most `rounds` rounds of search, apply and
+// rebuild. Returns the number of rounds that changed the graph.
+pub fn run_rounds(inout g: EGraph, in rules: Rules, rounds: u64) -> u64 {
+    g.rebuild();
+    let mut ids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut changed: u64 = 0;
+    for i in 0..rounds {
+        let nodes0 = g.raw_len();
+        let mut ms = matches_new();
+        search_all(in g, in rules, 18446744073709551615, inout ms);
+        let mut unions: u64 = 0;
+        for r in 0..rules.count() {
+            let a = at64(in ms.rule_start, r);
+            let b = at64(in ms.rule_start, inc(r));
+            for mi in a..b {
+                if !guard_holds(in g, in rules, r, in ms, mi) {
+                    continue;
+                }
+                if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
+                    unions = inc(unions);
+                }
+            }
+        }
+        unions = wrapping_add(unions, g.rebuild());
+        if unions == 0 && g.raw_len() == nodes0 {
+            break;
+        }
+        changed = inc(changed);
+    }
+    changed
+}

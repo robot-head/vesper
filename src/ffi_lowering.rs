@@ -700,6 +700,17 @@ impl ForeignChecked {
         &self,
         entry: &str,
         fuel: Option<u64>,
+        host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
+    ) -> Result<crate::runtime::Value, FfiError> {
+        self.evaluate_with_options(entry, fuel, true, host)
+    }
+
+    /// Run in the evaluator with a fuel limit and a choice of optimization mode.
+    pub fn evaluate_with_options(
+        &self,
+        entry: &str,
+        fuel: Option<u64>,
+        optimize: bool,
         mut host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
     ) -> Result<crate::runtime::Value, FfiError> {
         let fail = |m: String| FfiError::new(FfiErrorKind::Codegen, m, None);
@@ -712,6 +723,7 @@ impl ForeignChecked {
             }
         }
         let mut runtime = crate::runtime::Runtime::new(&world);
+        runtime.optimize = optimize;
         if let Some(fuel) = fuel {
             runtime.fuel = fuel;
         }

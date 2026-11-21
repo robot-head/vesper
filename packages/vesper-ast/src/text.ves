@@ -367,6 +367,16 @@ fn digit(in src: ChunkSeq[u8], i: u64) -> u64 {
     }
 }
 
+// Track nonzero discarded digits for rounding and the scale of the retained prefix.
+fn discard_digit(sticky: bool, exponent: i64, digit: u64, fractional: bool) -> (bool, i64) {
+    let scale = if fractional {
+        exponent
+    } else {
+        wrapping_add(exponent, 1)
+    };
+    (sticky || digit != 0, scale)
+}
+
 // The f64 bit pattern of Float token `start..end` of `src`
 // (`[0-9]+.[0-9]+([eE][+-]?[0-9]+)?` or `[0-9]+[eE][+-]?[0-9]+`).
 pub fn parse_float(in src: ChunkSeq[u8], start: u64, end: u64) -> u64 {
@@ -408,12 +418,9 @@ pub fn parse_float(in src: ChunkSeq[u8], start: u64, end: u64) -> u64 {
                 exp = wrapping_sub(exp, 1);
             }
         } else {
-            if v != 0 {
-                dropped_nonzero = true;
-            }
-            if !frac {
-                exp = wrapping_add(exp, 1);
-            }
+            let (sticky, scale) = discard_digit(dropped_nonzero, exp, v, frac);
+            dropped_nonzero = sticky;
+            exp = scale;
         }
         i = wrapping_add(i, 1);
     }
@@ -505,6 +512,53 @@ pub fn parse_float(in src: ChunkSeq[u8], start: u64, end: u64) -> u64 {
 }
 
 test {
+    // @case fractional_zero(false, -7, 0, true, false, -7)
+    // @case fractional_nonzero(false, -7, 3, true, true, -7)
+    // @case integral_zero(false, 0, 0, false, false, 1)
+    // @case integral_nonzero(false, 1, 9, false, true, 2)
+    // @case preserves_sticky(true, -7, 0, true, true, -7)
+    fn test_discarded_decimal_digit(
+        sticky: bool,
+        exponent: i64,
+        digit: u64,
+        frac: bool,
+        expected: bool,
+        scale: i64
+    ) -> bool {
+        let (nonzero, next_scale) = discard_digit(sticky, exponent, digit, frac);
+        nonzero == expected && next_scale == scale
+    }
+
+    // @case zero_shift(0, 0xffffffff00000001, false)
+    // @case within_first_limb(4, 0x9ffffffff0000000, true)
+    // @case starts_on_second_limb(32, 0x23456789ffffffff, true)
+    // @case aligned_past_top(96, 0x0000000000000000, true)
+    fn test_limb_window(shift: u64, expected: u64, lower_bits: bool) -> bool {
+        let mut num = ChunkSeq::new[u64]();
+        num.push(1);
+        num.push(0xffffffff);
+        num.push(0x23456789);
+        bits_at(in num, shift) == expected && any_below(in num, shift) == lower_bits
+    }
+
+    fn test_big_integer_carry_and_borrow() -> bool {
+        let mut a = ChunkSeq::new[u64]();
+        a.push(0xffffffff);
+        let mut one = ChunkSeq::new[u64]();
+        one.push(1);
+        mul_add_small(inout a, 1, 1);
+        if a.len() != 2 || bitlen(in a) != 33 || !bit(in a, 32) || cmp(in a, in one) != 1 {
+            return false;
+        }
+        sub(inout a, in one);
+        if a.len() != 1 || limb(in a, 0) != 0xffffffff || cmp(in one, in a) != -1 {
+            return false;
+        }
+        shl(inout a, 33);
+        shr1(inout a);
+        a.len() == 2 && limb(in a, 0) == 0 && limb(in a, 1) == 0xffffffff
+    }
+
     // @case empty(in "\"\"", in "")
     // @case ascii_run(in "\"abc\"", in "abc")
     // @case utf8_run(in "\"é水\"", in "é水")
@@ -518,6 +572,20 @@ test {
     // @case isolated_low_surrogate(in "\"abc\\uDE00\"", in "")
     // @case invalid_second_surrogate(in "\"abc\\uD83D\\u0041\"", in "")
     // @case raw_control_character(in "\"a\nb\"", in "")
+    // @case space_is_not_control(in "\"a b\"", in "a b")
+    // @case hex_digit_boundaries(in "\"\\u004A\\u004F\\u006a\\u006f\\u0039\"", in "JOjo9")
+    // @case first_surrogate_pair(in "\"\\uD800\\uDC00\"", in "𐀀")
+    // @case last_surrogate_pair(in "\"\\uDBFF\\uDFFF\"", in "􏿿")
+    // @case surrogate_at_lower_boundary_is_invalid(in "\"before\\uD800\"", in "")
+    // @case surrogate_at_upper_boundary_is_invalid(in "\"before\\uDFFF\"", in "")
+    // @case surrogate_followed_by_non_escape(in "\"before\\uD800abc\"", in "")
+    // @case surrogate_followed_by_wrong_escape(in "\"before\\uD800\\n\"", in "")
+    // @case second_surrogate_above_maximum(in "\"before\\uD800\\uE000\"", in "")
+    // @case before_surrogates(in "\"\\uD7FF\"", in "퟿")
+    // @case after_surrogates(in "\"\\uE000\"", in "")
+    // @case high_surrogate_wrong_escape_with_low_digits(in "\"\\uD800\\tDC00\"", in "")
+    // @case first_isolated_low_with_suffix(in "\"before\\uDC00after\"", in "")
+    // @case last_isolated_low_with_suffix(in "\"before\\uDFFFafter\"", in "")
     fn test_decode_string(in token: Str, in expected: Str) -> bool {
         let mut source = String::new();
         source.push_str(in "prefix");
@@ -555,13 +623,23 @@ test {
     // @case smallest_subnormal(in "4.9406564584124654e-324", 0x0000000000000001)
     // @case underflow(in "2e-324", 0x0000000000000000)
     // @case huge_exponent(in "1e9999999999", 0x7ff0000000000000)
+    // @case integer_with_internal_zeros(in "109.09e2", 0x40c54e8000000000)
+    // @case rounds_carry_into_exponent(in "1.9999999999999999", 0x4000000000000000)
+    // @case rounds_from_subnormal_to_normal(in "2.2250738585072012e-308", 0x0010000000000000)
+    // @case below_half_subnormal(in "2.4703282292062327e-324", 0x0000000000000000)
+    // @case above_half_subnormal(in "2.4703282292062328e-324", 0x0000000000000001)
+    // @case zero_with_huge_exponent(in "0.00e999999999", 0x0000000000000000)
+    // @case at_positive_cutoff(in "1e309", 0x7ff0000000000000)
+    // @case at_negative_cutoff(in "1e-327", 0x0000000000000000)
+    // @case integer_half_even_down(in "9007199254740993e0", 0x4340000000000000)
+    // @case fractional_half_even_up(in "1.00000000000000033306690738754696212708950042724609375", 0x3ff0000000000002)
     fn test_parse_float(in token: Str, expected_bits: u64) -> bool {
         let mut source = ChunkSeq::new[u8]();
         source.extend(in "prefix".as_bytes());
         let start = source.len();
         source.extend(in token.as_bytes());
         let end = source.len();
-        source.extend(in "suffix".as_bytes());
+        source.extend(in "9suffix".as_bytes());
         parse_float(in source, start, end) == expected_bits
     }
 }
