@@ -359,6 +359,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH5 lane 9 (#1332): the policy on the wasm/emit input
+        # (ir::lower_world) against ir_opt::optimize. Anchored globs.
+        "test/optimizer_build_time": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH5 lane 8 (#1331): memoized World::mode against the original on
         # every corpus world. Anchored globs.
         "test/world_mode_speed": glob([
@@ -725,6 +732,8 @@ vesper_crate(
         "test/self_host_optimize": "eternal",
         # The optimizer policy (#1279) optimizes every corpus world three times.
         "test/optimizer_budget": "long",
+        # The wasm/emit optimizer input (#1332) over the corpus.
+        "test/optimizer_build_time": "long",
         # World::mode (#1331) answers every corpus query three times.
         "test/world_mode_speed": "long",
     },
