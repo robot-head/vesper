@@ -26,6 +26,7 @@ The lane lands in several PRs. This report grows with each one.
 | Budget hand-over | `src/optimize/witness.rs`: `Spent`, `WitnessBudget::spent`, `verify_spent` (additive) |
 | Test | `tests/self_host_optimize.rs` |
 | Bazel data and timeout | `BUILD.bazel` |
+| 128-bit kinds in the checker ports | `packages/vesper-check-data/src/world.ves`, `packages/vesper-check-core-typing/src/ints.ves` |
 
 `src/optimize/witness.rs` is outside the lane's exclusive paths. The swap
 point has to continue the producer's budget across the language boundary,
@@ -190,6 +191,17 @@ Minimal repros, each refused by `vesper check` on `main` at `c8ac321`:
 
 4. **Constants cannot be imported** (known; #1239 is open). `budget.ves`
    and `witness.ves` each declare the error codes they use.
+
+### Gaps in other ports
+
+The package is the corpus's first world with `i128` in its types, and the
+checker ports did not know the 128-bit kinds yet. `@vesper/check-data`'s
+`Known::is_integer` now names `i128` and `u128` (so their mode is copy, as
+in Rust), and `@vesper/check-core-typing`'s `int_bits`, `int_unsigned` and
+`fits` give them 128 bits. Before, `self_host_check_data` (a struct holding
+`ChunkSeq[TermRow]` came out linear, Rust says affine) and
+`self_host_check_core_typing_exprs` (`value: 0` into an `i128` field gave
+E0200) each failed on this package alone.
 
 ### What is left
 
