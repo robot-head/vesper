@@ -43,11 +43,14 @@ VesperPackageInfo = provider(
 )
 
 def _vesper_package_impl(ctx):
-    own = [ctx.file.manifest] + ctx.files.srcs
+    own = [ctx.file.manifest] + ctx.files.srcs + ctx.files.vsys
     prefix = ctx.file.manifest.dirname + "/src/"
     for f in ctx.files.srcs:
         if not f.path.startswith(prefix):
             fail("%s is not under %s" % (f.path, prefix))
+    for f in ctx.files.vsys:
+        if not f.path.startswith(ctx.file.manifest.dirname + "/"):
+            fail("%s is not in the package directory %s" % (f.path, ctx.file.manifest.dirname))
     files = depset(own, transitive = [d[VesperPackageInfo].files for d in ctx.attr.deps])
     return [
         VesperPackageInfo(manifest = ctx.file.manifest, srcs = own, files = files),
@@ -64,6 +67,10 @@ vesper_package = rule(
         ),
         "manifest": attr.label(allow_single_file = ["Loom.toml"], mandatory = True),
         "srcs": attr.label_list(allow_files = [".ves"], doc = "Every file under src/ (use a glob)."),
+        "vsys": attr.label_list(
+            allow_files = [".vsys"],
+            doc = "The `.vsys` files the manifest names (`[package] vsys`, #1150).",
+        ),
     },
 )
 

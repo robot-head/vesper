@@ -1,0 +1,11 @@
+[package]
+name = "@vesper/driver"
+version = "0.1.0"
+edition = "2026"
+# The driver's decisions only compute: arguments in, options or an error
+# message out. The hybrid's driver module (crates/vesper-hybrid/modules/
+# driver) does the I/O.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper-std/fmt" = { version = "^0.1", path = "../vesper-std/fmt" }
