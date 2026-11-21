@@ -1,0 +1,1369 @@
+// @vesper/codegen-seq: native lowering of sequences, bytes and strings
+// (self-hosting SH4 lane 9, #1283). Part 1 ports the decisions native
+// lowering makes before it emits anything, over @vesper/place-ir tables:
+//
+// - `drop_plan`: `fip::seq_drop_plan` (src/fip.rs), the function-local
+//   `ChunkSeq`, `String` and owning-aggregate slots that native code frees
+//   itself, and what each frees (src/seq/native.rs reads it at function
+//   entry).
+// - `borrowed`: `fip::borrowed_scrutinees`, the `match` scrutinees that are
+//   borrows, which the plan refuses bindings of.
+// - `seq_rows`: for every `Op::Seq`, what `Codegen::seq_op` and the
+//   `Op::Seq` dispatch of src/native.rs read off the operation and its
+//   types: `SeqOp::name`, `has_receiver`, `receiver_pass`, `mutates`,
+//   `fallible`, `place_primitive`, `byte_scan`, the (defaulted) element
+//   type and its packed stride (`seq::elem_bytes`).
+//
+// Emission (src/seq/native*.rs, src/strings/native.rs) and the AOT
+// sequence runtime (src/seq/aot_runtime.rs) come after SH4 lane 1 lends
+// Cranelift builders to Vesper.
+//
+// The harness entry is `codegen_seq_decisions`
+// (tests/self_host_codegen_seq.rs); its input is @vesper/place-ir's (names,
+// types, world, program) followed by one `fip` flag per function.
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    push_decimal,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    debug_type,
+    default_type,
+    substitute
+};
+use @vesper/check-data::world::{
+    World,
+    vector_words
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+use @vesper/check-layout::{
+    Layouts,
+    layout_of,
+    layouts_new
+};
+use @vesper/place-ir::{
+    FnRow,
+    InstRow,
+    Program,
+    read_program
+};
+
+const NONE32: u32 = 4294967295;
+
+// check-data's type kinds.
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_INFER: u8 = 5;
+
+// Passes (check_words.rs `pass_word`).
+const P_SINK: u64 = 2;
+
+// Opcodes (ir_words.rs `OP_NAMES`).
+const OP_READ: u8 = 2;
+const OP_BIND: u8 = 3;
+const OP_WRITE: u8 = 4;
+const OP_CLOSURE: u8 = 14;
+const OP_HANDLE: u8 = 15;
+const OP_SEQ: u8 = 18;
+
+// Terminators.
+const TERM_MATCH: u8 = 3;
+
+// Pattern kinds.
+const PAT_BIND: u64 = 1;
+const PAT_LITERAL: u64 = 2;
+const PAT_TUPLE: u64 = 3;
+const PAT_CONSTRUCTOR: u64 = 4;
+
+// Patterns nested deeper than this are corrupt input (place-ir reads no
+// further).
+const MAX_DEPTH: u64 = 512;
+
+// `fip::SeqDrop`, plus 0 for "not planned".
+const D_NONE: u8 = 0;
+const D_SEQ: u8 = 1;
+const D_STR: u8 = 2;
+const D_OWNED: u8 = 3;
+const D_FIELDS: u8 = 4;
+
+// `seq::elem_bytes` of a type with no layout.
+const NO_STRIDE: u64 = 18446744073709551615;
+
+// ----- symbols ------------------------------------------------------------------
+
+// Names the decisions compare against, interned once.
+pub copy struct Syms {
+    string: u32,
+    str_: u32,
+    dyn_: u32,
+    chunk_seq: u32,
+    slice: u32,
+    tiled_seq: u32,
+    box_: u32,
+    box_box: u32,
+    region_box: u32,
+    watermark: u32,
+    never: u32,
+    zero: u32,
+    assign: u32,
+    u8_: u32,
+    u32_: u32,
+    bool_: u32,
+    i128_: u32,
+    u128_: u32,
+    try_get: u32,
+    hoisted_try_get: u32,
+}
+
+fn syms_new(inout n: Names) -> Syms {
+    Syms {
+        string: n.intern(in "String".as_bytes()),
+        str_: n.intern(in "Str".as_bytes()),
+        dyn_: n.intern(in "dyn".as_bytes()),
+        chunk_seq: n.intern(in "ChunkSeq".as_bytes()),
+        slice: n.intern(in "Slice".as_bytes()),
+        tiled_seq: n.intern(in "TiledSeq".as_bytes()),
+        box_: n.intern(in "Box".as_bytes()),
+        box_box: n.intern(in "Box::Box".as_bytes()),
+        region_box: n.intern(in "RegionBox".as_bytes()),
+        watermark: n.intern(in "Watermark".as_bytes()),
+        never: n.intern(in "Never".as_bytes()),
+        zero: n.intern(in "0".as_bytes()),
+        assign: n.intern(in "=".as_bytes()),
+        u8_: n.intern(in "u8".as_bytes()),
+        u32_: n.intern(in "u32".as_bytes()),
+        bool_: n.intern(in "bool".as_bytes()),
+        i128_: n.intern(in "i128".as_bytes()),
+        u128_: n.intern(in "u128".as_bytes()),
+        try_get: n.intern(in "TryGet".as_bytes()),
+        hoisted_try_get: n.intern(in "Hoisted(TryGet)".as_bytes()),
+    }
+}
+
+// ----- small tables -------------------------------------------------------------
+
+fn bool_at(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+// Grows `s` with `fill` so that index `i` exists.
+fn cover_u8(inout s: ChunkSeq[u8], i: u64) {
+    if s.len() <= i {
+        s.resize(inc(i), 0);
+    }
+}
+
+fn cover_bool(inout s: ChunkSeq[bool], i: u64) {
+    if s.len() <= i {
+        s.resize(inc(i), false);
+    }
+}
+
+fn cover_u32(inout s: ChunkSeq[u32], i: u64) {
+    if s.len() <= i {
+        s.resize(inc(i), 0);
+    }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+// ----- the function being decided -----------------------------------------------
+
+// One function's header, as tables the decisions look up.
+pub struct Func {
+    // params: (name symbol, pass)
+    param_names: ChunkSeq[u32],
+    param_passes: ChunkSeq[u64],
+    captures: ChunkSeq[u32],
+    // value id -> type id + 1 (0: unknown)
+    value_types: ChunkSeq[u32],
+    // locals in name order: (name symbol, type id)
+    local_names: ChunkSeq[u32],
+    local_types: ChunkSeq[u32],
+    // value id -> defining instruction index + 1 (0: none)
+    defs: ChunkSeq[u32],
+}
+
+fn func_new() -> Func {
+    Func {
+        param_names: ChunkSeq::new[u32](),
+        param_passes: ChunkSeq::new[u64](),
+        captures: ChunkSeq::new[u32](),
+        value_types: ChunkSeq::new[u32](),
+        local_names: ChunkSeq::new[u32](),
+        local_types: ChunkSeq::new[u32](),
+        defs: ChunkSeq::new[u32](),
+    }
+}
+
+// Reads the header words of `f` (ir_words.rs `Tables::header`).
+fn read_func(in p: Program, f: FnRow, inout out: Func) {
+    out.param_names.clear();
+    out.param_passes.clear();
+    out.captures.clear();
+    out.value_types.clear();
+    out.local_names.clear();
+    out.local_types.clear();
+    out.defs.clear();
+    let mut k = f.ha;
+    let np = p.op(k);
+    k = inc(k);
+    for i in 0..np {
+        out.param_names.push(n32(p.op(k)));
+        out.param_passes.push(p.op(inc(k)));
+        let nproj = p.op(add(k, 2));
+        // name, pass, nproj, nproj paths, type, span start, end
+        k = add(k, add(6, nproj));
+    }
+    // result, effects
+    k = add(k, 2);
+    let nb = p.op(k);
+    k = add(inc(k), wrapping_mul(nb, 2));
+    let nc = p.op(k);
+    k = inc(k);
+    for i in 0..nc {
+        out.captures.push(n32(p.op(k)));
+        k = inc(k);
+    }
+    let nv = p.op(k);
+    k = inc(k);
+    for i in 0..nv {
+        let v = p.op(k);
+        let t = n32(p.op(inc(k)));
+        cover_u32(inout out.value_types, v);
+        let ok = out.value_types.try_set(v, wrapping_add(t, 1));
+        k = add(k, 2);
+    }
+    let nl = p.op(k);
+    k = inc(k);
+    for i in 0..nl {
+        out.local_names.push(n32(p.op(k)));
+        out.local_types.push(n32(p.op(inc(k))));
+        k = add(k, 2);
+    }
+    for bi in 0..f.bc {
+        let b = p.block(add(f.b0, bi));
+        for ii in 0..b.ic {
+            let at = add(b.i0, ii);
+            let inst = p.inst(at);
+            cover_u32(inout out.defs, w(inst.dest));
+            let ok = out.defs.try_set(w(inst.dest), n32(inc(at)));
+        }
+    }
+}
+
+impl Func {
+    // The pass of parameter `name`, or NONE (not a parameter).
+    fn param_pass(in self, name: u32) -> u64 {
+        for i in 0..self.param_names.len() {
+            if u32_at(in self.param_names, i) == name {
+                return u64_at(in self.param_passes, i);
+            }
+        }
+        18446744073709551615
+    }
+
+    fn is_param(in self, name: u32) -> bool {
+        self.param_pass(name) != 18446744073709551615
+    }
+
+    fn captured(in self, name: u32) -> bool {
+        for i in 0..self.captures.len() {
+            if u32_at(in self.captures, i) == name {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The type of value `v`, or NONE32.
+    fn value_type(in self, v: u64) -> u32 {
+        let t = u32_at(in self.value_types, v);
+        if t == 0 {
+            NONE32
+        } else {
+            wrapping_sub(t, 1)
+        }
+    }
+
+    // The defining instruction of value `v` (an index into `insts`), or
+    // NONE32.
+    fn def(in self, v: u64) -> u32 {
+        let d = u32_at(in self.defs, v);
+        if d == 0 {
+            NONE32
+        } else {
+            wrapping_sub(d, 1)
+        }
+    }
+}
+
+// ----- patterns -----------------------------------------------------------------
+
+// What a pattern walk found.
+pub copy struct PatInfo {
+    kind: u64,
+    has_box: bool,
+}
+
+// Walks the pattern at ops[k], appending every name it binds to `names`
+// (`pattern_names`); `has_box` is `pattern_has_box`. Leaves `k` after it.
+fn walk_pattern(
+    in p: Program,
+    inout k: u64,
+    depth: u64,
+    in s: Syms,
+    box_active: bool,
+    inout names: ChunkSeq[u32],
+) -> PatInfo {
+    let kind = p.op(k);
+    k = add(k, 3);
+    let mut has_box = false;
+    if depth > MAX_DEPTH {
+        return PatInfo {
+            kind: kind,
+            has_box: false
+        };
+    }
+    if kind == PAT_BIND {
+        names.push(n32(p.op(k)));
+        k = inc(k);
+    } else if kind == PAT_LITERAL {
+        k = add(k, 3);
+    } else if kind == PAT_TUPLE {
+        let n = p.op(k);
+        k = inc(k);
+        for i in 0..n {
+            let c = walk_pattern(in p, inout k, inc(depth), in s, box_active, inout names);
+            has_box = has_box || c.has_box;
+        }
+    } else if kind == PAT_CONSTRUCTOR {
+        let name = n32(p.op(k));
+        let n = p.op(add(k, 2));
+        k = add(k, 3);
+        // `fip::is_box_pattern`: `Box(x)` or `Box::Box(x)` with field "0".
+        if box_active && (name == s.box_ || name == s.box_box) && n == 1 && n32(p.op(k)) == s.zero {
+            has_box = true;
+        }
+        for i in 0..n {
+            k = inc(k);
+            let c = walk_pattern(in p, inout k, inc(depth), in s, box_active, inout names);
+            has_box = has_box || c.has_box;
+        }
+    }
+    PatInfo {
+        kind: kind,
+        has_box: has_box
+    }
+}
+
+// ----- type predicates ----------------------------------------------------------
+
+// The decision tables of one compilation.
+pub struct Dec {
+    c: Ctx,
+    s: Syms,
+    ls: Layouts,
+    // `drop_visit`'s `seen` types
+    seen: ChunkSeq[u32],
+    // `holds_sequence`'s `seen` names
+    seen_names: ChunkSeq[u32],
+    // per function, by symbol: plan kind, refused, bound-name set
+    plan: ChunkSeq[u8],
+    refused: ChunkSeq[bool],
+    named: ChunkSeq[bool],
+    touched: ChunkSeq[u32],
+    // per function, by value id
+    matched: ChunkSeq[bool],
+    borrowed: ChunkSeq[bool],
+    vtouched: ChunkSeq[u32],
+    scratch: ChunkSeq[u32],
+    fn_: Func,
+}
+
+fn named_is(in t: Types, ty: u32, name: u32, arity: u64) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == name && w(n.n) == arity
+}
+
+impl Dec {
+    fn is_seq(in self, ty: u32) -> bool {
+        named_is(in self.c.types, ty, self.s.chunk_seq, 1)
+    }
+
+    fn is_slice(in self, ty: u32) -> bool {
+        named_is(in self.c.types, ty, self.s.slice, 1)
+    }
+
+    fn is_string(in self, ty: u32) -> bool {
+        named_is(in self.c.types, ty, self.s.string, 0)
+    }
+
+    fn is_text(in self, ty: u32) -> bool {
+        self.is_string(ty) || named_is(in self.c.types, ty, self.s.str_, 0)
+    }
+
+    // `numeric::is_scalar_name` (check-data's `Known::is_scalar` predates
+    // `i128`/`u128`).
+    fn is_scalar_name(in self, n: u32) -> bool {
+        self.c.world.k.is_scalar(n) || n == self.s.i128_ || n == self.s.u128_
+    }
+
+    // `fip::drop_visit`: `needs_drop` (`unknown` false) and `may_need_drop`.
+    fn drop_visit(inout self, ty0: u32, unknown: bool) -> bool {
+        let ty = default_type(inout self.c.types, ty0);
+        if self.is_seq(ty) || self.is_string(ty) {
+            return true;
+        }
+        let n = self.c.types.node(ty);
+        if n.kind == K_NAMED && n.name == self.s.dyn_ && n.n == 1 {
+            return true;
+        }
+        if n.kind == K_NAMED && n.n == 0 && self.c.names.has_prefix(n.name, in "__dyn__".as_bytes()) {
+            return true;
+        }
+        if n.kind == K_TUPLE {
+            for i in 0..w(n.n) {
+                let a = self.c.types.arg(ty, i);
+                if self.drop_visit(a, unknown) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind == K_NAMED {
+            let box_ = self.c.world.box_active && n.name == self.s.box_ && n.n == 1;
+            let tiled = n.name == self.s.tiled_seq && (n.n == 1 || n.n == 2);
+            let is_handle = n.name == self.s.region_box || n.name == self.s.watermark;
+            if box_ || self.is_slice(ty) || tiled || is_handle {
+                return false;
+            }
+            let ai = self.c.world.lookup(n.name);
+            if ai == NONE32 {
+                return unknown
+                    && !self.is_scalar_name(n.name)
+                    && n.name != self.s.never
+                    && !self.is_text(ty)
+                    && vector_words(in self.c.types, in self.c.names, self.c.world.k, ty) == 0;
+            }
+            let a = self.c.world.adt(ai);
+            if w(a.gn) != w(n.n) {
+                return unknown;
+            }
+            for i in 0..self.seen.len() {
+                if u32_at(in self.seen, i) == ty {
+                    return false;
+                }
+            }
+            self.seen.push(ty);
+            let vars = self.c.world.vars_of(in self.c.types, a, ty);
+            let mut found = false;
+            for vi in 0..w(a.vn) {
+                let v = self.c.world.variant(add(w(a.va), vi));
+                for fi in 0..w(v.fc) {
+                    let f = self.c.world.field(add(w(v.fa), fi));
+                    let ft = substitute(inout self.c.types, f.ty, in vars);
+                    if self.drop_visit(ft, unknown) {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            let last = self.seen.pop();
+            return found;
+        }
+        n.kind == K_INFER && unknown
+    }
+
+    fn needs_drop(inout self, ty: u32) -> bool {
+        self.seen.clear();
+        self.drop_visit(ty, false)
+    }
+
+    fn may_need_drop(inout self, ty: u32) -> bool {
+        self.seen.clear();
+        self.drop_visit(ty, true)
+    }
+
+    // `seq::holds_sequence` (no defaulting; `seen` is by ADT name).
+    fn holds_visit(inout self, ty: u32) -> bool {
+        if self.is_seq(ty) || self.is_slice(ty) {
+            return true;
+        }
+        let n = self.c.types.node(ty);
+        if n.kind == K_TUPLE {
+            for i in 0..w(n.n) {
+                if self.holds_visit(self.c.types.arg(ty, i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind != K_NAMED {
+            return false;
+        }
+        for i in 0..w(n.n) {
+            if self.holds_visit(self.c.types.arg(ty, i)) {
+                return true;
+            }
+        }
+        let ai = self.c.world.lookup(n.name);
+        if ai == NONE32 {
+            return false;
+        }
+        for i in 0..self.seen_names.len() {
+            if u32_at(in self.seen_names, i) == n.name {
+                return false;
+            }
+        }
+        self.seen_names.push(n.name);
+        let a = self.c.world.adt(ai);
+        let mut found = false;
+        for vi in 0..w(a.vn) {
+            let v = self.c.world.variant(add(w(a.va), vi));
+            for fi in 0..w(v.fc) {
+                let f = self.c.world.field(add(w(v.fa), fi));
+                if self.holds_visit(f.ty) {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        let last = self.seen_names.pop();
+        found
+    }
+
+    fn holds_sequence(inout self, ty: u32) -> bool {
+        self.seen_names.clear();
+        self.holds_visit(ty)
+    }
+
+    fn is_adt(in self, ty: u32) -> bool {
+        let n = self.c.types.node(ty);
+        n.kind == K_NAMED && self.c.world.lookup(n.name) != NONE32
+    }
+
+    // `seq::elem`: the element type of `ChunkSeq[T]` or `Slice[T]`, or
+    // NONE32.
+    fn elem(in self, ty: u32) -> u32 {
+        if self.is_seq(ty) || self.is_slice(ty) {
+            self.c.types.arg(ty, 0)
+        } else {
+            NONE32
+        }
+    }
+
+    // `seq::elem_bytes`, or NO_STRIDE when the type has no layout.
+    fn stride(inout self, ty0: u32) -> u64 {
+        let ty = default_type(inout self.c.types, ty0);
+        let n = self.c.types.node(ty);
+        if n.kind == K_NAMED && n.n == 0 {
+            if n.name == self.s.u8_ || n.name == self.s.bool_ {
+                return 1;
+            }
+            if n.name == self.s.u32_ {
+                return 4;
+            }
+        }
+        let l = layout_of(inout self.ls, inout self.c.types, inout self.c.names, in self.c.world, ty);
+        if l == NONE32 {
+            NO_STRIDE
+        } else {
+            w(self.ls.node(l).size)
+        }
+    }
+}
+
+// ----- per-function symbol and value sets ---------------------------------------
+
+impl Dec {
+    fn touch(inout self, name: u32) {
+        cover_u8(inout self.plan, w(name));
+        cover_bool(inout self.refused, w(name));
+        cover_bool(inout self.named, w(name));
+        self.touched.push(name);
+    }
+
+    fn plan_of(in self, name: u32) -> u8 {
+        u8_at(in self.plan, w(name))
+    }
+
+    fn set_plan(inout self, name: u32, kind: u8) {
+        self.touch(name);
+        let ok = self.plan.try_set(w(name), kind);
+    }
+
+    fn refuse(inout self, name: u32) {
+        self.touch(name);
+        let ok = self.refused.try_set(w(name), true);
+    }
+
+    // Refuses every name in `self.scratch`.
+    fn refuse_scratch(inout self) {
+        for i in 0..self.scratch.len() {
+            let n = u32_at(in self.scratch, i);
+            self.refuse(n);
+        }
+    }
+
+    fn vtouch(inout self, v: u64) {
+        cover_bool(inout self.matched, v);
+        cover_bool(inout self.borrowed, v);
+        self.vtouched.push(n32(v));
+    }
+
+    // Clears every per-function set.
+    fn reset(inout self) {
+        for i in 0..self.touched.len() {
+            let s = w(u32_at(in self.touched, i));
+            let a = self.plan.try_set(s, 0);
+            let b = self.refused.try_set(s, false);
+            let c = self.named.try_set(s, false);
+        }
+        self.touched.clear();
+        for i in 0..self.vtouched.len() {
+            let v = w(u32_at(in self.vtouched, i));
+            let a = self.matched.try_set(v, false);
+            let b = self.borrowed.try_set(v, false);
+        }
+        self.vtouched.clear();
+    }
+}
+
+// The label (`SeqOp` `Debug` text) symbol of an `Op::Seq` instruction.
+fn seq_label(in p: Program, inst: InstRow) -> u32 {
+    p.pool_row(p.op(inst.a)).label
+}
+
+// ----- borrowed scrutinees --------------------------------------------------------
+
+impl Dec {
+    // `fip::borrowed_scrutinees` of `f` into `self.borrowed`.
+    fn borrowed_scrutinees(inout self, in p: Program, f: FnRow) {
+        for bi in 0..f.bc {
+            let b = p.block(add(f.b0, bi));
+            if b.term == TERM_MATCH {
+                let v = p.op(b.ta);
+                self.vtouch(v);
+                let ok = self.matched.try_set(v, true);
+            }
+        }
+        for i in 0..self.fn_.param_names.len() {
+            if u64_at(in self.fn_.param_passes, i) != P_SINK {
+                let n = u32_at(in self.fn_.param_names, i);
+                self.touch(n);
+                let ok = self.named.try_set(w(n), true);
+            }
+        }
+        let box_active = self.c.world.box_active;
+        loop {
+            let mut changed = false;
+            for bi in 0..f.bc {
+                let b = p.block(add(f.b0, bi));
+                for ii in 0..b.ic {
+                    let inst = p.inst(add(b.i0, ii));
+                    let d = w(inst.dest);
+                    if inst.op == OP_READ {
+                        let root = n32(p.op(inst.a));
+                        if bool_at(in self.matched, d)
+                            && bool_at(in self.named, w(root))
+                            && !bool_at(in self.borrowed, d) {
+                            let ok = self.borrowed.try_set(d, true);
+                            changed = true;
+                        }
+                    } else if inst.op == OP_SEQ {
+                        let l = seq_label(in p, inst);
+                        if (l == self.s.try_get || l == self.s.hoisted_try_get)
+                            && bool_at(in self.matched, d)
+                            && !bool_at(in self.borrowed, d) {
+                            let ok = self.borrowed.try_set(d, true);
+                            changed = true;
+                        }
+                    } else if inst.op == OP_BIND {
+                        let v = p.op(inst.a);
+                        if bool_at(in self.borrowed, v) {
+                            self.scratch.clear();
+                            let mut k = inc(inst.a);
+                            let info = walk_pattern(in p, inout k, 0, in self.s, box_active, inout self.scratch);
+                            for j in 0..self.scratch.len() {
+                                let n = u32_at(in self.scratch, j);
+                                if !bool_at(in self.named, w(n)) {
+                                    self.touch(n);
+                                    let ok = self.named.try_set(w(n), true);
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+}
+
+// ----- the drop plan --------------------------------------------------------------
+
+impl Dec {
+    // The root of a `Write` place "a.b.c" ("a"), or NONE32 when that name
+    // was never interned (so nothing is planned for it).
+    fn place_root(in self, place: u32) -> u32 {
+        let n = self.c.names.size(place);
+        for i in 0..n {
+            if self.c.names.byte(place, i) == 46 {
+                let mut b: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](i);
+                for j in 0..i {
+                    b.push(self.c.names.byte(place, j));
+                }
+                return self.c.names.lookup(in b.as_slice());
+            }
+        }
+        place
+    }
+
+    fn owned_or_fields(in self, name: u32) -> bool {
+        if name == NONE32 {
+            return false;
+        }
+        let k = self.plan_of(name);
+        k == D_OWNED || k == D_FIELDS
+    }
+
+    fn plan_is(in self, name: u32, kind: u8) -> bool {
+        name != NONE32 && self.plan_of(name) == kind
+    }
+
+    // `fip::seq_drop_plan` of `f` into `self.plan` (minus `self.refused`).
+    // Returns whether anything was planned before refusals.
+    fn drop_plan(inout self, in p: Program, f: FnRow, fip: bool) -> bool {
+        if fip {
+            return false;
+        }
+        let mut any = false;
+        for i in 0..self.fn_.local_names.len() {
+            let name = u32_at(in self.fn_.local_names, i);
+            let ty = u32_at(in self.fn_.local_types, i);
+            let pass = self.fn_.param_pass(name);
+            let param = pass != 18446744073709551615;
+            let kind = if self.is_seq(ty) {
+                D_SEQ
+            } else if self.is_string(ty) {
+                D_STR
+            } else if param && self.needs_drop(ty) {
+                D_OWNED
+            } else if self.is_adt(ty) && !param && (self.holds_sequence(ty) || self.needs_drop(ty)) {
+                D_FIELDS
+            } else {
+                D_NONE
+            };
+            if kind == D_NONE || self.fn_.captured(name) || (param && pass != P_SINK) {
+                continue;
+            }
+            self.set_plan(name, kind);
+            any = true;
+        }
+        if !any {
+            return false;
+        }
+        let box_active = self.c.world.box_active;
+        for bi in 0..f.bc {
+            let b = p.block(add(f.b0, bi));
+            for ii in 0..b.ic {
+                let inst = p.inst(add(b.i0, ii));
+                let a = inst.a;
+                if inst.op == OP_READ {
+                    let root = n32(p.op(a));
+                    let path = p.op(inc(a));
+                    let pass = p.op(add(a, 2));
+                    if pass == P_SINK {
+                        let partial = p.path(path).n != 0
+                            && self.may_need_drop(inst.ty)
+                            && !self.owned_or_fields(root);
+                        if partial || self.plan_is(root, D_STR) {
+                            self.refuse(root);
+                        }
+                    }
+                } else if inst.op == OP_WRITE {
+                    let place = n32(p.op(a));
+                    let op = n32(p.op(inc(a)));
+                    let root = self.place_root(place);
+                    if (place != root && !self.owned_or_fields(root))
+                        || op != self.s.assign
+                        || (self.plan_is(root, D_STR) && self.fn_.is_param(root)) {
+                        if root != NONE32 {
+                            self.refuse(root);
+                        }
+                    }
+                } else if inst.op == OP_BIND {
+                    let v = p.op(a);
+                    self.scratch.clear();
+                    let mut k = inc(a);
+                    let info = walk_pattern(in p, inout k, 0, in self.s, box_active, inout self.scratch);
+                    let d = self.fn_.def(v);
+                    let borrow_read = if d == NONE32 {
+                        false
+                    } else {
+                        let di = p.inst(w(d));
+                        di.op == OP_READ && p.op(add(di.a, 2)) != P_SINK
+                    };
+                    if borrow_read
+                        || bool_at(in self.borrowed, v)
+                        || (info.kind != PAT_BIND && info.has_box) {
+                        self.refuse_scratch();
+                    }
+                } else if inst.op == OP_CLOSURE || inst.op == OP_HANDLE {
+                    let is_handle = inst.op == OP_HANDLE;
+                    // handle: has, state value; then the pool entry
+                    let mut k = if is_handle {
+                        add(a, 3)
+                    } else {
+                        inc(a)
+                    };
+                    let na = p.op(k);
+                    k = inc(k);
+                    for j in 0..na {
+                        let key = n32(p.op(k));
+                        let slot = n32(p.op(inc(k)));
+                        if !is_handle {
+                            self.refuse(key);
+                            self.refuse(slot);
+                        } else if self.plan_is(slot, D_STR) {
+                            self.refuse(slot);
+                        }
+                        k = add(k, 2);
+                    }
+                    let nm = p.op(k);
+                    k = inc(k);
+                    for j in 0..nm {
+                        self.refuse(n32(p.op(k)));
+                        k = add(k, 2);
+                    }
+                }
+            }
+            if b.term == TERM_MATCH {
+                // value, n, n x (pattern, block)
+                let mut k = inc(b.ta);
+                let n = p.op(k);
+                k = inc(k);
+                for j in 0..n {
+                    self.scratch.clear();
+                    let info = walk_pattern(in p, inout k, 0, in self.s, box_active, inout self.scratch);
+                    k = inc(k);
+                    self.refuse_scratch();
+                }
+            }
+        }
+        true
+    }
+}
+
+// ----- `SeqOp` from its `Debug` text ----------------------------------------------
+
+// The label's bytes.
+fn label_bytes(in names: Names, label: u32, inout out: ChunkSeq[u8]) {
+    out.clear();
+    names.write(label, inout out);
+}
+
+fn bytes_eq(in a: ChunkSeq[u8], lo: u64, hi: u64, in b: Str) -> bool {
+    let bb = b.as_bytes();
+    if wrapping_sub(hi, lo) != bb.len() {
+        return false;
+    }
+    for i in 0..bb.len() {
+        let y = match bb.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if u8_at(in a, add(lo, i)) != y {
+            return false;
+        }
+    }
+    true
+}
+
+fn contains(in a: ChunkSeq[u8], in b: Str) -> bool {
+    let bb = b.as_bytes();
+    if bb.len() > a.len() {
+        return false;
+    }
+    let last = wrapping_sub(a.len(), bb.len());
+    for i in 0..inc(last) {
+        if bytes_eq(in a, i, add(i, bb.len()), b) {
+            return true;
+        }
+    }
+    false
+}
+
+// The end of the variant name: the first `(`, ` ` or the end.
+fn head_end(in a: ChunkSeq[u8], from: u64) -> u64 {
+    let mut i = from;
+    loop {
+        if i >= a.len() {
+            return i;
+        }
+        let c = u8_at(in a, i);
+        if c == 40 || c == 32 || c == 41 {
+            return i;
+        }
+        i = inc(i);
+    }
+}
+
+// One operation, decoded from its `Debug` text.
+pub copy struct OpInfo {
+    // Byte range of the variant name in the label.
+    h0: u64,
+    h1: u64,
+    // For `Str(op)` and `Hoisted(access)`: the inner variant's range.
+    i0: u64,
+    i1: u64,
+}
+
+fn op_info(in a: ChunkSeq[u8]) -> OpInfo {
+    let h1 = head_end(in a, 0);
+    let mut i0 = h1;
+    let mut i1 = h1;
+    if h1 < a.len() && u8_at(in a, h1) == 40 {
+        i0 = inc(h1);
+        i1 = head_end(in a, i0);
+    }
+    OpInfo {
+        h0: 0,
+        h1: h1,
+        i0: i0,
+        i1: i1
+    }
+}
+
+fn head_is(in a: ChunkSeq[u8], o: OpInfo, in s: Str) -> bool {
+    bytes_eq(in a, o.h0, o.h1, s)
+}
+
+fn inner_is(in a: ChunkSeq[u8], o: OpInfo, in s: Str) -> bool {
+    bytes_eq(in a, o.i0, o.i1, s)
+}
+
+// `StrOp::mutates`.
+fn str_mutates(in a: ChunkSeq[u8], o: OpInfo) -> bool {
+    inner_is(in a, o, "PushStr") || inner_is(in a, o, "PushChar") || inner_is(in a, o, "Clear")
+        || inner_is(in a, o, "Reserve")
+}
+
+// `SeqOp::mutates`.
+fn op_mutates(in a: ChunkSeq[u8], o: OpInfo) -> bool {
+    if head_is(in a, o, "Str") {
+        return str_mutates(in a, o);
+    }
+    if head_is(in a, o, "Wide") {
+        return contains(in a, "write: true");
+    }
+    if head_is(in a, o, "Vector") {
+        return contains(in a, "store: true");
+    }
+    head_is(in a, o, "Push") || head_is(in a, o, "Pop") || head_is(in a, o, "Set")
+        || head_is(in a, o, "TrySet") || head_is(in a, o, "Clear") || head_is(in a, o, "Truncate")
+        || head_is(in a, o, "Reserve") || head_is(in a, o, "Extend")
+        || head_is(in a, o, "ExtendAsciiLowercase") || head_is(in a, o, "MakeAsciiLowercase")
+        || head_is(in a, o, "CopyFrom") || head_is(in a, o, "CopyWithin") || head_is(in a, o, "Fill")
+        || head_is(in a, o, "Resize") || head_is(in a, o, "FillRange")
+        || head_is(in a, o, "ExtendFromWithin") || head_is(in a, o, "ExtendReversed")
+}
+
+// `SeqOp::fallible`.
+fn op_fallible(in a: ChunkSeq[u8], o: OpInfo) -> bool {
+    if head_is(in a, o, "Str") {
+        return inner_is(in a, o, "ByteAt");
+    }
+    if head_is(in a, o, "Get") || head_is(in a, o, "Set") || head_is(in a, o, "Finish")
+        || head_is(in a, o, "SliceGet") || head_is(in a, o, "SliceSet") {
+        return true;
+    }
+    if head_is(in a, o, "CopyFrom") || head_is(in a, o, "CopyWithin")
+        || head_is(in a, o, "MakeAsciiLowercase") || head_is(in a, o, "FillRange")
+        || head_is(in a, o, "ExtendFromWithin") || head_is(in a, o, "Wide") {
+        return contains(in a, "total: false");
+    }
+    if head_is(in a, o, "Vector") {
+        return contains(in a, "masked: false");
+    }
+    false
+}
+
+// `SeqOp::has_receiver`.
+fn op_has_receiver(in a: ChunkSeq[u8], o: OpInfo) -> bool {
+    !(head_is(in a, o, "New") || head_is(in a, o, "WithCapacity") || head_is(in a, o, "BoundsGuard")
+        || head_is(in a, o, "Swap") || head_is(in a, o, "Replace"))
+}
+
+// `SeqOp::place_primitive`.
+fn op_place_primitive(in a: ChunkSeq[u8], o: OpInfo) -> bool {
+    head_is(in a, o, "Swap") || head_is(in a, o, "Replace")
+}
+
+// `SeqOp::byte_scan`.
+fn op_byte_scan(in a: ChunkSeq[u8], o: OpInfo) -> bool {
+    head_is(in a, o, "SumBe16") || head_is(in a, o, "BytesEq") || head_is(in a, o, "BytesCmp")
+        || head_is(in a, o, "FindByte") || head_is(in a, o, "FindEither")
+        || head_is(in a, o, "FindNotIn") || head_is(in a, o, "EqIgnoreAsciiCase")
+        || head_is(in a, o, "ExtendAsciiLowercase") || head_is(in a, o, "MakeAsciiLowercase")
+}
+
+// `StrOp::name`.
+fn str_name(in a: ChunkSeq[u8], o: OpInfo, inout out: ChunkSeq[u8]) {
+    if inner_is(in a, o, "Len") {
+        put(inout out, "len");
+    } else if inner_is(in a, o, "ByteAt") {
+        put(inout out, "byte_at");
+    } else if inner_is(in a, o, "TryByteAt") {
+        put(inout out, "try_byte_at");
+    } else if inner_is(in a, o, "AsStr") {
+        put(inout out, "as_str");
+    } else if inner_is(in a, o, "AsBytes") {
+        put(inout out, "as_bytes");
+    } else if inner_is(in a, o, "SubStr") {
+        put(inout out, "slice");
+    } else if inner_is(in a, o, "PushStr") {
+        put(inout out, "push_str");
+    } else if inner_is(in a, o, "PushChar") {
+        put(inout out, "push_char");
+    } else if inner_is(in a, o, "Clear") {
+        put(inout out, "clear");
+    } else if inner_is(in a, o, "Reserve") {
+        put(inout out, "reserve");
+    } else {
+        put(inout out, "?");
+    }
+}
+
+// `Wide::name`: `{try_}{read,write}_u{16,32,64}_{le,be}`.
+fn wide_name(in a: ChunkSeq[u8], inout out: ChunkSeq[u8]) {
+    if contains(in a, "total: true") {
+        put(inout out, "try_");
+    }
+    if contains(in a, "write: true") {
+        put(inout out, "write_u");
+    } else {
+        put(inout out, "read_u");
+    }
+    if contains(in a, "bytes: 2,") {
+        put(inout out, "16");
+    } else if contains(in a, "bytes: 4,") {
+        put(inout out, "32");
+    } else {
+        put(inout out, "64");
+    }
+    if contains(in a, "big: true") {
+        put(inout out, "_be");
+    } else {
+        put(inout out, "_le");
+    }
+}
+
+fn total_name(in a: ChunkSeq[u8], in checked: Str, in total: Str, inout out: ChunkSeq[u8]) {
+    if contains(in a, "total: true") {
+        put(inout out, total);
+    } else {
+        put(inout out, checked);
+    }
+}
+
+// `SeqOp::name`.
+fn op_name(in a: ChunkSeq[u8], o: OpInfo, inout out: ChunkSeq[u8]) {
+    if head_is(in a, o, "Str") {
+        str_name(in a, o, inout out);
+    } else if head_is(in a, o, "Hoisted") {
+        // `access.checked(false).name()`
+        if inner_is(in a, o, "Get") {
+            put(inout out, "get");
+        } else if inner_is(in a, o, "Set") {
+            put(inout out, "set");
+        } else if inner_is(in a, o, "TryGet") {
+            put(inout out, "try_get");
+        } else {
+            put(inout out, "try_set");
+        }
+    } else if head_is(in a, o, "Wide") {
+        wide_name(in a, inout out);
+    } else if head_is(in a, o, "Vector") {
+        put(inout out, "Vec::");
+        if contains(in a, "store: true") {
+            put(inout out, "store");
+        } else {
+            put(inout out, "load");
+        }
+        if contains(in a, "masked: true") {
+            put(inout out, "_masked");
+        }
+    } else if head_is(in a, o, "New") {
+        put(inout out, "new");
+    } else if head_is(in a, o, "WithCapacity") {
+        put(inout out, "with_capacity");
+    } else if head_is(in a, o, "Len") || head_is(in a, o, "SliceLen") {
+        put(inout out, "len");
+    } else if head_is(in a, o, "Push") {
+        put(inout out, "push");
+    } else if head_is(in a, o, "Pop") {
+        put(inout out, "pop");
+    } else if head_is(in a, o, "Get") || head_is(in a, o, "SliceGet") {
+        put(inout out, "get");
+    } else if head_is(in a, o, "Set") || head_is(in a, o, "SliceSet") {
+        put(inout out, "set");
+    } else if head_is(in a, o, "TryGet") {
+        put(inout out, "try_get");
+    } else if head_is(in a, o, "TrySet") {
+        put(inout out, "try_set");
+    } else if head_is(in a, o, "Clear") {
+        put(inout out, "clear");
+    } else if head_is(in a, o, "Truncate") {
+        put(inout out, "truncate");
+    } else if head_is(in a, o, "Reserve") {
+        put(inout out, "reserve");
+    } else if head_is(in a, o, "Extend") {
+        put(inout out, "extend");
+    } else if head_is(in a, o, "Finish") {
+        put(inout out, "finish");
+    } else if head_is(in a, o, "AsSlice") {
+        put(inout out, "as_slice");
+    } else if head_is(in a, o, "SubSlice") {
+        put(inout out, "slice");
+    } else if head_is(in a, o, "BoundsGuard") {
+        put(inout out, "bounds_guard");
+    } else if head_is(in a, o, "CopyFrom") {
+        total_name(in a, "copy_from", "try_copy_from", inout out);
+    } else if head_is(in a, o, "Fill") {
+        put(inout out, "fill");
+    } else if head_is(in a, o, "SumBe16") {
+        put(inout out, "sum_be16");
+    } else if head_is(in a, o, "BytesEq") {
+        put(inout out, "eq");
+    } else if head_is(in a, o, "BytesCmp") {
+        put(inout out, "cmp");
+    } else if head_is(in a, o, "FindByte") {
+        put(inout out, "find_byte");
+    } else if head_is(in a, o, "CopyWithin") {
+        total_name(in a, "copy_within", "try_copy_within", inout out);
+    } else if head_is(in a, o, "Swap") {
+        put(inout out, "swap");
+    } else if head_is(in a, o, "Replace") {
+        put(inout out, "replace");
+    } else if head_is(in a, o, "FindEither") {
+        put(inout out, "find_either");
+    } else if head_is(in a, o, "FindNotIn") {
+        put(inout out, "find_not_in");
+    } else if head_is(in a, o, "EqIgnoreAsciiCase") {
+        put(inout out, "eq_ignore_ascii_case");
+    } else if head_is(in a, o, "ExtendAsciiLowercase") {
+        put(inout out, "extend_ascii_lowercase");
+    } else if head_is(in a, o, "MakeAsciiLowercase") {
+        total_name(in a, "make_ascii_lowercase", "try_make_ascii_lowercase", inout out);
+    } else if head_is(in a, o, "Resize") {
+        put(inout out, "resize");
+    } else if head_is(in a, o, "FillRange") {
+        total_name(in a, "fill", "try_fill", inout out);
+    } else if head_is(in a, o, "ExtendFromWithin") {
+        total_name(in a, "extend_from_within", "try_extend_from_within", inout out);
+    } else if head_is(in a, o, "ExtendReversed") {
+        put(inout out, "extend_reversed");
+    } else {
+        put(inout out, "?");
+    }
+}
+
+// ----- output -------------------------------------------------------------------
+
+fn flag(inout o: ChunkSeq[u8], in key: Str, v: bool) {
+    o.push(32);
+    put(inout o, key);
+    if v {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+}
+
+impl Dec {
+    fn write_type(in self, ty: u32, inout o: ChunkSeq[u8]) {
+        if ty == NONE32 {
+            o.push(45);
+        } else {
+            debug_type(in self.c.types, in self.c.names, ty, inout o);
+        }
+    }
+
+    // One `seq` line per `Op::Seq` of `f` (the module comment lists the
+    // fields).
+    fn seq_rows(inout self, in p: Program, f: FnRow, inout o: ChunkSeq[u8]) {
+        let mut label: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for bi in 0..f.bc {
+            let b = p.block(add(f.b0, bi));
+            for ii in 0..b.ic {
+                let inst = p.inst(add(b.i0, ii));
+                if inst.op != OP_SEQ {
+                    continue;
+                }
+                let l = seq_label(in p, inst);
+                label_bytes(in self.c.names, l, inout label);
+                let info = op_info(in label);
+                let recv = op_has_receiver(in label, info);
+                let muts = op_mutates(in label, info);
+                put(inout o, "seq %");
+                push_decimal(inout o, w(inst.dest));
+                o.push(32);
+                op_name(in label, info, inout o);
+                flag(inout o, "recv=", recv);
+                put(inout o, " pass=");
+                if muts || head_is(in label, info, "SliceSet") {
+                    put(inout o, "inout");
+                } else {
+                    put(inout o, "in");
+                }
+                flag(inout o, "mut=", muts);
+                flag(inout o, "fail=", op_fallible(in label, info));
+                flag(inout o, "prim=", op_place_primitive(in label, info));
+                flag(inout o, "scan=", op_byte_scan(in label, info));
+                // operands: pool entry, n args x (pass, value, root, path)
+                let nargs = p.op(inc(inst.a));
+                let source = if recv {
+                    if nargs == 0 {
+                        NONE32
+                    } else {
+                        self.fn_.value_type(p.op(add(inst.a, 3)))
+                    }
+                } else {
+                    inst.ty
+                };
+                let e = if source == NONE32 {
+                    NONE32
+                } else {
+                    self.elem(source)
+                };
+                put(inout o, " elem=");
+                if e == NONE32 {
+                    o.push(45);
+                    put(inout o, " stride=-");
+                } else {
+                    let d = default_type(inout self.c.types, e);
+                    self.write_type(d, inout o);
+                    put(inout o, " stride=");
+                    let s = self.stride(d);
+                    if s == NO_STRIDE {
+                        o.push(45);
+                    } else {
+                        push_decimal(inout o, s);
+                    }
+                }
+                o.push(10);
+            }
+        }
+    }
+
+    fn function(inout self, in p: Program, fi: u64, fip: bool, inout o: ChunkSeq[u8]) {
+        let f = p.function(fi);
+        read_func(in p, f, inout self.fn_);
+        put(inout o, "fn ");
+        self.c.names.write(f.name, inout o);
+        o.push(10);
+        self.borrowed_scrutinees(in p, f);
+        let planned = self.drop_plan(in p, f, fip);
+        if planned {
+            for i in 0..self.fn_.local_names.len() {
+                let n = u32_at(in self.fn_.local_names, i);
+                let k = self.plan_of(n);
+                if k == D_NONE || bool_at(in self.refused, w(n)) {
+                    continue;
+                }
+                put(inout o, "drop ");
+                self.c.names.write(n, inout o);
+                if k == D_SEQ {
+                    put(inout o, " Seq\n");
+                } else if k == D_STR {
+                    put(inout o, " Str\n");
+                } else if k == D_OWNED {
+                    put(inout o, " Owned\n");
+                } else {
+                    put(inout o, " Fields\n");
+                }
+            }
+        }
+        for v in 0..self.borrowed.len() {
+            if bool_at(in self.borrowed, v) {
+                put(inout o, "borrowed %");
+                push_decimal(inout o, v);
+                o.push(10);
+            }
+        }
+        self.seq_rows(in p, f, inout o);
+        self.reset();
+    }
+}
+
+// ----- entries ------------------------------------------------------------------
+
+// The decisions of every function of the input's program, as text (see
+// tests/self_host_codegen_seq.rs `rust_decisions` for the format), packed by
+// `pack_text`.
+pub fn codegen_seq_decisions(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let nf = r.word(in b);
+    let mut fips: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](nf);
+    for i in 0..nf {
+        fips.push(r.word(in b) != 0);
+    }
+    let s = syms_new(inout c.names);
+    let mut d = Dec {
+        c: c,
+        s: s,
+        ls: layouts_new(),
+        seen: ChunkSeq::new[u32](),
+        seen_names: ChunkSeq::new[u32](),
+        plan: ChunkSeq::new[u8](),
+        refused: ChunkSeq::new[bool](),
+        named: ChunkSeq::new[bool](),
+        touched: ChunkSeq::new[u32](),
+        matched: ChunkSeq::new[bool](),
+        borrowed: ChunkSeq::new[bool](),
+        vtouched: ChunkSeq::new[u32](),
+        scratch: ChunkSeq::new[u32](),
+        fn_: func_new(),
+    };
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for fi in 0..p.fn_count() {
+        d.function(in p, fi, bool_at(in fips, fi), inout o);
+    }
+    pack_text(in o)
+}
