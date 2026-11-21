@@ -17,10 +17,10 @@ mod tiled_rules;
 
 #[path = "arrays/check.rs"]
 mod array_rules;
-#[path = "loops/for_sequences.rs"]
-mod for_sequences;
 #[path = "check/call_facts.rs"]
 mod call_facts;
+#[path = "loops/for_sequences.rs"]
+mod for_sequences;
 #[path = "integer_widths/literal_typing.rs"]
 mod literal_typing;
 #[path = "loops/check.rs"]
