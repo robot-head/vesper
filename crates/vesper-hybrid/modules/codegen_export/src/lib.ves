@@ -1,0 +1,18 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// The export glue of the hybrid Stage 2 build (self-hosting SH4 lane 12,
+// #1286): the export ABI v2 runtime entry points and handle drop glue,
+// emitted in Vesper over the Cranelift module the Rust compiler lends
+// (src/native_export/glue.rs's swap point). `vesper build --lib` exports
+// `export` as `vesper_hybrid_codegen_export_export`, and
+// crates/vesper-hybrid installs it as the `export` hook of
+// `vesper::codegen_swap`.
+use @vesper/codegen-export-glue::{
+    export_glue
+};
+
+// One glue request: `call` is the address of the lent call. Returns 1 when
+// it emitted the glue, 0 to leave it to Rust.
+pub fn export(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    export_glue(call)
+}

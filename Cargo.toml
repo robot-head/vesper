@@ -111,6 +111,9 @@ members = [
     "crates/vesper-tools",
     "experiments/native-pulse",
     "crates/vesper-cranelift-sys",
+    # The SH4 codegen swap harness (#1275): its own crate, because the root
+    # package cannot depend on the shim (the shim's tests depend on it).
+    "crates/vesper-codegen-swap-test",
     "crates/vesper-codegen-numeric-test",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -271,6 +274,8 @@ license = "MIT OR Apache-2.0"
 # std_process.rs and std_env.rs bind it into the JIT. It has no dependencies.
 vesper-std-host = { path = "crates/vesper-std-host" }
 blake3 = "1.8"
+# Grows the native lowering's stack on deep specialization (#1329).
+stacker = "0.1"
 vesper-core = { path = "crates/vesper-core" }
 # The compiler links the frozen Rust seed copy of vesper-forge (#1157).
 vesper-forge = { path = "crates/vesper-forge/seed", package = "vesper-forge-seed", default-features = false }
@@ -372,6 +377,35 @@ libc = "0.2"
 # paths for `vesper build` on Windows (already locked through cc).
 [target.'cfg(windows)'.dependencies]
 find-msvc-tools = "=0.1.15"
+
+# Test builds optimize the e-graph engines and Cranelift (#1376): debug
+# egglog and Cranelift made the self-host differentials spend most of their
+# time JIT-compiling the Vesper ports. Keep this list in step with the
+# `crate.annotation` rustc_flags in MODULE.bazel.
+[profile.dev.package]
+cranelift-assembler-x64 = { opt-level = 2 }
+cranelift-bforest = { opt-level = 2 }
+cranelift-bitset = { opt-level = 2 }
+cranelift-codegen = { opt-level = 2 }
+cranelift-codegen-shared = { opt-level = 2 }
+cranelift-control = { opt-level = 2 }
+cranelift-entity = { opt-level = 2 }
+cranelift-frontend = { opt-level = 2 }
+cranelift-jit = { opt-level = 2 }
+cranelift-module = { opt-level = 2 }
+cranelift-native = { opt-level = 2 }
+cranelift-object = { opt-level = 2 }
+egg = { opt-level = 2 }
+egglog = { opt-level = 2 }
+egglog-add-primitive = { opt-level = 2 }
+egglog-ast = { opt-level = 2 }
+egglog-bridge = { opt-level = 2 }
+egglog-concurrency = { opt-level = 2 }
+egglog-core-relations = { opt-level = 2 }
+egglog-numeric-id = { opt-level = 2 }
+egglog-reports = { opt-level = 2 }
+egglog-union-find = { opt-level = 2 }
+regalloc2 = { opt-level = 2 }
 
 [profile.release]
 lto = "thin"

@@ -637,7 +637,7 @@ impl Session {
                 let checked = self.checked()?;
                 let mut program = ir::lower(checked);
                 if o.optimize {
-                    vesper::ir_opt::optimize(&checked.world, &mut program)?;
+                    vesper::ir_opt_policy::optimize(&checked.world, &mut program)?;
                 }
                 crate::write(
                     o.output(),

@@ -1691,18 +1691,18 @@ pub fn stable_views(f: &FunctionIr) -> Vec<HeaderHoist> {
     }
     let all: BTreeSet<usize> = (0..f.blocks.len()).collect();
     let insts = || f.blocks.iter().flat_map(|b| b.instructions.iter());
-    if insts().any(|i| {
+    // Code this graph cannot see runs: a closure or handler body, an
+    // indirect call, an effect operation.
+    let opaque = insts().any(|i| {
         matches!(
             i.op,
             Op::Closure { .. } | Op::Handle { .. } | Op::Indirect { .. }
         ) || matches!(&i.op, Op::Call { callee, .. }
             if callee.contains("::") && callee != "Fail::raise")
-    }) {
-        return vec![];
-    }
+    });
     let users = value_users(f);
     let mut out = vec![];
-    for param in &f.params {
+    for param in f.params.iter().filter(|_| !opaque) {
         if !matches!(param.pass, Pass::In | Pass::Inout) {
             continue;
         }
@@ -1752,9 +1752,13 @@ pub fn stable_views(f: &FunctionIr) -> Vec<HeaderHoist> {
     }
     // A sequence field of an `in` parameter (`self.nodes` of `in self`):
     // nothing can write, move or resize a place under an `in` borrow, so
-    // its handle and header are fixed for the call too.
+    // its handle and header are fixed for the call too, whatever code the
+    // graph cannot see runs (a lent closure, a callback, a method call;
+    // #1330). Only a handler shares the graph's names, so a graph with one
+    // keeps the old rule.
+    let handles = insts().any(|i| matches!(i.op, Op::Handle { .. }));
     let mut fields: BTreeMap<Vec<String>, HeaderHoist> = BTreeMap::new();
-    for param in f.params.iter().filter(|p| p.pass == Pass::In) {
+    for param in f.params.iter().filter(|p| p.pass == Pass::In && !handles) {
         if insts().any(|i| matches!(&i.op, Op::Bind { pattern, .. } if binds(pattern, &param.name)))
         {
             continue;

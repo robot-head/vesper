@@ -1,0 +1,1043 @@
+// Test discovery of src/test_discovery.rs: `rust_case_rows` (the `// @case`
+// rows and their wrapper functions), `rust_discover` (which functions are
+// tests, `syntax_attr_to_anvil` and the Anvil harness plan of each) and
+// `classify` of crates/vesper-test/src/classify.rs.
+//
+// The input and result words are those of
+// tests/common/test_runner_words.rs (util.ves `Reader`,
+// `put_text`).
+
+use @vesper/front::lex::{
+    lex,
+    token_end
+};
+use @vesper/front::diag::{
+    diags_new
+};
+use @vesper/front::kinds::{
+    k_comment,
+    k_whitespace
+};
+use self::attrs::{
+    Arg,
+    Attrs,
+    CaseAttr,
+    FnAttrs,
+    OptNum,
+    OptText,
+    TestAttr,
+    V_BOOL,
+    V_FLOAT,
+    V_IDENT,
+    V_INT,
+    V_RAW,
+    V_STRING,
+    Val,
+    extract_test_attrs,
+    test_attr_new
+};
+use self::big::{
+    push_big
+};
+use self::util::{
+    Reader,
+    add,
+    bit,
+    byte,
+    char_at,
+    inc,
+    is_alnum,
+    is_alpha,
+    is_text,
+    location,
+    push_decimal,
+    push_range,
+    put_buf,
+    put_text,
+    same,
+    starts_with,
+    starts_with_space,
+    sub,
+    trim_end,
+    trim_start,
+    u8_at,
+    u64_at
+};
+
+// ------------------------------------------------------------ source tokens
+
+// The token kinds and ranges of the whole stream, trivia included (for
+// `preceding_comments`).
+pub struct Toks {
+    kind: ChunkSeq[u8],
+    start: ChunkSeq[u64],
+    end: ChunkSeq[u64],
+}
+
+pub fn toks(in src: Slice[u8]) -> Toks {
+    let mut d = diags_new();
+    let t = lex(in src, inout d);
+    let n = t.kind.len();
+    let mut start = ChunkSeq::with_capacity[u64](n);
+    let mut end = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        start
+            .push(
+            match t.start.try_get(i) {
+                Option::Some(s) => widen_u64(s),
+                Option::None => 0,
+            }
+        );
+        end.push(token_end(in t, i));
+    }
+    Toks {
+        kind: t.kind,
+        start: start,
+        end: end
+    }
+}
+
+// `preceding_comments(tokens, fn_start)`: the line comments directly before
+// `fn_start`, nearest first, as (start, end) pairs in `out`.
+fn preceding_comments(in t: Toks, fn_start: u64, inout out: ChunkSeq[u64]) {
+    out.clear();
+    // partition_point(|t| t.span.end <= fn_start)
+    let mut lo: u64 = 0;
+    let mut hi = t.kind.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, sub(hi, lo) / 2);
+        if u64_at(in t.end, mid) <= fn_start {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    let mut i = lo;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = sub(i, 1);
+        let k = u8_at(in t.kind, i);
+        if k == k_comment() {
+            out.push(u64_at(in t.start, i));
+            out.push(u64_at(in t.end, i));
+        } else if k != k_whitespace() {
+            break;
+        }
+    }
+}
+
+// `trim_start_matches('/').trim_start()` of a comment.
+fn after_slashes(in src: Slice[u8], s: u64, e: u64) -> u64 {
+    let mut i = s;
+    loop {
+        if i >= e || byte(in src, i) != 47 {
+            break;
+        }
+        i = inc(i);
+    }
+    trim_start(in src, i, e)
+}
+
+// `is_test_marker`.
+fn is_test_marker(in src: Slice[u8], s: u64, e: u64) -> bool {
+    let i = after_slashes(in src, s, e);
+    is_text(in src, i, e, in "@test")
+        || starts_with(in src, i, e, in "@test ")
+        || starts_with(in src, i, e, in "@test:")
+        || starts_with(in src, i, e, in "@test(")
+}
+
+// `case_marker`: whether the comment is a `@case` row, and the trimmed row.
+fn case_marker(in src: Slice[u8], s: u64, e: u64) -> (bool, u64, u64) {
+    let i = after_slashes(in src, s, e);
+    if !starts_with(in src, i, e, in "@case") {
+        return (false, 0, 0);
+    }
+    let r = add(i, 5);
+    if r < e && !starts_with_space(in src, r, e) {
+        return (false, 0, 0);
+    }
+    let a = trim_start(in src, r, e);
+    let z = trim_end(in src, a, e);
+    (true, a, z)
+}
+
+fn has_test_marker(in src: Slice[u8], in comments: ChunkSeq[u64]) -> bool {
+    let n = comments.len() / 2;
+    for k in 0..n {
+        let s = u64_at(in comments, wrapping_mul(k, 2));
+        let e = u64_at(in comments, inc(wrapping_mul(k, 2)));
+        if is_test_marker(in src, s, e) {
+            return true;
+        }
+    }
+    false
+}
+
+fn put_error(in msg: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(1);
+    put_buf(inout out, in msg);
+    out
+}
+
+fn push_location(inout m: ChunkSeq[u8], in src: Slice[u8], offset: u64) {
+    let (line, column) = location(in src, offset);
+    push_decimal(inout m, line);
+    m.push(58);
+    push_decimal(inout m, column);
+    m.extend(in ": ".as_bytes());
+}
+
+// ------------------------------------------------------------ case rows
+
+// Input: the source; the names wrappers must avoid (functions and `use`
+// locals); per function item: index, span start, generic, has a body and
+// its name.
+pub fn case_rows(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let (ss, se) = r.text(in b);
+    let src = b[ss..se];
+    let name_count = r.word(in b);
+    let mut names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..name_count {
+        let (s, e) = r.text(in b);
+        names.push(s);
+        names.push(e);
+    }
+    let t = toks(in src);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(0);
+    let count_at = out.len();
+    out.push(0);
+    let mut rows: u64 = 0;
+    let mut suffix: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut expanded = false;
+    let mut next_entry: u64 = 0;
+    let mut comments: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut row_list: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut entry: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let fn_count = r.word(in b);
+    for f in 0..fn_count {
+        let index = r.word(in b);
+        let fn_start = r.word(in b);
+        let generic = r.word(in b) != 0;
+        let body = r.word(in b) != 0;
+        let (ns, ne) = r.text(in b);
+        preceding_comments(in t, fn_start, inout comments);
+        row_list.clear();
+        let n = comments.len() / 2;
+        for k in 0..n {
+            let s = u64_at(in comments, wrapping_mul(k, 2));
+            let e = u64_at(in comments, inc(wrapping_mul(k, 2)));
+            let (is_row, a, z) = case_marker(in src, s, e);
+            if is_row {
+                row_list.push(a);
+                row_list.push(z);
+                row_list.push(s);
+                row_list.push(e);
+            }
+        }
+        if row_list.len() == 0 {
+            continue;
+        }
+        if generic || !body {
+            msg.clear();
+            msg.extend(in "test function '".as_bytes());
+            push_range(inout msg, in b, ns, ne);
+            if generic {
+                msg.extend(in "' cannot be generic".as_bytes());
+            } else {
+                msg.extend(in "' must have a body".as_bytes());
+            }
+            return put_error(in msg);
+        }
+        // Labels taken so far for this function: (start, end) in `src`.
+        let mut labels: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let m = row_list.len() / 4;
+        for q in 0..m {
+            // Source order: the nearest comment comes first in `row_list`.
+            let k = sub(sub(m, 1), q);
+            let a = u64_at(in row_list, wrapping_mul(k, 4));
+            let z = u64_at(in row_list, add(wrapping_mul(k, 4), 1));
+            let span_start = u64_at(in row_list, add(wrapping_mul(k, 4), 2));
+            let span_end = u64_at(in row_list, add(wrapping_mul(k, 4), 3));
+            // split_once('(').unwrap_or_default()
+            let mut open = a;
+            let mut found = false;
+            loop {
+                if open >= z {
+                    break;
+                }
+                if byte(in src, open) == 40 {
+                    found = true;
+                    break;
+                }
+                open = inc(open);
+            }
+            let (la, lz, args_a, args_z) = if found {
+                (a, trim_end(in src, a, open), inc(open), z)
+            } else {
+                (a, a, a, a)
+            };
+            let first = byte(in src, la);
+            let closed = args_z > args_a && byte(in src, sub(args_z, 1)) == 41;
+            let mut valid = lz > la && (is_alpha(first) || first == 95) && closed;
+            if valid {
+                for i in inc(la)..lz {
+                    let c = byte(in src, i);
+                    if !is_alnum(c) && c != 95 {
+                        valid = false;
+                    }
+                }
+            }
+            if !valid {
+                msg.clear();
+                push_location(inout msg, in src, span_start);
+                msg.extend(in "expected @case name(arguments) for '".as_bytes());
+                push_range(inout msg, in b, ns, ne);
+                msg.push(39);
+                return put_error(in msg);
+            }
+            let lc = labels.len() / 2;
+            for j in 0..lc {
+                let ps = u64_at(in labels, wrapping_mul(j, 2));
+                let pe = u64_at(in labels, inc(wrapping_mul(j, 2)));
+                if same(in src, ps, pe, in src, la, lz) {
+                    msg.clear();
+                    push_location(inout msg, in src, span_start);
+                    msg.extend(in "duplicate test case '".as_bytes());
+                    push_range(inout msg, in b, ns, ne);
+                    msg.extend(in "::".as_bytes());
+                    push_range(inout msg, in src, la, lz);
+                    msg.push(39);
+                    return put_error(in msg);
+                }
+            }
+            labels.push(la);
+            labels.push(lz);
+            // The first free `__vesper_test_case_<n>`.
+            loop {
+                entry.clear();
+                entry.extend(in "__vesper_test_case_".as_bytes());
+                push_decimal(inout entry, next_entry);
+                next_entry = inc(next_entry);
+                let mut taken = false;
+                for j in 0..name_count {
+                    let s = u64_at(in names, wrapping_mul(j, 2));
+                    let e = u64_at(in names, inc(wrapping_mul(j, 2)));
+                    if same(in b, s, e, in entry.as_slice(), 0, entry.len()) {
+                        taken = true;
+                    }
+                }
+                if !taken {
+                    break;
+                }
+            }
+            expanded = true;
+            let start = add(add(src.len(), suffix.len()), 1);
+            suffix.extend(in "\nfn ".as_bytes());
+            suffix.extend(in entry.as_slice());
+            suffix.extend(in "() { ".as_bytes());
+            push_range(inout suffix, in b, ns, ne);
+            suffix.push(40);
+            push_range(inout suffix, in src, args_a, args_z);
+            suffix.extend(in " }".as_bytes());
+            let gen_end = add(src.len(), suffix.len());
+            // The row: name, span, entry, generated span, function index.
+            msg.clear();
+            push_range(inout msg, in b, ns, ne);
+            msg.extend(in "::".as_bytes());
+            push_range(inout msg, in src, la, lz);
+            put_buf(inout out, in msg);
+            out.push(span_start);
+            out.push(span_end);
+            put_buf(inout out, in entry);
+            out.push(start);
+            out.push(gen_end);
+            out.push(index);
+            rows = inc(rows);
+        }
+    }
+    let ok = out.try_set(count_at, rows);
+    out.push(bit(expanded));
+    put_buf(inout out, in suffix);
+    out
+}
+
+// ------------------------------------------------------------ discovery
+
+// One function item of the expanded parse: its name, span, flags, params
+// (`params[pa..pa + pn]`) and effect names (`effects[ea..ea + en]`), every
+// text a range of the input.
+copy struct Item {
+    is_fn: bool,
+    ns: u64,
+    ne: u64,
+    start: u64,
+    end: u64,
+    generic: bool,
+    body: bool,
+    pa: u64,
+    pn: u64,
+    ea: u64,
+    en: u64,
+}
+
+copy struct Param {
+    ns: u64,
+    ne: u64,
+    ts: u64,
+    te: u64,
+}
+
+copy struct Case {
+    es: u64,
+    ee: u64,
+    ns: u64,
+    ne: u64,
+    start: u64,
+    end: u64,
+    target: u64,
+}
+
+// The Anvil plan's mode (`TestMode` discriminants).
+const MODE_UNIT: u64 = 0;
+const MODE_PROPERTY: u64 = 1;
+const MODE_SIMPULSE: u64 = 2;
+const MODE_BUDGET: u64 = 3;
+const MODE_EXPECT_ERROR: u64 = 4;
+
+// `DEFAULT_PROPERTY_CASES`, `DEFAULT_SIM_SCHEDULES` and `DEFAULT_SEED`.
+const DEFAULT_PROPERTY_CASES: u64 = 64;
+const DEFAULT_SIM_SCHEDULES: u64 = 16;
+const DEFAULT_SEED: u64 = 0;
+
+// `effect_head(eff) == name`.
+fn effect_is(in b: Slice[u8], s: u64, e: u64, in name: Str) -> bool {
+    let a = trim_start(in b, s, e);
+    let z = trim_end(in b, a, e);
+    let mut i = a;
+    loop {
+        if i >= z {
+            break;
+        }
+        let c = byte(in b, i);
+        if c == 91 || c == 32 || c == 9 || c == 64 {
+            break;
+        }
+        i = inc(i);
+    }
+    is_text(in b, a, i, in name)
+}
+
+fn has_effect(in b: Slice[u8], in effects: ChunkSeq[u64], it: Item, in name: Str) -> bool {
+    for k in 0..it.en {
+        let at = wrapping_mul(add(it.ea, k), 2);
+        if effect_is(in b, u64_at(in effects, at), u64_at(in effects, inc(at)), in name) {
+            return true;
+        }
+    }
+    false
+}
+
+// `SIMPULSE_EFFECTS`, `NONDETERMINISTIC_FFI_EFFECTS` and
+// `AMBIENT_IO_EFFECTS` of crates/vesper-test/src/classify.rs, space
+// separated.
+const SIMPULSE_EFFECTS: Str = "Scope Net Storage Clock";
+const NONDETERMINISTIC_FFI_EFFECTS: Str = "Ffi Unsafe";
+const AMBIENT_IO_EFFECTS: Str = "Io Fs Env Process";
+
+// Whether the function has any of the space-separated effects `names`.
+fn has_any(in b: Slice[u8], in effects: ChunkSeq[u64], it: Item, in names: Str) -> bool {
+    let n = names.as_bytes();
+    let mut s: u64 = 0;
+    for i in 0..inc(n.len()) {
+        if i == n.len() || byte(in n, i) == 32 {
+            let name = names[s..i];
+            if has_effect(in b, in effects, it, in name) {
+                return true;
+            }
+            s = inc(i);
+        }
+    }
+    false
+}
+
+fn hex_digit(d: u64) -> u8 {
+    if d < 10 {
+        wrapping_u8(add(d, 48))
+    } else {
+        wrapping_u8(add(d, 87))
+    }
+}
+
+fn push_unicode_escape(inout out: ChunkSeq[u8], c: u64) {
+    out.extend(in "\\u{".as_bytes());
+    let mut started = false;
+    for k in 0..6 {
+        let shift = wrapping_u32(wrapping_mul(sub(5, k), 4));
+        let d = wrapping_shr_u64(c, shift) & 15;
+        if d != 0 || started || k == 5 {
+            out.push(hex_digit(d));
+            started = true;
+        }
+    }
+    out.push(125);
+}
+
+// The characters `push_debug_str` escapes as `\u{..}`.
+fn not_printable(c: u64) -> bool {
+    if c < 32 || c == 127 || c == 173 {
+        return true;
+    }
+    (c >= 128 && c < 160) || (c >= 768 && c < 880)
+}
+
+// `format!("{s:?}")`: quoted, with `char::escape_debug` escapes. Of the
+// characters Rust escapes as not printable, only ASCII and C1 controls,
+// the soft hyphen and combining diacritical marks are recognised here
+// (see the report's compiler gaps).
+fn push_debug_str(inout out: ChunkSeq[u8], in t: Slice[u8], s: u64, e: u64) {
+    out.push(34);
+    let mut i = s;
+    loop {
+        if i >= e {
+            break;
+        }
+        let (c, n) = char_at(in t, i);
+        if c == 0 {
+            out.extend(in "\\0".as_bytes());
+        } else if c == 9 {
+            out.extend(in "\\t".as_bytes());
+        } else if c == 10 {
+            out.extend(in "\\n".as_bytes());
+        } else if c == 13 {
+            out.extend(in "\\r".as_bytes());
+        } else if c == 34 {
+            out.extend(in "\\\"".as_bytes());
+        } else if c == 92 {
+            out.extend(in "\\\\".as_bytes());
+        } else if not_printable(c) {
+            push_unicode_escape(inout out, c);
+        } else {
+            push_range(inout out, in t, i, add(i, n));
+        }
+        i = add(i, n);
+    }
+    out.push(34);
+}
+
+// `attr_value_to_string`.
+fn push_value(inout out: ChunkSeq[u8], in txt: Slice[u8], v: Val) {
+    if v.tag == V_INT {
+        push_big(inout out, v.int);
+    } else if v.tag == V_BOOL {
+        if v.flag {
+            out.extend(in "true".as_bytes());
+        } else {
+            out.extend(in "false".as_bytes());
+        }
+    } else if v.tag == V_STRING {
+        push_debug_str(inout out, in txt, v.a, v.b);
+    } else {
+        push_range(inout out, in txt, v.a, v.b);
+    }
+}
+
+fn opt_value(has: bool, v: u64) -> u64 {
+    if has {
+        v
+    } else {
+        0
+    }
+}
+
+// One discovered test: index, name, span, the harness plan and the raw
+// `@test_case` pins (`Discovered` in src/test_discovery.rs).
+fn put_test(
+    inout out: ChunkSeq[u64],
+    in b: Slice[u8],
+    in src: Slice[u8],
+    in at: Attrs,
+    in params: ChunkSeq[Param],
+    in effects: ChunkSeq[u64],
+    index: u64,
+    it: Item,
+    has_attrs: bool,
+    fa: FnAttrs,
+    is_case: bool,
+    c: Case
+) {
+    out.push(index);
+    if is_case {
+        put_text(inout out, in b, c.ns, c.ne);
+        out.push(c.start);
+        out.push(c.end);
+    } else {
+        put_text(inout out, in b, it.ns, it.ne);
+        out.push(it.start);
+        out.push(it.end);
+    }
+    let txt = at.txt.as_slice();
+    // syntax_attr_to_anvil
+    let has_test = has_attrs && fa.has_test;
+    let t: TestAttr = fa.test;
+    let expect = has_test && t.expect_error.has;
+    let attr_cases = has_test && t.cases.has;
+    let attr_sims = has_test && t.sim_schedules.has;
+    let attr_fault = has_test && t.fault_profile.has;
+    let gate = has_test
+        && (t.max_stack.has || t.max_cycles.has || (t.zero_alloc_has && t.zero_alloc));
+    let pins = if has_attrs {
+        fa.cn
+    } else {
+        0
+    };
+    // A case row's wrapper is an explicit unit invocation: no effects.
+    let effectful = !is_case;
+    let const_time = effectful && has_effect(in b, in effects, it, in "ConstTime");
+    let realtime = effectful && has_effect(in b, in effects, it, in "Realtime");
+    let simpulse_effect = effectful && has_any(in b, in effects, it, in SIMPULSE_EFFECTS);
+    let wants_simpulse = simpulse_effect || attr_sims || attr_fault;
+    let mut value_params = false;
+    for k in 0..it.pn {
+        let p = match params.try_get(add(it.pa, k)) {
+            Option::Some(p) => p,
+            Option::None => Param {
+                ns: 0,
+                ne: 0,
+                ts: 0,
+                te: 0
+            },
+        };
+        let capability = is_text(in b, p.ts, p.te, in "SimStorageCtl")
+            || is_text(in b, p.ts, p.te, in "SimNetCtl")
+            || starts_with(in b, p.ts, p.te, in "Cap[");
+        if !capability {
+            value_params = true;
+        }
+    }
+    let has_property = value_params || attr_cases || pins > 0;
+    let nondet = effectful && has_any(in b, in effects, it, in NONDETERMINISTIC_FFI_EFFECTS);
+    let ambient = effectful && has_any(in b, in effects, it, in AMBIENT_IO_EFFECTS);
+    let zero_alloc = gate && t.zero_alloc_has && t.zero_alloc;
+    let max_stack = gate && t.max_stack.has;
+    let max_cycles = gate && t.max_cycles.has;
+    let budget_active = max_stack || max_cycles || zero_alloc || const_time || realtime;
+    let mode = if expect {
+        MODE_EXPECT_ERROR
+    } else if wants_simpulse {
+        MODE_SIMPULSE
+    } else if has_property {
+        MODE_PROPERTY
+    } else if budget_active {
+        MODE_BUDGET
+    } else {
+        MODE_UNIT
+    };
+    let uses_simpulse = !expect && wants_simpulse;
+    let effective_property = !expect && has_property;
+    // The plan.
+    put_text(inout out, in b, it.ns, it.ne);
+    out.push(mode);
+    out.push(bit(effective_property));
+    out.push(bit(uses_simpulse));
+    out.push(bit(max_stack));
+    out.push(opt_value(max_stack, t.max_stack.v));
+    out.push(bit(max_cycles));
+    out.push(opt_value(max_cycles, t.max_cycles.v));
+    out.push(bit(zero_alloc));
+    out.push(bit(const_time));
+    out.push(bit(realtime));
+    out.push(bit(expect));
+    if expect {
+        put_text(inout out, in txt, t.expect_error.a, t.expect_error.b);
+        // primary.or(expected_span)
+        if t.primary.has {
+            out.push(1);
+            put_text(inout out, in txt, t.primary.a, t.primary.b);
+        } else if t.expected_span.has {
+            out.push(1);
+            put_text(inout out, in txt, t.expected_span.a, t.expected_span.b);
+        } else {
+            out.push(0);
+        }
+        out.push(bit(t.related.has));
+        if t.related.has {
+            put_text(inout out, in txt, t.related.a, t.related.b);
+        }
+    }
+    // `n as u32`.
+    let property_cases = if !effective_property {
+        0
+    } else if attr_cases {
+        t.cases.v & 4294967295
+    } else {
+        DEFAULT_PROPERTY_CASES
+    };
+    let sim_schedules = if !uses_simpulse {
+        0
+    } else if attr_sims {
+        t.sim_schedules.v & 4294967295
+    } else {
+        DEFAULT_SIM_SCHEDULES
+    };
+    out.push(property_cases);
+    out.push(sim_schedules);
+    if uses_simpulse && attr_fault {
+        let fs = t.fault_profile.a;
+        let fe = t.fault_profile.b;
+        if is_text(in txt, fs, fe, in "TornWalSector") {
+            out.push(1);
+        } else if is_text(in txt, fs, fe, in "NetPartition") {
+            out.push(2);
+        } else if is_text(in txt, fs, fe, in "ClockSkew") {
+            out.push(3);
+        } else {
+            out.push(4);
+            put_text(inout out, in txt, fs, fe);
+        }
+    } else {
+        out.push(0);
+    }
+    out.push(DEFAULT_SEED);
+    // The pinned cases as source spellings.
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    out.push(pins);
+    for k in 0..pins {
+        let ca = match at.cases.try_get(add(fa.ca, k)) {
+            Option::Some(ca) => ca,
+            Option::None => CaseAttr {
+                a: 0,
+                n: 0,
+                start: 0,
+                end: 0
+            },
+        };
+        out.push(ca.n);
+        for j in 0..ca.n {
+            match at.args.try_get(add(ca.a, j)) {
+                Option::Some(arg) => {
+                    s.clear();
+                    if arg.has_name {
+                        push_range(inout s, in src, arg.na, arg.nb);
+                        s.extend(in " = ".as_bytes());
+                    }
+                    push_value(inout s, in txt, arg.val);
+                    put_buf(inout out, in s);
+                },
+                Option::None => out.push(0),
+            }
+        }
+    }
+    // fuel_limit, timeout_ms, ignore: never set by attributes.
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    out.push(bit(nondet));
+    out.push(bit(ambient));
+    // The raw pins.
+    out.push(pins);
+    for k in 0..pins {
+        let ca = match at.cases.try_get(add(fa.ca, k)) {
+            Option::Some(ca) => ca,
+            Option::None => CaseAttr {
+                a: 0,
+                n: 0,
+                start: 0,
+                end: 0
+            },
+        };
+        out.push(ca.start);
+        out.push(ca.end);
+        out.push(ca.n);
+        for j in 0..ca.n {
+            match at.args.try_get(add(ca.a, j)) {
+                Option::Some(arg) => {
+                    out.push(bit(arg.has_name));
+                    if arg.has_name {
+                        put_text(inout out, in src, arg.na, arg.nb);
+                    }
+                    out.push(arg.start);
+                    out.push(arg.end);
+                    let v = arg.val;
+                    out.push(widen_u64(v.tag));
+                    if v.tag == V_INT {
+                        out.push(bit(v.int.neg));
+                        out.push(v.int.hi);
+                        out.push(v.int.lo);
+                    } else if v.tag == V_BOOL {
+                        out.push(bit(v.flag));
+                    } else {
+                        put_text(inout out, in txt, v.a, v.b);
+                    }
+                },
+                Option::None => out.push(0),
+            }
+        }
+    }
+}
+
+fn put_name_error(in b: Slice[u8], it: Item, in what: Str) -> ChunkSeq[u64] {
+    let mut msg: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    msg.extend(in "test function '".as_bytes());
+    push_range(inout msg, in b, it.ns, it.ne);
+    msg.extend(in what.as_bytes());
+    put_error(in msg)
+}
+
+// Input: the original source; the items of the expanded parse (per item:
+// whether it is a function, then its name, span, generic, has a body, its
+// params as (name, type) and its effect names); the case rows (entry,
+// name, span, target function index). Result: 0 and the tests in source
+// order, or 1 and the error.
+pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let (ss, se) = r.text(in b);
+    let src = b[ss..se];
+    let item_count = r.word(in b);
+    let mut items: ChunkSeq[Item] = ChunkSeq::with_capacity[Item](item_count);
+    let mut params: ChunkSeq[Param] = ChunkSeq::new[Param]();
+    let mut effects: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..item_count {
+        let is_fn = r.word(in b) != 0;
+        if !is_fn {
+            items
+                .push(
+                Item {
+                    is_fn: false,
+                    ns: 0,
+                    ne: 0,
+                    start: 0,
+                    end: 0,
+                    generic: false,
+                    body: false,
+                    pa: 0,
+                    pn: 0,
+                    ea: 0,
+                    en: 0
+                }
+            );
+            continue;
+        }
+        let (ns, ne) = r.text(in b);
+        let start = r.word(in b);
+        let end = r.word(in b);
+        let generic = r.word(in b) != 0;
+        let body = r.word(in b) != 0;
+        let pa = params.len();
+        let pn = r.word(in b);
+        for k in 0..pn {
+            let (pns, pne) = r.text(in b);
+            let (ts, te) = r.text(in b);
+            params
+                .push(
+                Param {
+                    ns: pns,
+                    ne: pne,
+                    ts: ts,
+                    te: te
+                }
+            );
+        }
+        let ea = effects.len() / 2;
+        let en = r.word(in b);
+        for k in 0..en {
+            let (es, ee) = r.text(in b);
+            effects.push(es);
+            effects.push(ee);
+        }
+        items
+            .push(
+            Item {
+                is_fn: true,
+                ns: ns,
+                ne: ne,
+                start: start,
+                end: end,
+                generic: generic,
+                body: body,
+                pa: pa,
+                pn: pn,
+                ea: ea,
+                en: en
+            }
+        );
+    }
+    let case_count = r.word(in b);
+    let mut cases: ChunkSeq[Case] = ChunkSeq::with_capacity[Case](case_count);
+    for i in 0..case_count {
+        let (es, ee) = r.text(in b);
+        let (ns, ne) = r.text(in b);
+        let start = r.word(in b);
+        let end = r.word(in b);
+        let target = r.word(in b);
+        cases
+            .push(
+            Case {
+                es: es,
+                ee: ee,
+                ns: ns,
+                ne: ne,
+                start: start,
+                end: end,
+                target: target
+            }
+        );
+    }
+    let t = toks(in src);
+    let at = extract_test_attrs(in src, in t.kind, in t.start, in t.end);
+    let mut comments: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // Each test's words, and (span start, offset, length) to sort them.
+    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let fn_attr_count = at.fns.len();
+    for index in 0..item_count {
+        let it = match items.try_get(index) {
+            Option::Some(it) => it,
+            Option::None => break,
+        };
+        if !it.is_fn {
+            continue;
+        }
+        // attr_map.get(name): the last attribute set of that name.
+        let mut has_attrs = false;
+        let mut fa = FnAttrs {
+            na: 0,
+            nb: 0,
+            has_test: false,
+            test: test_attr_new(0, 0),
+            ca: 0,
+            cn: 0
+        };
+        for k in 0..fn_attr_count {
+            match at.fns.try_get(k) {
+                Option::Some(f) => {
+                    if same(in src, f.na, f.nb, in b, it.ns, it.ne) {
+                        has_attrs = true;
+                        fa = f;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        let has_real_attr = has_attrs && (fa.has_test || fa.cn > 0);
+        // case_entries.get(name) and case_targets.contains(name).
+        let mut is_case = false;
+        let mut c = Case {
+            es: 0,
+            ee: 0,
+            ns: 0,
+            ne: 0,
+            start: 0,
+            end: 0,
+            target: 0
+        };
+        let mut is_target = false;
+        for k in 0..case_count {
+            match cases.try_get(k) {
+                Option::Some(x) => {
+                    if same(in b, x.es, x.ee, in b, it.ns, it.ne) {
+                        is_case = true;
+                        c = x;
+                    }
+                    match items.try_get(x.target) {
+                        Option::Some(target) => {
+                            let named = same(in b, target.ns, target.ne, in b, it.ns, it.ne);
+                            if target.is_fn && named {
+                                is_target = true;
+                            }
+                        },
+                        Option::None => {},
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        let mut legacy = false;
+        if !is_target {
+            if starts_with(in b, it.ns, it.ne, in "test_") {
+                legacy = true;
+            } else {
+                preceding_comments(in t, it.start, inout comments);
+                legacy = has_test_marker(in src, in comments);
+            }
+        }
+        if !has_real_attr && !legacy && !is_case {
+            continue;
+        }
+        if it.generic {
+            return put_name_error(in b, it, in "' cannot be generic");
+        }
+        if !it.body {
+            return put_name_error(in b, it, in "' must have a body");
+        }
+        if it.pn > 0 && !has_real_attr {
+            return put_name_error(in b, it, in "' must take zero arguments");
+        }
+        let offset = words.len();
+        put_test(
+            inout words,
+            in b,
+            in src,
+            in at,
+            in params,
+            in effects,
+            index,
+            it,
+            has_attrs,
+            fa,
+            is_case,
+            c
+        );
+        let key = if is_case {
+            c.start
+        } else {
+            it.start
+        };
+        order.push(key);
+        order.push(offset);
+        order.push(sub(words.len(), offset));
+    }
+    // A stable insertion sort by span start.
+    let n = order.len() / 3;
+    let mut idx: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for k in 0..n {
+        let key = u64_at(in order, wrapping_mul(k, 3));
+        let mut j = idx.len();
+        idx.push(k);
+        loop {
+            if j == 0 {
+                break;
+            }
+            let prev = u64_at(in idx, sub(j, 1));
+            if u64_at(in order, wrapping_mul(prev, 3)) <= key {
+                break;
+            }
+            let ok = idx.try_set(j, prev);
+            j = sub(j, 1);
+        }
+        let ok = idx.try_set(j, k);
+    }
+    out.push(0);
+    out.push(n);
+    for k in 0..n {
+        let which = u64_at(in idx, k);
+        let offset = u64_at(in order, inc(wrapping_mul(which, 3)));
+        let len = u64_at(in order, add(wrapping_mul(which, 3), 2));
+        out.extend(in words[offset..add(offset, len)]);
+    }
+    out
+}

@@ -111,6 +111,17 @@ fn union_error(
     ZErr::Work
 }
 
+// The input heads of a three-way union, as bits of one pick.
+enum Head: _ {
+    A = 1,
+    B = 2,
+    C = 4
+}
+
+fn has_head(pick: u64, head: u64) -> bool {
+    (pick & head) != 0
+}
+
 // The sum of up to three canonical sets of one width, in one merge pass.
 pub fn zs_union3(
     width: u64,
@@ -147,36 +158,36 @@ pub fn zs_union3(
         let ai = wrapping_mul(i, stride);
         let bj = wrapping_mul(j, stride);
         let ck = wrapping_mul(k, stride);
-        // Which heads hold the smallest row: bit 1 a, 2 b, 4 c.
+        // Which heads hold the smallest row, as `Head` bits.
         let mut pick: u64 = 0;
         if ha {
-            pick = 1;
+            pick = Head::A;
         }
         if hb {
             if pick == 0 {
-                pick = 2;
+                pick = Head::B;
             } else {
                 let o = cmp_rows(in b, bj, in a, ai, width);
                 if o < 0 {
-                    pick = 2;
+                    pick = Head::B;
                 } else if o == 0 {
-                    pick = 3;
+                    pick = Head::A | Head::B;
                 }
             }
         }
         if hc {
             if pick == 0 {
-                pick = 4;
+                pick = Head::C;
             } else {
-                let o = if (pick & 1) == 1 {
+                let o = if has_head(pick, Head::A) {
                     cmp_rows(in c, ck, in a, ai, width)
                 } else {
                     cmp_rows(in c, ck, in b, bj, width)
                 };
                 if o < 0 {
-                    pick = 4;
+                    pick = Head::C;
                 } else if o == 0 {
-                    pick = pick | 4;
+                    pick = pick | Head::C;
                 }
             }
         }
@@ -185,35 +196,35 @@ pub fn zs_union3(
             Fail::raise(union_error(width, in a, na, in b, nb, in c, nc, max_rows, budget));
         }
         let mut acc = acc_zero();
-        if (pick & 1) == 1 {
+        if has_head(pick, Head::A) {
             acc = acc_add(acc, cell(in a, wrapping_add(ai, width)));
         }
-        if (pick & 2) == 2 {
+        if has_head(pick, Head::B) {
             acc = acc_add(acc, cell(in b, wrapping_add(bj, width)));
         }
-        if (pick & 4) == 4 {
+        if has_head(pick, Head::C) {
             acc = acc_add(acc, cell(in c, wrapping_add(ck, width)));
         }
         if !acc_is_zero(acc) {
             if !acc_fits(acc) {
                 overflow = true;
             }
-            if (pick & 1) == 1 {
+            if has_head(pick, Head::A) {
                 push_row(inout out, in a, ai, width);
-            } else if (pick & 2) == 2 {
+            } else if has_head(pick, Head::B) {
                 push_row(inout out, in b, bj, width);
             } else {
                 push_row(inout out, in c, ck, width);
             }
             out.push(acc_value(acc));
         }
-        if (pick & 1) == 1 {
+        if has_head(pick, Head::A) {
             i = wrapping_add(i, 1);
         }
-        if (pick & 2) == 2 {
+        if has_head(pick, Head::B) {
             j = wrapping_add(j, 1);
         }
-        if (pick & 4) == 4 {
+        if has_head(pick, Head::C) {
             k = wrapping_add(k, 1);
         }
     }
@@ -600,9 +611,7 @@ fn is_live(in live: ChunkSeq[u8], i: u64) -> bool {
     }
 }
 
-fn max_word() -> u64 {
-    18446744073709551615
-}
+const MAX_WORD: u64 = 18446744073709551615;
 
 // The watermark after a change: the least live hold, or the old bound.
 fn publish(in holds: ChunkSeq[i64], in live: ChunkSeq[u8], watermark: i64) -> i64 {
@@ -645,7 +654,7 @@ pub fn frontier_acquire(
     }
     let mut index = live.len();
     for i in 0..live.len() {
-        if !is_live(in live, i) && word(in gens, i) < max_word() {
+        if !is_live(in live, i) && word(in gens, i) < MAX_WORD {
             index = i;
             break;
         }
@@ -659,7 +668,7 @@ pub fn frontier_acquire(
         live.push(0);
     }
     let g = word(in gens, index);
-    if g == max_word() {
+    if g == MAX_WORD {
         Fail::raise(FrErr::Exhausted);
     }
     gens.try_set(index, wrapping_add(g, 1));
@@ -702,7 +711,7 @@ pub fn frontier_advance(
         Fail::raise(FrErr::Regression);
     }
     let g = word(in gens, slot);
-    if g == max_word() {
+    if g == MAX_WORD {
         Fail::raise(FrErr::Exhausted);
     }
     let ng = wrapping_add(g, 1);

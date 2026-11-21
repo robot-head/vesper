@@ -1,0 +1,29 @@
+// @vesper/hybrid-test-runner: `vesper::test_discovery` served from Vesper
+// in the hybrid Stage 2 build (self-hosting SH5 lane 14, #1337).
+//
+// `case_rows_words` and `discover_words` take one call's input as the
+// little-endian words of tests/common/test_runner_words.rs (the source,
+// the parse's function items and the case rows) and return the result
+// words that `decode_case_rows` and `decode_discover` read back.
+
+// @export abi 4
+
+use @vesper/test-runner::{
+    case_rows_words as rows,
+    discover_words as tests,
+    format as words_format
+};
+
+// The word format of both entries; tests/common/test_runner_words.rs
+// checks it.
+pub fn format() -> u64 {
+    words_format()
+}
+
+pub fn case_rows_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    rows(in input)
+}
+
+pub fn discover_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    tests(in input)
+}

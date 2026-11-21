@@ -179,13 +179,17 @@ impl Layouts {
     }
 
     fn scalar(inout self, ty: u32) -> u32 {
+        self.scalar_sized(ty, 8)
+    }
+
+    fn scalar_sized(inout self, ty: u32, size: u32) -> u32 {
         let id = n32(self.nodes.len());
         self
             .nodes
             .push(
             LNode {
                 ty: ty,
-                size: 8,
+                size: size,
                 kind: L_SCALAR,
                 a: 0,
                 n: 0
@@ -312,6 +316,10 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
     } else {
         0
     };
+    // `i128` and `u128` are two words, low word first (#1174).
+    if n.kind == K_NAMED && n.n == 0 && k.is_wide(name) {
+        return ls.scalar_sized(ty, 16);
+    }
     let scalar = n
         .kind
         == K_LIT

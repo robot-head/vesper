@@ -296,12 +296,12 @@ impl<'w> Session<'w> {
                     return Err(misuse(log, WalError::NotRecovered));
                 }
                 let index = args[0].as_u64().expect("u64 index");
-                let record = usize::try_from(index).ok().and_then(|i| wal.view().get(i));
+                let record = usize::try_from(index).ok().and_then(|i| wal.record(i));
                 events.push(ModelEvent::WalRead {
                     log: log.clone(),
                     task: task.clone(),
                     index,
-                    lsn: record.map(|r| r.lsn),
+                    lsn: record.as_ref().map(|r| r.lsn),
                     at_ns: now,
                 });
                 ModelStep::Immediate {
@@ -525,7 +525,7 @@ impl<'w> Session<'w> {
         match internal {
             Internal::Deliver { network, message } => {
                 let state = &model.networks[network];
-                let to = state.net.in_flight()[message].to;
+                let to = state.net.in_flight_to(*message).expect("in-flight message");
                 let up = model.processes[state.owners[&to]].up;
                 let state = model.networks.get_mut(network).unwrap();
                 match state.net.arrive(*message, up).expect("in-flight message") {
@@ -642,7 +642,7 @@ impl<'w> Session<'w> {
                                 request: *request,
                                 durable_lsn: wal.durable_lsn(),
                                 durable_bytes: durable.len() as u64,
-                                durable_sha256: crate::program::sha256_hex(durable),
+                                durable_sha256: crate::program::sha256_hex(&durable),
                                 at_ns: now,
                             });
                             deliveries.push((
@@ -714,7 +714,7 @@ impl<'w> Session<'w> {
                             choice,
                             applied,
                             durable_bytes: durable.len() as u64,
-                            durable_sha256: crate::program::sha256_hex(durable),
+                            durable_sha256: crate::program::sha256_hex(&durable),
                         });
                     }
                     for (name, endpoint) in &plan.spec.processes[p].endpoints {

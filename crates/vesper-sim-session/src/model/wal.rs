@@ -17,7 +17,9 @@
 //! everything after it is discarded and truncated from the medium. Nothing
 //! here touches a real file, clock or random source.
 use serde::{Deserialize, Serialize};
+#[cfg(not(feature = "vesper-port"))]
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 
 pub const FRAME_HEADER_BYTES: usize = 20;
 
@@ -29,6 +31,11 @@ pub struct WalRecord {
     pub payload: String,
 }
 impl WalRecord {
+    #[cfg(feature = "vesper-port")]
+    pub fn frame(&self) -> Vec<u8> {
+        crate::port::wal_frame(self.lsn, &self.payload)
+    }
+    #[cfg(not(feature = "vesper-port"))]
     pub fn frame(&self) -> Vec<u8> {
         let payload = self.payload.as_bytes();
         let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + payload.len());
@@ -43,6 +50,7 @@ impl WalRecord {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn check(lsn: u64, payload: &[u8]) -> [u8; 8] {
     let mut hasher = Sha256::new();
     hasher.update(lsn.to_le_bytes());
@@ -77,8 +85,50 @@ pub struct Recovery {
     pub damage: Option<TailDamage>,
 }
 
+/// The port's damage code, expected LSN and found LSN.
+#[cfg(feature = "vesper-port")]
+fn damage(code: (u8, u64, u64)) -> Option<TailDamage> {
+    match code {
+        (0, _, _) => None,
+        (1, _, _) => Some(TailDamage::TornHeader),
+        (2, _, _) => Some(TailDamage::TornPayload),
+        (3, _, _) => Some(TailDamage::BadCheck),
+        (4, expected, found) => Some(TailDamage::OutOfOrder { expected, found }),
+        (5, _, _) => Some(TailDamage::BadPayload),
+        (other, _, _) => panic!("invalid tail damage {other} from Vesper"),
+    }
+}
+
 /// Scan a medium with the `wal-frame-v1` policy. This never fails: damage is
 /// reported and the valid prefix is returned.
+#[cfg(feature = "vesper-port")]
+pub fn scan(bytes: &[u8]) -> Recovery {
+    let result = crate::port::wal_scan(bytes);
+    let records = crate::port::scan_result_records(&result)
+        .chunks_exact(3)
+        .map(|r| {
+            let (start, len) = (r[1] as usize, r[2] as usize);
+            WalRecord {
+                lsn: r[0],
+                payload: std::str::from_utf8(&bytes[start..start + len])
+                    .expect("the port validated the payload")
+                    .into(),
+            }
+        })
+        .collect();
+    let valid_bytes = crate::port::scan_result_valid_bytes(&result) as usize;
+    let damage = damage(crate::port::scan_result_damage(&result));
+    Recovery {
+        records,
+        valid_bytes,
+        discarded_bytes: bytes.len() - valid_bytes,
+        damage,
+    }
+}
+
+/// Scan a medium with the `wal-frame-v1` policy. This never fails: damage is
+/// reported and the valid prefix is returned.
+#[cfg(not(feature = "vesper-port"))]
 pub fn scan(bytes: &[u8]) -> Recovery {
     let mut records = vec![];
     let mut offset = 0;
@@ -172,6 +222,7 @@ pub struct CrashApplied {
     pub torn_bytes: u64,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Wal {
     limits: WalLimits,
@@ -186,6 +237,7 @@ pub struct Wal {
     generation: u64,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 impl Wal {
     pub fn new(limits: WalLimits) -> Self {
         Self {
@@ -199,8 +251,8 @@ impl Wal {
             generation: 0,
         }
     }
-    pub fn durable_bytes(&self) -> &[u8] {
-        &self.durable
+    pub fn durable_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Borrowed(&self.durable)
     }
     pub fn generation(&self) -> u64 {
         self.generation
@@ -208,15 +260,16 @@ impl Wal {
     pub fn is_recovered(&self) -> bool {
         self.recovered
     }
-    pub fn volatile(&self) -> &[WalRecord] {
-        &self.volatile
+    pub fn volatile(&self) -> Vec<WalRecord> {
+        self.volatile.clone()
     }
-    pub fn in_flight(&self) -> Option<&Batch> {
-        self.in_flight.as_ref()
+    pub fn in_flight(&self) -> Option<Batch> {
+        self.in_flight.clone()
     }
-    /// The durable records visible to this epoch (empty before recovery).
-    pub fn view(&self) -> &[WalRecord] {
-        &self.view
+    /// The `index`th durable record visible to this epoch (none before
+    /// recovery).
+    pub fn record(&self, index: usize) -> Option<WalRecord> {
+        self.view.get(index).cloned()
     }
     /// Highest durable LSN visible to this epoch, or 0.
     pub fn durable_lsn(&self) -> u64 {
@@ -291,10 +344,10 @@ impl Wal {
     }
 
     /// Move every volatile record into the in-flight batch.
-    pub fn begin_flush(&mut self, request: u64) -> Result<&Batch, WalError> {
+    pub fn begin_flush(&mut self, request: u64) -> Result<Batch, WalError> {
         self.check_flush()?;
         let records = std::mem::take(&mut self.volatile);
-        Ok(self.in_flight.insert(Batch { request, records }))
+        Ok(self.in_flight.insert(Batch { request, records }).clone())
     }
 
     /// The device acknowledged the flush: the batch becomes durable.
@@ -346,6 +399,201 @@ impl Wal {
             in_flight_records,
             persisted_records: persisted,
             torn_bytes: torn,
+        }
+    }
+}
+
+/// Under `vesper-port` the Vesper state (port/src/lib.ves) owns the medium,
+/// the regions, the bounds and the crash rules; this wrapper keeps each live
+/// record's payload, keyed by LSN.
+#[cfg(feature = "vesper-port")]
+pub struct Wal {
+    state: crate::port::WalState,
+    payloads: std::collections::BTreeMap<u64, String>,
+}
+
+#[cfg(feature = "vesper-port")]
+impl Clone for Wal {
+    fn clone(&self) -> Self {
+        Self {
+            state: crate::port::WalState::clone(&self.state),
+            payloads: self.payloads.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl PartialEq for Wal {
+    fn eq(&self, other: &Self) -> bool {
+        self.payloads == other.payloads && crate::port::WalState::same(&self.state, &other.state)
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl Eq for Wal {}
+
+#[cfg(feature = "vesper-port")]
+impl std::fmt::Debug for Wal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wal")
+            .field("durable", &hex(&self.durable_bytes()))
+            .field("in_flight", &self.in_flight())
+            .field("volatile", &self.volatile())
+            .field("generation", &self.generation())
+            .finish()
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+fn wal_result(r: crate::port::WalResult) -> Result<u64, WalError> {
+    use crate::port::WalResult as R;
+    match r {
+        R::Ok(v) => Ok(v),
+        R::NotRecovered => Err(WalError::NotRecovered),
+        R::AlreadyRecovered => Err(WalError::AlreadyRecovered),
+        R::FlushInFlight => Err(WalError::FlushInFlight),
+        R::NoFlushInFlight => Err(WalError::NoFlushInFlight),
+        R::RecordTooLarge(bytes, limit) => Err(WalError::RecordTooLarge { bytes, limit }),
+        R::LogFull(records, bytes) => Err(WalError::LogFull { records, bytes }),
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl Wal {
+    pub fn new(limits: WalLimits) -> Self {
+        Self {
+            state: crate::port::WalState::new(
+                limits.max_records,
+                limits.max_bytes,
+                limits.max_record_bytes,
+            ),
+            payloads: std::collections::BTreeMap::new(),
+        }
+    }
+    pub fn durable_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(crate::port::wal_state_durable(&self.state))
+    }
+    pub fn generation(&self) -> u64 {
+        crate::port::wal_state_generation(&self.state)
+    }
+    pub fn is_recovered(&self) -> bool {
+        crate::port::wal_state_is_recovered(&self.state)
+    }
+    fn records(&self, lsns: Vec<u64>) -> Vec<WalRecord> {
+        lsns.into_iter()
+            .map(|lsn| WalRecord {
+                lsn,
+                payload: self.payloads[&lsn].clone(),
+            })
+            .collect()
+    }
+    pub fn volatile(&self) -> Vec<WalRecord> {
+        self.records(crate::port::wal_state_volatile_lsns(&self.state))
+    }
+    pub fn in_flight(&self) -> Option<Batch> {
+        crate::port::wal_state_is_flushing(&self.state).then(|| Batch {
+            request: crate::port::wal_state_request(&self.state),
+            records: self.records(crate::port::wal_state_in_flight_lsns(&self.state)),
+        })
+    }
+    /// The `index`th durable record visible to this epoch (none before
+    /// recovery).
+    pub fn record(&self, index: usize) -> Option<WalRecord> {
+        // LSNs start at 1; 0 is the port's "past the end".
+        match crate::port::wal_state_view_lsn(&self.state, index as u64) {
+            0 => None,
+            lsn => self.records(vec![lsn]).pop(),
+        }
+    }
+    /// Highest durable LSN visible to this epoch, or 0.
+    pub fn durable_lsn(&self) -> u64 {
+        crate::port::wal_state_durable_lsn(&self.state)
+    }
+
+    /// Open the log for this epoch: scan, truncate damage, and continue LSNs
+    /// after the last valid record.
+    pub fn recover(&mut self) -> Result<Recovery, WalError> {
+        let discarded_from = crate::port::wal_state_durable_len(&self.state);
+        let recovery = crate::port::wal_state_recover(&mut self.state);
+        if !crate::port::wal_recovery_ok(&recovery) {
+            return Err(WalError::AlreadyRecovered);
+        }
+        let durable = self.durable_bytes();
+        let records: Vec<WalRecord> = crate::port::wal_recovery_records(&recovery)
+            .chunks_exact(3)
+            .map(|r| {
+                let (start, len) = (r[1] as usize, r[2] as usize);
+                WalRecord {
+                    lsn: r[0],
+                    payload: std::str::from_utf8(&durable[start..start + len])
+                        .expect("the port validated the payload")
+                        .into(),
+                }
+            })
+            .collect();
+        let valid_bytes = crate::port::wal_recovery_valid_bytes(&recovery) as usize;
+        let damage = damage(crate::port::wal_recovery_damage(&recovery));
+        self.payloads = records.iter().map(|r| (r.lsn, r.payload.clone())).collect();
+        Ok(Recovery {
+            records,
+            valid_bytes,
+            discarded_bytes: discarded_from as usize - valid_bytes,
+            damage,
+        })
+    }
+
+    /// Check that `payload` can be appended without exceeding any bound.
+    pub fn check_append(&self, payload: &str) -> Result<(), WalError> {
+        wal_result(crate::port::wal_state_check_append(
+            &self.state,
+            payload.len() as u64,
+        ))
+        .map(drop)
+    }
+
+    /// Append to the volatile region and return the assigned LSN.
+    pub fn append(&mut self, payload: String) -> Result<u64, WalError> {
+        let lsn = wal_result(crate::port::wal_state_append(&mut self.state, &payload))?;
+        self.payloads.insert(lsn, payload);
+        Ok(lsn)
+    }
+
+    pub fn check_flush(&self) -> Result<(), WalError> {
+        wal_result(crate::port::wal_state_check_flush(&self.state)).map(drop)
+    }
+
+    /// Move every volatile record into the in-flight batch.
+    pub fn begin_flush(&mut self, request: u64) -> Result<Batch, WalError> {
+        wal_result(crate::port::wal_state_begin_flush(&mut self.state, request))?;
+        Ok(self.in_flight().expect("the port began a flush"))
+    }
+
+    /// The device acknowledged the flush: the batch becomes durable.
+    pub fn complete_flush(&mut self) -> Result<Batch, WalError> {
+        let batch = self.in_flight();
+        wal_result(crate::port::wal_state_complete_flush(&mut self.state))?;
+        Ok(batch.expect("the port completed a flush"))
+    }
+
+    /// The device reported failure: nothing in the batch became durable and
+    /// its records return, oldest first, to the volatile region.
+    pub fn fail_flush(&mut self) -> Result<Batch, WalError> {
+        let batch = self.in_flight();
+        wal_result(crate::port::wal_state_fail_flush(&mut self.state))?;
+        Ok(batch.expect("the port failed a flush"))
+    }
+
+    /// Process crash: volatile records vanish; the first `persisted` in-flight
+    /// records reach the medium whole and, if a further record exists,
+    /// `torn` bytes of its frame (clamped below the full frame) follow.
+    pub fn crash(&mut self, persisted: u64, torn: u64) -> CrashApplied {
+        let c = crate::port::wal_state_crash(&mut self.state, persisted, torn);
+        self.payloads.clear();
+        CrashApplied {
+            volatile_lost: c.volatile_lost,
+            in_flight_records: c.in_flight_records,
+            persisted_records: c.persisted_records,
+            torn_bytes: c.torn_bytes,
         }
     }
 }
