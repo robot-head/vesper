@@ -1,0 +1,10 @@
+[package]
+name = "@vesper/codegen-scalar-emit"
+version = "0.1.0"
+edition = "2026"
+# Every emission reaches Cranelift through @vesper/cranelift's `.vsys`
+# library; the decisions it follows are @vesper/codegen-scalar's plan.
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/cranelift" = { version = "^0.1", path = "../../vesper-cranelift" }
