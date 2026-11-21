@@ -76,6 +76,46 @@ pass harness test takes every sixteenth of those),
 because running the passes over the whole corpus takes over half an hour in a
 debug build. `PLACE_IR_STEP=1` runs every world (the numbers above).
 
+### Instruction counts (callgrind)
+
+Here the swap is measured in instructions over every tenth corpus world, at the
+`lower` boundary: 31 worlds and 1.9 M output words (`PLACE_IR_STEP=10`). The
+measurement is the ignored test `place_ir_callgrind` in an optimized test
+build (`--profile port-compiler`). It runs one phase per process under
+`--instr-atstart=no`. The driver turns instrumentation on
+(`callgrind_control -i on`) only after the setup, which loads the corpus and
+compiles the package, and then creates the `PLACE_IR_GO` file:
+
+```sh
+PLACE_IR_PHASE=$ph PLACE_IR_STEP=10 PLACE_IR_GO=$go valgrind --tool=callgrind \
+  --instr-atstart=no [--toggle-collect='*place_ir_measured*'] \
+  <self_host_place_ir test binary> --ignored --exact place_ir_callgrind &
+# wait for "place-ir callgrind: ready" on stderr, then
+callgrind_control -i on $!; touch $go
+```
+
+The Rust phases are counted inside the measured function
+(`--toggle-collect`). The Vesper phase runs in JIT code, where callgrind's
+function toggle sees nothing, so it is the whole run after setup minus a
+`PLACE_IR_PHASE=none` run (127.6 M Ir). Lowering and decode measured both ways
+agree within 0.1%.
+
+| Step | Ir | vs `ir::lower_world` |
+|---|--:|--:|
+| `ir::lower_world` (Rust) | 844,146,457 | 1.00x |
+| Encode world + program (Rust) | 1,119,033,067 | 1.33x |
+| Vesper read + write | 200,354,139 | 0.24x |
+| Decode (Rust) | 363,326,516 | 0.43x |
+| Whole swap (encode + Vesper + decode) | 1,682,713,722 | 1.99x |
+
+The instruction counts tell the same story as the wall clock, at a higher
+level. The Vesper tables are cheap, and the Rust word encoding is the cost,
+mostly the world section that check-data reads first. On this input a
+Vesper IR pass pays about 2x a lowering in instructions before it does any
+work. That overhead is the boundary's, not the pass's. Removing it is the
+job of the ABI v4 tree input, or of passes that stay in Vesper tables
+between each other instead of round-tripping every pass.
+
 ## Stage 1 guard
 
 `src/ir.rs`, `ir_opt::optimize`, src/verified_codegen/**, lean/**,
@@ -124,5 +164,4 @@ works around:
 
 ## What is left
 
-- Callgrind numbers for the round trip.
 - Structured payload kinds when a lane needs to make new operations.
