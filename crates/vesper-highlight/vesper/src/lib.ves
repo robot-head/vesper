@@ -630,6 +630,13 @@ fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_m
         } else {
             K_EOF
         };
+        // `effect`, `handle`, `sink` and `inout` used as names (#1244) are
+        // classed as the identifiers they are (`contextual_name_at`).
+        let k = if contextual_name_at(k, before, after) {
+            K_LOWER
+        } else {
+            k
+        };
         let mut flags: u64 = if k == K_ERROR {
             F_RECOVERED
         } else {
@@ -731,6 +738,36 @@ fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_m
         out.push(e | wrapping_shl_u64(class, 32) | wrapping_shl_u64(flags, 48));
     }
     out
+}
+
+// `contextual_name_at`: a contextual keyword right after `fn`, `.` or `let`,
+// or right before `:`, `(`, `,`, `)`, `.`, `=`, `;` or `}`, is a name.
+fn contextual_name_at(k: u8, before: u8, after: u8) -> bool {
+    (k == K_EFFECT || k == K_HANDLE || k == K_SINK || k == K_INOUT)
+        && (name_before(before) || name_after(after))
+}
+
+fn name_before(k: u8) -> bool {
+    k == K_FN || k == K_DOT || k == K_LET
+}
+
+fn name_after(k: u8) -> bool {
+    k
+        == K_COLON
+        || k
+        == K_L_PAREN
+        || k
+        == K_COMMA
+        || k
+        == K_R_PAREN
+        || k
+        == K_DOT
+        || k
+        == K_EQ
+        || k
+        == K_SEMI
+        || k
+        == K_R_BRACE
 }
 
 // The class of a token kind that needs no context, or NO_CLASS.

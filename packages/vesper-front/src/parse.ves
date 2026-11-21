@@ -812,14 +812,73 @@ fn json_string(in p: P, i: u64) -> bool {
     }
 }
 
-// `Parser::literal`: the literal class (0 for none) and an Int's value.
+// The magnitude class of Int token `i` (`_` removed): `M_U64` up to
+// `u64::MAX`, `M_I128` up to `2^127` (`i128::MIN` negated), `M_U128` up to
+// `u128::MAX`, and `M_NONE` past it or without digits.
+const M_NONE: u8 = 0;
+const M_U64: u8 = 1;
+const M_I128: u8 = 2;
+const M_U128: u8 = 3;
+
+fn int_class(in p: P, i: u64) -> u8 {
+    let (ok, _) = int_value(in p, i);
+    if ok {
+        return M_U64;
+    }
+    let s = tstart(in p, i);
+    let e = tend(in p, i);
+    let src = p.src.as_slice();
+    let x = byte(in src, inc(s));
+    let hex = wrapping_sub(e, s) >= 2 && byte(in src, s) == 48 && (x == 120 || x == 88);
+    let from = if hex {
+        add(s, 2)
+    } else {
+        s
+    };
+    let base: u128 = if hex {
+        16
+    } else {
+        10
+    };
+    let mut v: u128 = 0;
+    let mut digits: u64 = 0;
+    for j in from..e {
+        let c = byte(in src, j);
+        if c != 95 {
+            let d = widen_u128(hex_value(c));
+            v = match checked_mul_u128(v, base) {
+                Option::Some(m) => m,
+                Option::None => {
+                    return M_NONE;
+                }
+            };
+            v = match checked_add_u128(v, d) {
+                Option::Some(a) => a,
+                Option::None => {
+                    return M_NONE;
+                }
+            };
+            digits = inc(digits);
+        }
+    }
+    if digits == 0 {
+        M_NONE
+    } else if v <= widen_u128(1) << 127 {
+        M_I128
+    } else {
+        M_U128
+    }
+}
+
+// `Parser::literal`: the literal class (0 for none) and an Int's value (0
+// past `u64::MAX`).
 fn literal(inout p: P) -> (u8, u64) {
     let k = kind(in p);
     if k == k_int() {
         let i = bump(inout p);
         let (ok, v) = int_value(in p, i);
-        if !ok {
-            err(inout p, in "integer literal exceeds u64 range");
+        if !ok && int_class(in p, i) == M_NONE {
+            err(inout p, in "integer literal exceeds u128 range");
         }
         (l_int(), v)
     } else if k == k_float() {
@@ -892,12 +951,6 @@ fn reserved_word(k: u8) -> bool {
         || k
         == k_in()
         || k
-        == k_inout()
-        || k
-        == k_sink()
-        || k
-        == k_handle()
-        || k
         == k_return()
         || k
         == k_match()
@@ -914,20 +967,102 @@ fn reserved_word(k: u8) -> bool {
         || k
         == k_enum()
         || k
-        == k_effect()
-        || k
         == k_impl()
 }
 
 // `state`, `linear`, `with` and `eff` are keywords only where their forms
 // start; wherever a name is expected they are names (`at_contextual_name`).
 // `eff` opens an effect row only after a signature and as the `e: eff` bound.
+// `effect`, `handle`, `sink` and `inout` are contextual too (`contextual_kind`):
+// `handle` starts an expression only before an effect (`handle_starts`), and
+// the pass modes are modes only before an operand (`pass_word_is_mode`).
 fn contextual_name(k: u8) -> bool {
-    k == k_state() || k == k_linear() || k == k_with() || k == k_eff()
+    k
+        == k_state()
+        || k
+        == k_linear()
+        || k
+        == k_with()
+        || k
+        == k_eff()
+        || k
+        == k_effect()
+        || k
+        == k_handle()
+        || k
+        == k_sink()
+        || k
+        == k_inout()
 }
 
 fn at_contextual_name(in p: P) -> bool {
-    contextual_name(kind(in p))
+    contextual_name(kind(in p)) && !(at(in p, k_handle()) && handle_starts(in p))
+}
+
+// `Parser::handle_starts`: `handle E`, `handle self::m::E`, `handle @p/q::E`
+// or `handle l: E`.
+fn handle_starts(in p: P) -> bool {
+    let n1 = nth(in p, 1);
+    if n1 == k_upper() || n1 == k_self_kw() || n1 == k_at() {
+        return true;
+    }
+    (n1 == k_lower() || contextual_name(n1)) && nth(in p, 2) == k_colon()
+}
+
+// `Parser::pass_word_is_mode`: whether `sink` or `inout` is a pass mode in a
+// parameter (`params`) or argument list.
+fn pass_word_is_mode(in p: P, params: bool) -> bool {
+    let n = nth(in p, 1);
+    if params {
+        return n == k_lower() || n == k_self_kw() || contextual_name(n);
+    }
+    if n == k_lower() {
+        return !at_word(in p, 1, w_as());
+    }
+    n
+        == k_upper()
+        || n
+        == k_self_kw()
+        || n
+        == k_at()
+        || n
+        == k_int()
+        || n
+        == k_float()
+        || n
+        == k_string()
+        || n
+        == k_true()
+        || n
+        == k_false()
+        || n
+        == k_l_brace()
+        || n
+        == k_bang()
+        || n
+        == k_tilde()
+        || n
+        == k_pipe()
+        || n
+        == k_or()
+        || n
+        == k_match()
+        || n
+        == k_if()
+        || n
+        == k_state()
+        || n
+        == k_linear()
+        || n
+        == k_eff()
+        || n
+        == k_effect()
+        || n
+        == k_handle()
+        || n
+        == k_sink()
+        || n
+        == k_inout()
 }
 
 // `Parser::at_path_root`: at `self::`, `super::` or `@scope/name::`.
@@ -996,9 +1131,19 @@ fn mode(inout p: P) -> bool {
     }
 }
 
+// `Parser::pass`: a pass mode in a function type, where one is always a mode.
 fn pass(inout p: P) {
     let k = kind(in p);
     if k == k_in() || k == k_inout() || k == k_sink() {
+        bump(inout p);
+    }
+}
+
+// `Parser::pass_in`: a pass mode in a parameter (`params`) or argument list,
+// where `inout` and `sink` may also be names.
+fn pass_in(inout p: P, params: bool) {
+    let k = kind(in p);
+    if k == k_in() || ((k == k_inout() || k == k_sink()) && pass_word_is_mode(in p, params)) {
         bump(inout p);
     }
 }
@@ -1559,7 +1704,7 @@ fn params(inout p: P, end: u8) {
         if at(in p, end) || at(in p, k_eof()) {
             return;
         }
-        pass(inout p);
+        pass_in(inout p, true);
         let name = lower(inout p);
         let sym = tsym(in p, name);
         p.binds.push(sym);
@@ -2223,7 +2368,15 @@ fn block_inner(inout p: P) -> Ex {
 
 fn statement_anchor(in p: P) -> bool {
     let k = kind(in p);
-    k == k_let() || k == k_match() || k == k_handle() || k == k_return() || k == k_if()
+    k
+        == k_let()
+        || k
+        == k_match()
+        || k
+        == k_return()
+        || k
+        == k_if()
+        || (k == k_handle() && handle_starts(in p))
 }
 
 // `Parser::recover_statement`: an ERROR_NODE over the tokens up to the
@@ -2320,7 +2473,7 @@ fn expr_inner(inout p: P) -> Ex {
     } else {
         0
     };
-    let e = if k == k_handle() {
+    let e = if k == k_handle() && handle_starts(in p) {
         handle_expr(inout p)
     } else if w
         == w_region()
@@ -2376,8 +2529,7 @@ fn for_header(in p: P, cur: u64) -> bool {
             == k_true()
             || n
             == k_false()
-            || n
-            == k_eff()
+            || contextual_name(n)
     )
 }
 
@@ -2547,7 +2699,7 @@ fn closure(inout p: P) -> Ex {
 fn handle_expr(inout p: P) -> Ex {
     let start = cur_start(in p);
     expect(inout p, k_handle());
-    if at(in p, k_lower()) {
+    if at(in p, k_lower()) || at_contextual_name(in p) {
         lower(inout p);
         expect(inout p, k_colon());
     }
@@ -2915,7 +3067,7 @@ fn postfix_inner(inout p: P) -> Ex {
         } else if k == k_dot() {
             bump(inout p);
             let mk = kind(in p);
-            if p.editor && mk != k_lower() && mk != k_self_kw() && !contextual_name(mk) {
+            if p.editor && mk != k_lower() && mk != k_self_kw() && !at_contextual_name(in p) {
                 // Editor mode: an INCOMPLETE member and its site.
                 let s = last_end(in p);
                 site(inout p, s, s, 0, e.rcv);
@@ -2996,7 +3148,7 @@ fn args(inout p: P) -> u32 {
         if at(in p, k_r_paren()) || at(in p, k_eof()) {
             return h;
         }
-        pass(inout p);
+        pass_in(inout p, false);
         let a = expr(inout p);
         h = hmax(h, a.h);
         if !eat(inout p, k_comma()) {
@@ -3044,7 +3196,7 @@ fn primary_inner(inout p: P) -> Ex {
         return e;
     }
     let k = kind(in p);
-    if k == k_lower() || k == k_self_kw() || contextual_name(k) {
+    if k == k_lower() || k == k_self_kw() || at_contextual_name(in p) {
         let i = bump(inout p);
         let mut e = ex(x_name(), start, last_end(in p), 0);
         e.sym = tsym(in p, i);
@@ -3266,10 +3418,18 @@ fn pattern(inout p: P) {
 fn pattern_inner(inout p: P) {
     start_node(inout p, n_pattern());
     let negative = eat(inout p, k_minus());
+    let class = if at(in p, k_int()) {
+        int_class(in p, idx(in p, 0))
+    } else {
+        M_NONE
+    };
     let (lit, _) = literal(inout p);
     if lit != 0 {
         if negative && lit != l_int() && lit != l_float() {
             err(inout p, in "only numeric patterns can be negative");
+        }
+        if negative && class == M_U128 {
+            err(inout p, in "integer literal exceeds i128 range when negated");
         }
     } else {
         if negative {

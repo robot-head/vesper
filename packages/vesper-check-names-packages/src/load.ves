@@ -450,6 +450,7 @@ fn constants(inout s: St, in l: L, m: u32) {
                 }
             );
             s.cl_bits.push(v.bits);
+            s.cl_hi.push(v.hi);
             s.cl_untyped.push(at8(in l.const_untyped, i));
         }
     }

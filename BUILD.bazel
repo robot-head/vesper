@@ -705,7 +705,8 @@ vesper_crate(
         "test/self_host_check_data": "long",
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
-        "test/self_host_ir_inline": "long",
+        # The inliner differential passed 900 s on a cold CI run.
+        "test/self_host_ir_inline": "eternal",
         # Four round-trip tests and the pass harness share one stage build;
         # past 900 s on a busy runner.
         "test/self_host_place_ir": "eternal",
