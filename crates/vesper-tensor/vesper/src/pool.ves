@@ -150,10 +150,24 @@ fn validate_pages(
 ) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     let count = slots[5 * slot + 4];
     let base = 2 * refs * slot;
-    for i in u64_zero()..count {
-        if !lease_ok(in pages, slot, generation, leases[base + 2 * i], leases[base + 2 * i + 1]) {
+    // `lease_ok` for every lease, with the page index bounded once so the
+    // word offsets cannot wrap.
+    let page_count = pages.len() / 4;
+    let mut at = base;
+    for _i in u64_zero()..count {
+        let page = leases[at];
+        let page_generation = leases[wrapping_add(at, 1)];
+        if page >= page_count {
             return 4;
         }
+        let q = wrapping_mul(4, page);
+        if pages[q] != 1
+            || pages[wrapping_add(q, 1)] != slot
+            || pages[wrapping_add(q, 2)] != generation
+            || pages[wrapping_add(q, 3)] != page_generation {
+            return 4;
+        }
+        at = wrapping_add(at, 2);
     }
     0
 }
@@ -289,14 +303,23 @@ pub fn kv_append(
         let n = pages.len() / 4;
         let mut found = false;
         let mut any_free = false;
-        for p in u64_zero()..n {
-            if !found && pages[4 * p] == 0 {
+        // The first free page with a generation left (`position`), as
+        // in the Rust build; `any_free` matters only when there is none.
+        let mut p: u64 = 0;
+        loop {
+            if p >= n {
+                break;
+            }
+            let at = wrapping_mul(4, p);
+            if pages[at] == 0 {
                 any_free = true;
-                if pages[4 * p + 3] < max_u64() {
+                if pages[wrapping_add(at, 3)] < max_u64() {
                     found = true;
                     page = p;
+                    break;
                 }
             }
+            p = wrapping_add(p, 1);
         }
         if !found {
             return if any_free {
