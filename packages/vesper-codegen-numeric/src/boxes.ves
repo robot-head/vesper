@@ -1,0 +1,126 @@
+// The Box runtime of AOT objects (src/fip/aot_runtime.rs): `vesper_box_alloc`
+// (calloc of at least eight bytes, exit 72 on out of memory) and
+// `vesper_box_free`, both counting live boxes in the local word
+// `vesper_box_live` with an atomic add.
+
+const BOX_OOM_STATUS: i64 = 72;
+// `AtomicRmwOp::Add` in the shim's codes.
+const ATOMIC_ADD: u32 = 1;
+
+// `live_counter`: the zeroed, eight-byte aligned, writable counter word.
+fn box_live_counter(inout m: Module) -> Option[DataId] eff [Ffi[Cranelift]] {
+    let id = declare_data(inout m, in "vesper_box_live".as_bytes(), linkage_local(), true);
+    let mut d = match data_new() {
+        Some(d) => d,
+        None => return None,
+    };
+    data_zeroinit(inout d, 8);
+    data_align(inout d, 8);
+    if define_data(inout m, id, d) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+fn box_count(inout b: Builder, in m: Module, live: DataId, delta: i64) eff [Ffi[Cranelift]] {
+    let data = import_data(inout b, in m, live);
+    let address = ins_symbol_value(inout b, ty_i64(), data);
+    let d = rt_k(inout b, delta);
+    ins_atomic_rmw(inout b, ATOMIC_ADD, ty_i64(), mem_trusted(), address, d);
+}
+
+// `declare_or_define` and `declare_or_define_free` on a module that holds
+// neither yet: `alloc` and `free` select them, in that order; the counter
+// is defined once.
+pub fn define_box_runtime(inout m: Module, alloc: bool, free: bool) -> bool eff [Ffi[Cranelift]] {
+    if !alloc && !free {
+        return true;
+    }
+    let live = match box_live_counter(inout m) {
+        Some(x) => x,
+        None => return false,
+    };
+    if alloc && !box_define_alloc(inout m, live) {
+        return false;
+    }
+    if free && !box_define_free(inout m, live) {
+        return false;
+    }
+    true
+}
+
+fn box_define_alloc(inout m: Module, live: DataId) -> bool eff [Ffi[Cranelift]] {
+    let calloc = rt_import(inout m, in "calloc".as_bytes(), 2, true);
+    let exit_fn = rt_import(inout m, in "exit".as_bytes(), 1, false);
+    let alloc_sig = rt_sig(inout m, 1, true);
+    let alloc_id = declare_function(
+        inout m,
+        in "vesper_box_alloc".as_bytes(),
+        linkage_local(),
+        alloc_sig
+    );
+    let mut b = match builder_new(in m, alloc_sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let entry = create_block(inout b);
+    let oom = create_block(inout b);
+    let ok = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    let req = block_param(inout b, entry, 0);
+    let eight = rt_k(inout b, 8);
+    let too_small = ins_icmp(inout b, cc_ult(), req, eight);
+    let size = ins_select(inout b, too_small, eight, req);
+    let one = rt_k(inout b, 1);
+    let args = vals2(one, size);
+    let ptr = rt_call1(inout b, inout m, calloc, in args.as_slice());
+    let is_null = ins_icmp_imm(inout b, cc_eq(), ptr, 0);
+    ins_brif0(inout b, is_null, oom, ok);
+
+    switch_to_block(inout b, oom);
+    let exit_ref = import_function(inout b, inout m, exit_fn);
+    let status = rt_k(inout b, BOX_OOM_STATUS);
+    let sargs = vals1(status);
+    ins_call(inout b, exit_ref, in sargs.as_slice());
+    ins_trap(inout b, trap_user(72));
+
+    switch_to_block(inout b, ok);
+    box_count(inout b, in m, live, 1);
+    ins_return1(inout b, ptr);
+    rt_finish(inout m, alloc_id, b)
+}
+
+fn box_define_free(inout m: Module, live: DataId) -> bool eff [Ffi[Cranelift]] {
+    let free_sig = rt_sig(inout m, 1, false);
+    let libc_free = declare_function(inout m, in "free".as_bytes(), linkage_import(), free_sig);
+    let box_free_id = declare_function(
+        inout m,
+        in "vesper_box_free".as_bytes(),
+        linkage_local(),
+        free_sig
+    );
+    let mut b = match builder_new(in m, free_sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let entry = create_block(inout b);
+    let do_free = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    let ptr = block_param(inout b, entry, 0);
+    let is_null = ins_icmp_imm(inout b, cc_eq(), ptr, 0);
+    ins_brif0(inout b, is_null, done, do_free);
+
+    switch_to_block(inout b, do_free);
+    let args = vals1(ptr);
+    rt_call(inout b, inout m, libc_free, in args.as_slice());
+    box_count(inout b, in m, live, -1);
+    ins_jump0(inout b, done);
+
+    switch_to_block(inout b, done);
+    tl_return0(inout b);
+    rt_finish(inout m, box_free_id, b)
+}

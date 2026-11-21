@@ -111,6 +111,7 @@ members = [
     "crates/vesper-tools",
     "experiments/native-pulse",
     "crates/vesper-cranelift-sys",
+    "crates/vesper-codegen-numeric-test",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
 default-members = [
