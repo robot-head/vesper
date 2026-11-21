@@ -74,6 +74,104 @@ crate.annotation(
     gen_build_script = "off",
     rustc_env = {"DEBUG_OUTPUT_DIR": "wasmtime-component-macro-debug"},
 )
+# Optimize the e-graph engines and Cranelift in every build (#1376). In
+# fastbuild they ran unoptimized, and the self-host differentials spent most
+# of Test all targets JIT-compiling the Vesper ports through them. The last
+# opt-level flag wins, and these come after the compilation mode's. Keep the
+# list in step with [profile.dev.package] in Cargo.toml.
+crate.annotation(
+    crate = "cranelift-assembler-x64",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-bforest",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-bitset",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-codegen",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-codegen-shared",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-control",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-entity",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-frontend",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-jit",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-module",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-native",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "cranelift-object",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egg",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog-add-primitive",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog-ast",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog-bridge",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog-concurrency",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog-core-relations",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog-numeric-id",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog-reports",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "egglog-union-find",
+    rustc_flags = ["-Copt-level=2"],
+)
+crate.annotation(
+    crate = "regalloc2",
+    rustc_flags = ["-Copt-level=2"],
+)
+
 use_repo(crate, "crates")
 
 use_repo(toolchains, "host_cargo")

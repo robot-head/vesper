@@ -327,6 +327,21 @@ vesper_crate(
             "//crates/vesper-sim-session:files",
         ],
     },
+    # Sampled self-host differentials (#1376): Test all targets must finish
+    # inside BuildBuddy's one-hour limit, and these took 6-14 min each on
+    # the full corpus. Bazel checks every n-th corpus world (and fewer fuzz
+    # rounds); Cargo (`cargo test --test <name>`) still runs them whole.
+    test_env_by_target = {
+        "test/hybrid_ir_check": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_ast": {"VESPER_AST_FUZZ": "1000"},
+        "test/self_host_check_core_typing_exprs": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_loops_atomics": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_check_regions_seqs": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_egraph": {"CHECK_HARNESS_STRIDE": "4"},
+        "test/self_host_front_v2": {"VESPER_FRONT_FUZZ": "1000"},
+        # With its own PLACE_IR_STEP of 4: every 16th world.
+        "test/self_host_place_ir": {"CHECK_HARNESS_STRIDE": "4"},
+    },
     # The sealed Logos root is a fresh external input on every CI run. Only
     # its acceptance test inherits the random path (and must rerun).
     test_env_inherit = {
