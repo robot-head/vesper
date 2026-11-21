@@ -1,0 +1,99 @@
+// @vesper/fusion: the bounded equality-saturation engine of `vesper-fusion`
+// (Rust-exit wave SH6, lane 18, #1413). It replaces the crate's use of
+// egglog 3: the same program text (sorts, constructors with `:cost`,
+// rewrites, `let` bindings), saturated and extracted the way egglog does,
+// with a rewrite explanation in place of egglog's proof (see engine.ves).
+
+use self::util::{
+    at64,
+    n32,
+    w
+};
+use self::engine::{
+    Eng,
+    NONE,
+    eng_new
+};
+
+// Runs `program` and extracts the binding named `root`.
+//
+// `mode`: bit 0 saturates (otherwise the input graph itself is extracted),
+// bit 1 explains the extraction; bits 8 and up are the iteration limit.
+//
+// Output words: status (0 ok, else an error code), the byte offset of the
+// error, the saturation iterations, the e-node count. Then, when ok: the
+// root's tree cost, the extracted arena (node count, then per node: kind,
+// two words, child count, children), its root slot; when explaining, the
+// witness arena (count, nodes as above), the source root's slot, and the
+// steps (count, then per step: rule, direction, path length, path,
+// substitution length, then per variable: name start, name length, term
+// slot). Names and string literals are byte ranges of `program`.
+pub fn fusion_run(in program: Str, in root: Str, mode: u64) -> ChunkSeq[u64] {
+    let mut e = eng_new(in program);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    e.load();
+    let mut r: u32 = NONE;
+    if !e.failed() {
+        r = e.binding(in root);
+        if r == NONE {
+            out.push(9);
+            out.push(0);
+            out.push(0);
+            out.push(e.node_count());
+            return out;
+        }
+    }
+    if !e.failed() {
+        if (mode & 1) == 1 {
+            e.run(mode >> 8);
+        } else {
+            e.rebuild();
+        }
+    }
+    let mut x_root: u32 = 0;
+    if !e.failed() {
+        e.extract_costs(r);
+        let c = e.find(r);
+        if !e.has_extraction(c) {
+            out.push(13);
+            out.push(0);
+            out.push(e.iteration_count());
+            out.push(e.node_count());
+            return out;
+        }
+        x_root = e.emit_extracted(c);
+    }
+    let mut src: u32 = 0;
+    if !e.failed() && (mode & 2) == 2 {
+        e.explain_extracted(r);
+        src = e.source_slot(r);
+    }
+    out.push(e.error());
+    out.push(e.error_at());
+    out.push(e.iteration_count());
+    out.push(e.node_count());
+    if e.failed() {
+        return out;
+    }
+    out.push(e.cost_of(r));
+    out.push(e.extracted_count());
+    let extracted_words = e.extracted_words();
+    for i in 0..extracted_words.len() {
+        out.push(at64(in extracted_words, i));
+    }
+    out.push(w(x_root));
+    if (mode & 2) == 2 {
+        out.push(e.term_count());
+        let term_words = e.term_words();
+        for i in 0..term_words.len() {
+            out.push(at64(in term_words, i));
+        }
+        out.push(w(src));
+        out.push(e.step_count());
+        let step_words = e.step_words();
+        for i in 0..step_words.len() {
+            out.push(at64(in step_words, i));
+        }
+    }
+    out
+}
