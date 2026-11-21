@@ -140,3 +140,69 @@ fn a_braced_scope_expands_its_nested_lexical_sugar_before_exit_lowering() {
     assert!(out.source.contains("wrapping_add"), "{}", out.source);
     assert_eq!(out.regions.len(), 2);
 }
+
+#[test]
+fn pattern_sugar_binds_captured_patterns_and_freshens_literal_binders() {
+    let source = "sugar present:pat {rule(present $p:pat)=>{Option::Some($p)}} sugar ignored:pat {rule(ignored {})=>{shadow}} fn main()->i64 {let shadow=9; match Option::Some(33) { present value => wrapping_add(value,shadow), ignored {} => shadow }}";
+    let p = parser::parse_surface_with_limits(source, Default::default()).unwrap();
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    assert_eq!(
+        p.syntax()
+            .descendants()
+            .filter(|n| n.kind() == parser::SUGAR_PAT)
+            .count(),
+        2
+    );
+    let out = expand_sugar_mapped(source).unwrap().unwrap();
+    assert!(
+        parser::parse(&out.source).diagnostics.is_empty(),
+        "{}",
+        out.source
+    );
+    assert!(out.source.contains("Option::Some(value)"), "{}", out.source);
+    assert!(out.source.contains("pattern_0 => shadow"), "{}", out.source);
+}
+
+#[test]
+fn nested_phrase_and_generated_function_expand_with_lexical_binders() {
+    let src = "sugar inner:expr {rule(inner $x:expr $b:block)=>{$x}}
+               sugar outer:expr {rule(outer $x:expr $b:block)=>{{let t=$x;inner t {}}}}
+               sugar make:item {rule(make $n:ident $b:block)=>{fn $n(t:i64)->i64{let x=outer t {}; x+1}}}
+               make entry {}";
+    let result = expand_sugar_mapped(src).unwrap().unwrap();
+    assert!(result.source.contains("fn entry"), "{}", result.source);
+    assert_eq!(result.regions.len(), 3);
+    assert!(
+        parser::parse(&result.source).diagnostics.is_empty(),
+        "{}",
+        result.source
+    );
+}
+
+#[test]
+fn executable_expansion_respects_test_module_visibility() {
+    use vesper_syntax::sugar_expand::expand_sugar_for_execution;
+    let source = "sugar mainval:expr {rule(mainval {})=>{1}} fn main(){mainval {}} test { fn only(){unknown {}} }";
+    assert!(expand_sugar_for_execution(source, false).unwrap().is_some());
+    assert_eq!(
+        expand_sugar_for_execution(source, true).unwrap_err().code,
+        "E0142"
+    );
+    let src = "test { sugar extra:expr {rule(extra {})=>{1}} } fn main(){extra {}}";
+    assert_eq!(
+        expand_sugar_for_execution(src, false).unwrap_err().code,
+        "E0142"
+    );
+    assert!(expand_sugar_for_execution(src, true).unwrap().is_some());
+}
+
+#[test]
+fn duplicated_nested_blocks_share_the_outer_expression_cache() {
+    let src = "sugar twice:expr {rule(twice $b:block)=>{{ $b; $b }}}
+               sugar outer:expr {rule(outer $x:expr $b:block)=>{{twice { $x }}}}
+               fn main()->i64{outer tick() {} }";
+    let out = expand_sugar(src).unwrap().unwrap();
+    assert!(parser::parse(&out).diagnostics.is_empty(), "{out}");
+    assert_eq!(out.matches("let mut ").count(), 1, "{out}");
+    assert_eq!(out.matches("match ").count(), 2, "{out}");
+}

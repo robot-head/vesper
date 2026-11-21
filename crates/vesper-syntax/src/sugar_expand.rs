@@ -91,7 +91,6 @@ struct Definition {
     emits: Effects,
     rules: Vec<Rule>,
     import: Option<usize>,
-    test_block: Option<Span>,
 }
 
 fn range(node: &SyntaxNode) -> Span {
@@ -139,7 +138,7 @@ fn charge(work: &mut usize, units: usize, span: Span) -> Result<(), Diagnostic> 
     Ok(())
 }
 
-fn parse(source: &str) -> Result<parser::Parse, Diagnostic> {
+fn parse(source: &str, include_tests: bool) -> Result<parser::Parse, Diagnostic> {
     parser::parse_expansion_scopes(
         source,
         parser::ParseLimits {
@@ -147,7 +146,7 @@ fn parse(source: &str) -> Result<parser::Parse, Diagnostic> {
             max_tokens: lexer::HARD_TOKENS,
             ..Default::default()
         },
-        true,
+        include_tests,
     )
     .map_err(|e| e.diagnostic(0))
 }
@@ -246,12 +245,6 @@ fn read_definition(
             tail,
         });
     }
-    let test_block = decl
-        .ancestors()
-        .skip(1)
-        .filter(|n| n.kind() == parser::ITEM)
-        .find(|n| token_words(n).next().is_some_and(|t| t.text() == "test"))
-        .map(|n| range(&n));
     Ok(Definition {
         keys,
         name,
@@ -261,11 +254,10 @@ fn read_definition(
         emits,
         rules,
         import,
-        test_block,
     })
 }
 
-type Bindings = BTreeMap<String, Vec<(usize, bool)>>;
+type Bindings = BTreeMap<String, (usize, bool)>;
 
 #[derive(Default)]
 struct Registry {
@@ -295,17 +287,12 @@ fn bind(
         .copied()
         .chain(def.keys.iter().filter(|_| !alias).map(String::as_str))
     {
-        let list = heads.entry(key.to_owned()).or_default();
-        if list
-            .iter()
-            .any(|&(i, _)| defs[i].test_block == def.test_block)
-        {
+        if heads.insert(key.to_owned(), (id, alias)).is_some() {
             return Err(diag(
                 format!("duplicate sugar binding for `{key}`"),
                 def.rules[0].span.clone(),
             ));
         }
-        list.push((id, alias));
     }
     Ok(())
 }
@@ -321,15 +308,7 @@ impl Registry {
             .and_then(|id| self.imported_scope.get(id))
             .map_or(&self.heads, |&id| &self.scopes[id]);
         env.get(key)
-            .into_iter()
-            .flatten()
             .map(|&(id, alias)| (&self.defs[id], alias))
-            .filter(|(d, _)| {
-                d.test_block
-                    .as_ref()
-                    .is_none_or(|r| r.start <= call.start && call.end <= r.end)
-            })
-            .max_by_key(|(d, _)| d.test_block.is_some())
             .ok_or_else(|| {
                 Diagnostic::new("E0142", format!("unresolved sugar `{key}`"), call.clone())
             })
@@ -608,6 +587,14 @@ pub fn expand_sugar_mapped(source: &str) -> Result<Option<ExpandedSugar>, Diagno
     expand_sugar_with_imports(source, &[])
 }
 
+/// Compile sugar using the same test declaration visibility as the core parser.
+pub fn expand_sugar_for_execution(
+    source: &str,
+    include_tests: bool,
+) -> Result<Option<ExpandedSugar>, Diagnostic> {
+    expand_sugar_with_scopes_for_execution(source, &[], &[], &[], include_tests)
+}
+
 /// Resolve imported declaration slices under the names visible to this module.
 pub fn expand_sugar_with_imports(
     source: &str,
@@ -625,6 +612,17 @@ pub fn expand_sugar_with_scopes(
     scopes: &[&[(String, usize)]],
     visible: &[usize],
 ) -> Result<Option<ExpandedSugar>, Diagnostic> {
+    expand_sugar_with_scopes_for_execution(source, imports, scopes, visible, true)
+}
+
+/// Package compiler entry point with explicit test visibility.
+pub fn expand_sugar_with_scopes_for_execution(
+    source: &str,
+    imports: &[(&str, &str)],
+    scopes: &[&[(String, usize)]],
+    visible: &[usize],
+    include_tests: bool,
+) -> Result<Option<ExpandedSugar>, Diagnostic> {
     if source.len() > MAX_BYTES || imports.len() > MAX_STEPS {
         return Err(limit(0..0));
     }
@@ -635,7 +633,7 @@ pub fn expand_sugar_with_scopes(
     }
     for (i, (_, source)) in imports.iter().enumerate() {
         charge(&mut work, source.len(), 0..0)?;
-        let p = parse(source)?;
+        let p = parse(source, true)?;
         if let Some(d) = p.diagnostics.first() {
             return Err(d.clone());
         }
@@ -686,7 +684,7 @@ pub fn expand_sugar_with_scopes(
     let mut steps = 0;
     for depth in 0..=MAX_DEPTH {
         charge(&mut work, state.source.len(), 0..0)?;
-        let parsed = parse(&state.source)?;
+        let parsed = parse(&state.source, include_tests)?;
         let root = parsed.syntax();
         let decls: Vec<_> = root
             .descendants()
@@ -797,7 +795,13 @@ pub fn expand_sugar_with_scopes(
             let mut tail_end = None;
             for rule in &def.rules {
                 let tail = if rule.tail {
-                    let end = *tail_end.get_or_insert(block_end(&node, &mut work)?);
+                    let end = if let Some(end) = tail_end {
+                        end
+                    } else {
+                        let end = block_end(&node, &mut work)?;
+                        tail_end = Some(end);
+                        end
+                    };
                     Some(&state.source[call.end..end])
                 } else {
                     None
@@ -857,7 +861,7 @@ pub fn expand_sugar_with_scopes(
                         " ".repeat(start - HEADER.len()),
                         &state.source[start..end]
                     );
-                    let inside = parse(&wrapped)?.syntax();
+                    let inside = parse(&wrapped, include_tests)?.syntax();
                     let nested: Vec<_> = inside
                         .descendants()
                         .filter(|n| call_node(n.kind()))
@@ -913,6 +917,12 @@ pub fn expand_sugar_with_scopes(
                     diag(m, original.clone())
                         .with_related(rule.span.clone(), "in this pattern template")
                 })?;
+            }
+            if captures
+                .values()
+                .any(|c| c.sort == "scope" && !c.values.is_empty())
+            {
+                charge(&mut work, state.source.len(), original.clone())?;
             }
             let scope_items = scope::lower(
                 &mut rendered,

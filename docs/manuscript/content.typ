@@ -485,8 +485,11 @@ Path           ::= PathRoot? UpperIdent ( '::' ( UpperIdent | LowerIdent ) )*
 PathRoot       ::= UseRoot '::' ( LowerIdent '::' )* ;  (* qualified path, ch 11.3 *)
 
 (* ==================== 7. PATTERNS & LEXICAL TOKENS ===================== *)
-Pat            ::= '_' | LowerIdent | Literal | '(' PatList? ')'
+Pat            ::= '_' | LowerIdent | Literal | '(' PatList? ')' | PatternSugar
                  | Path ( '(' PatList? ')' | '{' FieldPatList? '}' )? ;
+PatternSugar   ::= LowerIdent ( PatternHead+ SugarGroup? | SugarGroup ) ;
+PatternHead    ::= LowerIdent | Literal | '(' PatList? ')' | Path
+                 ( '(' PatList? ')' | '{' FieldPatList? '}' )? ;
 PatList        ::= Pat ( ',' Pat )* ','? ;
 FieldPatList   ::= ( LowerIdent ( ':' Pat )? ) ( ',' FieldPatList )? ;
 
@@ -505,7 +508,7 @@ during declaration collection and type checking.
 
 *Or-patterns.* A `match` arm `p1 | p2 | ... => e` has one or more alternatives: it means exactly the arms `p1 => e`, `p2 => e`, ... in that order, so the value takes the first alternative that matches, every alternative counts toward exhaustiveness, and the body is checked once per alternative, with that alternative's bindings. Every alternative must bind the same names at the same types (`E0214`); a diagnostic in the shared body is reported once. `|` separates alternatives only at the top of an arm's pattern: nested or-patterns (`Some(1 | 2)`), a leading `|` and guards are not part of the grammar. _Current implementation:_ backends see one arm per alternative, so the body's code is emitted once per alternative; the self-hosted Stage 1 checker (`packages/vesper-compiler`) does not accept or-patterns.
 
-*Sugar disambiguation.* `sugar` declarations (#link(<ch-6-sugar>)[Section 7.5]) never add productions; every user form must fit `ItemSugar`, `TailSugarStmt`, `ClauseSugarExpr`, `PipeExpr`, `DottedBinOp`, or `TaggedDelimExpr`. `SugarToken` is any token except an unbalanced closing delimiter, and `SymbolTail` continues an operator glyph sequence. Eight rules make the choice between core syntax and a sugar slot deterministic, using only tokens and the lossless CST's trivia, never imports:
+*Sugar disambiguation.* `sugar` declarations (#link(<ch-6-sugar>)[Section 7.5]) never add productions; every user form must fit `ItemSugar`, `TailSugarStmt`, `ClauseSugarExpr`, `PatternSugar`, `PipeExpr`, `DottedBinOp`, or `TaggedDelimExpr`. `SugarToken` is any token except an unbalanced closing delimiter, and `SymbolTail` continues an operator glyph sequence. Eight rules make the choice between core syntax and a sugar slot deterministic, using only tokens and the lossless CST's trivia, never imports:
 
 + *Adjacent tags.* The lexer emits a `TagIdent` only when a `LowerIdent` touches a `'"'` or `'{'` with no whitespace or comment between them, as in `hex"dead beef"` or `bits{ ver: u4 = 4 }`. A spaced `name {` is never a tagged literal. Stylus never inserts or removes that space.
 + *Header mode.* The scrutinee of `match`, the condition of `if`, the range of `for`, and every `HeaderExpr` head of a sugar form parse in header mode: the expression ends before a `{` that follows a complete operand and before a `HeadWord`. A struct literal or clause sugar in those positions needs parentheses, as with Rust's restriction on struct literals in conditions. So `if ready { ... }`, `scratch tmp[256] { ... }`, and `decreases hi - lo { ... }` all end their header at the `{`, and `send (AppendReq { entry }) on sink ch;` parenthesizes its struct literal.
@@ -515,6 +518,8 @@ during declaration collection and type checking.
 + *Token-tree groups.* Stage 1 keeps every `SugarGroup` as a balanced token tree. Stage 2 re-parses it by the sort of the hole it binds (`$b:block` as a `Block`, `$( ... ),*` as a field or arm list), so `emplace out pkt { magic: 1, crc: c }` and `modify_reg inout r { .txe = 1 }` need no block-shaped contents. Stylus formats a group as a block when it parses as one, and as a token tree otherwise.
 + *No word operators.* A `LowerIdent` after a complete operand always ends a header; there are no infix word operators such as `x matches p`, because choosing them would require knowing which sugars are imported.
 + *Stage 2 classification.* Stage 2 resolves the skeleton's head word against in-scope `sugar` bindings. An unbound head raises `E0142` (`UnresolvedSugar`); a binding whose sort does not fit the slot (an `expr` sugar used as an item, or a `tag` sugar written spaced) raises `E0141` (`SugarSortMismatch`). Formatting and Chroma Tier 0 highlighting never depend on this step.
+
+In a pattern position, a lowercase name by itself binds a value. A following pattern operand, parenthesized list, or spaced braced group starts a `PatternSugar`, as in `present value`, `present(value)`, or `absent {}`. Core pattern delimiters such as `=>`, `|`, `=` and `in` still end the pattern. A rule declared with sort `pat` may splice a pattern hole whose binders the caller can use in a match arm. A binder written literally in the template receives a fresh name.
 
 With these rules every slot is chosen from at most two tokens after the head word plus the trivia flag on `TagIdent`, and the call case decides at the token after `)`. Inside a `PipeExpr` right-hand call, a bare `_` argument is the pipeline placeholder (`frame |> parse(_, in cfg)`); `_` is rejected as an expression elsewhere.
 
@@ -1492,6 +1497,8 @@ fn main() -> i64 {
 }
 ```
 ]
+
+The expression-macro checker resolves a closed set of functions. In a package, functions that contain a macro invocation and the functions they call must resolve within that set. Other functions in the file can use package imports normally. The rule expander also diagnoses templates whose opaque token-tree headers leave the scope or evaluation count of a substitution ambiguous.
 
 The table compares the intended properties:
 

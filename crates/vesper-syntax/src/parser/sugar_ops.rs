@@ -138,13 +138,15 @@ impl Parser<'_> {
         self.trivia();
         self.builder.start_node(TAGGED_LITERAL);
         self.bump();
+        let mut operands = Vec::new();
         if self.at(K::String) {
             self.bump(); // The tag decides how to interpret its payload.
+        } else if self.template_scopes {
+            operands.push(self.block());
         } else {
             self.sugar_group();
         }
         self.builder.finish_node();
-        // Only the surface CST escapes this parser mode.
-        ExprKind::Tuple(vec![])
+        ExprKind::Tuple(operands)
     }
 }

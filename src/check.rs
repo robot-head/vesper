@@ -947,14 +947,7 @@ pub(crate) fn check_core(
         .iter()
         .any(|d| matches!(d.code.as_str(), "E0143" | "E0144"))
     {
-        return (
-            Checked {
-                expression_types: world.types.clone(),
-                world,
-                diagnostics,
-            },
-            resolved,
-        );
+        return (finish_check(world, diagnostics), resolved);
     }
     if !for_plans.is_empty() {
         // Check the index loops `for` over a sequence means instead
@@ -1021,17 +1014,18 @@ pub(crate) fn check_core(
         diagnostics.extend(crate::ir_check::validate(&world, &program));
         diagnostics.extend(crate::atomics::check_program(&world, &program));
     }
+    (finish_check(world, diagnostics), resolved)
+}
+
+fn finish_check(world: World, mut diagnostics: Vec<Diagnostic>) -> Checked {
     let mut seen = BTreeSet::new();
     diagnostics
         .retain(|d| seen.insert((d.code.clone(), d.span.start, d.span.end, d.message.clone())));
-    (
-        Checked {
-            expression_types: world.types.clone(),
-            world,
-            diagnostics,
-        },
-        resolved,
-    )
+    Checked {
+        expression_types: world.types.clone(),
+        world,
+        diagnostics,
+    }
 }
 #[derive(Clone)]
 struct Checker<'a> {

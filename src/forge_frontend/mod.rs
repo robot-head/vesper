@@ -4,6 +4,7 @@ pub mod authority;
 pub mod lower;
 pub mod provenance;
 mod sugar;
+pub(crate) use sugar::parse_package_sugar;
 pub use sugar::{
     CompilerInput, check_compiler_source, original_diagnostic, parse_compiler_input,
     parse_compiler_source, parse_expanded_sugar,
@@ -706,7 +707,7 @@ pub fn expand_source(
     // The existing Forge grammar has its own diagnostics and resource stages.
     // Only modules declaring sugar need preprocessing at this entry point.
     let expanded = if source.contains("sugar") {
-        vesper_syntax::sugar_expand::expand_sugar_mapped(source).map_err(|d| {
+        vesper_syntax::sugar_expand::expand_sugar_for_execution(source, false).map_err(|d| {
             let mut error = failure(Stage::Expand, &d.message);
             error.diagnostics.push(d);
             error

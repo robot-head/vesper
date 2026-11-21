@@ -194,3 +194,11 @@ fn expression_macro_token_budget_applies_only_to_real_macros() {
         vesper_fmt::Error::TokenLimit
     );
 }
+
+#[test]
+fn match_pattern_sugar_roundtrips_without_expansion() {
+    let source = "sugar present:pat{rule(present $p:pat)=>{Option::Some($p)}} fn f(){match x{present value=>value,_=>0}}";
+    let out = formatted(source);
+    assert!(out.contains("present value => value"), "{out}");
+    assert!(out.contains("$p:pat"), "{out}");
+}

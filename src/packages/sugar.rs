@@ -1,15 +1,18 @@
 //! Resolve sugar imports over the package graph before parsing executable bodies.
+mod forge;
 use super::*;
 use crate::parser;
 use std::sync::Arc;
 use vesper_syntax::{
     lexer::TokenKind as K,
-    sugar_expand::{ExpandedSugar, expand_sugar_with_scopes},
+    sugar_expand::{ExpandedSugar, expand_sugar_with_scopes_for_execution},
 };
 
 #[derive(Default)]
 pub(super) struct ModuleSugar {
     pub fresh_prefix: String,
+    /// Functions validated inside Forge's closed authority graph.
+    pub audited: Option<BTreeSet<String>>,
     pub declarations: BTreeMap<String, Declaration>,
     surface: bool,
     tests: bool,
@@ -64,10 +67,6 @@ impl ModuleSugar {
             }
             let decl = item.children().find(|n| n.kind() == parser::SUGAR_DECL);
             if let Some(decl) = decl {
-                // Test-block declarations are private to that lexical block.
-                if !top {
-                    continue;
-                }
                 let span =
                     usize::from(decl.text_range().start())..usize::from(decl.text_range().end());
                 let mut public = false;
@@ -239,8 +238,13 @@ impl Plan {
             .iter()
             .map(|i| (i.alias.as_str(), i.decl.text.as_ref()))
             .collect();
-        let Some(mut expanded) =
-            expand_sugar_with_scopes(source, &bindings, &scopes, &self.visible)?
+        let Some(mut expanded) = expand_sugar_with_scopes_for_execution(
+            source,
+            &bindings,
+            &scopes,
+            &self.visible,
+            m.sugar.tests,
+        )?
         else {
             return Err(Diagnostic::new(
                 "E0142",
@@ -269,8 +273,11 @@ impl Plan {
             })
             .collect();
         let mixed_imports = mask_macro_imports(&mut expanded, &m.sugar.imports);
-        let (text, mut parsed) =
-            crate::forge_frontend::parse_expanded_sugar(expanded, m.sugar.tests)?;
+        let (text, mut parsed) = if mixed_imports {
+            forge::parse(expanded, m.sugar.tests, &mut m.sugar.audited)?
+        } else {
+            crate::forge_frontend::parse_expanded_sugar(expanded, m.sugar.tests)?
+        };
         if mixed_imports {
             parsed.module.uses = m.parsed.uses.clone();
         }
@@ -280,7 +287,13 @@ impl Plan {
             // origins retain their source order.
             let (_, origin) = origins
                 .find(|((call, rule), _)| *call == r.call && *rule == r.rule)
-                .expect("projected regions preserve expansion order");
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        "E0141",
+                        "cannot locate the definition of an expanded package sugar",
+                        r.call.clone(),
+                    )
+                })?;
             m.sugar.origins.push(origin);
         }
         Ok((text, parsed))

@@ -135,6 +135,9 @@ impl Parser<'_> {
     pub(super) fn pattern_phrase(&mut self) {
         self.trivia();
         self.builder.start_node(SUGAR_PAT);
+        if self.template_scopes {
+            self.error("nested pattern sugar requires pattern expansion before binding analysis");
+        }
         self.bump();
         loop {
             match self.kind() {
@@ -197,9 +200,10 @@ impl Parser<'_> {
             self.bump();
         }
         self.bump(); // the head word
-        self.sugar_heads();
+        let mut operands = Vec::new();
+        self.sugar_heads(&mut operands);
         if self.at(K::LBrace) {
-            self.sugar_group();
+            self.phrase_body(&mut operands);
             while slot != SUGAR_ITEM
                 && !self.source[self.end()..self.start()].contains(['\n', '\r'])
                 && (self.at(K::Else) || self.phrase_entry(true))
@@ -207,8 +211,8 @@ impl Parser<'_> {
                 self.trivia();
                 self.builder.start_node(SUGAR_CONTINUATION);
                 self.bump();
-                self.sugar_heads();
-                self.sugar_group();
+                self.sugar_heads(&mut operands);
+                self.phrase_body(&mut operands);
                 self.builder.finish_node();
             }
             if slot == SUGAR_STMT {
@@ -223,7 +227,14 @@ impl Parser<'_> {
         // This value is only scratch space for the surrounding core parser.
         // The public surface API returns the CST and diagnostics alone.
         Expr {
-            kind: ExprKind::Tuple(vec![]),
+            kind: if self.template_scopes {
+                ExprKind::Block {
+                    statements: operands,
+                    tail: None,
+                }
+            } else {
+                ExprKind::Tuple(Vec::new())
+            },
             span: start..self.end(),
         }
     }
@@ -247,7 +258,15 @@ impl Parser<'_> {
             && sugar_ops::core_operator(kind).is_none()
     }
 
-    fn sugar_heads(&mut self) {
+    fn phrase_body(&mut self, operands: &mut Vec<Statement>) {
+        if self.template_scopes {
+            operands.push(Statement::Expr(self.block()));
+        } else {
+            self.sugar_group();
+        }
+    }
+
+    fn sugar_heads(&mut self, operands: &mut Vec<Statement>) {
         while !matches!(
             self.kind(),
             K::LBrace | K::Semi | K::Eof | K::RBrace | K::RParen | K::RBracket | K::Comma
@@ -256,28 +275,50 @@ impl Parser<'_> {
             match self.kind() {
                 K::Let => {
                     self.bump();
-                    self.pattern();
+                    let pat = self.pattern();
                     self.expect(K::Eq);
-                    self.restricted();
+                    let value = self.restricted();
+                    if self.template_scopes {
+                        operands.push(Statement::Let {
+                            pat,
+                            ty: Type::Infer,
+                            value,
+                            mutable: false,
+                        });
+                    }
                 }
                 kind if matches!(kind, K::In | K::Inout | K::Sink) || self.at_word(0, "out") => {
                     self.bump();
                     let old = self.no_struct;
                     self.no_struct = true;
-                    self.postfix(false);
+                    let expr = self.postfix(false);
+                    if self.template_scopes {
+                        operands.push(Statement::Expr(expr));
+                    }
                     self.no_struct = old;
                 }
                 K::LParen => {
                     self.bump();
-                    self.args(false);
+                    let args = self.args(false);
+                    if self.template_scopes {
+                        operands.extend(args.into_iter().map(|a| Statement::Expr(a.expr)));
+                    }
                     self.expect(K::RParen);
                 }
-                K::LBracket => self.sugar_group(),
+                K::LBracket => {
+                    if self.template_scopes {
+                        self.error("raw phrase headers require typed hole matching before binding analysis");
+                    }
+                    self.sugar_group();
+                }
                 _ if self.at(K::Else) || self.at_bracketed_head_word() => {
                     self.bump();
                 }
                 _ => {
-                    self.restricted();
+                    let expr = self.restricted();
+                    if self.template_scopes {
+                        operands.push(Statement::Expr(expr));
+                    }
                 }
             }
             if self.pos == before {

@@ -87,7 +87,21 @@ pub fn parse_surface_with_limits(
     source: &str,
     limits: ParseLimits,
 ) -> Result<SurfaceParse, lexer::LexLimit> {
-    parse_surface_with_macro_limits(source, limits, surface_macro_limits(limits))
+    parse_surface_with_test_mode(source, limits, true)
+}
+
+/// Return surface syntax under the compiler's test-block visibility mode.
+/// Disabled test blocks retain their byte ranges as opaque item contents.
+pub fn parse_surface_with_test_mode(
+    source: &str,
+    limits: ParseLimits,
+    include_tests: bool,
+) -> Result<SurfaceParse, lexer::LexLimit> {
+    let parsed = parse_expansion_scopes(source, limits, include_tests)?;
+    Ok(SurfaceParse {
+        green: parsed.green,
+        diagnostics: parsed.diagnostics,
+    })
 }
 
 fn surface_macro_limits(limits: ParseLimits) -> crate::macro_source::Limits {
@@ -286,13 +300,26 @@ fn parse_module_with_limits(
     include_tests: bool,
     macros: Option<crate::macro_source::Limits>,
 ) -> Result<Parse, lexer::LexLimit> {
-    parse_module_profile(source, limits, include_tests, macros.is_some(), macros)
+    parse_module_profile(
+        source,
+        limits,
+        include_tests,
+        macros.is_some(),
+        macros,
+        false,
+    )
 }
 
 /// A typed sugar hole is detached from its macro declarations. Check its
 /// grammar here; the whole-module surface pass owns macro identity and arity.
 pub(crate) fn parse_sugar_fragment(source: &str) -> Result<Parse, lexer::LexLimit> {
-    parse_module_profile(source, ParseLimits::default(), false, true, None)
+    parse_module_profile(source, ParseLimits::default(), false, true, None, false)
+}
+
+/// Preserve nested phrase operands and block bodies for template binding analysis.
+/// This private representation never reaches type checking or execution.
+pub(crate) fn parse_template_scopes(source: &str) -> Result<Parse, lexer::LexLimit> {
+    parse_module_profile(source, ParseLimits::default(), true, true, None, true)
 }
 
 fn parse_module_profile(
@@ -301,6 +328,7 @@ fn parse_module_profile(
     include_tests: bool,
     surface: bool,
     macros: Option<crate::macro_source::Limits>,
+    template_scopes: bool,
 ) -> Result<Parse, lexer::LexLimit> {
     let lex_limits = lexer::LexLimits {
         max_source_bytes: limits.max_source_bytes,
@@ -348,6 +376,7 @@ fn parse_module_profile(
     };
     let mut p = Parser {
         surface,
+        template_scopes,
         group_ends,
         before_handler_in: false,
         source,
@@ -430,6 +459,7 @@ fn parse_module_profile(
 }
 struct Parser<'a> {
     surface: bool,
+    template_scopes: bool,
     group_ends: Vec<usize>,
     before_handler_in: bool,
     source: &'a str,
@@ -2393,7 +2423,10 @@ impl Parser<'_> {
                 continue;
             }
             if self.surface && self.at_sugar_phrase() {
-                self.sugar_phrase(SUGAR_STMT);
+                let phrase = self.sugar_phrase(SUGAR_STMT);
+                if self.template_scopes {
+                    statements.push(Statement::Expr(phrase));
+                }
                 continue;
             }
             if self.eat(K::Let) {

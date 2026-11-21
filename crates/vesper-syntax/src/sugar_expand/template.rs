@@ -402,6 +402,37 @@ mod tests {
     }
 
     #[test]
+    fn nested_sugar_operands_and_generated_functions_keep_lexical_bindings() {
+        let caps = BTreeMap::from([("x".into(), repeated(&[(&[], "caller()")], &[]))]);
+        let body = render("{ let t=$x; inner t { t } }", &caps, "fresh_", 4096)
+            .unwrap()
+            .text;
+        assert_eq!(
+            body,
+            "{ let fresh_local1=(caller()); inner fresh_local1 { fresh_local1 } }"
+        );
+        let item = render("fn made(t:i64)->i64{let y=$x; y+t}", &caps, "fresh_", 4096)
+            .unwrap()
+            .text;
+        assert_eq!(
+            item,
+            "fn made(fresh_param1:i64)->i64{let fresh_local2=(caller()); fresh_local2+fresh_param1}"
+        );
+        let checked = render(
+            "{ let t=$x; inner t { let t = 7; t } }",
+            &caps,
+            "fresh_",
+            4096,
+        )
+        .unwrap()
+        .text;
+        assert_eq!(
+            checked,
+            "{ let fresh_local1=(caller()); inner fresh_local1 { let fresh_local2 = 7; fresh_local2 } }"
+        );
+    }
+
+    #[test]
     fn or_pattern_alternatives_and_fields_share_the_correct_local_name() {
         let src =
             "match value { Either::Left(x) | Either::Right(x) => Pair { x: /*same field*/ x }, }";
@@ -419,6 +450,11 @@ mod tests {
         cap.sort = "place".into();
         let caps = BTreeMap::from([("p".into(), cap)]);
         assert!(render("write(inout $p)", &caps, "fresh_", 4096).is_err());
+        assert!(
+            render("{let y=1; inner inout $p {y}}", &caps, "fresh_", 4096)
+                .unwrap_err()
+                .contains("upgrades")
+        );
         let out = render("read(in $p)", &caps, "fresh_", 4096).unwrap();
         assert_eq!(&out.text[out.places[0].0.clone()], "obj.field");
         assert_eq!(&out.text[out.origins[0].0.clone()], "((obj.field))");

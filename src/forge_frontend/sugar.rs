@@ -2,7 +2,7 @@
 //! output still require Forge's hygiene, checking and authority pipeline.
 use super::*;
 use crate::{ast::SugarEffectRegion, parser};
-use vesper_syntax::sugar_expand::{ExpandedSugar, expand_sugar_mapped};
+use vesper_syntax::sugar_expand::{ExpandedSugar, expand_sugar_for_execution};
 
 fn has_macro_declaration(source: &str) -> bool {
     source.contains("macro")
@@ -44,7 +44,7 @@ pub fn parse_compiler_input(
     if parsed.diagnostics.is_empty() {
         return Ok((source.into(), parsed, Vec::new()));
     }
-    match expand_sugar_mapped(source)? {
+    match expand_sugar_for_execution(source, include_tests)? {
         Some(expanded) => {
             let (bytes, parsed, map) = parse_resolved(expanded, include_tests, Some(source))?;
             Ok((bytes.into(), parsed, map))
@@ -119,7 +119,9 @@ pub(super) fn macro_test_input(source: &str, include_tests: bool) -> std::borrow
     if !source.contains("test") {
         return source.into();
     }
-    let Ok(surface) = parser::parse_surface_with_limits(source, Default::default()) else {
+    let Ok(surface) =
+        parser::parse_surface_with_test_mode(source, Default::default(), include_tests)
+    else {
         return source.into();
     };
     if !surface.diagnostics.is_empty() {
@@ -174,6 +176,13 @@ pub(super) fn macro_test_input(source: &str, include_tests: bool) -> std::borrow
             .expect("only complete token spans were blanked")
             .into(),
     }
+}
+
+pub(crate) fn parse_package_sugar(
+    expanded: ExpandedSugar,
+    include_tests: bool,
+) -> Result<(String, parser::Parse, Vec<SourceMapSegment>), Diagnostic> {
+    parse_resolved(expanded, include_tests, None)
 }
 
 fn parse_resolved(

@@ -899,9 +899,11 @@ fn repeated_arguments_keep_each_value_and_position() {
 fn standalone_test_file_discovers_and_runs_core_sugar_and_macro_cases() {
     let fixture = Fixture::new(
         r#"macro keep($x:expr) -> expr { quote { $x } }
-    sugar num : tag { rule (num{ $n:expr }) => { $n } }
+    sugar literal : tag { rule (literal{ $n:expr }) => { $n } }
     test {
-        fn test_mixed() -> bool { keep!(num{42}) == 42 }
+        fn test_mixed() -> bool { keep!(literal{true}) }
+        // @case positive(true)
+        fn test_case_mixed(value: bool) -> bool { keep!(literal{value}) }
     }"#,
     );
     let result = output(
@@ -912,6 +914,36 @@ fn standalone_test_file_discovers_and_runs_core_sugar_and_macro_cases() {
     );
     let report: Value = serde_json::from_slice(&result.stdout).unwrap();
     assert!(result.status.success(), "{report}");
-    assert_eq!(report["total"], 1);
+    assert_eq!(report["total"], 2);
     assert_eq!(report["passed"], true);
+}
+
+#[test]
+fn sugar_expands_in_match_pattern_and_exposes_the_callers_binder() {
+    assert_sugar_run(
+        "sugar present:pat {rule(present $p:pat)=>{Option::Some($p)}} fn main()->i64{match Option::Some(42) { present found => found, Option::None => 0 }}",
+        42,
+    );
+}
+
+#[test]
+fn ordinary_builds_skip_unresolved_sugar_in_disabled_test_blocks() {
+    let source = r#"sugar literal: tag { rule (literal{ $n:expr }) => { $n } }
+    test { fn test_future() -> bool { missing_sugar {} } }
+    fn main() -> i64 { literal{42} }"#;
+    assert_sugar_run(source, 42);
+    let fixture = Fixture::new(source);
+    let enabled = output(
+        Command::new(binary())
+            .args(["check", "--include-tests", "--json"])
+            .arg(&fixture.path),
+    );
+    assert!(!enabled.status.success());
+    let diagnostics: Vec<Value> = serde_json::from_slice(&enabled.stdout).unwrap();
+    assert_eq!(diagnostics[0]["code"], "E0142");
+    let mixed = r#"macro keep($x:expr) -> expr { quote { $x } }
+    sugar literal: tag { rule (literal{ $n:expr }) => { $n } }
+    test { fn broken() { let missing = ; } }
+    fn main() -> i64 { keep!(literal{42}) }"#;
+    assert_sugar_run(mixed, 42);
 }

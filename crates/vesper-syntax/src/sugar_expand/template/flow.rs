@@ -47,6 +47,7 @@ struct Flow<'a, 'b> {
     literals: BTreeMap<(usize, usize), String>,
     declarations: Vec<(usize, Option<usize>, usize, String, bool)>,
     tokens: Vec<Token>,
+    nested: BTreeSet<(usize, usize)>,
     fresh: usize,
 }
 
@@ -153,6 +154,20 @@ impl Flow<'_, '_> {
         }
         Ok(())
     }
+    fn nested_place(&mut self, operand: &Expr) -> Result<(), String> {
+        let start = self
+            .tokens
+            .partition_point(|t| t.span.end <= operand.span.start);
+        let previous = self.tokens[..start]
+            .iter()
+            .rev()
+            .find(|t| !t.kind.trivia() && t.kind != K::LParen);
+        let mode = previous.and_then(|t| self.slice(&t.span).parse::<SugarPass>().ok());
+        if let Some(mode) = mode {
+            self.place(operand, mode)?;
+        }
+        Ok(())
+    }
     fn inert(&self, e: &Expr) -> bool {
         match &e.kind {
             ExprKind::Literal(_) => true,
@@ -176,6 +191,12 @@ impl Flow<'_, '_> {
             earlier_effect: false,
         });
         let parent = Some(node);
+        let nested = self.nested.contains(&(e.span.start, e.span.end));
+        let operand_edge = if nested {
+            Edge::Conditional
+        } else {
+            Edge::Always
+        };
         let outer = env.len();
         match &e.kind {
             ExprKind::Name(n) => {
@@ -194,7 +215,12 @@ impl Flow<'_, '_> {
                 let mut earlier = false;
                 for x in xs {
                     let child = self.nodes.len();
-                    self.walk(x, parent, Edge::Always, env)?;
+                    let edge = if nested && matches!(x.kind, ExprKind::Block { .. }) {
+                        Edge::Repeated
+                    } else {
+                        operand_edge
+                    };
+                    self.walk(x, parent, edge, env)?;
                     self.nodes[child].earlier_effect = earlier;
                     earlier |= !self.inert(x);
                 }
@@ -221,13 +247,27 @@ impl Flow<'_, '_> {
                     let first = self.nodes.len();
                     match stmt {
                         Statement::Let { value, pat, .. } => {
-                            self.walk(value, parent, Edge::Always, env)?;
+                            self.walk(value, parent, operand_edge, env)?;
                             self.pattern(pat, env, false);
                         }
-                        Statement::Expr(x) => self.walk(x, parent, Edge::Always, env)?,
+                        Statement::Expr(x) => {
+                            if nested {
+                                self.nested_place(x)?;
+                            }
+                            // The selected inner rule may copy its block argument.
+                            // Keep an outer expression hole shared across those copies.
+                            let edge = if nested && matches!(x.kind, ExprKind::Block { .. }) {
+                                Edge::Repeated
+                            } else {
+                                operand_edge
+                            };
+                            self.walk(x, parent, edge, env)?;
+                        }
                     }
                     self.nodes[first].earlier_effect = after != block_start;
-                    after = self.statement(first, after);
+                    if !nested {
+                        after = self.statement(first, after);
+                    }
                 }
                 if let Some(x) = tail {
                     let first = self.nodes.len();
@@ -269,12 +309,12 @@ impl Flow<'_, '_> {
                 self.nodes[child].earlier_effect = !self.inert(a);
             }
             ExprKind::Binary(op, a, b) => {
-                self.walk(a, parent, Edge::Always, env)?;
+                self.walk(a, parent, operand_edge, env)?;
                 let child = self.nodes.len();
                 self.walk(
                     b,
                     parent,
-                    if matches!(op.as_str(), "&&" | "||") {
+                    if nested || matches!(op.as_str(), "&&" | "||") {
                         Edge::Conditional
                     } else {
                         Edge::Always
@@ -383,6 +423,40 @@ impl Flow<'_, '_> {
         env.truncate(outer);
         Ok(())
     }
+    fn function(&mut self, f: &Function, wrapped: bool) -> Result<(), String> {
+        let Some(body) = &f.body else { return Ok(()) };
+        let mut names = Vec::new();
+        if !wrapped {
+            for p in &f.params {
+                if p.name.starts_with(self.sk.mark) || p.name == "self" {
+                    continue;
+                }
+                let start = self.tokens.partition_point(|t| t.span.end <= p.span.start);
+                let name = self.tokens[start..]
+                    .iter()
+                    .take_while(|t| t.span.start < p.span.end)
+                    .find(|t| self.slice(&t.span) == p.name)
+                    .map(|t| t.span.clone());
+                if let Some(span) = name {
+                    let fresh = self.fresh("param");
+                    self.rename(span, fresh.clone());
+                    names.push((p.name.clone(), fresh));
+                }
+            }
+        }
+        self.walk(body, None, Edge::Always, &mut names)?;
+        for id in 0..self.usages.len() {
+            let uses = std::mem::take(&mut self.usages[id]);
+            if self.sk.holes[id].cap.sort != "expr"
+                && !uses.iter().any(|(k, _)| self.writes.contains(k))
+            {
+                continue;
+            }
+            let paths: Vec<_> = uses.iter().map(|(k, n)| (*k, self.path(*n))).collect();
+            self.plan(id, &paths, 0)?;
+        }
+        Ok(())
+    }
     // The AST omits let keywords, grouping parentheses and semicolons.
     // Locate the actual beginning of the statement following the last one.
     fn statement(&mut self, child: usize, after: usize) -> usize {
@@ -488,10 +562,31 @@ impl Flow<'_, '_> {
 }
 
 pub(super) fn render(mut sk: Skeleton<'_>) -> Result<Rendered, String> {
-    let wrapper = format!("{PREFIX}{}\n}}", sk.source);
-    let parsed = parser::rust_parse(&wrapper);
+    let mut source = format!("{PREFIX}{}\n}}", sk.source);
+    let mut parsed = parser::rust_parse(&source);
+    let mut wrapped = true;
+    if !parsed.diagnostics.is_empty() {
+        parsed = parser::parse_template_scopes(&source).map_err(|e| e.to_string())?;
+    }
+    if !parsed.diagnostics.is_empty() {
+        // Preserve the prefix length so all projections into template text use
+        // the same offsets for expression, statement, and item templates.
+        source = format!("{}{}", " ".repeat(PREFIX.len()), sk.source);
+        parsed = parser::parse_template_scopes(&source).map_err(|e| e.to_string())?;
+        wrapped = false;
+    }
+    let nested = parsed
+        .syntax()
+        .descendants()
+        .filter(|n| super::super::call_node(n.kind()) || n.kind() == parser::SURFACE_MACRO_CALL)
+        .map(|n| {
+            let r = n.text_range();
+            (usize::from(r.start()), usize::from(r.end()))
+        })
+        .collect();
     let mut flow = Flow {
-        tokens: lexer::lex(&wrapper).0,
+        tokens: lexer::lex(&source).0,
+        nested,
         nodes: vec![],
         usages: vec![vec![]; sk.holes.len()],
         writes: BTreeSet::new(),
@@ -500,20 +595,18 @@ pub(super) fn render(mut sk: Skeleton<'_>) -> Result<Rendered, String> {
         fresh: 0,
         sk: &mut sk,
     };
-    if parsed.diagnostics.is_empty()
-        && let Some(Item::Function(f)) = parsed.module.items.first()
-        && let Some(body) = &f.body
-    {
-        flow.walk(body, None, Edge::Always, &mut vec![])?;
-        for id in 0..flow.usages.len() {
-            let uses = &flow.usages[id];
-            if flow.sk.holes[id].cap.sort != "expr"
-                && !uses.iter().any(|(k, _)| flow.writes.contains(k))
-            {
-                continue;
+    if parsed.diagnostics.is_empty() && !parsed.module.items.is_empty() {
+        for item in &parsed.module.items {
+            let methods = match item {
+                Item::Function(f) => std::slice::from_ref(f.as_ref()),
+                Item::Impl { methods, .. } => methods,
+                Item::Trait(t) => &t.methods,
+                Item::Conformance(c) => &c.methods,
+                Item::Adt(_) | Item::Effect(_) => continue,
+            };
+            for function in methods {
+                flow.function(function, wrapped)?;
             }
-            let paths: Vec<_> = uses.iter().map(|(k, n)| (*k, flow.path(*n))).collect();
-            flow.plan(id, &paths, 0)?;
         }
     } else {
         // Item-producing and nested-sugar templates need no core expression AST
@@ -617,14 +710,14 @@ fn emit(sk: &Skeleton<'_>, mut edits: Vec<Replacement>) -> Result<Rendered, Stri
                 bounded(
                     &mut result.text,
                     &format!(
-                        "{{ match {name} {{ Option::Some({name}_v) => {name}_v, Option::None => {{ let {name}_v = "
+                        "({{ match {name} {{ Option::Some({name}_v) => {name}_v, Option::None => {{ let {name}_v = "
                     ),
                     sk.max,
                 )?;
                 result.hole(&sk.holes[id], sk.max)?;
                 bounded(
                     &mut result.text,
-                    &format!("; {name} = Option::Some({name}_v); {name}_v }} }} }}"),
+                    &format!("; {name} = Option::Some({name}_v); {name}_v }} }} }})"),
                     sk.max,
                 )?;
             }

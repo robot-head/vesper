@@ -1034,6 +1034,9 @@ impl Loader<'_> {
                     sugar: &m.sugar,
                     regions: &m.parsed.sugar_origins,
                     effect_scope: None,
+                    auditing: false,
+                    own,
+
                     shift: base,
                     values: vec![],
                     types: vec![],
@@ -1067,6 +1070,11 @@ impl Loader<'_> {
                 }
                 for item in &m.parsed.items {
                     let mut item = item.clone();
+                    renamer.auditing =
+                        m.sugar.audited.as_ref().is_some_and(|audited| match &item {
+                            Item::Function(f) => audited.contains(&f.name),
+                            _ => true,
+                        });
                     renamer.item(&mut item);
                     for (name, span) in global_names(&item) {
                         if let Some((owner, other_file, _)) = globals.get(&name) {
@@ -1729,6 +1737,8 @@ struct Renamer<'a> {
     sugar: &'a sugar::ModuleSugar,
     regions: &'a [SugarEffectRegion],
     effect_scope: Option<&'a ModuleKey>,
+    auditing: bool,
+    own: &'a BTreeMap<String, Kind>,
     /// Value bindings in scope.
     values: Vec<String>,
     /// Type and row parameters in scope.
@@ -1758,12 +1768,19 @@ impl Renamer<'_> {
     fn span(&self, s: &mut Span) {
         *s = s.start + self.shift..s.end + self.shift;
     }
+    fn audit_package_reference(&mut self, n: &str, span: &Span) {
+        if self.auditing {
+            self.diagnostics.push(Diagnostic::new("FORGE_AUTHORITY",
+                format!("the closed macro authority graph cannot resolve the external package binding '{n}'"),span.clone()));
+        }
+    }
     /// A free name in namespace `ns`: imported/own item, else left for the
     /// checker. A root module item reached without an import is reported
     /// (local span).
     fn resolve(&mut self, n: &str, span: &Span, ns: Kind) -> Option<String> {
         if let Some(scope) = self.definition(span) {
             if let Some(target) = self.resolver.sugar_name(scope, n, ns) {
+                self.audit_package_reference(n, span);
                 return Some(target);
             }
             if !n.starts_with(&self.sugar.fresh_prefix)
@@ -1787,7 +1804,11 @@ impl Renamer<'_> {
         if let Some((t, kind)) = self.names.get(n)
             && kind.has(ns)
         {
-            return Some(t.clone());
+            let target = t.clone();
+            if !self.own.contains_key(n) {
+                self.audit_package_reference(n, span);
+            }
+            return Some(target);
         }
         if let Some((owner, shown)) = self.variants.get(n)
             && !self.names.values().any(|(t, _)| t == owner)
@@ -1821,6 +1842,7 @@ impl Renamer<'_> {
     }
     /// A qualified path, resolved to its internal name (or reported).
     fn qualified(&mut self, n: &mut String, span: &Span) {
+        self.audit_package_reference(n, span);
         let (package, module) = self
             .definition(span)
             .map_or((self.package, self.module), |(p, m)| (*p, m.as_slice()));
@@ -1836,7 +1858,11 @@ impl Renamer<'_> {
             && self.definition(span).is_none()
             && let Some((t, _)) = self.names.get(n.as_str())
         {
-            *n = t.clone();
+            let target = t.clone();
+            if !self.own.contains_key(n.as_str()) {
+                self.audit_package_reference(n, span);
+            }
+            *n = target;
             return;
         }
         if is_qualified(n) {
@@ -2073,8 +2099,15 @@ impl Renamer<'_> {
                 fields,
                 named,
             } => {
-                let local = self.names.get(name.as_str()).map(|(t, _)| t.clone());
+                let foreign = self.definition(&span);
+                let local = match foreign {
+                    Some(scope) => self.resolver.sugar_name(scope, name, Kind::Value),
+                    None => self.names.get(name.as_str()).map(|(t, _)| t.clone()),
+                };
                 if let Some(t) = local.filter(|t| crate::arrays::is_const_function(t)) {
+                    if foreign.is_some() || !self.own.contains_key(name.as_str()) {
+                        self.audit_package_reference(name, &span);
+                    }
                     *name = t;
                 } else {
                     self.type_name(name, &span);

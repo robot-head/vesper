@@ -5,13 +5,14 @@
 //! The supported protocol binds one scope to a local, executes cleanup, and
 //! resumes that local exactly once as the block tail. A concrete Fail row is
 //! relayed with its payload. Open effect rows, labelled Fail capabilities,
-//! other potentially abortive user effects, and an enclosing closure require
+//! other potentially abortive user effects, and inferred closure rows require
 //! control or type information not present at this expansion phase and are
 //! diagnosed. In a function returning Option with a Fail row, an explicit
-//! match disambiguates Option's early return from Result's abort.
+//! match disambiguates Option's early return from Result's abort. The same
+//! restriction applies to a question mark inside a nested effect handler.
 use super::{matcher::Captures, template::Rendered};
 use crate::{
-    ast::{ExprKind, Item, Span},
+    ast::{Effects, ExprKind, Item, Span, Type},
     lexer::{self, Token, TokenKind as K},
     parser,
 };
@@ -44,10 +45,26 @@ struct Jump {
     value: Option<Span>,
 }
 
+fn outermost(mut spans: Vec<Span>) -> Vec<Span> {
+    spans.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
+    let mut out = Vec::new();
+    for r in spans {
+        if out.last().is_none_or(|prev| !covers(prev, &r)) {
+            out.push(r);
+        }
+    }
+    out
+}
+fn enclosed(spans: &[Span], r: &Span) -> bool {
+    let end = spans.partition_point(|s| s.start <= r.start);
+    end > 0 && covers(&spans[end - 1], r)
+}
+
 struct Control {
     jumps: Vec<Jump>,
     questions: Vec<(Span, Span)>,
     crosses_loop: bool,
+    question_in_handler: bool,
 }
 fn jumps(body: &str) -> Result<Control, String> {
     let prefix = "fn __scope_probe() ";
@@ -101,187 +118,144 @@ fn jumps(body: &str) -> Result<Control, String> {
             span: relative(&e.span),
         });
     });
+    let closures = outermost(closures);
+    let loops = outermost(loops);
+    let handlers = outermost(handlers);
+    let forbidden = outermost(forbidden);
     jumps.retain(|j| {
-        !closures.iter().any(|r| covers(r, &j.span))
-            && (j.exit == Exit::Return || !loops.iter().any(|r| covers(r, &j.span)))
+        !enclosed(&closures, &j.span) && (j.exit == Exit::Return || !enclosed(&loops, &j.span))
     });
     if jumps.iter().any(|j| {
-        forbidden.iter().any(|r| covers(r, &j.span))
-            || j.exit != Exit::Return && handlers.iter().any(|r| covers(r, &j.span))
+        enclosed(&forbidden, &j.span) || j.exit != Exit::Return && enclosed(&handlers, &j.span)
     }) {
         return Err("invalid control transfer across a handler or region boundary".into());
     }
-    tries.retain(|(t, _)| !closures.iter().any(|r| covers(r, t)));
+    tries.retain(|(t, _)| !enclosed(&closures, t));
+    let question_in_handler = tries.iter().any(|(t, _)| enclosed(&handlers, t));
     let crosses_loop = jumps.iter().any(|j| {
-        j.exit == Exit::Return && handlers.iter().chain(&loops).any(|r| covers(r, &j.span))
+        j.exit == Exit::Return && (enclosed(&handlers, &j.span) || enclosed(&loops, &j.span))
     });
     Ok(Control {
         jumps,
         questions: tries,
         crosses_loop,
+        question_in_handler,
     })
 }
 
-/// Collect the concrete Fail rows active at the call, retaining the source
-/// spelling of type arguments (including nested generic types).
-fn ambient(source: &str, call: Span) -> Result<(Vec<String>, String), String> {
-    let p =
-        parser::parse_surface_with_limits(source, Default::default()).map_err(|e| e.to_string())?;
-    let root = p.syntax();
-    let mut total_effects = std::collections::BTreeSet::from([
-        "ConstTime".to_owned(),
-        "Realtime".to_owned(),
-        "ConstDenorm".to_owned(),
-        "DetFloat".to_owned(),
-    ]);
-    let all = significant(source)?;
-    for decl in all.windows(3) {
-        if decl[0].kind == K::Linear && decl[1].kind == K::Effect && decl[2].kind == K::Upper {
-            total_effects.insert(source[decl[2].span.clone()].to_owned());
+/// Select the actual function, closure and handler bodies enclosing this
+/// call. Handler clauses execute outside their own handler; closures start
+/// a fresh effect and return boundary.
+fn ambient(source: &str, call: Span) -> Result<(Vec<String>, Type), String> {
+    let mut parsed = parser::parse_expansion_scopes(source, Default::default(), true)
+        .map_err(|e| e.to_string())?;
+    if !parsed.diagnostics.is_empty() {
+        return Err("could not determine effects at scope capture".into());
+    }
+    let linear: std::collections::BTreeSet<_> = parsed
+        .module
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Effect(e) if e.linear => Some(e.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut functions = parsed.module.items.iter_mut().flat_map(|i| match i {
+        Item::Function(f) => std::slice::from_mut(f.as_mut()),
+        Item::Impl { methods, .. } => methods.as_mut_slice(),
+        Item::Conformance(c) => c.methods.as_mut_slice(),
+        _ => &mut [],
+    });
+    let f = functions
+        .find(|f| f.body.as_ref().is_some_and(|b| covers(&b.span, &call)))
+        .ok_or("scope capture requires a function body")?;
+    let mut result = f.result.clone();
+    let mut effects = f.effects.clone();
+    let mut frames = Vec::new();
+    parser::walk_exprs(f.body.as_mut().unwrap(), &mut |e| match &e.kind {
+        ExprKind::Handle { effect, body, .. } if covers(&body.span, &call) => {
+            frames.push((
+                body.span.len(),
+                None,
+                Effects {
+                    instances: vec![effect.clone()],
+                    tail: None,
+                },
+                false,
+            ));
+        }
+        ExprKind::Closure {
+            result,
+            effects,
+            body,
+            infer_effects,
+            ..
+        } if covers(&body.span, &call) => {
+            frames.push((
+                body.span.len(),
+                Some(result.clone()),
+                effects.clone(),
+                *infer_effects,
+            ));
+        }
+        _ => {}
+    });
+    frames.sort_by_key(|(len, ..)| std::cmp::Reverse(*len));
+    for (_, returns, frame, inferred) in frames {
+        if let Some(returns) = returns {
+            if inferred {
+                return Err(
+                    "exit-aware scope inside a closure requires an explicit effect row".into(),
+                );
+            }
+            result = returns;
+            effects = frame;
+        } else {
+            effects.instances.extend(frame.instances);
         }
     }
-    let check_effect = |name: &str| {
-        if name == "Fail" || total_effects.contains(name) {
-            Ok(())
-        } else {
-            Err(format!(
-                "exit-aware scope cannot relay potentially abortive effect `{name}`"
-            ))
-        }
-    };
+    if effects.tail.is_some() {
+        return Err("an exit-aware scope requires concrete effect rows".into());
+    }
     let mut rows = Vec::new();
-    let mut result_ty = "()".to_owned();
-    for node in root
-        .descendants()
-        .filter(|n| matches!(n.kind(), parser::ITEM | parser::EXPR))
-    {
-        let r = node.text_range();
-        if usize::from(r.start()) > call.start || usize::from(r.end()) < call.end {
-            continue;
-        }
-        let s = &source[usize::from(r.start())..call.start];
-        let ts = significant(s)?;
-        let word = |i: usize| ts.get(i).map_or("", |t| &s[t.span.clone()]);
-        let kind = |i: usize| ts.get(i).map(|t| t.kind);
-        let mut ranges = Vec::new();
-        if node.kind() == parser::ITEM {
-            // Only the signature's top-level effect row is ambient.
-            let mut depth = 0usize;
-            for (i, t) in ts.iter().enumerate() {
-                match t.kind {
-                    K::LBrace if depth == 0 => break,
-                    K::Arrow if depth == 0 => {
-                        let mut j = i + 1;
-                        let mut brackets = 0usize;
-                        while j < ts.len() {
-                            if brackets == 0
-                                && (matches!(ts[j].kind, K::Eff | K::LBrace)
-                                    || matches!(word(j), "where" | "ensures"))
-                            {
-                                break;
-                            }
-                            match ts[j].kind {
-                                K::LParen | K::LBracket => brackets += 1,
-                                K::RParen | K::RBracket => brackets = brackets.saturating_sub(1),
-                                _ => {}
-                            }
-                            j += 1;
-                        }
-                        if j > i + 1 {
-                            result_ty = s[ts[i + 1].span.start..ts[j - 1].span.end].to_owned();
-                        }
-                    }
-                    K::Eff if depth == 0 && kind(i + 1) == Some(K::LBracket) => {
-                        let mut j = i + 2;
-                        let mut nesting = 0;
-                        while j < ts.len() {
-                            if nesting == 0 && ts[j].kind == K::RBracket {
-                                break;
-                            }
-                            if nesting == 0 && ts[j].kind == K::Upper {
-                                check_effect(word(j))?;
-                            }
-                            if nesting == 0
-                                && (ts[j].kind == K::Pipe
-                                    || (ts[j].kind == K::Lower && kind(j + 1) != Some(K::Colon)))
-                            {
-                                return Err(
-                                    "an exit-aware scope requires concrete effect rows".into()
-                                );
-                            }
-                            if ts[j].kind == K::LBracket {
-                                nesting += 1
-                            }
-                            if ts[j].kind == K::RBracket {
-                                nesting -= 1
-                            }
-                            j += 1;
-                        }
-                        ranges.push(i + 2..j);
-                    }
-                    K::LParen | K::LBracket | K::LBrace => depth += 1,
-                    K::RParen | K::RBracket | K::RBrace => depth = depth.saturating_sub(1),
-                    _ => {}
-                }
-            }
-        } else if kind(0) == Some(K::Handle) {
-            // A handle's clauses execute outside that handle.
-            let mut depth = 0usize;
-            let mut in_clauses = false;
-            for t in &ts {
-                match t.kind {
-                    K::With if depth == 0 => in_clauses = true,
-                    K::LBrace | K::LParen | K::LBracket => depth += 1,
-                    K::RBrace | K::RParen | K::RBracket => depth = depth.saturating_sub(1),
-                    _ => {}
-                }
-            }
-            if !in_clauses {
-                let name = if kind(2) == Some(K::Colon) { 3 } else { 1 };
-                if kind(name) == Some(K::Upper) {
-                    check_effect(word(name))?;
-                }
-                ranges.push(1..ts.len().min(4));
-            }
-        } else if matches!(kind(0), Some(K::Pipe | K::Or)) {
-            return Err(
-                "scope capture inside a closure requires an explicit control boundary".into(),
-            );
-        }
-        for indices in ranges {
-            for i in indices {
-                if word(i) != "Fail" || kind(i + 1) != Some(K::LBracket) {
-                    continue;
-                }
-                if i > 0 && kind(i - 1) == Some(K::Colon) {
+    for e in effects.instances {
+        match e.name.as_str() {
+            "Fail" => {
+                if e.label.is_some() {
                     return Err(
                         "exit-aware scope cannot intercept a labelled Fail capability".into(),
                     );
                 }
-                let mut j = i + 2;
-                let mut n = 1;
-                while j < ts.len() {
-                    match ts[j].kind {
-                        K::LBracket => n += 1,
-                        K::RBracket => n -= 1,
-                        _ => {}
-                    }
-                    if n == 0 {
-                        break;
-                    }
-                    j += 1;
-                }
-                if j == ts.len() {
-                    return Err("incomplete Fail type in scope context".into());
-                }
-                let row = s[ts[i].span.start..ts[j].span.end].to_owned();
+                let [arg] = e.args.as_slice() else {
+                    return Err("expected Fail with one error type".into());
+                };
+                let row = format!("Fail[{}]", source_type(arg)?);
                 if !rows.contains(&row) {
-                    rows.push(row)
+                    rows.push(row);
                 }
+            }
+            "ConstTime" | "Realtime" | "ConstDenorm" | "DetFloat" | parser::REGION_EFFECT => {}
+            n if linear.contains(n) => {}
+            n => {
+                return Err(format!(
+                    "exit-aware scope cannot relay potentially abortive effect `{n}`"
+                ));
             }
         }
     }
-    Ok((rows, result_ty))
+    Ok((rows, result))
+}
+
+// Display for function and row types is intended for diagnostics, not source
+// generation. Never print it back as an approximation of the caller's type.
+fn source_type(t: &Type) -> Result<String, String> {
+    match t {
+        Type::Named(_, args) | Type::Tuple(args) if args.iter().all(|a| source_type(a).is_ok()) => {
+            Ok(t.to_string())
+        }
+        _ => Err("scope exit requires an explicit named or tuple payload type".into()),
+    }
 }
 
 struct Change {
@@ -331,7 +305,9 @@ fn rewrite(r: &mut Rendered, mut edits: Vec<Change>, max: usize) -> Result<(), S
     map.push((pos..r.text.len(), text.len()));
     text.push_str(&r.text[pos..]);
     let parts = |old: &Span| {
-        map.iter()
+        map[map.partition_point(|(src, _)| src.end <= old.start)..]
+            .iter()
+            .take_while(|(src, _)| src.start < old.end)
             .filter_map(|(src, at)| {
                 let a = src.start.max(old.start);
                 let b = src.end.min(old.end);
@@ -423,9 +399,8 @@ pub(super) fn lower(
     let control = jumps(&r.text[body.clone()])?;
     let jumps = control.jumps;
     let (fails, result_ty) = ambient(source, call)?;
-    let option_try =
-        !control.questions.is_empty() && result_ty.split(['[', ' ']).next() == Some("Option");
-    if option_try && !fails.is_empty() {
+    let option_try = !control.questions.is_empty() && result_ty.name() == "Option";
+    if option_try && (!fails.is_empty() || control.question_in_handler) {
         return Err(
             "use an explicit match for `?` when both Option and Fail exits are active in a scope"
                 .into(),
@@ -446,7 +421,10 @@ pub(super) fn lower(
     let mut head = String::new();
     let mut foot = String::new();
     if relay_return {
-        head.push_str(&format!("handle {label}: {effect}[{result_ty}] in {{ "));
+        head.push_str(&format!(
+            "handle {label}: {effect}[{}] in {{ ",
+            source_type(&result_ty)?
+        ));
     }
     for f in &fails {
         head.push_str(&format!("handle {f} in {{ "));
@@ -546,8 +524,9 @@ pub(super) fn lower(
         );
     }
     if relay_return {
-        result =
-            format!("match {value} {{ Result::Ok({value}) => {result}, Result::Err({err}) => return {err}, }}");
+        result = format!(
+            "match {value} {{ Result::Ok({value}) => {result}, Result::Err({err}) => return {err}, }}"
+        );
     }
     edits.push(Change {
         range: ts[resume].span.start..ts[resume + 4].span.end,

@@ -625,3 +625,58 @@ fn imported_effect_ceiling_reports_the_original_call_and_defining_rule() {
     world(&dir);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn imported_rule_calls_its_private_helper_alongside_an_independent_macro() {
+    let dir = package(
+        "sugar-helper-macro",
+        &[
+            ("Loom.toml", &manifest("@demo/app", "")),
+            (
+                "src/rules.ves",
+                "fn private_value()->i64 { 2 } pub sugar emit:expr { rule(emit $b:block) => { private_value() } }",
+            ),
+            (
+                "src/main.ves",
+                "use self::rules::emit; macro forty()->expr{quote{40}} fn macro_value()->i64{forty!()} fn main()->i64{wrapping_add(macro_value(),emit {})}",
+            ),
+        ],
+    );
+    let checked = world(&dir);
+    assert_eq!(
+        Runtime::new(&checked.world)
+            .run("main", vec![])
+            .unwrap()
+            .to_string(),
+        "42"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_package_alias_cannot_replace_a_builtin_after_forge_audits_it() {
+    let dir = package(
+        "sugar-helper-authority",
+        &[
+            ("Loom.toml", &manifest("@demo/app", "")),
+            (
+                "src/rules.ves",
+                "pub fn replacement(in x:i64, in y:i64)->i64{x} pub sugar keep:expr { rule(keep $b:block) => { $b } }",
+            ),
+            (
+                "src/main.ves",
+                "use self::rules::{replacement as wrapping_add, keep}; macro computed()->expr{quote{wrapping_add(1,2)}} fn main()->i64{keep { computed!() }}",
+            ),
+        ],
+    );
+    let assembled = packages::load(&dir).unwrap();
+    assert!(
+        assembled
+            .diagnostics
+            .iter()
+            .any(|d| d.diagnostic.code == "FORGE_AUTHORITY"),
+        "{:?}",
+        assembled.diagnostics
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
