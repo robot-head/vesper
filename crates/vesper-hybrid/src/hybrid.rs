@@ -34,6 +34,9 @@ mod ir_check_binding;
 #[allow(clippy::all)]
 #[path = "../port/stack_bound.rs"]
 mod stack_bound_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
 
