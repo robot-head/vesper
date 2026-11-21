@@ -51,7 +51,7 @@ vesper_port_object(
 vesper_port_object(
     name = "crucible_vesper_divergent_tape",
     edit_src = "vesper/src/lib.ves",
-    edits = {"wrapping_u8(wrapping_add(d, 87))": "wrapping_u8(wrapping_add(d, 88))"},
+    edits = {"wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS))": "wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS + 1))"},
     library = "crucible",
     package = ":port_package",
     target = VESPER_TARGET,
@@ -60,7 +60,7 @@ vesper_port_object(
 vesper_port_object(
     name = "crucible_vesper_divergent_shrink",
     edit_src = "vesper/src/lib.ves",
-    edits = {"    if outcome == 0 {\n": "    if outcome <= 1 {\n"},
+    edits = {"    if outcome == Outcome::FailedSameKind {\n": "    if outcome <= Outcome::Invalid {\n"},
     library = "crucible",
     package = ":port_package",
     target = VESPER_TARGET,
