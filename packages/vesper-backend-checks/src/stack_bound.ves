@@ -1,0 +1,625 @@
+// Module stack_bound of @vesper/backend-checks (see lib.ves): the shared
+// worst-case stack analysis of src/stack_bound.rs (`stack_bound_report`
+// for Cranelift graphs, `render`) and the analysis it runs,
+// `vesper_silicon::stack::analyze_stack` (crates/vesper-silicon/src/stack.rs).
+//
+// Word-level, so other ports can reuse it (SH4 lane 16 wraps it with the
+// eBPF-origin checks): build a `StackGraph` and a `StackPol`, call
+// `analyze_stack`, read the rows it appends to a `Report` (input.ves):
+//
+// - `sr`: per policy root, in policy order: root, budget, has worst case,
+//   worst case, within budget, worst path (at, n in `spool`);
+// - `sf`: findings in Rust order: function, has inst, inst, rule (at, len)
+//   and message (at, len) in `tx`.
+//
+// Names are `Names` symbols; `analyze_stack` interns nothing.
+
+use @vesper/check-data::names::{
+    Names
+};
+use self::input::{
+    Report
+};
+use self::util::{
+    cmp_names,
+    filled,
+    g,
+    put,
+    putn,
+    puts,
+    st
+};
+
+const NONE: u64 = 18446744073709551615;
+
+pub struct StackGraph {
+    // per function: name, frame bytes (ids are positions)
+    pub names: ChunkSeq[u64],
+    pub frames: ChunkSeq[u64],
+    // (caller, callee)
+    pub calls: ChunkSeq[u64],
+    // (caller, instruction)
+    pub indirect: ChunkSeq[u64],
+    // (caller, symbol, has inst, inst)
+    pub external: ChunkSeq[u64],
+}
+
+pub fn graph_new() -> StackGraph {
+    StackGraph {
+        names: ChunkSeq::new[u64](),
+        frames: ChunkSeq::new[u64](),
+        calls: ChunkSeq::new[u64](),
+        indirect: ChunkSeq::new[u64](),
+        external: ChunkSeq::new[u64](),
+    }
+}
+
+pub struct StackPol {
+    // (function, budget) in policy order
+    pub roots: ChunkSeq[u64],
+    // (symbol, bytes) in symbol order
+    pub external_bounds: ChunkSeq[u64],
+    // (caller, at, n) over `targets`, caller order
+    pub indirect_targets: ChunkSeq[u64],
+    pub targets: ChunkSeq[u64],
+}
+
+pub fn pol_new() -> StackPol {
+    StackPol {
+        roots: ChunkSeq::new[u64](),
+        external_bounds: ChunkSeq::new[u64](),
+        indirect_targets: ChunkSeq::new[u64](),
+        targets: ChunkSeq::new[u64](),
+    }
+}
+
+pub const RULE_RECURSION: Str = "silicon.stack.recursion";
+pub const RULE_INDIRECT: Str = "silicon.stack.unresolved_indirect_call";
+pub const RULE_EXTERNAL: Str = "silicon.stack.unbounded_external_call";
+pub const RULE_BUDGET: Str = "silicon.stack.budget_exceeded";
+pub const RULE_UNKNOWN_ROOT: Str = "silicon.stack.unknown_root";
+pub const RULE_UNKNOWN_TARGET: Str = "silicon.stack.unknown_indirect_target";
+
+// A finding whose message is `r.tx[msg..]`.
+fn finding(inout r: Report, function: u64, has_inst: bool, inst: u64, in rule: Str, msg: u64) {
+    let len = wrapping_sub(r.tx.len(), msg);
+    let at = r.tx.len();
+    put(inout r.tx, rule);
+    r.sf.push(function);
+    if has_inst {
+        r.sf.push(1);
+    } else {
+        r.sf.push(0);
+    }
+    r.sf.push(inst);
+    r.sf.push(at);
+    r.sf.push(wrapping_sub(r.tx.len(), at));
+    r.sf.push(msg);
+    r.sf.push(len);
+}
+
+// The value bound to `key` in (key, value) rows, or NONE.
+fn lookup2(in rows: ChunkSeq[u64], key: u64) -> u64 {
+    let n = rows.len() / 2;
+    for i in 0..n {
+        if g(in rows, wrapping_mul(i, 2)) == key {
+            return g(in rows, wrapping_add(wrapping_mul(i, 2), 1));
+        }
+    }
+    NONE
+}
+
+// `Succ` order: functions by id, then bounded symbols by (name, bytes).
+fn succ_less(in nm: Names, ka: u64, a1: u64, a2: u64, kb: u64, b1: u64, b2: u64) -> i64 {
+    if ka != kb {
+        if ka < kb {
+            return -1;
+        }
+        return 1;
+    }
+    if ka == 0 {
+        if a1 < b1 {
+            return -1;
+        }
+        if a1 > b1 {
+            return 1;
+        }
+        return 0;
+    }
+    let c = cmp_names(in nm, a1, b1);
+    if c != 0 {
+        return c;
+    }
+    if a2 < b2 {
+        return -1;
+    }
+    if a2 > b2 {
+        return 1;
+    }
+    0
+}
+
+// Inserts (kind, a, b) into caller `v`'s sorted set; rows of 3 words in
+// `succ[start[v]..]`, kept per caller in `lists` (one ChunkSeq per caller
+// is not available, so callers own slices of a flat table rebuilt below).
+fn set_add(in nm: Names, inout set: ChunkSeq[u64], kind: u64, a: u64, b: u64) {
+    let n = set.len() / 3;
+    let mut at = n;
+    for i in 0..n {
+        let c = succ_less(
+            in nm,
+            kind,
+            a,
+            b,
+            g(in set, wrapping_mul(i, 3)),
+            g(in set, wrapping_add(wrapping_mul(i, 3), 1)),
+            g(in set, wrapping_add(wrapping_mul(i, 3), 2))
+        );
+        if c == 0 {
+            return;
+        }
+        if c < 0 && at == n {
+            at = i;
+        }
+    }
+    set.resize(wrapping_add(set.len(), 3), 0);
+    let mut i = n;
+    loop {
+        if i <= at {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        for w in 0..3 {
+            st(
+                inout set,
+                wrapping_add(wrapping_mul(wrapping_add(i, 1), 3), w),
+                g(in set, wrapping_add(wrapping_mul(i, 3), w))
+            );
+        }
+    }
+    st(inout set, wrapping_mul(at, 3), kind);
+    st(inout set, wrapping_add(wrapping_mul(at, 3), 1), a);
+    st(inout set, wrapping_add(wrapping_mul(at, 3), 2), b);
+}
+
+// Successor sets of all functions: `pending` collects (caller, kind, a, b)
+// in insertion order; `build` turns it into per-caller sorted rows.
+struct Succ {
+    start: ChunkSeq[u64],
+    rows: ChunkSeq[u64],
+}
+
+fn build_succ(in nm: Names, n: u64, in pending: ChunkSeq[u64]) -> Succ {
+    let mut start = filled(wrapping_add(n, 1), 0);
+    let mut rows: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // Callers in id order; each caller's entries in insertion order.
+    let count = pending.len() / 4;
+    let mut by: ChunkSeq[u64] = filled(wrapping_add(n, 1), 0);
+    for e in 0..count {
+        let c = g(in pending, wrapping_mul(e, 4));
+        st(inout by, wrapping_add(c, 1), wrapping_add(g(in by, wrapping_add(c, 1)), 1));
+    }
+    for v in 0..n {
+        st(inout by, wrapping_add(v, 1), wrapping_add(g(in by, wrapping_add(v, 1)), g(in by, v)));
+    }
+    let mut order = filled(count, 0);
+    let mut fill = filled(n, 0);
+    for e in 0..count {
+        let c = g(in pending, wrapping_mul(e, 4));
+        let slot = wrapping_add(g(in by, c), g(in fill, c));
+        st(inout order, slot, e);
+        st(inout fill, c, wrapping_add(g(in fill, c), 1));
+    }
+    for v in 0..n {
+        st(inout start, v, rows.len() / 3);
+        let mut set: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in g(in by, v)..g(in by, wrapping_add(v, 1)) {
+            let e = wrapping_mul(g(in order, k), 4);
+            set_add(
+                in nm,
+                inout set,
+                g(in pending, wrapping_add(e, 1)),
+                g(in pending, wrapping_add(e, 2)),
+                g(in pending, wrapping_add(e, 3))
+            );
+        }
+        rows.extend(in set.as_slice());
+    }
+    st(inout start, n, rows.len() / 3);
+    Succ {
+        start: start,
+        rows: rows
+    }
+}
+
+fn push4(inout s: ChunkSeq[u64], a: u64, b: u64, c: u64, d: u64) {
+    s.push(a);
+    s.push(b);
+    s.push(c);
+    s.push(d);
+}
+
+// Tarjan's strongly connected components over the function successors of
+// `succ` (iterative, as stack.rs's `tarjan`). Returns the components
+// flattened: `comp` holds members sorted, `cstart` the bounds.
+fn tarjan(n: u64, in s: Succ, inout comp: ChunkSeq[u64], inout cstart: ChunkSeq[u64]) {
+    let mut index = filled(n, NONE);
+    let mut low = filled(n, 0);
+    let mut on_stack = filled(n, 0);
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut next: u64 = 0;
+    cstart.push(0);
+    for start in 0..n {
+        if g(in index, start) != NONE {
+            continue;
+        }
+        // (v, child) frames; child counts function successors only.
+        let mut work: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        work.push(start);
+        work.push(0);
+        loop {
+            let top = work.len();
+            if top == 0 {
+                break;
+            }
+            let v = g(in work, wrapping_sub(top, 2));
+            let child = g(in work, wrapping_sub(top, 1));
+            if child == 0 && g(in index, v) == NONE {
+                st(inout index, v, next);
+                st(inout low, v, next);
+                next = wrapping_add(next, 1);
+                stack.push(v);
+                st(inout on_stack, v, 1);
+            }
+            // The child-th function successor of v.
+            let mut w = NONE;
+            let mut seen: u64 = 0;
+            for k in g(in s.start, v)..g(in s.start, wrapping_add(v, 1)) {
+                if w == NONE && g(in s.rows, wrapping_mul(k, 3)) == 0 {
+                    if seen == child {
+                        w = g(in s.rows, wrapping_add(wrapping_mul(k, 3), 1));
+                    }
+                    seen = wrapping_add(seen, 1);
+                }
+            }
+            if w != NONE {
+                st(inout work, wrapping_sub(top, 1), wrapping_add(child, 1));
+                if g(in index, w) == NONE {
+                    work.push(w);
+                    work.push(0);
+                } else if g(in on_stack, w) == 1 {
+                    let iw = g(in index, w);
+                    if iw < g(in low, v) {
+                        st(inout low, v, iw);
+                    }
+                }
+                continue;
+            }
+            work.truncate(wrapping_sub(top, 2));
+            if work.len() > 0 {
+                let parent = g(in work, wrapping_sub(work.len(), 2));
+                if g(in low, v) < g(in low, parent) {
+                    st(inout low, parent, g(in low, v));
+                }
+            }
+            if g(in low, v) == g(in index, v) {
+                let from = comp.len();
+                loop {
+                    let sl = stack.len();
+                    if sl == 0 {
+                        break;
+                    }
+                    let x = g(in stack, wrapping_sub(sl, 1));
+                    stack.truncate(wrapping_sub(sl, 1));
+                    st(inout on_stack, x, 0);
+                    comp.push(x);
+                    if x == v {
+                        break;
+                    }
+                }
+                // sort the component (insertion sort)
+                let to = comp.len();
+                let mut i = wrapping_add(from, 1);
+                loop {
+                    if i >= to {
+                        break;
+                    }
+                    let x = g(in comp, i);
+                    let mut j = i;
+                    loop {
+                        if j <= from || g(in comp, wrapping_sub(j, 1)) <= x {
+                            break;
+                        }
+                        st(inout comp, j, g(in comp, wrapping_sub(j, 1)));
+                        j = wrapping_sub(j, 1);
+                    }
+                    st(inout comp, j, x);
+                    i = wrapping_add(i, 1);
+                }
+                cstart.push(comp.len());
+            }
+        }
+    }
+}
+
+// `analyze_stack(graph, policy)`: findings and root rows into `r`.
+pub fn analyze_stack(in nm: Names, in gr: StackGraph, in pol: StackPol, inout r: Report) {
+    let n = gr.names.len();
+    // name -> id: the last function with that name (`HashMap` collect).
+    let mut pending: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut unbounded = filled(n, 0);
+    for e in 0..gr.calls.len() / 2 {
+        push4(
+            inout pending,
+            g(in gr.calls, wrapping_mul(e, 2)),
+            0,
+            g(in gr.calls, wrapping_add(wrapping_mul(e, 2), 1)),
+            0
+        );
+    }
+    for e in 0..gr.external.len() / 4 {
+        let b = wrapping_mul(e, 4);
+        let caller = g(in gr.external, b);
+        let sym = g(in gr.external, wrapping_add(b, 1));
+        let bytes = lookup2(in pol.external_bounds, sym);
+        if bytes != NONE {
+            push4(inout pending, caller, 1, sym, bytes);
+        } else {
+            st(inout unbounded, caller, 1);
+            let m = r.tx.len();
+            put(inout r.tx, "call to `");
+            puts(inout r.tx, in nm, sym);
+            put(
+                inout r.tx,
+                "` has no declared stack bound; list it in StackPolicy::external_bounds"
+            );
+            finding(
+                inout r,
+                g(in gr.names, caller),
+                g(in gr.external, wrapping_add(b, 2)) == 1,
+                g(in gr.external, wrapping_add(b, 3)),
+                RULE_EXTERNAL,
+                m
+            );
+        }
+    }
+    for e in 0..gr.indirect.len() / 2 {
+        let caller = g(in gr.indirect, wrapping_mul(e, 2));
+        let inst = g(in gr.indirect, wrapping_add(wrapping_mul(e, 2), 1));
+        let cname = g(in gr.names, caller);
+        let mut row = NONE;
+        for t in 0..pol.indirect_targets.len() / 3 {
+            if row == NONE && g(in pol.indirect_targets, wrapping_mul(t, 3)) == cname {
+                row = t;
+            }
+        }
+        if row == NONE {
+            st(inout unbounded, caller, 1);
+            let m = r.tx.len();
+            put(inout r.tx, "indirect call without a policy-listed target set");
+            finding(inout r, cname, true, inst, RULE_INDIRECT, m);
+        } else {
+            let at = g(in pol.indirect_targets, wrapping_add(wrapping_mul(row, 3), 1));
+            let cnt = g(in pol.indirect_targets, wrapping_add(wrapping_mul(row, 3), 2));
+            for q in 0..cnt {
+                let t = g(in pol.targets, wrapping_add(at, q));
+                let mut id = NONE;
+                for f in 0..n {
+                    if g(in gr.names, f) == t {
+                        id = f;
+                    }
+                }
+                if id != NONE {
+                    push4(inout pending, caller, 0, id, 0);
+                } else {
+                    let bytes = lookup2(in pol.external_bounds, t);
+                    if bytes != NONE {
+                        push4(inout pending, caller, 1, t, bytes);
+                    } else {
+                        st(inout unbounded, caller, 1);
+                        let m = r.tx.len();
+                        put(inout r.tx, "indirect target `");
+                        puts(inout r.tx, in nm, t);
+                        put(inout r.tx, "` is neither defined nor bounded");
+                        finding(inout r, cname, true, inst, RULE_UNKNOWN_TARGET, m);
+                    }
+                }
+            }
+        }
+    }
+    let s = build_succ(in nm, n, in pending);
+    let mut comp: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut cstart: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    tarjan(n, in s, inout comp, inout cstart);
+    let ncomp = wrapping_sub(cstart.len(), 1);
+    let mut cyclic = filled(n, 0);
+    for ci in 0..ncomp {
+        let lo = g(in cstart, ci);
+        let hi = g(in cstart, wrapping_add(ci, 1));
+        let first = g(in comp, lo);
+        let mut is_cycle = wrapping_sub(hi, lo) > 1;
+        if !is_cycle {
+            for k in g(in s.start, first)..g(in s.start, wrapping_add(first, 1)) {
+                if g(in s.rows, wrapping_mul(k, 3))
+                    == 0
+                    && g(in s.rows, wrapping_add(wrapping_mul(k, 3), 1))
+                    == first {
+                    is_cycle = true;
+                }
+            }
+        }
+        if is_cycle {
+            let m = r.tx.len();
+            put(inout r.tx, "recursive call cycle among {");
+            for k in lo..hi {
+                let v = g(in comp, k);
+                st(inout cyclic, v, 1);
+                if k > lo {
+                    put(inout r.tx, ", ");
+                }
+                puts(inout r.tx, in nm, g(in gr.names, v));
+            }
+            put(inout r.tx, "}");
+            finding(inout r, g(in gr.names, first), false, 0, RULE_RECURSION, m);
+        }
+    }
+    // depth (has, value) and best successor row per function
+    let mut has_depth = filled(n, 0);
+    let mut depth = filled(n, 0);
+    let mut best = filled(n, NONE);
+    for ci in 0..ncomp {
+        for k in g(in cstart, ci)..g(in cstart, wrapping_add(ci, 1)) {
+            let v = g(in comp, k);
+            if g(in cyclic, v) == 0 && g(in unbounded, v) == 0 {
+                let mut deepest: u64 = 0;
+                let mut pick = NONE;
+                let mut ok = true;
+                for q in g(in s.start, v)..g(in s.start, wrapping_add(v, 1)) {
+                    if ok {
+                        let kind = g(in s.rows, wrapping_mul(q, 3));
+                        let a = g(in s.rows, wrapping_add(wrapping_mul(q, 3), 1));
+                        let mut d: u64 = 0;
+                        if kind == 0 {
+                            if g(in has_depth, a) == 0 {
+                                ok = false;
+                            } else {
+                                d = g(in depth, a);
+                            }
+                        } else {
+                            d = g(in s.rows, wrapping_add(wrapping_mul(q, 3), 2));
+                        }
+                        if ok && (pick == NONE || d > deepest) {
+                            deepest = d;
+                            pick = q;
+                        }
+                    }
+                }
+                if ok {
+                    st(inout has_depth, v, 1);
+                    st(inout depth, v, wrapping_add(g(in gr.frames, v), deepest));
+                    st(inout best, v, pick);
+                }
+            }
+        }
+    }
+    for ri in 0..pol.roots.len() / 2 {
+        let root = g(in pol.roots, wrapping_mul(ri, 2));
+        let budget = g(in pol.roots, wrapping_add(wrapping_mul(ri, 2), 1));
+        let mut id = NONE;
+        for f in 0..n {
+            if g(in gr.names, f) == root {
+                id = f;
+            }
+        }
+        if id == NONE {
+            let m = r.tx.len();
+            put(inout r.tx, "stack root is not a function of this program");
+            finding(inout r, root, false, 0, RULE_UNKNOWN_ROOT, m);
+            r.sr.push(root);
+            r.sr.push(budget);
+            r.sr.push(0);
+            r.sr.push(0);
+            r.sr.push(0);
+            r.sr.push(r.spool.len());
+            r.sr.push(0);
+            continue;
+        }
+        let has_worst = g(in has_depth, id) == 1;
+        let worst = g(in depth, id);
+        let path_at = r.spool.len();
+        if has_worst {
+            let mut cur = id;
+            loop {
+                r.spool.push(g(in gr.names, cur));
+                let q = g(in best, cur);
+                if q == NONE {
+                    break;
+                }
+                let kind = g(in s.rows, wrapping_mul(q, 3));
+                let a = g(in s.rows, wrapping_add(wrapping_mul(q, 3), 1));
+                if kind == 1 {
+                    r.spool.push(a);
+                    break;
+                }
+                cur = a;
+            }
+        }
+        let path_n = wrapping_sub(r.spool.len(), path_at);
+        let within = has_worst && worst <= budget;
+        if has_worst && !within {
+            let m = r.tx.len();
+            put(inout r.tx, "worst-case stack ");
+            putn(inout r.tx, worst);
+            put(inout r.tx, " bytes exceeds @stack_limit(");
+            putn(inout r.tx, budget);
+            put(inout r.tx, ") along ");
+            for k in 0..path_n {
+                if k > 0 {
+                    put(inout r.tx, " -> ");
+                }
+                puts(inout r.tx, in nm, g(in r.spool, wrapping_add(path_at, k)));
+            }
+            finding(inout r, root, false, 0, RULE_BUDGET, m);
+        } else if !has_worst {
+            let m = r.tx.len();
+            put(
+                inout r.tx,
+                "worst-case stack depth is unbounded (recursion or unresolved call reachable)"
+            );
+            finding(inout r, root, false, 0, RULE_BUDGET, m);
+        }
+        r.sr.push(root);
+        r.sr.push(budget);
+        if has_worst {
+            r.sr.push(1);
+        } else {
+            r.sr.push(0);
+        }
+        r.sr.push(worst);
+        if within {
+            r.sr.push(1);
+        } else {
+            r.sr.push(0);
+        }
+        r.sr.push(path_at);
+        r.sr.push(path_n);
+    }
+    r.has_stack = true;
+}
+
+// `stack_bound::render`: one line per root.
+pub fn render(in nm: Names, in r: Report, inout out: ChunkSeq[u8]) {
+    for ri in 0..r.sr.len() / 7 {
+        let b = wrapping_mul(ri, 7);
+        put(inout out, "stack ");
+        puts(inout out, in nm, g(in r.sr, b));
+        put(inout out, ": worst case ");
+        if g(in r.sr, wrapping_add(b, 2)) == 1 {
+            putn(inout out, g(in r.sr, wrapping_add(b, 3)));
+            put(inout out, " bytes");
+        } else {
+            put(inout out, "unbounded");
+        }
+        put(inout out, " of ");
+        putn(inout out, g(in r.sr, wrapping_add(b, 1)));
+        put(inout out, " byte budget (");
+        if g(in r.sr, wrapping_add(b, 4)) == 1 {
+            put(inout out, "ok");
+        } else {
+            put(inout out, "exceeded");
+        }
+        put(inout out, ") via ");
+        let at = g(in r.sr, wrapping_add(b, 5));
+        let pn = g(in r.sr, wrapping_add(b, 6));
+        if pn == 0 {
+            put(inout out, "-");
+        }
+        for k in 0..pn {
+            if k > 0 {
+                put(inout out, " -> ");
+            }
+            puts(inout out, in nm, g(in r.spool, wrapping_add(at, k)));
+        }
+        put(inout out, "\n");
+    }
+}

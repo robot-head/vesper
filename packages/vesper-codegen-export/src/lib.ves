@@ -1,0 +1,58 @@
+// @vesper/codegen-export: the export ABI of `vesper build --lib` in Vesper
+// (self-hosting wave SH4 lane 12, #1286). It ports src/native_export.rs
+// and src/native_export/**.
+//
+// Part 1 is the Rust binding generator (src/native_export/binding.rs,
+// binding_v2.rs, binding_v4.rs): from a library interface and the binding
+// options it writes the binding text byte for byte as Rust does.
+//
+// - iface.ves: the `LibraryInterface` tables and the type predicates.
+// - text.ves: text building and sorted string sets.
+// - binding.ves: the v1 generator and the shared pieces.
+// - binding_v2.ves: the v2 and v3 generator.
+// - binding_v4.ves: the v4 additions (trees, sequence views, lent handles).
+//
+// `binding_text` is the harness entry (tests/self_host_codegen_export.rs,
+// whose words.rs is the Rust half of the input).
+
+use @vesper/check-data::pack_text;
+use self::iface::{
+    Iface,
+    read_iface
+};
+use self::binding::{
+    Gen,
+    binding_v1,
+    gen_new
+};
+use self::binding_v2::{
+    binding_v2
+};
+use self::directives::{
+    parse_directives
+};
+
+// `rust_binding(interface, options)`.
+pub fn rust_binding(sink i: Iface) -> ChunkSeq[u8] {
+    let g = gen_new(i);
+    let mut out = ChunkSeq::with_capacity[u8](65536);
+    if g.i.is_v2() {
+        binding_v2(in g, inout out);
+    } else {
+        binding_v1(in g, inout out);
+    }
+    out
+}
+
+// Harness entry: the binding text of the encoded interface and options.
+pub fn binding_text(in input: Str) -> ChunkSeq[u64] {
+    let i = read_iface(in input.as_bytes());
+    let out = rust_binding(i);
+    pack_text(in out)
+}
+
+// Harness entry: `Directives::parse` of the encoded source and target, as
+// a dump (directives.ves).
+pub fn directives_dump(in input: Str) -> ChunkSeq[u64] {
+    parse_directives(in input)
+}

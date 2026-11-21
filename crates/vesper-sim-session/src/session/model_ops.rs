@@ -525,7 +525,7 @@ impl<'w> Session<'w> {
         match internal {
             Internal::Deliver { network, message } => {
                 let state = &model.networks[network];
-                let to = state.net.in_flight()[message].to;
+                let to = state.net.in_flight_to(*message).expect("in-flight message");
                 let up = model.processes[state.owners[&to]].up;
                 let state = model.networks.get_mut(network).unwrap();
                 match state.net.arrive(*message, up).expect("in-flight message") {

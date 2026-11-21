@@ -1,0 +1,521 @@
+// The function bodies a check reads, as flat tables (self-hosting wave SH2
+// lane 10, #1182). The harness writes each `ast::Expr` in pre-order
+// (tests/self_host_check_loops_atomics.rs, `AstEnc`); this decoder keeps
+// one row per expression and one per pattern, children as ranges of one
+// shared pool, and types as ids of the check-data arena, so a walk is a
+// loop over indices instead of a `Box` tree.
+
+use @vesper/check-data::input::{
+    Reader
+};
+
+const NONE32: u32 = 4294967295;
+
+// `ExprKind`, in the harness's numbering.
+pub const E_LIT: u8 = 0;
+pub const E_NAME: u8 = 1;
+pub const E_TUPLE: u8 = 2;
+pub const E_STRUCT: u8 = 3;
+pub const E_BLOCK: u8 = 4;
+pub const E_CALL: u8 = 5;
+pub const E_FIELD: u8 = 6;
+pub const E_TRY: u8 = 7;
+pub const E_UNARY: u8 = 8;
+pub const E_INDEX: u8 = 9;
+pub const E_BINARY: u8 = 10;
+pub const E_ASSIGN: u8 = 11;
+pub const E_IF: u8 = 12;
+pub const E_MATCH: u8 = 13;
+pub const E_CLOSURE: u8 = 14;
+pub const E_HANDLE: u8 = 15;
+pub const E_LOOP: u8 = 16;
+pub const E_FOR: u8 = 17;
+pub const E_RANGE: u8 = 18;
+pub const E_BREAK: u8 = 19;
+pub const E_CONTINUE: u8 = 20;
+pub const E_RETURN: u8 = 21;
+
+// `PatternKind`.
+pub const P_WILD: u8 = 0;
+pub const P_BIND: u8 = 1;
+pub const P_LIT: u8 = 2;
+pub const P_TUPLE: u8 = 3;
+pub const P_CTOR: u8 = 4;
+
+// One expression. Children are `kids[a..a+n]` in the order the Rust walks
+// visit them (a block's statement values then its tail; a call's callee
+// then its arguments; a handle's state, body, return clause and operation
+// clauses; a `for`'s iterable then its body).
+pub copy struct ExprRow {
+    kind: u8,
+    // Range: inclusive. Handle: 1 = has state, 2 = region block.
+    // Break, Return: has a value. If: has an else. Block: has a tail.
+    flag: u8,
+    // The `Pass` of the call argument this expression is (0 otherwise).
+    pass: u8,
+    // 1 when this expression is the value of a `let`.
+    is_let: bool,
+    start: u64,
+    end: u64,
+    // Name, Struct, Field, Call (none): the name symbol.
+    name: u32,
+    // Closure: its result type as written.
+    ty: u32,
+    // Closure: the result its function frame expects (the written one, or
+    // the expected function type's result when it is `Infer`).
+    expected: u32,
+    // Handle: the checker returns before checking it. Operation clause
+    // body: the checker skips the clause (an undeclared operation).
+    unchecked: bool,
+    // Let value: the `let` type.
+    let_ty: u32,
+    // Let value: the `let` pattern. Match arm body: the arm pattern.
+    // For: the loop pattern.
+    pat: u32,
+    a: u32,
+    n: u32,
+    // Call: its explicit type arguments; Closure: its parameter types
+    // (`tys[ta..ta+tn]`).
+    ta: u32,
+    tn: u32,
+}
+
+pub copy struct PatRow {
+    kind: u8,
+    start: u64,
+    end: u64,
+    name: u32,
+    a: u32,
+    n: u32,
+}
+
+// A function's signature and body (`ast::Function`).
+pub copy struct FnRow {
+    name: u32,
+    generics: u32,
+    // `effects.instances.is_empty() && effects.tail.is_none()`
+    pure_row: bool,
+    // params: passes[pa..pa+pn] and types tys[pa'..]
+    pa: u32,
+    pn: u32,
+    result: u32,
+    // NONE32 without a body.
+    body: u32,
+}
+
+pub struct Exprs {
+    rows: ChunkSeq[ExprRow],
+    kids: ChunkSeq[u32],
+    tys: ChunkSeq[u32],
+    pats: ChunkSeq[PatRow],
+    pat_kids: ChunkSeq[u32],
+    fns: ChunkSeq[FnRow],
+    param_passes: ChunkSeq[u8],
+    param_types: ChunkSeq[u32],
+}
+
+pub fn exprs_new() -> Exprs {
+    Exprs {
+        rows: ChunkSeq::new[ExprRow](),
+        kids: ChunkSeq::new[u32](),
+        tys: ChunkSeq::new[u32](),
+        pats: ChunkSeq::new[PatRow](),
+        pat_kids: ChunkSeq::new[u32](),
+        fns: ChunkSeq::new[FnRow](),
+        param_passes: ChunkSeq::new[u8](),
+        param_types: ChunkSeq::new[u32]()
+    }
+}
+
+fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE32,
+    }
+}
+
+fn empty_row() -> ExprRow {
+    ExprRow {
+        kind: E_LIT,
+        flag: 0,
+        pass: 0,
+        is_let: false,
+        start: 0,
+        end: 0,
+        name: NONE32,
+        ty: NONE32,
+        expected: NONE32,
+        unchecked: false,
+        let_ty: NONE32,
+        pat: NONE32,
+        a: 0,
+        n: 0,
+        ta: 0,
+        tn: 0
+    }
+}
+
+impl Exprs {
+    pub fn row(in self, e: u32) -> ExprRow {
+        match self.rows.try_get(widen_u64(e)) {
+            Option::Some(r) => r,
+            Option::None => empty_row(),
+        }
+    }
+
+    pub fn kind(in self, e: u32) -> u8 {
+        self.row(e).kind
+    }
+
+    // Child `i` of `e` (NONE32 past the end).
+    pub fn kid(in self, e: u32, i: u64) -> u32 {
+        let r = self.row(e);
+        if i >= widen_u64(r.n) {
+            return NONE32;
+        }
+        at32(in self.kids, wrapping_add(widen_u64(r.a), i))
+    }
+
+    pub fn kid_count(in self, e: u32) -> u64 {
+        widen_u64(self.row(e).n)
+    }
+
+    pub fn ty_at(in self, e: u32, i: u64) -> u32 {
+        let r = self.row(e);
+        at32(in self.tys, wrapping_add(widen_u64(r.ta), i))
+    }
+
+    pub fn pat(in self, p: u32) -> PatRow {
+        match self.pats.try_get(widen_u64(p)) {
+            Option::Some(r) => r,
+            Option::None => PatRow {
+                kind: P_WILD,
+                start: 0,
+                end: 0,
+                name: NONE32,
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    pub fn pat_kid(in self, p: u32, i: u64) -> u32 {
+        let r = self.pat(p);
+        at32(in self.pat_kids, wrapping_add(widen_u64(r.a), i))
+    }
+
+    pub fn fn_count(in self) -> u64 {
+        self.fns.len()
+    }
+
+    pub fn function(in self, i: u64) -> FnRow {
+        match self.fns.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => FnRow {
+                name: NONE32,
+                generics: 0,
+                pure_row: true,
+                pa: 0,
+                pn: 0,
+                result: NONE32,
+                body: NONE32
+            },
+        }
+    }
+
+    pub fn param_pass(in self, f: FnRow, i: u64) -> u8 {
+        match self.param_passes.try_get(wrapping_add(widen_u64(f.pa), i)) {
+            Option::Some(p) => p,
+            Option::None => 0,
+        }
+    }
+
+    pub fn param_type(in self, f: FnRow, i: u64) -> u32 {
+        at32(in self.param_types, wrapping_add(widen_u64(f.pa), i))
+    }
+
+    fn set(inout self, e: u32, r: ExprRow) {
+        let ok = self.rows.try_set(widen_u64(e), r);
+    }
+
+    fn finish_kids(inout self, e: u32, in kids: ChunkSeq[u32]) {
+        let mut r = self.row(e);
+        r.a = wrapping_u32(self.kids.len());
+        r.n = wrapping_u32(kids.len());
+        self.kids.extend(in kids.as_slice());
+        self.set(e, r);
+    }
+}
+
+fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+    at32(in nmap, x)
+}
+
+// One pattern, in pre-order: kind, start, end, then Bind: name; Tuple: n,
+// patterns; Constructor: name, n, (field name, pattern) pairs.
+pub fn read_pat(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout x: Exprs,
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> u32 {
+    let kind = wrapping_u8(r.word(in b));
+    let start = r.word(in b);
+    let end = r.word(in b);
+    let id = wrapping_u32(x.pats.len());
+    x
+        .pats
+        .push(
+        PatRow {
+            kind: kind,
+            start: start,
+            end: end,
+            name: NONE32,
+            a: 0,
+            n: 0
+        }
+    );
+    let mut name = NONE32;
+    let mut kids = ChunkSeq::new[u32]();
+    if kind == P_BIND {
+        name = sym(in nmap, r.word(in b));
+    } else if kind == P_TUPLE {
+        let n = r.word(in b);
+        for i in 0..n {
+            kids.push(read_pat(inout r, in b, inout x, in nmap, in tmap));
+        }
+    } else if kind == P_CTOR {
+        name = sym(in nmap, r.word(in b));
+        let n = r.word(in b);
+        for i in 0..n {
+            let field = r.word(in b);
+            kids.push(read_pat(inout r, in b, inout x, in nmap, in tmap));
+        }
+    }
+    let a = wrapping_u32(x.pat_kids.len());
+    x.pat_kids.extend(in kids.as_slice());
+    let ok = x
+        .pats
+        .try_set(
+        widen_u64(id),
+        PatRow {
+            kind: kind,
+            start: start,
+            end: end,
+            name: name,
+            a: a,
+            n: wrapping_u32(kids.len())
+        }
+    );
+    id
+}
+
+fn read_types_into(inout r: Reader, in b: Slice[u8], inout x: Exprs, in tmap: ChunkSeq[u32], n: u64)
+    -> u32 {
+    let a = wrapping_u32(x.tys.len());
+    for i in 0..n {
+        x.tys.push(at32(in tmap, r.word(in b)));
+    }
+    a
+}
+
+// One expression in pre-order: kind, start, end, then the kind's words
+// (see `AstEnc::expr` in the harness).
+pub fn read_expr(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout x: Exprs,
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> u32 {
+    let kind = wrapping_u8(r.word(in b));
+    let start = r.word(in b);
+    let end = r.word(in b);
+    let id = wrapping_u32(x.rows.len());
+    let mut row = empty_row();
+    row.kind = kind;
+    row.start = start;
+    row.end = end;
+    x.rows.push(row);
+    let mut kids = ChunkSeq::new[u32]();
+    if kind == E_NAME {
+        row.name = sym(in nmap, r.word(in b));
+    } else if kind == E_TUPLE {
+        let n = r.word(in b);
+        for i in 0..n {
+            kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        }
+    } else if kind == E_STRUCT {
+        row.name = sym(in nmap, r.word(in b));
+        let n = r.word(in b);
+        for i in 0..n {
+            kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        }
+    } else if kind == E_BLOCK {
+        let n = r.word(in b);
+        for i in 0..n {
+            let tag = r.word(in b);
+            if tag == 0 {
+                let p = read_pat(inout r, in b, inout x, in nmap, in tmap);
+                let t = at32(in tmap, r.word(in b));
+                let v = read_expr(inout r, in b, inout x, in nmap, in tmap);
+                let mut vr = x.row(v);
+                vr.is_let = true;
+                vr.pat = p;
+                vr.let_ty = t;
+                x.set(v, vr);
+                kids.push(v);
+            } else {
+                kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+            }
+        }
+        if r.word(in b) != 0 {
+            row.flag = 1;
+            kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        }
+    } else if kind == E_CALL {
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        let nt = r.word(in b);
+        row.ta = read_types_into(inout r, in b, inout x, in tmap, nt);
+        row.tn = wrapping_u32(nt);
+        let n = r.word(in b);
+        for i in 0..n {
+            let pass = wrapping_u8(r.word(in b));
+            let v = read_expr(inout r, in b, inout x, in nmap, in tmap);
+            let mut vr = x.row(v);
+            vr.pass = pass;
+            x.set(v, vr);
+            kids.push(v);
+        }
+    } else if kind == E_FIELD {
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        row.name = sym(in nmap, r.word(in b));
+    } else if kind == E_TRY || kind == E_UNARY || kind == E_LOOP {
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+    } else if kind == E_INDEX || kind == E_BINARY || kind == E_ASSIGN {
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+    } else if kind == E_IF {
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        if r.word(in b) != 0 {
+            row.flag = 1;
+            kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        }
+    } else if kind == E_MATCH {
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        let n = r.word(in b);
+        for i in 0..n {
+            let p = read_pat(inout r, in b, inout x, in nmap, in tmap);
+            let v = read_expr(inout r, in b, inout x, in nmap, in tmap);
+            let mut vr = x.row(v);
+            vr.pat = p;
+            x.set(v, vr);
+            kids.push(v);
+        }
+    } else if kind == E_CLOSURE {
+        let n = r.word(in b);
+        row.ta = read_types_into(inout r, in b, inout x, in tmap, n);
+        row.tn = wrapping_u32(n);
+        row.ty = at32(in tmap, r.word(in b));
+        row.expected = at32(in tmap, r.word(in b));
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+    } else if kind == E_HANDLE {
+        let flags = r.word(in b);
+        row.flag = wrapping_u8(flags & 3);
+        row.unchecked = (flags & 4) != 0;
+        if (row.flag & 1) != 0 {
+            kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        }
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        let n = r.word(in b);
+        for i in 0..n {
+            let checked = r.word(in b);
+            let v = read_expr(inout r, in b, inout x, in nmap, in tmap);
+            if checked == 0 {
+                let mut vr = x.row(v);
+                vr.unchecked = true;
+                x.set(v, vr);
+            }
+            kids.push(v);
+        }
+    } else if kind == E_FOR {
+        row.pat = read_pat(inout r, in b, inout x, in nmap, in tmap);
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+    } else if kind == E_RANGE {
+        row.flag = wrapping_u8(r.word(in b));
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+    } else if kind == E_BREAK || kind == E_RETURN {
+        if r.word(in b) != 0 {
+            row.flag = 1;
+            kids.push(read_expr(inout r, in b, inout x, in nmap, in tmap));
+        }
+    }
+    // A child's own row was written by its read; keep the fields set above.
+    let mut done = x.row(id);
+    done.flag = row.flag;
+    done.name = row.name;
+    done.ty = row.ty;
+    done.expected = row.expected;
+    done.unchecked = row.unchecked;
+    done.pat = row.pat;
+    done.ta = row.ta;
+    done.tn = row.tn;
+    x.set(id, done);
+    x.finish_kids(id, in kids);
+    id
+}
+
+// A function record: name, generics, pure row, n, n (pass, type) pairs,
+// result, has body, body.
+pub fn read_fn(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout x: Exprs,
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> FnRow {
+    let name = sym(in nmap, r.word(in b));
+    let generics = wrapping_u32(r.word(in b));
+    let pure_row = r.word(in b) != 0;
+    let pn = r.word(in b);
+    let pa = wrapping_u32(x.param_passes.len());
+    for i in 0..pn {
+        x.param_passes.push(wrapping_u8(r.word(in b)));
+        x.param_types.push(at32(in tmap, r.word(in b)));
+    }
+    let result = at32(in tmap, r.word(in b));
+    let body = if r.word(in b) != 0 {
+        read_expr(inout r, in b, inout x, in nmap, in tmap)
+    } else {
+        NONE32
+    };
+    FnRow {
+        name: name,
+        generics: generics,
+        pure_row: pure_row,
+        pa: pa,
+        pn: wrapping_u32(pn),
+        result: result,
+        body: body
+    }
+}
+
+// `n` function records, kept in `x.fns`.
+pub fn read_fns(
+    inout r: Reader,
+    in b: Slice[u8],
+    inout x: Exprs,
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) {
+    let n = r.word(in b);
+    for i in 0..n {
+        let f = read_fn(inout r, in b, inout x, in nmap, in tmap);
+        x.fns.push(f);
+    }
+}

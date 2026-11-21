@@ -1,0 +1,59 @@
+// @vesper/codegen-numeric: native lowering of the numeric and memory
+// families in Vesper (self-hosting wave SH4, lane 11, #1285).
+//
+// Rust stays the default compiler. This package emits through
+// @vesper/cranelift (the C-ABI shim, owner decision 2026-11-19) and is
+// compared with the Rust lowering by tests/self_host_codegen_numeric.rs.
+//
+// Part 1 holds what needs no lent builder from lane 1 (#1275):
+// - rt.ves: helpers shared by the generated runtimes.
+// - regions.ves: the region runtime of AOT executables
+//   (src/regions/aot_runtime.rs).
+// - tiled.ves: the TiledSeq runtime (src/tiled/aot_runtime.rs).
+// - boxes.ves: the Box runtime (src/fip/aot_runtime.rs).
+// - shapes.ves: the vector lane shapes and chunk plans of src/vector.rs
+//   and src/native_vector.rs.
+//
+// The test assembles @vesper/cranelift's source with these files into one
+// unit (the shim's own tests do the same) until a package can import a
+// `.vsys` library (shim report, gap 4).
+
+// Runtime families of `runtime_object`.
+pub const RT_REGIONS: u32 = 1;
+pub const RT_TILED: u32 = 2;
+pub const RT_BOX_ALLOC: u32 = 4;
+pub const RT_BOX_FREE: u32 = 8;
+
+// An object module for `triple` with Cranelift `flags` holding the
+// runtimes `families` selects, in the order the Rust lowering defines
+// them; the object is published to the host (`take_published`), 0 on a
+// failure.
+pub fn runtime_object(in triple: Slice[u8], in flags: Slice[u8], families: u32)
+    -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in triple, in flags, in "vesper".as_bytes()) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let mut ok = true;
+    if (families & RT_REGIONS) != 0 || (families & RT_TILED) != 0 {
+        ok = define_region_runtime(inout m);
+    }
+    if ok && (families & RT_TILED) != 0 {
+        ok = define_tiled_runtime(inout m);
+    }
+    if ok {
+        ok = define_box_runtime(
+            inout m,
+            (families & RT_BOX_ALLOC) != 0,
+            (families & RT_BOX_FREE) != 0
+        );
+    }
+    if !ok {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}

@@ -1,0 +1,118 @@
+// @vesper/check-loops-atomics: the loop, try/Option, atomics and stack
+// bound checks of the compiler in Vesper (self-hosting wave SH2 lane 10,
+// #1182), on the checker data of @vesper/check-data.
+//
+// - control.ves: where `break`, `continue` and `return` may jump, which
+//   iterables a `for` takes, and `?` on `Option` (`src/loops/check.rs`,
+//   `src/loops/try_option.rs`: E0213, E0200).
+// - atomics.ves: the atomic and worker preludes a module needs, the
+//   operation, order and worker rules, and the private cell on Place IR
+//   (`src/atomics.rs`: E0820-E0824).
+// - stack.ves: the single stack-bound report (`src/stack_bound.rs` with
+//   the shared Silicon analysis and the eBPF kernel rules), and `render`.
+// - ast.ves: function bodies as flat expression and pattern tables.
+//
+// Each entry takes the harness input (tests/common/check_harness.rs plus
+// the task words of tests/self_host_check_loops_atomics.rs) and returns
+// its diagnostics or report as text packed by `pack_text`. Rust stays the
+// default checker.
+
+use @vesper/check-data::{
+    pack_text
+};
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use self::ast::{
+    exprs_new,
+    read_fns
+};
+use self::control::{
+    check_bodies,
+    control_new
+};
+use self::atomics::{
+    atomics_new,
+    check_program,
+    check_world,
+    needs_prelude,
+    needs_workers,
+    read_items,
+    read_ir,
+    syms_new
+};
+use self::stack::{
+    read_graph,
+    write_report
+};
+use self::out::{
+    put
+};
+
+// Task "control": the world's functions (n function records). Returns the
+// E0213 and E0200 diagnostics of the control rules, in walk order.
+pub fn check_loops_control(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let mut x = exprs_new();
+    read_fns(inout r, in b, inout x, in c.nmap, in c.tmap);
+    let mut ctl = control_new(inout c.names);
+    let mut o = ChunkSeq::new[u8]();
+    check_bodies(inout o, inout ctl, in x, in c.types, in c.world);
+    pack_text(in o)
+}
+
+// Task "atomics": the two prelude flags of the world, its functions, the
+// module's items and the Place IR. Returns `needs_prelude` and
+// `needs_workers` of the module, then the diagnostics of `check_world`
+// and `check_program`.
+pub fn check_atomics(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let atomic = r.word(in b) != 0;
+    let workers = r.word(in b) != 0;
+    let mut x = exprs_new();
+    read_fns(inout r, in b, inout x, in c.nmap, in c.tmap);
+    let items = read_items(inout r, in b, in c.nmap, in c.tmap, exprs_new());
+    let ir = read_ir(inout r, in b, in c.nmap, in c.tmap);
+    let sy = syms_new(inout c.names);
+    let mut o = ChunkSeq::new[u8]();
+    put(inout o, "prelude ");
+    if needs_prelude(in c.names, in c.types, in items, in sy) {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+    put(inout o, " workers ");
+    if needs_workers(in items, in sy) {
+        o.push(49);
+    } else {
+        o.push(48);
+    }
+    o.push(10);
+    let a = atomics_new(sy, atomic, workers);
+    check_world(inout o, inout c.types, in c.names, in c.world, in x, in a);
+    check_program(inout o, in c.names, in c.types, in ir, in a);
+    pack_text(in o)
+}
+
+// Task "stack": one call graph and its policy. Returns the report's roots
+// and findings, then `render`, then whether it is accepted.
+pub fn check_stack_bound(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let g = read_graph(inout r, in b, in c.nmap);
+    let mut o = ChunkSeq::new[u8]();
+    write_report(inout o, in c.names, in g);
+    pack_text(in o)
+}

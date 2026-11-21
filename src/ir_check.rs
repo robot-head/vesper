@@ -1031,20 +1031,22 @@ impl Flow<'_> {
         let mut out = a.clone();
         for (n, slot) in &b.slots {
             if let Some(old) = out.slots.get_mut(n) {
-                let x = self.mode(&old.ty) == Mode::Linear
-                    && old.pass == Pass::Sink
-                    && !old.moved.contains(&vec![]);
-                let y = self.mode(&slot.ty) == Mode::Linear
-                    && slot.pass == Pass::Sink
-                    && !slot.moved.contains(&vec![]);
+                // The cheap tests come first: `mode` is pure, so the order
+                // does not change the answer (#1331).
+                let x = old.pass == Pass::Sink
+                    && !old.moved.contains(&vec![])
+                    && self.mode(&old.ty) == Mode::Linear;
+                let y = slot.pass == Pass::Sink
+                    && !slot.moved.contains(&vec![])
+                    && self.mode(&slot.ty) == Mode::Linear;
                 if x != y {
                     self.caused(format!("linear place '{n}' has inconsistent ownership at a CFG join"), span.clone(), self.origins.slot(n), "Ownership of a linear place must agree on the incoming control-flow edges.");
                 }
                 old.moved.extend(slot.moved.clone());
             } else {
-                if self.mode(&slot.ty) == Mode::Linear
-                    && slot.pass == Pass::Sink
+                if slot.pass == Pass::Sink
                     && !slot.moved.contains(&vec![])
+                    && self.mode(&slot.ty) == Mode::Linear
                 {
                     self.caused(format!("linear place '{n}' survives only one CFG edge"), span.clone(), self.origins.slot(n), "An owned linear place cannot disappear on another incoming control-flow edge.");
                 }
@@ -1053,7 +1055,7 @@ impl Flow<'_> {
         }
         for (id, value) in &b.values {
             if let Some(old) = out.values.get_mut(id) {
-                if self.mode(&old.ty) == Mode::Linear && old.owned && old.consumed != value.consumed
+                if old.owned && old.consumed != value.consumed && self.mode(&old.ty) == Mode::Linear
                 {
                     self.caused(format!("linear temporary %{id} has inconsistent ownership at a CFG join"), span.clone(), self.origins.value(*id), "Ownership of a linear temporary must agree on incoming control-flow edges.");
                 }

@@ -1,0 +1,272 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Vesper",
+  "scopeName": "source.vesper",
+  "fileTypes": ["ves"],
+  "comment": "Vesper TextMate grammar. Tokens follow crates/vesper-syntax/src/lexer.rs; contextual keywords follow the Tier 0 rules in crates/vesper-highlight/src/tier0.rs. Tested by editors/textmate/test/run.mjs.",
+  "patterns": [{ "include": "#items" }],
+  "repository": {
+    "items": {
+      "patterns": [
+        { "include": "#comments" },
+        { "include": "#strings" },
+        { "include": "#attributes" },
+        { "include": "#numbers" },
+        { "include": "#declarations" },
+        { "include": "#keywords" },
+        { "include": "#types" },
+        { "include": "#functions" },
+        { "include": "#metavariables" },
+        { "include": "#operators" },
+        { "include": "#punctuation" }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.vesper",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.vesper" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.comment.vesper" } },
+          "patterns": [{ "include": "#block-comment-nested" }]
+        },
+        {
+          "name": "comment.line.double-slash.vesper",
+          "begin": "//",
+          "end": "$",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.vesper" } },
+          "patterns": [
+            {
+              "comment": "Comment directives such as `// @export abi 3`, `// @case name(...)` and `// @vesper ...`.",
+              "match": "\\G/?\\s*(@[a-z_][a-z0-9_]*)",
+              "captures": { "1": { "name": "storage.type.annotation.directive.vesper" } }
+            }
+          ]
+        }
+      ]
+    },
+    "block-comment-nested": {
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [{ "include": "#block-comment-nested" }]
+    },
+    "strings": {
+      "name": "string.quoted.double.vesper",
+      "begin": "\"",
+      "end": "\"",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.vesper" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.vesper" } },
+      "patterns": [
+        {
+          "name": "constant.character.escape.vesper",
+          "match": "\\\\(?:u\\{[0-9A-Fa-f]{1,6}\\}|u[0-9A-Fa-f]{4}|x[0-9A-Fa-f]{2}|.)"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "comment": "Package paths: `use @vesper/check-data::util`, `@vesper-std/hash-sys`.",
+          "name": "entity.name.namespace.package.vesper",
+          "match": "@[a-z][a-z0-9_-]*(?:/[a-z][a-z0-9_-]*|(?=::))|@[a-z][a-z0-9_]*-[a-z0-9_-]*"
+        },
+        {
+          "comment": "Mode annotations: `ticket: Ticket @@copy`, closure types `fn @copy (i64) -> i64`.",
+          "match": "(@@)([a-z_][a-z0-9_]*)|(@)(copy|affine|linear|mod)\\b",
+          "captures": {
+            "1": { "name": "punctuation.definition.annotation.vesper" },
+            "2": { "name": "storage.modifier.mode.vesper" },
+            "3": { "name": "punctuation.definition.annotation.vesper" },
+            "4": { "name": "storage.modifier.modal.vesper" }
+          }
+        },
+        {
+          "comment": "Attributes: `@test`, `@test_case(...)`, `@fip`, `@proof`.",
+          "match": "(@)([a-z_][a-z0-9_]*)",
+          "captures": {
+            "0": { "name": "meta.annotation.vesper" },
+            "1": { "name": "punctuation.definition.annotation.vesper" },
+            "2": { "name": "storage.type.annotation.vesper" }
+          }
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.vesper",
+          "match": "\\b[0-9]+(?:\\.[0-9]+(?:[eE][+-]?[0-9]+)?|[eE][+-]?[0-9]+)\\b"
+        },
+        {
+          "name": "constant.numeric.hex.vesper",
+          "match": "\\b0[xX][0-9A-Fa-f_]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.decimal.vesper",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([a-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.vesper" },
+            "2": { "name": "entity.name.function.vesper" }
+          }
+        },
+        {
+          "match": "\\b(struct|enum|effect|trait|type)\\s+([A-Z][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.$1.vesper" },
+            "2": { "name": "entity.name.type.vesper" }
+          }
+        },
+        {
+          "match": "\\b(macro)\\s+([a-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.macro.vesper" },
+            "2": { "name": "entity.name.function.macro.vesper" }
+          }
+        },
+        {
+          "match": "\\b(const)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.const.vesper" },
+            "2": { "name": "variable.other.constant.vesper" }
+          }
+        },
+        {
+          "match": "\\b(let)\\s+(mut)\\b",
+          "captures": {
+            "1": { "name": "storage.type.let.vesper" },
+            "2": { "name": "storage.modifier.mut.vesper" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "comment": "Hard control keywords (lexer tokens).",
+          "name": "keyword.control.vesper",
+          "match": "\\b(?:if|else|match|return|handle|with)\\b"
+        },
+        {
+          "comment": "Contextual loop words, keywords only where they parse so (tier0 is_loop_keyword).",
+          "name": "keyword.control.loop.vesper",
+          "match": "\\bloop\\b(?=\\s*\\{)|\\bfor\\b(?=\\s+[A-Za-z_(])|\\bbreak\\b(?!\\s*(?:[=.:,]|::))|\\bcontinue\\b(?=\\s*(?:$|[;})\\],]))"
+        },
+        {
+          "comment": "Hard declaration keywords (lexer tokens).",
+          "name": "storage.type.vesper",
+          "match": "\\b(?:fn|struct|enum|effect|impl|let|eff)\\b"
+        },
+        {
+          "comment": "Handler state: `handle E state p = e in`.",
+          "name": "storage.type.state.vesper",
+          "match": "\\bstate\\b(?=\\s+[a-z_][A-Za-z0-9_]*\\s*=[^=>])"
+        },
+        {
+          "comment": "Modal specifiers.",
+          "name": "storage.modifier.modal.vesper",
+          "match": "\\b(?:copy|affine|linear|mod)\\b"
+        },
+        {
+          "comment": "Pass modes.",
+          "name": "storage.modifier.mode.vesper",
+          "match": "\\b(?:inout|sink|in)\\b"
+        },
+        {
+          "comment": "Contextual declaration words (tier0 CONTEXTUAL_DECL plus const/extern/dyn/as), keywords before a name, type, item or block.",
+          "name": "keyword.other.vesper",
+          "match": "\\b(?:pub|use|trait|type|where|region|model|wire|dim|extern|dyn|as|tiled)\\b(?=\\s+[A-Za-z_@{(\\[]|\\s*\\{)|\\b(?:quote|test)\\b(?=\\s*\\{)"
+        },
+        {
+          "name": "variable.language.self.vesper",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "variable.language.super.vesper",
+          "match": "\\b(?:super|crate)\\b(?=::)"
+        },
+        {
+          "name": "constant.language.boolean.vesper",
+          "match": "\\b(?:true|false)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "comment": "Primitive scalars.",
+          "name": "support.type.primitive.vesper",
+          "match": "\\b(?:u8|u16|u32|u64|u128|i8|i16|i32|i64|i128|f32|f64|bool|usize|isize)\\b"
+        },
+        {
+          "comment": "Wire endian scalars (manuscript section 13.2): u16be, i64le, f32be, ...",
+          "name": "support.type.primitive.wire.vesper",
+          "match": "\\b(?:[ui](?:8|16|32|64|128)|f(?:32|64))(?:be|le)\\b"
+        },
+        {
+          "comment": "SCREAMING_CASE constants.",
+          "name": "variable.other.constant.vesper",
+          "match": "\\b[A-Z][A-Z0-9]*_[A-Z0-9_]*\\b|\\b[A-Z][A-Z0-9]+\\b(?![a-z])"
+        },
+        {
+          "name": "entity.name.type.vesper",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "comment": "Macro calls: `keep!(...)`.",
+          "match": "\\b([a-z_][A-Za-z0-9_]*)(!)(?=\\s*[(\\[{])",
+          "captures": {
+            "1": { "name": "entity.name.function.macro.vesper" },
+            "2": { "name": "punctuation.definition.macro.vesper" }
+          }
+        },
+        {
+          "comment": "Calls, including explicit type arguments: `f(x)`, `Box::new[dyn T](x)`.",
+          "name": "entity.name.function.vesper",
+          "match": "\\b[a-z_][A-Za-z0-9_]*(?=\\s*\\(|\\[[^\\]\\[]*(?:\\[[^\\]\\[]*\\][^\\]\\[]*)*\\]\\()"
+        }
+      ]
+    },
+    "metavariables": {
+      "comment": "Macro metavariables: `$x: expr`.",
+      "name": "variable.other.metavariable.vesper",
+      "match": "\\$[A-Za-z_][A-Za-z0-9_]*"
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.arrow.vesper", "match": "->|=>" },
+        { "name": "keyword.operator.namespace.vesper", "match": "::" },
+        { "name": "keyword.operator.range.vesper", "match": "\\.\\.=?" },
+        { "name": "keyword.operator.comparison.vesper", "match": "==|!=|<=|>=" },
+        { "name": "keyword.operator.logical.vesper", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.assignment.vesper", "match": "[-+*/%|&]?=" },
+        { "name": "keyword.operator.bitwise.vesper", "match": "<<|>>|[&|^~]" },
+        { "name": "keyword.operator.comparison.vesper", "match": "[<>]" },
+        { "name": "keyword.operator.arithmetic.vesper", "match": "[-+*/%]" },
+        { "name": "keyword.operator.question.vesper", "match": "\\?" }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.separator.comma.vesper", "match": "," },
+        { "name": "punctuation.terminator.semicolon.vesper", "match": ";" },
+        { "name": "punctuation.separator.colon.vesper", "match": ":" },
+        { "name": "punctuation.accessor.dot.vesper", "match": "\\." },
+        { "name": "punctuation.brackets.round.vesper", "match": "[()]" },
+        { "name": "punctuation.brackets.square.vesper", "match": "[\\[\\]]" },
+        { "name": "punctuation.brackets.curly.vesper", "match": "[{}]" }
+      ]
+    }
+  }
+}

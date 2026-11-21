@@ -31,7 +31,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: logos-sweep-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: logos-sweep-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: true
 
 env:

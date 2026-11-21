@@ -711,7 +711,9 @@ impl Planner<'_> {
             }
             params.push(ExportParam {
                 name: p.name.clone(),
-                pointer: layout(self.world, &function, &p.ty)?.aggregate() || p.pass == Pass::Inout,
+                pointer: layout(self.world, &function, &p.ty)?.aggregate()
+                    || p.pass == Pass::Inout
+                    || wide_by_pointer(&ty),
                 ty,
                 pass: (p.pass != Pass::In).then(|| pass_name(p.pass).into()),
                 in_place: false,
@@ -719,6 +721,7 @@ impl Planner<'_> {
         }
         let result = self.ty(&function, &f.result)?;
         self.position(&function, &f.result, &result, Position::Result)?;
+        let wide_result = wide_by_pointer(&result);
         let result_layout = layout(self.world, &function, &f.result)?;
         let fail_record_words = if errors.is_empty() {
             None
@@ -734,7 +737,7 @@ impl Planner<'_> {
             params,
             result,
             result_words: result_layout.size / 8,
-            result_pointer: result_layout.aggregate(),
+            result_pointer: result_layout.aggregate() || wide_result,
             errors,
             fail_record_words,
             instance_of,
@@ -861,15 +864,15 @@ impl Planner<'_> {
                 "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports, or, with `// @export abi 4`, is lent `in` by Rust)",
             ));
         }
-        // `i128`/`u128` (SH2 lane 2, #1174) are two words that no export
-        // ABI version lays out yet.
+        // `i128`/`u128` (SH4 lane 3, #1277) are a two-word cell, low word
+        // first, wherever they cross: inside an aggregate, a mirror or a
+        // sequence as their two words, and as a parameter or result through
+        // a pointer to them ([`wide_by_pointer`]), never in registers.
         if let Type::Named(n, args) = ty
             && args.is_empty()
             && crate::numeric::is_wide_name(n)
         {
-            return Err(refuse(
-                "is a 128-bit integer, which no export ABI version carries yet; pass its two u64 words (wrapping_u64(x), wrapping_u64(x >> 64))",
-            ));
+            return Ok(AbiType::Scalar { name: n.clone() });
         }
         match ty {
             Type::Tuple(items) if items.is_empty() => Ok(AbiType::Scalar {
@@ -1159,9 +1162,19 @@ pub(crate) fn owning(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
     }
 }
 
+/// Whether `ty` is `i128` or `u128`, which cross as a parameter or a
+/// result through a pointer to their two words (#1277). The platform C
+/// ABIs disagree on 128-bit integers (Windows x64 passes them by reference,
+/// AAPCS64 in an even register pair), so the export ABI never puts one in
+/// registers; [`define_wide_entry`] adapts the function's own signature.
+pub(crate) fn wide_by_pointer(ty: &AbiType) -> bool {
+    matches!(ty, AbiType::Scalar { name } if crate::numeric::is_wide_name(name))
+}
+
 /// Size of `ty` in words.
 pub(crate) fn abi_words(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> u32 {
     match ty {
+        ty if wide_by_pointer(ty) => 2,
         AbiType::Scalar { .. }
         | AbiType::Seq { .. }
         | AbiType::Box { .. }
@@ -1245,6 +1258,7 @@ fn compile_exports<M: Module>(
     }
     let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
+    super::wide_native::refine_wide_tuples(&mut program);
     if optimize {
         crate::ir_swap::optimize(world, &mut program)?;
         crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default());
@@ -1260,16 +1274,26 @@ fn compile_exports<M: Module>(
     // the v2 glue use; internal calls use the register conventions of [`NativeAbi`] (#935).
     let abi = NativeAbi::plan(world, &all, optimize, |key| exports.contains_key(key))?;
     let mut ids = BTreeMap::new();
+    // Exports with a by-value 128-bit parameter or result: the function is
+    // local and a [`define_wide_entry`] adapter takes the export symbol.
+    let mut wide_entries = vec![];
     for (i, (key, (name, vars))) in all.iter().enumerate() {
         let f = concrete(world, name, vars)?;
+        let wide = exports
+            .get(key)
+            .and_then(|symbol| interface.functions.iter().find(|e| &e.symbol == symbol))
+            .filter(|e| needs_wide_entry(e));
         let (symbol, linkage) = match exports.get(key) {
-            Some(symbol) => (symbol.clone(), Linkage::Export),
-            None => (format!("vesper_function_{i}"), Linkage::Local),
+            Some(symbol) if wide.is_none() => (symbol.clone(), Linkage::Export),
+            _ => (format!("vesper_function_{i}"), Linkage::Local),
         };
         let sig = signature_with_abi(m, world, &f, false, abi.of(key))?;
         let id = m
             .declare_function(&symbol, linkage, &sig)
             .map_err(|e| e.to_string())?;
+        if let Some(e) = wide {
+            wide_entries.push((e.clone(), id, sig.clone()));
+        }
         ids.insert(key.clone(), id);
     }
     let clif = define_instances_observed_with_trace(
@@ -1287,6 +1311,9 @@ fn compile_exports<M: Module>(
         optimize,
         &abi,
     )?;
+    for (export, inner, sig) in &wide_entries {
+        define_wide_entry(m, export, *inner, sig)?;
+    }
     if interface.is_v2() {
         // SH4 swap point (#1275): the `export` hook may emit the glue.
         match crate::codegen_swap::installed().export {
@@ -1298,6 +1325,115 @@ fn compile_exports<M: Module>(
         }
     }
     Ok(clif)
+}
+
+/// Whether `f` passes or returns a 128-bit integer by value, which its
+/// export symbol takes through a pointer instead ([`wide_by_pointer`]).
+fn needs_wide_entry(f: &ExportedFunction) -> bool {
+    wide_by_pointer(&f.result)
+        || f.params
+            .iter()
+            .any(|p| p.pass() != "inout" && wide_by_pointer(&p.ty))
+}
+
+/// The export symbol of `export`, a function with a by-value `i128`/`u128`
+/// parameter or result (#1277): it takes each such parameter as a pointer
+/// to its two words and writes such a result through a leading result
+/// pointer, loading and storing the words around one call of the function
+/// `inner` (signature `sig`, the internal one). Every other parameter, the
+/// failure record and the return word pass through unchanged.
+fn define_wide_entry<M: Module>(
+    m: &mut M,
+    export: &ExportedFunction,
+    inner: cranelift_module::FuncId,
+    sig: &ir::Signature,
+) -> Result<(), String> {
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    let pointer = m.target_config().pointer_type();
+    let wide_result = wide_by_pointer(&export.result);
+    // The internal signature: [result pointer] params.. [fail record].
+    let leading = usize::from(export.result_pointer && !wide_result);
+    let fail = usize::from(export.fail_record_words.is_some());
+    if sig.params.len() != leading + export.params.len() + fail || sig.returns.len() != 1 {
+        return Err(format!(
+            "'{}': 128-bit export entry does not match the function's signature",
+            export.name
+        ));
+    }
+    let mut entry = m.make_signature();
+    if export.result_pointer {
+        entry.params.push(AbiParam::new(pointer));
+    }
+    for (i, p) in export.params.iter().enumerate() {
+        entry.params.push(if p.pointer {
+            AbiParam::new(pointer)
+        } else {
+            sig.params[leading + i]
+        });
+    }
+    if fail == 1 {
+        entry.params.push(AbiParam::new(pointer));
+    }
+    // A wide result is written through the result pointer; any other
+    // return (a float register included) passes through.
+    entry.returns.push(if wide_result {
+        AbiParam::new(types::I64)
+    } else {
+        sig.returns[0]
+    });
+    let id = m
+        .declare_function(&export.symbol, Linkage::Export, &entry)
+        .map_err(|e| e.to_string())?;
+    let mut ctx = m.make_context();
+    ctx.func.signature = entry;
+    let mut fbc = FunctionBuilderContext::new();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let block = b.create_block();
+        b.append_block_params_for_function_params(block);
+        b.switch_to_block(block);
+        let args = b.block_params(block).to_vec();
+        let flags = ir::MemFlags::trusted();
+        let mut at = 0;
+        let mut call = vec![];
+        let result = if export.result_pointer {
+            at = 1;
+            Some(args[0])
+        } else {
+            None
+        };
+        if leading == 1 {
+            call.push(result.expect("an aggregate result pointer"));
+        }
+        for p in &export.params {
+            let arg = args[at];
+            at += 1;
+            call.push(if p.pass() != "inout" && wide_by_pointer(&p.ty) {
+                b.ins().load(types::I128, flags, arg, 0)
+            } else {
+                arg
+            });
+        }
+        if fail == 1 {
+            call.push(args[at]);
+        }
+        let callee = m.declare_func_in_func(inner, b.func);
+        let inst = b.ins().call(callee, &call);
+        let returned = b.inst_results(inst)[0];
+        let word = if wide_result {
+            b.ins()
+                .store(flags, returned, result.expect("a result pointer"), 0);
+            b.ins().iconst(types::I64, 0)
+        } else {
+            returned
+        };
+        b.ins().return_(&[word]);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    m.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
+    m.clear_context(&mut ctx);
+    Ok(())
 }
 
 /// A compiled library: its object bytes and interface.

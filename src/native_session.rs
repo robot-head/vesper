@@ -855,6 +855,7 @@ fn compile_session_with_linkage<M: Module>(
     let instances: InstanceMap = super::instances(world, &plan.entry)?;
     let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
+    super::wide_native::refine_wide_tuples(&mut program);
     if optimize {
         crate::ir_swap::optimize(world, &mut program)?;
         crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default());
@@ -936,6 +937,8 @@ fn compile_session_with_linkage<M: Module>(
             caller_slot: None,
             reuse_slots: BTreeMap::new(),
             register_locals: BTreeSet::new(),
+            bound_params: BTreeSet::new(),
+            scalar_enums: Default::default(),
             split: BTreeMap::new(),
             current_call_slot: None,
             in_fip_fn: world.functions.get(&plan.entry).is_some_and(|f| f.fip),

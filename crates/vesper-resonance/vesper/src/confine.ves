@@ -4,24 +4,23 @@
 // The Rust wrapper numbers the distinct effects (an `Effect::Other` name is
 // one more effect) and lends the graph and the policy as word slices:
 //
-// - `fns`: eight words per function: known (0 or 1), frame bytes, loops (0
-//   none, 1 bounded, 2 unbounded), the bound, then the first word and count
-//   of its effect codes and of its call sites (callee, instruction) in
-//   `pool`.
+// - `fns`: FN_WORDS words per function (`FnWord`): known (0 or 1), frame
+//   bytes, `Loops`, the bound, then the first word and count of its effect
+//   codes and of its call sites (callee, instruction) in `pool`.
 // - `calls`: (caller, callee) pairs; `indirect`: (caller, site) pairs.
-// - `entries`: the policy's indirect targets in key order, four words each:
-//   caller, site, first target in `pool`, target count.
+// - `entries`: the policy's indirect targets in key order, ENTRY_WORDS
+//   words each (`Entry`): caller, site, first target in `pool`, target count.
 // - `roots`: (function, has budget, budget) triples; `allowed`: the codes of
 //   the allowed effects.
 //
-// The result's first word is 0, then the finding count and each finding:
-// root, has instruction, instruction, rule, subject function, two rule
-// words, the path length and the path from the root. Or it is 1
-// UnknownFnId(id), or 2 UnknownIndirectSite(caller, site).
+// The result's first word is a `Status`: Ok, then the finding count and
+// each finding: root, has instruction, instruction, rule, subject function,
+// two rule words, the path length and the path from the root. Or it is
+// UnknownFnId(id), or UnknownIndirectSite(caller, site).
 //
-// Rules: 0 forbidden effect (code), 1 unknown callee, 2 unresolved indirect
-// call (site), 3 unbounded loop, 4 loop bound (bound, maximum), 5 recursion,
-// 6 stack budget (depth, budget), 7 stack depth overflow.
+// Rules (`Rule`): forbidden effect (code), unknown callee, unresolved
+// indirect call (site), unbounded loop, loop bound (bound, maximum),
+// recursion, stack budget (depth, budget), stack depth overflow.
 use self::seqs::{
     at,
     filled,
@@ -29,19 +28,106 @@ use self::seqs::{
     set
 };
 
-fn none() -> u64 {
-    18446744073709551615
+// No function or instruction.
+const NONE: u64 = 18446744073709551615;
+
+// The words of a `fns` record.
+enum FnWord: _ {
+    Known,
+    FrameBytes,
+    Loops,
+    Bound,
+    FirstEffect,
+    EffectCount,
+    FirstCall,
+    CallCount
+}
+
+const FN_WORDS: u64 = 8;
+
+// A function's loops.
+enum Loops: _ {
+    None,
+    Bounded,
+    Unbounded
+}
+
+// The words of an `entries` record.
+enum Entry: _ {
+    Caller,
+    Site,
+    FirstTarget,
+    TargetCount
+}
+
+const ENTRY_WORDS: u64 = 4;
+
+// The words of a `roots` record.
+enum Root: _ {
+    Function,
+    HasBudget,
+    Budget
+}
+
+const ROOT_WORDS: u64 = 3;
+
+// A (caller, callee), (caller, site) or (callee, instruction) pair.
+const PAIR_WORDS: u64 = 2;
+
+// An edge row is the caller and a link; a link (a successor, or a BFS
+// parent) is the function, whether the call has an instruction, and the
+// instruction.
+const EDGE_WORDS: u64 = 4;
+
+enum Link: _ {
+    Function,
+    HasInstruction,
+    Instruction
+}
+
+const LINK_WORDS: u64 = 3;
+
+// The result's first word.
+enum Status: _ {
+    Ok,
+    UnknownFnId,
+    UnknownIndirectSite
+}
+
+// The result word that counts the findings.
+const FINDING_COUNT_WORD: u64 = 1;
+
+// Finding rules.
+enum Rule: _ {
+    ForbiddenEffect,
+    UnknownCallee,
+    UnresolvedIndirectCall,
+    UnboundedLoop,
+    LoopBound,
+    Recursion,
+    StackBudget,
+    StackDepthOverflow
+}
+
+// A DFS stack frame is a function and its next successor.
+const DFS_FRAME_WORDS: u64 = 2;
+
+// The stack-depth DFS colors.
+enum Color: _ {
+    White,
+    Grey,
+    Black
 }
 
 fn fw(in fns: Slice[u64], f: u64, w: u64) -> u64 {
-    at(in fns, wrapping_add(wrapping_mul(f, 8), w))
+    at(in fns, wrapping_add(wrapping_mul(f, FN_WORDS), w))
 }
 
 fn fail(code: u64, a: u64, b: u64) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
     out.push(code);
     out.push(a);
-    if code == 2 {
+    if code == Status::UnknownIndirectSite {
         out.push(b);
     }
     out
@@ -57,16 +143,16 @@ struct Adj {
     usites: ChunkSeq[u64]
 }
 
-// The entry index of (caller, site) in `entries`, or `none()`.
+// The entry index of (caller, site) in `entries`, or `NONE`.
 fn entry(in entries: Slice[u64], caller: u64, site: u64) -> u64 {
-    let n = entries.len() / 4;
+    let n = entries.len() / ENTRY_WORDS;
     for e in 0..n {
-        let b = wrapping_mul(e, 4);
-        if at(in entries, b) == caller && at(in entries, wrapping_add(b, 1)) == site {
+        let b = wrapping_mul(e, ENTRY_WORDS);
+        if at(in entries, b) == caller && at(in entries, wrapping_add(b, Entry::Site)) == site {
             return e;
         }
     }
-    none()
+    NONE
 }
 
 // Rows of `edges` (caller first, then `width - 1` words) bucketed by
@@ -110,32 +196,32 @@ pub fn c_verify(
     has_max: bool,
     max_loops: u64
 ) -> ChunkSeq[u64] {
-    let n = fns.len() / 8;
+    let n = fns.len() / FN_WORDS;
     // Edges in the Rust push order, with the checks in the Rust order.
     let mut edges: ChunkSeq[u64] = ChunkSeq::new();
     let mut unresolved: ChunkSeq[u64] = ChunkSeq::new();
-    let ncalls = calls.len() / 2;
+    let ncalls = calls.len() / PAIR_WORDS;
     for e in 0..ncalls {
-        let caller = at(in calls, wrapping_mul(e, 2));
-        let callee = at(in calls, wrapping_add(wrapping_mul(e, 2), 1));
+        let caller = at(in calls, wrapping_mul(e, PAIR_WORDS));
+        let callee = at(in calls, wrapping_add(wrapping_mul(e, PAIR_WORDS), 1));
         if caller >= n {
-            return fail(1, caller, 0);
+            return fail(Status::UnknownFnId, caller, 0);
         }
         if callee >= n {
-            return fail(1, callee, 0);
+            return fail(Status::UnknownFnId, callee, 0);
         }
         // The instruction of the caller's first call site to the callee.
-        let mut inst = none();
-        let first = fw(in fns, caller, 6);
-        for k in 0..fw(in fns, caller, 7) {
-            let b = wrapping_add(first, wrapping_mul(k, 2));
-            if inst == none() && at(in pool, b) == callee {
+        let mut inst = NONE;
+        let first = fw(in fns, caller, FnWord::FirstCall);
+        for k in 0..fw(in fns, caller, FnWord::CallCount) {
+            let b = wrapping_add(first, wrapping_mul(k, PAIR_WORDS));
+            if inst == NONE && at(in pool, b) == callee {
                 inst = at(in pool, wrapping_add(b, 1));
             }
         }
         edges.push(caller);
         edges.push(callee);
-        if inst == none() {
+        if inst == NONE {
             edges.push(0);
             edges.push(0);
         } else {
@@ -143,27 +229,30 @@ pub fn c_verify(
             edges.push(inst);
         }
     }
-    let nind = indirect.len() / 2;
+    let nind = indirect.len() / PAIR_WORDS;
     for e in 0..nind {
-        let caller = at(in indirect, wrapping_mul(e, 2));
-        let site = at(in indirect, wrapping_add(wrapping_mul(e, 2), 1));
+        let caller = at(in indirect, wrapping_mul(e, PAIR_WORDS));
+        let site = at(in indirect, wrapping_add(wrapping_mul(e, PAIR_WORDS), 1));
         if caller >= n {
-            return fail(1, caller, 0);
+            return fail(Status::UnknownFnId, caller, 0);
         }
         let k = entry(in entries, caller, site);
         let mut count: u64 = 0;
-        if k != none() {
-            count = at(in entries, wrapping_add(wrapping_mul(k, 4), 3));
+        if k != NONE {
+            count = at(in entries, wrapping_add(wrapping_mul(k, ENTRY_WORDS), Entry::TargetCount));
         }
         if count == 0 {
             unresolved.push(caller);
             unresolved.push(site);
         } else {
-            let first = at(in entries, wrapping_add(wrapping_mul(k, 4), 2));
+            let first = at(
+                in entries,
+                wrapping_add(wrapping_mul(k, ENTRY_WORDS), Entry::FirstTarget)
+            );
             for t in 0..count {
                 let target = at(in pool, wrapping_add(first, t));
                 if target >= n {
-                    return fail(1, target, 0);
+                    return fail(Status::UnknownFnId, target, 0);
                 }
                 edges.push(caller);
                 edges.push(target);
@@ -172,47 +261,48 @@ pub fn c_verify(
             }
         }
     }
-    let nentries = entries.len() / 4;
+    let nentries = entries.len() / ENTRY_WORDS;
     for k in 0..nentries {
-        let caller = at(in entries, wrapping_mul(k, 4));
-        let site = at(in entries, wrapping_add(wrapping_mul(k, 4), 1));
+        let caller = at(in entries, wrapping_mul(k, ENTRY_WORDS));
+        let site = at(in entries, wrapping_add(wrapping_mul(k, ENTRY_WORDS), Entry::Site));
         if caller >= n {
-            return fail(1, caller, 0);
+            return fail(Status::UnknownFnId, caller, 0);
         }
         let mut found = false;
         for e in 0..nind {
-            if at(in indirect, wrapping_mul(e, 2))
+            if at(in indirect, wrapping_mul(e, PAIR_WORDS))
                 == caller
-                && at(in indirect, wrapping_add(wrapping_mul(e, 2), 1))
+                && at(in indirect, wrapping_add(wrapping_mul(e, PAIR_WORDS), 1))
                 == site {
                 found = true;
             }
         }
         if !found {
-            return fail(2, caller, site);
+            return fail(Status::UnknownIndirectSite, caller, site);
         }
     }
-    let nroots = roots.len() / 3;
+    let nroots = roots.len() / ROOT_WORDS;
     for r in 0..nroots {
-        let f = at(in roots, wrapping_mul(r, 3));
+        let f = at(in roots, wrapping_mul(r, ROOT_WORDS));
         if f >= n {
-            return fail(1, f, 0);
+            return fail(Status::UnknownFnId, f, 0);
         }
     }
-    let (start, succ) = rows(in edges, 4, edges.len() / 4, n);
-    let (ustart, usites) = rows(in unresolved, 2, unresolved.len() / 2, n);
+    let (start, succ) = rows(in edges, EDGE_WORDS, edges.len() / EDGE_WORDS, n);
+    let (ustart, usites) = rows(in unresolved, PAIR_WORDS, unresolved.len() / PAIR_WORDS, n);
     let adj = Adj {
         start: start,
         succ: succ,
         ustart: ustart,
         usites: usites
     };
-    let mut ok = filled(1, 0);
+    let mut ok = filled(1, Status::Ok);
     ok.push(0);
     for r in 0..nroots {
-        let root = at(in roots, wrapping_mul(r, 3));
-        let has_budget = at(in roots, wrapping_add(wrapping_mul(r, 3), 1)) == 1;
-        let budget = at(in roots, wrapping_add(wrapping_mul(r, 3), 2));
+        let rb = wrapping_mul(r, ROOT_WORDS);
+        let root = at(in roots, rb);
+        let has_budget = at(in roots, wrapping_add(rb, Root::HasBudget)) == 1;
+        let budget = at(in roots, wrapping_add(rb, Root::Budget));
         verify_root(
             in fns,
             in pool,
@@ -245,26 +335,27 @@ fn push(
     let mut path: ChunkSeq[u64] = ChunkSeq::new();
     path.push(v);
     let mut cur = v;
-    let mut inst = none();
+    let mut inst = NONE;
     loop {
-        let p = get(in parent, wrapping_mul(cur, 3));
-        if p == none() {
+        let p = get(in parent, wrapping_mul(cur, LINK_WORDS));
+        if p == NONE {
             break;
         }
         path.push(p);
         if p == root {
-            if get(in parent, wrapping_add(wrapping_mul(cur, 3), 1)) == 1 {
-                inst = get(in parent, wrapping_add(wrapping_mul(cur, 3), 2));
+            let link = wrapping_mul(cur, LINK_WORDS);
+            if get(in parent, wrapping_add(link, Link::HasInstruction)) == 1 {
+                inst = get(in parent, wrapping_add(link, Link::Instruction));
             } else {
-                inst = none();
+                inst = NONE;
             }
         }
         cur = p;
     }
-    let count = wrapping_add(get(in out, 1), 1);
-    set(inout out, 1, count);
+    let count = wrapping_add(get(in out, FINDING_COUNT_WORD), 1);
+    set(inout out, FINDING_COUNT_WORD, count);
     out.push(root);
-    if inst == none() {
+    if inst == NONE {
         out.push(0);
         out.push(0);
     } else {
@@ -304,10 +395,10 @@ fn verify_root(
     max_loops: u64,
     inout out: ChunkSeq[u64]
 ) {
-    let n = fns.len() / 8;
+    let n = fns.len() / FN_WORDS;
     // Breadth-first search for shortest call paths: per function, the
     // parent, whether the call has an instruction, and the instruction.
-    let mut parent = filled(wrapping_mul(n, 3), none());
+    let mut parent = filled(wrapping_mul(n, LINK_WORDS), NONE);
     let mut seen = filled(n, 0);
     let mut order: ChunkSeq[u64] = ChunkSeq::new();
     set(inout seen, root, 1);
@@ -320,19 +411,22 @@ fn verify_root(
         let u = get(in order, head);
         head = wrapping_add(head, 1);
         for k in get(in adj.start, u)..get(in adj.start, wrapping_add(u, 1)) {
-            let v = get(in adj.succ, wrapping_mul(k, 3));
+            let v = get(in adj.succ, wrapping_mul(k, LINK_WORDS));
             if get(in seen, v) == 0 {
                 set(inout seen, v, 1);
-                set(inout parent, wrapping_mul(v, 3), u);
+                set(inout parent, wrapping_mul(v, LINK_WORDS), u);
                 set(
                     inout parent,
-                    wrapping_add(wrapping_mul(v, 3), 1),
-                    get(in adj.succ, wrapping_add(wrapping_mul(k, 3), 1))
+                    wrapping_add(wrapping_mul(v, LINK_WORDS), Link::HasInstruction),
+                    get(
+                        in adj.succ,
+                        wrapping_add(wrapping_mul(k, LINK_WORDS), Link::HasInstruction)
+                    )
                 );
                 set(
                     inout parent,
-                    wrapping_add(wrapping_mul(v, 3), 2),
-                    get(in adj.succ, wrapping_add(wrapping_mul(k, 3), 2))
+                    wrapping_add(wrapping_mul(v, LINK_WORDS), Link::Instruction),
+                    get(in adj.succ, wrapping_add(wrapping_mul(k, LINK_WORDS), Link::Instruction))
                 );
                 order.push(v);
             }
@@ -340,11 +434,11 @@ fn verify_root(
     }
     for i in 0..order.len() {
         let v = get(in order, i);
-        if fw(in fns, v, 0) == 0 {
-            push(inout out, in parent, root, v, 1, 0, 0);
+        if fw(in fns, v, FnWord::Known) == 0 {
+            push(inout out, in parent, root, v, Rule::UnknownCallee, 0, 0);
         } else {
-            let first = fw(in fns, v, 4);
-            let count = fw(in fns, v, 5);
+            let first = fw(in fns, v, FnWord::FirstEffect);
+            let count = fw(in fns, v, FnWord::EffectCount);
             for j in 0..count {
                 let code = at(in pool, wrapping_add(first, j));
                 let mut earlier = false;
@@ -354,72 +448,80 @@ fn verify_root(
                     }
                 }
                 if !earlier && !is_allowed(in allowed, code) {
-                    push(inout out, in parent, root, v, 0, code, 0);
+                    push(inout out, in parent, root, v, Rule::ForbiddenEffect, code, 0);
                 }
             }
             for k in get(in adj.ustart, v)..get(in adj.ustart, wrapping_add(v, 1)) {
-                push(inout out, in parent, root, v, 2, get(in adj.usites, k), 0);
+                push(
+                    inout out,
+                    in parent,
+                    root,
+                    v,
+                    Rule::UnresolvedIndirectCall,
+                    get(in adj.usites, k),
+                    0
+                );
             }
-            let loops = fw(in fns, v, 2);
-            if loops == 2 && reject_unbounded {
-                push(inout out, in parent, root, v, 3, 0, 0);
-            } else if loops == 1 && has_max {
-                let b = fw(in fns, v, 3);
+            let loops = fw(in fns, v, FnWord::Loops);
+            if loops == Loops::Unbounded && reject_unbounded {
+                push(inout out, in parent, root, v, Rule::UnboundedLoop, 0, 0);
+            } else if loops == Loops::Bounded && has_max {
+                let b = fw(in fns, v, FnWord::Bound);
                 if b > max_loops {
-                    push(inout out, in parent, root, v, 4, b, max_loops);
+                    push(inout out, in parent, root, v, Rule::LoopBound, b, max_loops);
                 }
             }
         }
     }
     // Worst-case stack depth over the reachable subgraph: an iterative DFS
-    // (0 white, 1 grey, 2 black) with checked sums.
-    let mut color = filled(n, 0);
+    // (`Color`) with checked sums.
+    let mut color = filled(n, Color::White);
     let mut depth = filled(n, 0);
     let mut stack: ChunkSeq[u64] = ChunkSeq::new();
     stack.push(root);
     stack.push(0);
-    set(inout color, root, 1);
+    set(inout color, root, Color::Grey);
     loop {
         let top = stack.len();
         if top == 0 {
             break;
         }
-        let u = get(in stack, wrapping_sub(top, 2));
+        let u = get(in stack, wrapping_sub(top, DFS_FRAME_WORDS));
         let next = get(in stack, wrapping_sub(top, 1));
         let lo = get(in adj.start, u);
         let hi = get(in adj.start, wrapping_add(u, 1));
         if wrapping_add(lo, next) < hi {
-            let v = get(in adj.succ, wrapping_mul(wrapping_add(lo, next), 3));
+            let v = get(in adj.succ, wrapping_mul(wrapping_add(lo, next), LINK_WORDS));
             set(inout stack, wrapping_sub(top, 1), wrapping_add(next, 1));
             let c = get(in color, v);
-            if c == 0 {
-                set(inout color, v, 1);
+            if c == Color::White {
+                set(inout color, v, Color::Grey);
                 stack.push(v);
                 stack.push(0);
-            } else if c == 1 {
-                push(inout out, in parent, root, v, 5, 0, 0);
+            } else if c == Color::Grey {
+                push(inout out, in parent, root, v, Rule::Recursion, 0, 0);
                 return;
             }
         } else {
             let mut deepest: u64 = 0;
             for k in lo..hi {
-                let d = get(in depth, get(in adj.succ, wrapping_mul(k, 3)));
+                let d = get(in depth, get(in adj.succ, wrapping_mul(k, LINK_WORDS)));
                 if d > deepest {
                     deepest = d;
                 }
             }
-            let frame = fw(in fns, u, 1);
-            if deepest > wrapping_sub(none(), frame) {
-                push(inout out, in parent, root, root, 7, 0, 0);
+            let frame = fw(in fns, u, FnWord::FrameBytes);
+            if deepest > wrapping_sub(NONE, frame) {
+                push(inout out, in parent, root, root, Rule::StackDepthOverflow, 0, 0);
                 return;
             }
             set(inout depth, u, wrapping_add(frame, deepest));
-            set(inout color, u, 2);
-            stack.truncate(wrapping_sub(top, 2));
+            set(inout color, u, Color::Black);
+            stack.truncate(wrapping_sub(top, DFS_FRAME_WORDS));
         }
     }
     let d = get(in depth, root);
     if has_budget && d > budget {
-        push(inout out, in parent, root, root, 6, d, budget);
+        push(inout out, in parent, root, root, Rule::StackBudget, d, budget);
     }
 }
