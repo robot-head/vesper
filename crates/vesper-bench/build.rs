@@ -39,7 +39,11 @@ const EDITS: &[(&str, &str, &str)] = &[
         "return wrapping_sub(start, end);",
     ),
     // paired_difference.rs: a fractional difference reports out of range.
-    ("paired_difference", "return (1, 0);", "return (2, 0);"),
+    (
+        "paired_difference",
+        "return (Exactness::Fractional, 0);",
+        "return (Exactness::OutOfRange, 0);",
+    ),
     // walsh.rs: odd and even medians swap.
     (
         "walsh",
@@ -55,19 +59,19 @@ const EDITS: &[(&str, &str, &str)] = &[
     // signed_rank_confidence.rs: the inversion tests at 10%, not 5%.
     (
         "signed_rank_confidence",
-        "mul(40, tail) > pow2(n)",
+        "mul(TAIL_LIMIT_SCALE, tail) > pow2(n)",
         "mul(20, tail) > pow2(n)",
     ),
     // hodges_lehmann.rs: the interval's critical rank is the 10% one.
     (
         "hodges_lehmann",
-        "if mul(40, tail) <= total {",
+        "if mul(TAIL_LIMIT_SCALE, tail) <= total {",
         "if mul(20, tail) <= total {",
     ),
     // statistics.rs: the median interval's binomial tail is 2.5%, not 5%.
     (
         "statistics",
-        "w_mul_small(tail, 200)",
+        "w_mul_small(tail, ALPHA_TAIL_DENOMINATOR)",
         "w_mul_small(tail, 100)",
     ),
     // statistics.rs (Mann-Whitney): each tie counts twice.
@@ -81,23 +85,23 @@ const EDITS: &[(&str, &str, &str)] = &[
         "if !w_ult(left, right) {",
     ),
     // wire.rs: 10001 basis points are accepted.
-    ("wire", "if bp > 10000 {", "if bp > 10001 {"),
+    ("wire", "if bp > BP_SCALE {", "if bp > 10001 {"),
     // layout.rs: heap offsets skip the last step.
     (
         "layout",
-        "mul(rem(heap, 256), 16)",
-        "mul(rem(heap, 255), 16)",
+        "mul(rem(heap, HEAP_OFFSET_STEPS), HEAP_OFFSET_STEP)",
+        "mul(rem(heap, 255), HEAP_OFFSET_STEP)",
     ),
     // execution.rs: an epoch's sample counts three windows of operations.
     (
         "execution",
-        "do_paired_sample_new(a, b, cmul(operations, 2))",
+        "do_paired_sample_new(a, b, cmul(operations, WINDOWS_PER_ARM))",
         "do_paired_sample_new(a, b, cmul(operations, 3))",
     ),
     // causal.rs: every predicted speedup is 100% too high.
     (
         "causal",
-        "let mut result = w_sub(w_u64(10000), q);",
+        "let mut result = w_sub(w_u64(BP_SCALE), q);",
         "let mut result = w_sub(w_u64(20000), q);",
     ),
 ];

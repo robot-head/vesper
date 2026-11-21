@@ -126,6 +126,14 @@ pub fn lower_world(world: &World) -> Program {
     program
 }
 
+/// The handle drops of [`lower_world`] inserted into an already lowered
+/// `program`: the native IR swap point's `lower` hook
+/// ([`crate::ir_swap::lower`], SH3 lane 1).
+pub fn insert_drops(world: &World, program: &mut Program) {
+    // A refused drop is reported by `check_module` before any backend runs.
+    let _ = insert(world, program);
+}
+
 /// One inserted drop: the graph, the handle type and its library effect.
 #[derive(Debug)]
 pub(super) struct DropSite {

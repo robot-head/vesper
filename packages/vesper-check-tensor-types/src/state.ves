@@ -1,0 +1,1034 @@
+// The tables of the tensor checker (src/tensor_types/dim.rs and types.rs):
+// interned names, hash-consed dimensions and tensor-view types, the
+// diagnostics, and the display of each as Rust prints it.
+//
+// The census design (docs/parallel-results/self-host-census.md): a
+// dimension and a type are `u32` ids of hash-consed nodes, so `Dim == Dim`
+// and `Ty == Ty` in Rust are id equality here; names are symbols of one
+// `Names` table, compared byte by byte where Rust orders `String`s.
+
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::util::{
+    add,
+    fold,
+    inc,
+    inc32,
+    n32,
+    push_decimal,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+
+// `u32::MAX`: an absent id, or a failed conversion (its text is `St.err`).
+const NONE: u32 = 4294967295;
+// `dim::MAX_DIM` and `dim::MAX_FACTORS`.
+const MAX_DIM: u64 = 1099511627776;
+const MAX_FACTORS: u64 = 16;
+
+// Ty kinds (`types::Ty`).
+const T_TENSOR: u8 = 1;
+const T_LEASE: u8 = 2;
+const T_SEQ: u8 = 3;
+const T_ADT: u8 = 4;
+const T_TUPLE: u8 = 5;
+const T_FN: u8 = 6;
+const T_VAR: u8 = 7;
+const T_BASE: u8 = 8;
+const T_UNKNOWN: u8 = 9;
+
+// `coeff * Π var^exp`: `n` (var, exp) pairs at `ditems[a..]`, sorted by
+// the variable's name bytes (`BTreeMap<String, u32>` order).
+pub copy struct DimN {
+    coeff: u64,
+    a: u32,
+    n: u32
+}
+
+// A `types::Ty`. Tensor: `a` dtype, items = shape dims. Lease and Seq:
+// `a` KvHeads, `c` HeadDim. Adt: `a` name, items = (tag, id) pairs (tag 0
+// Ty, 1 Dim, 2 DType). Tuple: items. Fn: items = parameters, `c` result.
+// Var and Base: `a` name.
+pub copy struct TyN {
+    k: u8,
+    a: u32,
+    c: u32,
+    b: u32,
+    n: u32
+}
+
+pub struct St {
+    names: Names,
+    // AST symbol -> name.
+    amap: ChunkSeq[u32],
+    // Well-known names.
+    s_tensor: u32,
+    s_kv: u32,
+    s_lease: u32,
+    s_seq: u32,
+    s_kverr: u32,
+    s_dims: u32,
+    s_f32: u32,
+    s_bf16: u32,
+    s_bytes: u32,
+    s_pad: u32,
+    s_shape: u32,
+    s_prod: u32,
+    s_option: u32,
+    s_result: u32,
+    s_some: u32,
+    s_ok: u32,
+    s_err: u32,
+    s_wire: u32,
+    s_int: u32,
+    s_f64: u32,
+    s_bool: u32,
+    s_string: u32,
+    s_u64: u32,
+    s_dyn: u32,
+    // Dimensions.
+    dn: ChunkSeq[DimN],
+    ditems: ChunkSeq[u32],
+    dhash: ChunkSeq[u64],
+    dslots: ChunkSeq[u32],
+    dmask: u64,
+    // The last `DimError`: 1 Overflow, 2 Zero, 3 Factors.
+    derr: u8,
+    one: u32,
+    // Types.
+    tn: ChunkSeq[TyN],
+    titems: ChunkSeq[u32],
+    thash: ChunkSeq[u64],
+    tslots: ChunkSeq[u32],
+    tmask: u64,
+    unknown: u32,
+    unit: u32,
+    // The message of the last failed conversion (Rust's `Err(String)`).
+    err: ChunkSeq[u8],
+    // Diagnostics: code number (761 for E0761), span, message bytes.
+    dcode: ChunkSeq[u32],
+    dstart: ChunkSeq[u64],
+    dend: ChunkSeq[u64],
+    dma: ChunkSeq[u64],
+    dmb: ChunkSeq[u64],
+    dtext: ChunkSeq[u8]
+}
+
+pub fn zero_slots(n: u64) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    s.resize(n, 0);
+    s
+}
+
+fn sym(inout n: Names, in s: Str) -> u32 {
+    n.intern(in s.as_bytes())
+}
+
+pub fn st_new() -> St {
+    let mut n = names_new();
+    let mut st = St {
+        s_tensor: sym(inout n, "Tensor"),
+        s_kv: sym(inout n, "KvCachePool"),
+        s_lease: sym(inout n, "KvPageLease"),
+        s_seq: sym(inout n, "ActiveKvSeq"),
+        s_kverr: sym(inout n, "KvOomError"),
+        s_dims: sym(inout n, "Dims"),
+        s_f32: sym(inout n, "F32"),
+        s_bf16: sym(inout n, "Bf16"),
+        s_bytes: sym(inout n, "ByteArray"),
+        s_pad: sym(inout n, "ZeroPad"),
+        s_shape: sym(inout n, "[]"),
+        s_prod: sym(inout n, "*"),
+        s_option: sym(inout n, "Option"),
+        s_result: sym(inout n, "Result"),
+        s_some: sym(inout n, "Some"),
+        s_ok: sym(inout n, "Ok"),
+        s_err: sym(inout n, "Err"),
+        s_wire: sym(inout n, "wire"),
+        s_int: sym(inout n, "int"),
+        s_f64: sym(inout n, "f64"),
+        s_bool: sym(inout n, "bool"),
+        s_string: sym(inout n, "String"),
+        s_u64: sym(inout n, "u64"),
+        s_dyn: sym(inout n, "dyn"),
+        names: n,
+        amap: ChunkSeq::new[u32](),
+        dn: ChunkSeq::new[DimN](),
+        ditems: ChunkSeq::new[u32](),
+        dhash: ChunkSeq::new[u64](),
+        dslots: zero_slots(1024),
+        dmask: 1023,
+        derr: 0,
+        one: 0,
+        tn: ChunkSeq::new[TyN](),
+        titems: ChunkSeq::new[u32](),
+        thash: ChunkSeq::new[u64](),
+        tslots: zero_slots(1024),
+        tmask: 1023,
+        unknown: 0,
+        unit: 0,
+        err: ChunkSeq::new[u8](),
+        dcode: ChunkSeq::new[u32](),
+        dstart: ChunkSeq::new[u64](),
+        dend: ChunkSeq::new[u64](),
+        dma: ChunkSeq::new[u64](),
+        dmb: ChunkSeq::new[u64](),
+        dtext: ChunkSeq::new[u8]()
+    };
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let one = mk_dim(inout st, 1, in none);
+    st.one = one;
+    let u = mk_ty(inout st, T_UNKNOWN, 0, 0, in none);
+    st.unknown = u;
+    let t = mk_ty(inout st, T_TUPLE, 0, 0, in none);
+    st.unit = t;
+    st
+}
+
+// ----- text -------------------------------------------------------------------
+
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+// Clears the error text.
+
+pub fn fail(inout st: St, in s: Str) -> u32 {
+    st.err.clear();
+    put(inout st.err, in s);
+    NONE
+}
+
+// Byte order of two names (`String` order): -1, 0 or 1.
+pub fn cmp_names(in st: St, x: u32, y: u32) -> i64 {
+    if x == y {
+        return 0;
+    }
+    let a = st.names.size(x);
+    let b = st.names.size(y);
+    let mut i: u64 = 0;
+    loop {
+        if i >= a || i >= b {
+            break;
+        }
+        let p = st.names.byte(x, i);
+        let q = st.names.byte(y, i);
+        if p < q {
+            return -1;
+        }
+        if p > q {
+            return 1;
+        }
+        i = inc(i);
+    }
+    if a < b {
+        -1
+    } else if a > b {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn spells(in st: St, s: u32, in t: Str) -> bool {
+    st.names.spells(s, in t.as_bytes())
+}
+
+// Whether the name is a nonempty run of ASCII digits (`is_dim_name`).
+pub fn is_digits(in st: St, s: u32) -> bool {
+    let n = st.names.size(s);
+    if n == 0 {
+        return false;
+    }
+    for i in 0..n {
+        let c = st.names.byte(s, i);
+        if c < 48 || c > 57 {
+            return false;
+        }
+    }
+    true
+}
+
+// Interns bytes `from..` of name `s`.
+pub fn name_suffix(inout st: St, s: u32, from: u64) -> u32 {
+    let mut t = ChunkSeq::new[u8]();
+    let n = st.names.size(s);
+    let mut i = from;
+    loop {
+        if i >= n {
+            break;
+        }
+        t.push(st.names.byte(s, i));
+        i = inc(i);
+    }
+    st.names.intern(in t.as_slice())
+}
+
+// Interns bytes `..to` of name `s`.
+pub fn name_prefix(inout st: St, s: u32, to: u64) -> u32 {
+    let mut t = ChunkSeq::new[u8]();
+    for i in 0..to {
+        t.push(st.names.byte(s, i));
+    }
+    st.names.intern(in t.as_slice())
+}
+
+// The offset of the first `::` in `s`, or the name's size.
+pub fn first_colons(in st: St, s: u32) -> u64 {
+    let n = st.names.size(s);
+    let mut i: u64 = 0;
+    loop {
+        if inc(i) >= n {
+            return n;
+        }
+        if st.names.byte(s, i) == 58 && st.names.byte(s, inc(i)) == 58 {
+            return i;
+        }
+        i = inc(i);
+    }
+}
+
+// `name.rsplit("::").next()`: the text after the last `::`.
+pub fn last_segment(inout st: St, s: u32) -> u32 {
+    let n = st.names.size(s);
+    let mut cut: u64 = 0;
+    let mut found = false;
+    let mut i: u64 = 0;
+    loop {
+        if inc(i) >= n {
+            break;
+        }
+        if st.names.byte(s, i) == 58 && st.names.byte(s, inc(i)) == 58 {
+            cut = wrapping_add(i, 2);
+            found = true;
+        }
+        i = inc(i);
+    }
+    if found {
+        name_suffix(inout st, s, cut)
+    } else {
+        s
+    }
+}
+
+// `name.strip_prefix(prefix)` for a `prefix` ending in `::`: the rest, or
+// NONE.
+pub fn strip_prefix(inout st: St, s: u32, in prefix: Str) -> u32 {
+    if st.names.has_prefix(s, in prefix.as_bytes()) {
+        name_suffix(inout st, s, prefix.len())
+    } else {
+        NONE
+    }
+}
+
+// ----- dimensions (dim.rs) ------------------------------------------------------
+
+pub fn dim_node(in st: St, d: u32) -> DimN {
+    match st.dn.try_get(widen_u64(d)) {
+        Option::Some(x) => x,
+        Option::None => DimN {
+            coeff: 1,
+            a: 0,
+            n: 0
+        },
+    }
+}
+
+pub fn dim_var_at(in st: St, d: u32, i: u64) -> u32 {
+    let x = dim_node(in st, d);
+    u32_at(in st.ditems, wrapping_add(widen_u64(x.a), wrapping_mul(i, 2)))
+}
+
+pub fn dim_exp_at(in st: St, d: u32, i: u64) -> u32 {
+    let x = dim_node(in st, d);
+    u32_at(in st.ditems, wrapping_add(widen_u64(x.a), inc(wrapping_mul(i, 2))))
+}
+
+fn dim_hash(coeff: u64, in items: ChunkSeq[u32]) -> u64 {
+    let mut h = fold(14695981039346656037, coeff);
+    for i in 0..items.len() {
+        h = fold(h, widen_u64(u32_at(in items, i)));
+    }
+    h
+}
+
+fn dim_same(in st: St, id: u32, coeff: u64, in items: ChunkSeq[u32]) -> bool {
+    let x = dim_node(in st, id);
+    if x.coeff != coeff || wrapping_mul(widen_u64(x.n), 2) != items.len() {
+        return false;
+    }
+    for i in 0..items.len() {
+        if u32_at(in st.ditems, wrapping_add(widen_u64(x.a), i)) != u32_at(in items, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn grow_dims(inout st: St) {
+    let cap = wrapping_mul(wrapping_add(st.dmask, 1), 2);
+    let mut slots = zero_slots(cap);
+    let mask = wrapping_sub(cap, 1);
+    for id in 0..st.dhash.len() {
+        let mut at = u64_at(in st.dhash, id) & mask;
+        loop {
+            if u32_at(in slots, at) == 0 {
+                break;
+            }
+            at = inc(at) & mask;
+        }
+        let ok = slots.try_set(at, wrapping_u32(inc(id)));
+    }
+    st.dslots = slots;
+    st.dmask = mask;
+}
+
+// The dimension `coeff * Π items` (items sorted (var, exp) pairs).
+pub fn mk_dim(inout st: St, coeff: u64, in items: ChunkSeq[u32]) -> u32 {
+    let h = dim_hash(coeff, in items);
+    let mut at = h & st.dmask;
+    loop {
+        let slot = u32_at(in st.dslots, at);
+        if slot == 0 {
+            break;
+        }
+        let id = wrapping_sub(slot, 1);
+        if u64_at(in st.dhash, widen_u64(id)) == h && dim_same(in st, id, coeff, in items) {
+            return id;
+        }
+        at = inc(at) & st.dmask;
+    }
+    let id = wrapping_u32(st.dn.len());
+    let a = wrapping_u32(st.ditems.len());
+    st.ditems.extend(in items.as_slice());
+    st
+        .dn
+        .push(
+        DimN {
+            coeff: coeff,
+            a: a,
+            n: wrapping_u32(items.len() >> 1)
+        }
+    );
+    st.dhash.push(h);
+    let ok = st.dslots.try_set(at, inc32(id));
+    if wrapping_mul(st.dhash.len(), 2) > st.dmask {
+        grow_dims(inout st);
+    }
+    id
+}
+
+// `Dim::constant`: NONE with `derr` on zero or overflow.
+pub fn dim_const(inout st: St, n: u64) -> u32 {
+    if n == 0 {
+        st.derr = 2;
+        return NONE;
+    }
+    if n > MAX_DIM {
+        st.derr = 1;
+        return NONE;
+    }
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    mk_dim(inout st, n, in none)
+}
+
+pub fn dim_var(inout st: St, v: u32) -> u32 {
+    let mut items = ChunkSeq::new[u32]();
+    items.push(v);
+    items.push(1);
+    mk_dim(inout st, 1, in items)
+}
+
+// `Dim::as_const`: the constant, or NONE64 (u64::MAX).
+
+// `Dim::as_var`: the variable when the dimension is exactly it, else NONE.
+pub fn dim_as_var(in st: St, d: u32) -> u32 {
+    let x = dim_node(in st, d);
+    if x.coeff == 1 && x.n == 1 && dim_exp_at(in st, d, 0) == 1 {
+        dim_var_at(in st, d, 0)
+    } else {
+        NONE
+    }
+}
+
+// `Dim::mul`: NONE with `derr` on overflow or too many factors.
+pub fn dim_mul(inout st: St, x: u32, y: u32) -> u32 {
+    let a = dim_node(in st, x);
+    let b = dim_node(in st, y);
+    let coeff = match checked_mul_u64(a.coeff, b.coeff) {
+        Option::Some(c) => c,
+        Option::None => {
+            st.derr = 1;
+            return NONE;
+        },
+    };
+    if coeff > MAX_DIM {
+        st.derr = 1;
+        return NONE;
+    }
+    let mut items = ChunkSeq::new[u32]();
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    let an = widen_u64(a.n);
+    let bn = widen_u64(b.n);
+    let mut total: u64 = 0;
+    loop {
+        if i >= an && j >= bn {
+            break;
+        }
+        let mut take: i64 = 0;
+        if i >= an {
+            take = 1;
+        } else if j >= bn {
+            take = -1;
+        } else {
+            take = cmp_names(in st, dim_var_at(in st, x, i), dim_var_at(in st, y, j));
+        }
+        if take < 0 {
+            items.push(dim_var_at(in st, x, i));
+            let e = dim_exp_at(in st, x, i);
+            items.push(e);
+            total = wrapping_add(total, widen_u64(e));
+            i = inc(i);
+        } else if take > 0 {
+            items.push(dim_var_at(in st, y, j));
+            let e = dim_exp_at(in st, y, j);
+            items.push(e);
+            total = wrapping_add(total, widen_u64(e));
+            j = inc(j);
+        } else {
+            items.push(dim_var_at(in st, x, i));
+            let e = wrapping_add(dim_exp_at(in st, x, i), dim_exp_at(in st, y, j));
+            items.push(e);
+            total = wrapping_add(total, widen_u64(e));
+            i = inc(i);
+            j = inc(j);
+        }
+    }
+    if total > MAX_FACTORS {
+        st.derr = 3;
+        return NONE;
+    }
+    mk_dim(inout st, coeff, in items)
+}
+
+// The dimension `d` without variable `v` (its factor removed), keeping the
+// coefficient.
+pub fn dim_without(inout st: St, d: u32, v: u32) -> u32 {
+    let x = dim_node(in st, d);
+    let mut items = ChunkSeq::new[u32]();
+    for i in 0..widen_u64(x.n) {
+        let y = dim_var_at(in st, d, i);
+        if y != v {
+            items.push(y);
+            items.push(dim_exp_at(in st, d, i));
+        }
+    }
+    mk_dim(inout st, x.coeff, in items)
+}
+
+pub fn dim_mentions(in st: St, d: u32, v: u32) -> bool {
+    for i in 0..widen_u64(dim_node(in st, d).n) {
+        if dim_var_at(in st, d, i) == v {
+            return true;
+        }
+    }
+    false
+}
+
+// The exponent of `v` in `d` (0 when absent).
+pub fn dim_exp_of(in st: St, d: u32, v: u32) -> u32 {
+    for i in 0..widen_u64(dim_node(in st, d).n) {
+        if dim_var_at(in st, d, i) == v {
+            return dim_exp_at(in st, d, i);
+        }
+    }
+    0
+}
+
+// `Dim::divides`: `x` divides `y` for every value of the variables.
+pub fn dim_divides(in st: St, x: u32, y: u32) -> bool {
+    let a = dim_node(in st, x);
+    let b = dim_node(in st, y);
+    let ac = a.coeff;
+    if ac == 0 {
+        return b.coeff == 0;
+    }
+    if b.coeff % ac != 0 {
+        return false;
+    }
+    for i in 0..widen_u64(a.n) {
+        let v = dim_var_at(in st, x, i);
+        if dim_exp_of(in st, y, v) < dim_exp_at(in st, x, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// `y / x` when `dim_divides(x, y)`: the solved value of `Subst::solve`.
+pub fn dim_quotient(inout st: St, x: u32, y: u32) -> u32 {
+    let a = dim_node(in st, x);
+    let b = dim_node(in st, y);
+    let mut coeff = b.coeff;
+    let ac = a.coeff;
+    if ac > 0 {
+        coeff = b.coeff / ac;
+    }
+    let mut items = ChunkSeq::new[u32]();
+    for i in 0..widen_u64(b.n) {
+        let v = dim_var_at(in st, y, i);
+        let e = wrapping_sub(dim_exp_at(in st, y, i), dim_exp_of(in st, x, v));
+        if e != 0 {
+            items.push(v);
+            items.push(e);
+        }
+    }
+    mk_dim(inout st, coeff, in items)
+}
+
+// The derived `Ord` of `Dim`: coefficient, then the (var, exp) pairs.
+pub fn cmp_dim(in st: St, x: u32, y: u32) -> i64 {
+    if x == y {
+        return 0;
+    }
+    let a = dim_node(in st, x);
+    let b = dim_node(in st, y);
+    if a.coeff < b.coeff {
+        return -1;
+    }
+    if a.coeff > b.coeff {
+        return 1;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= widen_u64(a.n) || i >= widen_u64(b.n) {
+            break;
+        }
+        let c = cmp_names(in st, dim_var_at(in st, x, i), dim_var_at(in st, y, i));
+        if c != 0 {
+            return c;
+        }
+        let p = dim_exp_at(in st, x, i);
+        let q = dim_exp_at(in st, y, i);
+        if p < q {
+            return -1;
+        }
+        if p > q {
+            return 1;
+        }
+        i = inc(i);
+    }
+    if a.n < b.n {
+        -1
+    } else if a.n > b.n {
+        1
+    } else {
+        0
+    }
+}
+
+// `impl Display for DimError`.
+pub fn put_dim_error(inout o: ChunkSeq[u8], e: u8) {
+    if e == 1 {
+        put(inout o, in "dimension exceeds 1099511627776");
+    } else if e == 2 {
+        put(inout o, in "dimensions must be positive");
+    } else {
+        put(inout o, in "dimension has more than 16 factors");
+    }
+}
+
+// Sets `err` to the last `DimError` and returns NONE.
+pub fn dim_fail(inout st: St) -> u32 {
+    st.err.clear();
+    put_dim_error(inout st.err, st.derr);
+    NONE
+}
+
+// `impl Display for Dim`.
+pub fn put_dim(in st: St, inout o: ChunkSeq[u8], d: u32) {
+    let x = dim_node(in st, d);
+    let mut first = true;
+    if x.coeff != 1 || x.n == 0 {
+        push_decimal(inout o, x.coeff);
+        first = false;
+    }
+    for i in 0..widen_u64(x.n) {
+        let v = dim_var_at(in st, d, i);
+        let e = dim_exp_at(in st, d, i);
+        for k in 0..widen_u64(e) {
+            if !first {
+                put(inout o, in " * ");
+            }
+            st.names.write(v, inout o);
+            first = false;
+        }
+    }
+}
+
+// A shape is a list of dims: `n` ids at `items[a..]`. `display_shape`.
+pub fn put_shape(in st: St, inout o: ChunkSeq[u8], in items: ChunkSeq[u32]) {
+    o.push(91);
+    for i in 0..items.len() {
+        if i > 0 {
+            put(inout o, in ", ");
+        }
+        put_dim(in st, inout o, u32_at(in items, i));
+    }
+    o.push(93);
+}
+
+// ----- dtypes --------------------------------------------------------------------
+// A `DType` is one word: 0 F32, 1 Bf16, 2 + 2 * name a block, 3 + 2 * name a
+// dtype variable.
+
+pub fn put_dtype(in st: St, inout o: ChunkSeq[u8], d: u32) {
+    if d == 0 {
+        put(inout o, in "F32");
+    } else if d == 1 {
+        put(inout o, in "Bf16");
+    } else {
+        st.names.write((wrapping_sub(d, 2) >> 1), inout o);
+    }
+}
+
+// ----- types (types.rs `Ty`) ------------------------------------------------------
+
+pub fn ty_node(in st: St, t: u32) -> TyN {
+    match st.tn.try_get(widen_u64(t)) {
+        Option::Some(x) => x,
+        Option::None => TyN {
+            k: T_UNKNOWN,
+            a: 0,
+            c: 0,
+            b: 0,
+            n: 0
+        },
+    }
+}
+
+// Item `i` of a type (a shape dim, tuple element or parameter; for an Adt
+// the tag of argument `i / 2` or its id).
+pub fn ty_item(in st: St, t: u32, i: u64) -> u32 {
+    let x = ty_node(in st, t);
+    u32_at(in st.titems, wrapping_add(widen_u64(x.b), i))
+}
+
+// The items of a type as a list.
+pub fn ty_items(in st: St, t: u32) -> ChunkSeq[u32] {
+    let x = ty_node(in st, t);
+    let mut out = ChunkSeq::with_capacity[u32](widen_u64(x.n));
+    let mut m = widen_u64(x.n);
+    if x.k == T_ADT {
+        m = wrapping_mul(m, 2);
+    }
+    for i in 0..m {
+        out.push(u32_at(in st.titems, wrapping_add(widen_u64(x.b), i)));
+    }
+    out
+}
+
+fn ty_hash(k: u8, a: u32, c: u32, in items: ChunkSeq[u32]) -> u64 {
+    let mut h = fold(14695981039346656037, widen_u64(k));
+    h = fold(h, widen_u64(a));
+    h = fold(h, widen_u64(c));
+    for i in 0..items.len() {
+        h = fold(h, widen_u64(u32_at(in items, i)));
+    }
+    h
+}
+
+fn ty_same(in st: St, id: u32, k: u8, a: u32, c: u32, in items: ChunkSeq[u32]) -> bool {
+    let x = ty_node(in st, id);
+    let mut m = widen_u64(x.n);
+    if x.k == T_ADT {
+        m = wrapping_mul(m, 2);
+    }
+    if x.k != k || x.a != a || x.c != c || m != items.len() {
+        return false;
+    }
+    for i in 0..items.len() {
+        if u32_at(in st.titems, wrapping_add(widen_u64(x.b), i)) != u32_at(in items, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn grow_tys(inout st: St) {
+    let cap = wrapping_mul(wrapping_add(st.tmask, 1), 2);
+    let mut slots = zero_slots(cap);
+    let mask = wrapping_sub(cap, 1);
+    for id in 0..st.thash.len() {
+        let mut at = u64_at(in st.thash, id) & mask;
+        loop {
+            if u32_at(in slots, at) == 0 {
+                break;
+            }
+            at = inc(at) & mask;
+        }
+        let ok = slots.try_set(at, wrapping_u32(inc(id)));
+    }
+    st.tslots = slots;
+    st.tmask = mask;
+}
+
+// The type with these parts (hash-consed). For an Adt `items` holds
+// (tag, id) pairs.
+pub fn mk_ty(inout st: St, k: u8, a: u32, c: u32, in items: ChunkSeq[u32]) -> u32 {
+    let h = ty_hash(k, a, c, in items);
+    let mut at = h & st.tmask;
+    loop {
+        let slot = u32_at(in st.tslots, at);
+        if slot == 0 {
+            break;
+        }
+        let id = wrapping_sub(slot, 1);
+        if u64_at(in st.thash, widen_u64(id)) == h && ty_same(in st, id, k, a, c, in items) {
+            return id;
+        }
+        at = inc(at) & st.tmask;
+    }
+    let id = wrapping_u32(st.tn.len());
+    let b = wrapping_u32(st.titems.len());
+    st.titems.extend(in items.as_slice());
+    let mut n = items.len();
+    if k == T_ADT {
+        n = n >> 1;
+    }
+    st
+        .tn
+        .push(
+        TyN {
+            k: k,
+            a: a,
+            c: c,
+            b: b,
+            n: wrapping_u32(n)
+        }
+    );
+    st.thash.push(h);
+    let ok = st.tslots.try_set(at, inc32(id));
+    if wrapping_mul(st.thash.len(), 2) > st.tmask {
+        grow_tys(inout st);
+    }
+    id
+}
+
+pub fn ty_named(inout st: St, k: u8, name: u32) -> u32 {
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    mk_ty(inout st, k, name, 0, in none)
+}
+
+pub fn ty_pair(inout st: St, k: u8, kv: u32, hd: u32) -> u32 {
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    mk_ty(inout st, k, kv, hd, in none)
+}
+
+// `Ty::has_tensor`.
+pub fn has_tensor(in st: St, t: u32) -> bool {
+    let x = ty_node(in st, t);
+    if x.k == T_TENSOR || x.k == T_LEASE || x.k == T_SEQ {
+        return true;
+    }
+    if x.k == T_ADT {
+        for i in 0..widen_u64(x.n) {
+            let tag = ty_item(in st, t, wrapping_mul(i, 2));
+            if tag != 0 {
+                return true;
+            }
+            if has_tensor(in st, ty_item(in st, t, inc(wrapping_mul(i, 2)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if x.k == T_TUPLE || x.k == T_FN {
+        for i in 0..widen_u64(x.n) {
+            if has_tensor(in st, ty_item(in st, t, i)) {
+                return true;
+            }
+        }
+        if x.k == T_FN {
+            return has_tensor(in st, x.c);
+        }
+    }
+    false
+}
+
+// `impl Display for Ty`.
+pub fn put_ty(in st: St, inout o: ChunkSeq[u8], t: u32) {
+    let x = ty_node(in st, t);
+    if x.k == T_TENSOR {
+        put(inout o, in "Tensor[");
+        put_dtype(in st, inout o, x.a);
+        put(inout o, in ", ");
+        o.push(91);
+        for i in 0..widen_u64(x.n) {
+            if i > 0 {
+                put(inout o, in ", ");
+            }
+            put_dim(in st, inout o, ty_item(in st, t, i));
+        }
+        put(inout o, in "]]");
+    } else if x.k == T_LEASE || x.k == T_SEQ {
+        if x.k == T_LEASE {
+            put(inout o, in "KvPageLease[");
+        } else {
+            put(inout o, in "ActiveKvSeq[");
+        }
+        put_dim(in st, inout o, x.a);
+        put(inout o, in ", ");
+        put_dim(in st, inout o, x.c);
+        o.push(93);
+    } else if x.k == T_ADT {
+        st.names.write(x.a, inout o);
+        if x.n > 0 {
+            o.push(91);
+            for i in 0..widen_u64(x.n) {
+                if i > 0 {
+                    put(inout o, in ", ");
+                }
+                let tag = ty_item(in st, t, wrapping_mul(i, 2));
+                let id = ty_item(in st, t, inc(wrapping_mul(i, 2)));
+                if tag == 0 {
+                    put_ty(in st, inout o, id);
+                } else if tag == 1 {
+                    put_dim(in st, inout o, id);
+                } else {
+                    put_dtype(in st, inout o, id);
+                }
+            }
+            o.push(93);
+        }
+    } else if x.k == T_TUPLE {
+        o.push(40);
+        for i in 0..widen_u64(x.n) {
+            if i > 0 {
+                put(inout o, in ", ");
+            }
+            put_ty(in st, inout o, ty_item(in st, t, i));
+        }
+        o.push(41);
+    } else if x.k == T_FN {
+        put(inout o, in "fn(");
+        for i in 0..widen_u64(x.n) {
+            if i > 0 {
+                put(inout o, in ", ");
+            }
+            put_ty(in st, inout o, ty_item(in st, t, i));
+        }
+        put(inout o, in ") -> ");
+        put_ty(in st, inout o, x.c);
+    } else if x.k == T_VAR || x.k == T_BASE {
+        st.names.write(x.a, inout o);
+    } else {
+        o.push(95);
+    }
+}
+
+// ----- diagnostics ------------------------------------------------------------------
+
+// Pushes a diagnostic whose message is `m`.
+pub fn diag(inout st: St, code: u32, start: u64, end: u64, in m: ChunkSeq[u8]) {
+    st.dcode.push(code);
+    st.dstart.push(start);
+    st.dend.push(end);
+    st.dma.push(st.dtext.len());
+    st.dtext.extend(in m.as_slice());
+    st.dmb.push(st.dtext.len());
+}
+
+pub fn diag_s(inout st: St, code: u32, start: u64, end: u64, in m: Str) {
+    let mut t = ChunkSeq::new[u8]();
+    put(inout t, in m);
+    diag(inout st, code, start, end, in t);
+}
+
+// Whether diagnostics `i` and `j` have the same code, span and message.
+pub fn diag_same(in st: St, i: u64, j: u64) -> bool {
+    if u32_at(in st.dcode, i)
+        != u32_at(in st.dcode, j)
+        || u64_at(in st.dstart, i)
+        != u64_at(in st.dstart, j)
+        || u64_at(in st.dend, i)
+        != u64_at(in st.dend, j) {
+        return false;
+    }
+    let a = u64_at(in st.dma, i);
+    let b = u64_at(in st.dmb, i);
+    let c = u64_at(in st.dma, j);
+    let d = u64_at(in st.dmb, j);
+    if wrapping_sub(b, a) != wrapping_sub(d, c) {
+        return false;
+    }
+    for k in 0..wrapping_sub(b, a) {
+        if u8_at(in st.dtext, wrapping_add(a, k)) != u8_at(in st.dtext, wrapping_add(c, k)) {
+            return false;
+        }
+    }
+    true
+}
+
+// Truncates the diagnostics to the first `n`.
+pub fn diag_truncate(inout st: St, n: u64) {
+    st.dcode.truncate(n);
+    st.dstart.truncate(n);
+    st.dend.truncate(n);
+    let t = u64_at(in st.dma, n);
+    if n < st.dma.len() {
+        st.dtext.truncate(t);
+    }
+    st.dma.truncate(n);
+    st.dmb.truncate(n);
+}
+
+// Whether `err` contains `s` (`str::contains`).
+pub fn err_contains(in st: St, in s: Str) -> bool {
+    let b = s.as_bytes();
+    let n = st.err.len();
+    let m = b.len();
+    if m > n {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if wrapping_add(i, m) > n {
+            break;
+        }
+        let mut ok = true;
+        for k in 0..m {
+            let c = match b.try_get(k) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if u8_at(in st.err, wrapping_add(i, k)) != c {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            return true;
+        }
+        i = inc(i);
+    }
+    false
+}
+
+// `types::error_code` of `err`: 762 for dimension range and rank errors,
+// else 761.
+pub fn err_code(in st: St) -> u32 {
+    if err_contains(in st, in "dimension exceeds 1099511627776")
+        || err_contains(in st, in "dimensions must be positive")
+        || err_contains(in st, in "dimension has more than 16 factors")
+        || err_contains(in st, in "exceeds the supported rank") {
+        762
+    } else {
+        761
+    }
+}

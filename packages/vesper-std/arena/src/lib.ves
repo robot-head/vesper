@@ -88,6 +88,10 @@ pub fn arena_with_capacity[T: mod affine](n: u64) -> Arena[T] {
     }
 }
 
+fn at_capacity(len: u64) -> bool {
+    len >= 4294967295
+}
+
 impl [T: mod affine] Arena[T] {
     // The number of values allocated.
     pub fn len(in self) -> u64 {
@@ -102,7 +106,7 @@ impl [T: mod affine] Arena[T] {
     // and `v` is dropped).
     pub fn alloc(inout self, sink v: T) -> Idx[T] {
         let n = self.items.len();
-        if n >= 4294967295 {
+        if at_capacity(n) {
             Idx {
                 raw: 4294967295
             }
@@ -117,7 +121,7 @@ impl [T: mod affine] Arena[T] {
     // The index the next `alloc` returns.
     pub fn next_idx(in self) -> Idx[T] {
         let n = self.items.len();
-        if n >= 4294967295 {
+        if at_capacity(n) {
             Idx {
                 raw: 4294967295
             }
@@ -289,6 +293,13 @@ impl [K, V: mod copy] IdxMap[K, V] {
 }
 
 test {
+    // @case last_usable(4294967294, false)
+    // @case reserved(4294967295, true)
+    // @case beyond_index_range(4294967296, true)
+    fn test_capacity_boundary(len: u64, expected: bool) -> bool {
+        at_capacity(len) == expected
+    }
+
     // @case first(0, false)
     // @case largest_usable(4294967294, false)
     // @case reserved(4294967295, true)
@@ -403,6 +414,7 @@ test {
 
     // @case first(0, true, 2)
     // @case existing(1, true, 2)
+    // @case append(2, true, 3)
     // @case sparse(12, true, 13)
     // @case reserved(4294967295, false, 2)
     fn test_index_map(raw: u32, expected_write: bool, length: u64) -> bool {
@@ -435,7 +447,7 @@ test {
             .get(first)
             == contents
             && map
-            .get(idx_from_raw[u32](2))
+            .get(idx_from_raw[u32](3))
             == 99
     }
 }

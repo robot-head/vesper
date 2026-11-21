@@ -1,0 +1,50 @@
+// @vesper/check-effects: the capability effect rules of
+// src/capability_effects.rs (`ConstTime`, `Realtime`, `DetFloat`,
+// `ConstDenorm`, `RtBus` and the secret discipline) in Vesper, on the
+// checker data of @vesper/check-data (self-hosting wave SH2 lane 8, #1180).
+// Rust stays the default checker; tests/self_host_check_effects.rs runs
+// this module against `capability_effects::check_world` over the corpus,
+// the checker fixtures and capability mutants.
+//
+// - prog.ves: the program the rules walk (functions with bodies, effect
+//   declarations, call instantiations), decoded from the task words.
+// - keys.ves: sorted key sets, the interprocedural facts.
+// - walker.ves: `Walker`, one walk of a function body.
+// - check.ves: `check_world`: summaries, both walks, realtime recursion and
+//   the diagnostics in source order.
+
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/check-data::{
+    pack_text
+};
+use self::prog::{
+    read_prog
+};
+use self::walker::{
+    syms_new,
+    walk_new
+};
+use self::check::{
+    check_world,
+    write_text
+};
+
+// Task "check_effects": the input is the harness world followed by the
+// task words of `encode_task`; the result is one text line per diagnostic.
+pub fn check_effects(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_prog(inout r, in b, in c);
+    let k = syms_new(inout c);
+    let mut s = walk_new(k);
+    let rows = check_world(inout c, in p, inout s);
+    let mut o = ChunkSeq::new[u8]();
+    write_text(in s, in rows, inout o);
+    pack_text(in o)
+}

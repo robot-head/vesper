@@ -29,6 +29,9 @@ divergent = []
 # The same check for the parse module (#1155): every AST flag reads back
 # inverted.
 divergent-parse = []
+# The same check for the IR check module (#1177): every program gets one
+# made-up IR-check diagnostic.
+divergent-ir-check = []
 
 [dependencies]
 vesper = { path = "../.." }

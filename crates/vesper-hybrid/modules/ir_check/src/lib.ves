@@ -1,0 +1,40 @@
+// @vesper/hybrid-ir-check: `vesper::ir_check::validate` served from Vesper
+// in the hybrid Stage 2 build (self-hosting SH2 lane 5, #1177).
+//
+// `validate_words` takes one call's input as little-endian words (names,
+// types, the world, then the lowered program; written by `ir_input` in
+// tests/common/check_words.rs) and returns the kept diagnostics as words
+// (`ir_check_words` of @vesper/ir-check), which `decode_diagnostics` reads
+// back into Rust `Diagnostic`s.
+
+// @export abi 4
+
+use @vesper/ir-check::{
+    ir_check_words
+};
+
+// The layout version of `validate_words`; tests/check_words.rs checks it.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn validate_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    ir_check_words(in input)
+}
+
+// The divergent build's stream (build.rs `divergent-ir-check`): one made-up
+// E0410 "divergent" at 0..0 for every program, so every checked file fails.
+fn divergent_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(1);
+    o.push(5);
+    o.push(206983934021);
+    o.push(9);
+    o.push(7954878057846040932);
+    o.push(116);
+    o.push(0);
+    o.push(0);
+    o.push(0);
+    o.push(0);
+    o
+}

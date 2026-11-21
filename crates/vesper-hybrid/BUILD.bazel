@@ -10,6 +10,14 @@ vesper_hybrid(
             "edit_src": "modules/layout/src/lib.ves",
             "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
         },
+        "hybrid_check_layout": {
+            "edit_src": "modules/check_layout/src/lib.ves",
+            "edits": {"    layout_words(in input)\n": "    layout_words(in input[0..0])\n"},
+        },
+        "hybrid_ir_check": {
+            "edit_src": "modules/ir_check/src/lib.ves",
+            "edits": {"    ir_check_words(in input)\n": "    divergent_words(in input)\n"},
+        },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
             "edits": {"    if b {\n        1\n    } else {\n        0\n    }": "    if b {\n        0\n    } else {\n        1\n    }"},
@@ -28,6 +36,15 @@ vesper_hybrid(
     ],
     # The parse module (#1155) builds on the front end v2 and the AST.
     module_deps = {
+        # The checker swaps (#1177) build on @vesper/check-data.
+        "hybrid_check_layout": [
+            "//:check_data_package",
+            "//:check_layout_package",
+        ],
+        "hybrid_ir_check": [
+            "//:check_data_package",
+            "//:ir_check_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -35,6 +52,8 @@ vesper_hybrid(
         ],
     },
     modules = {
+        "hybrid_check_layout": "modules/check_layout",
+        "hybrid_ir_check": "modules/ir_check",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
     },

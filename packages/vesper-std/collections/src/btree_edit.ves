@@ -319,6 +319,81 @@ impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
 test {
     use self::btree::btree_new;
 
+    fn test_reinsert_key_into_emptied_leaf() -> bool {
+        let mut tree = btree_new[u64, u64]();
+        tree.insert(7, 11);
+        if tree.remove(7) != Option::Some(11) || tree.insert(7, 21) != Option::None {
+            return false;
+        }
+        tree.len() == 1 && tree.get(7) == Option::Some(21)
+    }
+
+    fn test_split_keeps_leaf_links_in_both_directions() -> bool {
+        let mut tree = btree_new[u64, u64]();
+        let mut key: u64 = 48;
+        loop {
+            if key == 0 {
+                break;
+            }
+            key = wrapping_sub(key, 1);
+            let value = key;
+            tree.insert(key, value);
+        }
+        if tree
+            .lcount
+            .len()
+            < 3
+            || tree
+            .lkeys
+            .len()
+            != wrapping_mul(tree.lcount.len(), 16)
+            || tree
+            .ikeys
+            .len()
+            != wrapping_mul(tree.icount.len(), 16)
+            || tree
+            .ikids
+            .len()
+            != wrapping_mul(tree.icount.len(), 17) {
+            return false;
+        }
+        let mut leaf = tree.cursor_first().leaf;
+        let mut prev = none_id();
+        let n = tree.lcount.len();
+        for i in 0..n {
+            if leaf == none_id() || tree.leaf_prev(leaf) != prev {
+                return false;
+            }
+            prev = leaf;
+            leaf = tree.leaf_next(leaf);
+        }
+        leaf == none_id()
+    }
+
+    fn test_write_full_internal_node_preserves_next_row() -> bool {
+        let mut tree = btree_new[u64, u64]();
+        let left = tree.new_internal(42);
+        let right = tree.new_internal(99);
+        for i in 0..16 {
+            tree.split_keys.push(i);
+            tree.split_kids.push(i);
+        }
+        tree.split_kids.push(16);
+        tree.write_internal(left, 0, 16, 42, 0);
+        let right_base = wrapping_mul(right, 16);
+        tree
+            .ikeys
+            .try_get(right_base)
+            == Option::Some(99)
+            && tree
+            .ikeys
+            .try_get(15)
+            == Option::Some(15)
+            && tree
+            .kid(left, 16)
+            == 16
+    }
+
     // @case empty(0)
     // @case single(1)
     // @case full_leaf(16)

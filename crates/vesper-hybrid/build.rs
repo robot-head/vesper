@@ -14,6 +14,13 @@ use vesper_port_harness::{GENERATED_BINDING_ENV, OBJECT_ENV, Port};
 const MODULES: &[(&str, &str, &str)] = &[
     ("hybrid_layout", "modules/layout", "port/layout.rs"),
     ("hybrid_parse", "modules/parse", "port/parse.rs"),
+    // SH2 lane 5 (#1177): the whole layout and the IR check.
+    (
+        "hybrid_check_layout",
+        "modules/check_layout",
+        "port/check_layout.rs",
+    ),
+    ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
 ];
 
 /// The divergence check of the differential harness: the enum tag word
@@ -22,6 +29,23 @@ const MODULES: &[(&str, &str, &str)] = &[
 const DIVERGENT_EDIT: (&str, &str) = (
     "        8\n    } else {\n        0\n",
     "        16\n    } else {\n        0\n",
+);
+
+/// With the whole layout swapped (#1177) the pilot's word arithmetic runs
+/// only under the Rust fallback, so the `divergent` build also lays out
+/// every type from an empty input: the wrong type, with no ADTs.
+#[cfg(feature = "divergent")]
+const DIVERGENT_CHECK_LAYOUT_EDIT: (&str, &str) = (
+    "    layout_words(in input)\n",
+    "    layout_words(in input[0..0])\n",
+);
+
+/// The IR check's divergence check: every program gets one made-up E0410
+/// (`divergent_words` in modules/ir_check), so every checked file fails.
+#[cfg(feature = "divergent-ir-check")]
+const DIVERGENT_IR_CHECK_EDIT: (&str, &str) = (
+    "    ir_check_words(in input)\n",
+    "    divergent_words(in input)\n",
 );
 
 /// The parse module's divergence check: every AST flag (`let mut`, `pub`,
@@ -56,6 +80,18 @@ fn main() {
         #[cfg(feature = "divergent")]
         let port = if *library == "hybrid_layout" {
             port.edit(DIVERGENT_EDIT.0, DIVERGENT_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent")]
+        let port = if *library == "hybrid_check_layout" {
+            port.edit(DIVERGENT_CHECK_LAYOUT_EDIT.0, DIVERGENT_CHECK_LAYOUT_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-ir-check")]
+        let port = if *library == "hybrid_ir_check" {
+            port.edit(DIVERGENT_IR_CHECK_EDIT.0, DIVERGENT_IR_CHECK_EDIT.1)
         } else {
             port
         };

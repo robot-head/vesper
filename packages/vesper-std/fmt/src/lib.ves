@@ -254,6 +254,15 @@ pub fn fnv1a64(in s: Slice[u8]) -> u64 {
 }
 
 test {
+    // @case empty(in "", 0)
+    // @case empty_suffix(in "prefix", 6)
+    fn test_reverse_empty_tail(in text: Str, from: u64) -> bool {
+        let mut bytes = ChunkSeq::new[u8]();
+        bytes.extend(in text.as_bytes());
+        reverse_tail(inout bytes, from);
+        bytes_equal(in bytes.as_slice(), in text.as_bytes())
+    }
+
     fn bytes_equal(in a: Slice[u8], in b: Slice[u8]) -> bool {
         if a.len() != b.len() {
             return false;
@@ -355,6 +364,8 @@ test {
     // @case digit_equals_radix(in "2", 2, Result::Err(ParseIntError::InvalidDigit))
     // @case letter_equals_radix(in "G", 16, Result::Err(ParseIntError::InvalidDigit))
     // @case no_prefix(in "0xff", 16, Result::Err(ParseIntError::InvalidDigit))
+    // @case colon_is_not_a_digit(in "1:0", 10, Result::Err(ParseIntError::InvalidDigit))
+    // @case at_is_not_a_digit(in "@", 36, Result::Err(ParseIntError::InvalidDigit))
     fn test_parse_radix(in input: Str, radix: u64, expected: Result[u64, ParseIntError]) -> bool {
         unsigned_matches(parse_u64_radix(in input.as_bytes(), radix), expected)
     }

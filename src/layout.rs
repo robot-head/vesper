@@ -29,7 +29,17 @@ pub struct LayoutVariant {
     pub fields: Vec<LayoutField>,
 }
 impl Layout {
+    /// The layout of `ty`: [`rust_layout_of`], or the installed
+    /// [`LayoutTable`] (the hybrid build's Vesper layout).
     pub fn of(world: &World, ty: &Type) -> Result<Self, String> {
+        match LAYOUT_TABLE.get() {
+            // While a `.vsys` handle drop plan runs, `Box` detection reads
+            // thread-local state the Vesper layout does not see.
+            Some(table) if !crate::fip::handle_drops_active() => (table.of)(world, ty),
+            _ => rust_layout_of(world, ty),
+        }
+    }
+    fn rust_of(world: &World, ty: &Type) -> Result<Self, String> {
         Self::build(
             world,
             &crate::numeric::default_type(ty),
@@ -274,6 +284,34 @@ pub const RUST_WORD_LAYOUT: WordLayout = WordLayout {
 };
 
 static WORD_LAYOUT: std::sync::OnceLock<WordLayout> = std::sync::OnceLock::new();
+
+/// [`Layout::of`] as a function table: the swap-in point for the whole
+/// layout in the hybrid Stage 2 build (self-hosting SH2 lane 5, #1177),
+/// which installs `@vesper/check-layout` here. Nothing in the default
+/// compiler installs one, so it always runs [`rust_layout_of`]. An installed
+/// `of` must return exactly what [`rust_layout_of`] returns (the hybrid's
+/// tests check it).
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutTable {
+    /// [`Layout::of`].
+    pub of: fn(&World, &Type) -> Result<Layout, String>,
+}
+
+/// The Rust layout, the default [`LayoutTable`].
+pub const RUST_LAYOUT: LayoutTable = LayoutTable { of: rust_layout_of };
+
+static LAYOUT_TABLE: std::sync::OnceLock<LayoutTable> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_LAYOUT`] for the rest of the process. Only the first call
+/// takes effect; a later one returns its table back.
+pub fn install_layout(table: LayoutTable) -> Result<(), LayoutTable> {
+    LAYOUT_TABLE.set(table)
+}
+
+/// [`Layout::of`] by the Rust layout, whatever table is installed.
+pub fn rust_layout_of(world: &World, ty: &Type) -> Result<Layout, String> {
+    Layout::rust_of(world, ty)
+}
 
 /// Replace [`RUST_WORD_LAYOUT`] for the rest of the process. Only the first
 /// call takes effect; a later one returns its table back.

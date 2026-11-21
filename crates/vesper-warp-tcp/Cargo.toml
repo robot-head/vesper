@@ -2,6 +2,7 @@
 name = "vesper-warp-tcp"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Sans-IO RFC 9293 TCP endpoint for Vesper Warp (section 35): wire format, state machine, SACK loss recovery and a deterministic lossy test harness"
 publish = false
 build = "build.rs"

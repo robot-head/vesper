@@ -2,6 +2,7 @@
 name = "h3-interop"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 publish = false
 
 # Not a member of the Vesper workspace: its quinn/h3/tokio dependencies stay

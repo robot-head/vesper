@@ -1,0 +1,931 @@
+// @vesper/check-layout: `src/layout.rs` (`Layout::of`, `aggregate`,
+// `field`, `variant`) over the @vesper/check-data tables (self-hosting SH2
+// lane 5, #1177). The census translation (SH1 lane 15, #1130) promoted to a
+// package; it matched Rust on every corpus type at 0.34x of its time.
+//
+// A Rust `Layout` owns a deep copy of each field's layout (`layout:
+// Box<Layout>`, cloned once more into its parent); here layouts live in one
+// arena and a field names its layout's id.
+//
+// - `layout_of`: `Layout::of`, a layout id or NONE32 with the message.
+// - `put_layout_words`: one layout as the word stream the hybrid build
+//   reads back into a Rust `Layout` (tests/common/check_words.rs).
+// - `check_layout_text` / `check_layout_words`: the harness entries
+//   (tests/hybrid_layout.rs).
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    add,
+    fold,
+    inc,
+    n32,
+    push_decimal,
+    push_signed,
+    u32_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    default_type,
+    display,
+    substitute
+};
+use @vesper/check-data::world::{
+    Known,
+    World,
+    vector_words
+};
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+
+// Constants cannot be imported across modules yet (check-data gap 1); these
+// copies equal check-data's.
+const NONE32: u32 = 4294967295;
+const NO_ADT: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+
+pub const L_SCALAR: u8 = 0;
+pub const L_PRODUCT: u8 = 1;
+pub const L_ENUM: u8 = 2;
+
+pub copy struct LNode {
+    ty: u32,
+    size: u32,
+    kind: u8,
+    // product: fields[a..a+n]; enum: variants[a..a+n]
+    a: u32,
+    n: u32,
+}
+
+pub copy struct LField {
+    name: u32,
+    ty: u32,
+    offset: i32,
+    layout: u32,
+}
+
+pub copy struct LVariant {
+    name: u32,
+    fa: u32,
+    fc: u32,
+}
+
+pub struct Layouts {
+    nodes: ChunkSeq[LNode],
+    fields: ChunkSeq[LField],
+    variants: ChunkSeq[LVariant],
+    // The message of the last failed build (Rust: `Err(String)`).
+    err: ChunkSeq[u8],
+    seen: ChunkSeq[u32],
+    // Tuple field names "0", "1", ... interned on first use.
+    digits: ChunkSeq[u32],
+}
+
+pub fn layouts_new() -> Layouts {
+    Layouts {
+        nodes: ChunkSeq::new[LNode](),
+        fields: ChunkSeq::new[LField](),
+        variants: ChunkSeq::new[LVariant](),
+        err: ChunkSeq::new[u8](),
+        seen: ChunkSeq::new[u32](),
+        digits: ChunkSeq::new[u32](),
+    }
+}
+
+// A layout table position, to drop everything built after it.
+pub copy struct LMark {
+    nodes: u64,
+    fields: u64,
+    variants: u64,
+}
+
+impl Layouts {
+    pub fn node(in self, l: u32) -> LNode {
+        match self.nodes.try_get(w(l)) {
+            Option::Some(n) => n,
+            Option::None => LNode {
+                ty: 0,
+                size: 0,
+                kind: 0,
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    pub fn lfield(in self, i: u64) -> LField {
+        match self.fields.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => LField {
+                name: 0,
+                ty: 0,
+                offset: 0,
+                layout: 0
+            },
+        }
+    }
+
+    pub fn lvariant(in self, i: u64) -> LVariant {
+        match self.variants.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => LVariant {
+                name: 0,
+                fa: 0,
+                fc: 0
+            },
+        }
+    }
+
+    pub fn mark(in self) -> LMark {
+        LMark {
+            nodes: self.nodes.len(),
+            fields: self.fields.len(),
+            variants: self.variants.len()
+        }
+    }
+
+    pub fn reset(inout self, m: LMark) {
+        self.nodes.truncate(m.nodes);
+        self.fields.truncate(m.fields);
+        self.variants.truncate(m.variants);
+    }
+
+    // `Layout::aggregate`.
+    pub fn aggregate(in self, l: u32) -> bool {
+        self.node(l).kind != L_SCALAR
+    }
+
+    // `Layout::field(name)`: the field index, or NONE32.
+    pub fn field_named(in self, l: u32, name: u32) -> u32 {
+        let n = self.node(l);
+        if n.kind != L_PRODUCT {
+            return NONE32;
+        }
+        for i in 0..w(n.n) {
+            if self.lfield(add(w(n.a), i)).name == name {
+                return n32(add(w(n.a), i));
+            }
+        }
+        NONE32
+    }
+
+    fn scalar(inout self, ty: u32) -> u32 {
+        let id = n32(self.nodes.len());
+        self
+            .nodes
+            .push(
+            LNode {
+                ty: ty,
+                size: 8,
+                kind: L_SCALAR,
+                a: 0,
+                n: 0
+            }
+        );
+        id
+    }
+
+    fn product(inout self, ty: u32, size: u32, in fs: ChunkSeq[LField]) -> u32 {
+        let a = n32(self.fields.len());
+        for i in 0..fs.len() {
+            match fs.try_get(i) {
+                Option::Some(f) => self.fields.push(f),
+                Option::None => {}
+            }
+        }
+        let id = n32(self.nodes.len());
+        self
+            .nodes
+            .push(
+            LNode {
+                ty: ty,
+                size: size,
+                kind: L_PRODUCT,
+                a: a,
+                n: n32(fs.len())
+            }
+        );
+        id
+    }
+
+    fn fail(inout self, in t: Types, in names: Names, in a: Str, ty: u32, in b: Str) -> u32 {
+        self.err.clear();
+        self.err.extend(in a.as_bytes());
+        if ty != NONE32 {
+            display(in t, in names, ty, inout self.err);
+        }
+        self.err.extend(in b.as_bytes());
+        NONE32
+    }
+
+    fn digit_name(inout self, inout names: Names, i: u64) -> u32 {
+        loop {
+            if self.digits.len() > i {
+                break;
+            }
+            let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            push_decimal(inout text, self.digits.len());
+            let s = names.intern(in text.as_slice());
+            self.digits.push(s);
+        }
+        u32_at(in self.digits, i)
+    }
+}
+
+// The word arithmetic of `RUST_WORD_LAYOUT` (`crates/vesper-hybrid` pilot).
+// `next_offset` returns false when the sum does not fit an i32.
+fn next_offset(offset: i32, size: u32) -> i64 {
+    wrapping_add(widen_i64(offset), widen_i64(wrapping_i32(size)))
+}
+
+fn fits_i32(x: i64) -> bool {
+    x <= 2147483647 && x >= -2147483648
+}
+
+fn max_u32(a: u32, b: u32) -> u32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// `Layout::of`: the layout id, or NONE32 with the message in `ls.err`.
+pub fn layout_of(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty: u32)
+    -> u32 {
+    let d = default_type(inout t, ty);
+    ls.seen.clear();
+    build(inout ls, inout t, inout names, in wd, d, 0)
+}
+
+fn word_tuple(inout t: Types, k: Known, n: u64) -> u32 {
+    let word = t.named0(k.u64_);
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..n {
+        args.push(word);
+    }
+    t.tuple(in args)
+}
+
+fn retag(inout ls: Layouts, l: u32, ty: u32) -> u32 {
+    let n = ls.node(l);
+    let ok = ls
+        .nodes
+        .try_set(
+        w(l),
+        LNode {
+            ty: ty,
+            size: n.size,
+            kind: n.kind,
+            a: n.a,
+            n: n.n
+        }
+    );
+    l
+}
+
+fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty: u32, depth: u64)
+    -> u32 {
+    let k = wd.k;
+    if depth > 128 {
+        return ls
+            .fail(
+            in t,
+            in names,
+            "value layout exceeds 128 levels; use an owning indirection for recursive data",
+            NONE32,
+            ""
+        );
+    }
+    let n = t.node(ty);
+    let name = if n.kind == K_NAMED {
+        n.name
+    } else {
+        0
+    };
+    let scalar = n
+        .kind
+        == K_LIT
+        || n
+        .kind
+        == K_FN
+        || (n.kind == K_NAMED && k.is_scalar(name))
+        || (n.kind == K_NAMED && (name == k.region_box || name == k.watermark))
+        || (name == k.tiled_seq && (n.n == 1 || n.n == 2))
+        || (name == k.chunk_seq && n.n == 1)
+        || (wd.box_active && name == k.box_ && n.n == 1)
+        || ty
+        == t
+        .unit;
+    if scalar {
+        return ls.scalar(ty);
+    }
+    // A trait object is the pair `{data, vtable}` (§7.1).
+    if name == k.dyn_ && n.n == 1 {
+        let pair = word_tuple(inout t, k, 2);
+        let l = build(inout ls, inout t, inout names, in wd, pair, inc(depth));
+        if l == NONE32 {
+            return NONE32;
+        }
+        return retag(inout ls, l, ty);
+    }
+    // A slice is the view `{handle, start, len}` (§13).
+    if name == k.slice && n.n == 1 {
+        let view = word_tuple(inout t, k, 3);
+        let l = build(inout ls, inout t, inout names, in wd, view, inc(depth));
+        if l == NONE32 {
+            return NONE32;
+        }
+        return retag(inout ls, l, ty);
+    }
+    if n.kind == K_TUPLE {
+        let mut offset: i32 = 0;
+        let mut fs: ChunkSeq[LField] = ChunkSeq::with_capacity[LField](w(n.n));
+        for i in 0..w(n.n) {
+            let ft = u32_at(in t.items, add(w(n.a), i));
+            let l = build(inout ls, inout t, inout names, in wd, ft, inc(depth));
+            if l == NONE32 {
+                return NONE32;
+            }
+            let fname = ls.digit_name(inout names, i);
+            fs
+                .push(
+                LField {
+                    name: fname,
+                    ty: ft,
+                    offset: offset,
+                    layout: l
+                }
+            );
+            let next = next_offset(offset, ls.node(l).size);
+            if !fits_i32(next) {
+                return ls.fail(in t, in names, "value layout is too large", NONE32, "");
+            }
+            offset = wrapping_i32(next);
+        }
+        return ls.product(ty, max_u32(wrapping_u32(offset), 8), in fs);
+    }
+    // Vectors and masks (§14.3) are their packed lane bytes.
+    let words = vector_words(in t, in names, k, ty);
+    if words != 0 {
+        let word_ty = t.named0(k.u64_);
+        let mut fs: ChunkSeq[LField] = ChunkSeq::new[LField]();
+        for i in 0..w(words) {
+            let wl = ls.scalar(word_ty);
+            let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            text.push(36);
+            push_decimal(inout text, i);
+            let fname = names.intern(in text.as_slice());
+            fs
+                .push(
+                LField {
+                    name: fname,
+                    ty: word_ty,
+                    offset: wrapping_i32(wrapping_mul(i, 8)),
+                    layout: wl
+                }
+            );
+        }
+        return ls.product(ty, wrapping_mul(words, 8), in fs);
+    }
+    // A string or string view is `{len, cap, data}` (§13 strings).
+    if n.kind == K_NAMED && n.n == 0 && (name == k.string || name == k.str_) {
+        let word_ty = t.named0(k.u64_);
+        let mut fs: ChunkSeq[LField] = ChunkSeq::new[LField]();
+        let l0 = ls.scalar(word_ty);
+        fs
+            .push(
+            LField {
+                name: k.len,
+                ty: word_ty,
+                offset: 0,
+                layout: l0
+            }
+        );
+        let l1 = ls.scalar(word_ty);
+        fs
+            .push(
+            LField {
+                name: k.cap,
+                ty: word_ty,
+                offset: 8,
+                layout: l1
+            }
+        );
+        let l2 = ls.scalar(word_ty);
+        fs
+            .push(
+            LField {
+                name: k.data,
+                ty: word_ty,
+                offset: 16,
+                layout: l2
+            }
+        );
+        return ls.product(ty, 24, in fs);
+    }
+    if n.kind != K_NAMED {
+        return ls.fail(in t, in names, "native layout is not yet defined for ", ty, "");
+    }
+    let ai = wd.lookup(name);
+    if ai == NO_ADT {
+        return ls.fail(in t, in names, "native layout is not defined for ", ty, "");
+    }
+    let a = wd.adt(ai);
+    if a.gn != n.n {
+        return ls.fail(in t, in names, "unresolved type arguments in layout of ", ty, "");
+    }
+    for i in 0..ls.seen.len() {
+        if u32_at(in ls.seen, i) == ty {
+            return ls
+                .fail(
+                in t,
+                in names,
+                "recursive inline layout of ",
+                ty,
+                "; an owning indirection is required"
+            );
+        }
+    }
+    ls.seen.push(ty);
+    let vars = wd.vars_of(in t, a, ty);
+    let mut size: u32 = 8;
+    let mut vs: ChunkSeq[LVariant] = ChunkSeq::with_capacity[LVariant](w(a.vn));
+    let mut all: ChunkSeq[LField] = ChunkSeq::new[LField]();
+    for vi in 0..w(a.vn) {
+        let v = wd.variant(add(w(a.va), vi));
+        let mut offset: i32 = if a.is_enum {
+            8
+        } else {
+            0
+        };
+        let fa = n32(all.len());
+        for fi in 0..w(v.fc) {
+            let f = wd.field(add(w(v.fa), fi));
+            let ft = substitute(inout t, f.ty, in vars);
+            let l = build(inout ls, inout t, inout names, in wd, ft, inc(depth));
+            if l == NONE32 {
+                return NONE32;
+            }
+            all
+                .push(
+                LField {
+                    name: f.name,
+                    ty: ft,
+                    offset: offset,
+                    layout: l
+                }
+            );
+            let next = next_offset(offset, ls.node(l).size);
+            if !fits_i32(next) {
+                return ls.fail(in t, in names, "value layout is too large", NONE32, "");
+            }
+            offset = wrapping_i32(next);
+        }
+        size = max_u32(size, wrapping_u32(offset));
+        vs
+            .push(
+            LVariant {
+                name: v.name,
+                fa: fa,
+                fc: v.fc
+            }
+        );
+    }
+    let last = wrapping_sub(ls.seen.len(), 1);
+    ls.seen.truncate(last);
+    let base = n32(ls.fields.len());
+    for i in 0..all.len() {
+        match all.try_get(i) {
+            Option::Some(f) => ls.fields.push(f),
+            Option::None => {}
+        }
+    }
+    if a.is_enum {
+        let va = n32(ls.variants.len());
+        for i in 0..vs.len() {
+            match vs.try_get(i) {
+                Option::Some(v) => ls
+                    .variants
+                    .push(
+                    LVariant {
+                        name: v.name,
+                        fa: wrapping_add(v.fa, base),
+                        fc: v.fc
+                    }
+                ),
+                Option::None => {}
+            }
+        }
+        let id = n32(ls.nodes.len());
+        ls
+            .nodes
+            .push(
+            LNode {
+                ty: ty,
+                size: size,
+                kind: L_ENUM,
+                a: va,
+                n: n32(vs.len())
+            }
+        );
+        id
+    } else {
+        let first = match vs.try_get(0) {
+            Option::Some(v) => v,
+            Option::None => LVariant {
+                name: 0,
+                fa: 0,
+                fc: 0
+            },
+        };
+        let id = n32(ls.nodes.len());
+        ls
+            .nodes
+            .push(
+            LNode {
+                ty: ty,
+                size: size,
+                kind: L_PRODUCT,
+                a: wrapping_add(first.fa, base),
+                n: first.fc
+            }
+        );
+        id
+    }
+}
+
+// ----- the word stream of one layout (the hybrid build's result) -----------
+//
+// Names and types are written once each, the first time a layout mentions
+// them, as tables the reader rebuilds in order; a type's parts come before
+// it (post-order), in the harness encoder's format (`Enc::ty`):
+//
+//   1 (ok)
+//   names    count, then per name its byte length and bytes eight per word
+//   types    count, then per type, in post-order:
+//              literal  0, negative, magnitude
+//              named    1, name, n, n argument types
+//              tuple    2, n, n types
+//              function 3, n, n (pass, type), result, row, mode
+//              row      4, row
+//              infer    5
+//            a row is: count, per effect (label + 1 or 0, name, n, n
+//            types), then tail + 1 or 0
+//   layout   pre-order: type, size, kind; then a product's field count and
+//            per field (name, type, offset, layout), or an enum's variant
+//            count and per variant (name, field count, fields)
+//
+// A failed layout is `0`, the message's byte length, then its bytes.
+
+pub struct Out {
+    // symbol -> out name index + 1
+    name_ix: ChunkSeq[u32],
+    names: ChunkSeq[u64],
+    name_count: u64,
+    // type id -> out type index + 1
+    type_ix: ChunkSeq[u32],
+    types: ChunkSeq[u64],
+    type_count: u64,
+    body: ChunkSeq[u64],
+}
+
+pub fn out_new() -> Out {
+    Out {
+        name_ix: ChunkSeq::new[u32](),
+        names: ChunkSeq::new[u64](),
+        name_count: 0,
+        type_ix: ChunkSeq::new[u32](),
+        types: ChunkSeq::new[u64](),
+        type_count: 0,
+        body: ChunkSeq::new[u64](),
+    }
+}
+
+// Bytes `b` eight per word, little-endian, after their length.
+pub fn put_bytes(inout o: ChunkSeq[u64], in b: Slice[u8]) {
+    let n = b.len();
+    o.push(n);
+    let mut acc: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        let c = match b.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        acc = acc | wrapping_shl_u64(c, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            o.push(acc);
+            acc = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        o.push(acc);
+    }
+}
+
+fn grow_to(inout s: ChunkSeq[u32], i: u64) {
+    if s.len() <= i {
+        s.resize(inc(i), 0);
+    }
+}
+
+impl Out {
+    pub fn name(inout self, in names: Names, s: u32) -> u64 {
+        grow_to(inout self.name_ix, w(s));
+        let x = u32_at(in self.name_ix, w(s));
+        if x != 0 {
+            return wrapping_sub(w(x), 1);
+        }
+        let i = self.name_count;
+        self.name_count = inc(i);
+        let ok = self.name_ix.try_set(w(s), n32(inc(i)));
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        names.write(s, inout text);
+        put_bytes(inout self.names, in text.as_slice());
+        i
+    }
+
+    // 0 for none, else the out name index + 1 (`opt` is symbol + 1 or 0).
+    fn opt_name(inout self, in names: Names, opt: u32) -> u64 {
+        if opt == 0 {
+            0
+        } else {
+            inc(self.name(in names, wrapping_sub(opt, 1)))
+        }
+    }
+
+    fn row(inout self, in t: Types, in names: Names, r: u32, inout out: ChunkSeq[u64]) {
+        let row = t.row(r);
+        out.push(w(row.n));
+        for i in 0..w(row.n) {
+            let e = t.effect_at(add(w(row.a), i));
+            let mut args: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for j in 0..w(e.n) {
+                let a = self.ty(in t, in names, u32_at(in t.items, add(w(e.a), j)));
+                args.push(a);
+            }
+            let label = self.opt_name(in names, e.label);
+            out.push(label);
+            let name = self.name(in names, e.name);
+            out.push(name);
+            out.push(w(e.n));
+            for j in 0..args.len() {
+                out
+                    .push(
+                    match args.try_get(j) {
+                        Option::Some(a) => a,
+                        Option::None => 0,
+                    }
+                );
+            }
+        }
+        let tail = self.opt_name(in names, row.tail);
+        out.push(tail);
+    }
+
+    // The out index of type `ty`, writing it (and its parts) first.
+    pub fn ty(inout self, in t: Types, in names: Names, ty: u32) -> u64 {
+        grow_to(inout self.type_ix, w(ty));
+        let x = u32_at(in self.type_ix, w(ty));
+        if x != 0 {
+            return wrapping_sub(w(x), 1);
+        }
+        let n = t.node(ty);
+        let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if n.kind == K_LIT {
+            words.push(0);
+            words.push(widen_u64(n.mode));
+            words.push(wrapping_u64(n.lit));
+        } else if n.kind == K_NAMED || n.kind == K_TUPLE {
+            let mut args: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for i in 0..w(n.n) {
+                let a = self.ty(in t, in names, u32_at(in t.items, add(w(n.a), i)));
+                args.push(a);
+            }
+            if n.kind == K_NAMED {
+                words.push(1);
+                let s = self.name(in names, n.name);
+                words.push(s);
+            } else {
+                words.push(2);
+            }
+            words.push(w(n.n));
+            for i in 0..args.len() {
+                words
+                    .push(
+                    match args.try_get(i) {
+                        Option::Some(a) => a,
+                        Option::None => 0,
+                    }
+                );
+            }
+        } else if n.kind == K_FN {
+            let mut ps: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for i in 0..w(n.n) {
+                let p = self.ty(in t, in names, u32_at(in t.items, add(w(n.a), i)));
+                ps.push(p);
+            }
+            let r = self.ty(in t, in names, n.r);
+            words.push(3);
+            words.push(w(n.n));
+            for i in 0..ps.len() {
+                words.push(widen_u64(t.param_pass(ty, i)));
+                words
+                    .push(
+                    match ps.try_get(i) {
+                        Option::Some(a) => a,
+                        Option::None => 0,
+                    }
+                );
+            }
+            words.push(r);
+            self.row(in t, in names, n.r2, inout words);
+            words.push(widen_u64(n.mode));
+        } else if n.kind == K_ROW {
+            words.push(4);
+            self.row(in t, in names, n.r2, inout words);
+        } else {
+            words.push(5);
+        }
+        let i = self.type_count;
+        self.type_count = inc(i);
+        let ok = self.type_ix.try_set(w(ty), n32(inc(i)));
+        self.types.extend(in words.as_slice());
+        i
+    }
+
+    fn fields(inout self, in ls: Layouts, in t: Types, in names: Names, a: u64, n: u64) {
+        self.body.push(n);
+        for i in 0..n {
+            let f = ls.lfield(add(a, i));
+            let fname = self.name(in names, f.name);
+            self.body.push(fname);
+            let fty = self.ty(in t, in names, f.ty);
+            self.body.push(fty);
+            self.body.push(wrapping_u64(widen_i64(f.offset)));
+            self.layout(in ls, in t, in names, f.layout);
+        }
+    }
+
+    pub fn layout(inout self, in ls: Layouts, in t: Types, in names: Names, l: u32) {
+        let n = ls.node(l);
+        let ty = self.ty(in t, in names, n.ty);
+        self.body.push(ty);
+        self.body.push(w(n.size));
+        self.body.push(widen_u64(n.kind));
+        if n.kind == L_PRODUCT {
+            self.fields(in ls, in t, in names, w(n.a), w(n.n));
+        }
+        if n.kind == L_ENUM {
+            self.body.push(w(n.n));
+            for i in 0..w(n.n) {
+                let v = ls.lvariant(add(w(n.a), i));
+                let vname = self.name(in names, v.name);
+                self.body.push(vname);
+                self.fields(in ls, in t, in names, w(v.fa), w(v.fc));
+            }
+        }
+    }
+
+    // The finished stream: 1, the names, the types, then the body.
+    pub fn finish(in self, inout o: ChunkSeq[u64]) {
+        o.push(1);
+        o.push(self.name_count);
+        o.extend(in self.names.as_slice());
+        o.push(self.type_count);
+        o.extend(in self.types.as_slice());
+        o.extend(in self.body.as_slice());
+    }
+}
+
+// `Layout::of(ty)` as the word stream above, appended to `o`.
+pub fn put_layout_words(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    ty: u32,
+    inout o: ChunkSeq[u64]
+) {
+    let m = ls.mark();
+    let l = layout_of(inout ls, inout t, inout names, in wd, ty);
+    if l == NONE32 {
+        o.push(0);
+        put_bytes(inout o, in ls.err.as_slice());
+    } else {
+        let mut out = out_new();
+        out.layout(in ls, in t, in names, l);
+        out.finish(inout o);
+    }
+    ls.reset(m);
+}
+
+// ----- the harness entries --------------------------------------------------
+
+// One layout as text, the format of `layout_text` in tests/hybrid_layout.rs:
+// `size kind` then each field as `name@offset: type = (layout)`.
+pub fn write_layout(in ls: Layouts, in t: Types, in names: Names, l: u32, inout o: ChunkSeq[u8]) {
+    let n = ls.node(l);
+    push_decimal(inout o, w(n.size));
+    if n.kind == L_SCALAR {
+        o.extend(in " S".as_bytes());
+        return;
+    }
+    if n.kind == L_PRODUCT {
+        o.extend(in " P{".as_bytes());
+        write_fields(in ls, in t, in names, w(n.a), w(n.n), inout o);
+        o.push(125);
+        return;
+    }
+    o.extend(in " E{".as_bytes());
+    for i in 0..w(n.n) {
+        let v = ls.lvariant(add(w(n.a), i));
+        names.write(v.name, inout o);
+        o.push(40);
+        write_fields(in ls, in t, in names, w(v.fa), w(v.fc), inout o);
+        o.extend(in ");".as_bytes());
+    }
+    o.push(125);
+}
+
+fn write_fields(
+    in ls: Layouts,
+    in t: Types,
+    in names: Names,
+    a: u64,
+    n: u64,
+    inout o: ChunkSeq[u8]
+) {
+    for i in 0..n {
+        let f = ls.lfield(add(a, i));
+        names.write(f.name, inout o);
+        o.push(64);
+        push_signed(inout o, widen_i64(f.offset));
+        o.extend(in ": ".as_bytes());
+        display(in t, in names, f.ty, inout o);
+        o.extend(in " = (".as_bytes());
+        write_layout(in ls, in t, in names, f.layout, inout o);
+        o.extend(in "); ".as_bytes());
+    }
+}
+
+// The harness task: a count, then that many input type indices. Each type
+// gives one line: `T <type>: <layout>` or `T <type>: error <message>`.
+pub fn check_layout_text(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let count = r.word(in b);
+    let mut ls = layouts_new();
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..count {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        o.extend(in "T ".as_bytes());
+        display(in c.types, in c.names, ty, inout o);
+        o.extend(in ": ".as_bytes());
+        let m = ls.mark();
+        let l = layout_of(inout ls, inout c.types, inout c.names, in c.world, ty);
+        if l == NONE32 {
+            o.extend(in "error ".as_bytes());
+            o.extend(in ls.err.as_slice());
+        } else {
+            write_layout(in ls, in c.types, in c.names, l, inout o);
+        }
+        o.push(10);
+        ls.reset(m);
+    }
+    pack_text(in o)
+}
+
+// The hybrid task: one type index; its layout's word stream.
+pub fn layout_words(in b: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let ty = u32_at(in c.tmap, r.word(in b));
+    let mut ls = layouts_new();
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_layout_words(inout ls, inout c.types, inout c.names, in c.world, ty, inout o);
+    o
+}
+
+// `layout_words` from the harness's `Str` input (the JIT entries take one
+// `in Str`).
+pub fn check_layout_words(in input: Str) -> ChunkSeq[u64] {
+    layout_words(in input.as_bytes())
+}

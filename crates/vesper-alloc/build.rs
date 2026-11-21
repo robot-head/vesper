@@ -18,13 +18,13 @@ const EDITS: &[(&str, &str)] = &[
     // region.rs placement: spare chunks kept by a rewind are never reused.
     (
         "            let s = fit(chunk_at(in b, i), size, align);",
-        "            let s = max_u64();",
+        "            let s = MAX_U64;",
     ),
     // region.rs watermarks: a rewound watermark stays outstanding.
     ("b.marks.truncate(pos);", "b.marks.truncate(inc(pos));"),
     // vec.rs: a linear vector of one element is no live obligation.
     (
-        "        && sget(in b, index, f_elen())\n        > 0;",
-        "        && sget(in b, index, f_elen())\n        > 1;",
+        "        && sget(in b, index, SlotWord::Elen)\n        > 0;",
+        "        && sget(in b, index, SlotWord::Elen)\n        > 1;",
     ),
 ];

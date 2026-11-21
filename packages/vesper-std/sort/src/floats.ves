@@ -90,6 +90,17 @@ pub fn sort_f32_bits(inout s: Slice[u32]) {
 }
 
 test {
+    // @case equal_zero(0, 0, Equal)
+    // @case equal_nan_payload(0x7ff8000000000001, 0x7ff8000000000001, Equal)
+    // @case signed_zero(0x8000000000000000, 0, Less)
+    // @case reversed_signed_zero(0, 0x8000000000000000, Greater)
+    fn test_total_order_f64_comparison(a: u64, b: u64, expected: Ordering) -> bool {
+        use model TotalOrderF64;
+        let left: f64 = from_bits_f64(a);
+        let right: f64 = from_bits_f64(b);
+        left.cmp(right) == expected
+    }
+
     // @case across_signed_zero(0x8000000000000000, 0, true)
     // @case negative_nan(0xfff8000000000001, 0xfff0000000000000, true)
     // @case negative_subnormal(0x8000000000000001, 0x8000000000000000, true)

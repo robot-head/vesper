@@ -2,6 +2,7 @@
 name = "vesper-sim-session"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Reference-evaluator Vesper source sessions under the deterministic SimPulse kernel"
 publish = false
 

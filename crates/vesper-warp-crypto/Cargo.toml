@@ -2,6 +2,7 @@
 name = "vesper-warp-crypto"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Warp QUIC packet protection with linear nonce tickets (design section 35.1, RFC 9001)"
 publish = false
 

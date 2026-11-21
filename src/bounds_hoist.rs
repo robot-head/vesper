@@ -46,8 +46,95 @@ pub fn run(program: &mut Program) -> usize {
 
 /// Versions the eligible loops of one function.
 pub fn hoist_function(f: &mut FunctionIr) -> usize {
+    hoist_function_with(f, None)
+}
+
+/// The callback `hoist_function_traced` reports each step to.
+type Trace<'a> = &'a mut dyn FnMut(&FunctionIr, Step);
+
+/// One decision of the pass, on the function as it stands before the pass
+/// applies it (self-hosting SH3 lane 12, #1251): the port
+/// `@vesper/bounds-hoist` must make the same one on the same IR. Only the
+/// differential tests read these; the pass is [`hoist_function`].
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct Step {
+    pub kind: StepKind,
+    /// The loop header a counted step decides (0 otherwise).
+    pub header: usize,
+    /// The innermost loop around `header` (a counted step).
+    pub enclosing: Option<BTreeSet<usize>>,
+    /// The loop headers tried before (a compared-loop step).
+    pub tried: BTreeSet<usize>,
+    /// The decision, as text ([`StepKind`] says the format).
+    pub decision: String,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepKind {
+    /// The accesses dominating comparisons prove in bounds:
+    /// `b:k:access` each.
+    Compared,
+    /// The counted-loop headers, innermost first, each with the innermost
+    /// loop around it: `h(b,b,..)` or `h(-)`.
+    Order,
+    /// Whether the counted loop `header` is versioned, and how.
+    Counted,
+    /// The next loop with a compared bound and what it guards.
+    ComparedLoop,
+    /// The element accesses a checked access dominates: `b:k` each.
+    Dominated,
+}
+
+fn access_text(a: Access) -> &'static str {
+    match a {
+        Access::Get => "get",
+        Access::Set => "set",
+        Access::TryGet => "try_get",
+        Access::TrySet => "try_set",
+    }
+}
+
+fn blocks_text(blocks: &BTreeSet<usize>) -> String {
+    blocks
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// [`hoist_function`], reporting each decision to `trace` first.
+#[doc(hidden)]
+pub fn hoist_function_traced(
+    f: &mut FunctionIr,
+    trace: &mut dyn FnMut(&FunctionIr, Step),
+) -> usize {
+    hoist_function_with(f, Some(trace))
+}
+
+fn step(kind: StepKind, decision: String) -> Step {
+    Step {
+        kind,
+        header: 0,
+        enclosing: None,
+        tried: BTreeSet::new(),
+        decision,
+    }
+}
+
+fn hoist_function_with(f: &mut FunctionIr, mut trace: Option<Trace<'_>>) -> usize {
     // Accesses that dominating comparisons prove in bounds need no guard.
-    facts::drop_compared_checks(f);
+    let compared = facts::compared_checks(f);
+    if let Some(t) = trace.as_mut() {
+        let text = compared
+            .iter()
+            .map(|(b, k, a)| format!("{b}:{k}:{}", access_text(*a)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        t(f, step(StepKind::Compared, text));
+    }
+    facts::make_unchecked(f, &compared);
     // Inner loops first: versioning a loop copies its body, nested loops
     // and all, with the same value ids, and a loop whose values a copy
     // outside it uses is not versioned.
@@ -63,23 +150,85 @@ pub fn hoist_function(f: &mut FunctionIr) -> usize {
         .filter(|&h| preds[h].iter().any(|&p| dominates(&idom, h, p)))
         .map(|h| (h, natural_loop(h, &preds, &idom)))
         .collect();
-    let versioned = headers
+    let order: Vec<(usize, Option<BTreeSet<usize>>)> = headers
         .into_iter()
-        .filter(|&(_, h)| {
+        .map(|(_, h)| {
             // The innermost loop around this one.
             let enclosing = loops
                 .iter()
                 .filter(|(o, l)| *o != h && l.contains(&h))
                 .min_by_key(|(_, l)| l.len())
                 .map(|(_, l)| l.clone());
-            version(f, h, enclosing.as_ref())
+            (h, enclosing)
         })
-        .count();
+        .collect();
+    if let Some(t) = trace.as_mut() {
+        let text = order
+            .iter()
+            .map(|(h, e)| match e {
+                Some(l) => format!("{h}({})", blocks_text(l)),
+                None => format!("{h}(-)"),
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        t(f, step(StepKind::Order, text));
+    }
+    let mut versioned = 0;
+    for (h, enclosing) in order {
+        let plan = counted_plan(f, h, enclosing.as_ref());
+        if let Some(t) = trace.as_mut() {
+            let text = plan
+                .as_ref()
+                .map_or_else(|| "none".into(), CountedPlan::text);
+            t(
+                f,
+                Step {
+                    header: h,
+                    enclosing: enclosing.clone(),
+                    ..step(StepKind::Counted, text)
+                },
+            );
+        }
+        if let Some(plan) = plan {
+            clone_loop(
+                f,
+                h,
+                plan.pre,
+                &plan.head,
+                &plan.blocks,
+                &plan.receivers,
+                &plan.candidates,
+            );
+            versioned += 1;
+        }
+    }
     // Loops bounded by a compared, loop-invariant end the function cannot
     // relate to the length.
-    let versioned = versioned + facts::version_compared_loops(f);
-    drop_dominated_checks(f);
+    let versioned = versioned + facts::version_compared_loops(f, &mut trace);
+    let dominated = dominated_checks(f);
+    if let Some(t) = trace.as_mut() {
+        let text = dominated
+            .iter()
+            .map(|(b, k)| format!("{b}:{k}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        t(f, step(StepKind::Dominated, text));
+    }
+    make_unchecked(f, &dominated);
     versioned
+}
+
+/// Makes the element accesses at `at` (block, instruction) unchecked.
+fn make_unchecked(f: &mut FunctionIr, at: &[(usize, usize)]) {
+    for &(b, k) in at {
+        let i = &mut f.blocks[b].instructions[k];
+        if let Op::Seq { op, .. } = &mut i.op
+            && let Some(access) = hoistable(*op)
+        {
+            *op = SeqOp::Hoisted(access);
+            i.fallible = false;
+        }
+    }
 }
 
 /// The index of an access, for comparing accesses: the same value, or a
@@ -101,6 +250,14 @@ enum IndexKey {
 /// value's definition dominates every use, so no new definition runs
 /// between the dominating access and this one.
 pub fn drop_dominated_checks(f: &mut FunctionIr) -> usize {
+    let dropped = dominated_checks(f);
+    make_unchecked(f, &dropped);
+    dropped.len()
+}
+
+/// The accesses [`drop_dominated_checks`] makes unchecked: (block,
+/// instruction) each.
+fn dominated_checks(f: &FunctionIr) -> Vec<(usize, usize)> {
     let preds = reached_preds(f);
     let idom = idoms(f, &preds);
     let reached = reached(f);
@@ -200,16 +357,7 @@ pub fn drop_dominated_checks(f: &mut FunctionIr) -> usize {
             }
         }
     }
-    for &(b, k) in &dropped {
-        let i = &mut f.blocks[b].instructions[k];
-        if let Op::Seq { op, .. } = &mut i.op
-            && let Some(access) = hoistable(*op)
-        {
-            *op = SeqOp::Hoisted(access);
-            i.fallible = false;
-        }
-    }
-    dropped.len()
+    dropped
 }
 
 /// The counted-loop header shape [`crate::loops`] lowers `for` to.
@@ -500,21 +648,58 @@ fn keeps_length(op: SeqOp) -> bool {
         )
 }
 
-/// Versions the loop headed by `h` when it is eligible.
-fn version(f: &mut FunctionIr, h: usize, enclosing: Option<&BTreeSet<usize>>) -> bool {
-    let Some(head) = header(f, h) else {
-        return false;
-    };
+/// What versioning the counted loop headed by `h` takes: its preheader,
+/// header slots, blocks, the guarded receivers (by place and index form, in
+/// key order) and the accesses the fast copy makes unchecked.
+struct CountedPlan {
+    pre: usize,
+    head: Header,
+    blocks: BTreeSet<usize>,
+    receivers: Vec<Receiver>,
+    candidates: BTreeMap<ValueId, (Access, String)>,
+}
+
+impl CountedPlan {
+    /// The decision text of a [`StepKind::Counted`] step.
+    fn text(&self) -> String {
+        let receivers = self
+            .receivers
+            .iter()
+            .map(|r| format!("{}@{}:{}", r.place.display(), r.form.key(), r.read.dest))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let accesses = self
+            .candidates
+            .iter()
+            .map(|(v, (a, _))| format!("{v}:{}", access_text(*a)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "pre={} inclusive={} blocks={} receivers=[{receivers}] accesses=[{accesses}]",
+            self.pre,
+            self.head.inclusive,
+            blocks_text(&self.blocks)
+        )
+    }
+}
+
+/// Whether the loop headed by `h` is eligible, and how it is versioned.
+fn counted_plan(
+    f: &FunctionIr,
+    h: usize,
+    enclosing: Option<&BTreeSet<usize>>,
+) -> Option<CountedPlan> {
+    let head = header(f, h)?;
     // Predecessors among the blocks the entry reaches: the inliner and
     // `break` leave unreachable blocks whose edges enter nothing.
     let preds = reached_preds(f);
     if preds[h].is_empty() {
-        return false;
+        return None;
     }
     let idom = idoms(f, &preds);
     let blocks = natural_loop(h, &preds, &idom);
     if !blocks.contains(&head.body) {
-        return false;
+        return None;
     }
     // One preheader, entering through the header only.
     let outside: Vec<usize> = preds[h]
@@ -523,19 +708,19 @@ fn version(f: &mut FunctionIr, h: usize, enclosing: Option<&BTreeSet<usize>>) ->
         .filter(|p| !blocks.contains(p))
         .collect();
     let [pre] = outside.as_slice() else {
-        return false;
+        return None;
     };
     let pre = *pre;
     if !matches!(&f.blocks[pre].terminator, Terminator::Jump { block, args } if *block == h && args.is_empty())
     {
-        return false;
+        return None;
     }
     for &b in &blocks {
         if b != h && preds[b].iter().any(|p| !blocks.contains(p)) {
-            return false;
+            return None;
         }
         if f.fip_join_slots.contains_key(&b) {
-            return false;
+            return None;
         }
     }
     let insts = || {
@@ -549,7 +734,7 @@ fn version(f: &mut FunctionIr, h: usize, enclosing: Option<&BTreeSet<usize>>) ->
             Op::Closure { .. } | Op::Handle { .. } | Op::Indirect { .. }
         ) || f.fip_call_slots.contains_key(&i.dest)
     }) {
-        return false;
+        return None;
     }
     // No value defined in the loop is used outside it.
     let mut defined: BTreeSet<ValueId> = insts().map(|(_, i)| i.dest).collect();
@@ -566,7 +751,7 @@ fn version(f: &mut FunctionIr, h: usize, enclosing: Option<&BTreeSet<usize>>) ->
             .flat_map(|i| uses(&i.op))
             .chain(terminator_uses(&block.terminator));
         if used.into_iter().any(|v| defined.contains(&v)) {
-            return false;
+            return None;
         }
     }
     // The bound never changes; the index changes only in latch blocks that
@@ -574,17 +759,17 @@ fn version(f: &mut FunctionIr, h: usize, enclosing: Option<&BTreeSet<usize>>) ->
     let mut latches = BTreeSet::new();
     for (b, i) in insts() {
         match &i.op {
-            Op::Write { place, .. } if place_root(place) == head.bound => return false,
+            Op::Write { place, .. } if place_root(place) == head.bound => return None,
             Op::Write { place, .. } if place_root(place) == head.index => {
                 if !matches!(f.blocks[b].terminator, Terminator::Jump { block, .. } if block == h) {
-                    return false;
+                    return None;
                 }
                 latches.insert(b);
             }
             Op::Bind { pattern, .. }
                 if binds(pattern, &head.index) || binds(pattern, &head.bound) =>
             {
-                return false;
+                return None;
             }
             _ => {}
         }
@@ -694,7 +879,7 @@ fn version(f: &mut FunctionIr, h: usize, enclosing: Option<&BTreeSet<usize>>) ->
     receivers.retain(|_, r| stable(f, &blocks, &r.place.root));
     candidates.retain(|_, (_, key)| receivers.contains_key(key));
     if candidates.is_empty() {
-        return false;
+        return None;
     }
     // A loop with a short constant trip count saves less than its guards
     // cost: each guard checks both range ends with overflow-checked sums
@@ -705,7 +890,7 @@ fn version(f: &mut FunctionIr, h: usize, enclosing: Option<&BTreeSet<usize>>) ->
             if trips.saturating_mul(candidates.len() as u64)
                 < GUARD_COST * receivers.len() as u64 =>
         {
-            return false;
+            return None;
         }
         // An inner loop runs its guard on every iteration of the loop
         // around it. When its range changes with that loop's iteration it
@@ -716,13 +901,17 @@ fn version(f: &mut FunctionIr, h: usize, enclosing: Option<&BTreeSet<usize>>) ->
         None if enclosing.is_some_and(|outer| !bound_invariant(f, &head, outer))
             && candidates.len() <= receivers.len() =>
         {
-            return false;
+            return None;
         }
         _ => {}
     }
-    let receivers: Vec<Receiver> = receivers.into_values().collect();
-    clone_loop(f, h, pre, &head, &blocks, &receivers, &candidates);
-    true
+    Some(CountedPlan {
+        pre,
+        head,
+        blocks,
+        receivers: receivers.into_values().collect(),
+        candidates,
+    })
 }
 
 /// Whether every binding of `head`'s range slots (its start and its bound)

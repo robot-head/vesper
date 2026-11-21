@@ -299,6 +299,80 @@ impl [T: mod copy] RadixSeq[T] {
 }
 
 test {
+    // @case leaf_boundary(32)
+    // @case branch_boundary(1024)
+    fn test_reappend_after_freeze_at_boundary(boundary: u64) -> bool {
+        let mut seq = radix_seq_new[u64]();
+        for i in 0..boundary {
+            seq.push(i);
+        }
+        seq.push(boundary);
+        let snapshot = seq.freeze();
+        if seq.pop() != Option::Some(boundary) {
+            return false;
+        }
+        let leaf_count = seq.leaf_epoch.len();
+        let node_count = seq.node_epoch.len();
+        seq.push(99);
+        let expected_nodes = if boundary == 32 {
+            1
+        } else {
+            2
+        };
+        let live = seq.get(boundary) == Option::Some(99);
+        let frozen = seq.snapshot_get(snapshot, boundary) == Option::Some(boundary);
+        live
+            && frozen
+            && seq
+            .leaf_epoch
+            .len()
+            == wrapping_add(leaf_count, 1)
+            && seq
+            .node_epoch
+            .len()
+            == wrapping_add(node_count, expected_nodes)
+            && seq
+            .elems
+            .len()
+            == wrapping_mul(seq.leaf_epoch.len(), 32)
+            && seq
+            .kids
+            .len()
+            == wrapping_mul(seq.node_epoch.len(), 32)
+    }
+
+    fn test_set_preserves_other_leaves_in_same_branch() -> bool {
+        let mut seq = radix_seq_new[u64]();
+        let size: u64 = 1057;
+        for i in 0..size {
+            seq.push(i);
+        }
+        let frozen = seq.freeze();
+        if !seq.set(1024, 99) {
+            return false;
+        }
+        seq
+            .get(1024)
+            == Option::Some(99)
+            && seq
+            .get(1025)
+            == Option::Some(1025)
+            && seq
+            .get(1056)
+            == Option::Some(1056)
+            && seq
+            .snapshot_get(frozen, 1024)
+            == Option::Some(1024)
+            && seq
+            .elems
+            .len()
+            == wrapping_mul(seq.leaf_epoch.len(), 32)
+            && seq
+            .kids
+            .len()
+            == wrapping_mul(seq.node_epoch.len(), 32)
+    }
+
     // @case empty(0)
     // @case one(1)
     // @case last_slot_in_leaf(31)

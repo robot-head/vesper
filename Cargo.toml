@@ -262,6 +262,7 @@ default-run = "vesper"
 name = "vesper"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # The host shim of @vesper-std/fs, process and env (#1125). `vesper jit`
