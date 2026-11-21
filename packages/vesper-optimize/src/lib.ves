@@ -228,10 +228,18 @@ pub fn optimize_decode(in input: Str) -> ChunkSeq[u64] {
 }
 
 // The names of one case: in the words (`text` is the whole input), or in
-// `text` alone when the input is split.
-fn names_of(inout r: Reader, in b: Slice[u8], in text: Str, split: bool, inout t: Tree) {
+// `text` alone when the input is split. There every case's names follow
+// the previous case's, and `at` carries the offset across cases.
+fn names_of(
+    inout r: Reader,
+    in b: Slice[u8],
+    in text: Str,
+    split: bool,
+    inout at: u64,
+    inout t: Tree
+) {
     if split {
-        read_names_text(inout r, in b, in text, inout t);
+        read_names_text(inout r, in b, in text, inout at, inout t);
     } else {
         read_names(inout r, in text, inout t);
     }
@@ -246,10 +254,11 @@ fn run_cases(in b: Slice[u8], in text: Str, split: bool, check: bool) -> ChunkSe
     let mut types = ChunkSeq::new[TypeRow]();
     let mut cert = cert_new();
     let cases = r.word(in b);
+    let mut at: u64 = 0;
     for k in 0..cases {
         let mut budget = read_budget(inout r, in b);
         let mut t = tree_new();
-        names_of(inout r, in b, in text, split, inout t);
+        names_of(inout r, in b, in text, split, inout at, inout t);
         read_types(inout r, in b, inout types);
         read_exprs(inout r, in b, inout t, inout map);
         let source = mapped(in map, r.word(in b));
@@ -406,10 +415,11 @@ fn propose_cases(in b: Slice[u8], in text: Str, split: bool, mode: u8) -> ChunkS
     let mut map = ChunkSeq::new[u32]();
     let mut types = ChunkSeq::new[TypeRow]();
     let cases = r.word(in b);
+    let mut at: u64 = 0;
     for k in 0..cases {
         let mut budget = read_budget(inout r, in b);
         let mut t = tree_new();
-        names_of(inout r, in b, in text, split, inout t);
+        names_of(inout r, in b, in text, split, inout at, inout t);
         read_types(inout r, in b, inout types);
         read_exprs(inout r, in b, inout t, inout map);
         let source = mapped(in map, r.word(in b));

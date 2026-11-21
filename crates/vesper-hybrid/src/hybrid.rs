@@ -60,6 +60,11 @@ mod optimize_binding;
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/bounds_hoist.rs"]
+mod bounds_hoist_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -116,6 +121,8 @@ static OPTIMIZE_PROPOSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static OPTIMIZE_VERIFY_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs `modules/bounds_hoist` hoisted.
+static BOUNDS_HOIST_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -328,9 +335,15 @@ const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
         place_ir_round_trip(Some(world), program);
         report
     }),
+    // SH3 lane 12 (#1251): bounds hoisting from `modules/bounds_hoist`.
     hoist: Some(|program| {
-        let n = vesper::bounds_hoist::run(program);
-        place_ir_round_trip(None, program);
+        let Some(p) = ir_words::through_vesper(None, program, bounds_hoist_binding::hoist_words)
+        else {
+            return vesper::bounds_hoist::run(program);
+        };
+        BOUNDS_HOIST_CALLS.fetch_add(1, Relaxed);
+        let n = versioned_loops(&p).saturating_sub(versioned_loops(program));
+        *program = p;
         n
     }),
 };
@@ -416,6 +429,34 @@ const VESPER_OPTIMIZE: vesper::optimize::OptimizeTable = vesper::optimize::Optim
     verify: vesper_verify,
     propose: Some(vesper_propose),
 };
+
+/// The loops of `program` behind a bounds guard: branches on a
+/// `SeqOp::BoundsGuard` result of their own block, one per versioned loop
+/// (the count `bounds_hoist::run` returns, which no caller reads).
+fn versioned_loops(program: &vesper::ir::Program) -> usize {
+    use vesper::ir::{Op, Terminator};
+    use vesper::seq::SeqOp;
+    program
+        .functions
+        .values()
+        .flat_map(|f| &f.blocks)
+        .filter(|b| {
+            let Terminator::Branch { condition, .. } = b.terminator else {
+                return false;
+            };
+            b.instructions.iter().any(|i| {
+                i.dest == condition
+                    && matches!(
+                        i.op,
+                        Op::Seq {
+                            op: SeqOp::BoundsGuard { .. },
+                            ..
+                        }
+                    )
+            })
+        })
+        .count()
+}
 
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
@@ -513,6 +554,10 @@ extern "C" fn report() {
         "vesper-hybrid: place-ir round-tripped {} programs through Vesper",
         PLACE_IR_CALLS.load(Relaxed)
     );
+    eprintln!(
+        "vesper-hybrid: bounds-hoist hoisted {} programs in Vesper",
+        BOUNDS_HOIST_CALLS.load(Relaxed)
+    );
 }
 
 // Run `install` before `main` (the platform's static-constructor section).
@@ -538,3 +583,75 @@ compile_error!(
 )]
 #[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
 static INSTALL: extern "C" fn() = install;
+
+#[cfg(test)]
+mod tests {
+    use vesper::ast::{Arg, Expr, ExprKind, Literal, Pass, Type, TypeMap};
+    use vesper::optimize::witness::WitnessLimits;
+
+    use super::{optimize_binding, optimize_words};
+
+    fn expr(kind: ExprKind, at: usize, len: usize) -> Expr {
+        Expr {
+            kind,
+            span: at..at + len,
+        }
+    }
+
+    fn typed(e: &Expr, t: &str, types: &mut TypeMap) {
+        types.insert((e.span.start, e.span.end), Type::Named(t.into(), vec![]));
+    }
+
+    /// A split batch of several cases reads each case's names after the
+    /// previous case's, so it answers as the cases do one by one.
+    #[test]
+    fn split_batches_keep_the_names_cursor() {
+        let mut types = TypeMap::new();
+        // x + 0
+        let x = expr(ExprKind::Name("x".into()), 0, 1);
+        let zero = expr(ExprKind::Literal(Literal::Int(0)), 4, 1);
+        typed(&x, "u32", &mut types);
+        typed(&zero, "u32", &mut types);
+        let first = expr(
+            ExprKind::Binary("+".into(), Box::new(x), Box::new(zero)),
+            0,
+            5,
+        );
+        typed(&first, "u32", &mut types);
+        // wrapping_add(y, 0)
+        let callee = expr(ExprKind::Name("wrapping_add".into()), 10, 12);
+        let y = expr(ExprKind::Name("y".into()), 23, 1);
+        let zero = expr(ExprKind::Literal(Literal::Int(0)), 26, 1);
+        typed(&y, "u32", &mut types);
+        typed(&zero, "u32", &mut types);
+        let arg = |expr| Arg {
+            pass: Pass::In,
+            explicit: false,
+            expr,
+        };
+        let second = expr(
+            ExprKind::Call {
+                callee: Box::new(callee),
+                types: vec![],
+                args: vec![arg(y), arg(zero)],
+            },
+            10,
+            18,
+        );
+        typed(&second, "u32", &mut types);
+        let limits = WitnessLimits::default();
+        let propose = |cases: &[&Expr]| {
+            let mut batch = optimize_words::Batch::new(cases.len(), true);
+            for e in cases {
+                batch.propose(e, &optimize_words::relevant_types(&[e], &types), limits);
+            }
+            optimize_words::unpack_text(&optimize_binding::propose_words(
+                &batch.bytes,
+                &batch.names,
+            ))
+        };
+        let one_by_one = propose(&[&first]) + &propose(&[&second]);
+        assert_eq!(propose(&[&first, &second]), one_by_one);
+        assert!(!one_by_one.contains("P E "), "{one_by_one}");
+    }
+}

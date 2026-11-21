@@ -216,7 +216,13 @@ fn hybrid_matches_the_default_compiler() {
                         let tie_file = OPTIMIZE_EQUAL_COST_TIES
                             .iter()
                             .any(|t| Path::new(t) == file.as_path());
-                        if !diff.is_empty() && tie_file && command[0] == "emit" {
+                        // A tie only changes the emitted IR or object: both
+                        // runs succeed with the same diagnostics.
+                        let artifact_only =
+                            diff.iter().all(|d| *d == "stdout" || *d == "object bytes")
+                                && d.output.status.success()
+                                && (command.get(2) == Some(&"object") || diff == ["stdout"]);
+                        if !diff.is_empty() && tie_file && command[0] == "emit" && artifact_only {
                             let r = run_with(
                                 &hybrid,
                                 &root,
@@ -348,5 +354,16 @@ fn pilot_module_runs_from_vesper() {
     assert!(
         proposed > 0,
         "the Vesper optimize module proposed for nothing"
+    );
+    // SH3 lane 12 (#1251): the `hoist` hook hoists every native program.
+    let hoisted: u64 = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: bounds-hoist hoisted "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no bounds-hoist report in {stderr:?}"));
+    assert!(
+        hoisted > 0,
+        "the Vesper bounds-hoist module hoisted no program"
     );
 }

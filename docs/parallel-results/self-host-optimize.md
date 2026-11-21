@@ -358,7 +358,20 @@ equal-cost extraction ties of part 2 (spans 1049:1135, 532:611,
 `OPTIMIZE_EQUAL_COST_TIES`. For a mismatch on one of them, it reruns the
 hybrid with `VESPER_HYBRID_RUST_PRODUCER=1` (Rust search, Vesper checker).
 If that run equals the default, it counts the run as a tie. A mismatch on
-any other file, or one the Rust search does not explain, still fails.
+any other file, or one the Rust search does not explain, still fails. A
+run is eligible only when both compilers succeed with the same
+diagnostics and only the emitted IR or object differs.
+
+The export glue test (`crates/vesper-hybrid/tests/codegen_export.rs`)
+meets one more tie: `semver` built with the optimizer, where the Vesper
+search keeps `wrapping_add(wrapping_add(start, acc), seg)` and egg picks
+the same-size `acc, start` order. That build is compared again with the
+Rust search, so its glue is still checked byte for byte.
+
+The split entries take a batch of several cases. Each case's names follow
+the previous case's in the one `Str`, and a cursor carries the offset
+across cases. A hybrid unit test (`split_batches_keep_the_names_cursor`)
+checks that a two-case batch answers as the two cases do one by one.
 
 The divergent build is caught: 10 runs differ, the first on
 `emit --emit ir tests/fixtures/bounded_generics/hash.ves`. The rest of the

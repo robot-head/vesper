@@ -81,6 +81,12 @@ vesper_hybrid(
             "//:check_data_package",
             "//:place_ir_package",
         ],
+        # The IR swap point's `hoist` hook (#1251).
+        "hybrid_bounds_hoist": [
+            "//:bounds_hoist_package",
+            "//:check_data_package",
+            "//:place_ir_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -103,6 +109,7 @@ vesper_hybrid(
         "hybrid_parse": "modules/parse",
         "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
+        "hybrid_bounds_hoist": "modules/bounds_hoist",
     },
     # The export glue swap (#1286) builds every library a port crate links
     # (tests/self_host_codegen_export/ports.rs) with both compilers.
