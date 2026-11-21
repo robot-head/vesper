@@ -15,6 +15,8 @@ fn main() -> u64 { count(10) }";
     let text = String::from_utf8_lossy(&bytes);
     let symbols: Vec<&str> = text
         .split('\0')
+        // Mach-O symbols carry a leading underscore.
+        .map(|s| s.strip_prefix('_').unwrap_or(s))
         .filter(|s| s.starts_with("vesper_function_"))
         .collect();
     assert!(symbols.iter().any(|s| s.ends_with("_count")), "{symbols:?}");
