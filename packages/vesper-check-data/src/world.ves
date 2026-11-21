@@ -180,10 +180,18 @@ impl Known {
             .u128_
     }
 
+    // `numeric::is_wide_name`: the two-word integers (#1174), which
+    // `is_integer` also includes.
+    pub fn is_wide(self, s: u32) -> bool {
+        s == self.i128_ || s == self.u128_
+    }
+
     // `numeric::is_scalar_name`.
     pub fn is_scalar(self, s: u32) -> bool {
         self
             .is_integer(s)
+            || self
+            .is_wide(s)
             || s
             == self
             .f32_

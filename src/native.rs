@@ -177,6 +177,13 @@ fn instance_key(name: &str, vars: &BTreeMap<String, Type>) -> String {
 /// `Type::Named(<function>, [])`. `$` never starts a generic name, so
 /// substitution ignores these entries.
 const FN_ARG: &str = "$fn:";
+/// Stack the native lowering keeps free before it recurses into a nested
+/// graph or expression; below it, the recursion moves to a new segment of
+/// [`LOWERING_STACK_SEGMENT`] bytes. One specialization level of a debug
+/// build takes about 75 KiB (SH5 lane 6, #1329).
+const LOWERING_RED_ZONE: usize = 512 * 1024;
+/// Size of each stack segment the native lowering grows by.
+const LOWERING_STACK_SEGMENT: usize = 8 * 1024 * 1024;
 /// Type nodes one native instance's type arguments may hold. There is no
 /// cap on the number of instances (SH3 lane 7, #1246): a program has as
 /// many as it reaches. Only polymorphic recursion makes that number
@@ -3325,7 +3332,13 @@ impl<M: Module> Codegen<'_, '_, M> {
     ) -> Result<(), String> {
         // An inlined graph restores the caller's location when it is done.
         let saved = self.srcloc;
-        let result = self.ir_graph_at(f, sret, return_to);
+        // Effect and closure specialization inline a callee's graph here,
+        // up to 64 levels, and a debug build spends about 75 KiB of stack
+        // per level: the lowering continues on a fresh stack segment
+        // whenever the current one runs low (SH5 lane 6, #1329).
+        let result = stacker::maybe_grow(LOWERING_RED_ZONE, LOWERING_STACK_SEGMENT, || {
+            self.ir_graph_at(f, sret, return_to)
+        });
         if return_to.is_some() && self.source_locations {
             self.srcloc = saved;
             self.b.set_srcloc(saved);
@@ -5069,6 +5082,12 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// keeps the parent's span. Synthetic expressions (`0..0`) keep the
     /// enclosing location.
     fn expr(&mut self, e: &Expr) -> Result<ir::Value, String> {
+        // Nested expressions recurse here; see `ir_graph`.
+        stacker::maybe_grow(LOWERING_RED_ZONE, LOWERING_STACK_SEGMENT, || {
+            self.expr_located(e)
+        })
+    }
+    fn expr_located(&mut self, e: &Expr) -> Result<ir::Value, String> {
         if !self.source_locations || e.span.end == 0 {
             return self.expr_at(e);
         }
