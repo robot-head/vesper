@@ -176,7 +176,7 @@ impl SgxQuote {
     #[cfg(vesper_port)]
     fn parse_port(bytes: &[u8], mode: u64) -> Result<(Self, usize), ParseError> {
         let (used, p) =
-            crate::port::parse(|w, d| crate::port::vesper::sgx_parse(bytes, mode, w, d))?;
+            crate::port::parse(bytes, |w, _| crate::port::vesper::sgx_parse(bytes, mode, w))?;
         let mut f = p.fields();
         let header = SgxQuoteHeader {
             version: f.u16(),

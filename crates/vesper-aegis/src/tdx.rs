@@ -399,7 +399,7 @@ impl TdxQuote {
     #[cfg(vesper_port)]
     fn parse_port(bytes: &[u8], mode: u64) -> Result<(Self, usize), ParseError> {
         let (used, p) =
-            crate::port::parse(|w, d| crate::port::vesper::tdx_parse(bytes, mode, w, d))?;
+            crate::port::parse(bytes, |w, _| crate::port::vesper::tdx_parse(bytes, mode, w))?;
         let mut f = p.fields();
         let header = TdxQuoteHeader {
             version: f.u16(),

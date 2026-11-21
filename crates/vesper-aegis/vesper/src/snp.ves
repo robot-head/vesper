@@ -18,7 +18,8 @@ use self::reader::{
     rd_u32,
     rd_u64,
     unsupported,
-    zero
+    zero,
+    put
 };
 
 // src/snp.rs: the report versions read (2 to 6; CPUID fields from 3,
@@ -47,11 +48,8 @@ const P384_BYTES: u64 = 48;
 const P384_WORDS: u64 = 6;
 const P384_LAST_WORD: u64 = 40;
 const WORD_BYTES: u64 = 8;
-// Format code (lib.ves) and the result sizes `parse` reserves: 14 words
-// and 633 bytes.
+// Format code (lib.ves).
 const FORMAT_SNP_REPORT: u64 = 2;
-const REPORT_WORDS: u64 = 14;
-const REPORT_BYTES: u64 = 633;
 
 // "Venice": family 1Ah, model 50h..5Fh or C0h..CFh.
 pub fn is_venice(family: u64, model: u64) -> bool {
@@ -64,17 +62,17 @@ pub fn is_venice(family: u64, model: u64) -> bool {
 }
 
 // One ETCB_VERSION at `b[at..at + 32]`: bytes 14..32 are reserved; the
-// fourteen SVNs are appended to `d`.
-pub fn etcb(in b: Slice[u8], at: u64, inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr]] {
+// fourteen SVNs are its first bytes, and `at` goes to the output words.
+pub fn etcb(in b: Slice[u8], at: u64, inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
     if !zero(in b, wrapping_add(at, ETCB_SVNS), wrapping_add(at, ETCB_LEN)) {
         raise(k_reserved(), FORMAT_SNP_REPORT, 0, 0, 0);
     }
-    d.extend(in b[at..wrapping_add(at, ETCB_SVNS)]);
+    put(inout w, at);
 }
 
 // SnpEtcb::parse of a 32-byte array.
-pub fn parse_etcb(in b: Slice[u8], inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr]] {
-    etcb(in b, 0, inout d);
+pub fn parse_etcb(in b: Slice[u8], inout w: Slice[u64]) -> Unit eff [Fail[AErr]] {
+    etcb(in b, 0, inout w);
 }
 
 // Words: version, guest_svn, policy, vmpl, signature_algo, current_tcb,
@@ -84,74 +82,72 @@ pub fn parse_etcb(in b: Slice[u8], inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr
 // author_key_digest, report_id, report_id_ma, cpuid, chip_id,
 // current_version, committed_version, the three ETCBs' SVNs (if present),
 // signature_r_s.
-pub fn parse(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn parse(in b: Slice[u8], inout w: Slice[u64], inout d: Slice[u8])
     -> Unit eff [Fail[AErr]] {
     let mut r = rd(0, b.len(), FORMAT_SNP_REPORT);
-    w.reserve(REPORT_WORDS);
-    d.reserve(REPORT_BYTES);
     let version = rd_u32(in b, inout r, 1);
     if version < SNP_REPORT_MIN_VERSION || version > SNP_REPORT_MAX_VERSION {
         unsupported(in r, 1, version);
     }
-    w.push(version);
-    w.push(rd_u32(in b, inout r, 2));
-    w.push(rd_u64(in b, inout r, 3));
-    arr(in b, inout r, 16, 4, inout d);
-    arr(in b, inout r, 16, 5, inout d);
-    w.push(rd_u32(in b, inout r, 6));
+    put(inout w, version);
+    put(inout w, rd_u32(in b, inout r, 2));
+    put(inout w, rd_u64(in b, inout r, 3));
+    arr(in b, inout r, 16, 4, inout w);
+    arr(in b, inout r, 16, 5, inout w);
+    put(inout w, rd_u32(in b, inout r, 6));
     let algo = rd_u32(in b, inout r, 7);
     if algo != SNP_SIG_ALGO_ECDSA_P384_SHA384 {
         unsupported(in r, 7, algo);
     }
-    w.push(algo);
-    w.push(rd_u64(in b, inout r, 8));
-    w.push(rd_u64(in b, inout r, 9));
+    put(inout w, algo);
+    put(inout w, rd_u64(in b, inout r, 8));
+    put(inout w, rd_u64(in b, inout r, 9));
     let flags = rd_u32(in b, inout r, 10);
     if flags & FLAGS_RESERVED != 0 {
         unsupported(in r, 10, flags);
     }
-    w.push(flags);
+    put(inout w, flags);
     reserved(in b, inout r, 4, 11);
-    arr(in b, inout r, 64, 12, inout d);
-    arr(in b, inout r, 48, 13, inout d);
-    arr(in b, inout r, 32, 14, inout d);
-    arr(in b, inout r, 48, 15, inout d);
-    arr(in b, inout r, 48, 16, inout d);
-    arr(in b, inout r, 32, 17, inout d);
-    arr(in b, inout r, 32, 18, inout d);
-    w.push(rd_u64(in b, inout r, 19));
+    arr(in b, inout r, 64, 12, inout w);
+    arr(in b, inout r, 48, 13, inout w);
+    arr(in b, inout r, 32, 14, inout w);
+    arr(in b, inout r, 48, 15, inout w);
+    arr(in b, inout r, 48, 16, inout w);
+    arr(in b, inout r, 32, 17, inout w);
+    arr(in b, inout r, 32, 18, inout w);
+    put(inout w, rd_u64(in b, inout r, 19));
     let cpuid = take(inout r, 3, 20);
     if version == SNP_REPORT_MIN_VERSION && !zero(in b, cpuid, wrapping_add(cpuid, 3)) {
         nonzero(in r, 21);
     }
-    d.extend(in b[cpuid..wrapping_add(cpuid, 3)]);
+    put(inout w, cpuid);
     reserved(in b, inout r, 21, 22);
-    arr(in b, inout r, 64, 23, inout d);
-    w.push(rd_u64(in b, inout r, 24));
-    arr(in b, inout r, 3, 25, inout d);
+    arr(in b, inout r, 64, 23, inout w);
+    put(inout w, rd_u64(in b, inout r, 24));
+    arr(in b, inout r, 3, 25, inout w);
     reserved(in b, inout r, 1, 26);
-    arr(in b, inout r, 3, 27, inout d);
+    arr(in b, inout r, 3, 27, inout w);
     reserved(in b, inout r, 1, 28);
-    w.push(rd_u64(in b, inout r, 29));
+    put(inout w, rd_u64(in b, inout r, 29));
     if version >= SNP_REPORT_VERSION_MIT_VECTORS {
-        w.push(rd_u64(in b, inout r, 30));
-        w.push(rd_u64(in b, inout r, 31));
+        put(inout w, rd_u64(in b, inout r, 30));
+        put(inout w, rd_u64(in b, inout r, 31));
     } else {
         reserved(in b, inout r, 16, 32);
-        w.push(0);
-        w.push(0);
+        put(inout w, 0);
+        put(inout w, 0);
     }
     reserved(in b, inout r, 24, 33);
     let venice = version
         >= SNP_REPORT_VERSION_CPUID
         && is_venice(byte(in b, cpuid), byte(in b, wrapping_add(cpuid, 1)));
     if version >= SNP_REPORT_VERSION_ETCB && venice {
-        w.push(1);
-        etcb(in b, take(inout r, ETCB_LEN, 34), inout d);
-        etcb(in b, take(inout r, ETCB_LEN, 35), inout d);
-        etcb(in b, take(inout r, ETCB_LEN, 36), inout d);
+        put(inout w, 1);
+        etcb(in b, take(inout r, ETCB_LEN, 34), inout w);
+        etcb(in b, take(inout r, ETCB_LEN, 35), inout w);
+        etcb(in b, take(inout r, ETCB_LEN, 36), inout w);
     } else {
-        w.push(0);
+        put(inout w, 0);
         reserved(in b, inout r, 96, 37);
     }
     reserved(in b, inout r, 32, 38);
@@ -159,19 +155,18 @@ pub fn parse(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
     let ss = take(inout r, SIG_COMPONENT_LE_BYTES, 40);
     reserved(in b, inout r, 368, 41);
     finish(in r);
-    signature_half(in b, sr, inout d);
-    signature_half(in b, ss, inout d);
+    signature_half(in b, sr, 0, inout d);
+    signature_half(in b, ss, P384_BYTES, inout d);
 }
 
 // A little-endian, zero-extended 72-byte signature component at `at`,
-// appended big-endian in 48 bytes.
-pub fn signature_half(in b: Slice[u8], at: u64, inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr]] {
+// written big-endian to `d[base..base + 48]`.
+pub fn signature_half(in b: Slice[u8], at: u64, base: u64, inout d: Slice[u8])
+    -> Unit eff [Fail[AErr]] {
     if !zero(in b, wrapping_add(at, P384_BYTES), wrapping_add(at, SIG_COMPONENT_LE_BYTES)) {
         raise(k_reserved(), FORMAT_SNP_REPORT, 42, 0, 0);
     }
     // Six eight-byte words, last first, each stored byte-swapped.
-    let base = d.len();
-    d.extend(in b[at..wrapping_add(at, P384_BYTES)]);
     for k in 0..P384_WORDS {
         let v = match b
             .try_read_u64_le(

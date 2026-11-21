@@ -274,7 +274,7 @@ impl AegisAttestationClaimsWire {
     #[cfg(vesper_port)]
     pub fn decode(bytes: &[u8]) -> Result<Self, ParseError> {
         let ((), p) =
-            crate::port::parse(|w, d| crate::port::vesper::claims_wire_decode(bytes, w, d))?;
+            crate::port::parse(bytes, |w, _| crate::port::vesper::claims_wire_decode(bytes, w))?;
         let mut f = p.fields();
         Ok(AegisAttestationClaimsWire {
             tee_arch_tag: f.u16(),

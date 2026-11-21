@@ -18,7 +18,8 @@ use self::reader::{
     rd_u16,
     rd_u32,
     rd_u64,
-    unsupported
+    unsupported,
+    put
 };
 
 // src/tdx.rs: quote versions, the body types and their lengths, ECDSA
@@ -40,11 +41,8 @@ const CERT_DATA_QE_REPORT: u64 = 6;
 const MAX_SIG_DATA_LEN: u64 = 65536;
 // `vm_index` of a TD 1.5 "ex" body: 0 to 3.
 const MAX_VM_INDEX: u64 = 3;
-// Format code (lib.ves), the result words `parse` reserves and the cap on
-// its byte reservation hint.
+// Format code (lib.ves).
 const FORMAT_TDX_QUOTE_V4: u64 = 0;
-const QUOTE_WORDS: u64 = 16;
-const RESERVE_HINT_MAX: u64 = 16384;
 
 // The largest signature-data section (MAX_SIG_DATA_LEN).
 pub fn max_sig_data() -> u64 {
@@ -57,56 +55,55 @@ pub fn blob(
     inout r: Rd,
     n: u64,
     field: u64,
-    inout w: ChunkSeq[u64],
-    inout d: ChunkSeq[u8]
+    inout w: Slice[u64]
 ) -> Unit eff [Fail[AErr]] {
-    w.push(n);
-    arr(in b, inout r, n, field, inout d);
+    put(inout w, n);
+    arr(in b, inout r, n, field, inout w);
 }
 
 // QeReportBody::parse (the 384-byte SGX report of the Quoting Enclave).
 // Words: misc_select, isv_prod_id, isv_svn. Bytes: cpu_svn, attributes,
 // mr_enclave, mr_signer, report_data.
-pub fn qe_report(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn qe_report(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
     -> Unit eff [Fail[AErr]] {
-    arr(in b, inout r, 16, 43, inout d);
-    w.push(rd_u32(in b, inout r, 44));
+    arr(in b, inout r, 16, 43, inout w);
+    put(inout w, rd_u32(in b, inout r, 44));
     reserved(in b, inout r, 28, 45);
-    arr(in b, inout r, 16, 46, inout d);
-    arr(in b, inout r, 32, 47, inout d);
+    arr(in b, inout r, 16, 46, inout w);
+    arr(in b, inout r, 32, 47, inout w);
     reserved(in b, inout r, 32, 48);
-    arr(in b, inout r, 32, 49, inout d);
+    arr(in b, inout r, 32, 49, inout w);
     reserved(in b, inout r, 96, 50);
-    w.push(rd_u16(in b, inout r, 51));
-    w.push(rd_u16(in b, inout r, 52));
+    put(inout w, rd_u16(in b, inout r, 51));
+    put(inout w, rd_u16(in b, inout r, 52));
     reserved(in b, inout r, 60, 53);
-    arr(in b, inout r, 64, 54, inout d);
+    arr(in b, inout r, 64, 54, inout w);
 }
 
 // TdReportBody::parse. Words: seam_attributes, td_attributes, xfam.
 // Bytes: tee_tcb_svn, mr_seam, mr_signer_seam, mr_td, mr_config_id,
 // mr_owner, mr_owner_config, rtmr0..3, report_data.
-pub fn td_body(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn td_body(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
     -> Unit eff [Fail[AErr]] {
-    arr(in b, inout r, 16, 55, inout d);
-    arr(in b, inout r, 48, 56, inout d);
-    arr(in b, inout r, 48, 57, inout d);
-    w.push(rd_u64(in b, inout r, 58));
-    w.push(rd_u64(in b, inout r, 59));
-    w.push(rd_u64(in b, inout r, 60));
-    arr(in b, inout r, 48, 61, inout d);
-    arr(in b, inout r, 48, 62, inout d);
-    arr(in b, inout r, 48, 63, inout d);
-    arr(in b, inout r, 48, 64, inout d);
-    arr(in b, inout r, 48, 65, inout d);
-    arr(in b, inout r, 48, 66, inout d);
-    arr(in b, inout r, 48, 67, inout d);
-    arr(in b, inout r, 48, 68, inout d);
-    arr(in b, inout r, 64, 69, inout d);
+    arr(in b, inout r, 16, 55, inout w);
+    arr(in b, inout r, 48, 56, inout w);
+    arr(in b, inout r, 48, 57, inout w);
+    put(inout w, rd_u64(in b, inout r, 58));
+    put(inout w, rd_u64(in b, inout r, 59));
+    put(inout w, rd_u64(in b, inout r, 60));
+    arr(in b, inout r, 48, 61, inout w);
+    arr(in b, inout r, 48, 62, inout w);
+    arr(in b, inout r, 48, 63, inout w);
+    arr(in b, inout r, 48, 64, inout w);
+    arr(in b, inout r, 48, 65, inout w);
+    arr(in b, inout r, 48, 66, inout w);
+    arr(in b, inout r, 48, 67, inout w);
+    arr(in b, inout r, 48, 68, inout w);
+    arr(in b, inout r, 64, 69, inout w);
 }
 
 // Td15ExFields::parse. Words: vm_index. Bytes: the nine arrays after it.
-pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
     -> Unit eff [Fail[AErr]] {
     let at = take(inout r, 1, 70);
     let vm_index = match b.try_get(at) {
@@ -116,16 +113,16 @@ pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d: Ch
     if vm_index > MAX_VM_INDEX {
         unsupported(in r, 70, vm_index);
     }
-    w.push(vm_index);
-    arr(in b, inout r, 32, 71, inout d);
-    arr(in b, inout r, 48, 72, inout d);
-    arr(in b, inout r, 48, 73, inout d);
-    arr(in b, inout r, 8, 74, inout d);
-    arr(in b, inout r, 16, 75, inout d);
-    arr(in b, inout r, 16, 76, inout d);
-    arr(in b, inout r, 12, 77, inout d);
-    arr(in b, inout r, 48, 78, inout d);
-    arr(in b, inout r, 8, 79, inout d);
+    put(inout w, vm_index);
+    arr(in b, inout r, 32, 71, inout w);
+    arr(in b, inout r, 48, 72, inout w);
+    arr(in b, inout r, 48, 73, inout w);
+    arr(in b, inout r, 8, 74, inout w);
+    arr(in b, inout r, 16, 75, inout w);
+    arr(in b, inout r, 16, 76, inout w);
+    arr(in b, inout r, 12, 77, inout w);
+    arr(in b, inout r, 48, 78, inout w);
+    arr(in b, inout r, 8, 79, inout w);
 }
 
 // TdxQuote::parse_prefix, then the tail rule `mode` (reader::tail).
@@ -137,29 +134,19 @@ pub fn td15_ex(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d: Ch
 // user_data, the body bytes, tee_tcb_svn2 and mr_service_td (types 3 and
 // 4), the type 4 bytes, quote_signature, attestation_key, the QE report
 // bytes, qe_report_signature, qe_auth_data, the PEM chain.
-pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn parse(in b: Slice[u8], mode: u64, inout w: Slice[u64])
     -> u64 eff [Fail[AErr]] {
     let mut r = rd(0, b.len(), FORMAT_TDX_QUOTE_V4);
-    w.reserve(QUOTE_WORDS);
-    // A hint only: capped so a short quote at the front of a large
-    // buffer (prefix mode) or an input rejected at the header reserves
-    // no more than a real quote needs.
-    let hint = if b.len() < RESERVE_HINT_MAX {
-        b.len()
-    } else {
-        RESERVE_HINT_MAX
-    };
-    d.reserve(hint);
     let version = rd_u16(in b, inout r, 80);
     let att_key_type = rd_u16(in b, inout r, 81);
     let tee_type = rd_u32(in b, inout r, 82);
-    w.push(version);
-    w.push(att_key_type);
-    w.push(tee_type);
-    w.push(rd_u16(in b, inout r, 83));
-    w.push(rd_u16(in b, inout r, 84));
-    arr(in b, inout r, 16, 85, inout d);
-    arr(in b, inout r, 20, 86, inout d);
+    put(inout w, version);
+    put(inout w, att_key_type);
+    put(inout w, tee_type);
+    put(inout w, rd_u16(in b, inout r, 83));
+    put(inout w, rd_u16(in b, inout r, 84));
+    arr(in b, inout r, 16, 85, inout w);
+    arr(in b, inout r, 20, 86, inout w);
     if version != TDX_QUOTE_VERSION && version != TDX_QUOTE_VERSION_5 {
         unsupported(in r, 80, version);
     }
@@ -186,19 +173,19 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
         }
         let at = take(inout r, body_size, 89);
         let mut br = rd(at, wrapping_add(at, body_size), FORMAT_TDX_QUOTE_V4);
-        w.push(body_type);
-        td_body(in b, inout br, inout w, inout d);
+        put(inout w, body_type);
+        td_body(in b, inout br, inout w);
         if body_type != TDX_BODY_TYPE_TD10 {
-            arr(in b, inout br, 16, 90, inout d);
-            arr(in b, inout br, 48, 91, inout d);
+            arr(in b, inout br, 16, 90, inout w);
+            arr(in b, inout br, 48, 91, inout w);
         }
         if body_type == TDX_BODY_TYPE_TD15_EX {
-            td15_ex(in b, inout br, inout w, inout d);
+            td15_ex(in b, inout br, inout w);
         }
         finish(in br);
     } else {
-        w.push(0);
-        td_body(in b, inout r, inout w, inout d);
+        put(inout w, 0);
+        td_body(in b, inout r, inout w);
     }
     let sig_len = rd_u32(in b, inout r, 92);
     if sig_len > max_sig_data() {
@@ -208,8 +195,8 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
     let used = r.pos;
 
     let mut s = rd(sig, wrapping_add(sig, sig_len), FORMAT_TDX_QUOTE_V4);
-    arr(in b, inout s, 64, 94, inout d);
-    arr(in b, inout s, 64, 95, inout d);
+    arr(in b, inout s, 64, 94, inout w);
+    arr(in b, inout s, 64, 95, inout w);
     let cert_type = rd_u16(in b, inout s, 96);
     if cert_type != CERT_DATA_QE_REPORT {
         unsupported(in s, 96, cert_type);
@@ -219,16 +206,16 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
     finish(in s);
 
     let mut c = rd(cert, wrapping_add(cert, cert_size), FORMAT_TDX_QUOTE_V4);
-    qe_report(in b, inout c, inout w, inout d);
-    arr(in b, inout c, 64, 99, inout d);
+    qe_report(in b, inout c, inout w);
+    arr(in b, inout c, 64, 99, inout w);
     let auth_len = rd_u16(in b, inout c, 100);
-    blob(in b, inout c, auth_len, 101, inout w, inout d);
+    blob(in b, inout c, auth_len, 101, inout w);
     let inner_type = rd_u16(in b, inout c, 102);
     if inner_type != CERT_DATA_PCK_CHAIN_PEM {
         unsupported(in c, 102, inner_type);
     }
     let inner_size = rd_u32(in b, inout c, 103);
-    blob(in b, inout c, inner_size, 104, inout w, inout d);
+    blob(in b, inout c, inner_size, 104, inout w);
     finish(in c);
     tail(in b, used, mode, FORMAT_TDX_QUOTE_V4);
     used

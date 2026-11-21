@@ -14,7 +14,8 @@ use self::reader::{
     rd,
     rd_u16,
     rd_u32,
-    unsupported
+    unsupported,
+    put
 };
 
 // src/claims.rs: the wire's architecture tags (TDX 1, SNP 2, CCA 3), the
@@ -66,7 +67,7 @@ const TCB_HIGH_SKIP: u64 = 4;
 // AegisAttestationClaimsWire::decode. Words: tee_arch_tag, tcb_svn,
 // enclave_flags. Bytes: mr_enclave_sha384, loom_lock_blake3,
 // olean_spec_mif, chan_binding_prefix.
-pub fn decode_wire(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn decode_wire(in b: Slice[u8], inout w: Slice[u64])
     -> Unit eff [Fail[AErr]] {
     let mut r = rd(0, b.len(), FORMAT_CLAIMS_WIRE);
     let tag = rd_u16(in b, inout r, 122);
@@ -78,13 +79,13 @@ pub fn decode_wire(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8
     if flags & FLAGS_RESERVED != 0 {
         unsupported(in r, 124, flags);
     }
-    w.push(tag);
-    w.push(tcb_svn);
-    w.push(flags);
-    arr(in b, inout r, MEASUREMENT_BYTES, 125, inout d);
-    arr(in b, inout r, DIGEST_BYTES, 126, inout d);
-    arr(in b, inout r, DIGEST_BYTES, 127, inout d);
-    arr(in b, inout r, PREFIX_BYTES, 128, inout d);
+    put(inout w, tag);
+    put(inout w, tcb_svn);
+    put(inout w, flags);
+    arr(in b, inout r, MEASUREMENT_BYTES, 125, inout w);
+    arr(in b, inout r, DIGEST_BYTES, 126, inout w);
+    arr(in b, inout r, DIGEST_BYTES, 127, inout w);
+    arr(in b, inout r, PREFIX_BYTES, 128, inout w);
     finish(in r);
 }
 

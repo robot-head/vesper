@@ -187,29 +187,45 @@ pub(crate) fn parse_error(e: vesper::AErr) -> ParseError {
     }
 }
 
-/// The two field streams of one successful parse.
-pub(crate) struct Parsed {
-    w: Vec<u64>,
-    d: Vec<u8>,
+/// Room for the words of the longest parse (a TDX v5 quote with a TD 1.5
+/// "ex" body writes 52), after the count in word 0.
+const WORDS: usize = 96;
+/// Room for the bytes a parser computes: the SNP signature, `r || s`.
+const DERIVED: usize = 96;
+
+/// The output of one successful parse: the words the port wrote, the bytes
+/// it computed, and the input whose offsets the words give.
+pub(crate) struct Parsed<'a> {
+    w: [u64; WORDS],
+    d: [u8; DERIVED],
+    input: &'a [u8],
 }
 
-/// Run a port parser over fresh streams.
-pub(crate) fn parse<T>(
-    run: impl FnOnce(&mut Vec<u64>, &mut Vec<u8>) -> Result<T, vesper::AErr>,
-) -> Result<(T, Parsed), ParseError> {
+/// Run a port parser over `input` with fresh output buffers.
+pub(crate) fn parse<'a, T>(
+    input: &'a [u8],
+    run: impl FnOnce(&mut [u64], &mut [u8]) -> Result<T, vesper::AErr>,
+) -> Result<(T, Parsed<'a>), ParseError> {
     let mut p = Parsed {
-        w: Vec::new(),
-        d: Vec::new(),
+        w: [0; WORDS],
+        d: [0; DERIVED],
+        input,
     };
     let out = run(&mut p.w, &mut p.d).map_err(parse_error)?;
+    assert!(
+        p.w[0] < WORDS as u64,
+        "the port wrote {} words, more than the adapter's buffer holds",
+        p.w[0]
+    );
     Ok((out, p))
 }
 
-impl Parsed {
+impl Parsed<'_> {
     pub(crate) fn fields(&self) -> Fields<'_> {
         Fields {
-            w: &self.w,
+            w: &self.w[1..=self.w[0] as usize],
             d: &self.d,
+            input: self.input,
         }
     }
 }
@@ -220,9 +236,10 @@ impl Parsed {
 pub(crate) struct Fields<'a> {
     w: &'a [u64],
     d: &'a [u8],
+    input: &'a [u8],
 }
 
-impl Fields<'_> {
+impl<'a> Fields<'a> {
     pub(crate) fn word(&mut self) -> u64 {
         let (first, rest) = self.w.split_first().expect("the port wrote this word");
         self.w = rest;
@@ -241,20 +258,27 @@ impl Fields<'_> {
         self.word() as u32
     }
 
-    pub(crate) fn bytes(&mut self, n: usize) -> &[u8] {
-        let (first, rest) = self.d.split_at(n);
-        self.d = rest;
-        first
+    /// `n` input bytes at the offset the next word gives.
+    pub(crate) fn bytes(&mut self, n: usize) -> &'a [u8] {
+        let at = self.word() as usize;
+        &self.input[at..at + n]
     }
 
     pub(crate) fn array<const N: usize>(&mut self) -> [u8; N] {
         self.bytes(N).try_into().expect("N bytes")
     }
 
-    /// A variable-length field: its length word, then its bytes.
+    /// A variable-length field: its length word, then its offset word.
     pub(crate) fn vec(&mut self) -> Vec<u8> {
         let n = self.word() as usize;
         self.bytes(n).to_vec()
+    }
+
+    /// The next `N` bytes the port computed.
+    pub(crate) fn derived<const N: usize>(&mut self) -> [u8; N] {
+        let (first, rest) = self.d.split_at(N);
+        self.d = rest;
+        first.try_into().expect("N bytes")
     }
 }
 

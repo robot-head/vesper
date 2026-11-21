@@ -99,11 +99,23 @@ pub fn rd_u64(in b: Slice[u8], inout r: Rd, field: u64) -> u64 eff [Fail[AErr]] 
     }
 }
 
-// A fixed-size byte array: consumed and appended to `d`.
-pub fn arr(in b: Slice[u8], inout r: Rd, n: u64, field: u64, inout d: ChunkSeq[u8])
+// Append `v` to the output words. `w[0]` counts the words written after
+// it; a buffer too small for them keeps counting but stores nothing more,
+// and the Rust adapter checks the count against its buffer.
+pub fn put(inout w: Slice[u64], v: u64) {
+    let k = match w.try_get(0) {
+        Option::Some(x) => wrapping_add(x, 1),
+        Option::None => 1,
+    };
+    w.try_set(k, v);
+    w.try_set(0, k);
+}
+
+// A fixed-size byte array: consumed, and its offset in the input appended
+// to the output words (the adapter slices the input it passed).
+pub fn arr(in b: Slice[u8], inout r: Rd, n: u64, field: u64, inout w: Slice[u64])
     -> Unit eff [Fail[AErr]] {
-    let at = take(inout r, n, field);
-    d.extend(in b[at..wrapping_add(at, n)]);
+    put(inout w, take(inout r, n, field));
 }
 
 // The byte at `i`, or 0 past the end (callers check bounds first).
@@ -116,22 +128,7 @@ pub fn byte(in b: Slice[u8], i: u64) -> u64 {
 
 // Whether `b[start..end]` is all zero.
 pub fn zero(in b: Slice[u8], start: u64, end: u64) -> bool {
-    // Eight bytes at a time, then the tail.
-    let mut acc: u64 = 0;
-    let mut i = start;
-    let words = wrapping_sub(end, start) / WORD_BYTES;
-    for k in 0..words {
-        let x = match b.try_read_u64_le(i) {
-            Option::Some(v) => v,
-            Option::None => 1,
-        };
-        acc = acc | x;
-        i = wrapping_add(i, WORD_BYTES);
-    }
-    if acc != 0 {
-        return false;
-    }
-    all_zero(in b[i..end])
+    all_zero(in b[start..end])
 }
 
 pub fn all_zero(in s: Slice[u8]) -> bool {

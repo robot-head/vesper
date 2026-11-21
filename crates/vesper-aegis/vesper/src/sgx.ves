@@ -16,7 +16,8 @@ use self::reader::{
     take,
     rd_u16,
     rd_u32,
-    unsupported
+    unsupported,
+    put
 };
 use self::tdx::{
     blob,
@@ -31,36 +32,30 @@ const SGX_QUOTE_VERSION: u64 = 3;
 const SGX_ATT_KEY_ECDSA_P256: u64 = 2;
 const SGX_REPORT_BODY_LEN: u64 = 384;
 const CERT_DATA_PCK_CHAIN_PEM: u64 = 5;
-// Format code (lib.ves), the result words `parse` reserves, and its byte
-// hint: the input plus the signed header and body (432 bytes) and raw QE
-// report (384) it copies, capped as in tdx.ves.
+// Format code (lib.ves).
 const FORMAT_SGX_QUOTE_V3: u64 = 1;
-const QUOTE_WORDS: u64 = 14;
-const COPIED_BYTES: u64 = 816;
-const RESERVE_HINT_MAX: u64 = 16384;
-const RESERVE_HINT_CAP: u64 = 17200;
 
 // SgxReportBody::parse. Words: misc_select, isv_prod_id, isv_svn,
 // config_svn. Bytes: cpu_svn, isv_ext_prod_id, attributes, mr_enclave,
 // mr_signer, config_id, isv_family_id, report_data.
-pub fn report_body(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn report_body(in b: Slice[u8], inout r: Rd, inout w: Slice[u64])
     -> Unit eff [Fail[AErr]] {
-    arr(in b, inout r, 16, 105, inout d);
-    w.push(rd_u32(in b, inout r, 106));
+    arr(in b, inout r, 16, 105, inout w);
+    put(inout w, rd_u32(in b, inout r, 106));
     reserved(in b, inout r, 12, 107);
-    arr(in b, inout r, 16, 108, inout d);
-    arr(in b, inout r, 16, 109, inout d);
-    arr(in b, inout r, 32, 110, inout d);
+    arr(in b, inout r, 16, 108, inout w);
+    arr(in b, inout r, 16, 109, inout w);
+    arr(in b, inout r, 32, 110, inout w);
     reserved(in b, inout r, 32, 111);
-    arr(in b, inout r, 32, 112, inout d);
+    arr(in b, inout r, 32, 112, inout w);
     reserved(in b, inout r, 32, 113);
-    arr(in b, inout r, 64, 114, inout d);
-    w.push(rd_u16(in b, inout r, 115));
-    w.push(rd_u16(in b, inout r, 116));
-    w.push(rd_u16(in b, inout r, 117));
+    arr(in b, inout r, 64, 114, inout w);
+    put(inout w, rd_u16(in b, inout r, 115));
+    put(inout w, rd_u16(in b, inout r, 116));
+    put(inout w, rd_u16(in b, inout r, 117));
     reserved(in b, inout r, 42, 118);
-    arr(in b, inout r, 16, 119, inout d);
-    arr(in b, inout r, 64, 69, inout d);
+    arr(in b, inout r, 16, 119, inout w);
+    arr(in b, inout r, 64, 69, inout w);
 }
 
 // SgxQuote::parse_prefix, then the tail rule `mode` (reader::tail).
@@ -72,17 +67,9 @@ pub fn report_body(in b: Slice[u8], inout r: Rd, inout w: ChunkSeq[u64], inout d
 // bytes as received), quote_signature, attestation_key, the raw QE report
 // (384 bytes), the QE report bytes, qe_report_signature, qe_auth_data, the
 // PEM chain.
-pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+pub fn parse(in b: Slice[u8], mode: u64, inout w: Slice[u64])
     -> u64 eff [Fail[AErr]] {
     let mut r = rd(0, b.len(), FORMAT_SGX_QUOTE_V3);
-    w.reserve(QUOTE_WORDS);
-    // A hint only, capped as in tdx.ves.
-    let hint = if b.len() < RESERVE_HINT_MAX {
-        wrapping_add(b.len(), COPIED_BYTES)
-    } else {
-        RESERVE_HINT_CAP
-    };
-    d.reserve(hint);
     let version = rd_u16(in b, inout r, 80);
     if version != SGX_QUOTE_VERSION {
         unsupported(in r, 80, version);
@@ -92,14 +79,14 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
         unsupported(in r, 81, att_key_type);
     }
     reserved(in b, inout r, 4, 120);
-    w.push(version);
-    w.push(att_key_type);
-    w.push(rd_u16(in b, inout r, 83));
-    w.push(rd_u16(in b, inout r, 84));
-    arr(in b, inout r, 16, 85, inout d);
-    arr(in b, inout r, 20, 86, inout d);
-    report_body(in b, inout r, inout w, inout d);
-    d.extend(in b[0..r.pos]);
+    put(inout w, version);
+    put(inout w, att_key_type);
+    put(inout w, rd_u16(in b, inout r, 83));
+    put(inout w, rd_u16(in b, inout r, 84));
+    arr(in b, inout r, 16, 85, inout w);
+    arr(in b, inout r, 20, 86, inout w);
+    report_body(in b, inout r, inout w);
+    put(inout w, 0);
 
     let sig_len = rd_u32(in b, inout r, 92);
     if sig_len > max_sig_data() {
@@ -109,21 +96,21 @@ pub fn parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkS
     let used = r.pos;
 
     let mut s = rd(sig, wrapping_add(sig, sig_len), FORMAT_SGX_QUOTE_V3);
-    arr(in b, inout s, 64, 94, inout d);
-    arr(in b, inout s, 64, 95, inout d);
+    arr(in b, inout s, 64, 94, inout w);
+    arr(in b, inout s, 64, 95, inout w);
     let qe = take(inout s, SGX_REPORT_BODY_LEN, 121);
-    d.extend(in b[qe..wrapping_add(qe, SGX_REPORT_BODY_LEN)]);
+    put(inout w, qe);
     let mut q = rd(qe, wrapping_add(qe, SGX_REPORT_BODY_LEN), FORMAT_SGX_QUOTE_V3);
-    qe_report(in b, inout q, inout w, inout d);
-    arr(in b, inout s, 64, 99, inout d);
+    qe_report(in b, inout q, inout w);
+    arr(in b, inout s, 64, 99, inout w);
     let auth_len = rd_u16(in b, inout s, 100);
-    blob(in b, inout s, auth_len, 101, inout w, inout d);
+    blob(in b, inout s, auth_len, 101, inout w);
     let cert_type = rd_u16(in b, inout s, 96);
     if cert_type != CERT_DATA_PCK_CHAIN_PEM {
         unsupported(in s, 96, cert_type);
     }
     let cert_size = rd_u32(in b, inout s, 97);
-    blob(in b, inout s, cert_size, 98, inout w, inout d);
+    blob(in b, inout s, cert_size, 98, inout w);
     finish(in s);
     tail(in b, used, mode, FORMAT_SGX_QUOTE_V3);
     used

@@ -107,7 +107,7 @@ pub struct SnpReport {
 impl SnpReport {
     #[cfg(vesper_port)]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        let ((), p) = crate::port::parse(|w, d| crate::port::vesper::snp_parse(bytes, w, d))?;
+        let ((), p) = crate::port::parse(bytes, |w, d| crate::port::vesper::snp_parse(bytes, w, d))?;
         let mut f = p.fields();
         let version = f.u32();
         let guest_svn = f.u32();
@@ -174,7 +174,7 @@ impl SnpReport {
             current_etcb,
             launch_etcb,
             committed_etcb,
-            signature_r_s: f.array(),
+            signature_r_s: f.derived(),
         })
     }
 
@@ -506,7 +506,7 @@ pub struct SnpEtcb {
 impl SnpEtcb {
     #[cfg(vesper_port)]
     pub fn parse(b: [u8; SNP_ETCB_LEN]) -> Result<Self, ParseError> {
-        let ((), p) = crate::port::parse(|_, d| crate::port::vesper::snp_etcb_parse(&b, d))?;
+        let ((), p) = crate::port::parse(&b, |w, _| crate::port::vesper::snp_etcb_parse(&b, w))?;
         Ok(SnpEtcb::from_svns(p.fields().array()))
     }
 
