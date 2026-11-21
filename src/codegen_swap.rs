@@ -43,7 +43,7 @@
 //! | `call` | the same | [`INSTRUCTION`] for `Op::Call` and `Op::Indirect` |
 //! | `aggregate` | the same, and the layout helpers | [`INSTRUCTION`] for tuples, data, projections and indexing; the [`aggregate`] ops |
 //! | `drops` | `Codegen::drop_box_value` | [`drops::DROP_BOX`] |
-//! | `seq` | `Codegen::ir_graph_at` | [`INSTRUCTION`] for `Op::Seq` |
+//! | `seq` | `Codegen::ir_graph_at`, and the sequence helpers | [`INSTRUCTION`] for `Op::Seq`; the [`seq`] ops |
 //! | `control` | the same | [`INSTRUCTION`] for closures, handlers and calls of effect operations |
 //! | `numeric` | the same | [`INSTRUCTION`] for `Op::Vector` and `Op::Tiled` |
 //! | `drops` (fip) | the same | [`INSTRUCTION`] for `Op::Fip` |
@@ -545,4 +545,31 @@ pub mod drops {
     /// Drop the `Box` contents a value owns (`Codegen::drop_box_value`).
     /// Args `[value]`, with the value's type; no result.
     pub const DROP_BOX: u32 = 1;
+}
+
+/// The `seq` family's helper requests (self-hosting SH4 lane 9, #1283).
+pub mod seq {
+    /// Define the AOT sequence runtime (`seq::aot_runtime::define`: the
+    /// live counter, the shared empty header, the fault messages and
+    /// `vesper_seq_fault`, `_new`, `_make`, `_grow`, `_free` and
+    /// `vesper_str_release`) in the lent module, which has none of it yet
+    /// and a 64-bit pointer type. Args [`runtime_args`]; no result. The
+    /// lent builder is not used.
+    pub const RUNTIME: u32 = 1;
+
+    /// [`RUNTIME`]'s argument words: whether the target is Windows (no
+    /// fault message is written there), then the runtime's constants
+    /// `INLINE_BYTES`, `NEW_INLINE_BYTES`, `BUFFER_PREFIX`, `FAULT_STATUS`
+    /// and `HEADER_BYTES`, so the two emitters cannot drift apart.
+    pub fn runtime_args(windows: bool) -> [u64; 6] {
+        use crate::seq::native_runtime::{BUFFER_PREFIX, INLINE_BYTES, NEW_INLINE_BYTES};
+        [
+            u64::from(windows),
+            INLINE_BYTES as u64,
+            NEW_INLINE_BYTES as u64,
+            BUFFER_PREFIX as u64,
+            crate::seq::FAULT_STATUS as u64,
+            crate::seq::HEADER_BYTES as u64,
+        ]
+    }
 }
