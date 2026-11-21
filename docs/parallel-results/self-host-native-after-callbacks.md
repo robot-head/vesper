@@ -62,6 +62,9 @@ handle, then its length and data words) on every call.
   (`::`): under an `in` borrow nothing can write, move or resize the field,
   whatever code runs. Only a `handle` (which shares the graph's names) and,
   for whole `inout` and `in` sequence parameters, the old rule remain.
+- `@vesper/bounds-hoist` (`packages/vesper-bounds-hoist/src/hoists.ves`)
+  mirrors the `stable_views` change, so `self_host_bounds_hoist` still
+  matches Rust step for step.
 - A nested graph keeps its entry hoists whose root is an invariant root, and
   reads them with `seq_invariant_field_view`: the handle word and its header
   words are read-only, non-trapping, movable loads, which Cranelift moves
