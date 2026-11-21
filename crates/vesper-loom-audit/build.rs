@@ -30,7 +30,7 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
     // check.ves: overlapping intervals pass (audit malformed_or_ambiguous_catalogs_never_produce_clean_results).
     (
         "check",
-        "if !p.has_fixed || prec_ord(in s.l, p.fixed, r.intro) == 2 {",
+        "if !p.has_fixed || prec_ord(in s.l, p.fixed, r.intro) == Order::Greater {",
         "if !p.has_fixed {",
     ),
     // paths.ves: a longer native path replaces a shorter one (audit native_shared_dependency_chooses_shortest_path_per_root).

@@ -152,7 +152,7 @@ fn rewrite_expr(
 }
 
 /// The direct subexpressions of `e`.
-fn children(e: &mut Expr) -> Vec<&mut Expr> {
+pub(super) fn children(e: &mut Expr) -> Vec<&mut Expr> {
     if e.kind.control_children().is_some() {
         return e.kind.control_children_mut().unwrap_or_default();
     }

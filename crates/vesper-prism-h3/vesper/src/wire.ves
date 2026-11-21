@@ -1,0 +1,92 @@
+// QPACK wire patterns (RFC 9204 §4; src/qpack/wire.rs), shared by the
+// encoder and the decoder: each instruction's and field line's first-byte
+// bits and the length of its integer prefix. The enums are untyped, so a
+// bit pattern is a `u8` and a prefix length a `u64` where they are used.
+
+// §3.2.1: an entry's size is its name and value lengths plus 32.
+pub const ENTRY_OVERHEAD: u64 = 32;
+// §4.1.2: a value string's length prefix.
+pub const VALUE_PREFIX: u64 = 7;
+
+// §4.3.2 Insert with Name Reference.
+pub enum InsertNameRef: _ {
+    Bits = 0x80,
+    Static = 0x40,
+    Prefix = 6,
+}
+
+// §4.3.3 Insert with Literal Name.
+pub enum InsertLiteral: _ {
+    Bits = 0x40,
+    Prefix = 5,
+}
+
+// §4.3.1 Set Dynamic Table Capacity.
+pub enum SetCapacity: _ {
+    Bits = 0x20,
+    Prefix = 5,
+}
+
+// §4.3.4 Duplicate (first-byte bits 000).
+pub enum Duplicate: _ {
+    Prefix = 5,
+}
+
+// §4.4.1 Section Acknowledgment.
+pub enum SectionAck: _ {
+    Bits = 0x80,
+    Prefix = 7,
+}
+
+// §4.4.2 Stream Cancellation.
+pub enum StreamCancel: _ {
+    Bits = 0x40,
+    Prefix = 6,
+}
+
+// §4.4.3 Insert Count Increment.
+pub enum InsertCountIncrement: _ {
+    Bits = 0,
+    Prefix = 6,
+}
+
+// §4.5.1 the field section prefix.
+pub enum SectionPrefix: _ {
+    RicPrefix = 8,
+    BaseNegative = 0x80,
+    DeltaBasePrefix = 7,
+}
+
+// §4.5.2 Indexed Field Line.
+pub enum Indexed: _ {
+    Bits = 0x80,
+    Static = 0x40,
+    Prefix = 6,
+}
+
+// §4.5.3 Indexed Field Line with Post-Base Index.
+pub enum IndexedPostBase: _ {
+    Bits = 0x10,
+    Prefix = 4,
+}
+
+// §4.5.4 Literal Field Line with Name Reference.
+pub enum NameRef: _ {
+    Bits = 0x40,
+    Never = 0x20,
+    Static = 0x10,
+    Prefix = 4,
+}
+
+// §4.5.5 Literal Field Line with Post-Base Name Reference (bits 0000).
+pub enum PostBaseNameRef: _ {
+    Never = 8,
+    Prefix = 3,
+}
+
+// §4.5.6 Literal Field Line with Literal Name.
+pub enum LiteralName: _ {
+    Bits = 0x20,
+    Never = 0x10,
+    Prefix = 3,
+}

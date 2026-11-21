@@ -351,7 +351,7 @@ fn bare_dyn_type(f: &Function) -> Option<(Type, Span)> {
 }
 
 /// Whether the module writes `dyn` anywhere.
-pub(crate) fn uses_dyn(module: &Module) -> bool {
+pub fn uses_dyn(module: &Module) -> bool {
     let fns = |f: &Function| function_types(f).iter().any(|(t, _)| mentions_dyn(t));
     module.items.iter().any(|item| match item {
         Item::Function(f) => fns(f),
@@ -370,7 +370,7 @@ pub(crate) fn uses_dyn(module: &Module) -> bool {
 /// A direct use of a `dyn` parameter as a call argument, checked against
 /// the callee once calls are resolved ([`check_forwards`]).
 #[derive(Debug, Clone)]
-pub(crate) struct Forward {
+pub struct Forward {
     /// The parameter.
     pub name: String,
     /// The call expression's span.
@@ -384,14 +384,14 @@ pub(crate) struct Forward {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum Callee {
+pub enum Callee {
     Name(String),
     /// `base.method(...)`, with the base's span.
     Method(Span, String),
 }
 
 /// The module with `dyn` parameters lowered ([`lower`]).
-pub(crate) struct Lowered {
+pub struct Lowered {
     pub module: Module,
     /// Hidden type parameter to trait, by owning function (World name).
     pub params: BTreeMap<String, BTreeMap<String, Type>>,
@@ -403,7 +403,7 @@ pub(crate) struct Lowered {
 /// Lowers `dyn` parameters to hidden bounded type parameters and checks
 /// that `dyn` appears nowhere else, that every object trait is object
 /// safe, and that no `dyn` value escapes syntactically.
-pub(crate) fn lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
+pub fn lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
     let mut out = module.clone();
     let mut errors = vec![];
     let mut params = BTreeMap::new();

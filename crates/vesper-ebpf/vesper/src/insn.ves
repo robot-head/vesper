@@ -5,83 +5,109 @@
 
 // The opcode fields of src/insn.rs (`class`, `op`, `jmp`, `source`, `size`,
 // `mode`, `atomic`, `pseudo`), named after the kernel's `BPF_*` macros
-// (include/uapi/linux/bpf.h, RFC 9669). Constants are not patterns, so the
-// decoders below compare instead of matching.
+// (include/uapi/linux/bpf.h, RFC 9669), grouped as value enums.
 
 // Instruction classes (`BPF_CLASS`, low three bits).
-const CLASS_LD: u8 = 0;
-const CLASS_LDX: u8 = 1;
-const CLASS_ST: u8 = 2;
-const CLASS_STX: u8 = 3;
-const CLASS_ALU: u8 = 4;
-const CLASS_JMP: u8 = 5;
-const CLASS_JMP32: u8 = 6;
-const CLASS_ALU64: u8 = 7;
-const CLASS_MASK: u8 = 7;
+pub enum BpfClass: _ {
+    Ld = 0,
+    Ldx = 1,
+    St = 2,
+    Stx = 3,
+    Alu = 4,
+    Jmp = 5,
+    Jmp32 = 6,
+    Alu64 = 7,
+    Mask = 7,
+}
+
 // ALU operation codes (`BPF_OP`, high four bits).
-const OP_ADD: u8 = 0;
-const OP_SUB: u8 = 16;
-const OP_MUL: u8 = 32;
-const OP_DIV: u8 = 48;
-const OP_OR: u8 = 64;
-const OP_AND: u8 = 80;
-const OP_LSH: u8 = 96;
-const OP_RSH: u8 = 112;
-const OP_NEG: u8 = 128;
-const OP_MOD: u8 = 144;
-const OP_XOR: u8 = 160;
-const OP_MOV: u8 = 176;
-const OP_ARSH: u8 = 192;
-const OP_END: u8 = 208;
-const OP_MASK: u8 = 240;
+pub enum BpfAlu: u8 {
+    Add = 0,
+    Sub = 16,
+    Mul = 32,
+    Div = 48,
+    Or = 64,
+    And = 80,
+    Lsh = 96,
+    Rsh = 112,
+    Neg = 128,
+    Mod = 144,
+    Xor = 160,
+    Mov = 176,
+    Arsh = 192,
+    End = 208,
+    Mask = 240,
+}
+
 // Jump operation codes (`BPF_OP`).
-const JMP_JA: u8 = 0;
-const JMP_JEQ: u8 = 16;
-const JMP_JGT: u8 = 32;
-const JMP_JGE: u8 = 48;
-const JMP_JSET: u8 = 64;
-const JMP_JNE: u8 = 80;
-const JMP_JSGT: u8 = 96;
-const JMP_JSGE: u8 = 112;
-const JMP_CALL: u8 = 128;
-const JMP_EXIT: u8 = 144;
-const JMP_JLT: u8 = 160;
-const JMP_JLE: u8 = 176;
-const JMP_JSLT: u8 = 192;
-const JMP_JSLE: u8 = 208;
+pub enum BpfJmp: u8 {
+    Ja = 0,
+    Jeq = 16,
+    Jgt = 32,
+    Jge = 48,
+    Jset = 64,
+    Jne = 80,
+    Jsgt = 96,
+    Jsge = 112,
+    Call = 128,
+    Exit = 144,
+    Jlt = 160,
+    Jle = 176,
+    Jslt = 192,
+    Jsle = 208,
+}
+
 // The source bit (`BPF_K` immediate, `BPF_X` register; `BPF_TO_BE` on END).
-const SRC_K: u8 = 0;
-const SRC_X: u8 = 8;
-const SRC_TO_BE: u8 = 8;
+pub enum BpfSrc: _ {
+    K = 0,
+    X = 8,
+    ToBe = 8,
+}
+
 // Access sizes (`BPF_SIZE`).
-const SIZE_W: u8 = 0;
-const SIZE_H: u8 = 8;
-const SIZE_B: u8 = 16;
-const SIZE_DW: u8 = 24;
-const SIZE_MASK: u8 = 24;
+pub enum BpfSize: u8 {
+    W = 0,
+    H = 8,
+    B = 16,
+    Dw = 24,
+    Mask = 24,
+}
+
 // Load and store modes (`BPF_MODE`).
-const MODE_IMM: u8 = 0;
-const MODE_ABS: u8 = 32;
-const MODE_IND: u8 = 64;
-const MODE_MEM: u8 = 96;
-const MODE_MEMSX: u8 = 128;
-const MODE_ATOMIC: u8 = 192;
-const MODE_MASK: u8 = 224;
+pub enum BpfMode: u8 {
+    Imm = 0,
+    Abs = 32,
+    Ind = 64,
+    Mem = 96,
+    Memsx = 128,
+    Atomic = 192,
+    Mask = 224,
+}
+
 // `BPF_ATOMIC` `imm` values: an ALU op, optionally `BPF_FETCH`, or an
 // exchange (`BPF_XCHG` = 0xe0 | FETCH, `BPF_CMPXCHG` = 0xf0 | FETCH).
-const ATOMIC_ADD: i32 = 0;
-const ATOMIC_OR: i32 = 64;
-const ATOMIC_AND: i32 = 80;
-const ATOMIC_XOR: i32 = 160;
-const ATOMIC_FETCH: i32 = 1;
-const ATOMIC_XCHG: i32 = 225;
-const ATOMIC_CMPXCHG: i32 = 241;
-// `LD_IMM64` and `CALL` source-register pseudo values.
-const PSEUDO_MAP_FD: u8 = 1;
-const PSEUDO_MAP_VALUE: u8 = 2;
-const PSEUDO_MAP_IDX_VALUE: u8 = 6;
-const PSEUDO_CALL: u8 = 1;
-const PSEUDO_KFUNC_CALL: u8 = 2;
+pub enum BpfAtomic: i32 {
+    Add = 0,
+    Or = 64,
+    And = 80,
+    Xor = 160,
+    Fetch = 1,
+    Xchg = 225,
+    Cmpxchg = 241,
+}
+
+// `LD_IMM64` source-register pseudo values (`BPF_PSEUDO_MAP_*`).
+pub enum PseudoLd: u8 {
+    Fd = 1,
+    Value = 2,
+    IdxValue = 6,
+}
+
+// `CALL` source-register pseudo values (`BPF_PSEUDO_CALL`, `BPF_PSEUDO_KFUNC_CALL`).
+pub enum PseudoCall: u8 {
+    Call = 1,
+    KfuncCall = 2,
+}
 // The largest register number (R10, the frame pointer).
 const MAX_REG: u8 = 10;
 // A register field is a nibble of byte 1.
@@ -347,12 +373,12 @@ fn zero_i32(pc: usize, v: i32, field: u8) eff [Fail[DecodeError]] {
 }
 
 fn size_from_code(c: u8) -> Size {
-    let m = c & SIZE_MASK;
-    if m == SIZE_W {
+    let m = c & BpfSize::Mask;
+    if m == BpfSize::W {
         Size::W
-    } else if m == SIZE_H {
+    } else if m == BpfSize::H {
         Size::H
-    } else if m == SIZE_B {
+    } else if m == BpfSize::B {
         Size::B
     } else {
         Size::DW
@@ -361,10 +387,10 @@ fn size_from_code(c: u8) -> Size {
 
 fn size_code(s: Size) -> u8 {
     match s {
-        Size::W => SIZE_W,
-        Size::H => SIZE_H,
-        Size::B => SIZE_B,
-        Size::DW => SIZE_DW,
+        Size::W => BpfSize::W,
+        Size::H => BpfSize::H,
+        Size::B => BpfSize::B,
+        Size::DW => BpfSize::Dw,
     }
 }
 
@@ -376,37 +402,37 @@ fn is_dw(s: Size) -> bool {
 }
 
 fn jmp_from_code(op: u8) -> Option[JmpOp] {
-    if op == JMP_JEQ {
+    if op == BpfJmp::Jeq {
         return Option::Some(JmpOp::Eq);
     }
-    if op == JMP_JGT {
+    if op == BpfJmp::Jgt {
         return Option::Some(JmpOp::Gt);
     }
-    if op == JMP_JGE {
+    if op == BpfJmp::Jge {
         return Option::Some(JmpOp::Ge);
     }
-    if op == JMP_JSET {
+    if op == BpfJmp::Jset {
         return Option::Some(JmpOp::Set);
     }
-    if op == JMP_JNE {
+    if op == BpfJmp::Jne {
         return Option::Some(JmpOp::Ne);
     }
-    if op == JMP_JSGT {
+    if op == BpfJmp::Jsgt {
         return Option::Some(JmpOp::SGt);
     }
-    if op == JMP_JSGE {
+    if op == BpfJmp::Jsge {
         return Option::Some(JmpOp::SGe);
     }
-    if op == JMP_JLT {
+    if op == BpfJmp::Jlt {
         return Option::Some(JmpOp::Lt);
     }
-    if op == JMP_JLE {
+    if op == BpfJmp::Jle {
         return Option::Some(JmpOp::Le);
     }
-    if op == JMP_JSLT {
+    if op == BpfJmp::Jslt {
         return Option::Some(JmpOp::SLt);
     }
-    if op == JMP_JSLE {
+    if op == BpfJmp::Jsle {
         return Option::Some(JmpOp::SLe);
     }
     Option::None
@@ -414,73 +440,73 @@ fn jmp_from_code(op: u8) -> Option[JmpOp] {
 
 fn jmp_code(op: JmpOp) -> u8 {
     match op {
-        JmpOp::Eq => JMP_JEQ,
-        JmpOp::Gt => JMP_JGT,
-        JmpOp::Ge => JMP_JGE,
-        JmpOp::Set => JMP_JSET,
-        JmpOp::Ne => JMP_JNE,
-        JmpOp::SGt => JMP_JSGT,
-        JmpOp::SGe => JMP_JSGE,
-        JmpOp::Lt => JMP_JLT,
-        JmpOp::Le => JMP_JLE,
-        JmpOp::SLt => JMP_JSLT,
-        JmpOp::SLe => JMP_JSLE,
+        JmpOp::Eq => BpfJmp::Jeq,
+        JmpOp::Gt => BpfJmp::Jgt,
+        JmpOp::Ge => BpfJmp::Jge,
+        JmpOp::Set => BpfJmp::Jset,
+        JmpOp::Ne => BpfJmp::Jne,
+        JmpOp::SGt => BpfJmp::Jsgt,
+        JmpOp::SGe => BpfJmp::Jsge,
+        JmpOp::Lt => BpfJmp::Jlt,
+        JmpOp::Le => BpfJmp::Jle,
+        JmpOp::SLt => BpfJmp::Jslt,
+        JmpOp::SLe => BpfJmp::Jsle,
     }
 }
 
 // (opcode high nibble, off) of an ALU op.
 fn alu_code(op: AluOp) -> (u8, i16) {
     match op {
-        AluOp::Add => (OP_ADD, 0),
-        AluOp::Sub => (OP_SUB, 0),
-        AluOp::Mul => (OP_MUL, 0),
-        AluOp::Div => (OP_DIV, 0),
-        AluOp::SDiv => (OP_DIV, 1),
-        AluOp::Or => (OP_OR, 0),
-        AluOp::And => (OP_AND, 0),
-        AluOp::Lsh => (OP_LSH, 0),
-        AluOp::Rsh => (OP_RSH, 0),
-        AluOp::Neg => (OP_NEG, 0),
-        AluOp::Mod => (OP_MOD, 0),
-        AluOp::SMod => (OP_MOD, 1),
-        AluOp::Xor => (OP_XOR, 0),
-        AluOp::Mov => (OP_MOV, 0),
-        AluOp::MovSx(b) => (OP_MOV, widen_i16(b)),
-        AluOp::Arsh => (OP_ARSH, 0),
+        AluOp::Add => (BpfAlu::Add, 0),
+        AluOp::Sub => (BpfAlu::Sub, 0),
+        AluOp::Mul => (BpfAlu::Mul, 0),
+        AluOp::Div => (BpfAlu::Div, 0),
+        AluOp::SDiv => (BpfAlu::Div, 1),
+        AluOp::Or => (BpfAlu::Or, 0),
+        AluOp::And => (BpfAlu::And, 0),
+        AluOp::Lsh => (BpfAlu::Lsh, 0),
+        AluOp::Rsh => (BpfAlu::Rsh, 0),
+        AluOp::Neg => (BpfAlu::Neg, 0),
+        AluOp::Mod => (BpfAlu::Mod, 0),
+        AluOp::SMod => (BpfAlu::Mod, 1),
+        AluOp::Xor => (BpfAlu::Xor, 0),
+        AluOp::Mov => (BpfAlu::Mov, 0),
+        AluOp::MovSx(b) => (BpfAlu::Mov, widen_i16(b)),
+        AluOp::Arsh => (BpfAlu::Arsh, 0),
     }
 }
 
 fn atomic_from_imm(imm: i32) -> Option[AtomicOp] {
-    if imm == ATOMIC_XCHG {
+    if imm == BpfAtomic::Xchg {
         return Option::Some(AtomicOp::Xchg);
     }
-    if imm == ATOMIC_CMPXCHG {
+    if imm == BpfAtomic::Cmpxchg {
         return Option::Some(AtomicOp::CmpXchg);
     }
-    let fetch = (imm & ATOMIC_FETCH) != 0;
-    let code = imm & ~ATOMIC_FETCH;
-    if code == ATOMIC_ADD {
+    let fetch = (imm & BpfAtomic::Fetch) != 0;
+    let code = imm & ~BpfAtomic::Fetch;
+    if code == BpfAtomic::Add {
         return Option::Some(
             AtomicOp::Add {
                 fetch: fetch
             }
         );
     }
-    if code == ATOMIC_OR {
+    if code == BpfAtomic::Or {
         return Option::Some(
             AtomicOp::Or {
                 fetch: fetch
             }
         );
     }
-    if code == ATOMIC_AND {
+    if code == BpfAtomic::And {
         return Option::Some(
             AtomicOp::And {
                 fetch: fetch
             }
         );
     }
-    if code == ATOMIC_XOR {
+    if code == BpfAtomic::Xor {
         return Option::Some(
             AtomicOp::Xor {
                 fetch: fetch
@@ -492,7 +518,7 @@ fn atomic_from_imm(imm: i32) -> Option[AtomicOp] {
 
 fn fetch_bit(f: bool) -> i32 {
     if f {
-        ATOMIC_FETCH
+        BpfAtomic::Fetch
     } else {
         0
     }
@@ -503,21 +529,21 @@ fn atomic_imm(op: AtomicOp) -> i32 {
         AtomicOp::Add {
             fetch
         }
-        => ATOMIC_ADD | fetch_bit(fetch),
+        => BpfAtomic::Add | fetch_bit(fetch),
         AtomicOp::Or {
             fetch
         }
-        => ATOMIC_OR | fetch_bit(fetch),
+        => BpfAtomic::Or | fetch_bit(fetch),
         AtomicOp::And {
             fetch
         }
-        => ATOMIC_AND | fetch_bit(fetch),
+        => BpfAtomic::And | fetch_bit(fetch),
         AtomicOp::Xor {
             fetch
         }
-        => ATOMIC_XOR | fetch_bit(fetch),
-        AtomicOp::Xchg => ATOMIC_XCHG,
-        AtomicOp::CmpXchg => ATOMIC_CMPXCHG,
+        => BpfAtomic::Xor | fetch_bit(fetch),
+        AtomicOp::Xchg => BpfAtomic::Xchg,
+        AtomicOp::CmpXchg => BpfAtomic::Cmpxchg,
     }
 }
 
@@ -525,65 +551,65 @@ fn atomic_imm(op: AtomicOp) -> i32 {
 // sign-extending forms), or None.
 fn alu_op(opc: u8, off: i16, wide: bool) -> Option[AluOp] {
     if off == 0 {
-        if opc == OP_ADD {
+        if opc == BpfAlu::Add {
             return Option::Some(AluOp::Add);
         }
-        if opc == OP_SUB {
+        if opc == BpfAlu::Sub {
             return Option::Some(AluOp::Sub);
         }
-        if opc == OP_MUL {
+        if opc == BpfAlu::Mul {
             return Option::Some(AluOp::Mul);
         }
-        if opc == OP_DIV {
+        if opc == BpfAlu::Div {
             return Option::Some(AluOp::Div);
         }
-        if opc == OP_OR {
+        if opc == BpfAlu::Or {
             return Option::Some(AluOp::Or);
         }
-        if opc == OP_AND {
+        if opc == BpfAlu::And {
             return Option::Some(AluOp::And);
         }
-        if opc == OP_LSH {
+        if opc == BpfAlu::Lsh {
             return Option::Some(AluOp::Lsh);
         }
-        if opc == OP_RSH {
+        if opc == BpfAlu::Rsh {
             return Option::Some(AluOp::Rsh);
         }
-        if opc == OP_NEG {
+        if opc == BpfAlu::Neg {
             return Option::Some(AluOp::Neg);
         }
-        if opc == OP_MOD {
+        if opc == BpfAlu::Mod {
             return Option::Some(AluOp::Mod);
         }
-        if opc == OP_XOR {
+        if opc == BpfAlu::Xor {
             return Option::Some(AluOp::Xor);
         }
-        if opc == OP_MOV {
+        if opc == BpfAlu::Mov {
             return Option::Some(AluOp::Mov);
         }
-        if opc == OP_ARSH {
+        if opc == BpfAlu::Arsh {
             return Option::Some(AluOp::Arsh);
         }
         return Option::None;
     }
-    if off == 1 && opc == OP_DIV {
+    if off == 1 && opc == BpfAlu::Div {
         return Option::Some(AluOp::SDiv);
     }
-    if off == 1 && opc == OP_MOD {
+    if off == 1 && opc == BpfAlu::Mod {
         return Option::Some(AluOp::SMod);
     }
-    if opc == OP_MOV && (off == 8 || off == 16 || (off == 32 && wide)) {
+    if opc == BpfAlu::Mov && (off == 8 || off == 16 || (off == 32 && wide)) {
         return Option::Some(AluOp::MovSx(wrapping_u8(off)));
     }
     Option::None
 }
 
 fn decode_alu(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
-    let wide = (r.code & CLASS_MASK) == CLASS_ALU64;
-    let x = r.code & SRC_X != 0;
+    let wide = (r.code & BpfClass::Mask) == BpfClass::Alu64;
+    let x = r.code & BpfSrc::X != 0;
     let dst = reg(pc, r.dst);
-    let opc = r.code & OP_MASK;
-    if opc == OP_END {
+    let opc = r.code & BpfAlu::Mask;
+    if opc == BpfAlu::End {
         let kind = if !wide && !x {
             Endian::ToLe
         } else if !wide {
@@ -612,7 +638,7 @@ fn decode_alu(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
     }
     let op = match alu_op(opc, r.off, wide) {
         Option::Some(o) => o,
-        Option::None => if opc <= OP_ARSH {
+        Option::None => if opc <= BpfAlu::Arsh {
             reserved(pc, 2)
         } else {
             bad(pc, r.code)
@@ -652,10 +678,10 @@ fn decode_alu(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
 }
 
 fn decode_jmp(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
-    let wide = (r.code & CLASS_MASK) == CLASS_JMP;
-    let x = r.code & SRC_X != 0;
-    let opc = r.code & OP_MASK;
-    if opc == JMP_JA {
+    let wide = (r.code & BpfClass::Mask) == BpfClass::Jmp;
+    let x = r.code & BpfSrc::X != 0;
+    let opc = r.code & BpfAlu::Mask;
+    if opc == BpfJmp::Ja {
         if x {
             bad(pc, r.code);
         }
@@ -672,7 +698,7 @@ fn decode_jmp(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
             off: r.imm
         };
     }
-    if opc == JMP_CALL && wide {
+    if opc == BpfJmp::Call && wide {
         if x {
             bad(pc, r.code);
         }
@@ -689,7 +715,7 @@ fn decode_jmp(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         };
         return Insn::Call(t);
     }
-    if opc == JMP_EXIT && wide {
+    if opc == BpfJmp::Exit && wide {
         if x {
             bad(pc, r.code);
         }
@@ -722,8 +748,8 @@ fn decode_jmp(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
 
 fn decode_ld(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail[DecodeError]] {
     let size = size_from_code(r.code);
-    let mode = r.code & MODE_MASK;
-    if mode == MODE_IMM && is_dw(size) {
+    let mode = r.code & BpfMode::Mask;
+    if mode == BpfMode::Imm && is_dw(size) {
         let dst = reg(pc, r.dst);
         zero_i16(pc, r.off, FIELD_OFF);
         if !has_hi {
@@ -736,12 +762,12 @@ fn decode_ld(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail
             let lo = widen_u64(wrapping_u32(r.imm));
             let up = widen_u64(wrapping_u32(hi.imm));
             Imm64::Value(lo | (up << 32))
-        } else if r.src == PSEUDO_MAP_FD {
+        } else if r.src == PseudoLd::Fd {
             if hi.imm != 0 {
                 broken(pc);
             }
             Imm64::MapFd(r.imm)
-        } else if r.src >= PSEUDO_MAP_VALUE && r.src <= PSEUDO_MAP_IDX_VALUE {
+        } else if r.src >= PseudoLd::Value && r.src <= PseudoLd::IdxValue {
             Imm64::Pseudo {
                 src: r.src,
                 imm_lo: r.imm,
@@ -755,10 +781,10 @@ fn decode_ld(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail
             imm: imm
         };
     }
-    if (mode == MODE_ABS || mode == MODE_IND) && !is_dw(size) {
+    if (mode == BpfMode::Abs || mode == BpfMode::Ind) && !is_dw(size) {
         zero_u8(pc, r.dst, FIELD_DST);
         zero_i16(pc, r.off, FIELD_OFF);
-        let indirect = mode == MODE_IND;
+        let indirect = mode == BpfMode::Ind;
         let src = if indirect {
             reg(pc, r.src)
         } else {
@@ -776,13 +802,13 @@ fn decode_ld(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail
 }
 
 fn decode_mem(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
-    let cls = r.code & CLASS_MASK;
+    let cls = r.code & BpfClass::Mask;
     let size = size_from_code(r.code);
-    let mode = r.code & MODE_MASK;
-    if cls == CLASS_LDX {
-        let sign_extend = if mode == MODE_MEM {
+    let mode = r.code & BpfMode::Mask;
+    if cls == BpfClass::Ldx {
+        let sign_extend = if mode == BpfMode::Mem {
             false
-        } else if mode == MODE_MEMSX && !is_dw(size) {
+        } else if mode == BpfMode::Memsx && !is_dw(size) {
             true
         } else {
             bad(pc, r.code)
@@ -799,7 +825,7 @@ fn decode_mem(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         };
     }
     if cls == 2 {
-        if mode != MODE_MEM {
+        if mode != BpfMode::Mem {
             bad(pc, r.code);
         }
         zero_u8(pc, r.src, FIELD_SRC);
@@ -811,7 +837,7 @@ fn decode_mem(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         };
     }
     // STX
-    if mode == MODE_MEM {
+    if mode == BpfMode::Mem {
         zero_i32(pc, r.imm, FIELD_IMM);
         let dst = reg(pc, r.dst);
         let src = reg(pc, r.src);
@@ -827,7 +853,7 @@ fn decode_mem(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
         Size::DW => true,
         _ => false,
     };
-    if mode == MODE_ATOMIC && atomic_size {
+    if mode == BpfMode::Atomic && atomic_size {
         let op = match atomic_from_imm(r.imm) {
             Option::Some(o) => o,
             Option::None => bad(pc, r.code),
@@ -859,12 +885,12 @@ pub fn decode(pc: usize, len: usize, lo: RawInsn, hi: RawInsn) -> Insn eff [Fail
 }
 
 fn decode_slot(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail[DecodeError]] {
-    let cls = r.code & CLASS_MASK;
-    if cls == CLASS_ALU || cls == CLASS_ALU64 {
+    let cls = r.code & BpfClass::Mask;
+    if cls == BpfClass::Alu || cls == BpfClass::Alu64 {
         decode_alu(pc, r)
-    } else if cls == CLASS_JMP || cls == CLASS_JMP32 {
+    } else if cls == BpfClass::Jmp || cls == BpfClass::Jmp32 {
         decode_jmp(pc, r)
-    } else if cls == CLASS_LD {
+    } else if cls == BpfClass::Ld {
         decode_ld(pc, r, has_hi, hi)
     } else {
         decode_mem(pc, r)
@@ -948,8 +974,8 @@ fn one(r: RawInsn) -> Encoded {
 
 fn op_src(o: Operand) -> (u8, u8, i32) {
     match o {
-        Operand::Imm(i) => (SRC_K, 0, i),
-        Operand::Reg(s) => (SRC_X, s, 0),
+        Operand::Imm(i) => (BpfSrc::K, 0, i),
+        Operand::Reg(s) => (BpfSrc::X, s, 0),
     }
 }
 
@@ -964,9 +990,9 @@ pub fn encode(i: Insn) -> Encoded {
         }
         => {
             let cls: u8 = if wide {
-                CLASS_ALU64
+                BpfClass::Alu64
             } else {
-                CLASS_ALU
+                BpfClass::Alu
             };
             let (opc, off) = alu_code(op);
             let (x, sreg, imm) = op_src(src);
@@ -979,9 +1005,9 @@ pub fn encode(i: Insn) -> Encoded {
         }
         => {
             let code: u8 = match kind {
-                Endian::ToLe => CLASS_ALU | OP_END,
-                Endian::ToBe => CLASS_ALU | OP_END | SRC_TO_BE,
-                Endian::Swap => CLASS_ALU64 | OP_END,
+                Endian::ToLe => BpfClass::Alu | BpfAlu::End,
+                Endian::ToBe => BpfClass::Alu | BpfAlu::End | BpfSrc::ToBe,
+                Endian::Swap => BpfClass::Alu64 | BpfAlu::End,
             };
             one(raw(code, dst, 0, 0, widen_i32(bits)))
         },
@@ -989,9 +1015,9 @@ pub fn encode(i: Insn) -> Encoded {
             off
         }
         => if off >= -32768 && off <= 32767 {
-            one(raw(CLASS_JMP | JMP_JA, 0, 0, wrapping_i16(off), 0))
+            one(raw(BpfClass::Jmp | BpfJmp::Ja, 0, 0, wrapping_i16(off), 0))
         } else {
-            one(raw(CLASS_JMP32 | JMP_JA, 0, 0, 0, off))
+            one(raw(BpfClass::Jmp32 | BpfJmp::Ja, 0, 0, 0, off))
         },
         Insn::Jcond {
             wide,
@@ -1002,19 +1028,23 @@ pub fn encode(i: Insn) -> Encoded {
         }
         => {
             let cls: u8 = if wide {
-                CLASS_JMP
+                BpfClass::Jmp
             } else {
-                CLASS_JMP32
+                BpfClass::Jmp32
             };
             let (x, sreg, imm) = op_src(src);
             one(raw(cls | jmp_code(op) | x, dst, sreg, off, imm))
         },
         Insn::Call(t) => match t {
-            CallTarget::Helper(n) => one(raw(CLASS_JMP | JMP_CALL, 0, 0, 0, n)),
-            CallTarget::Local(n) => one(raw(CLASS_JMP | JMP_CALL, 0, PSEUDO_CALL, 0, n)),
-            CallTarget::Kfunc(n) => one(raw(CLASS_JMP | JMP_CALL, 0, PSEUDO_KFUNC_CALL, 0, n)),
+            CallTarget::Helper(n) => one(raw(BpfClass::Jmp | BpfJmp::Call, 0, 0, 0, n)),
+            CallTarget::Local(n) => one(
+                raw(BpfClass::Jmp | BpfJmp::Call, 0, PseudoCall::Call, 0, n)
+            ),
+            CallTarget::Kfunc(n) => one(
+                raw(BpfClass::Jmp | BpfJmp::Call, 0, PseudoCall::KfuncCall, 0, n)
+            ),
         },
-        Insn::Exit => one(raw(CLASS_JMP | JMP_EXIT, 0, 0, 0, 0)),
+        Insn::Exit => one(raw(BpfClass::Jmp | BpfJmp::Exit, 0, 0, 0, 0)),
         Insn::LdImm64 {
             dst,
             imm
@@ -1022,7 +1052,7 @@ pub fn encode(i: Insn) -> Encoded {
         => {
             let (src, lo, up): (u8, i32, i32) = match imm {
                 Imm64::Value(v) => (0, wrapping_i32(v), wrapping_i32(v >> 32)),
-                Imm64::MapFd(fd) => (PSEUDO_MAP_FD, fd, 0),
+                Imm64::MapFd(fd) => (PseudoLd::Fd, fd, 0),
                 Imm64::Pseudo {
                     src,
                     imm_lo,
@@ -1032,7 +1062,7 @@ pub fn encode(i: Insn) -> Encoded {
             };
             Encoded {
                 n: 2,
-                lo: raw(CLASS_LD | MODE_IMM | SIZE_DW, dst, src, 0, lo),
+                lo: raw(BpfClass::Ld | BpfMode::Imm | BpfSize::Dw, dst, src, 0, lo),
                 hi: raw(0, 0, 0, 0, up)
             }
         },
@@ -1045,11 +1075,11 @@ pub fn encode(i: Insn) -> Encoded {
         }
         => {
             let mode: u8 = if sign_extend {
-                MODE_MEMSX
+                BpfMode::Memsx
             } else {
-                MODE_MEM
+                BpfMode::Mem
             };
-            one(raw(CLASS_LDX | mode | size_code(size), dst, src, off, 0))
+            one(raw(BpfClass::Ldx | mode | size_code(size), dst, src, off, 0))
         },
         Insn::St {
             size,
@@ -1057,14 +1087,14 @@ pub fn encode(i: Insn) -> Encoded {
             off,
             imm
         }
-        => one(raw(CLASS_ST | MODE_MEM | size_code(size), dst, 0, off, imm)),
+        => one(raw(BpfClass::St | BpfMode::Mem | size_code(size), dst, 0, off, imm)),
         Insn::Stx {
             size,
             dst,
             src,
             off
         }
-        => one(raw(CLASS_STX | MODE_MEM | size_code(size), dst, src, off, 0)),
+        => one(raw(BpfClass::Stx | BpfMode::Mem | size_code(size), dst, src, off, 0)),
         Insn::Atomic {
             size,
             op,
@@ -1072,7 +1102,9 @@ pub fn encode(i: Insn) -> Encoded {
             src,
             off
         }
-        => one(raw(CLASS_STX | MODE_ATOMIC | size_code(size), dst, src, off, atomic_imm(op))),
+        => one(
+            raw(BpfClass::Stx | BpfMode::Atomic | size_code(size), dst, src, off, atomic_imm(op))
+        ),
         Insn::LdLegacy {
             size,
             indirect,
@@ -1081,16 +1113,16 @@ pub fn encode(i: Insn) -> Encoded {
         }
         => {
             let mode: u8 = if indirect {
-                MODE_IND
+                BpfMode::Ind
             } else {
-                MODE_ABS
+                BpfMode::Abs
             };
             let s: u8 = if indirect {
                 src
             } else {
                 0
             };
-            one(raw(CLASS_LD | mode | size_code(size), 0, s, 0, imm))
+            one(raw(BpfClass::Ld | mode | size_code(size), 0, s, 0, imm))
         },
     }
 }

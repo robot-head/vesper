@@ -752,6 +752,7 @@ fn standard_library_core_and_byte_source_unit_tests_pass() {
     check_source_unit_tests(&[
         ("packages/vesper-std/bytes/src/ct.ves", 17),
         ("packages/vesper-std/bytes/src/lib.ves", 53),
+        ("packages/vesper-std/bytes/src/views.ves", 24),
         ("packages/vesper-std/core/src/lib.ves", 23),
         ("packages/vesper-std/core/src/option.ves", 27),
         ("packages/vesper-std/core/src/result.ves", 13),
@@ -768,7 +769,7 @@ fn standard_library_collection_source_unit_tests_pass() {
         ("packages/vesper-std/collections/src/radix_seq.ves", 16),
         ("packages/vesper-std/graph/src/util.ves", 9),
         ("packages/vesper-std/hash/src/fast.ves", 23),
-        ("packages/vesper-std/intern/src/lib.ves", 33),
+        ("packages/vesper-std/intern/src/lib.ves", 36),
         ("packages/vesper-std/sort/src/unstable.ves", 28),
     ]);
 }

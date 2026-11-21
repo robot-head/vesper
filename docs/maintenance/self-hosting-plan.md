@@ -227,7 +227,18 @@ corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
 | Swap | Lane | Whole corpus wall | Whole corpus Ir | Swapped module alone | Report |
 |---|---|--:|--:|---|---|
 | `parse` (front end v2 + AST, read back into `Parse`) | SH1-12 (#1155) | 1.03x | 1.06x | 1.00x wall, 1.19x Ir over 911 sources | [self-host-parser-swap.md](../parallel-results/self-host-parser-swap.md) |
+| `dyn` (`dyn_fn` + `dyn_trait`; differential only, swap is a follow-up) | SH2-11 (#1183) | not swapped | not swapped | 0.28x wall over 930 sources forced, 0.70x on the dyn suites | [self-host-check-dyn.md](../parallel-results/self-host-check-dyn.md) |
 | `names_packages` (package assembler: imports, re-exports, renaming; not swapped yet) | SH2-6 (#1178) | not swapped | not swapped | 0.72x-0.87x wall and 1.54x Ir of `packages::load` (two parses per module until SH2-1); assembler alone 0.37x-0.44x wall, 0.99x Ir | [self-host-check-names-packages.md](../parallel-results/self-host-check-names-packages.md) |
+| `fip` checks (`fip::check_world`; not swapped yet, part 1 of the lane) | SH2-12 (#1184) | not swapped | not swapped | 0.92x wall with decoding (0.56x checks only) over 315 worlds; encoding the input costs 2.5x of Rust's check | [self-host-check-fip.md](../parallel-results/self-host-check-fip.md) |
+
+**SH2 checker ports.** Each row is one checker port. Until its swap into
+the hybrid build lands, the numbers are the ported rules alone against the
+Rust rules they replace, over lane 4's corpus (ABBA, release build, Vesper
+time divided by Rust time, input decode subtracted).
+
+| Port | Lane | Ported so far | Differential | Rules alone | Hybrid swap | Report |
+|---|---|---|---|--:|---|---|
+| regions, sequences, strings, arrays, tiled, vectors | SH2-9 (#1181) | type and world rules (part 1) | 0 of 282 worlds; E0200, E0792, E0797, E1404, E1501-E1503, E1520 on mutants | 1.12x types, 1.17x world | with the expression rules | [self-host-check-regions-seqs.md](../parallel-results/self-host-check-regions-seqs.md) |
 
 ## Estimates
 

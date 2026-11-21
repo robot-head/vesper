@@ -1,18 +1,11 @@
 // sim_aura.rs: focus order, dispatch, audits and the topology encoding.
 use self::codes::{
-    b_children,
-    b_handler,
-    b_slots,
-    e_focused,
-    k_button,
-    k_container,
-    k_input,
-    none_id,
-    p_enabled,
-    p_text,
-    p_visible,
-    v_bool,
-    v_text
+    Budget,
+    Event,
+    Prop,
+    ValueTag,
+    WidgetKind,
+    NONE_ID
 };
 use self::recording::{
     child_count,
@@ -87,24 +80,24 @@ pub fn query_with(sink tree: Tree) -> Query {
     }
 }
 
-// Whether a mounted widget's bool property (`p_enabled()`, `p_visible()`) is false.
+// Whether a mounted widget's bool property (`Prop::Enabled`, `Prop::Visible`) is false.
 pub fn flag_off(in s: RState, widget: u64, property: u64) -> bool {
     let k = widget_slot(in s, widget, property);
-    if k == none_id() {
+    if k == NONE_ID {
         false
     } else {
         let v = rslot(in s.slots, k);
-        v.tag == v_bool() && v.payload == 0
+        v.tag == ValueTag::Bool && v.payload == 0
     }
 }
 
 pub fn mounted_label(in s: RState, widget: u64) -> bool {
-    let k = widget_slot(in s, widget, p_text());
-    if k == none_id() {
+    let k = widget_slot(in s, widget, Prop::Text);
+    if k == NONE_ID {
         false
     } else {
         let v = rslot(in s.slots, k);
-        v.tag == v_text() && !blank_seq(in s.text, v.tstart, v.tlen)
+        v.tag == ValueTag::Text && !blank_seq(in s.text, v.tstart, v.tlen)
     }
 }
 
@@ -131,11 +124,11 @@ pub fn focus_order(in rec: Recorder, inout q: Query) {
         let id = seq_u64(in stack, dec(top));
         stack.truncate(dec(top));
         let i = widget_index(in rec.st, id);
-        if i != none_id() && !seq_bool(in seen, i) {
+        if i != NONE_ID && !seq_bool(in seen, i) {
             seen.try_set(i, true);
-            if !flag_off(in rec.st, id, p_visible()) && !flag_off(in rec.st, id, p_enabled()) {
+            if !flag_off(in rec.st, id, Prop::Visible) && !flag_off(in rec.st, id, Prop::Enabled) {
                 let kind = rwidget(in rec.st.widgets, i).kind;
-                if kind == k_button() || kind == k_input() {
+                if kind == WidgetKind::Button || kind == WidgetKind::Input {
                     q.items.push(id);
                 }
                 let n = child_count(in rec.st, id);
@@ -162,7 +155,7 @@ pub fn do_sim_focusable(in rec: Recorder) -> Query {
 // `q.has_handler`/`q.handler`.
 pub fn dispatch_if_subscribed(in rec: Recorder, inout q: Query, widget: u64, event: u64) {
     let k = widget_sub(in rec.st, widget, event);
-    if k == none_id() {
+    if k == NONE_ID {
         q.has_handler = false;
     } else {
         q.has_handler = true;
@@ -186,9 +179,9 @@ pub fn do_sim_focus(in rec: Recorder, has_focus: bool, focused: u64, forward: bo
     let at = if has_focus {
         position(in q.items, focused)
     } else {
-        none_id()
+        NONE_ID
     };
-    let next = if at == none_id() {
+    let next = if at == NONE_ID {
         if forward {
             seq_u64(in q.items, 0)
         } else {
@@ -200,7 +193,7 @@ pub fn do_sim_focus(in rec: Recorder, has_focus: bool, focused: u64, forward: bo
         seq_u64(in q.items, dec(add(at, n)) % n)
     };
     q.target = next;
-    dispatch_if_subscribed(in rec, inout q, next, e_focused());
+    dispatch_if_subscribed(in rec, inout q, next, Event::Focused);
     q
 }
 
@@ -210,7 +203,7 @@ pub fn do_sim_focus(in rec: Recorder, has_focus: bool, focused: u64, forward: bo
 pub fn do_sim_trigger(in rec: Recorder, same_session: bool, widget: u64, event: u64) -> Query {
     let mut q = query_new();
     focus_order(in rec, inout q);
-    if !same_session || !rec.st.has_session || position(in q.items, widget) == none_id() {
+    if !same_session || !rec.st.has_session || position(in q.items, widget) == NONE_ID {
         q.code = 1;
         return q;
     }
@@ -228,7 +221,7 @@ pub fn do_sim_trigger(in rec: Recorder, same_session: bool, widget: u64, event: 
 pub fn do_sim_still_focusable(in rec: Recorder, widget: u64) -> Query {
     let mut q = query_new();
     focus_order(in rec, inout q);
-    q.found = position(in q.items, widget) != none_id();
+    q.found = position(in q.items, widget) != NONE_ID;
     q
 }
 
@@ -240,7 +233,7 @@ pub fn audit_one(
     subscribed: bool,
     target: u64
 ) {
-    if kind == k_button() || kind == k_input() {
+    if kind == WidgetKind::Button || kind == WidgetKind::Input {
         q.interactive = inc(q.interactive);
         if visible && !labelled {
             q.items.push(0);
@@ -279,9 +272,9 @@ pub fn do_sim_audit(in rec: Recorder) -> Query {
             stack.truncate(dec(top));
             flags.truncate(dec(top));
             let i = widget_index(in rec.st, id);
-            if i != none_id() && !seq_bool(in seen, i) {
+            if i != NONE_ID && !seq_bool(in seen, i) {
                 seen.try_set(i, true);
-                let visible = parent_visible && !flag_off(in rec.st, id, p_visible());
+                let visible = parent_visible && !flag_off(in rec.st, id, Prop::Visible);
                 let w = rwidget(in rec.st.widgets, i);
                 audit_one(
                     inout q,
@@ -312,7 +305,7 @@ pub fn do_sim_audit(in rec: Recorder) -> Query {
             audit_one(
                 inout q,
                 w.kind,
-                !flag_off(in rec.st, w.serial, p_visible()),
+                !flag_off(in rec.st, w.serial, Prop::Visible),
                 mounted_label(in rec.st, w.serial),
                 widget_sub_count(in rec.st, w.serial) != 0,
                 w.serial
@@ -329,26 +322,26 @@ pub fn tree_prop(in t: Tree, n: TNode, property: u64) -> u64 {
             return add(n.pstart, j);
         }
     }
-    none_id()
+    NONE_ID
 }
 
 pub fn tree_flag_off(in t: Tree, n: TNode, property: u64) -> bool {
     let k = tree_prop(in t, n, property);
-    if k == none_id() {
+    if k == NONE_ID {
         false
     } else {
         let p = tprop(in t.props, k);
-        p.tag == v_bool() && p.payload == 0
+        p.tag == ValueTag::Bool && p.payload == 0
     }
 }
 
 pub fn tree_label(in t: Tree, n: TNode, in text: Slice[u8]) -> bool {
-    let k = tree_prop(in t, n, p_text());
-    if k == none_id() {
+    let k = tree_prop(in t, n, Prop::Text);
+    if k == NONE_ID {
         false
     } else {
         let p = tprop(in t.props, k);
-        p.tag == v_text() && !blank_slice(in text, p.tstart, p.tlen)
+        p.tag == ValueTag::Text && !blank_slice(in text, p.tstart, p.tlen)
     }
 }
 
@@ -374,12 +367,12 @@ pub fn do_audit_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice[
         let ti = seq_u64(in q.tree.order, oi);
         let node = tnode(in q.tree.nodes, ti);
         let parent = seq_u64(in q.tree.parent, ti);
-        let parent_visible = if parent == none_id() {
+        let parent_visible = if parent == NONE_ID {
             true
         } else {
             seq_bool(in flags, parent)
         };
-        let visible = parent_visible && !tree_flag_off(in q.tree, node, p_visible());
+        let visible = parent_visible && !tree_flag_off(in q.tree, node, Prop::Visible);
         flags.try_set(ti, visible);
         let labelled = tree_label(in q.tree, node, in text);
         audit_one(inout q, node.kind, visible, labelled, node.scount != 0, node.key);
@@ -389,9 +382,9 @@ pub fn do_audit_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice[
 
 // The slot properties of each kind, in slot order (sim_aura::kind_properties).
 pub fn kind_slot_count(kind: u64) -> u64 {
-    if kind == k_container() {
+    if kind == WidgetKind::Container {
         3
-    } else if kind == k_input() {
+    } else if kind == WidgetKind::Input {
         5
     } else {
         4
@@ -399,9 +392,9 @@ pub fn kind_slot_count(kind: u64) -> u64 {
 }
 
 pub fn kind_slot_property(kind: u64, i: u64) -> u64 {
-    if kind == k_container() {
+    if kind == WidgetKind::Container {
         add(i, 2)
-    } else if kind == k_input() {
+    } else if kind == WidgetKind::Input {
         i
     } else if i == 0 {
         0
@@ -429,7 +422,7 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
         let ti = seq_u64(in q.tree.order, oi);
         let node = tnode(in q.tree.nodes, ti);
         if slots > U32_MAX {
-            q.fault = Option::Some(ViewFault::Budget(b_slots()));
+            q.fault = Option::Some(ViewFault::Budget(Budget::Slots));
             return q;
         }
         let base = slots;
@@ -440,7 +433,7 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
             q
                 .values
                 .push(
-                if tree_prop(in q.tree, node, property) == none_id() {
+                if tree_prop(in q.tree, node, property) == NONE_ID {
                     0
                 } else {
                     1
@@ -449,14 +442,14 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
             slots = inc(slots);
         }
         if node.ccount > U16_MAX {
-            q.fault = Option::Some(ViewFault::Budget(b_children()));
+            q.fault = Option::Some(ViewFault::Budget(Budget::Children));
             return q;
         }
         let mut action: u64 = 0;
         for j in 0..node.scount {
             let h = tsub(in q.tree.subs, add(node.sstart, j)).handler;
             if h > U32_MAX {
-                q.fault = Option::Some(ViewFault::Budget(b_handler()));
+                q.fault = Option::Some(ViewFault::Budget(Budget::Handler));
                 return q;
             }
             if j == 0 {
@@ -464,13 +457,13 @@ pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice
             }
         }
         let mut flags: u64 = 0;
-        if !tree_flag_off(in q.tree, node, p_visible()) {
+        if !tree_flag_off(in q.tree, node, Prop::Visible) {
             flags = flags | FLAG_VISIBLE;
         }
-        if !tree_flag_off(in q.tree, node, p_enabled()) {
+        if !tree_flag_off(in q.tree, node, Prop::Enabled) {
             flags = flags | FLAG_ENABLED;
         }
-        if node.kind == k_button() || node.kind == k_input() {
+        if node.kind == WidgetKind::Button || node.kind == WidgetKind::Input {
             flags = flags | FLAG_INTERACTIVE;
         }
         if tree_label(in q.tree, node, in text) {

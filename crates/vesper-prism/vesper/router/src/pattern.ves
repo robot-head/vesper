@@ -1,17 +1,6 @@
 // Route pattern parsing: literal and `{name}` segments, and their checks.
 
 // ASCII bytes this module compares against (constants are per module).
-const NUL: u8 = 0;
-const SPACE: u8 = 32;
-const HASH: u8 = 35;
-const PERCENT: u8 = 37;
-const DOT: u8 = 46;
-const SLASH: u8 = 47;
-const COLON: u8 = 58;
-const QUESTION: u8 = 63;
-const BACKSLASH: u8 = 92;
-const UNDERSCORE: u8 = 95;
-const DEL: u8 = 127;
 
 use self::{
     RouteFault,
@@ -21,11 +10,14 @@ use self::{
     is_digit,
     is_alpha
 };
+use self::ascii::{
+    Ascii
+};
 
-// A C0, DEL or C1 control character (`char::is_control`) at `i` of UTF-8 text.
+// A C0, Ascii::Del or C1 control character (`char::is_control`) at `i` of UTF-8 text.
 fn control_at(in p: Slice[u8], i: u64, hi: u64) -> bool {
     let b = byte(in p, i);
-    if b < SPACE || b == DEL {
+    if b < Ascii::Space || b == Ascii::Del {
         return true;
     }
     if b == 194 && wrapping_add(i, 1) < hi {
@@ -67,12 +59,12 @@ pub fn same(in a: Slice[u8], alo: u64, ahi: u64, in b: Slice[u8], blo: u64, bhi:
 // trailing slash.
 pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, RouteFault] {
     let n = p.len();
-    if n == 0 || byte(in p, 0) != SLASH {
+    if n == 0 || byte(in p, 0) != Ascii::Slash {
         return Result::Err(RouteFault::InvalidPattern);
     }
     let mut hi = n;
     let mut trailing = false;
-    if n >= 2 && byte(in p, wrapping_sub(n, 1)) == SLASH {
+    if n >= 2 && byte(in p, wrapping_sub(n, 1)) == Ascii::Slash {
         if n == 2 {
             return Result::Err(RouteFault::InvalidPattern);
         }
@@ -90,7 +82,7 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
     }
     let mut segments: u64 = 1;
     for i in 1..hi {
-        if byte(in p, i) == SLASH {
+        if byte(in p, i) == Ascii::Slash {
             segments = wrapping_add(segments, 1);
         }
     }
@@ -99,16 +91,16 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
     }
     let mut at: u64 = 1;
     loop {
-        let end = find(in p, at, hi, SLASH);
-        if at < end && byte(in p, at) == COLON {
+        let end = find(in p, at, hi, Ascii::Slash);
+        if at < end && byte(in p, at) == Ascii::Colon {
             let name_lo = wrapping_add(at, 1);
             let first = byte(in p, name_lo);
-            if name_lo >= end || !(is_alpha(first) || first == UNDERSCORE) {
+            if name_lo >= end || !(is_alpha(first) || first == Ascii::Underscore) {
                 return Result::Err(RouteFault::InvalidParameterName);
             }
             for i in name_lo..end {
                 let b = byte(in p, i);
-                if !(is_alpha(b) || is_digit(b) || b == UNDERSCORE) {
+                if !(is_alpha(b) || is_digit(b) || b == Ascii::Underscore) {
                     return Result::Err(RouteFault::InvalidParameterName);
                 }
             }
@@ -130,28 +122,28 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
             );
         } else {
             // Literals are decoded text, so they obey the target policy: no
-            // separators, NUL, dot segments or percent (no second decode).
+            // separators, Ascii::Nul, dot segments or percent (no second decode).
             let len = wrapping_sub(end, at);
             let dots = (len == 1 || len == 2)
                 && byte(in p, at)
-                == DOT
+                == Ascii::Dot
                 && byte(in p, wrapping_sub(end, 1))
-                == DOT;
+                == Ascii::Dot;
             if len == 0 || dots {
                 return Result::Err(RouteFault::InvalidPattern);
             }
             for i in at..end {
                 let b = byte(in p, i);
                 if b
-                    == BACKSLASH
+                    == Ascii::Backslash
                     || b
-                    == NUL
+                    == Ascii::Nul
                     || b
-                    == PERCENT
+                    == Ascii::Percent
                     || b
-                    == QUESTION
+                    == Ascii::Question
                     || b
-                    == HASH
+                    == Ascii::Hash
                     || control_at(in p, i, end) {
                     return Result::Err(RouteFault::InvalidPattern);
                 }

@@ -4,6 +4,8 @@ use @vesper/loom-calculus::{
     Diag
 };
 use @vesper/loom-calculus::util::{
+    Ascii,
+    Order,
     add,
     diag,
     gb,
@@ -25,108 +27,85 @@ use self::{
     S
 };
 
+const DECIMAL_BASE: u64 = 10;
+// Dedup once ds holds this many entries past twice the deduplicated count.
+const DEDUP_SLACK: u64 = 4096;
+
 // Diagnostic codes. 0 .. 15 are the calculus codes (`Code`, in order);
 // the solver's own codes follow (CODES in src/port.rs).
-pub fn c_unsupported_schema() -> u64 {
-    16
+pub enum SolverCode: _ {
+    UnsupportedSchema = 16,
+    DuplicateCandidate,
+    ConflictingRoot,
+    InvalidSystemName,
+    DuplicateSystemCandidate,
+    UnsupportedPolicy,
+    UnknownFeature,
+    LockedRootMismatch,
+    LockedManifestMismatch,
+    LockedCandidateMissing,
+    LockedFeaturesMismatch,
+    LockedUnusedPackage,
+    LockedPackageMissing,
+    LockedSystemMissing,
+    LockedUnusedSystem,
+    LockedSystemCandidateMissing,
+    BudgetExhausted,
+    VersionConflict,
+    NoCandidate,
+    NoSystemCandidate,
+    InvalidMaxSolutions,
+    UnknownOptimizeObjective,
+    InsufficientReproAttestations,
+    UnvettedNamespace,
+    MissingCandidateMetadata
 }
 
-pub fn c_duplicate_candidate() -> u64 {
-    17
+// Error kinds, in the order of KINDS in src/port.rs.
+pub enum ErrorKind: _ {
+    InvalidInput,
+    UnsupportedPolicy,
+    Unsatisfiable,
+    BudgetExhausted,
+    LockedMismatch
 }
 
-pub fn c_conflicting_root() -> u64 {
-    18
+// The tag after the occurrence table: a solution or an error.
+pub enum ResultTag: _ {
+    Solution,
+    Error
 }
 
-pub fn c_invalid_system_name() -> u64 {
-    19
+// Optimization objectives, in the order of OBJECTIVES in src/port.rs;
+// `Unknown` marks a name that is none of them.
+pub enum Objective: _ {
+    ZeroCve,
+    MinCapabilitySurface,
+    MinDupMajors,
+    MinStaleness,
+    MinTrustCost,
+    Unknown
 }
 
-pub fn c_duplicate_system_candidate() -> u64 {
-    20
+// The words of `met`, one metric per objective plus the unknown-metadata
+// count.
+pub enum Metric: _ {
+    Cves,
+    CapabilitySurface,
+    DupMajors,
+    Staleness,
+    TrustCost,
+    UnknownMetadata
 }
 
-pub fn c_unsupported_policy() -> u64 {
-    21
+// The orders `msort` knows (see `sorder`).
+pub enum SolverSort: _ {
+    Manifests = 1,
+    NativeCandidates,
+    Values,
+    Diagnostics,
+    Pairs
 }
-
-pub fn c_unknown_feature() -> u64 {
-    22
-}
-
-pub fn c_locked_root_mismatch() -> u64 {
-    23
-}
-
-pub fn c_locked_manifest_mismatch() -> u64 {
-    24
-}
-
-pub fn c_locked_candidate_missing() -> u64 {
-    25
-}
-
-pub fn c_locked_features_mismatch() -> u64 {
-    26
-}
-
-pub fn c_locked_unused_package() -> u64 {
-    27
-}
-
-pub fn c_locked_package_missing() -> u64 {
-    28
-}
-
-pub fn c_locked_system_missing() -> u64 {
-    29
-}
-
-pub fn c_locked_unused_system() -> u64 {
-    30
-}
-
-pub fn c_locked_system_candidate_missing() -> u64 {
-    31
-}
-
-pub fn c_budget_exhausted() -> u64 {
-    32
-}
-
-pub fn c_version_conflict() -> u64 {
-    33
-}
-
-pub fn c_no_candidate() -> u64 {
-    34
-}
-
-pub fn c_no_system_candidate() -> u64 {
-    35
-}
-
-pub fn c_invalid_max_solutions() -> u64 {
-    36
-}
-
-pub fn c_unknown_optimize_objective() -> u64 {
-    37
-}
-
-pub fn c_insufficient_repro_attestations() -> u64 {
-    38
-}
-
-pub fn c_unvetted_namespace() -> u64 {
-    39
-}
-
-pub fn c_missing_candidate_metadata() -> u64 {
-    40
-}
-
 // ---------------------------------------------------------------------
 // Text.
 
@@ -174,8 +153,8 @@ pub fn dnum(inout s: S, x: u64) {
     let at = s.dp.len();
     let mut rest = x;
     loop {
-        s.dp.push(wrapping_u8(wrapping_add(48, rest % 10)));
-        rest = rest / 10;
+        s.dp.push(wrapping_u8(wrapping_add(Ascii::Zero, rest % DECIMAL_BASE)));
+        rest = rest / DECIMAL_BASE;
         if rest == 0 {
             break;
         }
@@ -217,7 +196,7 @@ pub fn emit(inout s: S, code: u64, pkg: u64, so: u64, sl: u64, mo: u64) {
             ml: ml
         }
     );
-    if s.ds.len() >= add(mul(s.dedup_n, 2), 4096) {
+    if s.ds.len() >= add(mul(s.dedup_n, 2), DEDUP_SLACK) {
         dedup(inout s);
     }
 }
@@ -261,10 +240,10 @@ fn dbytes_ord(in s: S, ao: u64, al: u64, bo: u64, bl: u64) -> u64 {
         let x = dbyte(in s, add(ao, i));
         let y = dbyte(in s, add(bo, i));
         if x < y {
-            return 0;
+            return Order::Less;
         }
         if x > y {
-            return 2;
+            return Order::Greater;
         }
     }
     ord(al, bl)
@@ -276,15 +255,15 @@ pub fn ds_ord(in s: S, a: u64, b: u64) -> u64 {
     let x = diag(in s.ds, a);
     let y = diag(in s.ds, b);
     let o = ord(x.code, y.code);
-    if o != 1 {
+    if o != Order::Equal {
         return o;
     }
     let o = ord(okey(x.pkg), okey(y.pkg));
-    if o != 1 {
+    if o != Order::Equal {
         return o;
     }
     let o = dbytes_ord(in s, x.so, x.sl, y.so, y.sl);
-    if o != 1 {
+    if o != Order::Equal {
         return o;
     }
     dbytes_ord(in s, x.mo, x.ml, y.mo, y.ml)
@@ -301,13 +280,13 @@ pub fn dedup(inout s: S) {
     for i in 0..s.ds.len() {
         s.idx.push(i);
     }
-    msort(inout s, 4);
+    msort(inout s, SolverSort::Diagnostics);
     s.dt.clear();
     s.dq.clear();
     let mut last = none();
     for j in 0..s.idx.len() {
         let x = sw(in s.idx, j);
-        let dup = last != none() && ds_ord(in s, last, x) == 1;
+        let dup = last != none() && ds_ord(in s, last, x) == Order::Equal;
         if !dup {
             last = x;
             let d = diag(in s.ds, x);
@@ -354,41 +333,41 @@ pub fn dedup(inout s: S) {
 // ascending; 4 diagnostics (ds_ord); 5 (pa, pc) pairs ascending.
 
 pub fn sorder(in s: S, kind: u64, a: u64, b: u64) -> u64 {
-    if kind == 1 {
+    if kind == SolverSort::Manifests {
         let x = match s.l.mans.try_get(a) {
             Option::Some(m) => m,
-            Option::None => return 1,
+            Option::None => return Order::Equal,
         };
         let y = match s.l.mans.try_get(b) {
             Option::Some(m) => m,
-            Option::None => return 1,
+            Option::None => return Order::Equal,
         };
         let o = ord(x.name, y.name);
-        if o != 1 {
+        if o != Order::Equal {
             return o;
         }
         ver_ord(in s.l, y.ver, x.ver)
-    } else if kind == 2 {
+    } else if kind == SolverSort::NativeCandidates {
         let x = match s.sys.try_get(a) {
             Option::Some(m) => m,
-            Option::None => return 1,
+            Option::None => return Order::Equal,
         };
         let y = match s.sys.try_get(b) {
             Option::Some(m) => m,
-            Option::None => return 1,
+            Option::None => return Order::Equal,
         };
         let o = ord(x.name, y.name);
-        if o != 1 {
+        if o != Order::Equal {
             return o;
         }
         ver_ord(in s.l, y.ver, x.ver)
-    } else if kind == 3 {
+    } else if kind == SolverSort::Values {
         ord(a, b)
-    } else if kind == 4 {
+    } else if kind == SolverSort::Diagnostics {
         ds_ord(in s, a, b)
     } else {
         let o = ord(sw(in s.pa, a), sw(in s.pa, b));
-        if o != 1 {
+        if o != Order::Equal {
             return o;
         }
         ord(sw(in s.pc, a), sw(in s.pc, b))
@@ -466,7 +445,7 @@ pub fn sort_values(inout s: S, which: u64) {
             s.idx.push(x);
         }
     }
-    msort(inout s, 3);
+    msort(inout s, SolverSort::Values);
     if which == 0 {
         s.cnames.clear();
         for i in 0..s.idx.len() {
