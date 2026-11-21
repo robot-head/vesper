@@ -482,6 +482,12 @@ pub fn verify_emitted(
     verifiers: &BTreeSet<NativeVerifier>,
     policy: &NativeVerifierPolicy,
 ) -> Result<NativeVerifierReport, String> {
+    // SH4 swap point (#1275): the `verifiers` hook may verify instead.
+    if let Some(hook) = crate::codegen_swap::installed().verifiers
+        && let Some(r) = hook(world, functions, target, verifiers, policy)
+    {
+        return r;
+    }
     let names = Names::new(functions);
     let mut report = NativeVerifierReport {
         verifiers: verifiers.clone(),

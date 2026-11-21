@@ -1,0 +1,85 @@
+// @vesper/wit-component: the part of wit-component 0.261 (and wit-parser)
+// the wasm backend reaches, in Vesper: wrapping the backend's core module
+// and WIT world into a `wasm32-wasip2` component, byte for byte as
+// src/wasm_backend/component.rs `encode` does.
+//
+// It writes the component directly (see comp.ves) and covers the worlds
+// the backend writes without host imports. A WIT outside that subset is
+// declined, and the caller wraps the module with Rust's wit-component.
+
+use self::wit::{
+    Wit,
+    parse
+};
+use self::comp::{
+    encode,
+    needs_realloc
+};
+use @vesper/check-data::pack_text;
+
+// The world kinds of `WasmWorld`.
+const W_COMMAND: u8 = 0;
+
+// Why the port declined (the second word of a declined answer).
+const D_INPUT: u64 = 1;
+const D_PLUGIN: u64 = 2;
+const D_REALLOC: u64 = 5;
+// WIT reasons (wit.ves `E_*`) are answered as 16 + reason.
+const D_WIT: u64 = 16;
+
+fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn declined(reason: u64) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    out.push(1);
+    out.push(reason);
+    out
+}
+
+// The harness entry over a `Str` (see `wit_component_wrap_bytes`).
+pub fn wit_component_wrap(in input: Str) -> ChunkSeq[u64] {
+    wit_component_wrap_bytes(in input.as_bytes())
+}
+
+// Input: the world kind (0 command, 1 Nexus plugin), the WIT's byte length
+// as a little-endian u32, the WIT text, then the core module. Answer:
+// `[0, packed component]` (check-data `pack_text`), or `[1, reason]` when
+// the port declines and Rust should wrap.
+pub fn wit_component_wrap_bytes(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let n = input.len();
+    if n < 5 {
+        return declined(D_INPUT);
+    }
+    if byte(in input, 0) != W_COMMAND {
+        return declined(D_PLUGIN);
+    }
+    let mut len: u64 = 0;
+    for k in 0..4 {
+        len = len | wrapping_shl_u64(
+            widen_u64(byte(in input, wrapping_add(1, k))),
+            wrapping_mul(wrapping_u32(k), 8)
+        );
+    }
+    let wit_end = wrapping_add(5, len);
+    if wit_end > n {
+        return declined(D_INPUT);
+    }
+    let w = parse(in input[5..wit_end]);
+    if w.err != 0 {
+        return declined(wrapping_add(D_WIT, w.err));
+    }
+    if needs_realloc(in w) {
+        return declined(D_REALLOC);
+    }
+    let component = encode(in input[wit_end..n], in w);
+    let packed = pack_text(in component);
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(packed.len(), 1));
+    out.push(0);
+    out.extend(in packed.as_slice());
+    out
+}

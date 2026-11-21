@@ -106,6 +106,9 @@ const COMMANDS: &[&[&str]] = &[
     &["check", "--json"],
     &["emit", "--emit", "ir"],
     &["emit", "--emit", "object", "-o", "{out}"],
+    // The wasm backend swap (#1289): the component bytes. `build` prints the
+    // output path, so both compilers write the same one, in turn.
+    &["build", "--target", "wasm32-wasip2", "-o", "{out}"],
 ];
 
 struct Run {
@@ -180,8 +183,10 @@ fn hybrid_matches_the_default_compiler() {
                         break;
                     };
                     for (c, command) in COMMANDS.iter().enumerate() {
-                        let a = scratch.join(format!("{i}-{c}-default.o"));
-                        let b = scratch.join(format!("{i}-{c}-hybrid.o"));
+                        // One output path for both: each run reads its
+                        // bytes back before the other starts.
+                        let a = scratch.join(format!("{i}-{c}.o"));
+                        let b = a.clone();
                         let d = run(&default, &root, command, file, &a);
                         let h = run(&hybrid, &root, command, file, &b);
                         let diff = differences(&d, &h);
@@ -280,4 +285,37 @@ fn pilot_module_runs_from_vesper() {
             .unwrap_or_else(|| panic!("no {module} report in {stderr:?}"));
         assert!(calls > 0, "the Vesper {module} module answered no calls");
     }
+}
+
+/// The wasm backend module (#1289) really compiles from Vesper in the
+/// hybrid build, and its component is wrapped from Vesper (#1334):
+/// `transaction.ves` has no handler and no host capability.
+#[test]
+fn wasm_module_runs_from_vesper() {
+    let root = repository();
+    let out = std::env::temp_dir().join(format!("vesper-hybrid-wasm-{}.wasm", std::process::id()));
+    let output = Command::new(hybrid())
+        .current_dir(&root)
+        .env("VESPER_HYBRID_STATS", "1")
+        .args(["build", "--target", "wasm32-wasip2", "-o"])
+        .arg(&out)
+        .arg("examples/transaction.ves")
+        .output()
+        .expect("run vesper-hybrid");
+    let _ = std::fs::remove_file(&out);
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let compiled: Option<u64> = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: wasm backend compiled "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok());
+    assert_eq!(compiled, Some(1), "{stderr}");
+    // ... and @vesper/wit-component wraps its component (#1334).
+    let wrapped: Option<u64> = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: wit-component wrapped "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok());
+    assert_eq!(wrapped, Some(1), "{stderr}");
 }

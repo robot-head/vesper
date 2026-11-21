@@ -203,6 +203,20 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 15 (#1289): @vesper/wasm-backend against src/wasm_backend
+        # over the tests/wasm_backend.rs programs and the corpus.
+        "test/self_host_wasm_backend": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/wasm_backend.rs"],
+        # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
+        # over the same programs.
+        "test/self_host_wit_component": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/wasm_backend.rs"],
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
@@ -597,6 +611,10 @@ vesper_crate(
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
         "test/self_host_place_ir": "long",
+        # The wasm backend differential: about 10 min in a debug build.
+        "test/self_host_wasm_backend": "long",
+        # The component wrapping differential (#1334): ~2 min release.
+        "test/self_host_wit_component": "long",
         "test/self_host_check_harness": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
@@ -715,12 +733,51 @@ vesper_package(
     deps = [":check_data_package"],
 )
 
+# The Place IR data and the wasm backend port as dependencies of the hybrid
+# compiler's wasm_backend module (self-hosting SH4 lane 15, #1289).
+vesper_package(
+    name = "place_ir_package",
+    srcs = glob(["packages/vesper-place-ir/src/**/*.ves"]),
+    manifest = "packages/vesper-place-ir/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+vesper_package(
+    name = "wasm_backend_package",
+    srcs = glob(["packages/vesper-wasm-backend/src/**/*.ves"]),
+    manifest = "packages/vesper-wasm-backend/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
+    name = "wit_component_package",
+    srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
+    manifest = "packages/vesper-wit-component/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
 vesper_package(
     name = "std_hash_sys_package",
     srcs = glob(["packages/vesper-std/hash/sys/src/**/*.ves"]),
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":std_hash_package"],
+)
+
+# The codegen base as a dependency of the hybrid compiler's codegen module
+# (self-hosting SH4 lane 1, #1275); @vesper/cranelift is in its own package.
+vesper_package(
+    name = "codegen_base_package",
+    srcs = glob(["packages/vesper-codegen-base/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-base/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
 )
 
 filegroup(

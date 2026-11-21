@@ -1,0 +1,12 @@
+[package]
+name = "@vesper/hybrid-wasm-backend"
+version = "0.1.0"
+edition = "2026"
+# The wasm backend only computes bytes: no I/O, clock or network (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../../../../packages/vesper-check-data" }
+"@vesper/place-ir" = { version = "^0.1", path = "../../../../packages/vesper-place-ir" }
+"@vesper/wasm-backend" = { version = "^0.1", path = "../../../../packages/vesper-wasm-backend" }
+"@vesper/wit-component" = { version = "^0.1", path = "../../../../packages/vesper-wit-component" }

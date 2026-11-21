@@ -30,6 +30,16 @@ mod check_layout_binding;
 #[path = "../port/ir_check.rs"]
 mod ir_check_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/codegen.rs"]
+mod codegen_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/wasm_backend.rs"]
+mod wasm_backend_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -37,6 +47,13 @@ mod parse_words;
 // the root package's tests/hybrid_layout.rs and tests/hybrid_ir_check.rs.
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+
+// The wasm backend swap's input encoder (#1289): the Place IR words of
+// #1259 and the wasm section, shared with tests/self_host_wasm_backend.rs.
+#[path = "../../../tests/common/ir_words.rs"]
+mod ir_words;
+#[path = "../../../tests/common/wasm_words.rs"]
+mod wasm_words;
 
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -46,6 +63,15 @@ static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs checked by the Vesper IR-check module.
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
+/// `aggregate` requests the Vesper codegen module emitted, and declined.
+static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
+static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Programs the Vesper wasm backend compiled, and left to Rust.
+static WASM_CALLS: AtomicU64 = AtomicU64::new(0);
+static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Components `@vesper/wit-component` wrapped, and left to wit-component.
+static WRAP_CALLS: AtomicU64 = AtomicU64::new(0);
+static WRAP_DECLINED: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -115,6 +141,159 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
     },
 };
 
+/// The `aggregate` hook of `vesper::codegen_swap` from `modules/codegen`:
+/// the census lowering family, emitted in Vesper through the lent builder
+/// and module (`vesper_cranelift_sys::lend`).
+fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    let kind = if lent.jit {
+        vesper_cranelift_sys::ModuleKind::Jit
+    } else {
+        vesper_cranelift_sys::ModuleKind::Object
+    };
+    let (answer, crossing) = vesper_cranelift_sys::lend_as(
+        kind,
+        lent.builder,
+        &mut *lent.module,
+        lent.op,
+        lent.args,
+        codegen_binding::aggregate,
+    );
+    if let Some(e) = crossing.error {
+        return Err(format!("codegen (aggregate op {}): {e}", lent.op));
+    }
+    if crossing.unreturned {
+        return Err(format!(
+            "codegen (aggregate op {}) kept a lent handle",
+            lent.op
+        ));
+    }
+    if answer == 1 {
+        CODEGEN_CALLS.fetch_add(1, Relaxed);
+        lent.results.extend(crossing.results);
+        Ok(true)
+    } else {
+        CODEGEN_DECLINED.fetch_add(1, Relaxed);
+        Ok(false)
+    }
+}
+
+/// The `wasm` hook of `vesper::codegen_swap` from `modules/wasm_backend`:
+/// `@vesper/wasm-backend` writes the core module and the WIT, and
+/// `@vesper/wit-component` wraps them into the component (#1334), with
+/// Rust's wit-component where it declines (host imports). Errors (so the
+/// messages stay Rust's) and programs with handlers or host capabilities
+/// (not ported yet) decline to the Rust backend.
+fn vesper_wasm(
+    world: &vesper::check::World,
+    entry: &str,
+    options: &vesper::wasm_backend::WasmOptions,
+) -> Option<Result<vesper::wasm_backend::WasmArtifact, vesper::wasm_backend::WasmError>> {
+    match compile_wasm(world, entry, options) {
+        Some(artifact) => {
+            WASM_CALLS.fetch_add(1, Relaxed);
+            Some(Ok(artifact))
+        }
+        None => {
+            WASM_DECLINED.fetch_add(1, Relaxed);
+            None
+        }
+    }
+}
+
+/// `wasm_words::compile_with` over the binding, with the component from
+/// Vesper.
+fn compile_wasm(
+    w: &vesper::check::World,
+    entry: &str,
+    o: &vesper::wasm_backend::WasmOptions,
+) -> Option<vesper::wasm_backend::WasmArtifact> {
+    if !w.functions.contains_key(entry) {
+        return None;
+    }
+    let program = wasm_words::backend_program(w, o)?;
+    let input = wasm_words::wasm_input(w, &program, entry, o)?;
+    let wasm_words::Outcome::Module {
+        core,
+        wit,
+        functions,
+    } = wasm_words::outcome(&wasm_backend_binding::compile_words(&input))
+    else {
+        return None;
+    };
+    match wrap_component(&core, &wit, o.world) {
+        Some(component) => {
+            WRAP_CALLS.fetch_add(1, Relaxed);
+            Some(artifact(w, entry, o, core, component, wit, functions))
+        }
+        None => {
+            WRAP_DECLINED.fetch_add(1, Relaxed);
+            Some(wasm_words::artifact(w, entry, o, core, wit, functions))
+        }
+    }
+}
+
+/// `wasm_words::artifact` with the component given: the artifact of a
+/// module without handlers or host capabilities.
+fn artifact(
+    w: &vesper::check::World,
+    entry: &str,
+    o: &vesper::wasm_backend::WasmOptions,
+    core: Vec<u8>,
+    component: Vec<u8>,
+    wit: String,
+    functions: usize,
+) -> vesper::wasm_backend::WasmArtifact {
+    use vesper::wasm_backend::{ENTRY_INTERFACE, WasmWorld};
+    let f = &w.functions[entry];
+    vesper::wasm_backend::WasmArtifact {
+        core,
+        component,
+        wit,
+        world: o.world,
+        export: match o.world {
+            WasmWorld::Command => format!("{ENTRY_INTERFACE}#main"),
+            WasmWorld::NexusPlugin => "run".to_owned(),
+        },
+        params: f.params.iter().map(|p| p.ty.clone()).collect(),
+        result: vesper::numeric::default_type(&f.result),
+        stack_switching: false,
+        imports: vec![],
+        handlers: vec![],
+        functions,
+    }
+}
+
+/// `@vesper/wit-component`'s component for a core module and its WIT, or
+/// `None` where it declines (modules/wasm_backend `wrap_words`).
+fn wrap_component(
+    core: &[u8],
+    wit: &str,
+    world: vesper::wasm_backend::WasmWorld,
+) -> Option<Vec<u8>> {
+    let mut input = Vec::with_capacity(5 + wit.len() + core.len());
+    input.push(match world {
+        vesper::wasm_backend::WasmWorld::Command => 0,
+        vesper::wasm_backend::WasmWorld::NexusPlugin => 1,
+    });
+    input.extend_from_slice(&u32::try_from(wit.len()).ok()?.to_le_bytes());
+    input.extend_from_slice(wit.as_bytes());
+    input.extend_from_slice(core);
+    let words = wasm_backend_binding::wrap_words(&input);
+    if words.first() != Some(&0) {
+        return None;
+    }
+    let len = usize::try_from(*words.get(1)?).ok()?;
+    let mut bytes = Vec::with_capacity(len + 8);
+    for x in &words[2..] {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    if bytes.len() < len {
+        return None;
+    }
+    bytes.truncate(len);
+    Some(bytes)
+}
+
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
     if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
@@ -127,6 +306,14 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
+        std::process::abort();
+    }
+    let hooks = vesper::codegen_swap::CodegenHooks {
+        aggregate: Some(vesper_aggregate),
+        wasm: Some(vesper_wasm),
+        ..Default::default()
+    };
+    if vesper::codegen_swap::install(hooks).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
@@ -155,6 +342,21 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-check answered {} calls from Vesper",
         IR_CHECK_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: codegen emitted {} aggregate requests from Vesper ({} declined)",
+        CODEGEN_CALLS.load(Relaxed),
+        CODEGEN_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
+        WASM_CALLS.load(Relaxed),
+        WASM_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: wit-component wrapped {} components from Vesper ({} declined)",
+        WRAP_CALLS.load(Relaxed),
+        WRAP_DECLINED.load(Relaxed)
     );
 }
 

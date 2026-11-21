@@ -41,6 +41,11 @@ vesper_hybrid(
             "//:check_data_package",
             "//:check_layout_package",
         ],
+        # The codegen swap (#1275) emits through the Cranelift shim.
+        "hybrid_codegen": [
+            "//:codegen_base_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         "hybrid_ir_check": [
             "//:check_data_package",
             "//:ir_check_package",
@@ -50,12 +55,22 @@ vesper_hybrid(
             "//:front_package",
             "//:std_intern_package",
         ],
+        # The wasm backend swap (#1289) builds on the Place IR data; the
+        # component wrapping (#1334) on @vesper/wit-component.
+        "hybrid_wasm_backend": [
+            "//:check_data_package",
+            "//:place_ir_package",
+            "//:wasm_backend_package",
+            "//:wit_component_package",
+        ],
     },
     modules = {
         "hybrid_check_layout": "modules/check_layout",
+        "hybrid_codegen": "modules/codegen",
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
+        "hybrid_wasm_backend": "modules/wasm_backend",
     },
     test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
     test_path_binaries = {

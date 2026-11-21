@@ -1,0 +1,46 @@
+// `WasmError` of src/wasm_backend.rs: what the backend raises (as
+// `Fail[WErr]`) when it rejects a program. The harness compares the kind
+// and, for `Unsupported`, the construct; the Rust detail texts are not
+// reproduced.
+
+// Kinds, in `WasmError` order.
+pub const K_UNSUPPORTED: u8 = 0;
+pub const K_ENTRY: u8 = 1;
+pub const K_LIMIT: u8 = 2;
+pub const K_INVALID: u8 = 3;
+pub const K_ENCODE: u8 = 4;
+// Not a Rust error: a construct this port does not lower yet.
+pub const K_NOT_PORTED: u8 = 5;
+
+// `Unsupported` constructs, in declaration order.
+pub const U_FUNCTION_VALUE: u8 = 0;
+pub const U_STRING: u8 = 1;
+pub const U_FLOAT_REMAINDER: u8 = 2;
+pub const U_INDEX: u8 = 3;
+pub const U_PROJECTION: u8 = 4;
+pub const U_GENERIC_OPERATION: u8 = 5;
+pub const U_GENERIC_EFFECT_INSTANCE: u8 = 6;
+pub const U_LABELLED_EFFECT_ROW: u8 = 7;
+pub const U_INOUT_EFFECT_ARGUMENT: u8 = 8;
+pub const U_FIRST_CLASS_CONTINUATION: u8 = 9;
+pub const U_NON_TAIL_RESUMPTIVE_HANDLER: u8 = 10;
+pub const U_EXTERNAL_FUNCTION: u8 = 11;
+pub const U_EXPORT_TYPE: u8 = 12;
+pub const U_OPERATION: u8 = 13;
+pub const U_INTEGER_WIDTH: u8 = 14;
+pub const U_FLOAT32: u8 = 15;
+
+pub copy struct WErr {
+    kind: u8,
+    construct: u8,
+    // A small number naming the site, for debugging a port difference.
+    site: u64,
+}
+
+pub fn werr(kind: u8, construct: u8, site: u64) -> WErr {
+    WErr {
+        kind: kind,
+        construct: construct,
+        site: site
+    }
+}

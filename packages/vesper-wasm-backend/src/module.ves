@@ -1,0 +1,601 @@
+// Core module assembly (src/wasm_backend/module.rs): type, import,
+// function, table, memory, tag, global, export, element, code and data
+// sections in the order the binary format requires, written byte for
+// byte as wasm-encoder writes them.
+
+use self::enc::{
+    Code,
+    ValTy,
+    append,
+    put_bytes,
+    put_valtype,
+    sleb,
+    uleb,
+    uleb_size,
+    vt
+};
+use self::err::{
+    WErr,
+    werr
+};
+
+// `err::K_INVALID` (constants cannot be imported yet).
+const K_INVALID: u8 = 3;
+const NONE32: u32 = 4294967295;
+// First byte of static data (string literals); the heap follows it
+// (`module::DATA_START`).
+pub const DATA_START: u64 = 16;
+const PAGE: u64 = 65536;
+
+const TD_FUNC: u8 = 0;
+const TD_CONT: u8 = 1;
+
+// Section ids.
+const S_TYPE: u8 = 1;
+const S_IMPORT: u8 = 2;
+const S_FUNCTION: u8 = 3;
+const S_TABLE: u8 = 4;
+const S_MEMORY: u8 = 5;
+const S_GLOBAL: u8 = 6;
+const S_EXPORT: u8 = 7;
+const S_ELEMENT: u8 = 9;
+const S_CODE: u8 = 10;
+const S_DATA: u8 = 11;
+const S_TAG: u8 = 13;
+
+// Export kinds.
+pub const EXPORT_FUNC: u8 = 0;
+pub const EXPORT_MEMORY: u8 = 2;
+
+// A type definition: a function type (`vals[p0..p0+pn]` params, then
+// `rn` results) or a continuation type over function type `func`.
+pub copy struct TypeDef {
+    kind: u8,
+    p0: u64,
+    pn: u64,
+    rn: u64,
+    func: u32,
+}
+
+pub copy struct ImportRow {
+    // module and name: text[m0..m0+mn], text[n0..n0+nn]
+    m0: u64,
+    mn: u64,
+    n0: u64,
+    nn: u64,
+    ty: u32,
+}
+
+pub copy struct FuncRow {
+    ty: u32,
+    // body bytes: bodies[b0..b0+bn]; `defined` once given
+    b0: u64,
+    bn: u64,
+    defined: bool,
+}
+
+pub copy struct ExportRow {
+    n0: u64,
+    nn: u64,
+    kind: u8,
+    index: u32,
+}
+
+// An append-only builder: every index it returns stays valid.
+pub struct Builder {
+    imports: ChunkSeq[ImportRow],
+    data: ChunkSeq[u8],
+    heap_global: u32,
+    types: ChunkSeq[TypeDef],
+    vals: ChunkSeq[ValTy],
+    funcs: ChunkSeq[FuncRow],
+    bodies: ChunkSeq[u8],
+    globals: ChunkSeq[i64],
+    table: ChunkSeq[u32],
+    declared: ChunkSeq[u32],
+    tags: ChunkSeq[u32],
+    exports: ChunkSeq[ExportRow],
+    text: ChunkSeq[u8],
+}
+
+pub fn builder_new() -> Builder {
+    Builder {
+        imports: ChunkSeq::new[ImportRow](),
+        data: ChunkSeq::new[u8](),
+        heap_global: NONE32,
+        types: ChunkSeq::new[TypeDef](),
+        vals: ChunkSeq::new[ValTy](),
+        funcs: ChunkSeq::new[FuncRow](),
+        bodies: ChunkSeq::new[u8](),
+        globals: ChunkSeq::new[i64](),
+        table: ChunkSeq::new[u32](),
+        declared: ChunkSeq::new[u32](),
+        tags: ChunkSeq::new[u32](),
+        exports: ChunkSeq::new[ExportRow](),
+        text: ChunkSeq::new[u8](),
+    }
+}
+
+fn val_at(in s: ChunkSeq[ValTy], i: u64) -> ValTy {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => vt(0),
+    }
+}
+
+fn same_val(a: ValTy, b: ValTy) -> bool {
+    a.kind == b.kind && a.index == b.index
+}
+
+fn byte_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn copy_range(inout out: ChunkSeq[u8], in s: ChunkSeq[u8], a: u64, n: u64) {
+    for i in 0..n {
+        out.push(byte_at(in s, wrapping_add(a, i)));
+    }
+}
+
+// A section: its id, its size and its bytes.
+fn section(inout out: ChunkSeq[u8], id: u8, in body: ChunkSeq[u8]) {
+    out.push(id);
+    uleb(inout out, body.len());
+    append(inout out, in body);
+}
+
+impl Builder {
+    fn type_def(in self, i: u64) -> TypeDef {
+        match self.types.try_get(i) {
+            Option::Some(t) => t,
+            Option::None => TypeDef {
+                kind: TD_FUNC,
+                p0: 0,
+                pn: 0,
+                rn: 0,
+                func: 0
+            },
+        }
+    }
+
+    fn func_row(in self, i: u64) -> FuncRow {
+        match self.funcs.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => FuncRow {
+                ty: 0,
+                b0: 0,
+                bn: 0,
+                defined: false
+            },
+        }
+    }
+
+    // The index of function type (params, results), interned.
+    pub fn func_type(inout self, in params: ChunkSeq[ValTy], in results: ChunkSeq[ValTy]) -> u32 {
+        for i in 0..self.types.len() {
+            let t = self.type_def(i);
+            if t.kind == TD_FUNC && t.pn == params.len() && t.rn == results.len() {
+                let mut same = true;
+                for k in 0..t.pn {
+                    if !same_val(
+                        val_at(in self.vals, wrapping_add(t.p0, k)),
+                        val_at(in params, k)
+                    ) {
+                        same = false;
+                    }
+                }
+                for k in 0..t.rn {
+                    let at = wrapping_add(wrapping_add(t.p0, t.pn), k);
+                    if !same_val(val_at(in self.vals, at), val_at(in results, k)) {
+                        same = false;
+                    }
+                }
+                if same {
+                    return wrapping_u32(i);
+                }
+            }
+        }
+        let p0 = self.vals.len();
+        for k in 0..params.len() {
+            self.vals.push(val_at(in params, k));
+        }
+        for k in 0..results.len() {
+            self.vals.push(val_at(in results, k));
+        }
+        let i = self.types.len();
+        self
+            .types
+            .push(
+            TypeDef {
+                kind: TD_FUNC,
+                p0: p0,
+                pn: params.len(),
+                rn: results.len(),
+                func: 0
+            }
+        );
+        wrapping_u32(i)
+    }
+
+    // `n` parameters of type `p` and `m` results of type `r`.
+    pub fn func_type_n(inout self, n: u64, p: u8, m: u64, r: u8) -> u32 {
+        let mut ps = ChunkSeq::new[ValTy]();
+        for i in 0..n {
+            ps.push(vt(p));
+        }
+        let mut rs = ChunkSeq::new[ValTy]();
+        for i in 0..m {
+            rs.push(vt(r));
+        }
+        self.func_type(in ps, in rs)
+    }
+
+    pub fn cont_type(inout self, func: u32) -> u32 {
+        for i in 0..self.types.len() {
+            let t = self.type_def(i);
+            if t.kind == TD_CONT && t.func == func {
+                return wrapping_u32(i);
+            }
+        }
+        let i = self.types.len();
+        self
+            .types
+            .push(
+            TypeDef {
+                kind: TD_CONT,
+                p0: 0,
+                pn: 0,
+                rn: 0,
+                func: func
+            }
+        );
+        wrapping_u32(i)
+    }
+
+    pub fn declare_typed(inout self, ty: u32) -> u32 {
+        self
+            .funcs
+            .push(
+            FuncRow {
+                ty: ty,
+                b0: 0,
+                bn: 0,
+                defined: false
+            }
+        );
+        wrapping_u32(wrapping_sub(wrapping_add(self.imports.len(), self.funcs.len()), 1))
+    }
+
+    pub fn declare(inout self, in params: ChunkSeq[ValTy], in results: ChunkSeq[ValTy]) -> u32 {
+        let ty = self.func_type(in params, in results);
+        self.declare_typed(ty)
+    }
+
+    // A function of `n` `i64` parameters returning one `i64`.
+    pub fn declare_i64(inout self, n: u64) -> u32 {
+        let ty = self.func_type_n(n, 126, 1, 126);
+        self.declare_typed(ty)
+    }
+
+    fn put_text(inout self, in s: Slice[u8]) -> u64 {
+        let a = self.text.len();
+        for i in 0..s.len() {
+            match s.try_get(i) {
+                Option::Some(x) => self.text.push(x),
+                Option::None => {},
+            }
+        }
+        a
+    }
+
+    // Import a function; all imports precede every declared function.
+    pub fn import(
+        inout self,
+        in module: Slice[u8],
+        in name: Slice[u8],
+        in params: ChunkSeq[ValTy],
+        in results: ChunkSeq[ValTy]
+    ) -> u32 eff [Fail[WErr]] {
+        if self.funcs.len() != 0 {
+            Fail::raise(werr(K_INVALID, 0, 1));
+        }
+        let ty = self.func_type(in params, in results);
+        let m0 = self.put_text(in module);
+        let n0 = self.put_text(in name);
+        self
+            .imports
+            .push(
+            ImportRow {
+                m0: m0,
+                mn: module.len(),
+                n0: n0,
+                nn: name.len(),
+                ty: ty
+            }
+        );
+        wrapping_u32(wrapping_sub(self.imports.len(), 1))
+    }
+
+    pub fn import_count(in self) -> u64 {
+        self.imports.len()
+    }
+
+    pub fn define(inout self, index: u32, in body: ChunkSeq[u8]) {
+        let i = wrapping_sub(widen_u64(index), self.imports.len());
+        let f = self.func_row(i);
+        let b0 = self.bodies.len();
+        append(inout self.bodies, in body);
+        let row = FuncRow {
+            ty: f.ty,
+            b0: b0,
+            bn: body.len(),
+            defined: true
+        };
+        let ok = self.funcs.try_set(i, row);
+    }
+
+    pub fn function_count(in self) -> u64 {
+        wrapping_add(self.imports.len(), self.funcs.len())
+    }
+
+    // Append 8-byte-aligned static bytes; returns their address.
+    pub fn data(inout self, in bytes: ChunkSeq[u8]) -> u64 {
+        let at = wrapping_add(DATA_START, self.data.len());
+        append(inout self.data, in bytes);
+        loop {
+            if (self.data.len() & 7) == 0 {
+                break;
+            }
+            self.data.push(0);
+        }
+        at
+    }
+
+    pub fn set_heap_global(inout self, g: u32) {
+        self.heap_global = g;
+    }
+
+    pub fn heap_start(in self) -> u64 {
+        wrapping_add(DATA_START, self.data.len())
+    }
+
+    // A mutable `i64` global with the given initial value.
+    pub fn global(inout self, init: i64) -> u32 {
+        self.globals.push(init);
+        wrapping_u32(wrapping_sub(self.globals.len(), 1))
+    }
+
+    // Place `func` in the function table and return its slot.
+    pub fn table_slot(inout self, func: u32) -> u32 {
+        self.table.push(func);
+        wrapping_u32(wrapping_sub(self.table.len(), 1))
+    }
+
+    // Declare `func` as a `ref.func` target.
+    pub fn declare_ref(inout self, func: u32) {
+        for i in 0..self.declared.len() {
+            match self.declared.try_get(i) {
+                Option::Some(x) => {
+                    if x == func {
+                        return;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        self.declared.push(func);
+    }
+
+    pub fn tag(inout self, func_type: u32) -> u32 {
+        self.tags.push(func_type);
+        wrapping_u32(wrapping_sub(self.tags.len(), 1))
+    }
+
+    pub fn export_func(inout self, in name: Slice[u8], func: u32) {
+        let n0 = self.put_text(in name);
+        self
+            .exports
+            .push(
+            ExportRow {
+                n0: n0,
+                nn: name.len(),
+                kind: EXPORT_FUNC,
+                index: func
+            }
+        );
+    }
+
+    // The module's bytes (`Builder::finish`).
+    pub fn finish(in self, max_pages: u32) -> ChunkSeq[u8] eff [Fail[WErr]] {
+        let mut out = ChunkSeq::new[u8]();
+        // "\0asm", version 1
+        out.push(0);
+        out.push(97);
+        out.push(115);
+        out.push(109);
+        out.push(1);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        let mut s = ChunkSeq::new[u8]();
+        uleb(inout s, self.types.len());
+        for i in 0..self.types.len() {
+            let t = self.type_def(i);
+            if t.kind == TD_FUNC {
+                s.push(96);
+                uleb(inout s, t.pn);
+                for k in 0..t.pn {
+                    put_valtype(inout s, val_at(in self.vals, wrapping_add(t.p0, k)));
+                }
+                uleb(inout s, t.rn);
+                for k in 0..t.rn {
+                    put_valtype(
+                        inout s,
+                        val_at(in self.vals, wrapping_add(wrapping_add(t.p0, t.pn), k))
+                    );
+                }
+            } else {
+                // `cont` composite type 0x5d with its function type index
+                s.push(93);
+                sleb(inout s, wrapping_i64(widen_u64(t.func)));
+            }
+        }
+        section(inout out, S_TYPE, in s);
+        if self.imports.len() != 0 {
+            s.clear();
+            uleb(inout s, self.imports.len());
+            for i in 0..self.imports.len() {
+                match self.imports.try_get(i) {
+                    Option::Some(m) => {
+                        uleb(inout s, m.mn);
+                        copy_range(inout s, in self.text, m.m0, m.mn);
+                        uleb(inout s, m.nn);
+                        copy_range(inout s, in self.text, m.n0, m.nn);
+                        s.push(0);
+                        uleb(inout s, widen_u64(m.ty));
+                    },
+                    Option::None => {},
+                }
+            }
+            section(inout out, S_IMPORT, in s);
+        }
+        s.clear();
+        uleb(inout s, self.funcs.len());
+        for i in 0..self.funcs.len() {
+            uleb(inout s, widen_u64(self.func_row(i).ty));
+        }
+        section(inout out, S_FUNCTION, in s);
+        s.clear();
+        // one funcref table, min = max = the slot count
+        uleb(inout s, 1);
+        s.push(112);
+        s.push(1);
+        uleb(inout s, self.table.len());
+        uleb(inout s, self.table.len());
+        section(inout out, S_TABLE, in s);
+        let heap_start = self.heap_start();
+        let mut min_pages = wrapping_add(heap_start, 65535) / PAGE;
+        if min_pages == 0 {
+            min_pages = 1;
+        }
+        if min_pages > widen_u64(max_pages) {
+            Fail::raise(werr(K_INVALID, 0, 2));
+        }
+        s.clear();
+        uleb(inout s, 1);
+        s.push(1);
+        uleb(inout s, min_pages);
+        uleb(inout s, widen_u64(max_pages));
+        section(inout out, S_MEMORY, in s);
+        if self.tags.len() != 0 {
+            s.clear();
+            uleb(inout s, self.tags.len());
+            for i in 0..self.tags.len() {
+                s.push(0);
+                match self.tags.try_get(i) {
+                    Option::Some(t) => uleb(inout s, widen_u64(t)),
+                    Option::None => {},
+                }
+            }
+            section(inout out, S_TAG, in s);
+        }
+        s.clear();
+        uleb(inout s, self.globals.len());
+        for i in 0..self.globals.len() {
+            let init = if wrapping_u32(i) == self.heap_global {
+                wrapping_i64(heap_start)
+            } else {
+                match self.globals.try_get(i) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                }
+            };
+            s.push(126);
+            s.push(1);
+            s.push(66);
+            sleb(inout s, init);
+            s.push(11);
+        }
+        section(inout out, S_GLOBAL, in s);
+        s.clear();
+        uleb(inout s, wrapping_add(self.exports.len(), 1));
+        put_bytes(inout s, in "memory".as_bytes());
+        s.push(EXPORT_MEMORY);
+        uleb(inout s, 0);
+        for i in 0..self.exports.len() {
+            match self.exports.try_get(i) {
+                Option::Some(e) => {
+                    uleb(inout s, e.nn);
+                    copy_range(inout s, in self.text, e.n0, e.nn);
+                    s.push(e.kind);
+                    uleb(inout s, widen_u64(e.index));
+                },
+                Option::None => {},
+            }
+        }
+        section(inout out, S_EXPORT, in s);
+        let mut segments: u64 = 0;
+        s.clear();
+        if self.table.len() != 0 {
+            segments = wrapping_add(segments, 1);
+            // active, explicit table 0: flag 2, table, offset, elemkind
+            s.push(2);
+            uleb(inout s, 0);
+            s.push(65);
+            sleb(inout s, 0);
+            s.push(11);
+            s.push(0);
+            uleb(inout s, self.table.len());
+            for i in 0..self.table.len() {
+                match self.table.try_get(i) {
+                    Option::Some(f) => uleb(inout s, widen_u64(f)),
+                    Option::None => {},
+                }
+            }
+        }
+        if self.declared.len() != 0 {
+            segments = wrapping_add(segments, 1);
+            s.push(3);
+            s.push(0);
+            uleb(inout s, self.declared.len());
+            for i in 0..self.declared.len() {
+                match self.declared.try_get(i) {
+                    Option::Some(f) => uleb(inout s, widen_u64(f)),
+                    Option::None => {},
+                }
+            }
+        }
+        if segments != 0 {
+            let mut e = ChunkSeq::new[u8]();
+            uleb(inout e, segments);
+            append(inout e, in s);
+            section(inout out, S_ELEMENT, in e);
+        }
+        s.clear();
+        uleb(inout s, self.funcs.len());
+        for i in 0..self.funcs.len() {
+            let f = self.func_row(i);
+            if !f.defined {
+                Fail::raise(werr(K_INVALID, 0, 3));
+            }
+            uleb(inout s, f.bn);
+            copy_range(inout s, in self.bodies, f.b0, f.bn);
+        }
+        section(inout out, S_CODE, in s);
+        if self.data.len() != 0 {
+            s.clear();
+            uleb(inout s, 1);
+            s.push(0);
+            s.push(65);
+            sleb(inout s, wrapping_i64(DATA_START));
+            s.push(11);
+            uleb(inout s, self.data.len());
+            append(inout s, in self.data);
+            section(inout out, S_DATA, in s);
+        }
+        out
+    }
+}
