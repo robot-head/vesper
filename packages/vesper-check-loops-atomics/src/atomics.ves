@@ -398,7 +398,7 @@ fn check_expr(
 }
 
 // `worker_body`: whether `body` names a top-level, non-generic function
-// with an empty effect row.
+// whose effect row may run on a worker (`worker_row`).
 fn worker_body(in names: Names, in x: Exprs, in a: Atomics, body: u32) -> bool {
     let r = x.row(body);
     if r.kind != E_NAME {
@@ -413,7 +413,7 @@ fn worker_body(in names: Names, in x: Exprs, in a: Atomics, body: u32) -> bool {
         .generics
         == 0
         && f
-        .pure_row
+        .worker_row
         && !is_prelude_function(in names, in a.sy, a.atomic, a.workers, f.name)
 }
 
@@ -457,9 +457,12 @@ fn check_workers(inout o: ChunkSeq[u8], in names: Names, in x: Exprs, in a: Atom
         open(inout o, "E0823", body.start, body.end);
         put(
             inout o,
-            "the body of 'parallel_for' must be a named function with an empty effect row"
+            "the body of 'parallel_for' must be a named function whose effects need no handler"
         );
-        help(inout o, "declare `fn body(in data: A, i: u64)` and pass `body`");
+        help(
+            inout o,
+            "declare `fn body(in data: A, i: u64)` whose row holds only `Ffi[Lib]`, `Alloc` or capability effects, and pass `body`"
+        );
     }
 }
 

@@ -366,7 +366,7 @@ fn main() -> u64 {
 }
 ",
         "E0823",
-        "named function with an empty effect row",
+        "named function whose effects need no handler",
     );
     // A body with an effect.
     rejects(
@@ -379,7 +379,57 @@ fn main() -> u64 {
 }
 ",
         "E0823",
-        "named function with an empty effect row",
+        "named function whose effects need no handler",
+    );
+}
+
+/// Bodies may carry stateless capabilities (§15.4): a capability effect
+/// runs on the pool, and an `Alloc` marker without operations is accepted. A user effect with operations, or a
+/// labelled instance, still needs a handler and is refused.
+#[test]
+fn capability_bodies_run_on_workers() {
+    differential(
+        "realtime_body",
+        "\
+fn mix(in seed: u64, i: u64) eff [Realtime] {
+    let _ = wrapping_mul(wrapping_add(seed, i), 2654435761);
+}
+fn main() -> u64 {
+    let seed: u64 = 7;
+    parallel_for(in seed, 100, mix);
+    seed
+}
+",
+        7,
+    );
+    // An entry cannot carry a declared effect, so the `Alloc` body is
+    // checked only.
+    accepted(
+        "\
+effect Alloc {}
+struct Totals { sum: Atomic[u64] }
+fn add(in t: Totals, i: u64) eff [Alloc] {
+    t.sum.fetch_add(i, MemoryOrder::Relaxed);
+}
+fn main() -> u64 eff [Alloc] {
+    let t = Totals { sum: Atomic::new(0) };
+    parallel_for(in t, 10, add);
+    t.sum.load(MemoryOrder::SeqCst)
+}
+",
+    );
+    rejects(
+        "\
+effect Alloc { fn grab(n: u64) -> u64; }
+fn take(in s: u64, i: u64) eff [Alloc] { let _ = Alloc::grab(i); }
+fn main() -> u64 {
+    let seed: u64 = 1;
+    parallel_for(in seed, 4, take);
+    0
+}
+",
+        "E0823",
+        "named function whose effects need no handler",
     );
 }
 
