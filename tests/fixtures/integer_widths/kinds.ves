@@ -368,17 +368,17 @@ fn try_isize(a: isize, b: isize) -> (isize, isize) {
 
 fn main()
     -> (
-    (u8, u8),
-    (u16, u16),
-    (u32, u32),
-    (u64, u64),
-    (usize, usize),
-    (i8, i8),
-    (i16, i16),
-    (i32, i32),
-    (i64, i64),
-    (isize, isize)
-) {
+        (u8, u8),
+        (u16, u16),
+        (u32, u32),
+        (u64, u64),
+        (usize, usize),
+        (i8, i8),
+        (i16, i16),
+        (i32, i32),
+        (i64, i64),
+        (isize, isize)
+    ) {
     (
         try_u8(100, 27),
         try_u16(60000, 5001),

@@ -863,8 +863,7 @@ fn axpy_at(
     if words {
         for i in u64_zero()..n {
             let v = from_bits_f32(out[o0 + i])
-                + alpha
-                * from_bits_f32(storage.read_u32_le(at + 4 * i));
+                + alpha * from_bits_f32(storage.read_u32_le(at + 4 * i));
             out.set(o0 + i, to_bits_f32(v));
         }
     } else {

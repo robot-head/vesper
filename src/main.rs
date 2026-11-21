@@ -305,34 +305,51 @@ fn cli() -> Result<(), String> {
     } else {
         None
     };
-    let source = match &loaded {
+    let original = match &loaded {
         Some(p) => p.sources.combined(),
         None => fs::read_to_string(&input).map_err(|e| format!("{input}: {e}"))?,
     };
     if command == "build" && target.as_deref() == Some("bpf") {
         // Compiler eBPF target (§27): verified BPF ELF object with BTF.
         let summary =
-            vesper::ebpf_backend::build_command(&input, &source, &entry, output.as_deref())?;
+            vesper::ebpf_backend::build_command(&input, &original, &entry, output.as_deref())?;
         print!("{summary}");
         return Ok(());
     }
-    let mut parsed = match &loaded {
-        Some(p) => parser::Parse {
-            module: p.module.clone(),
-            green: parser::parse("").green,
-            diagnostics: vec![],
-        },
-        None if include_tests => parser::parse_for_tests(&source),
-        None => parser::parse(&source),
-    };
-    if command == "emit" && format == "cst" {
-        if !parsed.diagnostics.is_empty() {
-            diagnostics(&input, &source, &parsed.diagnostics, json);
+    let (source, mut parsed, source_map) = match &loaded {
+        Some(p) => (
+            std::borrow::Cow::Borrowed(original.as_str()),
+            parser::Parse {
+                module: p.module.clone(),
+                green: parser::parse("").green,
+                diagnostics: vec![],
+            },
+            Vec::new(),
+        ),
+        None if command == "emit" && format == "cst" => {
+            let core = parser::parse(&original);
+            let syntax = if core.diagnostics.is_empty() {
+                core.syntax()
+            } else if let Ok(surface) =
+                parser::parse_surface_with_limits(&original, Default::default())
+                && surface.diagnostics.is_empty()
+            {
+                surface.syntax()
+            } else {
+                diagnostics(&input, &original, &core.diagnostics, json);
+                core.syntax()
+            };
+            return write(output, format!("{syntax:#?}\n").as_bytes());
         }
-        return write(output, format!("{:#?}\n", parsed.syntax()).as_bytes());
-    }
+        None => vesper::forge_frontend::parse_compiler_input(&original, include_tests).map_err(
+            |diagnostic| {
+                diagnostics(&input, &original, std::slice::from_ref(&diagnostic), json);
+                format!("{}: {}", diagnostic.code, diagnostic.message)
+            },
+        )?,
+    };
     if !parsed.diagnostics.is_empty() {
-        diagnostics(&input, &source, &parsed.diagnostics, json);
+        compiler_diagnostics(&input, &original, &parsed.diagnostics, &source_map, json);
         return Err(format!("{} syntax error(s)", parsed.diagnostics.len()));
     }
     // `.vsys` libraries the loaded packages carry (`[package] vsys`).
@@ -362,7 +379,13 @@ fn cli() -> Result<(), String> {
     let mut checked = check::check(&parsed.module);
     // A library with `.vsys` imports checks only through the Bridge
     // lowering, which the export path below runs.
-    if !checked.diagnostics.is_empty() && !lib.needs_module(&source, !package_vsys.is_empty()) {
+    let sugar_rejection = checked
+        .diagnostics
+        .iter()
+        .any(|d| matches!(d.code.as_str(), "E0143" | "E0144"));
+    if !checked.diagnostics.is_empty()
+        && (sugar_rejection || !lib.needs_module(&source, !package_vsys.is_empty()))
+    {
         match &loaded {
             Some(p) => {
                 let localized: Vec<_> = checked
@@ -372,7 +395,9 @@ fn cli() -> Result<(), String> {
                     .collect();
                 package_diagnostics(p, &localized, json);
             }
-            None => diagnostics(&input, &source, &checked.diagnostics, json),
+            None => {
+                compiler_diagnostics(&input, &original, &checked.diagnostics, &source_map, json)
+            }
         }
         return Err(format!("{} semantic error(s)", checked.diagnostics.len()));
     }
@@ -400,7 +425,7 @@ fn cli() -> Result<(), String> {
         // the export path places generated code past the end.
         let directives_source = match &loaded {
             Some(p) => export_directives_source(p)?,
-            None => source.clone(),
+            None => source.to_string(),
         };
         let foreign = loaded.is_some() && lib.needs_module(&source, !package_vsys.is_empty());
         let module = foreign.then(|| parsed.module.clone());
@@ -733,6 +758,25 @@ fn package_diagnostics(
         }
     }
 }
+fn compiler_diagnostics(
+    file: &str,
+    source: &str,
+    errors: &[Diagnostic],
+    map: &[vesper::forge_frontend::SourceMapSegment],
+    json: bool,
+) {
+    if map.is_empty() {
+        diagnostics(file, source, errors, json);
+    } else {
+        let mapped: Vec<_> = errors
+            .iter()
+            .cloned()
+            .map(|d| vesper::forge_frontend::original_diagnostic(map, d))
+            .collect();
+        diagnostics(file, source, &mapped, json);
+    }
+}
+
 fn diagnostics(file: &str, source: &str, ds: &[Diagnostic], json: bool) {
     if json {
         println!("{}", serde_json::to_string(ds).unwrap());

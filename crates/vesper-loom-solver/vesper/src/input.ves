@@ -96,17 +96,17 @@ fn read_extra(inout s: S) {
     s
         .mx
         .push(
-        Mx {
-            has_json: has_json,
-            json: json,
-            resolver: resolver,
-            opt_at: opt_at,
-            opt_n: opt_n,
-            has_min: has_min,
-            min: minv,
-            block: block
-        }
-    );
+            Mx {
+                has_json: has_json,
+                json: json,
+                resolver: resolver,
+                opt_at: opt_at,
+                opt_n: opt_n,
+                has_min: has_min,
+                min: minv,
+                block: block
+            }
+        );
 }
 
 // tables; root manifest, extra; exact root requirement; requested
@@ -135,11 +135,11 @@ pub fn decode_request(inout s: S) {
         s
             .sys
             .push(
-            SysSel {
-                name: name,
-                ver: v
-            }
-        );
+                SysSel {
+                    name: name,
+                    ver: v
+                }
+            );
     }
     s.maxd = rd(inout s.l);
 }
@@ -169,16 +169,16 @@ pub fn decode_metadata(inout s: S, with_limits: bool) {
         s
             .metas
             .push(
-            Meta {
-                name: name,
-                ver: vt,
-                cve: cve,
-                stale: stale,
-                trust: trust,
-                repro: repro,
-                vetted: vetted
-            }
-        );
+                Meta {
+                    name: name,
+                    ver: vt,
+                    cve: cve,
+                    stale: stale,
+                    trust: trust,
+                    repro: repro,
+                    vetted: vetted
+                }
+            );
     }
 }
 

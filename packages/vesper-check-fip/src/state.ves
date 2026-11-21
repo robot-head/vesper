@@ -188,11 +188,11 @@ impl Binds {
             self
                 .moves
                 .push(
-                MoveRow {
-                    name: name,
-                    path: path
-                }
-            );
+                    MoveRow {
+                        name: name,
+                        path: path
+                    }
+                );
         }
     }
 

@@ -158,18 +158,18 @@ pub fn check_world_adts(in t: Types, in names: Names, in wd: World, in sg: Sigs,
                             d
                                 .text
                                 .extend(
-                                in "' must have a Copy scalar type (u8, u32, u64, i64, f64, bool), found "
-                                    .as_bytes()
-                            );
+                                    in "' must have a Copy scalar type (u8, u32, u64, i64, f64, bool), found "
+                                        .as_bytes()
+                                );
                             display(in t, in names, fd.ty, inout d.text);
                             d
                                 .close(
-                                c,
-                                m,
-                                "mark non-scalar or aggregate fields as 'cold'",
-                                start,
-                                stop
-                            );
+                                    c,
+                                    m,
+                                    "mark non-scalar or aggregate fields as 'cold'",
+                                    start,
+                                    stop
+                                );
                         }
                     } else if temp != T_COLD {
                         let c = d.open("E1502");
@@ -181,12 +181,12 @@ pub fn check_world_adts(in t: Types, in names: Names, in wd: World, in sg: Sigs,
                         d.text.extend(in "' must be annotated 'hot' or 'cold'".as_bytes());
                         d
                             .close(
-                            c,
-                            m,
-                            "prefix every field in a tiled(N) struct with 'hot' or 'cold'",
-                            start,
-                            stop
-                        );
+                                c,
+                                m,
+                                "prefix every field in a tiled(N) struct with 'hot' or 'cold'",
+                                start,
+                                stop
+                            );
                     }
                 }
             }

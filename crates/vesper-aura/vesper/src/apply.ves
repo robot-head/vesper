@@ -154,14 +154,10 @@ pub fn validate_final(inout rec: Recorder) -> Option[BackendFault] {
     let ns = rec.stage.nslots;
     let nb = rec.stage.nsubs;
     let ne = rec.stage.edges.len();
-    if n
-        > wrapping_sub(MAX_U64, 1)
-        || ns
-        > wrapping_sub(MAX_U64, inc(n))
-        || nb
-        > wrapping_sub(MAX_U64, add(inc(n), ns))
-        || ne
-        > wrapping_sub(MAX_U64, add(add(inc(n), ns), nb)) {
+    if n > wrapping_sub(MAX_U64, 1)
+        || ns > wrapping_sub(MAX_U64, inc(n))
+        || nb > wrapping_sub(MAX_U64, add(inc(n), ns))
+        || ne > wrapping_sub(MAX_U64, add(add(inc(n), ns), nb)) {
         return budget(Budget::Teardown);
     }
     if add(add(add(inc(n), ns), nb), ne) > lim.patches {

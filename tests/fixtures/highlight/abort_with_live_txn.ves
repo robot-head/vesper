@@ -10,15 +10,13 @@ impl WriteTxn {
     fn commit(sink self) -> u64 {
         let WriteTxn {
             slot
-        }
-        = self;
+        } = self;
         slot
     }
     fn abort(sink self) {
         let WriteTxn {
             slot
-        }
-        = self;
+        } = self;
     }
 }
 

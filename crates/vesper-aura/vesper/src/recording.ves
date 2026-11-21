@@ -111,13 +111,8 @@ pub fn widget_index(in s: RState, serial: u64) -> u64 {
             hi = mid;
         }
     }
-    if lo
-        < s
-        .widgets
-        .len()
-        && rwidget(in s.widgets, lo)
-        .serial
-        == serial
+    if lo < s.widgets.len()
+        && rwidget(in s.widgets, lo).serial == serial
         && seq_bool(in s.wlive, lo) {
         lo
     } else {
@@ -378,16 +373,16 @@ pub fn copy_state(in src: RState, inout dst: RState) {
             dst
                 .slots
                 .push(
-                RSlot {
-                    serial: v.serial,
-                    widget: v.widget,
-                    property: v.property,
-                    tag: v.tag,
-                    payload: v.payload,
-                    tstart: tstart,
-                    tlen: v.tlen
-                }
-            );
+                    RSlot {
+                        serial: v.serial,
+                        widget: v.widget,
+                        property: v.property,
+                        tag: v.tag,
+                        payload: v.payload,
+                        tstart: tstart,
+                        tlen: v.tlen
+                    }
+                );
             dst.slive.push(true);
         }
     }

@@ -134,24 +134,12 @@ fn matches_impl(in l: L, in c: Cmp, in v: Ver) -> bool {
 }
 
 fn pre_compatible(in l: L, in c: Cmp, in v: Ver) -> bool {
-    c
-        .major
-        == v
-        .major
-        && c
-        .has_minor
-        && c
-        .minor
-        == v
-        .minor
-        && c
-        .has_patch
-        && c
-        .patch
-        == v
-        .patch
-        && slen(in l, c.pre)
-        != 0
+    c.major == v.major
+        && c.has_minor
+        && c.minor == v.minor
+        && c.has_patch
+        && c.patch == v.patch
+        && slen(in l, c.pre) != 0
 }
 
 // Whether version vi satisfies requirement ri.

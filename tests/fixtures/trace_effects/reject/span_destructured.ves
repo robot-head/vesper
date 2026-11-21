@@ -6,7 +6,6 @@ fn main() -> u64 eff [Trace] {
         parent_span_id,
         start_mono_ns,
         schema_id
-    }
-    = s;
+    } = s;
     ctx.span_id
 }

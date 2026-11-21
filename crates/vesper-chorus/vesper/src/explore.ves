@@ -369,12 +369,9 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
                         }
                     } else {
                         for b in 0..lkn(in c, t) {
-                            if next
-                                == none()
-                                && lbr(in c, t, b, 0)
-                                == hl
-                                && lbr(in c, t, b, 1)
-                                == hp {
+                            if next == none()
+                                && lbr(in c, t, b, 0) == hl
+                                && lbr(in c, t, b, 1) == hp {
                                 next = lbr(in c, t, b, 2);
                             }
                         }
@@ -423,12 +420,12 @@ pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_qu
     c
         .out
         .push(
-        if bound_hit {
-            1
-        } else {
-            0
-        }
-    );
+            if bound_hit {
+                1
+            } else {
+                0
+            }
+        );
 }
 
 fn orphans(inout c: C, s: u64, k: u64) {

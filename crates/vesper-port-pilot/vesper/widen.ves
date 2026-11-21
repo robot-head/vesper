@@ -113,12 +113,12 @@ fn name(i: u64) -> String {
     s.push_str(in "file");
     s
         .push_char(
-        if i == 0 {
-            48
-        } else {
-            49
-        }
-    );
+            if i == 0 {
+                48
+            } else {
+                49
+            }
+        );
     s
 }
 

@@ -486,3 +486,197 @@ pub fn state() -> u64 { 10 }
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn sugar_reexports_and_aliases_keep_the_rule_and_holes_in_their_lexical_modules() {
+    let dir = package(
+        "sugar-lexical",
+        &[
+            (
+                "app/Loom.toml",
+                &manifest(
+                    "@demo/app",
+                    "[dependencies]\n\"@demo/syntax\" = { version = \"^0.1\", path = \"../syntax\" }",
+                ),
+            ),
+            ("syntax/Loom.toml", &manifest("@demo/syntax", "")),
+            (
+                "syntax/src/lib.ves",
+                "pub use self::rules::answer as public_answer;",
+            ),
+            (
+                "syntax/src/rules.ves",
+                "fn helper(in x:i64)->i64 { wrapping_add(x,2) }\npub sugar answer : expr { rule (answer $x:expr {}) => { helper($x) } }",
+            ),
+            (
+                "app/src/main.ves",
+                "use @demo/syntax::public_answer as compute;\nfn helper()->i64 {40}\nfn main()->i64 {compute helper() {}}",
+            ),
+        ],
+    );
+    let checked = world(&dir.join("app"));
+    assert_eq!(
+        Runtime::new(&checked.world)
+            .run("main", vec![])
+            .unwrap()
+            .to_string(),
+        "42"
+    );
+    std::fs::write(
+        dir.join("syntax/src/rules.ves"),
+        "sugar answer : expr { rule (answer $x:expr {}) => { $x } }",
+    )
+    .unwrap();
+    let rejected = packages::load(&dir.join("app")).unwrap();
+    assert!(
+        rejected
+            .diagnostics
+            .iter()
+            .any(|d| d.diagnostic.code == packages::PRIVATE_ITEM),
+        "{:?}",
+        rejected.diagnostics
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn imported_sugar_composes_with_expression_macro_declarations() {
+    let dir = package(
+        "sugar-macro",
+        &[
+            ("Loom.toml", &manifest("@demo/app", "")),
+            (
+                "src/rules.ves",
+                "pub sugar keep : expr { rule (keep $x:expr {}) => { $x } }",
+            ),
+            (
+                "src/main.ves",
+                "use self::rules::keep;\nmacro answer()->expr{quote{42}}\nfn main()->i64{keep answer!() {}}",
+            ),
+        ],
+    );
+    let checked = world(&dir);
+    assert_eq!(
+        Runtime::new(&checked.world)
+            .run("main", vec![])
+            .unwrap()
+            .to_string(),
+        "42"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn private_sugar_from_an_imported_template_resolves_in_the_defining_module() {
+    let dir = package(
+        "sugar-private-nested",
+        &[
+            ("Loom.toml", &manifest("@demo/app", "")),
+            (
+                "src/rules.ves",
+                "sugar inner : expr { rule (inner $b:block) => { 42 } }\npub sugar outer : expr { rule (outer $b:block) => { inner {} } }",
+            ),
+            (
+                "src/main.ves",
+                "use self::rules::outer;\nsugar inner : expr { rule (inner $b:block) => { 0 } }\nfn main()->i64 {outer {}}",
+            ),
+        ],
+    );
+    let checked = world(&dir);
+    assert_eq!(
+        Runtime::new(&checked.world)
+            .run("main", vec![])
+            .unwrap()
+            .to_string(),
+        "42"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn imported_effect_ceiling_reports_the_original_call_and_defining_rule() {
+    let caller = "use self::rules::{emit, Log};\nfn main() eff [Log] { emit {} }";
+    let definition = "pub effect Log { fn record(); } fn helper() eff [Log] { Log::record(); }\npub sugar emit : expr { rule (emit $b:block) => { helper() } }";
+    let dir = package(
+        "sugar-ceiling",
+        &[
+            ("Loom.toml", &manifest("@demo/app", "")),
+            ("src/main.ves", caller),
+            ("src/rules.ves", definition),
+        ],
+    );
+    let assembled = packages::load(&dir).unwrap();
+    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
+    let checked = check::check(&assembled.module);
+    let d = checked
+        .diagnostics
+        .iter()
+        .find(|d| d.code == "E0144")
+        .unwrap();
+    let localized = assembled.sources.localize(d);
+    let main = &assembled.sources.files[localized.file.unwrap()];
+    assert_eq!(&main.text[localized.diagnostic.span], "emit {}");
+    assert!(localized.diagnostic.help.unwrap().contains("rules.ves:2:"));
+    std::fs::write(
+        dir.join("src/rules.ves"),
+        definition.replace("emit : expr", "emit : expr emits eff [Log]"),
+    )
+    .unwrap();
+    world(&dir);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn imported_rule_calls_its_private_helper_alongside_an_independent_macro() {
+    let dir = package(
+        "sugar-helper-macro",
+        &[
+            ("Loom.toml", &manifest("@demo/app", "")),
+            (
+                "src/rules.ves",
+                "fn private_value()->i64 { 2 } pub sugar emit:expr { rule(emit $b:block) => { private_value() } }",
+            ),
+            (
+                "src/main.ves",
+                "use self::rules::emit; macro forty()->expr{quote{40}} fn macro_value()->i64{forty!()} fn main()->i64{wrapping_add(macro_value(),emit {})}",
+            ),
+        ],
+    );
+    let checked = world(&dir);
+    assert_eq!(
+        Runtime::new(&checked.world)
+            .run("main", vec![])
+            .unwrap()
+            .to_string(),
+        "42"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_package_alias_cannot_replace_a_builtin_after_forge_audits_it() {
+    let dir = package(
+        "sugar-helper-authority",
+        &[
+            ("Loom.toml", &manifest("@demo/app", "")),
+            (
+                "src/rules.ves",
+                "pub fn replacement(in x:i64, in y:i64)->i64{x} pub sugar keep:expr { rule(keep $b:block) => { $b } }",
+            ),
+            (
+                "src/main.ves",
+                "use self::rules::{replacement as wrapping_add, keep}; macro computed()->expr{quote{wrapping_add(1,2)}} fn main()->i64{keep { computed!() }}",
+            ),
+        ],
+    );
+    let assembled = packages::load(&dir).unwrap();
+    assert!(
+        assembled
+            .diagnostics
+            .iter()
+            .any(|d| d.diagnostic.code == "FORGE_AUTHORITY"),
+        "{:?}",
+        assembled.diagnostics
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

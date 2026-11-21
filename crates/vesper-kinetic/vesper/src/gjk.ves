@@ -496,13 +496,8 @@ fn gjk_cores(
         pb = add(pb, scale(s.b, l));
     }
     let vv = dot(v, v);
-    let distance = if vv
-        <= REL_TOL_SQ
-        * size
-        * size
-        || simplex
-        .len()
-        == 4
+    let distance = if vv <= REL_TOL_SQ * size * size
+        || simplex.len() == 4
         || (stalled && vv <= REL_TOL * size * size) {
         0.0
     } else {
@@ -591,14 +586,14 @@ fn make_face(in pts: ChunkSeq[Sp], i: u64, j: u64, k: u64, inside: V3, inout out
     }
     out
         .push(
-        Face {
-            i: i,
-            j: jj,
-            k: kk,
-            n: n,
-            dist: dot(n, a)
-        }
-    );
+            Face {
+                i: i,
+                j: jj,
+                k: kk,
+                n: n,
+                dist: dot(n, a)
+            }
+        );
     true
 }
 
@@ -811,11 +806,11 @@ fn toggle_edge(inout horizon: ChunkSeq[Edge], p: u64, q: u64) {
     }
     horizon
         .push(
-        Edge {
-            p: p,
-            q: q
-        }
-    );
+            Edge {
+                p: p,
+                q: q
+            }
+        );
 }
 
 // ----- separation --------------------------------------------------------------

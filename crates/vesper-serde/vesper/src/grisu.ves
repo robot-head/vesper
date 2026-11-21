@@ -252,10 +252,8 @@ fn round_and_weed(
     }
     if plus1w < plus1v_down && wrapping_sub(threshold, plus1w) >= ten_kappa {
         let next = wrapping_add(plus1w, ten_kappa);
-        if next
-            < plus1v_down
-            || wrapping_sub(plus1v_down, plus1w)
-            >= wrapping_sub(next, plus1v_down) {
+        if next < plus1v_down
+            || wrapping_sub(plus1v_down, plus1w) >= wrapping_sub(next, plus1v_down) {
             return none();
         }
     }

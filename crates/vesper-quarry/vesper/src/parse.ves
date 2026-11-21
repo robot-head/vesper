@@ -604,12 +604,12 @@ pub fn parse_select(inout q: Q) {
         q
             .sels
             .push(
-            Sel {
-                expr: expr,
-                aoff: aoff,
-                alen: alen
-            }
-        );
+                Sel {
+                    expr: expr,
+                    aoff: aoff,
+                    alen: alen
+                }
+            );
         let bn = q.sels.len();
         if !bound(inout q, bn, 2, "projection limit") {
             return;
@@ -629,9 +629,7 @@ pub fn parse_select(inout q: Q) {
         return;
     }
     loop {
-        if q
-            .err
-            != 0
+        if q.err != 0
             || at_end(in q)
             || peek_is_sym(in q, SEMICOLON)
             || peek_is_word(in q, kw_where()) {

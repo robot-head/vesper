@@ -12,8 +12,7 @@ linear effect Tick {
 fn run(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     let r = handle Tick in {
         wrapping_add(value, Tick::tick())
     } with {

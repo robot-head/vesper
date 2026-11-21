@@ -1029,10 +1029,8 @@ test {
         }
         fen_add(inout weights, 0, 5);
         fen_add(inout weights, 1, 1);
-        fen_prefix(in weights.as_slice(), size)
-            == size
-            && fen_select(in weights.as_slice(), rank)
-            == expected
+        fen_prefix(in weights.as_slice(), size) == size
+            && fen_select(in weights.as_slice(), rank) == expected
     }
 
     fn test_heap_orders_equal_deadlines_by_completion() -> bool {
@@ -1113,27 +1111,13 @@ test {
             return false;
         }
         let refused = kernel_next_task(inout kernel);
-        refused
-            .code
-            == 10
-            && refused
-            .task
-            == 3
-            && kernel
-            .ready_total
-            == 0
-            && kernel
-            .cand_total
-            == 0
-            && kernel
-            .now
-            == 0
-            && kernel
-            .pending_n
-            == 1
-            && kernel
-            .heap_top()
-            == Option::Some(17)
+        refused.code == 10
+            && refused.task == 3
+            && kernel.ready_total == 0
+            && kernel.cand_total == 0
+            && kernel.now == 0
+            && kernel.pending_n == 1
+            && kernel.heap_top() == Option::Some(17)
     }
 
     fn test_completed_io_is_removed_from_deadline_heap() -> bool {
@@ -1168,9 +1152,7 @@ test {
         if !started
             || !dispatched
             || !blocked
-            || running
-            .kind
-            != 1
+            || running.kind != 1
             || kernel_is_complete(in kernel) {
             return false;
         }
@@ -1247,12 +1229,8 @@ test {
         } else {
             ev(4, task, wait.value, 0, 0)
         };
-        if kernel
-            .out
-            .try_get(0)
-            != Option::Some(expected_event)
-            || atb(in kernel.p_io.as_slice(), dec(wait.value))
-            != scheduled {
+        if kernel.out.try_get(0) != Option::Some(expected_event)
+            || atb(in kernel.p_io.as_slice(), dec(wait.value)) != scheduled {
             return false;
         }
         if cancel {

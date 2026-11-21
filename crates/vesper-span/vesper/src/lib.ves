@@ -136,46 +136,16 @@ fn hard() -> Limits {
 // `Limits::validate`.
 pub fn validate(in l: Limits) -> Unit eff [Fail[Error]] {
     let h = hard();
-    if l
-        .max_source_bytes
-        > h
-        .max_source_bytes
-        || l
-        .max_lines
-        > h
-        .max_lines
-        || l
-        .max_metadata_bytes
-        > h
-        .max_metadata_bytes
-        || l
-        .max_work
-        > h
-        .max_work
-        || l
-        .max_edits
-        > h
-        .max_edits
-        || l
-        .max_output_bytes
-        > h
-        .max_output_bytes
-        || l
-        .max_diagnostics
-        > h
-        .max_diagnostics
-        || l
-        .max_labels
-        > h
-        .max_labels
-        || l
-        .max_fixes
-        > h
-        .max_fixes
-        || l
-        .max_text_bytes
-        > h
-        .max_text_bytes {
+    if l.max_source_bytes > h.max_source_bytes
+        || l.max_lines > h.max_lines
+        || l.max_metadata_bytes > h.max_metadata_bytes
+        || l.max_work > h.max_work
+        || l.max_edits > h.max_edits
+        || l.max_output_bytes > h.max_output_bytes
+        || l.max_diagnostics > h.max_diagnostics
+        || l.max_labels > h.max_labels
+        || l.max_fixes > h.max_fixes
+        || l.max_text_bytes > h.max_text_bytes {
         Fail::raise(Error::InvalidLimits);
     }
 }
@@ -393,12 +363,7 @@ pub fn range(in text: Str, in lines: Slice[u64], max_work: usize, span: ByteSpan
 // `LineIndex::span`.
 pub fn span(in text: Str, in lines: Slice[u64], max_work: usize, r: Range)
     -> ByteSpan eff [Fail[Error]] {
-    if r
-        .start
-        .line
-        > r
-        .end
-        .line
+    if r.start.line > r.end.line
         || (r.start.line == r.end.line && r.start.character > r.end.character) {
         Fail::raise(Error::ReversedRange);
     }
@@ -482,8 +447,7 @@ fn check_edits(
             let b_end = word(in edits, wrapping_add(other, 1));
             // Adjacent nonempty edits are allowed; insertions at a shared
             // boundary are not.
-            if start
-                == b_start
+            if start == b_start
                 || (start < b_end && b_start < end)
                 || (start == end && start == b_end)
                 || (b_start == b_end && b_start == end) {

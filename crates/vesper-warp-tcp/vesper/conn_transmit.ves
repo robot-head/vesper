@@ -176,16 +176,11 @@ fn try_new_data(
     // Data may flow once our SYN is acknowledged.
     let s = t.st;
     if !(
-        s
-            == State::Established
-            || s
-            == State::FinWait1
-            || s
-            == State::Closing
-            || s
-            == State::CloseWait
-            || s
-            == State::LastAck
+        s == State::Established
+            || s == State::FinWait1
+            || s == State::Closing
+            || s == State::CloseWait
+            || s == State::LastAck
     ) {
         return Result::Ok(Option::None);
     }

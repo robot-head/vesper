@@ -13,6 +13,8 @@ mod proof_lean;
 pub mod proof_model;
 mod proof_source;
 pub mod recovery;
+mod sugar_layout;
+mod surface;
 // Generated and committed, but kept outside src/ so formatters, which check
 // every file under src/, never reflow it (see the porting recipe).
 #[cfg(vesper_port)]
@@ -54,10 +56,7 @@ pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
 pub use proof_model::{DocumentModel, ProofError, ProofLimits};
 pub use proof_source::{FormatVerification, format_for_verification};
 pub use recovery::{RecoveryEdit, RecoveryFormatResult, format_recovery_source};
-use vesper_syntax::{
-    lexer::{self, Token, TokenKind as K},
-    parser,
-};
+use vesper_syntax::lexer::{self, Token, TokenKind as K};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -143,6 +142,8 @@ struct Piece<'a> {
     blank: bool,
     /// No whitespace separates this token from the previous one.
     glued: bool,
+    /// Grammar-sensitive boundary from the unexpanded surface CST.
+    sugar_gap: Option<Gap>,
 }
 fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
     tokens
@@ -153,6 +154,7 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
             text: &source[t.span.clone()],
             blank: false,
             glued: false,
+            sugar_gap: None,
         })
         .collect()
 }
@@ -166,7 +168,7 @@ fn guarded_lex(
     if source.len() > lexer::HARD_SOURCE_BYTES {
         return Err(Error::InputLimit);
     }
-    let lexed = lexer::lex_with_limits(
+    let lexed = lexer::sugar_lex_with_limits(
         source,
         lexer::LexLimits {
             max_source_bytes: lexer::HARD_SOURCE_BYTES,
@@ -293,7 +295,7 @@ fn guarded_lex(
 /// the preflight keeps counting its chain. Anything else starts a new item or
 /// statement. Unknown cases count as continuations, which only refuses more.
 fn continues_chain(kind: K, text: &str) -> bool {
-    is_binary_operator(kind)
+    infix_precedence(kind).is_some()
         || matches!(
             kind,
             K::Dot
@@ -327,31 +329,13 @@ fn once(
     limits: Limits,
     work: &mut Work,
     capture: Option<ModelCapture<'_>>,
-) -> Result<(String, bool), Error> {
+) -> Result<(String, surface::Profile), Error> {
     let (tokens, macros) = match guarded_lex(source, limits, work, false) {
         Ok(tokens) => (tokens, false),
         Err(Error::OpaqueMacro) => (guarded_lex(source, limits, work, true)?, true),
         Err(error) => return Err(error),
     };
-    let syntax = if macros {
-        macro_source::syntax(source, &tokens, limits, work)?
-    } else {
-        let parsed = parser::parse_with_limits(
-            source,
-            parser::ParseLimits {
-                max_source_bytes: lexer::HARD_SOURCE_BYTES,
-                max_tokens: lexer::HARD_TOKENS,
-                ..Default::default()
-            },
-        )
-        .map_err(|_| Error::TokenLimit)?;
-        if let Some(error) = parsed.diagnostics.first() {
-            return Err(Error::Syntax {
-                offset: error.span.start,
-            });
-        }
-        parsed.syntax()
-    };
+    let (syntax, profile) = surface::syntax(source, &tokens, limits, work, macros)?;
     // The CST is the lowering source. Exact source slices are anchored by each
     // lossless token's byte range; compare against lexer evidence before use.
     let mut atoms = Vec::new();
@@ -379,6 +363,7 @@ fn once(
                     text: &source[start..end],
                     blank: std::mem::take(&mut blank),
                     glued: std::mem::replace(&mut glued, true),
+                    sugar_gap: None,
                 });
             }
         }
@@ -394,6 +379,9 @@ fn once(
             .any(|(a, b)| a.kind != b.kind || a.text != b.text)
     {
         return Err(Error::Conservation);
+    }
+    if !profile.nodes.is_empty() {
+        sugar_layout::annotate(source, &tokens, &mut atoms, &profile.nodes);
     }
     let mut doc_limits = limits;
     doc_limits.max_work = work.max - work.used;
@@ -416,15 +404,29 @@ fn once(
             }
         }
     }
-    Ok((output, macros))
+    Ok((output, profile))
 }
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
-    // The port formats the source unless it is in the macro profile.
+    // The native port handles executable grammar. Sugar uses the host's
+    // lossless surface CST, including in test bodies skipped by batch parsing.
+    if source.len() > limits.max_input_bytes {
+        return Err(Error::InputLimit);
+    }
     #[cfg(vesper_port)]
-    if let Some(result) = port::format_source(source, limits) {
-        return result;
+    if !surface::may_have_test_block(source)
+        && let Some(result) = port::format_source(source, limits)
+    {
+        let needs_surface = match &result {
+            Err(Error::Syntax { .. }) => true,
+            // Legacy lexing reports a diagnostic limit for multiple backticks.
+            Err(Error::TokenLimit) => source.contains('`'),
+            _ => false,
+        };
+        if !needs_surface {
+            return result;
+        }
     }
     let mut work = Work::new(limits.max_work);
     format_with_work(source, limits, &mut work)
@@ -445,9 +447,9 @@ pub(crate) fn format_with_capture(
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
-    let (output, macros) = once(source, limits, work, capture)?;
-    let original = guarded_lex(source, limits, work, macros)?;
-    let rewritten = guarded_lex(&output, limits, work, macros)?;
+    let (output, profile) = once(source, limits, work, capture)?;
+    let original = guarded_lex(source, limits, work, profile.allow_macro_tokens)?;
+    let rewritten = guarded_lex(&output, limits, work, profile.allow_macro_tokens)?;
     let a = pieces(source, &original);
     let b = pieces(&output, &rewritten);
     if a.len() != b.len()
@@ -457,8 +459,8 @@ pub(crate) fn format_with_capture(
     {
         return Err(Error::Conservation);
     }
-    let (second, second_macros) = once(&output, limits, work, None)?;
-    if second != output || macros != second_macros {
+    let (second, second_profile) = once(&output, limits, work, None)?;
+    if second != output || profile != second_profile {
         return Err(Error::NotIdempotent);
     }
     Ok(FormatResult {
@@ -466,50 +468,112 @@ pub(crate) fn format_with_capture(
         output,
     })
 }
-fn concat_group<'a>(
-    ids: &mut Vec<DocId>,
-    document: &mut Document<'a>,
-    out: &mut Vec<DocId>,
-) -> Result<(), Error> {
-    if !ids.is_empty() {
-        let node = document.push(Doc::Concat(std::mem::take(ids)))?;
-        out.push(document.push(Doc::Group(node))?);
+/// A statement or list item. Breaks at the same precedence share a group,
+/// while tighter operands can still fit on a single continuation line.
+#[derive(Default)]
+struct Line {
+    docs: Vec<DocId>,
+    breaks: Vec<(usize, u8)>,
+}
+impl Line {
+    fn push(&mut self, doc: DocId) {
+        self.docs.push(doc);
     }
-    Ok(())
+    fn push_break(&mut self, lead: DocId, precedence: u8) {
+        self.breaks.push((self.docs.len(), precedence));
+        self.docs.push(lead);
+    }
+    fn flush(&mut self, document: &mut Document<'_>, out: &mut Vec<DocId>) -> Result<(), Error> {
+        if !self.docs.is_empty() {
+            let group = if self.breaks.is_empty() {
+                let concat = document.push(Doc::Concat(std::mem::take(&mut self.docs)))?;
+                document.push(Doc::Group(concat))?
+            } else {
+                let node = self.layout(document, 0, self.docs.len(), &self.breaks)?;
+                self.docs.clear();
+                self.breaks.clear();
+                node
+            };
+            out.push(group);
+        }
+        Ok(())
+    }
+    // Recursion is bounded by the number of precedence levels, independent
+    // of the number of operators in a sequence.
+    fn layout(
+        &self,
+        document: &mut Document<'_>,
+        start: usize,
+        end: usize,
+        breaks: &[(usize, u8)],
+    ) -> Result<DocId, Error> {
+        let Some(weakest) = breaks.iter().map(|&(_, level)| level).min() else {
+            return document.push(Doc::Concat(self.docs[start..end].to_vec()));
+        };
+        let mut segments = Vec::new();
+        let mut operand = start;
+        let mut child_breaks = 0;
+        let mut lead = None;
+        for (index, &(offset, level)) in breaks.iter().enumerate() {
+            if level != weakest {
+                continue;
+            }
+            if operand < offset {
+                let rhs = self.layout(document, operand, offset, &breaks[child_breaks..index])?;
+                segments.push(nest_continuation(document, lead, rhs)?);
+            }
+            lead = Some(self.docs[offset]);
+            operand = offset + 1;
+            child_breaks = index + 1;
+        }
+        let rhs = self.layout(document, operand, end, &breaks[child_breaks..])?;
+        segments.push(nest_continuation(document, lead, rhs)?);
+        let concat = document.push(Doc::Concat(segments))?;
+        document.push(Doc::Group(concat))
+    }
+}
+
+fn nest_continuation(
+    document: &mut Document<'_>,
+    lead: Option<DocId>,
+    content: DocId,
+) -> Result<DocId, Error> {
+    if let Some(lead) = lead {
+        let continuation = document.push(Doc::Concat(vec![lead, content]))?;
+        document.push(Doc::Nest(4, continuation))
+    } else {
+        Ok(content)
+    }
 }
 #[derive(Clone, Copy)]
 enum Gap {
     None,
+    /// A space that must stay on this line, even beside a comment.
+    Space,
     Soft,
     Empty,
     /// Break point before an infix operator; nested one level when broken.
-    Operator,
+    Operator(u8),
     /// Break point before `->`, in its own group so it breaks only when the
     /// return type cannot follow an already laid-out parameter list.
     Return,
     Hard,
 }
-fn is_binary_operator(kind: K) -> bool {
-    matches!(
-        kind,
-        K::Plus
-            | K::Minus
-            | K::Star
-            | K::Slash
-            | K::Percent
-            | K::EqEq
-            | K::Ne
-            | K::Lt
-            | K::Le
-            | K::Gt
-            | K::Ge
-            | K::And
-            | K::Or
-            | K::Amp
-            | K::Caret
-            | K::Shl
-            | K::Shr
-    )
+// These levels follow the expression parser. Assignment is spaced separately
+// and a pipe may introduce a closure, so only unambiguous infix gaps break.
+fn infix_precedence(kind: K) -> Option<u8> {
+    Some(match kind {
+        K::Or => 2,
+        K::And => 3,
+        K::EqEq | K::Ne => 4,
+        K::Lt | K::Le | K::Gt | K::Ge => 5,
+        K::Caret => 7,
+        K::Amp => 8,
+        K::Shl | K::Shr => 9,
+        K::Plus | K::Minus => 10,
+        K::Star | K::Slash | K::Percent => 11,
+        _ => return None,
+    })
 }
 /// Whether a token can start the upper bound of a range.
 fn starts_range_bound(kind: K) -> bool {
@@ -533,6 +597,7 @@ fn ends_operand(kind: K) -> bool {
             | K::RParen
             | K::RBracket
             | K::RBrace
+            | K::Question
     )
 }
 fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) -> Gap {
@@ -550,7 +615,16 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     if after_block
         && !matches!(
             current.kind,
-            K::Comma | K::Semi | K::RParen | K::RBracket | K::Dot | K::Question | K::Else | K::With
+            K::Comma
+                | K::Semi
+                | K::RParen
+                | K::RBracket
+                | K::Dot
+                | K::Question
+                | K::Else
+                | K::With
+                | K::Eq
+                | K::FatArrow
         )
     {
         return Gap::Hard;
@@ -576,8 +650,9 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     if current.kind == K::Arrow {
         return Gap::Return;
     }
-    if is_binary_operator(current.kind) && ends_operand(previous.kind) {
-        return Gap::Operator;
+    if let Some(precedence) = infix_precedence(current.kind).filter(|_| ends_operand(previous.kind))
+    {
+        return Gap::Operator(precedence);
     }
     if matches!(
         current.kind,
@@ -627,10 +702,11 @@ fn sequence<'a>(
     // delimiters (and member-chain dots) before anything else.
     let list = end.is_some() && !block;
     let mut output = Vec::new();
-    let mut line = Vec::new();
+    let mut line = Line::default();
     let mut previous: Option<Piece<'a>> = None;
     let mut previous_block = false;
     let mut previous_unary = false;
+    let mut previous_ends_operand = false;
     // Inside a package name `@scope/name` (`use` and trait paths), whose
     // tokens must stay adjacent for the parser.
     let mut package = false;
@@ -642,7 +718,11 @@ fn sequence<'a>(
                 (p.kind == K::At && current.kind == K::Lower)
                     || (package && matches!(current.kind, K::Lower | K::Minus | K::Slash | K::Int))
             });
-        let spacing = if previous_unary || package {
+        let spacing = if previous.is_none() {
+            Gap::None
+        } else if let Some(gap) = current.sugar_gap {
+            gap
+        } else if previous_unary || package {
             Gap::None
         } else if list && previous.is_some_and(|p| p.kind == K::Semi) {
             // `[T; N]` and `[x; N]` (§5): a `;` inside brackets is a
@@ -656,7 +736,7 @@ fn sequence<'a>(
             || previous.is_some_and(|p| p.kind == K::BlockComment);
         match spacing {
             Gap::Hard => {
-                concat_group(&mut line, document, &mut output)?;
+                line.flush(document, &mut output)?;
                 // Keep at most one blank line where the source had one or more
                 // between two items; the bare newline leaves no indentation.
                 if current.blank {
@@ -665,31 +745,29 @@ fn sequence<'a>(
                 output.push(document.push(Doc::HardLine)?);
             }
             Gap::Soft if list && after_comma => {
-                concat_group(&mut line, document, &mut output)?;
+                line.flush(document, &mut output)?;
                 output.push(document.push(Doc::SoftLineOrSpace)?);
             }
             Gap::Soft if !is_block && near_comment => {
                 line.push(document.push(Doc::SoftLineOrSpace)?)
             }
-            Gap::Soft if !is_block => line.push(document.push(Doc::Text(" "))?),
+            Gap::Space | Gap::Soft if !is_block => line.push(document.push(Doc::Text(" "))?),
             Gap::Return => {
-                concat_group(&mut line, document, &mut output)?;
+                line.flush(document, &mut output)?;
                 let lead = document.push(Doc::SoftLineOrSpace)?;
-                line.push(document.push(Doc::Nest(4, lead))?);
+                line.push_break(lead, 1);
             }
-            Gap::Empty | Gap::Operator => {
-                let lead = document.push(if matches!(spacing, Gap::Empty) {
-                    Doc::SoftLineOrEmpty
-                } else {
-                    Doc::SoftLineOrSpace
-                })?;
-                line.push(document.push(Doc::Nest(4, lead))?);
+            Gap::Empty => {
+                line.push_break(document.push(Doc::SoftLineOrEmpty)?, 12);
+            }
+            Gap::Operator(precedence) => {
+                line.push_break(document.push(Doc::SoftLineOrSpace)?, precedence);
             }
             _ => {}
         }
         if is_block {
-            concat_group(&mut line, document, &mut output)?;
-            if matches!(spacing, Gap::Soft) {
+            line.flush(document, &mut output)?;
+            if matches!(spacing, Gap::Soft | Gap::Space) {
                 output.push(document.push(Doc::Text(" "))?);
             }
         }
@@ -706,7 +784,12 @@ fn sequence<'a>(
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
             // The formatter never adds or removes tokens, so a source trailing
             // comma is kept and selects the vertical layout.
-            let trailing_comma = !is_block && *pos > 0 && atoms[*pos - 1].kind == K::Comma;
+            let trailing_comma = !is_block
+                && atoms[..*pos]
+                    .iter()
+                    .rev()
+                    .find(|a| !matches!(a.kind, K::Comment | K::BlockComment))
+                    .is_some_and(|a| a.kind == K::Comma);
             let closing = atoms
                 .get(*pos)
                 .filter(|a| a.kind == close)
@@ -746,20 +829,25 @@ fn sequence<'a>(
         }
         previous_block = is_block;
         // A prefix `-`/`!` binds to its operand with no space.
-        previous_unary = matches!(current.kind, K::Minus | K::Bang | K::Tilde)
-            && previous.is_none_or(|p| !ends_operand(p.kind));
+        previous_unary =
+            matches!(current.kind, K::Minus | K::Bang | K::Tilde) && !previous_ends_operand;
+        let kind = match current.kind {
+            K::LParen => K::RParen,
+            K::LBracket => K::RBracket,
+            K::LBrace => K::RBrace,
+            _ => current.kind,
+        };
+        if !matches!(kind, K::Comment | K::BlockComment) {
+            previous_ends_operand = ends_operand(kind);
+        }
         previous = Some(Piece {
-            kind: match current.kind {
-                K::LParen => K::RParen,
-                K::LBracket => K::RBracket,
-                K::LBrace => K::RBrace,
-                _ => current.kind,
-            },
+            kind,
             text: current.text,
             blank: false,
             glued: current.glued,
+            sugar_gap: None,
         });
     }
-    concat_group(&mut line, document, &mut output)?;
+    line.flush(document, &mut output)?;
     document.push(Doc::Concat(output))
 }

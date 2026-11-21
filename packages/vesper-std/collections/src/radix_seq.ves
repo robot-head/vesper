@@ -323,22 +323,10 @@ test {
         let frozen = seq.snapshot_get(snapshot, boundary) == Option::Some(boundary);
         live
             && frozen
-            && seq
-            .leaf_epoch
-            .len()
-            == wrapping_add(leaf_count, 1)
-            && seq
-            .node_epoch
-            .len()
-            == wrapping_add(node_count, expected_nodes)
-            && seq
-            .elems
-            .len()
-            == wrapping_mul(seq.leaf_epoch.len(), 32)
-            && seq
-            .kids
-            .len()
-            == wrapping_mul(seq.node_epoch.len(), 32)
+            && seq.leaf_epoch.len() == wrapping_add(leaf_count, 1)
+            && seq.node_epoch.len() == wrapping_add(node_count, expected_nodes)
+            && seq.elems.len() == wrapping_mul(seq.leaf_epoch.len(), 32)
+            && seq.kids.len() == wrapping_mul(seq.node_epoch.len(), 32)
     }
 
     fn test_set_preserves_other_leaves_in_same_branch() -> bool {
@@ -351,26 +339,12 @@ test {
         if !seq.set(1024, 99) {
             return false;
         }
-        seq
-            .get(1024)
-            == Option::Some(99)
-            && seq
-            .get(1025)
-            == Option::Some(1025)
-            && seq
-            .get(1056)
-            == Option::Some(1056)
-            && seq
-            .snapshot_get(frozen, 1024)
-            == Option::Some(1024)
-            && seq
-            .elems
-            .len()
-            == wrapping_mul(seq.leaf_epoch.len(), 32)
-            && seq
-            .kids
-            .len()
-            == wrapping_mul(seq.node_epoch.len(), 32)
+        seq.get(1024) == Option::Some(99)
+            && seq.get(1025) == Option::Some(1025)
+            && seq.get(1056) == Option::Some(1056)
+            && seq.snapshot_get(frozen, 1024) == Option::Some(1024)
+            && seq.elems.len() == wrapping_mul(seq.leaf_epoch.len(), 32)
+            && seq.kids.len() == wrapping_mul(seq.node_epoch.len(), 32)
     }
 
     // @case empty(0)
@@ -431,17 +405,10 @@ test {
         } else {
             Option::None
         };
-        if seq
-            .set(index, 9999)
-            != written
-            || seq
-            .get(index)
-            != changed
-            || snapshot_len(before)
-            != count
-            || seq
-            .snapshot_get(before, index)
-            != original {
+        if seq.set(index, 9999) != written
+            || seq.get(index) != changed
+            || snapshot_len(before) != count
+            || seq.snapshot_get(before, index) != original {
             return false;
         }
         let after = seq.freeze();
@@ -450,14 +417,8 @@ test {
             return false;
         }
         seq.thaw(before);
-        seq
-            .len()
-            == count
-            && seq
-            .get(index)
-            == original
-            && seq
-            .snapshot_get(after, index)
-            == changed
+        seq.len() == count
+            && seq.get(index) == original
+            && seq.snapshot_get(after, index) == changed
     }
 }

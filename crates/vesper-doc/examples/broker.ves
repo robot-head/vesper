@@ -62,8 +62,7 @@ fn begin(in broker.{index}: Broker) -> WriteTxn {
 fn commit(sink tx: WriteTxn) -> Receipt eff [Storage] {
     let WriteTxn {
         slot
-    }
-    = tx;
+    } = tx;
     Receipt {
         slot: Storage::append(slot)
     }

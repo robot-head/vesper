@@ -79,8 +79,7 @@ fn serve_ack_first(client: u64) -> u64 eff [Disk, Net] {
     };
     let Lease {
         id
-    }
-    = lease;
+    } = lease;
     acked
 }
 
@@ -108,8 +107,7 @@ fn serve_flush_first(client: u64) -> u64 eff [Disk, Net] {
     };
     let Lease {
         id
-    }
-    = lease;
+    } = lease;
     acked
 }
 

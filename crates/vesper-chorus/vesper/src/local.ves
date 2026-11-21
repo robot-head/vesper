@@ -126,18 +126,12 @@ pub fn mkl(inout c: C, tag: u64, a: u64, b: u64, cc: u64, d: u64, from: u64) -> 
             break;
         }
         let m = wrapping_sub(e, 1);
-        if sw(in c.lh, m)
-            == h
-            && sw(in c.lt, m)
-            == tag
-            && sw(in c.la, m)
-            == a
-            && sw(in c.lb, m)
-            == b
-            && sw(in c.lc, m)
-            == cc
-            && sw(in c.ld, m)
-            == d
+        if sw(in c.lh, m) == h
+            && sw(in c.lt, m) == tag
+            && sw(in c.la, m) == a
+            && sw(in c.lb, m) == b
+            && sw(in c.lc, m) == cc
+            && sw(in c.ld, m) == d
             && same_kids(in c, m, from) {
             c.tmp.truncate(from);
             return m;
@@ -711,14 +705,10 @@ fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
         return r;
     }
     if (tx == 1 && ty == 2) || (tx == 2 && ty == 1) {
-        if la(in c, x)
-            != b
-            || la(in c, y)
-            != a
-            || lb(in c, x)
-            != lb(in c, y)
-            || lc(in c, x)
-            != lc(in c, y) {
+        if la(in c, x) != b
+            || la(in c, y) != a
+            || lb(in c, x) != lb(in c, y)
+            || lc(in c, x) != lc(in c, y) {
             return false;
         }
         let h76 = ld(in c, x);
@@ -734,10 +724,8 @@ fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
             return false;
         }
         for i in 0..n {
-            if lbr(in c, x, i, 0)
-                != lbr(in c, y, i, 0)
-                || lbr(in c, x, i, 1)
-                != lbr(in c, y, i, 1) {
+            if lbr(in c, x, i, 0) != lbr(in c, y, i, 0)
+                || lbr(in c, x, i, 1) != lbr(in c, y, i, 1) {
                 return false;
             }
             let h78 = lbr(in c, x, i, 2);

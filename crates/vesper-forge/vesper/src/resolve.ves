@@ -349,12 +349,9 @@ pub fn parameters(in w: Slice[u64], inout r: R) -> u64 {
             }
         }
         // Only source tokens (rank 0) without a claim.
-        if tok(in w, index, 0)
-            != 1
-            || origin_rank(in w, tok(in w, index, 2))
-            != 0
-            || tok(in w, index, 3)
-            != 0
+        if tok(in w, index, 0) != 1
+            || origin_rank(in w, tok(in w, index, 2)) != 0
+            || tok(in w, index, 3) != 0
             || !distinct {
             raise(inout r, err_parameter(), index, 1, 0, 0);
             return ctx_len;
@@ -495,12 +492,9 @@ fn path_spells(
     let mut k: u64 = 0;
     for i in 0..n {
         if i > 0 {
-            if wrapping_add(k, 2)
-                > len
-                || byte(in names, wrapping_add(start, k))
-                != 58
-                || byte(in names, wrapping_add(start, wrapping_add(k, 1)))
-                != 58 {
+            if wrapping_add(k, 2) > len
+                || byte(in names, wrapping_add(start, k)) != 58
+                || byte(in names, wrapping_add(start, wrapping_add(k, 1))) != 58 {
                 return false;
             }
             k = wrapping_add(k, 2);
@@ -706,8 +700,7 @@ fn path(
     for i in 0..n {
         let t = wd(in w, wrapping_add(at, wrapping_add(i, 1)));
         if !same_set(in w, tok(in w, t, 6), tok(in w, t, 7), in w, ff, fl)
-            || tok(in w, t, 2)
-            != fo {
+            || tok(in w, t, 2) != fo {
             raise(inout r, err_mixed_path(), t, 0, 0, 0);
             return none;
         }

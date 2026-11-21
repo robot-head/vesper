@@ -271,17 +271,17 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         };
         exprs
             .push(
-            ExprRow {
-                kind: kind,
-                start: start,
-                end: end,
-                a: a,
-                b: b2,
-                c: c,
-                d: d,
-                e: e
-            }
-        );
+                ExprRow {
+                    kind: kind,
+                    start: start,
+                    end: end,
+                    a: a,
+                    b: b2,
+                    c: c,
+                    d: d,
+                    e: e
+                }
+            );
     }
     let qn = r.word(in b);
     let mut pats: ChunkSeq[PatRow] = ChunkSeq::with_capacity[PatRow](qn);
@@ -297,15 +297,15 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         }
         pats
             .push(
-            PatRow {
-                kind: kind,
-                start: start,
-                end: end,
-                a: a,
-                b: bb,
-                c: c
-            }
-        );
+                PatRow {
+                    kind: kind,
+                    start: start,
+                    end: end,
+                    a: a,
+                    b: bb,
+                    c: c
+                }
+            );
     }
     let fnn = r.word(in b);
     let mut fns: ChunkSeq[FnRow] = ChunkSeq::with_capacity[FnRow](fnn);
@@ -324,11 +324,11 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
             let row = r.word(in b) != 0;
             generics
                 .push(
-                GenRow {
-                    name: g,
-                    row: row
-                }
-            );
+                    GenRow {
+                        name: g,
+                        row: row
+                    }
+                );
         }
         let qn2 = r.word(in b);
         let pa = n32(params.len());
@@ -340,14 +340,14 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
             let pe = r.word(in b);
             params
                 .push(
-                ParamRow {
-                    name: pname,
-                    pass: pass,
-                    ty: pty,
-                    start: ps,
-                    end: pe
-                }
-            );
+                    ParamRow {
+                        name: pname,
+                        pass: pass,
+                        ty: pty,
+                        start: ps,
+                        end: pe
+                    }
+                );
         }
         let result = ty(in tmap, r.word(in b));
         let effects = ty(in tmap, r.word(in b));
@@ -355,20 +355,20 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tma
         set_index(inout by_name, name, wrapping_add(n32(i), 1));
         fns
             .push(
-            FnRow {
-                name: name,
-                fip: fip,
-                start: start,
-                end: end,
-                ga: ga,
-                gn: n32(gn),
-                pa: pa,
-                pn: n32(qn2),
-                result: result,
-                effects: effects,
-                body: body
-            }
-        );
+                FnRow {
+                    name: name,
+                    fip: fip,
+                    start: start,
+                    end: end,
+                    ga: ga,
+                    gn: n32(gn),
+                    pa: pa,
+                    pn: n32(qn2),
+                    result: result,
+                    effects: effects,
+                    body: body
+                }
+            );
     }
     Ast {
         pool: pool,

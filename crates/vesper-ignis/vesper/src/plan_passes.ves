@@ -16,22 +16,22 @@ fn plan_texture(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u3
                         let sub = flat_index(res, mip, slice, plane);
                         entries
                             .push(
-                            ReqEntry {
-                                sub: sub,
-                                seq: seq,
-                                access: u.access,
-                                sync: u.sync,
-                                has_layout: if u.has_layout {
-                                    1
-                                } else {
-                                    0
-                                },
-                                layout: layout_ord(u.layout),
-                                mip: mip,
-                                slice: slice,
-                                plane: plane
-                            }
-                        );
+                                ReqEntry {
+                                    sub: sub,
+                                    seq: seq,
+                                    access: u.access,
+                                    sync: u.sync,
+                                    has_layout: if u.has_layout {
+                                        1
+                                    } else {
+                                        0
+                                    },
+                                    layout: layout_ord(u.layout),
+                                    mip: mip,
+                                    slice: slice,
+                                    plane: plane
+                                }
+                            );
                         seq = wrapping_add(seq, 1);
                     }
                 }
@@ -178,14 +178,14 @@ fn plan_buffer(inout pl: Planner, in g: Graph, p: u32, queue: u32, resource: u32
         pl
             .writer
             .try_set(
-            r,
-            Rec {
-                pass: p,
-                queue: queue,
-                sync: wsync,
-                access: waccess
-            }
-        );
+                r,
+                Rec {
+                    pass: p,
+                    queue: queue,
+                    sync: wsync,
+                    access: waccess
+                }
+            );
     }
     PlanFault::None
 }
@@ -255,15 +255,15 @@ fn plan_final_layouts(inout pl: Planner, in g: Graph) -> PlanFault {
                                 match recs.try_get(i) {
                                     Option::Some(x) => recency
                                         .push(
-                                        Recency {
-                                            neg_gpos: wrapping_sub(
-                                                max_u64(),
-                                                widen_u64(get32(in pl.gpos, widen_u64(x.pass)))
-                                            ),
-                                            seq: i,
-                                            queue: x.queue
-                                        }
-                                    ),
+                                            Recency {
+                                                neg_gpos: wrapping_sub(
+                                                    max_u64(),
+                                                    widen_u64(get32(in pl.gpos, widen_u64(x.pass)))
+                                                ),
+                                                seq: i,
+                                                queue: x.queue
+                                            }
+                                        ),
                                     Option::None => (),
                                 }
                             }
@@ -287,13 +287,12 @@ fn plan_final_layouts(inout pl: Planner, in g: Graph) -> PlanFault {
                             let mut chosen = none32();
                             for i in 0..candidates.len() {
                                 let q = get32(in candidates, i);
-                                if chosen
-                                    == none32()
+                                if chosen == none32()
                                     && queue_can_transition(
-                                    get_queue(in g, widen_u64(q)),
-                                    cur,
-                                    fin
-                                ) {
+                                        get_queue(in g, widen_u64(q)),
+                                        cur,
+                                        fin
+                                    ) {
                                     chosen = q;
                                 }
                             }
@@ -315,11 +314,11 @@ fn plan_final_layouts(inout pl: Planner, in g: Graph) -> PlanFault {
                                             pl
                                                 .final_waits
                                                 .push(
-                                                Pair {
-                                                    key: chosen,
-                                                    value: x.pass
-                                                }
-                                            );
+                                                    Pair {
+                                                        key: chosen,
+                                                        value: x.pass
+                                                    }
+                                                );
                                         }
                                     },
                                     Option::None => (),

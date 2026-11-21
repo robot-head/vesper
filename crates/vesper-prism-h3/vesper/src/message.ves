@@ -92,24 +92,11 @@ fn is(in b: Slice[u8], lo: u64, hi: u64, in lit: Slice[u8]) -> bool {
 }
 
 fn same(in b: Slice[u8], a: Span, c: Span) -> bool {
-    if wrapping_sub(a.hi, a.lo)
-        != wrapping_sub(c.hi, c.lo)
-        || a
-        .hi
-        > b
-        .len()
-        || c
-        .hi
-        > b
-        .len()
-        || a
-        .lo
-        > a
-        .hi
-        || c
-        .lo
-        > c
-        .hi {
+    if wrapping_sub(a.hi, a.lo) != wrapping_sub(c.hi, c.lo)
+        || a.hi > b.len()
+        || c.hi > b.len()
+        || a.lo > a.hi
+        || c.lo > c.hi {
         return false;
     }
     bytes_eq(in b[a.lo..a.hi], in b[c.lo..c.hi])
@@ -153,11 +140,13 @@ fn check_regular(in b: Slice[u8], l: Line) -> Option[MessageError] {
     if (wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in "connection".as_bytes()))
         || (wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in "keep-alive".as_bytes()))
         || (
-        wrapping_sub(l.mid, l.lo) == 16 && is(in b, l.lo, l.mid, in "proxy-connection".as_bytes())
-    )
+            wrapping_sub(l.mid, l.lo) == 16
+                && is(in b, l.lo, l.mid, in "proxy-connection".as_bytes())
+        )
         || (
-        wrapping_sub(l.mid, l.lo) == 17 && is(in b, l.lo, l.mid, in "transfer-encoding".as_bytes())
-    )
+            wrapping_sub(l.mid, l.lo) == 17
+                && is(in b, l.lo, l.mid, in "transfer-encoding".as_bytes())
+        )
         || (wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in "upgrade".as_bytes())) {
         return Option::Some(MessageError::ConnectionSpecificField);
     }

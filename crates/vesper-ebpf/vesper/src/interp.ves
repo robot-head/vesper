@@ -351,8 +351,7 @@ fn slots_of(i: Insn) -> u64 {
         Insn::LdImm64 {
             dst,
             imm
-        }
-        => 2,
+        } => 2,
         _ => 1,
     }
 }
@@ -466,9 +465,12 @@ fn alloc(inout i: I, kind: u64, len: u64, init: bool) -> u64 {
     let base = i.next_base;
     i
         .next_base = add(
-        base,
-        add(mul(shr(add(add(len, PAGE_SIZE), sub(PAGE_SIZE, 1)), PAGE_SHIFT), PAGE_SIZE), PAGE_SIZE)
-    );
+            base,
+            add(
+                mul(shr(add(add(len, PAGE_SIZE), sub(PAGE_SIZE, 1)), PAGE_SHIFT), PAGE_SIZE),
+                PAGE_SIZE
+            )
+        );
     let off = i.mem.len();
     grow(inout i, pad8(len), init);
     let id = shr(i.rt.len(), 3);
@@ -642,24 +644,15 @@ fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
 }
 
 fn skb_writable(at: u64) -> bool {
-    at
-        == SkBuff::Mark
-        || at
-        == SkBuff::Priority
-        || at
-        == SkBuff::TcIndex
-        || at
-        == SkBuff::Cb
-        || at
-        == add(SkBuff::Cb, 4)
-        || at
-        == add(SkBuff::Cb, 8)
-        || at
-        == add(SkBuff::Cb, 12)
-        || at
-        == add(SkBuff::Cb, 16)
-        || at
-        == SkBuff::TcClassid
+    at == SkBuff::Mark
+        || at == SkBuff::Priority
+        || at == SkBuff::TcIndex
+        || at == SkBuff::Cb
+        || at == add(SkBuff::Cb, 4)
+        || at == add(SkBuff::Cb, 8)
+        || at == add(SkBuff::Cb, 12)
+        || at == add(SkBuff::Cb, 16)
+        || at == SkBuff::TcClassid
 }
 
 fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]] {
@@ -1323,27 +1316,22 @@ fn decode_code(e: DecodeError) -> u64 {
     match e {
         DecodeError::TruncatedProgram {
             len
-        }
-        => shl(widen_u64(len), 12),
+        } => shl(widen_u64(len), 12),
         DecodeError::BadRegister {
             pc,
             reg
-        }
-        => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
+        } => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
         DecodeError::InvalidOpcode {
             pc,
             code
-        }
-        => 2 | shl(widen_u64(code), 4) | shl(widen_u64(pc), 12),
+        } => 2 | shl(widen_u64(code), 4) | shl(widen_u64(pc), 12),
         DecodeError::ReservedFieldSet {
             pc,
             field
-        }
-        => 3 | shl(widen_u64(field), 4) | shl(widen_u64(pc), 12),
+        } => 3 | shl(widen_u64(field), 4) | shl(widen_u64(pc), 12),
         DecodeError::BrokenLdImm64 {
             pc
-        }
-        => 4 | shl(widen_u64(pc), 12),
+        } => 4 | shl(widen_u64(pc), 12),
     }
 }
 
@@ -1423,12 +1411,12 @@ fn push_frame(inout i: I, ret_pc: u64, lp: bool, entry: u64, n: u64, arg: Val) {
     i
         .frames
         .push(
-        if lp {
-            1
-        } else {
-            0
-        }
-    );
+            if lp {
+                1
+            } else {
+                0
+            }
+        );
     i.frames.push(entry);
     i.frames.push(0);
     i.frames.push(n);
@@ -1489,8 +1477,7 @@ fn exec(
                 op,
                 dst,
                 src
-            }
-            => {
+            } => {
                 let b = match src {
                     Operand::Imm(c) => scalar(
                         if wide {
@@ -1546,15 +1533,13 @@ fn exec(
                 kind,
                 bits,
                 dst
-            }
-            => {
+            } => {
                 let a = get(in i, pc, reg(dst));
                 set(inout i, reg(dst), scalar(endian(kind, bits, a.v)));
             },
             Insn::Ja {
                 off
-            }
-            => {
+            } => {
                 to = jump(pc, imm_bits(off));
             },
             Insn::Jcond {
@@ -1563,8 +1548,7 @@ fn exec(
                 dst,
                 src,
                 off
-            }
-            => {
+            } => {
                 let a = get(in i, pc, reg(dst));
                 let b = match src {
                     Operand::Imm(c) => if wide {
@@ -1581,8 +1565,7 @@ fn exec(
             Insn::LdImm64 {
                 dst,
                 imm
-            }
-            => {
+            } => {
                 match imm {
                     Imm64::Value(v) => set(inout i, reg(dst), scalar(v)),
                     Imm64::MapFd(m) => {
@@ -1597,8 +1580,7 @@ fn exec(
                         src,
                         imm_lo,
                         imm_hi
-                    }
-                    => {
+                    } => {
                         if src != 4 {
                             raise(5, pc, 0, 0, 0, 0);
                         }
@@ -1616,8 +1598,7 @@ fn exec(
                 src,
                 off,
                 sign_extend
-            }
-            => {
+            } => {
                 let p = get(in i, pc, reg(src));
                 let n = size_bytes(size);
                 let at = resolve(in i, pc, p, off16(off), n);
@@ -1657,8 +1638,7 @@ fn exec(
                 dst,
                 off,
                 imm
-            }
-            => {
+            } => {
                 let p = get(in i, pc, reg(dst));
                 store(inout i, pc, p, off16(off), size_bytes(size), scalar(imm_bits(imm)));
             },
@@ -1667,8 +1647,7 @@ fn exec(
                 dst,
                 src,
                 off
-            }
-            => {
+            } => {
                 let p = get(in i, pc, reg(dst));
                 let v = get(in i, pc, reg(src));
                 store(inout i, pc, p, off16(off), size_bytes(size), v);
@@ -1679,8 +1658,7 @@ fn exec(
                 dst,
                 src,
                 off
-            }
-            => {
+            } => {
                 let p = get(in i, pc, reg(dst));
                 let s = get(in i, pc, reg(src));
                 let n = size_bytes(size);
@@ -1706,8 +1684,7 @@ fn exec(
                 match op {
                     AtomicOp::Add {
                         fetch
-                    }
-                    => {
+                    } => {
                         nv = add(old, sv);
                         if fetch {
                             fetch_to = reg(src);
@@ -1715,8 +1692,7 @@ fn exec(
                     },
                     AtomicOp::Or {
                         fetch
-                    }
-                    => {
+                    } => {
                         nv = old | sv;
                         if fetch {
                             fetch_to = reg(src);
@@ -1724,8 +1700,7 @@ fn exec(
                     },
                     AtomicOp::And {
                         fetch
-                    }
-                    => {
+                    } => {
                         nv = old & sv;
                         if fetch {
                             fetch_to = reg(src);
@@ -1733,8 +1708,7 @@ fn exec(
                     },
                     AtomicOp::Xor {
                         fetch
-                    }
-                    => {
+                    } => {
                         nv = old ^ sv;
                         if fetch {
                             fetch_to = reg(src);
@@ -1871,8 +1845,7 @@ fn exec(
                 indirect,
                 src,
                 imm
-            }
-            => {
+            } => {
                 raise(5, pc, 0, 0, 0, 0);
             },
             Insn::Exit => {
@@ -2058,24 +2031,24 @@ fn load_state(
         i
             .rt
             .push(
-            if r == 0 {
-                6
-            } else {
-                3
-            }
-        );
+                if r == 0 {
+                    6
+                } else {
+                    3
+                }
+            );
         i.rt.push(sw(in st, b));
         i.rt.push(sw(in st, add(b, 1)));
         i.rt.push(sw(in st, add(b, 2)));
         i
             .rt
             .push(
-            if r == 0 {
-                0
-            } else {
-                1
-            }
-        );
+                if r == 0 {
+                    0
+                } else {
+                    1
+                }
+            );
         i.rt.push(0);
         i.rt.push(0);
         i.rt.push(0);
@@ -2148,13 +2121,13 @@ fn save(inout i: I) -> ChunkSeq[u64] {
                 let t = gw(in ids, sub(w, 1));
                 spill
                     .try_set(
-                    k,
-                    if t == none() {
-                        1
-                    } else {
-                        add(t, 1)
-                    }
-                );
+                        k,
+                        if t == none() {
+                            1
+                        } else {
+                            add(t, 1)
+                        }
+                    );
             }
         }
         i.mem = mem;
@@ -2342,12 +2315,12 @@ pub fn run_program(
     let mut bytes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](i.rbytes.len());
     w
         .push(
-        if res.code == 0 {
-            0
-        } else {
-            1
-        }
-    );
+            if res.code == 0 {
+                0
+            } else {
+                1
+            }
+        );
     w.push(res.code);
     w.push(res.pc);
     w.push(res.d);

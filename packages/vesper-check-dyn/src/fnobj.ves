@@ -513,34 +513,34 @@ fn hidden_trait(inout d: D, kind: u32, sig: u32) -> u32 {
         .ast
         .fns
         .alloc(
-        FnNode {
-            name: d.k.call,
-            fip: false,
-            generics: 0,
-            params: pl,
-            result: sn.b,
-            effects: sn.c,
-            body: NONE,
-            start: 0,
-            end: 0
-        }
-    )
+            FnNode {
+                name: d.k.call,
+                fip: false,
+                generics: 0,
+                params: pl,
+                result: sn.b,
+                effects: sn.c,
+                body: NONE,
+                start: 0,
+                end: 0
+            }
+        )
         .raw();
     let ml = list1(inout d, f);
     let t = d
         .ast
         .traits
         .alloc(
-        TraitNode {
-            name: name,
-            public: false,
-            generics: 0,
-            assoc: 0,
-            methods: ml,
-            start: 0,
-            end: 0
-        }
-    )
+            TraitNode {
+                name: name,
+                public: false,
+                generics: 0,
+                assoc: 0,
+                methods: ml,
+                start: 0,
+                end: 0
+            }
+        )
         .raw();
     d.tr_names.push(name);
     d.tr_nodes.push(t);
@@ -1000,16 +1000,11 @@ fn trim_new(inout d: D, n: u32) -> u32 {
             break;
         }
         let at = wrapping_sub(len, 5);
-        if sym_byte(in d.ast, n, at)
-            == 58
-            && sym_byte(in d.ast, n, inc(at))
-            == 58
-            && sym_byte(in d.ast, n, wrapping_add(at, 2))
-            == 110
-            && sym_byte(in d.ast, n, wrapping_add(at, 3))
-            == 101
-            && sym_byte(in d.ast, n, wrapping_add(at, 4))
-            == 119 {
+        if sym_byte(in d.ast, n, at) == 58
+            && sym_byte(in d.ast, n, inc(at)) == 58
+            && sym_byte(in d.ast, n, wrapping_add(at, 2)) == 110
+            && sym_byte(in d.ast, n, wrapping_add(at, 3)) == 101
+            && sym_byte(in d.ast, n, wrapping_add(at, 4)) == 119 {
             len = at;
         } else {
             break;
@@ -1031,13 +1026,13 @@ fn infer(inout d: D, e: u32) -> u32 {
             .ast
             .lits
             .get_or(
-            idx_from_raw[Lit](n.a),
-            Lit {
-                kind: 0,
-                neg: false,
-                bits: 0
-            }
-        );
+                idx_from_raw[Lit](n.a),
+                Lit {
+                    kind: 0,
+                    neg: false,
+                    bits: 0
+                }
+            );
         if lit.kind == 1 {
             return d.t_i64;
         }
@@ -1154,10 +1149,8 @@ fn callee_params(inout d: D, callee: u32, inout out: ChunkSeq[u32]) -> bool {
                 break;
             }
             i = wrapping_sub(i, 1);
-            if sym_byte(in d.ast, c.a, i)
-                == 58
-                && sym_byte(in d.ast, c.a, wrapping_sub(i, 1))
-                == 58 {
+            if sym_byte(in d.ast, c.a, i) == 58
+                && sym_byte(in d.ast, c.a, wrapping_sub(i, 1)) == 58 {
                 cut = n32(wrapping_sub(i, 1));
                 break;
             }
@@ -1535,24 +1528,18 @@ fn call(inout d: D, e: u32) {
         }
         wants.push(want);
         let a = arg_at(in d, la(in d, n.c, i));
-        let lend = a
-            .pass
-            == 1
-            && ex(in d, a.expr)
-            .kind
-            == 15
-            && want
-            != NONE
-            && fn_sig(in d, want)
-            != NONE;
+        let lend = a.pass == 1
+            && ex(in d, a.expr).kind == 15
+            && want != NONE
+            && fn_sig(in d, want) != NONE;
         lends
             .push(
-            if lend {
-                1
-            } else {
-                0
-            }
-        );
+                if lend {
+                    1
+                } else {
+                    0
+                }
+            );
         if lend {
             last_lend = i;
             has_lend = true;
@@ -1851,13 +1838,13 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
             .ast
             .fields
             .alloc(
-            FieldNode {
-                name: fname,
-                ty: u32_at(in cap_t, i),
-                modality: 3,
-                temperature: 0
-            }
-        )
+                FieldNode {
+                    name: fname,
+                    ty: u32_at(in cap_t, i),
+                    modality: 3,
+                    temperature: 0
+                }
+            )
             .raw();
         fields.push(f);
     }
@@ -1866,12 +1853,12 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
         .ast
         .variants
         .alloc(
-        VariantNode {
-            name: struct_name,
-            fields: fl,
-            named: true
-        }
-    )
+            VariantNode {
+                name: struct_name,
+                fields: fl,
+                named: true
+            }
+        )
         .raw();
     let vl = list1(inout d, v);
     let adt_span = span(inout d);
@@ -1879,18 +1866,18 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
         .ast
         .adts
         .alloc(
-        AdtNode {
-            name: struct_name,
-            mode: 1,
-            generics: 0,
-            variants: vl,
-            is_enum: false,
-            tiled: false,
-            tile_width: 0,
-            start: adt_span,
-            end: inc32(adt_span)
-        }
-    )
+            AdtNode {
+                name: struct_name,
+                mode: 1,
+                generics: 0,
+                variants: vl,
+                is_enum: false,
+                tiled: false,
+                tile_width: 0,
+                start: adt_span,
+                end: inc32(adt_span)
+            }
+        )
         .raw();
     let receiver = pass_of(kind, in d);
     let mut mps = ChunkSeq::new[u32]();
@@ -1979,32 +1966,32 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
         .ast
         .fns
         .alloc(
-        FnNode {
-            name: d.k.call,
-            fip: false,
-            generics: 0,
-            params: mpl,
-            result: sn.b,
-            effects: body_effects,
-            body: new_body,
-            start: ms,
-            end: inc32(ms)
-        }
-    )
+            FnNode {
+                name: d.k.call,
+                fip: false,
+                generics: 0,
+                params: mpl,
+                result: sn.b,
+                effects: body_effects,
+                body: new_body,
+                start: ms,
+                end: inc32(ms)
+            }
+        )
         .raw();
     let trs = span(inout d);
     let tref = d
         .ast
         .trait_refs
         .alloc(
-        TraitRefNode {
-            package: NONE,
-            name: trait_name,
-            args: 0,
-            start: trs,
-            end: inc32(trs)
-        }
-    )
+            TraitRefNode {
+                package: NONE,
+                name: trait_name,
+                args: 0,
+                start: trs,
+                end: inc32(trs)
+            }
+        )
         .raw();
     let self_t = named(inout d, struct_name, 0);
     let ml = list1(inout d, method_fn);
@@ -2013,19 +2000,19 @@ fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
         .ast
         .confs
         .alloc(
-        ConfNode {
-            model: NONE,
-            public: false,
-            generics: 0,
-            trait_ref: tref,
-            self_ty: self_t,
-            wheres: 0,
-            assoc: 0,
-            methods: ml,
-            start: cfs,
-            end: inc32(cfs)
-        }
-    )
+            ConfNode {
+                model: NONE,
+                public: false,
+                generics: 0,
+                trait_ref: tref,
+                self_ty: self_t,
+                wheres: 0,
+                assoc: 0,
+                methods: ml,
+                start: cfs,
+                end: inc32(cfs)
+            }
+        )
         .raw();
     d.gen_adts.push(adt);
     d.gen_confs.push(conf);

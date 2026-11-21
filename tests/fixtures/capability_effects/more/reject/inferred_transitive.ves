@@ -16,8 +16,7 @@ fn scaled(x: u64) -> u64 eff [ConstTime, Fail[RuntimeError]] {
 fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime, Fail[RuntimeError]] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     Secret {
         value: scaled(value)
     }

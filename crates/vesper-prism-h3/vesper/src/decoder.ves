@@ -393,12 +393,12 @@ fn lines(
         sec
             .fields
             .push(
-            if sensitive {
-                1
-            } else {
-                0
-            }
-        );
+                if sensitive {
+                    1
+                } else {
+                    0
+                }
+            );
         count = inc(count);
     }
     if ric > 0 && max_ref != ric {

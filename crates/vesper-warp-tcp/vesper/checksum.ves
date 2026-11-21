@@ -18,8 +18,7 @@ pub fn pseudo_header_sum(ips: Ips, tcp_len: u64) -> Result[u64, WireError] {
         Ips::V4 {
             src,
             dst
-        }
-        => {
+        } => {
             if tcp_len > MAX_IPV4_TCP_LEN {
                 Result::Err(WireError::TooLong)
             } else {
@@ -36,8 +35,7 @@ pub fn pseudo_header_sum(ips: Ips, tcp_len: u64) -> Result[u64, WireError] {
             s1,
             d0,
             d1
-        }
-        => {
+        } => {
             if tcp_len > MAX_IPV6_TCP_LEN {
                 Result::Err(WireError::TooLong)
             } else {

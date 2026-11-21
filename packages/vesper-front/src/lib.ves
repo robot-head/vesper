@@ -299,11 +299,11 @@ fn report_oversized(retained: u64, in d: Diags) -> ChunkSeq[u64] {
     for i in 0..d.text.len() {
         out
             .push(
-            match d.text.try_get(i) {
-                Option::Some(c) => widen_u64(c),
-                Option::None => 0,
-            }
-        );
+                match d.text.try_get(i) {
+                    Option::Some(c) => widen_u64(c),
+                    Option::None => 0,
+                }
+            );
     }
     out
 }
@@ -406,51 +406,26 @@ test {
         } else {
             1
         };
-        if rows
-            .try_get(0)
-            != Option::Some(leaves)
-            || rows
-            .try_get(1)
-            != Option::Some(1)
-            || rows
-            .try_get(2)
-            != Option::Some(1) {
+        if rows.try_get(0) != Option::Some(leaves)
+            || rows.try_get(1) != Option::Some(1)
+            || rows.try_get(2) != Option::Some(1) {
             return false;
         }
-        if leaves
-            == 1
+        if leaves == 1
             && (
-            rows
-                .try_get(3)
-                != Option::Some(69)
-                || rows
-                .try_get(4)
-                != Option::Some(0)
-                || rows
-                .try_get(5)
-                != Option::Some(retained)
-                || rows
-                .try_get(6)
-                != Option::Some(0)
-        ) {
+                rows.try_get(3) != Option::Some(69)
+                    || rows.try_get(4) != Option::Some(0)
+                    || rows.try_get(5) != Option::Some(retained)
+                    || rows.try_get(6) != Option::Some(0)
+            ) {
             return false;
         }
         let root = wrapping_add(3, leaves << 2);
-        rows
-            .try_get(root)
-            == Option::Some(200)
-            && rows
-            .try_get(wrapping_add(root, 3))
-            == Option::Some(retained)
-            && rows
-            .try_get(wrapping_add(root, 4))
-            == Option::Some(3)
-            && rows
-            .try_get(wrapping_add(root, 5))
-            == Option::Some(retained)
-            && rows
-            .try_get(wrapping_add(root, 6))
-            == Option::Some(retained)
+        rows.try_get(root) == Option::Some(200)
+            && rows.try_get(wrapping_add(root, 3)) == Option::Some(retained)
+            && rows.try_get(wrapping_add(root, 4)) == Option::Some(3)
+            && rows.try_get(wrapping_add(root, 5)) == Option::Some(retained)
+            && rows.try_get(wrapping_add(root, 6)) == Option::Some(retained)
     }
 
     fn test_rejected_report_keeps_diagnostic_boundaries() -> bool {
@@ -458,33 +433,15 @@ test {
         diag_push(inout diagnostics, 1, 3, 4, in "a".as_bytes());
         diag_push(inout diagnostics, 3, 5, 6, in "bc".as_bytes());
         let rows = report_rejected(in diagnostics);
-        rows
-            .len()
-            == 14
-            && rows
-            .try_get(2)
-            == Option::Some(2)
-            && rows
-            .try_get(3)
-            == Option::Some(1)
-            && rows
-            .try_get(6)
-            == Option::Some(1)
-            && rows
-            .try_get(7)
-            == Option::Some(97)
-            && rows
-            .try_get(8)
-            == Option::Some(3)
-            && rows
-            .try_get(11)
-            == Option::Some(2)
-            && rows
-            .try_get(12)
-            == Option::Some(98)
-            && rows
-            .try_get(13)
-            == Option::Some(99)
+        rows.len() == 14
+            && rows.try_get(2) == Option::Some(2)
+            && rows.try_get(3) == Option::Some(1)
+            && rows.try_get(6) == Option::Some(1)
+            && rows.try_get(7) == Option::Some(97)
+            && rows.try_get(8) == Option::Some(3)
+            && rows.try_get(11) == Option::Some(2)
+            && rows.try_get(12) == Option::Some(98)
+            && rows.try_get(13) == Option::Some(99)
     }
 
     // @case empty(in "", 1)
@@ -510,16 +467,10 @@ test {
         let first = token_sym(in tokens, 0);
         let current = token_sym(in tokens, index);
         let same_symbol = first != 0 && current == first;
-        diagnostics
-            .code
-            .len()
-            == 0
-            && same_symbol
-            == repeats
-            && token_word(in tokens, index)
-            == word
-            && token_end(in tokens, index)
-            == end
+        diagnostics.code.len() == 0
+            && same_symbol == repeats
+            && token_word(in tokens, index) == word
+            && token_end(in tokens, index) == end
     }
 
     // @case empty(in "", 0)
@@ -572,12 +523,8 @@ test {
             }
         }
         if rejected {
-            let empty = direct
-                .try_get(0)
-                == Option::Some(0)
-                && direct
-                .try_get(1)
-                == Option::Some(0);
+            let empty = direct.try_get(0) == Option::Some(0)
+                && direct.try_get(1) == Option::Some(0);
             empty && direct.try_get(2) == Option::Some(1) && direct.try_get(3) == Option::Some(3)
         } else {
             direct.try_get(2) == Option::Some(0) && u64_at(in direct, 1) > 0

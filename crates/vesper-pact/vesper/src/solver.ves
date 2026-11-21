@@ -739,12 +739,12 @@ pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
     s
         .sk_co
         .push(
-        if coinductive {
-            1
-        } else {
-            0
-        }
-    );
+            if coinductive {
+                1
+            } else {
+                0
+            }
+        );
     s.sk_pco.push(identity);
     s.sk_pind.push(ind);
     s.sk_uco.push(0);

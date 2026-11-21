@@ -14,8 +14,7 @@ fn length(sink l: List) -> u64 {
         List::Cons {
             head,
             tail
-        }
-        => wrapping_add(1, length(tail)),
+        } => wrapping_add(1, length(tail)),
     }
 }
 

@@ -5,8 +5,7 @@ copy struct Pair {
     right: Ticket
 }
 fn close(sink ticket: Ticket) {
-    let Ticket {}
-    = ticket;
+    let Ticket {} = ticket;
 }
 
 fn routing() -> i64 {
@@ -19,8 +18,7 @@ fn routing() -> i64 {
     let Pair {
         left,
         right
-    }
-    = pair;
+    } = pair;
     close(left);
     close(right);
     42
@@ -53,7 +51,6 @@ fn wrong_return() -> (Ticket, Ghost) {
 
 fn error_after_mint() -> i64 {
     let ticket = Ticket {};
-    let Ticket {}
-    = ticket;
+    let Ticket {} = ticket;
     42
 }

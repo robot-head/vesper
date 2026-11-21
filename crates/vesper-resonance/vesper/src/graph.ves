@@ -178,35 +178,35 @@ fn processors(in kinds: Slice[u64], in g: Slice[u64], n: u64, block: u64)
         if kind == Kind::Source {
             procs
                 .push(
-                Box::new[dyn DspProcessor](
-                    Source {
-                        seed: p,
-                        t: 0
-                    }
-                )
-            );
+                    Box::new[dyn DspProcessor](
+                        Source {
+                            seed: p,
+                            t: 0
+                        }
+                    )
+                );
         } else if kind == Kind::Latent {
             let delay = at(in g, i * Words::Node + 1);
             procs
                 .push(
-                Box::new[dyn DspProcessor](
-                    Latent {
-                        ring: zeros(delay + block),
-                        delay: delay,
-                        head: 0,
-                        sum: zeros(block)
-                    }
-                )
-            );
+                    Box::new[dyn DspProcessor](
+                        Latent {
+                            ring: zeros(delay + block),
+                            delay: delay,
+                            head: 0,
+                            sum: zeros(block)
+                        }
+                    )
+                );
         } else {
             procs
                 .push(
-                Box::new[dyn DspProcessor](
-                    Gain {
-                        gain: from_bits_f32(narrow_u32(p))
-                    }
-                )
-            );
+                    Box::new[dyn DspProcessor](
+                        Gain {
+                            gain: from_bits_f32(narrow_u32(p))
+                        }
+                    )
+                );
         }
     }
     procs

@@ -13,7 +13,10 @@ fn score(
 }
 macro make() -> expr {
     quote {
-        (ignore("comma, ) 🦀"), /* tuple, ) λ */)
+        (
+            ignore("comma, ) 🦀"),
+            /* tuple, ) λ */
+        )
     }
 }
 fn main() -> i64 {

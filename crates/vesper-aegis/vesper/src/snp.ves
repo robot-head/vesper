@@ -55,12 +55,11 @@ const REPORT_BYTES: u64 = 633;
 
 // "Venice": family 1Ah, model 50h..5Fh or C0h..CFh.
 pub fn is_venice(family: u64, model: u64) -> bool {
-    family
-        == VENICE_FAMILY
+    family == VENICE_FAMILY
         && (
-        (model >= VENICE_MODELS_A_FIRST && model <= VENICE_MODELS_A_LAST)
-            || (model >= VENICE_MODELS_B_FIRST && model <= VENICE_MODELS_B_LAST)
-    )
+            (model >= VENICE_MODELS_A_FIRST && model <= VENICE_MODELS_A_LAST)
+                || (model >= VENICE_MODELS_B_FIRST && model <= VENICE_MODELS_B_LAST)
+        )
 }
 
 // One ETCB_VERSION at `b[at..at + 32]`: bytes 14..32 are reserved; the
@@ -142,8 +141,7 @@ pub fn parse(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
         w.push(0);
     }
     reserved(in b, inout r, 24, 33);
-    let venice = version
-        >= SNP_REPORT_VERSION_CPUID
+    let venice = version >= SNP_REPORT_VERSION_CPUID
         && is_venice(byte(in b, cpuid), byte(in b, wrapping_add(cpuid, 1)));
     if version >= SNP_REPORT_VERSION_ETCB && venice {
         w.push(1);
@@ -175,8 +173,8 @@ pub fn signature_half(in b: Slice[u8], at: u64, inout d: ChunkSeq[u8]) -> Unit e
     for k in 0..P384_WORDS {
         let v = match b
             .try_read_u64_le(
-            wrapping_add(at, wrapping_sub(P384_LAST_WORD, wrapping_mul(k, WORD_BYTES)))
-        ) {
+                wrapping_add(at, wrapping_sub(P384_LAST_WORD, wrapping_mul(k, WORD_BYTES)))
+            ) {
             Option::Some(x) => x,
             Option::None => 0,
         };

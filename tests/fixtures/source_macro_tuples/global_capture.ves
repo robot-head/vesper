@@ -29,11 +29,11 @@ macro make() -> expr {
 }
 fn forward(in helper: i64)
     -> (
-    (
-        i64,
-    ),
-    i64
-) {
+        (
+            i64,
+        ),
+        i64
+    ) {
     make!()
 }
 fn main() -> i64 {

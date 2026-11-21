@@ -188,9 +188,9 @@ pub fn vbyte_encode(in values: Slice[u32], inout out: Slice[u8], lim: VbyteLimit
         for k in 0..w {
             out
                 .try_set(
-                wrapping_add(pos, k),
-                wrapping_u8(bit_shr(v, wrapping_mul(k, 8)) & BYTE_MASK)
-            );
+                    wrapping_add(pos, k),
+                    wrapping_u8(bit_shr(v, wrapping_mul(k, 8)) & BYTE_MASK)
+                );
         }
         pos = wrapping_add(pos, w);
     }
@@ -563,9 +563,9 @@ pub fn archive_encode(
             for k in 0..label_len {
                 out
                     .try_set(
-                    wrapping_add(cursor, k),
-                    wrapping_u8(byte(in labels, wrapping_add(label_off, k)))
-                );
+                        wrapping_add(cursor, k),
+                        wrapping_u8(byte(in labels, wrapping_add(label_off, k)))
+                    );
             }
             cursor = wrapping_add(cursor, label_len);
         }
@@ -598,23 +598,17 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
     if len < header_len() {
         raise(BinErrorKind::BTruncated, len);
     }
-    if byte(in bytes, 0)
-        != MAGIC_V
-        || byte(in bytes, 1)
-        != MAGIC_S
-        || byte(in bytes, 2)
-        != MAGIC_P
-        || byte(in bytes, 3)
-        != MAGIC_A {
+    if byte(in bytes, 0) != MAGIC_V
+        || byte(in bytes, 1) != MAGIC_S
+        || byte(in bytes, 2) != MAGIC_P
+        || byte(in bytes, 3) != MAGIC_A {
         raise(BinErrorKind::BMagic, 0);
     }
     if byte(in bytes, HDR_VERSION) != VERSION || byte(in bytes, wrapping_add(HDR_VERSION, 1)) != 0 {
         raise(BinErrorKind::BVersion, HDR_VERSION);
     }
-    if byte(in bytes, HDR_SCHEMA)
-        != TREE_SCHEMA
-        || byte(in bytes, wrapping_add(HDR_SCHEMA, 1))
-        != 0 {
+    if byte(in bytes, HDR_SCHEMA) != TREE_SCHEMA
+        || byte(in bytes, wrapping_add(HDR_SCHEMA, 1)) != 0 {
         raise(BinErrorKind::BSchema, HDR_SCHEMA);
     }
     let total = get_u32(in bytes, HDR_TOTAL_LEN);
@@ -726,16 +720,9 @@ pub fn archive_validate(in bytes: Slice[u8], lim: ArchiveLimits) -> u64 eff [Fai
                     REL_BYTES,
                     len
                 );
-                if target
-                    .start
-                    < header_len()
-                    || target
-                    .start
-                    >= range
-                    .end
-                    || wrapping_sub(target.start, header_len())
-                    % NODE_BYTES
-                    != 0 {
+                if target.start < header_len()
+                    || target.start >= range.end
+                    || wrapping_sub(target.start, header_len()) % NODE_BYTES != 0 {
                     raise(BinErrorKind::BTree, entry);
                 }
                 check_edge(

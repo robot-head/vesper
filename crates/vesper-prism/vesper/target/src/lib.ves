@@ -288,13 +288,9 @@ fn valid_utf8(in s: Slice[u8]) -> bool {
 // The decoded bytes are appended to `out`. A part without `%` (and without
 // `+` where `+` is a space) is copied whole.
 fn decode(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64, plus_is_space: bool) {
-    if lo
-        <= hi
-        && hi
-        <= s
-        .len()
-        && find(in s, lo, hi, Ascii::Percent)
-        == hi
+    if lo <= hi
+        && hi <= s.len()
+        && find(in s, lo, hi, Ascii::Percent) == hi
         && (!plus_is_space || find(in s, lo, hi, 43) == hi) {
         out.extend(in s[lo..hi]);
         return;

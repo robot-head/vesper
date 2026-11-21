@@ -25,6 +25,8 @@ mod for_sequences;
 mod literal_typing;
 #[path = "loops/check.rs"]
 mod loop_rules;
+#[path = "check/sugar.rs"]
+mod sugar;
 #[path = "loops/try_option.rs"]
 mod try_option;
 
@@ -454,6 +456,7 @@ impl World {
         loop {
             iteration += 1;
             let mut c = Checker {
+                sugar: &sugar::Ceilings::default(),
                 world: &world,
                 diagnostics: vec![],
                 types: BTreeMap::new(),
@@ -841,6 +844,7 @@ pub(crate) fn check_core(
     // Module constants (§2.2): every use is a call of the constant.
     let with_consts = crate::arrays::lower_consts(module);
     let module = with_consts.as_ref().unwrap_or(module);
+    let ceilings = sugar::Ceilings::new(&module.sugar_origins);
     let (mut world, collection_errors) = World::collect(module);
     let mut resolved;
     let mut diagnostics = vec![];
@@ -850,6 +854,7 @@ pub(crate) fn check_core(
     loop {
         iteration += 1;
         let mut c = Checker {
+            sugar: &ceilings,
             world: &world,
             diagnostics: collection_errors.clone(),
             types: BTreeMap::new(),
@@ -936,6 +941,14 @@ pub(crate) fn check_core(
             break;
         }
     }
+    // Rewriting a loop or an element view creates synthetic spans. Keep a
+    // violation already established against the original expansion evidence.
+    if diagnostics
+        .iter()
+        .any(|d| matches!(d.code.as_str(), "E0143" | "E0144"))
+    {
+        return (finish_check(world, diagnostics), resolved);
+    }
     if !for_plans.is_empty() {
         // Check the index loops `for` over a sequence means instead
         // (`for_sequences`).
@@ -1001,20 +1014,22 @@ pub(crate) fn check_core(
         diagnostics.extend(crate::ir_check::validate(&world, &program));
         diagnostics.extend(crate::atomics::check_program(&world, &program));
     }
+    (finish_check(world, diagnostics), resolved)
+}
+
+fn finish_check(world: World, mut diagnostics: Vec<Diagnostic>) -> Checked {
     let mut seen = BTreeSet::new();
     diagnostics
         .retain(|d| seen.insert((d.code.clone(), d.span.start, d.span.end, d.message.clone())));
-    (
-        Checked {
-            expression_types: world.types.clone(),
-            world,
-            diagnostics,
-        },
-        resolved,
-    )
+    Checked {
+        expression_types: world.types.clone(),
+        world,
+        diagnostics,
+    }
 }
 #[derive(Clone)]
 struct Checker<'a> {
+    sugar: &'a sugar::Ceilings<'a>,
     world: &'a World,
     diagnostics: Vec<Diagnostic>,
     types: TypeMap,
@@ -1617,6 +1632,17 @@ impl Checker<'_> {
         }
     }
     fn place(&mut self, p: &Place, env: &mut Env, usage: Usage, span: Span) -> Type {
+        self.check_place(p, env, usage, span, false)
+    }
+
+    fn check_place(
+        &mut self,
+        p: &Place,
+        env: &mut Env,
+        usage: Usage,
+        span: Span,
+        initialize: bool,
+    ) -> Type {
         let Some(b) = env.bindings.get(&p.root).cloned() else {
             self.error("E0201", format!("unknown binding '{}'", p.root), span);
             return Type::Infer;
@@ -1675,6 +1701,18 @@ impl Checker<'_> {
             );
             Type::Infer
         });
+        if !self.sugar.is_empty() {
+            let requested = match usage {
+                Usage::Borrow(Pass::Inout) if initialize => SugarPass::Out,
+                Usage::Borrow(Pass::Inout) => SugarPass::Inout,
+                Usage::Borrow(Pass::Sink) => SugarPass::Sink,
+                Usage::Own if self.mode(&ty) != Mode::Copy => SugarPass::Sink,
+                _ => SugarPass::In,
+            };
+            if let Some(d) = self.sugar.captured_access(&span, requested) {
+                self.diagnostics.push(d);
+            }
+        }
         for (loan, mode, origin) in self.loans.clone() {
             let reserved =
                 mode == Pass::Inout && self.reserved_loans.contains(&(origin.start, origin.end));
@@ -1777,6 +1815,16 @@ impl Checker<'_> {
         self.expr_expected(e, env, usage, &Type::Infer)
     }
     fn expr_expected(&mut self, e: &Expr, env: &mut Env, usage: Usage, expected: &Type) -> Type {
+        if let ExprKind::Assign(op, lhs, _) = &e.kind {
+            let pass = if op == "=" {
+                SugarPass::Out
+            } else {
+                SugarPass::Inout
+            };
+            if let Some(d) = self.sugar.access(&e.span, lhs, pass) {
+                self.diagnostics.push(d);
+            }
+        }
         let before = if matches!(e.kind, ExprKind::Handle { .. } | ExprKind::Closure { .. }) {
             Some(env.clone())
         } else {
@@ -2283,7 +2331,13 @@ impl Checker<'_> {
                     self.expr(r, env, Usage::Own);
                     return Type::unit();
                 }
-                let expected = self.place(&p, env, Usage::Borrow(Pass::Inout), l.span.clone());
+                let expected = self.check_place(
+                    &p,
+                    env,
+                    Usage::Borrow(Pass::Inout),
+                    l.span.clone(),
+                    op == "=",
+                );
                 self.types
                     .insert((l.span.start, l.span.end), expected.clone());
                 let target_fact = |env: &Env| {
@@ -3501,6 +3555,14 @@ impl Checker<'_> {
             env,
         );
         for ((expr, explicit), param) in actuals.into_iter().zip(&f.params) {
+            let pass = match param.pass {
+                Pass::In => SugarPass::In,
+                Pass::Inout => SugarPass::Inout,
+                Pass::Sink => SugarPass::Sink,
+            };
+            if let Some(d) = self.sugar.access(&span, expr, pass) {
+                self.diagnostics.push(d);
+            }
             // Two-phase argument loans (§4.3): every `inout` argument, not
             // only the receiver, is reserved while the call's other
             // arguments are evaluated.
@@ -4000,6 +4062,11 @@ impl Checker<'_> {
         self.observations.pop().unwrap().1
     }
     fn require_effect(&mut self, effect: &Effect, env: &Env, span: Span) {
+        if self.dead == 0
+            && let Some(d) = self.sugar.effect(&span, effect)
+        {
+            self.diagnostics.push(d);
+        }
         // Built-in capability effects constrain callees, not callers: they are
         // never requested from the caller's row (see `capability_effects`).
         if self.dead != 0 || crate::capability_effects::is_capability_effect(&effect.name) {
@@ -4062,6 +4129,11 @@ impl Checker<'_> {
         }
     }
     fn check_abort_frame(&mut self, env: &Env, effect: &str, span: Span) {
+        if self.dead == 0
+            && let Some(d) = self.sugar.open_row(&span, effect)
+        {
+            self.diagnostics.push(d);
+        }
         self.check_abort_frame_for(env, effect, span, None);
     }
     fn check_abort_frame_for(
@@ -5156,7 +5228,7 @@ impl Checker<'_> {
         if let Some(previous) = self.world.handler_effects.get(&(span.start, span.end)) {
             union_effects(&mut resume_effects, previous);
         }
-        let out = if returned.name() == "Never" && *expected != Type::Infer {
+        let mut out = if returned.name() == "Never" && *expected != Type::Infer {
             expected.clone()
         } else {
             returned
@@ -5237,6 +5309,11 @@ impl Checker<'_> {
             self.leave_control();
             union_effects(&mut outgoing, &self.finish_observing());
             self.expect_type(&out, &actual, op.body.span.clone());
+            // Complementary variants can determine generic arguments that
+            // the return clause alone leaves open (Ok(v) versus Err(e)).
+            if unresolved(&out) {
+                out = self.join_types(&out, &actual, op.body.span.clone());
+            }
             if crate::integer_widths::holds_wide(&out) {
                 self.constrain_literals(&op.body, &out);
             }

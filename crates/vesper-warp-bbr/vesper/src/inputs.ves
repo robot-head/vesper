@@ -195,12 +195,8 @@ fn update_rate_sample(
 ) {
     b.delivered = wrapping_add(b.delivered, widen_u64(packet.bytes));
     b.delivered_ns = now_ns;
-    let is_newest = !p
-        .has_newest
-        || packet
-        .sent_ns
-        > b
-        .first_sent_ns
+    let is_newest = !p.has_newest
+        || packet.sent_ns > b.first_sent_ns
         || (packet.sent_ns == b.first_sent_ns && packet.pn > p.rs.last_acked_pn);
     if is_newest {
         p.rs.prior_delivered = snapshot.delivered;

@@ -198,10 +198,8 @@ fn sweep_overlaps(in smin: Slice[u32], in smax: Slice[u32], s: u64, t: u64) -> b
     let bt = wrapping_mul(t, 3);
     for a in 0..u(3) {
         if !(
-            gf(in smin, wrapping_add(bs, a))
-                <= gf(in smax, wrapping_add(bt, a))
-                && gf(in smin, wrapping_add(bt, a))
-                <= gf(in smax, wrapping_add(bs, a))
+            gf(in smin, wrapping_add(bs, a)) <= gf(in smax, wrapping_add(bt, a))
+                && gf(in smin, wrapping_add(bt, a)) <= gf(in smax, wrapping_add(bs, a))
         ) {
             return false;
         }

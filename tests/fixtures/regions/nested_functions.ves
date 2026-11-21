@@ -7,11 +7,11 @@ copy struct Pair {
 fn make(l: i64, r2: i64) -> RegionBox[r, Pair] eff [r: Region] {
     r
         .box(
-        Pair {
-            left: l,
-            right: r2
-        }
-    )
+            Pair {
+                left: l,
+                right: r2
+            }
+        )
 }
 
 fn sum(b: RegionBox[r, Pair]) -> i64 eff [r: Region] {
@@ -25,11 +25,11 @@ fn main() -> i64 {
         region inner(64) {
             let y = inner
                 .box(
-                Pair {
-                    left: 10,
-                    right: 11
-                }
-            );
+                    Pair {
+                        left: 10,
+                        right: 11
+                    }
+                );
             wrapping_add(sum(x), inner.get(y).right)
         }
     }

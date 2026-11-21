@@ -63,18 +63,18 @@ impl Diags {
         self
             .rows
             .push(
-            DiagRow {
-                code_a: code_a,
-                msg_a: msg_a,
-                msg_b: help_a,
-                help_a: help_a,
-                end: self.text.len(),
-                start: start,
-                stop: stop,
-                ra: n32(self.rel.len()),
-                rn: 0
-            }
-        );
+                DiagRow {
+                    code_a: code_a,
+                    msg_a: msg_a,
+                    msg_b: help_a,
+                    help_a: help_a,
+                    end: self.text.len(),
+                    start: start,
+                    stop: stop,
+                    ra: n32(self.rel.len()),
+                    rn: 0
+                }
+            );
     }
 
     pub fn row(in self, i: u64) -> DiagRow {

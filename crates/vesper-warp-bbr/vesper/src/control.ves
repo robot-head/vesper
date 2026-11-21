@@ -21,9 +21,9 @@ fn set_pacing_rate(inout b: Bbrv3) {
 fn set_send_quantum(inout b: Bbrv3) {
     b
         .send_quantum = max(
-        min(b.pacing_rate / MILLIS_PER_SEC, MAX_SEND_QUANTUM),
-        wrapping_mul(b.smss, 2)
-    );
+            min(b.pacing_rate / MILLIS_PER_SEC, MAX_SEND_QUANTUM),
+            wrapping_mul(b.smss, 2)
+        );
 }
 
 fn bdp_multiple(inout b: Bbrv3, gain: u64) -> u64 {

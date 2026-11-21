@@ -142,17 +142,9 @@ impl Sums {
     }
 
     pub fn same(in self, in o: Sums) -> bool {
-        self
-            .inferred
-            .same(in o.inferred)
-            && self
-            .outputs
-            .same(in o.outputs)
-            && self
-            .resumed
-            .same(in o.resumed)
-            && self
-            .addr
-            .same(in o.addr)
+        self.inferred.same(in o.inferred)
+            && self.outputs.same(in o.outputs)
+            && self.resumed.same(in o.resumed)
+            && self.addr.same(in o.addr)
     }
 }

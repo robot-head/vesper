@@ -97,14 +97,10 @@ pub fn tcb_connect(inout t: Tcb, now: u64, ips: Ips, remote_port: u16, iss_base:
 
 pub fn tcb_write(inout t: Tcb, n: u64) -> Result[Unit, TcpFail] {
     let s = t.st;
-    let open = s
-        == State::SynSent
-        || s
-        == State::SynReceived
-        || s
-        == State::Established
-        || s
-        == State::CloseWait;
+    let open = s == State::SynSent
+        || s == State::SynReceived
+        || s == State::Established
+        || s == State::CloseWait;
     if open && !t.fin_requested {
         let v = wrapping_add(t.write_end, n);
         if v < t.write_end || v >= MAX_STREAM_OFFSET {
@@ -126,8 +122,7 @@ pub fn tcb_close(inout t: Tcb) -> Result[Unit, TcpFail] {
         enter_closed(inout t, Option::None);
         Result::Ok(())
     } else if (s == State::SynReceived || s == State::Established || s == State::CloseWait)
-        && !t
-        .fin_requested {
+        && !t.fin_requested {
         t.fin_requested = true;
         if s == State::Established {
             t.st = State::FinWait1;
@@ -149,14 +144,14 @@ pub fn tcb_abort(inout t: Tcb) {
             Option::Some(ips) => {
                 t
                     .pending_rst = Option::Some(
-                    RstSpec {
-                        ips: ips,
-                        src_port: t.cfg.local_port,
-                        dst_port: t.remote_port,
-                        seq: seqmap_seq(t.snd_isn, t.snd_nxt),
-                        ack: Option::None
-                    }
-                );
+                        RstSpec {
+                            ips: ips,
+                            src_port: t.cfg.local_port,
+                            dst_port: t.remote_port,
+                            seq: seqmap_seq(t.snd_isn, t.snd_nxt),
+                            ack: Option::None
+                        }
+                    );
             },
             Option::None => (),
         }

@@ -135,34 +135,34 @@ fn insert(inout s: RxState, inout ranges: Slice[AckRange], pn: u64) {
         let above = at(in ranges, wrapping_sub(i, 1));
         ranges
             .try_set(
-            wrapping_sub(i, 1),
-            AckRange {
-                smallest: at(in ranges, i).smallest,
-                largest: above.largest
-            }
-        );
+                wrapping_sub(i, 1),
+                AckRange {
+                    smallest: at(in ranges, i).smallest,
+                    largest: above.largest
+                }
+            );
         shift_down(inout ranges, wrapping_add(i, 1), s.len);
         s.len = wrapping_sub(s.len, 1);
     } else if joins_above {
         let above = at(in ranges, wrapping_sub(i, 1));
         ranges
             .try_set(
-            wrapping_sub(i, 1),
-            AckRange {
-                smallest: pn,
-                largest: above.largest
-            }
-        );
+                wrapping_sub(i, 1),
+                AckRange {
+                    smallest: pn,
+                    largest: above.largest
+                }
+            );
     } else if joins_below {
         let below = at(in ranges, i);
         ranges
             .try_set(
-            i,
-            AckRange {
-                smallest: below.smallest,
-                largest: pn
-            }
-        );
+                i,
+                AckRange {
+                    smallest: below.smallest,
+                    largest: pn
+                }
+            );
     } else if s.len == n {
         // Forget the lowest range (possibly the new one).
         let lowest = if i == n {
@@ -276,12 +276,12 @@ pub fn rx_on_ack_of_ack(inout s: RxState, inout ranges: Slice[AckRange], x: u64)
         if r.largest > x {
             ranges
                 .try_set(
-                j,
-                AckRange {
-                    smallest: wrapping_add(x, 1),
-                    largest: r.largest
-                }
-            );
+                    j,
+                    AckRange {
+                        smallest: wrapping_add(x, 1),
+                        largest: r.largest
+                    }
+                );
             s.len = wrapping_add(j, 1);
         } else {
             s.len = j;

@@ -370,13 +370,13 @@ pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern:
     }
     if walking
         && find_term(
-        in r,
-        terms_of(node_at(in r, node), parsed.trailing),
-        in method,
-        0,
-        method.len()
-    )
-        != none() {
+            in r,
+            terms_of(node_at(in r, node), parsed.trailing),
+            in method,
+            0,
+            method.len()
+        )
+            != none() {
         return Result::Err(RouteFault::DuplicateRoute);
     }
     // Every refusal was found above; from here the insert cannot fail.
@@ -418,13 +418,13 @@ pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern:
                 r
                     .edges
                     .push(
-                    Edge {
-                        next: current.first_static,
-                        child: child,
-                        key_lo: key_lo,
-                        key_hi: r.keys.len()
-                    }
-                );
+                        Edge {
+                            next: current.first_static,
+                            child: child,
+                            key_lo: key_lo,
+                            key_hi: r.keys.len()
+                        }
+                    );
                 current.first_static = e;
                 set_node(inout r, node, current);
                 node = child;
@@ -442,13 +442,13 @@ pub fn router_core_insert(inout r: RouterCore, in method: Slice[u8], in pattern:
     r
         .terms
         .push(
-        Term {
-            next: terms_of(last, parsed.trailing),
-            method_lo: method_lo,
-            method_hi: r.methods.len(),
-            route: id
-        }
-    );
+            Term {
+                next: terms_of(last, parsed.trailing),
+                method_lo: method_lo,
+                method_hi: r.methods.len(),
+                route: id
+            }
+        );
     if parsed.trailing {
         last.terms_slash = t;
     } else {

@@ -476,18 +476,9 @@ copy struct ActiveSplit {
 
 fn same_split(a: ActiveSplit, kb: KeyedBarrier) -> bool {
     let b = kb.barrier;
-    a
-        .graph
-        == kb
-        .graph
-        && a
-        .texture
-        == b
-        .texture
-        && a
-        .resource
-        == b
-        .resource
+    a.graph == kb.graph
+        && a.texture == b.texture
+        && a.resource == b.resource
         && (!b.texture || a.range == b.subresources)
 }
 
@@ -528,14 +519,14 @@ pub fn lower_plan(
                             out
                                 .cmds
                                 .push(
-                                LoweredRec {
-                                    stream: s32,
-                                    tag: cmd.tag,
-                                    source: c,
-                                    start: 0,
-                                    count: 0
-                                }
-                            );
+                                    LoweredRec {
+                                        stream: s32,
+                                        tag: cmd.tag,
+                                        source: c,
+                                        start: 0,
+                                        count: 0
+                                    }
+                                );
                         } else {
                             let start = out.natives.len();
                             for bi in cmd.a..wrapping_add(cmd.a, cmd.b) {
@@ -568,24 +559,22 @@ pub fn lower_plan(
                                             if !replaced {
                                                 active
                                                     .push(
-                                                    ActiveSplit {
-                                                        graph: kb.graph,
-                                                        texture: b.texture,
-                                                        resource: b.resource,
-                                                        range: b.subresources,
-                                                        event_id: event_id,
-                                                        producer_sync: b.sync_before
-                                                    }
-                                                );
+                                                        ActiveSplit {
+                                                            graph: kb.graph,
+                                                            texture: b.texture,
+                                                            resource: b.resource,
+                                                            range: b.subresources,
+                                                            event_id: event_id,
+                                                            producer_sync: b.sync_before
+                                                        }
+                                                    );
                                             }
                                         } else if (b.sync_before & split_bit()) == split_bit() {
                                             let mut found = active.len();
                                             for a in 0..active.len() {
                                                 match active.try_get(a) {
                                                     Option::Some(x) => {
-                                                        if found
-                                                            == active
-                                                            .len()
+                                                        if found == active.len()
                                                             && same_split(x, kb) {
                                                             found = a;
                                                         }
@@ -620,11 +609,11 @@ pub fn lower_plan(
                                             native => out
                                                 .natives
                                                 .push(
-                                                NativeRec {
-                                                    source: bi,
-                                                    native: native
-                                                }
-                                            ),
+                                                    NativeRec {
+                                                        source: bi,
+                                                        native: native
+                                                    }
+                                                ),
                                         }
                                     },
                                     Option::None => (),
@@ -635,14 +624,14 @@ pub fn lower_plan(
                                 out
                                     .cmds
                                     .push(
-                                    LoweredRec {
-                                        stream: s32,
-                                        tag: 1,
-                                        source: c,
-                                        start: start,
-                                        count: count
-                                    }
-                                );
+                                        LoweredRec {
+                                            stream: s32,
+                                            tag: 1,
+                                            source: c,
+                                            start: start,
+                                            count: count
+                                        }
+                                    );
                             }
                         }
                     }

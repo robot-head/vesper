@@ -200,15 +200,9 @@ test {
             } else {
                 1
             };
-            if result
-                .member(id, member_index)
-                != expected_member
-                || result
-                .size(id)
-                != size
-                || result
-                .member(id, size)
-                != 4294967295 {
+            if result.member(id, member_index) != expected_member
+                || result.size(id) != size
+                || result.member(id, size) != 4294967295 {
                 return false;
             }
         }

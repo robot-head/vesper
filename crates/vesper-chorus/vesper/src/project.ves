@@ -289,16 +289,11 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
         }
         return choice(inout c, false, peer, f);
     }
-    if ta
-        == 1
-        && tb
-        == 1
-        && la(in c, a)
-        == la(in c, b)
-        && lb(in c, a)
-        == lb(in c, b)
-        && lc(in c, a)
-        == lc(in c, b) {
+    if ta == 1
+        && tb == 1
+        && la(in c, a) == la(in c, b)
+        && lb(in c, a) == lb(in c, b)
+        && lc(in c, a) == lc(in c, b) {
         let h100 = ld(in c, a);
         let h101 = ld(in c, b);
         let m = merge(inout c, h100, h101);

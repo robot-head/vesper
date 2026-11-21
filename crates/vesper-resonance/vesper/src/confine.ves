@@ -270,10 +270,8 @@ pub fn c_verify(
         }
         let mut found = false;
         for e in 0..nind {
-            if at(in indirect, wrapping_mul(e, PAIR_WORDS))
-                == caller
-                && at(in indirect, wrapping_add(wrapping_mul(e, PAIR_WORDS), 1))
-                == site {
+            if at(in indirect, wrapping_mul(e, PAIR_WORDS)) == caller
+                && at(in indirect, wrapping_add(wrapping_mul(e, PAIR_WORDS), 1)) == site {
                 found = true;
             }
         }

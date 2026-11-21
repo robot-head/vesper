@@ -439,33 +439,17 @@ test {
         let first = table.intern(in text);
         let second = table.intern(in text);
         let (start, end) = table.span(first);
-        if first
-            .id()
-            != 0
-            || first
-            != second
-            || table
-            .lookup(in text)
-            != Option::Some(first)
-            || table
-            .is_empty()
-            || table
-            .len()
-            != 1
-            || !table
-            .contains(first)
-            || !table
-            .symbol_eq(first, in text)
-            || table
-            .symbol_len(first)
-            != length
-            || start
-            != 0
-            || end
-            != length
-            || table
-            .text_byte(end)
-            != Option::None {
+        if first.id() != 0
+            || first != second
+            || table.lookup(in text) != Option::Some(first)
+            || table.is_empty()
+            || table.len() != 1
+            || !table.contains(first)
+            || !table.symbol_eq(first, in text)
+            || table.symbol_len(first) != length
+            || start != 0
+            || end != length
+            || table.text_byte(end) != Option::None {
             return false;
         }
         let bytes = text.as_bytes();
@@ -496,26 +480,14 @@ test {
         let unknown = symbol_from_id(raw);
         let mut out = String::new();
         out.push_str(in "z");
-        !table
-            .contains(unknown)
-            && table
-            .symbol_len(unknown)
-            == 0
-            && !table
-            .symbol_eq(unknown, in "")
-            && !table
-            .resolve_into(unknown, inout out)
-            && out
-            .len()
-            == 1
-            && out
-            .try_byte_at(0)
-            == Option::Some(122)
-            && table
-            .lookup(in "ab")
-            == Option::None
-            && !table
-            .symbol_eq(first, in "abd")
+        !table.contains(unknown)
+            && table.symbol_len(unknown) == 0
+            && !table.symbol_eq(unknown, in "")
+            && !table.resolve_into(unknown, inout out)
+            && out.len() == 1
+            && out.try_byte_at(0) == Option::Some(122)
+            && table.lookup(in "ab") == Option::None
+            && !table.symbol_eq(first, in "abd")
     }
 
     // @case empty(0, 0)
@@ -536,14 +508,9 @@ test {
             let mut name = String::new();
             name.push_char(wrapping_u32(wrapping_add(65, i)));
             let sym = symbol_from_id(wrapping_u32(i));
-            if table
-                .lookup(in name)
-                != Option::Some(sym)
-                || !table
-                .symbol_eq(sym, in name)
-                || table
-                .intern(in name)
-                != sym {
+            if table.lookup(in name) != Option::Some(sym)
+                || !table.symbol_eq(sym, in name)
+                || table.intern(in name) != sym {
                 return false;
             }
         }
@@ -573,26 +540,16 @@ test {
         let b = path.as_bytes();
         let mut at: u64 = 0;
         for i in 1..b.len() {
-            if b
-                .try_get(i)
-                == Option::Some(58)
-                && b
-                .try_get(wrapping_sub(i, 1))
-                == Option::Some(58) {
+            if b.try_get(i) == Option::Some(58)
+                && b.try_get(wrapping_sub(i, 1)) == Option::Some(58) {
                 at = wrapping_add(i, 1);
             }
         }
         let hit = t.lookup_span(p, at, path.len());
         let view = t.lookup_view(in b[at..b.len()]);
-        hit
-            == view
-            && (hit == Option::Some(want))
-            == found
-            && t
-            .lookup_span(p, 1, 0)
-            == Option::None
-            && t
-            .lookup_span(p, 0, wrapping_add(path.len(), 1))
-            == Option::None
+        hit == view
+            && (hit == Option::Some(want)) == found
+            && t.lookup_span(p, 1, 0) == Option::None
+            && t.lookup_span(p, 0, wrapping_add(path.len(), 1)) == Option::None
     }
 }
