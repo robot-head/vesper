@@ -31,6 +31,90 @@ impl Abi for crate::port_types::PlannedRegion {
     }
 }
 
+impl Abi for crate::port_types::PvhFault {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port_types::PvhFault::Truncated => {
+                out[0] = 0;
+            }
+            crate::port_types::PvhFault::BadMagic => {
+                out[0] = 1;
+            }
+            crate::port_types::PvhFault::NotElf64LittleEndian => {
+                out[0] = 2;
+            }
+            crate::port_types::PvhFault::NotX86_64Executable => {
+                out[0] = 3;
+            }
+            crate::port_types::PvhFault::BadProgramHeaders => {
+                out[0] = 4;
+            }
+            crate::port_types::PvhFault::NoLoadSegment => {
+                out[0] = 5;
+            }
+            crate::port_types::PvhFault::SegmentFileRange { index: f0 } => {
+                out[0] = 6;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port_types::PvhFault::SegmentOverflow { index: f0 } => {
+                out[0] = 7;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port_types::PvhFault::SegmentOutsideRam { index: f0 } => {
+                out[0] = 8;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port_types::PvhFault::SegmentsOverlap { a: f0, b: f1 } => {
+                out[0] = 9;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+            }
+            crate::port_types::PvhFault::SegmentOverBootData { index: f0 } => {
+                out[0] = 10;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port_types::PvhFault::MalformedNote => {
+                out[0] = 11;
+            }
+            crate::port_types::PvhFault::MissingPvhNote => {
+                out[0] = 12;
+            }
+            crate::port_types::PvhFault::DuplicatePvhNote => {
+                out[0] = 13;
+            }
+            crate::port_types::PvhFault::EntryAbove4G => {
+                out[0] = 14;
+            }
+            crate::port_types::PvhFault::EntryNotExecutable { entry: f0 } => {
+                out[0] = 15;
+                Abi::put(f0, &mut out[1..]);
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port_types::PvhFault::Truncated,
+            1 => crate::port_types::PvhFault::BadMagic,
+            2 => crate::port_types::PvhFault::NotElf64LittleEndian,
+            3 => crate::port_types::PvhFault::NotX86_64Executable,
+            4 => crate::port_types::PvhFault::BadProgramHeaders,
+            5 => crate::port_types::PvhFault::NoLoadSegment,
+            6 => crate::port_types::PvhFault::SegmentFileRange { index: Abi::get(&words[1..]) },
+            7 => crate::port_types::PvhFault::SegmentOverflow { index: Abi::get(&words[1..]) },
+            8 => crate::port_types::PvhFault::SegmentOutsideRam { index: Abi::get(&words[1..]) },
+            9 => crate::port_types::PvhFault::SegmentsOverlap { a: Abi::get(&words[1..]), b: Abi::get(&words[2..]) },
+            10 => crate::port_types::PvhFault::SegmentOverBootData { index: Abi::get(&words[1..]) },
+            11 => crate::port_types::PvhFault::MalformedNote,
+            12 => crate::port_types::PvhFault::MissingPvhNote,
+            13 => crate::port_types::PvhFault::DuplicatePvhNote,
+            14 => crate::port_types::PvhFault::EntryAbove4G,
+            15 => crate::port_types::PvhFault::EntryNotExecutable { entry: Abi::get(&words[1..]) },
+            tag => panic!("invalid PvhFault tag {tag} from Vesper"),
+        }
+    }
+}
+
 impl Abi for crate::port_types::SlotError {
     const WORDS: usize = 5;
     fn put(&self, out: &mut [u64]) {
@@ -133,14 +217,17 @@ impl Abi for crate::port_types::SlotError {
 }
 
 const _: () = assert!(<Option<crate::port_types::SlotError> as Abi>::WORDS == 6);
+const _: () = assert!(<Result<(u32, u64), crate::port_types::PvhFault> as Abi>::WORDS == 4);
 const _: () = assert!(<crate::port_types::KvmHostLimits as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::PlannedRegion as Abi>::WORDS == 5);
+const _: () = assert!(<crate::port_types::PvhFault as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port_types::SlotError as Abi>::WORDS == 5);
 
 unsafe extern "C" {
     fn vesper_aether_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_aether_seq_free(seq: i64) -> i64;
     fn vesper_aether_live_allocations() -> i64;
+    fn vesper_aether_pvh_parse(result: *mut u64, elf: *mut u64, ram: *mut u64, out: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify(result: *mut u64, regions: *mut u64, limits: *mut u64) -> i64;
     fn vesper_aether_slot_plan_verify_cross_vm(result: *mut u64, vm_ids: *mut u64, regions: *mut u64, region_vm: *mut u64) -> i64;
 }
@@ -155,6 +242,16 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_aether_live_allocations() }
+}
+
+/// Calls `pvh_parse` of the Vesper library `aether` (`vesper_aether_pvh_parse`).
+pub fn pvh_parse(elf: &[u8], ram: &[u64], out: &mut [u64]) -> Result<(u32, u64), crate::port_types::PvhFault> {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_aether_pvh_parse` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(elf, |view_elf| vesper_port_abi::with_slice(ram, |view_ram| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_aether_pvh_parse(result.as_mut_ptr(), view_elf, view_ram, view_out) })));
+    <Result<(u32, u64), crate::port_types::PvhFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `slot_plan_verify` of the Vesper library `aether` (`vesper_aether_slot_plan_verify`).

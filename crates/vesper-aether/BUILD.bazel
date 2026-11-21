@@ -18,6 +18,7 @@ vesper_crate(
 AETHER_PARTS = [
     "vesper/src/util.ves",
     "vesper/src/slot_plan.ves",
+    "vesper/src/pvh.ves",
 ]
 
 genrule(
@@ -69,5 +70,8 @@ rust_library(
         ("slot_plan", ["//crates/vesper-loom-cas"]),
         ("slot_plan_port", []),
         ("abba_slot_plan", ["//crates/vesper-bench"]),
+        ("boot", []),
+        ("pvh_port", []),
+        ("abba_pvh", ["//crates/vesper-bench"]),
     ]
 ]

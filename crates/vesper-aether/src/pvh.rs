@@ -163,6 +163,39 @@ fn scan_notes(notes: &[u8], found: &mut Option<u32>) -> Result<(), PvhError> {
 
 /// Parses and validates a PVH ELF against the guest RAM layout.
 pub fn parse_pvh_elf(elf: &[u8], memory: &GuestMemory) -> Result<PvhImage, PvhError> {
+    #[cfg(feature = "vesper-port")]
+    {
+        let mut ram = [0u64; 2 * crate::guest_mem::MAX_GUEST_REGIONS];
+        let words = memory.layout_words(&mut ram);
+        // Room for one segment per declared program header (the port
+        // checks the count; this only sizes the buffer).
+        let declared = elf
+            .get(56..58)
+            .map_or(0, |b| usize::from(u16::from_le_bytes([b[0], b[1]])));
+        let mut out = vec![0u64; 5 * declared.min(MAX_PHDRS)];
+        let (entry, count) =
+            crate::binding::pvh_parse(elf, &ram[..words], &mut out).map_err(PvhError::from)?;
+        let segments = out
+            .chunks_exact(5)
+            .take(count as usize)
+            .map(|w| LoadSegment {
+                paddr: w[0],
+                file_offset: w[1],
+                file_bytes: w[2],
+                mem_bytes: w[3],
+                executable: w[4] != 0,
+            })
+            .collect();
+        Ok(PvhImage { entry, segments })
+    }
+    #[cfg(not(feature = "vesper-port"))]
+    parse_pvh_elf_reference(elf, memory)
+}
+
+/// The Rust implementation of [`parse_pvh_elf`], kept for the differential
+/// and ABBA tests until the port flips.
+#[doc(hidden)]
+pub fn parse_pvh_elf_reference(elf: &[u8], memory: &GuestMemory) -> Result<PvhImage, PvhError> {
     if elf.len() < ELF_HEADER_BYTES {
         return Err(PvhError::Truncated);
     }

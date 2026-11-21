@@ -285,7 +285,7 @@ a stack slot and is tested again at each `match`, and live values spill
 across loop bodies (a 3 KB frame in the audit). That is gap G10 below. The
 port is ready to flip once G10 closes; re-run the ABBA test then.
 
-## Part 2b: `vesper-aether` slot plans in Vesper (no flip yet)
+## Part 2b: `vesper-aether` slot plans and PVH parsing in Vesper (no flip yet)
 
 `slot_plan` (the KVM memory-slot plan verifier and the cross-VM host
 check) is Vesper (`crates/vesper-aether/vesper/src/{util,slot_plan}.ves`)
@@ -310,6 +310,23 @@ instructions per element in Vesper against about 60 in Rust's small sort.
 This is G10 again: every element access goes through an `Option` kept in
 memory. The port waits on the same codegen fix as umem.
 
+`pvh::parse_pvh_elf` (the bounds-checked PVH ELF parser and note scan)
+is Vesper too (`vesper/src/pvh.ves`), with the Rust kept as
+`parse_pvh_elf_reference`. The boot tests pass on the port.
+`tests/pvh_port.rs` compares both builds on every truncation and single
+bit flip of the test kernel, plus 20,000 images with random header and
+note fields. The divergence check (a segment may end one byte past the
+file) fails that test. `load_pvh` (the writes into guest memory) stays
+Rust for now.
+
+PVH speed (`tests/abba_pvh.rs`: parse the test kernel and every
+truncation of it) is 10x Rust ([9.8, 10.2]). Each call is about 100 ns,
+so the fixed cost of crossing the binding is a large share, and the parser
+body alone costs 5.7x the Rust instructions. Reading fields through
+`try_read_u64_le` and returning segments in a caller buffer (instead of
+an `inout ChunkSeq`, which allocates a sequence per call) took it down
+from 17x.
+
 ## Compiler gaps (for the coordinator)
 
 | Gap | Blocks | Owner of the fix |
@@ -321,7 +338,7 @@ memory. The port waits on the same codegen fix as umem.
 | G5 C function pointers / callbacks | threads, signal handlers, `dlsym` | manuscript §16.3 + compiler |
 | G6 atomics on foreign memory | macOS rings (none here) | compiler builtins |
 | G8 effectful workers | aether's vCPU and uffd threads (lazy guest memory needs a concurrent fault resolver) | manuscript §15 + compiler |
-| G10 `Option` results kept in memory and retested; heavy spills in loops | the 1.5x bar for umem (2.1x) and aether slot plans (4.0x), likely every branchy port | compiler codegen (native backend) |
+| G10 `Option` results kept in memory and retested; heavy spills in loops | the 1.5x bar for umem (2.1x), aether slot plans (4.0x) and PVH parsing (10x), likely every branchy port | compiler codegen (native backend) |
 
 ## Census rows
 

@@ -100,3 +100,51 @@ impl From<SlotError> for crate::slot_plan::PlanError {
         }
     }
 }
+
+/// `PvhError` as the Vesper parser returns it (indices as u64, no
+/// `Memory`: parsing never touches guest memory).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PvhFault {
+    Truncated,
+    BadMagic,
+    NotElf64LittleEndian,
+    NotX86_64Executable,
+    BadProgramHeaders,
+    NoLoadSegment,
+    SegmentFileRange { index: u64 },
+    SegmentOverflow { index: u64 },
+    SegmentOutsideRam { index: u64 },
+    SegmentsOverlap { a: u64, b: u64 },
+    SegmentOverBootData { index: u64 },
+    MalformedNote,
+    MissingPvhNote,
+    DuplicatePvhNote,
+    EntryAbove4G,
+    EntryNotExecutable { entry: u32 },
+}
+
+impl From<PvhFault> for crate::pvh::PvhError {
+    fn from(e: PvhFault) -> Self {
+        use crate::pvh::PvhError as P;
+        // Indices are below MAX_PHDRS (64).
+        let ix = |n: u64| usize::try_from(n).unwrap_or(usize::MAX);
+        match e {
+            PvhFault::Truncated => P::Truncated,
+            PvhFault::BadMagic => P::BadMagic,
+            PvhFault::NotElf64LittleEndian => P::NotElf64LittleEndian,
+            PvhFault::NotX86_64Executable => P::NotX86_64Executable,
+            PvhFault::BadProgramHeaders => P::BadProgramHeaders,
+            PvhFault::NoLoadSegment => P::NoLoadSegment,
+            PvhFault::SegmentFileRange { index } => P::SegmentFileRange { index: ix(index) },
+            PvhFault::SegmentOverflow { index } => P::SegmentOverflow { index: ix(index) },
+            PvhFault::SegmentOutsideRam { index } => P::SegmentOutsideRam { index: ix(index) },
+            PvhFault::SegmentsOverlap { a, b } => P::SegmentsOverlap { a: ix(a), b: ix(b) },
+            PvhFault::SegmentOverBootData { index } => P::SegmentOverBootData { index: ix(index) },
+            PvhFault::MalformedNote => P::MalformedNote,
+            PvhFault::MissingPvhNote => P::MissingPvhNote,
+            PvhFault::DuplicatePvhNote => P::DuplicatePvhNote,
+            PvhFault::EntryAbove4G => P::EntryAbove4G,
+            PvhFault::EntryNotExecutable { entry } => P::EntryNotExecutable { entry },
+        }
+    }
+}

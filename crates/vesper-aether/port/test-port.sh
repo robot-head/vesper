@@ -32,3 +32,5 @@ expect() { # <test file> <tests that must fail> -- <tests that must pass>
 # slot_plan: touching ranges count as overlapping.
 expect slot_plan accepts_adjacent_aligned_slots overlap_check_matches_pairwise_definition -- rejects_each_malformed_region
 expect slot_plan_port verify_matches_the_rust_verifier
+# pvh: a segment may end one byte past the file.
+expect pvh_port truncations_and_bit_flips_match

@@ -1,0 +1,377 @@
+// ---------------------------------------------------------------------------
+// PVH ELF parsing and validation (src/pvh.rs, `parse_pvh_elf`).
+
+const XEN_ELFNOTE_PHYS32_ENTRY: u64 = 18;
+const ELF_HEADER_BYTES: u64 = 64;
+const PHDR_BYTES: u64 = 56;
+const MAX_PHDRS: u64 = 64;
+const PT_LOAD: u64 = 1;
+const PT_NOTE: u64 = 4;
+const PF_X: u64 = 1;
+const EM_X86_64: u64 = 62;
+const ET_EXEC: u64 = 2;
+
+// `PvhError` without `Memory` (parsing never touches guest memory), with
+// indices as u64.
+copy enum PvhFault {
+    Truncated,
+    BadMagic,
+    NotElf64LittleEndian,
+    NotX86_64Executable,
+    BadProgramHeaders,
+    NoLoadSegment,
+    SegmentFileRange {
+        index: u64
+    },
+    SegmentOverflow {
+        index: u64
+    },
+    SegmentOutsideRam {
+        index: u64
+    },
+    SegmentsOverlap {
+        a: u64,
+        b: u64
+    },
+    SegmentOverBootData {
+        index: u64
+    },
+    MalformedNote,
+    MissingPvhNote,
+    DuplicatePvhNote,
+    EntryAbove4G,
+    EntryNotExecutable {
+        entry: u32
+    }
+}
+
+fn byte(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+// Little-endian `n`-byte field (2, 4 or 8) at `base + at` inside the
+// window `[base, base + len)` of `b`; `None` past the window.
+fn le(in b: Slice[u8], base: u64, len: u64, at: u64, n: u64) -> Option[u64] {
+    if add_overflows(at, n) || wrapping_add(at, n) > len {
+        return Option::None;
+    }
+    let i = wrapping_add(base, at);
+    if n == 8 {
+        b.try_read_u64_le(i)
+    } else if n == 4 {
+        match b.try_read_u32_le(i) {
+            Option::Some(v) => Option::Some(widen_u64(v)),
+            Option::None => Option::None,
+        }
+    } else {
+        match b.try_read_u16_le(i) {
+            Option::Some(v) => Option::Some(widen_u64(v)),
+            Option::None => Option::None,
+        }
+    }
+}
+
+fn sat_add(a: u64, b: u64) -> u64 {
+    if add_overflows(a, b) {
+        U64_MAX
+    } else {
+        wrapping_add(a, b)
+    }
+}
+
+fn spans_overlap(a0: u64, a1: u64, b0: u64, b1: u64) -> bool {
+    a0 < sat_add(b0, b1) && b0 < sat_add(a0, a1)
+}
+
+// The guest-physical ranges the loader writes itself (BOOT_AREAS).
+fn over_boot_data(paddr: u64, len: u64) -> bool {
+    spans_overlap(paddr, len, 1280, 32)
+        || spans_overlap(paddr, len, 24576, 8192)
+        || spans_overlap(paddr, len, 131072, 4096)
+}
+
+// `GuestMemory::contains`: `ram` is `(gpa, len)` pairs.
+fn ram_contains(in ram: Slice[u64], gpa: u64, len: u64) -> bool {
+    if add_overflows(gpa, len) {
+        return false;
+    }
+    let end = wrapping_add(gpa, len);
+    let pairs = ram.len() / 2;
+    for i in 0..pairs {
+        let r0 = match ram.try_get(wrapping_add(i, i)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let rl = match ram.try_get(wrapping_add(wrapping_add(i, i), 1)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if r0 <= gpa && end <= wrapping_add(r0, rl) {
+            return true;
+        }
+    }
+    false
+}
+
+fn align4(n: u64) -> Option[u64] {
+    if add_overflows(n, 3) {
+        Option::None
+    } else {
+        Option::Some(wrapping_add(n, 3) & 18446744073709551612)
+    }
+}
+
+// `scan_notes` over the window `[base, base + len)` of `elf`.
+fn scan_notes(in elf: Slice[u8], base: u64, len: u64, inout found: Option[u32])
+    -> Option[PvhFault] {
+    let mut at: u64 = 0;
+    loop {
+        if at >= len {
+            break;
+        }
+        let namesz = match le(in elf, base, len, at, 4) {
+            Option::Some(v) => v,
+            Option::None => return Option::Some(PvhFault::MalformedNote),
+        };
+        let descsz = match le(in elf, base, len, wrapping_add(at, 4), 4) {
+            Option::Some(v) => v,
+            Option::None => return Option::Some(PvhFault::MalformedNote),
+        };
+        let kind = match le(in elf, base, len, wrapping_add(at, 8), 4) {
+            Option::Some(v) => v,
+            Option::None => return Option::Some(PvhFault::MalformedNote),
+        };
+        let name_at = wrapping_add(at, 12);
+        let name_pad = match align4(namesz) {
+            Option::Some(v) => v,
+            Option::None => return Option::Some(PvhFault::MalformedNote),
+        };
+        if add_overflows(name_at, name_pad) {
+            return Option::Some(PvhFault::MalformedNote);
+        }
+        let desc_at = wrapping_add(name_at, name_pad);
+        let desc_pad = match align4(descsz) {
+            Option::Some(v) => v,
+            Option::None => return Option::Some(PvhFault::MalformedNote),
+        };
+        if add_overflows(desc_at, desc_pad) {
+            return Option::Some(PvhFault::MalformedNote);
+        }
+        let next = wrapping_add(desc_at, desc_pad);
+        if add_overflows(desc_at, descsz) || wrapping_add(desc_at, descsz) > len {
+            return Option::Some(PvhFault::MalformedNote);
+        }
+        let is_xen = namesz
+            == 4
+            && byte(in elf, wrapping_add(base, name_at))
+            == 88
+            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 1)))
+            == 101
+            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 2)))
+            == 110
+            && byte(in elf, wrapping_add(base, wrapping_add(name_at, 3)))
+            == 0;
+        if is_xen && kind == XEN_ELFNOTE_PHYS32_ENTRY {
+            match found {
+                Option::Some(_) => return Option::Some(PvhFault::DuplicatePvhNote),
+                Option::None => (),
+            }
+            let entry = if descsz == 4 || descsz == 8 {
+                match le(in elf, base, len, desc_at, descsz) {
+                    Option::Some(v) => v,
+                    Option::None => return Option::Some(PvhFault::Truncated),
+                }
+            } else {
+                return Option::Some(PvhFault::MalformedNote);
+            };
+            if entry > 4294967295 {
+                return Option::Some(PvhFault::EntryAbove4G);
+            }
+            found = Option::Some(wrapping_u32(entry));
+        }
+        if next <= at {
+            return Option::Some(PvhFault::MalformedNote);
+        }
+        at = next;
+    }
+    Option::None
+}
+
+const SEGMENT_WORDS: u64 = 5;
+
+// Segment `k` of the `PT_LOAD` table in `out` (5 words each: paddr, file
+// offset, file bytes, memory bytes, executable).
+fn seg_word(in out: Slice[u64], k: u64, w: u64) -> u64 {
+    match out.try_get(wrapping_add(wrapping_mul(k, SEGMENT_WORDS), w)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `parse_pvh_elf`: `(entry, segment count)`, with the `PT_LOAD` segments in
+// `out` (room for MAX_PHDRS). `ram` is the guest layout as `(gpa, len)`
+// pairs.
+pub fn pvh_parse(in elf: Slice[u8], in ram: Slice[u64], inout out: Slice[u64])
+    -> Result[(u32, u64), PvhFault] {
+    let mut count: u64 = 0;
+    let n = elf.len();
+    if n < ELF_HEADER_BYTES {
+        return Result::Err(PvhFault::Truncated);
+    }
+    if byte(in elf, 0)
+        != 127
+        || byte(in elf, 1)
+        != 69
+        || byte(in elf, 2)
+        != 76
+        || byte(in elf, 3)
+        != 70 {
+        return Result::Err(PvhFault::BadMagic);
+    }
+    if byte(in elf, 4) != 2 || byte(in elf, 5) != 1 || byte(in elf, 6) != 1 {
+        return Result::Err(PvhFault::NotElf64LittleEndian);
+    }
+    let e_type = match le(in elf, 0, n, 16, 2) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let e_machine = match le(in elf, 0, n, 18, 2) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if e_type != ET_EXEC || e_machine != EM_X86_64 {
+        return Result::Err(PvhFault::NotX86_64Executable);
+    }
+    let phoff = match le(in elf, 0, n, 32, 8) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let phentsize = match le(in elf, 0, n, 54, 2) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let phnum = match le(in elf, 0, n, 56, 2) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if phentsize != PHDR_BYTES || phnum == 0 || phnum > MAX_PHDRS {
+        return Result::Err(PvhFault::BadProgramHeaders);
+    }
+    let table = wrapping_mul(phnum, PHDR_BYTES);
+    if add_overflows(phoff, table) || wrapping_add(phoff, table) > n {
+        return Result::Err(PvhFault::BadProgramHeaders);
+    }
+    let mut entry: Option[u32] = Option::None;
+    for i in 0..phnum {
+        let p = wrapping_add(phoff, wrapping_mul(i, PHDR_BYTES));
+        let kind = match le(in elf, 0, n, p, 4) {
+            Option::Some(v) => v,
+            Option::None => return Result::Err(PvhFault::Truncated),
+        };
+        let flags = match le(in elf, 0, n, wrapping_add(p, 4), 4) {
+            Option::Some(v) => v,
+            Option::None => return Result::Err(PvhFault::Truncated),
+        };
+        let offset = match le(in elf, 0, n, wrapping_add(p, 8), 8) {
+            Option::Some(v) => v,
+            Option::None => return Result::Err(PvhFault::Truncated),
+        };
+        let paddr = match le(in elf, 0, n, wrapping_add(p, 24), 8) {
+            Option::Some(v) => v,
+            Option::None => return Result::Err(PvhFault::Truncated),
+        };
+        let filesz = match le(in elf, 0, n, wrapping_add(p, 32), 8) {
+            Option::Some(v) => v,
+            Option::None => return Result::Err(PvhFault::Truncated),
+        };
+        let memsz = match le(in elf, 0, n, wrapping_add(p, 40), 8) {
+            Option::Some(v) => v,
+            Option::None => return Result::Err(PvhFault::Truncated),
+        };
+        if add_overflows(offset, filesz) || wrapping_add(offset, filesz) > n {
+            return Result::Err(
+                PvhFault::SegmentFileRange {
+                    index: i
+                }
+            );
+        }
+        if kind == PT_LOAD {
+            if filesz > memsz || memsz == 0 {
+                return Result::Err(
+                    PvhFault::SegmentFileRange {
+                        index: i
+                    }
+                );
+            }
+            if add_overflows(paddr, memsz) {
+                return Result::Err(
+                    PvhFault::SegmentOverflow {
+                        index: i
+                    }
+                );
+            }
+            if !ram_contains(in ram, paddr, memsz) {
+                return Result::Err(
+                    PvhFault::SegmentOutsideRam {
+                        index: i
+                    }
+                );
+            }
+            if over_boot_data(paddr, memsz) {
+                return Result::Err(
+                    PvhFault::SegmentOverBootData {
+                        index: i
+                    }
+                );
+            }
+            let w = wrapping_mul(count, SEGMENT_WORDS);
+            out.try_set(w, paddr);
+            out.try_set(wrapping_add(w, 1), offset);
+            out.try_set(wrapping_add(w, 2), filesz);
+            out.try_set(wrapping_add(w, 3), memsz);
+            out.try_set(wrapping_add(w, 4), flags & PF_X);
+            count = wrapping_add(count, 1);
+        } else if kind == PT_NOTE {
+            match scan_notes(in elf, offset, filesz, inout entry) {
+                Option::Some(e) => return Result::Err(e),
+                Option::None => (),
+            }
+        }
+    }
+    if count == 0 {
+        return Result::Err(PvhFault::NoLoadSegment);
+    }
+    for a in 0..count {
+        let pa = seg_word(in out, a, 0);
+        let ma = seg_word(in out, a, 3);
+        for b in wrapping_add(a, 1)..count {
+            if spans_overlap(pa, ma, seg_word(in out, b, 0), seg_word(in out, b, 3)) {
+                return Result::Err(
+                    PvhFault::SegmentsOverlap {
+                        a: a,
+                        b: b
+                    }
+                );
+            }
+        }
+    }
+    let entry32 = match entry {
+        Option::Some(e) => e,
+        Option::None => return Result::Err(PvhFault::MissingPvhNote),
+    };
+    let e = widen_u64(entry32);
+    for k in 0..count {
+        let p = seg_word(in out, k, 0);
+        if seg_word(in out, k, 4) != 0 && p <= e && e < wrapping_add(p, seg_word(in out, k, 2)) {
+            return Result::Ok((entry32, count));
+        }
+    }
+    Result::Err(
+        PvhFault::EntryNotExecutable {
+            entry: entry32
+        }
+    )
+}
