@@ -280,4 +280,15 @@ fn pilot_module_runs_from_vesper() {
             .unwrap_or_else(|| panic!("no {module} report in {stderr:?}"));
         assert!(calls > 0, "the Vesper {module} module answered no calls");
     }
+    // SH3 lane 12 (#1251): the `hoist` hook hoists every native program.
+    let hoisted: u64 = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: bounds-hoist hoisted "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no bounds-hoist report in {stderr:?}"));
+    assert!(
+        hoisted > 0,
+        "the Vesper bounds-hoist module hoisted no program"
+    );
 }

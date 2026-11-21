@@ -50,6 +50,12 @@ vesper_hybrid(
             "//:check_data_package",
             "//:place_ir_package",
         ],
+        # The IR swap point's `hoist` hook (#1251).
+        "hybrid_bounds_hoist": [
+            "//:bounds_hoist_package",
+            "//:check_data_package",
+            "//:place_ir_package",
+        ],
         "hybrid_parse": [
             "//:ast_package",
             "//:front_package",
@@ -62,6 +68,7 @@ vesper_hybrid(
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
         "hybrid_place_ir": "modules/place_ir",
+        "hybrid_bounds_hoist": "modules/bounds_hoist",
     },
     test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
     test_path_binaries = {
