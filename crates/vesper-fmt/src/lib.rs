@@ -13,6 +13,8 @@ mod proof_lean;
 pub mod proof_model;
 mod proof_source;
 pub mod recovery;
+mod sugar_layout;
+mod surface;
 // Generated and committed, but kept outside src/ so formatters, which check
 // every file under src/, never reflow it (see the porting recipe).
 #[cfg(vesper_port)]
@@ -54,10 +56,7 @@ pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
 pub use proof_model::{DocumentModel, ProofError, ProofLimits};
 pub use proof_source::{FormatVerification, format_for_verification};
 pub use recovery::{RecoveryEdit, RecoveryFormatResult, format_recovery_source};
-use vesper_syntax::{
-    lexer::{self, Token, TokenKind as K},
-    parser,
-};
+use vesper_syntax::lexer::{self, Token, TokenKind as K};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -143,6 +142,8 @@ struct Piece<'a> {
     blank: bool,
     /// No whitespace separates this token from the previous one.
     glued: bool,
+    /// Grammar-sensitive boundary from the unexpanded surface CST.
+    sugar_gap: Option<Gap>,
 }
 fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
     tokens
@@ -153,6 +154,7 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
             text: &source[t.span.clone()],
             blank: false,
             glued: false,
+            sugar_gap: None,
         })
         .collect()
 }
@@ -166,7 +168,7 @@ fn guarded_lex(
     if source.len() > lexer::HARD_SOURCE_BYTES {
         return Err(Error::InputLimit);
     }
-    let lexed = lexer::lex_with_limits(
+    let lexed = lexer::sugar_lex_with_limits(
         source,
         lexer::LexLimits {
             max_source_bytes: lexer::HARD_SOURCE_BYTES,
@@ -327,31 +329,13 @@ fn once(
     limits: Limits,
     work: &mut Work,
     capture: Option<ModelCapture<'_>>,
-) -> Result<(String, bool), Error> {
+) -> Result<(String, surface::Profile), Error> {
     let (tokens, macros) = match guarded_lex(source, limits, work, false) {
         Ok(tokens) => (tokens, false),
         Err(Error::OpaqueMacro) => (guarded_lex(source, limits, work, true)?, true),
         Err(error) => return Err(error),
     };
-    let syntax = if macros {
-        macro_source::syntax(source, &tokens, limits, work)?
-    } else {
-        let parsed = parser::parse_with_limits(
-            source,
-            parser::ParseLimits {
-                max_source_bytes: lexer::HARD_SOURCE_BYTES,
-                max_tokens: lexer::HARD_TOKENS,
-                ..Default::default()
-            },
-        )
-        .map_err(|_| Error::TokenLimit)?;
-        if let Some(error) = parsed.diagnostics.first() {
-            return Err(Error::Syntax {
-                offset: error.span.start,
-            });
-        }
-        parsed.syntax()
-    };
+    let (syntax, profile) = surface::syntax(source, &tokens, limits, work, macros)?;
     // The CST is the lowering source. Exact source slices are anchored by each
     // lossless token's byte range; compare against lexer evidence before use.
     let mut atoms = Vec::new();
@@ -379,6 +363,7 @@ fn once(
                     text: &source[start..end],
                     blank: std::mem::take(&mut blank),
                     glued: std::mem::replace(&mut glued, true),
+                    sugar_gap: None,
                 });
             }
         }
@@ -394,6 +379,9 @@ fn once(
             .any(|(a, b)| a.kind != b.kind || a.text != b.text)
     {
         return Err(Error::Conservation);
+    }
+    if !profile.nodes.is_empty() {
+        sugar_layout::annotate(source, &tokens, &mut atoms, &profile.nodes);
     }
     let mut doc_limits = limits;
     doc_limits.max_work = work.max - work.used;
@@ -416,15 +404,29 @@ fn once(
             }
         }
     }
-    Ok((output, macros))
+    Ok((output, profile))
 }
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
-    // The port formats the source unless it is in the macro profile.
+    // The native port handles executable grammar. Sugar uses the host's
+    // lossless surface CST, including in test bodies skipped by batch parsing.
+    if source.len() > limits.max_input_bytes {
+        return Err(Error::InputLimit);
+    }
     #[cfg(vesper_port)]
-    if let Some(result) = port::format_source(source, limits) {
-        return result;
+    if !surface::may_have_test_block(source)
+        && let Some(result) = port::format_source(source, limits)
+    {
+        let needs_surface = match &result {
+            Err(Error::Syntax { .. }) => true,
+            // Legacy lexing reports a diagnostic limit for multiple backticks.
+            Err(Error::TokenLimit) => source.contains('`'),
+            _ => false,
+        };
+        if !needs_surface {
+            return result;
+        }
     }
     let mut work = Work::new(limits.max_work);
     format_with_work(source, limits, &mut work)
@@ -445,9 +447,9 @@ pub(crate) fn format_with_capture(
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
-    let (output, macros) = once(source, limits, work, capture)?;
-    let original = guarded_lex(source, limits, work, macros)?;
-    let rewritten = guarded_lex(&output, limits, work, macros)?;
+    let (output, profile) = once(source, limits, work, capture)?;
+    let original = guarded_lex(source, limits, work, profile.allow_macro_tokens)?;
+    let rewritten = guarded_lex(&output, limits, work, profile.allow_macro_tokens)?;
     let a = pieces(source, &original);
     let b = pieces(&output, &rewritten);
     if a.len() != b.len()
@@ -457,8 +459,8 @@ pub(crate) fn format_with_capture(
     {
         return Err(Error::Conservation);
     }
-    let (second, second_macros) = once(&output, limits, work, None)?;
-    if second != output || macros != second_macros {
+    let (second, second_profile) = once(&output, limits, work, None)?;
+    if second != output || profile != second_profile {
         return Err(Error::NotIdempotent);
     }
     Ok(FormatResult {
@@ -546,6 +548,8 @@ fn nest_continuation(
 #[derive(Clone, Copy)]
 enum Gap {
     None,
+    /// A space that must stay on this line, even beside a comment.
+    Space,
     Soft,
     Empty,
     /// Break point before an infix operator; nested one level when broken.
@@ -714,7 +718,11 @@ fn sequence<'a>(
                 (p.kind == K::At && current.kind == K::Lower)
                     || (package && matches!(current.kind, K::Lower | K::Minus | K::Slash | K::Int))
             });
-        let spacing = if previous_unary || package {
+        let spacing = if previous.is_none() {
+            Gap::None
+        } else if let Some(gap) = current.sugar_gap {
+            gap
+        } else if previous_unary || package {
             Gap::None
         } else if list && previous.is_some_and(|p| p.kind == K::Semi) {
             // `[T; N]` and `[x; N]` (§5): a `;` inside brackets is a
@@ -743,7 +751,7 @@ fn sequence<'a>(
             Gap::Soft if !is_block && near_comment => {
                 line.push(document.push(Doc::SoftLineOrSpace)?)
             }
-            Gap::Soft if !is_block => line.push(document.push(Doc::Text(" "))?),
+            Gap::Space | Gap::Soft if !is_block => line.push(document.push(Doc::Text(" "))?),
             Gap::Return => {
                 line.flush(document, &mut output)?;
                 let lead = document.push(Doc::SoftLineOrSpace)?;
@@ -759,7 +767,7 @@ fn sequence<'a>(
         }
         if is_block {
             line.flush(document, &mut output)?;
-            if matches!(spacing, Gap::Soft) {
+            if matches!(spacing, Gap::Soft | Gap::Space) {
                 output.push(document.push(Doc::Text(" "))?);
             }
         }
@@ -837,6 +845,7 @@ fn sequence<'a>(
             text: current.text,
             blank: false,
             glued: current.glued,
+            sugar_gap: None,
         });
     }
     line.flush(document, &mut output)?;

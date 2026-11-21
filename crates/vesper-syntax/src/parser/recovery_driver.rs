@@ -53,6 +53,9 @@ fn lex(source: &str, limits: Limits, work: &mut Work) -> Result<lexer::Lexed, Er
 fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a> {
     let item_names = super::contextual_item_names(&tokens, source, false);
     Parser {
+        surface: false,
+        group_ends: Vec::new(),
+        before_handler_in: false,
         source,
         tokens,
         pos: 0,

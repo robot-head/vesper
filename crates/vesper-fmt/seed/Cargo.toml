@@ -50,6 +50,10 @@ path = "../tests/proof_model.rs"
 name = "recovery"
 path = "../tests/recovery.rs"
 
+[[test]]
+name = "sugar"
+path = "../tests/sugar.rs"
+
 [lints.rust]
 # cfg(vesper_port) is set only by the port-backed package's build script.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

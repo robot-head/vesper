@@ -48,14 +48,17 @@ recognized. Comment and string spelling are conserved exactly.
 Built-in forms such as `for` and `continue` keep their source spelling through
 formatting. The parser's later lowering of these forms is independent of layout.
 
-For user-defined `sugar`, the next dependency is Stage 1 parser support for
-`PhraseSkeleton` nodes. Once available, Stylus can format declarations and
-uses directly from the lossless CST, before import resolution or expansion.
-Coverage should include clause, tail and item forms, pipeline and dotted
-operator precedence, and tagged literals. Tests should check tag adjacency,
-same-line continuation clauses, and balanced token groups alongside the usual
-token, comment and idempotence checks. See the
-[manuscript, sections 2.2, 7.5 and 19](../../docs/manuscript/content.typ).
+Stylus formats user-defined `sugar` before import resolution. Its syntax-only
+parser, `vesper_syntax::parser::parse_surface_with_limits`, returns a lossless
+CST for declarations, rules, typed holes, clause heads, same-line continuations,
+tagged literals, and pipeline and dotted operators. For example, it keeps
+`bits{…}` adjacent and keeps `} on_error(e) {` on a single line. Balanced
+groups can contain tokens that acquire their meaning when a rule is expanded.
+Formatting checks that the sugar nodes still cover the same tokens after
+reparsing. The port-backed formatter uses this shared Rust surface parser for
+sugar. Execution, rule binding and expansion are separate compiler work. The
+expression-macro profile above still requires a complete module of its own.
+See the [manuscript, sections 2.2, 7.5 and 19](../../docs/manuscript/content.typ).
 
 Default source formatting still rejects invalid or incomplete buffers. The
 separate `format_recovery_source(&str, Limits)` API offers syntax-only formatting

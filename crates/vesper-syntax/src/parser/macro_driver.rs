@@ -22,6 +22,9 @@ fn parser<'a>(
     });
     let item_names = super::contextual_item_names(&owned, source, false);
     Ok(Parser {
+        surface: false,
+        group_ends: Vec::new(),
+        before_handler_in: false,
         source,
         tokens: owned,
         pos: 0,

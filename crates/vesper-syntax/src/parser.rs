@@ -29,6 +29,65 @@ pub const INCOMPLETE: SyntaxKind = SyntaxKind(207);
 mod macro_driver;
 mod recovery_driver;
 mod scope;
+mod sugar_decl;
+mod sugar_ops;
+mod sugar_phrase;
+
+/// Import-free surface nodes. Executable parsing does not produce these kinds.
+pub const SUGAR_ITEM: SyntaxKind = SyntaxKind(208);
+pub const SUGAR_STMT: SyntaxKind = SyntaxKind(209);
+pub const SUGAR_EXPR: SyntaxKind = SyntaxKind(210);
+pub const SUGAR_GROUP: SyntaxKind = SyntaxKind(211);
+pub const SUGAR_DECL: SyntaxKind = SyntaxKind(212);
+pub const SUGAR_RULE: SyntaxKind = SyntaxKind(213);
+pub const SUGAR_PATTERN: SyntaxKind = SyntaxKind(214);
+pub const SUGAR_TEMPLATE: SyntaxKind = SyntaxKind(215);
+pub const SUGAR_CONTINUATION: SyntaxKind = SyntaxKind(216);
+pub const SUGAR_HOLE: SyntaxKind = SyntaxKind(217);
+
+pub fn is_sugar_node(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SUGAR_ITEM
+            | SUGAR_STMT
+            | SUGAR_EXPR
+            | SUGAR_GROUP
+            | SUGAR_DECL
+            | SUGAR_RULE
+            | SUGAR_PATTERN
+            | SUGAR_TEMPLATE
+            | SUGAR_CONTINUATION
+            | SUGAR_HOLE
+            | SUGAR_OPERATOR
+            | PIPE_EXPR
+            | DOTTED_EXPR
+            | TAGGED_LITERAL
+    )
+}
+
+/// Lossless tooling parse; a surface phrase has no executable meaning here.
+#[derive(Debug, Clone)]
+pub struct SurfaceParse {
+    pub green: GreenNode,
+    pub diagnostics: Vec<Diagnostic>,
+}
+impl SurfaceParse {
+    pub fn syntax(&self) -> SyntaxNode {
+        SyntaxNode::new_root(self.green.clone())
+    }
+}
+
+/// Parse core syntax and Stage 1 sugar without resolving imports or expanding rules.
+pub fn parse_surface_with_limits(
+    source: &str,
+    limits: ParseLimits,
+) -> Result<SurfaceParse, lexer::LexLimit> {
+    let parsed = parse_module_with_limits(source, limits, true, true)?;
+    Ok(SurfaceParse {
+        green: parsed.green,
+        diagnostics: parsed.diagnostics,
+    })
+}
 pub(crate) use macro_driver::{parse_source_header, parse_source_item};
 #[allow(
     unused_imports,
@@ -36,6 +95,7 @@ pub(crate) use macro_driver::{parse_source_header, parse_source_item};
 )]
 pub(crate) use recovery_driver::{BodyContext, capture_body_context, parse_body_fragment};
 pub use recovery_driver::{parse_complete_items, parse_recovery};
+pub use sugar_ops::{DOTTED_EXPR, PIPE_EXPR, SUGAR_OPERATOR, TAGGED_LITERAL, sugar_operator};
 
 #[derive(Clone)]
 struct HeaderNote {
@@ -150,7 +210,7 @@ pub fn parse_for_tests(source: &str) -> Parse {
 }
 
 fn parse_module(source: &str, include_tests: bool) -> Parse {
-    match parse_module_with_limits(source, ParseLimits::default(), include_tests) {
+    match parse_module_with_limits(source, ParseLimits::default(), include_tests, false) {
         Ok(parsed) => parsed,
         Err(mut limit) => {
             let retained = lexer::prefix_boundary(source, ParseLimits::default().max_source_bytes);
@@ -173,13 +233,14 @@ fn parse_module(source: &str, include_tests: bool) -> Parse {
 /// Token/diagnostic/depth exhaustion returns an empty AST and E0003 with the
 /// complete byte-bounded source preserved losslessly in balanced CST nodes.
 pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lexer::LexLimit> {
-    parse_module_with_limits(source, limits, false)
+    parse_module_with_limits(source, limits, false, false)
 }
 
 fn parse_module_with_limits(
     source: &str,
     limits: ParseLimits,
     include_tests: bool,
+    surface: bool,
 ) -> Result<Parse, lexer::LexLimit> {
     let lex_limits = lexer::LexLimits {
         max_source_bytes: limits.max_source_bytes,
@@ -199,7 +260,11 @@ fn parse_module_with_limits(
         tokens,
         diagnostics,
         limit,
-    } = lexer::lex_with_limits(source, lex_limits)?;
+    } = if surface {
+        lexer::sugar_lex_with_limits(source, lex_limits)?
+    } else {
+        lexer::lex_with_limits(source, lex_limits)?
+    };
     if limit.is_some() {
         let mut builder = GreenNodeBuilder::new();
         builder.start_node(MODULE);
@@ -216,7 +281,15 @@ fn parse_module_with_limits(
         });
     }
     let item_names = contextual_item_names(&tokens, source, include_tests);
+    let group_ends = if surface {
+        sugar_phrase::group_ends(&tokens)
+    } else {
+        Vec::new()
+    };
     let mut p = Parser {
+        surface,
+        group_ends,
+        before_handler_in: false,
         source,
         tokens,
         pos: 0,
@@ -271,7 +344,9 @@ fn parse_module_with_limits(
     if p.halted {
         module = Module::default();
     }
-    lower_const_uses(&mut module);
+    if !surface {
+        lower_const_uses(&mut module);
+    }
     Ok(Parse {
         module,
         green: p.builder.finish(),
@@ -279,6 +354,9 @@ fn parse_module_with_limits(
     })
 }
 struct Parser<'a> {
+    surface: bool,
+    group_ends: Vec<usize>,
+    before_handler_in: bool,
     source: &'a str,
     tokens: Vec<Token>,
     pos: usize,
@@ -900,8 +978,26 @@ impl Parser<'_> {
     }
 
     fn item(&mut self) -> Option<Item> {
+        if self.surface
+            && (self.at_word(0, "sugar")
+                || (self.at_word(0, "pub") && self.at_word(1, "sugar"))
+                || (self.at(K::At) && self.at_word(1, "lean_notation")))
+        {
+            self.sugar_decl();
+            return None;
+        }
         if self.at_test_block() {
             self.skip_test_block();
+            return None;
+        }
+        if self.surface
+            && self.at_sugar_phrase()
+            && !matches!(
+                self.text(0),
+                "pub" | "use" | "const" | "tiled" | "wire" | "macro" | "trait" | "model"
+            )
+        {
+            self.sugar_phrase(SUGAR_ITEM);
             return None;
         }
         let (item, public) = self.declaration()?;
@@ -2217,6 +2313,10 @@ impl Parser<'_> {
                 self.use_model(start..start);
                 continue;
             }
+            if self.surface && self.at_sugar_phrase() {
+                self.sugar_phrase(SUGAR_STMT);
+                continue;
+            }
             if self.eat(K::Let) {
                 // `let mut` (manuscript `LetStmt`); `mut` is a contextual word.
                 let mutable = self.at_word(0, "mut") && self.nth(1) != K::Colon;
@@ -2324,6 +2424,7 @@ impl Parser<'_> {
             K::Lower if self.at_continue() => self.continue_expr(),
             K::Return => self.jump_expr(true),
             K::Pipe | K::Or => self.closure(),
+            _ if self.surface && self.at_sugar_phrase() => self.sugar_phrase(SUGAR_EXPR),
             _ => self.binary(0),
         };
         self.builder.finish_node();
@@ -2356,11 +2457,11 @@ impl Parser<'_> {
         self.expect(K::In);
         let old = self.no_struct;
         self.no_struct = true;
-        let first = self.binary(2);
+        let first = self.binary(3);
         let iter = if matches!(self.kind(), K::DotDot | K::DotDotEq) {
             let inclusive = self.at(K::DotDotEq);
             self.bump();
-            let end = self.binary(2);
+            let end = self.binary(3);
             let span = first.span.start..end.span.end;
             self.record_expr(Expr {
                 kind: ExprKind::Range {
@@ -2573,7 +2674,11 @@ impl Parser<'_> {
         let state = if self.eat(K::State) {
             let p = self.pattern();
             self.expect(K::Eq);
-            Some((p, Box::new(self.expr())))
+            let outer = self.before_handler_in;
+            self.before_handler_in = self.surface;
+            let value = self.expr();
+            self.before_handler_in = outer;
+            Some((p, Box::new(value)))
         } else {
             None
         };
@@ -2676,19 +2781,23 @@ impl Parser<'_> {
         }
     }
     fn binary(&mut self, min: u8) -> Expr {
+        self.binary_operand(min, false)
+    }
+    fn binary_operand(&mut self, min: u8, pipeline_rhs: bool) -> Expr {
         let previous = self.depth;
         if !self.enter() {
             return self.placeholder_expr();
         }
-        let result = self.binary_inner(min);
+        let result = self.binary_inner(min, pipeline_rhs);
         self.depth = previous;
         self.record_expr(result)
     }
-    fn binary_inner(&mut self, min: u8) -> Expr {
+    fn binary_inner(&mut self, min: u8, pipeline_rhs: bool) -> Expr {
+        let checkpoint = self.builder.checkpoint();
         let mut lhs = if matches!(self.kind(), K::Minus | K::Bang | K::Tilde) {
             let start = self.start();
             let op = self.bump();
-            let v = self.binary(12);
+            let v = self.binary(24);
             let kind = if op == "-" {
                 if let ExprKind::Literal(Literal::Int(n)) = v.kind {
                     ExprKind::Literal(Literal::Int(-n))
@@ -2703,27 +2812,16 @@ impl Parser<'_> {
                 span: start..self.end(),
             }
         } else {
-            self.postfix()
+            self.postfix(pipeline_rhs)
         };
         loop {
-            let (prec, right) = match self.kind() {
-                K::Eq | K::PlusEq | K::MinusEq | K::StarEq | K::SlashEq | K::PercentEq => (1, true),
-                K::Or => (2, false),
-                K::And => (3, false),
-                K::EqEq | K::Ne => (4, false),
-                K::Lt | K::Le | K::Gt | K::Ge => (5, false),
-                // Bit operators bind tighter than comparisons, as in Rust.
-                K::Pipe => (6, false),
-                K::Caret => (7, false),
-                K::Amp => (8, false),
-                K::Shl | K::Shr => (9, false),
-                K::Plus | K::Minus => (10, false),
-                K::Star | K::Slash | K::Percent => (11, false),
-                _ => (0, false),
-            };
-            if prec == 0 || prec < min {
+            let custom = self.surface_operator();
+            let operator = custom
+                .map(|(level, _)| (level, false))
+                .or_else(|| sugar_ops::core_operator(self.kind()));
+            let Some((prec, right)) = operator.filter(|(level, _)| *level >= min) else {
                 break;
-            }
+            };
             if self.expr_height(&lhs) >= self.limits.max_depth {
                 self.exhaust(lexer::LexLimitKind::Depth, self.limits.max_depth);
                 break;
@@ -2731,11 +2829,15 @@ impl Parser<'_> {
             if !self.enter() {
                 break;
             }
-            let op = self.bump();
+            let op = if let Some((_, end)) = custom {
+                self.consume_sugar_operator(end)
+            } else {
+                self.bump()
+            };
             let rhs = if right {
                 self.expr()
             } else {
-                self.binary(prec + 1)
+                self.binary_operand(prec + 1, custom.is_some() && prec == 3)
             };
             let span = lhs.span.start..rhs.span.end;
             let kind = if right {
@@ -2743,24 +2845,31 @@ impl Parser<'_> {
             } else {
                 ExprKind::Binary(op, Box::new(lhs), Box::new(rhs))
             };
+            if let Some((level, _)) = custom {
+                self.builder
+                    .start_node_at(checkpoint, if level == 3 { PIPE_EXPR } else { DOTTED_EXPR });
+                self.builder.finish_node();
+            }
             lhs = self.record_expr(Expr { kind, span });
         }
         lhs
     }
-    fn postfix(&mut self) -> Expr {
+    fn postfix(&mut self, pipeline_rhs: bool) -> Expr {
         let previous = self.depth;
         if !self.enter() {
             return self.placeholder_expr();
         }
-        let result = self.postfix_inner();
+        let result = self.postfix_inner(pipeline_rhs);
         self.depth = previous;
         self.record_expr(result)
     }
-    fn postfix_inner(&mut self) -> Expr {
+    fn postfix_inner(&mut self, pipeline_rhs: bool) -> Expr {
         let checkpoint = self.builder.checkpoint();
         let mut e = self.primary();
         loop {
-            if !matches!(self.kind(), K::LParen | K::LBracket | K::Dot | K::Question) {
+            if !matches!(self.kind(), K::LParen | K::LBracket | K::Dot | K::Question)
+                || self.at(K::Dot) && self.surface_operator().is_some()
+            {
                 break;
             }
             if self.expr_height(&e) >= self.limits.max_depth {
@@ -2774,7 +2883,7 @@ impl Parser<'_> {
             let kind = match self.kind() {
                 K::LParen => {
                     self.bump();
-                    let args = self.args();
+                    let args = self.args(pipeline_rhs);
                     self.expect(K::RParen);
                     ExprKind::Call {
                         callee: Box::new(e),
@@ -2825,7 +2934,7 @@ impl Parser<'_> {
                     if generic {
                         let types = self.type_args();
                         self.expect(K::LParen);
-                        let args = self.args();
+                        let args = self.args(pipeline_rhs);
                         self.expect(K::RParen);
                         ExprKind::Call {
                             callee: Box::new(e),
@@ -2838,7 +2947,7 @@ impl Parser<'_> {
                             // `p[..]` and `p[..b]`: open slice intervals.
                             self.open_interval(&e, None)
                         } else {
-                            let index = self.expr();
+                            let index = self.delimited_expr();
                             // A slice interval `p[a..b]` (§2.2) is an index whose
                             // expression is the binary `..` of its bounds.
                             if self.kind() == K::DotDot {
@@ -2846,7 +2955,7 @@ impl Parser<'_> {
                                     self.open_interval(&e, Some(index))
                                 } else {
                                     let op = self.bump();
-                                    let hi = self.expr();
+                                    let hi = self.delimited_expr();
                                     let span = index.span.start..hi.span.end;
                                     self.record_expr(Expr {
                                         kind: ExprKind::Binary(op, Box::new(index), Box::new(hi)),
@@ -2891,14 +3000,23 @@ impl Parser<'_> {
         }
         e
     }
-    fn args(&mut self) -> Vec<Arg> {
+    fn args(&mut self, pipeline_rhs: bool) -> Vec<Arg> {
         let mut args = vec![];
         while !self.at(K::RParen) && !self.at(K::Eof) {
             let (pass, explicit) = self.pass();
+            let expr = if pipeline_rhs
+                && !explicit
+                && self.at_word(0, "_")
+                && matches!(self.nth(1), K::Comma | K::RParen)
+            {
+                self.pipeline_placeholder()
+            } else {
+                self.delimited_expr()
+            };
             args.push(Arg {
                 pass,
                 explicit,
-                expr: self.expr(),
+                expr,
             });
             if !self.eat(K::Comma) {
                 break;
@@ -2963,6 +3081,13 @@ impl Parser<'_> {
             ExprKind::Literal(l)
         } else {
             match self.kind() {
+                _ if self.surface && self.at_word(0, "_") => {
+                    self.error(
+                        "pipeline placeholder must be a bare argument of the right-hand call",
+                    );
+                    ExprKind::Name(self.bump())
+                }
+                _ if self.at_tagged_literal() => self.tagged_literal(),
                 _ if self.at_path_root() => {
                     // `self::m::f`, `super::m::T { .. }`, `@scope/name::m::E::V`.
                     let name = self.qualified_path();
@@ -3002,7 +3127,7 @@ impl Parser<'_> {
                     let mut values = vec![];
                     let mut comma = false;
                     while !self.at(K::RParen) && !self.at(K::Eof) {
-                        values.push(self.expr());
+                        values.push(self.delimited_expr());
                         comma = self.eat(K::Comma);
                         if !comma {
                             break;
@@ -3061,7 +3186,7 @@ impl Parser<'_> {
         self.expect(K::LBracket);
         let mut values = vec![];
         while !self.at(K::RBracket) && !self.at(K::Eof) {
-            let value = self.expr();
+            let value = self.delimited_expr();
             if values.is_empty() && self.eat(K::Semi) {
                 let mut n = self.array_length();
                 self.expect(K::RBracket);
@@ -3134,7 +3259,7 @@ impl Parser<'_> {
                 }
             }
         } else {
-            self.expr()
+            self.delimited_expr()
         };
         let span = lo.span.start.min(dots.start)..hi.span.end.max(dots.end);
         self.record_expr(Expr {

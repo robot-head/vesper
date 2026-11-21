@@ -58,6 +58,7 @@ rust_test(
         "macro_source",
         "proof_model",
         "recovery",
+        "sugar",
     ]
 ]
 
