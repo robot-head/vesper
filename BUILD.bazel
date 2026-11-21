@@ -337,6 +337,9 @@ vesper_crate(
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
+            # The Vesper programs of the Lean and tiled tests (part 2).
+            "tests/lean*.rs",
+            "tests/tiled.rs",
         ]) + ["//crates/vesper-lean-syntax:files"],
         # Self-hosting SH3 lane 8 (#1247): @vesper/egraph against egg and
         # egglog on the same corpus. Anchored globs.
