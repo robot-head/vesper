@@ -24,6 +24,12 @@ const MODULES: &[(&str, &str, &str)] = &[
     // SH4 lane 1 (#1275): the census lowering family, emitted through
     // lent Cranelift handles.
     ("hybrid_codegen", "modules/codegen", "port/codegen.rs"),
+    // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
+    (
+        "hybrid_codegen_export",
+        "modules/codegen_export",
+        "port/codegen_export.rs",
+    ),
     // SH5 lane 14 (#1337): test discovery of `vesper test`.
     (
         "hybrid_test_runner",

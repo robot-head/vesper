@@ -2,7 +2,8 @@
 
 Part 1 (#1357, merged as `b647460`) ported the datagram link model. Part 2
 (#1380, merged as `97de64f`) ported SHA-256 and the WAL frame codec and
-recovery scan. Part 3 ports the virtual message network `net-v1`.
+recovery scan. Part 3 (#1384, merged as `ce75623`) ported the virtual
+message network `net-v1`. Part 4 ports the write-ahead log state machine.
 
 ## Part 1: the datagram link model
 
@@ -217,10 +218,64 @@ those parts.
    on `ChunkSeq[u64]` is E1525 ("'eq' reads and writes bytes"). Comparing
    word sequences is a loop.
 
+## Part 4: the write-ahead log state machine
+
+Base: `main` at `ce75623`.
+
+### What changed
+
+- `WalState` at the end of `port/src/lib.ves` is the `Wal` of
+  `src/model/wal.rs`. It owns:
+  - the medium's bytes and LSN assignment,
+  - the volatile and in-flight regions, kept as one queue of
+    `(lsn, frame_len)` pairs whose front `in_flight` entries are the batch,
+    with their frames built at append,
+  - the record and byte bounds,
+  - flush begin, completion and failure (a failed batch is already at the
+    front of the volatile region),
+  - recovery through the part 2 scan,
+  - the crash rules: the persisted prefix is clamped to the batch, and a
+    torn tail stays below a whole frame.
+- The Rust `Wal` wrapper keeps each live record's payload, keyed by LSN,
+  so it can return `WalRecord`s.
+- `Wal`'s reference accessors became owned ones on both builds:
+  - `durable_bytes` returns a `Cow`.
+  - `volatile`, `in_flight` and `begin_flush` return owned values.
+  - `view` is now `record(index)`, its only use.
+- The differential adds a `wal_ops` case: 3,000 pseudo-random operations,
+  each followed by the log's state (the medium's digest and length, the
+  durable LSN, the recovered flag, the batch and the volatile records). The
+  operations are appends (some too large or past the bounds), flush begins,
+  completions and failures, reads, crashes with persisted prefixes and torn
+  tails, and recoveries.
+- The `log` divergent edit lets a torn tail cover the whole next frame. No
+  unit test tears a whole frame, but the `wal_ops` transcript changes.
+
+### Results
+
+| Check | Rust | Vesper |
+|---|---|---|
+| Crate tests | all pass | all pass |
+| Transcript differential (11 cases) | blessed | **0 differences** |
+
+| Measure (release, best of 5) | Rust | Vesper | Ratio |
+|---|---|---|---|
+| `wal_ops_throughput`: 10^5 operations of the `wal_ops` mix | 742 ns/op | 4,152 ns/op | 5.6x |
+| `net_throughput` (rerun) | 396 ns/op | 439 ns/op | 1.11x |
+| Link (rerun) | 47.2 ns | 51.4 ns | 1.09x |
+| SHA-256 (rerun) | 0.77 ns/byte | 11.91 ns/byte | 15.5x |
+| WAL scan (rerun) | 327 ns/frame | 2,892 ns/frame | 8.8x |
+
+The log is bound by SHA-256. Every frame carries a check, the port builds
+each frame at append (Rust builds it at flush or crash, so records that
+vanish before either are never hashed), and every recovery rescans the
+medium. A faster SHA-256 is the first step toward parity. Rust stays the
+default.
+
 ## What is left (later parts of #1342)
 
-- The `Wal` state machine itself (part 2 ported only its codec), and a
-  faster SHA-256.
+- A faster SHA-256 (it bounds the WAL's speed), and building frames at
+  flush rather than at append.
 - `model/umem.rs` and `model/warp.rs` (3,100 lines, over the
   `vesper-warp-umem` crate).
 - `model/mod.rs` process epochs, scenario validation, the canonical-JSON

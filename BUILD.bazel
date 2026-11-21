@@ -1008,6 +1008,28 @@ vesper_package(
     deps = [":std_hash_package"],
 )
 
+# SH4 lane 12 (#1286): the export ABI binding generators and, over
+# @vesper/cranelift, the v2 glue the hybrid's `export` hook emits.
+vesper_package(
+    name = "codegen_export_package",
+    srcs = glob(["packages/vesper-codegen-export/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-export/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+vesper_package(
+    name = "codegen_export_glue_package",
+    srcs = glob(["packages/vesper-codegen-export/glue/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-export/glue/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":codegen_export_package",
+        "//packages/vesper-cranelift:cranelift_package",
+    ],
+)
+
 # The codegen base as a dependency of the hybrid compiler's codegen module
 # (self-hosting SH4 lane 1, #1275); @vesper/cranelift is in its own package.
 vesper_package(
