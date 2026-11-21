@@ -701,14 +701,20 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     }
     Gap::Soft
 }
-/// Whether `effect`, `handle`, `sink` or `inout` is a name for spacing: after
-/// `.`, `fn` or `let`, or before an infix operator or `?` (a pass mode or
-/// keyword is never followed by one), so `s.sink[0]` and `sink - 1` keep
-/// their usual spacing (#1244).
+/// Whether `effect`, `handle`, `sink`, `inout`, `copy` or `affine` is a name
+/// for spacing: after `.`, `fn` or `let`, or before an infix operator or `?`
+/// (a pass mode or keyword is never followed by one), so `s.sink[0]` and
+/// `sink - 1` keep their usual spacing (#1244). `copy (` and `affine (` are
+/// calls of a value of that name except after `@` (`fn @copy (u64)`), and
+/// `copy [` indexes one (#1327).
 fn word_used_as_name(previous: Option<K>, current: K, next: Option<K>) -> bool {
-    matches!(current, K::Effect | K::Handle | K::Sink | K::Inout)
+    let modal = matches!(current, K::Copy | K::Affine);
+    (matches!(current, K::Effect | K::Handle | K::Sink | K::Inout) || modal)
         && (matches!(previous, Some(K::Dot | K::Fn | K::Let))
-            || next.is_some_and(|n| is_binary_operator(n) || n == K::Question))
+            || next.is_some_and(|n| is_binary_operator(n) || n == K::Question)
+            || (modal
+                && next.is_some_and(|n| matches!(n, K::LParen | K::LBracket))
+                && !matches!(previous, Some(K::At | K::AtAt))))
 }
 fn sequence<'a>(
     atoms: &[Piece<'a>],

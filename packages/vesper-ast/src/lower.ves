@@ -983,6 +983,10 @@ fn contextual_name(k: u8) -> bool {
         || k
         == k_linear()
         || k
+        == k_copy()
+        || k
+        == k_affine()
+        || k
         == k_with()
         || k
         == k_eff()
@@ -1052,6 +1056,10 @@ fn pass_word_is_mode(in l: L, params: bool) -> bool {
         == k_state()
         || n
         == k_linear()
+        || n
+        == k_copy()
+        || n
+        == k_affine()
         || n
         == k_eff()
         || n
@@ -3175,7 +3183,7 @@ fn conformance_rest(inout l: L, start: u64, model: u32, public: bool, gs: u32, b
 // ---------------------------------------------------------------- blocks
 
 fn is_block_like(k: u8) -> bool {
-    k == 17 || k == 18 || k == 13 || k == 14
+    k == 17 || k == 18 || k == 13 || k == 14 || k == 16
 }
 
 fn block(inout l: L) -> u32 {
@@ -3960,6 +3968,13 @@ fn primary(inout l: L) -> u32 {
     }
     if k == k_l_brace() {
         return block(inout l);
+    }
+    // `a && if b { x } else { y }`, `a || match v { .. }`: an operand.
+    if k == k_if() {
+        return if_expr(inout l);
+    }
+    if k == k_match() {
+        return match_expr(inout l);
     }
     if !at(in l, k_eof()) {
         bump(inout l);
