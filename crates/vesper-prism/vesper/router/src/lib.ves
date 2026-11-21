@@ -12,12 +12,6 @@
 // backtracks depth first within `max_match_work` visited nodes.
 
 // ASCII bytes this module compares against (constants are per module).
-const DIGIT_0: u8 = 48;
-const DIGIT_9: u8 = 57;
-const UPPER_A: u8 = 65;
-const UPPER_Z: u8 = 90;
-const LOWER_A: u8 = 97;
-const LOWER_Z: u8 = 122;
 
 // The RFC 9110 §5.6.2 `tchar` bytes (ALPHA, DIGIT and !#$%&'*+-.^_`|~):
 // bit `b` of LOW for bytes 0-63, bit `b - 64` of HIGH for 64-127.
@@ -34,6 +28,9 @@ use self::matching::{
 use self::pattern::{
     same,
     parse_pattern
+};
+use self::ascii::{
+    Ascii
 };
 
 copy struct RouterLimits {
@@ -151,11 +148,11 @@ pub fn word(in s: Slice[u64], i: u64) -> u64 {
 }
 
 pub fn is_digit(b: u8) -> bool {
-    b >= DIGIT_0 && b <= DIGIT_9
+    b >= Ascii::Digit0 && b <= Ascii::Digit9
 }
 
 pub fn is_alpha(b: u8) -> bool {
-    (b >= UPPER_A && b <= UPPER_Z) || (b >= LOWER_A && b <= LOWER_Z)
+    (b >= Ascii::UpperA && b <= Ascii::UpperZ) || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
 }
 
 // The RFC 9110 `tchar` bytes (ALPHA, DIGIT and !#$%&'*+-.^_`|~) as two
