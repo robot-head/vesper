@@ -29,8 +29,8 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // huffman.rs: the last byte is padded with zeros instead of EOS ones.
     (
         "huffman",
-        "out.push(wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));",
-        "out.push(wrapping_u8(shl(acc, pad)));",
+        "out.try_set(at, wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));",
+        "out.try_set(at, wrapping_u8(shl(acc, pad)));",
     ),
     // prefix.rs: a multi-byte integer reports one byte too few.
     (

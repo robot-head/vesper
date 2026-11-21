@@ -25,6 +25,9 @@ use self::huffman_codes::{
 // A code word (huffman_codes): `bit length << CODE_LEN_SHIFT | code`.
 const CODE_LEN_SHIFT: u64 = 32;
 const CODE_MASK: u64 = 0xffffffff;
+// The encoder writes its code bits in 32-bit (4-byte) words.
+const WRITE_BITS: u64 = 32;
+const WRITE_BYTES: u64 = 4;
 // The trie's internal nodes (the code is complete) and the EOS symbol
 // (RFC 7541 Appendix B); a leaf child holds `leaf() | symbol`.
 const INTERNAL_NODES: u64 = 256;
@@ -158,8 +161,11 @@ pub fn huff_encoded_len(in h: Huff, in data: Slice[u8]) -> u64 {
 }
 
 // Appends the Huffman encoding of `data` to `out`, padded with the EOS
-// prefix (all ones).
-pub fn huff_encode(in h: Huff, in data: Slice[u8], inout out: ChunkSeq[u8]) {
+// prefix (all ones). `len` is its length (`huff_encoded_len`): `out` grows
+// once, and the code bits are written 32 at a time.
+pub fn huff_encode(in h: Huff, in data: Slice[u8], len: u64, inout out: ChunkSeq[u8]) {
+    let mut at = out.len();
+    out.resize(wrapping_add(at, len), 0);
     let mut acc: u64 = 0;
     let mut nbits: u64 = 0;
     for i in 0..data.len() {
@@ -167,18 +173,25 @@ pub fn huff_encode(in h: Huff, in data: Slice[u8], inout out: ChunkSeq[u8]) {
         let len = shr(e, CODE_LEN_SHIFT);
         acc = shl(acc, len) | (e & CODE_MASK);
         nbits = wrapping_add(nbits, len);
-        loop {
-            if nbits < 8 {
-                break;
-            }
-            nbits = wrapping_sub(nbits, 8);
-            out.push(wrapping_u8(shr(acc, nbits)));
+        if nbits >= WRITE_BITS {
+            nbits = wrapping_sub(nbits, WRITE_BITS);
+            let _w = out.try_write_u32_be(at, wrapping_u32(shr(acc, nbits)));
+            at = wrapping_add(at, WRITE_BYTES);
+            acc = acc & wrapping_sub(bit(nbits), 1);
         }
-        acc = acc & wrapping_sub(bit(nbits), 1);
     }
+    loop {
+        if nbits < 8 {
+            break;
+        }
+        nbits = wrapping_sub(nbits, 8);
+        let _s = out.try_set(at, wrapping_u8(shr(acc, nbits)));
+        at = inc(at);
+    }
+    acc = acc & wrapping_sub(bit(nbits), 1);
     if nbits > 0 {
         let pad = wrapping_sub(8, nbits);
-        out.push(wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));
+        let _s = out.try_set(at, wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));
     }
 }
 

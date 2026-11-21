@@ -32,7 +32,7 @@ vesper_port_object(
 DIVERGENT = {
     "decoder": ("decoder", "let a = wrapping_add(base, index);", "let a = wrapping_add(base, inc(index));"),
     "encoder": ("encoder", "inc(ric % full)", "ric % full"),
-    "huffman": ("huffman", "out.push(wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));", "out.push(wrapping_u8(shl(acc, pad)));"),
+    "huffman": ("huffman", "out.try_set(at, wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));", "out.try_set(at, wrapping_u8(shl(acc, pad)));"),
     "prefix": ("prefix", "used: wrapping_sub(inc(i), at)", "used: wrapping_sub(i, at)"),
     "table": ("table", "wrapping_sub(t.inserted, table_len(in t))", "wrapping_sub(t.inserted, inc(table_len(in t)))"),
     "varint": ("varint", "if v < VI1_LIMIT {", "if v <= VI1_LIMIT {"),

@@ -276,21 +276,29 @@ pub fn check_trailers(fields: &[Field]) -> Result<(), MessageError> {
 use crate::qpack::port::{abi::Span, binding as port};
 
 /// The field list as the port takes it: the bytes, and three words per
-/// field (name length, value length, sensitive).
+/// field (name length, value length, where the field begins in the bytes).
+/// The buffers are per thread and reused, so a message allocates none.
 #[cfg(feature = "vesper-port")]
-fn flatten(fields: &[Field]) -> (Vec<u8>, Vec<u64>) {
-    let mut bytes = Vec::with_capacity(fields.iter().map(|f| f.name.len() + f.value.len()).sum());
-    let mut meta = Vec::with_capacity(fields.len() * META_WORDS);
-    for f in fields {
-        bytes.extend_from_slice(&f.name);
-        bytes.extend_from_slice(&f.value);
-        meta.extend_from_slice(&[
-            f.name.len() as u64,
-            f.value.len() as u64,
-            u64::from(f.sensitive),
-        ]);
+fn flatten<R>(fields: &[Field], with: impl FnOnce(&[u8], &[u64]) -> R) -> R {
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<(Vec<u8>, Vec<u64>)> = const {
+            std::cell::RefCell::new((Vec::new(), Vec::new()))
+        };
     }
-    (bytes, meta)
+    SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let (bytes, meta) = &mut *scratch;
+        bytes.clear();
+        meta.clear();
+        meta.reserve(fields.len() * META_WORDS);
+        for f in fields {
+            let start = bytes.len() as u64;
+            bytes.extend_from_slice(&f.name);
+            bytes.extend_from_slice(&f.value);
+            meta.extend_from_slice(&[f.name.len() as u64, f.value.len() as u64, start]);
+        }
+        with(bytes, meta)
+    })
 }
 
 /// A range the port checked as UTF-8.
@@ -301,15 +309,24 @@ fn text(bytes: &[u8], s: Span) -> String {
 
 #[cfg(feature = "vesper-port")]
 pub fn parse_request(mut fields: Vec<Field>) -> Result<RequestHead, MessageError> {
-    let (bytes, meta) = flatten(&fields);
-    let parts = port::h3_parse_request(&bytes, &meta)?;
+    let (parts, method, scheme, authority, path, protocol) = flatten(&fields, |bytes, meta| {
+        let parts = port::h3_parse_request(bytes, meta)?;
+        Ok::<_, MessageError>((
+            parts,
+            text(bytes, parts.method),
+            text(bytes, parts.scheme),
+            parts.authority.map(|s| text(bytes, s)),
+            text(bytes, parts.path),
+            parts.protocol.map(|s| text(bytes, s)),
+        ))
+    })?;
     fields.drain(..parts.pseudo as usize);
     Ok(RequestHead {
-        method: text(&bytes, parts.method),
-        scheme: text(&bytes, parts.scheme),
-        authority: parts.authority.map(|s| text(&bytes, s)),
-        path: text(&bytes, parts.path),
-        protocol: parts.protocol.map(|s| text(&bytes, s)),
+        method,
+        scheme,
+        authority,
+        path,
+        protocol,
         fields,
         content_length: parts.content_length,
     })
@@ -317,8 +334,7 @@ pub fn parse_request(mut fields: Vec<Field>) -> Result<RequestHead, MessageError
 
 #[cfg(feature = "vesper-port")]
 pub fn parse_response(mut fields: Vec<Field>) -> Result<ResponseHead, MessageError> {
-    let (bytes, meta) = flatten(&fields);
-    let parts = port::h3_parse_response(&bytes, &meta)?;
+    let parts = flatten(&fields, port::h3_parse_response)?;
     fields.drain(..parts.pseudo as usize);
     Ok(ResponseHead {
         status: parts.status,
@@ -330,8 +346,7 @@ pub fn parse_response(mut fields: Vec<Field>) -> Result<ResponseHead, MessageErr
 /// Trailers carry no pseudo-headers (§4.3).
 #[cfg(feature = "vesper-port")]
 pub fn check_trailers(fields: &[Field]) -> Result<(), MessageError> {
-    let (bytes, meta) = flatten(fields);
-    match port::h3_check_trailers(&bytes, &meta) {
+    match flatten(fields, port::h3_check_trailers) {
         Some(e) => Err(e),
         None => Ok(()),
     }
