@@ -293,6 +293,31 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 16 (#1339): @vesper/lsp, @vesper/lsp-documents
+        # and @vesper/memo against crates/vesper-lsp and salsa over recorded
+        # `vesper lsp` sessions of the examples. Anchored globs.
+        "test/self_host_lsp_core": glob([
+            "examples/**",
+            "packages/vesper-lsp/**",
+            "packages/vesper-memo/**",
+        ]) + [
+            "//crates/vesper-serde:files",
+            "//crates/vesper-span:files",
+        ],
+        # Self-hosting SH5 lane 17 (#1340): @vesper/lsp-features against
+        # src/lsp/navigation.rs and live `vesper lsp` sessions over the
+        # examples and fixtures. Anchored globs.
+        "test/self_host_lsp_features": glob([
+            "examples/**",
+            "tests/fixtures/**",
+            "src/lsp/fixtures/**",
+            "packages/vesper-lsp-features/**",
+            "packages/vesper-ast/**",
+            "packages/vesper-front/**",
+            "packages/vesper-std/**",
+        ]) + [
+            "//crates/vesper-span:files",
+        ],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -640,6 +665,12 @@ vesper_crate(
         "test/self_host_egraph": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "long",
+        # The LSP core differential (#1339) records live `vesper lsp` sessions
+        # and JIT-compiles three packages: about 2.5 min unoptimized.
+        "test/self_host_lsp_core": "long",
+        # The LSP features differential (#1340) JIT-compiles @vesper/lsp-features
+        # and answers about 51,000 navigation requests on the corpus.
+        "test/self_host_lsp_features": "long",
     },
 )
 
