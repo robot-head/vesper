@@ -124,6 +124,93 @@ fn wal_codec_transcript() -> String {
 }
 
 /// A frame with arbitrary payload bytes and a correct check.
+/// Steps a net-v1 network: `n` pseudo-random sends, arrivals (some of
+/// unknown ids), receives, waits, timeouts, crashes, partitions and heals
+/// over four endpoints with tight bounds. With `states`, each line also
+/// holds the network's whole state after the operation.
+fn net_ops(n: u64, states: bool) -> (vesper_sim_session::model::net::Network, Vec<String>) {
+    use vesper_sim_session::model::net::{NetLimits, Network};
+    let mut net = Network::new(
+        NetLimits {
+            max_in_flight: 6,
+            max_inbox: 3,
+            max_message_bytes: 12,
+        },
+        5,
+        [((1, 2), 9), ((2, 1), 3), ((3, 4), 40), ((4, 1), u64::MAX)].into(),
+        [4, 1, 3, 2],
+    );
+    let mut rng = 0x5eed_u64;
+    let mut draw = |m: u64| {
+        rng = rng
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (rng >> 33) % m
+    };
+    let mut log = vec![];
+    let mut request = 100;
+    for step in 0..n {
+        let a = draw(4) + 1;
+        let b = draw(4) + 1;
+        let line = match draw(16) {
+            0..=4 => {
+                let payload = "x".repeat(draw(15) as usize);
+                format!(
+                    "send {a}->{b} {:?}",
+                    net.send(a, b, payload, step * 7, draw(5) != 0)
+                )
+            }
+            5..=8 => {
+                let ids: Vec<u64> = net.in_flight().iter().map(|m| m.id).collect();
+                let id = if ids.is_empty() || draw(8) == 0 {
+                    step + 1_000
+                } else {
+                    ids[draw(ids.len() as u64) as usize]
+                };
+                format!("arrive {id} {:?}", net.arrive(id, draw(6) != 0))
+            }
+            9 | 10 => format!("take {a} {:?}", net.take_queued(a)),
+            11 => {
+                request += 1;
+                net.wait(a, request);
+                format!("wait {a} {request}")
+            }
+            12 => format!(
+                "cancel {a} {:?}",
+                net.cancel_wait(a, 100 + draw(request - 99))
+            ),
+            13 => format!("crash {a} {:?}", net.crash(a)),
+            14 => format!("partition {a} {b} {}", net.partition(a, b)),
+            _ => format!("heal {a} {b} {}", net.heal(a, b)),
+        };
+        if states {
+            log.push(format!(
+                "{line} | {:?} {:?} {:?} {:?}",
+                net.partitions(),
+                net.in_flight(),
+                net.inboxes(),
+                net.waiting()
+            ));
+        } else {
+            log.push(line);
+        }
+    }
+    (net, log)
+}
+
+/// net-v1 through 4,000 operations, with the network's whole state after
+/// every operation.
+fn net_transcript() -> String {
+    let (net, mut log) = net_ops(4_000, true);
+    // Clones compare equal; crashing every endpoint of the copy ends it.
+    let mut copy = net.clone();
+    assert_eq!(copy, net);
+    for e in 1..=4 {
+        log.push(format!("final crash {e} {:?}", copy.crash(e)));
+    }
+    log.join("\n")
+}
+
 fn raw_frame(lsn: u64, payload: &[u8]) -> Vec<u8> {
     let mut input = lsn.to_le_bytes().to_vec();
     input.extend_from_slice(payload);
@@ -175,6 +262,12 @@ fn transcripts_match_the_rust_build() {
     match golden.iter().find(|(n, _)| *n == "wal_codec") {
         Some((_, expected)) if *expected == codec => {}
         expected => differences.push(format!("wal_codec: {codec}, expected {expected:?}")),
+    }
+    let net = hex(&Sha256::digest(net_transcript().as_bytes()));
+    blessed.push_str(&format!("net {net}\n"));
+    match golden.iter().find(|(n, _)| *n == "net") {
+        Some((_, expected)) if *expected == net => {}
+        expected => differences.push(format!("net: {net}, expected {expected:?}")),
     }
     for (name, source, scenario) in cases() {
         let start = std::time::Instant::now();
@@ -298,5 +391,26 @@ fn wal_throughput() {
         "scan: {:.0} ns per frame ({} bytes), {c} records",
         t.as_nanos() as f64 / 10_000.0,
         medium.len()
+    );
+}
+
+/// net-v1 alone: 10^6 operations of the `net` transcript's mix.
+/// `cargo test --release --test self_host_sim_session -- --ignored
+/// --nocapture`, with and without `--features vesper-port`.
+#[test]
+#[ignore = "timing; run by hand in release"]
+fn net_throughput() {
+    let n = 1_000_000u64;
+    let mut best = std::time::Duration::MAX;
+    let mut check = 0;
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let (_, log) = net_ops(n, false);
+        best = best.min(start.elapsed());
+        check = log.iter().map(String::len).sum::<usize>();
+    }
+    eprintln!(
+        "net: {:.1} ns per operation (best of 5), checksum {check}",
+        best.as_nanos() as f64 / n as f64
     );
 }

@@ -27,6 +27,25 @@ pub enum TransmitOutcome {
     Delivered(bool, u64, u64, u64),
 }
 
+/// `Result<Sent, NetError>` from `Network::send`, without the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    TooLarge(u64),
+    InFlightFull,
+    InboxFull,
+    InFlight(u64, u64),
+    Dropped(u64, u64, u8),
+}
+
+/// `Option<Arrival>` from `Network::arrive`, without the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArriveOutcome {
+    Unknown,
+    Delivered(u64),
+    Queued,
+    Dropped(u8),
+}
+
 pub use port_binding::*;
 
 #[rustfmt::skip]
