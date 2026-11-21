@@ -1,0 +1,1288 @@
+// The component boundary of src/wasm_backend/component.rs: the WIT world
+// for the entry and the canonical-ABI export wrappers in the core module.
+//
+// Encoding the component itself (`component::encode`, wit-component and
+// wit-parser) stays in Rust: the harness wraps this port's core module and
+// WIT text with it.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    w
+};
+use self::enc::{
+    Code,
+    ValTy,
+    code_new,
+    function_bytes,
+    vt
+};
+use self::err::{
+    WErr,
+    werr
+};
+use self::lower::{
+    L,
+    body_each,
+    body_n,
+    get32
+};
+use self::plan::{
+    Shape
+};
+
+const NONE32: u32 = 4294967295;
+const K_UNSUPPORTED: u8 = 0;
+const K_ENTRY: u8 = 1;
+const K_INVALID: u8 = 3;
+const U_EXPORT_TYPE: u8 = 12;
+const P_INOUT: u8 = 1;
+
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+
+const SH_SCALAR: u8 = 0;
+const SH_TUPLE: u8 = 1;
+const SH_STRUCT: u8 = 2;
+const SH_ENUM: u8 = 3;
+const SH_STR: u8 = 4;
+const SC_I64: u8 = 0;
+const SC_U64: u8 = 1;
+const SC_U32: u8 = 2;
+const SC_U8: u8 = 3;
+const SC_BOOL: u8 = 4;
+const SC_F64: u8 = 5;
+const SC_UNIT: u8 = 6;
+const SC_NEVER: u8 = 7;
+
+const VT_I32: u8 = 127;
+const VT_I64: u8 = 126;
+const VT_F64: u8 = 124;
+
+const OP_UNREACHABLE: u8 = 0;
+const OP_NOP: u8 = 1;
+const OP_IF: u8 = 4;
+const OP_END: u8 = 11;
+const OP_DROP: u8 = 26;
+const OP_SELECT: u8 = 27;
+const OP_I32_LOAD: u8 = 40;
+const OP_I64_LOAD: u8 = 41;
+const OP_F64_LOAD: u8 = 43;
+const OP_I32_LOAD8_U: u8 = 45;
+const OP_I32_LOAD16_U: u8 = 47;
+const OP_I64_STORE: u8 = 55;
+const OP_I64_STORE8: u8 = 60;
+const OP_I64_STORE16: u8 = 61;
+const OP_I64_STORE32: u8 = 62;
+const OP_I32_LT_U: u8 = 73;
+const OP_I64_EQ: u8 = 81;
+const OP_I64_NE: u8 = 82;
+const OP_I64_GE_U: u8 = 90;
+const OP_I32_ADD: u8 = 106;
+const OP_I64_ADD: u8 = 124;
+const OP_I64_AND: u8 = 131;
+const OP_I32_WRAP_I64: u8 = 167;
+const OP_I64_EXTEND_I32_U: u8 = 173;
+const OP_I64_REINTERPRET_F64: u8 = 189;
+const OP_F64_REINTERPRET_I64: u8 = 191;
+
+const LOW32: i64 = 4294967295;
+
+fn export_err(site: u64) -> WErr {
+    werr(K_UNSUPPORTED, U_EXPORT_TYPE, site)
+}
+
+fn text(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    for i in 0..s.len() {
+        match s.try_get(i) {
+            Option::Some(b) => out.push(b),
+            Option::None => {},
+        }
+    }
+}
+
+fn is_digit(c: u8) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_lower(c: u8) -> bool {
+    c >= 97 && c <= 122
+}
+
+fn is_upper(c: u8) -> bool {
+    c >= 65 && c <= 90
+}
+
+// Close the current word of `ident` into `out`, merging a word that
+// starts with a digit into the one before it.
+fn ident_word(inout out: ChunkSeq[u8], inout cur: ChunkSeq[u8], inout merged: u64) {
+    if cur.len() == 0 {
+        return;
+    }
+    let first = match cur.try_get(0) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    };
+    if is_digit(first) {
+        if merged == 0 {
+            out.push(110);
+            merged = 1;
+        }
+    } else {
+        if merged > 0 {
+            out.push(45);
+        }
+        merged = add(merged, 1);
+    }
+    for i in 0..cur.len() {
+        match cur.try_get(i) {
+            Option::Some(c) => out.push(c),
+            Option::None => {},
+        }
+    }
+    cur = ChunkSeq::new[u8]();
+}
+
+// `component::ident`: a WIT identifier (kebab-case) for a Vesper name.
+pub fn ident(in name: Slice[u8], inout out: ChunkSeq[u8]) {
+    let mut cur = ChunkSeq::new[u8]();
+    let mut merged: u64 = 0;
+    let mut prev_lower = false;
+    for i in 0..name.len() {
+        let c = match name.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        let alnum = is_digit(c) || is_lower(c) || is_upper(c);
+        if !alnum {
+            ident_word(inout out, inout cur, inout merged);
+            prev_lower = false;
+            continue;
+        }
+        if is_upper(c) && prev_lower && cur.len() > 0 {
+            ident_word(inout out, inout cur, inout merged);
+        }
+        prev_lower = is_lower(c) || is_digit(c);
+        if is_upper(c) {
+            cur.push(wrapping_add(c, 32));
+        } else {
+            cur.push(c);
+        }
+    }
+    ident_word(inout out, inout cur, inout merged);
+    if merged == 0 {
+        text(inout out, in "unnamed".as_bytes());
+    }
+}
+
+fn ident_sym(in l: L, s: u32, inout out: ChunkSeq[u8]) {
+    let mut n = ChunkSeq::new[u8]();
+    l.cx.write_name(s, inout n);
+    ident(in n.as_slice(), inout out);
+}
+
+// `component::mangle`.
+fn mangle(in l: L, t: u32, inout out: ChunkSeq[u8]) {
+    let node = l.cx.types.node(t);
+    if node.kind == K_NAMED {
+        ident_sym(in l, node.name, inout out);
+        for i in 0..w(node.n) {
+            out.push(45);
+            mangle(in l, l.cx.types.arg(t, i), inout out);
+        }
+        return;
+    }
+    if node.kind == K_TUPLE {
+        text(inout out, in "tuple".as_bytes());
+        for i in 0..w(node.n) {
+            out.push(45);
+            mangle(in l, l.cx.types.arg(t, i), inout out);
+        }
+        return;
+    }
+    text(inout out, in "value".as_bytes());
+}
+
+// WIT type expressions and the named definitions they need
+// (`component::Wit`): `defs` holds each definition as `  {d}\n`.
+pub struct Wit {
+    defs: ChunkSeq[u8],
+    // type display -> mangled name symbol + 1
+    names: ChunkSeq[u32],
+    active: ChunkSeq[u32],
+}
+
+pub fn wit_new() -> Wit {
+    Wit {
+        defs: ChunkSeq::new[u8](),
+        names: ChunkSeq::new[u32](),
+        active: ChunkSeq::new[u32]()
+    }
+}
+
+fn set32(inout t: ChunkSeq[u32], k: u32, v: u32) {
+    let i = w(k);
+    loop {
+        if t.len() > i {
+            break;
+        }
+        t.push(0);
+    }
+    let ok = t.try_set(i, v);
+}
+
+fn display_key(inout l: L, t: u32) -> u32 {
+    let mut d = ChunkSeq::new[u8]();
+    l.cx.show(t, inout d);
+    l.cx.intern(in d)
+}
+
+impl Wit {
+    fn is_active(in self, k: u32) -> bool {
+        for i in 0..self.active.len() {
+            match self.active.try_get(i) {
+                Option::Some(x) => {
+                    if x == k {
+                        return true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        false
+    }
+
+    fn deactivate(inout self, k: u32) {
+        let mut keep = ChunkSeq::new[u32]();
+        for i in 0..self.active.len() {
+            match self.active.try_get(i) {
+                Option::Some(x) => {
+                    if x != k {
+                        keep.push(x);
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        self.active = keep;
+    }
+
+    fn def(inout self, in d: ChunkSeq[u8]) {
+        text(inout self.defs, in "  ".as_bytes());
+        for i in 0..d.len() {
+            match d.try_get(i) {
+                Option::Some(b) => self.defs.push(b),
+                Option::None => {},
+            }
+        }
+        self.defs.push(10);
+    }
+
+    // `Wit::ty`: the WIT type expression of `t`, written to `out`.
+    pub fn ty(inout self, inout l: L, t0: u32, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
+        let t = l.cx.default_ty(t0);
+        let key = display_key(inout l, t);
+        let named = get32(in self.names, key);
+        if named != 0 {
+            out.push(37);
+            l.cx.write_name(wrapping_sub(named, 1), inout out);
+            return;
+        }
+        if self.is_active(key) {
+            Fail::raise(export_err(1));
+        }
+        self.active.push(key);
+        if self.active.len() > 32 {
+            Fail::raise(export_err(1));
+        }
+        let sh = l.cx.shape(t);
+        if sh.kind == SH_SCALAR {
+            let s = sh.scalar;
+            if s == SC_I64 {
+                text(inout out, in "s64".as_bytes());
+            } else if s == SC_U64 {
+                text(inout out, in "u64".as_bytes());
+            } else if s == SC_U32 {
+                text(inout out, in "u32".as_bytes());
+            } else if s == SC_U8 {
+                text(inout out, in "u8".as_bytes());
+            } else if s == SC_BOOL {
+                text(inout out, in "bool".as_bytes());
+            } else if s == SC_F64 {
+                text(inout out, in "f64".as_bytes());
+            } else {
+                Fail::raise(export_err(2));
+            }
+        } else if sh.kind == SH_STR {
+            text(inout out, in "string".as_bytes());
+        } else if sh.kind == SH_TUPLE {
+            text(inout out, in "tuple<".as_bytes());
+            let n = l.cx.arity(sh.ty);
+            for i in 0..n {
+                if i > 0 {
+                    text(inout out, in ", ".as_bytes());
+                }
+                let e = l.cx.tuple_elem(sh.ty, i);
+                self.ty(inout l, e, inout out);
+            }
+            out.push(62);
+        } else if sh.kind == SH_STRUCT {
+            if l.cx.field_count(sh, 0) == 0 {
+                Fail::raise(export_err(3));
+            }
+            let mut name = ChunkSeq::new[u8]();
+            mangle(in l, t, inout name);
+            let mut body = ChunkSeq::new[u8]();
+            self.fields(inout l, sh, 0, inout body);
+            let mut d = ChunkSeq::new[u8]();
+            text(inout d, in "record %".as_bytes());
+            text(inout d, in name.as_slice());
+            text(inout d, in " { ".as_bytes());
+            text(inout d, in body.as_slice());
+            text(inout d, in " }".as_bytes());
+            self.def(in d);
+            let ns = l.cx.intern(in name);
+            set32(inout self.names, key, inc32(ns));
+            out.push(37);
+            text(inout out, in name.as_slice());
+        } else if sh.kind == SH_ENUM {
+            let mut name = ChunkSeq::new[u8]();
+            mangle(in l, t, inout name);
+            let mut cases = ChunkSeq::new[u8]();
+            let nv = l.cx.variant_count(sh);
+            for v in 0..nv {
+                if v > 0 {
+                    text(inout cases, in ", ".as_bytes());
+                }
+                let var = l.cx.variant(sh, v);
+                let mut case = ChunkSeq::new[u8]();
+                ident_sym(in l, var.name, inout case);
+                let nf = w(var.fc);
+                cases.push(37);
+                text(inout cases, in case.as_slice());
+                if nf == 0 {
+                    continue;
+                }
+                if var.named {
+                    let mut rec = ChunkSeq::new[u8]();
+                    text(inout rec, in name.as_slice());
+                    rec.push(45);
+                    text(inout rec, in case.as_slice());
+                    let mut body = ChunkSeq::new[u8]();
+                    self.fields(inout l, sh, v, inout body);
+                    let mut d = ChunkSeq::new[u8]();
+                    text(inout d, in "record %".as_bytes());
+                    text(inout d, in rec.as_slice());
+                    text(inout d, in " { ".as_bytes());
+                    text(inout d, in body.as_slice());
+                    text(inout d, in " }".as_bytes());
+                    self.def(in d);
+                    text(inout cases, in "(%".as_bytes());
+                    text(inout cases, in rec.as_slice());
+                    cases.push(41);
+                } else if nf == 1 {
+                    let (_, ft) = l.cx.variant_field(sh, v, 0);
+                    cases.push(40);
+                    self.ty(inout l, ft, inout cases);
+                    cases.push(41);
+                } else {
+                    text(inout cases, in "(tuple<".as_bytes());
+                    for i in 0..nf {
+                        if i > 0 {
+                            text(inout cases, in ", ".as_bytes());
+                        }
+                        let (_, ft) = l.cx.variant_field(sh, v, i);
+                        self.ty(inout l, ft, inout cases);
+                    }
+                    text(inout cases, in ">)".as_bytes());
+                }
+            }
+            let mut d = ChunkSeq::new[u8]();
+            text(inout d, in "variant %".as_bytes());
+            text(inout d, in name.as_slice());
+            text(inout d, in " { ".as_bytes());
+            text(inout d, in cases.as_slice());
+            text(inout d, in " }".as_bytes());
+            self.def(in d);
+            let ns = l.cx.intern(in name);
+            set32(inout self.names, key, inc32(ns));
+            out.push(37);
+            text(inout out, in name.as_slice());
+        } else {
+            Fail::raise(export_err(4));
+        }
+        self.deactivate(key);
+    }
+
+    // `Wit::fields`: `%name: type, ...` of variant `v` of `sh`.
+    fn fields(inout self, inout l: L, sh: Shape, v: u64, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
+        let mut seen = ChunkSeq::new[u32]();
+        let n = l.cx.field_count(sh, v);
+        for i in 0..n {
+            let (fname, ft) = l.cx.variant_field(sh, v, i);
+            let mut f = ChunkSeq::new[u8]();
+            ident_sym(in l, fname, inout f);
+            let fs = l.cx.intern(in f);
+            for j in 0..seen.len() {
+                match seen.try_get(j) {
+                    Option::Some(x) => {
+                        if x == fs {
+                            Fail::raise(export_err(5));
+                        }
+                    },
+                    Option::None => {},
+                }
+            }
+            seen.push(fs);
+            if i > 0 {
+                text(inout out, in ", ".as_bytes());
+            }
+            out.push(37);
+            text(inout out, in f.as_slice());
+            text(inout out, in ": ".as_bytes());
+            self.ty(inout l, ft, inout out);
+        }
+    }
+}
+
+fn inc32(x: u32) -> u32 {
+    wrapping_add(x, 1)
+}
+
+// ---- canonical ABI -------------------------------------------------------
+
+fn align_to(x: u64, a: u64) -> u64 {
+    wrapping_add(x, wrapping_sub(a, 1)) & (wrapping_sub(a, 1) ^ 18446744073709551615)
+}
+
+fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// The member types of a tuple, of a struct or of variant `v` of an enum.
+fn members(inout l: L, sh: Shape, v: u64) -> ChunkSeq[u32] {
+    let mut ts = ChunkSeq::new[u32]();
+    if sh.kind == SH_TUPLE {
+        for i in 0..l.cx.arity(sh.ty) {
+            ts.push(l.cx.tuple_elem(sh.ty, i));
+        }
+        return ts;
+    }
+    let n = l.cx.field_count(sh, v);
+    for i in 0..n {
+        let (_, t) = l.cx.variant_field(sh, v, i);
+        ts.push(t);
+    }
+    ts
+}
+
+fn t_at(in ts: ChunkSeq[u32], i: u64) -> u32 {
+    match ts.try_get(i) {
+        Option::Some(t) => t,
+        Option::None => NONE32,
+    }
+}
+
+fn o_at(in os: ChunkSeq[u64], i: u64) -> u64 {
+    match os.try_get(i) {
+        Option::Some(o) => o,
+        Option::None => 0,
+    }
+}
+
+// `discriminant`: (size, log2 alignment) of a variant's tag.
+fn disc_of(cases: u64) -> (u64, u64) {
+    if cases <= 256 {
+        (1, 0)
+    } else if cases <= 65536 {
+        (2, 1)
+    } else {
+        (4, 2)
+    }
+}
+
+// `size_align`: canonical (size, alignment) of the WIT image of `t`.
+fn size_align(inout l: L, t: u32) -> (u64, u64) eff [Fail[WErr]] {
+    let sh = l.cx.shape(t);
+    if sh.kind == SH_SCALAR {
+        let s = sh.scalar;
+        if s == SC_BOOL || s == SC_U8 {
+            return (1, 1);
+        }
+        if s == SC_U32 {
+            return (4, 4);
+        }
+        if s == SC_I64 || s == SC_U64 || s == SC_F64 {
+            return (8, 8);
+        }
+        Fail::raise(export_err(6));
+    }
+    if sh.kind == SH_STR {
+        return (8, 4);
+    }
+    if sh.kind == SH_TUPLE || sh.kind == SH_STRUCT {
+        let ts = members(inout l, sh, 0);
+        let (sa, _) = record(inout l, in ts);
+        return sa;
+    }
+    if sh.kind == SH_ENUM {
+        let nv = l.cx.variant_count(sh);
+        let (disc, _) = disc_of(nv);
+        let mut size: u64 = 0;
+        let mut align = disc;
+        for v in 0..nv {
+            let ts = members(inout l, sh, v);
+            let ((s, a), _) = record(inout l, in ts);
+            size = max64(size, s);
+            align = max64(align, a);
+        }
+        let payload = align_to(disc, align);
+        return (align_to(wrapping_add(payload, size), align), align);
+    }
+    Fail::raise(export_err(7));
+    (0, 1)
+}
+
+// `record`: ((size, align), field offsets) of a record of `ts`.
+fn record(inout l: L, in ts: ChunkSeq[u32]) -> ((u64, u64), ChunkSeq[u64]) eff [Fail[WErr]] {
+    let mut offset: u64 = 0;
+    let mut align: u64 = 1;
+    let mut offsets = ChunkSeq::new[u64]();
+    for i in 0..ts.len() {
+        let (s, a) = size_align(inout l, t_at(in ts, i));
+        offset = align_to(offset, a);
+        offsets.push(offset);
+        offset = wrapping_add(offset, s);
+        align = max64(align, a);
+    }
+    ((align_to(offset, align), align), offsets)
+}
+
+fn flat_count(inout l: L, t: u32) -> u64 eff [Fail[WErr]] {
+    let sh = l.cx.shape(t);
+    if sh.kind == SH_SCALAR {
+        return 1;
+    }
+    if sh.kind == SH_STR {
+        return 2;
+    }
+    if sh.kind == SH_TUPLE || sh.kind == SH_STRUCT {
+        let ts = members(inout l, sh, 0);
+        let mut n: u64 = 0;
+        for i in 0..ts.len() {
+            n = wrapping_add(n, flat_count(inout l, t_at(in ts, i)));
+        }
+        return n;
+    }
+    if sh.kind == SH_ENUM {
+        let mut m: u64 = 0;
+        for v in 0..l.cx.variant_count(sh) {
+            let ts = members(inout l, sh, v);
+            let mut n: u64 = 0;
+            for i in 0..ts.len() {
+                n = wrapping_add(n, flat_count(inout l, t_at(in ts, i)));
+            }
+            m = max64(m, n);
+        }
+        return wrapping_add(1, m);
+    }
+    Fail::raise(export_err(8));
+    0
+}
+
+fn temp(inout locals: ChunkSeq[ValTy], nparams: u64) -> u32 {
+    locals.push(vt(VT_I64));
+    wrapping_u32(wrapping_sub(wrapping_add(nparams, locals.len()), 1))
+}
+
+fn load_field(inout c: Code, from: u32, slot: u64, to: u32) {
+    c.get(from);
+    c.op(OP_I32_WRAP_I64);
+    c.mem(OP_I64_LOAD, 3, slot);
+    c.set(to);
+}
+
+// `store`: stores of the uniform value in local `v` of type `t` into the
+// canonical layout at `base + offset`.
+fn store(
+    inout l: L,
+    inout c: Code,
+    inout locals: ChunkSeq[ValTy],
+    nparams: u64,
+    base: u32,
+    offset: u64,
+    v: u32,
+    t: u32
+) eff [Fail[WErr]] {
+    let sh = l.cx.shape(t);
+    if sh.kind == SH_SCALAR {
+        c.get(base);
+        c.op(OP_I32_WRAP_I64);
+        c.get(v);
+        let s = sh.scalar;
+        if s == SC_BOOL || s == SC_U8 {
+            c.mem(OP_I64_STORE8, 0, offset);
+        } else if s == SC_U32 {
+            c.mem(OP_I64_STORE32, 2, offset);
+        } else {
+            c.mem(OP_I64_STORE, 3, offset);
+        }
+        return;
+    }
+    if sh.kind == SH_STR {
+        c.get(base);
+        c.op(OP_I32_WRAP_I64);
+        c.get(v);
+        c.i64_const(8);
+        c.op(OP_I64_ADD);
+        c.mem(OP_I64_STORE32, 2, offset);
+        c.get(base);
+        c.op(OP_I32_WRAP_I64);
+        c.get(v);
+        c.op(OP_I32_WRAP_I64);
+        c.mem(OP_I64_LOAD, 3, 0);
+        c.mem(OP_I64_STORE32, 2, wrapping_add(offset, 4));
+        return;
+    }
+    if sh.kind == SH_TUPLE || sh.kind == SH_STRUCT {
+        let ts = members(inout l, sh, 0);
+        let (_, offs) = record(inout l, in ts);
+        for i in 0..ts.len() {
+            let x = temp(inout locals, nparams);
+            load_field(inout c, v, wrapping_mul(8, i), x);
+            store(
+                inout l,
+                inout c,
+                inout locals,
+                nparams,
+                base,
+                wrapping_add(offset, o_at(in offs, i)),
+                x,
+                t_at(in ts, i)
+            );
+        }
+        return;
+    }
+    if sh.kind == SH_ENUM {
+        let (_, align) = size_align(inout l, t);
+        let nv = l.cx.variant_count(sh);
+        let (disc, disc_align) = disc_of(nv);
+        let payload = align_to(disc, align);
+        let tag = temp(inout locals, nparams);
+        load_field(inout c, v, 0, tag);
+        c.get(base);
+        c.op(OP_I32_WRAP_I64);
+        c.get(tag);
+        if disc == 1 {
+            c.mem(OP_I64_STORE8, disc_align, offset);
+        } else if disc == 2 {
+            c.mem(OP_I64_STORE16, disc_align, offset);
+        } else {
+            c.mem(OP_I64_STORE32, disc_align, offset);
+        }
+        for ci in 0..nv {
+            let ts = members(inout l, sh, ci);
+            if ts.len() == 0 {
+                continue;
+            }
+            let (_, offs) = record(inout l, in ts);
+            c.get(tag);
+            c.i64_const(wrapping_i64(ci));
+            c.op(OP_I64_EQ);
+            c.open(OP_IF);
+            for i in 0..ts.len() {
+                let x = temp(inout locals, nparams);
+                load_field(inout c, v, wrapping_mul(8, wrapping_add(i, 1)), x);
+                let at = wrapping_add(wrapping_add(offset, payload), o_at(in offs, i));
+                store(inout l, inout c, inout locals, nparams, base, at, x, t_at(in ts, i));
+            }
+            c.op(OP_END);
+        }
+        return;
+    }
+    Fail::raise(export_err(9));
+}
+
+// `single_leaf`: the load (opcode, alignment) of the only flat value of a
+// single-flat type, and its core type.
+fn single_leaf(inout l: L, t: u32) -> (u8, u64, u8) eff [Fail[WErr]] {
+    let sh = l.cx.shape(t);
+    if sh.kind == SH_SCALAR {
+        let s = sh.scalar;
+        if s == SC_BOOL || s == SC_U8 {
+            return (OP_I32_LOAD8_U, 0, VT_I32);
+        }
+        if s == SC_U32 {
+            return (OP_I32_LOAD, 2, VT_I32);
+        }
+        if s == SC_F64 {
+            return (OP_F64_LOAD, 3, VT_F64);
+        }
+        return (OP_I64_LOAD, 3, VT_I64);
+    }
+    if sh.kind == SH_TUPLE && l.cx.arity(sh.ty) == 1 {
+        return single_leaf(inout l, l.cx.tuple_elem(sh.ty, 0));
+    }
+    if sh.kind == SH_STRUCT && l.cx.field_count(sh, 0) == 1 {
+        let (_, ft) = l.cx.variant_field(sh, 0, 0);
+        return single_leaf(inout l, ft);
+    }
+    if sh.kind == SH_ENUM {
+        let (d, _) = disc_of(l.cx.variant_count(sh));
+        if d == 1 {
+            return (OP_I32_LOAD8_U, 0, VT_I32);
+        }
+        if d == 2 {
+            return (OP_I32_LOAD16_U, 1, VT_I32);
+        }
+        return (OP_I32_LOAD, 2, VT_I32);
+    }
+    Fail::raise(werr(K_INVALID, 0, 10));
+    (0, 0, 0)
+}
+
+// `core_scalar`: the core type of a scalar, or 0 for Unit and Never.
+fn core_scalar(s: u8) -> u8 {
+    if s == SC_I64 || s == SC_U64 {
+        return VT_I64;
+    }
+    if s == SC_U32 || s == SC_U8 || s == SC_BOOL {
+        return VT_I32;
+    }
+    if s == SC_F64 {
+        return VT_F64;
+    }
+    0
+}
+
+fn k_at(in ks: ChunkSeq[u8], i: u64) -> u8 {
+    match ks.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => 0,
+    }
+}
+
+// `flatten`: the flat core types of `t` as a parameter.
+fn flatten(inout l: L, t: u32, inout out: ChunkSeq[u8]) eff [Fail[WErr]] {
+    let sh = l.cx.shape(t);
+    if sh.kind == SH_SCALAR {
+        let k = core_scalar(sh.scalar);
+        if k == 0 {
+            Fail::raise(export_err(11));
+        }
+        out.push(k);
+        return;
+    }
+    if sh.kind == SH_STR {
+        out.push(VT_I32);
+        out.push(VT_I32);
+        return;
+    }
+    if sh.kind == SH_TUPLE || sh.kind == SH_STRUCT {
+        let ts = members(inout l, sh, 0);
+        for i in 0..ts.len() {
+            flatten(inout l, t_at(in ts, i), inout out);
+        }
+        return;
+    }
+    if sh.kind == SH_ENUM {
+        out.push(VT_I32);
+        let mut joined = ChunkSeq::new[u8]();
+        for v in 0..l.cx.variant_count(sh) {
+            let ts = members(inout l, sh, v);
+            let mut case = ChunkSeq::new[u8]();
+            for i in 0..ts.len() {
+                flatten(inout l, t_at(in ts, i), inout case);
+            }
+            for i in 0..case.len() {
+                let k = k_at(in case, i);
+                if i >= joined.len() {
+                    joined.push(k);
+                } else if k_at(in joined, i) != k {
+                    let ok = joined.try_set(i, VT_I64);
+                }
+            }
+        }
+        for i in 0..joined.len() {
+            out.push(k_at(in joined, i));
+        }
+        return;
+    }
+    Fail::raise(export_err(12));
+}
+
+fn has_string(inout l: L, t: u32) -> bool {
+    let sh = handle Fail[WErr] in {
+        l.cx.shape(t)
+    } with {
+        return value => value,
+        raise(e, resume) => Shape {
+            kind: 255,
+            scalar: 0,
+            adt: NONE32,
+            ty: 0
+        },
+    };
+    if sh.kind == SH_STR {
+        return true;
+    }
+    if sh.kind == SH_TUPLE || sh.kind == SH_STRUCT {
+        let ts = members(inout l, sh, 0);
+        for i in 0..ts.len() {
+            if has_string(inout l, t_at(in ts, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if sh.kind == SH_ENUM {
+        for v in 0..l.cx.variant_count(sh) {
+            let ts = members(inout l, sh, v);
+            for i in 0..ts.len() {
+                if has_string(inout l, t_at(in ts, i)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn new_block(inout l: L, inout c: Code, inout locals: ChunkSeq[ValTy], nparams: u64, slots: u64)
+    -> u32 {
+    let b = temp(inout locals, nparams);
+    c.i64_const(wrapping_i64(wrapping_mul(8, slots)));
+    c.call(l.alloc);
+    c.set(b);
+    b
+}
+
+fn put(inout c: Code, b: u32, slot: u64, v: u32) {
+    c.get(b);
+    c.op(OP_I32_WRAP_I64);
+    c.get(v);
+    c.mem(OP_I64_STORE, 3, wrapping_mul(8, slot));
+}
+
+fn next_flat(in flat: ChunkSeq[u32], inout cursor: u64) -> u32 eff [Fail[WErr]] {
+    let x = match flat.try_get(cursor) {
+        Option::Some(x) => x,
+        Option::None => {
+            Fail::raise(werr(K_INVALID, 0, 13));
+            0
+        },
+    };
+    cursor = wrapping_add(cursor, 1);
+    x
+}
+
+// `lift`: the uniform value of parameter type `t` from the 64-bit flat
+// values `flat[cursor..]`; returns its local.
+fn lift(
+    inout l: L,
+    inout c: Code,
+    inout locals: ChunkSeq[ValTy],
+    nparams: u64,
+    t: u32,
+    in flat: ChunkSeq[u32],
+    inout cursor: u64
+) -> u32 eff [Fail[WErr]] {
+    let sh = l.cx.shape(t);
+    if sh.kind == SH_SCALAR {
+        let x = next_flat(in flat, inout cursor);
+        let s = sh.scalar;
+        if s == SC_U32 || s == SC_U8 || s == SC_BOOL {
+            // A joined variant slot carries the i32 in its low bits.
+            c.get(x);
+            c.i64_const(LOW32);
+            c.op(OP_I64_AND);
+            c.set(x);
+        }
+        return x;
+    }
+    if sh.kind == SH_STR {
+        let ptr = next_flat(in flat, inout cursor);
+        let len = next_flat(in flat, inout cursor);
+        let b = temp(inout locals, nparams);
+        c.get(len);
+        c.i64_const(LOW32);
+        c.op(OP_I64_AND);
+        c.tee(len);
+        c.i64_const(8);
+        c.op(OP_I64_ADD);
+        c.call(l.alloc);
+        c.tee(b);
+        c.op(OP_I32_WRAP_I64);
+        c.get(len);
+        c.mem(OP_I64_STORE, 3, 0);
+        c.get(b);
+        c.op(OP_I32_WRAP_I64);
+        c.i32_const(8);
+        c.op(OP_I32_ADD);
+        c.get(ptr);
+        c.op(OP_I32_WRAP_I64);
+        c.get(len);
+        c.op(OP_I32_WRAP_I64);
+        c.memory_copy();
+        return b;
+    }
+    if sh.kind == SH_TUPLE {
+        let ts = members(inout l, sh, 0);
+        let b = new_block(inout l, inout c, inout locals, nparams, ts.len());
+        for i in 0..ts.len() {
+            let v = lift(
+                inout l,
+                inout c,
+                inout locals,
+                nparams,
+                t_at(in ts, i),
+                in flat,
+                inout cursor
+            );
+            put(inout c, b, i, v);
+        }
+        return b;
+    }
+    if sh.kind == SH_STRUCT {
+        let ts = members(inout l, sh, 0);
+        let mut b: u32 = 0;
+        if ts.len() == 0 {
+            b = temp(inout locals, nparams);
+            c.i64_const(0);
+            c.set(b);
+        } else {
+            b = new_block(inout l, inout c, inout locals, nparams, ts.len());
+        }
+        for i in 0..ts.len() {
+            let v = lift(
+                inout l,
+                inout c,
+                inout locals,
+                nparams,
+                t_at(in ts, i),
+                in flat,
+                inout cursor
+            );
+            put(inout c, b, i, v);
+        }
+        return b;
+    }
+    if sh.kind == SH_ENUM {
+        let disc = next_flat(in flat, inout cursor);
+        let nv = l.cx.variant_count(sh);
+        let mut width: u64 = 0;
+        for v in 0..nv {
+            let ts = members(inout l, sh, v);
+            let mut case = ChunkSeq::new[u8]();
+            for i in 0..ts.len() {
+                flatten(inout l, t_at(in ts, i), inout case);
+            }
+            width = max64(width, case.len());
+        }
+        let out = temp(inout locals, nparams);
+        let start = cursor;
+        c.get(disc);
+        c.i64_const(wrapping_i64(nv));
+        c.op(OP_I64_GE_U);
+        c.open(OP_IF);
+        c.op(OP_UNREACHABLE);
+        c.op(OP_END);
+        for ci in 0..nv {
+            c.get(disc);
+            c.i64_const(wrapping_i64(ci));
+            c.op(OP_I64_EQ);
+            c.open(OP_IF);
+            let ts = members(inout l, sh, ci);
+            let b = new_block(inout l, inout c, inout locals, nparams, wrapping_add(1, ts.len()));
+            let tag = temp(inout locals, nparams);
+            c.i64_const(wrapping_i64(ci));
+            c.set(tag);
+            put(inout c, b, 0, tag);
+            let mut cur = start;
+            for fi in 0..ts.len() {
+                let x = lift(
+                    inout l,
+                    inout c,
+                    inout locals,
+                    nparams,
+                    t_at(in ts, fi),
+                    in flat,
+                    inout cur
+                );
+                put(inout c, b, wrapping_add(1, fi), x);
+            }
+            c.get(b);
+            c.set(out);
+            c.op(OP_END);
+        }
+        cursor = wrapping_add(start, width);
+        return out;
+    }
+    Fail::raise(export_err(14));
+    0
+}
+
+fn vts(in ks: ChunkSeq[u8]) -> ChunkSeq[ValTy] {
+    let mut out = ChunkSeq::new[ValTy]();
+    for i in 0..ks.len() {
+        out.push(vt(k_at(in ks, i)));
+    }
+    out
+}
+
+// `export_realloc`: `cabi_realloc(old, old_size, align, new_size)`.
+fn export_realloc(inout l: L) {
+    let mut ps = ChunkSeq::new[ValTy]();
+    for _i in 0..4 {
+        ps.push(vt(VT_I32));
+    }
+    let mut rs = ChunkSeq::new[ValTy]();
+    rs.push(vt(VT_I32));
+    let idx = l.b.declare(in ps, in rs);
+    let mut c = code_new();
+    c.get(3);
+    c.op(OP_I64_EXTEND_I32_U);
+    c.call(l.alloc);
+    c.set(4);
+    c.get(0);
+    c.open(OP_IF);
+    c.get(4);
+    c.op(OP_I32_WRAP_I64);
+    c.get(0);
+    c.get(1);
+    c.get(3);
+    c.get(1);
+    c.get(3);
+    c.op(OP_I32_LT_U);
+    c.op(OP_SELECT);
+    c.memory_copy();
+    c.op(OP_END);
+    c.get(4);
+    c.op(OP_I32_WRAP_I64);
+    c.op(OP_END);
+    l.b.define(idx, in body_n(1, in c));
+    l.b.export_func(in "cabi_realloc".as_bytes(), idx);
+}
+
+// `component::exports`: add the export wrappers for the entry and return
+// the WIT source.
+pub fn exports(inout l: L) -> ChunkSeq[u8] eff [Fail[WErr]] {
+    let entry = l.cx.f.entry;
+    let plugin = l.cx.f.plugin;
+    let sig = l.cx.sig(entry);
+    if sig.gn != 0 {
+        Fail::raise(werr(K_ENTRY, 0, 20));
+    }
+    let mut wit = wit_new();
+    let mut params = ChunkSeq::new[u8]();
+    let mut core_params = ChunkSeq::new[u8]();
+    let mut scalars = ChunkSeq::new[u8]();
+    for i in 0..sig.pn {
+        let p = l.cx.f.param(add(sig.p0, i));
+        if p.pass == P_INOUT {
+            Fail::raise(werr(K_ENTRY, 0, 21));
+        }
+        if i > 0 {
+            text(inout params, in ", ".as_bytes());
+        }
+        params.push(37);
+        ident_sym(in l, p.name, inout params);
+        text(inout params, in ": ".as_bytes());
+        wit.ty(inout l, p.ty, inout params);
+        handle Fail[WErr] in {
+            flatten(inout l, p.ty, inout core_params)
+        } with {
+            return value => value,
+            raise(e, resume) => {
+                if e.kind == K_UNSUPPORTED {
+                    Fail::raise(werr(K_ENTRY, 0, 22));
+                }
+                Fail::raise(e);
+            },
+        };
+        let sh = l.cx.shape(p.ty);
+        if sh.kind == SH_SCALAR {
+            scalars.push(sh.scalar);
+        }
+    }
+    if core_params.len() > 16 {
+        Fail::raise(werr(K_ENTRY, 0, 23));
+    }
+    if plugin && l.plan.host.len() > 0 {
+        Fail::raise(werr(K_ENTRY, 0, 24));
+    }
+    let result = l.cx.default_ty(sig.result);
+    let shape = l.cx.shape(result);
+    let unit = shape.kind == SH_SCALAR && (shape.scalar == SC_UNIT || shape.scalar == SC_NEVER);
+    let mut wit_result = ChunkSeq::new[u8]();
+    if !unit {
+        wit.ty(inout l, result, inout wit_result);
+    }
+    let mut flat: u64 = 0;
+    if !unit {
+        flat = flat_count(inout l, result);
+    }
+    let mut core_result = ChunkSeq::new[u8]();
+    if flat == 0 {} else if shape.kind == SH_SCALAR {
+        core_result.push(core_scalar(shape.scalar));
+    } else if flat == 1 {
+        let (_, _, k) = single_leaf(inout l, result);
+        core_result.push(k);
+    } else {
+        core_result.push(VT_I32);
+    }
+    if plugin {
+        let ok = scalars
+            .len()
+            == 2
+            && k_at(in scalars, 0)
+            == SC_U32
+            && k_at(in scalars, 1)
+            == SC_U64
+            && shape
+            .kind
+            == SH_SCALAR
+            && shape
+            .scalar
+            == SC_I64;
+        if !ok {
+            Fail::raise(werr(K_ENTRY, 0, 25));
+        }
+    }
+    // Wrapper: canonical parameters -> uniform values -> entry -> result.
+    let nparams = core_params.len();
+    let mut locals = ChunkSeq::new[ValTy]();
+    let mut c = code_new();
+    // (No host capability frames: a program with one is not ported yet.)
+    let mut flat_params = ChunkSeq::new[u32]();
+    for i in 0..core_params.len() {
+        let x = temp(inout locals, nparams);
+        c.get(wrapping_u32(i));
+        let k = k_at(in core_params, i);
+        if k == VT_I32 {
+            c.op(OP_I64_EXTEND_I32_U);
+        } else if k == VT_F64 {
+            c.op(OP_I64_REINTERPRET_F64);
+        }
+        c.set(x);
+        flat_params.push(x);
+    }
+    let mut cursor: u64 = 0;
+    let mut args = ChunkSeq::new[u32]();
+    for i in 0..sig.pn {
+        let p = l.cx.f.param(add(sig.p0, i));
+        args
+            .push(
+            lift(inout l, inout c, inout locals, nparams, p.ty, in flat_params, inout cursor)
+        );
+    }
+    for i in 0..args.len() {
+        match args.try_get(i) {
+            Option::Some(a) => c.get(a),
+            Option::None => {},
+        }
+    }
+    let r = temp(inout locals, nparams);
+    c.call(wrapping_sub(get32(in l.funcs, entry), 1));
+    c.set(r);
+    c.global_get(l.abort);
+    c.i64_const(0);
+    c.op(OP_I64_NE);
+    c.open(OP_IF);
+    c.op(OP_UNREACHABLE);
+    c.op(OP_END);
+    if flat == 0 {} else if shape.kind == SH_SCALAR {
+        c.get(r);
+        let k = core_scalar(shape.scalar);
+        if k == VT_I32 {
+            c.op(OP_I32_WRAP_I64);
+        } else if k == VT_F64 {
+            c.op(OP_F64_REINTERPRET_I64);
+        }
+    } else {
+        let (size, _) = size_align(inout l, result);
+        let area = temp(inout locals, nparams);
+        c.i64_const(wrapping_i64(size));
+        c.call(l.alloc);
+        c.set(area);
+        store(inout l, inout c, inout locals, nparams, area, 0, r, result);
+        c.get(area);
+        c.op(OP_I32_WRAP_I64);
+        if flat == 1 {
+            let (op, align, _) = single_leaf(inout l, result);
+            c.mem(op, align, 0);
+        }
+    }
+    c.op(OP_END);
+    let wrapper = l.b.declare(in vts(in core_params), in vts(in core_result));
+    l.b.define(wrapper, in body_each(in locals, in c));
+    if plugin {
+        l.b.export_func(in "run".as_bytes(), wrapper);
+    } else {
+        l.b.export_func(in "vesper:program/entry@0.1.0#main".as_bytes(), wrapper);
+    }
+    let mut src = ChunkSeq::new[u8]();
+    text(inout src, in "package vesper:program@0.1.0;\n\n".as_bytes());
+    if plugin {
+        text(inout src, in "world plugin {\n".as_bytes());
+        text(inout src, in wit.defs.as_slice());
+        text(inout src, in "  export run: func(".as_bytes());
+        text(inout src, in params.as_slice());
+        src.push(41);
+        if !unit {
+            text(inout src, in " -> ".as_bytes());
+            text(inout src, in wit_result.as_slice());
+        }
+        text(inout src, in ";\n}\n".as_bytes());
+        return src;
+    }
+    let mut has_str = false;
+    for i in 0..sig.pn {
+        let p = l.cx.f.param(add(sig.p0, i));
+        if has_string(inout l, p.ty) {
+            has_str = true;
+        }
+    }
+    if has_str {
+        export_realloc(inout l);
+    }
+    let mut run = ChunkSeq::new[u8]();
+    if sig.pn == 0 {
+        // wasi:cli/run: run the entry and report success.
+        let mut rs = ChunkSeq::new[ValTy]();
+        rs.push(vt(VT_I32));
+        let none = ChunkSeq::new[ValTy]();
+        let f = l.b.declare(in none, in rs);
+        let mut rc = code_new();
+        rc.call(wrapper);
+        if core_result.len() == 0 {
+            rc.op(OP_NOP);
+        } else {
+            rc.op(OP_DROP);
+        }
+        rc.i32_const(0);
+        rc.op(OP_END);
+        let counts = ChunkSeq::new[u32]();
+        let types = ChunkSeq::new[ValTy]();
+        l.b.define(f, in function_bytes(in counts, in types, in rc));
+        l.b.export_func(in "wasi:cli/run@0.2.0#run".as_bytes(), f);
+        text(inout run, in "  export wasi:cli/run@0.2.0;\n".as_bytes());
+    }
+    text(inout src, in "interface entry {\n".as_bytes());
+    text(inout src, in wit.defs.as_slice());
+    text(inout src, in "  main: func(".as_bytes());
+    text(inout src, in params.as_slice());
+    src.push(41);
+    if !unit {
+        text(inout src, in " -> ".as_bytes());
+        text(inout src, in wit_result.as_slice());
+    }
+    text(inout src, in ";\n}\n\nworld program {\n".as_bytes());
+    text(inout src, in run.as_slice());
+    text(inout src, in "  export entry;\n}\n".as_bytes());
+    src
+}

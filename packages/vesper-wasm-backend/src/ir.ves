@@ -1,0 +1,885 @@
+// The backend's inputs: the Place IR program (@vesper/place-ir) with a
+// decoded header per function, and the wasm section the harness appends
+// (tests/self_host_wasm_backend.rs `wasm_input`): the options, the world's
+// function and effect signatures, the checker's call type arguments and
+// the facts the backend reads from closure and handler expressions (the
+// pool keeps those expressions on the Rust side).
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+use @vesper/check-data::world::{
+    set_by_symbol
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader
+};
+use @vesper/place-ir::{
+    Program
+};
+
+const NONE32: u32 = 4294967295;
+
+// Pattern kinds (ir_words.rs).
+pub const PAT_WILD: u64 = 0;
+pub const PAT_BIND: u64 = 1;
+pub const PAT_LITERAL: u64 = 2;
+pub const PAT_TUPLE: u64 = 3;
+pub const PAT_CONSTRUCTOR: u64 = 4;
+pub const LIT_STRING: u64 = 3;
+
+pub copy struct GenRow {
+    name: u32,
+    row: bool,
+}
+
+pub copy struct ParamRow {
+    name: u32,
+    pass: u8,
+    ty: u32,
+}
+
+// An effect instance of a row: label (NONE32 when absent), name and
+// arguments `tys[a0..a0+an]`.
+pub copy struct EffInst {
+    label: u32,
+    name: u32,
+    a0: u64,
+    an: u64,
+}
+
+// A function or operation signature.
+pub copy struct Sig {
+    g0: u64,
+    gn: u64,
+    p0: u64,
+    pn: u64,
+    result: u32,
+    e0: u64,
+    en: u64,
+    // the row's tail symbol, or NONE32
+    tail: u32,
+}
+
+pub copy struct EffDecl {
+    name: u32,
+    linear: bool,
+    // generic names: gsyms[g0..g0+gn]
+    g0: u64,
+    gn: u64,
+    // operations: ops[o0..o0+on]
+    o0: u64,
+    on: u64,
+}
+
+pub copy struct OpDecl {
+    name: u32,
+    sig: u64,
+}
+
+// `world.calls[(s0, s1)]`: pairs[v0..v0+vn].
+pub copy struct CallRow {
+    s0: u64,
+    s1: u64,
+    v0: u64,
+    vn: u64,
+}
+
+pub copy struct Pair {
+    name: u32,
+    ty: u32,
+}
+
+// The facts of one pool row. `kind` 0: not an expression; 1: a closure
+// (`fn_` its nested function, `free` its free names less its params);
+// 2: a handler (`free` the handler expression's free names, the rest in
+// `hops[h0..]`, see `read_handler`).
+pub copy struct ExprFact {
+    kind: u64,
+    fn_: u32,
+    f0: u64,
+    fc: u64,
+    h0: u64,
+}
+
+pub struct Facts {
+    plugin: bool,
+    stack_switching: bool,
+    max_pages: u64,
+    max_functions: u64,
+    max_instructions: u64,
+    entry: u32,
+    trace_active: bool,
+    caps: ChunkSeq[u32],
+    sigs: ChunkSeq[Sig],
+    gens: ChunkSeq[GenRow],
+    params: ChunkSeq[ParamRow],
+    effs: ChunkSeq[EffInst],
+    tys: ChunkSeq[u32],
+    // symbol -> sig index + 1
+    fn_sig: ChunkSeq[u32],
+    decls: ChunkSeq[EffDecl],
+    gsyms: ChunkSeq[u32],
+    ops: ChunkSeq[OpDecl],
+    // symbol -> decl index + 1
+    eff_by_sym: ChunkSeq[u32],
+    calls: ChunkSeq[CallRow],
+    pairs: ChunkSeq[Pair],
+    exprs: ChunkSeq[ExprFact],
+    free: ChunkSeq[u32],
+    // handler facts and patterns, names as symbols (pattern format of
+    // ir_words.rs)
+    hops: ChunkSeq[u64],
+}
+
+fn sym(in c: Ctx, x: u64) -> u32 {
+    u32_at(in c.nmap, x)
+}
+
+fn opt_sym(in c: Ctx, x: u64) -> u32 {
+    if x == 0 {
+        NONE32
+    } else {
+        u32_at(in c.nmap, wrapping_sub(x, 1))
+    }
+}
+
+fn tid(in c: Ctx, x: u64) -> u32 {
+    u32_at(in c.tmap, x)
+}
+
+fn read_eff(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> EffInst {
+    let label = opt_sym(in c, r.word(in b));
+    let name = sym(in c, r.word(in b));
+    let an = r.word(in b);
+    let a0 = f.tys.len();
+    for i in 0..an {
+        f.tys.push(tid(in c, r.word(in b)));
+    }
+    EffInst {
+        label: label,
+        name: name,
+        a0: a0,
+        an: an
+    }
+}
+
+fn read_sig(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 {
+    let gn = r.word(in b);
+    let g0 = f.gens.len();
+    for i in 0..gn {
+        let name = sym(in c, r.word(in b));
+        let row = r.word(in b) != 0;
+        f
+            .gens
+            .push(
+            GenRow {
+                name: name,
+                row: row
+            }
+        );
+    }
+    let pn = r.word(in b);
+    let p0 = f.params.len();
+    for i in 0..pn {
+        let name = sym(in c, r.word(in b));
+        let pass = wrapping_u8(r.word(in b));
+        let ty = tid(in c, r.word(in b));
+        f
+            .params
+            .push(
+            ParamRow {
+                name: name,
+                pass: pass,
+                ty: ty
+            }
+        );
+    }
+    let result = tid(in c, r.word(in b));
+    let en = r.word(in b);
+    // instances first, into a scratch list: their arguments go to `tys`
+    let mut row = ChunkSeq::new[EffInst]();
+    for i in 0..en {
+        row.push(read_eff(inout r, in b, in c, inout f));
+    }
+    let e0 = f.effs.len();
+    for i in 0..en {
+        match row.try_get(i) {
+            Option::Some(e) => f.effs.push(e),
+            Option::None => {},
+        }
+    }
+    let tail = opt_sym(in c, r.word(in b));
+    let i = f.sigs.len();
+    f
+        .sigs
+        .push(
+        Sig {
+            g0: g0,
+            gn: gn,
+            p0: p0,
+            pn: pn,
+            result: result,
+            e0: e0,
+            en: en,
+            tail: tail
+        }
+    );
+    i
+}
+
+// A pattern copied into `hops` with its names as symbols.
+fn copy_pattern(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts, depth: u64) {
+    let kind = r.word(in b);
+    f.hops.push(kind);
+    f.hops.push(r.word(in b));
+    f.hops.push(r.word(in b));
+    if depth > 512 {
+        return;
+    }
+    if kind == PAT_BIND {
+        f.hops.push(w(sym(in c, r.word(in b))));
+    } else if kind == PAT_LITERAL {
+        let lk = r.word(in b);
+        f.hops.push(lk);
+        if lk == LIT_STRING {
+            f.hops.push(w(sym(in c, r.word(in b))));
+        } else {
+            f.hops.push(r.word(in b));
+        }
+        f.hops.push(r.word(in b));
+    } else if kind == PAT_TUPLE {
+        let n = r.word(in b);
+        f.hops.push(n);
+        for i in 0..n {
+            copy_pattern(inout r, in b, in c, inout f, inc(depth));
+        }
+    } else if kind == PAT_CONSTRUCTOR {
+        f.hops.push(w(sym(in c, r.word(in b))));
+        f.hops.push(r.word(in b));
+        let n = r.word(in b);
+        f.hops.push(n);
+        for i in 0..n {
+            f.hops.push(w(sym(in c, r.word(in b))));
+            copy_pattern(inout r, in b, in c, inout f, inc(depth));
+        }
+    }
+}
+
+fn copy_names(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) {
+    let n = r.word(in b);
+    f.hops.push(n);
+    for i in 0..n {
+        f.hops.push(w(sym(in c, r.word(in b))));
+    }
+}
+
+// A handler's facts into `hops`: the effect (label + 1 or 0, name, n,
+// argument types), has state, body function, return function, the
+// return clause's patterns (n, patterns) and free names (n, names), then
+// n clauses of (name, function, patterns, free names).
+fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) {
+    let label = r.word(in b);
+    f
+        .hops
+        .push(
+        if label == 0 {
+            0
+        } else {
+            inc(w(sym(in c, wrapping_sub(label, 1))))
+        }
+    );
+    f.hops.push(w(sym(in c, r.word(in b))));
+    let na = r.word(in b);
+    f.hops.push(na);
+    for i in 0..na {
+        f.hops.push(w(tid(in c, r.word(in b))));
+    }
+    f.hops.push(r.word(in b));
+    f.hops.push(w(sym(in c, r.word(in b))));
+    f.hops.push(w(sym(in c, r.word(in b))));
+    let np = r.word(in b);
+    f.hops.push(np);
+    for i in 0..np {
+        copy_pattern(inout r, in b, in c, inout f, 0);
+    }
+    copy_names(inout r, in b, in c, inout f);
+    let nc = r.word(in b);
+    f.hops.push(nc);
+    for k in 0..nc {
+        f.hops.push(w(sym(in c, r.word(in b))));
+        f.hops.push(w(sym(in c, r.word(in b))));
+        let n = r.word(in b);
+        f.hops.push(n);
+        for i in 0..n {
+            copy_pattern(inout r, in b, in c, inout f, 0);
+        }
+        copy_names(inout r, in b, in c, inout f);
+    }
+}
+
+fn read_free(inout r: Reader, in b: Slice[u8], in c: Ctx, inout f: Facts) -> u64 {
+    let n = r.word(in b);
+    for i in 0..n {
+        f.free.push(sym(in c, r.word(in b)));
+    }
+    n
+}
+
+// The wasm section, after `read_program`; `pool` is the program's pool
+// row count.
+pub fn read_facts(inout r: Reader, in b: Slice[u8], in c: Ctx, pool: u64) -> Facts {
+    let mut f = Facts {
+        plugin: false,
+        stack_switching: false,
+        max_pages: 0,
+        max_functions: 0,
+        max_instructions: 0,
+        entry: 0,
+        trace_active: false,
+        caps: ChunkSeq::new[u32](),
+        sigs: ChunkSeq::new[Sig](),
+        gens: ChunkSeq::new[GenRow](),
+        params: ChunkSeq::new[ParamRow](),
+        effs: ChunkSeq::new[EffInst](),
+        tys: ChunkSeq::new[u32](),
+        fn_sig: ChunkSeq::new[u32](),
+        decls: ChunkSeq::new[EffDecl](),
+        gsyms: ChunkSeq::new[u32](),
+        ops: ChunkSeq::new[OpDecl](),
+        eff_by_sym: ChunkSeq::new[u32](),
+        calls: ChunkSeq::new[CallRow](),
+        pairs: ChunkSeq::new[Pair](),
+        exprs: ChunkSeq::new[ExprFact](),
+        free: ChunkSeq::new[u32](),
+        hops: ChunkSeq::new[u64](),
+    };
+    f.plugin = r.word(in b) == 1;
+    f.stack_switching = r.word(in b) != 0;
+    f.max_pages = r.word(in b);
+    f.max_functions = r.word(in b);
+    f.max_instructions = r.word(in b);
+    f.entry = sym(in c, r.word(in b));
+    f.trace_active = r.word(in b) != 0;
+    let ncaps = r.word(in b);
+    for i in 0..ncaps {
+        f.caps.push(sym(in c, r.word(in b)));
+    }
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let name = sym(in c, r.word(in b));
+        let s = read_sig(inout r, in b, in c, inout f);
+        set_by_symbol(inout f.fn_sig, name, n32(inc(s)));
+    }
+    let ne = r.word(in b);
+    for i in 0..ne {
+        let name = sym(in c, r.word(in b));
+        let linear = r.word(in b) != 0;
+        let gn = r.word(in b);
+        let g0 = f.gsyms.len();
+        for k in 0..gn {
+            f.gsyms.push(sym(in c, r.word(in b)));
+        }
+        let on = r.word(in b);
+        // signatures first (they append to the shared tables)
+        let mut names = ChunkSeq::new[u32]();
+        let mut sigs = ChunkSeq::new[u64]();
+        for k in 0..on {
+            names.push(sym(in c, r.word(in b)));
+            sigs.push(read_sig(inout r, in b, in c, inout f));
+        }
+        let o0 = f.ops.len();
+        for k in 0..on {
+            f
+                .ops
+                .push(
+                OpDecl {
+                    name: u32_at(in names, k),
+                    sig: u64_at(in sigs, k)
+                }
+            );
+        }
+        let d = f.decls.len();
+        f
+            .decls
+            .push(
+            EffDecl {
+                name: name,
+                linear: linear,
+                g0: g0,
+                gn: gn,
+                o0: o0,
+                on: on
+            }
+        );
+        set_by_symbol(inout f.eff_by_sym, name, n32(inc(d)));
+    }
+    let ncalls = r.word(in b);
+    for i in 0..ncalls {
+        let s0 = r.word(in b);
+        let s1 = r.word(in b);
+        let k = r.word(in b);
+        let v0 = f.pairs.len();
+        for j in 0..k {
+            let name = sym(in c, r.word(in b));
+            let ty = tid(in c, r.word(in b));
+            f
+                .pairs
+                .push(
+                Pair {
+                    name: name,
+                    ty: ty
+                }
+            );
+        }
+        f
+            .calls
+            .push(
+            CallRow {
+                s0: s0,
+                s1: s1,
+                v0: v0,
+                vn: k
+            }
+        );
+    }
+    for i in 0..pool {
+        let kind = r.word(in b);
+        let mut fact = ExprFact {
+            kind: kind,
+            fn_: 0,
+            f0: f.free.len(),
+            fc: 0,
+            h0: f.hops.len()
+        };
+        if kind == 1 {
+            fact.fn_ = sym(in c, r.word(in b));
+            fact.f0 = f.free.len();
+            fact.fc = read_free(inout r, in b, in c, inout f);
+        } else if kind == 2 {
+            fact.f0 = f.free.len();
+            fact.fc = read_free(inout r, in b, in c, inout f);
+            fact.h0 = f.hops.len();
+            read_handler(inout r, in b, in c, inout f);
+        }
+        f.exprs.push(fact);
+    }
+    f
+}
+
+impl Facts {
+    pub fn sig(in self, i: u64) -> Sig {
+        match self.sigs.try_get(i) {
+            Option::Some(s) => s,
+            Option::None => Sig {
+                g0: 0,
+                gn: 0,
+                p0: 0,
+                pn: 0,
+                result: 0,
+                e0: 0,
+                en: 0,
+                tail: NONE32
+            },
+        }
+    }
+
+    // `world.functions.get(name)`: a sig index + 1, or 0.
+    pub fn fn_sig_of(in self, name: u32) -> u64 {
+        w(u32_at(in self.fn_sig, w(name)))
+    }
+
+    pub fn gen(in self, i: u64) -> GenRow {
+        match self.gens.try_get(i) {
+            Option::Some(g) => g,
+            Option::None => GenRow {
+                name: 0,
+                row: false
+            },
+        }
+    }
+
+    pub fn param(in self, i: u64) -> ParamRow {
+        match self.params.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => ParamRow {
+                name: 0,
+                pass: 0,
+                ty: 0
+            },
+        }
+    }
+
+    pub fn eff(in self, i: u64) -> EffInst {
+        match self.effs.try_get(i) {
+            Option::Some(e) => e,
+            Option::None => EffInst {
+                label: NONE32,
+                name: 0,
+                a0: 0,
+                an: 0
+            },
+        }
+    }
+
+    pub fn ty_at(in self, i: u64) -> u32 {
+        u32_at(in self.tys, i)
+    }
+
+    // `world.effects.get(name)`: a decl index + 1, or 0.
+    pub fn decl_of(in self, name: u32) -> u64 {
+        w(u32_at(in self.eff_by_sym, w(name)))
+    }
+
+    pub fn decl(in self, i: u64) -> EffDecl {
+        match self.decls.try_get(i) {
+            Option::Some(d) => d,
+            Option::None => EffDecl {
+                name: 0,
+                linear: false,
+                g0: 0,
+                gn: 0,
+                o0: 0,
+                on: 0
+            },
+        }
+    }
+
+    pub fn op(in self, i: u64) -> OpDecl {
+        match self.ops.try_get(i) {
+            Option::Some(o) => o,
+            Option::None => OpDecl {
+                name: 0,
+                sig: 0
+            },
+        }
+    }
+
+    pub fn is_capability(in self, name: u32) -> bool {
+        for i in 0..self.caps.len() {
+            if u32_at(in self.caps, i) == name {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The call row of span (s0, s1), or the row count.
+    pub fn call_at(in self, s0: u64, s1: u64) -> u64 {
+        let mut lo: u64 = 0;
+        let mut hi = self.calls.len();
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+            let c = self.call(mid);
+            if c.s0 < s0 || (c.s0 == s0 && c.s1 < s1) {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+        let c = self.call(lo);
+        if lo < self.calls.len() && c.s0 == s0 && c.s1 == s1 {
+            lo
+        } else {
+            self.calls.len()
+        }
+    }
+
+    pub fn call(in self, i: u64) -> CallRow {
+        match self.calls.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => CallRow {
+                s0: 0,
+                s1: 0,
+                v0: 0,
+                vn: 0
+            },
+        }
+    }
+
+    pub fn pair(in self, i: u64) -> Pair {
+        match self.pairs.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => Pair {
+                name: 0,
+                ty: 0
+            },
+        }
+    }
+
+    pub fn expr(in self, i: u64) -> ExprFact {
+        match self.exprs.try_get(i) {
+            Option::Some(e) => e,
+            Option::None => ExprFact {
+                kind: 0,
+                fn_: 0,
+                f0: 0,
+                fc: 0,
+                h0: 0
+            },
+        }
+    }
+
+    pub fn free_at(in self, i: u64) -> u32 {
+        u32_at(in self.free, i)
+    }
+}
+
+// ----- function headers ---------------------------------------------------------
+
+// A function's decoded header (ops of place-ir `FnRow.ha..`): params
+// `fparams[p0..]`, result, effects, locals `flocals[l0..]` (in name order,
+// as the Rust `BTreeMap` iterates), and the value types: `vtys[v0 + id]`
+// for value ids below `vn` (NONE32 where a value has no type).
+pub copy struct FnInfo {
+    name: u32,
+    p0: u64,
+    pn: u64,
+    result: u32,
+    effects: u32,
+    l0: u64,
+    ln: u64,
+    v0: u64,
+    vn: u64,
+}
+
+pub copy struct IrParam {
+    name: u32,
+    pass: u8,
+    ty: u32,
+}
+
+pub copy struct IrLocal {
+    name: u32,
+    ty: u32,
+}
+
+pub struct Ir {
+    p: Program,
+    fns: ChunkSeq[FnInfo],
+    fparams: ChunkSeq[IrParam],
+    flocals: ChunkSeq[IrLocal],
+    vtys: ChunkSeq[u32],
+    // symbol -> function index + 1
+    by_name: ChunkSeq[u32],
+}
+
+fn op_at(in p: Program, i: u64) -> u64 {
+    u64_at(in p.ops, i)
+}
+
+pub fn ir_new(sink p: Program) -> Ir {
+    let mut ir = Ir {
+        p: p,
+        fns: ChunkSeq::new[FnInfo](),
+        fparams: ChunkSeq::new[IrParam](),
+        flocals: ChunkSeq::new[IrLocal](),
+        vtys: ChunkSeq::new[u32](),
+        by_name: ChunkSeq::new[u32](),
+    };
+    for fi in 0..ir.p.fns.len() {
+        let row = ir.p.function(fi);
+        let mut at = row.ha;
+        let np = op_at(in ir.p, at);
+        at = inc(at);
+        let p0 = ir.fparams.len();
+        for i in 0..np {
+            let name = n32(op_at(in ir.p, at));
+            let pass = wrapping_u8(op_at(in ir.p, inc(at)));
+            let k = op_at(in ir.p, add(at, 2));
+            at = add(at, add(3, k));
+            let ty = n32(op_at(in ir.p, at));
+            at = add(at, 3);
+            ir
+                .fparams
+                .push(
+                IrParam {
+                    name: name,
+                    pass: pass,
+                    ty: ty
+                }
+            );
+        }
+        let result = n32(op_at(in ir.p, at));
+        let effects = n32(op_at(in ir.p, inc(at)));
+        at = add(at, 2);
+        let nb = op_at(in ir.p, at);
+        at = add(at, add(1, wrapping_mul(nb, 2)));
+        let nc = op_at(in ir.p, at);
+        at = add(at, add(1, nc));
+        let nv = op_at(in ir.p, at);
+        at = inc(at);
+        // the largest value id fixes the table's size
+        let mut top: u64 = 0;
+        for i in 0..nv {
+            let v = op_at(in ir.p, add(at, wrapping_mul(i, 2)));
+            if inc(v) > top {
+                top = inc(v);
+            }
+        }
+        let v0 = ir.vtys.len();
+        for i in 0..top {
+            ir.vtys.push(NONE32);
+        }
+        for i in 0..nv {
+            let v = op_at(in ir.p, add(at, wrapping_mul(i, 2)));
+            let t = n32(op_at(in ir.p, add(at, inc(wrapping_mul(i, 2)))));
+            let ok = ir.vtys.try_set(add(v0, v), t);
+        }
+        at = add(at, wrapping_mul(nv, 2));
+        let nl = op_at(in ir.p, at);
+        at = inc(at);
+        let l0 = ir.flocals.len();
+        for i in 0..nl {
+            ir
+                .flocals
+                .push(
+                IrLocal {
+                    name: n32(op_at(in ir.p, add(at, wrapping_mul(i, 2)))),
+                    ty: n32(op_at(in ir.p, add(at, inc(wrapping_mul(i, 2)))))
+                }
+            );
+        }
+        ir
+            .fns
+            .push(
+            FnInfo {
+                name: row.name,
+                p0: p0,
+                pn: np,
+                result: result,
+                effects: effects,
+                l0: l0,
+                ln: nl,
+                v0: v0,
+                vn: top
+            }
+        );
+        set_by_symbol(inout ir.by_name, row.name, n32(inc(fi)));
+    }
+    ir
+}
+
+impl Ir {
+    // The function named `name`: an index + 1, or 0.
+    pub fn find(in self, name: u32) -> u64 {
+        w(u32_at(in self.by_name, w(name)))
+    }
+
+    pub fn info(in self, i: u64) -> FnInfo {
+        match self.fns.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => FnInfo {
+                name: 0,
+                p0: 0,
+                pn: 0,
+                result: 0,
+                effects: 0,
+                l0: 0,
+                ln: 0,
+                v0: 0,
+                vn: 0
+            },
+        }
+    }
+
+    pub fn param(in self, i: u64) -> IrParam {
+        match self.fparams.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => IrParam {
+                name: 0,
+                pass: 0,
+                ty: 0
+            },
+        }
+    }
+
+    pub fn local(in self, i: u64) -> IrLocal {
+        match self.flocals.try_get(i) {
+            Option::Some(l) => l,
+            Option::None => IrLocal {
+                name: 0,
+                ty: 0
+            },
+        }
+    }
+
+    // The type of value `v` of function `f`, or NONE32.
+    pub fn value_type(in self, f: FnInfo, v: u64) -> u32 {
+        if v >= f.vn {
+            return NONE32;
+        }
+        u32_at(in self.vtys, add(f.v0, v))
+    }
+
+    // The type of local `name` of function `f`, or NONE32.
+    pub fn local_type(in self, f: FnInfo, name: u32) -> u32 {
+        for i in 0..f.ln {
+            let l = self.local(add(f.l0, i));
+            if l.name == name {
+                return l.ty;
+            }
+        }
+        NONE32
+    }
+
+    pub fn has_local(in self, f: FnInfo, name: u32) -> bool {
+        for i in 0..f.ln {
+            if self.local(add(f.l0, i)).name == name {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn word(in self, i: u64) -> u64 {
+        u64_at(in self.p.ops, i)
+    }
+
+    // Block `k` of function `fi`'s block parameters: (first op, count).
+    pub fn block_params(in self, fi: u64, k: u64) -> (u64, u64) {
+        let row = self.p.function(fi);
+        let b = self.p.block(add(row.b0, k));
+        // entry token, ni, ni x (block, token), outgoing token, np, values
+        let ni = self.word(inc(b.ha));
+        let at = add(add(b.ha, 2), wrapping_mul(ni, 2));
+        let np_at = inc(at);
+        (inc(np_at), self.word(np_at))
+    }
+}
+
+// The index just past the pattern at `ops[at]` (ir_words.rs layout).
+pub fn pattern_end(in ops: ChunkSeq[u64], at: u64, depth: u64) -> u64 {
+    let kind = u64_at(in ops, at);
+    let mut i = add(at, 3);
+    if depth > 512 {
+        return i;
+    }
+    if kind == PAT_BIND {
+        i = inc(i);
+    } else if kind == PAT_LITERAL {
+        i = add(i, 3);
+    } else if kind == PAT_TUPLE {
+        let n = u64_at(in ops, i);
+        i = inc(i);
+        for k in 0..n {
+            i = pattern_end(in ops, i, inc(depth));
+        }
+    } else if kind == PAT_CONSTRUCTOR {
+        let n = u64_at(in ops, add(i, 2));
+        i = add(i, 3);
+        for k in 0..n {
+            i = pattern_end(in ops, inc(i), inc(depth));
+        }
+    }
+    i
+}

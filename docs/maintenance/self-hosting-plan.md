@@ -261,6 +261,15 @@ time divided by Rust time, input decode subtracted).
 |---|---|---|---|--:|---|---|
 | regions, sequences, strings, arrays, tiled, vectors | SH2-9 (#1181) | type and world rules (part 1) | 0 of 282 worlds; E0200, E0792, E0797, E1404, E1501-E1503, E1520 on mutants | 1.12x types, 1.17x world | with the expression rules | [self-host-check-regions-seqs.md](../parallel-results/self-host-check-regions-seqs.md) |
 
+**SH4 backend swaps.** Each row is one backend family swapped into the
+hybrid build through `src/codegen_swap.rs` (#1275). The differential counts
+are against the Rust backend; the times are the swapped part alone (ABBA,
+release) and the hybrid CLI against the default.
+
+| Swap | Lane | Ported so far | Differential | Swapped part alone | Hybrid CLI | Report |
+|---|---|---|---|--:|---|---|
+| `wasm` (`wasm_backend::compile`; wit-component wrapping stays Rust) | SH4-15 (#1289) | all but handlers, host frames and evidence (part 1) | 640 of 1,292 compilations byte-identical, 136 equal errors, 516 declined, 0 differ; hybrid differential 0 of 2,152 runs | 0.27x (0.38x with encoding) | `build --target wasm32-wasip2` 1.51x (debug; declined programs compile twice) | [self-host-wasm-backend.md](../parallel-results/self-host-wasm-backend.md) |
+
 ## Estimates
 
 These are rough. They come from the port waves so far, where one lane ported
