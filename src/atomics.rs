@@ -50,10 +50,10 @@
 //! `0..n` and returns after the last one (fork-join). The workers share
 //! `data` only through an `in` borrow, so the only state they can update
 //! together is an `Atomic` cell inside it; a body that takes `data` by
-//! `inout` (`E0824`), and a body that is not a named function with an empty
-//! effect row (`E0823`), are refused. The scope cannot leak a worker: the
-//! call joins every iteration before it returns, so no worker outlives the
-//! borrow.
+//! `inout` (`E0824`), and a body that is not a named function whose effect
+//! row holds only stateless capabilities (`E0823`, [`worker_row`]), are
+//! refused. The scope cannot leak a worker: the call joins every iteration
+//! before it returns, so no worker outlives the borrow.
 //!
 //! The prelude body is the sequential loop, which is a valid schedule of the
 //! fork-join call, so the evaluator, executables and the verified backend's
@@ -353,7 +353,7 @@ pub fn needs_workers(module: &Module) -> bool {
 /// loop. It takes a function value, so native code specializes it into its
 /// callers, and the JIT intercepts the call before that ([`workers`]).
 pub const WORKERS_PRELUDE: &str = "\
-fn parallel_for[A](in data: A, n: u64, body: fn @copy(in A, u64)) {
+fn parallel_for[A, e: eff](in data: A, n: u64, body: fn @copy(in A, u64) eff [e]) eff [e] {
     for i in 0..n { body(in data, i); }
 }
 ";
@@ -484,17 +484,33 @@ pub fn check_world(world: &World) -> Vec<Diagnostic> {
     out
 }
 
+/// Whether an effect row may run on a `parallel_for` worker (§15.4): it is
+/// closed and holds only stateless capabilities, which need no handler,
+/// capture or per-caller state: the built-in capability effects
+/// (`Realtime`, `ConstTime`, ...), foreign libraries (`Ffi[Lib]`; the
+/// Bridge frontend refuses isolated ones) and an `Alloc` declared without
+/// operations. The empty row is one.
+pub fn worker_row(world: &World, effects: &Effects) -> bool {
+    effects.tail.is_none()
+        && effects.instances.iter().all(|e| {
+            e.label.is_none()
+                && (crate::capability_effects::is_capability_effect(&e.name)
+                    || crate::ffi_lowering::is_foreign_effect(&e.name)
+                    || (e.name == crate::fip::ALLOC_EFFECT
+                        && world.effects.get(&e.name).is_some_and(|d| d.ops.is_empty())))
+        })
+}
+
 /// The named function a `parallel_for` call runs on its workers, if `body`
-/// is one the JIT can hand to the pool: a top-level, non-generic function
-/// with an empty effect row (`E0823` otherwise).
+/// is one the pool can run: a top-level, non-generic function whose effect
+/// row is a [`worker_row`] (`E0823` otherwise).
 pub fn worker_body<'w>(world: &'w World, body: &Expr) -> Option<&'w Function> {
     let ExprKind::Name(n) = &body.kind else {
         return None;
     };
     world.functions.get(n).filter(|f| {
         f.generics.is_empty()
-            && f.effects.instances.is_empty()
-            && f.effects.tail.is_none()
+            && worker_row(world, &f.effects)
             && !is_prelude_function(world, &f.name)
     })
 }
@@ -586,8 +602,35 @@ pub fn thread_affine(world: &World, body: &str, data: &Type) -> bool {
     false
 }
 
+/// Every `parallel_for` body the program names, with the span of the body
+/// argument: the Bridge frontend refuses bodies that reach an isolated
+/// library ([`worker_row`]).
+pub fn worker_bodies(world: &World) -> Vec<(Span, String)> {
+    let mut out = vec![];
+    if !world.workers_prelude {
+        return out;
+    }
+    for f in world.functions.values() {
+        if is_prelude_function(world, &f.name) {
+            continue;
+        }
+        if let Some(body) = &f.body {
+            walk(body, &mut |e| {
+                if let ExprKind::Call { callee, args, .. } = &e.kind
+                    && matches!(&callee.kind, ExprKind::Name(n) if n == PARALLEL_FOR)
+                    && args.len() == 3
+                    && let ExprKind::Name(n) = &args[2].expr.kind
+                {
+                    out.push((args[2].expr.span.clone(), n.clone()));
+                }
+            });
+        }
+    }
+    out
+}
+
 /// The scoped-worker rules (module docs): workers share `data` only by
-/// `in`, and each body is a named function with an empty effect row.
+/// `in`, and each body is a named function with a worker row.
 fn check_workers(world: &World, e: &Expr, out: &mut Vec<Diagnostic>) {
     let ExprKind::Call { callee, args, .. } = &e.kind else {
         return;
@@ -627,11 +670,13 @@ fn check_workers(world: &World, e: &Expr, out: &mut Vec<Diagnostic>) {
         out.push(
             diagnostic(
                 "E0823",
-                "the body of 'parallel_for' must be a named function with an empty effect row"
+                "the body of 'parallel_for' must be a named function whose effects need no handler"
                     .into(),
                 &body.span,
             )
-            .with_help("declare `fn body(in data: A, i: u64)` and pass `body`"),
+            .with_help(
+                "declare `fn body(in data: A, i: u64)` whose row holds only `Ffi[Lib]`, `Alloc` or capability effects, and pass `body`",
+            ),
         );
     }
 }
