@@ -38,4 +38,5 @@ sys library Crypto (
     fn vcr_mlkem768_encaps(isa: u32, nocapture in ek: CSlice[u8], nocapture in m: CSlice[u8], nocapture inout ct: CSlice[u8], nocapture inout ss: CSlice[u8]) -> ForeignVal[u32];
     fn vcr_mlkem768_decaps(isa: u32, nocapture in dk: CSlice[u8], nocapture in ct: CSlice[u8], nocapture inout ss: CSlice[u8]) -> ForeignVal[u32];
     fn vcr_ecdsa_verify(alg: u32, nocapture in public: CSlice[u8], nocapture in msg: CSlice[u8], nocapture in sig: CSlice[u8]) -> ForeignVal[u32];
+    fn vcr_rsa_verify(alg: u32, nocapture in public: CSlice[u8], nocapture in msg: CSlice[u8], nocapture in sig: CSlice[u8]) -> ForeignVal[u32];
 }

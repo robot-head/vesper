@@ -670,3 +670,52 @@ fn symbols_cover_every_call() {
         "symbols() and crypto.vsys list the same calls in order"
     );
 }
+
+/// RSA PSS and PKCS #1 v1.5 against ring signatures made with a throwaway
+/// 2048-bit test key (tests/fixtures/rsa2048.pk8, PKCS #8 DER, made with
+/// `openssl genrsa -traditional 2048 | openssl pkcs8 -topk8 -nocrypt -outform der`).
+#[test]
+fn rsa_verifies_ring_signatures() {
+    use ring::rand::SystemRandom;
+    use ring::signature::{self, KeyPair, RsaKeyPair};
+    let kp = RsaKeyPair::from_pkcs8(include_bytes!("fixtures/rsa2048.pk8")).unwrap();
+    let rng = SystemRandom::new();
+    let pk = kp.public_key().as_ref();
+    let msg = b"tuf root metadata";
+    let pads: [(&'static dyn signature::RsaEncoding, u32); 6] = [
+        (&signature::RSA_PSS_SHA256, rsa::PSS_SHA256),
+        (&signature::RSA_PSS_SHA384, rsa::PSS_SHA384),
+        (&signature::RSA_PSS_SHA512, rsa::PSS_SHA512),
+        (&signature::RSA_PKCS1_SHA256, rsa::PKCS1_SHA256),
+        (&signature::RSA_PKCS1_SHA384, rsa::PKCS1_SHA384),
+        (&signature::RSA_PKCS1_SHA512, rsa::PKCS1_SHA512),
+    ];
+    for (pad, alg) in pads {
+        let mut sig = vec![0u8; kp.public().modulus_len()];
+        kp.sign(pad, &rng, msg, &mut sig).unwrap();
+        let v = |a: u32, m: &[u8]| unsafe {
+            vcr_rsa_verify(
+                a,
+                pk.as_ptr(),
+                pk.len(),
+                m.as_ptr(),
+                m.len(),
+                sig.as_ptr(),
+                sig.len(),
+            )
+        };
+        assert_eq!(v(alg, msg), OK, "alg {alg}");
+        assert_eq!(v(alg, b"tuf root metadatb"), AUTH, "alg {alg}");
+        // A PSS signature is not a PKCS #1 one, and back.
+        let other = if alg <= rsa::PSS_SHA512 {
+            alg + 3
+        } else {
+            alg - 3
+        };
+        assert_eq!(v(other, msg), AUTH, "alg {alg} as {other}");
+    }
+    assert_eq!(
+        unsafe { vcr_rsa_verify(9, [].as_ptr(), 0, [].as_ptr(), 0, [].as_ptr(), 0) },
+        UNSUPPORTED
+    );
+}

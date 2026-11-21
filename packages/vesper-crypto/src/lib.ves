@@ -39,6 +39,7 @@
 // |     fn vcr_mlkem768_encaps(isa: u32, nocapture in ek: CSlice[u8], nocapture in m: CSlice[u8], nocapture inout ct: CSlice[u8], nocapture inout ss: CSlice[u8]) -> ForeignVal[u32];
 // |     fn vcr_mlkem768_decaps(isa: u32, nocapture in dk: CSlice[u8], nocapture in ct: CSlice[u8], nocapture inout ss: CSlice[u8]) -> ForeignVal[u32];
 // |     fn vcr_ecdsa_verify(alg: u32, nocapture in public: CSlice[u8], nocapture in msg: CSlice[u8], nocapture in sig: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_rsa_verify(alg: u32, nocapture in public: CSlice[u8], nocapture in msg: CSlice[u8], nocapture in sig: CSlice[u8]) -> ForeignVal[u32];
 // | }
 //
 // @vesper/crypto: the one door to vetted cryptography (Rust-exit SH6 lane
@@ -96,6 +97,16 @@ pub enum EcdsaAlg: _ {
     P384Sha384Fixed = 2,
     P256Sha256Asn1 = 3,
     P384Sha384Asn1 = 4
+}
+
+// RSA verification algorithm codes (ring's, 2048-8192-bit moduli).
+pub enum RsaAlg: _ {
+    PssSha256 = 1,
+    PssSha384 = 2,
+    PssSha512 = 3,
+    Pkcs1Sha256 = 4,
+    Pkcs1Sha384 = 5,
+    Pkcs1Sha512 = 6
 }
 
 // Sizes every caller needs.
@@ -416,11 +427,18 @@ pub fn mlkem768_decaps(isa: u32, in dk: Slice[u8], in ct: Slice[u8], inout ss: S
 }
 
 // ---------------------------------------------------------------------------
-// ECDSA verification.
+// ECDSA and RSA verification.
 
 // Whether `sig` is a valid ECDSA signature of `msg` under the uncompressed
 // SEC1 point `public`, for an `EcdsaAlg` code.
 pub fn ecdsa_verify(alg: u32, in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
     -> bool eff [Ffi[Crypto]] {
     Crypto::vcr_ecdsa_verify(alg, in public, in msg, in sig) == 0
+}
+
+// Whether `sig` is a valid RSA signature of `msg` under the DER
+// `RSAPublicKey` (PKCS #1) `public`, for an `RsaAlg` code.
+pub fn rsa_verify(alg: u32, in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    Crypto::vcr_rsa_verify(alg, in public, in msg, in sig) == 0
 }

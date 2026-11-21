@@ -9,7 +9,7 @@ Base: `main` at `ab965f2a`.
 ### What changed
 
 - **`crates/vesper-crypto-sys`** (new): the one C-ABI shim over vetted
-  cryptography. 32 `vcr_*` calls, each a direct call into one library,
+  cryptography. 33 `vcr_*` calls, each a direct call into one library,
   with no logic beyond length checks:
 
   | Family | Calls | Library |
@@ -21,6 +21,7 @@ Base: `main` at `ab965f2a`.
   | Ed25519 | `ed25519_public/sign/verify` (strict) | `ed25519-dalek` |
   | ML-KEM-768 | `mlkem768_isa_available/keygen/validate/encaps/decaps` (portable, AVX2, NEON) | `libcrux-ml-kem` |
   | ECDSA P-256/P-384 verification (fixed and ASN.1) | `ecdsa_verify` | `ring` |
+| RSA PSS and PKCS #1 v1.5 verification, SHA-256/384/512, 2048-8192 bits (for `vesper-loom-tuf`, lane 16) | `rsa_verify` | `ring` |
   | Randomness, constant-time equality, zeroization | `random`, `ct_eq`, `zeroize` | `getrandom`, `subtle`, `zeroize` |
 
   The design follows `vesper-cranelift-sys`: three linear handles (`Aead`,
@@ -36,11 +37,11 @@ Base: `main` at `ab965f2a`.
   shim's status. The first protocol logic lives here in Vesper: TLS 1.3
   `HkdfLabel` and `HKDF-Expand-Label` (RFC 8446 §7.1), which Warp's QUIC
   key schedule and the TLS session both need.
-- **Tests.** `crates/vesper-crypto-sys/tests/vectors.rs` (15 tests):
+- **Tests.** `crates/vesper-crypto-sys/tests/vectors.rs` (16 tests):
   known answers for every call (FIPS 180-4, FIPS 197, the GCM spec, RFC
   4231, 5869, 7748, 8032, 8439, 9001), ML-KEM on every backend this CPU
   runs (identical bytes across backends, implicit rejection, the modulus
-  check), ECDSA against ring signatures, the status and no-write rules,
+  check), ECDSA and RSA against ring signatures, the status and no-write rules,
   leak counts, and `symbols()` against `crypto.vsys`.
   `tests/crypto_shim.rs` (2 tests): a driver package that depends on
   `@vesper/crypto` runs every wrapper in the JIT bound to the shim on the
@@ -53,7 +54,7 @@ Base: `main` at `ab965f2a`.
 
 | | Lines | Non-comment, non-blank |
 |---|--:|--:|
-| `crates/vesper-crypto-sys/src/lib.rs` | 1,086 | 845 |
+| `crates/vesper-crypto-sys/src/lib.rs` | 1,137 | 888 |
 
 That is inside the plan's 1-2k estimate. TLS 1.3 (rustls) and X.509 path
 validation (webpki) are not in the shim yet; they come with the
@@ -105,4 +106,8 @@ without the owner.
 4. `vesper-warp-tls`: a TLS 1.3 session behind the shim (rustls's QUIC
    API as linear handles) and the session layer (transport parameters,
    reassembly, configuration) in Vesper.
-5. The census row in `scripts/rust-census.py` once plan PR #1415 lands.
+5. One shared BLAKE3 C-library package (the official C implementation
+   behind `.vsys`) and the build support for compiling C sources into a
+   port, for lanes 12 (`vesper-loom-audit`) and 16 (asked by the
+   coordinator from lane 16's audit, #1421).
+6. The census row in `scripts/rust-census.py` once plan PR #1415 lands.

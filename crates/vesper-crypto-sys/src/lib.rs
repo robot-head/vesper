@@ -13,7 +13,7 @@
 //! | X25519 | `x25519-dalek` |
 //! | Ed25519 (strict verification) | `ed25519-dalek` |
 //! | ML-KEM-768 (FIPS 203) | Cryspen `libcrux-ml-kem` (portable, AVX2, NEON) |
-//! | ECDSA P-256/P-384 verification | `ring` |
+//! | ECDSA P-256/P-384, RSA PSS and PKCS #1 v1.5 verification | `ring` |
 //! | Operating-system randomness | `getrandom` |
 //! | Constant-time equality, zeroization | `subtle`, `zeroize` |
 //!
@@ -94,6 +94,17 @@ pub mod ecdsa {
     pub const P384_SHA384_FIXED: u32 = 2;
     pub const P256_SHA256_ASN1: u32 = 3;
     pub const P384_SHA384_ASN1: u32 = 4;
+}
+
+/// RSA verification algorithm codes (ring's algorithms of the same name,
+/// 2048-8192-bit moduli).
+pub mod rsa {
+    pub const PSS_SHA256: u32 = 1;
+    pub const PSS_SHA384: u32 = 2;
+    pub const PSS_SHA512: u32 = 3;
+    pub const PKCS1_SHA256: u32 = 4;
+    pub const PKCS1_SHA384: u32 = 5;
+    pub const PKCS1_SHA512: u32 = 6;
 }
 
 /// The AEAD tag length of every supported algorithm.
@@ -1043,6 +1054,45 @@ pub unsafe extern "C" fn vcr_ecdsa_verify(
     })
 }
 
+/// Verifies an RSA signature over `msg` with a DER `RSAPublicKey`
+/// (PKCS #1), using ring's algorithm `alg` ([`rsa`] codes). [`AUTH`] for a
+/// bad key or signature.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcr_rsa_verify(
+    alg: u32,
+    public: *const u8,
+    public_len: usize,
+    msg: *const u8,
+    msg_len: usize,
+    sig: *const u8,
+    sig_len: usize,
+) -> u32 {
+    // SAFETY: the `.vsys` contract.
+    let (pk, msg, sig) = unsafe {
+        (
+            slice(public, public_len),
+            slice(msg, msg_len),
+            slice(sig, sig_len),
+        )
+    };
+    guard(|| {
+        use ring::signature as s;
+        let a: &'static dyn s::VerificationAlgorithm = match alg {
+            rsa::PSS_SHA256 => &s::RSA_PSS_2048_8192_SHA256,
+            rsa::PSS_SHA384 => &s::RSA_PSS_2048_8192_SHA384,
+            rsa::PSS_SHA512 => &s::RSA_PSS_2048_8192_SHA512,
+            rsa::PKCS1_SHA256 => &s::RSA_PKCS1_2048_8192_SHA256,
+            rsa::PKCS1_SHA384 => &s::RSA_PKCS1_2048_8192_SHA384,
+            rsa::PKCS1_SHA512 => &s::RSA_PKCS1_2048_8192_SHA512,
+            _ => return UNSUPPORTED,
+        };
+        match s::UnparsedPublicKey::new(a, pk).verify(msg, sig) {
+            Ok(()) => OK,
+            Err(_) => AUTH,
+        }
+    })
+}
+
 /// Every `vcr_*` symbol with its address, for hosts that bind the `.vsys`
 /// library `Crypto` without a linker (the JIT tests).
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
@@ -1082,5 +1132,6 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("vcr_mlkem768_encaps", vcr_mlkem768_encaps as *const u8),
         ("vcr_mlkem768_decaps", vcr_mlkem768_decaps as *const u8),
         ("vcr_ecdsa_verify", vcr_ecdsa_verify as *const u8),
+        ("vcr_rsa_verify", vcr_rsa_verify as *const u8),
     ]
 }
