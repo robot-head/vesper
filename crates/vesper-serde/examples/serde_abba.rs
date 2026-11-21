@@ -155,7 +155,12 @@ fn workload(name: &str) -> Box<dyn FnMut() -> usize> {
             // A mixed document: objects of strings (with escapes and
             // non-ASCII), integers, floats, booleans, null and nested arrays.
             let texts: Vec<String> = (0..2_000)
-                .map(|i| format!("user \"{i}\" \u{fc}n\u{ef}c\u{f8}d\u{e9}\n{}", "lorem ipsum ".repeat(1 + i % 4)))
+                .map(|i| {
+                    format!(
+                        "user \"{i}\" \u{fc}n\u{ef}c\u{f8}d\u{e9}\n{}",
+                        "lorem ipsum ".repeat(1 + i % 4)
+                    )
+                })
                 .collect();
             let texts: &'static [String] = texts.leak();
             let leaf: &'static [Value<'static>] =
