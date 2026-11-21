@@ -1538,10 +1538,7 @@ pub mod plan_probe {
         /// `types::Generated::append` onto an empty module: pass 1 with
         /// `instances: None`, pass 2 with the slice-length vectors used per
         /// (library, symbol).
-        pub fn declarations(
-            &self,
-            instances: Option<&SliceInstances>,
-        ) -> Vec<Item> {
+        pub fn declarations(&self, instances: Option<&SliceInstances>) -> Vec<Item> {
             let mut module = Module::default();
             self.0.append(&mut module, instances);
             module.items
