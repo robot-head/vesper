@@ -190,6 +190,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH3 lane 10 (#1249): the optimizer's certificate
+        # checker over every proposal of the same corpus. Anchored globs.
+        "test/self_host_optimize": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -511,6 +518,8 @@ vesper_crate(
         "test/self_host_check_names_packages": "long",
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
+        # The optimizer differential (#1249) checks every corpus world.
+        "test/self_host_optimize": "long",
     },
 )
 

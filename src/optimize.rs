@@ -67,6 +67,34 @@ fn rules() -> Vec<Rewrite<Math, ()>> {
         rewrite!("wself-sub";"(wrapping_sub ?x ?x)"=>"0" if total("?x")),
     ]
 }
+/// This module as a function table: the swap-in point for the hybrid Stage 2
+/// build (`crates/vesper-hybrid`, self-hosting SH3 lane 10, #1249), which
+/// installs `@vesper/optimize`'s functions here before the CLI starts.
+/// Nothing in the default compiler installs a table, so it always runs the
+/// Rust code below, unchanged.
+#[derive(Debug, Clone, Copy)]
+pub struct OptimizeTable {
+    /// The install gate: checks a proposal's certificate against the exact
+    /// source and candidate, continuing the producer's budget (`limits`,
+    /// already `spent`). [`witness::verify_spent`] is the Rust one.
+    pub verify: fn(
+        source: &Expr,
+        candidate: &Expr,
+        types: &TypeMap,
+        certificate: &witness::RewriteCertificate,
+        limits: WitnessLimits,
+        spent: &mut witness::Spent,
+    ) -> Result<(), WitnessError>,
+}
+
+static OPTIMIZE: std::sync::OnceLock<OptimizeTable> = std::sync::OnceLock::new();
+
+/// Replace the Rust install gate for the rest of the process. Only the first
+/// call takes effect; a later one returns its table back.
+pub fn install_optimize(table: OptimizeTable) -> Result<(), OptimizeTable> {
+    OPTIMIZE.set(table)
+}
+
 // This is the only expression-installation seam. The producer is untrusted:
 // verify the exact source/candidate and every proof with its cumulative budget.
 fn install_proposal(
@@ -74,13 +102,25 @@ fn install_proposal(
     types: &TypeMap,
     mut proposal: Box<RewriteProposal>,
 ) -> Result<(), WitnessError> {
-    witness::verify_with_budget(
-        expression,
-        &proposal.candidate,
-        types,
-        &proposal.certificate,
-        &mut proposal.budget,
-    )?;
+    if let Some(table) = OPTIMIZE.get() {
+        let mut spent = proposal.budget.spent();
+        (table.verify)(
+            expression,
+            &proposal.candidate,
+            types,
+            &proposal.certificate,
+            proposal.budget.limits(),
+            &mut spent,
+        )?;
+    } else {
+        witness::verify_with_budget(
+            expression,
+            &proposal.candidate,
+            types,
+            &proposal.certificate,
+            &mut proposal.budget,
+        )?;
+    }
     *expression = proposal.candidate;
     Ok(())
 }
