@@ -261,6 +261,14 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 15 (#1338): @vesper/doc against the Rust doc
+        # renderers; the package reads JSON through @vesper/serde.
+        "test/self_host_doc": glob([
+            "bootstrap/corpus/**",
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["//crates/vesper-serde:port_package"],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -600,6 +608,8 @@ vesper_crate(
         # The capability-effect differential (#1180): corpus, fixtures, mutants.
         "test/self_host_check_effects": "long",
         "test/self_host_check_fip": "long",
+        # The doc differential (#1338) documents every corpus file twice.
+        "test/self_host_doc": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
     },
@@ -689,6 +699,14 @@ vesper_package(
     manifest = "packages/vesper-check-layout/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+vesper_package(
+    name = "doc_package",
+    srcs = glob(["packages/vesper-doc/src/**/*.ves"]),
+    manifest = "packages/vesper-doc/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//crates/vesper-serde:port_package"],
 )
 
 vesper_package(

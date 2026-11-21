@@ -12,6 +12,7 @@ pub mod links;
 pub mod modes;
 pub mod package;
 pub mod sim;
+pub mod swap;
 pub mod visual;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -818,6 +819,40 @@ pub fn render_document_html(
             return Err("link display differs from retained source bytes".into());
         }
     }
+    if let Some(table) = swap::table() {
+        let compact = swap::compact(report)?;
+        let targets: Vec<(String, &str)> = targets
+            .iter()
+            .map(|t| (links::anchor_id(t.kind, &t.path), t.path.as_str()))
+            .collect();
+        let comments: Vec<swap::LinkedComment<'_>> = document
+            .doc_comments
+            .iter()
+            .map(|c| swap::LinkedComment {
+                text: &c.text,
+                start: c.span.end - c.text.len(),
+                end: c.span.end,
+            })
+            .collect();
+        let references: Vec<swap::LinkedReference<'_>> = document
+            .intra_doc_links
+            .references
+            .iter()
+            .map(|r| swap::LinkedReference {
+                start: r.span.start,
+                end: r.span.end,
+                anchor: &r.anchor,
+            })
+            .collect();
+        let request = swap::linked_request(
+            limits.max_output_bytes,
+            &compact,
+            &targets,
+            &comments,
+            &references,
+        );
+        return swap::decode((table.linked_page)(&request));
+    }
     let legacy = render_html(report, limits)?;
     let suffix = b"</html>\n";
     let prefix = legacy
@@ -892,6 +927,10 @@ pub fn render_document_html(
 }
 pub fn render_html(value: &impl Serialize, limits: Limits) -> Result<Vec<u8>, String> {
     limits.validate()?;
+    if let Some(table) = swap::table() {
+        let request = swap::pretty_request(&swap::compact(value)?, limits.max_output_bytes);
+        return swap::decode((table.static_page)(&request));
+    }
     let json = to_json(value, limits.max_output_bytes)?;
     let mut output = Bounded {
         bytes: Vec::new(),
@@ -998,6 +1037,10 @@ impl Write for Bounded {
     }
 }
 pub fn to_json(value: &impl Serialize, max_bytes: usize) -> Result<Vec<u8>, String> {
+    if let Some(table) = swap::table() {
+        let request = swap::pretty_request(&swap::compact(value)?, max_bytes);
+        return swap::decode((table.pretty_json)(&request));
+    }
     let mut output = Bounded {
         bytes: Vec::new(),
         limit: max_bytes,

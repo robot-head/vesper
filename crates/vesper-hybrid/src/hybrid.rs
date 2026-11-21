@@ -30,6 +30,11 @@ mod check_layout_binding;
 #[path = "../port/ir_check.rs"]
 mod ir_check_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/doc.rs"]
+mod doc_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -46,6 +51,8 @@ static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs checked by the Vesper IR-check module.
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
+/// JSON texts and pages rendered by the Vesper doc module.
+static DOC_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -111,6 +118,23 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
     },
 };
 
+/// `vesper_doc::swap::RenderTable` from `modules/doc`: the JSON writer and
+/// the static and linked pages of `@vesper/doc`.
+const VESPER_DOC: vesper_doc::swap::RenderTable = vesper_doc::swap::RenderTable {
+    pretty_json: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_pretty_json(request)
+    },
+    static_page: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_static_page(request)
+    },
+    linked_page: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_linked_page(request)
+    },
+};
+
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
     if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
@@ -123,6 +147,12 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
+        std::process::abort();
+    }
+    // The request layout the Rust encoder writes must be the module's.
+    if doc_binding::doc_format() != vesper_doc::swap::FORMAT
+        || vesper_doc::swap::install_render(VESPER_DOC).is_err()
+    {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
@@ -151,6 +181,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-check answered {} calls from Vesper",
         IR_CHECK_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: doc answered {} calls from Vesper",
+        DOC_CALLS.load(Relaxed)
     );
 }
 

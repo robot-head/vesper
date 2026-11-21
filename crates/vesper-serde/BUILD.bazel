@@ -10,6 +10,8 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    # @vesper/doc reads JSON through this package's tape (#1338).
+    visibility = ["//visibility:public"],
 )
 
 vesper_port_object(
