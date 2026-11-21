@@ -5764,6 +5764,8 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "vesper-beacon",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "zstd 0.13.4",
 ]
 
