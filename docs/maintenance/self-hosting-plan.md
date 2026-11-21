@@ -263,6 +263,14 @@ time divided by Rust time, input decode subtracted).
 | regions, sequences, strings, arrays, tiled, vectors | SH2-9 (#1181) | type and world rules (part 1) | 0 of 282 worlds; E0200, E0792, E0797, E1404, E1501-E1503, E1520 on mutants | 1.12x types, 1.17x world | with the expression rules | [self-host-check-regions-seqs.md](../parallel-results/self-host-check-regions-seqs.md) |
 | loops (control rules, `?` on `Option`), atomics, stack bound | SH2-10 (#1182) | control frames (E0213, E0200), atomics (E0820-E0824, preludes), stack bound | 0 of 903 control worlds, 535 atomics worlds, 4,000 call graphs | atomics 2.31x, stack bound 2.54x (decode included); control pass 80 ms over the corpus | not yet (follow-up) | [self-host-check-loops-atomics.md](../parallel-results/self-host-check-loops-atomics.md) |
 
+**SH4 backend ports.** Each row is one backend port. Until its swap into the
+hybrid build lands, the numbers are the port alone against the Rust code it
+replaces (ABBA, port-compiler profile, Vesper time divided by Rust time).
+
+| Port | Lane | Ported so far | Differential | Port alone | Hybrid swap | Report |
+|---|---|---|---|--:|---|---|
+| eBPF backend (`ebpf_backend` surface + lowering + assembler; stack bound with lane 17) | SH4-16 (#1290) | part 1: surface, lowering, assembler | 0 of 243 cases (137 accepted, ELF objects equal) and 0 of 292 corpus worlds | 3.61x backend alone; 0.93x with the verifier model, 1.10x with encoding | after SH4-1 | [self-host-ebpf-backend.md](../parallel-results/self-host-ebpf-backend.md) |
+
 ## Estimates
 
 These are rough. They come from the port waves so far, where one lane ported

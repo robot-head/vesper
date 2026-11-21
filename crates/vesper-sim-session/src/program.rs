@@ -1,4 +1,5 @@
 //! Parsed and checked source owned independently of every session borrowing it.
+#[cfg(not(feature = "vesper-port"))]
 use sha2::{Digest, Sha256};
 use vesper::{check, check::World, parser};
 
@@ -57,6 +58,15 @@ impl CheckedProgram {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    crate::port::sha256(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[cfg(not(feature = "vesper-port"))]
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()

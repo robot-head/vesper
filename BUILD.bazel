@@ -240,6 +240,14 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 16 (#1290): @vesper/ebpf-backend against src/ebpf_backend
+        # over the eBPF fixtures and the corpus; the package depends on the
+        # @vesper/ebpf port in crates/vesper-ebpf/vesper.
+        "test/self_host_ebpf_backend": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["//crates/vesper-ebpf:files"],
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -323,6 +331,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 18 (#1341): @vesper/lean-extract against
+        # lean::extract on the same corpus; it imports @vesper/lean-syntax.
+        "test/self_host_lean_extract": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["//crates/vesper-lean-syntax:files"],
         # Self-hosting SH3 lane 8 (#1247): @vesper/egraph against egg and
         # egglog on the same corpus. Anchored globs.
         "test/self_host_egraph": glob([
@@ -337,6 +352,20 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 5 (#1279): the native optimizer policy against
+        # ir_opt::optimize on the same corpus. Anchored globs.
+        "test/optimizer_budget": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH5 lane 8 (#1331): memoized World::mode against the original on
+        # every corpus world. Anchored globs.
+        "test/world_mode_speed": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -344,6 +373,8 @@ vesper_crate(
         "test/std_process": [":files"],
         # .vsys imports carried by packages (#1150): drivers over @vesper-std/fs.
         "test/vsys_packages": [":files"],
+        # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
+        "test/vsys_package_imports": ["//packages/vesper-cranelift:files"],
         # @vesper-std graph, intern, arena and hash (#1127) as a driver's dependencies.
         "test/std_arena": [":files"],
         "test/std_graph": [":files"],
@@ -665,6 +696,8 @@ vesper_crate(
         "test/self_host_place_ir": "eternal",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
+        # The eBPF backend differential (#1290) loads every corpus world.
+        "test/self_host_ebpf_backend": "long",
         "test/self_host_check_harness": "long",
         "test/self_host_check_loops_atomics": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
@@ -686,8 +719,14 @@ vesper_crate(
         "test/self_host_check_fip": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
+        # The Lean head differential (#1341) checks every corpus world.
+        "test/self_host_lean_extract": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "eternal",
+        # The optimizer policy (#1279) optimizes every corpus world three times.
+        "test/optimizer_budget": "long",
+        # World::mode (#1331) answers every corpus query three times.
+        "test/world_mode_speed": "long",
     },
 )
 

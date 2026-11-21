@@ -27,6 +27,8 @@ mod literal_typing;
 mod loop_rules;
 #[path = "loops/try_option.rs"]
 mod try_option;
+#[path = "check/world_mode.rs"]
+mod world_mode;
 
 const TRY_OPERAND: &str = "'?' requires Result[T, E], or Option[T] in a function returning Option";
 #[path = "seq/check.rs"]
@@ -76,6 +78,9 @@ pub struct World {
     /// Second-class trait objects: `dyn` parameters, vtable stubs and the
     /// vtables the program needs (empty without `dyn`; §7.1).
     pub dyn_objects: crate::dyn_trait::DynObjects,
+    /// Memoized ADT expansions of [`World::mode`]. A clone starts empty and
+    /// it never makes two worlds unequal.
+    pub mode_cache: world_mode::ModeCache,
 }
 impl World {
     pub fn collect(module: &Module) -> (Self, Vec<Diagnostic>) {
@@ -276,85 +281,27 @@ impl World {
                 .map(|v| (a, v))
         })
     }
+    /// The mode of `ty` in this world, with `bounds` giving the modes of
+    /// type parameters. ADT expansions are memoized per world
+    /// ([`world_mode`]); the answer is the original algorithm's
+    /// ([`world_mode::reference`]).
     pub fn mode(&self, ty: &Type, bounds: &BTreeMap<String, Mode>) -> Mode {
-        fn visit(
-            w: &World,
-            ty: &Type,
-            bounds: &BTreeMap<String, Mode>,
-            seen: &mut BTreeSet<String>,
-        ) -> Mode {
-            match ty {
-                Type::Infer | Type::IntLiteral(_) => Mode::Copy,
-                Type::Row(_) => Mode::Copy,
-                Type::Tuple(ts) => ts
-                    .iter()
-                    .fold(Mode::Copy, |m, t| m.join(visit(w, t, bounds, seen))),
-                Type::Function { mode, .. } => *mode,
-                Type::Named(n, args) => {
-                    if let Some(m) = bounds.get(n) {
-                        return *m;
-                    }
-                    if crate::vector::shape_of(ty).is_some() {
-                        return Mode::Copy;
-                    }
-                    if crate::numeric::is_scalar_name(n) {
-                        return Mode::Copy;
-                    }
-                    if n == crate::strings::STRING_TYPE || n == crate::strings::STR_TYPE {
-                        return Mode::Affine;
-                    }
-                    // A trait object owns an affine value (§7.3).
-                    if n == crate::ast::DYN_TYPE {
-                        return Mode::Affine;
-                    }
-                    // RegionBox[r, T] has the mode of T (§15.2).
-                    if n == crate::regions::BOX_TYPE {
-                        return args
-                            .get(1)
-                            .map_or(Mode::Linear, |t| visit(w, t, bounds, seen));
-                    }
-                    // ChunkSeq[T] owns its elements; Slice[T] is a borrow (§13).
-                    if n == crate::seq::CHUNK_SEQ_TYPE || n == crate::seq::SLICE_TYPE {
-                        return args
-                            .first()
-                            .map_or(Mode::Affine, |t| visit(w, t, bounds, seen))
-                            .join(Mode::Affine);
-                    }
-                    // TiledSeq[T] is an affine AoSoA sequence container (§12.5).
-                    if n == crate::tiled::TILED_SEQ_TYPE {
-                        return args
-                            .first()
-                            .map_or(Mode::Affine, |t| visit(w, t, bounds, seen))
-                            .join(Mode::Affine);
-                    }
-                    let Some(a) = w.adts.get(n) else {
-                        return Mode::Linear;
-                    };
-                    let argument_modes = args
-                        .iter()
-                        .map(|t| visit(w, t, bounds, seen))
-                        .collect::<Vec<_>>();
-                    let key = format!("{n}:{argument_modes:?}");
-                    if !seen.insert(key.clone()) {
-                        return a.mode;
-                    }
-                    let component_bounds = a
-                        .generics
-                        .iter()
-                        .zip(argument_modes)
-                        .map(|(g, m)| (g.name.clone(), m))
-                        .collect();
-                    let mut m = a.mode;
-                    for f in a.variants.iter().flat_map(|v| &v.fields) {
-                        let intrinsic = visit(w, &f.ty, &component_bounds, seen);
-                        m = m.join(f.modality.unwrap_or(intrinsic));
-                    }
-                    seen.remove(&key);
-                    m
-                }
-            }
-        }
-        visit(self, ty, bounds, &mut BTreeSet::new())
+        world_mode::mode(self, ty, bounds)
+    }
+    /// The original, unmemoized `mode` (for differential tests and benches).
+    #[doc(hidden)]
+    pub fn mode_reference(&self, ty: &Type, bounds: &BTreeMap<String, Mode>) -> Mode {
+        world_mode::reference(self, ty, bounds)
+    }
+    /// Forgets the memoized modes. Call it after changing `adts` of a world
+    /// that has answered a `mode` query.
+    pub fn clear_mode_cache(&self) {
+        self.mode_cache.clear();
+    }
+    /// How many ADT expansions the mode memo holds.
+    #[doc(hidden)]
+    pub fn mode_cache_len(&self) -> usize {
+        world_mode::cached(self)
     }
     pub fn field(&self, ty: &Type, path: &[String]) -> Option<Type> {
         let mut ty = ty.clone();
