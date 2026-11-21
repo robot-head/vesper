@@ -608,6 +608,53 @@ pub fn ast_rows(in source: Str) -> ChunkSeq[u64] {
 }
 
 test {
+    fn test_missing_literal_uses_zero_value() -> bool {
+        let ast = ast_new();
+        let literal = lit_at(in ast, 0);
+        literal.kind == 0 && !literal.neg && literal.bits == 0
+    }
+
+    // @case named(1, 7)
+    // @case tuple(2, 4294967295)
+    fn test_type_name_only_reads_named_types(kind: u8, expected: u32) -> bool {
+        let mut ast = ast_new();
+        ast
+            .types
+            .alloc(
+            TypeNode {
+                kind: kind,
+                a: 7,
+                b: 0,
+                c: 0,
+                d: 0
+            }
+        );
+        type_name(in ast, 0) == expected
+    }
+
+    fn test_ast_rows_include_symbol_text_size() -> bool {
+        let named = ast_rows(in "fn abc() {}");
+        let empty = ast_rows(in "");
+        let empty_symbols = match empty.try_get(35) {
+            Option::Some(count) => count,
+            Option::None => return false,
+        };
+        let empty_bytes = match empty.try_get(36) {
+            Option::Some(count) => count,
+            Option::None => return false,
+        };
+        empty_symbols
+            > 0
+            && empty_bytes
+            > 0
+            && named
+            .try_get(35)
+            == Option::Some(wrapping_add(empty_symbols, 1))
+            && named
+            .try_get(36)
+            == Option::Some(wrapping_add(empty_bytes, 3))
+    }
+
     // @case empty(in "", 0, 0, 0, 0)
     // @case constant_body(in "fn f() -> i64 { 1 }", 1, 0, 0, 1)
     // @case two_functions(in "fn f() {} fn g() {}", 2, 0, 0, 2)

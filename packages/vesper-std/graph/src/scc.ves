@@ -200,7 +200,15 @@ test {
             } else {
                 1
             };
-            if result.member(id, member_index) != expected_member || result.size(id) != size {
+            if result
+                .member(id, member_index)
+                != expected_member
+                || result
+                .size(id)
+                != size
+                || result
+                .member(id, size)
+                != 4294967295 {
                 return false;
             }
         }
@@ -212,6 +220,16 @@ test {
             }
         }
         result.size(wrapping_u32(count)) == 0 && result.member(wrapping_u32(count), 0) == 4294967295
+    }
+
+    // @case edge_to_completed_component(1, 0, 0, 1)
+    // @case edge_to_unvisited_component(0, 1, 1, 0)
+    fn test_one_way_edge(from: u32, to: u32, first: u32, second: u32) -> bool {
+        let mut builder = graph_builder(2);
+        builder.add_edge(from, to);
+        let graph = builder.build();
+        let result = scc(in graph);
+        result.count() == 2 && result.component(0) == first && result.component(1) == second
     }
 
     // @case without_bridge(false, 0, 1)

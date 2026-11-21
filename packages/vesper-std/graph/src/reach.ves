@@ -170,6 +170,7 @@ test {
     // @case cycle_wraps(true, 3, 1, true)
     // @case isolated_reflexive(false, 4, 4, true)
     // @case isolated_unreachable(true, 0, 4, false)
+    // @case cycle_cannot_reach_island(true, 1, 4, false)
     // @case invalid_root(false, 5, 0, false)
     // @case invalid_target(true, 0, 4294967295, false)
     fn test_reaches(cycle: bool, root: u32, target: u32, expected: bool) -> bool {
@@ -177,6 +178,17 @@ test {
         let result = reachable_from(in graph, root);
         let from_root = get_bool(in result.as_slice(), widen_u64(target));
         result.len() == 5 && from_root == expected && reaches(in graph, root, target) == expected
+    }
+
+    // @case existing_row(0, 3, false)
+    // @case empty_row(1, 3, false)
+    // @case correct_row(2, 3, true)
+    fn test_reaches_stops_at_edge_row(root: u32, target: u32, expected: bool) -> bool {
+        let mut builder = graph_builder(4);
+        builder.add_edge(0, 1);
+        builder.add_edge(2, 3);
+        let graph = builder.build();
+        reaches(in graph, root, target) == expected
     }
 
     // @case disjoint_roots(0, 4, 31)
@@ -197,6 +209,27 @@ test {
             }
         }
         result.len() == 5
+    }
+
+    fn test_repeated_roots_visit_the_same_neighbors_once() -> bool {
+        let leaves: u32 = 512;
+        let mut builder = graph_builder(wrapping_add(leaves, 1));
+        for i in 0..leaves {
+            builder.add_edge(0, wrapping_add(i, 1));
+        }
+        let graph = builder.build();
+        let mut roots = ChunkSeq::new[u32]();
+        roots.resize(widen_u64(leaves), 0);
+        let result = reachable_from_all(in graph, in roots.as_slice());
+        if result.len() != wrapping_add(widen_u64(leaves), 1) {
+            return false;
+        }
+        for i in 0..result.len() {
+            if result.try_get(i) != Option::Some(true) {
+                return false;
+            }
+        }
+        true
     }
 
     // @case diamond_uses_edge_order(false, 0, in "3210")

@@ -176,14 +176,14 @@ impl Checker<'_> {
                     span.clone(),
                 );
             }
-            // An element view (§13) of a sequence place is a place of the
-            // whole sequence for disjointness.
+            // An element view (§13): any element is lent in place, as its own place, so elements
+            // known to differ are disjoint ([`Place::element`]).
             let element = match &a.expr.kind {
-                ExprKind::Index(base, _) if interval(&a.expr).is_none() => {
+                ExprKind::Index(base, index) if interval(&a.expr).is_none() => {
                     let base_ty = self.peek_type(base, env);
                     elem(&base_ty)
-                        .filter(|t| **t != Type::Infer && self.mode(t) != Mode::Copy)
-                        .and_then(|_| Place::from_expr(base))
+                        .filter(|t| **t != Type::Infer)
+                        .and_then(|_| Place::element(base, index))
                 }
                 _ => None,
             };
@@ -630,6 +630,22 @@ impl Checker<'_> {
         Some((pass, p))
     }
 
+    /// Records the types of the sequence places that the field/index chain
+    /// `e` indexes, for the element-path rewrite
+    /// (`crate::seq::element_paths`), without checking `e`.
+    pub(super) fn note_element_bases(&mut self, e: &Expr, env: &Env) {
+        let mut cur = e;
+        while let ExprKind::Field(b, _) | ExprKind::Index(b, _) = &cur.kind {
+            if matches!(cur.kind, ExprKind::Index(..)) && Place::from_expr(b).is_some() {
+                let t = self.peek_type(b, env);
+                if is_seq_or_slice(&t) {
+                    self.types.insert((b.span.start, b.span.end), t);
+                }
+            }
+            cur = b;
+        }
+    }
+
     /// Borrows a method receiver: `in` reads may use any expression, `inout`
     /// updates need a place.
     fn seq_receiver(&mut self, base: &Expr, env: &mut Env, pass: Pass) {
@@ -682,18 +698,31 @@ impl Checker<'_> {
         // the sequence as it borrows the element.
         // So is an element whose type is not copy (an element view, §13):
         // it is borrowed in place, never copied out.
-        let lend_boxed = matches!(usage, Usage::Borrow(_))
-            && (crate::dyn_trait::is_boxed(&elem_ty)
-                || (elem_ty != Type::Infer && self.mode(&elem_ty) != Mode::Copy));
-        self.expr(
-            base,
-            env,
-            if lend_boxed {
-                usage
-            } else {
-                Usage::Borrow(Pass::In)
-            },
-        );
+        // Any element lent `inout` is lent in place too (§13).
+        let lend_boxed = matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Borrow(_))
+                && (crate::dyn_trait::is_boxed(&elem_ty)
+                    || (elem_ty != Type::Infer && self.mode(&elem_ty) != Mode::Copy)));
+        // A lent element is accessed as its own place, so two elements
+        // known to differ may be lent to one call ([`Place::element`]).
+        match Place::element(base, index).filter(|_| lend_boxed) {
+            Some(p) => {
+                self.place(&p, env, usage, base.span.clone());
+                self.types
+                    .insert((base.span.start, base.span.end), base_ty.clone());
+            }
+            None => {
+                self.expr(
+                    base,
+                    env,
+                    if lend_boxed {
+                        usage
+                    } else {
+                        Usage::Borrow(Pass::In)
+                    },
+                );
+            }
+        }
         let u64_ty = Type::named("u64");
         let t = self.expr_expected(index, env, Usage::Own, &u64_ty);
         self.expect_type(&u64_ty, &t, index.span.clone());

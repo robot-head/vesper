@@ -172,6 +172,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 14 (#1186): the tensor types checker port,
+        # differential over fixtures, checker sources, mutants and corpus.
+        "test/self_host_check_tensor_types": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         "test/self_host_check_harness": glob([
             "examples/**",
             "packages/**",
@@ -184,13 +191,6 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
-        # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
-        # vector rules over the same corpus. Anchored globs.
-        "test/self_host_check_regions_seqs": glob([
-            "examples/**",
-            "packages/**",
-            "tests/fixtures/**",
-        ]),
         "test/hybrid_ir_check": glob([
             "examples/**",
             "packages/**",
@@ -198,6 +198,20 @@ vesper_crate(
         ]),
         # SH3 lane 11 (#1250): the inliner differential on the same corpus.
         "test/self_host_ir_inline": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH3 lane 1 (#1240): @vesper/place-ir round trips over the same
+        # corpus at every native IR pass boundary.
+        "test/self_host_place_ir": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
+        # vector rules over the same corpus. Anchored globs.
+        "test/self_host_check_regions_seqs": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -233,9 +247,22 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH2 lane 8 (#1180): @vesper/check-effects against capability_effects.
+        "test/self_host_check_effects": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 12 (#1184): @vesper/check-fip against
         # fip::check_world on the same corpus, its checker cases and mutants.
         "test/self_host_check_fip": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH3 lane 8 (#1247): @vesper/egraph against egg and
+        # egglog on the same corpus. Anchored globs.
+        "test/self_host_egraph": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -563,7 +590,11 @@ vesper_crate(
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
         "test/self_host_ir_inline": "long",
+        "test/self_host_place_ir": "long",
         "test/self_host_check_harness": "long",
+        # The tensor types differential (#1186) JIT-compiles the port and
+        # replays mutants and the corpus.
+        "test/self_host_check_tensor_types": "eternal",
         # The region and sequence rules differential (#1181): ~7 min debug.
         "test/self_host_check_regions_seqs": "long",
         # The dyn differential runs both passes over every .ves source twice.
@@ -573,7 +604,11 @@ vesper_crate(
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
         "test/self_host_check_core_typing_exprs": "long",
+        # The capability-effect differential (#1180): corpus, fixtures, mutants.
+        "test/self_host_check_effects": "long",
         "test/self_host_check_fip": "long",
+        # The e-graph differential (#1247) runs egg and egglog on the corpus.
+        "test/self_host_egraph": "long",
     },
 )
 

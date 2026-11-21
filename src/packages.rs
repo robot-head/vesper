@@ -261,7 +261,7 @@ pub fn is_package(path: &Path) -> bool {
 /// them into one module. `Err` is an I/O failure; language and manifest
 /// errors are reported in [`Assembled`].
 pub fn load(dir: &Path) -> Result<Assembled, String> {
-    load_with_parser(dir, None)
+    load_with_parser(dir, None, None)
 }
 
 /// Include test-only declarations in the root package. Dependencies are
@@ -280,15 +280,31 @@ type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse),
 /// The callback may append synthetic source, but its AST must use offsets
 /// into the resulting text. Dependencies always use the ordinary parser.
 pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
-    load_with_parser(dir, Some(parse))
+    load_with_parser(dir, Some(parse), None)
+}
+
+/// Assemble tests against one changed dependency source held in memory.
+pub fn load_with_dependency_replacement(
+    dir: &Path,
+    parse: &mut RootParser<'_>,
+    replacement: (&Path, &str),
+) -> Result<Assembled, String> {
+    load_with_parser(dir, Some(parse), Some(replacement))
 }
 
 fn read_source(path: &Path) -> Result<String, String> {
     fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-fn load_with_parser(dir: &Path, parse: Option<&mut RootParser<'_>>) -> Result<Assembled, String> {
-    let mut loader = Loader::default();
+fn load_with_parser(
+    dir: &Path,
+    parse: Option<&mut RootParser<'_>>,
+    replacement: Option<(&Path, &str)>,
+) -> Result<Assembled, String> {
+    let mut loader = Loader {
+        replacement,
+        ..Loader::default()
+    };
     let root = loader.package(dir, dir.to_path_buf(), &mut vec![], parse)?;
     let package = root
         .map(|i| loader.packages[i].name.as_str().to_owned())
@@ -322,7 +338,7 @@ fn load_with_parser(dir: &Path, parse: Option<&mut RootParser<'_>>) -> Result<As
 }
 
 #[derive(Default)]
-struct Loader {
+struct Loader<'a> {
     packages: Vec<Package>,
     /// Canonical directory -> package index.
     by_path: BTreeMap<PathBuf, usize>,
@@ -330,6 +346,7 @@ struct Loader {
     diagnostics: Vec<PackageDiagnostic>,
     manifest_errors: Vec<(String, Diagnostic)>,
     vsys: Vec<PackageVsys>,
+    replacement: Option<(&'a Path, &'a str)>,
 }
 
 fn manifest_error(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -437,7 +454,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), String> 
     Ok(())
 }
 
-impl Loader {
+impl Loader<'_> {
     /// Load one package (and, recursively, its dependencies). `stack` holds
     /// the canonical directories being loaded, for cycle detection.
     fn package(
@@ -536,7 +553,10 @@ impl Loader {
             let (text, parsed) = if let Some(parse) = parse.as_deref_mut() {
                 parse(&path)?
             } else {
-                let text = read_source(&path)?;
+                let text = match self.replacement {
+                    Some((replaced, text)) if normalize(&path) == replaced => text.to_owned(),
+                    _ => read_source(&path)?,
+                };
                 let parsed = crate::parser::parse(&text);
                 (text, parsed)
             };

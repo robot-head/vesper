@@ -9,9 +9,9 @@
 // are bit for bit the Rust build's.
 //
 // A voice tile is five lane slices of 16 words (ic1eq, ic2eq, g_coeff,
-// k_damping, gain), and the pan weights two (left, right). A parameter-ramp bank is one slice of 3 * 64 words: ramp
-// p (0 gain, 1 g, 2 k) is current, target, step and remaining, 16 words
-// each, from word 64 p.
+// k_damping, gain), and the pan weights two (left, right). A parameter-ramp
+// bank is one slice of three ramps (`RampBase`: gain, g, k), each the
+// `RampSlice`s current, target, step and remaining, LANES words each.
 use self::{
     PidFault
 };
@@ -19,12 +19,43 @@ use self::util::{
     is_finite
 };
 
-pub fn lanes() -> u64 {
-    16
+// Voices per tile.
+const LANES: u64 = 16;
+// `pan`'s divisor: the last voice pans fully right.
+const LAST_LANE: f32 = 15.0;
+
+// A ramp's lane slices, LANES words each, from its base word.
+enum RampSlice: _ {
+    Current = 0,
+    Target = 16,
+    Step = 32,
+    Remaining = 48
 }
 
-fn six() -> u64 {
-    6
+// The base word of each ramp in the ramp bank (each four `RampSlice`s).
+enum RampBase: _ {
+    Gain = 0,
+    G = 64,
+    K = 128
+}
+
+// The PID gains words (kp, ki, kd, dt, torque_limit, integral_limit).
+enum Gain: _ {
+    Kp,
+    Ki,
+    Kd,
+    Dt,
+    TorqueLimit,
+    IntegralLimit
+}
+
+const GAIN_WORDS: u64 = 6;
+
+// The PID state words.
+enum Pid: _ {
+    Integral,
+    HasPrevious,
+    Previous
 }
 
 pub fn f(in s: Slice[u32], i: u64) -> f32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
@@ -39,14 +70,14 @@ pub fn put(inout s: Slice[u32], i: u64, v: f32) eff [Fail[RuntimeError], Fail[Ar
 pub fn ramp_lane(inout ramps: Slice[u32], base: u64, lane: u64)
     -> f32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let cur = base + lane;
-    let rem = ramps[base + 48 + lane];
+    let rem = ramps[base + RampSlice::Remaining + lane];
     if rem > 0 {
         let next = rem - 1;
-        ramps.set(base + 48 + lane, next);
+        ramps.set(base + RampSlice::Remaining + lane, next);
         if next == 0 {
-            ramps.set(cur, ramps[base + 16 + lane]);
+            ramps.set(cur, ramps[base + RampSlice::Target + lane]);
         } else {
-            let v = f(in ramps, cur) + f(in ramps, base + 32 + lane);
+            let v = f(in ramps, cur) + f(in ramps, base + RampSlice::Step + lane);
             put(inout ramps, cur, v);
         }
     }
@@ -56,8 +87,8 @@ pub fn ramp_lane(inout ramps: Slice[u32], base: u64, lane: u64)
 // Whether any lane of the ramp at word `base` has samples remaining.
 fn ramping(in ramps: Slice[u32], base: u64) -> bool eff [Fail[RuntimeError], Fail[ArithOverflow]] {
     let mut any = false;
-    for v in 0..lanes() {
-        if ramps[base + 48 + v] != 0 {
+    for v in 0..LANES {
+        if ramps[base + RampSlice::Remaining + v] != 0 {
             any = true;
         }
     }
@@ -66,7 +97,7 @@ fn ramping(in ramps: Slice[u32], base: u64) -> bool eff [Fail[RuntimeError], Fai
 
 // `SvfBank::pan`: the stereo weights of voice `v`.
 pub fn pan(v: u64) -> (f32, f32) {
-    let p = nearest_f32(v) / 15.0;
+    let p = nearest_f32(v) / LAST_LANE;
     (1.0 - p, p)
 }
 
@@ -92,38 +123,38 @@ pub fn k_render(
     // takes the ramps' values once and then only the lanes still ramping
     // (the Rust build copies all of them every frame, to the same values).
     if start < end {
-        for v in 0..lanes() {
+        for v in 0..LANES {
             let gain = f(in ramps, v);
-            let g = f(in ramps, 64 + v);
-            let k = f(in ramps, 128 + v);
+            let g = f(in ramps, RampBase::G + v);
+            let k = f(in ramps, RampBase::K + v);
             gn.set(v, to_bits_f32(gain));
             gc.set(v, to_bits_f32(g));
             kd.set(v, to_bits_f32(k));
         }
     }
     for i in start..end {
-        if ramping(in ramps, 0) {
-            for v in 0..lanes() {
-                let gain = ramp_lane(inout ramps, 0, v);
+        if ramping(in ramps, RampBase::Gain) {
+            for v in 0..LANES {
+                let gain = ramp_lane(inout ramps, RampBase::Gain, v);
                 gn.set(v, to_bits_f32(gain));
             }
         }
-        if ramping(in ramps, 64) {
-            for v in 0..lanes() {
-                let g = ramp_lane(inout ramps, 64, v);
+        if ramping(in ramps, RampBase::G) {
+            for v in 0..LANES {
+                let g = ramp_lane(inout ramps, RampBase::G, v);
                 gc.set(v, to_bits_f32(g));
             }
         }
-        if ramping(in ramps, 128) {
-            for v in 0..lanes() {
-                let k = ramp_lane(inout ramps, 128, v);
+        if ramping(in ramps, RampBase::K) {
+            for v in 0..LANES {
+                let k = ramp_lane(inout ramps, RampBase::K, v);
                 kd.set(v, to_bits_f32(k));
             }
         }
         let v0 = f(in input, i);
         let mut l: f32 = 0.0;
         let mut r: f32 = 0.0;
-        for v in 0..lanes() {
+        for v in 0..LANES {
             let g = f(in gc, v);
             let k = f(in kd, v);
             let a1 = 1.0 / (1.0 + g * (g + k));
@@ -164,10 +195,10 @@ pub fn k_render_reference(
         let v0 = f(in input, i);
         let mut l: f32 = 0.0;
         let mut r: f32 = 0.0;
-        for v in 0..lanes() {
-            let gain = ramp_lane(inout ramps, 0, v);
-            let g = ramp_lane(inout ramps, 64, v);
-            let k = ramp_lane(inout ramps, 128, v);
+        for v in 0..LANES {
+            let gain = ramp_lane(inout ramps, RampBase::Gain, v);
+            let g = ramp_lane(inout ramps, RampBase::G, v);
+            let k = ramp_lane(inout ramps, RampBase::K, v);
             gn.set(v, to_bits_f32(gain));
             gc.set(v, to_bits_f32(g));
             kd.set(v, to_bits_f32(k));
@@ -213,12 +244,12 @@ pub fn k_pid_check(in gains: Slice[u32]) eff [
     Fail[ArithOverflow],
     Fail[PidFault]
 ] {
-    for i in 0..six() {
+    for i in 0..GAIN_WORDS {
         if bad_gain(f(in gains, i)) {
             Fail::raise(PidFault::BadGains);
         }
     }
-    if f(in gains, 3) <= 0.0 {
+    if f(in gains, Gain::Dt) <= 0.0 {
         Fail::raise(PidFault::BadGains);
     }
 }
@@ -233,24 +264,24 @@ pub fn k_pid_step(in gains: Slice[u32], inout st: Slice[u32], setpoint: u32, mea
     if !is_finite(sp) || !is_finite(m) {
         Fail::raise(PidFault::NonFiniteInput);
     }
-    let kp = f(in gains, 0);
-    let ki = f(in gains, 1);
-    let kdg = f(in gains, 2);
-    let dt = f(in gains, 3);
-    let tl = f(in gains, 4);
-    let il = f(in gains, 5);
+    let kp = f(in gains, Gain::Kp);
+    let ki = f(in gains, Gain::Ki);
+    let kdg = f(in gains, Gain::Kd);
+    let dt = f(in gains, Gain::Dt);
+    let tl = f(in gains, Gain::TorqueLimit);
+    let il = f(in gains, Gain::IntegralLimit);
     let error = sp - m;
-    let integral = clamp(f(in st, 0) + ki * error * dt, -il, il);
+    let integral = clamp(f(in st, Pid::Integral) + ki * error * dt, -il, il);
     let mut derivative: f32 = 0.0;
-    if st[1] == 1 {
-        derivative = -(m - f(in st, 2)) / dt;
+    if st[(Pid::HasPrevious)] == 1 {
+        derivative = -(m - f(in st, Pid::Previous)) / dt;
     }
     let u = kp * error + integral + kdg * derivative;
     if !is_finite(error) || !is_finite(integral) || !is_finite(derivative) || !is_finite(u) {
         Fail::raise(PidFault::NonFiniteIntermediate);
     }
-    put(inout st, 0, integral);
-    st.set(1, 1);
-    st.set(2, measurement);
+    put(inout st, Pid::Integral, integral);
+    st.set(Pid::HasPrevious, 1);
+    st.set(Pid::Previous, measurement);
     to_bits_f32(clamp(u, -tl, tl))
 }

@@ -22,6 +22,9 @@ use self::{
     WalshOut
 };
 use self::util::{
+    I64_MAX,
+    I64_MIN_MAGNITUDE,
+    MAX_PAIRS,
     add,
     add_rank,
     cu,
@@ -60,8 +63,25 @@ use self::wide::{
     w_zero
 };
 
-pub fn max_pairs() -> u64 {
-    32
+// A two-sided 5% test: each tail holds at most 1/TAIL_LIMIT_SCALE of the
+// outcomes.
+const TAIL_LIMIT_SCALE: u64 = 40;
+
+// Gate outcomes shared with the wrappers (src/port.rs).
+enum Outcome: _ {
+    Pass,
+    Regression,
+    // An empty confidence set, or too few pairs for an interval.
+    NoInterval,
+    // The interval does not separate from the threshold.
+    CrossesThreshold
+}
+
+// per_op_difference's codes.
+enum Exactness: _ {
+    Integral,
+    Fractional,
+    OutOfRange
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +134,7 @@ fn validate_len(len: u64) eff [Fail[SignedRankError]] {
     if len == 0 {
         Fail::raise(SignedRankError::EmptyEvidence);
     }
-    if len > max_pairs() {
+    if len > MAX_PAIRS {
         Fail::raise(SignedRankError::TooManyPairs);
     }
 }
@@ -317,7 +337,7 @@ fn accepts(
     let tail_limit = min_u64(positive_rank, sub(total_rank, positive_rank));
     let tail = tail_sum(in dist, tail_limit);
     // 2*tail / total > 1/20; both sides fit u64 for n <= 32.
-    mul(40, tail) > pow2(n)
+    mul(TAIL_LIMIT_SCALE, tail) > pow2(n)
 }
 
 fn segment(lower: Option[W], lower_inclusive: bool, upper: Option[W], upper_inclusive: bool)
@@ -444,7 +464,7 @@ pub fn do_signed_rank_confidence_set(in differences: Slice[i64])
     if n == 0 {
         Fail::raise(SignedRankConfidenceError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(SignedRankConfidenceError::TooManyPairs);
     }
     confidence_core(in differences)
@@ -456,7 +476,7 @@ pub fn do_paired_samples_confidence_set(in samples: Slice[Sample])
     if n == 0 {
         Fail::raise(PairedConfError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(PairedConfError::TooManySamples);
     }
     let operations = gs(in samples, 0).operations;
@@ -472,7 +492,7 @@ pub fn do_paired_samples_confidence_set(in samples: Slice[Sample])
         }
         if s.candidate >= s.baseline {
             let d = sub(s.candidate, s.baseline);
-            if d > 9223372036854775807 {
+            if d > I64_MAX {
                 Fail::raise(
                     PairedConfError::DifferenceOutOfRange {
                         index: widen_usize(i)
@@ -482,7 +502,7 @@ pub fn do_paired_samples_confidence_set(in samples: Slice[Sample])
             differences.push(wrapping_i64(d));
         } else {
             let d = sub(s.baseline, s.candidate);
-            if d > 9223372036854775808 {
+            if d > I64_MIN_MAGNITUDE {
                 Fail::raise(
                     PairedConfError::DifferenceOutOfRange {
                         index: widen_usize(i)
@@ -503,27 +523,25 @@ fn seg_upper(s: Segment) -> W {
     w(s.upper_hi, s.upper_lo)
 }
 
-// Gate outcomes shared with the wrappers: 0 Pass, 1 Regression, 2 empty
-// set, 3 threshold not separated.
 pub fn do_classify_differences(in segments: Slice[Segment], max_difference: i64) -> u64 {
     let n = segments.len();
     if n == 0 {
-        return 2;
+        return Outcome::NoInterval;
     }
     let first = gseg(in segments, 0);
     let last = gseg(in segments, dec(n));
     let threshold = w_twice(w_i64(max_difference));
     if last.upper_bounded && !w_slt(threshold, seg_upper(last)) {
-        0
+        Outcome::Pass
     } else if first
         .lower_bounded
         && (
         w_slt(threshold, seg_lower(first))
             || (w_eq(seg_lower(first), threshold) && !first.lower_inclusive)
     ) {
-        1
+        Outcome::Regression
     } else {
-        3
+        Outcome::CrossesThreshold
     }
 }
 
@@ -548,20 +566,20 @@ pub fn do_classify_samples(in segments: Slice[Segment], operations: u64, max_dif
     -> u64 {
     let n = segments.len();
     if n == 0 {
-        return 2;
+        return Outcome::NoInterval;
     }
     let first = gseg(in segments, 0);
     let last = gseg(in segments, dec(n));
     if last.upper_bounded && do_compare_endpoint(seg_upper(last), operations, max_difference) != 1 {
-        return 0;
+        return Outcome::Pass;
     }
     if first.lower_bounded {
         let order = do_compare_endpoint(seg_lower(first), operations, max_difference);
         if order == 1 || (order == 0 && !first.lower_inclusive) {
-            return 1;
+            return Outcome::Regression;
         }
     }
-    3
+    Outcome::CrossesThreshold
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +616,7 @@ pub fn do_walsh_pseudomedian(in differences: Slice[i64])
     if n == 0 {
         Fail::raise(WalshEstimateError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(WalshEstimateError::TooManyPairs);
     }
     let sums = walsh_sums(in differences);
@@ -618,7 +636,7 @@ pub fn do_hodges_lehmann_paired(in differences: Slice[i64])
     if n == 0 {
         Fail::raise(HodgesLehmannError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(HodgesLehmannError::TooManyPairs);
     }
     for i in 0..n {
@@ -659,7 +677,7 @@ pub fn do_hodges_lehmann_paired(in differences: Slice[i64])
     let mut critical_tail: u64 = 0;
     for rank in 0..inc(max_rank) {
         tail = add(tail, cu(in dist, rank));
-        if mul(40, tail) <= total {
+        if mul(TAIL_LIMIT_SCALE, tail) <= total {
             found = true;
             critical = rank;
             critical_tail = tail;
@@ -690,20 +708,19 @@ pub fn do_hodges_lehmann_paired(in differences: Slice[i64])
     }
 }
 
-// Gate outcomes: 0 Pass, 1 Regression, 2 insufficient pairs, 3 interval
-// crosses the threshold.
+// Gate outcomes are Outcome codes.
 pub fn do_gate_paired_difference(in differences: Slice[i64], max_difference: i64)
     -> HlGate eff [Fail[HodgesLehmannError]] {
     let estimate = do_hodges_lehmann_paired(in differences);
     let threshold = w_twice(w_i64(max_difference));
     let outcome: u64 = if !estimate.has_interval {
-        2
+        Outcome::NoInterval
     } else if !w_slt(threshold, estimate.upper_times_two) {
-        0
+        Outcome::Pass
     } else if w_slt(threshold, estimate.lower_times_two) {
-        1
+        Outcome::Regression
     } else {
-        3
+        Outcome::CrossesThreshold
     };
     HlGate {
         outcome: outcome,
@@ -714,9 +731,8 @@ pub fn do_gate_paired_difference(in differences: Slice[i64], max_difference: i64
 // ---------------------------------------------------------------------------
 // paired_difference.rs
 
-// The exact per-operation difference of one sample: 0 and `ok` when it is
-// an integer in i64, else the error code 1 (fractional) or 2 (out of
-// range).
+// The exact per-operation difference of one sample with its Exactness
+// (the difference is 0 unless Integral).
 fn per_op_difference(s: Sample) -> (u64, i64) {
     let up = s.candidate >= s.baseline;
     let mag = if up {
@@ -725,19 +741,19 @@ fn per_op_difference(s: Sample) -> (u64, i64) {
         sub(s.baseline, s.candidate)
     };
     if rem(mag, s.operations) != 0 {
-        return (1, 0);
+        return (Exactness::Fractional, 0);
     }
     let q = div(mag, s.operations);
     if up {
-        if q > 9223372036854775807 {
-            (2, 0)
+        if q > I64_MAX {
+            (Exactness::OutOfRange, 0)
         } else {
-            (0, wrapping_i64(q))
+            (Exactness::Integral, wrapping_i64(q))
         }
-    } else if q > 9223372036854775808 {
-        (2, 0)
+    } else if q > I64_MIN_MAGNITUDE {
+        (Exactness::OutOfRange, 0)
     } else {
-        (0, wrapping_i64(sub(0, q)))
+        (Exactness::Integral, wrapping_i64(sub(0, q)))
     }
 }
 
@@ -747,20 +763,20 @@ pub fn do_exact_paired_differences(in samples: Slice[Sample])
     if n == 0 {
         Fail::raise(PairedDifferenceError::EmptyEvidence);
     }
-    if n > max_pairs() {
+    if n > MAX_PAIRS {
         Fail::raise(PairedDifferenceError::TooManySamples);
     }
     let mut result: ChunkSeq[i64] = ChunkSeq::with_capacity[i64](n);
     for i in 0..n {
         let (code, d) = per_op_difference(gs(in samples, i));
-        if code == 1 {
+        if code == Exactness::Fractional {
             Fail::raise(
                 PairedDifferenceError::NonIntegral {
                     index: widen_usize(i)
                 }
             );
         }
-        if code == 2 {
+        if code == Exactness::OutOfRange {
             Fail::raise(
                 PairedDifferenceError::OutOfRange {
                     index: widen_usize(i)

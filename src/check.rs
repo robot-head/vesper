@@ -19,6 +19,8 @@ mod tiled_rules;
 mod array_rules;
 #[path = "check/call_facts.rs"]
 mod call_facts;
+#[path = "loops/for_sequences.rs"]
+mod for_sequences;
 #[path = "integer_widths/literal_typing.rs"]
 mod literal_typing;
 #[path = "loops/check.rs"]
@@ -446,6 +448,8 @@ impl World {
 
         let mut diagnostics;
         let mut option_tries;
+        let mut types;
+        let mut for_plans;
         let mut iteration = 0usize;
         loop {
             iteration += 1;
@@ -487,6 +491,9 @@ impl World {
                 shadowed: vec![],
                 literals: Default::default(),
                 option_tries: BTreeSet::new(),
+                for_sequences: BTreeMap::new(),
+                loop_borrows: vec![],
+                view_sources: vec![],
                 result_ranges: Default::default(),
             };
             c.function_with_literal_typing(&func_norm);
@@ -495,9 +502,13 @@ impl World {
                 results,
                 handler_effects,
                 option_tries: tries,
+                types: checked_types,
+                for_sequences: plans,
                 ..
             } = c;
             option_tries = tries;
+            types = checked_types;
+            for_plans = plans;
             let changed =
                 world.function_results != results || world.handler_effects != handler_effects;
             world.function_results = results;
@@ -516,7 +527,8 @@ impl World {
             }
         }
 
-        if !option_tries.is_empty() {
+        if !for_plans.is_empty() {
+            // Check the index loop a `for` over a sequence means instead.
             let after = func_norm
                 .span
                 .end
@@ -526,10 +538,36 @@ impl World {
                 items: vec![Item::Function(Box::new(func_norm))],
                 ..Module::default()
             };
+            let desugared = for_sequences::desugar(&single, &for_plans, after);
+            if let Some(Item::Function(desugared_fn)) = desugared.items.into_iter().next() {
+                return self.check_isolated_item(&desugared_fn);
+            }
+            return diagnostics;
+        }
+        if !option_tries.is_empty() {
+            let after = func_norm
+                .span
+                .end
+                .max(world.types.keys().map(|k| k.1).max().unwrap_or(0))
+                + 1;
+            let single = Module {
+                items: vec![Item::Function(Box::new(func_norm.clone()))],
+                ..Module::default()
+            };
             let desugared = try_option::desugar(&single, &option_tries, after);
             if let Some(Item::Function(desugared_fn)) = desugared.items.into_iter().next() {
                 return self.check_isolated_item(&desugared_fn);
             }
+        }
+        let after = func_norm
+            .span
+            .end
+            .max(types.keys().map(|k| k.1).max().unwrap_or(0))
+            + 1;
+        if let Some(rewritten) =
+            crate::seq::element_paths::desugar_function(&func_norm, &world, &types, after)
+        {
+            return self.check_isolated_item(&rewritten);
         }
 
         let mut seen = BTreeSet::new();
@@ -570,15 +608,74 @@ impl Place {
             _ => None,
         }
     }
+    /// The place of element `index` of the sequence place `base` (§13): a
+    /// path segment `[n]` for an integer literal, `[$ixK_m]` for an index
+    /// the element-path rewrite bound and checked distinct
+    /// ([`crate::seq::element_paths`]), and `[_]` for any other index.
+    pub fn element(base: &Expr, index: &Expr) -> Option<Self> {
+        let mut p = Self::from_expr(base)?;
+        p.path.push(element_segment(index));
+        Some(p)
+    }
     pub fn overlaps(&self, other: &Self) -> bool {
         self.root == other.root
-            && (self.path.starts_with(&other.path) || other.path.starts_with(&self.path))
+            && self
+                .path
+                .iter()
+                .zip(&other.path)
+                .all(|(a, b)| a == b || !disjoint_segments(a, b))
     }
     pub fn display(&self) -> String {
-        std::iter::once(self.root.as_str())
-            .chain(self.path.iter().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join(".")
+        let mut out = self.root.clone();
+        for segment in &self.path {
+            if !is_element_segment(segment) {
+                out.push('.');
+            }
+            out.push_str(segment);
+        }
+        out
+    }
+}
+/// The path segment of an element index (see [`Place::element`]).
+fn element_segment(index: &Expr) -> String {
+    match &index.kind {
+        ExprKind::Literal(Literal::Int(n)) => format!("[{n}]"),
+        ExprKind::Name(n) if crate::seq::element_paths::is_distinct_index(n) => format!("[{n}]"),
+        _ => "[_]".into(),
+    }
+}
+/// Whether `segment` is an element segment of a place path ([`Place::element`]),
+/// as opposed to a field or an interval loan (`crate::seq::interval_segment`).
+pub fn is_element_segment(segment: &str) -> bool {
+    segment.starts_with('[') && !segment.contains("..")
+}
+/// Whether two different path segments name disjoint parts: two fields, two
+/// interval loans (proved disjoint by `seq_call_slices`), or two elements
+/// known to differ (distinct literals, or two indices of one checked
+/// group). An unknown index `[_]` may be any element, and an element may be
+/// inside any interval.
+fn disjoint_segments(a: &str, b: &str) -> bool {
+    match (is_element_segment(a), is_element_segment(b)) {
+        (false, false) => a.starts_with('[') == b.starts_with('['),
+        (true, true) => {
+            let inner = |s: &str| s[1..s.len() - 1].to_string();
+            let (a, b) = (inner(a), inner(b));
+            if a == "_" || b == "_" {
+                return false;
+            }
+            match (a.parse::<i128>(), b.parse::<i128>()) {
+                (Ok(x), Ok(y)) => x != y,
+                (Err(_), Err(_)) => crate::seq::element_paths::distinct_indices(&a, &b),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+impl Place {
+    /// Whether the place goes through a sequence element.
+    pub fn through_element(&self) -> bool {
+        self.path.iter().any(|s| is_element_segment(s))
     }
 }
 // Diagnostic-only evidence. This is deliberately excluded from ownership state
@@ -749,6 +846,7 @@ pub(crate) fn check_core(
     let mut diagnostics = vec![];
     let mut iteration = 0;
     let mut option_tries: BTreeSet<(usize, usize)>;
+    let mut for_plans: BTreeMap<(usize, usize), for_sequences::Plan>;
     loop {
         iteration += 1;
         let mut c = Checker {
@@ -789,6 +887,9 @@ pub(crate) fn check_core(
             shadowed: vec![],
             literals: Default::default(),
             option_tries: BTreeSet::new(),
+            for_sequences: BTreeMap::new(),
+            loop_borrows: vec![],
+            view_sources: vec![],
             result_ranges: Default::default(),
         };
         c.declarations();
@@ -809,9 +910,11 @@ pub(crate) fn check_core(
             string_capacity,
             resolved: trait_calls,
             option_tries: tries,
+            for_sequences: plans,
             ..
         } = c;
         option_tries = tries;
+        for_plans = plans;
         resolved = trait_calls;
         let changed = world.function_results != results || world.handler_effects != handler_effects;
         world.types = types;
@@ -833,6 +936,19 @@ pub(crate) fn check_core(
             break;
         }
     }
+    if !for_plans.is_empty() {
+        // Check the index loops `for` over a sequence means instead
+        // (`for_sequences`).
+        let after = world
+            .functions
+            .values()
+            .map(|f| f.span.end)
+            .chain(world.types.keys().map(|k| k.1))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        return check_core(&for_sequences::desugar(module, &for_plans, after), traits);
+    }
     if !option_tries.is_empty() {
         // Check the early exits `?` on `Option` means instead (`try_option`).
         let after = world
@@ -844,6 +960,21 @@ pub(crate) fn check_core(
             .unwrap_or(0)
             + 1;
         return check_core(&try_option::desugar(module, &option_tries, after), traits);
+    }
+    // Field paths through sequence elements and calls that borrow two
+    // elements of one sequence mean element views (§13): check those
+    // instead (`crate::seq::element_paths`).
+    let after = world
+        .functions
+        .values()
+        .map(|f| f.span.end)
+        .chain(world.types.keys().map(|k| k.1))
+        .max()
+        .unwrap_or(0)
+        + 1;
+    if let Some(rewritten) = crate::seq::element_paths::desugar(module, &world, &world.types, after)
+    {
+        return check_core(&rewritten, traits);
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::capability_effects::check_world(&world));
@@ -948,6 +1079,16 @@ struct Checker<'a> {
     literals: literal_typing::LiteralTyping,
     /// Spans of `?` on `Option` ([`try_option`]), rewritten after checking.
     option_tries: BTreeSet<(usize, usize)>,
+    /// `for` loops over arrays and sequences by the span of their iterable
+    /// ([`for_sequences`]), rewritten to index loops after checking.
+    for_sequences: BTreeMap<(usize, usize), for_sequences::Plan>,
+    /// Places an enclosing `for` loop iterates: its body may read them but
+    /// not write, lend `inout` or move them ([`for_sequences`]).
+    loop_borrows: Vec<(Place, Span)>,
+    /// Bound views of immutable owned bindings: the viewed place, the view
+    /// binding's name and declaration span. While the view is in scope the
+    /// place cannot be moved (`E1531`).
+    view_sources: Vec<(Place, String, Span)>,
     /// Result-range summaries of called functions ([`call_facts`]).
     result_ranges: std::cell::RefCell<call_facts::ResultRanges>,
 }
@@ -1453,6 +1594,28 @@ impl Checker<'_> {
             }
         }
     }
+    /// The type at `path` inside a value of type `ty`: fields, and the
+    /// elements of sequences (`[..]` segments, [`Place::element`]).
+    fn place_type(&self, ty: &Type, path: &[String]) -> Option<Type> {
+        let mut ty = ty.clone();
+        let mut fields: Vec<String> = vec![];
+        for segment in path {
+            if is_element_segment(segment) {
+                if !fields.is_empty() {
+                    ty = self.world.field(&ty, &fields)?;
+                    fields.clear();
+                }
+                ty = crate::seq::elem(&ty)?.clone();
+            } else {
+                fields.push(segment.clone());
+            }
+        }
+        if fields.is_empty() {
+            Some(ty)
+        } else {
+            self.world.field(&ty, &fields)
+        }
+    }
     fn place(&mut self, p: &Place, env: &mut Env, usage: Usage, span: Span) -> Type {
         let Some(b) = env.bindings.get(&p.root).cloned() else {
             self.error("E0201", format!("unknown binding '{}'", p.root), span);
@@ -1503,7 +1666,7 @@ impl Checker<'_> {
                 span.clone(),
             );
         }
-        let ty = self.world.field(&b.ty, &p.path).unwrap_or_else(|| {
+        let ty = self.place_type(&b.ty, &p.path).unwrap_or_else(|| {
             transfer_allowed = false;
             self.error(
                 "E0202",
@@ -1533,6 +1696,20 @@ impl Checker<'_> {
                 self.related(b.span.clone(), "accessed binding introduced here");
                 self.help("An exclusive argument loan cannot overlap another access while the call's arguments are evaluated.");
             }
+        }
+        if (matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy))
+            && !self.loop_borrows.is_empty()
+            && !self.check_loop_borrows(p, &span)
+        {
+            transfer_allowed = false;
+        }
+        if matches!(usage, Usage::Own)
+            && self.mode(&ty) != Mode::Copy
+            && !self.view_sources.is_empty()
+            && !self.check_view_sources(p, env, &span)
+        {
+            transfer_allowed = false;
         }
         let writes = matches!(usage, Usage::Borrow(Pass::Inout))
             || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy);
@@ -1882,6 +2059,10 @@ impl Checker<'_> {
                                     at: Arc::clone(&binding.mutation),
                                     looped: false,
                                 });
+                                if bound_view {
+                                    let span = binding.span.clone();
+                                    self.record_view_source(value, n, span, env);
+                                }
                             }
                             for n in pattern_names(pat) {
                                 if let Some(binding) = env.bindings.get_mut(&n) {
@@ -2082,6 +2263,10 @@ impl Checker<'_> {
             ExprKind::Assign(op, l, r) if let Some(t) = self.array_assign(e, op, l, r, env) => t,
             ExprKind::Assign(op, l, r) => {
                 let Some(p) = Place::from_expr(l) else {
+                    // A field path through a sequence element is rewritten
+                    // to an element view (`crate::seq::element_paths`),
+                    // which needs the sequence's type.
+                    self.note_element_bases(l, env);
                     self.error("E0300", "assignment requires a place", l.span.clone());
                     return Type::Infer;
                 };
@@ -2953,12 +3138,18 @@ impl Checker<'_> {
         let element = self.receiver_type(e, env);
         if !crate::dyn_trait::is_boxed(&element) {
             // An element whose type is not copy is lent in place (an
-            // element view, §13): the call borrows the whole sequence as it
-            // borrows the element.
-            if element == Type::Infer || self.mode(&element) == Mode::Copy {
+            // element view, §13), and so is any element lent `inout`: the
+            // call borrows the element's place in the sequence, which
+            // overlaps the whole sequence and every element that may be the
+            // same one ([`Place::element`]).
+            if element == Type::Infer
+                || (self.mode(&element) == Mode::Copy
+                    && (param.pass != Pass::Inout
+                        || !crate::seq::is_seq_or_slice(&self.peek_type(base, env))))
+            {
                 return None;
             }
-            return Place::from_expr(base);
+            return Place::element(base, index);
         }
         // An `inout` lend may only reach the object: a vtable stub's
         // receiver or a `dyn` parameter. A callee taking the box itself
@@ -2969,7 +3160,7 @@ impl Checker<'_> {
         {
             return None;
         }
-        Place::from_expr(base)
+        Place::element(base, index)
     }
     /// Resolves a trait call through the frontend. `None`: not a trait call.
     /// `Some(None)`: a trait call that failed (diagnosed). `Some(Some(f))`:
@@ -3377,7 +3568,26 @@ impl Checker<'_> {
                                     "earlier overlapping argument evaluated here"
                                 },
                             );
-                            self.help("Overlapping argument places are allowed only when both arguments use shared in passing.");
+                            if (param.pass == Pass::In || *mode == Pass::In)
+                                && p.path.len() != old.path.len()
+                                && !p.through_element()
+                                && !old.through_element()
+                            {
+                                // A field of a lent receiver (§13): the
+                                // shared borrow reaches every field.
+                                let (whole, part) = if p.path.len() < old.path.len() {
+                                    (p.display(), old.display())
+                                } else {
+                                    (old.display(), p.display())
+                                };
+                                if let Some(d) = self.diagnostics.last_mut() {
+                                    d.help = Some(format!(
+                                        "An 'in' borrow of '{whole}' reaches every field, including '{part}', so the callee could read it while it is written. Pass the fields the callee reads instead of '{whole}'."
+                                    ));
+                                }
+                            } else {
+                                self.help("Overlapping argument places are allowed only when both arguments use shared in passing.");
+                            }
                         }
                     }
                     loans.push((p, param.pass, expr.span.clone()));

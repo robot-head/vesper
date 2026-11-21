@@ -36,6 +36,7 @@ pub mod ir;
 pub mod ir_check;
 pub mod ir_inline;
 pub mod ir_opt;
+pub mod ir_swap;
 pub mod layout;
 pub mod lean;
 mod lean_ir;
