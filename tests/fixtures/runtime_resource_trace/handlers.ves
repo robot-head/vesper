@@ -13,8 +13,7 @@ fn handler_return() -> i64 {
     handle Ask in {
         Ticket {}
     } with {
-        return Ticket {}
-        => 42,
+        return Ticket {} => 42,
         ask(k) => k(0),
     }
 }
@@ -23,8 +22,7 @@ fn borrowed_handler() -> i64 {
     let ticket = Ticket {};
     handle Inspect in {
         Inspect::inspect(in ticket);
-        let Ticket {}
-        = ticket;
+        let Ticket {} = ticket;
         42
     } with {
         return value => value,

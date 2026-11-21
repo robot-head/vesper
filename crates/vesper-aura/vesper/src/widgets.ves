@@ -89,14 +89,14 @@ pub fn patch_create(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in t
     s
         .widgets
         .push(
-        RWidget {
-            serial: serial,
-            kind: word(in w, base, 3),
-            has_parent: false,
-            parent: 0,
-            user_state: 0
-        }
-    );
+            RWidget {
+                serial: serial,
+                kind: word(in w, base, 3),
+                has_parent: false,
+                parent: 0,
+                user_state: 0
+            }
+        );
     s.wlive.push(true);
     s.nwidgets = inc(s.nwidgets);
     record(inout s, lim, op(EV_CREATED, serial, 0, 0, 0))
@@ -114,14 +114,10 @@ pub fn patch_destroy(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in 
     }
     let node = rwidget(in s.widgets, i);
     if (s.has_root && s.root == serial)
-        || node
-        .has_parent
-        || child_count(in s, serial)
-        != 0
-        || widget_slot_count(in s, serial)
-        != 0
-        || widget_sub_count(in s, serial)
-        != 0 {
+        || node.has_parent
+        || child_count(in s, serial) != 0
+        || widget_slot_count(in s, serial) != 0
+        || widget_sub_count(in s, serial) != 0 {
         return invalid(Invalid::Destroy);
     }
     s.wlive.try_set(i, false);

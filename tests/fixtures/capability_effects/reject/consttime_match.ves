@@ -6,8 +6,7 @@ copy struct Secret[T] {
 fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     match value {
         0 => Secret {
             value: 1

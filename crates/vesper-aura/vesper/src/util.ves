@@ -349,23 +349,15 @@ pub fn is_space(c: u64) -> bool {
     if c < NEXT_LINE {
         return false;
     }
-    c
-        == NEXT_LINE
-        || c
-        == NO_BREAK_SPACE
-        || c
-        == OGHAM_SPACE_MARK
+    c == NEXT_LINE
+        || c == NO_BREAK_SPACE
+        || c == OGHAM_SPACE_MARK
         || (c >= EN_QUAD && c <= HAIR_SPACE)
-        || c
-        == LINE_SEPARATOR
-        || c
-        == PARAGRAPH_SEPARATOR
-        || c
-        == NARROW_NO_BREAK_SPACE
-        || c
-        == MEDIUM_MATHEMATICAL_SPACE
-        || c
-        == IDEOGRAPHIC_SPACE
+        || c == LINE_SEPARATOR
+        || c == PARAGRAPH_SEPARATOR
+        || c == NARROW_NO_BREAK_SPACE
+        || c == MEDIUM_MATHEMATICAL_SPACE
+        || c == IDEOGRAPHIC_SPACE
 }
 
 // The width of the UTF-8 sequence that starts with byte `b`.

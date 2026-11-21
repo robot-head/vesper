@@ -25,12 +25,12 @@ fn moved(p: RegionBox[r, Point], dx: i64) -> Point eff [r: Region] {
     let q = r.get(p);
     r
         .set(
-        p,
-        Point {
-            x: wrapping_add(q.x, dx),
-            y: q.y
-        }
-    );
+            p,
+            Point {
+                x: wrapping_add(q.x, dx),
+                y: q.y
+            }
+        );
     r.get(p)
 }
 fn count(n: i64, acc: RegionBox[r, i64]) -> i64 eff [r: Region] {
@@ -61,11 +61,11 @@ fn main() -> (i64, Point, i64, (bool, bool), u64, i64, i64) {
         bump(b);
         let p = r
             .box(
-            Point {
-                x: 1,
-                y: 2
-            }
-        );
+                Point {
+                    x: 1,
+                    y: 2
+                }
+            );
         let moved_p = moved(p, 10);
         let c = r.box(0);
         let ten = count(10, c);

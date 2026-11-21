@@ -234,8 +234,7 @@ pub fn regions_seqs_types(in input: Str) -> ChunkSeq[u64] {
         o.push(10);
         put(inout o, "M ");
         let mut dm = diags_new();
-        if prev
-            != NONE32
+        if prev != NONE32
             && mismatch(in c.types, in c.names, k, prev, norm, start, stop, inout dm) {
             diag_line(inout o, in dm, 0);
         } else {
@@ -354,27 +353,27 @@ fn read_sigs(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Sigs {
             sg
                 .params
                 .push(
-                Param {
-                    name: pname,
-                    pass: pass,
-                    ty: ty,
-                    start: ps,
-                    stop: pe
-                }
-            );
+                    Param {
+                        name: pname,
+                        pass: pass,
+                        ty: ty,
+                        start: ps,
+                        stop: pe
+                    }
+                );
         }
         sg
             .sigs
             .push(
-            Sig {
-                name: name,
-                start: start,
-                stop: stop,
-                result: result,
-                pa: pa,
-                pn: n32(np)
-            }
-        );
+                Sig {
+                    name: name,
+                    start: start,
+                    stop: stop,
+                    result: result,
+                    pa: pa,
+                    pn: n32(np)
+                }
+            );
     }
     for i in 0..c.world.adts.len() {
         sg.adt_start.push(r.word(in b));

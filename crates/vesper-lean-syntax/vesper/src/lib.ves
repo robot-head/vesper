@@ -189,21 +189,14 @@ fn quoted(inout p: P, in pool: Str, off: u64, len: u64, delimiter: u32) {
             Option::None => (0, end),
         };
         let plain = !(
-            c
-                == 92
-                || c
-                == 10
-                || c
-                == 13
-                || c
-                == 9
-                || c
-                == delimiter
+            c == 92
+                || c == 10
+                || c == 13
+                || c == 9
+                || c == delimiter
                 || (is_control(c) && c <= 255)
-                || c
-                == 8232
-                || c
-                == 8233
+                || c == 8232
+                || c == 8233
         );
         if !plain {
             p.out.push_str(pool[run..i]);
@@ -1308,18 +1301,13 @@ pub fn valid_ident(in v: Str) -> bool {
             Option::None => (0, n),
         };
         if is_control(c)
-            || c
-            == 171
-            || c
-            == 187
-            || c
-            == 8232
-            || c
-            == 8233
+            || c == 171
+            || c == 187
+            || c == 8232
+            || c == 8233
             || (c >= 8234 && c <= 8238)
             || (c >= 8294 && c <= 8297)
-            || c
-            == 65279 {
+            || c == 65279 {
             return false;
         }
         i = next;

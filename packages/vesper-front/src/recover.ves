@@ -156,24 +156,15 @@ fn field_or(x: u64, mask: u64, default: u64) -> u64 {
 // `Limits::preflight` with `work` as `max_work`.
 fn preflight(in lim: ChunkSeq[u64], n: u64, work: u64) -> u64 {
     // `Limits::HARD`.
-    if l_source(in lim)
-        > 1048576
-        || l_tokens(in lim)
-        > 65536
-        || l_diags(in lim)
-        > 128
-        || l_depth(in lim)
-        > 128
-        || l_depth(in lim)
-        == 0
-        || l_sites(in lim)
-        > 4096
-        || l_decls(in lim)
-        > 4096
-        || work
-        > 134217728
-        || l_ident(in lim)
-        > 1024 {
+    if l_source(in lim) > 1048576
+        || l_tokens(in lim) > 65536
+        || l_diags(in lim) > 128
+        || l_depth(in lim) > 128
+        || l_depth(in lim) == 0
+        || l_sites(in lim) > 4096
+        || l_decls(in lim) > 4096
+        || work > 134217728
+        || l_ident(in lim) > 1024 {
         return 1;
     }
     if n > l_source(in lim) {
@@ -285,11 +276,10 @@ fn prefix(in t: Tokens, at: u64) -> (u64, u64) {
             }
         }
         let k = kind_at(in t, i);
-        if k
-            != k_fn()
+        if k != k_fn()
             && (
-            saw_fip || (!is_type(k) && !word(in t, i, w_trait()) && !word(in t, i, w_model()))
-        ) {
+                saw_fip || (!is_type(k) && !word(in t, i, w_trait()) && !word(in t, i, w_model()))
+            ) {
             return (none(), none());
         }
     }
@@ -384,15 +374,13 @@ fn macro_start(in b: Slice[u8], in t: Tokens, at: u64) -> u64 {
         }
         return none();
     }
-    if k
-        == k_lower()
-        && kind_at(in t, n)
-        == k_l_brace()
+    if k == k_lower()
+        && kind_at(in t, n) == k_l_brace()
         && (
-        spelled(in b, in t, at, in "quote".as_bytes())
-            || spelled(in b, in t, at, in "quasiquote".as_bytes())
-            || spelled(in b, in t, at, in "syntax_quote".as_bytes())
-    ) {
+            spelled(in b, in t, at, in "quote".as_bytes())
+                || spelled(in b, in t, at, in "quasiquote".as_bytes())
+                || spelled(in b, in t, at, in "syntax_quote".as_bytes())
+        ) {
         return n;
     }
     none()
@@ -723,8 +711,7 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
         }
         let k = u8_at(in t.kind, i);
         if (k == k_upper() || k == k_lower())
-            && wrapping_sub(token_end(in t, i), w32(in t.start, i))
-            > l_ident(in lim) {
+            && wrapping_sub(token_end(in t, i), w32(in t.start, i)) > l_ident(in lim) {
             return fail(18);
         }
         if k == k_error() && opaque == n {
@@ -794,12 +781,9 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
         let lexical = span_end > opaque;
         let has_body = ext.body_start != none();
         let test_block = word(in t, start, w_test())
-            && kind_at(in t, next(in t, inc(start)))
-            == k_l_brace();
+            && kind_at(in t, next(in t, inc(start))) == k_l_brace();
         let opaque_item = lexical
-            || macros
-            .len()
-            != 0
+            || macros.len() != 0
             || (kind == d_other() && !test_block)
             || (ext.uncertain && kind != d_function())
             || (name == none() && kind != d_impl() && kind != d_use() && !test_block);
@@ -873,12 +857,9 @@ pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[
             let has_header = p.hdr.len() != 0;
             if kind == d_function() {
                 if has_header
-                    && u64_at(in p.hdr, 2)
-                    == 1
+                    && u64_at(in p.hdr, 2) == 1
                     && has_body
-                    && ext
-                    .body_start
-                    == u64_at(in p.hdr, 1) {
+                    && ext.body_start == u64_at(in p.hdr, 1) {
                     header_start = u64_at(in p.hdr, 0);
                     header_end = u64_at(in p.hdr, 1);
                 } else {
@@ -1272,10 +1253,8 @@ fn assemble(
                 if k >= tree.node_kind.len() {
                     break;
                 }
-                if w32(in tree.node_start, k)
-                    == green_start
-                    && w32(in tree.node_end, k)
-                    == green_end
+                if w32(in tree.node_start, k) == green_start
+                    && w32(in tree.node_end, k) == green_end
                     && (context == none() || u8_at(in tree.node_kind, k) == 205) {
                     found = k;
                     break;

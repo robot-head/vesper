@@ -188,10 +188,8 @@ fn gen_starts_with(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
         return false;
     }
     for k in 0..n {
-        if gen_kind(in w, a, k)
-            != gen_kind(in w, b, k)
-            || gen_value(in w, a, k)
-            != gen_value(in w, b, k) {
+        if gen_kind(in w, a, k) != gen_kind(in w, b, k)
+            || gen_value(in w, a, k) != gen_value(in w, b, k) {
             return false;
         }
     }
@@ -282,10 +280,8 @@ fn cap_arg(in w: ChunkSeq[u64], c: u64, k: u64) -> u64 {
 
 // The same identity, effect and type arguments.
 fn same_capability(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
-    if cap_identity(in w, a)
-        != cap_identity(in w, b)
-        || cap_effect(in w, a)
-        != cap_effect(in w, b) {
+    if cap_identity(in w, a) != cap_identity(in w, b)
+        || cap_effect(in w, a) != cap_effect(in w, b) {
         return false;
     }
     let n = cap_arg_count(in w, a);
@@ -805,10 +801,8 @@ fn validate_function(
         }
         let d = find_export(in w, i, cap_effect(in w, c));
         if d != none() && at(in w, d, 0) == 3 {
-            if cap_resumption(in w, c)
-                != at(in w, d, 3)
-                || cap_arg_count(in w, c)
-                != gen_count(in w, at(in w, d, 1)) {
+            if cap_resumption(in w, c) != at(in w, d, 3)
+                || cap_arg_count(in w, c) != gen_count(in w, at(in w, d, 1)) {
                 unsupported(
                     inout q,
                     path,
@@ -1249,10 +1243,8 @@ fn function(
                     "An equality contract cannot be replaced by an upper-bound contract."
                 );
             } else if cap_grade(in w, o) == 1 {
-                if cap_has_ceiling(in w, o)
-                    != cap_has_ceiling(in w, n)
-                    || cap_ceiling(in w, o)
-                    != cap_ceiling(in w, n) {
+                if cap_has_ceiling(in w, o) != cap_has_ceiling(in w, n)
+                    || cap_ceiling(in w, o) != cap_ceiling(in w, n) {
                     breaking(
                         inout q,
                         path,
@@ -1577,10 +1569,8 @@ pub fn compare_q(in ws: Slice[u64], in t: Slice[u8]) -> Q {
         let name = ext_field(in w, old, k, 0);
         let e = find_ext(in w, new, name);
         if e != none() {
-            if ext_field(in w, new, e, 1)
-                != ext_field(in w, old, k, 1)
-                || ext_field(in w, new, e, 2)
-                > ext_field(in w, old, k, 2) {
+            if ext_field(in w, new, e, 1) != ext_field(in w, old, k, 1)
+                || ext_field(in w, new, e, 2) > ext_field(in w, old, k, 2) {
                 let path = path_node(inout q, none(), 0, name);
                 breaking(
                     inout q,

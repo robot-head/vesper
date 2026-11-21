@@ -75,8 +75,7 @@ fn main() -> Summary eff [Pulse] {
     absorb(inout tally, inout buf);
     let Ticket {
         id
-    }
-    = ticket;
+    } = ticket;
     Summary {
         ticket: wrapping_add(id, before),
         paused: paused,

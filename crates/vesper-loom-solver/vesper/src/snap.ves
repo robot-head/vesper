@@ -155,13 +155,13 @@ pub fn run_solve(inout s: S, with_systems: bool, partial: bool) -> bool {
         .l
         .roots
         .push(
-        Root {
-            name: root,
-            req: s.rexact,
-            feat_at: s.rf_at,
-            feat_n: s.rf_n
-        }
-    );
+            Root {
+                name: root,
+                req: s.rexact,
+                feat_at: s.rf_at,
+                feat_n: s.rf_n
+            }
+        );
     s.l.ss_at = s.l.ssels.len();
     s.l.ss_n = 0;
     if with_systems {

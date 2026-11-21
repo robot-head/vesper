@@ -10,18 +10,12 @@ fn handle_ack(inout t: Tcb, now: u64, seg: Seg) {
     let prev_una = t.snd_una;
 
     // Duplicate-ACK test (RFC 5681 §2) before the window update.
-    let is_dup = ack_abs
-        == prev_una
-        && seg
-        .pay_len
-        == 0
+    let is_dup = ack_abs == prev_una
+        && seg.pay_len == 0
         && !has(seg.h.flags, syn_bit())
         && !has(seg.h.flags, fin_bit())
-        && new_wnd
-        == old_wnd
-        && t
-        .sent_len
-        > 0;
+        && new_wnd == old_wnd
+        && t.sent_len > 0;
 
     // Window update (RFC 9293 §3.10.7.4, SND.WL1/WL2).
     if sn_lt(t.snd_wl1, seg.h.seq) || (t.snd_wl1 == seg.h.seq && sn_le(t.snd_wl2, seg.h.ack)) {
@@ -117,10 +111,8 @@ fn scoreboard_losses(inout t: Tcb, now: u64) {
         if s.sacked {
             sacked_count = wrapping_add(sacked_count, 1);
             sacked_bytes = wrapping_add(sacked_bytes, widen_u64(seg_bytes(s)));
-        } else if !s
-            .lost
-            && !s
-            .rexmit_in_recovery
+        } else if !s.lost
+            && !s.rexmit_in_recovery
             && (sacked_count >= dup_thresh() || sacked_bytes > limit) {
             mark_lost(inout t, now, i);
             any = true;

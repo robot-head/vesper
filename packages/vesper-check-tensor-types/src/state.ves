@@ -408,12 +408,12 @@ pub fn mk_dim(inout st: St, coeff: u64, in items: ChunkSeq[u32]) -> u32 {
     st
         .dn
         .push(
-        DimN {
-            coeff: coeff,
-            a: a,
-            n: wrapping_u32(items.len() >> 1)
-        }
-    );
+            DimN {
+                coeff: coeff,
+                a: a,
+                n: wrapping_u32(items.len() >> 1)
+            }
+        );
     st.dhash.push(h);
     let ok = st.dslots.try_set(at, inc32(id));
     if wrapping_mul(st.dhash.len(), 2) > st.dmask {
@@ -804,14 +804,14 @@ pub fn mk_ty(inout st: St, k: u8, a: u32, c: u32, in items: ChunkSeq[u32]) -> u3
     st
         .tn
         .push(
-        TyN {
-            k: k,
-            a: a,
-            c: c,
-            b: b,
-            n: wrapping_u32(n)
-        }
-    );
+            TyN {
+                k: k,
+                a: a,
+                c: c,
+                b: b,
+                n: wrapping_u32(n)
+            }
+        );
     st.thash.push(h);
     let ok = st.tslots.try_set(at, inc32(id));
     if wrapping_mul(st.thash.len(), 2) > st.tmask {
@@ -952,12 +952,9 @@ pub fn diag_s(inout st: St, code: u32, start: u64, end: u64, in m: Str) {
 
 // Whether diagnostics `i` and `j` have the same code, span and message.
 pub fn diag_same(in st: St, i: u64, j: u64) -> bool {
-    if u32_at(in st.dcode, i)
-        != u32_at(in st.dcode, j)
-        || u64_at(in st.dstart, i)
-        != u64_at(in st.dstart, j)
-        || u64_at(in st.dend, i)
-        != u64_at(in st.dend, j) {
+    if u32_at(in st.dcode, i) != u32_at(in st.dcode, j)
+        || u64_at(in st.dstart, i) != u64_at(in st.dstart, j)
+        || u64_at(in st.dend, i) != u64_at(in st.dend, j) {
         return false;
     }
     let a = u64_at(in st.dma, i);

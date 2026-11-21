@@ -114,48 +114,41 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
             }
             pieces
                 .push(
-                Piece {
-                    param: true,
-                    lo: name_lo,
-                    hi: end
-                }
-            );
+                    Piece {
+                        param: true,
+                        lo: name_lo,
+                        hi: end
+                    }
+                );
         } else {
             // Literals are decoded text, so they obey the target policy: no
             // separators, Ascii::Nul, dot segments or percent (no second decode).
             let len = wrapping_sub(end, at);
             let dots = (len == 1 || len == 2)
-                && byte(in p, at)
-                == Ascii::Dot
-                && byte(in p, wrapping_sub(end, 1))
-                == Ascii::Dot;
+                && byte(in p, at) == Ascii::Dot
+                && byte(in p, wrapping_sub(end, 1)) == Ascii::Dot;
             if len == 0 || dots {
                 return Result::Err(RouteFault::InvalidPattern);
             }
             for i in at..end {
                 let b = byte(in p, i);
-                if b
-                    == Ascii::Backslash
-                    || b
-                    == Ascii::Nul
-                    || b
-                    == Ascii::Percent
-                    || b
-                    == Ascii::Question
-                    || b
-                    == Ascii::Hash
+                if b == Ascii::Backslash
+                    || b == Ascii::Nul
+                    || b == Ascii::Percent
+                    || b == Ascii::Question
+                    || b == Ascii::Hash
                     || control_at(in p, i, end) {
                     return Result::Err(RouteFault::InvalidPattern);
                 }
             }
             pieces
                 .push(
-                Piece {
-                    param: false,
-                    lo: at,
-                    hi: end
-                }
-            );
+                    Piece {
+                        param: false,
+                        lo: at,
+                        hi: end
+                    }
+                );
         }
         if end >= hi {
             break;

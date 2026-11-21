@@ -390,12 +390,12 @@ fn branch(inout s: S, n: u64, next: u64, opt: bool, needs_meta: bool) {
             s
                 .nodes
                 .push(
-                Node {
-                    parent: n,
-                    name: next,
-                    man: mi
-                }
-            );
+                    Node {
+                        parent: n,
+                        name: next,
+                        man: mi
+                    }
+                );
             s.stack.push(at);
         }
     }
@@ -626,12 +626,12 @@ pub fn search(inout s: S, opt: bool) {
     s
         .nodes
         .push(
-        Node {
-            parent: none(),
-            name: root,
-            man: rm
-        }
-    );
+            Node {
+                parent: none(),
+                name: root,
+                man: rm
+            }
+        );
     s.stack.push(0);
     s.sdec = 0;
     s.sunsup = false;

@@ -491,26 +491,16 @@ fn is_str(op: u32) -> bool {
 }
 
 pub fn byte_scan(op: u32) -> bool {
-    op
-        == OP_SUM_BE16
-        || op
-        == OP_BYTES_EQ
-        || op
-        == OP_BYTES_CMP
-        || op
-        == OP_FIND_BYTE
-        || op
-        == OP_FIND_EITHER
-        || op
-        == OP_FIND_NOT_IN
-        || op
-        == OP_EQ_IGNORE_ASCII_CASE
-        || op
-        == OP_EXTEND_ASCII_LOWERCASE
-        || op
-        == OP_MAKE_ASCII_LOWERCASE
-        || op
-        == OP_TRY_MAKE_ASCII_LOWERCASE
+    op == OP_SUM_BE16
+        || op == OP_BYTES_EQ
+        || op == OP_BYTES_CMP
+        || op == OP_FIND_BYTE
+        || op == OP_FIND_EITHER
+        || op == OP_FIND_NOT_IN
+        || op == OP_EQ_IGNORE_ASCII_CASE
+        || op == OP_EXTEND_ASCII_LOWERCASE
+        || op == OP_MAKE_ASCII_LOWERCASE
+        || op == OP_TRY_MAKE_ASCII_LOWERCASE
 }
 
 pub fn fallible(op: u32) -> bool {
@@ -520,26 +510,16 @@ pub fn fallible(op: u32) -> bool {
     if is_wide(op) {
         return wide_index(op) < 12;
     }
-    op
-        == OP_GET
-        || op
-        == OP_SET
-        || op
-        == OP_FINISH
-        || op
-        == OP_SLICE_GET
-        || op
-        == OP_SLICE_SET
-        || op
-        == OP_COPY_FROM
-        || op
-        == OP_COPY_WITHIN
-        || op
-        == OP_MAKE_ASCII_LOWERCASE
-        || op
-        == OP_FILL_RANGE
-        || op
-        == OP_EXTEND_FROM_WITHIN
+    op == OP_GET
+        || op == OP_SET
+        || op == OP_FINISH
+        || op == OP_SLICE_GET
+        || op == OP_SLICE_SET
+        || op == OP_COPY_FROM
+        || op == OP_COPY_WITHIN
+        || op == OP_MAKE_ASCII_LOWERCASE
+        || op == OP_FILL_RANGE
+        || op == OP_EXTEND_FROM_WITHIN
 }
 
 pub fn mutates(op: u32) -> bool {
@@ -549,50 +529,28 @@ pub fn mutates(op: u32) -> bool {
     if is_wide(op) {
         return (wide_index(op) / 6) % 2 == 1;
     }
-    op
-        == OP_PUSH
-        || op
-        == OP_POP
-        || op
-        == OP_SET
-        || op
-        == OP_TRY_SET
-        || op
-        == OP_CLEAR
-        || op
-        == OP_TRUNCATE
-        || op
-        == OP_RESERVE
-        || op
-        == OP_EXTEND
-        || op
-        == OP_EXTEND_ASCII_LOWERCASE
-        || op
-        == OP_MAKE_ASCII_LOWERCASE
-        || op
-        == OP_TRY_MAKE_ASCII_LOWERCASE
-        || op
-        == OP_COPY_FROM
-        || op
-        == OP_TRY_COPY_FROM
-        || op
-        == OP_COPY_WITHIN
-        || op
-        == OP_TRY_COPY_WITHIN
-        || op
-        == OP_FILL
-        || op
-        == OP_RESIZE
-        || op
-        == OP_TRY_FILL
-        || op
-        == OP_FILL_RANGE
-        || op
-        == OP_EXTEND_FROM_WITHIN
-        || op
-        == OP_TRY_EXTEND_FROM_WITHIN
-        || op
-        == OP_EXTEND_REVERSED
+    op == OP_PUSH
+        || op == OP_POP
+        || op == OP_SET
+        || op == OP_TRY_SET
+        || op == OP_CLEAR
+        || op == OP_TRUNCATE
+        || op == OP_RESERVE
+        || op == OP_EXTEND
+        || op == OP_EXTEND_ASCII_LOWERCASE
+        || op == OP_MAKE_ASCII_LOWERCASE
+        || op == OP_TRY_MAKE_ASCII_LOWERCASE
+        || op == OP_COPY_FROM
+        || op == OP_TRY_COPY_FROM
+        || op == OP_COPY_WITHIN
+        || op == OP_TRY_COPY_WITHIN
+        || op == OP_FILL
+        || op == OP_RESIZE
+        || op == OP_TRY_FILL
+        || op == OP_FILL_RANGE
+        || op == OP_EXTEND_FROM_WITHIN
+        || op == OP_TRY_EXTEND_FROM_WITHIN
+        || op == OP_EXTEND_REVERSED
 }
 
 pub fn place_primitive(op: u32) -> bool {
@@ -613,30 +571,18 @@ pub fn has_receiver(op: u32) -> bool {
 
 // Whether `seq::fip_allocation` reports the operation (it grows a sequence).
 pub fn grows(op: u32) -> bool {
-    op
-        == OP_NEW
-        || op
-        == OP_WITH_CAPACITY
-        || op
-        == OP_PUSH
-        || op
-        == OP_EXTEND
-        || op
-        == OP_EXTEND_ASCII_LOWERCASE
-        || op
-        == OP_RESIZE
-        || op
-        == OP_EXTEND_FROM_WITHIN
-        || op
-        == OP_TRY_EXTEND_FROM_WITHIN
-        || op
-        == OP_EXTEND_REVERSED
-        || op
-        == wrapping_add(OP_STR, 6)
-        || op
-        == wrapping_add(OP_STR, 7)
-        || op
-        == wrapping_add(OP_STR, 9)
+    op == OP_NEW
+        || op == OP_WITH_CAPACITY
+        || op == OP_PUSH
+        || op == OP_EXTEND
+        || op == OP_EXTEND_ASCII_LOWERCASE
+        || op == OP_RESIZE
+        || op == OP_EXTEND_FROM_WITHIN
+        || op == OP_TRY_EXTEND_FROM_WITHIN
+        || op == OP_EXTEND_REVERSED
+        || op == wrapping_add(OP_STR, 6)
+        || op == wrapping_add(OP_STR, 7)
+        || op == wrapping_add(OP_STR, 9)
 }
 
 // `SeqOp::with_arity`.
@@ -910,12 +856,12 @@ fn second_class_open(inout d: Diags) -> u64 {
 fn second_class_close(inout d: Diags, c: u64, m: u64, start: u64, stop: u64) {
     d
         .close(
-        c,
-        m,
-        "take the slice as an 'in' or 'inout' parameter and pass s[a..b] or s.as_slice() at the call",
-        start,
-        stop
-    );
+            c,
+            m,
+            "take the slice as an 'in' or 'inout' parameter and pass s[a..b] or s.as_slice() at the call",
+            start,
+            stop
+        );
 }
 
 fn lower(b: u8) -> u8 {
@@ -955,8 +901,8 @@ pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, 
                 d
                     .text
                     .extend(
-                    in "Slice[T] is a second-class borrow and cannot appear in the ".as_bytes()
-                );
+                        in "Slice[T] is a second-class borrow and cannot appear in the ".as_bytes()
+                    );
                 if p.pass == P_IN {
                     put(inout d.text, "in");
                 } else if p.pass == P_INOUT {
@@ -976,9 +922,9 @@ pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, 
             d
                 .text
                 .extend(
-                in "Slice[T] is a second-class borrow and cannot appear in the result of '"
-                    .as_bytes()
-            );
+                    in "Slice[T] is a second-class borrow and cannot appear in the result of '"
+                        .as_bytes()
+                );
             names.write(f.name, inout d.text);
             d.text.push(39);
             second_class_close(inout d, c, m, f.start, f.stop);
@@ -996,9 +942,9 @@ pub fn seq_check_world(in t: Types, in names: Names, in wd: World, in sg: Sigs, 
                     d
                         .text
                         .extend(
-                        in "Slice[T] is a second-class borrow and cannot appear in field '"
-                            .as_bytes()
-                    );
+                            in "Slice[T] is a second-class borrow and cannot appear in field '"
+                                .as_bytes()
+                        );
                     names.write(a.name, inout d.text);
                     d.text.push(46);
                     names.write(fd.name, inout d.text);

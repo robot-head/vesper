@@ -56,26 +56,16 @@ pub fn kv_layout(in config: Slice[u64], inout out: Slice[u64])
     let tokens = config[4];
     let max_bytes = config[5];
     let element = config[6];
-    if heads
-        == 0
-        || head_dim
-        == 0
-        || pages
-        == 0
-        || pages
-        > MAX_PAGES
-        || sequences
-        == 0
-        || sequences
-        > MAX_SEQUENCES
-        || tokens
-        == 0
-        || tokens
-        > MAX_TOKENS_PER_SEQUENCE
-        || max_bytes
-        == 0
-        || max_bytes
-        > MAX_STORAGE {
+    if heads == 0
+        || head_dim == 0
+        || pages == 0
+        || pages > MAX_PAGES
+        || sequences == 0
+        || sequences > MAX_SEQUENCES
+        || tokens == 0
+        || tokens > MAX_TOKENS_PER_SEQUENCE
+        || max_bytes == 0
+        || max_bytes > MAX_STORAGE {
         return 11;
     }
     // Checked products, as the Rust build's `checked_mul`.
@@ -130,14 +120,10 @@ fn lease_ok(in pages: Slice[u64], slot: u64, generation: u64, page: u64, page_ge
     if 4 * page + 4 > pages.len() {
         return false;
     }
-    pages[4 * page]
-        == 1
-        && pages[4 * page + 1]
-        == slot
-        && pages[4 * page + 2]
-        == generation
-        && pages[4 * page + 3]
-        == page_generation
+    pages[4 * page] == 1
+        && pages[4 * page + 1] == slot
+        && pages[4 * page + 2] == generation
+        && pages[4 * page + 3] == page_generation
 }
 
 fn validate_pages(

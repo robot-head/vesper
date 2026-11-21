@@ -6,8 +6,7 @@ copy struct Secret[T] {
 fn bump(s: Secret[u64]) -> Secret[u64] eff [ConstTime, Fail[ArithOverflow]] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     Secret {
         value: value + 1
     }

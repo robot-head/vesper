@@ -108,36 +108,16 @@ fn text(inout b: Budget, n: u64) eff [Fail[LintFail]] {
 }
 
 fn validate_limits(in l: Limits) eff [Fail[LintFail]] {
-    if l
-        .bytes
-        == 0
-        || l
-        .bytes
-        > HARD_BYTES
-        || l
-        .depth
-        == 0
-        || l
-        .depth
-        > HARD_DEPTH
-        || l
-        .tokens
-        == 0
-        || l
-        .tokens
-        > HARD_TOKENS
-        || l
-        .nodes
-        == 0
-        || l
-        .nodes
-        > HARD_NODES
-        || l
-        .work
-        == 0
-        || l
-        .work
-        > HARD_WORK {
+    if l.bytes == 0
+        || l.bytes > HARD_BYTES
+        || l.depth == 0
+        || l.depth > HARD_DEPTH
+        || l.tokens == 0
+        || l.tokens > HARD_TOKENS
+        || l.nodes == 0
+        || l.nodes > HARD_NODES
+        || l.work == 0
+        || l.work > HARD_WORK {
         fail(P_INVALID_LIMITS);
     }
 }
@@ -158,45 +138,28 @@ const T_COMMA: u8 = 8;
 const T_NEWLINE: u8 = 9;
 
 fn atom_stop(c: u64) -> bool {
-    c
-        == 32
-        || c
-        == 9
-        || c
-        == 13
-        || c
-        == 10
-        || c
-        == 35
-        || c
-        == 39
-        || c
-        == 34
-        || c
-        == 46
-        || c
-        == 61
-        || c
-        == 91
-        || c
-        == 93
-        || c
-        == 123
-        || c
-        == 125
-        || c
-        == 44
+    c == 32
+        || c == 9
+        || c == 13
+        || c == 10
+        || c == 35
+        || c == 39
+        || c == 34
+        || c == 46
+        || c == 61
+        || c == 91
+        || c == 93
+        || c == 123
+        || c == 125
+        || c == 44
 }
 
 fn string_end(in s: Slice[u8], start: u64) -> u64 eff [Fail[LintFail]] {
     let n = s.len();
     let delim = at(in s, start);
-    let multiline = wrapping_add(start, 3)
-        <= n
-        && at(in s, inc(start))
-        == delim
-        && at(in s, wrapping_add(start, 2))
-        == delim;
+    let multiline = wrapping_add(start, 3) <= n
+        && at(in s, inc(start)) == delim
+        && at(in s, wrapping_add(start, 2)) == delim;
     let mut i = if multiline {
         wrapping_add(start, 3)
     } else {
@@ -599,15 +562,15 @@ fn new_node(inout t: Toml, kind: u8, implicit: bool, dotted: bool) -> u32 {
     t
         .nodes
         .push(
-        TNode {
-            kind: kind,
-            implicit: implicit,
-            dotted: dotted,
-            first: NONE,
-            last: NONE,
-            count: 0
-        }
-    );
+            TNode {
+                kind: kind,
+                implicit: implicit,
+                dotted: dotted,
+                first: NONE,
+                last: NONE,
+                count: 0
+            }
+        );
     id
 }
 
@@ -622,14 +585,14 @@ fn append(inout t: Toml, c: u32, kstart: u64, klen: u64, hash: u64, child: u32) 
     t
         .ents
         .push(
-        TEnt {
-            kstart: wrapping_u32(kstart),
-            klen: wrapping_u32(klen),
-            hash: hash,
-            child: child,
-            next: NONE
-        }
-    );
+            TEnt {
+                kstart: wrapping_u32(kstart),
+                klen: wrapping_u32(klen),
+                hash: hash,
+                child: child,
+                next: NONE
+            }
+        );
     let mut n = node(in t, c);
     if n.last == NONE {
         n.first = e;
@@ -876,12 +839,9 @@ fn escape(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
 // Characters a basic string holds unescaped (and a multiline one, besides
 // newlines).
 fn basic_unescaped(c: u64) -> bool {
-    c
-        == 32
-        || c
-        == 9
-        || c
-        == 33
+    c == 32
+        || c == 9
+        || c == 33
         || (c >= 35 && c <= 91)
         || (c >= 93 && c <= 126)
         || (c >= 128 && c != EOF)
@@ -1890,18 +1850,10 @@ fn validate_tree(in t: Toml, inout b: Budget) eff [Fail[LintFail]] {
         let x = node(in t, id);
         if x.kind == N_STRING {
             text(inout b, widen_u64(x.count));
-        } else if x
-            .kind
-            == N_INTEGER
-            || x
-            .kind
-            == N_FLOAT
-            || x
-            .kind
-            == N_BOOL
-            || x
-            .kind
-            == N_DATETIME {
+        } else if x.kind == N_INTEGER
+            || x.kind == N_FLOAT
+            || x.kind == N_BOOL
+            || x.kind == N_DATETIME {
             text(inout b, 8);
         } else {
             let len = widen_u64(x.count);

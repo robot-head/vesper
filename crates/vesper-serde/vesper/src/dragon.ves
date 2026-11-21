@@ -460,9 +460,9 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
             i = wrapping_sub(i, 1);
             out
                 .try_set(
-                wrapping_add(first, i),
-                wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE))
-            );
+                    wrapping_add(first, i),
+                    wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE))
+                );
             v = v / DECIMAL_BASE;
         }
     } else if wrapping_u64(s.k) < n {
@@ -497,9 +497,9 @@ pub fn put_shortest(inout out: Slice[u8], at: u64, s: Shortest) {
             i = wrapping_sub(i, 1);
             out
                 .try_set(
-                wrapping_add(p, i),
-                wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE))
-            );
+                    wrapping_add(p, i),
+                    wrapping_u8(wrapping_add(DIGIT_ZERO, v % DECIMAL_BASE))
+                );
             v = v / DECIMAL_BASE;
         }
     }

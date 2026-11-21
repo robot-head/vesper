@@ -8,25 +8,25 @@ fn main() -> i64 {
     region r(40) {
         let x = r
             .box(
-            Wide {
-                a: 1,
-                b: 2
-            }
-        );
+                Wide {
+                    a: 1,
+                    b: 2
+                }
+            );
         let y = r
             .box(
-            Wide {
-                a: 3,
-                b: 4
-            }
-        );
+                Wide {
+                    a: 3,
+                    b: 4
+                }
+            );
         let z = r
             .box(
-            Wide {
-                a: 5,
-                b: 6
-            }
-        );
+                Wide {
+                    a: 5,
+                    b: 6
+                }
+            );
         r.get(x).a
     }
 }

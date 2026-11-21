@@ -185,17 +185,17 @@ pub fn emit(inout s: S, code: u64, pkg: u64, so: u64, sl: u64, mo: u64) {
     s
         .ds
         .push(
-        Diag {
-            snap: 0,
-            code: code,
-            pkg: pkg,
-            dep: none(),
-            so: so,
-            sl: sl,
-            mo: mo,
-            ml: ml
-        }
-    );
+            Diag {
+                snap: 0,
+                code: code,
+                pkg: pkg,
+                dep: none(),
+                so: so,
+                sl: sl,
+                mo: mo,
+                ml: ml
+            }
+        );
     if s.ds.len() >= add(mul(s.dedup_n, 2), DEDUP_SLACK) {
         dedup(inout s);
     }

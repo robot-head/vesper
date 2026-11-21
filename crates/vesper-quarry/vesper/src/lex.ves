@@ -74,8 +74,7 @@ pub fn is_word_byte(c: u64) -> bool {
     (c >= LOWER_A && c <= LOWER_Z)
         || (c >= UPPER_A && c <= UPPER_Z)
         || (c >= DIGIT_0 && c <= DIGIT_9)
-        || c
-        == UNDERSCORE
+        || c == UNDERSCORE
 }
 
 pub fn is_digit(c: u64) -> bool {
@@ -109,10 +108,8 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
             let start = i;
             if (c >= LOWER_A && c <= LOWER_Z)
                 || (c >= UPPER_A && c <= UPPER_Z)
-                || c
-                == UNDERSCORE
-                || c
-                == COLON {
+                || c == UNDERSCORE
+                || c == COLON {
                 let is_param = c == COLON;
                 if is_param {
                     i = wrapping_add(i, 1);
@@ -139,17 +136,17 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 q
                     .toks
                     .push(
-                    Tok {
-                        kind: if is_param {
-                            tk_param()
-                        } else {
-                            tk_word()
-                        },
-                        a: off,
-                        b: len,
-                        kw: kw
-                    }
-                );
+                        Tok {
+                            kind: if is_param {
+                                tk_param()
+                            } else {
+                                tk_word()
+                            },
+                            a: off,
+                            b: len,
+                            kw: kw
+                        }
+                    );
             } else if is_digit(c) || c == MINUS {
                 i = wrapping_add(i, 1);
                 loop {
@@ -200,13 +197,13 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 q
                     .toks
                     .push(
-                    Tok {
-                        kind: tk_int(),
-                        a: v,
-                        b: 0,
-                        kw: 0
-                    }
-                );
+                        Tok {
+                            kind: tk_int(),
+                            a: v,
+                            b: 0,
+                            kw: 0
+                        }
+                    );
             } else if c == QUOTE {
                 i = wrapping_add(i, 1);
                 let off = q.pool.len();
@@ -235,25 +232,25 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 q
                     .toks
                     .push(
-                    Tok {
-                        kind: tk_text(),
-                        a: off,
-                        b: wrapping_sub(q.pool.len(), off),
-                        kw: 0
-                    }
-                );
+                        Tok {
+                            kind: tk_text(),
+                            a: off,
+                            b: wrapping_sub(q.pool.len(), off),
+                            kw: 0
+                        }
+                    );
             } else if c == EQUALS {
                 i = wrapping_add(i, 1);
                 q
                     .toks
                     .push(
-                    Tok {
-                        kind: tk_op(),
-                        a: 0,
-                        b: 0,
-                        kw: 0
-                    }
-                );
+                        Tok {
+                            kind: tk_op(),
+                            a: 0,
+                            b: 0,
+                            kw: 0
+                        }
+                    );
             } else if c == LT || c == GT || c == BANG {
                 i = wrapping_add(i, 1);
                 let second = if i < n {
@@ -282,36 +279,30 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                 q
                     .toks
                     .push(
-                    Tok {
-                        kind: tk_op(),
-                        a: op,
-                        b: 0,
-                        kw: 0
-                    }
-                );
-            } else if c
-                == LPAREN
-                || c
-                == RPAREN
-                || c
-                == COMMA
-                || c
-                == DOT
-                || c
-                == SEMICOLON
-                || c
-                == STAR {
+                        Tok {
+                            kind: tk_op(),
+                            a: op,
+                            b: 0,
+                            kw: 0
+                        }
+                    );
+            } else if c == LPAREN
+                || c == RPAREN
+                || c == COMMA
+                || c == DOT
+                || c == SEMICOLON
+                || c == STAR {
                 i = wrapping_add(i, 1);
                 q
                     .toks
                     .push(
-                    Tok {
-                        kind: tk_sym(),
-                        a: c,
-                        b: 0,
-                        kw: 0
-                    }
-                );
+                        Tok {
+                            kind: tk_sym(),
+                            a: c,
+                            b: 0,
+                            kw: 0
+                        }
+                    );
             } else {
                 if q.err == 0 {
                     q.err = 1;

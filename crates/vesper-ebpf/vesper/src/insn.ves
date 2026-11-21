@@ -528,20 +528,16 @@ fn atomic_imm(op: AtomicOp) -> i32 {
     match op {
         AtomicOp::Add {
             fetch
-        }
-        => BpfAtomic::Add | fetch_bit(fetch),
+        } => BpfAtomic::Add | fetch_bit(fetch),
         AtomicOp::Or {
             fetch
-        }
-        => BpfAtomic::Or | fetch_bit(fetch),
+        } => BpfAtomic::Or | fetch_bit(fetch),
         AtomicOp::And {
             fetch
-        }
-        => BpfAtomic::And | fetch_bit(fetch),
+        } => BpfAtomic::And | fetch_bit(fetch),
         AtomicOp::Xor {
             fetch
-        }
-        => BpfAtomic::Xor | fetch_bit(fetch),
+        } => BpfAtomic::Xor | fetch_bit(fetch),
         AtomicOp::Xchg => BpfAtomic::Xchg,
         AtomicOp::CmpXchg => BpfAtomic::Cmpxchg,
     }
@@ -909,8 +905,7 @@ fn is_ld_imm64(i: Insn) -> bool {
         Insn::LdImm64 {
             dst,
             imm
-        }
-        => true,
+        } => true,
         _ => false,
     }
 }
@@ -987,8 +982,7 @@ pub fn encode(i: Insn) -> Encoded {
             op,
             dst,
             src
-        }
-        => {
+        } => {
             let cls: u8 = if wide {
                 BpfClass::Alu64
             } else {
@@ -1002,8 +996,7 @@ pub fn encode(i: Insn) -> Encoded {
             kind,
             bits,
             dst
-        }
-        => {
+        } => {
             let code: u8 = match kind {
                 Endian::ToLe => BpfClass::Alu | BpfAlu::End,
                 Endian::ToBe => BpfClass::Alu | BpfAlu::End | BpfSrc::ToBe,
@@ -1013,8 +1006,7 @@ pub fn encode(i: Insn) -> Encoded {
         },
         Insn::Ja {
             off
-        }
-        => if off >= -32768 && off <= 32767 {
+        } => if off >= -32768 && off <= 32767 {
             one(raw(BpfClass::Jmp | BpfJmp::Ja, 0, 0, wrapping_i16(off), 0))
         } else {
             one(raw(BpfClass::Jmp32 | BpfJmp::Ja, 0, 0, 0, off))
@@ -1025,8 +1017,7 @@ pub fn encode(i: Insn) -> Encoded {
             dst,
             src,
             off
-        }
-        => {
+        } => {
             let cls: u8 = if wide {
                 BpfClass::Jmp
             } else {
@@ -1048,8 +1039,7 @@ pub fn encode(i: Insn) -> Encoded {
         Insn::LdImm64 {
             dst,
             imm
-        }
-        => {
+        } => {
             let (src, lo, up): (u8, i32, i32) = match imm {
                 Imm64::Value(v) => (0, wrapping_i32(v), wrapping_i32(v >> 32)),
                 Imm64::MapFd(fd) => (PseudoLd::Fd, fd, 0),
@@ -1057,8 +1047,7 @@ pub fn encode(i: Insn) -> Encoded {
                     src,
                     imm_lo,
                     imm_hi
-                }
-                => (src, imm_lo, imm_hi),
+                } => (src, imm_lo, imm_hi),
             };
             Encoded {
                 n: 2,
@@ -1072,8 +1061,7 @@ pub fn encode(i: Insn) -> Encoded {
             src,
             off,
             sign_extend
-        }
-        => {
+        } => {
             let mode: u8 = if sign_extend {
                 BpfMode::Memsx
             } else {
@@ -1086,23 +1074,20 @@ pub fn encode(i: Insn) -> Encoded {
             dst,
             off,
             imm
-        }
-        => one(raw(BpfClass::St | BpfMode::Mem | size_code(size), dst, 0, off, imm)),
+        } => one(raw(BpfClass::St | BpfMode::Mem | size_code(size), dst, 0, off, imm)),
         Insn::Stx {
             size,
             dst,
             src,
             off
-        }
-        => one(raw(BpfClass::Stx | BpfMode::Mem | size_code(size), dst, src, off, 0)),
+        } => one(raw(BpfClass::Stx | BpfMode::Mem | size_code(size), dst, src, off, 0)),
         Insn::Atomic {
             size,
             op,
             dst,
             src,
             off
-        }
-        => one(
+        } => one(
             raw(BpfClass::Stx | BpfMode::Atomic | size_code(size), dst, src, off, atomic_imm(op))
         ),
         Insn::LdLegacy {
@@ -1110,8 +1095,7 @@ pub fn encode(i: Insn) -> Encoded {
             indirect,
             src,
             imm
-        }
-        => {
+        } => {
             let mode: u8 = if indirect {
                 BpfMode::Ind
             } else {

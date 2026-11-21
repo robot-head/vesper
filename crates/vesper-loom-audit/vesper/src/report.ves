@@ -44,8 +44,7 @@ use self::util::{
 // `AffectedRange::contains`.
 pub fn range_holds(in l: L, in r: Rng, v: u64) -> bool {
     (r.pre || slen(in l, ver(in l, v).pre) == 0)
-        && prec_ord(in l, v, r.intro)
-        != 0
+        && prec_ord(in l, v, r.intro) != 0
         && (!r.has_fixed || prec_ord(in l, v, r.fixed) == 0)
 }
 

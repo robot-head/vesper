@@ -1493,12 +1493,9 @@ impl Fuzzer {
                 return;
             }
             let pos = wrapping_add(estart, i);
-            if at(in self.c_vals.as_slice(), pos)
-                == needle
-                && at(in self.c_tag.as_slice(), pos)
-                == 0
-                && repl
-                <= at(in self.c_max.as_slice(), pos) {
+            if at(in self.c_vals.as_slice(), pos) == needle
+                && at(in self.c_tag.as_slice(), pos) == 0
+                && repl <= at(in self.c_max.as_slice(), pos) {
                 self.scratch_from_entry(estart);
                 self.scratch.try_set(i, repl);
                 self.push_scratch(estart);
@@ -2151,14 +2148,10 @@ impl Search {
             return true;
         }
         if ta == Proc::Task && tb == Proc::Task {
-            return pa
-                == pb
-                || self
-                .conflicts(na, nb)
-                || self
-                .cancels(na, pb)
-                || self
-                .cancels(nb, pa);
+            return pa == pb
+                || self.conflicts(na, nb)
+                || self.cancels(na, pb)
+                || self.cancels(nb, pa);
         }
         if ta == Proc::Task && tb == Proc::Io {
             return pa == proc_task(pb);
@@ -2359,12 +2352,8 @@ impl Search {
         let m = self.ev_proc.len();
         for j in inc(n)..m {
             let e = at(in self.ev_proc.as_slice(), j);
-            if self
-                .clock_get(hb_off, hb_len, e)
-                > j
-                && self
-                .en_find(n, e)
-                != none()
+            if self.clock_get(hb_off, hb_len, e) > j
+                && self.en_find(n, e) != none()
                 && !seq_has(in self.t3.as_slice(), e) {
                 self.t3.push(e);
             }
@@ -2396,11 +2385,9 @@ impl Search {
             i = wrapping_sub(i, 1);
             let e = at(in self.ev_proc.as_slice(), i);
             let en = at(in self.ev_next.as_slice(), i);
-            let races = e
-                != p
+            let races = e != p
                 && may_co_enable(e, p)
-                && self
-                .dep(e, en, p, next)
+                && self.dep(e, en, p, next)
                 && !(self.clock_get(hb_off, hb_len, e) > i);
             if races {
                 self.add_at(i, p, hb_off, hb_len);
@@ -2989,11 +2976,11 @@ pub fn search_key(inout s: Search, key: u64) -> bool {
         let sl1 = wrapping_add(sl0, at(in s.n_sl_len.as_slice(), n));
         let c0 = at(in s.ca_sl_off.as_slice(), key);
         let c1 = wrapping_add(c0, at(in s.ca_sl_len.as_slice(), key));
-        hit = !s
-            .dpor
+        hit = !s.dpor
             || (
-            !s.bounded && range_subset(in s.ca_sl.as_slice(), c0, c1, in s.sl.as_slice(), sl0, sl1)
-        );
+                !s.bounded
+                    && range_subset(in s.ca_sl.as_slice(), c0, c1, in s.sl.as_slice(), sl0, sl1)
+            );
     }
     if hit {
         s.n_hit.try_set(n, true);
@@ -3083,9 +3070,7 @@ test {
                     reproduces = true;
                 }
             }
-            let invalid = candidate
-                .len()
-                == 0
+            let invalid = candidate.len() == 0
                 || (candidate.len() == 1 && candidate.try_get(0) == Option::Some(0));
             let outcome: u64 = if invalid {
                 1
@@ -3102,26 +3087,13 @@ test {
         let best = shrinker_best(in shrinker);
         let stats = shrinker_stats(in shrinker);
         rejected_before_next
-            && best
-            .len()
-            == 1
-            && best
-            .try_get(0)
-            == Option::Some(3)
-            && stats
-            .accepted
-            > 0
-            && stats
-            .invalid
-            > 0
-            && stats
-            .not_reproducing
-            > 0
-            && stats
-            .runs
-            < 80
-            && !stats
-            .budget_exhausted
+            && best.len() == 1
+            && best.try_get(0) == Option::Some(3)
+            && stats.accepted > 0
+            && stats.invalid > 0
+            && stats.not_reproducing > 0
+            && stats.runs < 80
+            && !stats.budget_exhausted
     }
 
     fn test_shrinker_stops_at_run_budget() -> bool {
@@ -3143,12 +3115,9 @@ test {
         features.push(closeness);
         features.push(4);
         if !fuzzer_next(inout fuzzer)
-            || fuzzer_seed(in fuzzer)
-            != 16294208416658607535
-            || fuzzer_observe(inout fuzzer, 0, in features.as_slice())
-            != 1
-            || fuzzer_observe(inout fuzzer, 0, in features.as_slice())
-            != 0 {
+            || fuzzer_seed(in fuzzer) != 16294208416658607535
+            || fuzzer_observe(inout fuzzer, 0, in features.as_slice()) != 1
+            || fuzzer_observe(inout fuzzer, 0, in features.as_slice()) != 0 {
             return false;
         }
 
@@ -3176,20 +3145,11 @@ test {
         let entry = fuzzer_corpus_entry(in fuzzer, 0);
         let candidate = fuzzer_candidate(in fuzzer);
         features.try_set(3, 5);
-        if entry
-            .len()
-            != 1
-            || entry
-            .try_get(0)
-            != Option::Some(2)
-            || candidate
-            .len()
-            != 1
-            || candidate
-            .try_get(0)
-            != Option::Some(7)
-            || fuzzer_observe(inout fuzzer, 0, in features.as_slice())
-            != 1 {
+        if entry.len() != 1
+            || entry.try_get(0) != Option::Some(2)
+            || candidate.len() != 1
+            || candidate.try_get(0) != Option::Some(7)
+            || fuzzer_observe(inout fuzzer, 0, in features.as_slice()) != 1 {
             return false;
         }
         let stats = fuzzer_stats(in fuzzer);
@@ -3202,8 +3162,7 @@ test {
         let mut fuzzer = fuzzer_new(0, max_execs, true, 0, 0);
         let features = ChunkSeq::new[u64]();
         if !fuzzer_next(inout fuzzer)
-            || fuzzer_observe(inout fuzzer, 2, in features.as_slice())
-            != 0
+            || fuzzer_observe(inout fuzzer, 2, in features.as_slice()) != 0
             || !fuzzer_next(inout fuzzer) {
             return false;
         }
@@ -3247,22 +3206,13 @@ test {
         search_child(inout search, false, in empty.as_slice(), in empty.as_slice());
         let done = search_choose(inout search);
         let prefix = search_prefix(in search);
-        if done
-            .code
-            != 2
-            || prefix
-            .len()
-            != 1
-            || prefix
-            .try_get(0)
-            != Option::Some(1)
-            || search_running(in search)
-            != none()
-            || search_preemptions(in search)
-            != 0
+        if done.code != 2
+            || prefix.len() != 1
+            || prefix.try_get(0) != Option::Some(1)
+            || search_running(in search) != none()
+            || search_preemptions(in search) != 0
             || !search_backtrack(inout search)
-            || search_nodes(in search)
-            != 1 {
+            || search_nodes(in search) != 1 {
             return false;
         }
         let second = search_choose(inout search);
@@ -3290,11 +3240,8 @@ test {
         let mut rng = Rng {
             word: seed
         };
-        rng_below_inclusive(inout rng, max_value)
-            == expected
-            && rng
-            .word
-            == wrapping_add(seed, 0x9e3779b97f4a7c15)
+        rng_below_inclusive(inout rng, max_value) == expected
+            && rng.word == wrapping_add(seed, 0x9e3779b97f4a7c15)
     }
 
     fn footprint_from_masks(
@@ -3345,16 +3292,10 @@ test {
         let mut search = search_new(true, false, 0, false);
         let a = footprint_from_masks(inout search, a_reads, a_writes, a_cancels, a_spawns);
         let b = footprint_from_masks(inout search, b_reads, b_writes, 0, b_spawns);
-        a
-            == 0
-            && b
-            == 1
-            && search
-            .dep(1, a, 2, b)
-            == dependent
-            && search
-            .dep(2, b, 1, a)
-            == dependent
+        a == 0
+            && b == 1
+            && search.dep(1, a, 2, b) == dependent
+            && search.dep(2, b, 1, a) == dependent
     }
 
     // @case shorter_wins(1, 3, 9, 2, 0, 0, true)
@@ -3421,14 +3362,10 @@ test {
             return false;
         }
         let cut = wrapping_sub(n, 1);
-        space_at(in bytes, 0, cut)
-            == 0
-            && space_before(in bytes, 1, n)
-            == 0
-            && space_at(in bytes, n, n)
-            == 0
-            && space_before(in bytes, n, n)
-            == 0
+        space_at(in bytes, 0, cut) == 0
+            && space_before(in bytes, 1, n) == 0
+            && space_at(in bytes, n, n) == 0
+            && space_before(in bytes, n, n) == 0
     }
 
     // @case no_solver_rows(0, in "")
@@ -3540,9 +3477,7 @@ test {
         search_child(inout search, false, in empty.as_slice(), in empty.as_slice());
         if search_key(inout search, 2)
             || !search_backtrack(inout search)
-            || search_choose(inout search)
-            .code
-            != 0 {
+            || search_choose(inout search).code != 0 {
             return false;
         }
         search_child(inout search, false, in empty.as_slice(), in empty.as_slice());
@@ -3550,11 +3485,8 @@ test {
             return false;
         }
         let hit = search_key(inout search, 2);
-        hit
-            == expected_hit
-            && search_stats(in search)
-            .cache_hits
-            == hits
+        hit == expected_hit
+            && search_stats(in search).cache_hits == hits
             && !search_backtrack(inout search)
     }
 
@@ -3600,46 +3532,16 @@ test {
         search.cl_proc.push(5);
         search.cl_val.push(1);
         search.join_into(1, 4);
-        let first = search
-            .t1
-            .try_get(0)
-            == Option::Some(1)
-            && search
-            .t1
-            .try_get(1)
-            == Option::Some(8)
-            && search
-            .t1
-            .try_get(2)
-            == Option::Some(2)
-            && search
-            .t1
-            .try_get(3)
-            == Option::Some(6);
-        let middle = search
-            .t1
-            .try_get(4)
-            == Option::Some(3)
-            && search
-            .t1
-            .try_get(5)
-            == Option::Some(9)
-            && search
-            .t1
-            .try_get(6)
-            == Option::Some(4)
-            && search
-            .t1
-            .try_get(7)
-            == Option::Some(5);
-        let last = search
-            .t1
-            .try_get(8)
-            == Option::Some(5)
-            && search
-            .t1
-            .try_get(9)
-            == Option::Some(1);
+        let first = search.t1.try_get(0) == Option::Some(1)
+            && search.t1.try_get(1) == Option::Some(8)
+            && search.t1.try_get(2) == Option::Some(2)
+            && search.t1.try_get(3) == Option::Some(6);
+        let middle = search.t1.try_get(4) == Option::Some(3)
+            && search.t1.try_get(5) == Option::Some(9)
+            && search.t1.try_get(6) == Option::Some(4)
+            && search.t1.try_get(7) == Option::Some(5);
+        let last = search.t1.try_get(8) == Option::Some(5)
+            && search.t1.try_get(9) == Option::Some(1);
         search.t1.len() == 10 && first && middle && last
     }
 
@@ -3657,50 +3559,17 @@ test {
         search.sm_insert(child, 0, 3);
         search.sm_insert(child, 9, 2);
         search.merge_summary(1);
-        let bounds = search
-            .sm_proc
-            .try_get(0)
-            == Option::Some(0)
-            && search
-            .sm_proc
-            .try_get(1)
-            == Option::Some(1)
-            && search
-            .sm_proc
-            .try_get(5)
-            == Option::Some(9);
-        let ordered_process = search
-            .sm_proc
-            .try_get(2)
-            == Option::Some(4)
-            && search
-            .sm_proc
-            .try_get(3)
-            == Option::Some(4)
-            && search
-            .sm_proc
-            .try_get(4)
-            == Option::Some(4);
-        let ordered_next = search
-            .sm_next
-            .try_get(2)
-            == Option::Some(6)
-            && search
-            .sm_next
-            .try_get(3)
-            == Option::Some(7)
-            && search
-            .sm_next
-            .try_get(4)
-            == Option::Some(8);
-        search
-            .sm_proc
-            .len()
-            == 6
-            && search
-            .sm_next
-            .len()
-            == 6
+        let bounds = search.sm_proc.try_get(0) == Option::Some(0)
+            && search.sm_proc.try_get(1) == Option::Some(1)
+            && search.sm_proc.try_get(5) == Option::Some(9);
+        let ordered_process = search.sm_proc.try_get(2) == Option::Some(4)
+            && search.sm_proc.try_get(3) == Option::Some(4)
+            && search.sm_proc.try_get(4) == Option::Some(4);
+        let ordered_next = search.sm_next.try_get(2) == Option::Some(6)
+            && search.sm_next.try_get(3) == Option::Some(7)
+            && search.sm_next.try_get(4) == Option::Some(8);
+        search.sm_proc.len() == 6
+            && search.sm_next.len() == 6
             && bounds
             && ordered_process
             && ordered_next
@@ -3727,12 +3596,12 @@ test {
             values.push(byte(in sample, i));
             kinds
                 .push(
-                if i == 2 {
-                    0
-                } else {
-                    1
-                }
-            );
+                    if i == 2 {
+                        0
+                    } else {
+                        1
+                    }
+                );
             limits.push(255);
         }
         let mut comparisons = ChunkSeq::new[u64]();
@@ -3817,20 +3686,11 @@ test {
         let stats = shrinker_stats(in shrinker);
         let key = tape_key(in best.as_slice());
         zeroed
-            && key
-            .len
-            == 8
-            && key
-            .lo
-            == 0
-            && stats
-            .accepted
-            == 1
-            && stats
-            .invalid
-            == 40
-            && !stats
-            .budget_exhausted
+            && key.len == 8
+            && key.lo == 0
+            && stats.accepted == 1
+            && stats.invalid == 40
+            && !stats.budget_exhausted
     }
 
     fn test_shrinker_lowers_with_binary_search() -> bool {
@@ -3856,20 +3716,11 @@ test {
         }
         let best = shrinker_best(in shrinker);
         let stats = shrinker_stats(in shrinker);
-        best
-            .len()
-            == 1
-            && best
-            .try_get(0)
-            == Option::Some(13)
-            && stats
-            .accepted
-            > 0
-            && stats
-            .not_reproducing
-            > 8
-            && !stats
-            .budget_exhausted
+        best.len() == 1
+            && best.try_get(0) == Option::Some(13)
+            && stats.accepted > 0
+            && stats.not_reproducing > 8
+            && !stats.budget_exhausted
     }
 
     fn test_shrinker_lowers_count_and_removes_corresponding_value() -> bool {
@@ -3887,12 +3738,8 @@ test {
                 return false;
             }
             let candidate = shrinker_candidate(in shrinker);
-            let valid = candidate
-                .len()
-                > 0
-                && wrapping_add(at(in candidate.as_slice(), 0), 1)
-                == candidate
-                .len();
+            let valid = candidate.len() > 0
+                && wrapping_add(at(in candidate.as_slice(), 0), 1) == candidate.len();
             let outcome: u64 = if valid {
                 0
             } else {
@@ -3902,20 +3749,11 @@ test {
         }
         let best = shrinker_best(in shrinker);
         let stats = shrinker_stats(in shrinker);
-        best
-            .len()
-            == 1
-            && best
-            .try_get(0)
-            == Option::Some(0)
-            && stats
-            .accepted
-            > 0
-            && stats
-            .invalid
-            > 0
-            && !stats
-            .budget_exhausted
+        best.len() == 1
+            && best.try_get(0) == Option::Some(0)
+            && stats.accepted > 0
+            && stats.invalid > 0
+            && !stats.budget_exhausted
     }
 
     fn test_shrinker_waits_for_the_current_result() -> bool {
@@ -3930,25 +3768,12 @@ test {
         let waiting = !shrinker_next(inout shrinker);
         let next = shrinker_candidate(in shrinker);
         waiting
-            && shrinker
-            .stats
-            .runs
-            == 2
-            && shrinker
-            .pc
-            == 19
-            && current
-            .len()
-            == 1
-            && current
-            .try_get(0)
-            == Option::Some(13)
-            && next
-            .len()
-            == 1
-            && next
-            .try_get(0)
-            == Option::Some(13)
+            && shrinker.stats.runs == 2
+            && shrinker.pc == 19
+            && current.len() == 1
+            && current.try_get(0) == Option::Some(13)
+            && next.len() == 1
+            && next.try_get(0) == Option::Some(13)
     }
 
     // @case smaller_with_budget(2, 1, true, 2, 19)
@@ -3971,21 +3796,11 @@ test {
         shrinker.cand.push(value);
         shrinker.res = true;
         let actual = shrinker.attempt(10);
-        actual
-            == starts
-            && shrinker
-            .stats
-            .runs
-            == runs
-            && shrinker
-            .pc
-            == pc
-            && shrinker
-            .res
-            == starts
-            && shrinker
-            .after
-            == 10
+        actual == starts
+            && shrinker.stats.runs == runs
+            && shrinker.pc == pc
+            && shrinker.res == starts
+            && shrinker.after == 10
     }
 
     // @case delete_last_legal_span(2, 2, 2, 1, 2)
@@ -4004,15 +3819,9 @@ test {
         let starts = shrinker_next(inout shrinker);
         let candidate = shrinker_candidate(in shrinker);
         starts
-            && candidate
-            .len()
-            == size
-            && candidate
-            .try_get(0)
-            == Option::Some(first)
-            && candidate
-            .try_get(wrapping_sub(size, 1))
-            == Option::Some(last)
+            && candidate.len() == size
+            && candidate.try_get(0) == Option::Some(first)
+            && candidate.try_get(wrapping_sub(size, 1)) == Option::Some(last)
     }
 
     // @case reproduces(0, true, 1, 0, 0)
@@ -4041,38 +3850,22 @@ test {
         } else {
             2
         };
-        result
-            == accepted
-            && stats
-            .accepted
-            == improvements
-            && stats
-            .invalid
-            == invalid
-            && stats
-            .not_reproducing
-            == passed
-            && best
-            .len()
-            == expected_len
+        result == accepted
+            && stats.accepted == improvements
+            && stats.invalid == invalid
+            && stats.not_reproducing == passed
+            && best.len() == expected_len
     }
 
     fn test_fuzzer_initial_control_state() -> bool {
         let fuzzer = fuzzer_new(0, 8, false, 0, 0);
         let stats = fuzzer_stats(in fuzzer);
-        !fuzzer
-            .found
-            && !fuzzer
-            .in_solver
-            && !fuzzer
-            .full
-            && !fuzzer
-            .solver_run
-            && fuzzer_corpus_len(in fuzzer)
-            == 0
-            && stats
-            .execs
-            == 0
+        !fuzzer.found
+            && !fuzzer.in_solver
+            && !fuzzer.full
+            && !fuzzer.solver_run
+            && fuzzer_corpus_len(in fuzzer) == 0
+            && stats.execs == 0
     }
 
     fn test_sorted_feature_set_keeps_unique_values() -> bool {
@@ -4084,21 +3877,11 @@ test {
         let small = set_insert(inout values, 1);
         let membership_changed = zero && high && middle && !repeated && small;
         membership_changed
-            && values
-            .len()
-            == 4
-            && values
-            .try_get(0)
-            == Option::Some(0)
-            && values
-            .try_get(1)
-            == Option::Some(1)
-            && values
-            .try_get(2)
-            == Option::Some(4)
-            && values
-            .try_get(3)
-            == Option::Some(7)
+            && values.len() == 4
+            && values.try_get(0) == Option::Some(0)
+            && values.try_get(1) == Option::Some(1)
+            && values.try_get(2) == Option::Some(4)
+            && values.try_get(3) == Option::Some(7)
     }
 
     // @case identity(7, 0, 7, 7)
@@ -4153,16 +3936,9 @@ test {
         fuzzer.c_tag.push(0);
         fuzzer.c_max.push(18446744073709551615);
         fuzzer.solve_int(0, 2, 2, target);
-        fuzzer
-            .order
-            .len()
-            == 2
-            && fuzzer
-            .row_at(at(in fuzzer.order.as_slice(), 0), 0)
-            == first
-            && fuzzer
-            .row_at(at(in fuzzer.order.as_slice(), 1), 0)
-            == second
+        fuzzer.order.len() == 2
+            && fuzzer.row_at(at(in fuzzer.order.as_slice(), 0), 0) == first
+            && fuzzer.row_at(at(in fuzzer.order.as_slice(), 1), 0) == second
     }
 
     fn test_solver_keeps_comparisons_inside_each_corpus_entry() -> bool {
@@ -4305,15 +4081,10 @@ test {
             return false;
         }
         let first = fuzzer_candidate(in fuzzer);
-        if first
-            .len()
-            != 1
-            || first
-            .try_get(0)
-            != Option::Some(7)
+        if first.len() != 1
+            || first.try_get(0) != Option::Some(7)
             || !fuzzer_next(inout fuzzer)
-            || !fuzzer
-            .solver_run {
+            || !fuzzer.solver_run {
             return false;
         }
         let second = fuzzer_candidate(in fuzzer);
@@ -4338,16 +4109,11 @@ test {
         let worse = fuzzer_observe(inout fuzzer, 0, in feature.as_slice());
         feature.try_set(0, 0x8000000000000003);
         let different_site = fuzzer_observe(inout fuzzer, 0, in feature.as_slice());
-        let novelty = first
-            == 0
-            && improves
-            == 1
-            && equal
-            == 0
-            && worse
-            == 0
-            && different_site
-            == 1;
+        let novelty = first == 0
+            && improves == 1
+            && equal == 0
+            && worse == 0
+            && different_site == 1;
         let stats = fuzzer_stats(in fuzzer);
         novelty && stats.features == 2
     }
@@ -4386,18 +4152,10 @@ test {
     // @case dpor_bound(true, true, true, false)
     fn test_search_modes(dpor: bool, has_bound: bool, bounded: bool, sleeps: bool) -> bool {
         let search = search_new(dpor, has_bound, 1, false);
-        search
-            .dpor
-            == dpor
-            && search
-            .has_bound
-            == has_bound
-            && search
-            .bounded
-            == bounded
-            && search
-            .sleeping
-            == sleeps
+        search.dpor == dpor
+            && search.has_bound == has_bound
+            && search.bounded == bounded
+            && search.sleeping == sleeps
     }
 
     // @case two_timers(9223372041149743104, 9223372045444710400, true)
@@ -4462,15 +4220,9 @@ test {
             }
             search_child(inout search, false, in empty.as_slice(), in empty.as_slice());
             let prefix = search_prefix(in search);
-            if prefix
-                .len()
-                != 2
-                || prefix
-                .try_get(0)
-                != Option::Some(first.value)
-                || prefix
-                .try_get(1)
-                != Option::Some(second.value) {
+            if prefix.len() != 2
+                || prefix.try_get(0) != Option::Some(first.value)
+                || prefix.try_get(1) != Option::Some(second.value) {
                 return false;
             }
             explored = inc(explored);
@@ -4549,24 +4301,12 @@ test {
         search.cl_proc.push(2);
         search.cl_val.push(3);
         search.cl_val.push(5);
-        let process_index = search
-            .pc_find_in(0, 1, 1)
-            == 0
-            && search
-            .pc_find_in(0, 1, 2)
-            == none()
-            && search
-            .pc_find_in(0, 1, 0)
-            == none();
-        let clock = search
-            .clock_get(0, 1, 1)
-            == 3
-            && search
-            .clock_get(0, 1, 2)
-            == 0
-            && search
-            .clock_get(0, 1, 0)
-            == 0;
+        let process_index = search.pc_find_in(0, 1, 1) == 0
+            && search.pc_find_in(0, 1, 2) == none()
+            && search.pc_find_in(0, 1, 0) == none();
+        let clock = search.clock_get(0, 1, 1) == 3
+            && search.clock_get(0, 1, 2) == 0
+            && search.clock_get(0, 1, 0) == 0;
         process_index && clock && search.pc_off.try_get(0) == Option::Some(3)
     }
 
@@ -4765,10 +4505,8 @@ test {
         } else {
             search.add_backtrack_points();
         }
-        atb(in search.en_bt.as_slice(), 1)
-            == first_node
-            && atb(in search.en_bt.as_slice(), 3)
-            == second_node
+        atb(in search.en_bt.as_slice(), 1) == first_node
+            && atb(in search.en_bt.as_slice(), 3) == second_node
     }
 
     // @case eight(0, 8, 6)
@@ -4955,25 +4693,14 @@ test {
         search.cl_val.push(3);
         search.cl_val.push(5);
         search.add_at(0, 2, 0, 3);
-        let unique = search
-            .t3
-            .len()
-            == 2
-            && search
-            .t3
-            .try_get(0)
-            == Option::Some(2)
-            && search
-            .t3
-            .try_get(1)
-            == Option::Some(3);
+        let unique = search.t3.len() == 2
+            && search.t3.try_get(0) == Option::Some(2)
+            && search.t3.try_get(1) == Option::Some(3);
         unique
             && !atb(in search.en_bt.as_slice(), 0)
             && !atb(in search.en_bt.as_slice(), 3)
-            && atb(in search.en_bt.as_slice(), 1)
-            == second
-            && atb(in search.en_bt.as_slice(), 2)
-            == third
+            && atb(in search.en_bt.as_slice(), 1) == second
+            && atb(in search.en_bt.as_slice(), 2) == third
     }
 
     // @case prunes_preempting_choice(true, 0, 1, 1, true)
@@ -5030,18 +4757,9 @@ test {
         child_steps.push(0);
         search_child(inout search, false, in child.as_slice(), in child_steps.as_slice());
         search.pop_node();
-        let merged = search
-            .sm_proc
-            .len()
-            == 2
-            && search
-            .sm_proc
-            .try_get(0)
-            == Option::Some(1)
-            && search
-            .sm_proc
-            .try_get(1)
-            == Option::Some(2);
+        let merged = search.sm_proc.len() == 2
+            && search.sm_proc.try_get(0) == Option::Some(1)
+            && search.sm_proc.try_get(1) == Option::Some(2);
         search.pop_node();
         merged && search.sm_proc.len() == 0 && search.sm_next.len() == 0
     }
@@ -5065,18 +4783,10 @@ test {
         let second = search_choose(inout search);
         let off = at(in search.ev_cl.as_slice(), 1);
         let len = at(in search.ev_cl_len.as_slice(), 1);
-        second
-            .code
-            == 0
-            && second
-            .value
-            == 2
-            && search
-            .clock_get(off, len, 1)
-            == 1
-            && search
-            .clock_get(off, len, 2)
-            == 2
+        second.code == 0
+            && second.value == 2
+            && search.clock_get(off, len, 1) == 1
+            && search.clock_get(off, len, 2) == 2
     }
 
     fn test_reenabled_task_keeps_earlier_clock() -> bool {
@@ -5118,31 +4828,13 @@ test {
         search.pc_insert(0, 0, 4, 1, false);
         search.pc_insert(0, 3, 6, 1, false);
         search.pc_insert(0, 2, 5, 1, false);
-        let clock = search
-            .t1
-            .len()
-            == 6
-            && search
-            .t1
-            .try_get(0)
-            == Option::Some(0)
-            && search
-            .t1
-            .try_get(2)
-            == Option::Some(2)
-            && search
-            .t1
-            .try_get(4)
-            == Option::Some(3);
-        let indices = search
-            .pc_find_in(0, 3, 0)
-            == 0
-            && search
-            .pc_find_in(0, 3, 2)
-            == 1
-            && search
-            .pc_find_in(0, 3, 3)
-            == 2;
+        let clock = search.t1.len() == 6
+            && search.t1.try_get(0) == Option::Some(0)
+            && search.t1.try_get(2) == Option::Some(2)
+            && search.t1.try_get(4) == Option::Some(3);
+        let indices = search.pc_find_in(0, 3, 0) == 0
+            && search.pc_find_in(0, 3, 2) == 1
+            && search.pc_find_in(0, 3, 3) == 2;
         clock && indices && search.pc_off.try_get(1) == Option::Some(5)
     }
 
@@ -5152,35 +4844,14 @@ test {
         search.sm_insert(0, 4, 2);
         search.sm_insert(0, 4, 5);
         search.sm_insert(0, 4, 5);
-        let processes = search
-            .sm_proc
-            .len()
-            == 3
-            && search
-            .sm_proc
-            .try_get(0)
-            == Option::Some(0)
-            && search
-            .sm_proc
-            .try_get(1)
-            == Option::Some(4)
-            && search
-            .sm_proc
-            .try_get(2)
-            == Option::Some(4);
+        let processes = search.sm_proc.len() == 3
+            && search.sm_proc.try_get(0) == Option::Some(0)
+            && search.sm_proc.try_get(1) == Option::Some(4)
+            && search.sm_proc.try_get(2) == Option::Some(4);
         processes
-            && search
-            .sm_next
-            .try_get(0)
-            == Option::Some(0)
-            && search
-            .sm_next
-            .try_get(1)
-            == Option::Some(2)
-            && search
-            .sm_next
-            .try_get(2)
-            == Option::Some(5)
+            && search.sm_next.try_get(0) == Option::Some(0)
+            && search.sm_next.try_get(1) == Option::Some(2)
+            && search.sm_next.try_get(2) == Option::Some(5)
     }
 
     fn test_backtrack_order_sorts_enabled_positions() -> bool {
@@ -5192,26 +4863,11 @@ test {
         enabled.push(2);
         let nexts = ChunkSeq::new[u64]();
         search_root(inout search, in enabled.as_slice(), in nexts.as_slice(), none());
-        search
-            .en_ord
-            .len()
-            == 4
-            && search
-            .en_ord
-            .try_get(0)
-            == Option::Some(1)
-            && search
-            .en_ord
-            .try_get(1)
-            == Option::Some(3)
-            && search
-            .en_ord
-            .try_get(2)
-            == Option::Some(0)
-            && search
-            .en_ord
-            .try_get(3)
-            == Option::Some(2)
+        search.en_ord.len() == 4
+            && search.en_ord.try_get(0) == Option::Some(1)
+            && search.en_ord.try_get(1) == Option::Some(3)
+            && search.en_ord.try_get(2) == Option::Some(0)
+            && search.en_ord.try_get(3) == Option::Some(2)
     }
 
     fn test_solver_limits_match_starts_to_eight() -> bool {
@@ -5224,15 +4880,9 @@ test {
         let mut needle = ChunkSeq::new[u64]();
         needle.push(97);
         let starts = fuzzer.find_in_lane(0, in needle.as_slice());
-        starts
-            .len()
-            == 8
-            && starts
-            .try_get(0)
-            == Option::Some(0)
-            && starts
-            .try_get(7)
-            == Option::Some(7)
+        starts.len() == 8
+            && starts.try_get(0) == Option::Some(0)
+            && starts.try_get(7) == Option::Some(7)
     }
 
     fn test_solver_clips_replacement_at_end_of_lane() -> bool {
@@ -5375,26 +5025,12 @@ test {
         last: Option[u64]
     ) -> bool {
         let parsed = tape_parse(in text, limit);
-        parsed
-            .code
-            == code
-            && parsed
-            .index
-            == index
-            && parsed
-            .start
-            == start
-            && parsed
-            .end
-            == end
-            && parsed
-            .values
-            .len()
-            == count
-            && parsed
-            .values
-            .try_get(wrapping_sub(count, 1))
-            == last
+        parsed.code == code
+            && parsed.index == index
+            && parsed.start == start
+            && parsed.end == end
+            && parsed.values.len() == count
+            && parsed.values.try_get(wrapping_sub(count, 1)) == last
     }
 
     // @case empty(0, 0, in "vesper-crucible-tape/1\n")

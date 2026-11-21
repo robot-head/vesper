@@ -439,12 +439,9 @@ pub fn valid_ipv6(in s: Slice[u8], lo: u64, hi: u64) -> bool {
 }
 
 pub fn numeric_part(in s: Slice[u8], lo: u64, hi: u64) -> bool {
-    if wrapping_sub(hi, lo)
-        >= 2
-        && byte(in s, lo)
-        == Ascii::Digit0
-        && lower(byte(in s, inc(lo)))
-        == Ascii::LowerX {
+    if wrapping_sub(hi, lo) >= 2
+        && byte(in s, lo) == Ascii::Digit0
+        && lower(byte(in s, inc(lo))) == Ascii::LowerX {
         read_number(in s, wrapping_add(lo, 2), hi, 16, max_u64(), true, max_u64()) == hi
     } else {
         read_number(in s, lo, hi, 10, max_u64(), true, max_u64()) == hi

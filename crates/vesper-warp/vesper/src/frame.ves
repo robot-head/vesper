@@ -113,22 +113,13 @@ pub fn fr_allowed(ty: u64, pt: PktType) -> bool {
         !zero_rtt
     } else if ty == T_NEW_TOKEN || ty == T_PATH_RESPONSE || ty == T_HANDSHAKE_DONE {
         one_rtt
-    } else if ty
-        == T_NEW_CONNECTION_ID
-        || ty
-        == T_RETIRE_CONNECTION_ID
-        || ty
-        == T_PATH_CHALLENGE
-        || ty
-        == T_RESET_STREAM
-        || ty
-        == T_STOP_SENDING
-        || ty
-        == T_CONNECTION_CLOSE_APP
-        || ty
-        >= T_STREAM
-        && ty
-        <= T_STREAMS_BLOCKED_UNI {
+    } else if ty == T_NEW_CONNECTION_ID
+        || ty == T_RETIRE_CONNECTION_ID
+        || ty == T_PATH_CHALLENGE
+        || ty == T_RESET_STREAM
+        || ty == T_STOP_SENDING
+        || ty == T_CONNECTION_CLOSE_APP
+        || ty >= T_STREAM && ty <= T_STREAMS_BLOCKED_UNI {
         zero_rtt || one_rtt
     } else {
         false
@@ -341,14 +332,10 @@ pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail
             end: p2
         };
     }
-    if ty
-        >= T_MAX_STREAMS_BIDI
-        && ty
-        <= T_STREAMS_BLOCKED_UNI
-        && ty
-        != T_DATA_BLOCKED
-        && ty
-        != T_STREAM_DATA_BLOCKED {
+    if ty >= T_MAX_STREAMS_BIDI
+        && ty <= T_STREAMS_BLOCKED_UNI
+        && ty != T_DATA_BLOCKED
+        && ty != T_STREAM_DATA_BLOCKED {
         let (n, p1) = vi(in buf, p0, ty);
         if n > max_stream_count() {
             malformed(ty);
@@ -593,11 +580,10 @@ pub fn fr_check_ranges(in ranges: Slice[AckRange], ack_delay: u64) eff [Fail[Fra
         if r.smallest > r.largest || r.largest > vi_max() {
             malformed(T_ACK);
         }
-        if i
-            > 0
+        if i > 0
             && (
-            r.largest > wrapping_sub(U64_MAX, 2) || wrapping_add(r.largest, 2) > prev_smallest
-        ) {
+                r.largest > wrapping_sub(U64_MAX, 2) || wrapping_add(r.largest, 2) > prev_smallest
+            ) {
             malformed(T_ACK);
         }
         prev_smallest = r.smallest;
@@ -668,14 +654,10 @@ pub fn fr_kind_is_ack_eliciting(kind: u64) -> bool {
 // RFC 9000 §9.1 probing frames: PADDING, PATH_CHALLENGE, PATH_RESPONSE and
 // NEW_CONNECTION_ID.
 pub fn fr_kind_is_probing(kind: u64) -> bool {
-    kind
-        == K_PADDING
-        || kind
-        == K_PATH_CHALLENGE
-        || kind
-        == K_PATH_RESPONSE
-        || kind
-        == K_NEW_CONNECTION_ID
+    kind == K_PADDING
+        || kind == K_PATH_CHALLENGE
+        || kind == K_PATH_RESPONSE
+        || kind == K_NEW_CONNECTION_ID
 }
 
 fn flag(b: bool, v: u64) -> u64 {
@@ -691,8 +673,7 @@ fn kind_of(f: FrameW) -> (u64, u64) {
     match f {
         FrameW::Padding {
             len
-        }
-        => (K_PADDING, 0),
+        } => (K_PADDING, 0),
         FrameW::Ping => (K_PING, 0),
         FrameW::Ack {
             largest,
@@ -705,21 +686,18 @@ fn kind_of(f: FrameW) -> (u64, u64) {
             first_range,
             count,
             pairs
-        }
-        => (K_ACK, flag(has_ecn, 1)),
+        } => (K_ACK, flag(has_ecn, 1)),
         FrameW::Crypto {
             offset,
             data
-        }
-        => (K_CRYPTO, 0),
+        } => (K_CRYPTO, 0),
         FrameW::Stream {
             stream_id,
             offset,
             data,
             fin,
             has_length
-        }
-        => (
+        } => (
             K_STREAM,
             flag(fin, stream_fin()) | flag(has_length, stream_len()) | flag(
                 offset != 0,
@@ -728,74 +706,60 @@ fn kind_of(f: FrameW) -> (u64, u64) {
         ),
         FrameW::MaxData {
             max
-        }
-        => (K_MAX_DATA, 0),
+        } => (K_MAX_DATA, 0),
         FrameW::MaxStreamData {
             stream_id,
             max
-        }
-        => (K_MAX_STREAM_DATA, 0),
+        } => (K_MAX_STREAM_DATA, 0),
         FrameW::ResetStream {
             stream_id,
             error_code,
             final_size
-        }
-        => (K_RESET_STREAM, 0),
+        } => (K_RESET_STREAM, 0),
         FrameW::StopSending {
             stream_id,
             error_code
-        }
-        => (K_STOP_SENDING, 0),
+        } => (K_STOP_SENDING, 0),
         FrameW::MaxStreams {
             uni,
             max
-        }
-        => (K_MAX_STREAMS, flag(uni, 1)),
+        } => (K_MAX_STREAMS, flag(uni, 1)),
         FrameW::DataBlocked {
             limit
-        }
-        => (K_DATA_BLOCKED, 0),
+        } => (K_DATA_BLOCKED, 0),
         FrameW::StreamDataBlocked {
             stream_id,
             limit
-        }
-        => (K_STREAM_DATA_BLOCKED, 0),
+        } => (K_STREAM_DATA_BLOCKED, 0),
         FrameW::StreamsBlocked {
             uni,
             limit
-        }
-        => (K_STREAMS_BLOCKED, flag(uni, 1)),
+        } => (K_STREAMS_BLOCKED, flag(uni, 1)),
         FrameW::ConnectionClose {
             error_code,
             has_frame_type,
             frame_type,
             reason
-        }
-        => (K_CONNECTION_CLOSE, flag(has_frame_type, 1)),
+        } => (K_CONNECTION_CLOSE, flag(has_frame_type, 1)),
         FrameW::HandshakeDone => (K_HANDSHAKE_DONE, 0),
         FrameW::NewToken {
             token
-        }
-        => (K_NEW_TOKEN, 0),
+        } => (K_NEW_TOKEN, 0),
         FrameW::NewConnectionId {
             seq,
             retire_prior_to,
             cid,
             reset_token
-        }
-        => (K_NEW_CONNECTION_ID, 0),
+        } => (K_NEW_CONNECTION_ID, 0),
         FrameW::RetireConnectionId {
             seq
-        }
-        => (K_RETIRE_CONNECTION_ID, 0),
+        } => (K_RETIRE_CONNECTION_ID, 0),
         FrameW::PathChallenge {
             data
-        }
-        => (K_PATH_CHALLENGE, 0),
+        } => (K_PATH_CHALLENGE, 0),
         FrameW::PathResponse {
             data
-        }
-        => (K_PATH_RESPONSE, 0),
+        } => (K_PATH_RESPONSE, 0),
     }
 }
 
@@ -856,8 +820,7 @@ pub fn fr_encode(
     match f {
         FrameW::Padding {
             len
-        }
-        => {
+        } => {
             // The Rust writer fills the room it has before failing.
             let n = if len > out.len() {
                 out.len()
@@ -887,8 +850,7 @@ pub fn fr_encode(
             first_range,
             count,
             pairs
-        }
-        => {
+        } => {
             if decoded {
                 let n = ranges.len();
                 if n == 0 {
@@ -950,8 +912,7 @@ pub fn fr_encode(
         FrameW::Crypto {
             offset,
             data
-        }
-        => {
+        } => {
             if !end_ok(offset, a.len()) {
                 enc();
             }
@@ -965,8 +926,7 @@ pub fn fr_encode(
             data,
             fin,
             has_length
-        }
-        => {
+        } => {
             if !end_ok(offset, a.len()) {
                 enc();
             }
@@ -981,15 +941,13 @@ pub fn fr_encode(
         },
         FrameW::MaxData {
             max
-        }
-        => {
+        } => {
             at = w_vi(inout out, at, max);
         },
         FrameW::MaxStreamData {
             stream_id,
             max
-        }
-        => {
+        } => {
             at = w_vi(inout out, at, stream_id);
             at = w_vi(inout out, at, max);
         },
@@ -997,8 +955,7 @@ pub fn fr_encode(
             stream_id,
             error_code,
             final_size
-        }
-        => {
+        } => {
             at = w_vi(inout out, at, stream_id);
             at = w_vi(inout out, at, error_code);
             at = w_vi(inout out, at, final_size);
@@ -1006,16 +963,14 @@ pub fn fr_encode(
         FrameW::StopSending {
             stream_id,
             error_code
-        }
-        => {
+        } => {
             at = w_vi(inout out, at, stream_id);
             at = w_vi(inout out, at, error_code);
         },
         FrameW::MaxStreams {
             uni,
             max
-        }
-        => {
+        } => {
             if max > max_stream_count() {
                 enc();
             }
@@ -1024,8 +979,7 @@ pub fn fr_encode(
         FrameW::StreamsBlocked {
             uni,
             limit
-        }
-        => {
+        } => {
             if limit > max_stream_count() {
                 enc();
             }
@@ -1033,15 +987,13 @@ pub fn fr_encode(
         },
         FrameW::DataBlocked {
             limit
-        }
-        => {
+        } => {
             at = w_vi(inout out, at, limit);
         },
         FrameW::StreamDataBlocked {
             stream_id,
             limit
-        }
-        => {
+        } => {
             at = w_vi(inout out, at, stream_id);
             at = w_vi(inout out, at, limit);
         },
@@ -1050,8 +1002,7 @@ pub fn fr_encode(
             has_frame_type,
             frame_type,
             reason
-        }
-        => {
+        } => {
             at = w_vi(inout out, at, error_code);
             if has_frame_type {
                 at = w_vi(inout out, at, frame_type);
@@ -1061,8 +1012,7 @@ pub fn fr_encode(
         },
         FrameW::NewToken {
             token
-        }
-        => {
+        } => {
             if a.len() == 0 {
                 enc();
             }
@@ -1074,8 +1024,7 @@ pub fn fr_encode(
             retire_prior_to,
             cid,
             reset_token
-        }
-        => {
+        } => {
             if retire_prior_to > seq || a.len() == 0 || a.len() > MAX_CID_LEN {
                 enc();
             }
@@ -1091,20 +1040,17 @@ pub fn fr_encode(
         },
         FrameW::RetireConnectionId {
             seq
-        }
-        => {
+        } => {
             at = w_vi(inout out, at, seq);
         },
         FrameW::PathChallenge {
             data
-        }
-        => {
+        } => {
             at = w_u64(inout out, at, data);
         },
         FrameW::PathResponse {
             data
-        }
-        => {
+        } => {
             at = w_u64(inout out, at, data);
         },
         _ => {},

@@ -432,15 +432,15 @@ fn c_irrefutable_fields(at: i64, field: i64, named: bool, depth: i64)
         let next = c_pattern_end(pat);
         c_irrefutable(pat, ty.ty, depth + 1)
             && c_irrefutable_fields(
-            if c_kind(next) == 38 {
-                c_next(next)
-            } else {
-                next
-            },
-            c_field_next(field, named),
-            named,
-            depth
-        )
+                if c_kind(next) == 38 {
+                    c_next(next)
+                } else {
+                    next
+                },
+                c_field_next(field, named),
+                named,
+                depth
+            )
     }
 }
 

@@ -220,16 +220,11 @@ pub fn skip_mods(in tab: Slice[u64], in idx: Slice[u64], id0: u64) -> u64 {
     let n: u64 = MAX_MOD_CHAIN;
     for i in 0..n {
         let k = tkind(in tab, in idx, id);
-        if k
-            == BtfKind::Typedef
-            || k
-            == BtfKind::Volatile
-            || k
-            == BtfKind::Const
-            || k
-            == BtfKind::Restrict
-            || k
-            == BtfKind::TypeTag {
+        if k == BtfKind::Typedef
+            || k == BtfKind::Volatile
+            || k == BtfKind::Const
+            || k == BtfKind::Restrict
+            || k == BtfKind::TypeTag {
             id = tf(in tab, in idx, id, 2);
         } else {
             return id;
@@ -245,18 +240,12 @@ pub fn size_of(in tab: Slice[u64], in idx: Slice[u64], id: u64, depth: u64) -> (
     }
     let t = skip_mods(in tab, in idx, id);
     let k = tkind(in tab, in idx, t);
-    if k
-        == BtfKind::Int
-        || k
-        == BtfKind::Struct
-        || k
-        == BtfKind::Union
-        || k
-        == BtfKind::Enum
-        || k
-        == BtfKind::Float
-        || k
-        == BtfKind::Datasec {
+    if k == BtfKind::Int
+        || k == BtfKind::Struct
+        || k == BtfKind::Union
+        || k == BtfKind::Enum
+        || k == BtfKind::Float
+        || k == BtfKind::Datasec {
         return (true, tf(in tab, in idx, t, 2));
     }
     if k == BtfKind::Ptr {
@@ -301,12 +290,9 @@ fn essential_len(in s: Slice[u8], at: u64, n: u64) -> u64 {
     let last = wrapping_sub(n, 2);
     for i in 0..last {
         let j = wrapping_add(at, i);
-        if bt(in s, j)
-            == ASCII_UNDERSCORE
-            && bt(in s, wrapping_add(j, 1))
-            == ASCII_UNDERSCORE
-            && bt(in s, wrapping_add(j, 2))
-            == ASCII_UNDERSCORE {
+        if bt(in s, j) == ASCII_UNDERSCORE
+            && bt(in s, wrapping_add(j, 1)) == ASCII_UNDERSCORE
+            && bt(in s, wrapping_add(j, 2)) == ASCII_UNDERSCORE {
             return i;
         }
     }
@@ -460,12 +446,9 @@ fn types_match(
         return k == BtfKind::Void;
     }
     if tag == LocalTag::Int {
-        return k
-            == BtfKind::Int
-            && wd(in lt, wrapping_add(p, 3))
-            == tf(in tab, in idx, tid, 2)
-            && (wd(in lt, wrapping_add(p, 4)) != 0)
-            == ((tf(in tab, in idx, tid, 3) & 1) != 0);
+        return k == BtfKind::Int
+            && wd(in lt, wrapping_add(p, 3)) == tf(in tab, in idx, tid, 2)
+            && (wd(in lt, wrapping_add(p, 4)) != 0) == ((tf(in tab, in idx, tid, 3) & 1) != 0);
     }
     if tag == LocalTag::Enum {
         if k != BtfKind::Enum {
@@ -494,36 +477,33 @@ fn types_match(
         return true;
     }
     if tag == LocalTag::Ptr {
-        return k
-            == BtfKind::Ptr
+        return k == BtfKind::Ptr
             && types_match(
-            in lt,
-            in ltext,
-            wrapping_add(p, 6),
-            in tab,
-            in idx,
-            in strs,
-            tf(in tab, in idx, tid, 2),
-            true,
-            d1
-        );
+                in lt,
+                in ltext,
+                wrapping_add(p, 6),
+                in tab,
+                in idx,
+                in strs,
+                tf(in tab, in idx, tid, 2),
+                true,
+                d1
+            );
     }
     if tag == LocalTag::Array {
-        return k
-            == BtfKind::Array
-            && wd(in lt, wrapping_add(p, 5))
-            == tf(in tab, in idx, tid, 4)
+        return k == BtfKind::Array
+            && wd(in lt, wrapping_add(p, 5)) == tf(in tab, in idx, tid, 4)
             && types_match(
-            in lt,
-            in ltext,
-            wrapping_add(p, 6),
-            in tab,
-            in idx,
-            in strs,
-            tf(in tab, in idx, tid, 2),
-            behind_ptr,
-            d1
-        );
+                in lt,
+                in ltext,
+                wrapping_add(p, 6),
+                in tab,
+                in idx,
+                in strs,
+                tf(in tab, in idx, tid, 2),
+                behind_ptr,
+                d1
+            );
     }
     // a struct or union
     let union = wd(in lt, wrapping_add(p, 4)) != 0;
@@ -554,16 +534,16 @@ fn types_match(
             if !any
                 && names_match(in ltext, mo, ml, in strs, te(in tab, in idx, tid, 4, j, 0))
                 && types_match(
-                in lt,
-                in ltext,
-                child,
-                in tab,
-                in idx,
-                in strs,
-                te(in tab, in idx, tid, 4, j, 1),
-                false,
-                d1
-            ) {
+                    in lt,
+                    in ltext,
+                    child,
+                    in tab,
+                    in idx,
+                    in strs,
+                    te(in tab, in idx, tid, 4, j, 1),
+                    false,
+                    d1
+                ) {
                 any = true;
             }
         }
@@ -700,12 +680,9 @@ pub fn local_value(
         }
         return field_value(kind, bits, width, lsize(in lt, ty), lsigned(in lt, ty), inout out);
     }
-    if kind
-        == CoreReloc::TypeExists
-        || kind
-        == CoreReloc::EnumvalExists
-        || kind
-        == CoreReloc::TypeMatches {
+    if kind == CoreReloc::TypeExists
+        || kind == CoreReloc::EnumvalExists
+        || kind == CoreReloc::TypeMatches {
         out = 1;
         return 0;
     }
@@ -888,8 +865,7 @@ pub fn values_over(
                     let tn = tf(in tab, in idx, id, 6);
                     code = NO_VALUE;
                     for j in 0..tn {
-                        if code
-                            == NO_VALUE
+                        if code == NO_VALUE
                             && name_is(in ltext, wo, wl, in strs, te(in tab, in idx, id, 2, j, 0)) {
                             code = 0;
                             v = if kind == CoreReloc::EnumvalValue {
@@ -929,14 +905,10 @@ pub fn values_over(
 }
 
 fn is_exists(kind: u64) -> bool {
-    kind
-        == CoreReloc::FieldExists
-        || kind
-        == CoreReloc::TypeExists
-        || kind
-        == CoreReloc::EnumvalExists
-        || kind
-        == CoreReloc::TypeMatches
+    kind == CoreReloc::FieldExists
+        || kind == CoreReloc::TypeExists
+        || kind == CoreReloc::EnumvalExists
+        || kind == CoreReloc::TypeMatches
 }
 
 // `CoreSpec::combine`: 0 with the value in `out`, 8 no match, 9 disagree.

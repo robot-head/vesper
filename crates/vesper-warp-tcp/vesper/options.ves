@@ -269,16 +269,10 @@ fn opts_parse_at(in bytes: Slice[u8], from: u64, to: u64) -> Result[Opts, WireEr
                 opts.sack_permitted = true;
             } else if kind == OptKind::Sack {
                 let n = wrapping_sub(len, KIND_AND_LEN) / SACK_BLOCK_LEN;
-                if wrapping_sub(len, KIND_AND_LEN)
-                    % SACK_BLOCK_LEN
-                    != 0
-                    || n
-                    == 0
-                    || n
-                    > MAX_SACK_BLOCKS
-                    || opts
-                    .sack_len
-                    != 0 {
+                if wrapping_sub(len, KIND_AND_LEN) % SACK_BLOCK_LEN != 0
+                    || n == 0
+                    || n > MAX_SACK_BLOCKS
+                    || opts.sack_len != 0 {
                     return malformed(kind);
                 }
                 for k in 0..n {
@@ -303,11 +297,11 @@ fn opts_parse_at(in bytes: Slice[u8], from: u64, to: u64) -> Result[Opts, WireEr
                 };
                 opts
                     .timestamps = Option::Some(
-                    Timestamps {
-                        val: wrapping_u32(w >> 32),
-                        ecr: wrapping_u32(w)
-                    }
-                );
+                        Timestamps {
+                            val: wrapping_u32(w >> 32),
+                            ecr: wrapping_u32(w)
+                        }
+                    );
             }
             // Unknown options with a valid length are skipped.
             i = wrapping_add(i, len);

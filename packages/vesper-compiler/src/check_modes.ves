@@ -256,14 +256,10 @@ fn c_validate_decls(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[Arit
 fn c_bind_name(env: CEnv, name: Tok, ty: CType, pass: i64)
     -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let old = c_lookup(env, name, env.count);
-    let valid = if old
-        >= 0
-        && c_slot(env, old)
-        .pass
-        == 2
+    let valid = if old >= 0
+        && c_slot(env, old).pass == 2
         && !c_moved(env, old)
-        && c_mode(c_slot(env, old).ty, 0)
-        == 2 {
+        && c_mode(c_slot(env, old).ty, 0) == 2 {
         c_error(302, name.start, name.end)
     } else {
         0
@@ -292,15 +288,10 @@ fn c_exhaust(env: CEnv, low: i64, n: i64, start: i64, end: i64)
         0
     } else {
         let b = c_slot(env, n - 1);
-        let valid = if c_lookup(env, b.name, env.count)
-            == n
-            - 1
-            && b
-            .pass
-            == 2
+        let valid = if c_lookup(env, b.name, env.count) == n - 1
+            && b.pass == 2
             && !c_moved(env, n - 1)
-            && c_mode(b.ty, 0)
-            == 2 {
+            && c_mode(b.ty, 0) == 2 {
             c_error(302, start, end)
         } else {
             0
@@ -456,33 +447,28 @@ fn c_live_loans(loans: CEnv, i: i64, active: CEnv)
 }
 fn c_literal_name(t: Tok, length: i64, first: i64, second: i64, third: i64)
     -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
-    t
-        .end
-        - t
-        .start
-        == length
+    t.end - t.start == length
         && word(
-        t.start,
-        if length > 6 {
-            t.start + 6
-        } else {
-            t.end
-        }
-    )
-        == first
-        && (
-        length
-            <= 6
-            || word(
-            t.start + 6,
-            if length > 12 {
-                t.start + 12
+            t.start,
+            if length > 6 {
+                t.start + 6
             } else {
                 t.end
             }
         )
-            == second
-    )
+            == first
+        && (
+            length <= 6
+                || word(
+                    t.start + 6,
+                    if length > 12 {
+                        t.start + 12
+                    } else {
+                        t.end
+                    }
+                )
+                    == second
+        )
         && (length <= 12 || word(t.start + 12, t.end) == third)
 }
 fn c_reserved_decl(d: CDecl) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {

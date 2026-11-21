@@ -23,8 +23,7 @@ fn insert[T: mod copy](sink l: List[T], x: T) -> List[T] where T: Ord {
         List::Cons {
             head,
             tail
-        }
-        => match x.cmp(head) {
+        } => match x.cmp(head) {
             Greater => match tail {
                 Box(rest) => List::Cons {
                     head: head,
@@ -50,8 +49,7 @@ fn digest(sink l: List[Key], acc: u64) -> u64 {
         List::Cons {
             head,
             tail
-        }
-        => match tail {
+        } => match tail {
             Box(rest) => digest(
                 rest,
                 wrapping_add(

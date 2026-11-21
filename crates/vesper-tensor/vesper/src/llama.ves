@@ -176,13 +176,13 @@ pub fn check_checkpoint(in b: Slice[u8], rope_base: u32, rms_epsilon: u32, inout
     }
     out
         .set(
-        7,
-        if shared {
-            1
-        } else {
-            0
-        }
-    );
+            7,
+            if shared {
+                1
+            } else {
+                0
+            }
+        );
     let dim = out[0];
     let hidden = out[1];
     let layers = out[2];
@@ -311,16 +311,11 @@ pub fn decode_piece(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
     }
     let n = piece.len() - start;
     // `<0xHH>`.
-    if n
-        == 6
-        && piece[start]
-        == LESS
-        && piece[start + 1]
-        == DIGIT_0
-        && piece[start + 2]
-        == LOWER_X
-        && piece[start + 5]
-        == GREATER {
+    if n == 6
+        && piece[start] == LESS
+        && piece[start + 1] == DIGIT_0
+        && piece[start + 2] == LOWER_X
+        && piece[start + 5] == GREATER {
         // `u8::from_str_radix` also takes a leading `+`.
         let lo = hex_digit(piece[start + 4]);
         if piece[start + 3] == 43 && lo < NOT_HEX {
@@ -343,16 +338,11 @@ pub fn decode_piece(in piece: Slice[u8], after_bos: bool, inout out: Slice[u64])
 // `is_ascii_whitespace`: tab, newline, form feed, carriage return, space).
 fn single(b: u64, inout out: Slice[u64]) -> u64 eff [Fail[RuntimeError]] {
     if (b >= GRAPHIC_FIRST && b <= GRAPHIC_LAST)
-        || b
-        == TAB
-        || b
-        == LF
-        || b
-        == FF
-        || b
-        == CR
-        || b
-        == SPACE_U64 {
+        || b == TAB
+        || b == LF
+        || b == FF
+        || b == CR
+        || b == SPACE_U64 {
         out.set(1, b);
         return 1;
     }

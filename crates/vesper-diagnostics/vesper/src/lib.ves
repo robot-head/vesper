@@ -251,15 +251,10 @@ fn valid_offset(in t: Slice[u8], offset: u64) -> Unit eff [Fail[Failure]] {
     if offset < t.len() && is_continuation(byte(in t, offset)) {
         Fail::raise(Failure::Utf8Boundary);
     }
-    if offset
-        > 0
-        && byte(in t, wrapping_sub(offset, 1))
-        == 13
-        && offset
-        < t
-        .len()
-        && byte(in t, offset)
-        == 10 {
+    if offset > 0
+        && byte(in t, wrapping_sub(offset, 1)) == 13
+        && offset < t.len()
+        && byte(in t, offset) == 10 {
         Fail::raise(Failure::LineEndingInterior);
     }
 }
@@ -499,9 +494,9 @@ fn put_decimal(inout out: ChunkSeq[u8], n: u64) {
     for i in 0..d {
         let ok = out
             .try_set(
-            wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
-            wrapping_u8(wrapping_add(x % 10, 48))
-        );
+                wrapping_sub(wrapping_add(base, d), wrapping_add(i, 1)),
+                wrapping_u8(wrapping_add(x % 10, 48))
+            );
         x = x / 10;
     }
 }
@@ -1234,8 +1229,7 @@ fn write_margin(
                             }
                         }
                     } else {
-                        if vbar_l
-                            == none()
+                        if vbar_l == none()
                             && !is_parent
                             && (is_start != (report_row < label_row)) {
                             vbar_l = label;
@@ -1415,12 +1409,12 @@ fn report_labels(
         r
             .lab
             .push(
-            if first != last {
-                1
-            } else {
-                0
-            }
-        );
+                if first != last {
+                    1
+                } else {
+                    0
+                }
+            );
         if l == 0 {
             r.lab.push(d.message);
             r.lab.push(d.message_len);
@@ -2055,8 +2049,7 @@ pub fn terminal(
     }
     bound(work, caps.max_work, Res::Work);
     bound(metadata, caps.max_metadata_bytes, Res::Metadata);
-    let pad: u64 = if n
-        > 0
+    let pad: u64 = if n > 0
         && (byte(in t, wrapping_sub(n, 1)) == 13 || byte(in t, wrapping_sub(n, 1)) == 10) {
         1
     } else {
@@ -2112,8 +2105,7 @@ pub fn terminal(
         margin_draw,
         width,
         color: c
-    }
-    = r;
+    } = r;
     if full {
         Fail::raise(Failure::Output);
     }

@@ -250,11 +250,11 @@ pub fn check_table(inout q: Q, b: Bind) -> u64 {
     q
         .aliases
         .push(
-        Rng {
-            off: b.aoff,
-            len: b.alen
-        }
-    );
+            Rng {
+                off: b.aoff,
+                len: b.alen
+            }
+        );
     let t = find_table(in q, b.noff, b.nlen);
     if t == none() {
         fail_name(inout q, 2, "table ", b.noff, b.nlen);
@@ -271,32 +271,32 @@ pub fn check_table(inout q: Q, b: Bind) -> u64 {
         q
             .bcols
             .push(
-            BCol {
-                aoff: b.aoff,
-                alen: b.alen,
-                coff: c.noff,
-                clen: c.nlen,
-                binding: binding,
-                slot: slot,
-                ty: c.ty,
-                nullable: c.nullable
-            }
-        );
+                BCol {
+                    aoff: b.aoff,
+                    alen: b.alen,
+                    coff: c.noff,
+                    clen: c.nlen,
+                    binding: binding,
+                    slot: slot,
+                    ty: c.ty,
+                    nullable: c.nullable
+                }
+            );
     }
     q
         .plan
         .push(
-        Node {
-            kind: 0,
-            a: b.noff,
-            b: b.nlen,
-            c: binding,
-            d: slots_at,
-            e: tab.n,
-            f: none(),
-            g: none()
-        }
-    );
+            Node {
+                kind: 0,
+                a: b.noff,
+                b: b.nlen,
+                c: binding,
+                d: slots_at,
+                e: tab.n,
+                f: none(),
+                g: none()
+            }
+        );
     wrapping_sub(q.plan.len(), 1)
 }
 

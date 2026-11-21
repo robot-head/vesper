@@ -74,16 +74,16 @@ pub fn decode_catalog(inout s: A) {
         s
             .advs
             .push(
-            Adv {
-                id: id,
-                kind: kind,
-                name: name,
-                r_at: r_at,
-                r_n: nr,
-                sev: sev,
-                sum: sum
-            }
-        );
+                Adv {
+                    id: id,
+                    kind: kind,
+                    name: name,
+                    r_at: r_at,
+                    r_n: nr,
+                    sev: sev,
+                    sum: sum
+                }
+            );
     }
     let nnat = rd(inout s.l);
     for i in 0..nnat {
@@ -93,12 +93,12 @@ pub fn decode_catalog(inout s: A) {
         s
             .nats
             .push(
-            Nat {
-                name: name,
-                ver: ver,
-                expr: expr
-            }
-        );
+                Nat {
+                    name: name,
+                    ver: ver,
+                    expr: expr
+                }
+            );
     }
 }
 

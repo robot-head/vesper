@@ -380,9 +380,9 @@ fn nat_div(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
             let at = wrapping_add(j, nb);
             un
                 .try_set(
-                at,
-                wrapping_u32(wrapping_add(widen_u64(g32(in un.as_slice(), at)), c) & LIMB_MASK)
-            );
+                    at,
+                    wrapping_u32(wrapping_add(widen_u64(g32(in un.as_slice(), at)), c) & LIMB_MASK)
+                );
         }
         q.try_set(j, wrapping_u32(qhat));
     }

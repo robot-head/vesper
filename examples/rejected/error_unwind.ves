@@ -13,6 +13,5 @@ fn bad() eff [Fail[i64]] {
     // E0402: an abortable effect would discard tx.
     let WriteTxn {
         id
-    }
-    = tx;
+    } = tx;
 }

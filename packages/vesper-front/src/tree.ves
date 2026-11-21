@@ -96,12 +96,12 @@ pub fn report_into(inout out: ChunkSeq[u64], in tree: Tree, in t: Tokens, in d: 
         let parent = w32(in tree.node_parent, i);
         out
             .push(
-            if parent == 4294967295 {
-                nodes
-            } else {
-                parent
-            }
-        );
+                if parent == 4294967295 {
+                    nodes
+                } else {
+                    parent
+                }
+            );
         out.push(w32(in tree.node_start, i));
         out.push(w32(in tree.node_end, i));
     }

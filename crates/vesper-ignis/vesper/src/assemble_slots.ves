@@ -123,15 +123,15 @@ fn boxes(r: Resource, in members: ChunkSeq[u32], in coords: ChunkSeq[SubPos])
         }
         out
             .push(
-            SubresourceRange {
-                first_mip: m0,
-                mip_count: mips,
-                first_slice: s0,
-                slice_count: slices,
-                first_plane: p0,
-                plane_count: planes
-            }
-        );
+                SubresourceRange {
+                    first_mip: m0,
+                    mip_count: mips,
+                    first_slice: s0,
+                    slice_count: slices,
+                    first_plane: p0,
+                    plane_count: planes
+                }
+            );
     }
     out
 }
@@ -170,44 +170,44 @@ fn file_barrier(
         let at1 = pending.len();
         items
             .push(
-            SlotItem {
-                slot: 1,
-                value: pk1,
-                resource: b.resource,
-                range: key,
-                seq: seq1,
-                barrier: at1
-            }
-        );
+                SlotItem {
+                    slot: 1,
+                    value: pk1,
+                    resource: b.resource,
+                    range: key,
+                    seq: seq1,
+                    barrier: at1
+                }
+            );
         pending.push(begin);
         let seq2 = items.len();
         let at2 = pending.len();
         items
             .push(
-            SlotItem {
-                slot: 0,
-                value: pk2,
-                resource: b.resource,
-                range: key,
-                seq: seq2,
-                barrier: at2
-            }
-        );
+                SlotItem {
+                    slot: 0,
+                    value: pk2,
+                    resource: b.resource,
+                    range: key,
+                    seq: seq2,
+                    barrier: at2
+                }
+            );
         pending.push(end);
     } else {
         let seq0 = items.len();
         let at0 = pending.len();
         items
             .push(
-            SlotItem {
-                slot: pk0,
-                value: pk1,
-                resource: b.resource,
-                range: key,
-                seq: seq0,
-                barrier: at0
-            }
-        );
+                SlotItem {
+                    slot: pk0,
+                    value: pk1,
+                    resource: b.resource,
+                    range: key,
+                    seq: seq0,
+                    barrier: at0
+                }
+            );
         pending.push(b);
     }
 }
@@ -267,11 +267,11 @@ fn needed_waits(inout ck: Clocks, q: u32, in producers: ChunkSeq[u32]) -> ChunkS
             );
             candidates
                 .push(
-                Pair {
-                    key: wrapping_u32(dq),
-                    value: d
-                }
-            );
+                    Pair {
+                        key: wrapping_u32(dq),
+                        value: d
+                    }
+                );
         }
     }
     let mut out: ChunkSeq[Pair] = ChunkSeq::new[Pair]();
@@ -356,13 +356,13 @@ fn emit_slot(
     out
         .cmds
         .push(
-        CmdRec {
-            queue: queue,
-            tag: 1,
-            a: start,
-            b: r.count
-        }
-    );
+            CmdRec {
+                queue: queue,
+                tag: 1,
+                a: start,
+                b: r.count
+            }
+        );
 }
 
 fn emit_waits(inout out: PlanOut, in list: ChunkSeq[Pair], in value_of: ChunkSeq[u64], queue: u32) {
@@ -371,13 +371,13 @@ fn emit_waits(inout out: PlanOut, in list: ChunkSeq[Pair], in value_of: ChunkSeq
             Option::Some(w) => out
                 .cmds
                 .push(
-                CmdRec {
-                    queue: queue,
-                    tag: 0,
-                    a: widen_u64(w.key),
-                    b: get64(in value_of, widen_u64(w.value))
-                }
-            ),
+                    CmdRec {
+                        queue: queue,
+                        tag: 0,
+                        a: widen_u64(w.key),
+                        b: get64(in value_of, widen_u64(w.value))
+                    }
+                ),
             Option::None => (),
         }
     }

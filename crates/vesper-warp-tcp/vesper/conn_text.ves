@@ -4,9 +4,7 @@ fn accept_text(inout t: Tcb, now: u64, seg: Seg, in bytes: Slice[u8], inout ring
     let mut rec = no_recv();
     let s = t.st;
     if !(s == State::Established || s == State::FinWait1 || s == State::FinWait2)
-        || seg
-        .pay_len
-        == 0 {
+        || seg.pay_len == 0 {
         return rec;
     }
     let mut start = match seqmap_abs(t.rcv_isn, t.rcv_nxt, seg.h.seq) {
@@ -149,12 +147,12 @@ fn insert_ooo(inout t: Tcb, start: u64, end: u64) -> bool {
     t
         .ooo
         .push(
-        OooRange {
-            start: ns,
-            end: ne,
-            stamp: stamp
-        }
-    );
+            OooRange {
+                start: ns,
+                end: ne,
+                stamp: stamp
+            }
+        );
     true
 }
 
@@ -165,14 +163,10 @@ fn process_fin(inout t: Tcb, now: u64, seg: Seg) -> bool {
     }
     let s = t.st;
     if !(
-        s
-            == State::Established
-            || s
-            == State::FinWait1
-            || s
-            == State::FinWait2
-            || s
-            == State::SynReceived
+        s == State::Established
+            || s == State::FinWait1
+            || s == State::FinWait2
+            || s == State::SynReceived
     ) {
         // CLOSE-WAIT, CLOSING, LAST-ACK: remain; TIME-WAIT: restart.
         if s == State::TimeWait {

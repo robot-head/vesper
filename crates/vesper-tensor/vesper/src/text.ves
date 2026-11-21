@@ -210,10 +210,8 @@ pub fn utf8_ok(in s: Slice[u8], start: u64, end: u64)
                 n = 2;
                 lo = UTF8_E0_SECOND_MIN;
             } else if (c >= UTF8_LEAD_E1 && c <= UTF8_LEAD_EC)
-                || c
-                == UTF8_LEAD_EE
-                || c
-                == UTF8_LEAD_EF {
+                || c == UTF8_LEAD_EE
+                || c == UTF8_LEAD_EF {
                 n = 2;
             } else if c == UTF8_LEAD_ED {
                 n = 2;

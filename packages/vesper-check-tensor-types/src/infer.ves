@@ -579,11 +579,11 @@ fn adt_infos(inout st: St, inout cx: Cx, in a: Ast) {
             for k in 0..widen_u64(u32_at(in cx.ak_n, widen_u64(krow))) {
                 kinds
                     .push(
-                    u8_at(
-                        in cx.ak_k,
-                        wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(krow))), k)
-                    )
-                );
+                        u8_at(
+                            in cx.ak_k,
+                            wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(krow))), k)
+                        )
+                    );
             }
         }
         set_scope_from(inout cx, in names, in kinds);
@@ -930,8 +930,8 @@ fn variant_fields(
     for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
         names
             .push(
-            u32_at(in cx.fr_name, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
-        );
+                u32_at(in cx.fr_name, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
+            );
         let ft = sub_ty_or(
             inout st,
             in s,
@@ -1148,12 +1148,12 @@ fn struct_literal(
     for i in 0..gn {
         gnames
             .push(
-            u32_at(in cx.ai_syms, wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(r))), i))
-        );
+                u32_at(in cx.ai_syms, wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(r))), i))
+            );
         gkinds
             .push(
-            u8_at(in cx.ai_kinds, wrapping_add(widen_u64(u32_at(in cx.ai_ka, widen_u64(r))), i))
-        );
+                u8_at(in cx.ai_kinds, wrapping_add(widen_u64(u32_at(in cx.ai_ka, widen_u64(r))), i))
+            );
     }
     let mut renaming = subst_new();
     let mut fresh = ChunkSeq::new[u32]();
@@ -1632,19 +1632,28 @@ fn apply_sig(
     for i in 0..widen_u64(u32_at(in cx.sg_gn, widen_u64(row))) {
         gnames
             .push(
-            u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
-        );
+                u32_at(
+                    in cx.sg_gsym,
+                    wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
+                )
+            );
         gkinds
             .push(
-            u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
-        );
+                u8_at(
+                    in cx.sg_gkind,
+                    wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
+                )
+            );
     }
     let mut ptys = ChunkSeq::new[u32]();
     for i in 0..widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) {
         ptys
             .push(
-            u32_at(in cx.sg_pty, wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i))
-        );
+                u32_at(
+                    in cx.sg_pty,
+                    wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i)
+                )
+            );
     }
     let mut obs = ChunkSeq::new[Ob]();
     for i in 0..widen_u64(u32_at(in cx.sg_on, widen_u64(row))) {
@@ -1733,8 +1742,11 @@ fn call(inout st: St, inout cx: Cx, in a: Ast, e: u32, expected: u32) -> u32 {
         for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
             ptys
                 .push(
-                u32_at(in cx.fr_ty, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
-            );
+                    u32_at(
+                        in cx.fr_ty,
+                        wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i)
+                    )
+                );
         }
         let gn = info_gen_count(in cx, r);
         let mut gnames = ChunkSeq::new[u32]();
@@ -2925,13 +2937,19 @@ fn check_body(inout st: St, inout cx: Cx, in a: Ast, f: u32, row: u32) {
         cx
             .sc_name
             .push(
-            u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
-        );
+                u32_at(
+                    in cx.sg_gsym,
+                    wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
+                )
+            );
         cx
             .sc_kind
             .push(
-            u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
-        );
+                u8_at(
+                    in cx.sg_gkind,
+                    wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i)
+                )
+            );
     }
     let mut pc = list_len(in a, x.params);
     if widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) < pc {

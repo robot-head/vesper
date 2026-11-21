@@ -305,17 +305,10 @@ test {
     // @case reserved(4294967295, true)
     fn test_index(raw: u32, missing: bool) -> bool {
         let idx = idx_from_raw[u64](raw);
-        idx
-            .raw()
-            == raw
-            && idx
-            .index()
-            == widen_u64(raw)
-            && idx
-            .is_none()
-            == missing
-            && (idx == idx_none[u64]())
-            == missing
+        idx.raw() == raw
+            && idx.index() == widen_u64(raw)
+            && idx.is_none() == missing
+            && (idx == idx_none[u64]()) == missing
     }
 
     // @case empty(0, 0)
@@ -335,19 +328,10 @@ test {
                 return false;
             }
         }
-        arena
-            .len()
-            == count
-            && arena
-            .is_empty()
-            == (count == 0)
-            && arena
-            .next_idx()
-            .index()
-            == count
-            && arena
-            .at(count)
-            == Option::None
+        arena.len() == count
+            && arena.is_empty() == (count == 0)
+            && arena.next_idx().index() == count
+            && arena.at(count) == Option::None
     }
 
     // @case first(0, true, 99, 20)
@@ -371,25 +355,13 @@ test {
         } else {
             77
         };
-        present
-            == exists
-            && written
-            == exists
-            && arena
-            .get(idx)
-            == expected
-            && arena
-            .get_or(idx, 77)
-            == value
-            && arena
-            .len()
-            == 2
-            && arena
-            .at(0)
-            == Option::Some(first)
-            && arena
-            .at(1)
-            == Option::Some(second)
+        present == exists
+            && written == exists
+            && arena.get(idx) == expected
+            && arena.get_or(idx, 77) == value
+            && arena.len() == 2
+            && arena.at(0) == Option::Some(first)
+            && arena.at(1) == Option::Some(second)
     }
 
     // @case truncate_all(0, 0)
@@ -435,19 +407,10 @@ test {
             99
         };
         let wrote = map.set(target, 7);
-        wrote
-            == expected_write
-            && map
-            .len()
-            == length
-            && map
-            .get(target)
-            == target_value
-            && map
-            .get(first)
-            == contents
-            && map
-            .get(idx_from_raw[u32](3))
-            == 99
+        wrote == expected_write
+            && map.len() == length
+            && map.get(target) == target_value
+            && map.get(first) == contents
+            && map.get(idx_from_raw[u32](3)) == 99
     }
 }

@@ -251,10 +251,8 @@ pub fn validate(in schema: Slice[u64], root: u64, in lim: Slice[u64]) -> Unit ef
                 }
                 fail(3, id);
             }
-            if sw(in schema, wrapping_add(f, 1))
-                == K_MESSAGE
-                && sw(in schema, wrapping_add(f, 2))
-                >= n {
+            if sw(in schema, wrapping_add(f, 1)) == K_MESSAGE
+                && sw(in schema, wrapping_add(f, 2)) >= n {
                 fail(0, id);
             }
             previous = number;

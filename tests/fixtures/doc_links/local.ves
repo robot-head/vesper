@@ -8,8 +8,7 @@ impl Tx {
     fn commit(sink self) -> u64 {
         let Tx {
             id
-        }
-        = self;
+        } = self;
         id
     }
 }

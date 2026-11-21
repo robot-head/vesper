@@ -200,12 +200,12 @@ pub fn do_signed_rank_exact(in differences: Slice[i64])
         if d != 0 {
             obs
                 .push(
-                Obs {
-                    mag: uabs(d),
-                    den: 1,
-                    positive: d > 0
-                }
-            );
+                    Obs {
+                        mag: uabs(d),
+                        den: 1,
+                        positive: d > 0
+                    }
+                );
         }
     }
     rank_observations(inout obs, len)
@@ -226,12 +226,12 @@ pub fn do_signed_rank_exact_paired_samples(in samples: Slice[Sample])
             };
             obs
                 .push(
-                Obs {
-                    mag: mag,
-                    den: s.operations,
-                    positive: s.candidate > s.baseline
-                }
-            );
+                    Obs {
+                        mag: mag,
+                        den: s.operations,
+                        positive: s.candidate > s.baseline
+                    }
+                );
         }
     }
     rank_observations(inout obs, len)
@@ -292,11 +292,11 @@ fn accepts(
         if !w_is_zero(centered) {
             obs
                 .push(
-                CObs {
-                    mag: w_uabs(centered),
-                    positive: !w_is_neg(centered)
-                }
-            );
+                    CObs {
+                        mag: w_uabs(centered),
+                        positive: !w_is_neg(centered)
+                    }
+                );
         }
     }
     let n = obs.len();
@@ -382,30 +382,26 @@ fn append(inout result: ChunkSeq[Segment], next: Segment) {
     let n = result.len();
     if n > 0 {
         let last = cseg(in result, dec(n));
-        let same = last
-            .upper_bounded
-            == next
-            .lower_bounded
+        let same = last.upper_bounded == next.lower_bounded
             && (
-            !last
-                .upper_bounded
-                || (last.upper_hi == next.lower_hi && last.upper_lo == next.lower_lo)
-        );
+                !last.upper_bounded
+                    || (last.upper_hi == next.lower_hi && last.upper_lo == next.lower_lo)
+            );
         if same && (last.upper_inclusive || next.lower_inclusive) {
             result
                 .try_set(
-                dec(n),
-                Segment {
-                    lower_bounded: last.lower_bounded,
-                    lower_hi: last.lower_hi,
-                    lower_lo: last.lower_lo,
-                    lower_inclusive: last.lower_inclusive,
-                    upper_bounded: next.upper_bounded,
-                    upper_hi: next.upper_hi,
-                    upper_lo: next.upper_lo,
-                    upper_inclusive: next.upper_inclusive
-                }
-            );
+                    dec(n),
+                    Segment {
+                        lower_bounded: last.lower_bounded,
+                        lower_hi: last.lower_hi,
+                        lower_lo: last.lower_lo,
+                        lower_inclusive: last.lower_inclusive,
+                        upper_bounded: next.upper_bounded,
+                        upper_hi: next.upper_hi,
+                        upper_lo: next.upper_lo,
+                        upper_inclusive: next.upper_inclusive
+                    }
+                );
             return;
         }
     }
@@ -533,12 +529,11 @@ pub fn do_classify_differences(in segments: Slice[Segment], max_difference: i64)
     let threshold = w_twice(w_i64(max_difference));
     if last.upper_bounded && !w_slt(threshold, seg_upper(last)) {
         Outcome::Pass
-    } else if first
-        .lower_bounded
+    } else if first.lower_bounded
         && (
-        w_slt(threshold, seg_lower(first))
-            || (w_eq(seg_lower(first), threshold) && !first.lower_inclusive)
-    ) {
+            w_slt(threshold, seg_lower(first))
+                || (w_eq(seg_lower(first), threshold) && !first.lower_inclusive)
+        ) {
         Outcome::Regression
     } else {
         Outcome::CrossesThreshold

@@ -313,19 +313,19 @@ pub fn mount_next(
                 .m
                 .props
                 .push(
-                MProp {
-                    property: tp.property,
-                    slot: slot,
-                    tag: tp.tag,
-                    payload: tp.payload,
-                    tstart: tstart,
-                    tlen: if tp.tag == ValueTag::Text {
-                        tp.tlen
-                    } else {
-                        0
+                    MProp {
+                        property: tp.property,
+                        slot: slot,
+                        tag: tp.tag,
+                        payload: tp.payload,
+                        tstart: tstart,
+                        tlen: if tp.tag == ValueTag::Text {
+                            tp.tlen
+                        } else {
+                            0
+                        }
                     }
-                }
-            );
+                );
         }
         let sstart = p.m.subs.len();
         for j in 0..tn.scount {
@@ -351,12 +351,12 @@ pub fn mount_next(
                 .m
                 .subs
                 .push(
-                MSub {
-                    event: ts.event,
-                    id: sid,
-                    handler: ts.handler
-                }
-            );
+                    MSub {
+                        event: ts.event,
+                        id: sid,
+                        handler: ts.handler
+                    }
+                );
         }
         let cstart = p.m.kids.len();
         for j in 0..tn.ccount {
@@ -367,19 +367,19 @@ pub fn mount_next(
             .m
             .nodes
             .push(
-            MNode {
-                key: tn.key,
-                id: id,
-                kind: tn.kind,
-                src: ti,
-                pstart: pstart,
-                pcount: tn.pcount,
-                sstart: sstart,
-                scount: tn.scount,
-                cstart: cstart,
-                ccount: tn.ccount
-            }
-        );
+                MNode {
+                    key: tn.key,
+                    id: id,
+                    kind: tn.kind,
+                    src: ti,
+                    pstart: pstart,
+                    pcount: tn.pcount,
+                    sstart: sstart,
+                    scount: tn.scount,
+                    cstart: cstart,
+                    ccount: tn.ccount
+                }
+            );
         p.m.keys.push(tn.key);
         p.prev.push(prev);
         p.cur_start.push(0);
@@ -622,12 +622,12 @@ pub fn plan(in old: Mounted, inout p: Prepared, has_tree: bool, in text: Slice[u
         p
             .succ
             .push(
-            if same {
-                nj
-            } else {
-                NONE_ID
-            }
-        );
+                if same {
+                    nj
+                } else {
+                    NONE_ID
+                }
+            );
     }
     let old_root = mnode(in old.nodes, 0).id;
     let new_root = mnode(in p.m.nodes, 0).id;

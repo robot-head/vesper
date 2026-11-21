@@ -9,24 +9,24 @@ fn main() -> u64 {
     region r(1024) {
         let t = r
             .box(
-            Triple {
-                a: 1,
-                b: 2,
-                c: 0.5
-            }
-        );
+                Triple {
+                    a: 1,
+                    b: 2,
+                    c: 0.5
+                }
+            );
         let w = r.box(7);
         let none: RegionBox[r, Option[(i64, i64)]] = r.box(Option::None);
         let first = r.used();
         let m = r.checkpoint();
         let _ = r
             .box(
-            Triple {
-                a: 3,
-                b: 4,
-                c: 1.5
-            }
-        );
+                Triple {
+                    a: 3,
+                    b: 4,
+                    c: 1.5
+                }
+            );
         let grown = r.used();
         r.rewind(m);
         let back = r.used();

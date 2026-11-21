@@ -249,12 +249,8 @@ test {
             let digit = get32(in post.as_slice(), i, 4294967295);
             let byte = wrapping_add(wrapping_u8(digit), 48);
             let reverse_index = wrapping_sub(wrapping_sub(count, 1), i);
-            if expected
-                .try_byte_at(i)
-                != Option::Some(byte)
-                || reverse
-                .try_get(reverse_index)
-                != Option::Some(digit) {
+            if expected.try_byte_at(i) != Option::Some(byte)
+                || reverse.try_get(reverse_index) != Option::Some(digit) {
                 return false;
             }
         }

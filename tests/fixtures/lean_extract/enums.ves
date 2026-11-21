@@ -14,13 +14,11 @@ fn area(sink s: Shape) -> u64 eff [Fail[ArithOverflow]] {
     match s {
         Shape::Circle {
             r
-        }
-        => 3 * r * r,
+        } => 3 * r * r,
         Shape::Rect {
             h,
             w
-        }
-        => w * h,
+        } => w * h,
         Shape::Empty => 0,
     }
 }
@@ -29,8 +27,7 @@ fn is_round(sink s: Shape) -> bool {
     match s {
         Shape::Circle {
             r
-        }
-        => true,
+        } => true,
         _ => false,
     }
 }

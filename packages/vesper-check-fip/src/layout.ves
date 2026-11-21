@@ -111,20 +111,14 @@ fn build(inout s: Sizes, inout t: Types, in names: Names, in wd: World, ty: u32,
     } else {
         0
     };
-    let scalar = n
-        .kind
-        == K_LIT
-        || n
-        .kind
-        == K_FN
+    let scalar = n.kind == K_LIT
+        || n.kind == K_FN
         || (n.kind == K_NAMED && k.is_scalar(name))
         || (n.kind == K_NAMED && (name == k.region_box || name == k.watermark))
         || (n.kind == K_NAMED && name == k.tiled_seq && (n.n == 1 || n.n == 2))
         || (n.kind == K_NAMED && name == k.chunk_seq && n.n == 1)
         || (wd.box_active && n.kind == K_NAMED && name == k.box_ && n.n == 1)
-        || ty
-        == t
-        .unit;
+        || ty == t.unit;
     if scalar {
         return 8;
     }

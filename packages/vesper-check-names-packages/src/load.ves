@@ -190,97 +190,97 @@ pub fn item_at(in a: Ast, i: u32) -> ItemNode {
     a
         .items
         .get_or(
-        idx_from_raw[ItemNode](i),
-        ItemNode {
-            kind: 0,
-            node: 0
-        }
-    )
+            idx_from_raw[ItemNode](i),
+            ItemNode {
+                kind: 0,
+                node: 0
+            }
+        )
 }
 
 pub fn adt_at(in a: Ast, i: u32) -> AdtNode {
     a
         .adts
         .get_or(
-        idx_from_raw[AdtNode](i),
-        AdtNode {
-            name: ast_none(),
-            mode: 0,
-            generics: 0,
-            variants: 0,
-            is_enum: false,
-            tiled: false,
-            tile_width: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[AdtNode](i),
+            AdtNode {
+                name: ast_none(),
+                mode: 0,
+                generics: 0,
+                variants: 0,
+                is_enum: false,
+                tiled: false,
+                tile_width: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn fn_at(in a: Ast, i: u32) -> FnNode {
     a
         .fns
         .get_or(
-        idx_from_raw[FnNode](i),
-        FnNode {
-            name: ast_none(),
-            fip: false,
-            generics: 0,
-            params: 0,
-            result: ast_none(),
-            effects: ast_none(),
-            body: ast_none(),
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[FnNode](i),
+            FnNode {
+                name: ast_none(),
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: ast_none(),
+                effects: ast_none(),
+                body: ast_none(),
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
     a
         .effect_decls
         .get_or(
-        idx_from_raw[EffectDeclNode](i),
-        EffectDeclNode {
-            name: ast_none(),
-            linear: false,
-            generics: 0,
-            ops: 0,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[EffectDeclNode](i),
+            EffectDeclNode {
+                name: ast_none(),
+                linear: false,
+                generics: 0,
+                ops: 0,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 fn use_at(in a: Ast, i: u32) -> UseNode {
     a
         .uses
         .get_or(
-        idx_from_raw[UseNode](i),
-        UseNode {
-            package: ast_none(),
-            supers: 0,
-            path: 0,
-            names: 0,
-            public: false,
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[UseNode](i),
+            UseNode {
+                package: ast_none(),
+                supers: 0,
+                path: 0,
+                names: 0,
+                public: false,
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 fn use_name_at(in a: Ast, i: u32) -> UseNameNode {
     a
         .use_names
         .get_or(
-        idx_from_raw[UseNameNode](i),
-        UseNameNode {
-            name: ast_none(),
-            alias: ast_none(),
-            start: 0,
-            end: 0
-        }
-    )
+            idx_from_raw[UseNameNode](i),
+            UseNameNode {
+                name: ast_none(),
+                alias: ast_none(),
+                start: 0,
+                end: 0
+            }
+        )
 }
 
 pub fn variant_name(in a: Ast, v: u32) -> u32 {
@@ -366,12 +366,12 @@ pub fn collect(inout s: St, in a: Ast, m: u32) {
         s
             .use_public
             .push(
-            if u.public {
-                1
-            } else {
-                0
-            }
-        );
+                if u.public {
+                    1
+                } else {
+                    0
+                }
+            );
         s.use_start.push(u.start);
         s.use_end.push(u.end);
     }
