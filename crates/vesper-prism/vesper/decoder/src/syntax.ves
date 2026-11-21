@@ -1,23 +1,10 @@
+use self::ascii::{
+    Ascii
+};
 // Byte-level grammars of the decoder: tokens, targets, Host (with Rust std's
 // IPv4/IPv6 parsers) and field values.
 
 // ASCII bytes this module compares against (constants are per module).
-const NUL: u8 = 0;
-const TAB: u8 = 9;
-const SPACE: u8 = 32;
-const PERCENT: u8 = 37;
-const DOT: u8 = 46;
-const SLASH: u8 = 47;
-const DIGIT_0: u8 = 48;
-const DIGIT_9: u8 = 57;
-const COLON: u8 = 58;
-const UPPER_A: u8 = 65;
-const UPPER_F: u8 = 70;
-const UPPER_Z: u8 = 90;
-const LOWER_A: u8 = 97;
-const LOWER_F: u8 = 102;
-const LOWER_X: u8 = 120;
-const LOWER_Z: u8 = 122;
 // 'a' - 'A': adding it lowercases an ASCII capital.
 const ASCII_CASE_OFFSET: u8 = 32;
 // 'a' - 10 and 'A' - 10: subtracting them gives a hex letter's value.
@@ -69,11 +56,11 @@ pub fn queued(in front: Slice[u8], in back: Slice[u8], i: u64) -> u8 {
 }
 
 pub fn is_digit(b: u8) -> bool {
-    b >= DIGIT_0 && b <= DIGIT_9
+    b >= Ascii::Digit0 && b <= Ascii::Digit9
 }
 
 pub fn is_alpha(b: u8) -> bool {
-    (b >= UPPER_A && b <= UPPER_Z) || (b >= LOWER_A && b <= LOWER_Z)
+    (b >= Ascii::UpperA && b <= Ascii::UpperZ) || (b >= Ascii::LowerA && b <= Ascii::LowerZ)
 }
 
 pub fn is_alnum(b: u8) -> bool {
@@ -81,11 +68,13 @@ pub fn is_alnum(b: u8) -> bool {
 }
 
 pub fn is_hex(b: u8) -> bool {
-    is_digit(b) || (b >= UPPER_A && b <= UPPER_F) || (b >= LOWER_A && b <= LOWER_F)
+    is_digit(b)
+        || (b >= Ascii::UpperA && b <= Ascii::UpperF)
+        || (b >= Ascii::LowerA && b <= Ascii::LowerF)
 }
 
 pub fn lower(b: u8) -> u8 {
-    if b >= UPPER_A && b <= UPPER_Z {
+    if b >= Ascii::UpperA && b <= Ascii::UpperZ {
         wrapping_add(b, ASCII_CASE_OFFSET)
     } else {
         b
@@ -179,7 +168,7 @@ pub fn named(in s: Slice[u8], lo: u64, hi: u64, in lit: Str) -> bool {
 }
 
 pub fn is_ows(b: u8) -> bool {
-    b == SPACE || b == TAB
+    b == Ascii::Space || b == Ascii::Tab
 }
 
 pub copy struct Span {
@@ -228,7 +217,7 @@ pub fn find(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
             Option::None => (),
         }
     }
-    if b == NUL && end < hi && lo < hi {
+    if b == Ascii::Nul && end < hi && lo < hi {
         if lo > end {
             lo
         } else {
@@ -259,10 +248,10 @@ pub fn valid_target(options: bool, in t: Slice[u8], lo: u64, hi: u64) -> bool {
     if n == 1 && byte(in t, lo) == 42 {
         return options;
     }
-    if n == 0 || byte(in t, lo) != SLASH {
+    if n == 0 || byte(in t, lo) != Ascii::Slash {
         return false;
     }
-    if n >= 2 && byte(in t, inc(lo)) == SLASH {
+    if n >= 2 && byte(in t, inc(lo)) == Ascii::Slash {
         return false;
     }
     let mut i = lo;
@@ -285,7 +274,7 @@ pub fn valid_target(options: bool, in t: Slice[u8], lo: u64, hi: u64) -> bool {
             Option::Some(b) => b,
             Option::None => 0,
         };
-        if b == PERCENT {
+        if b == Ascii::Percent {
             let h1 = inc(i);
             let h2 = wrapping_add(i, 2);
             if h1 >= hi || !is_hex(byte(in t, h1)) || h2 >= hi || !is_hex(byte(in t, h2)) {
@@ -315,10 +304,10 @@ const MAX_DNS_LABEL_LEN: u64 = 63;
 
 pub fn digit_value(b: u8, radix: u64) -> u64 {
     if is_digit(b) {
-        wrapping_sub(widen_u64(b), widen_u64(DIGIT_0))
-    } else if radix == 16 && b >= LOWER_A && b <= LOWER_F {
+        wrapping_sub(widen_u64(b), widen_u64(Ascii::Digit0))
+    } else if radix == 16 && b >= Ascii::LowerA && b <= Ascii::LowerF {
         wrapping_sub(widen_u64(b), widen_u64(LOWER_HEX_OFFSET))
-    } else if radix == 16 && b >= UPPER_A && b <= UPPER_F {
+    } else if radix == 16 && b >= Ascii::UpperA && b <= Ascii::UpperF {
         wrapping_sub(widen_u64(b), widen_u64(UPPER_HEX_OFFSET))
     } else {
         radix
@@ -335,7 +324,7 @@ pub fn read_number(
     zero_prefix: bool,
     max_value: u64
 ) -> u64 {
-    let leading_zero = at < hi && byte(in s, at) == DIGIT_0;
+    let leading_zero = at < hi && byte(in s, at) == Ascii::Digit0;
     let mut i = at;
     let mut value: u64 = 0;
     let mut digits: u64 = 0;
@@ -369,7 +358,7 @@ pub fn read_ipv4(in s: Slice[u8], at: u64, hi: u64) -> u64 {
     let mut i = at;
     for k in 0..4 {
         if k > 0 {
-            if i >= hi || byte(in s, i) != DOT {
+            if i >= hi || byte(in s, i) != Ascii::Dot {
                 return max_u64();
             }
             i = inc(i);
@@ -403,7 +392,7 @@ pub fn read_groups(in s: Slice[u8], at: u64, hi: u64, limit: u64) -> Groups {
         let mut start = i;
         let mut ok = true;
         if g > 0 {
-            if i < hi && byte(in s, i) == COLON {
+            if i < hi && byte(in s, i) == Ascii::Colon {
                 start = inc(i);
             } else {
                 ok = false;
@@ -441,7 +430,7 @@ pub fn valid_ipv6(in s: Slice[u8], lo: u64, hi: u64) -> bool {
         return false;
     }
     let i = head.at;
-    if inc(i) >= hi || byte(in s, i) != COLON || byte(in s, inc(i)) != COLON {
+    if inc(i) >= hi || byte(in s, i) != Ascii::Colon || byte(in s, inc(i)) != Ascii::Colon {
         return false;
     }
     let limit = wrapping_sub(8, inc(head.count));
@@ -453,9 +442,9 @@ pub fn numeric_part(in s: Slice[u8], lo: u64, hi: u64) -> bool {
     if wrapping_sub(hi, lo)
         >= 2
         && byte(in s, lo)
-        == DIGIT_0
+        == Ascii::Digit0
         && lower(byte(in s, inc(lo)))
-        == LOWER_X {
+        == Ascii::LowerX {
         read_number(in s, wrapping_add(lo, 2), hi, 16, max_u64(), true, max_u64()) == hi
     } else {
         read_number(in s, lo, hi, 10, max_u64(), true, max_u64()) == hi
@@ -495,25 +484,25 @@ pub fn valid_host(in s: Slice[u8], lo: u64, hi: u64) -> bool {
         if after == hi {
             return true;
         }
-        return byte(in s, after) == COLON && valid_port(in s, inc(after), hi);
+        return byte(in s, after) == Ascii::Colon && valid_port(in s, inc(after), hi);
     }
-    let colon = find(in s, lo, hi, COLON);
+    let colon = find(in s, lo, hi, Ascii::Colon);
     if colon < hi {
         let port_lo = inc(colon);
-        let port_hi = find(in s, port_lo, hi, COLON);
+        let port_hi = find(in s, port_lo, hi, Ascii::Colon);
         if !valid_port(in s, port_lo, port_hi) || port_hi < hi {
             return false;
         }
     }
     let host_hi = colon;
     let mut class_hi = host_hi;
-    if class_hi > lo && byte(in s, dec(class_hi)) == DOT {
+    if class_hi > lo && byte(in s, dec(class_hi)) == Ascii::Dot {
         class_hi = dec(class_hi);
     }
     let mut numeric = true;
     let mut part = lo;
     loop {
-        let end = find(in s, part, class_hi, DOT);
+        let end = find(in s, part, class_hi, Ascii::Dot);
         if !numeric_part(in s, part, end) {
             numeric = false;
             break;
@@ -527,7 +516,7 @@ pub fn valid_host(in s: Slice[u8], lo: u64, hi: u64) -> bool {
         return read_ipv4(in s, lo, host_hi) == host_hi;
     }
     let mut name_hi = host_hi;
-    if name_hi > lo && byte(in s, dec(name_hi)) == DOT {
+    if name_hi > lo && byte(in s, dec(name_hi)) == Ascii::Dot {
         name_hi = dec(name_hi);
     }
     let n = wrapping_sub(name_hi, lo);
@@ -536,7 +525,7 @@ pub fn valid_host(in s: Slice[u8], lo: u64, hi: u64) -> bool {
     }
     let mut label = lo;
     loop {
-        let end = find(in s, label, name_hi, DOT);
+        let end = find(in s, label, name_hi, Ascii::Dot);
         if !valid_label(in s, label, end) {
             return false;
         }
@@ -554,7 +543,7 @@ pub fn decimal(in s: Slice[u8], lo: u64, hi: u64) -> Option[u64] {
     }
     let mut v: u64 = 0;
     for i in lo..hi {
-        let d = wrapping_sub(widen_u64(byte(in s, i)), widen_u64(DIGIT_0));
+        let d = wrapping_sub(widen_u64(byte(in s, i)), widen_u64(Ascii::Digit0));
         if d > 9 || v > U64_MAX_DIV_10 || (v == U64_MAX_DIV_10 && d > U64_MAX_LAST_DIGIT) {
             return Option::None;
         }

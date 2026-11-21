@@ -48,50 +48,34 @@ use self::table::{
 use self::reason::{
     reason_of
 };
+use self::wire::{
+    Duplicate,
+    Indexed,
+    IndexedPostBase,
+    InsertCountIncrement,
+    InsertLiteral,
+    InsertNameRef,
+    LiteralName,
+    NameRef,
+    PostBaseNameRef,
+    SectionAck,
+    SectionPrefix,
+    SetCapacity,
+    StreamCancel,
+    ENTRY_OVERHEAD,
+    VALUE_PREFIX
+};
 
 // QPACK wire patterns (RFC 9204 §4; src/qpack/wire.rs): first-byte bits
 // and integer prefix lengths.
 // §3.2.1: an entry's size is its name and value lengths plus 32.
-const ENTRY_OVERHEAD: u64 = 32;
 // Appendix A: the static table's length.
 const STATIC_TABLE_LEN: u64 = 99;
 // §4.1.2: a value string's length prefix.
-const VALUE_PREFIX: u64 = 7;
 // §4.3 encoder instructions.
-const INSERT_NAME_REF: u8 = 0x80;
-const INSERT_NAME_REF_STATIC: u8 = 0x40;
-const INSERT_NAME_REF_PREFIX: u64 = 6;
-const INSERT_LITERAL: u8 = 0x40;
-const INSERT_LITERAL_PREFIX: u64 = 5;
-const SET_CAPACITY: u8 = 0x20;
-const SET_CAPACITY_PREFIX: u64 = 5;
-const DUPLICATE_PREFIX: u64 = 5;
 // §4.4 decoder instructions.
-const SECTION_ACK: u8 = 0x80;
-const SECTION_ACK_PREFIX: u64 = 7;
-const STREAM_CANCEL: u8 = 0x40;
-const STREAM_CANCEL_PREFIX: u64 = 6;
-const INSERT_COUNT_INCREMENT: u8 = 0x00;
-const INSERT_COUNT_INCREMENT_PREFIX: u64 = 6;
 // §4.5.1 the field section prefix.
-const RIC_PREFIX: u64 = 8;
-const BASE_NEGATIVE: u8 = 0x80;
-const DELTA_BASE_PREFIX: u64 = 7;
 // §4.5.2-§4.5.6 field lines.
-const INDEXED: u8 = 0x80;
-const INDEXED_STATIC: u8 = 0x40;
-const INDEXED_PREFIX: u64 = 6;
-const INDEXED_POST_BASE: u8 = 0x10;
-const INDEXED_POST_BASE_PREFIX: u64 = 4;
-const NAME_REF: u8 = 0x40;
-const NAME_REF_NEVER: u8 = 0x20;
-const NAME_REF_STATIC: u8 = 0x10;
-const NAME_REF_PREFIX: u64 = 4;
-const POST_BASE_NAME_REF_NEVER: u8 = 0x08;
-const POST_BASE_NAME_REF_PREFIX: u64 = 3;
-const LITERAL_NAME: u8 = 0x20;
-const LITERAL_NAME_NEVER: u8 = 0x10;
-const LITERAL_NAME_PREFIX: u64 = 3;
 // decode_ric: 2 * MaxEntries must not overflow.
 const I64_MAX: u64 = 9223372036854775807;
 // compact_blocked rebuilds `blk_bytes` past this size once live sections
@@ -220,14 +204,14 @@ fn line(
 ) -> Result[u64, Reason] {
     let start = out.len();
     let first = byte(in buf, at);
-    if first & INDEXED != 0 {
-        let n = match num(decode_int(in buf, at, INDEXED_PREFIX)) {
+    if first & Indexed::Bits != 0 {
+        let n = match num(decode_int(in buf, at, Indexed::Prefix)) {
             Result::Ok(n) => n,
             Result::Err(r) => {
                 return Result::Err(r);
             },
         };
-        if first & INDEXED_STATIC != 0 {
+        if first & Indexed::Static != 0 {
             match copy_static(in st, n.value, false, inout out) {
                 Result::Ok(_u) => (),
                 Result::Err(r) => {
@@ -250,14 +234,14 @@ fn line(
         sensitive = false;
         return Result::Ok(wrapping_add(at, n.used));
     }
-    if first & NAME_REF != 0 {
-        let n = match num(decode_int(in buf, at, NAME_REF_PREFIX)) {
+    if first & NameRef::Bits != 0 {
+        let n = match num(decode_int(in buf, at, NameRef::Prefix)) {
             Result::Ok(n) => n,
             Result::Err(r) => {
                 return Result::Err(r);
             },
         };
-        if first & NAME_REF_STATIC != 0 {
+        if first & NameRef::Static != 0 {
             match copy_static(in st, n.value, false, inout out) {
                 Result::Ok(_u) => (),
                 Result::Err(r) => {
@@ -273,14 +257,14 @@ fn line(
             }
         }
         split = wrapping_sub(out.len(), start);
-        sensitive = first & NAME_REF_NEVER != 0;
+        sensitive = first & NameRef::Never != 0;
         return num_end(
             decode_string(in h, in buf, wrapping_add(at, n.used), VALUE_PREFIX, max, inout out)
         );
     }
-    if first & LITERAL_NAME != 0 {
+    if first & LiteralName::Bits != 0 {
         let mid = match num_end(
-            decode_string(in h, in buf, at, LITERAL_NAME_PREFIX, max, inout out)
+            decode_string(in h, in buf, at, LiteralName::Prefix, max, inout out)
         ) {
             Result::Ok(m) => m,
             Result::Err(r) => {
@@ -288,11 +272,11 @@ fn line(
             },
         };
         split = wrapping_sub(out.len(), start);
-        sensitive = first & LITERAL_NAME_NEVER != 0;
+        sensitive = first & LiteralName::Never != 0;
         return num_end(decode_string(in h, in buf, mid, VALUE_PREFIX, max, inout out));
     }
-    if first & INDEXED_POST_BASE != 0 {
-        let n = match num(decode_int(in buf, at, INDEXED_POST_BASE_PREFIX)) {
+    if first & IndexedPostBase::Bits != 0 {
+        let n = match num(decode_int(in buf, at, IndexedPostBase::Prefix)) {
             Result::Ok(n) => n,
             Result::Err(r) => {
                 return Result::Err(r);
@@ -310,7 +294,7 @@ fn line(
         sensitive = false;
         return Result::Ok(wrapping_add(at, n.used));
     }
-    let n = match num(decode_int(in buf, at, POST_BASE_NAME_REF_PREFIX)) {
+    let n = match num(decode_int(in buf, at, PostBaseNameRef::Prefix)) {
         Result::Ok(n) => n,
         Result::Err(r) => {
             return Result::Err(r);
@@ -323,7 +307,7 @@ fn line(
         },
     }
     split = wrapping_sub(out.len(), start);
-    sensitive = first & POST_BASE_NAME_REF_NEVER != 0;
+    sensitive = first & PostBaseNameRef::Never != 0;
     num_end(decode_string(in h, in buf, wrapping_add(at, n.used), VALUE_PREFIX, max, inout out))
 }
 
@@ -344,13 +328,13 @@ fn lines(
     in buf: Slice[u8],
     inout sec: Sections
 ) -> Result[Lines, Reason] {
-    let delta = match num(decode_int(in buf, 0, DELTA_BASE_PREFIX)) {
+    let delta = match num(decode_int(in buf, 0, SectionPrefix::DeltaBasePrefix)) {
         Result::Ok(n) => n,
         Result::Err(r) => {
             return Result::Err(r);
         },
     };
-    let base = if byte(in buf, 0) & BASE_NEGATIVE == 0 {
+    let base = if byte(in buf, 0) & SectionPrefix::BaseNegative == 0 {
         let b = wrapping_add(ric, delta.value);
         if b < ric {
             return Result::Err(Reason::IntegerOverflow);
@@ -469,7 +453,7 @@ pub fn dec_cancel_stream(inout d: DecoderCore, stream_id: u64) {
     }
     head(inout d.sec, 2, stream_id, 0, 0);
     if d.cfg.max_table_capacity > 0 {
-        encode_int(inout d.out, STREAM_CANCEL, STREAM_CANCEL_PREFIX, stream_id);
+        encode_int(inout d.out, StreamCancel::Bits, StreamCancel::Prefix, stream_id);
     }
 }
 
@@ -495,7 +479,7 @@ fn conclude(
                 if too_large {
                     dec_cancel_stream(inout d, stream_id);
                 } else {
-                    encode_int(inout d.out, SECTION_ACK, SECTION_ACK_PREFIX, stream_id);
+                    encode_int(inout d.out, SectionAck::Bits, SectionAck::Prefix, stream_id);
                     d.acknowledged = max64(d.acknowledged, ric);
                 }
             }
@@ -548,7 +532,7 @@ pub fn dec_decode_section(inout d: DecoderCore, in h: Huff, stream_id: u64, in d
         },
         Option::None => (),
     }
-    let encoded = match num(decode_int(in data, 0, RIC_PREFIX)) {
+    let encoded = match num(decode_int(in data, 0, SectionPrefix::RicPrefix)) {
         Result::Ok(n) => n,
         Result::Err(r) => {
             return dfail(inout d, r);
@@ -561,7 +545,7 @@ pub fn dec_decode_section(inout d: DecoderCore, in h: Huff, stream_id: u64, in d
         },
     };
     if ric > d.table.inserted {
-        match num(decode_int(in data, encoded.used, DELTA_BASE_PREFIX)) {
+        match num(decode_int(in data, encoded.used, SectionPrefix::DeltaBasePrefix)) {
             Result::Ok(_n) => (),
             Result::Err(r) => {
                 return dfail(inout d, r);
@@ -629,7 +613,7 @@ fn unblock(inout d: DecoderCore, in h: Huff) -> Result[Unit, QpackError] {
             let stream_id = word(in d.blk_stream.as_slice(), i);
             let lo = word(in d.blk_lo.as_slice(), i);
             let hi = wrapping_add(lo, word(in d.blk_len.as_slice(), i));
-            let n = match decode_int(in d.blk_bytes[lo..hi], 0, RIC_PREFIX) {
+            let n = match decode_int(in d.blk_bytes[lo..hi], 0, SectionPrefix::RicPrefix) {
                 Result::Ok(n) => n.used,
                 Result::Err(_e) => 0,
             };
@@ -683,8 +667,8 @@ fn instruction(inout d: DecoderCore, in h: Huff, at: u64) -> Result[u64, Reason]
     d.name.clear();
     d.value.clear();
     let mut used: u64 = 0;
-    if first & INSERT_NAME_REF != 0 {
-        let n = match decode_int(in d.pending.as_slice(), at, INSERT_NAME_REF_PREFIX) {
+    if first & InsertNameRef::Bits != 0 {
+        let n = match decode_int(in d.pending.as_slice(), at, InsertNameRef::Prefix) {
             Result::Ok(n) => n,
             Result::Err(PrefixError::Incomplete) => {
                 return Result::Ok(0);
@@ -693,7 +677,7 @@ fn instruction(inout d: DecoderCore, in h: Huff, at: u64) -> Result[u64, Reason]
                 return Result::Err(reason_of(e));
             },
         };
-        let found = if first & INSERT_NAME_REF_STATIC != 0 {
+        let found = if first & InsertNameRef::Static != 0 {
             if n.value < STATIC_TABLE_LEN {
                 let lo = static_name_lo(in h.st, n.value);
                 d.name.extend(in h.st.bytes[lo..static_name_hi(in h.st, n.value)]);
@@ -727,19 +711,19 @@ fn instruction(inout d: DecoderCore, in h: Huff, at: u64) -> Result[u64, Reason]
             },
         };
         if !found {
-            let insert_static = INSERT_NAME_REF | INSERT_NAME_REF_STATIC;
+            let insert_static: u8 = InsertNameRef::Bits | InsertNameRef::Static;
             if first & insert_static == insert_static {
                 return Result::Err(Reason::BadStaticIndex(n.value));
             }
             return Result::Err(Reason::BadDynamicIndex);
         }
         used = wrapping_sub(end, at);
-    } else if first & INSERT_LITERAL != 0 {
+    } else if first & InsertLiteral::Bits != 0 {
         let mid = match decode_string(
             in h,
             in d.pending.as_slice(),
             at,
-            INSERT_LITERAL_PREFIX,
+            InsertLiteral::Prefix,
             max,
             inout d.name
         ) {
@@ -768,8 +752,8 @@ fn instruction(inout d: DecoderCore, in h: Huff, at: u64) -> Result[u64, Reason]
             },
         };
         used = wrapping_sub(end, at);
-    } else if first & SET_CAPACITY != 0 {
-        let n = match decode_int(in d.pending.as_slice(), at, SET_CAPACITY_PREFIX) {
+    } else if first & SetCapacity::Bits != 0 {
+        let n = match decode_int(in d.pending.as_slice(), at, SetCapacity::Prefix) {
             Result::Ok(n) => n,
             Result::Err(PrefixError::Incomplete) => {
                 return Result::Ok(0);
@@ -784,7 +768,7 @@ fn instruction(inout d: DecoderCore, in h: Huff, at: u64) -> Result[u64, Reason]
         table_set_capacity(inout d.table, n.value);
         return Result::Ok(n.used);
     } else {
-        let n = match decode_int(in d.pending.as_slice(), at, DUPLICATE_PREFIX) {
+        let n = match decode_int(in d.pending.as_slice(), at, Duplicate::Prefix) {
             Result::Ok(n) => n,
             Result::Err(PrefixError::Incomplete) => {
                 return Result::Ok(0);
@@ -855,8 +839,8 @@ pub fn dec_take_decoder_stream(inout d: DecoderCore) -> ChunkSeq[u8] {
     if inserted > d.acknowledged {
         encode_int(
             inout d.out,
-            INSERT_COUNT_INCREMENT,
-            INSERT_COUNT_INCREMENT_PREFIX,
+            InsertCountIncrement::Bits,
+            InsertCountIncrement::Prefix,
             wrapping_sub(inserted, d.acknowledged)
         );
         d.acknowledged = inserted;

@@ -39,6 +39,10 @@ use self::relations::{
     refine_annotation,
     unresolved
 };
+use self::exprs::{
+    check_exprs,
+    ck_new
+};
 use self::patterns::{
     Pats,
     arms_cover,
@@ -205,4 +209,16 @@ pub fn core_typing_patterns(in input: Str) -> ChunkSeq[u64] {
         }
     }
     pack_text(in o)
+}
+
+// Expression typing: the per-span types of every supported function.
+pub fn core_typing_exprs(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let mut ck = ck_new(sink c);
+    check_exprs(inout r, in b, inout ck);
+    pack_text(in ck.out)
 }

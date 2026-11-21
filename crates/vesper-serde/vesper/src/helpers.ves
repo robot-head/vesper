@@ -13,6 +13,9 @@ use self::index::{
     raise,
     strings_equal
 };
+use self::ascii::{
+    Ascii
+};
 
 // A SWAR key is at most 7 bytes, so it and its closing quote fit a word.
 const SWAR_MAX_KEY: u64 = 7;
@@ -29,10 +32,6 @@ const MAX_ESCAPABLE_BYTES: u64 = 3074457345618258602;
 const QUOTES_LEN: u64 = 2;
 const KEY_PUNCTUATION_LEN: u64 = 3;
 const BYTE_MASK: u64 = 0xff;
-const ASCII_SPACE: u64 = 0x20;
-const ASCII_QUOTE: u64 = 0x22;
-const ASCII_BACKSLASH: u64 = 0x5c;
-const ASCII_TILDE: u64 = 0x7e;
 
 // `SwarFieldMatcher::compile_key`.
 pub fn swar_compile(field_idx: u16, in key: Slice[u8]) -> Option[Swar] {
@@ -43,12 +42,12 @@ pub fn swar_compile(field_idx: u16, in key: Slice[u8]) -> Option[Swar] {
     let mut word: u64 = 0;
     for i in 0..n {
         let b = at(in key, i);
-        if b < ASCII_SPACE || b > ASCII_TILDE || b == ASCII_QUOTE || b == ASCII_BACKSLASH {
+        if b < Ascii::Space || b > Ascii::Tilde || b == Ascii::Quote || b == Ascii::Backslash {
             return Option::None;
         }
         word = word | bit_shl(b, wrapping_mul(i, 8));
     }
-    word = word | bit_shl(ASCII_QUOTE, wrapping_mul(n, 8));
+    word = word | bit_shl(Ascii::Quote, wrapping_mul(n, 8));
     let count = wrapping_add(n, 1);
     let mask = bit_shr(U64_MAX, wrapping_mul(wrapping_sub(WORD_BYTES, count), 8));
     Option::Some(

@@ -956,6 +956,10 @@ fn desugarings_and_limits_match_the_rust_ast() {
         // Constants: every use becomes a call of `const$NAME`.
         "const A: u8 = 1; const B: [u8; 2] = [A; 2]; fn f() -> u8 { A + B.0 + g(A) } fn g(x: u8) -> u8 { let A = 1; x }",
         "pub const N: u64 = 0x10; impl S { fn f() -> u64 { N } } trait T { fn g(); } model M: T for S { fn g() { N; } }",
+        "pub enum C: u8 { A, B = 4, D, E = C::D | 1, F = C::E << 2, G = C::F - 100, H = C::G + 1, } enum N: i32 { M = -2, O, P, Q = N::O + 1 } enum Z: u8 {} enum B: bool { T = true }",
+        "enum E: u64 { A = 18446744073709551615, B, C = 1 << 64, D = 2 / 0, E = (1), F = { 3 } } fn f(x: u8) -> u8 { match (x, 1) { (E::A, C::B) | (LIMIT, _) => 1, (C::B(y), N::M) => y, _ => 2 } } const LIMIT: u8 = 3;",
+        "enum H: _ { A = 6, B, C = H::B << 3 } fn f(x: i32) -> u64 { match H::A { H::B => 1, _ => if x == H::C { H::A } else { 0 } } }",
+        "enum C: u8 { A = 1 } fn f(x: u8) { let C::A = x; for C::A in 0..2 {} handle E state C::A = 0 in { 0 } with { return C::A => 1, op(C::A) => 2 } }",
         // Array types and literals, with splats of pure and impure operands.
         "fn f(a: [[u8; 3]; 2], b: [(u8, u16); 2], c: [u8; 0], d: [u8; 70000], e: [[u8; 300]; 300]) {}",
         "fn f() { [1; 3]; [-x; 2]; [a + b * c; 2]; [f(); 3]; [{ 1 }; 2]; [(1, 2); 2]; [x.y; 2]; [[0; 2]; 2]; [f(); 0]; [1; 70000] }",

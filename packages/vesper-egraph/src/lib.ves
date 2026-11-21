@@ -1,0 +1,520 @@
+// @vesper/egraph: an e-graph in Vesper for the compiler's two equality
+// saturation passes (self-hosting wave SH3, lane 8, #1247; gap S7 of the
+// self-hosting plan). `src/optimize.rs` runs egg 0.10 on pure integer
+// expressions and `src/ir_opt.rs` runs egglog 3 on memory observations;
+// both rule sets are small, so this package is the part of egg and egglog
+// they use, not a general egglog. Rust stays the default; nothing here
+// replaces Rust code yet (SH3 lanes 9 and 10 swap the passes onto it).
+//
+// - graph.ves: hash-consed e-nodes, union-find, rebuild (egg's `EGraph`).
+// - rules.ves: patterns, the e-matching compiler, guards, the relation.
+// - run.ves: search and apply, egg's `Runner` and egglog's `(run n)`.
+// - extract.ves: `AstSize` extraction (egg's `Extractor`).
+//
+// The entries below are the differential's tasks
+// (tests/self_host_egraph.rs).
+
+use self::util::{
+    at32,
+    ati,
+    fold,
+    inc,
+    n32,
+    w
+};
+use self::graph::{
+    EGraph,
+    egraph_new
+};
+use self::rules::{
+    Rules,
+    rules_new
+};
+use self::run::{
+    Config,
+    Records,
+    records_new,
+    run_egg,
+    run_rounds
+};
+use self::extract::{
+    Extracted,
+    extractor
+};
+
+const NONE: u32 = 4294967295;
+const G_NONE: u8 = 0;
+const G_TOTAL: u8 = 1;
+const G_REL: u8 = 2;
+
+// ------------------------------------------------------------------ input
+
+struct Reader {
+    pos: u64
+}
+
+impl Reader {
+    fn word(inout self, in b: Slice[u8]) -> u64 {
+        let x = match b.try_read_u64_le(self.pos) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        self.pos = wrapping_add(self.pos, 8);
+        x
+    }
+}
+
+// ------------------------------------------------------------------ optimize
+
+// `src/optimize.rs`'s language, in egg's variant order (which is the
+// derived `Ord` the class e-nodes sort by).
+pub const M_NUM: u32 = 0;
+pub const M_ADD: u32 = 1;
+pub const M_SUB: u32 = 2;
+pub const M_MUL: u32 = 3;
+pub const M_WADD: u32 = 4;
+pub const M_WSUB: u32 = 5;
+pub const M_WMUL: u32 = 6;
+pub const M_INPUT: u32 = 7;
+
+pub fn math_arity() -> ChunkSeq[u8] {
+    let mut a: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    a.push(0);
+    a.push(2);
+    a.push(2);
+    a.push(2);
+    a.push(2);
+    a.push(2);
+    a.push(2);
+    a.push(0);
+    a
+}
+
+// (op ?x c)
+fn op_var_const(inout r: Rules, op: u32, c: i64) -> (u32, u32) {
+    r.begin();
+    let x = r.var(0);
+    let k = r.node(M_NUM, c, 0, 0);
+    r.node(op, 0, x, k);
+    r.end()
+}
+
+// (op c ?x)
+fn op_const_var(inout r: Rules, op: u32, c: i64) -> (u32, u32) {
+    r.begin();
+    let k = r.node(M_NUM, c, 0, 0);
+    let x = r.var(0);
+    r.node(op, 0, k, x);
+    r.end()
+}
+
+fn just_var(inout r: Rules, v: u32) -> (u32, u32) {
+    r.begin();
+    r.var(v);
+    r.end()
+}
+
+fn just_const(inout r: Rules, c: i64) -> (u32, u32) {
+    r.begin();
+    r.node(M_NUM, c, 0, 0);
+    r.end()
+}
+
+// (op ?a ?b)
+fn op_vars(inout r: Rules, op: u32, a: u32, b: u32) -> (u32, u32) {
+    r.begin();
+    let x = r.var(a);
+    let y = r.var(b);
+    r.node(op, 0, x, y);
+    r.end()
+}
+
+// (op (op ?x ?y) ?z) and (op ?x (op ?y ?z))
+fn assoc_left(inout r: Rules, op: u32) -> (u32, u32) {
+    r.begin();
+    let x = r.var(0);
+    let y = r.var(1);
+    let xy = r.node(op, 0, x, y);
+    let z = r.var(2);
+    r.node(op, 0, xy, z);
+    r.end()
+}
+
+fn assoc_right(inout r: Rules, op: u32) -> (u32, u32) {
+    r.begin();
+    let x = r.var(0);
+    let y = r.var(1);
+    let z = r.var(2);
+    let yz = r.node(op, 0, y, z);
+    r.node(op, 0, x, yz);
+    r.end()
+}
+
+// The 18 rules of `optimize::rules()`, in its order.
+pub fn math_rules() -> Rules {
+    let arity = math_arity();
+    let mut r = rules_new(in arity);
+    // add-zero, zero-add, sub-zero, mul-one, one-mul
+    let l = op_var_const(inout r, M_ADD, 0);
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    let l = op_const_var(inout r, M_ADD, 0);
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    let l = op_var_const(inout r, M_SUB, 0);
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    let l = op_var_const(inout r, M_MUL, 1);
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    let l = op_const_var(inout r, M_MUL, 1);
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    // mul-zero, zero-mul, self-sub: only total subterms
+    let l = op_var_const(inout r, M_MUL, 0);
+    let z = just_const(inout r, 0);
+    r.rule(l, z, G_TOTAL, 0, 0);
+    let l = op_const_var(inout r, M_MUL, 0);
+    let z = just_const(inout r, 0);
+    r.rule(l, z, G_TOTAL, 0, 0);
+    let l = op_vars(inout r, M_SUB, 0, 0);
+    let z = just_const(inout r, 0);
+    r.rule(l, z, G_TOTAL, 0, 0);
+    // wadd-zero, wsub-zero, wmul-one
+    let l = op_var_const(inout r, M_WADD, 0);
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    let l = op_var_const(inout r, M_WSUB, 0);
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    let l = op_var_const(inout r, M_WMUL, 1);
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    // wadd-comm, wmul-comm
+    let l = op_vars(inout r, M_WADD, 0, 1);
+    let x = op_vars(inout r, M_WADD, 1, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    let l = op_vars(inout r, M_WMUL, 0, 1);
+    let x = op_vars(inout r, M_WMUL, 1, 0);
+    r.rule(l, x, G_NONE, 0, 0);
+    // wadd-assoc, wmul-assoc
+    let l = assoc_left(inout r, M_WADD);
+    let x = assoc_right(inout r, M_WADD);
+    r.rule(l, x, G_NONE, 0, 0);
+    let l = assoc_left(inout r, M_WMUL);
+    let x = assoc_right(inout r, M_WMUL);
+    r.rule(l, x, G_NONE, 0, 0);
+    // wadd-cancel: (wrapping_sub (wrapping_add ?x ?y) ?y) => ?x if total(?y)
+    r.begin();
+    let vx = r.var(0);
+    let vy = r.var(1);
+    let s = r.node(M_WADD, 0, vx, vy);
+    let vy2 = r.var(1);
+    r.node(M_WSUB, 0, s, vy2);
+    let l = r.end();
+    let x = just_var(inout r, 0);
+    r.rule(l, x, G_TOTAL, 1, 0);
+    // wmul-zero, wself-sub
+    let l = op_var_const(inout r, M_WMUL, 0);
+    let z = just_const(inout r, 0);
+    r.rule(l, z, G_TOTAL, 0, 0);
+    let l = op_vars(inout r, M_WSUB, 0, 0);
+    let z = just_const(inout r, 0);
+    r.rule(l, z, G_TOTAL, 0, 0);
+    r
+}
+
+fn push_u32s(inout out: ChunkSeq[u64], in r: Records) {
+    for i in 0..r.word_count() {
+        out.push(w(r.word(i)));
+    }
+}
+
+// Task "math": `optimize`'s search (certificate.rs `run_graph` without the
+// witness budget) on each expression.
+// Input: case count, rule-checking constants (iteration limit, node limit,
+// match limit, id cap, reserve, record cap), then per case: kind range
+// (lo, hi as i64), variable count, node count, and the nodes (op, data,
+// child, child), children first, root last.
+// Output per case: stop, iterations, ids, hash-cons size, classes, a digest
+// of every id's original e-node, record words then the records, the root's
+// cost, and the best expression's nodes (op, data, child, child).
+pub fn egraph_math(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut rd = Reader {
+        pos: 0
+    };
+    let rules = math_rules();
+    let arity = math_arity();
+    let cases = rd.word(in b);
+    let iter_limit = rd.word(in b);
+    let node_limit = rd.word(in b);
+    let match_limit = rd.word(in b);
+    let raw_cap = rd.word(in b);
+    let reserve = rd.word(in b);
+    let record_cap = rd.word(in b);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for c in 0..cases {
+        let lo = wrapping_i64(rd.word(in b));
+        let hi = wrapping_i64(rd.word(in b));
+        let vars = wrapping_i64(rd.word(in b));
+        let n = rd.word(in b);
+        let mut g = egraph_new(in arity);
+        let mut ids: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+        let mut root: u32 = 0;
+        for i in 0..n {
+            let op = n32(rd.word(in b));
+            let data = wrapping_i64(rd.word(in b));
+            let c0 = rd.word(in b);
+            let c1 = rd.word(in b);
+            let x0 = at32(in ids, c0);
+            let x1 = at32(in ids, c1);
+            let a = g.arity_of(op);
+            let k0 = if a >= 1 {
+                x0
+            } else {
+                0
+            };
+            let k1 = if a >= 2 {
+                x1
+            } else {
+                0
+            };
+            // egg's add_expr: add_uncanonical per node, root found last.
+            let id = g.add_uncanonical(op, data, k0, k1);
+            ids.push(id);
+            root = id;
+        }
+        root = g.find(root);
+        let cfg = Config {
+            iter_limit: iter_limit,
+            node_limit: node_limit,
+            match_limit: match_limit,
+            raw_cap: raw_cap,
+            reserve: reserve,
+            record_cap: record_cap,
+            hook: true,
+            const_op: M_NUM,
+            input_op: M_INPUT,
+            lo: lo,
+            hi: hi,
+            vars: vars
+        };
+        let mut rec = records_new();
+        let (stop, iters) = run_egg(inout g, in rules, cfg, root, inout rec);
+        out.push(widen_u64(stop));
+        out.push(iters);
+        out.push(g.raw_len());
+        out.push(g.memo_len());
+        out.push(g.class_count());
+        let mut h: u64 = 14695981039346656037;
+        for k in 0..g.raw_len() {
+            let id = n32(k);
+            h = fold(h, w(g.raw_op(id)));
+            h = fold(h, wrapping_u64(g.raw_data(id)));
+            h = fold(h, w(g.raw_child(id, 0)));
+            h = fold(h, w(g.raw_child(id, 1)));
+        }
+        out.push(h);
+        out.push(rec.word_count());
+        push_u32s(inout out, in rec);
+        if stop == 5 {
+            out.push(0);
+            out.push(0);
+        } else {
+            let mut x = extractor(in g);
+            out.push(x.cost_of(in g, root));
+            if x.find_best(in g, root) {
+                out.push(x.len());
+                for i in 0..x.len() {
+                    out.push(w(x.op_at(i)));
+                    out.push(wrapping_u64(x.data_at(i)));
+                    out.push(w(x.child_at(i, 0)));
+                    out.push(w(x.child_at(i, 1)));
+                }
+            } else {
+                out.push(0);
+            }
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------------ ir_opt
+
+// `src/ir_opt.rs`'s memory-observation terms. egglog's `(Write S i64 V)`,
+// `(Barrier S i64)` and `(Read S i64)` keep their i64 as e-node data.
+pub const V_REF: u32 = 0;
+pub const V_START: u32 = 1;
+pub const V_WRITE: u32 = 2;
+pub const V_BARRIER: u32 = 3;
+pub const V_READ: u32 = 4;
+
+pub fn memory_arity() -> ChunkSeq[u8] {
+    let mut a: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    a.push(0);
+    a.push(0);
+    a.push(2);
+    a.push(1);
+    a.push(1);
+    a
+}
+
+// ir_opt's `RULES`:
+//   (rewrite (Read (Write s p v) p) v)
+//   (rule ((= r (Read (Write s p v) q)) (disjoint p q)) ((union r (Read s q))))
+pub fn memory_rules() -> Rules {
+    let arity = memory_arity();
+    let mut r = rules_new(in arity);
+    // Read binds p (data 0); the Write's data must equal it.
+    r.begin();
+    let s = r.var(0);
+    let v = r.var(1);
+    let wr = r.dnode(V_WRITE, 0, s, v);
+    r.dnode(V_READ, 0, wr, 0);
+    let l = r.end();
+    let x = just_var(inout r, 1);
+    r.rule(l, x, G_NONE, 0, 0);
+    // Read binds q (data 0), Write binds p (data 1); disjoint(p, q).
+    r.begin();
+    let s = r.var(0);
+    let v = r.var(1);
+    let wr = r.dnode(V_WRITE, 1, s, v);
+    r.dnode(V_READ, 0, wr, 0);
+    let l = r.end();
+    r.begin();
+    let s2 = r.var(0);
+    r.dnode(V_READ, 0, s2, 0);
+    let x = r.end();
+    r.rule(l, x, G_REL, 1, 0);
+    r
+}
+
+// State terms by token, grown on demand.
+fn set_token(inout s: ChunkSeq[u32], t: u64, id: u32) -> bool {
+    if t >= 16777216 {
+        return false;
+    }
+    if s.len() <= t {
+        s.resize(inc(t), NONE);
+    }
+    if at32(in s, t) != NONE {
+        return false;
+    }
+    s.try_set(t, id);
+    true
+}
+
+// Task "memory": ir_opt's per-block equality saturation.
+// Input: rounds, block count, then per block: pair count and the
+// disjoint pairs, step count and steps (1 read: dest, input token, place;
+// 2 write: output, input, place, value; 3 barrier: output, input, dest),
+// the entry token, query count and queries (dest, candidate count,
+// candidates).
+// Output per block: 1 if the program is ill-formed (egglog would refuse
+// it: an undefined or redefined state), else 0 and per query the first
+// candidate in the read's class, or u32::MAX.
+pub fn egraph_memory(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut rd = Reader {
+        pos: 0
+    };
+    let arity = memory_arity();
+    let rounds = rd.word(in b);
+    let blocks = rd.word(in b);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for bi in 0..blocks {
+        let mut rules = memory_rules();
+        let mut g = egraph_new(in arity);
+        let mut tokens: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut bad = false;
+        let pairs = rd.word(in b);
+        for i in 0..pairs {
+            let p = wrapping_i64(rd.word(in b));
+            let q = wrapping_i64(rd.word(in b));
+            rules.rel_add(p, q);
+        }
+        let entry = rd.word(in b);
+        let st = g.add(V_START, wrapping_i64(entry), 0, 0);
+        if !set_token(inout tokens, entry, st) {
+            bad = true;
+        }
+        let steps = rd.word(in b);
+        for i in 0..steps {
+            let kind = rd.word(in b);
+            if kind == 1 {
+                let dest = wrapping_i64(rd.word(in b));
+                let t = rd.word(in b);
+                let p = wrapping_i64(rd.word(in b));
+                let s = if t < tokens.len() {
+                    at32(in tokens, t)
+                } else {
+                    NONE
+                };
+                if s == NONE {
+                    bad = true;
+                } else {
+                    let v = g.add(V_REF, dest, 0, 0);
+                    let rdn = g.add(V_READ, p, s, 0);
+                    g.union(v, rdn);
+                }
+            } else {
+                let o = rd.word(in b);
+                let t = rd.word(in b);
+                let p = wrapping_i64(rd.word(in b));
+                let s = if t < tokens.len() {
+                    at32(in tokens, t)
+                } else {
+                    NONE
+                };
+                if kind == 2 {
+                    let v = wrapping_i64(rd.word(in b));
+                    if s == NONE {
+                        bad = true;
+                    } else {
+                        let vr = g.add(V_REF, v, 0, 0);
+                        let x = g.add(V_WRITE, p, s, vr);
+                        if !set_token(inout tokens, o, x) {
+                            bad = true;
+                        }
+                    }
+                } else if s == NONE {
+                    bad = true;
+                } else {
+                    let x = g.add(V_BARRIER, p, s, 0);
+                    if !set_token(inout tokens, o, x) {
+                        bad = true;
+                    }
+                }
+            }
+        }
+        let queries = rd.word(in b);
+        if !bad {
+            run_rounds(inout g, in rules, rounds);
+        }
+        if bad {
+            out.push(1);
+        } else {
+            out.push(0);
+        }
+        for q in 0..queries {
+            let dest = wrapping_i64(rd.word(in b));
+            let nc = rd.word(in b);
+            let root = g.lookup(V_REF, dest, 0, 0);
+            let mut found: u32 = NONE;
+            for j in 0..nc {
+                let c = rd.word(in b);
+                if found == NONE && !bad && root != NONE {
+                    let x = g.lookup(V_REF, wrapping_i64(c), 0, 0);
+                    if x != NONE && x == root {
+                        found = n32(c);
+                    }
+                }
+            }
+            if !bad {
+                out.push(w(found));
+            }
+        }
+    }
+    out
+}
