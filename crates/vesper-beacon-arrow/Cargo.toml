@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Budgeted Apache Arrow IPC and OTel Arrow (OTAP) adapter for Beacon spans and histograms"
+build = "build.rs"
+
+# The span stream (`export_batch`, `export_ring`) is the Vesper port in
+# vesper/: build.rs links it and checks port/binding.rs (Rust-exit wave SH6,
+# lane 18, #1413). The crate is outside the compiler's closure, so it needs no
+# seed copy.
 
 [features]
 default = ["grpc"]
@@ -13,9 +19,13 @@ grpc = ["dep:tonic", "dep:tonic-prost", "dep:tokio", "dep:subtle", "dep:rustls"]
 # Link Beacon's Vesper port instead of its Rust build (port wave P1 lane 4,
 # #901). Off by default until the port reaches performance parity.
 vesper-port = ["vesper-beacon/vesper-port"]
+# A deliberately wrong Vesper build: the port test run must fail
+# (crates/vesper-beacon-arrow/port/test-port.sh asserts which test does).
+vesper-port-divergent = []
 
 [dependencies]
 vesper-beacon = { path = "../vesper-beacon" }
+vesper-port-abi = { path = "../vesper-port-abi" }
 arrow-array = "=56.2.0"
 arrow-buffer = "=56.2.1"
 arrow-schema = "=56.2.0"
@@ -40,3 +50,6 @@ tokio = { version = "=1.54.1", optional = true, features = ["rt", "rt-multi-thre
 [dev-dependencies]
 rcgen = { version = "=0.14.10", default-features = false, features = ["crypto", "ring", "pem"] }
 arrow2 = { version = "=0.18.0", default-features = false, features = ["io_ipc"] }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }

@@ -1,6 +1,49 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The span stream writer is the Vesper port (Rust-exit SH6 lane 18, #1413):
+# build.rs links the object built here from the Loom package in vesper/ and
+# checks port/binding.rs against the generated binding. The divergent build
+# stays compiling here; crates/vesper-beacon-arrow/port/test-port.sh asserts
+# which test catches it.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "beacon_arrow_vesper",
+    library = "beacon_arrow",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "beacon_arrow_vesper_binding",
+    srcs = [":beacon_arrow_vesper"],
+    output_group = "rust_binding",
+)
+
+vesper_port_object(
+    name = "beacon_arrow_vesper_divergent_spans",
+    edit_src = "vesper/src/spans.ves",
+    edits = {"word(in wide, wrapping_add(base, i))": "word(in wide, wrapping_add(base, wrapping_add(i, 1)))"},
+    library = "beacon_arrow",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
 
 vesper_crate(
+    build_script_data = [
+        ":beacon_arrow_vesper",
+        ":beacon_arrow_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :beacon_arrow_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :beacon_arrow_vesper_binding)",
+    },
     # tests/lean_model.rs reads lean/BeaconRedaction.lean and its fixture; Lean
     # rejects symlinked runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],

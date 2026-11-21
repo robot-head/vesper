@@ -19,6 +19,13 @@ headers. A different implementation, `arrow2` **0.18.0** with `io_ipc`,
 is a development dependency for independent decoding and the self-checking
 example. Root registration and the shared lock file are coordinator-owned.
 
+The span stream is written by the Vesper package in `vesper/` (Rust-exit
+wave SH6, lane 18, #1413), linked through `port/binding.rs`. It lays the
+stream out byte for byte as the pinned `arrow-ipc` 56 `StreamWriter` does
+(64-byte alignment, metadata V5); `tests/span_stream_differential.rs` keeps
+the arrow-rs writer as the oracle. The Rust side only plans and fills the
+columns.
+
 `export_batch(&ColumnBatch<N>, limits)` borrows and preserves its source on
 success or failure. `export_ring(&mut TelemetryRing<N>, max_rows, limits)` exports
 up to the requested prefix and removes it **only after** complete serialization
@@ -67,8 +74,8 @@ Budgets are checked before any adapter/Arrow value buffers are constructed:
 - Output reservation is `B+2*65536+24`, including fixed schema/batch metadata and
   framing. The budget must admit this conservative reservation, which can be
   substantially larger than actual output, especially for empty/small batches.
-- The output Vec reserves once before writing. A bounded sink checks each write
-  before extending, so it cannot grow beyond the reserved logical limit.
+- The output Vec is allocated once, at the stream's exact length, which must
+  fit the output reservation; the writer never grows it.
 
 These are **logical data reservations**, not allocator capacity, total heap,
 RSS, or OOM guarantees. Arrow can allocate internal descriptors/buffers; allocator
