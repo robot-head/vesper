@@ -139,7 +139,14 @@ decode-only entry `optimize_decode` is timed separately and subtracted.
 | checker with its input decode | 13.2 ms | 44.4 ms | 3.36x |
 | checker alone (decode 18.8 ms subtracted) | 13.2 ms | 25.6 ms | 1.94x |
 
-CALLGRIND
+Callgrind instruction counts, one round over the 171 proposals of the
+fixtures and the generated islands (`OPTIMIZE_SKIP_CORPUS=1`; each side
+collected alone with `--toggle-collect='*measured_side*'`):
+
+| | Rust | Vesper | Ratio |
+| --- | --: | --: | --: |
+| checker with its input decode | 3.69 M | 16.21 M | 4.39x |
+| checker alone (decode 8.61 M subtracted) | 3.69 M | 7.60 M | 2.06x |
 
 The decode costs as much as the check because each case builds a fresh
 `Ast` (29 arenas and an interner). Part 3's swap will pass the module once

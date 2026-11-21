@@ -77,15 +77,18 @@ pub struct OptimizeTable {
     /// The install gate: checks a proposal's certificate against the exact
     /// source and candidate, continuing the producer's budget (`limits`,
     /// already `spent`). [`witness::verify_spent`] is the Rust one.
-    pub verify: fn(
-        source: &Expr,
-        candidate: &Expr,
-        types: &TypeMap,
-        certificate: &witness::RewriteCertificate,
-        limits: WitnessLimits,
-        spent: &mut witness::Spent,
-    ) -> Result<(), WitnessError>,
+    pub verify: VerifyFn,
 }
+
+/// The install gate's signature ([`OptimizeTable::verify`]).
+pub type VerifyFn = fn(
+    source: &Expr,
+    candidate: &Expr,
+    types: &TypeMap,
+    certificate: &witness::RewriteCertificate,
+    limits: WitnessLimits,
+    spent: &mut witness::Spent,
+) -> Result<(), WitnessError>;
 
 static OPTIMIZE: std::sync::OnceLock<OptimizeTable> = std::sync::OnceLock::new();
 
