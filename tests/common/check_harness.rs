@@ -28,7 +28,16 @@ use vesper::check::World;
 use vesper::{check, native, packages};
 
 pub fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    // The root package's tests, or a workspace crate's that includes this
+    // file by path (crates/vesper-codegen-swap-test, #1275): the nearest
+    // ancestor that holds the corpus's `packages/`.
+    // Under Bazel `CARGO_MANIFEST_DIR` is `.` (tests start in their
+    // package directory), so the search starts from its absolute form.
+    let dir = std::path::absolute(env!("CARGO_MANIFEST_DIR"))
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    dir.ancestors()
+        .find(|d| d.join("packages").is_dir() && d.join("examples").is_dir())
+        .map_or_else(|| dir.clone(), Path::to_path_buf)
 }
 
 fn env_usize(name: &str, default: usize) -> usize {

@@ -30,6 +30,11 @@ mod check_layout_binding;
 #[path = "../port/ir_check.rs"]
 mod ir_check_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/codegen.rs"]
+mod codegen_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -46,6 +51,9 @@ static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs checked by the Vesper IR-check module.
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
+/// `aggregate` requests the Vesper codegen module emitted, and declined.
+static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
+static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -111,6 +119,42 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
     },
 };
 
+/// The `aggregate` hook of `vesper::codegen_swap` from `modules/codegen`:
+/// the census lowering family, emitted in Vesper through the lent builder
+/// and module (`vesper_cranelift_sys::lend`).
+fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
+    let kind = if lent.jit {
+        vesper_cranelift_sys::ModuleKind::Jit
+    } else {
+        vesper_cranelift_sys::ModuleKind::Object
+    };
+    let (answer, crossing) = vesper_cranelift_sys::lend_as(
+        kind,
+        lent.builder,
+        &mut *lent.module,
+        lent.op,
+        lent.args,
+        codegen_binding::aggregate,
+    );
+    if let Some(e) = crossing.error {
+        return Err(format!("codegen (aggregate op {}): {e}", lent.op));
+    }
+    if crossing.unreturned {
+        return Err(format!(
+            "codegen (aggregate op {}) kept a lent handle",
+            lent.op
+        ));
+    }
+    if answer == 1 {
+        CODEGEN_CALLS.fetch_add(1, Relaxed);
+        lent.results.extend(crossing.results);
+        Ok(true)
+    } else {
+        CODEGEN_DECLINED.fetch_add(1, Relaxed);
+        Ok(false)
+    }
+}
+
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
     if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
@@ -123,6 +167,13 @@ extern "C" fn install() {
         std::process::abort();
     }
     if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
+        std::process::abort();
+    }
+    let hooks = vesper::codegen_swap::CodegenHooks {
+        aggregate: Some(vesper_aggregate),
+        ..Default::default()
+    };
+    if vesper::codegen_swap::install(hooks).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
@@ -151,6 +202,11 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-check answered {} calls from Vesper",
         IR_CHECK_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: codegen emitted {} aggregate requests from Vesper ({} declined)",
+        CODEGEN_CALLS.load(Relaxed),
+        CODEGEN_DECLINED.load(Relaxed)
     );
 }
 

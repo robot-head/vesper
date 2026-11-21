@@ -1,0 +1,1052 @@
+// @vesper/ffi-emit: the native emission of foreign (`.vsys`) calls in
+// Vesper (self-hosting SH4 lane 13, #1287), the `ffi` hook of
+// `vesper::codegen_swap`.
+//
+// `Codegen::foreign_perform` (src/ffi_lowering/native.rs) offers each call
+// to the hook in steps (`codegen_swap::ffi`): BEGIN, one ARG per argument,
+// REFUSE (C strings only), CALL, RESULT and FINISH (C strings only). The
+// Rust code keeps what needs its own state: evaluating the arguments, the
+// callee's declaration, `inout` restores, the `errno` pair and a refused
+// call's `Ok` store. Everything else is emitted here, instruction for
+// instruction as the Rust code emits it; the word encodings are documented
+// on `codegen_swap::ffi`.
+
+use @vesper/cranelift::{
+    Block,
+    FuncRef,
+    Ty,
+    Value,
+    call_args,
+    call_builder,
+    call_module,
+    call_op,
+    call_result,
+    call_result_value,
+    call_return_builder,
+    call_return_module,
+    call_conv_default,
+    cc_eq,
+    cc_ne,
+    cc_sge,
+    cc_ule,
+    create_block,
+    declare_function,
+    import_function,
+    ins_bor,
+    ins_brif0,
+    ins_bswap,
+    ins_call,
+    ins_iadd,
+    ins_iadd_imm,
+    ins_iconst,
+    ins_icmp_imm,
+    ins_imul_imm,
+    ins_ireduce,
+    ins_isub,
+    ins_jump0,
+    ins_load,
+    ins_select,
+    ins_sextend,
+    ins_store,
+    ins_trapz,
+    ins_uextend,
+    inst_result,
+    linkage_import,
+    module_pointer_type,
+    seal_block,
+    sig_new,
+    sig_param,
+    sig_return,
+    switch_to_block,
+    trap_user,
+    ty_i16,
+    ty_i32,
+    ty_i64,
+    ty_i8,
+    value_of_word,
+    value_word,
+    block_word
+};
+use @vesper/codegen-base::{
+    alloc
+};
+
+// The answer of a hook (`codegen_swap`).
+const HANDLED: u64 = 1;
+const DECLINED: u64 = 0;
+
+// The `ffi` requests (`codegen_swap::ffi`).
+const BEGIN: u32 = 1;
+const ARG: u32 = 2;
+const REFUSE: u32 = 3;
+const CALL: u32 = 4;
+const RESULT: u32 = 5;
+const FINISH: u32 = 6;
+
+// `codegen_swap::NO_VALUE`.
+const NO_VALUE: u64 = 18446744073709551615;
+
+// Handlers (BEGIN).
+const DIRECT: u64 = 0;
+
+// Source kinds (ARG).
+const SOURCE_SCALAR: u64 = 0;
+
+// Parameter kinds (ARG).
+const KIND_VALUE: u64 = 0;
+const KIND_HANDLE: u64 = 1;
+const KIND_CSTR: u64 = 2;
+const KIND_POINTER: u64 = 3;
+const KIND_SLICE: u64 = 4;
+const KIND_LENT: u64 = 5;
+
+// Value types `V`.
+const V_UNIT: u64 = 0;
+const V_SCALAR: u64 = 1;
+const V_BOOL: u64 = 2;
+const V_ENUM: u64 = 3;
+const V_HANDLE: u64 = 5;
+const V_NONNULL: u64 = 6;
+
+// Wire field kinds of `W`.
+const F_INTEGER: u64 = 0;
+const F_BYTES: u64 = 1;
+const F_PADDING: u64 = 2;
+const F_STRUCT: u64 = 3;
+
+// Pointees `P`.
+const P_SCALAR: u64 = 0;
+
+// Copy-back shapes.
+const SHAPE_SCALAR: u64 = 0;
+const SHAPE_STRUCT: u64 = 1;
+const SHAPE_SLICE: u64 = 2;
+
+// Wire integer byte orders.
+const ENDIAN_NATIVE: u64 = 0;
+const ENDIAN_LITTLE: u64 = 1;
+
+// `errno` readers (CALL).
+const ERRNO_LOCATION: u64 = 1;
+const ERRNO_ERROR: u64 = 2;
+
+// `ffi::NULL_HANDLE_TRAP` and `ffi::CSTR_ALLOC_TRAP`.
+const NULL_HANDLE_TRAP: u32 = 6;
+const CSTR_ALLOC_TRAP: u32 = 7;
+
+// `MemFlags::new()`.
+const PLAIN: u32 = 0;
+// Scalar words: `bits | signed << 8`.
+const SIGNED_BIT: u64 = 256;
+const BITS_MASK: u64 = 255;
+const WORD_BITS: u64 = 64;
+const BYTE_BITS: u64 = 8;
+
+// ---------------------------------------------------------------------------
+// Request words.
+
+struct R {
+    w: ChunkSeq[u64],
+    i: u64,
+}
+
+fn next(inout r: R) -> u64 {
+    let v = match r.w.try_get(r.i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    r.i = wrapping_add(r.i, 1);
+    v
+}
+
+fn at(in r: R, i: u64) -> u64 {
+    match r.w.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn val(w: u64) -> Value {
+    value_of_word(w)
+}
+
+fn imm(w: u64) -> i64 {
+    wrapping_i64(w)
+}
+
+fn off(w: u64) -> i32 {
+    wrapping_i32(w)
+}
+
+fn bits_of(s: u64) -> u64 {
+    s & BITS_MASK
+}
+
+fn signed_of(s: u64) -> bool {
+    (s & SIGNED_BIT) != 0
+}
+
+// ---------------------------------------------------------------------------
+// The small helpers of src/ffi_lowering/native.rs.
+
+fn c_type(bits: u64) -> Ty {
+    if bits == 8 {
+        ty_i8()
+    } else if bits == 16 {
+        ty_i16()
+    } else if bits == 32 {
+        ty_i32()
+    } else {
+        ty_i64()
+    }
+}
+
+fn narrow(inout b: Builder, v: Value, bits: u64) -> Value eff [Ffi[Cranelift]] {
+    if bits == WORD_BITS {
+        v
+    } else {
+        ins_ireduce(inout b, c_type(bits), v)
+    }
+}
+
+fn widen(inout b: Builder, v: Value, bits: u64, signed: bool) -> Value eff [Ffi[Cranelift]] {
+    if bits == WORD_BITS {
+        v
+    } else if signed {
+        ins_sextend(inout b, ty_i64(), v)
+    } else {
+        ins_uextend(inout b, ty_i64(), v)
+    }
+}
+
+// `foreign_word`: a scalar source, or the word at a source address.
+fn source_word(inout b: Builder, kind: u64, source: Value) -> Value eff [Ffi[Cranelift]] {
+    if kind == SOURCE_SCALAR {
+        source
+    } else {
+        ins_load(inout b, ty_i64(), PLAIN, source, 0)
+    }
+}
+
+fn guard(inout b: Builder, g: u64, v: Value, ty: Ty) -> Value eff [Ffi[Cranelift]] {
+    if g == NO_VALUE {
+        v
+    } else {
+        let zero = ins_iconst(inout b, ty, 0);
+        ins_select(inout b, val(g), v, zero)
+    }
+}
+
+fn swap(inout b: Builder, v: Value, int: u64, endian: u64, little: bool)
+    -> Value eff [Ffi[Cranelift]] {
+    let swapped = if endian == ENDIAN_NATIVE {
+        false
+    } else if endian == ENDIAN_LITTLE {
+        !little
+    } else {
+        little
+    };
+    if swapped && bits_of(int) > BYTE_BITS {
+        ins_bswap(inout b, v)
+    } else {
+        v
+    }
+}
+
+// A C library function of 64-bit word parameters (`foreign_libc`).
+fn libc(inout b: Builder, inout m: Module, which: u32, params: u64, returns: bool)
+    -> FuncRef eff [Ffi[Cranelift]] {
+    let sig = sig_new(inout m, call_conv_default());
+    for _ in 0..params {
+        sig_param(inout m, sig, ty_i64());
+    }
+    if returns {
+        sig_return(inout m, sig, ty_i64());
+    }
+    let id = if which == 0 {
+        declare_function(inout m, in "malloc".as_bytes(), linkage_import(), sig)
+    } else if which == 1 {
+        declare_function(inout m, in "memcpy".as_bytes(), linkage_import(), sig)
+    } else if which == 2 {
+        declare_function(inout m, in "memchr".as_bytes(), linkage_import(), sig)
+    } else {
+        declare_function(inout m, in "free".as_bytes(), linkage_import(), sig)
+    };
+    import_function(inout b, inout m, id)
+}
+
+const MALLOC: u32 = 0;
+const MEMCPY: u32 = 1;
+const MEMCHR: u32 = 2;
+const FREE: u32 = 3;
+
+fn call1(inout b: Builder, f: FuncRef, a: Value) -> u32 eff [Ffi[Cranelift]] {
+    let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](1);
+    args.push(wrapping_u32(value_word(a)));
+    ins_call(inout b, f, in args.as_slice())
+}
+
+fn call3(inout b: Builder, f: FuncRef, a: Value, c: Value, d: Value) -> u32 eff [Ffi[Cranelift]] {
+    let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](3);
+    args.push(wrapping_u32(value_word(a)));
+    args.push(wrapping_u32(value_word(c)));
+    args.push(wrapping_u32(value_word(d)));
+    ins_call(inout b, f, in args.as_slice())
+}
+
+// `foreign_view`: a source `Slice` view's `(data + start * stride, len)`.
+fn view(inout b: Builder, in m: Module, v: Value, stride: u64, inout out: ChunkSeq[u64]) eff [
+    Ffi[Cranelift]
+] {
+    let owner = ins_load(inout b, ty_i64(), PLAIN, v, 0);
+    let start = ins_load(inout b, ty_i64(), PLAIN, v, 8);
+    let len = ins_load(inout b, ty_i64(), PLAIN, v, 16);
+    let data = ins_load(inout b, ty_i64(), PLAIN, owner, 16);
+    let offset = ins_imul_imm(inout b, start, imm(stride));
+    let lent = ins_iadd(inout b, data, offset);
+    let dummy = alloc(inout b, in m, 8, true);
+    let empty = ins_icmp_imm(inout b, cc_eq(), data, 0);
+    let p = ins_select(inout b, empty, dummy, lent);
+    out.push(value_word(p));
+    out.push(value_word(len));
+}
+
+// `foreign_cstr`: a NUL-terminated `malloc` copy and the first NUL's offset.
+fn cstr(inout b: Builder, inout m: Module, data: Value, len: Value, inout out: ChunkSeq[u64]) eff [
+    Ffi[Cranelift]
+] {
+    let malloc = libc(inout b, inout m, MALLOC, 1, true);
+    let memcpy = libc(inout b, inout m, MEMCPY, 3, true);
+    let memchr = libc(inout b, inout m, MEMCHR, 3, true);
+    let size = ins_iadd_imm(inout b, len, 1);
+    call1(inout b, malloc, size);
+    let buffer = inst_result(inout b, 0);
+    ins_trapz(inout b, buffer, trap_user(CSTR_ALLOC_TRAP));
+    call3(inout b, memcpy, buffer, data, len);
+    let end = ins_iadd(inout b, buffer, len);
+    let nul = ins_iconst(inout b, ty_i8(), 0);
+    ins_store(inout b, PLAIN, nul, end, 0);
+    let zero = ins_iconst(inout b, ty_i64(), 0);
+    call3(inout b, memchr, data, zero, len);
+    let found = inst_result(inout b, 0);
+    let missing = ins_icmp_imm(inout b, cc_eq(), found, 0);
+    let pos = ins_isub(inout b, found, data);
+    let none = ins_iconst(inout b, ty_i64(), -1);
+    let nul_at = ins_select(inout b, missing, none, pos);
+    out.push(value_word(buffer));
+    out.push(value_word(nul_at));
+}
+
+// ---------------------------------------------------------------------------
+// Wire structs (`W` at the reader's position).
+
+// Whether `W` is already its source layout: only 64-bit native-endian
+// integers, in order, without padding or nesting (`identical_struct`).
+fn identical_struct(in r: R, start: u64, little: bool) -> bool {
+    let n = at(in r, wrapping_add(start, 1));
+    let mut i = wrapping_add(start, 2);
+    for k in 0..n {
+        if at(in r, i) != F_INTEGER {
+            return false;
+        }
+        let offset = at(in r, wrapping_add(i, 1));
+        let int = at(in r, wrapping_add(i, 2));
+        let endian = at(in r, wrapping_add(i, 3));
+        let native_order = if endian == ENDIAN_NATIVE {
+            true
+        } else if endian == ENDIAN_LITTLE {
+            little
+        } else {
+            !little
+        };
+        if bits_of(int) != WORD_BITS || offset != wrapping_mul(8, k) || !native_order {
+            return false;
+        }
+        i = wrapping_add(i, 5);
+    }
+    true
+}
+
+// Skip one `W` (returns the position after it).
+fn skip_wire(in r: R, start: u64) -> u64 {
+    let n = at(in r, wrapping_add(start, 1));
+    let mut i = wrapping_add(start, 2);
+    for _ in 0..n {
+        let kind = at(in r, i);
+        if kind == F_INTEGER {
+            i = wrapping_add(i, 5);
+        } else if kind == F_BYTES {
+            i = wrapping_add(i, wrapping_add(3, at(in r, wrapping_add(i, 2))));
+        } else if kind == F_PADDING {
+            i = wrapping_add(i, 2);
+        } else {
+            i = skip_wire(in r, wrapping_add(i, 3));
+        }
+    }
+    i
+}
+
+// `foreign_write_struct`: the source struct at `native` into the C buffer
+// at `base`.
+fn write_struct(
+    inout b: Builder,
+    in r: R,
+    start: u64,
+    native: Value,
+    buffer: Value,
+    base: u64,
+    little: bool
+) eff [Ffi[Cranelift]] {
+    let n = at(in r, wrapping_add(start, 1));
+    let mut i = wrapping_add(start, 2);
+    for _ in 0..n {
+        let kind = at(in r, i);
+        let offset = at(in r, wrapping_add(i, 1));
+        let to = wrapping_add(base, offset);
+        if kind == F_INTEGER {
+            let int = at(in r, wrapping_add(i, 2));
+            let endian = at(in r, wrapping_add(i, 3));
+            let from = at(in r, wrapping_add(i, 4));
+            let v = ins_load(inout b, ty_i64(), PLAIN, native, off(from));
+            let v = narrow(inout b, v, bits_of(int));
+            let v = swap(inout b, v, int, endian, little);
+            ins_store(inout b, PLAIN, v, buffer, off(to));
+            i = wrapping_add(i, 5);
+        } else if kind == F_BYTES {
+            let count = at(in r, wrapping_add(i, 2));
+            for j in 0..count {
+                let from = at(in r, wrapping_add(i, wrapping_add(3, j)));
+                let v = ins_load(inout b, ty_i64(), PLAIN, native, off(from));
+                let v = ins_ireduce(inout b, ty_i8(), v);
+                ins_store(inout b, PLAIN, v, buffer, off(wrapping_add(to, j)));
+            }
+            i = wrapping_add(i, wrapping_add(3, count));
+        } else if kind == F_PADDING {
+            i = wrapping_add(i, 2);
+        } else {
+            let from = at(in r, wrapping_add(i, 2));
+            let p = ins_iadd_imm(inout b, native, imm(from));
+            let inner = wrapping_add(i, 3);
+            write_struct(inout b, in r, inner, p, buffer, to, little);
+            i = skip_wire(in r, inner);
+        }
+    }
+}
+
+// `foreign_read_struct`: the C buffer at `base` back into the source
+// struct at `native`.
+fn read_struct(
+    inout b: Builder,
+    in r: R,
+    start: u64,
+    buffer: Value,
+    base: u64,
+    native: Value,
+    little: bool
+) eff [Ffi[Cranelift]] {
+    let n = at(in r, wrapping_add(start, 1));
+    let mut i = wrapping_add(start, 2);
+    for _ in 0..n {
+        let kind = at(in r, i);
+        let offset = at(in r, wrapping_add(i, 1));
+        let from = wrapping_add(base, offset);
+        if kind == F_INTEGER {
+            let int = at(in r, wrapping_add(i, 2));
+            let endian = at(in r, wrapping_add(i, 3));
+            let to = at(in r, wrapping_add(i, 4));
+            let bits = bits_of(int);
+            let v = ins_load(inout b, c_type(bits), PLAIN, buffer, off(from));
+            let v = swap(inout b, v, int, endian, little);
+            let v = widen(inout b, v, bits, signed_of(int));
+            ins_store(inout b, PLAIN, v, native, off(to));
+            i = wrapping_add(i, 5);
+        } else if kind == F_BYTES {
+            let count = at(in r, wrapping_add(i, 2));
+            for j in 0..count {
+                let to = at(in r, wrapping_add(i, wrapping_add(3, j)));
+                let v = ins_load(inout b, ty_i8(), PLAIN, buffer, off(wrapping_add(from, j)));
+                let v = ins_uextend(inout b, ty_i64(), v);
+                ins_store(inout b, PLAIN, v, native, off(to));
+            }
+            i = wrapping_add(i, wrapping_add(3, count));
+        } else if kind == F_PADDING {
+            i = wrapping_add(i, 2);
+        } else {
+            let to = at(in r, wrapping_add(i, 2));
+            let p = ins_iadd_imm(inout b, native, imm(to));
+            let inner = wrapping_add(i, 3);
+            read_struct(inout b, in r, inner, buffer, from, p, little);
+            i = skip_wire(in r, inner);
+        }
+    }
+}
+
+// The C size of pointee `P` at `start`.
+fn pointee_size(in r: R, start: u64) -> u64 {
+    if at(in r, start) == P_SCALAR {
+        bits_of(at(in r, wrapping_add(start, 1))) / BYTE_BITS
+    } else {
+        at(in r, wrapping_add(start, 1))
+    }
+}
+
+fn identical_pointee(in r: R, start: u64, little: bool) -> bool {
+    if at(in r, start) == P_SCALAR {
+        bits_of(at(in r, wrapping_add(start, 1))) == WORD_BITS
+    } else {
+        identical_struct(in r, wrapping_add(start, 1), little)
+    }
+}
+
+fn skip_pointee(in r: R, start: u64) -> u64 {
+    if at(in r, start) == P_SCALAR {
+        wrapping_add(start, 2)
+    } else {
+        skip_wire(in r, wrapping_add(start, 1))
+    }
+}
+
+// `foreign_write_slice`: `n` elements at the source offsets that follow
+// pointee `P` at `p`.
+fn write_slice(
+    inout b: Builder,
+    in r: R,
+    p: u64,
+    offsets: u64,
+    n: u64,
+    native: Value,
+    buffer: Value,
+    little: bool
+) eff [Ffi[Cranelift]] {
+    let size = pointee_size(in r, p);
+    for k in 0..n {
+        let to = wrapping_mul(k, size);
+        let from = at(in r, wrapping_add(offsets, k));
+        if at(in r, p) == P_SCALAR {
+            let v = ins_load(inout b, ty_i64(), PLAIN, native, off(from));
+            let v = narrow(inout b, v, bits_of(at(in r, wrapping_add(p, 1))));
+            ins_store(inout b, PLAIN, v, buffer, off(to));
+        } else {
+            let inner = ins_iadd_imm(inout b, native, imm(from));
+            write_struct(inout b, in r, wrapping_add(p, 1), inner, buffer, to, little);
+        }
+    }
+}
+
+fn read_slice(
+    inout b: Builder,
+    in r: R,
+    p: u64,
+    offsets: u64,
+    n: u64,
+    buffer: Value,
+    native: Value,
+    little: bool
+) eff [Ffi[Cranelift]] {
+    let size = pointee_size(in r, p);
+    for k in 0..n {
+        let from = wrapping_mul(k, size);
+        let to = at(in r, wrapping_add(offsets, k));
+        if at(in r, p) == P_SCALAR {
+            let s = at(in r, wrapping_add(p, 1));
+            let v = ins_load(inout b, c_type(bits_of(s)), PLAIN, buffer, off(from));
+            let v = widen(inout b, v, bits_of(s), signed_of(s));
+            ins_store(inout b, PLAIN, v, native, off(to));
+        } else {
+            let inner = ins_iadd_imm(inout b, native, imm(to));
+            read_struct(inout b, in r, wrapping_add(p, 1), buffer, from, inner, little);
+        }
+    }
+}
+
+// Copy words `[from, to)` of the request into `out`.
+fn copy_words(in r: R, from: u64, to: u64, inout out: ChunkSeq[u64]) {
+    for i in from..to {
+        out.push(at(in r, i));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ARG: one argument.
+
+// The C arguments, then the copy-back record and C string words, as ARG
+// answers them.
+struct Answer {
+    c: ChunkSeq[u64],
+    back: ChunkSeq[u64],
+    text: ChunkSeq[u64],
+}
+
+fn answer(call: u64, in a: Answer) eff [Ffi[Cranelift]] {
+    call_result(call, a.c.len());
+    for i in 0..a.c.len() {
+        call_result(call, word_at(in a.c, i));
+    }
+    call_result(call, a.back.len());
+    for i in 0..a.back.len() {
+        call_result(call, word_at(in a.back, i));
+    }
+    call_result(call, a.text.len());
+    for i in 0..a.text.len() {
+        call_result(call, word_at(in a.text, i));
+    }
+}
+
+fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `foreign_value` of value type `V` at the reader.
+fn value_arg(inout b: Builder, inout r: R, kind: u64, source: Value) -> Value eff [Ffi[Cranelift]] {
+    let v = next(inout r);
+    if v == V_SCALAR {
+        let s = next(inout r);
+        let word = source_word(inout b, kind, source);
+        narrow(inout b, word, bits_of(s))
+    } else if v == V_BOOL {
+        let word = source_word(inout b, kind, source);
+        ins_ireduce(inout b, ty_i8(), word)
+    } else {
+        // An enum (the Rust code checked that its source is in memory).
+        let s = next(inout r);
+        let n = next(inout r);
+        let tag = ins_load(inout b, ty_i64(), PLAIN, source, 0);
+        let first = if n > 0 {
+            at(in r, r.i)
+        } else {
+            0
+        };
+        let mut value = ins_iconst(inout b, ty_i64(), imm(first));
+        for i in 1..n {
+            let hit = ins_icmp_imm(inout b, cc_eq(), tag, imm(i));
+            let candidate = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(r.i, i))));
+            value = ins_select(inout b, hit, candidate, value);
+        }
+        r.i = wrapping_add(r.i, n);
+        narrow(inout b, value, bits_of(s))
+    }
+}
+
+// `foreign_option`: the `Some` payload address and the presence flag.
+fn option(
+    inout b: Builder,
+    nullable: bool,
+    some: u64,
+    offset: u64,
+    source: Value,
+    inout out: ChunkSeq[u64]
+) eff [Ffi[Cranelift]] {
+    if !nullable {
+        out.push(NO_VALUE);
+        out.push(value_word(source));
+        return;
+    }
+    let tag = ins_load(inout b, ty_i64(), PLAIN, source, 0);
+    let is_some = ins_icmp_imm(inout b, cc_eq(), tag, imm(some));
+    let payload = ins_iadd_imm(inout b, source, imm(offset));
+    out.push(value_word(is_some));
+    out.push(value_word(payload));
+}
+
+fn arg(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
+    let mut r = R {
+        w: call_args(call),
+        i: 0,
+    };
+    let _index = next(inout r);
+    let source_kind = next(inout r);
+    let source = val(next(inout r));
+    let little = next(inout r) == 1;
+    let kind = next(inout r);
+    let pointer = module_pointer_type(in m);
+    let mut a = Answer {
+        c: ChunkSeq::new[u64](),
+        back: ChunkSeq::new[u64](),
+        text: ChunkSeq::new[u64](),
+    };
+    if kind == KIND_CSTR {
+        let mut lent: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        view(inout b, in m, source, 1, inout lent);
+        cstr(inout b, inout m, val(word_at(in lent, 0)), val(word_at(in lent, 1)), inout a.text);
+        a.c.push(word_at(in a.text, 0));
+    } else if kind == KIND_LENT {
+        let stride = next(inout r);
+        view(inout b, in m, source, stride, inout a.c);
+    } else if kind == KIND_VALUE {
+        let v = value_arg(inout b, inout r, source_kind, source);
+        a.c.push(value_word(v));
+    } else if kind == KIND_HANDLE {
+        let v = source_word(inout b, source_kind, source);
+        a.c.push(value_word(v));
+    } else if kind == KIND_POINTER {
+        let writes = next(inout r) == 1;
+        let nullable = next(inout r) == 1;
+        let some = next(inout r);
+        let offset = next(inout r);
+        let p = r.i;
+        let mut opt: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        option(inout b, nullable, some, offset, source, inout opt);
+        let g = word_at(in opt, 0);
+        let payload = val(word_at(in opt, 1));
+        let ptr = if at(in r, p) == P_SCALAR {
+            let s = at(in r, wrapping_add(p, 1));
+            let buffer = alloc(inout b, in m, 8, true);
+            let word = source_word(
+                inout b,
+                if nullable {
+                    1
+                } else {
+                    source_kind
+                },
+                payload
+            );
+            let v = narrow(inout b, word, bits_of(s));
+            ins_store(inout b, PLAIN, v, buffer, 0);
+            if writes {
+                a.back.push(g);
+                a.back.push(value_word(buffer));
+                a.back.push(value_word(payload));
+                a.back.push(SHAPE_SCALAR);
+                a.back.push(s);
+            }
+            buffer
+        } else if identical_struct(in r, wrapping_add(p, 1), little) {
+            payload
+        } else {
+            let size = at(in r, wrapping_add(p, 1));
+            let buffer = alloc(inout b, in m, wrapping_u32(size), true);
+            write_struct(inout b, in r, wrapping_add(p, 1), payload, buffer, 0, little);
+            if writes {
+                a.back.push(g);
+                a.back.push(value_word(buffer));
+                a.back.push(value_word(payload));
+                a.back.push(SHAPE_STRUCT);
+                copy_words(in r, wrapping_add(p, 1), skip_pointee(in r, p), inout a.back);
+            }
+            buffer
+        };
+        let guarded = guard(inout b, g, ptr, pointer);
+        a.c.push(value_word(guarded));
+    } else if kind == KIND_SLICE {
+        let writes = next(inout r) == 1;
+        let nullable = next(inout r) == 1;
+        let some = next(inout r);
+        let offset = next(inout r);
+        let n = next(inout r);
+        let _size = next(inout r);
+        let p = r.i;
+        let offsets = skip_pointee(in r, p);
+        let mut opt: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        option(inout b, nullable, some, offset, source, inout opt);
+        let g = word_at(in opt, 0);
+        let payload = val(word_at(in opt, 1));
+        let ptr = if n == 0 {
+            alloc(inout b, in m, 8, true)
+        } else if identical_pointee(in r, p, little) {
+            payload
+        } else {
+            let bytes = wrapping_mul(n, pointee_size(in r, p));
+            let buffer = alloc(inout b, in m, wrapping_u32(bytes), true);
+            write_slice(inout b, in r, p, offsets, n, payload, buffer, little);
+            if writes {
+                a.back.push(g);
+                a.back.push(value_word(buffer));
+                a.back.push(value_word(payload));
+                a.back.push(SHAPE_SLICE);
+                a.back.push(n);
+                a.back.push(pointee_size(in r, p));
+                copy_words(in r, p, wrapping_add(offsets, n), inout a.back);
+            }
+            buffer
+        };
+        let guarded = guard(inout b, g, ptr, pointer);
+        a.c.push(value_word(guarded));
+        let len = ins_iconst(inout b, ty_i64(), imm(n));
+        let guarded_len = guard(inout b, g, len, ty_i64());
+        a.c.push(value_word(guarded_len));
+    } else {
+        return DECLINED;
+    }
+    answer(call, in a);
+    HANDLED
+}
+
+// ---------------------------------------------------------------------------
+// REFUSE, CALL, RESULT, FINISH.
+
+fn refuse(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelift]] {
+    let r = R {
+        w: call_args(call),
+        i: 0,
+    };
+    let size = at(in r, 0);
+    let err = at(in r, 1);
+    let err_offset = at(in r, 2);
+    let n = wrapping_sub(r.w.len(), 3);
+    let slot = alloc(inout b, in m, wrapping_u32(size), true);
+    let mut offset = ins_iconst(inout b, ty_i64(), -1);
+    for j in 0..n {
+        let k = wrapping_sub(wrapping_sub(n, 1), j);
+        let nul_at = val(at(in r, wrapping_add(3, k)));
+        let found = ins_icmp_imm(inout b, cc_sge(), nul_at, 0);
+        offset = ins_select(inout b, found, nul_at, offset);
+    }
+    let refused = ins_icmp_imm(inout b, cc_sge(), offset, 0);
+    let call_block = create_block(inout b);
+    let refuse_block = create_block(inout b);
+    let join = create_block(inout b);
+    ins_brif0(inout b, refused, refuse_block, call_block);
+    switch_to_block(inout b, refuse_block);
+    seal_block(inout b, refuse_block);
+    let tag = ins_iconst(inout b, ty_i64(), imm(err));
+    ins_store(inout b, PLAIN, tag, slot, 0);
+    ins_store(inout b, PLAIN, offset, slot, off(err_offset));
+    ins_jump0(inout b, join);
+    switch_to_block(inout b, call_block);
+    seal_block(inout b, call_block);
+    call_result_value(call, slot);
+    call_result(call, block_word(join));
+}
+
+// `foreign_os_error`: the calling thread's OS error code as a word.
+fn os_error(inout b: Builder, inout m: Module, which: u64) -> Value eff [Ffi[Cranelift]] {
+    let location = which == ERRNO_LOCATION || which == ERRNO_ERROR;
+    let sig = sig_new(inout m, call_conv_default());
+    sig_return(
+        inout m,
+        sig,
+        if location {
+            ty_i64()
+        } else {
+            ty_i32()
+        }
+    );
+    let id = if which == ERRNO_LOCATION {
+        declare_function(inout m, in "__errno_location".as_bytes(), linkage_import(), sig)
+    } else if which == ERRNO_ERROR {
+        declare_function(inout m, in "__error".as_bytes(), linkage_import(), sig)
+    } else {
+        declare_function(inout m, in "GetLastError".as_bytes(), linkage_import(), sig)
+    };
+    let f = import_function(inout b, inout m, id);
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ins_call(inout b, f, in none.as_slice());
+    let result = inst_result(inout b, 0);
+    let code = if location {
+        ins_load(inout b, ty_i32(), PLAIN, result, 0)
+    } else {
+        result
+    };
+    ins_uextend(inout b, ty_i64(), code)
+}
+
+// `foreign_copy_back` of the record at `start` (`[guard, buffer, target,
+// shape...]`).
+fn copy_back(inout b: Builder, in r: R, start: u64, little: bool) eff [Ffi[Cranelift]] {
+    let g = at(in r, start);
+    let buffer = val(at(in r, wrapping_add(start, 1)));
+    let target = val(at(in r, wrapping_add(start, 2)));
+    let shape = at(in r, wrapping_add(start, 3));
+    let s = wrapping_add(start, 4);
+    let mut join_word = NO_VALUE;
+    if g != NO_VALUE {
+        let then = create_block(inout b);
+        let join = create_block(inout b);
+        ins_brif0(inout b, val(g), then, join);
+        switch_to_block(inout b, then);
+        join_word = block_word(join);
+    }
+    if shape == SHAPE_SCALAR {
+        let sc = at(in r, s);
+        let v = ins_load(inout b, c_type(bits_of(sc)), PLAIN, buffer, 0);
+        let v = widen(inout b, v, bits_of(sc), signed_of(sc));
+        ins_store(inout b, PLAIN, v, target, 0);
+    } else if shape == SHAPE_STRUCT {
+        read_struct(inout b, in r, s, buffer, 0, target, little);
+    } else {
+        let n = at(in r, s);
+        let p = wrapping_add(s, 2);
+        let offsets = skip_pointee(in r, p);
+        read_slice(inout b, in r, p, offsets, n, buffer, target, little);
+    }
+    if join_word != NO_VALUE {
+        let join = @vesper/cranelift::block_of_word(join_word);
+        ins_jump0(inout b, join);
+        switch_to_block(inout b, join);
+    }
+}
+
+fn the_call(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+    let r = R {
+        w: call_args(call),
+        i: 0,
+    };
+    let callee = FuncRef {
+        id: wrapping_u32(at(in r, 0))
+    };
+    let errno = at(in r, 1);
+    let returns = at(in r, 2) == 1;
+    let little = at(in r, 3) == 1;
+    let n = at(in r, 4);
+    let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        args.push(wrapping_u32(at(in r, wrapping_add(5, i))));
+    }
+    ins_call(inout b, callee, in args.as_slice());
+    let raw = if returns {
+        value_word(inst_result(inout b, 0))
+    } else {
+        NO_VALUE
+    };
+    let os = if errno != 0 {
+        value_word(os_error(inout b, inout m, errno))
+    } else {
+        NO_VALUE
+    };
+    let mut i = wrapping_add(5, n);
+    let copies = at(in r, i);
+    i = wrapping_add(i, 1);
+    for _ in 0..copies {
+        let len = at(in r, i);
+        copy_back(inout b, in r, wrapping_add(i, 1), little);
+        i = wrapping_add(i, wrapping_add(len, 1));
+    }
+    call_result(call, raw);
+    call_result(call, os);
+}
+
+// `foreign_validated`: `Ok(ok)` when `valid`, else `Err(ForeignInvalid {
+// raw })`, from layout words `[size, ok, ok offset, err, err offset]`.
+fn validated(inout b: Builder, in m: Module, in r: R, l: u64, valid: Value, ok: Value, raw: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let ptr = alloc(inout b, in m, wrapping_u32(at(in r, l)), true);
+    let ok_tag = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(l, 1))));
+    let err_tag = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(l, 3))));
+    let tag = ins_select(inout b, valid, ok_tag, err_tag);
+    ins_store(inout b, PLAIN, tag, ptr, 0);
+    let payload = ins_select(inout b, valid, ok, raw);
+    ins_store(inout b, PLAIN, payload, ptr, off(at(in r, wrapping_add(l, 2))));
+    ptr
+}
+
+fn result(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelift]] {
+    let mut r = R {
+        w: call_args(call),
+        i: 0,
+    };
+    let raw = val(next(inout r));
+    let v = next(inout r);
+    let value = if v == V_UNIT {
+        ins_iconst(inout b, ty_i64(), 0)
+    } else if v == V_SCALAR {
+        let s = next(inout r);
+        widen(inout b, raw, bits_of(s), signed_of(s))
+    } else if v == V_BOOL {
+        let word = ins_uextend(inout b, ty_i64(), raw);
+        let valid = ins_icmp_imm(inout b, cc_ule(), word, 1);
+        validated(inout b, in m, in r, r.i, valid, word, word)
+    } else if v == V_ENUM {
+        let s = next(inout r);
+        let n = next(inout r);
+        let word = widen(inout b, raw, bits_of(s), false);
+        let mut valid = ins_iconst(inout b, ty_i8(), 0);
+        let mut index = ins_iconst(inout b, ty_i64(), 0);
+        for i in 0..n {
+            let hit = ins_icmp_imm(inout b, cc_eq(), word, imm(at(in r, wrapping_add(r.i, i))));
+            let candidate = ins_iconst(inout b, ty_i64(), imm(i));
+            index = ins_select(inout b, hit, candidate, index);
+            valid = ins_bor(inout b, valid, hit);
+        }
+        let l = wrapping_add(r.i, n);
+        validated(inout b, in m, in r, l, valid, index, word)
+    } else if v == V_NONNULL {
+        ins_trapz(inout b, raw, trap_user(NULL_HANDLE_TRAP));
+        if at(in r, r.i) == 0 {
+            raw
+        } else {
+            let ptr = alloc(inout b, in m, wrapping_u32(at(in r, wrapping_add(r.i, 1))), true);
+            ins_store(inout b, PLAIN, raw, ptr, 0);
+            ptr
+        }
+    } else {
+        // V_HANDLE.
+        let nullable = next(inout r) == 1;
+        let present = ins_icmp_imm(inout b, cc_ne(), raw, 0);
+        if !nullable {
+            validated(inout b, in m, in r, r.i, present, raw, raw)
+        } else {
+            let l = r.i;
+            let ptr = alloc(inout b, in m, wrapping_u32(at(in r, l)), true);
+            let some = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(l, 1))));
+            let none = ins_iconst(inout b, ty_i64(), imm(at(in r, wrapping_add(l, 3))));
+            let tag = ins_select(inout b, present, some, none);
+            ins_store(inout b, PLAIN, tag, ptr, 0);
+            ins_store(inout b, PLAIN, raw, ptr, off(at(in r, wrapping_add(l, 2))));
+            ptr
+        }
+    };
+    call_result_value(call, value);
+}
+
+fn finish(call: u64, inout b: Builder, inout m: Module) eff [Ffi[Cranelift]] {
+    let r = R {
+        w: call_args(call),
+        i: 0,
+    };
+    for i in 0..r.w.len() {
+        let free = libc(inout b, inout m, FREE, 1, false);
+        call1(inout b, free, val(at(in r, i)));
+    }
+}
+
+// One `ffi` request on the lent handles.
+fn request(call: u64, inout b: Builder, inout m: Module) -> u64 eff [Ffi[Cranelift]] {
+    let op = call_op(call);
+    if op == BEGIN {
+        // `isolated(mpk)` trampolines need machine-code helpers the shim
+        // cannot define yet: Rust emits those calls.
+        let r = call_args(call);
+        return if word_at(in r, 0) == DIRECT {
+            HANDLED
+        } else {
+            DECLINED
+        };
+    }
+    if op == ARG {
+        return arg(call, inout b, inout m);
+    }
+    if op == REFUSE {
+        refuse(call, inout b, in m);
+    } else if op == CALL {
+        the_call(call, inout b, inout m);
+    } else if op == RESULT {
+        result(call, inout b, in m);
+    } else if op == FINISH {
+        finish(call, inout b, inout m);
+    } else {
+        return DECLINED;
+    }
+    HANDLED
+}
+
+// The `ffi` hook: one request over the lent builder and module.
+pub fn ffi_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut b = match call_builder(call) {
+        Some(b) => b,
+        None => return DECLINED,
+    };
+    let mut m = match call_module(call) {
+        Some(m) => m,
+        None => {
+            call_return_builder(call, b);
+            return DECLINED;
+        }
+    };
+    let handled = request(call, inout b, inout m);
+    call_return_module(call, m);
+    call_return_builder(call, b);
+    handled
+}
