@@ -6071,6 +6071,8 @@ name = "vesper-fusion"
 version = "0.1.0"
 dependencies = [
  "egglog",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-resonance-seed",
  "vesper-tensor-seed",
 ]
