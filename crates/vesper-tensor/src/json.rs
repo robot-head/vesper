@@ -45,33 +45,55 @@ pub fn parse(bytes: &[u8]) -> Result<Value, Error> {
     if bytes.len() >= 1 << 28 {
         return Err(Error::Limit("JSON header bytes"));
     }
-    let mut strs = vec![0u8; bytes.len()];
-    let mut levels = [0u64; MAX_DEPTH + 1];
-    let mut tape_words = bytes.len() / 8 + 16;
-    let mut key_slots = (bytes.len() / 16 + 16).next_power_of_two();
-    loop {
-        let mut tape = vec![0u64; tape_words];
-        let mut keys = vec![0u64; 2 * key_slots];
-        // An integer above `u64::MAX` fails the port's checked arithmetic,
-        // which `check` maps to `Error::Overflow` as the Rust build returns.
-        let r = crate::port::check(
-            crate::port::binding::parse_json(bytes, &mut tape, &mut keys, &mut strs, &mut levels),
-            |_| BAD,
-        )?;
-        let n = match r >> 60 {
-            0 => r as usize,
-            11 => {
-                tape_words *= 2;
-                continue;
-            }
-            12 => {
-                key_slots *= 2;
-                continue;
-            }
-            code => return Err(failure(code)),
-        };
-        return Ok(from_tape(&tape[..n], &strs));
+    // The port writes every tape word and string byte before it reads it,
+    // so per-thread buffers serve every call without being cleared; the
+    // duplicate-key table must start empty, so it is zeroed per attempt.
+    thread_local! {
+        static BUFFERS: std::cell::RefCell<(Vec<u8>, Vec<u64>)> =
+            const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
     }
+    BUFFERS.with(|buffers| {
+        let (strs, tape) = &mut *buffers.borrow_mut();
+        if strs.len() < bytes.len() {
+            strs.resize(bytes.len(), 0);
+        }
+        let strs = &mut strs[..bytes.len()];
+        let mut levels = [0u64; MAX_DEPTH + 1];
+        let mut tape_words = bytes.len() / 8 + 16;
+        let mut key_slots = (bytes.len() / 16 + 16).next_power_of_two();
+        loop {
+            if tape.len() < tape_words {
+                tape.resize(tape_words, 0);
+            }
+            let mut keys = vec![0u64; 2 * key_slots];
+            // An integer above `u64::MAX` fails the port's checked
+            // arithmetic, which `check` maps to `Error::Overflow` as the
+            // Rust build returns.
+            let r = crate::port::check(
+                crate::port::binding::parse_json(
+                    bytes,
+                    &mut tape[..tape_words],
+                    &mut keys,
+                    strs,
+                    &mut levels,
+                ),
+                |_| BAD,
+            )?;
+            let n = match r >> 60 {
+                0 => r as usize,
+                11 => {
+                    tape_words *= 2;
+                    continue;
+                }
+                12 => {
+                    key_slots *= 2;
+                    continue;
+                }
+                code => return Err(failure(code)),
+            };
+            return Ok(from_tape(&tape[..n], strs));
+        }
+    })
 }
 
 #[cfg(vesper_port)]
