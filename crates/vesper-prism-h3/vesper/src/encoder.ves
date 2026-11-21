@@ -38,47 +38,34 @@ use self::table::{
 use self::reason::{
     reason_of
 };
+use self::wire::{
+    Indexed,
+    IndexedPostBase,
+    InsertLiteral,
+    InsertNameRef,
+    LiteralName,
+    NameRef,
+    PostBaseNameRef,
+    SectionAck,
+    SectionPrefix,
+    SetCapacity,
+    StreamCancel,
+    ENTRY_OVERHEAD,
+    VALUE_PREFIX
+};
 
 // QPACK wire patterns (RFC 9204 §4; src/qpack/wire.rs): first-byte bits
 // and integer prefix lengths.
 // §3.2.1: an entry's size is its name and value lengths plus 32.
-const ENTRY_OVERHEAD: u64 = 32;
 // `max_entry_share` is in 1/256ths of the capacity.
 const ENTRY_SHARE_SCALE: u64 = 256;
 // §4.1.2: a value string's length prefix.
-const VALUE_PREFIX: u64 = 7;
 // §4.3 encoder instructions.
-const INSERT_NAME_REF: u8 = 0x80;
-const INSERT_NAME_REF_STATIC: u8 = 0x40;
-const INSERT_NAME_REF_PREFIX: u64 = 6;
-const INSERT_LITERAL: u8 = 0x40;
-const INSERT_LITERAL_PREFIX: u64 = 5;
-const SET_CAPACITY: u8 = 0x20;
-const SET_CAPACITY_PREFIX: u64 = 5;
 // §4.4 decoder instructions; one is at most 10 bytes, so more pending than
 // this is malformed.
-const SECTION_ACK: u8 = 0x80;
-const SECTION_ACK_PREFIX: u64 = 7;
-const STREAM_CANCEL: u8 = 0x40;
-const STREAM_CANCEL_PREFIX: u64 = 6;
 const MAX_PENDING_INSTRUCTION: u64 = 16;
 // §4.5.1 the field section prefix.
-const RIC_PREFIX: u64 = 8;
-const BASE_NEGATIVE: u8 = 0x80;
-const DELTA_BASE_PREFIX: u64 = 7;
 // §4.5.2-§4.5.6 field lines.
-const INDEXED: u8 = 0x80;
-const INDEXED_STATIC: u8 = 0x40;
-const INDEXED_PREFIX: u64 = 6;
-const INDEXED_POST_BASE: u8 = 0x10;
-const INDEXED_POST_BASE_PREFIX: u64 = 4;
-const NAME_REF: u8 = 0x40;
-const NAME_REF_NEVER: u8 = 0x20;
-const NAME_REF_STATIC: u8 = 0x10;
-const NAME_REF_PREFIX: u64 = 4;
-const POST_BASE_NAME_REF_PREFIX: u64 = 3;
-const LITERAL_NAME: u8 = 0x20;
-const LITERAL_NAME_PREFIX: u64 = 3;
 // compact_refs rebuilds `sec_refs` past this many words once live
 // references are at most a quarter of them.
 const COMPACT_MIN_REFS: u64 = 4096;
@@ -221,20 +208,20 @@ fn try_insert(inout e: EncoderCore, in h: Huff, in name: Slice[u8], in value: Sl
     match static_name(in h.st, in name) {
         Option::Some(i) => encode_int(
             inout e.out,
-            INSERT_NAME_REF | INSERT_NAME_REF_STATIC,
-            INSERT_NAME_REF_PREFIX,
+            InsertNameRef::Bits | InsertNameRef::Static,
+            InsertNameRef::Prefix,
             i
         ),
         Option::None => match dynamic_name(in e, in name, true) {
             Option::Some(abs) => {
                 let rel = wrapping_sub(wrapping_sub(e.table.inserted, abs), 1);
-                encode_int(inout e.out, INSERT_NAME_REF, INSERT_NAME_REF_PREFIX, rel);
+                encode_int(inout e.out, InsertNameRef::Bits, InsertNameRef::Prefix, rel);
             },
             Option::None => encode_string(
                 in h,
                 inout e.out,
-                INSERT_LITERAL,
-                INSERT_LITERAL_PREFIX,
+                InsertLiteral::Bits,
+                InsertLiteral::Prefix,
                 in name
             ),
         },
@@ -278,7 +265,7 @@ fn field_line(
     if !sensitive {
         match static_exact(in h.st, in name, in value) {
             Option::Some(i) => {
-                encode_int(inout e.lines, INDEXED | INDEXED_STATIC, INDEXED_PREFIX, i);
+                encode_int(inout e.lines, Indexed::Bits | Indexed::Static, Indexed::Prefix, i);
                 e.stats.static_refs = inc(e.stats.static_refs);
                 return;
             },
@@ -306,10 +293,10 @@ fn field_line(
                     inout e,
                     abs,
                     base,
-                    INDEXED,
-                    INDEXED_PREFIX,
-                    INDEXED_POST_BASE,
-                    INDEXED_POST_BASE_PREFIX
+                    Indexed::Bits,
+                    Indexed::Prefix,
+                    IndexedPostBase::Bits,
+                    IndexedPostBase::Prefix
                 );
                 e.stats.dynamic_refs = inc(e.stats.dynamic_refs);
                 return;
@@ -317,11 +304,11 @@ fn field_line(
             Option::None => (),
         }
     }
-    // The N bit of each literal form: NAME_REF_NEVER, and shifted right by
+    // The N bit of each literal form: NameRef::Never, and shifted right by
     // 2 and 1 it is the N bit of the post-base and literal-name forms
-    // (POST_BASE_NAME_REF_NEVER and LITERAL_NAME_NEVER in src/qpack/wire.rs).
+    // (PostBaseNameRef::Never and LiteralName::Never in src/qpack/wire.rs).
     let ref_never: u8 = if sensitive {
-        NAME_REF_NEVER
+        NameRef::Never
     } else {
         0
     };
@@ -331,8 +318,8 @@ fn field_line(
     match static_name(in h.st, in name) {
         Option::Some(i) => encode_int(
             inout e.lines,
-            NAME_REF | NAME_REF_STATIC | ref_never,
-            NAME_REF_PREFIX,
+            NameRef::Bits | NameRef::Static | ref_never,
+            NameRef::Prefix,
             i
         ),
         Option::None => {
@@ -346,16 +333,16 @@ fn field_line(
                     inout e,
                     abs,
                     base,
-                    NAME_REF | ref_never,
-                    NAME_REF_PREFIX,
+                    NameRef::Bits | ref_never,
+                    NameRef::Prefix,
                     post_never,
-                    POST_BASE_NAME_REF_PREFIX
+                    PostBaseNameRef::Prefix
                 ),
                 Option::None => encode_string(
                     in h,
                     inout e.lines,
-                    LITERAL_NAME | literal_never,
-                    LITERAL_NAME_PREFIX,
+                    LiteralName::Bits | literal_never,
+                    LiteralName::Prefix,
                     in name
                 ),
             }
@@ -414,16 +401,16 @@ pub fn enc_encode(
         ric = max64(ric, inc(word(in e.cur_refs.as_slice(), i)));
     }
     let mut out = ChunkSeq::with_capacity[u8](wrapping_add(e.lines.len(), 4));
-    encode_int(inout out, 0, RIC_PREFIX, encode_ric(ric, e.max_entries));
+    encode_int(inout out, 0, SectionPrefix::RicPrefix, encode_ric(ric, e.max_entries));
     if ric == 0 {
         out.push(0);
     } else if base >= ric {
-        encode_int(inout out, 0, DELTA_BASE_PREFIX, wrapping_sub(base, ric));
+        encode_int(inout out, 0, SectionPrefix::DeltaBasePrefix, wrapping_sub(base, ric));
     } else {
         encode_int(
             inout out,
-            BASE_NEGATIVE,
-            DELTA_BASE_PREFIX,
+            SectionPrefix::BaseNegative,
+            SectionPrefix::DeltaBasePrefix,
             wrapping_sub(wrapping_sub(ric, base), 1)
         );
     }
@@ -518,10 +505,10 @@ pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
             break;
         }
         let first = byte(in e.pending.as_slice(), at);
-        let bits: u64 = if first & SECTION_ACK != 0 {
-            SECTION_ACK_PREFIX
+        let bits: u64 = if first & SectionAck::Bits != 0 {
+            SectionAck::Prefix
         } else {
-            STREAM_CANCEL_PREFIX
+            StreamCancel::Prefix
         };
         let value = match decode_int(in e.pending.as_slice(), at, bits) {
             Result::Ok(num) => {
@@ -535,7 +522,7 @@ pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
                 return fail(inout e, reason_of(err));
             },
         };
-        if first & SECTION_ACK != 0 {
+        if first & SectionAck::Bits != 0 {
             match find_section(in e, value) {
                 Option::Some(i) => {
                     e.known_received = max64(e.known_received, sec_ric(in e, i));
@@ -545,7 +532,7 @@ pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
                     return fail(inout e, Reason::UnexpectedAcknowledgment(value));
                 },
             }
-        } else if first & STREAM_CANCEL != 0 {
+        } else if first & StreamCancel::Bits != 0 {
             loop {
                 match find_section(in e, value) {
                     Option::Some(i) => release(inout e, i),
@@ -587,7 +574,7 @@ pub fn enc_apply_peer_settings(
         max_table_capacity
     };
     if cap > 0 && cap != e.table.capacity {
-        encode_int(inout e.out, SET_CAPACITY, SET_CAPACITY_PREFIX, cap);
+        encode_int(inout e.out, SetCapacity::Bits, SetCapacity::Prefix, cap);
         table_set_capacity(inout e.table, cap);
     }
 }

@@ -22,13 +22,13 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // plan.rs: a child move reports its positions swapped.
     (
-        "op(op_move_child(), node.id, child_id, from, index)",
-        "op(op_move_child(), node.id, child_id, index, from)",
+        "op(OpTag::MoveChild, node.id, child_id, from, index)",
+        "op(OpTag::MoveChild, node.id, child_id, index, from)",
     ),
     // session.rs: a stale plan passes the session's revision check.
     (
         "    } else if p.base != r.revision {",
-        "    } else if p.base == max_u64() {",
+        "    } else if p.base == MAX_U64 {",
     ),
     // recording.rs: an injected rejection fires one patch late.
     (
@@ -37,7 +37,7 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // sim_aura.rs: Inputs drop out of the focus order.
     (
-        "                if kind == k_button() || kind == k_input() {\n                    q.items.push(id);",
-        "                if kind == k_button() {\n                    q.items.push(id);",
+        "                if kind == WidgetKind::Button || kind == WidgetKind::Input {\n                    q.items.push(id);",
+        "                if kind == WidgetKind::Button {\n                    q.items.push(id);",
     ),
 ];

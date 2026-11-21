@@ -177,6 +177,69 @@ fn instance_key(name: &str, vars: &BTreeMap<String, Type>) -> String {
 /// `Type::Named(<function>, [])`. `$` never starts a generic name, so
 /// substitution ignores these entries.
 const FN_ARG: &str = "$fn:";
+/// Type nodes one native instance's type arguments may hold. There is no
+/// cap on the number of instances (SH3 lane 7, #1246): a program has as
+/// many as it reaches. Only polymorphic recursion makes that number
+/// unbounded, and it does so by growing the type arguments, so bounding
+/// their size bounds the set (finitely many types fit in this many nodes)
+/// while any real program stays far below it. 256 matches the checker's
+/// `pact_frontend::mono::MAX_TYPE_SIZE`.
+pub(crate) const MAX_NATIVE_INSTANCE_TYPE_SIZE: usize = 256;
+/// Type nodes in an instance's type arguments ([`MAX_NATIVE_INSTANCE_TYPE_SIZE`]).
+fn instance_type_size(vars: &BTreeMap<String, Type>) -> usize {
+    // Effect arguments count too: polymorphic recursion can grow a type
+    // through `eff [E[T]]` as well as through type arguments.
+    fn row(effects: &crate::ast::Effects) -> usize {
+        effects
+            .instances
+            .iter()
+            .map(|e| 1 + e.args.iter().map(size).sum::<usize>())
+            .sum()
+    }
+    fn size(t: &Type) -> usize {
+        match t {
+            Type::Named(_, args) | Type::Tuple(args) => 1 + args.iter().map(size).sum::<usize>(),
+            Type::Function {
+                params,
+                result,
+                effects,
+                ..
+            } => {
+                1 + params.iter().map(|(_, t)| size(t)).sum::<usize>() + size(result) + row(effects)
+            }
+            Type::Row(effects) => 1 + row(effects),
+            _ => 1,
+        }
+    }
+    vars.values().map(size).sum()
+}
+/// The error for an instance of `name` whose type arguments outgrew
+/// [`MAX_NATIVE_INSTANCE_TYPE_SIZE`]: the chain of instances from the
+/// nearest enclosing instance of the same function, which is the cycle
+/// that keeps growing them.
+fn polymorphic_recursion_error(
+    name: &str,
+    parent: Option<&str>,
+    parents: &BTreeMap<String, (Option<String>, String)>,
+) -> String {
+    let mut chain = vec![name.to_string()];
+    let mut at = parent.map(str::to_string);
+    while let Some(key) = at {
+        let Some((up, function)) = parents.get(&key) else {
+            break;
+        };
+        chain.push(function.clone());
+        if function == name {
+            break;
+        }
+        at = up.clone();
+    }
+    chain.reverse();
+    format!(
+        "native monomorphization of '{name}' creates unboundedly many instances (polymorphic recursion through {}): its type arguments passed {MAX_NATIVE_INSTANCE_TYPE_SIZE} type nodes",
+        chain.join(" -> ")
+    )
+}
 /// The function-value parameters of an instance bound to top-level
 /// functions, `param -> function` (empty for other instances; pass
 /// [`EmittedFunction::vars`]).
@@ -727,6 +790,11 @@ fn register_result_words(world: &World, f: &Function) -> Result<Option<u32>, Str
 /// No internal conventions: every function keeps the default ABI.
 static DEFAULT_ABI: std::sync::LazyLock<NativeAbi> = std::sync::LazyLock::new(NativeAbi::default);
 type InstanceMap = BTreeMap<String, (String, BTreeMap<String, Type>)>;
+/// How many function instances native code for `entry` compiles: the
+/// number the old fixed cap counted against (#1246).
+pub fn instance_count(world: &World, entry: &str) -> Result<usize, String> {
+    Ok(instances(world, entry)?.len())
+}
 fn instances(world: &World, entry: &str) -> Result<InstanceMap, String> {
     instances_for_entry(world, entry, false)
 }
@@ -743,6 +811,16 @@ fn trace_host_direct(world: &World, f: &Function) -> bool {
 fn instances_for_entry(
     world: &World,
     entry: &str,
+    include_entry: bool,
+) -> Result<InstanceMap, String> {
+    instances_for_roots(world, &[entry], include_entry)
+}
+/// The instances every root in `roots` reaches, from one lowering of the
+/// world and one walk ([`instances_for_entry`] per root lowered the whole
+/// world once per export, quadratic in a library's size, #1246).
+pub(crate) fn instances_for_roots(
+    world: &World,
+    roots: &[&str],
     include_entry: bool,
 ) -> Result<InstanceMap, String> {
     let program = crate::ffi_lowering::drops::lower_world(world);
@@ -764,27 +842,39 @@ fn instances_for_entry(
                 })
         })
         .collect::<BTreeSet<_>>();
-    let mut todo = vec![(entry.to_string(), BTreeMap::new())];
-    let mut seen = BTreeSet::new();
+    let drops = crate::ffi_lowering::drops::DropCallees::new(&program);
+    let mut todo: Vec<(String, BTreeMap<String, Type>, Option<String>)> = roots
+        .iter()
+        .rev()
+        .map(|root| (root.to_string(), BTreeMap::new(), None))
+        .collect();
+    // Instance key -> (the instance that first reached it, its function),
+    // to report a polymorphic-recursion cycle.
+    let mut seen: BTreeMap<String, (Option<String>, String)> = BTreeMap::new();
     let mut result = BTreeMap::new();
-    while let Some((name, vars)) = todo.pop() {
+    while let Some((name, vars, parent)) = todo.pop() {
         let key = instance_key(&name, &vars);
-        if !seen.insert(key.clone()) {
+        if seen.contains_key(&key) {
             continue;
         }
-        if seen.len() > 1024 {
-            return Err("native monomorphization exceeds 1024 function instances".into());
+        if instance_type_size(&vars) > MAX_NATIVE_INSTANCE_TYPE_SIZE {
+            return Err(polymorphic_recursion_error(&name, parent.as_deref(), &seen));
         }
+        seen.insert(key.clone(), (parent, name.clone()));
+        let from = key.clone();
+        let mut todo = |callee: String, vars: BTreeMap<String, Type>| {
+            todo.push((callee, vars, Some(from.clone())));
+        };
         let f = concrete(world, &name, &vars)?;
-        if (include_entry && (key == entry || trace_host_direct(world, &f)))
+        if (include_entry && (roots.contains(&key.as_str()) || trace_host_direct(world, &f)))
             || !specialized_function(world, &f)
             || !function_arguments(&vars).is_empty()
         {
             result.insert(key, (name.clone(), vars.clone()));
         }
         // Handle drops (§16.3) are calls the source body never names.
-        for callee in crate::ffi_lowering::drops::drop_callees(world, &program, &name) {
-            todo.push((callee, BTreeMap::new()));
+        for callee in drops.of(world, &name) {
+            todo(callee, BTreeMap::new());
         }
         if let Some(body) = &f.body {
             visit(body, &mut |e| {
@@ -792,7 +882,7 @@ fn instances_for_entry(
                     && references.contains(&(e.span.start, e.span.end, n.clone()))
                     && world.functions[n].generics.is_empty()
                 {
-                    todo.push((n.clone(), BTreeMap::new()));
+                    todo(n.clone(), BTreeMap::new());
                 }
                 if let ExprKind::Call { callee, .. } = &e.kind {
                     let target = match &callee.kind {
@@ -823,7 +913,7 @@ fn instances_for_entry(
                             world.dyn_objects.vtable(object, &substitute(actual, &vars))
                     {
                         for (method, vars) in vtable.methods.clone() {
-                            todo.push((method, vars));
+                            todo(method, vars);
                         }
                     }
                     if let Some(name) = target {
@@ -865,7 +955,7 @@ fn instances_for_entry(
                             for (method, vars) in
                                 vtable.map(|v| v.methods.clone()).unwrap_or_default()
                             {
-                                todo.push((method, vars));
+                                todo(method, vars);
                             }
                         }
                         let instance = world.dyn_objects.erase(&name, &instance);
@@ -873,7 +963,7 @@ fn instances_for_entry(
                             // A vtable stub is called through its slot.
                             return;
                         }
-                        todo.push((name, instance));
+                        todo(name, instance);
                     }
                 }
             });
@@ -1345,6 +1435,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 local_types,
                 generic_vars: generic_vars.clone(),
                 pointers,
+                narrow_homes: BTreeMap::new(),
                 handlers: vec![],
                 exits: vec![],
                 inline_depth: 0,
@@ -1376,6 +1467,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 result_buffer: own_abi.result_words.and(sret),
                 forced_call_vars: None,
                 discard_slot: None,
+                element_writebacks: vec![],
             };
             c.set_location(f.span.start);
             // Function-value parameters bound to top-level functions by
@@ -1545,6 +1637,12 @@ pub fn jit_traced_with_options(
 ) -> Result<crate::runtime::Value, String> {
     jit_run_entry(world, entry, optimize, EntryEffects::TraceHost)
 }
+/// Parameters a [`WordFunction`] may take: eight, so that ports pass
+/// options as words instead of packing them into a `flags` word (#1246).
+/// Six of them travel in registers on SysV x86-64, eight on AArch64 and
+/// four on Windows x64; the rest go on the stack, which the host call below
+/// and Cranelift's default convention agree on.
+pub const MAX_WORD_FUNCTION_ARGS: usize = 8;
 /// A JIT-compiled function whose parameters and result are each one
 /// machine word (`in` aggregates are their addresses), for host code that
 /// calls compiled Vesper from several threads at once (source atomics,
@@ -1566,8 +1664,13 @@ impl WordFunction {
     /// an `in` aggregate, and the row must be empty.
     pub fn compile(world: &World, entry: &str, optimize: bool) -> Result<Self, String> {
         let f = world.functions.get(entry).ok_or("unknown entry")?;
-        if !f.effects.instances.is_empty() || f.effects.tail.is_some() || f.params.len() > 3 {
-            return Err("a word function takes at most three words and has no effects".into());
+        if !f.effects.instances.is_empty()
+            || f.effects.tail.is_some()
+            || f.params.len() > MAX_WORD_FUNCTION_ARGS
+        {
+            return Err(format!(
+                "a word function takes at most {MAX_WORD_FUNCTION_ARGS} words and has no effects"
+            ));
         }
         if Layout::of(world, &f.result)?.aggregate() {
             return Err("a word function returns one word".into());
@@ -1648,6 +1751,26 @@ impl WordFunction {
                 [a, b, c] => std::mem::transmute::<*const u8, extern "C" fn(u64, u64, u64) -> u64>(
                     code,
                 )(a, b, c),
+                [a, b, c, d] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d),
+                [a, b, c, d, e] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d, e),
+                [a, b, c, d, e, g] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d, e, g),
+                [a, b, c, d, e, g, h] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d, e, g, h),
+                [a, b, c, d, e, g, h, i] => std::mem::transmute::<
+                    *const u8,
+                    extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64) -> u64,
+                >(code)(a, b, c, d, e, g, h, i),
                 _ => unreachable!("arity checked at compile"),
             })
         }
@@ -2246,6 +2369,10 @@ struct Codegen<'a, 'b, M: Module> {
     local_types: BTreeMap<String, Type>,
     generic_vars: BTreeMap<String, Type>,
     pointers: BTreeMap<u32, Variable>,
+    /// Variables bound to an element view (§13) of a `u8`, `bool` or `u32`
+    /// element: every read loads the element and every write stores it, at
+    /// its width (the element's address variable and its type).
+    narrow_homes: BTreeMap<u32, (Variable, Type)>,
     handlers: Vec<Handler>,
     /// The graphs being emitted, innermost last: the targets of `return`
     /// ([`crate::ir::Op::Exit`]) by lowered function or closure name.
@@ -2316,6 +2443,10 @@ struct Codegen<'a, 'b, M: Module> {
     /// The slot an optimized out-of-bounds `try_set` writes instead of the
     /// sequence (#1151), created by the first such store.
     discard_slot: Option<ir::StackSlot>,
+    /// Element views (§13) of elements stored in fewer than 8 bytes, lent
+    /// through a word of scratch: (scratch, element address, element type),
+    /// written back when the call or place primitive that borrows them ends.
+    element_writebacks: Vec<(ir::Value, ir::Value, Type)>,
 }
 /// The Cranelift source location of source byte `offset`. Locations are
 /// byte offsets into the checked module's source; the all-ones value is
@@ -2402,6 +2533,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             .or_default()
             .merge(&info);
         self.b.def_var(variable, value);
+        if let Some((address, elem)) = self.narrow_homes.get(&variable.as_u32()).cloned() {
+            let pointer = self.b.use_var(address);
+            // The element is stored at its width; a failure here is a type
+            // the view's binding already accepted.
+            let _ = self.seq_store_elem(pointer, value, &elem);
+        }
         if let Some(address) = self.pointers.get(&variable.as_u32()).copied() {
             let pointer = self.b.use_var(address);
             self.b.ins().store(ir::MemFlags::new(), value, pointer, 0);
@@ -2409,6 +2546,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
     }
     fn use_var(&mut self, variable: Variable) -> ir::Value {
+        if let Some((address, elem)) = self.narrow_homes.get(&variable.as_u32()).cloned() {
+            let pointer = self.b.use_var(address);
+            if let Ok(value) = self.seq_load_elem(pointer, &elem) {
+                return value;
+            }
+        }
         let mut value = self.b.use_var(variable);
         if let Some(address) = self.pointers.get(&variable.as_u32()).copied() {
             let pointer = self.b.use_var(address);
@@ -2552,10 +2695,31 @@ impl<M: Module> Codegen<'_, '_, M> {
             free.remove(&p.name);
         }
         let mut captures = vec![];
+        // A lent closure (§4.2) borrows its aggregate captures for the
+        // call: the slot keeps the caller's address, not a copy.
+        let lent = self
+            .world
+            .lent_closures
+            .get(&crate::ir::nested_name("closure", &body.span))
+            .cloned()
+            .unwrap_or_default();
         for name in free {
             if let Some(var) = self.vars.get(&name).copied() {
                 let ty = self.local_types[&name].clone();
                 let layout = Layout::of(self.world, &ty)?;
+                if lent.contains(&name) && layout.aggregate() {
+                    let pointer_type = self.m.target_config().pointer_type();
+                    let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+                        ir::StackSlotKind::ExplicitSlot,
+                        pointer_type.bytes(),
+                        3,
+                    ));
+                    let pointer = self.b.ins().stack_addr(pointer_type, slot, 0);
+                    let value = self.use_var(var);
+                    self.b.ins().store(ir::MemFlags::new(), value, pointer, 0);
+                    captures.push((name, ty, slot, self.info(value)));
+                    continue;
+                }
                 let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
                     ir::StackSlotKind::ExplicitSlot,
                     layout.size,
@@ -2695,6 +2859,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         let generic_scope = self.generic_vars.clone();
         let caps_scope = self.capabilities.clone();
         let mut branches = 0;
+        // A tag known to name one closure needs no test (a lent closure,
+        // §4.2, is always called this way).
+        let single = !targets.is_empty()
+            && descriptors
+                .iter()
+                .enumerate()
+                .filter(|(index, c)| {
+                    targets.contains(&(index + 1)) && Self::callable_shape(&c.ty, ty)
+                })
+                .count()
+                == 1;
         for (index, closure) in descriptors.into_iter().enumerate() {
             if !targets.is_empty() && !targets.contains(&(index + 1)) {
                 continue;
@@ -2704,8 +2879,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             let yes = self.b.create_block();
             let no = self.b.create_block();
-            let condition = self.b.ins().icmp_imm(IntCC::Equal, tag, (index + 1) as i64);
-            self.branch(condition, yes, &[], no, &[]);
+            if single {
+                self.jump(yes, &[]);
+            } else {
+                let condition = self.b.ins().icmp_imm(IntCC::Equal, tag, (index + 1) as i64);
+                self.branch(condition, yes, &[], no, &[]);
+            }
             self.b.switch_to_block(yes);
             self.inline_depth += 1;
             let value = match &closure.target {
@@ -2839,6 +3018,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     ) -> Result<ir::Value, String> {
         let mut actuals = vec![];
         let mut restores = vec![];
+        let writebacks = self.element_writebacks.len();
         for (arg, param) in args.iter().zip(params) {
             let value = if param.pass == Pass::Inout {
                 let ptr = self.address(&arg.expr)?;
@@ -2859,20 +3039,29 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut caps = self.capabilities.clone();
         caps.extend(closure.capabilities.clone());
         self.capabilities = caps;
+        let lent = self
+            .world
+            .lent_closures
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
         for (name, ty, slot, info) in &closure.captures {
-            let ptr = self
-                .b
-                .ins()
-                .stack_addr(self.m.target_config().pointer_type(), *slot, 0);
+            let pointer_type = self.m.target_config().pointer_type();
+            let ptr = self.b.ins().stack_addr(pointer_type, *slot, 0);
             self.write_info(ptr, info.clone());
-            let value = self.load(ptr, ty)?;
             let layout = Layout::of(self.world, ty)?;
-            let value = if layout.aggregate() {
+            let value = if lent.contains(name) && layout.aggregate() {
+                // Borrowed in place (`closure_tag`): read-only, no copy.
+                let value = self.b.ins().load(pointer_type, ir::MemFlags::new(), ptr, 0);
+                self.write_info(value, info.clone());
+                value
+            } else if layout.aggregate() {
+                let value = self.load(ptr, ty)?;
                 let copy = self.alloc(layout.size);
                 self.copy_bytes(value, copy, layout.size);
                 copy
             } else {
-                value
+                self.load(ptr, ty)?
             };
             let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
             self.def_var(variable, value);
@@ -2923,6 +3112,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             let value = self.load(ptr, &ty)?;
             self.def_var(variable, value);
         }
+        self.seq_element_writeback(writebacks)?;
         Ok(result)
     }
     fn zero(&mut self) -> ir::Value {
@@ -3543,7 +3733,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             self.function_tag(root, &ty)?
                         } else if (*pass != Pass::Sink || split_sources.contains_key(&inst.dest))
                             && (Layout::of(self.world, &ty)?.aggregate()
-                                || matches!(ty, Type::Function { .. }))
+                                // A function value lent `in` is its tag,
+                                // as the callee reads it (§4.2).
+                                || (*pass == Pass::Inout && matches!(ty, Type::Function { .. })))
                         {
                             self.address(&e)?
                         } else {
@@ -3574,6 +3766,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         ));
                         let mut slot_index = 0;
                         if !self.seq_fused_bind(inst.dest, pattern, *value)? {
+                            self.seq_unfused_view(f, *value)?;
                             let bound = self.seq_drop_rebind(pattern, values[value])?;
                             self.borrowed_bind = borrowed_scrutinees.contains(value);
                             self.bind_ir(inst.dest, &mut slot_index, false, pattern, bound, &t)?;
@@ -3741,6 +3934,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 // A slice view argument is a value, not a place,
                                 // and so is a boxed object lent from a
                                 // sequence element (§7.3).
+                                if let Some(element) =
+                                    self.element_view_arg(f, a, &values, &inst.span)?
+                                {
+                                    return Ok(Arg {
+                                        pass: a.pass,
+                                        explicit: true,
+                                        expr: element,
+                                    });
+                                }
                                 let view = a.place.is_none()
                                     && f.values.get(&a.value).is_some_and(|t| {
                                         crate::seq::is_slice_type(t)
@@ -3791,6 +3993,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let es = args
                             .iter()
                             .map(|a| {
+                                if let Some(element) =
+                                    self.element_view_arg(f, a, &values, &inst.span)?
+                                {
+                                    return Ok(Arg {
+                                        pass: a.pass,
+                                        explicit: true,
+                                        expr: element,
+                                    });
+                                }
                                 let expr = if a.pass == Pass::Inout {
                                     ir_place_expr(
                                         a.place
@@ -3869,22 +4080,32 @@ impl<M: Module> Codegen<'_, '_, M> {
                         ));
                         // A hoisted read is in bounds by its loop's guard.
                         let checked = !matches!(op, crate::seq::SeqOp::Hoisted(_));
-                        self.seq_fused_try_get(inst.dest, operands, &receiver_type, checked)?
+                        let view = self
+                            .world
+                            .element_views
+                            .contains_key(&(inst.span.start, inst.span.end));
+                        self.seq_fused_try_get(inst.dest, operands, &receiver_type, checked, view)?
                     }
                     Op::Seq { op, args } if op.place_primitive() => {
                         // `swap` and `replace` write their `inout` places.
                         let [a, b] = args.as_slice() else {
                             return Err(format!("native {} needs two operands", op.name()));
                         };
-                        let place = |a: &crate::ir::Argument| {
+                        let place = |this: &mut Self, a: &crate::ir::Argument| {
+                            // An element view (§13) is its element's place.
+                            if let Some(element) =
+                                this.element_view_arg(f, a, &values, &inst.span)?
+                            {
+                                return Ok(element);
+                            }
                             a.place
                                 .as_ref()
                                 .map(|p| ir_place_expr(p, inst.span.clone()))
                                 .ok_or_else(|| format!("native {} lacks a place", op.name()))
                         };
-                        let first = place(a)?;
+                        let first = place(self, a)?;
                         let second = if *op == crate::seq::SeqOp::Swap {
-                            place(b)?
+                            place(self, b)?
                         } else {
                             self.ir_temp(b.value, &values, &f.values)?
                         };
@@ -4358,6 +4579,23 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Ok(ptr);
         }
         match &e.kind {
+            ExprKind::Name(n)
+                if self
+                    .vars
+                    .get(n)
+                    .is_some_and(|v| self.narrow_homes.contains_key(&v.as_u32())) =>
+            {
+                // A narrow element view is lent as a word of scratch and
+                // written back when the borrowing call ends.
+                let var = self.vars[n];
+                let (address, elem) = self.narrow_homes[&var.as_u32()].clone();
+                let value = self.use_var(var);
+                let scratch = self.alloc_uninit(8);
+                self.b.ins().store(ir::MemFlags::new(), value, scratch, 0);
+                let pointer = self.b.use_var(address);
+                self.element_writebacks.push((scratch, pointer, elem));
+                Ok(scratch)
+            }
             ExprKind::Name(n) => {
                 let var = *self.vars.get(n).ok_or("unknown native place")?;
                 let t = self.local_types.get(n).ok_or("native place lacks type")?;
@@ -4393,6 +4631,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 })?;
                 let ptr = self.address(base)?;
                 Ok(self.offset(ptr, f.offset))
+            }
+            // An element view (§13): the element's address in its buffer.
+            ExprKind::Index(base, index) if crate::seq::interval(e).is_none() => {
+                self.seq_element_address(base, index)
             }
             _ => Err("native mutable argument requires a place".into()),
         }
@@ -6410,6 +6652,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let result_layout = Layout::of(self.world, &f.result)?;
         let mut values = vec![];
         let mut restores = vec![];
+        let writebacks = self.element_writebacks.len();
         let mut sink_blocks = vec![];
         let declared = self.world.functions[name].params.clone();
         for ((arg, param), declared) in args.iter().zip(&f.params).zip(&declared) {
@@ -6632,6 +6875,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.in_fip_fn = fip_scope;
             self.capabilities = capability_scope;
             let result = result?;
+            self.seq_element_writeback(writebacks)?;
             for lent in self.sink_blocks.split_off(lent) {
                 self.free_sink_block(lent)?;
             }
@@ -6763,6 +7007,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             if pass_trace {
                 self.check_trace_failed();
             }
+            // Narrow element views lent through scratch (§13) keep the
+            // callee's writes even when it raises: write them back before
+            // the status can transfer control to a handler.
+            self.seq_element_writeback(writebacks)?;
             if let Some(record) = record {
                 if status_call {
                     let status = self.b.inst_results(call)[1];
@@ -7111,6 +7359,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut values = vec![];
         let mut refs = vec![];
         let mut restores = vec![];
+        let writebacks = self.element_writebacks.len();
         for (arg, param) in args.iter().zip(&signature.params) {
             let value = self.expr(&arg.expr)?;
             values.push(value);
@@ -7140,6 +7389,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .store(ir::MemFlags::new(), value, destination, 0);
             }
         }
+        self.seq_element_writeback(writebacks)?;
         Ok(result)
     }
     fn perform_values(

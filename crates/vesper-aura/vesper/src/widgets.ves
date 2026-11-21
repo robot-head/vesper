@@ -9,10 +9,9 @@ use self::apply::{
     word
 };
 use self::codes::{
-    b_nodes,
-    i_destroy,
-    i_root_parent,
-    none_id
+    Budget,
+    Invalid,
+    NONE_ID
 };
 use self::recording::{
     child_count,
@@ -49,11 +48,11 @@ pub fn patch_set_root(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in
             return foreign();
         }
         let i = widget_index(in s, root);
-        if i == none_id() {
+        if i == NONE_ID {
             return stale_widget();
         }
         if rwidget(in s.widgets, i).has_parent {
-            return invalid(i_root_parent());
+            return invalid(Invalid::RootParent);
         }
     }
     s.has_root = has;
@@ -85,7 +84,7 @@ pub fn patch_create(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in t
         Option::None => (),
     }
     if s.nwidgets >= lim.nodes {
-        return budget(b_nodes());
+        return budget(Budget::Nodes);
     }
     s
         .widgets
@@ -110,7 +109,7 @@ pub fn patch_destroy(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in 
     }
     let serial = word(in w, base, 2);
     let i = widget_index(in s, serial);
-    if i == none_id() {
+    if i == NONE_ID {
         return stale_widget();
     }
     let node = rwidget(in s.widgets, i);
@@ -123,7 +122,7 @@ pub fn patch_destroy(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in 
         != 0
         || widget_sub_count(in s, serial)
         != 0 {
-        return invalid(i_destroy());
+        return invalid(Invalid::Destroy);
     }
     s.wlive.try_set(i, false);
     s.nwidgets = dec(s.nwidgets);

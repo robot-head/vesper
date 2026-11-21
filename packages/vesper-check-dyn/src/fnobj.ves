@@ -1,0 +1,2295 @@
+// `src/dyn_fn.rs` in Vesper: function objects (`dyn Fn(A) -> R eff E`,
+// `dyn FnMut`, `dyn FnOnce`) become hidden one-method traits, and each
+// closure literal written where a function object is expected becomes a
+// hidden struct holding its captures plus a conformance whose `call` body
+// is the closure's body. The pass is syntactic: it runs before type
+// checking and finds expected types from declarations.
+//
+// Generated code gets synthetic spans from `base` on, two apart, each
+// recorded with the source span it stands for (`origins`, `relocate`).
+// The order spans are taken in is Rust's, so the two trees are equal
+// node for node, span for span.
+
+use @vesper/ast::{
+    Lit,
+    ExprNode,
+    StmtNode,
+    ParamNode,
+    FnNode,
+    TraitNode,
+    TraitRefNode,
+    ConfNode,
+    AdtNode,
+    VariantNode,
+    FieldNode,
+    ImplNode,
+    EffectsNode,
+    EffectNode
+};
+use @vesper/check-data::types::{
+    debug_type,
+    debug_row
+};
+use self::core::{
+    D,
+    w,
+    n32,
+    inc,
+    u32_at,
+    u64_at,
+    u8_at,
+    table_get,
+    table_set,
+    contains,
+    ll,
+    la,
+    mk_list,
+    list1,
+    list_words,
+    ex,
+    set_ex,
+    new_ex,
+    exn,
+    pt,
+    new_pat,
+    ty,
+    new_type,
+    named,
+    stmt_at,
+    set_stmt,
+    new_stmt,
+    arg_at,
+    clause_at,
+    param_at,
+    set_param,
+    new_param,
+    effects_at,
+    new_effects,
+    effect_at,
+    new_effect,
+    field_at,
+    set_field,
+    variant_at,
+    adt_at,
+    fn_at,
+    set_fn,
+    effect_decl_at,
+    impl_at,
+    set_impl,
+    trait_at,
+    trait_ref_at,
+    set_trait_ref,
+    conf_at,
+    set_conf,
+    item_at,
+    new_item,
+    intern_buf,
+    buf_sym,
+    buf_decimal,
+    sym_cmp,
+    sort_syms,
+    generic_at,
+    sym_len,
+    sym_byte,
+    sym_ends_with,
+    tid,
+    rid,
+    teq,
+    effect_eq,
+    is_infer,
+    type_name,
+    fn_sig,
+    fn_kind,
+    boxed_fn_sig,
+    any_fn_sig,
+    mentions_fn_object,
+    contains_infer,
+    mentions_any,
+    fn_types,
+    pattern_names,
+    free_names,
+    diag_open,
+    diag_close,
+    dput,
+    dsym,
+    dtype,
+    ddec
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+
+const NONE: u32 = 4294967295;
+
+// ---------------------------------------------------------------- uses_fn_objects
+
+fn fn_mentions(in d: D, f: u32) -> bool {
+    let mut ts = ChunkSeq::new[u32]();
+    fn_types(in d, f, false, inout ts);
+    let n = ts.len() / 3;
+    for i in 0..n {
+        if mentions_fn_object(in d, u32_at(in ts, wrapping_mul(i, 3))) {
+            return true;
+        }
+    }
+    false
+}
+
+fn fns_mention(in d: D, list: u32) -> bool {
+    for i in 0..ll(in d, list) {
+        if fn_mentions(in d, la(in d, list, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+// `dyn_fn::uses_fn_objects`: whether the module writes a function-object
+// type anywhere (`for_each_type`'s positions).
+pub fn uses_fn_objects(in d: D) -> bool {
+    for i in 0..d.ast.m_items.len() {
+        let it = item_at(in d, u32_at(in d.ast.m_items, i));
+        let x = it.node;
+        if it.kind == 1 {
+            let an = adt_at(in d, x);
+            for j in 0..ll(in d, an.variants) {
+                let v = variant_at(in d, la(in d, an.variants, j));
+                for q in 0..ll(in d, v.fields) {
+                    if mentions_fn_object(in d, field_at(in d, la(in d, v.fields, q)).ty) {
+                        return true;
+                    }
+                }
+            }
+        } else if it.kind == 2 {
+            if fn_mentions(in d, x) {
+                return true;
+            }
+        } else if it.kind == 4 {
+            let im = impl_at(in d, x);
+            if mentions_fn_object(in d, im.ty) || fns_mention(in d, im.methods) {
+                return true;
+            }
+        } else if it.kind == 5 {
+            if fns_mention(in d, trait_at(in d, x).methods) {
+                return true;
+            }
+        } else if it.kind == 6 {
+            let c = conf_at(in d, x);
+            if mentions_fn_object(in d, c.self_ty) {
+                return true;
+            }
+            let tr = trait_ref_at(in d, c.trait_ref);
+            for j in 0..ll(in d, tr.args) {
+                if mentions_fn_object(in d, la(in d, tr.args, j)) {
+                    return true;
+                }
+            }
+            if fns_mention(in d, c.methods) {
+                return true;
+            }
+        } else if it.kind == 3 {
+            if fns_mention(in d, effect_decl_at(in d, x).ops) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------- Decls
+
+// Adds method `m` of type `t` (`insert` when `replace`, else
+// `entry().or_insert`).
+fn add_method(inout d: D, t: u32, m: u32, f: u32, replace: bool) {
+    let mut r = table_get(in d.m_head, m);
+    loop {
+        if r == 0 {
+            break;
+        }
+        let i = w(wrapping_sub(r, 1));
+        if u32_at(in d.m_ty, i) == t {
+            if replace {
+                let ok = d.m_fn.try_set(i, f);
+            }
+            return;
+        }
+        r = u32_at(in d.m_next, i);
+    }
+    let row = n32(d.m_ty.len());
+    d.m_ty.push(t);
+    d.m_fn.push(f);
+    d.m_next.push(table_get(in d.m_head, m));
+    table_set(inout d.m_head, m, wrapping_add(row, 1));
+}
+
+// The method `m` of type `t`, or NONE.
+fn method(in d: D, t: u32, m: u32) -> u32 {
+    let mut r = table_get(in d.m_head, m);
+    loop {
+        if r == 0 {
+            return NONE;
+        }
+        let i = w(wrapping_sub(r, 1));
+        if u32_at(in d.m_ty, i) == t {
+            return u32_at(in d.m_fn, i);
+        }
+        r = u32_at(in d.m_next, i);
+    }
+}
+
+// `Decls::of`.
+fn decls(inout d: D) {
+    for i in 0..d.ast.m_items.len() {
+        let it = item_at(in d, u32_at(in d.ast.m_items, i));
+        let x = it.node;
+        if it.kind == 2 {
+            table_set(inout d.fn_by, fn_at(in d, x).name, wrapping_add(x, 1));
+        } else if it.kind == 4 {
+            let im = impl_at(in d, x);
+            let t = tname(in d, im.ty);
+            for j in 0..ll(in d, im.methods) {
+                let f = la(in d, im.methods, j);
+                add_method(inout d, t, fn_at(in d, f).name, f, true);
+            }
+        } else if it.kind == 6 {
+            let c = conf_at(in d, x);
+            let t = tname(in d, c.self_ty);
+            for j in 0..ll(in d, c.methods) {
+                let f = la(in d, c.methods, j);
+                add_method(inout d, t, fn_at(in d, f).name, f, false);
+            }
+        } else if it.kind == 1 {
+            let an = adt_at(in d, x);
+            if an.mode == 2 {
+                if d.linear.len() <= w(an.name) {
+                    d.linear.resize(inc(w(an.name)), 0);
+                }
+                let ok = d.linear.try_set(w(an.name), 1);
+            }
+            if !an.is_enum {
+                table_set(inout d.adt_by, an.name, wrapping_add(x, 1));
+            }
+        }
+    }
+}
+
+// `Type::name` as a symbol: "" for a type that is not Named.
+fn tname(in d: D, t: u32) -> u32 {
+    let n = type_name(in d, t);
+    if n == NONE {
+        d.k.empty
+    } else {
+        n
+    }
+}
+
+fn is_linear(in d: D, name: u32) -> bool {
+    if name == NONE {
+        return false;
+    }
+    u8_at(in d.linear, w(name)) == 1
+}
+
+// The declared type of field `f` of struct `s` (the last of that name),
+// or NONE.
+fn field_type(in d: D, s: u32, f: u32) -> u32 {
+    let a = table_get(in d.adt_by, s);
+    if a == 0 {
+        return NONE;
+    }
+    let an = adt_at(in d, wrapping_sub(a, 1));
+    let mut out = NONE;
+    for i in 0..ll(in d, an.variants) {
+        let v = variant_at(in d, la(in d, an.variants, i));
+        for j in 0..ll(in d, v.fields) {
+            let fd = field_at(in d, la(in d, v.fields, j));
+            if fd.name == f {
+                out = fd.ty;
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------- env
+
+fn env_get(in d: D, n: u32) -> u32 {
+    let mut i = d.env_k.len();
+    loop {
+        if i == 0 {
+            return NONE;
+        }
+        i = wrapping_sub(i, 1);
+        if u32_at(in d.env_k, i) == n {
+            return u32_at(in d.env_t, i);
+        }
+    }
+}
+
+fn env_has(in d: D, n: u32) -> bool {
+    env_get(in d, n) != NONE
+}
+
+fn env_put(inout d: D, n: u32, t: u32) {
+    d.env_k.push(n);
+    d.env_t.push(t);
+}
+
+fn env_mark(in d: D) -> u64 {
+    d.env_k.len()
+}
+
+fn env_restore(inout d: D, m: u64) {
+    d.env_k.truncate(m);
+    d.env_t.truncate(m);
+}
+
+// `bind`: a plain binding at `t`, a tuple element-wise, anything else at
+// an unknown type.
+fn bind(inout d: D, p: u32, t: u32) {
+    let n = pt(in d, p);
+    if n.kind == 2 {
+        env_put(inout d, n.a, t);
+    } else if n.kind == 4 {
+        let tn = ty(in d, t);
+        for i in 0..ll(in d, n.a) {
+            let mut et = d.t_infer;
+            if tn.kind == 2 && i < ll(in d, tn.a) {
+                et = la(in d, tn.a, i);
+            }
+            bind(inout d, la(in d, n.a, i), et);
+        }
+    } else {
+        let mut names = ChunkSeq::new[u32]();
+        pattern_names(in d, p, inout names);
+        for i in 0..names.len() {
+            env_put(inout d, u32_at(in names, i), d.t_infer);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- spans
+
+// `Lowering::span`: the next synthetic span (s..s+1), recorded with the
+// current origin.
+fn span(inout d: D) -> u32 {
+    let s = d.next_span;
+    d.next_span = wrapping_add(s, 2);
+    d.origins.push(s);
+    d.origins.push(w(d.o_start));
+    d.origins.push(w(d.o_end));
+    n32(s)
+}
+
+fn mk_expr(inout d: D, kind: u8, a: u32, b: u32) -> u32 {
+    let s = span(inout d);
+    new_ex(inout d, exn(kind, s, inc32(s), a, b, NONE))
+}
+
+fn inc32(x: u32) -> u32 {
+    wrapping_add(x, 1)
+}
+
+fn set_origin(inout d: D, start: u32, end: u32) {
+    d.o_start = start;
+    d.o_end = end;
+}
+
+// ---------------------------------------------------------------- hidden traits
+
+fn put_pass(inout o: ChunkSeq[u8], p: u32) {
+    if p == 0 {
+        o.extend(in "In".as_bytes());
+    } else if p == 1 {
+        o.extend(in "Inout".as_bytes());
+    } else {
+        o.extend(in "Sink".as_bytes());
+    }
+}
+
+fn hex_char(v: u64) -> u32 {
+    if v < 10 {
+        wrapping_u32(wrapping_add(v, 48))
+    } else {
+        wrapping_u32(wrapping_add(v, 87))
+    }
+}
+
+fn pass_of(kind: u32, in d: D) -> u8 {
+    if kind == d.k.fn_ {
+        0
+    } else if kind == d.k.fn_mut {
+        1
+    } else {
+        2
+    }
+}
+
+// `hidden_trait`: the hidden trait of function-object `kind` and signature
+// `sig` (a Function type), created on first use. Its name hashes the Rust
+// `Debug` text of the signature's parameters, result and effects.
+fn hidden_trait(inout d: D, kind: u32, sig: u32) -> u32 {
+    let sn = ty(in d, sig);
+    let mut key = ChunkSeq::new[u8]();
+    let ok = put_kind(inout d, kind, inout key);
+    key.push(124);
+    key.push(91);
+    let np = ll(in d, sn.a) / 2;
+    for i in 0..np {
+        if i > 0 {
+            key.extend(in ", ".as_bytes());
+        }
+        key.push(40);
+        put_pass(inout key, la(in d, sn.a, wrapping_mul(i, 2)));
+        key.extend(in ", ".as_bytes());
+        let t = tid(inout d, la(in d, sn.a, inc(wrapping_mul(i, 2))));
+        debug_type(in d.types, in d.names, t, inout key);
+        key.push(41);
+    }
+    key.push(93);
+    key.push(124);
+    let r = tid(inout d, sn.b);
+    debug_type(in d.types, in d.names, r, inout key);
+    key.push(124);
+    let row = rid(inout d, sn.c);
+    debug_row(in d.types, in d.names, row, inout key);
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..key.len() {
+        h = wrapping_mul(h ^ widen_u64(u8_at(in key, i)), 1099511628211);
+    }
+    d.buf.clear();
+    d.buf.push_str(in "__FnObject");
+    buf_sym(inout d, kind);
+    d.buf.push_str(in "_");
+    let mut k: u64 = 16;
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+        d.buf.push_char(hex_char(wrapping_shr_u64(h, wrapping_u32(wrapping_mul(k, 4))) & 15));
+    }
+    let name = intern_buf(inout d);
+    if contains(in d.tr_names, name) {
+        return name;
+    }
+    let receiver = pass_of(kind, in d);
+    let mut ps = ChunkSeq::new[u32]();
+    let sp = new_param(
+        inout d,
+        ParamNode {
+            name: d.k.self_,
+            pass: receiver,
+            projections: 0,
+            ty: d.t_infer,
+            start: 0,
+            end: 0
+        }
+    );
+    ps.push(sp);
+    for i in 0..np {
+        d.buf.clear();
+        d.buf.push_str(in "a");
+        buf_decimal(inout d, i);
+        let an = intern_buf(inout d);
+        let p = new_param(
+            inout d,
+            ParamNode {
+                name: an,
+                pass: wrapping_u8(la(in d, sn.a, wrapping_mul(i, 2))),
+                projections: 0,
+                ty: la(in d, sn.a, inc(wrapping_mul(i, 2))),
+                start: 0,
+                end: 0
+            }
+        );
+        ps.push(p);
+    }
+    let pl = mk_list(inout d, in ps);
+    let f = d
+        .ast
+        .fns
+        .alloc(
+        FnNode {
+            name: d.k.call,
+            fip: false,
+            generics: 0,
+            params: pl,
+            result: sn.b,
+            effects: sn.c,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    )
+        .raw();
+    let ml = list1(inout d, f);
+    let t = d
+        .ast
+        .traits
+        .alloc(
+        TraitNode {
+            name: name,
+            public: false,
+            generics: 0,
+            assoc: 0,
+            methods: ml,
+            start: 0,
+            end: 0
+        }
+    )
+        .raw();
+    d.tr_names.push(name);
+    d.tr_nodes.push(t);
+    name
+}
+
+fn put_kind(inout d: D, kind: u32, inout o: ChunkSeq[u8]) -> bool {
+    let (x, y) = d.ast.names.span(symbol_from_id(kind));
+    for i in x..y {
+        match d.ast.names.text_byte(i) {
+            Option::Some(c) => o.push(c),
+            Option::None => {},
+        }
+    }
+    true
+}
+
+// `erase`: every function-object type in `t` replaced by its hidden
+// trait's object type; returns `t` itself when nothing changes.
+fn erase(inout d: D, t: u32) -> u32 {
+    let sig = fn_sig(in d, t);
+    if sig != NONE {
+        let kind = fn_kind(in d, t);
+        let es = erase_sig(inout d, sig);
+        let name = hidden_trait(inout d, kind, es);
+        let inner = named(inout d, name, 0);
+        let args = list1(inout d, inner);
+        return named(inout d, d.k.dyn_, args);
+    }
+    let n = ty(in d, t);
+    if n.kind == 1 || n.kind == 2 {
+        let list = if n.kind == 1 {
+            n.b
+        } else {
+            n.a
+        };
+        let len = ll(in d, list);
+        let mut words = ChunkSeq::with_capacity[u32](len);
+        let mut changed = false;
+        for i in 0..len {
+            let x = la(in d, list, i);
+            let y = erase(inout d, x);
+            if y != x {
+                changed = true;
+            }
+            words.push(y);
+        }
+        if !changed {
+            return t;
+        }
+        let nl = mk_list(inout d, in words);
+        if n.kind == 1 {
+            return new_type(inout d, 1, n.a, nl, 0, 0);
+        }
+        return new_type(inout d, 2, nl, 0, 0, 0);
+    }
+    if n.kind == 3 {
+        return erase_sig(inout d, t);
+    }
+    t
+}
+
+// A Function type with its parameters and result erased (not its effects).
+fn erase_sig(inout d: D, t: u32) -> u32 {
+    let n = ty(in d, t);
+    let len = ll(in d, n.a);
+    let mut words = ChunkSeq::with_capacity[u32](len);
+    let mut changed = false;
+    for i in 0..len {
+        let x = la(in d, n.a, i);
+        if i % 2 == 1 {
+            let y = erase(inout d, x);
+            if y != x {
+                changed = true;
+            }
+            words.push(y);
+        } else {
+            words.push(x);
+        }
+    }
+    let r = erase(inout d, n.b);
+    if !changed && r == n.b {
+        return t;
+    }
+    let nl = if changed {
+        mk_list(inout d, in words)
+    } else {
+        n.a
+    };
+    new_type(inout d, 3, nl, r, n.c, n.d)
+}
+
+fn erase_list(inout d: D, list: u32) -> u32 {
+    let len = ll(in d, list);
+    let mut words = ChunkSeq::with_capacity[u32](len);
+    let mut changed = false;
+    for i in 0..len {
+        let x = la(in d, list, i);
+        let y = erase(inout d, x);
+        if y != x {
+            changed = true;
+        }
+        words.push(y);
+    }
+    if changed {
+        mk_list(inout d, in words)
+    } else {
+        list
+    }
+}
+
+fn erase_effect(inout d: D, e: u32) -> u32 {
+    let x = effect_at(in d, e);
+    let a = erase_list(inout d, x.args);
+    if a == x.args {
+        e
+    } else {
+        new_effect(inout d, x.label, x.name, a)
+    }
+}
+
+fn erase_effects(inout d: D, e: u32) -> u32 {
+    let en = effects_at(in d, e);
+    let len = ll(in d, en.instances);
+    let mut words = ChunkSeq::with_capacity[u32](len);
+    let mut changed = false;
+    for i in 0..len {
+        let x = la(in d, en.instances, i);
+        let y = erase_effect(inout d, x);
+        if y != x {
+            changed = true;
+        }
+        words.push(y);
+    }
+    if !changed {
+        return e;
+    }
+    let nl = mk_list(inout d, in words);
+    new_effects(inout d, nl, en.tail)
+}
+
+fn erase_param(inout d: D, p: u32) {
+    let pn = param_at(in d, p);
+    let t = erase(inout d, pn.ty);
+    if t != pn.ty {
+        set_param(
+            inout d,
+            p,
+            ParamNode {
+                name: pn.name,
+                pass: pn.pass,
+                projections: pn.projections,
+                ty: t,
+                start: pn.start,
+                end: pn.end
+            }
+        );
+    }
+}
+
+// `walk_function` with `erase` at every type position.
+fn erase_fn(inout d: D, f: u32) {
+    let fnode = fn_at(in d, f);
+    for i in 0..ll(in d, fnode.params) {
+        erase_param(inout d, la(in d, fnode.params, i));
+    }
+    let r = erase(inout d, fnode.result);
+    let e = erase_effects(inout d, fnode.effects);
+    if r != fnode.result || e != fnode.effects {
+        let cur = fn_at(in d, f);
+        set_fn(
+            inout d,
+            f,
+            FnNode {
+                name: cur.name,
+                fip: cur.fip,
+                generics: cur.generics,
+                params: cur.params,
+                result: r,
+                effects: e,
+                body: cur.body,
+                start: cur.start,
+                end: cur.end
+            }
+        );
+    }
+    if fnode.body != NONE {
+        erase_expr(inout d, fnode.body);
+    }
+}
+
+fn erase_fns(inout d: D, list: u32) {
+    for i in 0..ll(in d, list) {
+        erase_fn(inout d, la(in d, list, i));
+    }
+}
+
+fn erase_opt(inout d: D, e: u32) {
+    if e != NONE {
+        erase_expr(inout d, e);
+    }
+}
+
+fn erase_expr(inout d: D, e: u32) {
+    let n = ex(in d, e);
+    let k = n.kind;
+    if k == 3 {
+        for i in 0..ll(in d, n.a) {
+            erase_expr(inout d, la(in d, n.a, i));
+        }
+    } else if k == 4 {
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            erase_expr(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))));
+        }
+    } else if k == 5 {
+        for i in 0..ll(in d, n.a) {
+            let si = la(in d, n.a, i);
+            let s = stmt_at(in d, si);
+            if s.kind == 1 {
+                let t = erase(inout d, s.ty);
+                if t != s.ty {
+                    set_stmt(
+                        inout d,
+                        si,
+                        StmtNode {
+                            kind: s.kind,
+                            pat: s.pat,
+                            ty: t,
+                            value: s.value,
+                            mutable: s.mutable
+                        }
+                    );
+                }
+            }
+            erase_expr(inout d, s.value);
+        }
+        erase_opt(inout d, n.b);
+    } else if k == 6 {
+        erase_expr(inout d, n.a);
+        let tl = erase_list(inout d, n.b);
+        if tl != n.b {
+            let cur = ex(in d, e);
+            set_ex(inout d, e, exn(cur.kind, cur.start, cur.end, cur.a, tl, cur.c));
+        }
+        for i in 0..ll(in d, n.c) {
+            erase_expr(inout d, arg_at(in d, la(in d, n.c, i)).expr);
+        }
+    } else if k == 7 || k == 9 {
+        erase_expr(inout d, n.a);
+    } else if k == 10 {
+        erase_expr(inout d, n.b);
+    } else if k == 8 {
+        erase_expr(inout d, n.a);
+        erase_expr(inout d, n.b);
+    } else if k == 11 || k == 12 {
+        erase_expr(inout d, n.b);
+        erase_expr(inout d, n.c);
+    } else if k == 13 {
+        erase_expr(inout d, n.a);
+        erase_expr(inout d, n.b);
+        erase_opt(inout d, n.c);
+    } else if k == 14 {
+        erase_expr(inout d, n.a);
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            erase_expr(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))));
+        }
+    } else if k == 17 {
+        erase_expr(inout d, n.a);
+    } else if k == 18 {
+        erase_expr(inout d, n.b);
+        erase_expr(inout d, n.c);
+    } else if k == 19 {
+        erase_expr(inout d, n.a);
+        erase_expr(inout d, n.b);
+    } else if k == 20 || k == 21 {
+        erase_opt(inout d, n.a);
+    } else if k == 15 {
+        for i in 0..ll(in d, n.a) {
+            erase_param(inout d, la(in d, n.a, i));
+        }
+        let r = erase(inout d, n.c);
+        let ef = erase_effects(inout d, n.d);
+        if r != n.c || ef != n.d {
+            let cur = ex(in d, e);
+            set_ex(
+                inout d,
+                e,
+                ExprNode {
+                    kind: cur.kind,
+                    start: cur.start,
+                    end: cur.end,
+                    a: cur.a,
+                    b: cur.b,
+                    c: r,
+                    d: ef,
+                    e: cur.e
+                }
+            );
+        }
+        erase_expr(inout d, n.e);
+    } else if k == 16 {
+        let ef = erase_effect(inout d, n.a);
+        if ef != n.a {
+            let cur = ex(in d, e);
+            set_ex(
+                inout d,
+                e,
+                ExprNode {
+                    kind: cur.kind,
+                    start: cur.start,
+                    end: cur.end,
+                    a: ef,
+                    b: cur.b,
+                    c: cur.c,
+                    d: cur.d,
+                    e: cur.e
+                }
+            );
+        }
+        if n.b != NONE {
+            erase_expr(inout d, n.c);
+        }
+        erase_expr(inout d, n.d);
+        for i in 0..ll(in d, n.e) {
+            erase_expr(inout d, clause_at(in d, la(in d, n.e, i)).body);
+        }
+    }
+}
+
+// `for_each_type(module, erase)`.
+fn erase_module(inout d: D) {
+    for i in 0..d.ast.m_items.len() {
+        let it = item_at(in d, u32_at(in d.ast.m_items, i));
+        let x = it.node;
+        if it.kind == 1 {
+            let an = adt_at(in d, x);
+            for j in 0..ll(in d, an.variants) {
+                let v = variant_at(in d, la(in d, an.variants, j));
+                for q in 0..ll(in d, v.fields) {
+                    let fi = la(in d, v.fields, q);
+                    let f = field_at(in d, fi);
+                    let t = erase(inout d, f.ty);
+                    if t != f.ty {
+                        set_field(
+                            inout d,
+                            fi,
+                            FieldNode {
+                                name: f.name,
+                                ty: t,
+                                modality: f.modality,
+                                temperature: f.temperature
+                            }
+                        );
+                    }
+                }
+            }
+        } else if it.kind == 2 {
+            erase_fn(inout d, x);
+        } else if it.kind == 4 {
+            let im = impl_at(in d, x);
+            let t = erase(inout d, im.ty);
+            if t != im.ty {
+                set_impl(
+                    inout d,
+                    x,
+                    ImplNode {
+                        ty: t,
+                        generics: im.generics,
+                        methods: im.methods
+                    }
+                );
+            }
+            erase_fns(inout d, im.methods);
+        } else if it.kind == 5 {
+            erase_fns(inout d, trait_at(in d, x).methods);
+        } else if it.kind == 6 {
+            let c = conf_at(in d, x);
+            let st = erase(inout d, c.self_ty);
+            if st != c.self_ty {
+                let cur = conf_at(in d, x);
+                set_conf(
+                    inout d,
+                    x,
+                    ConfNode {
+                        model: cur.model,
+                        public: cur.public,
+                        generics: cur.generics,
+                        trait_ref: cur.trait_ref,
+                        self_ty: st,
+                        wheres: cur.wheres,
+                        assoc: cur.assoc,
+                        methods: cur.methods,
+                        start: cur.start,
+                        end: cur.end
+                    }
+                );
+            }
+            let tr = trait_ref_at(in d, c.trait_ref);
+            let al = erase_list(inout d, tr.args);
+            if al != tr.args {
+                set_trait_ref(
+                    inout d,
+                    c.trait_ref,
+                    TraitRefNode {
+                        package: tr.package,
+                        name: tr.name,
+                        args: al,
+                        start: tr.start,
+                        end: tr.end
+                    }
+                );
+            }
+            erase_fns(inout d, c.methods);
+        } else if it.kind == 3 {
+            erase_fns(inout d, effect_decl_at(in d, x).ops);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- syntactic types
+
+// `type_of`: the syntactic type of `e`, when the pass can tell it, else
+// NONE.
+fn type_of(in d: D, e: u32) -> u32 {
+    let n = ex(in d, e);
+    if n.kind == 2 {
+        return env_get(in d, n.a);
+    }
+    if n.kind == 7 {
+        let t = type_of(in d, n.a);
+        if t == NONE {
+            return NONE;
+        }
+        return field_type(in d, type_name(in d, t), n.b);
+    }
+    if n.kind == 8 {
+        let t = type_of(in d, n.a);
+        if t == NONE {
+            return NONE;
+        }
+        let tn = ty(in d, t);
+        if tn.kind == 1 && ll(in d, tn.b) == 1 {
+            return la(in d, tn.b, 0);
+        }
+        return NONE;
+    }
+    NONE
+}
+
+// `n.trim_end_matches("::new")` as a symbol.
+fn trim_new(inout d: D, n: u32) -> u32 {
+    let mut len = sym_len(in d.ast, n);
+    loop {
+        if len < 5 {
+            break;
+        }
+        let at = wrapping_sub(len, 5);
+        if sym_byte(in d.ast, n, at)
+            == 58
+            && sym_byte(in d.ast, n, inc(at))
+            == 58
+            && sym_byte(in d.ast, n, wrapping_add(at, 2))
+            == 110
+            && sym_byte(in d.ast, n, wrapping_add(at, 3))
+            == 101
+            && sym_byte(in d.ast, n, wrapping_add(at, 4))
+            == 119 {
+            len = at;
+        } else {
+            break;
+        }
+    }
+    d.buf.clear();
+    for i in 0..len {
+        d.buf.push_char(widen_u32(sym_byte(in d.ast, n, i)));
+    }
+    intern_buf(inout d)
+}
+
+// `infer`: the type a `let` without an annotation binds, when evident
+// (`Type::Infer` otherwise).
+fn infer(inout d: D, e: u32) -> u32 {
+    let n = ex(in d, e);
+    if n.kind == 1 {
+        let lit = d
+            .ast
+            .lits
+            .get_or(
+            idx_from_raw[Lit](n.a),
+            Lit {
+                kind: 0,
+                neg: false,
+                bits: 0
+            }
+        );
+        if lit.kind == 1 {
+            return d.t_i64;
+        }
+        if lit.kind == 3 {
+            return d.t_bool;
+        }
+        if lit.kind == 2 {
+            return d.t_f64;
+        }
+        return d.t_string;
+    }
+    if n.kind == 4 {
+        if table_get(in d.adt_by, n.a) != 0 {
+            return named(inout d, n.a, 0);
+        }
+        return d.t_infer;
+    }
+    if n.kind == 6 {
+        let c = ex(in d, n.a);
+        if c.kind != 2 {
+            return d.t_infer;
+        }
+        let name = c.a;
+        let nt = ll(in d, n.b);
+        if name == d.k.box_new && nt == 1 {
+            return named(inout d, d.k.box_, n.b);
+        }
+        if nt == 1 && sym_ends_with(in d.ast, name, in "::new") {
+            let head = trim_new(inout d, name);
+            return named(inout d, head, n.b);
+        }
+        if !env_has(in d, name) {
+            let f = table_get(in d.fn_by, name);
+            if f != 0 {
+                let fnode = fn_at(in d, wrapping_sub(f, 1));
+                if ll(in d, fnode.generics) == 0 {
+                    return fnode.result;
+                }
+            }
+        }
+        return d.t_infer;
+    }
+    let t = type_of(in d, e);
+    if t == NONE {
+        d.t_infer
+    } else {
+        t
+    }
+}
+
+// The parameter types of function `f`, from parameter `skip` on.
+fn param_types(in d: D, f: u32, skip: u64, inout out: ChunkSeq[u32]) {
+    let fnode = fn_at(in d, f);
+    for i in skip..ll(in d, fnode.params) {
+        out.push(param_at(in d, la(in d, fnode.params, i)).ty);
+    }
+}
+
+// The function-object shape of method `f`'s parameters: each parameter's
+// type id when it is a function object, else NONE.
+fn shape(inout d: D, f: u32, inout out: ChunkSeq[u32]) {
+    let fnode = fn_at(in d, f);
+    for i in 0..ll(in d, fnode.params) {
+        let t = param_at(in d, la(in d, fnode.params, i)).ty;
+        if any_fn_sig(in d, t) != NONE {
+            let id = tid(inout d, t);
+            out.push(id);
+        } else {
+            out.push(NONE);
+        }
+    }
+}
+
+fn same_words(in a: ChunkSeq[u32], in b: ChunkSeq[u32]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if u32_at(in a, i) != u32_at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The symbol of `d.buf` if it is interned, else NONE (a name never written
+// is no declaration's).
+fn lookup_buf(in d: D) -> u32 {
+    match d.ast.names.lookup(in d.buf) {
+        Option::Some(s) => s.id(),
+        Option::None => NONE,
+    }
+}
+
+// `callee_params`: the declared parameter types of the call `callee(..)`,
+// aligned with its arguments, into `out`; false when unknown.
+fn callee_params(inout d: D, callee: u32, inout out: ChunkSeq[u32]) -> bool {
+    let c = ex(in d, callee);
+    if c.kind == 2 {
+        if env_has(in d, c.a) {
+            return false;
+        }
+        let f = table_get(in d.fn_by, c.a);
+        if f != 0 {
+            param_types(in d, wrapping_sub(f, 1), 0, inout out);
+            return true;
+        }
+        // `n.rsplit_once("::")`.
+        let len = sym_len(in d.ast, c.a);
+        let mut cut = NONE;
+        let mut i = len;
+        loop {
+            if i < 2 {
+                break;
+            }
+            i = wrapping_sub(i, 1);
+            if sym_byte(in d.ast, c.a, i)
+                == 58
+                && sym_byte(in d.ast, c.a, wrapping_sub(i, 1))
+                == 58 {
+                cut = n32(wrapping_sub(i, 1));
+                break;
+            }
+        }
+        if cut == NONE {
+            return false;
+        }
+        d.buf.clear();
+        for j in 0..w(cut) {
+            d.buf.push_char(widen_u32(sym_byte(in d.ast, c.a, j)));
+        }
+        let t = lookup_buf(in d);
+        d.buf.clear();
+        for j in wrapping_add(w(cut), 2)..len {
+            d.buf.push_char(widen_u32(sym_byte(in d.ast, c.a, j)));
+        }
+        let m = lookup_buf(in d);
+        if t == NONE || m == NONE {
+            return false;
+        }
+        let f2 = method(in d, t, m);
+        if f2 == NONE {
+            return false;
+        }
+        param_types(in d, f2, 0, inout out);
+        return true;
+    }
+    if c.kind == 7 {
+        let recv = infer(inout d, c.a);
+        let m = c.b;
+        let mut f = NONE;
+        if !is_infer(in d, recv) {
+            f = method(in d, tname(in d, recv), m);
+            if f == NONE {
+                return false;
+            }
+        } else {
+            // Every candidate must agree on its function-object
+            // parameters, type for type; the first is the smallest type
+            // name (BTreeMap order).
+            let mut r = table_get(in d.m_head, m);
+            let mut first = NONE;
+            let mut first_ty = NONE;
+            loop {
+                if r == 0 {
+                    break;
+                }
+                let i = w(wrapping_sub(r, 1));
+                let t = u32_at(in d.m_ty, i);
+                if first == NONE || sym_cmp(in d.ast, t, first_ty) < 0 {
+                    first = u32_at(in d.m_fn, i);
+                    first_ty = t;
+                }
+                r = u32_at(in d.m_next, i);
+            }
+            if first == NONE {
+                return false;
+            }
+            let mut s0 = ChunkSeq::new[u32]();
+            shape(inout d, first, inout s0);
+            r = table_get(in d.m_head, m);
+            loop {
+                if r == 0 {
+                    break;
+                }
+                let i = w(wrapping_sub(r, 1));
+                let mut s1 = ChunkSeq::new[u32]();
+                shape(inout d, u32_at(in d.m_fn, i), inout s1);
+                if !same_words(in s0, in s1) {
+                    return false;
+                }
+                r = u32_at(in d.m_next, i);
+            }
+            f = first;
+        }
+        param_types(in d, f, 1, inout out);
+        return true;
+    }
+    false
+}
+
+// `trivial`: a literal or a path of names, fields and literal indices.
+fn trivial(in d: D, e: u32) -> bool {
+    let n = ex(in d, e);
+    if n.kind == 1 || n.kind == 2 {
+        return true;
+    }
+    if n.kind == 7 {
+        return trivial(in d, n.a);
+    }
+    if n.kind == 8 {
+        return trivial(in d, n.a) && trivial(in d, n.b);
+    }
+    false
+}
+
+// ---------------------------------------------------------------- lowering
+
+// `Lowering::function`.
+fn function(inout d: D, f: u32, self_ty: u32) {
+    let fnode = fn_at(in d, f);
+    env_restore(inout d, 0);
+    for i in 0..ll(in d, fnode.params) {
+        let p = param_at(in d, la(in d, fnode.params, i));
+        let mut t = p.ty;
+        if self_ty != NONE {
+            let tn = ty(in d, p.ty);
+            if tn.kind == 5 && p.name == d.k.self_ {
+                t = self_ty;
+            } else if tn.kind == 1 && tn.a == d.k.self_ty && ll(in d, tn.b) == 0 {
+                t = self_ty;
+            }
+        }
+        env_put(inout d, p.name, t);
+    }
+    if self_ty != NONE && !env_has(in d, d.k.self_) {
+        env_put(inout d, d.k.self_, self_ty);
+    }
+    d.generics.clear();
+    for i in 0..ll(in d, fnode.generics) {
+        let gn = generic_at(in d, la(in d, fnode.generics, i));
+        d.generics.push(gn.name);
+    }
+    d.result = fnode.result;
+    if fnode.body != NONE {
+        lower(inout d, fnode.body, fnode.result);
+    }
+    env_restore(inout d, 0);
+}
+
+fn lower_opt(inout d: D, e: u32, expected: u32) {
+    if e != NONE {
+        lower(inout d, e, expected);
+    }
+}
+
+// `Lowering::lower`: lowers `e` where a value of `expected` (NONE when
+// unknown) is wanted.
+fn lower(inout d: D, e: u32, expected: u32) {
+    let n = ex(in d, e);
+    if expected != NONE && n.kind == 15 {
+        let sig = fn_sig(in d, expected);
+        if sig != NONE {
+            let kind = fn_kind(in d, expected);
+            coerce(inout d, e, kind, sig);
+            return;
+        }
+    }
+    if n.kind == 6 && ll(in d, n.c) == 1 {
+        let c = ex(in d, n.a);
+        let a0 = arg_at(in d, la(in d, n.c, 0)).expr;
+        if c.kind == 2 && c.a == d.k.box_new && !env_has(in d, c.a) && ex(in d, a0).kind == 15 {
+            let mut object = NONE;
+            if ll(in d, n.b) > 0 {
+                let t0 = la(in d, n.b, 0);
+                if fn_sig(in d, t0) != NONE {
+                    object = t0;
+                }
+            } else if expected != NONE && boxed_fn_sig(in d, expected) != NONE {
+                object = la(in d, ty(in d, expected).b, 0);
+            }
+            if object != NONE {
+                let sig = fn_sig(in d, object);
+                if sig != NONE {
+                    let kind = fn_kind(in d, object);
+                    coerce(inout d, a0, kind, sig);
+                    if ll(in d, n.b) == 0 {
+                        let tl = list1(inout d, object);
+                        let cur = ex(in d, e);
+                        set_ex(inout d, e, exn(cur.kind, cur.start, cur.end, cur.a, tl, cur.c));
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    let k = n.kind;
+    if k == 1 || k == 2 {} else if k == 3 {
+        let en = ty(
+            in d,
+            if expected == NONE {
+                d.t_infer
+            } else {
+                expected
+            }
+        );
+        let len = ll(in d, n.a);
+        let tuple = expected != NONE && en.kind == 2 && ll(in d, en.a) == len;
+        for i in 0..len {
+            let want = if tuple {
+                la(in d, en.a, i)
+            } else {
+                d.t_infer
+            };
+            lower(inout d, la(in d, n.a, i), want);
+        }
+    } else if k == 4 {
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            let f = la(in d, n.b, wrapping_mul(i, 2));
+            let want = field_type(in d, n.a, f);
+            lower(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))), want);
+        }
+    } else if k == 5 {
+        let m = env_mark(in d);
+        for i in 0..ll(in d, n.a) {
+            let s = stmt_at(in d, la(in d, n.a, i));
+            if s.kind == 1 {
+                let want = if is_infer(in d, s.ty) {
+                    NONE
+                } else {
+                    s.ty
+                };
+                lower(inout d, s.value, want);
+                let bound = if want != NONE {
+                    want
+                } else {
+                    infer(inout d, s.value)
+                };
+                bind(inout d, s.pat, bound);
+            } else {
+                lower(inout d, s.value, NONE);
+            }
+        }
+        lower_opt(inout d, n.b, expected);
+        env_restore(inout d, m);
+    } else if k == 6 {
+        call(inout d, e);
+    } else if k == 7 || k == 9 {
+        lower(inout d, n.a, NONE);
+    } else if k == 10 {
+        lower(inout d, n.b, NONE);
+    } else if k == 8 {
+        lower(inout d, n.a, NONE);
+        lower(inout d, n.b, NONE);
+    } else if k == 11 {
+        lower(inout d, n.b, NONE);
+        lower(inout d, n.c, NONE);
+    } else if k == 12 {
+        let t = type_of(in d, n.b);
+        lower(inout d, n.b, NONE);
+        lower(inout d, n.c, t);
+    } else if k == 13 {
+        lower(inout d, n.a, NONE);
+        lower(inout d, n.b, expected);
+        lower_opt(inout d, n.c, expected);
+    } else if k == 14 {
+        lower(inout d, n.a, NONE);
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            let m = env_mark(in d);
+            bind(inout d, la(in d, n.b, wrapping_mul(i, 2)), d.t_infer);
+            lower(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))), expected);
+            env_restore(inout d, m);
+        }
+    } else if k == 15 {
+        let m = env_mark(in d);
+        for i in 0..ll(in d, n.a) {
+            let p = param_at(in d, la(in d, n.a, i));
+            env_put(inout d, p.name, p.ty);
+        }
+        lower(inout d, n.e, NONE);
+        env_restore(inout d, m);
+    } else if k == 16 {
+        if n.b != NONE {
+            lower(inout d, n.c, NONE);
+        }
+        lower(inout d, n.d, NONE);
+        for i in 0..ll(in d, n.e) {
+            let c = clause_at(in d, la(in d, n.e, i));
+            let m = env_mark(in d);
+            for j in 0..ll(in d, c.pats) {
+                bind(inout d, la(in d, c.pats, j), d.t_infer);
+            }
+            lower(inout d, c.body, NONE);
+            env_restore(inout d, m);
+        }
+    } else if k == 18 {
+        lower(inout d, n.b, NONE);
+        let m = env_mark(in d);
+        let t = if ex(in d, n.b).kind == 19 {
+            d.t_i64
+        } else {
+            d.t_infer
+        };
+        bind(inout d, n.a, t);
+        lower(inout d, n.c, NONE);
+        env_restore(inout d, m);
+    } else if k == 21 && n.a != NONE {
+        let r = d.result;
+        lower(inout d, n.a, r);
+    } else if k == 17 {
+        lower(inout d, n.a, NONE);
+    } else if k == 19 {
+        lower(inout d, n.a, NONE);
+        lower(inout d, n.b, NONE);
+    } else if k == 20 {
+        lower_opt(inout d, n.a, NONE);
+    }
+}
+
+// Moves expression `e`'s node to a new index and puts `Name(name)` with a
+// new synthetic span at `e`; returns the moved node's index.
+fn hoist(inout d: D, e: u32, in prefix: Str, mutable: bool, inout stmts: ChunkSeq[u32]) {
+    let old = ex(in d, e);
+    d.buf.clear();
+    d.buf.push_str(in prefix);
+    buf_decimal(inout d, w(old.start));
+    let name = intern_buf(inout d);
+    let value = new_ex(inout d, old);
+    let s = span(inout d);
+    set_ex(inout d, e, exn(2, s, inc32(s), name, NONE, NONE));
+    let ps = span(inout d);
+    let pat = new_pat(inout d, 2, ps, inc32(ps), name, NONE, NONE);
+    let st = new_stmt(
+        inout d,
+        StmtNode {
+            kind: 1,
+            pat: pat,
+            ty: d.t_infer,
+            value: value,
+            mutable: mutable
+        }
+    );
+    stmts.push(st);
+}
+
+// `Lowering::call`: closure arguments for function-object parameters
+// become objects, and a call of a function object becomes a call of
+// `call`.
+fn call(inout d: D, e: u32) {
+    let n = ex(in d, e);
+    let callee = n.a;
+    let mut params = ChunkSeq::new[u32]();
+    let known = callee_params(inout d, callee, inout params);
+    let cs = n.start;
+    let ce = n.end;
+    let c = ex(in d, callee);
+    let mut callee_object = false;
+    if c.kind == 2 || c.kind == 8 {
+        let t = type_of(in d, callee);
+        callee_object = t != NONE && any_fn_sig(in d, t) != NONE;
+    } else if c.kind == 7 {
+        let rt = type_of(in d, c.a);
+        let has_method = rt != NONE && method(in d, tname(in d, rt), c.b) != NONE;
+        if !has_method {
+            let t = type_of(in d, callee);
+            callee_object = t != NONE && any_fn_sig(in d, t) != NONE;
+        }
+    }
+    let mut push_element = NONE;
+    if c.kind == 7 && c.b == d.k.push {
+        let rt = type_of(in d, c.a);
+        if rt != NONE {
+            let rn = ty(in d, rt);
+            if rn.kind == 1 && ll(in d, rn.b) == 1 {
+                let a0 = la(in d, rn.b, 0);
+                if boxed_fn_sig(in d, a0) != NONE {
+                    push_element = a0;
+                }
+            }
+        }
+    }
+    lower(inout d, callee, NONE);
+    set_origin(inout d, cs, ce);
+    let nargs = ll(in d, n.c);
+    let mut wants = ChunkSeq::with_capacity[u32](nargs);
+    let mut lends = ChunkSeq::with_capacity[u8](nargs);
+    let mut last_lend: u64 = 0;
+    let mut has_lend = false;
+    for i in 0..nargs {
+        let mut want = push_element;
+        if want == NONE && known && i < params.len() {
+            want = u32_at(in params, i);
+        }
+        wants.push(want);
+        let a = arg_at(in d, la(in d, n.c, i));
+        let lend = a
+            .pass
+            == 1
+            && ex(in d, a.expr)
+            .kind
+            == 15
+            && want
+            != NONE
+            && fn_sig(in d, want)
+            != NONE;
+        lends
+            .push(
+            if lend {
+                1
+            } else {
+                0
+            }
+        );
+        if lend {
+            last_lend = i;
+            has_lend = true;
+        }
+    }
+    let mut hoisted = ChunkSeq::new[u32]();
+    for i in 0..nargs {
+        let a = arg_at(in d, la(in d, n.c, i));
+        let want = u32_at(in wants, i);
+        let lend_mut = u8_at(in lends, i) == 1;
+        lower(inout d, a.expr, want);
+        set_origin(inout d, cs, ce);
+        if !lend_mut && a.pass != 1 && has_lend && i < last_lend && !trivial(in d, a.expr) {
+            // An argument before a hoisted closure is evaluated first too,
+            // so the closure captures what it left behind.
+            hoist(inout d, a.expr, in "$arg", false, inout hoisted);
+            continue;
+        }
+        if lend_mut {
+            // An `inout` lend needs a place: the object is a local of the
+            // call's own block.
+            hoist(inout d, a.expr, in "$closure", true, inout hoisted);
+        }
+    }
+    set_origin(inout d, cs, ce);
+    if callee_object {
+        let old = ex(in d, callee);
+        let moved = new_ex(inout d, old);
+        let s = span(inout d);
+        set_ex(inout d, callee, exn(7, s, inc32(s), moved, d.k.call, NONE));
+    }
+    if hoisted.len() > 0 {
+        let call_node = ex(in d, e);
+        let moved = new_ex(inout d, call_node);
+        let s = span(inout d);
+        let sl = mk_list(inout d, in hoisted);
+        set_ex(inout d, e, exn(5, s, inc32(s), sl, moved, NONE));
+    }
+}
+
+fn field_name(in d: D, n: u32) -> u32 {
+    if n == d.k.self_ {
+        d.k.self_field
+    } else {
+        n
+    }
+}
+
+// The instance and tail names of an effect row, ", "-joined, into the
+// diagnostic (`names`).
+fn deffect_names(inout d: D, e: u32) {
+    let en = effects_at(in d, e);
+    let n = ll(in d, en.instances);
+    for i in 0..n {
+        if i > 0 {
+            dput(inout d, in ", ");
+        }
+        dsym(inout d, effect_at(in d, la(in d, en.instances, i)).name);
+    }
+    if en.tail != NONE {
+        if n > 0 {
+            dput(inout d, in ", ");
+        }
+        dsym(inout d, en.tail);
+    }
+}
+
+fn dpass(inout d: D, p: u8) {
+    if p == 0 {
+        dput(inout d, in "In");
+    } else if p == 1 {
+        dput(inout d, in "Inout");
+    } else {
+        dput(inout d, in "Sink");
+    }
+}
+
+// `Lowering::coerce`: replaces the closure literal `e` by a value of a
+// hidden struct that conforms to the hidden trait of `kind` and `sig`.
+fn coerce(inout d: D, e: u32, kind: u32, sig: u32) {
+    let n = ex(in d, e);
+    let sn = ty(in d, sig);
+    let start = n.start;
+    let end = n.end;
+    set_origin(inout d, start, end);
+    let nparams = ll(in d, n.a);
+    let nsig = ll(in d, sn.a) / 2;
+    if nparams != nsig {
+        let at = diag_open(inout d, in "E0207");
+        dput(inout d, in "the closure takes ");
+        ddec(inout d, nparams);
+        dput(inout d, in " parameters; `dyn ");
+        dsym(inout d, kind);
+        dput(inout d, in "` takes ");
+        ddec(inout d, nsig);
+        diag_close(inout d, at, start, end);
+        return;
+    }
+    for i in 0..nparams {
+        let p = param_at(in d, la(in d, n.a, i));
+        let pass = wrapping_u8(la(in d, sn.a, wrapping_mul(i, 2)));
+        let t = la(in d, sn.a, inc(wrapping_mul(i, 2)));
+        if !is_infer(in d, p.ty) && !teq(inout d, p.ty, t) {
+            let at = diag_open(inout d, in "E0200");
+            dput(inout d, in "the closure's parameter '");
+            dsym(inout d, p.name);
+            dput(inout d, in "' is written `");
+            dtype(inout d, p.ty);
+            dput(inout d, in "`; `dyn ");
+            dsym(inout d, kind);
+            dput(inout d, in "` passes `");
+            dtype(inout d, t);
+            dput(inout d, in "`");
+            diag_close(inout d, at, p.start, p.end);
+            return;
+        }
+        if p.pass != 0 && p.pass != pass {
+            let at = diag_open(inout d, in "E0200");
+            dput(inout d, in "the closure takes '");
+            dsym(inout d, p.name);
+            dput(inout d, in "' by `");
+            dpass(inout d, p.pass);
+            dput(inout d, in "`; `dyn ");
+            dsym(inout d, kind);
+            dput(inout d, in "` passes it by `");
+            dpass(inout d, pass);
+            dput(inout d, in "`");
+            diag_close(inout d, at, p.start, p.end);
+            return;
+        }
+    }
+    if !is_infer(in d, n.c) && !teq(inout d, n.c, sn.b) {
+        let at = diag_open(inout d, in "E0200");
+        dput(inout d, in "the closure returns `");
+        dtype(inout d, n.c);
+        dput(inout d, in "`; `dyn ");
+        dsym(inout d, kind);
+        dput(inout d, in "` returns `");
+        dtype(inout d, sn.b);
+        dput(inout d, in "`");
+        diag_close(inout d, at, start, end);
+        return;
+    }
+    // A written effect row restricts the body; it must fit the object's.
+    let infer_effects = n.b >= 256;
+    let mode = n.b & 255;
+    let mut body_effects = sn.c;
+    if !infer_effects {
+        let wn = effects_at(in d, n.d);
+        let sigfx = effects_at(in d, sn.c);
+        let mut fits = wn.tail == NONE;
+        for i in 0..ll(in d, wn.instances) {
+            let x = la(in d, wn.instances, i);
+            let mut any = false;
+            for j in 0..ll(in d, sigfx.instances) {
+                if effect_eq(inout d, la(in d, sigfx.instances, j), x) {
+                    any = true;
+                }
+            }
+            if !any {
+                fits = false;
+            }
+        }
+        if !fits {
+            let at = diag_open(inout d, in "E0401");
+            dput(inout d, in "the closure's written effects [");
+            deffect_names(inout d, n.d);
+            dput(inout d, in "] are not within those of `dyn ");
+            dsym(inout d, kind);
+            dput(inout d, in "`: [");
+            deffect_names(inout d, sn.c);
+            dput(inout d, in "]");
+            diag_close(inout d, at, start, end);
+            return;
+        }
+        body_effects = n.d;
+    }
+    if mode == 2 && kind != d.k.fn_once {
+        let at = diag_open(inout d, in "E0310");
+        dput(inout d, in "a linear closure can be called once: it is a `dyn FnOnce`, not a `dyn ");
+        dsym(inout d, kind);
+        dput(inout d, in "`");
+        diag_close(inout d, at, start, end);
+    }
+    // Lower nested objects inside the body first, with the closure's
+    // parameters in scope.
+    let m = env_mark(in d);
+    for i in 0..nparams {
+        let p = param_at(in d, la(in d, n.a, i));
+        env_put(inout d, p.name, la(in d, sn.a, inc(wrapping_mul(i, 2))));
+    }
+    let saved = d.result;
+    d.result = sn.b;
+    lower(inout d, n.e, sn.b);
+    d.result = saved;
+    env_restore(inout d, m);
+    // Captures: the body's free names bound outside, sorted by text.
+    let free = free_names(in d, n.e);
+    let mut cap_n = ChunkSeq::new[u32]();
+    let mut cap_t = ChunkSeq::new[u32]();
+    for i in 0..free.len() {
+        let x = u32_at(in free, i);
+        let mut is_param = false;
+        for j in 0..nparams {
+            if param_at(in d, la(in d, n.a, j)).name == x {
+                is_param = true;
+            }
+        }
+        if is_param {
+            continue;
+        }
+        let t = env_get(in d, x);
+        if t != NONE {
+            cap_n.push(x);
+            cap_t.push(t);
+        }
+    }
+    let ncap = cap_n.len();
+    for i in 0..ncap {
+        let x = u32_at(in cap_n, i);
+        let t = u32_at(in cap_t, i);
+        if contains_infer(in d, t) {
+            let at = diag_open(inout d, in "E0102");
+            dput(inout d, in "the closure captures '");
+            dsym(inout d, x);
+            dput(inout d, in "', whose type is not written where it is bound; annotate it (`let ");
+            dsym(inout d, x);
+            dput(inout d, in ": T = ..`) to lower the closure to `dyn ");
+            dsym(inout d, kind);
+            dput(inout d, in "`");
+            diag_close(inout d, at, start, end);
+            return;
+        }
+        if is_linear(in d, type_name(in d, t)) {
+            let once = kind == d.k.fn_once;
+            let at = if once {
+                diag_open(inout d, in "E0205")
+            } else {
+                diag_open(inout d, in "E0310")
+            };
+            dput(inout d, in "the closure captures the linear '");
+            dsym(inout d, x);
+            dput(inout d, in "' (");
+            dtype(inout d, t);
+            dput(inout d, in "); ");
+            if once {
+                dput(
+                    inout d,
+                    in "a `dyn FnOnce` object may be dropped uncalled, so it cannot own a linear value"
+                );
+            } else {
+                dput(
+                    inout d,
+                    in "a closure capturing a linear value can be called once only: it is never a `dyn Fn` or `dyn FnMut`"
+                );
+            }
+            diag_close(inout d, at, start, end);
+            return;
+        }
+        let mut generic = mentions_any(in d, t, in d.generics)
+            || mentions_any(in d, sn.b, in d.generics);
+        for j in 0..nsig {
+            if mentions_any(in d, la(in d, sn.a, inc(wrapping_mul(j, 2))), in d.generics) {
+                generic = true;
+            }
+        }
+        if generic {
+            let at = diag_open(inout d, in "E0633");
+            dput(inout d, in "a closure lowered to `dyn ");
+            dsym(inout d, kind);
+            dput(
+                inout d,
+                in "` cannot mention the type parameters of its enclosing function yet ('"
+            );
+            dsym(inout d, x);
+            dput(inout d, in "': ");
+            dtype(inout d, t);
+            dput(inout d, in ")");
+            diag_close(inout d, at, start, end);
+            return;
+        }
+    }
+    let erased = erase_sig(inout d, sig);
+    let trait_name = hidden_trait(inout d, kind, erased);
+    let index = d.gen_adts.len();
+    d.buf.clear();
+    d.buf.push_str(in "__Closure");
+    buf_decimal(inout d, index);
+    d.buf.push_str(in "_");
+    buf_decimal(inout d, w(start));
+    let struct_name = intern_buf(inout d);
+    let mut fields = ChunkSeq::new[u32]();
+    for i in 0..ncap {
+        let fname = field_name(in d, u32_at(in cap_n, i));
+        let f = d
+            .ast
+            .fields
+            .alloc(
+            FieldNode {
+                name: fname,
+                ty: u32_at(in cap_t, i),
+                modality: 3,
+                temperature: 0
+            }
+        )
+            .raw();
+        fields.push(f);
+    }
+    let fl = mk_list(inout d, in fields);
+    let v = d
+        .ast
+        .variants
+        .alloc(
+        VariantNode {
+            name: struct_name,
+            fields: fl,
+            named: true
+        }
+    )
+        .raw();
+    let vl = list1(inout d, v);
+    let adt_span = span(inout d);
+    let adt = d
+        .ast
+        .adts
+        .alloc(
+        AdtNode {
+            name: struct_name,
+            mode: 1,
+            generics: 0,
+            variants: vl,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: adt_span,
+            end: inc32(adt_span)
+        }
+    )
+        .raw();
+    let receiver = pass_of(kind, in d);
+    let mut mps = ChunkSeq::new[u32]();
+    let ss = span(inout d);
+    let sp = new_param(
+        inout d,
+        ParamNode {
+            name: d.k.self_,
+            pass: receiver,
+            projections: 0,
+            ty: d.t_infer,
+            start: ss,
+            end: inc32(ss)
+        }
+    );
+    mps.push(sp);
+    for i in 0..nparams {
+        let p = param_at(in d, la(in d, n.a, i));
+        let q = new_param(
+            inout d,
+            ParamNode {
+                name: p.name,
+                pass: wrapping_u8(la(in d, sn.a, wrapping_mul(i, 2))),
+                projections: 0,
+                ty: la(in d, sn.a, inc(wrapping_mul(i, 2))),
+                start: p.start,
+                end: p.end
+            }
+        );
+        mps.push(q);
+    }
+    let body = n.e;
+    let mut new_body = body;
+    if receiver == 2 {
+        // `FnOnce`: the object is consumed whole, binding each capture
+        // under its own name (`self` as `$self`).
+        let mut from = ChunkSeq::new[u32]();
+        let mut to = ChunkSeq::new[u32]();
+        for i in 0..ncap {
+            if u32_at(in cap_n, i) == d.k.self_ {
+                from.push(d.k.self_);
+                to.push(d.k.dollar_self);
+            }
+        }
+        substitute(inout d, body, in from, in to, false);
+        let mut pats = ChunkSeq::new[u32]();
+        for i in 0..ncap {
+            let x = u32_at(in cap_n, i);
+            let ps = span(inout d);
+            let bind_name = if x == d.k.self_ && from.len() > 0 {
+                d.k.dollar_self
+            } else {
+                x
+            };
+            let p = new_pat(inout d, 2, ps, inc32(ps), bind_name, NONE, NONE);
+            pats.push(field_name(in d, x));
+            pats.push(p);
+        }
+        let pl = mk_list(inout d, in pats);
+        let pat_span = span(inout d);
+        let self_expr = mk_expr(inout d, 2, d.k.self_, NONE);
+        let bs = span(inout d);
+        let cp = new_pat(inout d, 5, pat_span, inc32(pat_span), struct_name, pl, 1);
+        let st = new_stmt(
+            inout d,
+            StmtNode {
+                kind: 1,
+                pat: cp,
+                ty: d.t_infer,
+                value: self_expr,
+                mutable: true
+            }
+        );
+        let stl = list1(inout d, st);
+        new_body = new_ex(inout d, exn(5, bs, inc32(bs), stl, body, NONE));
+    } else {
+        let mut to = ChunkSeq::new[u32]();
+        for i in 0..ncap {
+            to.push(field_name(in d, u32_at(in cap_n, i)));
+        }
+        substitute(inout d, body, in cap_n, in to, true);
+    }
+    let mpl = mk_list(inout d, in mps);
+    let ms = span(inout d);
+    let method_fn = d
+        .ast
+        .fns
+        .alloc(
+        FnNode {
+            name: d.k.call,
+            fip: false,
+            generics: 0,
+            params: mpl,
+            result: sn.b,
+            effects: body_effects,
+            body: new_body,
+            start: ms,
+            end: inc32(ms)
+        }
+    )
+        .raw();
+    let trs = span(inout d);
+    let tref = d
+        .ast
+        .trait_refs
+        .alloc(
+        TraitRefNode {
+            package: NONE,
+            name: trait_name,
+            args: 0,
+            start: trs,
+            end: inc32(trs)
+        }
+    )
+        .raw();
+    let self_t = named(inout d, struct_name, 0);
+    let ml = list1(inout d, method_fn);
+    let cfs = span(inout d);
+    let conf = d
+        .ast
+        .confs
+        .alloc(
+        ConfNode {
+            model: NONE,
+            public: false,
+            generics: 0,
+            trait_ref: tref,
+            self_ty: self_t,
+            wheres: 0,
+            assoc: 0,
+            methods: ml,
+            start: cfs,
+            end: inc32(cfs)
+        }
+    )
+        .raw();
+    d.gen_adts.push(adt);
+    d.gen_confs.push(conf);
+    let mut sf = ChunkSeq::new[u32]();
+    for i in 0..ncap {
+        let x = u32_at(in cap_n, i);
+        let v2 = mk_expr(inout d, 2, x, NONE);
+        sf.push(field_name(in d, x));
+        sf.push(v2);
+    }
+    let sfl = mk_list(inout d, in sf);
+    set_ex(inout d, e, exn(4, start, end, struct_name, sfl, NONE));
+}
+
+fn map_get(in from: ChunkSeq[u32], in to: ChunkSeq[u32], x: u32) -> u32 {
+    for i in 0..from.len() {
+        if u32_at(in from, i) == x {
+            return u32_at(in to, i);
+        }
+    }
+    NONE
+}
+
+// The map without the keys in `bound`.
+fn map_without(
+    in from: ChunkSeq[u32],
+    in to: ChunkSeq[u32],
+    in bound: ChunkSeq[u32],
+    inout f2: ChunkSeq[u32],
+    inout t2: ChunkSeq[u32]
+) {
+    for i in 0..from.len() {
+        let x = u32_at(in from, i);
+        if !contains(in bound, x) {
+            f2.push(x);
+            t2.push(u32_at(in to, i));
+        }
+    }
+}
+
+fn subst_scoped(
+    inout d: D,
+    e: u32,
+    in from: ChunkSeq[u32],
+    in to: ChunkSeq[u32],
+    in bound: ChunkSeq[u32],
+    fields: bool
+) {
+    let mut f2 = ChunkSeq::new[u32]();
+    let mut t2 = ChunkSeq::new[u32]();
+    map_without(in from, in to, in bound, inout f2, inout t2);
+    substitute(inout d, e, in f2, in t2, fields);
+}
+
+fn subst_opt(inout d: D, e: u32, in from: ChunkSeq[u32], in to: ChunkSeq[u32], fields: bool) {
+    if e != NONE {
+        substitute(inout d, e, in from, in to, fields);
+    }
+}
+
+// `Lowering::substitute`: rewrites the free uses of the map's names in
+// `e`, to `self.field` (`fields`) or to another name.
+fn substitute(inout d: D, e: u32, in from: ChunkSeq[u32], in to: ChunkSeq[u32], fields: bool) {
+    if from.len() == 0 {
+        return;
+    }
+    let n = ex(in d, e);
+    let k = n.kind;
+    if k == 2 {
+        let t = map_get(in from, in to, n.a);
+        if t != NONE {
+            if fields {
+                let base = mk_expr(inout d, 2, d.k.self_, NONE);
+                set_ex(inout d, e, exn(7, n.start, n.end, base, t, NONE));
+            } else {
+                set_ex(inout d, e, exn(2, n.start, n.end, t, NONE, NONE));
+            }
+        }
+    } else if k == 3 {
+        for i in 0..ll(in d, n.a) {
+            substitute(inout d, la(in d, n.a, i), in from, in to, fields);
+        }
+    } else if k == 4 {
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            substitute(inout d, la(in d, n.b, inc(wrapping_mul(i, 2))), in from, in to, fields);
+        }
+    } else if k == 5 {
+        let mut f2 = list_copy(in from);
+        let mut t2 = list_copy(in to);
+        for i in 0..ll(in d, n.a) {
+            let s = stmt_at(in d, la(in d, n.a, i));
+            substitute(inout d, s.value, in f2, in t2, fields);
+            if s.kind == 1 {
+                let mut bound = ChunkSeq::new[u32]();
+                pattern_names(in d, s.pat, inout bound);
+                let mut f3 = ChunkSeq::new[u32]();
+                let mut t3 = ChunkSeq::new[u32]();
+                map_without(in f2, in t2, in bound, inout f3, inout t3);
+                f2 = f3;
+                t2 = t3;
+            }
+        }
+        subst_opt(inout d, n.b, in f2, in t2, fields);
+    } else if k == 6 {
+        // A path or function name is not a capture.
+        let c = ex(in d, n.a);
+        if c.kind != 2 || map_get(in from, in to, c.a) != NONE {
+            substitute(inout d, n.a, in from, in to, fields);
+        }
+        for i in 0..ll(in d, n.c) {
+            substitute(inout d, arg_at(in d, la(in d, n.c, i)).expr, in from, in to, fields);
+        }
+    } else if k == 7 || k == 9 {
+        substitute(inout d, n.a, in from, in to, fields);
+    } else if k == 10 {
+        substitute(inout d, n.b, in from, in to, fields);
+    } else if k == 8 {
+        substitute(inout d, n.a, in from, in to, fields);
+        substitute(inout d, n.b, in from, in to, fields);
+    } else if k == 11 || k == 12 {
+        substitute(inout d, n.b, in from, in to, fields);
+        substitute(inout d, n.c, in from, in to, fields);
+    } else if k == 13 {
+        substitute(inout d, n.a, in from, in to, fields);
+        substitute(inout d, n.b, in from, in to, fields);
+        subst_opt(inout d, n.c, in from, in to, fields);
+    } else if k == 14 {
+        substitute(inout d, n.a, in from, in to, fields);
+        let len = ll(in d, n.b) / 2;
+        for i in 0..len {
+            let mut bound = ChunkSeq::new[u32]();
+            pattern_names(in d, la(in d, n.b, wrapping_mul(i, 2)), inout bound);
+            subst_scoped(
+                inout d,
+                la(in d, n.b, inc(wrapping_mul(i, 2))),
+                in from,
+                in to,
+                in bound,
+                fields
+            );
+        }
+    } else if k == 15 {
+        let mut bound = ChunkSeq::new[u32]();
+        for i in 0..ll(in d, n.a) {
+            bound.push(param_at(in d, la(in d, n.a, i)).name);
+        }
+        subst_scoped(inout d, n.e, in from, in to, in bound, fields);
+    } else if k == 16 {
+        if n.b != NONE {
+            substitute(inout d, n.c, in from, in to, fields);
+        }
+        substitute(inout d, n.d, in from, in to, fields);
+        for i in 0..ll(in d, n.e) {
+            let c = clause_at(in d, la(in d, n.e, i));
+            let mut bound = ChunkSeq::new[u32]();
+            for j in 0..ll(in d, c.pats) {
+                pattern_names(in d, la(in d, c.pats, j), inout bound);
+            }
+            subst_scoped(inout d, c.body, in from, in to, in bound, fields);
+        }
+    } else if k == 18 {
+        substitute(inout d, n.b, in from, in to, fields);
+        let mut bound = ChunkSeq::new[u32]();
+        pattern_names(in d, n.a, inout bound);
+        subst_scoped(inout d, n.c, in from, in to, in bound, fields);
+    } else if k == 17 {
+        substitute(inout d, n.a, in from, in to, fields);
+    } else if k == 19 {
+        substitute(inout d, n.a, in from, in to, fields);
+        substitute(inout d, n.b, in from, in to, fields);
+    } else if k == 20 || k == 21 {
+        subst_opt(inout d, n.a, in from, in to, fields);
+    }
+}
+
+fn list_copy(in s: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::with_capacity[u32](s.len());
+    for i in 0..s.len() {
+        out.push(u32_at(in s, i));
+    }
+    out
+}
+
+// `dyn_fn::lower`. Returns whether it succeeded (no diagnostics).
+pub fn lower_fn_objects(inout d: D) -> bool {
+    let first_diag = d.diags.len();
+    decls(inout d);
+    let nitems = d.ast.m_items.len();
+    for i in 0..nitems {
+        let it = item_at(in d, u32_at(in d.ast.m_items, i));
+        let x = it.node;
+        if it.kind == 2 {
+            function(inout d, x, NONE);
+        } else if it.kind == 4 {
+            let im = impl_at(in d, x);
+            for j in 0..ll(in d, im.methods) {
+                function(inout d, la(in d, im.methods, j), im.ty);
+            }
+        } else if it.kind == 6 {
+            let c = conf_at(in d, x);
+            for j in 0..ll(in d, c.methods) {
+                function(inout d, la(in d, c.methods, j), c.self_ty);
+            }
+        }
+    }
+    for i in 0..d.gen_adts.len() {
+        let a = new_item(inout d, 1, u32_at(in d.gen_adts, i));
+        d.ast.m_items.push(a);
+        let c = new_item(inout d, 6, u32_at(in d.gen_confs, i));
+        d.ast.m_items.push(c);
+    }
+    // Every function-object type, in source and generated items alike,
+    // becomes its hidden trait's object type.
+    erase_module(inout d);
+    if d.diags.len() != first_diag {
+        return false;
+    }
+    // The hidden traits first, in name order.
+    let mut order = list_copy(in d.tr_names);
+    sort_syms(in d.ast, inout order);
+    let mut items = ChunkSeq::with_capacity[u32](wrapping_add(order.len(), d.ast.m_items.len()));
+    for i in 0..order.len() {
+        let name = u32_at(in order, i);
+        let mut node = NONE;
+        for j in 0..d.tr_names.len() {
+            if u32_at(in d.tr_names, j) == name {
+                node = u32_at(in d.tr_nodes, j);
+            }
+        }
+        let it = new_item(inout d, 5, node);
+        items.push(it);
+    }
+    for i in 0..d.ast.m_items.len() {
+        items.push(u32_at(in d.ast.m_items, i));
+    }
+    d.ast.m_items = items;
+    true
+}
+
+// `Lowered::relocate` of the span `start..end`: a span of generated code
+// is reported at the source span it came from.
+pub fn relocate(in d: D, start: u64, end: u64) -> (u64, u64) {
+    if start < d.base || start >= d.next_span {
+        return (start, end);
+    }
+    let n = d.origins.len() / 3;
+    // `partition_point(|(s, _)| *s <= start)`.
+    let mut lo: u64 = 0;
+    let mut hi = n;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+        if u64_at(in d.origins, wrapping_mul(mid, 3)) <= start {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo == 0 {
+        return (start, end);
+    }
+    let at = wrapping_mul(wrapping_sub(lo, 1), 3);
+    (u64_at(in d.origins, inc(at)), u64_at(in d.origins, wrapping_add(at, 2)))
+}

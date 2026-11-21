@@ -1590,7 +1590,8 @@ fn path_is_covered(path: &[String], moved: &[Vec<String>]) -> bool {
 
 /// The `match` scrutinees of `f` that are borrows (§4.3): by-value reads
 /// of a non-copy place rooted at an `in`/`inout` parameter, or at a name
-/// that an earlier borrowed `match` bound. The checker types such a `match`
+/// that an earlier borrowed `match` bound, and element views (a matched
+/// `try_get`, §13). The checker types such a `match`
 /// as a borrow, so its pattern binds `in` borrows: no `Box` it unpacks is
 /// freed and nothing it binds is dropped.
 pub fn borrowed_scrutinees(f: &crate::ir::FunctionIr) -> BTreeSet<ValueId> {
@@ -1615,6 +1616,17 @@ pub fn borrowed_scrutinees(f: &crate::ir::FunctionIr) -> BTreeSet<ValueId> {
         for i in f.blocks.iter().flat_map(|b| &b.instructions) {
             match &i.op {
                 Op::Read { root, .. } if matched.contains(&i.dest) && names.contains(root) => {
+                    out.insert(i.dest);
+                }
+                // An element view (`match s.try_get(i)`, §13) binds the
+                // element in place: its sequence frees it. A copy element
+                // has nothing to free, so every matched `try_get` counts.
+                Op::Seq {
+                    op:
+                        crate::seq::SeqOp::TryGet
+                        | crate::seq::SeqOp::Hoisted(crate::seq::Access::TryGet),
+                    ..
+                } if matched.contains(&i.dest) => {
                     out.insert(i.dest);
                 }
                 Op::Bind { pattern, value } if out.contains(value) => {
@@ -1765,6 +1777,31 @@ fn resolve_place_type(world: &World, root_ty: &Type, path: &[String]) -> Option<
 /// and a drop that belongs to one edge of a branch is placed in a block
 /// split onto that edge ([`split_edge`]), so each box is dropped exactly
 /// once on every path without a runtime drop flag.
+/// Whether `expr` is a lent closure literal (§4.2,
+/// [`World::lent_closures`]).
+fn lent_closure(world: &World, expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::Closure { body, .. }
+        if world.lent_closures.contains_key(&crate::ir::nested_name("closure", &body.span)))
+}
+
+/// The aliases of the names a closure literal uses (its captures).
+fn closure_aliases<'a>(
+    expr: &Expr,
+    aliases: &'a BTreeMap<String, String>,
+) -> impl Iterator<Item = (&'a String, &'a String)> {
+    let used = match &expr.kind {
+        ExprKind::Closure { params, body, .. } => {
+            let mut names = crate::check::free_names(body);
+            for p in params {
+                names.remove(&p.name);
+            }
+            names
+        }
+        _ => BTreeSet::new(),
+    };
+    aliases.iter().filter(move |(name, _)| used.contains(*name))
+}
+
 pub fn elaborate_non_fip_drops(world: &World, program: &mut crate::ir::Program) {
     if !active(world) {
         return;
@@ -2034,6 +2071,25 @@ const DROP_FIXPOINT_LIMIT: usize = 64;
 /// reaching it from outside the loop, so a box live at the header is
 /// owned on every edge that enters it.
 fn elaborate_function(world: &World, f: &crate::ir::FunctionIr) -> Option<Elaboration> {
+    // A lent closure's body (§4.2) borrows its captures: no plan, on a
+    // normal or a failure exit, drops them.
+    if let Some(names) = world.lent_closures.get(&f.name)
+        && f.params
+            .iter()
+            .any(|p| p.pass == Pass::Sink && names.contains(&p.name))
+    {
+        let mut g = f.clone();
+        for p in &mut g.params {
+            if p.pass == Pass::Sink && names.contains(&p.name) {
+                p.pass = Pass::In;
+            }
+        }
+        return elaborate_owned(world, &g);
+    }
+    elaborate_owned(world, f)
+}
+
+fn elaborate_owned(world: &World, f: &crate::ir::FunctionIr) -> Option<Elaboration> {
     use crate::ir::Terminator;
     let n_blocks = f.blocks.len();
     let mut plan = Elaboration {
@@ -2906,9 +2962,20 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
                     refused.extend(names);
                 }
             }
-            Op::Closure { aliases, moves, .. } => {
-                refused.extend(aliases.keys().cloned());
-                refused.extend(aliases.values().cloned());
+            // A lent closure (§4.2) only reads the names it uses: it
+            // neither moves nor keeps them.
+            Op::Closure { expr, .. } if lent_closure(world, expr) => {}
+            // Any other closure snapshots the names it uses when it is
+            // made; only those, and what it moves, are refused.
+            Op::Closure {
+                expr,
+                aliases,
+                moves,
+            } => {
+                for (name, slot) in closure_aliases(expr, aliases) {
+                    refused.insert(name.clone());
+                    refused.insert(slot.clone());
+                }
                 refused.extend(moves.iter().map(|p| p.root.clone()));
             }
             // A handled block and its clauses are graphs emitted inside this
@@ -3207,6 +3274,26 @@ pub fn replace_drops(
         }
     }
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        if let Op::Closure { expr, .. } = &inst.op
+            && lent_closure(world, expr)
+        {
+            continue;
+        }
+        if let Op::Closure {
+            expr,
+            aliases,
+            moves,
+        } = &inst.op
+        {
+            for (name, slot) in closure_aliases(expr, aliases) {
+                candidates.remove(name);
+                candidates.remove(slot);
+            }
+            for p in moves {
+                candidates.remove(&p.root);
+            }
+            continue;
+        }
         if let Op::Closure { aliases, moves, .. } | Op::Handle { aliases, moves, .. } = &inst.op {
             for name in aliases
                 .keys()

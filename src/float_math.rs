@@ -89,8 +89,7 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
         .filter_map(|n| transcendental_source(n))
         .map(|f| format!("{f}\n"))
         .collect();
-    let padded = format!("{}{source}", " ".repeat(end + 1));
-    let parsed = crate::parser::parse(&padded);
+    let parsed = crate::integer_widths::parse_at(&source, end + 1);
     debug_assert!(
         parsed.diagnostics.is_empty(),
         "float prelude: {:?}",

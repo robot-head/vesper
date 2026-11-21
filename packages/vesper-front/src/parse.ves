@@ -1318,9 +1318,37 @@ fn declaration(inout p: P) -> bool {
         bump(inout p);
         upper(inout p);
         let mark = p.binds.len();
+        let bracket = at(in p, k_l_bracket());
         generics(inout p);
         p.binds.truncate(mark);
         p.pending.clear();
+        if eat(inout p, k_colon()) {
+            // A value enum `enum Name: T { A = e, B, .. }`.
+            if bracket {
+                err(inout p, in "a value enum takes no type parameters");
+            }
+            // `enum Name: _ { .. }`: untyped members.
+            if at_word(in p, 0, w_underscore()) {
+                bump(inout p);
+            } else {
+                ty(inout p);
+            }
+            expect(inout p, k_l_brace());
+            loop {
+                if at(in p, k_r_brace()) || at(in p, k_eof()) {
+                    break;
+                }
+                upper(inout p);
+                if eat(inout p, k_eq()) {
+                    expr(inout p);
+                }
+                if !eat(inout p, k_comma()) {
+                    break;
+                }
+            }
+            expect(inout p, k_r_brace());
+            return true;
+        }
         expect(inout p, k_l_brace());
         loop {
             if at(in p, k_r_brace()) || at(in p, k_eof()) {
