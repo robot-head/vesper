@@ -5,17 +5,15 @@ load("//tools/bazel:cargo_test.bzl", "cargo_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-# The Rust build is the default (default features), with its tests.
-vesper_crate()
-
-# The Vesper build (port wave P3b lane 5, #1067, Cargo feature
-# `vesper-port`): QPACK forwarded to the Loom package in vesper/ through the
-# committed binding, with the connection driver still in Rust. Not the
-# default until it reaches parity.
+# The Vesper port is the only build (SH6 lane 5, #1400): the protocol core
+# is the Loom package in vesper/ (port wave P3b lane 5, #1067), which
+# build.rs links (`VESPER_PORT_OBJECT_H3`) and whose generated binding it
+# checks against the committed one. The connection drivers are still Rust.
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    deps = ["//crates/vesper-prism:bytes_package"],
 )
 
 vesper_port_object(
@@ -24,6 +22,24 @@ vesper_port_object(
     package = ":port_package",
     rust_types = "crate::qpack::port::abi",
     target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "h3_vesper_binding",
+    srcs = [":h3_vesper"],
+    output_group = "rust_binding",
+)
+
+vesper_crate(
+    build_script_data = [
+        ":h3_vesper",
+        ":h3_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_GENERATED_BINDING_H3": "$(execpath :h3_vesper_binding)",
+        "VESPER_PORT_OBJECT_H3": "$(execpath :h3_vesper)",
+    },
 )
 
 # The divergence check: the edits of DIVERGENT_EDITS in build.rs, one
@@ -60,34 +76,16 @@ _CRATE_DATA = PACKAGES["crates/vesper-prism-h3"].crate_data()
 rust_library(
     name = "port",
     srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
-    crate_features = ["vesper-port"],
     crate_name = "vesper_prism_h3",
     crate_root = "src/lib.rs",
     edition = "2024",
-    deps = ["//crates/vesper-port-abi"] + all_crate_deps(
+    # vesper-port-abi is a normal Cargo dependency now, so it is in here.
+    deps = all_crate_deps(
         _CRATE_DATA,
         normal = True,
         platforms = _CRATE_DATA["platforms"],
     ),
 )
-
-# The test files that need nothing but the crate, against the port. They
-# run in the package directory, as Cargo runs them. The interop tests
-# (Warp, quinn and wtransport peers) run against the port in Cargo, in the
-# Linux "Vesper ports" job (port/check.sh).
-PORT_TESTS = [
-    "frame_codec",
-    "h3_mem",
-    "message_rules",
-    "priority_bodies",
-    "qpack_encode_golden",
-    "qpack_qifs",
-    "qpack_rfc",
-    "robustness",
-    "webtransport_mem",
-]
-
-SUPPORT = ["h3_mem", "priority_bodies", "robustness", "webtransport_mem"]
 
 # The divergence check: each module's divergent object linked into the test
 # file that guards it (CHECKS, the same pairs as port/check.sh);
@@ -109,9 +107,8 @@ CHECKS = {
     (
         rust_test(
             name = "_port_%s%s.bin" % (test, suffix),
-            srcs = ["tests/%s.rs" % test] + (["tests/support/mod.rs"] if test in SUPPORT else []),
+            srcs = ["tests/%s.rs" % test],
             compile_data = [obj],
-            crate_features = ["vesper-port"],
             crate_name = test + suffix,
             crate_root = "tests/%s.rs" % test,
             data = glob(["tests/fixtures/**"]),
@@ -124,11 +121,14 @@ CHECKS = {
         cargo_test(
             name = "port_%s%s_test" % (test, suffix),
             cwd = package_name(),
-            tags = ["no-remote-exec"] + (["manual"] if suffix else []),
+            tags = [
+                "manual",
+                "no-remote-exec",
+            ],
             test = ":_port_%s%s.bin" % (test, suffix),
         ),
     )
-    for test, suffix, obj in [(t, "", ":h3_vesper") for t in PORT_TESTS] + [
+    for test, suffix, obj in [
         (CHECKS[m], "_divergent_" + m, ":h3_vesper_divergent_" + m)
         for m in DIVERGENT
     ]

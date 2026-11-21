@@ -14,13 +14,7 @@
 //! * CLOSE_WEBTRANSPORT_SESSION (0x2843) and DRAIN_WEBTRANSPORT_SESSION
 //!   (0x78ae) from draft-ietf-webtrans-http3.
 
-#[cfg(not(feature = "vesper-port"))]
-use vesper_warp::varint;
-
-#[cfg(not(feature = "vesper-port"))]
-use crate::frame::put_varint;
 #[cfg(test)]
-#[cfg(feature = "vesper-port")]
 use crate::frame::put_varint;
 
 pub const DATAGRAM: u64 = 0x00;
@@ -61,167 +55,18 @@ pub enum CapsuleError {
     Truncated,
 }
 
-#[cfg(not(feature = "vesper-port"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum State {
-    Header,
-    Skip { remaining: u64 },
-    Value { ty: u64, len: usize },
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Incremental capsule decoder for one stream's DATA payload.
-#[derive(Debug)]
-pub struct CapsuleReader {
-    buf: Vec<u8>,
-    state: State,
-    max_value: usize,
-}
-
-#[cfg(not(feature = "vesper-port"))]
-impl CapsuleReader {
-    /// `max_value` bounds every known capsule's value (a DATAGRAM capsule's
-    /// payload, a close reason).
-    pub fn new(max_value: usize) -> Self {
-        Self {
-            buf: Vec::new(),
-            state: State::Header,
-            max_value,
-        }
-    }
-
-    pub fn push(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-    }
-
-    /// Bytes held: at most one header or one bounded value.
-    pub fn buffered(&self) -> usize {
-        self.buf.len()
-    }
-
-    pub fn next_capsule(&mut self) -> Result<Option<Capsule>, CapsuleError> {
-        loop {
-            match self.state {
-                State::Header => {
-                    let Ok((ty, a)) = varint::decode(&self.buf) else {
-                        return Ok(None);
-                    };
-                    let Ok((len, b)) = varint::decode(&self.buf[a..]) else {
-                        return Ok(None);
-                    };
-                    self.buf.drain(..a + b);
-                    match ty {
-                        DATAGRAM | CLOSE_WEBTRANSPORT_SESSION | DRAIN_WEBTRANSPORT_SESSION => {
-                            let bound = if ty == CLOSE_WEBTRANSPORT_SESSION {
-                                4 + MAX_CLOSE_REASON
-                            } else {
-                                self.max_value
-                            };
-                            let len = usize::try_from(len).ok().filter(|l| *l <= bound).ok_or(
-                                CapsuleError::TooLarge {
-                                    capsule_type: ty,
-                                    len,
-                                },
-                            )?;
-                            self.state = State::Value { ty, len };
-                        }
-                        _ => {
-                            self.state = State::Skip { remaining: len };
-                            return Ok(Some(Capsule::Unknown(ty)));
-                        }
-                    }
-                }
-                State::Skip { remaining } => {
-                    let n = remaining.min(self.buf.len() as u64) as usize;
-                    self.buf.drain(..n);
-                    let left = remaining - n as u64;
-                    if left > 0 {
-                        self.state = State::Skip { remaining: left };
-                        return Ok(None);
-                    }
-                    self.state = State::Header;
-                }
-                State::Value { ty, len } => {
-                    if self.buf.len() < len {
-                        return Ok(None);
-                    }
-                    let value: Vec<u8> = self.buf.drain(..len).collect();
-                    self.state = State::Header;
-                    return parse(ty, value).map(Some);
-                }
-            }
-        }
-    }
-
-    /// The stream ended: an error unless it ended between capsules.
-    pub fn finish(&self) -> Result<(), CapsuleError> {
-        if self.state == State::Header && self.buf.is_empty() {
-            Ok(())
-        } else {
-            Err(CapsuleError::Truncated)
-        }
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-fn parse(ty: u64, value: Vec<u8>) -> Result<Capsule, CapsuleError> {
-    Ok(match ty {
-        DATAGRAM => Capsule::Datagram(value),
-        CLOSE_WEBTRANSPORT_SESSION => {
-            if value.len() < 4 {
-                return Err(CapsuleError::Malformed { capsule_type: ty });
-            }
-            let code = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
-            let reason = value[4..].to_vec();
-            // The reason is UTF-8 (draft-ietf-webtrans-http3 §5).
-            if std::str::from_utf8(&reason).is_err() {
-                return Err(CapsuleError::Malformed { capsule_type: ty });
-            }
-            Capsule::CloseSession { code, reason }
-        }
-        DRAIN_WEBTRANSPORT_SESSION => {
-            if !value.is_empty() {
-                return Err(CapsuleError::Malformed { capsule_type: ty });
-            }
-            Capsule::DrainSession
-        }
-        _ => unreachable!("only known types are buffered"),
-    })
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Appends one capsule.
-pub fn write_capsule(out: &mut Vec<u8>, ty: u64, value: &[u8]) {
-    put_varint(out, ty);
-    put_varint(out, value.len() as u64);
-    out.extend_from_slice(value);
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Appends a CLOSE_WEBTRANSPORT_SESSION capsule. `reason` must be UTF-8 of
-/// at most [`MAX_CLOSE_REASON`] bytes (the caller checks).
-pub fn write_close_session(out: &mut Vec<u8>, code: u32, reason: &[u8]) {
-    let mut v = Vec::with_capacity(4 + reason.len());
-    v.extend_from_slice(&code.to_be_bytes());
-    v.extend_from_slice(reason);
-    write_capsule(out, CLOSE_WEBTRANSPORT_SESSION, &v);
-}
-
 // ---------------------------------------------------------------------
 // The Vesper build (port wave P3b lane 5, #1067): vesper/src/capsule.ves.
 // ---------------------------------------------------------------------
 
-#[cfg(feature = "vesper-port")]
 use crate::qpack::port::binding as port;
 
 /// Incremental capsule decoder for one stream's DATA payload (the Vesper
 /// build).
-#[cfg(feature = "vesper-port")]
 pub struct CapsuleReader {
     core: port::CapsuleReaderCore,
 }
 
-#[cfg(feature = "vesper-port")]
 impl std::fmt::Debug for CapsuleReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CapsuleReader")
@@ -230,7 +75,6 @@ impl std::fmt::Debug for CapsuleReader {
     }
 }
 
-#[cfg(feature = "vesper-port")]
 impl CapsuleReader {
     /// `max_value` bounds every known capsule's value.
     pub fn new(max_value: usize) -> Self {
@@ -275,7 +119,6 @@ impl CapsuleReader {
 }
 
 /// Appends one capsule.
-#[cfg(feature = "vesper-port")]
 pub fn write_capsule(out: &mut Vec<u8>, ty: u64, value: &[u8]) {
     crate::frame::written(out, port::h3_record_header(ty, value.len() as u64));
     out.extend_from_slice(value);
@@ -283,7 +126,6 @@ pub fn write_capsule(out: &mut Vec<u8>, ty: u64, value: &[u8]) {
 
 /// Appends a CLOSE_WEBTRANSPORT_SESSION capsule. `reason` must be UTF-8 of
 /// at most [`MAX_CLOSE_REASON`] bytes (the caller checks).
-#[cfg(feature = "vesper-port")]
 pub fn write_close_session(out: &mut Vec<u8>, code: u32, reason: &[u8]) {
     crate::frame::written(out, port::h3_close_session(code, reason));
 }

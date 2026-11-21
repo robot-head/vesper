@@ -54,7 +54,7 @@ use self::wire::{
     VALUE_PREFIX
 };
 
-// QPACK wire patterns (RFC 9204 §4; src/qpack/wire.rs): first-byte bits
+// QPACK wire patterns (RFC 9204 §4): first-byte bits
 // and integer prefix lengths.
 // §3.2.1: an entry's size is its name and value lengths plus 32.
 // `max_entry_share` is in 1/256ths of the capacity.
@@ -306,7 +306,7 @@ fn field_line(
     }
     // The N bit of each literal form: NameRef::Never, and shifted right by
     // 2 and 1 it is the N bit of the post-base and literal-name forms
-    // (PostBaseNameRef::Never and LiteralName::Never in src/qpack/wire.rs).
+    // (PostBaseNameRef::Never and LiteralName::Never).
     let ref_never: u8 = if sensitive {
         NameRef::Never
     } else {

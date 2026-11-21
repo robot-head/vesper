@@ -2,16 +2,15 @@
 # vesper-prism-h3 port checks under Cargo (port wave P3b lane 5, #1067), run
 # by scripts/test-port-harness.sh.
 #
-# - The Rust build (default) and the Vesper build (`vesper-port`) both pass
-#   every test of the crate, the interop tests included (the connection
-#   driver stays Rust and calls the port's codec).
+# - The crate's only build (the Vesper port, SH6 lane 5, #1400) passes every
+#   test of the crate, the interop tests included (the connection driver
+#   stays Rust and calls the port's codec).
 # - The divergent Vesper build, one module at a time (VESPER_H3_DIVERGE,
 #   DIVERGENT_EDITS in build.rs), fails a test that guards that module, and a
 #   test that the edit does not reach still passes.
 set -eu
 cd "$(dirname "$0")/../../.."
 cargo test --locked -p vesper-prism-h3
-cargo test --locked -p vesper-prism-h3 --features vesper-port
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT HUP INT TERM
 while read -r module failing passing; do

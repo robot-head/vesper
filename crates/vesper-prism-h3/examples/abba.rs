@@ -1,13 +1,14 @@
-//! ABBA benchmark of the Rust and Vesper builds of vesper-prism-h3 (port
-//! wave P3b lane 5, #1067): QPACK decoding of the committed QIFs corpus,
+//! ABBA benchmark of the last Rust build of vesper-prism-h3 against the
+//! Vesper port (port wave P3b lane 5, #1067; SH6 lane 5, #1400): QPACK decoding of the committed QIFs corpus,
 //! QPACK encoding of its field lists, and frame parsing (`frames`): request
 //! streams of HEADERS and DATA frames, a control stream of SETTINGS and
 //! PRIORITY_UPDATE frames, and capsules, read in packet-sized pushes; and
 //! message validation (`messages`) of the netbsd QIF's field lists as requests
 //! or responses.
 //!
-//! The two builds are one crate compiled with and without `vesper-port`, so
-//! they cannot share a process. Each arm is a worker process (this example
+//! The two builds are this crate and its Rust build from an older commit
+//! (`scripts/bench.sh` builds it in a git worktree), so they cannot share a
+//! process. Each arm is a worker process (this example
 //! built one way or the other) that runs one batch of the workload per
 //! request on stdin; the driver times each request with `vesper-bench`'s
 //! `run_abba`, so both arms carry the same pipe round trip. A batch is long

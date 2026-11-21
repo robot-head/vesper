@@ -7,20 +7,6 @@ use super::huffman;
 /// IDs, indices and lengths alike.
 pub const MAX_INT: u64 = (1 << 62) - 1;
 
-/// RFC 7541 §5.1: each byte after the prefix carries 7 bits and a
-/// continuation flag; past a 56-bit shift the value cannot fit.
-#[cfg(not(feature = "vesper-port"))]
-const CONTINUATION: u8 = 0x80;
-#[cfg(not(feature = "vesper-port"))]
-const PAYLOAD_MASK: u8 = 0x7f;
-#[cfg(not(feature = "vesper-port"))]
-const PAYLOAD_BITS: u32 = 7;
-#[cfg(not(feature = "vesper-port"))]
-const MAX_SHIFT: u32 = 56;
-/// The shortest Huffman code is 5 bits (RFC 7541 Appendix B).
-#[cfg(not(feature = "vesper-port"))]
-const MIN_CODE_BITS: usize = 5;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrefixError {
     /// More bytes are needed (only an error once the input is complete).
@@ -34,127 +20,17 @@ pub enum PrefixError {
     Huffman(huffman::HuffmanError),
 }
 
-#[cfg(not(feature = "vesper-port"))]
-/// Decodes an integer whose prefix is the low `bits` bits of `buf[0]`.
-/// Returns the value and the bytes consumed.
-pub fn decode_int(buf: &[u8], bits: u8) -> Result<(u64, usize), PrefixError> {
-    debug_assert!((1..=8).contains(&bits));
-    let first = *buf.first().ok_or(PrefixError::Incomplete)?;
-    let mask = if bits == 8 {
-        0xff
-    } else {
-        (1u16 << bits) as u8 - 1
-    };
-    let mut value = u64::from(first & mask);
-    if value < u64::from(mask) {
-        return Ok((value, 1));
-    }
-    let mut shift = 0u32;
-    for (i, &byte) in buf.iter().enumerate().skip(1) {
-        // 62-bit values need at most 9 continuation bytes after an 8-bit
-        // prefix; anything longer (including zero-padded) is refused.
-        if shift > MAX_SHIFT {
-            return Err(PrefixError::IntegerOverflow);
-        }
-        let add = u64::from(byte & PAYLOAD_MASK) << shift;
-        value = value
-            .checked_add(add)
-            .filter(|v| *v <= MAX_INT)
-            .ok_or(PrefixError::IntegerOverflow)?;
-        if byte & CONTINUATION == 0 {
-            return Ok((value, i + 1));
-        }
-        shift += PAYLOAD_BITS;
-    }
-    Err(PrefixError::Incomplete)
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Appends an integer with an `bits`-bit prefix; `flags` fills the bits
-/// above the prefix in the first byte.
-pub fn encode_int(out: &mut Vec<u8>, flags: u8, bits: u8, mut value: u64) {
-    debug_assert!((1..=8).contains(&bits));
-    let mask: u64 = if bits == 8 { 0xff } else { (1 << bits) - 1 };
-    if value < mask {
-        out.push(flags | value as u8);
-        return;
-    }
-    out.push(flags | mask as u8);
-    value -= mask;
-    while value >= u64::from(CONTINUATION) {
-        out.push(CONTINUATION | (value as u8 & PAYLOAD_MASK));
-        value >>= PAYLOAD_BITS;
-    }
-    out.push(value as u8);
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Decodes a string literal whose Huffman flag is bit `bits` of `buf[0]`
-/// and whose length has a `bits`-bit prefix. `max_len` bounds the decoded
-/// length (and the encoded one, which is checked before any copying).
-pub fn decode_string(
-    buf: &[u8],
-    bits: u8,
-    max_len: usize,
-) -> Result<(Vec<u8>, usize), PrefixError> {
-    let first = *buf.first().ok_or(PrefixError::Incomplete)?;
-    let huff = first & (1 << bits) != 0;
-    let (len, used) = decode_int(buf, bits)?;
-    // A Huffman string decodes to at most 8/5 of its length; bound the
-    // wire length by the limit either way before touching the bytes.
-    let len = usize::try_from(len).map_err(|_| PrefixError::StringTooLong)?;
-    let limit = if huff {
-        max_len
-            .saturating_mul(8)
-            .div_ceil(MIN_CODE_BITS)
-            .max(max_len)
-    } else {
-        max_len
-    };
-    if len > limit {
-        return Err(PrefixError::StringTooLong);
-    }
-    let end = used.checked_add(len).ok_or(PrefixError::StringTooLong)?;
-    let raw = buf.get(used..end).ok_or(PrefixError::Incomplete)?;
-    let value = if huff {
-        huffman::decode(raw, max_len).map_err(|e| match e {
-            huffman::HuffmanError::TooLong => PrefixError::StringTooLong,
-            e => PrefixError::Huffman(e),
-        })?
-    } else {
-        raw.to_vec()
-    };
-    Ok((value, end))
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// Appends a string literal, Huffman-coded when that is strictly shorter.
-/// `flags` fills the bits above the H bit.
-pub fn encode_string(out: &mut Vec<u8>, flags: u8, bits: u8, value: &[u8]) {
-    let huff_len = huffman::encoded_len(value);
-    if huff_len < value.len() {
-        encode_int(out, flags | 1 << bits, bits, huff_len as u64);
-        huffman::encode(value, out);
-    } else {
-        encode_int(out, flags, bits, value.len() as u64);
-        out.extend_from_slice(value);
-    }
-}
-
 // The Vesper build: the same functions forwarded to the port.
 
-#[cfg(feature = "vesper-port")]
 pub fn decode_int(buf: &[u8], bits: u8) -> Result<(u64, usize), PrefixError> {
     let n = super::port::huff().decode_int(buf, u64::from(bits))?;
     Ok((n.value, n.used as usize))
 }
 
-#[cfg(feature = "vesper-port")]
 pub fn encode_int(out: &mut Vec<u8>, flags: u8, bits: u8, value: u64) {
     super::port::huff().encode_int(out, flags, u64::from(bits), value)
 }
 
-#[cfg(feature = "vesper-port")]
 pub fn decode_string(
     buf: &[u8],
     bits: u8,
@@ -165,7 +41,6 @@ pub fn decode_string(
     Ok((out, end as usize))
 }
 
-#[cfg(feature = "vesper-port")]
 pub fn encode_string(out: &mut Vec<u8>, flags: u8, bits: u8, value: &[u8]) {
     super::port::huff().encode_string(out, flags, u64::from(bits), value)
 }

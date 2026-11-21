@@ -1,25 +1,23 @@
-//! Under `vesper-port`, compile the Vesper library `h3` (the Loom package in
-//! vesper/) into a static library and check the committed binding (see
-//! docs/maintenance/porting-a-crate.md).
+//! Compile the Vesper library `h3` (the Loom package in vesper/) into a
+//! static library and check the committed binding (see
+//! docs/maintenance/porting-a-crate.md). Under Bazel the object is prebuilt
+//! (`VESPER_PORT_OBJECT_H3`).
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    #[cfg(feature = "vesper-port")]
-    {
-        let port = vesper_port_harness::Port::new("h3", "vesper")
-            .binding("port/binding.rs")
-            .rust_types("crate::qpack::port::abi");
-        #[cfg(feature = "vesper-port-divergent")]
-        let port = {
-            // One module at a time (`VESPER_H3_DIVERGE=huffman`), or all.
-            println!("cargo:rerun-if-env-changed=VESPER_H3_DIVERGE");
-            let only = std::env::var("VESPER_H3_DIVERGE").ok();
-            DIVERGENT_EDITS
-                .iter()
-                .filter(|(module, _, _)| only.as_deref().is_none_or(|m| m == *module))
-                .fold(port, |port, (_, from, to)| port.edit(from, to))
-        };
-        port.build();
-    }
+    let port = vesper_port_harness::Port::new("h3", "vesper")
+        .binding("port/binding.rs")
+        .rust_types("crate::qpack::port::abi");
+    #[cfg(feature = "vesper-port-divergent")]
+    let port = {
+        // One module at a time (`VESPER_H3_DIVERGE=huffman`), or all.
+        println!("cargo:rerun-if-env-changed=VESPER_H3_DIVERGE");
+        let only = std::env::var("VESPER_H3_DIVERGE").ok();
+        DIVERGENT_EDITS
+            .iter()
+            .filter(|(module, _, _)| only.as_deref().is_none_or(|m| m == *module))
+            .fold(port, |port, (_, from, to)| port.edit(from, to))
+    };
+    port.build();
 }
 
 /// The divergence check: one wrong line per ported module (mirrored in
