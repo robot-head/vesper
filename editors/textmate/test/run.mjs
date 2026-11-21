@@ -158,10 +158,9 @@ for (const rel of files) {
     const text = src.slice(tok.start, tok.end);
     const check = want[tok.kind];
     if (check) {
-      // A comment or string can span lines: check its first byte and every line start inside it.
-      const probes = [tok.start];
-      for (let k = tok.start; k < tok.end; k++) if (src[k - 1] === "\n" && src[k] !== "\n") probes.push(k);
-      for (const p of probes) {
+      // Every byte of the token (a comment or string can span lines; newlines carry no scope).
+      for (let p = tok.start; p < tok.end; p++) {
+        if (src[p] === "\n" || src[p] === "\r") continue;
         if (!check(sc[p] ?? [])) {
           problems.push(`${rel}:${lineOf(p)}: ${tok.kind} ${JSON.stringify(text.slice(0, 40))} got ${(sc[p] ?? []).slice(1).join(" ") || "(none)"}`);
           break;
