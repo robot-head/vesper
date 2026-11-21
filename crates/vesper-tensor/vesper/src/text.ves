@@ -205,10 +205,10 @@ const ALL_ONES: u64 = 0xffffffffffffffff;
 fn escape_mask(x: u64) -> u64 {
     let control = wrapping_sub(x, SPACES) & (x ^ ALL_ONES);
     let q = x ^ QUOTES;
-    let quote = wrapping_sub(q, ONES) & (q ^ ALL_ONES);
+    let quote_bits = wrapping_sub(q, ONES) & (q ^ ALL_ONES);
     let k = x ^ BACKSLASHES;
     let backslash = wrapping_sub(k, ONES) & (k ^ ALL_ONES);
-    (control | quote | backslash) & HIGHS
+    (control | quote_bits | backslash) & HIGHS
 }
 
 // Whether `s[start..end]` is UTF-8 as `String::from_utf8` accepts it: no
@@ -294,7 +294,20 @@ fn read_string(in b: Slice[u8], at: u64, inout strs: Slice[u8], sp: u64)
     loop {
         // Eight bytes with no quote, backslash or control byte are copied
         // as one word (both offsets are bounded first, so they cannot wrap).
-        if i <= b.len() && b.len() - i >= WORD_BYTES && o <= strs.len() && strs.len() - o >= WORD_BYTES {
+        if i
+            <= b
+            .len()
+            && b
+            .len()
+            - i
+            >= WORD_BYTES
+            && o
+            <= strs
+            .len()
+            && strs
+            .len()
+            - o
+            >= WORD_BYTES {
             let x = b.read_u64_le(i);
             let mask = escape_mask(x);
             high = high | (x & HIGHS);
@@ -412,7 +425,10 @@ fn add_key(inout keys: Slice[u64], in strs: Slice[u8], object: u64, word: u64, c
     let mut h: u64 = FNV_OFFSET ^ object;
     let words = len >> 3;
     for w in u64_zero()..words {
-        h = wrapping_mul(h ^ strs.read_u64_le(wrapping_add(start, wrapping_mul(w, WORD_BYTES))), FNV_PRIME);
+        h = wrapping_mul(
+            h ^ strs.read_u64_le(wrapping_add(start, wrapping_mul(w, WORD_BYTES))),
+            FNV_PRIME
+        );
     }
     for i in wrapping_mul(words, WORD_BYTES)..len {
         h = wrapping_mul(h ^ widen_u64(strs[wrapping_add(start, i)]), FNV_PRIME);

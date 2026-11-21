@@ -161,10 +161,14 @@ fn validate_pages(
             return 4;
         }
         let q = wrapping_mul(4, page);
-        if pages[q] != 1
-            || pages[wrapping_add(q, 1)] != slot
-            || pages[wrapping_add(q, 2)] != generation
-            || pages[wrapping_add(q, 3)] != page_generation {
+        if pages[q]
+            != 1
+            || pages[wrapping_add(q, 1)]
+            != slot
+            || pages[wrapping_add(q, 2)]
+            != generation
+            || pages[wrapping_add(q, 3)]
+            != page_generation {
             return 4;
         }
         at = wrapping_add(at, 2);

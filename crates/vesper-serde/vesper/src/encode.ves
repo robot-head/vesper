@@ -140,7 +140,16 @@ fn escaped_width(b: u64) -> u64 {
         } else {
             1
         }
-    } else if b == Ascii::Lf || b == Ascii::Cr || b == Ascii::Tab || b == Ascii::Backspace || b == Ascii::Ff {
+    } else if b
+        == Ascii::Lf
+        || b
+        == Ascii::Cr
+        || b
+        == Ascii::Tab
+        || b
+        == Ascii::Backspace
+        || b
+        == Ascii::Ff {
         ESCAPE_LEN
     } else {
         UNICODE_ESCAPE_LEN
@@ -164,10 +173,10 @@ fn word_escapes(x: u64) -> bool {
     let not_x = x ^ U64_MAX;
     let control = wrapping_sub(x, SPACES) & not_x;
     let q = x ^ QUOTES;
-    let quote = wrapping_sub(q, ONES) & (q ^ U64_MAX);
+    let quote_bits = wrapping_sub(q, ONES) & (q ^ U64_MAX);
     let k = x ^ BACKSLASHES;
     let backslash = wrapping_sub(k, ONES) & (k ^ U64_MAX);
-    (control | quote | backslash) & HIGHS != 0
+    (control | quote_bits | backslash) & HIGHS != 0
 }
 
 // The `r < 8` pool bytes at `p` as a word whose other bytes are plain
