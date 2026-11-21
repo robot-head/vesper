@@ -1,8 +1,8 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-# The Z-set kernels and the frontier are the Vesper port (port wave P3b lane
-# 7, #1069): build.rs links the object built here from the Loom package in
+# The Z-set kernels, the frontier, the accumulator and the CDC decoder are
+# the Vesper port (port wave P3b lane 7, #1069; SH6 lane 6, #1401): build.rs links the object built here from the Loom package in
 # vesper/ and checks port/binding.rs against the generated binding, as for
 # vesper-aura. Every test file runs against it.
 vesper_package(
@@ -47,24 +47,26 @@ vesper_crate(
     },
 )
 
-# The divergent builds, one per ported kernel (the Cargo
+# The divergent builds, one per ported kernel and its file (the Cargo
 # `vesper-port-divergent` feature applies the same edits from build.rs, one
 # at a time with VESPER_FLUX_DIVERGE): each must keep compiling, and
-# port/check.sh asserts that tests/kernels.rs catches it.
+# port/check.sh asserts that the differential tests catch it.
 [
     vesper_port_object(
         name = "flux_vesper_divergent_" + kernel,
-        edit_src = "vesper/src/lib.ves",
+        edit_src = "vesper/src/" + src,
         edits = {old: new},
         library = "flux",
         package = ":port_package",
         target = VESPER_TARGET,
     )
-    for kernel, old, new in [
-        ("union", "            acc = acc_add(acc, cell(in b, wrapping_add(bj, width)));\n", "            acc = acc_add(acc, 0);\n"),
-        ("filter", "            x >= value\n", "            x > value\n"),
-        ("consolidate", "        if !acc_is_zero(acc) {\n            if !acc_fits(acc) {\n                overflow = true;\n            }\n            push_row(inout out, in cells, fat, width);", "        if true {\n            if !acc_fits(acc) {\n                overflow = true;\n            }\n            push_row(inout out, in cells, fat, width);"),
-        ("join", "    if product > max_product {\n", "    if product >= max_product {\n"),
-        ("frontier", "    let mut min = watermark;\n", "    let mut min: i64 = 0;\n"),
+    for kernel, src, old, new in [
+        ("union", "lib.ves", "            acc = acc_add(acc, cell(in b, wrapping_add(bj, width)));\n", "            acc = acc_add(acc, 0);\n"),
+        ("filter", "lib.ves", "            x >= value\n", "            x > value\n"),
+        ("consolidate", "lib.ves", "        if !acc_is_zero(acc) {\n            if !acc_fits(acc) {\n                overflow = true;\n            }\n            push_row(inout out, in cells, fat, width);", "        if true {\n            if !acc_fits(acc) {\n                overflow = true;\n            }\n            push_row(inout out, in cells, fat, width);"),
+        ("join", "lib.ves", "    if product > max_product {\n", "    if product >= max_product {\n"),
+        ("frontier", "lib.ves", "    let mut min = watermark;\n", "    let mut min: i64 = 0;\n"),
+        ("accumulator", "acc.ves", "    if count >= a.max_rows {\n", "    if count > a.max_rows {\n"),
+        ("cdc", "cdc.ves", "        if flags != 0 {\n", "        if flags > 1 {\n"),
     ]
 ]

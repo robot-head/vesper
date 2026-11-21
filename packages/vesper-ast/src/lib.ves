@@ -48,14 +48,17 @@ pub copy struct ListRef {
     len: u32
 }
 
-// A literal (`Literal`). Kinds: 1 Int (`bits` is the magnitude, `neg` its
-// sign; `vesper_core` keeps an i128 within -(2^64 - 1)..=2^64 - 1), 2 Float
-// (`bits` is the f64 bit pattern), 3 Bool (`bits` 0 or 1), 4 String (`bits`
-// is the symbol of the decoded value).
+// A literal (`Literal`). Kinds: 1 Int (`hi`:`bits` is the 128-bit
+// magnitude, `neg` its sign; an i128, so the magnitude is at most 2^127),
+// 2 Float (`bits` is the f64 bit pattern), 3 Bool (`bits` 0 or 1), 4 String
+// (`bits` is the symbol of the decoded value), 5 WideInt (`hi`:`bits`, a
+// magnitude above `i128::MAX`; never negative). `hi` is 0 except for Int
+// and WideInt.
 pub copy struct Lit {
     kind: u8,
     neg: bool,
-    bits: u64
+    bits: u64,
+    hi: u64
 }
 
 // An expression (`Expr`): its `ExprKind` number, span and up to five
@@ -496,7 +499,8 @@ pub fn lit_at(in a: Ast, i: u32) -> Lit {
         Lit {
             kind: 0,
             neg: false,
-            bits: 0
+            bits: 0,
+            hi: 0
         }
     )
 }

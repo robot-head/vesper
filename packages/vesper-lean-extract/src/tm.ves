@@ -1,0 +1,576 @@
+// Lean terms as word ranges of the builder (`T`), for the structured
+// extractor (part 3): it composes terms out of order (`sequence`,
+// `ascribe`, buffered operands), so each helper writes a node whose
+// children are copies of earlier ranges. The helpers mirror the
+// constructors src/lean.rs uses (`app`, `pure`, `sequence`, `let_local`,
+// `bind_local`, `tuple_get`, ...); identifier checks happen where Rust
+// calls `ident`/`source_name`.
+
+use self::build::{
+    B,
+    B_EXPLICIT,
+    P_BIND,
+    P_CTOR,
+    P_TUPLE,
+    P_WILD,
+    S_ASSIGN,
+    S_BIND,
+    S_BIND_TYPED,
+    S_EXPR,
+    S_IF,
+    S_LET,
+    T,
+    T_APP,
+    T_ASCRIBE,
+    T_BINARY,
+    T_DO,
+    T_ELIMINATE,
+    T_FUN,
+    T_IF,
+    T_INFER,
+    T_MATCH,
+    T_NAT,
+    T_PRODUCT,
+    T_PROJECT,
+    T_REF,
+    T_TUPLE,
+    T_UNARY,
+    T_UPDATE,
+    T_RECORD
+};
+
+pub fn empty() -> ChunkSeq[T] {
+    ChunkSeq::new[T]()
+}
+
+fn t_at(in ts: ChunkSeq[T], i: u64) -> T {
+    match ts.try_get(i) {
+        Option::Some(t) => t,
+        Option::None => T {
+            a: 0,
+            n: 0
+        },
+    }
+}
+
+pub fn get(in ts: ChunkSeq[T], i: u64) -> T {
+    t_at(in ts, i)
+}
+
+fn put_all(inout b: B, in ts: ChunkSeq[T]) {
+    for i in 0..ts.len() {
+        b.put(t_at(in ts, i));
+    }
+}
+
+// `reference(&ident)`: an unrooted one-component name of a checked local.
+pub fn lref(inout b: B, s: u32) -> T {
+    let m = b.at();
+    b.w(T_REF);
+    b.w(0);
+    b.w(1);
+    b.sym(s);
+    b.since(m)
+}
+
+// `source_ref(s)`.
+pub fn sref(inout b: B, s: u32) -> T {
+    let m = b.at();
+    b.sref(s);
+    b.since(m)
+}
+
+// `named(s)`: a fixed unrooted reference.
+pub fn named(inout b: B, in s: Str) -> T {
+    let m = b.at();
+    b.named(in s);
+    b.since(m)
+}
+
+pub fn global(inout b: B, in a: Str) -> T {
+    let m = b.at();
+    b.global(in a);
+    b.since(m)
+}
+
+pub fn global2(inout b: B, in a: Str, in c: Str) -> T {
+    let m = b.at();
+    b.global2(in a, in c);
+    b.since(m)
+}
+
+// `unit()`: `Unit.unit`.
+pub fn unit(inout b: B) -> T {
+    global2(inout b, in "Unit", in "unit")
+}
+
+pub fn infer(inout b: B) -> T {
+    let m = b.at();
+    b.w(T_INFER);
+    b.since(m)
+}
+
+pub fn nat(inout b: B, in digits: Str) -> T {
+    let m = b.at();
+    b.nat(in digits);
+    b.since(m)
+}
+
+// A natural number literal of `v`.
+pub fn nat_u64(inout b: B, v: u64) -> T {
+    let mut d: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_decimal_u64(inout d, v);
+    let s = b.names.intern(in d.as_slice());
+    let m = b.at();
+    b.w(T_NAT);
+    b.sym(s);
+    b.since(m)
+}
+
+fn put_decimal_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_decimal_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+// A positional argument.
+pub fn pos(inout b: B, t: T) -> T {
+    let m = b.at();
+    b.w(0);
+    b.put(t);
+    b.since(m)
+}
+
+// A named argument `(name := t)` with a checked source identifier.
+pub fn named_arg_sym(inout b: B, s: u32, t: T) -> T {
+    let m = b.at();
+    b.w(1);
+    b.ident(s);
+    b.put(t);
+    b.since(m)
+}
+
+// A named argument with a fixed name.
+pub fn named_arg(inout b: B, in s: Str, t: T) -> T {
+    let m = b.at();
+    b.w(1);
+    b.text(in s);
+    b.put(t);
+    b.since(m)
+}
+
+// `Term::App` over encoded arguments (`pos`, `named_arg`).
+pub fn app_args(inout b: B, f: T, in args: ChunkSeq[T]) -> T {
+    let m = b.at();
+    b.w(T_APP);
+    b.w(args.len());
+    b.w(f.n);
+    b.put(f);
+    put_all(inout b, in args);
+    b.since(m)
+}
+
+// `app(f, args)`.
+pub fn app(inout b: B, f: T, in args: ChunkSeq[T]) -> T {
+    let m = b.at();
+    b.w(T_APP);
+    b.w(args.len());
+    b.w(f.n);
+    b.put(f);
+    for i in 0..args.len() {
+        b.w(0);
+        b.put(t_at(in args, i));
+    }
+    b.since(m)
+}
+
+pub fn app1(inout b: B, f: T, x: T) -> T {
+    let mut args = empty();
+    args.push(x);
+    app(inout b, f, in args)
+}
+
+pub fn app2(inout b: B, f: T, x: T, y: T) -> T {
+    let mut args = empty();
+    args.push(x);
+    args.push(y);
+    app(inout b, f, in args)
+}
+
+pub fn app3(inout b: B, f: T, x: T, y: T, z: T) -> T {
+    let mut args = empty();
+    args.push(x);
+    args.push(y);
+    args.push(z);
+    app(inout b, f, in args)
+}
+
+// `app(global(&[a, c]), [x])`.
+pub fn gapp1(inout b: B, in a: Str, in c: Str, x: T) -> T {
+    let f = global2(inout b, in a, in c);
+    app1(inout b, f, x)
+}
+
+pub fn gapp2(inout b: B, in a: Str, in c: Str, x: T, y: T) -> T {
+    let f = global2(inout b, in a, in c);
+    app2(inout b, f, x, y)
+}
+
+pub fn gapp3(inout b: B, in a: Str, in c: Str, x: T, y: T, z: T) -> T {
+    let f = global2(inout b, in a, in c);
+    app3(inout b, f, x, y, z)
+}
+
+// `pure(t)`.
+pub fn pure(inout b: B, t: T) -> T {
+    gapp1(inout b, in "Pure", in "pure", t)
+}
+
+pub fn binary(inout b: B, op: u64, x: T, y: T) -> T {
+    let m = b.at();
+    b.w(T_BINARY);
+    b.w(op);
+    b.put(x);
+    b.put(y);
+    b.since(m)
+}
+
+pub fn unary(inout b: B, op: u64, x: T) -> T {
+    let m = b.at();
+    b.w(T_UNARY);
+    b.w(op);
+    b.put(x);
+    b.since(m)
+}
+
+pub fn ite(inout b: B, c: T, y: T, n: T) -> T {
+    let m = b.at();
+    b.w(T_IF);
+    b.put(c);
+    b.put(y);
+    b.put(n);
+    b.since(m)
+}
+
+pub fn ascribe(inout b: B, v: T, ty: T) -> T {
+    let m = b.at();
+    b.w(T_ASCRIBE);
+    b.put(v);
+    b.put(ty);
+    b.since(m)
+}
+
+pub fn eliminate(inout b: B, v: T) -> T {
+    let m = b.at();
+    b.w(T_ELIMINATE);
+    b.put(v);
+    b.since(m)
+}
+
+// `Term::Do`.
+pub fn sequence(inout b: B, in ss: ChunkSeq[T], result: T) -> T {
+    let m = b.at();
+    b.w(T_DO);
+    b.w(ss.len());
+    put_all(inout b, in ss);
+    b.put(result);
+    b.since(m)
+}
+
+// `Term::Match` over encoded arms (`arm`).
+pub fn match_term(inout b: B, scrutinee: T, in arms: ChunkSeq[T]) -> T {
+    let m = b.at();
+    b.w(T_MATCH);
+    b.w(arms.len());
+    b.put(scrutinee);
+    put_all(inout b, in arms);
+    b.since(m)
+}
+
+pub fn arm(inout b: B, pattern: T, body: T) -> T {
+    let m = b.at();
+    b.put(pattern);
+    b.put(body);
+    b.since(m)
+}
+
+// `Term::Project` with a field: `project(base, field)` checks the field.
+pub fn project(inout b: B, base: T, field: u32) -> T {
+    let m = b.at();
+    b.w(T_PROJECT);
+    b.put(base);
+    b.w(0);
+    b.ident(field);
+    b.since(m)
+}
+
+// A fixed field projection (`lean_nodes::project`).
+pub fn project_fixed(inout b: B, base: T, in field: Str) -> T {
+    let m = b.at();
+    b.w(T_PROJECT);
+    b.put(base);
+    b.w(0);
+    b.text(in field);
+    b.since(m)
+}
+
+// `pair_get(base, k)`.
+pub fn pair_get(inout b: B, base: T, k: u64) -> T {
+    let m = b.at();
+    b.w(T_PROJECT);
+    b.put(base);
+    b.w(1);
+    b.w(k);
+    b.since(m)
+}
+
+// `tuple_get(t, i, n)`.
+pub fn tuple_get(inout b: B, t: T, i: u64, n: u64) -> T {
+    if n <= 1 {
+        return t;
+    }
+    let mut x = t;
+    for k in 0..i {
+        x = pair_get(inout b, x, 2);
+    }
+    if wrapping_add(i, 1) < n {
+        x = pair_get(inout b, x, 1);
+    }
+    x
+}
+
+// `lean_nodes::tuple`.
+pub fn tuple(inout b: B, in ts: ChunkSeq[T]) -> T {
+    if ts.len() == 0 {
+        return unit(inout b);
+    }
+    if ts.len() == 1 {
+        return t_at(in ts, 0);
+    }
+    let m = b.at();
+    b.w(T_TUPLE);
+    b.w(ts.len());
+    put_all(inout b, in ts);
+    b.since(m)
+}
+
+// `lean_nodes::product`.
+pub fn product(inout b: B, in ts: ChunkSeq[T]) -> T {
+    if ts.len() == 0 {
+        return global(inout b, in "Unit");
+    }
+    if ts.len() == 1 {
+        return t_at(in ts, 0);
+    }
+    let m = b.at();
+    b.w(T_PRODUCT);
+    b.w(ts.len());
+    put_all(inout b, in ts);
+    b.since(m)
+}
+
+// `Term::Record` over encoded fields (`field`).
+pub fn record(inout b: B, in fs: ChunkSeq[T]) -> T {
+    let m = b.at();
+    b.w(T_RECORD);
+    b.w(fs.len());
+    put_all(inout b, in fs);
+    b.since(m)
+}
+
+pub fn update(inout b: B, base: T, in fs: ChunkSeq[T]) -> T {
+    let m = b.at();
+    b.w(T_UPDATE);
+    b.w(fs.len());
+    b.put(base);
+    put_all(inout b, in fs);
+    b.since(m)
+}
+
+// A record field `name := t` (checked).
+pub fn field(inout b: B, name: u32, t: T) -> T {
+    let m = b.at();
+    b.ident(name);
+    b.put(t);
+    b.since(m)
+}
+
+// Binders: an explicit binder with a checked local (`explicit`).
+pub fn explicit(inout b: B, name: u32, ty: T) -> T {
+    let m = b.at();
+    b.w(B_EXPLICIT);
+    b.w(1);
+    b.sym(name);
+    b.put(ty);
+    b.since(m)
+}
+
+// An anonymous binder of kind `kind`.
+pub fn anonymous(inout b: B, kind: u64, ty: T) -> T {
+    let m = b.at();
+    b.w(kind);
+    b.w(0);
+    b.put(ty);
+    b.since(m)
+}
+
+pub fn binder_sym(inout b: B, kind: u64, name: u32, ty: T) -> T {
+    let m = b.at();
+    b.w(kind);
+    b.w(1);
+    b.sym(name);
+    b.put(ty);
+    b.since(m)
+}
+
+pub fn lambda(inout b: B, in binders: ChunkSeq[T], body: T) -> T {
+    let m = b.at();
+    b.w(T_FUN);
+    b.w(binders.len());
+    put_all(inout b, in binders);
+    b.put(body);
+    b.since(m)
+}
+
+// Patterns.
+pub fn p_wild(inout b: B) -> T {
+    let m = b.at();
+    b.w(P_WILD);
+    b.since(m)
+}
+
+pub fn p_bind(inout b: B, s: u32) -> T {
+    let m = b.at();
+    b.w(P_BIND);
+    b.sym(s);
+    b.since(m)
+}
+
+pub fn p_tuple(inout b: B, in ps: ChunkSeq[T]) -> T {
+    let m = b.at();
+    b.w(P_TUPLE);
+    b.w(ps.len());
+    put_all(inout b, in ps);
+    b.since(m)
+}
+
+// A constructor pattern; `name` is an encoded name (`name_range`).
+pub fn p_ctor(inout b: B, name: T, in ps: ChunkSeq[T]) -> T {
+    let m = b.at();
+    b.w(P_CTOR);
+    b.put(name);
+    b.w(ps.len());
+    put_all(inout b, in ps);
+    b.since(m)
+}
+
+// A fixed rooted two-component name (`fixed_name(&[a, c]).rooted()`).
+pub fn rooted2(inout b: B, in a: Str, in c: Str) -> T {
+    let m = b.at();
+    b.w(1);
+    b.w(2);
+    b.text(in a);
+    b.text(in c);
+    b.since(m)
+}
+
+// Statements (`DoStatement`).
+pub fn let_local(
+    inout b: B,
+    inout out: ChunkSeq[T],
+    name: u32,
+    value: T,
+    has_ty: bool,
+    ty: T,
+    mutable: bool
+) {
+    let m = b.at();
+    b.w(S_LET);
+    b
+        .w(
+        if mutable {
+            1
+        } else {
+            0
+        }
+    );
+    b.w(P_BIND);
+    b.sym(name);
+    if has_ty {
+        b.w(1);
+        b.put(ty);
+    } else {
+        b.w(0);
+    }
+    b.put(value);
+    out.push(b.since(m));
+}
+
+// `let pattern := value` (immutable, untyped).
+pub fn let_pattern(inout b: B, inout out: ChunkSeq[T], pattern: T, value: T) {
+    let m = b.at();
+    b.w(S_LET);
+    b.w(0);
+    b.put(pattern);
+    b.w(0);
+    b.put(value);
+    out.push(b.since(m));
+}
+
+pub fn bind_local(inout b: B, inout out: ChunkSeq[T], name: u32, action: T, has_ty: bool, ty: T) {
+    let m = b.at();
+    if has_ty {
+        b.w(S_BIND_TYPED);
+        b.w(P_BIND);
+        b.sym(name);
+        b.put(ty);
+        b.put(action);
+    } else {
+        b.w(S_BIND);
+        b.w(P_BIND);
+        b.sym(name);
+        b.put(action);
+    }
+    out.push(b.since(m));
+}
+
+pub fn bind_pattern_stmt(inout b: B, inout out: ChunkSeq[T], pattern: T, action: T) {
+    let m = b.at();
+    b.w(S_BIND);
+    b.put(pattern);
+    b.put(action);
+    out.push(b.since(m));
+}
+
+pub fn assign(inout b: B, inout out: ChunkSeq[T], local: u32, value: T) {
+    let m = b.at();
+    b.w(S_ASSIGN);
+    b.sym(local);
+    b.put(value);
+    out.push(b.since(m));
+}
+
+pub fn expr_stmt(inout b: B, t: T) -> T {
+    let m = b.at();
+    b.w(S_EXPR);
+    b.put(t);
+    b.since(m)
+}
+
+// `DS::If { condition, yes, no: None }`.
+pub fn if_stmt(inout b: B, condition: T, in yes: ChunkSeq[T]) -> T {
+    let m = b.at();
+    b.w(S_IF);
+    b.put(condition);
+    b.w(yes.len());
+    put_all(inout b, in yes);
+    b.w(0);
+    b.since(m)
+}
+
+pub fn extend(inout out: ChunkSeq[T], in more: ChunkSeq[T]) {
+    for i in 0..more.len() {
+        out.push(t_at(in more, i));
+    }
+}

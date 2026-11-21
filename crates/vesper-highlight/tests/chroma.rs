@@ -693,3 +693,31 @@ fn tier0_latency_on_a_200_line_file_is_measured() {
     // A loose sanity bound only; the report quotes the measured number.
     assert!(per.as_millis() < 250);
 }
+
+/// `effect`, `handle`, `sink` and `inout` used as names (#1244) are classed
+/// as the identifiers they are; as keywords they keep their classes.
+#[test]
+fn contextual_keywords_used_as_names_are_identifiers() {
+    let src = "effect E { fn e() -> u64; }
+fn effect() -> u64 { 1 }
+fn handle(sink: u64, inout: u64) -> u64 { let handle = sink; s.effect(handle, inout) }
+fn f(sink x: S, inout y: T) -> u64 { handle E in { g(sink x, inout y) } with { return v => v } }
+";
+    let spans = highlight_tier0(src).unwrap();
+    let c = |t, n| class_of(src, &spans, t, n);
+    assert_eq!(c("effect", 0), C::KeywordControl);
+    assert_eq!(c("effect", 1), C::FunctionIdent);
+    assert_eq!(c("effect", 2), C::FunctionIdent);
+    assert_eq!(c("handle", 0), C::FunctionIdent);
+    assert_ne!(c("handle", 1), C::KeywordControl);
+    assert_ne!(c("handle", 2), C::KeywordControl);
+    assert_eq!(c("handle", 3), C::KeywordControl);
+    assert_ne!(c("sink", 0), C::PassModeSink);
+    assert_ne!(c("inout", 0), C::PassModeInOut);
+    assert_ne!(c("sink", 1), C::PassModeSink);
+    assert_ne!(c("inout", 1), C::PassModeInOut);
+    assert_eq!(c("sink", 2), C::PassModeSink);
+    assert_eq!(c("inout", 2), C::PassModeInOut);
+    assert_eq!(c("sink", 3), C::PassModeSink);
+    assert_eq!(c("inout", 3), C::PassModeInOut);
+}

@@ -142,7 +142,7 @@ const K_NAMED: u8 = 1;
 const K_TUPLE: u8 = 2;
 const K_FN: u8 = 3;
 
-const LOOP_REFUSAL: Str = "Lean extraction does not model loop, for, break or return yet; write the iteration as a tail-recursive function";
+pub const LOOP_REFUSAL: Str = "Lean extraction does not model loop, for, break or return yet; write the iteration as a tail-recursive function";
 
 // What the emitter reads besides the builder and the type table.
 pub struct X {
@@ -426,7 +426,7 @@ fn signed_kind(in b: B, in t: Types, ty: u32) -> bool {
 }
 
 // `World::constructor(name)`: (adt index << 32) + variant index, or NONE64.
-fn lookup_constructor(inout b: B, in wd: World, name: u32) -> u64 {
+pub fn lookup_constructor(inout b: B, in wd: World, name: u32) -> u64 {
     let n = b.names.size(name);
     let mut seps: u64 = 0;
     let mut last: u64 = 0;
@@ -467,11 +467,11 @@ fn lookup_constructor(inout b: B, in wd: World, name: u32) -> u64 {
     constructor(in wd, qs, rs)
 }
 
-fn adt_of(in wd: World, c: u64) -> Adt {
+pub fn adt_of(in wd: World, c: u64) -> Adt {
     wd.adt(n32(wrapping_shr_u64(c, 32)))
 }
 
-fn variant_of(in wd: World, c: u64) -> Variant {
+pub fn variant_of(in wd: World, c: u64) -> Variant {
     wd.variant(c & 4294967295)
 }
 
@@ -589,7 +589,7 @@ fn field_type(inout t: Types, in b: B, in wd: World, ty: u32, field: u32) -> u32
 }
 
 // A projection's field as a tuple index (`str::parse::<usize>`), or NONE64.
-fn parse_index(in b: B, s: u32) -> u64 {
+pub fn parse_index(in b: B, s: u32) -> u64 {
     let n = b.names.size(s);
     if n == 0 {
         return NONE64;
@@ -829,7 +829,7 @@ fn split_place(inout b: B, s: u32, inout path: ChunkSeq[u32]) -> u32 {
 // ----- literals ---------------------------------------------------------------------
 
 // The decimal digits of the 128-bit magnitude (hi, lo).
-fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
+pub fn put_u128(inout o: ChunkSeq[u8], hi: u64, lo: u64) {
     if hi == 0 {
         put_decimal(inout o, lo);
         return;
@@ -884,7 +884,7 @@ fn nat_u64(inout b: B, v: u64) {
 }
 
 // `(x as f32).to_bits()` of the f64 with bits `d`, round to nearest even.
-fn f32_bits(d: u64) -> u64 {
+pub fn f32_bits(d: u64) -> u64 {
     let sign = wrapping_shl_u64(wrapping_shr_u64(d, 63), 31);
     let exp = wrapping_shr_u64(d, 52) & 2047;
     let mant = d & 4503599627370495;

@@ -1,0 +1,678 @@
+// @vesper/codegen-scalar-emit: the `scalar` hook of the native lowering
+// (self-hosting SH4 lane 6, #1280), over the Rust `Codegen`'s lent
+// Cranelift builder (src/codegen_swap.rs, lane 1's swap point).
+//
+// The graph walk (`Codegen::ir_graph_at`) asks the `scalar` hook to emit
+// each Place IR instruction of its family. @vesper/codegen-scalar plans
+// what to emit (`codegen_scalar_plan`: the `expr_at` arm, the condition
+// code, the narrow kind `coerce` reduces to); the harness hands this hook
+// the plan's request and immediates with the instruction's operand values,
+// and it emits what `expr_at` would. An instruction with no plan, or with
+// operand lanes the plan cannot see (floats, 128-bit words, mismatched
+// lanes), is declined and the Rust lowering emits it.
+//
+// A request's arguments are `[a, b, optimize, operand values...]`, where
+// `a` and `b` are the plan's immediates and `optimize` is the compile's
+// optimizer flag (`Codegen::operands_only`, which `coerce` reads).
+
+use @vesper/cranelift::{
+    Ty,
+    Value,
+    Var,
+    call_arg,
+    call_arg_count,
+    call_builder,
+    call_result,
+    call_op,
+    call_result_value,
+    call_return_builder,
+    cc_eq,
+    cc_ne,
+    cc_sge,
+    cc_sgt,
+    cc_sle,
+    cc_slt,
+    cc_uge,
+    cc_ugt,
+    cc_ule,
+    cc_ult,
+    declare_var,
+    def_var,
+    ins_band,
+    ins_band_imm,
+    ins_bnot,
+    ins_bor,
+    ins_bxor,
+    ins_f64const,
+    ins_iadd,
+    ins_icmp,
+    ins_icmp_imm,
+    ins_iconst,
+    ins_imul,
+    ins_ineg,
+    ins_ireduce,
+    ins_ishl,
+    ins_ishl_imm,
+    ins_rotl,
+    ins_rotr,
+    ins_isub,
+    ins_sextend,
+    ins_sshr,
+    ins_srem,
+    ins_smulhi,
+    ins_sshr_imm,
+    ins_udiv,
+    ins_uextend,
+    ins_urem,
+    ins_umulhi,
+    ins_ushr,
+    ty_i16,
+    ty_i32,
+    ty_i64,
+    ty_i8,
+    use_var,
+    value_of_word,
+    value_type
+};
+
+// The request protocol (src/codegen_swap.rs): the answer of a hook.
+pub const HANDLED: u64 = 1;
+pub const DECLINED: u64 = 0;
+
+// The plan's requests (@vesper/codegen-scalar keeps the same numbers).
+pub const PLAN_ZERO: u32 = 1;
+pub const PLAN_ICONST: u32 = 2;
+pub const PLAN_F64CONST: u32 = 3;
+pub const PLAN_ICMP: u32 = 4;
+pub const PLAN_BINOP: u32 = 5;
+pub const PLAN_BNOT: u32 = 6;
+pub const PLAN_NOT: u32 = 7;
+pub const PLAN_INEG: u32 = 8;
+pub const PLAN_SHIFT: u32 = 9;
+pub const PLAN_CONVERT: u32 = 10;
+
+// The tests of the raising arms (`codegen_swap::scalar::OVERFLOW` and
+// `DIVISOR`, renumbered past the plan's requests by the caller): the
+// hook answers the flag and the Rust code raises.
+pub const TEST_OVERFLOW: u32 = 11;
+pub const TEST_DIVISOR: u32 = 12;
+pub const TEST_NEGATE: u32 = 13;
+pub const TEST_SHIFT_RANGE: u32 = 14;
+pub const TEST_NARROW: u32 = 15;
+
+// A plain local's read, fresh binding and write (`codegen_swap::scalar`'s
+// READ_LOCAL, BIND_LOCAL and WRITE_LOCAL, renumbered the same way). The
+// Rust code chooses the arm and keeps the variable maps; the hook emits
+// the Cranelift variable operations. READ_LOCAL's args carry the
+// optimizer flag after the Rust words: `[var, kind, optimize]`.
+pub const LOCAL_READ: u32 = 16;
+pub const LOCAL_BIND: u32 = 17;
+pub const LOCAL_WRITE: u32 = 18;
+
+// `TEST_OVERFLOW`'s operators.
+const T_ADD: u64 = 1;
+const T_SUB: u64 = 2;
+const T_MUL: u64 = 3;
+const T_DIV: u64 = 4;
+
+// `PLAN_SHIFT`'s operations (the low byte of `a`; the kind is the next).
+const SHIFT_ISHL: u64 = 1;
+const SHIFT_USHR: u64 = 2;
+const SHIFT_SSHR: u64 = 3;
+const SHIFT_ROTL: u64 = 4;
+
+// `PLAN_CONVERT`'s conversions (the low byte of `a`; the target kind is
+// the next): `numeric::Conversion`.
+const CONV_WRAPPING: u64 = 3;
+
+// `PLAN_BINOP`'s operations.
+const BIN_IADD: u64 = 1;
+const BIN_ISUB: u64 = 2;
+const BIN_IMUL: u64 = 3;
+const BIN_UDIV: u64 = 4;
+const BIN_UREM: u64 = 5;
+const BIN_SREM: u64 = 6;
+const BIN_BAND: u64 = 7;
+const BIN_BOR: u64 = 8;
+const BIN_BXOR: u64 = 9;
+
+// A packed coerce word is one byte.
+const BYTE: u64 = 255;
+
+// Argument positions.
+const ARG_A: u64 = 0;
+const ARG_B: u64 = 1;
+const ARG_OPTIMIZE: u64 = 2;
+const ARG_X: u64 = 3;
+const ARG_Y: u64 = 4;
+
+// Type codes (`codegen_swap::ty_code`) of the integer lanes the hook
+// emits on: I8 1 to I64 4.
+const CODE_I8: u32 = 1;
+const CODE_I64: u32 = 4;
+
+// Integer kinds, in `numeric::IntegerKind`'s order: 1 u8, 2 u16, 3 u32,
+// 6 i8, 7 i16, 8 i32 are the narrow ones `coerce` reduces.
+fn kind_unsigned(k: u64) -> bool {
+    k >= 1 && k <= 5
+}
+fn kind_bits(k: u64) -> u64 {
+    if k == 1 || k == 6 {
+        8
+    } else if k == 2 || k == 7 {
+        16
+    } else {
+        32
+    }
+}
+fn kind_mask(k: u64) -> i64 {
+    if k == 1 {
+        255
+    } else if k == 2 {
+        65535
+    } else {
+        4294967295
+    }
+}
+
+// The narrow type of a narrow kind's width.
+fn narrow_type(bits: u64) -> Ty {
+    if bits == 8 {
+        ty_i8()
+    } else if bits == 16 {
+        ty_i16()
+    } else {
+        ty_i32()
+    }
+}
+
+// Whether kind `k` is a one-word kind narrower than 64 bits.
+fn narrow_kind(k: u64) -> bool {
+    (k >= 1 && k <= 3) || (k >= 6 && k <= 8)
+}
+
+fn code(t: Ty) -> u32 {
+    t.code
+}
+
+// `Codegen::coerce` of a one-word value to narrow kind `k` (0: none): a
+// narrow move on the optimize path, else a mask or a shift pair, and only
+// on an I64 lane.
+fn coerce(inout b: Builder, v: Value, k: u64, optimize: bool) -> Value eff [Ffi[Cranelift]] {
+    if k == 0 || code(value_type(inout b, v)) != CODE_I64 {
+        return v;
+    }
+    let bits = kind_bits(k);
+    if optimize {
+        let narrow = narrow_type(bits);
+        let low = ins_ireduce(inout b, narrow, v);
+        return if kind_unsigned(k) {
+            ins_uextend(inout b, ty_i64(), low)
+        } else {
+            ins_sextend(inout b, ty_i64(), low)
+        };
+    }
+    if kind_unsigned(k) {
+        return ins_band_imm(inout b, v, kind_mask(k));
+    }
+    let up = wrapping_i64(wrapping_sub(64, bits));
+    let high = ins_ishl_imm(inout b, v, up);
+    ins_sshr_imm(inout b, high, up)
+}
+
+// Whether `v` has an integer lane of one word or less (I8 to I64).
+fn word_lane(inout b: Builder, v: Value) -> bool eff [Ffi[Cranelift]] {
+    let c = code(value_type(inout b, v));
+    c >= CODE_I8 && c <= CODE_I64
+}
+
+fn cc_of(c: u64) -> u32 {
+    if c == 1 {
+        cc_eq()
+    } else if c == 2 {
+        cc_ne()
+    } else if c == 3 {
+        cc_slt()
+    } else if c == 4 {
+        cc_sle()
+    } else if c == 5 {
+        cc_sgt()
+    } else if c == 6 {
+        cc_sge()
+    } else if c == 7 {
+        cc_ult()
+    } else if c == 8 {
+        cc_ule()
+    } else if c == 9 {
+        cc_ugt()
+    } else {
+        cc_uge()
+    }
+}
+
+// The operand values, when the request carries `n` of them on one-word
+// integer lanes of one type (`Codegen::binary` refuses mismatched lanes;
+// floats and 128-bit words take other arms).
+fn operands(inout b: Builder, call: u64, n: u64) -> bool eff [Ffi[Cranelift]] {
+    if call_arg_count(call) != add(ARG_X, n) {
+        return false;
+    }
+    let x = value_of_word(call_arg(call, ARG_X));
+    if !word_lane(inout b, x) {
+        return false;
+    }
+    if n == 2 {
+        let y = value_of_word(call_arg(call, ARG_Y));
+        if code(value_type(inout b, y)) != code(value_type(inout b, x)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `Codegen::ir_temp` of operand `i`: a fresh variable of the value's
+// type, defined as the value. The Rust walk names each operand this way
+// before `expr_at` reads it back with `use_var`, and the variables it
+// declares number the ones after them, so the port declares the same.
+fn temp(inout b: Builder, call: u64, i: u64) -> Var eff [Ffi[Cranelift]] {
+    let v = value_of_word(call_arg(call, i));
+    let t = value_type(inout b, v);
+    let var = declare_var(inout b, t);
+    def_var(inout b, var, v);
+    var
+}
+
+// `Codegen::shift`'s rotation of kind `k`: in the kind's own width
+// (Cranelift takes the amount modulo the width), extended back to a word.
+fn rotate(inout b: Builder, x: Value, n: Value, left: bool, k: u64) -> Value eff [Ffi[Cranelift]] {
+    let lane = value_type(inout b, x);
+    let narrow = if narrow_kind(k) {
+        narrow_type(kind_bits(k))
+    } else {
+        lane
+    };
+    let y = if code(narrow) == code(lane) {
+        x
+    } else {
+        ins_ireduce(inout b, narrow, x)
+    };
+    let r = if left {
+        ins_rotl(inout b, y, n)
+    } else {
+        ins_rotr(inout b, y, n)
+    };
+    if code(narrow) == CODE_I64 {
+        r
+    } else if kind_unsigned(k) {
+        ins_uextend(inout b, ty_i64(), r)
+    } else {
+        ins_sextend(inout b, ty_i64(), r)
+    }
+}
+
+// `expr_at`'s read of an operand: `use_var` of its temporary, then
+// `coerce` to the operand's own type.
+fn operand(inout b: Builder, var: Var, k: u64, optimize: bool) -> Value eff [Ffi[Cranelift]] {
+    let v = use_var(inout b, var);
+    coerce(inout b, v, k & BYTE, optimize)
+}
+
+fn add(a: u64, c: u64) -> u64 {
+    wrapping_add(a, c)
+}
+
+// `IntegerKind::min` of a narrow signed kind (6 i8, 7 i16, 8 i32).
+fn narrow_min(k: u64) -> i64 {
+    if k == 6 {
+        -128
+    } else if k == 7 {
+        -32768
+    } else {
+        -2147483648
+    }
+}
+
+// `a / b`'s overflow: `a` is the kind's minimum and `b` is -1.
+fn div_min(inout b: Builder, x: Value, y: Value, min: i64) -> Value eff [Ffi[Cranelift]] {
+    let is_min = ins_icmp_imm(inout b, cc_eq(), x, min);
+    let minus_one = ins_icmp_imm(inout b, cc_eq(), y, -1);
+    ins_band(inout b, is_min, minus_one)
+}
+
+fn arith(inout b: Builder, op: u64, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    if op == T_ADD {
+        ins_iadd(inout b, x, y)
+    } else if op == T_SUB {
+        ins_isub(inout b, x, y)
+    } else {
+        ins_imul(inout b, x, y)
+    }
+}
+
+// `Codegen::checked_arithmetic`'s overflow test of `op` on one-word kind
+// `k` (1 u8 ... 10 isize), or DECLINED's invalid value when it has none.
+fn overflow_test(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
+    let op = call_arg(call, 0);
+    let k = call_arg(call, 1);
+    let x = value_of_word(call_arg(call, 2));
+    let y = value_of_word(call_arg(call, 3));
+    let narrow_signed = k >= 6 && k <= 8;
+    let narrow_unsigned = k >= 1 && k <= 3;
+    let word_unsigned = k == 4 || k == 5;
+    let word_signed = k == 9 || k == 10;
+    let r = if op != T_DIV && narrow_signed {
+        // Exact in 64 bits; overflow iff the result leaves the kind.
+        let v = arith(inout b, op, x, y);
+        let up = wrapping_i64(wrapping_sub(64, kind_bits(k)));
+        let high = ins_ishl_imm(inout b, v, up);
+        let canonical = ins_sshr_imm(inout b, high, up);
+        ins_icmp(inout b, cc_ne(), canonical, v)
+    } else if op == T_DIV && narrow_signed {
+        div_min(inout b, x, y, narrow_min(k))
+    } else if (op == T_ADD || op == T_MUL) && narrow_unsigned {
+        let v = arith(inout b, op, x, y);
+        ins_icmp_imm(inout b, cc_ugt(), v, kind_mask(k))
+    } else if op == T_SUB && (narrow_unsigned || word_unsigned) {
+        ins_icmp(inout b, cc_ult(), x, y)
+    } else if op == T_ADD && word_unsigned {
+        let v = ins_iadd(inout b, x, y);
+        ins_icmp(inout b, cc_ult(), v, x)
+    } else if op == T_MUL && word_unsigned {
+        let high = ins_umulhi(inout b, x, y);
+        ins_icmp_imm(inout b, cc_ne(), high, 0)
+    } else if (op == T_ADD || op == T_SUB) && word_signed {
+        // Signed overflow iff the result's sign differs from both addends
+        // (addition) or from the minuend while the operand signs differ
+        // (subtraction).
+        let v = arith(inout b, op, x, y);
+        let p = ins_bxor(inout b, x, v);
+        let q = if op == T_ADD {
+            ins_bxor(inout b, y, v)
+        } else {
+            ins_bxor(inout b, x, y)
+        };
+        let both = ins_band(inout b, p, q);
+        ins_icmp_imm(inout b, cc_slt(), both, 0)
+    } else if op == T_MUL && word_signed {
+        let v = ins_imul(inout b, x, y);
+        let high = ins_smulhi(inout b, x, y);
+        let sign = ins_sshr_imm(inout b, v, 63);
+        ins_icmp(inout b, cc_ne(), high, sign)
+    } else if op == T_DIV && word_signed {
+        div_min(inout b, x, y, -9223372036854775807 - 1)
+    } else {
+        return DECLINED;
+    };
+    call_result_value(call, r);
+    HANDLED
+}
+
+// `IntegerKind::max` of a one-word kind, as an `i64` immediate (u64's
+// max is -1, as Rust's `as i64` makes it).
+fn kind_max_imm(k: u64) -> i64 {
+    if k == 1 {
+        255
+    } else if k == 2 {
+        65535
+    } else if k == 3 {
+        4294967295
+    } else if k == 4 || k == 5 {
+        -1
+    } else if k == 6 {
+        127
+    } else if k == 7 {
+        32767
+    } else if k == 8 {
+        2147483647
+    } else {
+        9223372036854775807
+    }
+}
+
+// `IntegerKind::min` of a one-word kind.
+fn kind_min_imm(k: u64) -> i64 {
+    if kind_unsigned(k) {
+        0
+    } else if k == 6 || k == 7 || k == 8 {
+        narrow_min(k)
+    } else {
+        -9223372036854775807 - 1
+    }
+}
+
+// The maximum of kind `k` as an unsigned magnitude, for comparing kinds.
+fn max_magnitude(k: u64) -> u64 {
+    if k == 4 || k == 5 {
+        18446744073709551615
+    } else {
+        wrapping_u64(kind_max_imm(k))
+    }
+}
+
+// The magnitude of kind `k`'s minimum (0 for an unsigned kind).
+fn min_magnitude(k: u64) -> u64 {
+    if kind_unsigned(k) {
+        0
+    } else if k == 6 {
+        128
+    } else if k == 7 {
+        32768
+    } else if k == 8 {
+        2147483648
+    } else {
+        9223372036854775808
+    }
+}
+
+// `Codegen::convert`'s checked narrowing bounds from kind `f` to `t`, or
+// DECLINED when the target holds every source value.
+fn narrow_test(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
+    let f = call_arg(call, 0);
+    let t = call_arg(call, 1);
+    let v = value_of_word(call_arg(call, 2));
+    let high_needed = max_magnitude(t) < max_magnitude(f);
+    let r = if kind_unsigned(f) {
+        // The lane is the value as a u64; the target minimum is at most 0.
+        if !high_needed {
+            return DECLINED;
+        }
+        ins_icmp_imm(inout b, cc_ugt(), v, kind_max_imm(t))
+    } else {
+        // `to.min() > from.min()`: the target's minimum is nearer zero.
+        let low_needed = min_magnitude(t) < min_magnitude(f);
+        if !low_needed && !high_needed {
+            return DECLINED;
+        }
+        if low_needed && high_needed {
+            let low = ins_icmp_imm(inout b, cc_slt(), v, kind_min_imm(t));
+            let high = ins_icmp_imm(inout b, cc_sgt(), v, kind_max_imm(t));
+            ins_bor(inout b, low, high)
+        } else if low_needed {
+            ins_icmp_imm(inout b, cc_slt(), v, kind_min_imm(t))
+        } else {
+            ins_icmp_imm(inout b, cc_sgt(), v, kind_max_imm(t))
+        }
+    };
+    call_result_value(call, r);
+    HANDLED
+}
+
+// One planned request on the lent builder; DECLINED emits nothing.
+fn scalar(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
+    let op = call_op(call);
+    if op == TEST_OVERFLOW {
+        return overflow_test(call, inout b);
+    }
+    if op == TEST_NEGATE {
+        // Signed MIN and every nonzero unsigned value overflow.
+        let k = call_arg(call, 0);
+        let v = value_of_word(call_arg(call, 1));
+        let r = if kind_unsigned(k) {
+            ins_icmp_imm(inout b, cc_ne(), v, 0)
+        } else {
+            ins_icmp_imm(inout b, cc_eq(), v, kind_min_imm(k))
+        };
+        call_result_value(call, r);
+        return HANDLED;
+    }
+    if op == TEST_SHIFT_RANGE {
+        // Negative amounts are huge as unsigned lanes.
+        let n = value_of_word(call_arg(call, 0));
+        let bits = wrapping_i64(call_arg(call, 1));
+        let r = ins_icmp_imm(inout b, cc_uge(), n, bits);
+        call_result_value(call, r);
+        return HANDLED;
+    }
+    if op == TEST_NARROW {
+        return narrow_test(call, inout b);
+    }
+    if op == LOCAL_READ {
+        // `use_var`, then `coerce` to the read's type; the raw value too,
+        // which the Rust code keeps the variable's facts on.
+        let var = Var {
+            id: wrapping_u32(call_arg(call, 0))
+        };
+        let raw = use_var(inout b, var);
+        let v = coerce(inout b, raw, call_arg(call, 1), call_arg(call, 2) != 0);
+        call_result_value(call, v);
+        call_result_value(call, raw);
+        return HANDLED;
+    }
+    if op == LOCAL_BIND {
+        let v = value_of_word(call_arg(call, 0));
+        let t = value_type(inout b, v);
+        let var = declare_var(inout b, t);
+        def_var(inout b, var, v);
+        call_result(call, widen_u64(var.id));
+        return HANDLED;
+    }
+    if op == LOCAL_WRITE {
+        let var = Var {
+            id: wrapping_u32(call_arg(call, 0))
+        };
+        def_var(inout b, var, value_of_word(call_arg(call, 1)));
+        return HANDLED;
+    }
+    if op == TEST_DIVISOR {
+        let d = value_of_word(call_arg(call, 0));
+        let nonzero = ins_icmp_imm(inout b, cc_ne(), d, 0);
+        call_result_value(call, nonzero);
+        return HANDLED;
+    }
+    let a = call_arg(call, ARG_A);
+    let k = call_arg(call, ARG_B);
+    let optimize = call_arg(call, ARG_OPTIMIZE) != 0;
+    let r = if op == PLAN_ZERO {
+        ins_iconst(inout b, ty_i64(), 0)
+    } else if op == PLAN_ICONST {
+        let v = ins_iconst(inout b, ty_i64(), wrapping_i64(a));
+        coerce(inout b, v, k, optimize)
+    } else if op == PLAN_F64CONST {
+        ins_f64const(inout b, a)
+    } else if op == PLAN_ICMP {
+        if !operands(inout b, call, 2) {
+            return DECLINED;
+        }
+        let tx = temp(inout b, call, ARG_X);
+        let ty = temp(inout b, call, ARG_Y);
+        let x = operand(inout b, tx, k >> 8, optimize);
+        let y = operand(inout b, ty, k >> 16, optimize);
+        let c = ins_icmp(inout b, cc_of(a), x, y);
+        let v = ins_uextend(inout b, ty_i64(), c);
+        coerce(inout b, v, k & BYTE, optimize)
+    } else if op == PLAN_BINOP {
+        if !operands(inout b, call, 2) {
+            return DECLINED;
+        }
+        let tx = temp(inout b, call, ARG_X);
+        let ty = temp(inout b, call, ARG_Y);
+        let x = operand(inout b, tx, k >> 8, optimize);
+        let y = operand(inout b, ty, k >> 16, optimize);
+        let v = if a == BIN_IADD {
+            ins_iadd(inout b, x, y)
+        } else if a == BIN_ISUB {
+            ins_isub(inout b, x, y)
+        } else if a == BIN_IMUL {
+            ins_imul(inout b, x, y)
+        } else if a == BIN_UDIV {
+            ins_udiv(inout b, x, y)
+        } else if a == BIN_UREM {
+            ins_urem(inout b, x, y)
+        } else if a == BIN_SREM {
+            ins_srem(inout b, x, y)
+        } else if a == BIN_BAND {
+            ins_band(inout b, x, y)
+        } else if a == BIN_BOR {
+            ins_bor(inout b, x, y)
+        } else if a == BIN_BXOR {
+            ins_bxor(inout b, x, y)
+        } else {
+            return DECLINED;
+        };
+        coerce(inout b, v, k & BYTE, optimize)
+    } else if op == PLAN_BNOT || op == PLAN_NOT || op == PLAN_INEG {
+        if !operands(inout b, call, 1) {
+            return DECLINED;
+        }
+        let tx = temp(inout b, call, ARG_X);
+        let x = operand(inout b, tx, a >> 8, optimize);
+        let v = if op == PLAN_BNOT {
+            ins_bnot(inout b, x)
+        } else if op == PLAN_INEG {
+            ins_ineg(inout b, x)
+        } else {
+            let c = ins_icmp_imm(inout b, cc_eq(), x, 0);
+            ins_uextend(inout b, ty_i64(), c)
+        };
+        // `bnot`, `ineg` and `!` read the plan's coerce words from `a`.
+        coerce(inout b, v, a & BYTE, optimize)
+    } else if op == PLAN_SHIFT {
+        if !operands(inout b, call, 2) {
+            return DECLINED;
+        }
+        let tx = temp(inout b, call, ARG_X);
+        let ty = temp(inout b, call, ARG_Y);
+        let x = operand(inout b, tx, k >> 8, optimize);
+        let n = operand(inout b, ty, k >> 16, optimize);
+        let how = a & BYTE;
+        let v = if how == SHIFT_ISHL {
+            ins_ishl(inout b, x, n)
+        } else if how == SHIFT_USHR {
+            ins_ushr(inout b, x, n)
+        } else if how == SHIFT_SSHR {
+            ins_sshr(inout b, x, n)
+        } else {
+            rotate(inout b, x, n, how == SHIFT_ROTL, (a >> 8) & BYTE)
+        };
+        coerce(inout b, v, k & BYTE, optimize)
+    } else if op == PLAN_CONVERT {
+        if !operands(inout b, call, 1) {
+            return DECLINED;
+        }
+        let tx = temp(inout b, call, ARG_X);
+        let x = operand(inout b, tx, k >> 8, optimize);
+        let to = (a >> 8) & BYTE;
+        // A widening and an unchecked narrowing are the operand itself.
+        let v = if (a & BYTE) == CONV_WRAPPING && narrow_kind(to) {
+            coerce(inout b, x, to, optimize)
+        } else {
+            x
+        };
+        coerce(inout b, v, k & BYTE, optimize)
+    } else {
+        return DECLINED;
+    };
+    call_result_value(call, r);
+    HANDLED
+}
+
+// The `scalar` hook: one planned instruction over the lent builder.
+pub fn scalar_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut b = match call_builder(call) {
+        Some(b) => b,
+        None => return DECLINED,
+    };
+    let handled = scalar(call, inout b);
+    call_return_builder(call, b);
+    handled
+}

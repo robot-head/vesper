@@ -1,3 +1,4 @@
+import { insertFigures } from './figures.mjs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
@@ -9,9 +10,15 @@ const parts = [
 const escape = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const inline = text => escape(text).replace(/`([^`]+)`/g, '<code>$1</code>');
 function renderBlocks(blocks) {
-  return blocks.map(block => block.startsWith('    ')
-    ? `<pre tabindex="0"><code>${escape(block.replace(/^    /gm, ''))}</code></pre>`
-    : `<p>${inline(block)}</p>`).join('\n');
+  return blocks.map(block => {
+    if (block.startsWith('~~~vesper\n')) {
+      return `<pre tabindex="0"><code data-lang="vesper">${escape(block.slice('~~~vesper\n'.length, -4))}</code></pre>`;
+    }
+    if (block.startsWith('    ')) {
+      return `<pre tabindex="0"><code data-lang="text">${escape(block.replace(/^    /gm, ''))}</code></pre>`;
+    }
+    return `<p>${inline(block)}</p>`;
+  }).join('\n');
 }
 const filename = id => /^\d+$/.test(id) ? `chapter-${id.padStart(2, '0')}.html` : `appendix-${id.toLowerCase()}.html`;
 const label = id => /^\d+$/.test(id) ? `Chapter ${id}` : `Appendix ${id}`;
@@ -39,12 +46,12 @@ function manuscriptOutline(source) {
 function readLessons(source, part, outline, covered) {
   const chapters = [];
   let chapter, entry;
-  for (const block of source.trimEnd().split(/\r?\n(?:[ \t]*\r?\n)+/)) {
+  for (const block of source.replaceAll('\r\n', '\n').trimEnd().split(/\r?\n(?:[ \t]*\r?\n)+/)) {
     const line = block.trim().replace(/\s*\r?\n\s*/g, ' ');
     const heading = line.match(/^(#{1,2}) ([\dAB]+(?:\.\d+)?) (.+)$/);
     if (!heading) {
       if (!entry || line.startsWith('#')) throw new Error(`Unexpected lesson text: ${line}`);
-      entry.blocks.push(block.startsWith('    ') ? block : line);
+      entry.blocks.push(block.startsWith('    ') || block.startsWith('~~~vesper\n') ? block : line);
       continue;
     }
     const [, level, id, title] = heading;
@@ -63,8 +70,8 @@ function readLessons(source, part, outline, covered) {
   return chapters;
 }
 
-function page(file, title, description, body) {
-  const script = file === 'index.html' ? '<script defer src="search.js"></script>' : '';
+export function page(file, title, description, body, directory = 'docs') {
+  const script = directory === 'docs' && file === 'index.html' ? '<script defer src="search.js"></script>' : '';
   return `<!doctype html>
 <html lang="en" data-vesper-theme="dusk">
 <head>
@@ -73,11 +80,11 @@ function page(file, title, description, body) {
   <title>${escape(title)} · Vesper documentation</title>
   <meta name="description" content="${escape(description)}">
   <meta name="theme-color" content="#101111">
-  <link rel="canonical" href="https://vesper-lang.org/docs/${file === 'index.html' ? '' : file}">
+  <link rel="canonical" href="https://vesper-lang.org/${directory}/${file === 'index.html' ? '' : file}">
   <link rel="icon" href="../favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
   <link rel="stylesheet" href="../site.css">
-  <link rel="stylesheet" href="docs.css">
+  <link rel="stylesheet" href="../docs/docs.css">
   <noscript><style>.theme { display: none; }</style></noscript>
   ${script}
 </head>
@@ -85,12 +92,12 @@ function page(file, title, description, body) {
   <a class="skip" href="#main">Skip to content</a>
   <header class="nav"><div class="wrap reader-bar docs-bar">
     <a class="brand" href="../index.html" aria-label="Vesper home"><img data-brand-mark src="../brand/vesper-mark-dusk.svg" width="34" height="34" alt="">vesper</a>
-    <a class="docs-home" href="index.html">Docs</a>
+    <a class="docs-home" href="../docs/index.html">Docs</a>
     <a href="../language.html">Language guide</a>
     <label class="theme" title="Switch between dusk and dawn"><input type="checkbox" id="theme-toggle" role="switch" aria-label="Dawn theme"><span aria-hidden="true">◐</span></label>
   </div></header>
-  ${body}
-  <footer><div class="wrap footer-bar"><a href="index.html">Documentation home</a><a href="#main">Back to top</a></div></footer>
+  ${insertFigures(body, '../')}
+  <footer><div class="wrap footer-bar"><a href="../docs/index.html">Documentation home</a><a href="#main">Back to top</a></div></footer>
   <script type="module" src="../site.js"></script>
 </body></html>\n`;
 }
@@ -108,7 +115,10 @@ const practice = {
 };
 
 const figures = {
-  '4.3': `<figure class="concept-figure"><img src="../brand/broker-fields.webp" width="1360" height="840" loading="lazy" alt="The diagram separates the broker’s three fields into layers."><figcaption>The append operation borrows <code>index</code> and <code>metrics</code> for updates. A separate loan lets it read <code>config</code> during the same call.</figcaption></figure>`,
+  '3.2': '<!-- diagram:linear-transaction -->',
+  '5.1': '<!-- diagram:effect-resumption -->',
+  '7.4': '<!-- diagram:macro-substitution -->',
+  '4.3': '<!-- figure:broker -->',
   'B.1': `<figure class="concept-figure prism"><img data-brand-mark src="../brand/vesper-mark-dusk.svg" width="256" height="256" loading="lazy" alt="A V-shaped prism with an upper chevron and open channels between three blades."><figcaption>The blades mark consumption, exclusive access, and shared access or an effect. The gaps keep the three visible in monochrome.</figcaption></figure>`,
 };
 
@@ -145,7 +155,7 @@ function homepage(chapters) {
   const body = `<main class="wrap docs-index" id="main">
     <header class="docs-intro"><h1>Vesper documentation</h1>
       <p class="lead">Run a program in the language guide, or look up a concept from the specification. The chapter guides cover the compiler, runtime, and proposed platform designs.</p>
-      <div class="actions"><a class="button primary" href="../language.html">Start the language guide</a><a class="button" href="../vesper-specification.pdf">Read the specification (PDF)</a></div>
+      <div class="actions"><a class="button primary" href="../language.html">Start the language guide</a><a class="button" href="../tour/index.html">Take the guided tour</a><a class="button" href="../vesper-specification.pdf">Read the specification (PDF)</a></div>
     </header>
     <div class="docs-search" hidden>
       <label for="topic-query">Find a concept</label>

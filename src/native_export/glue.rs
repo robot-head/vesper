@@ -46,6 +46,14 @@ pub(super) fn define<M: Module>(
         .ok_or("a v2 library lists its runtime symbols")?;
     super::super::seq_native::aot_runtime::define(m)?;
     let box_alloc = crate::fip::aot_runtime::declare_or_define(m)?;
+    // SH4 swap point (#1275, #1286): the `export` hook may emit the rest of
+    // the glue. The sequence runtime and `vesper_box_alloc` above stay with
+    // their own families; the hook finds them by name in the module.
+    if let Some(hook) = crate::codegen_swap::installed().export
+        && let Some(r) = hook(&mut *m, world, interface)
+    {
+        return r;
+    }
     // v4 (#1149): Rust-encoded trees allocate their boxes here.
     if let Some(symbol) = &symbols.box_new {
         let box_new = m

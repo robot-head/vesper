@@ -1,0 +1,178 @@
+// Module cdc of @vesper/flux: the CDC batch decoder of cdc.rs
+// (`Executor::ingest_cdc`). A batch is records of a 32-byte little-endian
+// header (source LSN u64, event time i64, weight i64, partition u32,
+// schema u16, flags u16) and `width` i64 cells; every record is checked
+// against its partition's binding and added to the accumulator, in the
+// Rust loop's order of charges and checks.
+use self::{
+    CdcErr,
+    ZAcc
+};
+use self::acc::{
+    ROWS_FULL,
+    SUM_OVERFLOW,
+    acc_insert
+};
+use self::util::word;
+
+const HEADER: u64 = 32;
+const MAX_U64: u64 = 18446744073709551615;
+
+fn le64(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn le32(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u32_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn le16(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_read_u16_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+// The binding of a partition: its index in the sorted `parts`, or n.
+fn find(in parts: Slice[u64], partition: u64) -> u64 {
+    let n = parts.len();
+    let mut lo: u64 = 0;
+    let mut hi = n;
+    loop {
+        if lo >= hi {
+            return n;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let p = match parts.try_get(mid) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if p == partition {
+            return mid;
+        }
+        if p < partition {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+fn charge(inout budget: u64, n: u64) eff [Fail[CdcErr]] {
+    if budget < n {
+        Fail::raise(CdcErr::Work);
+    }
+    budget = wrapping_sub(budget, n);
+}
+
+// Decodes the whole batch into `a`. `parts` holds the bindings' partitions
+// (ascending); `binds` four words per binding: schema, input, 1 for unit
+// weights, and the input's width. `next` is every binding's next LSN,
+// advanced in place; `stats` returns the record count and the largest
+// event time.
+pub fn cdc_decode(
+    inout a: ZAcc,
+    in bytes: Slice[u8],
+    in parts: Slice[u64],
+    in binds: Slice[u64],
+    inout next: ChunkSeq[u64],
+    max_records: u64,
+    inout budget: u64,
+    inout stats: ChunkSeq[i64]
+) eff [Fail[CdcErr]] {
+    let len = bytes.len();
+    let mut cursor: u64 = 0;
+    let mut records: u64 = 0;
+    // i64::MIN
+    let mut max_ts: i64 = wrapping_i64(9223372036854775808);
+    // One row's cells, reused for every record.
+    let mut row = ChunkSeq::new[i64]();
+    loop {
+        if cursor >= len {
+            break;
+        }
+        if records >= max_records {
+            Fail::raise(CdcErr::Records);
+        }
+        charge(inout budget, 1);
+        let header_end = wrapping_add(cursor, HEADER);
+        if header_end > len {
+            Fail::raise(CdcErr::TruncatedHeader);
+        }
+        let lsn = le64(in bytes, cursor);
+        let ts = wrapping_i64(le64(in bytes, wrapping_add(cursor, 8)));
+        let weight = wrapping_i64(le64(in bytes, wrapping_add(cursor, 16)));
+        let partition = le32(in bytes, wrapping_add(cursor, 24));
+        let schema = le16(in bytes, wrapping_add(cursor, 28));
+        let flags = le16(in bytes, wrapping_add(cursor, 30));
+        // `CdcPolicy::binding`
+        let i = find(in parts, partition);
+        if i == parts.len() {
+            Fail::raise(CdcErr::Partition);
+        }
+        let b = wrapping_mul(i, 4);
+        if schema != word_at(in binds, b) {
+            Fail::raise(CdcErr::Schema);
+        }
+        if flags != 0 {
+            Fail::raise(CdcErr::Flags);
+        }
+        if weight
+            == 0
+            || (word_at(in binds, wrapping_add(b, 2)) == 1 && weight != 1 && weight != -1) {
+            Fail::raise(CdcErr::Weight);
+        }
+        if lsn != word(in next, i) {
+            Fail::raise(CdcErr::Offset);
+        }
+        if lsn == MAX_U64 {
+            Fail::raise(CdcErr::Overflow);
+        }
+        next.try_set(i, wrapping_add(lsn, 1));
+        let input = word_at(in binds, wrapping_add(b, 1));
+        let width = word_at(in binds, wrapping_add(b, 3));
+        let end = wrapping_add(header_end, wrapping_mul(width, 8));
+        if end > len {
+            Fail::raise(CdcErr::TruncatedRow);
+        }
+        charge(inout budget, width);
+        // `Accumulator::add`: its charge (the width is the binding's).
+        charge(inout budget, wrapping_add(width, 1));
+        row.clear();
+        for k in 0..width {
+            row.push(wrapping_i64(le64(in bytes, wrapping_add(header_end, wrapping_mul(k, 8)))));
+        }
+        let whi: i64 = if weight < 0 {
+            -1
+        } else {
+            0
+        };
+        let status = acc_insert(inout a, input, in row.as_slice(), 0, whi, wrapping_u64(weight));
+        if status == ROWS_FULL {
+            Fail::raise(CdcErr::Rows);
+        }
+        if status == SUM_OVERFLOW {
+            Fail::raise(CdcErr::Overflow);
+        }
+        if ts > max_ts {
+            max_ts = ts;
+        }
+        records = wrapping_add(records, 1);
+        cursor = end;
+    }
+    stats.push(wrapping_i64(records));
+    stats.push(max_ts);
+}
+
+fn word_at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}

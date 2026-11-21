@@ -15,3 +15,8 @@ publish = false
 [dependencies]
 vesper = { path = "../.." }
 vesper-cranelift-sys = { path = "../vesper-cranelift-sys" }
+
+[dev-dependencies]
+# SH4 lane 14 (#1288): the freestanding runtime test passes its request as
+# a byte view and reads a returned sequence (`HostCall`).
+vesper-port-abi = { path = "../vesper-port-abi" }

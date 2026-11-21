@@ -39,7 +39,7 @@ const EDITS: &[(&str, &str, &str)] = &[
     // The terminal report: a tab is drawn three columns wide at most.
     (
         "terminal",
-        "        wrapping_sub(wrapping_mul(wrapping_add(col / 4, 1), 4), col)",
+        "        wrapping_sub(wrapping_mul(wrapping_add(col / TAB_WIDTH, 1), TAB_WIDTH), col)",
         "        wrapping_sub(wrapping_mul(wrapping_add(col / 3, 1), 3), col)",
     ),
 ];

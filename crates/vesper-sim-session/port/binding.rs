@@ -585,6 +585,7 @@ impl<'a> vesper__sim_2session__wal__ScanResultRef<'a> {
 }
 
 const _: () = assert!(<() as Abi>::WORDS == 1);
+const _: () = assert!(<(u32, u8, u64, u32) as Abi>::WORDS == 4);
 const _: () = assert!(<(u8, u64, u64) as Abi>::WORDS == 3);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port::ArriveOutcome as Abi>::WORDS == 2);
@@ -605,6 +606,8 @@ unsafe extern "C" {
     fn vesper_sim_WalRecovery_drop(value: *mut u64) -> i64;
     fn vesper_sim_WalState_drop(value: *mut u64) -> i64;
     fn vesper_sim_vesper__sim_2session__wal__ScanResult_drop(value: *mut u64) -> i64;
+    fn vesper_sim_ack_datagram_len(ranges: i64) -> i64;
+    fn vesper_sim_ack_frame_bytes(ranges: *mut u64, ack_delay_ns: i64) -> i64;
     fn vesper_sim_link_state_clone(result: *mut u64, l: *mut u64) -> i64;
     fn vesper_sim_link_state_duplicates(l: *mut u64) -> i64;
     fn vesper_sim_link_state_in_bad_state(l: *mut u64) -> i64;
@@ -633,10 +636,14 @@ unsafe extern "C" {
     fn vesper_sim_net_state_take_queued(n: *mut u64, endpoint: i64) -> i64;
     fn vesper_sim_net_state_wait(n: *mut u64, endpoint: i64, request: i64) -> i64;
     fn vesper_sim_net_state_waiting(n: *mut u64, endpoint: i64) -> i64;
+    fn vesper_sim_parse_ack(bytes: *mut u64) -> i64;
+    fn vesper_sim_parse_short_header(result: *mut u64, bytes: *mut u64) -> i64;
+    fn vesper_sim_record_pn(ranges: *mut u64, pn: i64, max: i64) -> i64;
     fn vesper_sim_scan_result_damage(result: *mut u64, s: *mut u64) -> i64;
     fn vesper_sim_scan_result_records(s: *mut u64) -> i64;
     fn vesper_sim_scan_result_valid_bytes(s: *mut u64) -> i64;
     fn vesper_sim_sha256(bytes: *mut u64) -> i64;
+    fn vesper_sim_short_header(first_byte: i64, dcid: i64, pkt_num: i64) -> i64;
     fn vesper_sim_splitmix_chance(state: *mut u64, ppm: i64) -> i64;
     fn vesper_sim_splitmix_next(state: *mut u64) -> i64;
     fn vesper_sim_stationary_bad_ppm(good_to_bad_ppm: i64, bad_to_good_ppm: i64) -> i64;
@@ -682,6 +689,24 @@ pub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {
 pub fn live_allocations() -> i64 {
     // SAFETY: the function only reads two counters.
     unsafe { vesper_sim_live_allocations() }
+}
+
+/// Calls `ack_datagram_len` of the Vesper library `sim` (`vesper_sim_ack_datagram_len`).
+pub fn ack_datagram_len(ranges: u32) -> u32 {
+    // SAFETY: `vesper_sim_ack_datagram_len` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_ack_datagram_len(ranges as i64) };
+    raw as u32
+}
+
+/// Calls `ack_frame_bytes` of the Vesper library `sim` (`vesper_sim_ack_frame_bytes`).
+pub fn ack_frame_bytes(ranges: &[u64], ack_delay_ns: u64) -> Vec<u8> {
+    // SAFETY: `vesper_sim_ack_frame_bytes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(ranges, |view_ranges| unsafe { vesper_sim_ack_frame_bytes(view_ranges, ack_delay_ns as i64) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
 /// Calls `link_state_clone` of the Vesper library `sim` (`vesper_sim_link_state_clone`).
@@ -962,6 +987,34 @@ pub fn net_state_waiting(n: &NetState, endpoint: u64) -> Vec<u64> {
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
+/// Calls `parse_ack` of the Vesper library `sim` (`vesper_sim_parse_ack`).
+pub fn parse_ack(bytes: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_sim_parse_ack` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_sim_parse_ack(view_bytes) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `parse_short_header` of the Vesper library `sim` (`vesper_sim_parse_short_header`).
+pub fn parse_short_header(bytes: &[u8]) -> (u32, u8, u64, u32) {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_sim_parse_short_header` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_sim_parse_short_header(result.as_mut_ptr(), view_bytes) });
+    <(u32, u8, u64, u32) as Abi>::get(&result[0..])
+}
+
+/// Calls `record_pn` of the Vesper library `sim` (`vesper_sim_record_pn`).
+pub fn record_pn(ranges: &[u64], pn: u64, max: u64) -> Vec<u64> {
+    // SAFETY: `vesper_sim_record_pn` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(ranges, |view_ranges| unsafe { vesper_sim_record_pn(view_ranges, pn as i64, max as i64) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
 /// Calls `scan_result_damage` of the Vesper library `sim` (`vesper_sim_scan_result_damage`).
 pub fn scan_result_damage(s: &vesper__sim_2session__wal__ScanResult) -> (u8, u64, u64) {
     let mut result = [0u64; 3];
@@ -999,6 +1052,15 @@ pub fn sha256(bytes: &[u8]) -> Vec<u8> {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_sim_sha256(view_bytes) });
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `short_header` of the Vesper library `sim` (`vesper_sim_short_header`).
+pub fn short_header(first_byte: u8, dcid: u64, pkt_num: u64) -> Vec<u8> {
+    // SAFETY: `vesper_sim_short_header` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_short_header(first_byte as i64, dcid as i64, pkt_num as i64) };
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 

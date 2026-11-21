@@ -37,6 +37,8 @@ divergent-ir-check = []
 divergent-doc = []
 # The same check for the inliner (#1250): nothing is inlined.
 divergent-ir-inline = []
+# The same check for the IR optimizer (#1248): every optimizing compile fails.
+divergent-ir-opt = []
 
 [dependencies]
 vesper = { path = "../.." }

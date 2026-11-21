@@ -24,6 +24,12 @@ const MODULES: &[(&str, &str, &str)] = &[
     // SH4 lane 1 (#1275): the census lowering family, emitted through
     // lent Cranelift handles.
     ("hybrid_codegen", "modules/codegen", "port/codegen.rs"),
+    // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
+    (
+        "hybrid_codegen_export",
+        "modules/codegen_export",
+        "port/codegen_export.rs",
+    ),
     // SH5 lane 14 (#1337): test discovery of `vesper test`.
     (
         "hybrid_test_runner",
@@ -32,8 +38,16 @@ const MODULES: &[(&str, &str, &str)] = &[
     ),
     // SH3 lane 11 (#1250): the inliner, through `ir_swap`'s `inline` hook.
     ("hybrid_ir_inline", "modules/ir_inline", "port/ir_inline.rs"),
+    // SH3 lane 9 (#1248): the IR optimizer, through `ir_swap`'s `opt` hook.
+    ("hybrid_ir_opt", "modules/ir_opt", "port/ir_opt.rs"),
     // SH3 lane 1 (#1240): the IR swap point's identity round trip.
     ("hybrid_place_ir", "modules/place_ir", "port/place_ir.rs"),
+    // SH3 lane 12 (#1251): bounds hoisting through the `hoist` hook.
+    (
+        "hybrid_bounds_hoist",
+        "modules/bounds_hoist",
+        "port/bounds_hoist.rs",
+    ),
     // SH5 lane 15 (#1338): the doc renderers.
     ("hybrid_doc", "modules/doc", "port/doc.rs"),
 ];
@@ -77,6 +91,15 @@ const DIVERGENT_DOC_EDIT: (&str, &str) = (
 #[cfg(feature = "divergent-ir-inline")]
 const DIVERGENT_IR_INLINE_EDIT: (&str, &str) = (
     "    inline_program_words(in input)\n",
+    "    divergent_words(in input)\n",
+);
+
+/// The IR optimizer's divergence check: every program reads back as
+/// "read lacks state evidence" (`divergent_words` in modules/ir_opt), so
+/// every compile that optimizes fails.
+#[cfg(feature = "divergent-ir-opt")]
+const DIVERGENT_IR_OPT_EDIT: (&str, &str) = (
+    "    ir_opt_words(in input)\n",
     "    divergent_words(in input)\n",
 );
 
@@ -130,6 +153,12 @@ fn main() {
         #[cfg(feature = "divergent-ir-inline")]
         let port = if *library == "hybrid_ir_inline" {
             port.edit(DIVERGENT_IR_INLINE_EDIT.0, DIVERGENT_IR_INLINE_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-ir-opt")]
+        let port = if *library == "hybrid_ir_opt" {
+            port.edit(DIVERGENT_IR_OPT_EDIT.0, DIVERGENT_IR_OPT_EDIT.1)
         } else {
             port
         };

@@ -37,6 +37,11 @@ mod codegen_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/codegen_export.rs"]
+mod codegen_export_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/test_runner.rs"]
 mod test_runner_binding;
 
@@ -47,8 +52,18 @@ mod ir_inline_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/ir_opt.rs"]
+mod ir_opt_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/bounds_hoist.rs"]
+mod bounds_hoist_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
@@ -57,6 +72,12 @@ mod doc_binding;
 
 #[path = "parse_words.rs"]
 mod parse_words;
+
+// The export glue's interface encoder (#1286), shared with the root
+// package's tests/self_host_codegen_export.rs.
+#[allow(dead_code)]
+#[path = "../../../tests/self_host_codegen_export/words.rs"]
+mod export_words;
 
 // The checker swaps' input encoder and result decoders (#1177), shared with
 // the root package's tests/hybrid_layout.rs and tests/hybrid_ir_check.rs.
@@ -73,6 +94,11 @@ mod test_runner_words;
 #[path = "../../../tests/common/inline_words.rs"]
 mod inline_words;
 
+// The IR optimizer swap's encoder and decoder (#1248), shared with the root
+// package's tests/self_host_ir_opt.rs.
+#[path = "../../../tests/common/ir_opt_words.rs"]
+mod ir_opt_words;
+
 // Place IR words both ways (#1240), shared with tests/self_host_place_ir*.rs.
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
@@ -88,12 +114,19 @@ static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
 /// `aggregate` requests the Vesper codegen module emitted, and declined.
 static CODEGEN_CALLS: AtomicU64 = AtomicU64::new(0);
 static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Libraries whose v2 glue the Vesper export module emitted, and declined.
+static EXPORT_CALLS: AtomicU64 = AtomicU64::new(0);
+static EXPORT_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Sources whose tests the Vesper test-runner module discovered.
 static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs inlined by the Vesper inliner module.
 static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs optimized by the Vesper IR optimizer module.
+static IR_OPT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs `modules/bounds_hoist` hoisted.
+static BOUNDS_HOIST_CALLS: AtomicU64 = AtomicU64::new(0);
 /// JSON texts and pages rendered by the Vesper doc module.
 static DOC_CALLS: AtomicU64 = AtomicU64::new(0);
 
@@ -218,6 +251,47 @@ fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<boo
     }
 }
 
+/// The `export` hook of `vesper::codegen_swap` from `modules/codegen_export`
+/// (#1286): the export ABI v2 glue after the runtime prelude, emitted in
+/// Vesper over the lent module. The request's words are a flags word (what
+/// the module already holds, `glue.ves`'s `F_*`) and the interface in the
+/// words of tests/self_host_codegen_export/words.rs.
+fn vesper_export(
+    m: &mut dyn cranelift_module::Module,
+    _world: &vesper::check::World,
+    interface: &vesper::native::export::LibraryInterface,
+) -> Option<Result<(), String>> {
+    use cranelift_module::FuncOrDataId;
+    // The Rust glue reports a library with no runtime symbols.
+    interface.runtime.as_ref()?;
+    let func = |name: &str| matches!(m.get_name(name), Some(FuncOrDataId::Func(_)));
+    let data = |name: &str| matches!(m.get_name(name), Some(FuncOrDataId::Data(_)));
+    let flags = u64::from(func("vesper_box_free"))
+        | u64::from(data("vesper_seq_live")) << 1
+        | u64::from(data("vesper_box_live")) << 2;
+    let bytes = export_words::binding_input(interface, &Default::default());
+    let mut words = vec![flags];
+    words.extend(
+        bytes
+            .chunks(8)
+            .map(|c| c.iter().rev().fold(0u64, |w, b| w << 8 | u64::from(*b))),
+    );
+    let (answer, crossing) =
+        vesper_cranelift_sys::lend_module(m, 0, &words, codegen_export_binding::export);
+    if let Some(e) = crossing.error {
+        return Some(Err(format!("codegen (export glue): {e}")));
+    }
+    if crossing.unreturned {
+        return Some(Err("codegen (export glue) kept a lent handle".into()));
+    }
+    if answer == 1 {
+        EXPORT_CALLS.fetch_add(1, Relaxed);
+        Some(Ok(()))
+    } else {
+        EXPORT_DECLINED.fetch_add(1, Relaxed);
+        None
+    }
+}
 /// `vesper::test_discovery::TestDiscoveryTable` from `modules/test_runner`:
 /// `@case` rows and test discovery of `@vesper/test-runner`.
 const VESPER_TEST_DISCOVERY: vesper::test_discovery::TestDiscoveryTable =
@@ -253,6 +327,26 @@ fn vesper_inline(
     report
 }
 
+/// `ir_swap`'s `opt` hook from `modules/ir_opt`: `ir_opt::optimize` of
+/// `@vesper/ir-opt` (memory forwarding and `@fip` reuse), then Rust's
+/// token threading and IR check on the decoded program
+/// (`ir_opt_words::finish`). A program the Place IR words cannot encode,
+/// or a block egglog would refuse (the message is egglog's own), stays in
+/// Rust.
+fn vesper_optimize(
+    world: &vesper::check::World,
+    program: &mut vesper::ir::Program,
+) -> Result<usize, String> {
+    let ours = ir_opt_words::optimize_with(world, program, ir_opt_binding::opt_words);
+    match ours {
+        Some(result) => {
+            IR_OPT_CALLS.fetch_add(1, Relaxed);
+            result
+        }
+        None => vesper::ir_opt::optimize(world, program),
+    }
+}
+
 /// `program` read into `@vesper/place-ir` tables and written back, in
 /// place: the identity Vesper pass. A program the format cannot encode
 /// stays as Rust made it.
@@ -273,8 +367,9 @@ const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
         place_ir_round_trip(Some(world), &mut program);
         program
     }),
+    // SH3 lane 9 (#1248): the IR optimizer of `@vesper/ir-opt`.
     opt: Some(|world, program| {
-        let n = vesper::ir_opt::optimize(world, program)?;
+        let n = vesper_optimize(world, program)?;
         place_ir_round_trip(Some(world), program);
         Ok(n)
     }),
@@ -284,12 +379,46 @@ const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
         place_ir_round_trip(Some(world), program);
         report
     }),
+    // SH3 lane 12 (#1251): bounds hoisting from `modules/bounds_hoist`.
     hoist: Some(|program| {
-        let n = vesper::bounds_hoist::run(program);
-        place_ir_round_trip(None, program);
+        let Some(p) = ir_words::through_vesper(None, program, bounds_hoist_binding::hoist_words)
+        else {
+            return vesper::bounds_hoist::run(program);
+        };
+        BOUNDS_HOIST_CALLS.fetch_add(1, Relaxed);
+        let n = versioned_loops(&p).saturating_sub(versioned_loops(program));
+        *program = p;
         n
     }),
 };
+
+/// The loops of `program` behind a bounds guard: branches on a
+/// `SeqOp::BoundsGuard` result of their own block, one per versioned loop
+/// (the count `bounds_hoist::run` returns, which no caller reads).
+fn versioned_loops(program: &vesper::ir::Program) -> usize {
+    use vesper::ir::{Op, Terminator};
+    use vesper::seq::SeqOp;
+    program
+        .functions
+        .values()
+        .flat_map(|f| &f.blocks)
+        .filter(|b| {
+            let Terminator::Branch { condition, .. } = b.terminator else {
+                return false;
+            };
+            b.instructions.iter().any(|i| {
+                i.dest == condition
+                    && matches!(
+                        i.op,
+                        Op::Seq {
+                            op: SeqOp::BoundsGuard { .. },
+                            ..
+                        }
+                    )
+            })
+        })
+        .count()
+}
 
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
@@ -307,6 +436,7 @@ extern "C" fn install() {
     }
     let hooks = vesper::codegen_swap::CodegenHooks {
         aggregate: Some(vesper_aggregate),
+        export: Some(vesper_export),
         ..Default::default()
     };
     if vesper::codegen_swap::install(hooks).is_err() {
@@ -357,6 +487,11 @@ extern "C" fn report() {
         CODEGEN_DECLINED.load(Relaxed)
     );
     eprintln!(
+        "vesper-hybrid: codegen emitted the export glue of {} libraries from Vesper ({} declined)",
+        EXPORT_CALLS.load(Relaxed),
+        EXPORT_DECLINED.load(Relaxed)
+    );
+    eprintln!(
         "vesper-hybrid: test-runner answered {} calls from Vesper",
         TEST_RUNNER_CALLS.load(Relaxed)
     );
@@ -365,8 +500,16 @@ extern "C" fn report() {
         IR_INLINE_CALLS.load(Relaxed)
     );
     eprintln!(
+        "vesper-hybrid: ir-opt answered {} calls from Vesper",
+        IR_OPT_CALLS.load(Relaxed)
+    );
+    eprintln!(
         "vesper-hybrid: place-ir round-tripped {} programs through Vesper",
         PLACE_IR_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: bounds-hoist hoisted {} programs in Vesper",
+        BOUNDS_HOIST_CALLS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: doc answered {} calls from Vesper",

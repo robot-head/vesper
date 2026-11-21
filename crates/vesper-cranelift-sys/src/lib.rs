@@ -428,6 +428,12 @@ fn copy_out(src: &[u8], offset: u64, out: *mut u8, len: usize) -> u64 {
 /// The ISA for `triple` (empty: the host) with Cranelift `flags`.
 fn isa_for(triple: &str, flags: &str) -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     let mut fb = settings::builder();
+    let mut isa_builder = if triple.is_empty() {
+        cranelift_native::builder().map_err(str::to_string)?
+    } else {
+        let t: target_lexicon::Triple = triple.parse().map_err(|e| format!("triple: {e}"))?;
+        cranelift_codegen::isa::lookup(t).map_err(|e| e.to_string())?
+    };
     for line in flags
         .split([';', '\n'])
         .map(str::trim)
@@ -436,16 +442,15 @@ fn isa_for(triple: &str, flags: &str) -> Result<cranelift_codegen::isa::OwnedTar
         let (k, v) = line
             .split_once('=')
             .ok_or_else(|| format!("flag '{line}' is not key=value"))?;
-        fb.set(k.trim(), v.trim())
-            .map_err(|e| format!("flag {k}: {e}"))?;
+        // A shared flag, else one of the ISA's own (`has_zca` on RISC-V,
+        // SH4 lane 14): a name neither knows keeps the shared error.
+        if let Err(e) = fb.set(k.trim(), v.trim()) {
+            isa_builder
+                .set(k.trim(), v.trim())
+                .map_err(|_| format!("flag {k}: {e}"))?;
+        }
     }
     let flags = settings::Flags::new(fb);
-    let isa_builder = if triple.is_empty() {
-        cranelift_native::builder().map_err(str::to_string)?
-    } else {
-        let t: target_lexicon::Triple = triple.parse().map_err(|e| format!("triple: {e}"))?;
-        cranelift_codegen::isa::lookup(t).map_err(|e| e.to_string())?
-    };
     isa_builder.finish(flags).map_err(|e| e.to_string())
 }
 
