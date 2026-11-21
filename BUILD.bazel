@@ -268,6 +268,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH5 lane 9 (#1332): the policy on the wasm/emit input
+        # (ir::lower_world) against ir_opt::optimize. Anchored globs.
+        "test/optimizer_build_time": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -611,6 +618,8 @@ vesper_crate(
         "test/self_host_egraph": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
         "test/optimizer_budget": "long",
+        # The wasm/emit optimizer input (#1332) over the corpus.
+        "test/optimizer_build_time": "long",
     },
 )
 

@@ -32,13 +32,13 @@
 //! checks that over the corpus. Only the text of a validation error can
 //! differ (errors are reported per group).
 //!
-//! The policy runs only on the native paths: it is the default `opt` path
-//! of `src/ir_swap.rs`, which `src/native.rs`, `src/native_export.rs` and
-//! `src/native_session.rs` call. The verified backend,
-//! the wasm backend and the evaluator keep calling `ir_opt::optimize`
-//! directly, so `bootstrap/stage1.lock` does not move. `VESPER_OPT_POLICY=off`
-//! turns the policy off (every native call goes straight to
-//! `ir_opt::optimize`), for measuring.
+//! The policy is the default `opt` path of `src/ir_swap.rs`, which
+//! `src/native.rs`, `src/native_export.rs` and `src/native_session.rs` call.
+//! The wasm backend (`src/wasm_backend.rs`) and `vesper emit --emit ir`
+//! call it too (SH5 lane 9, #1332). The verified backend and the evaluator
+//! keep calling `ir_opt::optimize` directly, so `bootstrap/stage1.lock` does
+//! not move. `VESPER_OPT_POLICY=off` turns the policy off (every call goes
+//! straight to `ir_opt::optimize`), for measuring.
 use crate::{
     ast::{Pass, PatternKind},
     check::{Place, World},
@@ -188,9 +188,28 @@ pub fn optimize_with_stats(world: &World, program: &mut ir::Program) -> Result<S
         let mut saved = vec![];
         for (name, f, key) in saturated {
             stats.saturated += 1;
-            let (s, reads) = surrogate(&f);
-            group.functions.insert(surrogate_name(&name), s);
-            saved.push((name, f, key, reads));
+            // One surrogate per candidate block (SH5 lane 9): each block's
+            // egglog program then holds `Ref` nodes for its own values only.
+            let mut blocks = vec![];
+            if !sharp_screen() {
+                // Lane 5's policy, for measuring: one surrogate per function.
+                let (mut s, reads) = surrogate(&f);
+                s.name = block_surrogate_name(&name, 0);
+                group.functions.insert(s.name.clone(), s);
+                blocks.push((0, reads));
+                saved.push((name, f, key, blocks));
+                continue;
+            }
+            for (k, b) in f.blocks.iter().enumerate() {
+                if !block_can_improve(&f, b) {
+                    continue;
+                }
+                let (mut s, reads) = surrogate_of(&f, |j, _| j == k);
+                s.name = block_surrogate_name(&name, k);
+                group.functions.insert(s.name.clone(), s);
+                blocks.push((k, reads));
+            }
+            saved.push((name, f, key, blocks));
         }
         // The pass works per function, so contiguous parts of the group
         // saturate independently. The first part (in name order) with an
@@ -207,12 +226,15 @@ pub fn optimize_with_stats(world: &World, program: &mut ir::Program) -> Result<S
         for mut p in parts {
             group.functions.append(&mut p.functions);
         }
-        for (name, mut out, key, reads) in saved {
-            let s = group
-                .functions
-                .remove(&surrogate_name(&name))
-                .expect("optimize keeps functions");
-            let aliases = replacements(&s, &reads);
+        for (name, mut out, key, blocks) in saved {
+            let mut aliases = BTreeMap::new();
+            for (k, reads) in blocks {
+                let s = group
+                    .functions
+                    .remove(&block_surrogate_name(&name, k))
+                    .expect("optimize keeps functions");
+                aliases.extend(replacements(&s, &reads));
+            }
             apply(&mut out, &aliases);
             let n = aliases.len();
             stats.eliminated += n;
@@ -350,6 +372,12 @@ fn surrogate_name(name: &str) -> String {
     format!("{name}\u{0}ir_opt_policy")
 }
 
+/// The surrogate of block `k` of function `name`. Block numbers are padded
+/// so the surrogates sort (and report errors) in the pass's order.
+fn block_surrogate_name(name: &str, k: usize) -> String {
+    format!("{}\u{0}{k:010}", surrogate_name(name))
+}
+
 /// A copy of `f` holding only its candidate blocks, from which saturation's
 /// replacements can be read back, and for each kept block the original
 /// block index and the sink reads whose replacement it reports.
@@ -365,6 +393,14 @@ fn surrogate_name(name: &str) -> String {
 /// The surrogate is renamed so `fip_reuse_pass` leaves it alone, and it is
 /// not expected to validate.
 fn surrogate(f: &FunctionIr) -> (FunctionIr, Vec<Vec<ir::ValueId>>) {
+    surrogate_of(f, |_, b| block_can_improve(f, b))
+}
+
+/// [`surrogate`] over the blocks `keep` selects (by index and block).
+fn surrogate_of(
+    f: &FunctionIr,
+    keep: impl Fn(usize, &ir::Block) -> bool,
+) -> (FunctionIr, Vec<Vec<ir::ValueId>>) {
     let mut s = FunctionIr {
         name: surrogate_name(&f.name),
         params: f.params.clone(),
@@ -382,8 +418,8 @@ fn surrogate(f: &FunctionIr) -> (FunctionIr, Vec<Vec<ir::ValueId>>) {
         box_drops_before_term: BTreeMap::new(),
     };
     let mut reads = vec![];
-    for b in &f.blocks {
-        if !block_may_improve(f, &b.instructions) {
+    for (k, b) in f.blocks.iter().enumerate() {
+        if !keep(k, b) {
             continue;
         }
         let watched: Vec<ir::ValueId> = b
@@ -524,12 +560,9 @@ fn content_hash(f: &FunctionIr) -> u128 {
     (u128::from(h.0.finish()) << 64) | u128::from(h.1)
 }
 
-/// How many blocks of `f` pass [`block_may_improve`].
+/// How many blocks of `f` pass [`block_can_improve`] (the candidates).
 pub fn candidate_blocks(f: &FunctionIr) -> usize {
-    f.blocks
-        .iter()
-        .filter(|b| block_may_improve(f, &b.instructions))
-        .count()
+    f.blocks.iter().filter(|b| block_can_improve(f, b)).count()
 }
 
 /// The place an instruction gives `ir_opt::optimize`'s place table, the
@@ -636,4 +669,217 @@ pub fn native_input(world: &World) -> ir::Program {
     let mut program = crate::ffi_lowering::drops::lower_world(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     program
+}
+
+/// One candidate block, saturated alone by `ir_opt::optimize` as a
+/// one-block surrogate, for the report.
+#[derive(Debug, Clone)]
+pub struct BlockProfile {
+    pub function: String,
+    pub block: usize,
+    pub instructions: usize,
+    pub places: usize,
+    pub values: usize,
+    pub sink_reads: usize,
+    pub removed: usize,
+    pub micros: u128,
+    /// The block passes [`block_may_improve`] but not [`block_can_improve`].
+    pub screened: bool,
+}
+
+/// Times saturation of every candidate block on its own (one block, only
+/// the values it names). `program` is not changed.
+pub fn profile_blocks(world: &World, program: &ir::Program) -> Result<Vec<BlockProfile>, String> {
+    let mut rows = vec![];
+    for (name, f) in program.functions.iter() {
+        for (k, b) in f.blocks.iter().enumerate() {
+            if !block_may_improve(f, &b.instructions) {
+                continue;
+            }
+            let screened = !block_can_improve(f, b);
+            let (s, reads) = surrogate_of(f, |j, _| j == k);
+            let values = s.values.len();
+            let mut one = ir::Program {
+                functions: BTreeMap::from([(s.name.clone(), s)]),
+            };
+            let t = std::time::Instant::now();
+            if let Err(e) = crate::ir_opt::optimize(world, &mut one)
+                && !e.starts_with(VALIDATION_ERROR)
+            {
+                return Err(e);
+            }
+            let micros = t.elapsed().as_micros();
+            let s = one.functions.into_values().next().expect("one function");
+            let places: BTreeSet<Place> = b
+                .instructions
+                .iter()
+                .filter_map(|i| place_of(f, &i.op))
+                .collect();
+            rows.push(BlockProfile {
+                function: name.clone(),
+                block: k,
+                instructions: b.instructions.len(),
+                places: places.len(),
+                values,
+                sink_reads: reads[0].len(),
+                removed: replacements(&s, &reads).len(),
+                micros,
+                screened,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+/// `ir_opt`'s private `scalar` (mirrored): the values its saturation tracks.
+fn scalar(t: &crate::ast::Type) -> bool {
+    (crate::numeric::is_scalar_name(t.name()) && t.name() != "Never")
+        || *t == crate::ast::Type::unit()
+}
+
+/// `VESPER_OPT_POLICY_SCREEN=basic` keeps lane 5's policy (the screen
+/// [`block_may_improve`] alone, one surrogate per function), for measuring.
+fn sharp_screen() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("VESPER_OPT_POLICY_SCREEN").as_deref(),
+            Ok("basic")
+        )
+    })
+}
+
+/// What an instruction that changes the state token is in a block's egglog
+/// program: a `Write` of a place (by index) or an opaque `Barrier`.
+#[derive(Clone, Copy)]
+enum Step {
+    Write(usize),
+    Barrier,
+}
+
+/// A sharper necessary condition than [`block_may_improve`] (SH5 lane 9,
+/// #1332): some scalar sink read's `Read(s, p)` term can reach an earlier
+/// value under the pass's two rules.
+///
+/// In a block's program, a read `d` of place `p` at state `s` is unioned
+/// with `Read(s, p)`. The rules rewrite `Read(Write(s', p, v), p)` to `v`
+/// and `Read(Write(s', q, v), p)` to `Read(s', p)` when `p` and `q` are
+/// disjoint; nothing rewrites a `Read` of a `Barrier`, of a `Start`, or of a
+/// write to an overlapping other place. So the terms in `d`'s class that the
+/// rules can produce are the `Read(t, p)` for the states `t` on the walk
+/// back from `s` across disjoint writes, plus the value of a write of `p`
+/// where the walk stops. `d` can only become equal to an earlier value if
+/// that walk ends at a write of `p`, or meets a state from which an earlier
+/// scalar sink read of `p` reaches the same term. This screen follows those
+/// walks exactly (ignoring the round bound and the type filter, so it only
+/// ever keeps more blocks than the pass improves). A sink read without
+/// state evidence, or a walk through a state the block does not define,
+/// keeps the block so the pass reports what it reports.
+pub fn block_can_improve(f: &FunctionIr, block: &ir::Block) -> bool {
+    if !block_may_improve(f, &block.instructions) {
+        return false;
+    }
+    if !sharp_screen() {
+        return true;
+    }
+    // The pass's place table and place graph for this block.
+    let mut places = BTreeMap::<Place, usize>::new();
+    for i in &block.instructions {
+        if let Some(p) = place_of(f, &i.op) {
+            let next = places.len();
+            places.entry(p).or_insert(next);
+        }
+    }
+    let mut graph = ir::PlaceGraph::default();
+    for p in places.keys() {
+        graph.insert(p);
+    }
+    let by_index: Vec<&Place> = {
+        let mut v = vec![None; places.len()];
+        for (p, k) in &places {
+            v[*k] = Some(p);
+        }
+        v.into_iter()
+            .map(|p| p.expect("dense place indices"))
+            .collect()
+    };
+    let mut disjoint = HashMap::<(usize, usize), bool>::new();
+    let mut is_disjoint = |a: usize, b: usize| {
+        *disjoint
+            .entry((a, b))
+            .or_insert_with(|| !graph.overlaps(by_index[a], by_index[b]))
+    };
+    // State token -> (the state it was made from, what made it).
+    let mut steps = HashMap::<u32, (u32, Step)>::new();
+    let mut consumed = BTreeSet::<u32>::new();
+    // (state, place) for every `Read(state, place)` term an earlier scalar
+    // sink read's class holds.
+    let mut reached = BTreeSet::<(u32, usize)>::new();
+    for i in &block.instructions {
+        if let Op::Read {
+            root,
+            path,
+            pass: Pass::Sink,
+            ..
+        } = &i.op
+            && scalar(&i.ty)
+            && let Some(&p) = places.get(&Place {
+                root: root.clone(),
+                path: path.clone(),
+            })
+        {
+            let Some((input, _)) = i.token else {
+                return true;
+            };
+            let mut s = input;
+            let mut walk = vec![];
+            loop {
+                if reached.contains(&(s, p)) {
+                    return true;
+                }
+                walk.push(s);
+                match steps.get(&s) {
+                    Some((_, Step::Write(q))) if *q == p => return true,
+                    Some((from, Step::Write(q))) if is_disjoint(*q, p) => s = *from,
+                    Some(_) => break,
+                    None if s == block.entry_token => break,
+                    None => return true,
+                }
+                if walk.len() > block.instructions.len() + 1 {
+                    // A cycle of states; let the pass decide.
+                    return true;
+                }
+            }
+            reached.extend(walk.into_iter().map(|s| (s, p)));
+        }
+        if let Some((input, output)) = i.token
+            && input != output
+        {
+            let step = match &i.op {
+                Op::Write { op, value, .. }
+                    if op == "=" && f.values.get(value).is_some_and(scalar) =>
+                {
+                    place_of(f, &i.op)
+                        .and_then(|p| places.get(&p))
+                        .map(|k| Step::Write(*k))
+                }
+                Op::Bind { pattern, value, .. }
+                    if matches!(pattern.kind, PatternKind::Bind(_))
+                        && f.values.get(value).is_some_and(scalar) =>
+                {
+                    place_of(f, &i.op)
+                        .and_then(|p| places.get(&p))
+                        .map(|k| Step::Write(*k))
+                }
+                _ => None,
+            };
+            if !consumed.insert(input) {
+                // Two steps from one state: writes of equal values from it
+                // would be congruent. Not a chain; let the pass decide.
+                return true;
+            }
+            steps.insert(output, (input, step.unwrap_or(Step::Barrier)));
+        }
+    }
+    false
 }
