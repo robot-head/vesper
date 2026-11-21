@@ -15,6 +15,11 @@
 //! `ir_opt::optimize` (the Stage 1 guard). An installed hook must return
 //! what the Rust pass returns; the hybrid's tests and the pass harness of
 //! tests/self_host_place_ir*.rs check it.
+//!
+//! A hook should not re-encode the world on every call: the native call
+//! sites run inside a [`crate::swap_input`] scope (one per compilation),
+//! which gives each hook a per-compilation slot for its encoder state and
+//! the Vesper value it decoded once (SH4 lane 2, #1276).
 use crate::check::World;
 use crate::ir::Program;
 use crate::ir_inline::{Budget, Report};

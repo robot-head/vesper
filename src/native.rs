@@ -1081,6 +1081,8 @@ fn compile_entry<M: Module>(
     entry_effects: EntryEffects,
     linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
+    // One encode-once swap input per compilation (SH4 lane 2, #1276).
+    let _inputs = crate::swap_input::open(world);
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     // Foreign capabilities are granted by the package's `.vsys` import.
     let trace_ok = entry_effects == EntryEffects::TraceHost

@@ -202,6 +202,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 2 (#1276): the encode-once checker inputs over the same
+        # corpus.
+        "test/self_host_swap_inputs": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH3 lane 11 (#1250): the inliner differential on the same corpus.
         "test/self_host_ir_inline": glob([
             "examples/**",
@@ -663,6 +670,7 @@ vesper_crate(
         # Four round-trip tests and the pass harness share one stage build;
         # past 900 s on a busy runner.
         "test/self_host_place_ir": "eternal",
+        "test/self_host_swap_inputs": "long",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
         "test/self_host_check_harness": "long",

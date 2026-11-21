@@ -12,11 +12,17 @@ vesper_hybrid(
         },
         "hybrid_check_layout": {
             "edit_src": "modules/check_layout/src/lib.ves",
-            "edits": {"    layout_words(in input)\n": "    layout_words(in input[0..0])\n"},
+            "edits": {
+                "    layout_words(in input)\n": "    layout_words(in input[0..0])\n",
+                "    layout_part(inout s.c, in part)\n": "    layout_part(inout s.c, in part[0..0])\n",
+            },
         },
         "hybrid_ir_check": {
             "edit_src": "modules/ir_check/src/lib.ves",
-            "edits": {"    ir_check_words(in input)\n": "    divergent_words(in input)\n"},
+            "edits": {
+                "    ir_check_words(in input)\n": "    divergent_words(in input)\n",
+                "    ir_check_part(inout s.c, in part)\n": "    divergent_words(in part)\n",
+            },
         },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
@@ -69,5 +75,7 @@ vesper_hybrid(
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
+        # SH4 lane 2 (#1276): the hybrid's own cost report.
+        "test/swap_inputs": [":bin/vesper-hybrid"],
     },
 )

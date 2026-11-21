@@ -1247,6 +1247,8 @@ fn compile_exports<M: Module>(
     exports: &BTreeMap<String, String>,
     optimize: bool,
 ) -> Result<String, String> {
+    // One encode-once swap input per compilation (SH4 lane 2, #1276).
+    let _inputs = crate::swap_input::open(world);
     let roots: Vec<&str> = exports.keys().map(String::as_str).collect();
     let all = crate::native::instances_for_roots(world, &roots, false)?;
     for name in exports.keys() {
