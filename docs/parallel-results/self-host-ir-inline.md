@@ -66,7 +66,15 @@ Rust stays the default and nothing is deleted. No file under `src/` changes in e
 
 The differential's whole run took 64.36 s with the default compiler and 64.55 s with the hybrid (1.003x; both debug builds, the harness's own timing).
 
-CALLGRIND_PART2
+Callgrind, `port-compiler` profile, `vesper build --lib packages/vesper-check-data`, counting inside `vesper::ir_swap::inline` only:
+
+| Compiler | Ir |
+|---|--:|
+| Default (Rust) | 423,940,407 |
+| Hybrid (encode, Vesper inliner, decode, re-thread) | 321,100,583 |
+| Ratio | **0.76x** |
+
+The two objects are byte-identical. The whole build takes 4.98 s with the default compiler and 4.96 s with the hybrid.
 
 ## Numbers
 
@@ -96,7 +104,7 @@ Part 2's hybrid numbers below include the decode.
 
 ## Stage 1 guard
 
-Untouched: `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`, `lean/**`, `bootstrap/**`, `packages/vesper-compiler/**`. No file under `src/` changes at all; the hybrid hook goes through lane 1's `ir_swap`, which the verified backend never calls. Part 1's bootstrap-stage1 run passed ([run 44853720355](https://github.com/robot-head/vesper/actions/runs/44853720355)); part 2's is linked from its PR.
+Untouched: `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`, `lean/**`, `bootstrap/**`, `packages/vesper-compiler/**`. No file under `src/` changes at all; the hybrid hook goes through lane 1's `ir_swap`, which the verified backend never calls. Part 1's bootstrap-stage1 run passed ([run 44853720355](https://github.com/robot-head/vesper/actions/runs/44853720355)); part 2's passed too ([run 44898113914](https://github.com/robot-head/vesper/actions/runs/44898113914)).
 
 ## Compiler gaps
 
