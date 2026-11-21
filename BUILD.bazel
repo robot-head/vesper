@@ -196,6 +196,35 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 7 (#1281): @vesper/codegen-calls against the
+        # native backend's declarations over the corpus and the source strings
+        # of the feature test files it reads. Anchored globs.
+        "test/self_host_codegen_calls": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + [
+            "tests/arrays.rs",
+            "tests/capability_effects.rs",
+            "tests/capability_verifiers.rs",
+            "tests/checked_arithmetic.rs",
+            "tests/dyn_box.rs",
+            "tests/dyn_effects.rs",
+            "tests/dyn_fn.rs",
+            "tests/dyn_trait.rs",
+            "tests/ffi_handles.rs",
+            "tests/fip.rs",
+            "tests/floats.rs",
+            "tests/integer_widths.rs",
+            "tests/native_block_param_homes.rs",
+            "tests/native_export_f32.rs",
+            "tests/native_fail_status.rs",
+            "tests/native_handlers.rs",
+            "tests/native_hoist_calls.rs",
+            "tests/native_spans.rs",
+            "tests/vector_f32.rs",
+            "tests/wide_integers.rs",
+        ],
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -550,6 +579,7 @@ vesper_crate(
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
         "test/self_host_place_ir": "long",
+        "test/self_host_codegen_calls": "long",
         "test/self_host_check_harness": "long",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",

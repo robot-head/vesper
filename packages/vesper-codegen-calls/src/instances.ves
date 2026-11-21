@@ -1,0 +1,1411 @@
+// Native monomorphization: `instances_for_entry`, `instance_key`,
+// `concrete`, `call_vars` and the function predicates of src/native.rs
+// (`contains_function`, `capability_only`, `fail_only`,
+// `specialized_function`, `function_value_instance`) and
+// `ffi_lowering::drops::drop_callees`.
+//
+// An instance's substitution (Rust: `BTreeMap<String, Type>`) is a run of
+// (name symbol, type id) pairs kept sorted by the names' bytes, so
+// iterating it is BTreeMap order and its key text is Rust's `{:?}`.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    inc32,
+    n32,
+    u32_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    Vars,
+    debug_type,
+    default_type,
+    substitute,
+    substitute_row,
+    vars_new
+};
+use @vesper/check-data::world::{
+    World,
+    set_by_symbol
+};
+use @vesper/place-ir::{
+    Program
+};
+use self::data::{
+    Calls,
+    ExprNode,
+    FnInfo,
+    ParamInfo,
+    VarsRow
+};
+
+const NONE32: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const P_INOUT: u8 = 1;
+const E_NAME: u8 = 1;
+const E_CALL: u8 = 5;
+const E_FIELD: u8 = 6;
+const OP_READ: u8 = 2;
+const OP_CALL: u8 = 11;
+// `MAX_NATIVE_INSTANCES` of src/native.rs.
+const MAX_NATIVE_INSTANCES: u64 = 4096;
+
+// Names the decisions compare against, interned once.
+pub copy struct Syms {
+    fail: u32,
+    box_: u32,
+    box_new: u32,
+    dyn_: u32,
+    chunk_seq: u32,
+    tiled_seq: u32,
+    region_box: u32,
+    watermark: u32,
+    f32_: u32,
+    f64_: u32,
+    i128_: u32,
+    u128_: u32,
+    bool_: u32,
+    unit: u32,
+    never: u32,
+    u8_: u32,
+    u16_: u32,
+    u32_: u32,
+    u64_: u32,
+    usize_: u32,
+    i8_: u32,
+    i16_: u32,
+    i32_: u32,
+    i64_: u32,
+    isize_: u32,
+    const_time: u32,
+    realtime: u32,
+    det_float: u32,
+    const_denorm: u32,
+    isa: u32,
+}
+
+pub fn syms_new(inout n: Names) -> Syms {
+    Syms {
+        fail: n.intern(in "Fail".as_bytes()),
+        box_: n.intern(in "Box".as_bytes()),
+        box_new: n.intern(in "Box::new".as_bytes()),
+        dyn_: n.intern(in "dyn".as_bytes()),
+        chunk_seq: n.intern(in "ChunkSeq".as_bytes()),
+        tiled_seq: n.intern(in "TiledSeq".as_bytes()),
+        region_box: n.intern(in "RegionBox".as_bytes()),
+        watermark: n.intern(in "Watermark".as_bytes()),
+        f32_: n.intern(in "f32".as_bytes()),
+        f64_: n.intern(in "f64".as_bytes()),
+        i128_: n.intern(in "i128".as_bytes()),
+        u128_: n.intern(in "u128".as_bytes()),
+        bool_: n.intern(in "bool".as_bytes()),
+        unit: n.intern(in "Unit".as_bytes()),
+        never: n.intern(in "Never".as_bytes()),
+        u8_: n.intern(in "u8".as_bytes()),
+        u16_: n.intern(in "u16".as_bytes()),
+        u32_: n.intern(in "u32".as_bytes()),
+        u64_: n.intern(in "u64".as_bytes()),
+        usize_: n.intern(in "usize".as_bytes()),
+        i8_: n.intern(in "i8".as_bytes()),
+        i16_: n.intern(in "i16".as_bytes()),
+        i32_: n.intern(in "i32".as_bytes()),
+        i64_: n.intern(in "i64".as_bytes()),
+        isize_: n.intern(in "isize".as_bytes()),
+        const_time: n.intern(in "ConstTime".as_bytes()),
+        realtime: n.intern(in "Realtime".as_bytes()),
+        det_float: n.intern(in "DetFloat".as_bytes()),
+        const_denorm: n.intern(in "ConstDenorm".as_bytes()),
+        isa: n.intern(in "Isa".as_bytes()),
+    }
+}
+
+impl Syms {
+    // `numeric::is_wide_name`.
+    pub fn is_wide(self, s: u32) -> bool {
+        s == self.i128_ || s == self.u128_
+    }
+
+    // `numeric::is_integer_name`.
+    pub fn is_integer(self, s: u32) -> bool {
+        s
+            == self
+            .u8_
+            || s
+            == self
+            .u16_
+            || s
+            == self
+            .u32_
+            || s
+            == self
+            .u64_
+            || s
+            == self
+            .usize_
+            || s
+            == self
+            .i8_
+            || s
+            == self
+            .i16_
+            || s
+            == self
+            .i32_
+            || s
+            == self
+            .i64_
+            || s
+            == self
+            .isize_
+            || self
+            .is_wide(s)
+    }
+
+    pub fn is_float(self, s: u32) -> bool {
+        s == self.f32_ || s == self.f64_
+    }
+
+    // `numeric::is_scalar_name`.
+    pub fn is_scalar(self, s: u32) -> bool {
+        self
+            .is_integer(s)
+            || self
+            .is_float(s)
+            || s
+            == self
+            .bool_
+            || s
+            == self
+            .unit
+            || s
+            == self
+            .never
+    }
+
+    // `capability_effects::is_capability_effect`.
+    pub fn is_capability(self, s: u32) -> bool {
+        s
+            == self
+            .const_time
+            || s
+            == self
+            .realtime
+            || s
+            == self
+            .det_float
+            || s
+            == self
+            .const_denorm
+            || s
+            == self
+            .isa
+    }
+}
+
+// `ffi_lowering::is_foreign_effect`.
+pub fn is_foreign(in names: Names, s: u32) -> bool {
+    names.has_prefix(s, in "Ffi$".as_bytes())
+}
+
+// ----- substitutions ----------------------------------------------------------
+
+// A substitution under construction: pairs sorted by the names' bytes.
+pub struct IVars {
+    keys: ChunkSeq[u32],
+    tys: ChunkSeq[u32],
+}
+
+pub fn ivars_new() -> IVars {
+    IVars {
+        keys: ChunkSeq::new[u32](),
+        tys: ChunkSeq::new[u32]()
+    }
+}
+
+// The byte order of two names (Rust `str` order): -1, 0 or 1.
+pub fn cmp_names(in names: Names, a: u32, b: u32) -> i32 {
+    if a == b {
+        return 0;
+    }
+    let na = names.size(a);
+    let nb = names.size(b);
+    let n = if na < nb {
+        na
+    } else {
+        nb
+    };
+    for i in 0..n {
+        let x = names.byte(a, i);
+        let y = names.byte(b, i);
+        if x < y {
+            return -1;
+        }
+        if x > y {
+            return 1;
+        }
+    }
+    if na < nb {
+        -1
+    } else if na > nb {
+        1
+    } else {
+        0
+    }
+}
+
+impl IVars {
+    pub fn len(in self) -> u64 {
+        self.keys.len()
+    }
+
+    pub fn key(in self, i: u64) -> u32 {
+        u32_at(in self.keys, i)
+    }
+
+    pub fn ty(in self, i: u64) -> u32 {
+        u32_at(in self.tys, i)
+    }
+
+    pub fn get(in self, k: u32) -> u32 {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == k {
+                return u32_at(in self.tys, i);
+            }
+        }
+        NONE32
+    }
+
+    // `BTreeMap::insert`.
+    pub fn insert(inout self, in names: Names, k: u32, t: u32) {
+        let n = self.keys.len();
+        let mut at = n;
+        for i in 0..n {
+            let c = cmp_names(in names, u32_at(in self.keys, i), k);
+            if c == 0 {
+                let ok = self.tys.try_set(i, t);
+                return;
+            }
+            if c > 0 {
+                at = i;
+                break;
+            }
+        }
+        self.keys.push(0);
+        self.tys.push(0);
+        let mut j = n;
+        loop {
+            if j <= at {
+                break;
+            }
+            let pk = u32_at(in self.keys, wrapping_sub(j, 1));
+            let pt = u32_at(in self.tys, wrapping_sub(j, 1));
+            let ok1 = self.keys.try_set(j, pk);
+            let ok2 = self.tys.try_set(j, pt);
+            j = wrapping_sub(j, 1);
+        }
+        let ok3 = self.keys.try_set(at, k);
+        let ok4 = self.tys.try_set(at, t);
+    }
+
+    pub fn clear(inout self) {
+        self.keys.clear();
+        self.tys.clear();
+    }
+
+    pub fn copy_of(in self) -> IVars {
+        let mut out = ivars_new();
+        for i in 0..self.keys.len() {
+            out.keys.push(u32_at(in self.keys, i));
+            out.tys.push(u32_at(in self.tys, i));
+        }
+        out
+    }
+
+    // check-data's `Vars`, for `substitute`.
+    pub fn vars(in self) -> Vars {
+        let mut v = vars_new();
+        for i in 0..self.keys.len() {
+            v.set(u32_at(in self.keys, i), u32_at(in self.tys, i));
+        }
+        v
+    }
+}
+
+// The `$fn:` keys of an instance (`FN_ARG`): `$fn:<param>` binds a
+// function-value parameter to a top-level function.
+fn is_fn_arg(in names: Names, k: u32) -> bool {
+    names.has_prefix(k, in "$fn:".as_bytes())
+}
+
+fn push_name(in names: Names, s: u32, inout out: ChunkSeq[u8]) {
+    names.write(s, inout out);
+}
+
+// The parameter name of a `$fn:<param>` key, interned.
+fn fn_arg_param(inout names: Names, k: u32) -> u32 {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let a = names.start(k);
+    let e = names.end(k);
+    for i in add(a, 4)..e {
+        text.push(names.byte(k, wrapping_sub(i, a)));
+    }
+    names.intern(in text.as_slice())
+}
+
+// `instance_key`, interned.
+pub fn instance_key(inout names: Names, in t: Types, name: u32, in vars: IVars) -> u32 {
+    if vars.len() == 0 {
+        return name;
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push_name(in names, name, inout out);
+    let mut all_fn = true;
+    for i in 0..vars.len() {
+        if !is_fn_arg(in names, vars.key(i)) {
+            all_fn = false;
+        }
+    }
+    if all_fn {
+        // `apply$fn[f=triple]`
+        out.extend(in "$fn[".as_bytes());
+        for i in 0..vars.len() {
+            if i > 0 {
+                out.push(44);
+            }
+            let k = vars.key(i);
+            let a = names.start(k);
+            let e = names.end(k);
+            for j in add(a, 4)..e {
+                out.push(names.byte(k, wrapping_sub(j, a)));
+            }
+            out.push(61);
+            push_name(in names, t.name(vars.ty(i)), inout out);
+        }
+        out.push(93);
+    } else {
+        // `name${"T": Named("i64", [])}`
+        out.extend(in "${".as_bytes());
+        for i in 0..vars.len() {
+            if i > 0 {
+                out.extend(in ", ".as_bytes());
+            }
+            out.push(34);
+            push_name(in names, vars.key(i), inout out);
+            out.extend(in "\": ".as_bytes());
+            debug_type(in t, in names, vars.ty(i), inout out);
+        }
+        out.push(125);
+    }
+    names.intern(in out.as_slice())
+}
+
+// ----- concrete functions -------------------------------------------------------
+
+// `concrete(world, name, vars)`: the function with bound function-value
+// parameters removed and the substitution applied to its signature.
+pub struct Conc {
+    f: u32,
+    params: ChunkSeq[ParamInfo],
+    result: u32,
+    row: u32,
+}
+
+pub fn concrete(inout t: Types, inout names: Names, in d: Calls, name: u32, in vars: IVars)
+    -> Conc {
+    let fi = d.function(name);
+    let f = d.fn_info(fi);
+    let v = vars.vars();
+    let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..vars.len() {
+        let k = vars.key(i);
+        if is_fn_arg(in names, k) {
+            bound.push(fn_arg_param(inout names, k));
+        }
+    }
+    let mut params: ChunkSeq[ParamInfo] = ChunkSeq::new[ParamInfo]();
+    for i in 0..w(f.pn) {
+        let p = d.param(add(w(f.pa), i));
+        let mut keep = true;
+        for j in 0..bound.len() {
+            if u32_at(in bound, j) == p.name {
+                keep = false;
+            }
+        }
+        if keep {
+            let pt = substitute(inout t, p.ty, in v);
+            params
+                .push(
+                ParamInfo {
+                    name: p.name,
+                    pass: p.pass,
+                    ty: pt
+                }
+            );
+        }
+    }
+    let result = substitute(inout t, f.result, in v);
+    let row = substitute_row(inout t, f.row, in v);
+    Conc {
+        f: fi,
+        params: params,
+        result: result,
+        row: row
+    }
+}
+
+impl Conc {
+    pub fn param(in self, i: u64) -> ParamInfo {
+        match self.params.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => ParamInfo {
+                name: 0,
+                pass: 0,
+                ty: 0
+            },
+        }
+    }
+}
+
+// ----- predicates ---------------------------------------------------------------
+
+// `contains_function`.
+pub fn contains_function(inout t: Types, in wd: World, ty: u32) -> bool {
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    contains_fn_in(inout t, in wd, ty, inout seen)
+}
+
+fn contains_fn_in(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_FN {
+        return true;
+    }
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            let a = t.arg(ty, i);
+            if contains_fn_in(inout t, in wd, a, inout seen) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind != K_NAMED {
+        return false;
+    }
+    for i in 0..seen.len() {
+        if u32_at(in seen, i) == n.name {
+            for j in 0..w(n.n) {
+                if t.kind(t.arg(ty, j)) == K_FN {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+    let ai = wd.lookup(n.name);
+    if ai == NONE32 {
+        return false;
+    }
+    seen.push(n.name);
+    let a = wd.adt(ai);
+    let vars = wd.vars_of(in t, a, ty);
+    let mut result = false;
+    for vi in 0..w(a.vn) {
+        let v = wd.variant(add(w(a.va), vi));
+        for fi in 0..w(v.fc) {
+            let field = wd.field(add(w(v.fa), fi));
+            let ft = substitute(inout t, field.ty, in vars);
+            if !result && contains_fn_in(inout t, in wd, ft, inout seen) {
+                result = true;
+            }
+        }
+    }
+    // `seen.remove(n)`: the name is the last pushed.
+    let last = wrapping_sub(seen.len(), 1);
+    seen.truncate(last);
+    result
+}
+
+// `capability_only` of a row.
+pub fn capability_only(in t: Types, in names: Names, k: Syms, row: u32) -> bool {
+    let r = t.row(row);
+    for i in 0..w(r.n) {
+        let e = t.effect_at(add(w(r.a), i));
+        if !k.is_capability(e.name) && !is_foreign(in names, e.name) {
+            return false;
+        }
+    }
+    true
+}
+
+fn any_param_contains_function(inout t: Types, in wd: World, in params: ChunkSeq[ParamInfo])
+    -> bool {
+    for i in 0..params.len() {
+        let p = match params.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => ParamInfo {
+                name: 0,
+                pass: 0,
+                ty: 0
+            },
+        };
+        if contains_function(inout t, in wd, p.ty) {
+            return true;
+        }
+    }
+    false
+}
+
+// `fail_only` of a concrete function.
+pub fn fail_only(inout t: Types, in names: Names, in wd: World, k: Syms, in f: Conc) -> bool {
+    let r = t.row(f.row);
+    if r.tail != 0 {
+        return false;
+    }
+    let mut any_fail = false;
+    for i in 0..w(r.n) {
+        let e = t.effect_at(add(w(r.a), i));
+        if e.name == k.fail {
+            any_fail = true;
+        }
+        let ok = (e.name == k.fail && e.label == 0 && e.n == 1)
+            || (
+            (k.is_capability(e.name) || is_foreign(in names, e.name)) && e.label == 0 && e.n == 0
+        );
+        if !ok {
+            return false;
+        }
+    }
+    any_fail
+        && !contains_function(inout t, in wd, f.result)
+        && !any_param_contains_function(inout t, in wd, in f.params)
+}
+
+// `capability_abi`: a `fail_only` row that also names a capability effect.
+pub fn capability_abi(inout t: Types, in names: Names, in wd: World, k: Syms, in f: Conc) -> bool {
+    if !fail_only(inout t, in names, in wd, k, in f) {
+        return false;
+    }
+    let r = t.row(f.row);
+    for i in 0..w(r.n) {
+        if k.is_capability(t.effect_at(add(w(r.a), i)).name) {
+            return true;
+        }
+    }
+    false
+}
+
+// `specialized_function`.
+pub fn specialized(inout t: Types, in names: Names, in wd: World, k: Syms, in f: Conc) -> bool {
+    let r = t.row(f.row);
+    (
+        !capability_only(in t, in names, k, f.row)
+            || r
+            .tail
+            != 0
+            || contains_function(inout t, in wd, f.result)
+            || any_param_contains_function(inout t, in wd, in f.params)
+    )
+        && !fail_only(inout t, in names, in wd, k, in f)
+}
+
+// `function_value_instance` of a world function (unsubstituted).
+fn function_value_instance(
+    inout t: Types,
+    in names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    f: FnInfo
+) -> bool {
+    let r = t.row(f.row);
+    if r.n == 0 || r.tail != 0 || !capability_only(in t, in names, k, f.row) || f.gn != 0 {
+        return false;
+    }
+    if contains_function(inout t, in wd, f.result) {
+        return false;
+    }
+    let mut any = false;
+    for i in 0..w(f.pn) {
+        let p = d.param(add(w(f.pa), i));
+        if t.kind(p.ty) == K_FN {
+            any = true;
+            if p.pass == P_INOUT {
+                return false;
+            }
+        } else if contains_function(inout t, in wd, p.ty) {
+            return false;
+        }
+    }
+    any
+}
+
+// ----- the lowered program's facts ------------------------------------------------
+
+// `references` of `instances_for_entry`: (span, name) of every `Read` of a
+// world function that is not a local of the reading function. Rows sorted
+// by (start, end, symbol) for binary search.
+pub copy struct Ref {
+    s0: u64,
+    s1: u64,
+    sym: u32,
+}
+
+// What `instances_for_entry` reads of the program: the references and,
+// per program function, its `drop_callees` contribution.
+pub struct ProgramFacts {
+    refs: ChunkSeq[Ref],
+    // per program function: name, nested span (or none), drop callees
+    // drops[da..da+dn]
+    fn_names: ChunkSeq[u32],
+    nested: ChunkSeq[bool],
+    ns0: ChunkSeq[u64],
+    ns1: ChunkSeq[u64],
+    da: ChunkSeq[u32],
+    dn: ChunkSeq[u32],
+    drops: ChunkSeq[u32],
+}
+
+fn ref_at(in rs: ChunkSeq[Ref], i: u64) -> Ref {
+    match rs.try_get(i) {
+        Option::Some(r) => r,
+        Option::None => Ref {
+            s0: 0,
+            s1: 0,
+            sym: 0
+        },
+    }
+}
+
+fn ref_less(a: Ref, b: Ref) -> bool {
+    a.s0 < b.s0 || (a.s0 == b.s0 && (a.s1 < b.s1 || (a.s1 == b.s1 && a.sym < b.sym)))
+}
+
+// Bottom-up merge sort.
+fn sort_refs(inout rs: ChunkSeq[Ref]) {
+    let n = rs.len();
+    let mut tmp: ChunkSeq[Ref] = ChunkSeq::with_capacity[Ref](n);
+    for i in 0..n {
+        tmp.push(ref_at(in rs, i));
+    }
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = min_u64(add(lo, width), n);
+            let hi = min_u64(add(mid, width), n);
+            let mut i = lo;
+            let mut j = mid;
+            let mut o = lo;
+            loop {
+                if o >= hi {
+                    break;
+                }
+                let take_left = if i >= mid {
+                    false
+                } else if j >= hi {
+                    true
+                } else {
+                    !ref_less(ref_at(in rs, j), ref_at(in rs, i))
+                };
+                if take_left {
+                    let ok = tmp.try_set(o, ref_at(in rs, i));
+                    i = inc(i);
+                } else {
+                    let ok = tmp.try_set(o, ref_at(in rs, j));
+                    j = inc(j);
+                }
+                o = inc(o);
+            }
+            lo = hi;
+        }
+        for x in 0..n {
+            let ok = rs.try_set(x, ref_at(in tmp, x));
+        }
+        width = wrapping_mul(width, 2);
+    }
+}
+
+fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+impl ProgramFacts {
+    pub fn has_ref(in self, s0: u64, s1: u64, sym: u32) -> bool {
+        let key = Ref {
+            s0: s0,
+            s1: s1,
+            sym: sym
+        };
+        let mut lo: u64 = 0;
+        let mut hi = self.refs.len();
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+            if ref_less(ref_at(in self.refs, mid), key) {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+        let r = ref_at(in self.refs, lo);
+        lo < self.refs.len() && r.s0 == s0 && r.s1 == s1 && r.sym == sym
+    }
+}
+
+// A decimal `usize` as Rust's `str::parse` reads it (an optional `+`),
+// from text[a..e]; NONE when it is not one.
+fn parse_usize(in text: ChunkSeq[u8], a: u64, e: u64) -> u64 {
+    let mut i = a;
+    if i < e && u8_at(in text, i) == 43 {
+        i = inc(i);
+    }
+    if i >= e || wrapping_sub(e, i) > 19 {
+        return 18446744073709551615;
+    }
+    let mut v: u64 = 0;
+    loop {
+        if i >= e {
+            break;
+        }
+        let c = u8_at(in text, i);
+        if c < 48 || c > 57 {
+            return 18446744073709551615;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+        i = inc(i);
+    }
+    v
+}
+
+// The words of a program function's header, at `ops[ha..]`: skips to the
+// locals and marks each local's symbol with `stamp` in `marks`.
+fn mark_locals(in p: Program, ha: u64, inout marks: ChunkSeq[u32], stamp: u32) {
+    let mut pos = ha;
+    let np = p.op(pos);
+    pos = inc(pos);
+    for i in 0..np {
+        // name, pass, k, k paths, type, start, end
+        let k = p.op(add(pos, 2));
+        pos = add(pos, add(6, k));
+    }
+    // result, effects
+    pos = add(pos, 2);
+    let nb = p.op(pos);
+    pos = add(inc(pos), wrapping_mul(nb, 2));
+    let nc = p.op(pos);
+    pos = add(inc(pos), nc);
+    let nv = p.op(pos);
+    pos = add(inc(pos), wrapping_mul(nv, 2));
+    let nl = p.op(pos);
+    pos = inc(pos);
+    for i in 0..nl {
+        let s = n32(p.op(pos));
+        set_by_symbol(inout marks, s, stamp);
+        pos = add(pos, 2);
+    }
+}
+
+pub fn program_facts(in names: Names, in d: Calls, in p: Program) -> ProgramFacts {
+    let mut facts = ProgramFacts {
+        refs: ChunkSeq::new[Ref](),
+        fn_names: ChunkSeq::new[u32](),
+        nested: ChunkSeq::new[bool](),
+        ns0: ChunkSeq::new[u64](),
+        ns1: ChunkSeq::new[u64](),
+        da: ChunkSeq::new[u32](),
+        dn: ChunkSeq::new[u32](),
+        drops: ChunkSeq::new[u32](),
+    };
+    let mut marks: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for fi in 0..p.fn_count() {
+        let f = p.function(fi);
+        let stamp = inc32(n32(fi));
+        mark_locals(in p, f.ha, inout marks, stamp);
+        let da = n32(facts.drops.len());
+        for bi in 0..f.bc {
+            let blk = p.block(add(f.b0, bi));
+            for ii in 0..blk.ic {
+                let inst = p.inst(add(blk.i0, ii));
+                if inst.op == OP_READ {
+                    let root = n32(p.op(inst.a));
+                    if d.function(root) != NONE32 && u32_at(in marks, w(root)) != stamp {
+                        facts
+                            .refs
+                            .push(
+                            Ref {
+                                s0: inst.s0,
+                                s1: inst.s1,
+                                sym: root
+                            }
+                        );
+                    }
+                } else if inst.op == OP_CALL {
+                    let callee = n32(p.op(inst.a));
+                    if names.has_prefix(callee, in "$drop$".as_bytes()) {
+                        let mut dup = false;
+                        for j in w(da)..facts.drops.len() {
+                            if u32_at(in facts.drops, j) == callee {
+                                dup = true;
+                            }
+                        }
+                        if !dup {
+                            facts.drops.push(callee);
+                        }
+                    }
+                }
+            }
+        }
+        facts.da.push(da);
+        facts.dn.push(n32(wrapping_sub(facts.drops.len(), w(da))));
+        facts.fn_names.push(f.name);
+        // `nested` of `drop_callees`: `$<rest>` whose last two `_` parts
+        // are a span.
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        names.write(f.name, inout text);
+        let mut is_nested = false;
+        let mut s: u64 = 0;
+        let mut e: u64 = 0;
+        if text.len() > 0 && u8_at(in text, 0) == 36 {
+            let n = text.len();
+            let mut last = n;
+            let mut i = n;
+            loop {
+                if i <= 1 {
+                    break;
+                }
+                i = wrapping_sub(i, 1);
+                if u8_at(in text, i) == 95 {
+                    last = i;
+                    break;
+                }
+            }
+            if last < n {
+                let mut prev: u64 = 0;
+                let mut j = last;
+                loop {
+                    if j <= 1 {
+                        break;
+                    }
+                    j = wrapping_sub(j, 1);
+                    if u8_at(in text, j) == 95 {
+                        prev = j;
+                        break;
+                    }
+                }
+                let start_at = if prev == 0 {
+                    1
+                } else {
+                    inc(prev)
+                };
+                e = parse_usize(in text, inc(last), n);
+                s = parse_usize(in text, start_at, last);
+                is_nested = e != 18446744073709551615 && s != 18446744073709551615;
+            }
+        }
+        facts.nested.push(is_nested);
+        facts.ns0.push(s);
+        facts.ns1.push(e);
+    }
+    sort_refs(inout facts.refs);
+    facts
+}
+
+// `ffi_lowering::drops::drop_callees(world, program, name)`, pushed onto
+// `out` (no repeats, in program order).
+fn drop_callees(in d: Calls, in facts: ProgramFacts, name: u32, inout out: ChunkSeq[u32]) {
+    let fi = d.function(name);
+    if fi == NONE32 {
+        return;
+    }
+    let src = d.fn_info(fi);
+    let start = out.len();
+    for i in 0..facts.fn_names.len() {
+        let pn = u32_at(in facts.fn_names, i);
+        let nested = match facts.nested.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => false,
+        };
+        let s = match facts.ns0.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let e = match facts.ns1.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        if pn != name && !(nested && s >= src.s0 && e <= src.s1) {
+            continue;
+        }
+        let da = w(u32_at(in facts.da, i));
+        let dn = w(u32_at(in facts.dn, i));
+        for j in 0..dn {
+            let callee = u32_at(in facts.drops, add(da, j));
+            let mut dup = false;
+            for x in start..out.len() {
+                if u32_at(in out, x) == callee {
+                    dup = true;
+                }
+            }
+            if !dup {
+                out.push(callee);
+            }
+        }
+    }
+}
+
+// ----- discovery ----------------------------------------------------------------
+
+// One instance: its key, its function and its substitution
+// (pairs[a..a+n]).
+pub copy struct Inst {
+    key: u32,
+    name: u32,
+    a: u32,
+    n: u32,
+}
+
+pub struct Found {
+    // instances sorted by key (the `InstanceMap` order)
+    insts: ChunkSeq[Inst],
+    keys: ChunkSeq[u32],
+    tys: ChunkSeq[u32],
+    // the error, when discovery failed
+    err: ChunkSeq[u8],
+}
+
+impl Found {
+    pub fn inst(in self, i: u64) -> Inst {
+        match self.insts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Inst {
+                key: 0,
+                name: 0,
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    pub fn vars_of(in self, x: Inst) -> IVars {
+        let mut v = ivars_new();
+        for i in 0..w(x.n) {
+            v.keys.push(u32_at(in self.keys, add(w(x.a), i)));
+            v.tys.push(u32_at(in self.tys, add(w(x.a), i)));
+        }
+        v
+    }
+}
+
+// The work list: (function name, substitution in the pair arena).
+struct Todo {
+    names: ChunkSeq[u32],
+    va: ChunkSeq[u32],
+    vn: ChunkSeq[u32],
+    keys: ChunkSeq[u32],
+    tys: ChunkSeq[u32],
+}
+
+impl Todo {
+    fn push(inout self, name: u32, in v: IVars) {
+        self.names.push(name);
+        self.va.push(n32(self.keys.len()));
+        self.vn.push(n32(v.len()));
+        for i in 0..v.len() {
+            self.keys.push(v.key(i));
+            self.tys.push(v.ty(i));
+        }
+    }
+
+    // Pushes a row of pairs (a vtable method's or a call's), substituted
+    // as stored.
+    fn push_row(inout self, in names: Names, in d: Calls, r: VarsRow) {
+        let mut v = ivars_new();
+        for i in 0..w(r.n) {
+            v.insert(in names, d.pair_key(add(w(r.a), i)), d.pair_ty(add(w(r.a), i)));
+        }
+        self.push(r.name, in v);
+    }
+}
+
+fn expr_type(in wd: World, e: ExprNode) -> u32 {
+    wd.expr_type(e.s0, e.s1)
+}
+
+// `dyn_trait::boxed_object`: the object type of `Box[dyn T]`, or NONE32.
+fn boxed_object(in t: Types, k: Syms, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind == K_NAMED && n.name == k.box_ && n.n == 1 {
+        let a = t.arg(ty, 0);
+        if is_object(in t, k, a) {
+            return a;
+        }
+    }
+    NONE32
+}
+
+fn is_object(in t: Types, k: Syms, ty: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.name == k.dyn_ && n.n == 1
+}
+
+// `DynObjects::vtable(object, self_ty)`: a vtable row index, or NONE32.
+fn vtable(inout t: Types, in d: Calls, object: u32, self_ty: u32) -> u32 {
+    let o = default_type(inout t, object);
+    let s = default_type(inout t, self_ty);
+    for i in 0..d.vtables.len() {
+        let v = d.vtable_row(i);
+        if v.object == o && v.self_ty == s {
+            return n32(i);
+        }
+    }
+    NONE32
+}
+
+fn push_vtable_methods(in names: Names, in d: Calls, vt: u32, inout todo: Todo) {
+    if vt == NONE32 {
+        return;
+    }
+    let v = d.vtable_row(w(vt));
+    for i in 0..w(v.mn) {
+        todo.push_row(in names, in d, d.method(add(w(v.ma), i)));
+    }
+}
+
+// `world.functions[n].generics.is_empty()`.
+fn non_generic(in d: Calls, s: u32) -> bool {
+    let fi = d.function(s);
+    fi != NONE32 && d.fn_info(fi).gn == 0
+}
+
+// The symbol spelling `<base>::<method>`, or NONE32 when no name does.
+fn method_name(in names: Names, base: u32, method: u32) -> u32 {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    names.write(base, inout text);
+    text.extend(in "::".as_bytes());
+    names.write(method, inout text);
+    names.lookup(in text.as_slice())
+}
+
+// The callback of `visit` in `instances_for_entry`, at expression `i`.
+fn visit_node(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    in facts: ProgramFacts,
+    k: Syms,
+    i: u64,
+    in vars: IVars,
+    inout todo: Todo
+) {
+    let e = d.expr(i);
+    if e.kind == E_NAME {
+        if facts.has_ref(e.s0, e.s1, e.sym) && non_generic(in d, e.sym) {
+            let none = ivars_new();
+            todo.push(e.sym, in none);
+        }
+        return;
+    }
+    if e.kind != E_CALL {
+        return;
+    }
+    let v = vars.vars();
+    let ci = inc(i);
+    let callee = d.expr(ci);
+    let mut target = NONE32;
+    if callee.kind == E_NAME {
+        if d.function(callee.sym) != NONE32 && expr_type(in wd, callee) == NONE32 {
+            target = callee.sym;
+        }
+    } else if callee.kind == E_FIELD {
+        let base = d.expr(inc(ci));
+        let bt = expr_type(in wd, base);
+        if bt != NONE32 {
+            let s = substitute(inout t, bt, in v);
+            let m = method_name(in names, t.name(s), callee.sym);
+            if m != NONE32 && d.function(m) != NONE32 {
+                target = m;
+            }
+        }
+    }
+    // The arguments: the children after the callee.
+    let nargs = wrapping_sub(w(e.children), 1);
+    let first_arg = add(ci, w(callee.size));
+    // A boxed object (§7.3) needs its vtable's methods.
+    if callee.kind == E_NAME && callee.sym == k.box_new && nargs > 0 {
+        let ty = expr_type(in wd, e);
+        if ty != NONE32 {
+            let s = substitute(inout t, ty, in v);
+            let object = boxed_object(in t, k, s);
+            if object != NONE32 {
+                let actual = expr_type(in wd, d.expr(first_arg));
+                if actual != NONE32 {
+                    let sa = substitute(inout t, actual, in v);
+                    let vt = vtable(inout t, in d, object, sa);
+                    push_vtable_methods(in names, in d, vt, inout todo);
+                }
+            }
+        }
+    }
+    if target == NONE32 {
+        return;
+    }
+    // `call_vars`
+    let mut instance = ivars_new();
+    let cr = d.call_row(e.s0, e.s1);
+    for j in 0..w(cr.n) {
+        let pt = substitute(inout t, d.pair_ty(add(w(cr.a), j)), in v);
+        instance.insert(in names, d.pair_key(add(w(cr.a), j)), pt);
+    }
+    let tf = d.fn_info(d.function(target));
+    if function_value_instance(inout t, in names, in wd, in d, k, tf) {
+        let mut bound = ivars_new();
+        let mut arg = first_arg;
+        let n = if w(tf.pn) < nargs {
+            w(tf.pn)
+        } else {
+            nargs
+        };
+        for j in 0..n {
+            let p = d.param(add(w(tf.pa), j));
+            let a = d.expr(arg);
+            arg = add(arg, w(a.size));
+            if t.kind(p.ty) != K_FN {
+                continue;
+            }
+            if a.kind == E_NAME && facts.has_ref(a.s0, a.s1, a.sym) && non_generic(in d, a.sym) {
+                let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                text.extend(in "$fn:".as_bytes());
+                names.write(p.name, inout text);
+                let key = names.intern(in text.as_slice());
+                let fty = t.named0(a.sym);
+                bound.insert(in names, key, fty);
+            } else {
+                bound.clear();
+                break;
+            }
+        }
+        for j in 0..bound.len() {
+            instance.insert(in names, bound.key(j), bound.ty(j));
+        }
+    }
+    // A `dyn` argument needs its vtable's methods; the `dyn` function has
+    // one instance, its `dyn` parameters erased to their object types.
+    let dr = d.dyn_row(target);
+    if dr.n > 0 {
+        let iv = instance.vars();
+        let mut erased = instance.copy_of();
+        for j in 0..w(dr.n) {
+            let g = d.pair_key(add(w(dr.a), j));
+            let tr = d.pair_ty(add(w(dr.a), j));
+            let st = substitute(inout t, tr, in iv);
+            let mut oargs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            oargs.push(st);
+            let object = t.named(k.dyn_, in oargs);
+            let actual = instance.get(g);
+            if actual != NONE32 && !is_object(in t, k, actual) {
+                let vt = vtable(inout t, in d, object, actual);
+                push_vtable_methods(in names, in d, vt, inout todo);
+            }
+            erased.insert(in names, g, object);
+        }
+        instance = erased;
+    }
+    if d.is_stub(target) {
+        // A vtable stub is called through its slot.
+        return;
+    }
+    todo.push(target, in instance);
+}
+
+// `instances_for_entry(world, entry, false)`.
+pub fn discover(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    in facts: ProgramFacts,
+    k: Syms,
+    entry: u32
+) -> Found {
+    let mut found = Found {
+        insts: ChunkSeq::new[Inst](),
+        keys: ChunkSeq::new[u32](),
+        tys: ChunkSeq::new[u32](),
+        err: ChunkSeq::new[u8](),
+    };
+    let mut todo = Todo {
+        names: ChunkSeq::new[u32](),
+        va: ChunkSeq::new[u32](),
+        vn: ChunkSeq::new[u32](),
+        keys: ChunkSeq::new[u32](),
+        tys: ChunkSeq::new[u32](),
+    };
+    let none = ivars_new();
+    todo.push(entry, in none);
+    let stamp: u32 = 1;
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut seen_count: u64 = 0;
+    let mut drops: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    loop {
+        let top = todo.names.len();
+        if top == 0 {
+            break;
+        }
+        let at = wrapping_sub(top, 1);
+        let name = u32_at(in todo.names, at);
+        let va = w(u32_at(in todo.va, at));
+        let vn = w(u32_at(in todo.vn, at));
+        let mut vars = ivars_new();
+        for i in 0..vn {
+            vars.keys.push(u32_at(in todo.keys, add(va, i)));
+            vars.tys.push(u32_at(in todo.tys, add(va, i)));
+        }
+        todo.names.truncate(at);
+        todo.va.truncate(at);
+        todo.vn.truncate(at);
+        todo.keys.truncate(va);
+        todo.tys.truncate(va);
+        let key = instance_key(inout names, in t, name, in vars);
+        if u32_at(in seen, w(key)) == stamp {
+            continue;
+        }
+        set_by_symbol(inout seen, key, stamp);
+        seen_count = inc(seen_count);
+        if seen_count > MAX_NATIVE_INSTANCES {
+            found
+                .err
+                .extend(in "native monomorphization exceeds 4096 function instances".as_bytes());
+            return found;
+        }
+        let fi = d.function(name);
+        if fi == NONE32 {
+            found.err.extend(in "unknown function '".as_bytes());
+            names.write(name, inout found.err);
+            found.err.push(39);
+            return found;
+        }
+        let f = concrete(inout t, inout names, in d, name, in vars);
+        let mut bound_any = false;
+        for i in 0..vars.len() {
+            if is_fn_arg(in names, vars.key(i)) {
+                bound_any = true;
+            }
+        }
+        if !specialized(inout t, in names, in wd, k, in f) || bound_any {
+            found
+                .insts
+                .push(
+                Inst {
+                    key: key,
+                    name: name,
+                    a: n32(found.keys.len()),
+                    n: n32(vars.len())
+                }
+            );
+            for i in 0..vars.len() {
+                found.keys.push(vars.key(i));
+                found.tys.push(vars.ty(i));
+            }
+        }
+        // Handle drops (§16.3) are calls the source body never names.
+        drops.clear();
+        drop_callees(in d, in facts, name, inout drops);
+        for i in 0..drops.len() {
+            todo.push(u32_at(in drops, i), in none);
+        }
+        let info = d.fn_info(fi);
+        if info.body != NONE32 {
+            let root = w(info.body);
+            let size = w(d.expr(root).size);
+            for i in root..add(root, size) {
+                visit_node(inout t, inout names, in wd, in d, in facts, k, i, in vars, inout todo);
+            }
+        }
+    }
+    sort_insts(in names, inout found.insts);
+    found
+}
+
+fn inst_at(in xs: ChunkSeq[Inst], i: u64) -> Inst {
+    match xs.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Inst {
+            key: 0,
+            name: 0,
+            a: 0,
+            n: 0
+        },
+    }
+}
+
+// Sorts by key bytes (the `BTreeMap<String, _>` order); merge sort.
+fn sort_insts(in names: Names, inout xs: ChunkSeq[Inst]) {
+    let n = xs.len();
+    let mut tmp: ChunkSeq[Inst] = ChunkSeq::with_capacity[Inst](n);
+    for i in 0..n {
+        tmp.push(inst_at(in xs, i));
+    }
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = min_u64(add(lo, width), n);
+            let hi = min_u64(add(mid, width), n);
+            let mut i = lo;
+            let mut j = mid;
+            let mut o = lo;
+            loop {
+                if o >= hi {
+                    break;
+                }
+                let take_left = if i >= mid {
+                    false
+                } else if j >= hi {
+                    true
+                } else {
+                    cmp_names(in names, inst_at(in xs, j).key, inst_at(in xs, i).key) >= 0
+                };
+                if take_left {
+                    let ok = tmp.try_set(o, inst_at(in xs, i));
+                    i = inc(i);
+                } else {
+                    let ok = tmp.try_set(o, inst_at(in xs, j));
+                    j = inc(j);
+                }
+                o = inc(o);
+            }
+            lo = hi;
+        }
+        for x in 0..n {
+            let ok = xs.try_set(x, inst_at(in tmp, x));
+        }
+        width = wrapping_mul(width, 2);
+    }
+}

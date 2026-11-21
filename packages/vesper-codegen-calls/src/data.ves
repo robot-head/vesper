@@ -1,0 +1,507 @@
+// The parts of the checker's `World` and of each function's AST that
+// native lowering's decisions read, beyond @vesper/check-data's world
+// section: the function table (`world.functions`), the body expressions
+// (in `native::visit` order), the call instantiations (`world.calls`),
+// the `dyn` tables (`world.dyn_objects`) and two facts other passes own
+// (`trace_effects::active` and the fip caller-slot functions).
+//
+// The section follows @vesper/place-ir's program section; the encoder is
+// `calls_section` in tests/self_host_codegen_calls.rs:
+//
+//   trace_active
+//   nf, nf x (name, fip, span start, end, ng, ng generic names,
+//             np, np x (name, pass, type), result type, effects (a Row
+//             type), body root expression + 1 or 0)
+//   ne, ne x (kind, span start, end, symbol + 1 or 0, children, size)
+//   nc, nc x (span start, end, k, k x (generic name, type))
+//   nd, nd x (function, k, k x (dyn generic, trait type))
+//   ns, ns stub names
+//   nv, nv x (object type, self type, m, m x (method, k, k x (name, type)))
+//   nk, nk caller-slot function names
+//   nt, nt x (entry name, optimize)
+//
+// Expressions are pre-order rows: a node's children follow it, `size` is
+// the row count of its subtree, so a pre-order walk is a range walk.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    inc32,
+    n32,
+    u32_at,
+    w
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader
+};
+use @vesper/check-data::world::{
+    set_by_symbol
+};
+
+const NONE32: u32 = 4294967295;
+
+// `ExprKind` tags (the encoder's `expr_kind`).
+pub const E_LITERAL: u8 = 0;
+pub const E_NAME: u8 = 1;
+pub const E_CALL: u8 = 5;
+pub const E_FIELD: u8 = 6;
+
+pub copy struct FnInfo {
+    name: u32,
+    fip: bool,
+    s0: u64,
+    s1: u64,
+    // generic names: gens[ga..ga+gn]
+    ga: u32,
+    gn: u32,
+    // params[pa..pa+pn]
+    pa: u32,
+    pn: u32,
+    result: u32,
+    // the effects row (a row id of the type table)
+    row: u32,
+    // the body's root expression, or NONE32
+    body: u32,
+}
+
+pub copy struct ParamInfo {
+    name: u32,
+    pass: u8,
+    ty: u32,
+}
+
+pub copy struct ExprNode {
+    kind: u8,
+    s0: u64,
+    s1: u64,
+    // Name: the name; Field: the field or method name; else 0
+    sym: u32,
+    children: u32,
+    size: u32,
+}
+
+// One `world.calls` entry or one vtable method: pairs[a..a+n].
+pub copy struct VarsRow {
+    s0: u64,
+    s1: u64,
+    name: u32,
+    a: u32,
+    n: u32,
+}
+
+pub copy struct VTableRow {
+    object: u32,
+    self_ty: u32,
+    // methods[ma..ma+mn]
+    ma: u32,
+    mn: u32,
+}
+
+pub copy struct Task {
+    entry: u32,
+    optimize: bool,
+}
+
+pub struct Calls {
+    trace_active: bool,
+    fns: ChunkSeq[FnInfo],
+    gens: ChunkSeq[u32],
+    params: ChunkSeq[ParamInfo],
+    exprs: ChunkSeq[ExprNode],
+    // `world.calls`, sorted by span
+    calls: ChunkSeq[VarsRow],
+    // `dyn_objects.params`, by function
+    dyn_params: ChunkSeq[VarsRow],
+    vtables: ChunkSeq[VTableRow],
+    methods: ChunkSeq[VarsRow],
+    // (key symbol, type) pairs of every VarsRow table
+    pair_keys: ChunkSeq[u32],
+    pair_tys: ChunkSeq[u32],
+    // symbol -> function index + 1
+    fn_by_name: ChunkSeq[u32],
+    // symbol -> dyn params row + 1
+    dyn_by_name: ChunkSeq[u32],
+    // symbol -> 1 for vtable stubs, caller-slot functions
+    stubs: ChunkSeq[u32],
+    caller_slot: ChunkSeq[u32],
+    tasks: ChunkSeq[Task],
+}
+
+impl Calls {
+    pub fn fn_info(in self, i: u32) -> FnInfo {
+        match self.fns.try_get(w(i)) {
+            Option::Some(f) => f,
+            Option::None => FnInfo {
+                name: 0,
+                fip: false,
+                s0: 0,
+                s1: 0,
+                ga: 0,
+                gn: 0,
+                pa: 0,
+                pn: 0,
+                result: 0,
+                row: 0,
+                body: NONE32
+            },
+        }
+    }
+
+    // The function named `s` as an index, or NONE32.
+    pub fn function(in self, s: u32) -> u32 {
+        let x = u32_at(in self.fn_by_name, w(s));
+        if x == 0 {
+            NONE32
+        } else {
+            wrapping_sub(x, 1)
+        }
+    }
+
+    pub fn param(in self, i: u64) -> ParamInfo {
+        match self.params.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => ParamInfo {
+                name: 0,
+                pass: 0,
+                ty: 0
+            },
+        }
+    }
+
+    pub fn generic(in self, i: u64) -> u32 {
+        u32_at(in self.gens, i)
+    }
+
+    pub fn expr(in self, i: u64) -> ExprNode {
+        match self.exprs.try_get(i) {
+            Option::Some(e) => e,
+            Option::None => ExprNode {
+                kind: E_LITERAL,
+                s0: 0,
+                s1: 0,
+                sym: 0,
+                children: 0,
+                size: 1
+            },
+        }
+    }
+
+    pub fn pair_key(in self, i: u64) -> u32 {
+        u32_at(in self.pair_keys, i)
+    }
+
+    pub fn pair_ty(in self, i: u64) -> u32 {
+        u32_at(in self.pair_tys, i)
+    }
+
+    pub fn is_stub(in self, s: u32) -> bool {
+        u32_at(in self.stubs, w(s)) != 0
+    }
+
+    pub fn uses_caller_slot_name(in self, s: u32) -> bool {
+        u32_at(in self.caller_slot, w(s)) != 0
+    }
+
+    pub fn vtable_row(in self, i: u64) -> VTableRow {
+        match self.vtables.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => VTableRow {
+                object: 0,
+                self_ty: 0,
+                ma: 0,
+                mn: 0
+            },
+        }
+    }
+
+    pub fn method(in self, i: u64) -> VarsRow {
+        vars_row(in self.methods, i)
+    }
+
+    // The `dyn` parameters of function `s` (`dyn_objects.params[s]`), or
+    // a row with no pairs.
+    pub fn dyn_row(in self, s: u32) -> VarsRow {
+        let x = u32_at(in self.dyn_by_name, w(s));
+        if x == 0 {
+            return VarsRow {
+                s0: 0,
+                s1: 0,
+                name: s,
+                a: 0,
+                n: 0
+            };
+        }
+        vars_row(in self.dyn_params, w(wrapping_sub(x, 1)))
+    }
+
+    // `world.calls.get(&(s0, s1))`, or a row with no pairs.
+    pub fn call_row(in self, s0: u64, s1: u64) -> VarsRow {
+        let mut lo: u64 = 0;
+        let mut hi = self.calls.len();
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+            let r = vars_row(in self.calls, mid);
+            if r.s0 < s0 || (r.s0 == s0 && r.s1 < s1) {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+        let r = vars_row(in self.calls, lo);
+        if lo < self.calls.len() && r.s0 == s0 && r.s1 == s1 {
+            r
+        } else {
+            VarsRow {
+                s0: s0,
+                s1: s1,
+                name: 0,
+                a: 0,
+                n: 0
+            }
+        }
+    }
+
+    pub fn task(in self, i: u64) -> Task {
+        match self.tasks.try_get(i) {
+            Option::Some(t) => t,
+            Option::None => Task {
+                entry: 0,
+                optimize: false
+            },
+        }
+    }
+}
+
+fn vars_row(in rows: ChunkSeq[VarsRow], i: u64) -> VarsRow {
+    match rows.try_get(i) {
+        Option::Some(r) => r,
+        Option::None => VarsRow {
+            s0: 0,
+            s1: 0,
+            name: 0,
+            a: 0,
+            n: 0
+        },
+    }
+}
+
+fn sym(in c: Ctx, x: u64) -> u32 {
+    u32_at(in c.nmap, x)
+}
+
+fn ty(in c: Ctx, x: u64) -> u32 {
+    u32_at(in c.tmap, x)
+}
+
+// k (name, type) pairs into the pair tables; returns their start.
+fn read_pairs(inout r: Reader, in b: Slice[u8], in c: Ctx, inout d: Calls, k: u64) -> u32 {
+    let a = n32(d.pair_keys.len());
+    for i in 0..k {
+        let key = sym(in c, r.word(in b));
+        let t = ty(in c, r.word(in b));
+        d.pair_keys.push(key);
+        d.pair_tys.push(t);
+    }
+    a
+}
+
+fn read_names_into(inout r: Reader, in b: Slice[u8], in c: Ctx, inout table: ChunkSeq[u32]) {
+    let n = r.word(in b);
+    for i in 0..n {
+        let s = sym(in c, r.word(in b));
+        set_by_symbol(inout table, s, 1);
+    }
+}
+
+// Decodes the calls section; `r` is left after it.
+pub fn read_calls(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Calls {
+    let mut d = Calls {
+        trace_active: false,
+        fns: ChunkSeq::new[FnInfo](),
+        gens: ChunkSeq::new[u32](),
+        params: ChunkSeq::new[ParamInfo](),
+        exprs: ChunkSeq::new[ExprNode](),
+        calls: ChunkSeq::new[VarsRow](),
+        dyn_params: ChunkSeq::new[VarsRow](),
+        vtables: ChunkSeq::new[VTableRow](),
+        methods: ChunkSeq::new[VarsRow](),
+        pair_keys: ChunkSeq::new[u32](),
+        pair_tys: ChunkSeq::new[u32](),
+        fn_by_name: ChunkSeq::new[u32](),
+        dyn_by_name: ChunkSeq::new[u32](),
+        stubs: ChunkSeq::new[u32](),
+        caller_slot: ChunkSeq::new[u32](),
+        tasks: ChunkSeq::new[Task](),
+    };
+    d.trace_active = r.word(in b) != 0;
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let name = sym(in c, r.word(in b));
+        let fip = r.word(in b) != 0;
+        let s0 = r.word(in b);
+        let s1 = r.word(in b);
+        let ng = r.word(in b);
+        let ga = n32(d.gens.len());
+        for j in 0..ng {
+            d.gens.push(sym(in c, r.word(in b)));
+        }
+        let np = r.word(in b);
+        let pa = n32(d.params.len());
+        for j in 0..np {
+            let pname = sym(in c, r.word(in b));
+            let pass = wrapping_u8(r.word(in b));
+            let pty = ty(in c, r.word(in b));
+            d
+                .params
+                .push(
+                ParamInfo {
+                    name: pname,
+                    pass: pass,
+                    ty: pty
+                }
+            );
+        }
+        let result = ty(in c, r.word(in b));
+        let row_ty = ty(in c, r.word(in b));
+        let row = c.types.node(row_ty).r2;
+        let body = r.word(in b);
+        let root = if body == 0 {
+            NONE32
+        } else {
+            n32(wrapping_sub(body, 1))
+        };
+        set_by_symbol(inout d.fn_by_name, name, inc32(n32(d.fns.len())));
+        d
+            .fns
+            .push(
+            FnInfo {
+                name: name,
+                fip: fip,
+                s0: s0,
+                s1: s1,
+                ga: ga,
+                gn: n32(ng),
+                pa: pa,
+                pn: n32(np),
+                result: result,
+                row: row,
+                body: root
+            }
+        );
+    }
+    let ne = r.word(in b);
+    for i in 0..ne {
+        let kind = wrapping_u8(r.word(in b));
+        let s0 = r.word(in b);
+        let s1 = r.word(in b);
+        let x = r.word(in b);
+        let s = if x == 0 {
+            0
+        } else {
+            sym(in c, wrapping_sub(x, 1))
+        };
+        let children = n32(r.word(in b));
+        let size = n32(r.word(in b));
+        d
+            .exprs
+            .push(
+            ExprNode {
+                kind: kind,
+                s0: s0,
+                s1: s1,
+                sym: s,
+                children: children,
+                size: size
+            }
+        );
+    }
+    let nc = r.word(in b);
+    for i in 0..nc {
+        let s0 = r.word(in b);
+        let s1 = r.word(in b);
+        let k = r.word(in b);
+        let a = read_pairs(inout r, in b, in c, inout d, k);
+        d
+            .calls
+            .push(
+            VarsRow {
+                s0: s0,
+                s1: s1,
+                name: 0,
+                a: a,
+                n: n32(k)
+            }
+        );
+    }
+    let nd = r.word(in b);
+    for i in 0..nd {
+        let f = sym(in c, r.word(in b));
+        let k = r.word(in b);
+        let a = read_pairs(inout r, in b, in c, inout d, k);
+        set_by_symbol(inout d.dyn_by_name, f, inc32(n32(d.dyn_params.len())));
+        d
+            .dyn_params
+            .push(
+            VarsRow {
+                s0: 0,
+                s1: 0,
+                name: f,
+                a: a,
+                n: n32(k)
+            }
+        );
+    }
+    read_names_into(inout r, in b, in c, inout d.stubs);
+    let nv = r.word(in b);
+    for i in 0..nv {
+        let object = ty(in c, r.word(in b));
+        let self_ty = ty(in c, r.word(in b));
+        let m = r.word(in b);
+        let ma = n32(d.methods.len());
+        for j in 0..m {
+            let method = sym(in c, r.word(in b));
+            let k = r.word(in b);
+            let a = read_pairs(inout r, in b, in c, inout d, k);
+            d
+                .methods
+                .push(
+                VarsRow {
+                    s0: 0,
+                    s1: 0,
+                    name: method,
+                    a: a,
+                    n: n32(k)
+                }
+            );
+        }
+        d
+            .vtables
+            .push(
+            VTableRow {
+                object: object,
+                self_ty: self_ty,
+                ma: ma,
+                mn: n32(m)
+            }
+        );
+    }
+    read_names_into(inout r, in b, in c, inout d.caller_slot);
+    let nt = r.word(in b);
+    for i in 0..nt {
+        let entry = sym(in c, r.word(in b));
+        let optimize = r.word(in b) != 0;
+        d
+            .tasks
+            .push(
+            Task {
+                entry: entry,
+                optimize: optimize
+            }
+        );
+    }
+    d
+}

@@ -1,0 +1,130 @@
+// @vesper/codegen-calls: native lowering's instances, signatures and
+// calling conventions (self-hosting wave SH4, lane 7, #1281), ported from
+// src/native.rs:
+//
+// - instances.ves: monomorphization (`instances_for_entry`,
+//   `instance_key`, `concrete`, `call_vars`, the function predicates and
+//   `drop_callees`).
+// - abi.ves: `scalar`, `signature_with_abi`, `FnAbi`/`NativeAbi`,
+//   `register_result_words`, the entry checks of `compile_entry` and the
+//   symbols and signatures `declare_instances_with_trace` declares.
+// - data.ves: the function table, body expressions, call instantiations
+//   and `dyn` tables these read (the calls section of the input).
+//
+// The input is @vesper/check-data's names, types and world, then
+// @vesper/place-ir's program section (the lowered program, whose reads and
+// handle drops discovery follows), then the calls section; the harness is
+// tests/self_host_codegen_calls.rs. Emission (call lowering, entries)
+// comes with the SH4 codegen swap point (lane 1, #1275).
+//
+// - `codegen_calls_text`: per task (entry, optimize) a block
+//   `E <entry> <0|1>`, the capability-ABI instance keys (`C <key>`, or
+//   `C! <error>`), then the declared instances (`I ...`) or the error that
+//   refused the entry (`X <message>`).
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/check-layout::{
+    layouts_new
+};
+use @vesper/place-ir::{
+    read_program
+};
+use self::data::{
+    read_calls
+};
+use self::instances::{
+    capability_abi,
+    concrete,
+    discover,
+    program_facts,
+    syms_new
+};
+use self::abi::{
+    Errs,
+    check_entry,
+    declare
+};
+
+pub fn codegen_calls_text(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c);
+    let d = read_calls(inout r, in b, in c);
+    let k = syms_new(inout c.names);
+    let facts = program_facts(in c.names, in d, in p);
+    let mut ls = layouts_new();
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for ti in 0..d.tasks.len() {
+        let task = d.task(ti);
+        o.extend(in "E ".as_bytes());
+        c.names.write(task.entry, inout o);
+        if task.optimize {
+            o.extend(in " 1\n".as_bytes());
+        } else {
+            o.extend(in " 0\n".as_bytes());
+        }
+        let found = discover(
+            inout c.types,
+            inout c.names,
+            in c.world,
+            in d,
+            in facts,
+            k,
+            task.entry
+        );
+        if found.err.len() > 0 {
+            o.extend(in "C! ".as_bytes());
+            o.extend(in found.err.as_slice());
+            o.push(10);
+        } else {
+            for i in 0..found.insts.len() {
+                let x = found.inst(i);
+                let vars = found.vars_of(x);
+                let f = concrete(inout c.types, inout c.names, in d, x.name, in vars);
+                if capability_abi(inout c.types, in c.names, in c.world, k, in f) {
+                    o.extend(in "C ".as_bytes());
+                    c.names.write(x.key, inout o);
+                    o.push(10);
+                }
+            }
+        }
+        let mut err = Errs {
+            text: ChunkSeq::new[u8]()
+        };
+        let ok = check_entry(inout c.types, in c.names, in c.world, in d, task.entry, inout err)
+            && found
+            .err
+            .len()
+            == 0
+            && declare(
+            inout ls,
+            inout c.types,
+            inout c.names,
+            in c.world,
+            in d,
+            k,
+            in found,
+            task.entry,
+            task.optimize,
+            inout o,
+            inout err
+        );
+        if !ok {
+            o.extend(in "X ".as_bytes());
+            if err.failed() {
+                o.extend(in err.text.as_slice());
+            } else {
+                o.extend(in found.err.as_slice());
+            }
+            o.push(10);
+        }
+    }
+    pack_text(in o)
+}

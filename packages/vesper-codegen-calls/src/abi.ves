@@ -1,0 +1,498 @@
+// The native ABI decisions of src/native.rs: `scalar`,
+// `signature_with_abi`, `FnAbi`, `NativeAbi::plan`/`internal`,
+// `register_result_words`, and the entry checks and declarations of
+// `compile_entry`/`declare_instances_with_trace` (an object or JIT entry
+// that handles its effects: `EntryEffects::Handled`).
+//
+// A signature is a list of value-type codes (`V_*`) for its parameters and
+// its returns; the pointer type is `I64` on every hosted target.
+
+use @vesper/check-data::util::{
+    add,
+    n32,
+    push_decimal,
+    u32_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    display
+};
+use @vesper/check-data::world::{
+    World
+};
+use @vesper/check-layout::{
+    Layouts,
+    layout_of
+};
+use self::data::{
+    Calls,
+    FnInfo,
+    ParamInfo
+};
+use self::instances::{
+    Conc,
+    Found,
+    Inst,
+    Syms,
+    capability_abi,
+    capability_only,
+    concrete,
+    contains_function,
+    fail_only,
+    is_foreign
+};
+
+const NONE32: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_INFER: u8 = 5;
+const P_INOUT: u8 = 1;
+
+pub const V_I64: u8 = 0;
+pub const V_I128: u8 = 1;
+pub const V_F64: u8 = 2;
+pub const V_F32: u8 = 3;
+// No type: `scalar` refused (the message is in the error buffer).
+const V_NONE: u8 = 255;
+
+// `FnAbi`.
+pub copy struct FnAbi {
+    status: bool,
+    // register-result words, or 0 for none
+    result_words: u32,
+}
+
+pub fn default_abi() -> FnAbi {
+    FnAbi {
+        status: false,
+        result_words: 0
+    }
+}
+
+pub struct Sig {
+    params: ChunkSeq[u8],
+    returns: ChunkSeq[u8],
+}
+
+// The error of a failed decision (Rust: `Err(String)`), shared by every
+// step of one task.
+pub struct Errs {
+    text: ChunkSeq[u8],
+}
+
+impl Errs {
+    pub fn failed(in self) -> bool {
+        self.text.len() > 0
+    }
+}
+
+// `Layout::of(world, ty)`: (aggregate, size), or the message in `err`.
+pub copy struct LayoutFacts {
+    ok: bool,
+    aggregate: bool,
+    size: u32,
+}
+
+pub fn layout_facts(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    ty: u32,
+    inout err: Errs
+) -> LayoutFacts {
+    let m = ls.mark();
+    let l = layout_of(inout ls, inout t, inout names, in wd, ty);
+    if l == NONE32 {
+        err.text.clear();
+        err.text.extend(in ls.err.as_slice());
+        ls.reset(m);
+        return LayoutFacts {
+            ok: false,
+            aggregate: false,
+            size: 0
+        };
+    }
+    let facts = LayoutFacts {
+        ok: true,
+        aggregate: ls.aggregate(l),
+        size: ls.node(l).size
+    };
+    ls.reset(m);
+    facts
+}
+
+// `scalar(t, generics)`.
+fn scalar(in t: Types, in names: Names, in d: Calls, k: Syms, f: FnInfo, ty: u32, inout err: Errs)
+    -> u8 {
+    let n = t.node(ty);
+    if n.kind == K_LIT {
+        return V_I64;
+    }
+    if n.kind == K_NAMED {
+        if k.is_wide(n.name) {
+            return V_I128;
+        }
+        if n.name == k.f64_ {
+            return V_F64;
+        }
+        if n.name == k.f32_ {
+            return V_F32;
+        }
+        if k.is_scalar(n.name) && !k.is_float(n.name) {
+            return V_I64;
+        }
+        for i in 0..w(f.gn) {
+            if d.generic(add(w(f.ga), i)) == n.name {
+                return V_I64;
+            }
+        }
+        // Region box, watermark, TiledSeq, Box[T] and sequence handles are
+        // one word.
+        if n.name == k.region_box || n.name == k.watermark {
+            return V_I64;
+        }
+        if n.name == k.box_ && n.n == 1 {
+            return V_I64;
+        }
+        if n.name == k.tiled_seq && (n.n == 1 || n.n == 2) {
+            return V_I64;
+        }
+        if n.name == k.chunk_seq && n.n == 1 {
+            return V_I64;
+        }
+    }
+    if n.kind == K_TUPLE && n.n == 0 {
+        return V_I64;
+    }
+    if n.kind == K_INFER || n.kind == K_FN {
+        return V_I64;
+    }
+    err.text.clear();
+    err.text.extend(in "native backend does not yet lower aggregate type ".as_bytes());
+    display(in t, in names, ty, inout err.text);
+    V_NONE
+}
+
+pub fn uses_caller_slot(in d: Calls, f: FnInfo) -> bool {
+    f.fip && d.uses_caller_slot_name(f.name)
+}
+
+// `signature_with_abi(m, world, f, false, abi)`; false with the message in
+// `err` when a layout or `scalar` refuses.
+pub fn signature(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    in f: Conc,
+    abi: FnAbi,
+    inout sig: Sig,
+    inout err: Errs
+) -> bool {
+    sig.params.clear();
+    sig.returns.clear();
+    let info = d.fn_info(f.f);
+    let result = layout_facts(inout ls, inout t, inout names, in wd, f.result, inout err);
+    if !result.ok {
+        return false;
+    }
+    if result.aggregate && abi.result_words == 0 {
+        sig.params.push(V_I64);
+    }
+    for i in 0..f.params.len() {
+        let p = f.param(i);
+        let l = layout_facts(inout ls, inout t, inout names, in wd, p.ty, inout err);
+        if !l.ok {
+            return false;
+        }
+        if l.aggregate || p.pass == P_INOUT {
+            sig.params.push(V_I64);
+        } else {
+            let v = scalar(in t, in names, in d, k, info, p.ty, inout err);
+            if v == V_NONE {
+                return false;
+            }
+            sig.params.push(v);
+        }
+    }
+    if uses_caller_slot(in d, info) {
+        sig.params.push(V_I64);
+    }
+    if fail_only(inout t, in names, in wd, k, in f) {
+        sig.params.push(V_I64);
+    }
+    if abi.result_words != 0 {
+        for i in 0..w(abi.result_words) {
+            sig.returns.push(V_I64);
+        }
+    } else if result.aggregate {
+        sig.returns.push(V_I64);
+    } else {
+        let v = scalar(in t, in names, in d, k, info, f.result, inout err);
+        if v == V_NONE {
+            return false;
+        }
+        sig.returns.push(v);
+    }
+    if abi.status {
+        sig.returns.push(V_I64);
+    }
+    true
+}
+
+// `register_result_words`: 0 for none.
+fn register_result_words(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    in f: Conc,
+    inout err: Errs
+) -> u32 {
+    let l = layout_facts(inout ls, inout t, inout names, in wd, f.result, inout err);
+    if !l.ok {
+        return NONE32;
+    }
+    let info = d.fn_info(f.f);
+    if !l
+        .aggregate
+        || l
+        .size
+        == 0
+        || l
+        .size
+        > 16
+        || contains_function(inout t, in wd, f.result)
+        || uses_caller_slot(in d, info)
+        || info
+        .fip {
+        return 0;
+    }
+    wrapping_add(l.size, 7) / 8
+}
+
+// `NativeAbi::internal`: the convention of a non-boundary function; false
+// with the message in `err` when its result layout refuses.
+fn internal(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    in f: Conc,
+    inout abi: FnAbi,
+    inout err: Errs
+) -> bool {
+    abi.status = false;
+    abi.result_words = 0;
+    let r = t.row(f.row);
+    if fail_only(inout t, in names, in wd, k, in f)
+        && !capability_abi(inout t, in names, in wd, k, in f) {
+        abi.status = true;
+    } else if r.n == 0 && r.tail == 0 {
+        let words = register_result_words(
+            inout ls,
+            inout t,
+            inout names,
+            in wd,
+            in d,
+            in f,
+            inout err
+        );
+        if words == NONE32 {
+            return false;
+        }
+        abi.result_words = words;
+    }
+    true
+}
+
+// The entry checks of `compile_entry` for `EntryEffects::Handled`; false
+// with the message in `err`.
+pub fn check_entry(
+    inout t: Types,
+    in names: Names,
+    in wd: World,
+    in d: Calls,
+    entry: u32,
+    inout err: Errs
+) -> bool {
+    let fi = d.function(entry);
+    if fi == NONE32 {
+        err.text.clear();
+        err.text.extend(in "unknown entry".as_bytes());
+        return false;
+    }
+    let f = d.fn_info(fi);
+    let r = t.row(f.row);
+    let mut handled = r.tail == 0;
+    for i in 0..w(r.n) {
+        if !is_foreign(in names, t.effect_at(add(w(r.a), i)).name) {
+            handled = false;
+        }
+    }
+    if !handled {
+        err.text.clear();
+        err.text.extend(in "native entry must handle all effects".as_bytes());
+        return false;
+    }
+    let mut exposes = contains_function(inout t, in wd, f.result);
+    for i in 0..w(f.pn) {
+        if contains_function(inout t, in wd, d.param(add(w(f.pa), i)).ty) {
+            exposes = true;
+        }
+    }
+    if exposes {
+        err.text.clear();
+        err
+            .text
+            .extend(
+            in "native entry cannot expose specialized closure values; invoke them within the entry function"
+                .as_bytes()
+        );
+        return false;
+    }
+    true
+}
+
+fn put_code(v: u8, inout o: ChunkSeq[u8]) {
+    if v == V_I128 {
+        o.extend(in "i128".as_bytes());
+    } else if v == V_F64 {
+        o.extend(in "f64".as_bytes());
+    } else if v == V_F32 {
+        o.extend(in "f32".as_bytes());
+    } else {
+        o.extend(in "i64".as_bytes());
+    }
+}
+
+// `(p, ...) -> r, ...`
+pub fn put_sig(in sig: Sig, inout o: ChunkSeq[u8]) {
+    o.push(40);
+    for i in 0..sig.params.len() {
+        if i > 0 {
+            o.extend(in ", ".as_bytes());
+        }
+        put_code(
+            match sig.params.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => V_I64,
+            },
+            inout o
+        );
+    }
+    o.extend(in ") -> ".as_bytes());
+    for i in 0..sig.returns.len() {
+        if i > 0 {
+            o.extend(in ", ".as_bytes());
+        }
+        put_code(
+            match sig.returns.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => V_I64,
+            },
+            inout o
+        );
+    }
+}
+
+// The declarations of an entry's instances: `NativeAbi::plan` (optimized
+// builds; the entry is the only boundary) then each instance's symbol and
+// signature, one line each: `I <index> <key> = <source> @ <symbol> : <sig>`.
+// False with the message in `err` when a decision refuses.
+pub fn declare(
+    inout ls: Layouts,
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in d: Calls,
+    k: Syms,
+    in found: Found,
+    entry: u32,
+    optimize: bool,
+    inout o: ChunkSeq[u8],
+    inout err: Errs
+) -> bool {
+    let n = found.insts.len();
+    let mut abis: ChunkSeq[FnAbi] = ChunkSeq::with_capacity[FnAbi](n);
+    for i in 0..n {
+        let x = found.inst(i);
+        let mut abi = default_abi();
+        if optimize && x.key != entry {
+            let vars = found.vars_of(x);
+            let f = concrete(inout t, inout names, in d, x.name, in vars);
+            if !internal(
+                inout ls,
+                inout t,
+                inout names,
+                in wd,
+                in d,
+                k,
+                in f,
+                inout abi,
+                inout err
+            ) {
+                return false;
+            }
+        }
+        abis.push(abi);
+    }
+    let mut sig = Sig {
+        params: ChunkSeq::new[u8](),
+        returns: ChunkSeq::new[u8](),
+    };
+    let mut lines: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..n {
+        let x = found.inst(i);
+        let vars = found.vars_of(x);
+        let f = concrete(inout t, inout names, in d, x.name, in vars);
+        let abi = match abis.try_get(i) {
+            Option::Some(a) => a,
+            Option::None => default_abi(),
+        };
+        if !signature(
+            inout ls,
+            inout t,
+            inout names,
+            in wd,
+            in d,
+            k,
+            in f,
+            abi,
+            inout sig,
+            inout err
+        ) {
+            return false;
+        }
+        lines.extend(in "I ".as_bytes());
+        push_decimal(inout lines, i);
+        lines.push(32);
+        names.write(x.key, inout lines);
+        lines.extend(in " = ".as_bytes());
+        names.write(x.name, inout lines);
+        lines.extend(in " @ ".as_bytes());
+        if x.key == entry {
+            names.write(entry, inout lines);
+        } else {
+            lines.extend(in "vesper_function_".as_bytes());
+            push_decimal(inout lines, i);
+        }
+        lines.extend(in " : ".as_bytes());
+        put_sig(in sig, inout lines);
+        lines.push(10);
+    }
+    o.extend(in lines.as_slice());
+    true
+}
