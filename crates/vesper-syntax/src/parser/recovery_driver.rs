@@ -65,6 +65,7 @@ fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a>
         trait_bounds: vec![],
         uses: vec![],
         public_items: vec![],
+        extra_items: vec![],
         pending_bounds: vec![],
         limits: limits.parse,
         depth: 0,
@@ -390,6 +391,8 @@ fn ranged_tokens(tokens: &[Token], start: usize, end: usize, eof: usize) -> Vec<
 struct ParsedItem {
     green: GreenNode,
     item: Option<Item>,
+    /// The further members of a value enum (`item` is the first).
+    extra: Vec<Item>,
     diagnostics: Vec<Diagnostic>,
     sites: Vec<TraceSite>,
     header: Option<HeaderNote>,
@@ -426,6 +429,7 @@ fn parse_item(source: &str, tokens: Vec<Token>, limits: Limits) -> Result<Parsed
     Ok(ParsedItem {
         green: p.builder.finish(),
         item,
+        extra: std::mem::take(&mut p.extra_items),
         diagnostics: p.diagnostics,
         sites: p.sites,
         header: p.headers.into_iter().next(),
@@ -435,8 +439,12 @@ fn parse_item(source: &str, tokens: Vec<Token>, limits: Limits) -> Result<Parsed
         exact,
     })
 }
+/// The source span of a declaration's item. A value enum member
+/// (`const$E::M`) spans only its member, not the whole declaration, so it
+/// has none here.
 fn item_span(item: &Item) -> Option<Span> {
     match item {
+        Item::Function(f) if is_value_enum_member(f) => None,
         Item::Function(f) => Some(f.span.clone()),
         Item::Adt(a) => Some(a.span.clone()),
         Item::Effect(e) => Some(e.span.clone()),
@@ -444,6 +452,11 @@ fn item_span(item: &Item) -> Option<Span> {
         Item::Conformance(c) => Some(c.span.clone()),
         Item::Impl { .. } => None,
     }
+}
+fn is_value_enum_member(f: &crate::ast::Function) -> bool {
+    f.name
+        .strip_prefix(super::CONST_PREFIX)
+        .is_some_and(|n| n.contains("::"))
 }
 fn push_site(
     sites: &mut Vec<RecoverySite>,
@@ -755,10 +768,12 @@ pub fn parse_complete_items(
             return Err(Error::Unsupported);
         }
         if let Some(item) = parsed.item {
-            if item_span(&item).ok_or(Error::Unsupported)? != declaration.span {
+            let member = matches!(&item, Item::Function(f) if is_value_enum_member(f));
+            if !member && item_span(&item).ok_or(Error::Unsupported)? != declaration.span {
                 return Err(Error::InvalidInventory);
             }
             out.items.push(item);
+            out.items.extend(parsed.extra);
         } else if parsed.model_uses.is_empty()
             && !at_test_block(snapshot.source(), &lexed.tokens, start)
         {

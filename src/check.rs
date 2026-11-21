@@ -19,6 +19,8 @@ mod tiled_rules;
 mod array_rules;
 #[path = "loops/for_sequences.rs"]
 mod for_sequences;
+#[path = "check/call_facts.rs"]
+mod call_facts;
 #[path = "integer_widths/literal_typing.rs"]
 mod literal_typing;
 #[path = "loops/check.rs"]
@@ -484,6 +486,7 @@ impl World {
                 for_sequences: BTreeMap::new(),
                 loop_borrows: vec![],
                 view_sources: vec![],
+                result_ranges: Default::default(),
             };
             c.function_with_literal_typing(&func_norm);
             let Checker {
@@ -693,6 +696,12 @@ pub struct Checked {
 /// [`crate::pact_frontend`] into ordinary core functions and calls first;
 /// the returned World then contains only the existing core schema.
 pub fn check(module: &Module) -> Checked {
+    // Untyped value enum members are literals at every use (§2.2).
+    if let Some((module, diagnostics)) = crate::arrays::untyped_members(module) {
+        let mut checked = check(&module);
+        checked.diagnostics.extend(diagnostics);
+        return checked;
+    }
     // Source tensor types (§28.2): a module that uses them is checked and
     // elaborated by `tensor_types`, which runs the core checker itself.
     if let Some(checked) = crate::tensor_types::check(module) {
@@ -799,6 +808,7 @@ pub(crate) fn check_core(
             for_sequences: BTreeMap::new(),
             loop_borrows: vec![],
             view_sources: vec![],
+            result_ranges: Default::default(),
         };
         c.declarations();
         for f in world.functions.values() {
@@ -970,6 +980,8 @@ struct Checker<'a> {
     /// binding's name and declaration span. While the view is in scope the
     /// place cannot be moved (`E1531`).
     view_sources: Vec<(Place, String, Span)>,
+    /// Result-range summaries of called functions ([`call_facts`]).
+    result_ranges: std::cell::RefCell<call_facts::ResultRanges>,
 }
 impl Checker<'_> {
     fn error(&mut self, code: &str, msg: impl Into<String>, span: Span) {
@@ -1988,7 +2000,7 @@ impl Checker<'_> {
                     if let Some(kind) = crate::numeric::IntegerKind::from_type(&t)
                         && self
                             .integer_fact(v, env)
-                            .and_then(|n| kind.checked_neg(n))
+                            .and_then(|n| integer_widths_rules::fact_neg(kind, n))
                             .is_none()
                     {
                         self.overflow_failure(env, e.span.clone());
@@ -2204,9 +2216,9 @@ impl Checker<'_> {
                 let fact = if op == "=" {
                     value
                 } else {
-                    kind.zip(old)
-                        .zip(value)
-                        .and_then(|((k, a), b)| k.checked(&op[..1], a, b).ok())
+                    kind.zip(old).zip(value).and_then(|((k, a), b)| {
+                        integer_widths_rules::fact_checked(k, &op[..1], a, b).ok()
+                    })
                 };
                 let nonzero = fact.is_some_and(|n| n != 0) || (op == "=" && self.nonzero(r, env));
                 // A write to a field never establishes a fact about its root.
@@ -4023,7 +4035,8 @@ impl Checker<'_> {
     ) -> bool {
         match (a, b) {
             (Some(a), Some(b)) => {
-                kind.checked(op, a, b) != Err(crate::numeric::ArithFailure::Overflow)
+                integer_widths_rules::fact_checked(kind, op, a, b)
+                    != Err(crate::numeric::ArithFailure::Overflow)
             }
             _ if op == "/" => b.is_some_and(|b| b != -1) || a.is_some_and(|a| a != kind.min()),
             _ => false,
@@ -4150,12 +4163,12 @@ impl Checker<'_> {
             ExprKind::Name(n) => env.bindings.get(n)?.integer?,
             ExprKind::Unary(op, v) if op == "-" => {
                 let k = kind(v).or_else(|| kind(e))?;
-                k.checked_neg(self.integer_fact(v, env)?)?
+                integer_widths_rules::fact_neg(k, self.integer_fact(v, env)?)?
             }
             ExprKind::Binary(op, a, b) => {
                 let k = kind(a).or_else(|| kind(e))?;
                 let (a, b) = (self.integer_fact(a, env)?, self.integer_fact(b, env)?);
-                k.checked(op, a, b).ok()?
+                integer_widths_rules::fact_checked(k, op, a, b).ok()?
             }
             ExprKind::Call { callee, args, .. } => {
                 let ExprKind::Name(name) = &callee.kind else {
@@ -4194,7 +4207,7 @@ impl Checker<'_> {
             _ => return None,
         };
         match kind(e) {
-            Some(k) if !k.fits(n) => None,
+            Some(k) if !integer_widths_rules::fact_fits(k, n) => None,
             _ => Some(n),
         }
     }
@@ -4355,11 +4368,12 @@ impl Checker<'_> {
         Some((lo, hi))
     }
     /// Inclusive bounds of an integer expression: its exact fact, a name's
-    /// kind and current range, `x & m` with `m >= 0` in `0..=m`, and a
-    /// nonnegative `x % m` with `m > 0` in `0..m`.
+    /// kind and current range, `x & m` with `m >= 0` in `0..=m`, a
+    /// nonnegative `x % m` with `m > 0` in `0..m`, and a call's result range.
     fn integer_bounds(&self, e: &Expr, env: &Env) -> Option<(i128, i128)> {
         if let Some(n) = self.integer_fact(e, env) {
-            return Some((n, n));
+            // A `u128` fact above `i128::MAX` is a bit pattern, not a bound.
+            return (n >= 0 || !self.u128_expr(e, env)).then_some((n, n));
         }
         match &e.kind {
             ExprKind::Name(n) => Self::binding_bounds(env.bindings.get(n)?),
@@ -4380,6 +4394,11 @@ impl Checker<'_> {
                 let (blo, bhi) = self.integer_bounds(b, env)?;
                 (alo >= 0 && blo > 0).then(|| (0, ahi.min(bhi - 1)))
             }
+            // A call of a function whose returns are bounded ([`call_facts`]).
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Name(n) if !env.bindings.contains_key(n) => self.call_range(n)?,
+                _ => None,
+            },
             _ => None,
         }
     }
