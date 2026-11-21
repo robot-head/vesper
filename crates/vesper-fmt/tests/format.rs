@@ -31,6 +31,27 @@ fn canonical_simple_program_and_empty() {
     assert_eq!(verify(""), "\n");
 }
 #[test]
+fn parser_sugar_keeps_its_surface_syntax() {
+    assert_eq!(
+        verify(
+            "const LIMIT:u64=10;fn f(n:u64)->u64{for i in 0 .. LIMIT{if i==n{continue;}}match n{0|1=>LIMIT,_=>n,}}"
+        ),
+        "const LIMIT: u64 = 10;
+fn f(n: u64) -> u64 {
+    for i in 0..LIMIT {
+        if i == n {
+            continue;
+        }
+    }
+    match n {
+        0 | 1 => LIMIT,
+        _ => n,
+    }
+}
+"
+    );
+}
+#[test]
 fn comments_unicode_strings_projection_effects_and_generics() {
     for source in [
         "// Unicode 🦀 é\nfn main()->u64{/*outer/* nested */tail*/let x=1;// keep next token\n x}",
@@ -331,8 +352,11 @@ fn generics_and_effect_rows_break_inside_their_brackets() {
         "{output}"
     );
     assert!(output.starts_with("fn id[T: mod linear](x: T)"), "{output}");
-    assert!(output.contains("\n    Capability0,\n"), "{output}");
-    assert!(output.contains("\n] {\n    x\n}\n"), "{output}");
+    assert!(
+        output.contains("\n    -> T eff [\n        Capability0,\n"),
+        "{output}"
+    );
+    assert!(output.contains("\n    ] {\n    x\n}\n"), "{output}");
 }
 
 #[test]
@@ -591,4 +615,79 @@ fn lookahead_over_shared_empty_nodes_is_charged() {
     children.extend(std::iter::repeat_n(empty, 100_000));
     let root = doc.push(Doc::Concat(children)).unwrap();
     assert_eq!(doc.render(root).unwrap_err(), Error::WorkLimit);
+}
+
+#[test]
+fn wrapped_boolean_conditions_keep_short_comparisons_together() {
+    let output = verify(
+        "fn f() -> bool { rejected_before_next && best.len() == 1 \
+         && best.try_get(0) == Option::Some(3) && stats.accepted > 0 && stats.invalid > 0 \
+         && stats.not_reproducing > 0 && stats.runs < 80 && !stats.budget_exhausted }",
+    );
+    assert_eq!(
+        output,
+        "fn f() -> bool {
+    rejected_before_next
+        && best.len() == 1
+        && best.try_get(0) == Option::Some(3)
+        && stats.accepted > 0
+        && stats.invalid > 0
+        && stats.not_reproducing > 0
+        && stats.runs < 80
+        && !stats.budget_exhausted
+}
+"
+    );
+}
+
+#[test]
+fn wrapped_method_arguments_nest_under_the_method() {
+    let output = verify(
+        "fn f() { long_receiver_name.some_method_with_a_long_name(\
+         first_argument_with_a_long_name, second_argument_with_a_long_name) }",
+    );
+    assert_eq!(
+        output,
+        "fn f() {
+    long_receiver_name
+        .some_method_with_a_long_name(
+            first_argument_with_a_long_name,
+            second_argument_with_a_long_name
+        )
+}
+"
+    );
+}
+
+#[test]
+fn brace_patterns_keep_the_assignment_or_match_arrow() {
+    let output = verify("fn f() { let Ticket {} = ticket; match ticket { Ticket {} => 1, } }");
+    assert!(output.contains("let Ticket {} = ticket;"), "{output}");
+    assert!(output.contains("Ticket {} => 1,"), "{output}");
+}
+
+#[test]
+fn wrapped_tuple_return_type_nests_under_the_return_arrow() {
+    let output = verify("fn f() -> (u64,) { (1,) }");
+    assert!(
+        output.contains("    -> (\n        u64,\n    ) {"),
+        "{output}"
+    );
+}
+
+#[test]
+fn subtraction_after_try_and_comments_keeps_binary_spacing() {
+    let output = verify("fn f() { let a = call()? - 1; let b = x /* note */ - 1; -1 }");
+    assert!(output.contains("call()? - 1;"), "{output}");
+    assert!(output.contains("x /* note */ - 1;"), "{output}");
+    assert!(output.contains("\n    -1\n"), "{output}");
+}
+
+#[test]
+fn trailing_comma_before_block_comments_keeps_list_vertical() {
+    let output = verify("fn f() { call(alpha, beta, /* keep */) }");
+    assert_eq!(
+        output,
+        "fn f() {\n    call(\n        alpha,\n        beta,\n        /* keep */\n    )\n}\n"
+    );
 }

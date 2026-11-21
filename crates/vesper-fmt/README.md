@@ -15,17 +15,13 @@ No checker/native/compiler production code is changed.
    comment byte in its original order relative to both comments and code.
 5. Reparse and a second formatting pass giving byte-identical output.
 
-Layout follows Wadler-Lindig groups with Prettier-style lookahead. Spaces inside
-a line never break. An overlong line breaks, outermost first, at: delimited
-`(...)`, `[...]` and `.{...}` lists (one comma-separated item per line, each item
-its own group so `shard.{metrics}` projections and paths stay together), the
-`->` return type (its own group, so it only moves to an indented line when it
-cannot follow the parameter list), member-chain dots and infix operators (both
-indented one level). `::` paths never split. The formatter never adds or removes
-tokens, so a broken list keeps exactly the commas in the source; a source
-trailing comma selects the vertical layout even when the list would fit, which
-keeps both forms idempotent. A statement with no break point can still exceed
-the ribbon.
+The formatter uses a 100-column ribbon. When an expression wraps, it breaks
+at the weakest operator first. For example, each operand of a long `&&` chain
+can keep its member calls and comparisons on one line. Wrapped method calls
+and return types indent their contents relative to the continuation line.
+Delimited lists keep one item per line when they break. A trailing comma
+selects vertical layout even when comments follow it. Paths joined by `::`
+stay together, and an indivisible token can exceed the ribbon.
 
 Prefix `-`/`!` bind to their operand, calls/generic arguments attach to what they
 apply to, and a keyword such as `return` keeps a space before `(`. Where the source
@@ -48,6 +44,18 @@ macros. Unknown invocations, other categories, repetitions, derives and nested
 invocations remain errors. Bare `quote`/`quasiquote`/`syntax_quote` names retain
 their conservative opaque boundary unless a complete supported macro module is
 recognized. Comment and string spelling are conserved exactly.
+
+Built-in forms such as `for` and `continue` keep their source spelling through
+formatting. The parser's later lowering of these forms is independent of layout.
+
+For user-defined `sugar`, the next dependency is Stage 1 parser support for
+`PhraseSkeleton` nodes. Once available, Stylus can format declarations and
+uses directly from the lossless CST, before import resolution or expansion.
+Coverage should include clause, tail and item forms, pipeline and dotted
+operator precedence, and tagged literals. Tests should check tag adjacency,
+same-line continuation clauses, and balanced token groups alongside the usual
+token, comment and idempotence checks. See the
+[manuscript, sections 2.2, 7.5 and 19](../../docs/manuscript/content.typ).
 
 Default source formatting still rejects invalid or incomplete buffers. The
 separate `format_recovery_source(&str, Limits)` API offers syntax-only formatting
