@@ -261,7 +261,7 @@ time divided by Rust time, input decode subtracted).
 | Port | Lane | Ported so far | Differential | Rules alone | Hybrid swap | Report |
 |---|---|---|---|--:|---|---|
 | regions, sequences, strings, arrays, tiled, vectors | SH2-9 (#1181) | type and world rules (part 1) | 0 of 282 worlds; E0200, E0792, E0797, E1404, E1501-E1503, E1520 on mutants | 1.12x types, 1.17x world | with the expression rules | [self-host-check-regions-seqs.md](../parallel-results/self-host-check-regions-seqs.md) |
-| loops (control rules, `?` on `Option`), atomics, stack bound | SH2-10 (#1182) | control frames (E0213, E0200), atomics (E0820-E0824, preludes), stack bound | 0 of 903 control worlds, 535 atomics worlds, 4,000 call graphs | atomics 2.31x, stack bound 2.54x (decode included); control pass 80 ms over the corpus | not yet (follow-up) | [self-host-check-loops-atomics.md](../parallel-results/self-host-check-loops-atomics.md) |
+| loops (control rules, `?` on `Option`), atomics, stack bound | SH2-10 (#1182) | control frames (E0213, E0200), atomics (E0820-E0824, preludes), stack bound | 0 of 903 control worlds, 535 atomics worlds, 4,000 call graphs | atomics 2.31x, stack bound 2.54x (decode included); control pass 80 ms over the corpus | stack bound swapped (`stack_bound_report`): 0 of 26 `--verify-stack` and `ebpf check` commands differ; control and atomics not yet | [self-host-check-loops-atomics.md](../parallel-results/self-host-check-loops-atomics.md) |
 
 **SH4 backend ports.** Each row is one backend port. Until its swap into the
 hybrid build lands, the numbers are the port alone against the Rust code it

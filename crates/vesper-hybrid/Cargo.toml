@@ -32,6 +32,9 @@ divergent-parse = []
 # The same check for the IR check module (#1177): every program gets one
 # made-up IR-check diagnostic.
 divergent-ir-check = []
+# The same check for the stack-bound module (#1182): every graph is
+# rejected as malformed.
+divergent-stack-bound = []
 
 [dependencies]
 vesper = { path = "../.." }

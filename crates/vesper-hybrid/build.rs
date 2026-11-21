@@ -21,6 +21,12 @@ const MODULES: &[(&str, &str, &str)] = &[
         "port/check_layout.rs",
     ),
     ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
+    // SH2 lane 10 (#1182): the stack-bound report.
+    (
+        "hybrid_stack_bound",
+        "modules/stack_bound",
+        "port/stack_bound.rs",
+    ),
     // SH3 lane 1 (#1240): the IR swap point's identity round trip.
     ("hybrid_place_ir", "modules/place_ir", "port/place_ir.rs"),
 ];
@@ -47,6 +53,14 @@ const DIVERGENT_CHECK_LAYOUT_EDIT: (&str, &str) = (
 #[cfg(feature = "divergent-ir-check")]
 const DIVERGENT_IR_CHECK_EDIT: (&str, &str) = (
     "    ir_check_words(in input)\n",
+    "    divergent_words(in input)\n",
+);
+
+/// The stack-bound divergence check: every graph is rejected as malformed
+/// (`divergent_words` in modules/stack_bound), so every report differs.
+#[cfg(feature = "divergent-stack-bound")]
+const DIVERGENT_STACK_BOUND_EDIT: (&str, &str) = (
+    "    stack_bound_words(in input)\n",
     "    divergent_words(in input)\n",
 );
 
@@ -94,6 +108,12 @@ fn main() {
         #[cfg(feature = "divergent-ir-check")]
         let port = if *library == "hybrid_ir_check" {
             port.edit(DIVERGENT_IR_CHECK_EDIT.0, DIVERGENT_IR_CHECK_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-stack-bound")]
+        let port = if *library == "hybrid_stack_bound" {
+            port.edit(DIVERGENT_STACK_BOUND_EDIT.0, DIVERGENT_STACK_BOUND_EDIT.1)
         } else {
             port
         };

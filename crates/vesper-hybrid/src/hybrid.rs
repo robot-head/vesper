@@ -32,6 +32,11 @@ mod ir_check_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/stack_bound.rs"]
+mod stack_bound_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
 
@@ -43,6 +48,10 @@ mod parse_words;
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
 
+// The stack-bound swap's encoder and decoder (#1182), shared with the root
+// package's tests/self_host_check_loops_atomics.rs.
+#[path = "../../../tests/common/stack_words.rs"]
+mod stack_words;
 // Place IR words both ways (#1240), shared with tests/self_host_place_ir*.rs.
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
@@ -55,6 +64,8 @@ static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs checked by the Vesper IR-check module.
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Reports made by the Vesper stack-bound module.
+static STACK_BOUND_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 
@@ -126,6 +137,20 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
     },
 };
 
+/// `vesper::stack_bound::StackBoundTable` from `modules/stack_bound`: the
+/// stack-bound report of `@vesper/check-loops-atomics` (`vesper ebpf check`
+/// and `--verify-stack`).
+const VESPER_STACK_BOUND: vesper::stack_bound::StackBoundTable =
+    vesper::stack_bound::StackBoundTable {
+        report: |graph, policy| {
+            STACK_BOUND_CALLS.fetch_add(1, Relaxed);
+            let input = stack_words::stack_input(graph, policy);
+            stack_words::decode_stack_report(
+                graph.origin,
+                &stack_bound_binding::report_words(&input),
+            )
+        },
+    };
 /// `program` read into `@vesper/place-ir` tables and written back, in
 /// place: the identity Vesper pass. A program the format cannot encode
 /// stays as Rust made it.
@@ -177,6 +202,9 @@ extern "C" fn install() {
     if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
         std::process::abort();
     }
+    if vesper::stack_bound::install_stack_bound(VESPER_STACK_BOUND).is_err() {
+        std::process::abort();
+    }
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
         std::process::abort();
     }
@@ -206,6 +234,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-check answered {} calls from Vesper",
         IR_CHECK_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: stack-bound answered {} calls from Vesper",
+        STACK_BOUND_CALLS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: place-ir round-tripped {} programs through Vesper",
