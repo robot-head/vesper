@@ -39,9 +39,16 @@ pub fn parse(value: &str) -> Result<bool, String> {
 }
 
 /// Runs `entry` (a test function returning `bool`) on every engine; `Err`
-/// names the first engine that disagrees. `source` is the file's source,
-/// used to build the executable when it has a `main()`.
-pub fn agree(world: &World, entry: &str, source: &str, fuel: u64) -> Result<(), String> {
+/// names the first engine that disagrees. `standalone` is the source of a
+/// standalone file, used to build the executable when it has a `main()`; a
+/// package member is `None` (its file alone is not the program), and the
+/// executable check is left to the package's own build.
+pub fn agree(
+    world: &World,
+    entry: &str,
+    standalone: Option<&str>,
+    fuel: u64,
+) -> Result<(), String> {
     for optimize in [true, false] {
         let mut runtime = Runtime::new(world);
         runtime.optimize = optimize;
@@ -89,6 +96,7 @@ pub fn agree(world: &World, entry: &str, source: &str, fuel: u64) -> Result<(), 
         }
     }
     if let Some(main) = main
+        && let Some(source) = standalone
         && is_integer(&main.result)
         && links_executables()
     {

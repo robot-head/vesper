@@ -677,7 +677,7 @@ fn engines_agree(
     selected: &[UnitEntry],
     world: &World,
     foreign: Option<(&ForeignChecked, &EvalHost)>,
-    source: &str,
+    standalone: Option<&str>,
     fuel: u64,
 ) {
     if foreign.is_some() {
@@ -686,7 +686,7 @@ fn engines_agree(
     let Some(entry) = selected.iter().find(|test| test.name == rep.name) else {
         return;
     };
-    match test_engines::agree(world, &entry.entry, source, fuel) {
+    match test_engines::agree(world, &entry.entry, standalone, fuel) {
         Ok(()) => rep.message = format!("{} on every engine", rep.message),
         Err(message) => {
             rep.passed = false;
@@ -1633,7 +1633,7 @@ impl TestExecution<'_> {
                             &unit_batch_selected,
                             world,
                             foreign,
-                            &source,
+                            combined.is_none().then_some(source.as_str()),
                             opts.fuel,
                         );
                     }
