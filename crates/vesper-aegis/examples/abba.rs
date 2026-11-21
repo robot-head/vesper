@@ -17,7 +17,9 @@
 //! ```
 //!
 //! `window <port|rust> <workload> N` runs N passes once (for callgrind
-//! instruction counts of one arm). The driver runs epochs of windows in
+//! instruction counts of one arm). `flip-gate <workload>` runs 30 ABBA
+//! epochs and prints them in the flip gate's pairs protocol
+//! (scripts/ci/flip_gate.py, crates/vesper-aegis/flip-gate.toml). The driver runs epochs of windows in
 //! the order A B B A (A = Rust, B = port), pairs each epoch's totals and
 //! reports the median regression of B over A with
 //! `vesper_bench::analyze_pairs`.
@@ -28,6 +30,15 @@ use vesper_aegis as port;
 use vesper_aegis_rust as rust;
 
 const EPOCHS: usize = 9;
+/// Epochs of one `flip-gate` run (the gate's default).
+const FLIP_GATE_EPOCHS: usize = 30;
+/// Each workload and the passes in one window.
+const WORKLOADS: [(&str, usize); 4] = [
+    ("snp", 20_000),
+    ("tdx", 10_000),
+    ("sgx", 10_000),
+    ("policy", 50_000),
+];
 
 fn data(path: &str) -> Vec<u8> {
     std::fs::read(
@@ -185,12 +196,26 @@ fn main() {
         );
         return;
     }
-    for (workload, passes) in [
-        ("snp", 20_000),
-        ("tdx", 10_000),
-        ("sgx", 10_000),
-        ("policy", 50_000),
-    ] {
+    if args.get(1).map(String::as_str) == Some("flip-gate") {
+        let workload = args[2].as_str();
+        let passes = WORKLOADS
+            .iter()
+            .find(|(w, _)| *w == workload)
+            .unwrap_or_else(|| panic!("unknown workload {workload}"))
+            .1;
+        let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+            .map(|_| {
+                let a1 = window("rust", workload, passes, &s);
+                let b1 = window("port", workload, passes, &s);
+                let b2 = window("port", workload, passes, &s);
+                let a2 = window("rust", workload, passes, &s);
+                format!("{}:{}", a1 + a2, b1 + b2)
+            })
+            .collect();
+        println!("flip-gate pairs {workload} {}", pairs.join(" "));
+        return;
+    }
+    for (workload, passes) in WORKLOADS {
         let mut pairs = Vec::new();
         let mut ratios = Vec::new();
         for _ in 0..EPOCHS {
