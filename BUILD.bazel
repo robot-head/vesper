@@ -420,6 +420,9 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Rust-exit SH6 lane 19 (#1414): the Vesper suite, run with
+        # `vesper test --engines all`. Anchored glob.
+        "test/vesper_suite": glob(["tests/vesper/**"]),
         # Self-hosting SH5 lane 14 (#1337): @vesper/test-runner against
         # test_discovery on the repository's .ves files, the runner's test
         # suites and mutants. Anchored globs.
