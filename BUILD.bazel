@@ -352,6 +352,14 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 17 (#1291): @vesper/backend-checks against
+        # native_verifiers on the verifier fixtures and the corpus. Anchored
+        # globs; @vesper/resonance comes from its crate's package.
+        "test/self_host_backend_checks": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["//crates/vesper-resonance:files"],
         # SH4 lane 5 (#1279): the native optimizer policy against
         # ir_opt::optimize on the same corpus. Anchored globs.
         "test/optimizer_budget": glob([
@@ -723,6 +731,8 @@ vesper_crate(
         "test/self_host_lean_extract": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "eternal",
+        # The backend-checks differential emits every corpus program 4 times.
+        "test/self_host_backend_checks": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
         "test/optimizer_budget": "long",
         # World::mode (#1331) answers every corpus query three times.

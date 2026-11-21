@@ -1,0 +1,449 @@
+// Module stack of @vesper/backend-checks (see lib.ves): the stack verifier's
+// measurement of the emitted code (`measure_emitted` in
+// src/native_verifiers.rs) on Silicon's prologue decoders
+// (crates/vesper-silicon/src/prologue.rs: `measure_x86_64`,
+// `measure_aarch64`) and call sites (stack.rs `call_sites`).
+//
+// The machine code is input: Cranelift compiles each function with the
+// object ISA (the shim's job once SH4 lane 1 lends a module), and this
+// module decodes its prologue.
+
+use self::input::{
+    Cx,
+    fw,
+    iw,
+    pw
+};
+use self::stack_bound::{
+    StackGraph,
+    graph_new
+};
+use self::util::{
+    filled,
+    g,
+    put,
+    putn,
+    puts,
+    st
+};
+
+const EXT_KNOWN: u64 = 3;
+const EXT_LIBCALL: u64 = 2;
+const EXT_TESTCASE: u64 = 1;
+const EXT_USER: u64 = 0;
+const F_CODE_AT: u64 = 22;
+const F_CODE_LEN: u64 = 21;
+const F_COMPILE: u64 = 19;
+const F_COMPILE_MSG: u64 = 20;
+const F_FRAME_SIZE: u64 = 23;
+const F_ID: u64 = 3;
+const F_INSTS: u64 = 33;
+const F_KEY: u64 = 0;
+const F_LIBCALLS: u64 = 24;
+const F_NINSTS: u64 = 34;
+const I_DATA_EXT: u64 = 20;
+const I_ENT: u64 = 0;
+const I_FMT: u64 = 3;
+const X_INDEX: u64 = 2;
+const X_KIND: u64 = 0;
+const X_NS: u64 = 1;
+const X_S1: u64 = 4;
+const X_S2: u64 = 5;
+const FMT_CALL: u64 = 9;
+const FMT_CALL_INDIRECT: u64 = 10;
+const FMT_TRY_CALL: u64 = 11;
+const FMT_TRY_CALL_INDIRECT: u64 = 12;
+const NONE: u64 = 18446744073709551615;
+
+const U32_MAX: u64 = 4294967295;
+
+fn sat32(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s > U32_MAX {
+        U32_MAX
+    } else {
+        s
+    }
+}
+
+// Byte `i` of function `f`'s code (0 past the end).
+fn byte(in c: Cx, at: u64, len: u64, i: u64) -> u64 {
+    if i >= len {
+        return 256;
+    }
+    wrapping_shr_u64(g(in c.code, wrapping_add(at, i / 8)), wrapping_u32(wrapping_mul(i % 8, 8)))
+        & 255
+}
+
+// `MeasuredPrologue` as (call push, frame record, clobber push, sp sub).
+pub struct Measured {
+    call_push: u64,
+    frame_record: u64,
+    clobber: u64,
+    sp_sub: u64,
+}
+
+// `modrm_rsp_disp(code[i..])`: the length of a ModRM + SIB addressing
+// `[rsp + disp]`, or 0.
+fn modrm_rsp_disp(in c: Cx, at: u64, len: u64, i: u64) -> u64 {
+    let modrm = byte(in c, at, len, i);
+    if modrm == 256 {
+        return 0;
+    }
+    let sib = byte(in c, at, len, wrapping_add(i, 1));
+    if modrm & 7 != 4 || sib != 36 {
+        return 0;
+    }
+    let rest = wrapping_sub(len, i);
+    let m = modrm >> 6;
+    if m == 0 {
+        return 2;
+    }
+    if m == 1 {
+        if rest >= 3 {
+            return 3;
+        }
+        return 0;
+    }
+    if m == 2 {
+        if rest >= 6 {
+            return 6;
+        }
+        return 0;
+    }
+    0
+}
+
+// `x64_clobber_store_len(code[i..])`, or 0.
+fn clobber_store_len(in c: Cx, at: u64, len: u64, i: u64) -> u64 {
+    let b0 = byte(in c, at, len, i);
+    if b0 == 72 || b0 == 76 {
+        if byte(in c, at, len, wrapping_add(i, 1)) != 137 {
+            return 0;
+        }
+        let l = modrm_rsp_disp(in c, at, len, wrapping_add(i, 2));
+        if l == 0 {
+            return 0;
+        }
+        return wrapping_add(2, l);
+    }
+    if b0 == 243 {
+        let mut k: u64 = 1;
+        if byte(in c, at, len, wrapping_add(i, 1)) == 68 {
+            k = 2;
+        }
+        if byte(in c, at, len, wrapping_add(i, k))
+            != 15
+            || byte(in c, at, len, wrapping_add(i, wrapping_add(k, 1)))
+            != 127 {
+            return 0;
+        }
+        let l = modrm_rsp_disp(in c, at, len, wrapping_add(i, wrapping_add(k, 2)));
+        if l == 0 {
+            return 0;
+        }
+        return wrapping_add(wrapping_add(k, 2), l);
+    }
+    0
+}
+
+pub fn measure_x86_64(in c: Cx, at: u64, len: u64) -> Measured {
+    let mut m = Measured {
+        call_push: 8,
+        frame_record: 0,
+        clobber: 0,
+        sp_sub: 0,
+    };
+    let mut i: u64 = 0;
+    loop {
+        let b0 = byte(in c, at, len, i);
+        let b1 = byte(in c, at, len, wrapping_add(i, 1));
+        let b2 = byte(in c, at, len, wrapping_add(i, 2));
+        let b3 = byte(in c, at, len, wrapping_add(i, 3));
+        let rest = if i < len {
+            wrapping_sub(len, i)
+        } else {
+            0
+        };
+        if b0 == 243 && b1 == 15 && b2 == 30 && b3 == 250 {
+            i = wrapping_add(i, 4);
+        } else if b0 == 85 {
+            m.frame_record = sat32(m.frame_record, 8);
+            i = wrapping_add(i, 1);
+        } else if b0 == 72 && b1 == 137 && b2 == 229 {
+            i = wrapping_add(i, 3);
+        } else if rest >= 4 && b0 == 72 && b1 == 131 && b2 == 236 {
+            if b3 >= 128 {
+                break;
+            }
+            m.sp_sub = sat32(m.sp_sub, b3);
+            i = wrapping_add(i, 4);
+        } else if rest >= 7 && b0 == 72 && b1 == 129 && b2 == 236 {
+            let imm = b3 | (byte(in c, at, len, wrapping_add(i, 4)) << 8) | (
+                byte(in c, at, len, wrapping_add(i, 5)) << 16
+            ) | (byte(in c, at, len, wrapping_add(i, 6)) << 24);
+            if imm >= 2147483648 {
+                break;
+            }
+            m.sp_sub = sat32(m.sp_sub, imm);
+            i = wrapping_add(i, 7);
+        } else {
+            let l = clobber_store_len(in c, at, len, i);
+            if l == 0 {
+                break;
+            }
+            i = wrapping_add(i, l);
+        }
+    }
+    m
+}
+
+// The word at byte `i` (little endian).
+fn word32(in c: Cx, at: u64, len: u64, i: u64) -> u64 {
+    byte(in c, at, len, i) | (byte(in c, at, len, wrapping_add(i, 1)) << 8) | (
+        byte(in c, at, len, wrapping_add(i, 2)) << 16
+    ) | (byte(in c, at, len, wrapping_add(i, 3)) << 24)
+}
+
+pub fn measure_aarch64(in c: Cx, at: u64, len: u64) -> Measured {
+    let mut m = Measured {
+        call_push: 0,
+        frame_record: 0,
+        clobber: 0,
+        sp_sub: 0,
+    };
+    let mut has_x16 = false;
+    let mut x16: u64 = 0;
+    let words = len / 4;
+    for k in 0..words {
+        let w = word32(in c, at, len, wrapping_mul(k, 4));
+        let rn = (w >> 5) & 31;
+        if w == 3573752639 || w == 3573752703 || w & 4294967103 == 3573752863 {
+            // bti / paciasp / autiasp: no stack
+        } else if w == 2847898621 {
+            m.frame_record = sat32(m.frame_record, 16);
+        } else if w == 2432697341 {
+            // mov fp, sp
+        } else if w & 4290772992 == 2843738112 || w & 4290772992 == 1837105152 {
+            if rn != 31 {
+                break;
+            }
+            let imm7 = (w >> 15) & 127;
+            if imm7 & 64 == 0 {
+                break;
+            }
+            m.clobber = sat32(m.clobber, wrapping_mul(wrapping_sub(128, imm7), 8));
+        } else if w & 4292873216 == 4160752640 || w & 4292873216 == 4227861504 {
+            if rn != 31 {
+                break;
+            }
+            let imm9 = (w >> 12) & 511;
+            if imm9 & 256 == 0 {
+                break;
+            }
+            m.clobber = sat32(m.clobber, wrapping_sub(512, imm9));
+        } else if w & 4286578688 == 3506438144 && rn == 31 && w & 31 == 31 {
+            let imm12 = (w >> 10) & 4095;
+            let mut shift: u64 = 0;
+            if (w >> 22) & 1 == 1 {
+                shift = 12;
+            }
+            m.sp_sub = sat32(m.sp_sub, imm12 << shift);
+        } else if w & 2139095071 == 1384120336 {
+            let hw = (w >> 21) & 3;
+            has_x16 = true;
+            x16 = wrapping_shl_u64((w >> 5) & 65535, wrapping_u32(wrapping_mul(hw, 16)));
+        } else if w & 2139095071 == 1920991248 {
+            let hw = (w >> 21) & 3;
+            if !has_x16 {
+                break;
+            }
+            let mask = wrapping_shl_u64(65535, wrapping_u32(wrapping_mul(hw, 16)))
+                ^ 18446744073709551615;
+            x16 = (x16 & mask) | wrapping_shl_u64(
+                (w >> 5) & 65535,
+                wrapping_u32(wrapping_mul(hw, 16))
+            );
+        } else if w == 3408946175 {
+            if !has_x16 {
+                break;
+            }
+            has_x16 = false;
+            if x16 > U32_MAX {
+                break;
+            }
+            m.sp_sub = sat32(m.sp_sub, x16);
+        } else {
+            break;
+        }
+    }
+    m
+}
+
+// The silicon symbol of an external name record (`symbol_of_external`),
+// interned.
+fn symbol(inout c: Cx, x: u64) -> u64 {
+    let kind = pw(in c, wrapping_add(x, X_KIND));
+    let at = c.r.tx.len();
+    if kind == EXT_USER {
+        put(inout c.r.tx, "u");
+        putn(inout c.r.tx, pw(in c, wrapping_add(x, X_NS)));
+        put(inout c.r.tx, ":");
+        putn(inout c.r.tx, pw(in c, wrapping_add(x, X_INDEX)));
+    } else if kind == EXT_TESTCASE {
+        let t = wrapping_u32(pw(in c, wrapping_add(x, X_S1)));
+        let n = c.nm.size(t);
+        let mut from: u64 = 0;
+        if n > 0 && c.nm.byte(t, 0) == 37 {
+            from = 1;
+        }
+        for k in from..n {
+            c.r.tx.push(c.nm.byte(t, k));
+        }
+    } else if kind == EXT_LIBCALL {
+        put(inout c.r.tx, "libcall:");
+        puts(inout c.r.tx, in c.nm, pw(in c, wrapping_add(x, X_S1)));
+    } else {
+        put(inout c.r.tx, "known:");
+        puts(inout c.r.tx, in c.nm, pw(in c, wrapping_add(x, X_S1)));
+    }
+    let s = c.nm.intern(in c.r.tx[at..c.r.tx.len()]);
+    c.r.tx.truncate(at);
+    widen_u64(s)
+}
+
+fn err_key(inout c: Cx, f: u64) {
+    puts(inout c.emsg, in c.nm, fw(in c, f, F_KEY));
+}
+
+// `measure_emitted`: the contract call graph of the emitted functions with
+// frame bytes from the decoded prologues, names `u0:<func_id>` (graph ids
+// are positions). Sets `c.err` on failure.
+pub fn measure_emitted(inout c: Cx) -> StackGraph {
+    let mut gr = graph_new();
+    if c.isa_err {
+        puts(inout c.emsg, in c.nm, c.arch_name);
+        c.err = true;
+        return gr;
+    }
+    if c.arch > 1 {
+        put(inout c.emsg, "stack verifier supports x86_64 and aarch64, not ");
+        puts(inout c.emsg, in c.nm, c.arch_name);
+        c.err = true;
+        return gr;
+    }
+    // func id -> position + 1
+    let mut pos: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..c.nfns {
+        let id = fw(in c, i, F_ID);
+        if pos.len() <= id {
+            pos.resize(wrapping_add(id, 1), 0);
+        }
+        st(inout pos, id, wrapping_add(i, 1));
+    }
+    let mut edges = filled(0, 0);
+    for i in 0..c.nfns {
+        let status = fw(in c, i, F_COMPILE);
+        if status != 0 {
+            put(inout c.emsg, "stack verifier: compiling '");
+            err_key(inout c, i);
+            put(inout c.emsg, "': ");
+            puts(inout c.emsg, in c.nm, fw(in c, i, F_COMPILE_MSG));
+            c.err = true;
+            return gr;
+        }
+        let at = fw(in c, i, F_CODE_AT);
+        let len = fw(in c, i, F_CODE_LEN);
+        let mut m = Measured {
+            call_push: 0,
+            frame_record: 0,
+            clobber: 0,
+            sp_sub: 0,
+        };
+        if c.arch == 0 {
+            m = measure_x86_64(in c, at, len);
+        } else {
+            m = measure_aarch64(in c, at, len);
+        }
+        let total = wrapping_add(
+            wrapping_add(m.call_push, m.frame_record),
+            wrapping_add(m.clobber, m.sp_sub)
+        );
+        let minimum = wrapping_add(
+            wrapping_add(fw(in c, i, F_FRAME_SIZE), m.frame_record),
+            m.call_push
+        );
+        if total > U32_MAX || minimum > U32_MAX {
+            put(inout c.emsg, "stack verifier: frame of '");
+            err_key(inout c, i);
+            put(inout c.emsg, "' overflows");
+            c.err = true;
+            return gr;
+        }
+        if total < minimum {
+            put(inout c.emsg, "stack verifier: measured ");
+            putn(inout c.emsg, total);
+            put(inout c.emsg, " stack bytes for '");
+            err_key(inout c, i);
+            put(inout c.emsg, "' but its frame layout needs at least ");
+            putn(inout c.emsg, minimum);
+            c.err = true;
+            return gr;
+        }
+        let at2 = c.r.tx.len();
+        put(inout c.r.tx, "u0:");
+        putn(inout c.r.tx, fw(in c, i, F_ID));
+        let name = c.nm.intern(in c.r.tx[at2..c.r.tx.len()]);
+        c.r.tx.truncate(at2);
+        gr.names.push(widen_u64(name));
+        gr.frames.push(total);
+        let first = fw(in c, i, F_INSTS);
+        for k in 0..fw(in c, i, F_NINSTS) {
+            let row = wrapping_add(first, k);
+            let fmt = iw(in c, row, I_FMT);
+            let ent = iw(in c, row, I_ENT);
+            if fmt == FMT_CALL || fmt == FMT_TRY_CALL {
+                let x = wrapping_sub(iw(in c, row, I_DATA_EXT), 1);
+                let kind = pw(in c, wrapping_add(x, X_KIND));
+                let mut callee = NONE;
+                if kind == EXT_USER && pw(in c, wrapping_add(x, X_NS)) == 0 {
+                    let id = pw(in c, wrapping_add(x, X_INDEX));
+                    if g(in pos, id) != 0 {
+                        callee = wrapping_sub(g(in pos, id), 1);
+                    }
+                }
+                if callee != NONE {
+                    let key = wrapping_add(wrapping_mul(i, 4294967296), callee);
+                    let mut seen = false;
+                    for e in 0..edges.len() {
+                        if g(in edges, e) == key {
+                            seen = true;
+                        }
+                    }
+                    if !seen {
+                        edges.push(key);
+                        gr.calls.push(i);
+                        gr.calls.push(callee);
+                    }
+                } else {
+                    let sym = symbol(inout c, x);
+                    gr.external.push(i);
+                    gr.external.push(sym);
+                    gr.external.push(1);
+                    gr.external.push(ent);
+                }
+            } else if fmt == FMT_CALL_INDIRECT || fmt == FMT_TRY_CALL_INDIRECT {
+                gr.indirect.push(i);
+                gr.indirect.push(ent);
+            }
+        }
+        let la = fw(in c, i, F_LIBCALLS);
+        for k in 0..fw(in c, i, wrapping_add(F_LIBCALLS, 1)) {
+            gr.external.push(i);
+            gr.external.push(pw(in c, wrapping_add(la, k)));
+            gr.external.push(0);
+            gr.external.push(0);
+        }
+    }
+    gr
+}
