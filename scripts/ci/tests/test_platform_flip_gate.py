@@ -1,6 +1,7 @@
 from fractions import Fraction
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -14,6 +15,7 @@ SPEC = importlib.util.spec_from_file_location("flip_gate", GATE)
 flip_gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(flip_gate)
 PY = shlex.quote(sys.executable)
+CLEAN_ENV = {k: v for k, v in os.environ.items() if k != "RUSTFLAGS"}
 
 
 def py(code):
@@ -64,7 +66,7 @@ class FlipGateTest(unittest.TestCase):
         out = self.dir / "result.json"
         proc = subprocess.run([sys.executable, str(GATE), "demo", "--config", str(path),
                                "--json", str(out), "--quiet", *args],
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=CLEAN_ENV)
         result = json.loads(out.read_text()) if out.exists() else None
         return proc, result
 
@@ -149,6 +151,32 @@ class FlipGateTest(unittest.TestCase):
         self.assertEqual(bench["epochs"], 6)
         self.assertEqual(bench["decision"], "regression")
         self.assertGreater(bench["lower"], 1.5)
+
+    def test_build_and_abba_get_the_host_cpu(self):
+        # Each command appends its RUSTFLAGS to a file; tests and the
+        # differential keep the caller's flags.
+        log = self.dir / "flags.txt"
+        record = py(f"import os; open({str(log)!r}, 'a').write(os.environ.get('RUSTFLAGS', '') + chr(10))")
+        lines = ['name = "demo"', f"build = [{json.dumps(record)}]",
+                 "[[tests]]", f"run = {json.dumps(record)}",
+                 "[differential]", f"run = {json.dumps(record)}",
+                 "[[abba]]", 'workload = "w"',
+                 f"run = {json.dumps(record + ' && ' + self.pairs_harness('w', [(1, 1)] * 6))}"]
+        config = "\n".join(lines) + "\n"
+        proc, result = self.gate(config)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        flags = log.read_text().splitlines()
+        self.assertEqual(flags[0], "-C target-cpu=native")  # build
+        self.assertEqual(flags[1:3], ["", ""])  # tests, differential
+        self.assertEqual(flags[3], "-C target-cpu=native")  # abba
+        self.assertIn("RUSTFLAGS=-C target-cpu=native", proc.stdout)
+        log.unlink()
+        proc, result = self.gate(config, "--portable")
+        self.assertEqual(log.read_text().splitlines(), ["", "", "", ""])
+        self.assertEqual(flip_gate.bench_env({"RUSTFLAGS": "-C opt-level=3"}, True)["RUSTFLAGS"],
+                         "-C opt-level=3 -C target-cpu=native")
+        self.assertEqual(flip_gate.bench_env({"RUSTFLAGS": "-C target-cpu=native"}, True)["RUSTFLAGS"],
+                         "-C target-cpu=native")
 
     def test_configuration_errors(self):
         proc, _ = self.gate('[[abba]]\nworkload = "w"\nrust = "true"\n')

@@ -10,7 +10,7 @@ scoreboard in docs/maintenance/rust-exit-plan.md.
 
 Usage:
   flip_gate.py <crate-or-module> [--config FILE] [--only tests,differential,abba]
-               [--epochs N] [--threshold 1.5] [--json FILE] [--dry-run]
+               [--epochs N] [--threshold 1.5] [--portable] [--json FILE] [--dry-run]
 
 The configuration is TOML. Without --config the gate reads
 crates/<name>/flip-gate.toml, then packages/<name>/flip-gate.toml, then
@@ -38,6 +38,16 @@ with /bin/sh from the repository root; `env` adds variables to all of them.
   [[abba]]                            # or a harness that does its own ABBA
   workload = "index"
   run = "target/release/examples/abba flip-gate index"
+
+Host CPU. The `build` and `[[abba]]` commands run with
+RUSTFLAGS="-C target-cpu=native" added to any RUSTFLAGS already set, so the
+Rust half and the port objects (which the port harness builds for the outer
+build's CARGO_CFG_TARGET_FEATURE, #1454) both get the host's CPU features;
+a benchmark that gave only Rust AVX2 or SSSE3 would not compare the two
+implementations. Tests and the differential keep the caller's RUSTFLAGS.
+`--portable`, or `native = false` in the configuration, turns this off.
+Benchmark builds should use their own target directory or `--release`, so
+the flag change does not rebuild the test artifacts.
 
 Differential protocol: when the command prints a line
   flip-gate differential differences=<D> cases=<C>
@@ -81,6 +91,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CHECKS = ("tests", "differential", "abba")
 DEFAULT_EPOCHS = 30
 MIN_EPOCHS = 6
+NATIVE_RUSTFLAGS = "-C target-cpu=native"
 DIFF_LINE = re.compile(r"^flip-gate differential differences=(\d+) cases=(\d+)\s*$", re.M)
 PAIRS_LINE = re.compile(r"^flip-gate pairs (\S+)((?: \d+:\d+)+)\s*$", re.M)
 
@@ -161,24 +172,38 @@ def decide(lower, upper, threshold):
 # ---------------------------------------------------------------- running
 
 
+def bench_env(env, native):
+    """The environment of the build and ABBA commands: the host's CPU for
+    both halves unless --portable."""
+    if not native:
+        return env
+    flags = env.get("RUSTFLAGS", "").split()
+    if "target-cpu=native" not in " ".join(flags):
+        flags += NATIVE_RUSTFLAGS.split()
+    return {**env, "RUSTFLAGS": " ".join(flags)}
+
+
 class Runner:
-    def __init__(self, env, dry_run, log):
+    def __init__(self, env, dry_run, log, native=True):
         self.env = {**os.environ, **{k: str(v) for k, v in env.items()}}
+        self.bench = bench_env(self.env, native)
         self.dry_run = dry_run
         self.log = log
 
-    def run(self, command, capture=True):
-        self.log(f"$ {command}")
+    def run(self, command, capture=True, bench=False):
+        env = self.bench if bench else self.env
+        prefix = f"RUSTFLAGS={env.get('RUSTFLAGS', '')!r} " if bench and env is not self.env else ""
+        self.log(f"$ {prefix}{command}")
         if self.dry_run:
             return 0, ""
-        proc = subprocess.run(command, shell=True, cwd=ROOT, env=self.env, text=True,
+        proc = subprocess.run(command, shell=True, cwd=ROOT, env=env, text=True,
                               stdout=subprocess.PIPE if capture else None,
                               stderr=subprocess.STDOUT if capture else None)
         return proc.returncode, proc.stdout or ""
 
     def time(self, command):
         start = time.perf_counter_ns()
-        status, out = self.run(command)
+        status, out = self.run(command, bench=True)
         elapsed = time.perf_counter_ns() - start
         if status != 0:
             raise RuntimeError(f"`{command}` exited {status}\n{out[-2000:]}")
@@ -188,8 +213,8 @@ class Runner:
 def timed_pairs(runner, bench, epochs):
     rust, vesper = bench["rust"], bench["vesper"]
     if runner.dry_run:
-        runner.run(rust)
-        runner.run(vesper)
+        runner.run(rust, bench=True)
+        runner.run(vesper, bench=True)
         return []
     runner.time(rust)
     runner.time(vesper)
@@ -204,7 +229,7 @@ def timed_pairs(runner, bench, epochs):
 
 
 def harness_pairs(runner, bench):
-    status, out = runner.run(bench["run"])
+    status, out = runner.run(bench["run"], bench=True)
     if runner.dry_run:
         return []
     if status != 0:
@@ -241,9 +266,9 @@ def rust_lines(config, root):
 def gate(name, config, only, epochs_override, threshold, runner, lines=None):
     result = {"name": name, "lane": config.get("lane", ""), "threshold": str(threshold),
               "tests": None, "differential": None, "abba": [], "skipped": [],
-              "rust_lines": lines}
+              "rust_lines": lines, "rustflags": runner.bench.get("RUSTFLAGS", "")}
     for command in config.get("build", []):
-        status, out = runner.run(command)
+        status, out = runner.run(command, bench=True)
         if status != 0:
             result["error"] = f"build `{command}` exited {status}\n{out[-2000:]}"
             return finish(result)
@@ -355,6 +380,8 @@ def verdict_line(result):
             f"{describe_tests(result['tests'])} | differential "
             f"{describe_differential(result['differential'])} | ABBA vesper/rust "
             f"{describe_abba(result['abba'])}")
+    if result["abba"] and result.get("rustflags"):
+        line += f" | RUSTFLAGS={result['rustflags']}"
     if "error" in result:
         line += f" | {result['error'].splitlines()[0]}"
     return line
@@ -379,6 +406,8 @@ def main(argv=None):
                         help="comma-separated subset of tests,differential,abba")
     parser.add_argument("--epochs", type=int, help="override every timed workload's epochs")
     parser.add_argument("--threshold", default="1.5", help="Vesper/Rust bar (default 1.5)")
+    parser.add_argument("--portable", action="store_true",
+                        help=f"do not add RUSTFLAGS={NATIVE_RUSTFLAGS!r} to build and ABBA commands")
     parser.add_argument("--json", type=Path, help="write the full result as JSON")
     parser.add_argument("--dry-run", action="store_true", help="print the commands only")
     parser.add_argument("--quiet", action="store_true", help="do not echo commands")
@@ -403,7 +432,8 @@ def main(argv=None):
         return 3
 
     log = (lambda _msg: None) if args.quiet else (lambda msg: print(msg, file=sys.stderr))
-    runner = Runner(config.get("env", {}), args.dry_run, log)
+    native = not args.portable and config.get("native", True)
+    runner = Runner(config.get("env", {}), args.dry_run, log, native)
     result = gate(config.get("name", args.name), config, only, args.epochs, threshold, runner,
                   lines)
     for test in result["tests"] or []:

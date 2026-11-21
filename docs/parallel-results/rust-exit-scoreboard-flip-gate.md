@@ -27,6 +27,12 @@ scoreboard, and exits 0 (PASS), 1 (FAIL), 2 (INCONCLUSIVE) or 3
   (`analyze_pairs` in `crates/vesper-bench/src/statistics.rs`), recomputed on
   exact ratios (`fractions.Fraction`), so the gate and the Rust and Vesper
   benchmark crates agree on ranks (rank 10 of 30 epochs).
+- **Host CPU for both halves.** Build and ABBA commands run with
+  `RUSTFLAGS="-C target-cpu=native"` added, so the Rust half and, once
+  #1454 merges, the port objects get the host's CPU features (`--portable`
+  turns it off). Tests and the differential keep the caller's flags.
+- **The recipe** is "Flipping a module" in
+  [rust-exit-plan.md](../maintenance/rust-exit-plan.md#flipping-a-module).
 - **The test** is `scripts/ci/tests/test_platform_flip_gate.py` (15 tests),
   which the Platforms workflow's plan job already runs with every
   `test_platform*.py`. The prompt named `tests/flip_gate*.rs`; a Python test
@@ -38,7 +44,9 @@ scoreboard, and exits 0 (PASS), 1 (FAIL), 2 (INCONCLUSIVE) or 3
 `scripts/ci/flip-gate/vesper-span.toml`. vesper-span is port-backed already
 (SH0 lane 6, #1128); the Rust left is `src/lib.rs`, which the compiler links
 as the seed package. Linux x86-64, 4 cores, release examples, compiler from
-this commit (`VESPER_PORT_COMPILER`), 4 min 50 s for the whole run:
+this commit (`VESPER_PORT_COMPILER`), 4 min 50 s for the whole run. This
+run predates the host-CPU default (both halves at the baseline ISA); the
+part 2 re-score repeats it with `-C target-cpu=native` after #1454:
 
 ~~~text
 flip-gate vesper-span: FAIL (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 1/1 pass | differential 0 differences | ABBA vesper/rust lookup 1.35x [1.33x, 1.44x] n=30; index 0.32x [0.30x, 0.33x] n=30; edits 3.08x [2.92x, 3.15x] n=30
@@ -62,8 +70,7 @@ above, already reported by SH0 lane 6.
 
 ## What is left
 
-- Part 2, once plan PR #1415 merges: the "Flipping a module" recipe in
-  `docs/maintenance/rust-exit-plan.md` and its scoreboard; the single-build
+- Part 2: the single-build
   re-measure of every merged SH4 and SH5 swap in the hybrid (full suite and
   corpus differential, ABBA through the gate with
   `scripts/ci/flip-gate/compiler.toml`, callgrind per family) and the SH4
