@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2026"
 # Every call reaches Cranelift through the `.vsys` library in src/lib.ves.
 capability_ceiling = ["Fail", "Ffi"]
+# The `.vsys` library, so a package that depends on this one imports it
+# (#1275). It is the `// @export vsys` directive of src/lib.ves, copied;
+# crates/vesper-cranelift-sys/tests/header.rs keeps the two equal.
+vsys = ["cranelift.vsys"]

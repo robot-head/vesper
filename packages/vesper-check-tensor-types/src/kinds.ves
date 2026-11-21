@@ -1,0 +1,1724 @@
+// The module-level tables of the tensor checker and the surface-type half
+// of src/tensor_types (types.rs `collect_kinds`, `resolve_kinds`,
+// `adt_kinds`, `Scope`, `display_type`; infer.rs `mentions_tensors`,
+// `type_mentions` and the item walks).
+
+use @vesper/ast::{
+    Ast,
+    ExprNode,
+    PatNode,
+    TypeNode,
+    StmtNode,
+    ArgNode,
+    ClauseNode,
+    ParamNode,
+    EffectsNode,
+    EffectNode,
+    GenericNode,
+    FieldNode,
+    VariantNode,
+    AdtNode,
+    FnNode,
+    EffectDeclNode,
+    ImplNode,
+    TraitNode,
+    ConfNode,
+    ItemNode,
+    list_len,
+    list_at,
+    expr_at,
+    pat_at,
+    type_at
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper/check-data::util::{
+    push_decimal,
+    add,
+    inc,
+    n32,
+    u32_at,
+    u8_at,
+    w
+};
+use self::state::{
+    St,
+    put,
+    fail,
+    spells,
+    is_digits,
+    first_colons,
+    name_prefix,
+    dim_const,
+    dim_var,
+    dim_mul,
+    dim_fail,
+    mk_ty,
+    ty_named,
+    ty_pair,
+    has_tensor,
+};
+
+const NONE: u32 = 4294967295;
+const MAX_DIM: u64 = 1099511627776;
+
+const T_TENSOR: u8 = 1;
+const T_LEASE: u8 = 2;
+const T_SEQ: u8 = 3;
+const T_ADT: u8 = 4;
+const T_TUPLE: u8 = 5;
+const T_FN: u8 = 6;
+const T_VAR: u8 = 7;
+const T_BASE: u8 = 8;
+
+// `types::Kind`, in its `Ord` order.
+const KD_DIM: u8 = 0;
+const KD_DTYPE: u8 = 1;
+const KD_TYPE: u8 = 2;
+
+// Obligations (`infer::Obligation`): k 0 Even (d1 the dim), 1 Divides
+// (d1 divisor, d2 value); `r` the reason's name.
+pub copy struct Ob {
+    k: u8,
+    d1: u32,
+    d2: u32,
+    r: u32
+}
+
+pub struct Cx {
+    // `AdtKinds`: name -> row; row = kinds at ak_k[a..a + n].
+    ak_row: ChunkSeq[u32],
+    ak_a: ChunkSeq[u32],
+    ak_n: ChunkSeq[u32],
+    ak_k: ChunkSeq[u8],
+    // `AdtInfo` by name: kinds, generics, variants and fields.
+    ai_row: ChunkSeq[u32],
+    ai_name: ChunkSeq[u32],
+    ai_ka: ChunkSeq[u32],
+    ai_kn: ChunkSeq[u32],
+    ai_ga: ChunkSeq[u32],
+    ai_gn: ChunkSeq[u32],
+    ai_va: ChunkSeq[u32],
+    ai_vn: ChunkSeq[u32],
+    ai_enum: ChunkSeq[u8],
+    ai_syms: ChunkSeq[u32],
+    ai_kinds: ChunkSeq[u8],
+    vr_name: ChunkSeq[u32],
+    vr_fa: ChunkSeq[u32],
+    vr_fn: ChunkSeq[u32],
+    fr_name: ChunkSeq[u32],
+    fr_ty: ChunkSeq[u32],
+    // Info rows of distinct names in name order (`BTreeMap` iteration).
+    ai_sorted: ChunkSeq[u32],
+    // Wire struct names (`wire_struct_names`), by name.
+    blocks: ChunkSeq[u8],
+    // Checked wires by name: 0 absent, 1 a quantized format, 2 + row of
+    // its mismatch message.
+    wire: ChunkSeq[u32],
+    wa: ChunkSeq[u64],
+    wb: ChunkSeq[u64],
+    wtext: ChunkSeq[u8],
+    // Signatures by name (`FnSig`).
+    sg_row: ChunkSeq[u32],
+    sg_name: ChunkSeq[u32],
+    sg_ga: ChunkSeq[u32],
+    sg_gn: ChunkSeq[u32],
+    sg_gsym: ChunkSeq[u32],
+    sg_gkind: ChunkSeq[u8],
+    sg_pa: ChunkSeq[u32],
+    sg_pn: ChunkSeq[u32],
+    sg_ppass: ChunkSeq[u8],
+    sg_pty: ChunkSeq[u32],
+    sg_res: ChunkSeq[u32],
+    sg_pool: ChunkSeq[u8],
+    sg_kv: ChunkSeq[u32],
+    sg_hd: ChunkSeq[u32],
+    sg_oa: ChunkSeq[u32],
+    sg_on: ChunkSeq[u32],
+    sg_start: ChunkSeq[u64],
+    sg_end: ChunkSeq[u64],
+    obs: ChunkSeq[Ob],
+    // The scope of a conversion: generic name -> kind (newest first).
+    sc_name: ChunkSeq[u32],
+    sc_kind: ChunkSeq[u8],
+    // `collect_kinds`: the generics being collected and their kind sets.
+    gset: ChunkSeq[u32],
+    us_name: ChunkSeq[u32],
+    us_mask: ChunkSeq[u8],
+    // The body being checked.
+    cur: u32,
+    en_name: ChunkSeq[u32],
+    en_ty: ChunkSeq[u32],
+    en_marks: ChunkSeq[u64],
+    bo: ChunkSeq[Ob],
+    fresh: u64,
+    s_zero: u32,
+    s_one: u32
+}
+
+pub fn cx_new(inout st: St) -> Cx {
+    Cx {
+        ak_row: ChunkSeq::new[u32](),
+        ak_a: ChunkSeq::new[u32](),
+        ak_n: ChunkSeq::new[u32](),
+        ak_k: ChunkSeq::new[u8](),
+        ai_row: ChunkSeq::new[u32](),
+        ai_name: ChunkSeq::new[u32](),
+        ai_ka: ChunkSeq::new[u32](),
+        ai_kn: ChunkSeq::new[u32](),
+        ai_ga: ChunkSeq::new[u32](),
+        ai_gn: ChunkSeq::new[u32](),
+        ai_va: ChunkSeq::new[u32](),
+        ai_vn: ChunkSeq::new[u32](),
+        ai_enum: ChunkSeq::new[u8](),
+        ai_syms: ChunkSeq::new[u32](),
+        ai_kinds: ChunkSeq::new[u8](),
+        vr_name: ChunkSeq::new[u32](),
+        vr_fa: ChunkSeq::new[u32](),
+        vr_fn: ChunkSeq::new[u32](),
+        fr_name: ChunkSeq::new[u32](),
+        fr_ty: ChunkSeq::new[u32](),
+        ai_sorted: ChunkSeq::new[u32](),
+        blocks: ChunkSeq::new[u8](),
+        wire: ChunkSeq::new[u32](),
+        wa: ChunkSeq::new[u64](),
+        wb: ChunkSeq::new[u64](),
+        wtext: ChunkSeq::new[u8](),
+        sg_row: ChunkSeq::new[u32](),
+        sg_name: ChunkSeq::new[u32](),
+        sg_ga: ChunkSeq::new[u32](),
+        sg_gn: ChunkSeq::new[u32](),
+        sg_gsym: ChunkSeq::new[u32](),
+        sg_gkind: ChunkSeq::new[u8](),
+        sg_pa: ChunkSeq::new[u32](),
+        sg_pn: ChunkSeq::new[u32](),
+        sg_ppass: ChunkSeq::new[u8](),
+        sg_pty: ChunkSeq::new[u32](),
+        sg_res: ChunkSeq::new[u32](),
+        sg_pool: ChunkSeq::new[u8](),
+        sg_kv: ChunkSeq::new[u32](),
+        sg_hd: ChunkSeq::new[u32](),
+        sg_oa: ChunkSeq::new[u32](),
+        sg_on: ChunkSeq::new[u32](),
+        sg_start: ChunkSeq::new[u64](),
+        sg_end: ChunkSeq::new[u64](),
+        obs: ChunkSeq::new[Ob](),
+        sc_name: ChunkSeq::new[u32](),
+        sc_kind: ChunkSeq::new[u8](),
+        gset: ChunkSeq::new[u32](),
+        us_name: ChunkSeq::new[u32](),
+        us_mask: ChunkSeq::new[u8](),
+        cur: NONE,
+        en_name: ChunkSeq::new[u32](),
+        en_ty: ChunkSeq::new[u32](),
+        en_marks: ChunkSeq::new[u64](),
+        bo: ChunkSeq::new[Ob](),
+        fresh: 0,
+        s_zero: st.names.intern(in "0".as_bytes()),
+        s_one: st.names.intern(in "1".as_bytes())
+    }
+}
+
+// ----- tables keyed by name -------------------------------------------------------
+
+pub fn at32(in t: ChunkSeq[u32], i: u32) -> u32 {
+    match t.try_get(widen_u64(i)) {
+        Option::Some(v) => v,
+        Option::None => NONE,
+    }
+}
+
+pub fn set32(inout t: ChunkSeq[u32], i: u32, v: u32) {
+    if widen_u64(i) >= t.len() {
+        t.resize(inc(widen_u64(i)), NONE);
+    }
+    let ok = t.try_set(widen_u64(i), v);
+}
+
+pub fn set8(inout t: ChunkSeq[u8], i: u32, v: u8) {
+    if widen_u64(i) >= t.len() {
+        t.resize(inc(widen_u64(i)), 0);
+    }
+    let ok = t.try_set(widen_u64(i), v);
+}
+
+// The `AdtKinds` row of a name, or NONE.
+
+// ----- AST access -------------------------------------------------------------------
+
+// The name of an AST symbol.
+pub fn nm(in st: St, s: u32) -> u32 {
+    if s == NONE {
+        NONE
+    } else {
+        u32_at(in st.amap, widen_u64(s))
+    }
+}
+
+pub fn paramn(in a: Ast, i: u32) -> ParamNode {
+    a
+        .params
+        .get_or(
+        idx_from_raw[ParamNode](i),
+        ParamNode {
+            name: NONE,
+            pass: 0,
+            projections: 0,
+            ty: NONE,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn fnn(in a: Ast, i: u32) -> FnNode {
+    a
+        .fns
+        .get_or(
+        idx_from_raw[FnNode](i),
+        FnNode {
+            name: NONE,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: NONE,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn adtn(in a: Ast, i: u32) -> AdtNode {
+    a
+        .adts
+        .get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: NONE,
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn variantn(in a: Ast, i: u32) -> VariantNode {
+    a
+        .variants
+        .get_or(
+        idx_from_raw[VariantNode](i),
+        VariantNode {
+            name: NONE,
+            fields: 0,
+            named: false
+        }
+    )
+}
+
+pub fn fieldn(in a: Ast, i: u32) -> FieldNode {
+    a
+        .fields
+        .get_or(
+        idx_from_raw[FieldNode](i),
+        FieldNode {
+            name: NONE,
+            ty: NONE,
+            modality: 3,
+            temperature: 0
+        }
+    )
+}
+
+pub fn genericn(in a: Ast, i: u32) -> GenericNode {
+    a
+        .generics
+        .get_or(
+        idx_from_raw[GenericNode](i),
+        GenericNode {
+            name: NONE,
+            bound: 0,
+            row: false
+        }
+    )
+}
+
+pub fn effectsn(in a: Ast, i: u32) -> EffectsNode {
+    a
+        .effects
+        .get_or(
+        idx_from_raw[EffectsNode](i),
+        EffectsNode {
+            instances: 0,
+            tail: NONE
+        }
+    )
+}
+
+pub fn effectn(in a: Ast, i: u32) -> EffectNode {
+    a
+        .effect_nodes
+        .get_or(
+        idx_from_raw[EffectNode](i),
+        EffectNode {
+            label: NONE,
+            name: NONE,
+            args: 0
+        }
+    )
+}
+
+pub fn stmtn(in a: Ast, i: u32) -> StmtNode {
+    a
+        .stmts
+        .get_or(
+        idx_from_raw[StmtNode](i),
+        StmtNode {
+            kind: 0,
+            pat: NONE,
+            ty: NONE,
+            value: NONE,
+            mutable: false
+        }
+    )
+}
+
+pub fn argn(in a: Ast, i: u32) -> ArgNode {
+    a
+        .args
+        .get_or(
+        idx_from_raw[ArgNode](i),
+        ArgNode {
+            pass: 0,
+            explicit: false,
+            expr: NONE
+        }
+    )
+}
+
+pub fn clausen(in a: Ast, i: u32) -> ClauseNode {
+    a
+        .clauses
+        .get_or(
+        idx_from_raw[ClauseNode](i),
+        ClauseNode {
+            name: NONE,
+            pats: 0,
+            body: NONE
+        }
+    )
+}
+
+pub fn itemn(in a: Ast, i: u32) -> ItemNode {
+    a
+        .items
+        .get_or(
+        idx_from_raw[ItemNode](i),
+        ItemNode {
+            kind: 0,
+            node: NONE
+        }
+    )
+}
+
+pub fn effdecln(in a: Ast, i: u32) -> EffectDeclNode {
+    a
+        .effect_decls
+        .get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode {
+            name: NONE,
+            linear: false,
+            generics: 0,
+            ops: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn impln(in a: Ast, i: u32) -> ImplNode {
+    a
+        .impls
+        .get_or(
+        idx_from_raw[ImplNode](i),
+        ImplNode {
+            ty: NONE,
+            generics: 0,
+            methods: 0
+        }
+    )
+}
+
+pub fn traitn(in a: Ast, i: u32) -> TraitNode {
+    a
+        .traits
+        .get_or(
+        idx_from_raw[TraitNode](i),
+        TraitNode {
+            name: NONE,
+            public: false,
+            generics: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+pub fn confn(in a: Ast, i: u32) -> ConfNode {
+    a
+        .confs
+        .get_or(
+        idx_from_raw[ConfNode](i),
+        ConfNode {
+            model: NONE,
+            public: false,
+            generics: 0,
+            trait_ref: NONE,
+            self_ty: NONE,
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+// The module's items.
+
+pub fn item_at(in a: Ast, i: u64) -> ItemNode {
+    let id = match a.m_items.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE,
+    };
+    itemn(in a, id)
+}
+
+// A named type's name (as a name), or NONE.
+pub fn tname(in st: St, in a: Ast, t: u32) -> u32 {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        nm(in st, n.a)
+    } else {
+        NONE
+    }
+}
+
+// A named type's arguments list (0, the empty list, otherwise).
+pub fn targs(in a: Ast, t: u32) -> u32 {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        n.b
+    } else {
+        0
+    }
+}
+
+// ----- names --------------------------------------------------------------------------
+
+// `RESERVED`.
+pub fn is_reserved(in st: St, n: u32) -> bool {
+    n
+        == st
+        .s_tensor
+        || n
+        == st
+        .s_kv
+        || n
+        == st
+        .s_lease
+        || n
+        == st
+        .s_seq
+        || n
+        == st
+        .s_kverr
+        || n
+        == st
+        .s_dims
+        || n
+        == st
+        .s_f32
+        || n
+        == st
+        .s_bf16
+}
+
+// `wire_integer(n).is_some()`: `[ui](16|32|64)(le|be)`.
+pub fn is_wire_integer(in st: St, n: u32) -> bool {
+    if n == NONE || st.names.size(n) != 5 {
+        return false;
+    }
+    let b0 = st.names.byte(n, 0);
+    let b1 = st.names.byte(n, 1);
+    let b2 = st.names.byte(n, 2);
+    let b3 = st.names.byte(n, 3);
+    let b4 = st.names.byte(n, 4);
+    let sign = b0 == 117 || b0 == 105;
+    let bits = (b1 == 49 && b2 == 54) || (b1 == 51 && b2 == 50) || (b1 == 54 && b2 == 52);
+    let end = (b3 == 108 && b4 == 101) || (b3 == 98 && b4 == 101);
+    sign && bits && end
+}
+
+fn reserved_or_wire(in st: St, n: u32) -> bool {
+    is_reserved(in st, n)
+        || n
+        == st
+        .s_shape
+        || n
+        == st
+        .s_bytes
+        || n
+        == st
+        .s_pad
+        || is_wire_integer(in st, n)
+}
+
+// `path_mentions`.
+pub fn path_mentions(inout st: St, n: u32) -> bool {
+    if is_reserved(in st, n) {
+        return true;
+    }
+    let c = first_colons(in st, n);
+    if c < st.names.size(n) {
+        let p = name_prefix(inout st, n, c);
+        return is_reserved(in st, p);
+    }
+    false
+}
+
+// ----- mentions (infer.rs) ---------------------------------------------------------------
+
+pub fn type_mentions(in st: St, in a: Ast, t: u32) -> bool {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        if reserved_or_wire(in st, nm(in st, n.a)) {
+            return true;
+        }
+        for i in 0..list_len(in a, n.b) {
+            if type_mentions(in st, in a, list_at(in a, n.b, i)) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 2 {
+        for i in 0..list_len(in a, n.a) {
+            if type_mentions(in st, in a, list_at(in a, n.a, i)) {
+                return true;
+            }
+        }
+        false
+    } else if n.kind == 3 {
+        let m = list_len(in a, n.a) >> 1;
+        for i in 0..m {
+            if type_mentions(in st, in a, list_at(in a, n.a, inc(wrapping_mul(i, 2)))) {
+                return true;
+            }
+        }
+        type_mentions(in st, in a, n.b) || row_mentions(in st, in a, n.c)
+    } else if n.kind == 4 {
+        row_mentions(in st, in a, n.a)
+    } else {
+        false
+    }
+}
+
+pub fn effect_mentions(in st: St, in a: Ast, e: u32) -> bool {
+    let x = effectn(in a, e);
+    if is_reserved(in st, nm(in st, x.name)) {
+        return true;
+    }
+    for j in 0..list_len(in a, x.args) {
+        if type_mentions(in st, in a, list_at(in a, x.args, j)) {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn row_mentions(in st: St, in a: Ast, r: u32) -> bool {
+    if r == NONE {
+        return false;
+    }
+    let row = effectsn(in a, r);
+    for i in 0..list_len(in a, row.instances) {
+        if effect_mentions(in st, in a, list_at(in a, row.instances, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn pattern_mentions(inout st: St, in a: Ast, p: u32) -> bool {
+    let n = pat_at(in a, p);
+    if n.kind == 4 {
+        for i in 0..list_len(in a, n.a) {
+            if pattern_mentions(inout st, in a, list_at(in a, n.a, i)) {
+                return true;
+            }
+        }
+    } else if n.kind == 5 {
+        if path_mentions(inout st, nm(in st, n.a)) {
+            return true;
+        }
+        let m = list_len(in a, n.b) >> 1;
+        for i in 0..m {
+            if pattern_mentions(inout st, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2)))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn opt_mentions(inout st: St, in a: Ast, e: u32) -> bool {
+    if e == NONE {
+        false
+    } else {
+        expr_mentions(inout st, in a, e)
+    }
+}
+
+fn list_mentions(inout st: St, in a: Ast, l: u32) -> bool {
+    for i in 0..list_len(in a, l) {
+        if expr_mentions(inout st, in a, list_at(in a, l, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+// `function_mentions`' walk of a body (`walk`).
+pub fn expr_mentions(inout st: St, in a: Ast, e: u32) -> bool {
+    let n = expr_at(in a, e);
+    let k = n.kind;
+    if k == 2 {
+        return path_mentions(inout st, nm(in st, n.a));
+    }
+    if k == 3 {
+        return list_mentions(inout st, in a, n.a);
+    }
+    if k == 4 {
+        if path_mentions(inout st, nm(in st, n.a)) {
+            return true;
+        }
+        let m = list_len(in a, n.b) >> 1;
+        for i in 0..m {
+            if expr_mentions(inout st, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if k == 5 {
+        for i in 0..list_len(in a, n.a) {
+            let s = stmtn(in a, list_at(in a, n.a, i));
+            if s.kind == 1 {
+                if type_mentions(in st, in a, s.ty)
+                    || pattern_mentions(inout st, in a, s.pat)
+                    || expr_mentions(inout st, in a, s.value) {
+                    return true;
+                }
+            } else if expr_mentions(inout st, in a, s.value) {
+                return true;
+            }
+        }
+        return opt_mentions(inout st, in a, n.b);
+    }
+    if k == 6 {
+        if expr_mentions(inout st, in a, n.a) {
+            return true;
+        }
+        for i in 0..list_len(in a, n.b) {
+            if type_mentions(in st, in a, list_at(in a, n.b, i)) {
+                return true;
+            }
+        }
+        for i in 0..list_len(in a, n.c) {
+            if expr_mentions(inout st, in a, argn(in a, list_at(in a, n.c, i)).expr) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if k == 7 || k == 9 || k == 17 {
+        return expr_mentions(inout st, in a, n.a);
+    }
+    if k == 10 {
+        return expr_mentions(inout st, in a, n.b);
+    }
+    if k == 8 || k == 19 {
+        return expr_mentions(inout st, in a, n.a) || expr_mentions(inout st, in a, n.b);
+    }
+    if k == 11 || k == 12 {
+        return expr_mentions(inout st, in a, n.b) || expr_mentions(inout st, in a, n.c);
+    }
+    if k == 13 {
+        return expr_mentions(inout st, in a, n.a)
+            || expr_mentions(inout st, in a, n.b)
+            || opt_mentions(inout st, in a, n.c);
+    }
+    if k == 14 {
+        if expr_mentions(inout st, in a, n.a) {
+            return true;
+        }
+        let m = list_len(in a, n.b) >> 1;
+        for i in 0..m {
+            if pattern_mentions(inout st, in a, list_at(in a, n.b, wrapping_mul(i, 2)))
+                || expr_mentions(inout st, in a, list_at(in a, n.b, inc(wrapping_mul(i, 2)))) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if k == 18 {
+        return expr_mentions(inout st, in a, n.b)
+            || pattern_mentions(inout st, in a, n.a)
+            || expr_mentions(inout st, in a, n.c);
+    }
+    if k == 20 || k == 21 {
+        return opt_mentions(inout st, in a, n.a);
+    }
+    if k == 15 {
+        for i in 0..list_len(in a, n.a) {
+            if type_mentions(in st, in a, paramn(in a, list_at(in a, n.a, i)).ty) {
+                return true;
+            }
+        }
+        return type_mentions(in st, in a, n.c)
+            || row_mentions(in st, in a, n.d)
+            || expr_mentions(inout st, in a, n.e);
+    }
+    if k == 16 {
+        if effect_mentions(in st, in a, n.a) {
+            return true;
+        }
+        if n
+            .b
+            != NONE
+            && (pattern_mentions(inout st, in a, n.b) || expr_mentions(inout st, in a, n.c)) {
+            return true;
+        }
+        if expr_mentions(inout st, in a, n.d) {
+            return true;
+        }
+        for i in 0..list_len(in a, n.e) {
+            let c = clausen(in a, list_at(in a, n.e, i));
+            for j in 0..list_len(in a, c.pats) {
+                if pattern_mentions(inout st, in a, list_at(in a, c.pats, j)) {
+                    return true;
+                }
+            }
+            if expr_mentions(inout st, in a, c.body) {
+                return true;
+            }
+        }
+        return false;
+    }
+    false
+}
+
+pub fn function_mentions(inout st: St, in a: Ast, f: u32) -> bool {
+    let x = fnn(in a, f);
+    for i in 0..list_len(in a, x.params) {
+        if type_mentions(in st, in a, paramn(in a, list_at(in a, x.params, i)).ty) {
+            return true;
+        }
+    }
+    if type_mentions(in st, in a, x.result) || row_mentions(in st, in a, x.effects) {
+        return true;
+    }
+    if x.body != NONE {
+        return expr_mentions(inout st, in a, x.body);
+    }
+    false
+}
+
+pub fn fns_mention(inout st: St, in a: Ast, l: u32) -> bool {
+    for i in 0..list_len(in a, l) {
+        if function_mentions(inout st, in a, list_at(in a, l, i)) {
+            return true;
+        }
+    }
+    false
+}
+
+// `mentions_tensors`.
+pub fn mentions_tensors(inout st: St, in a: Ast) -> bool {
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind == 1 {
+            let x = adtn(in a, it.node);
+            for v in 0..list_len(in a, x.variants) {
+                let vn = variantn(in a, list_at(in a, x.variants, v));
+                for f in 0..list_len(in a, vn.fields) {
+                    if type_mentions(in st, in a, fieldn(in a, list_at(in a, vn.fields, f)).ty) {
+                        return true;
+                    }
+                }
+            }
+        } else if it.kind == 2 {
+            if function_mentions(inout st, in a, it.node) {
+                return true;
+            }
+        } else if it.kind == 3 {
+            if fns_mention(inout st, in a, effdecln(in a, it.node).ops) {
+                return true;
+            }
+        } else if it.kind == 4 {
+            let x = impln(in a, it.node);
+            if type_mentions(in st, in a, x.ty) || fns_mention(inout st, in a, x.methods) {
+                return true;
+            }
+        } else if it.kind == 5 {
+            if fns_mention(inout st, in a, traitn(in a, it.node).methods) {
+                return true;
+            }
+        } else if it.kind == 6 {
+            let x = confn(in a, it.node);
+            if fns_mention(inout st, in a, x.methods) || type_mentions(in st, in a, x.self_ty) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `tensor_types::active`.
+pub fn active(inout st: St, in a: Ast) -> bool {
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind == 1 && is_reserved(in st, nm(in st, adtn(in a, it.node).name)) {
+            return false;
+        }
+        if it.kind == 3 && is_reserved(in st, nm(in st, effdecln(in a, it.node).name)) {
+            return false;
+        }
+    }
+    mentions_tensors(inout st, in a)
+}
+
+// ----- wire struct names (wire.rs) ------------------------------------------------------
+
+fn wire_only(in st: St, in a: Ast, t: u32) -> bool {
+    let n = type_at(in a, t);
+    if n.kind != 1 {
+        return false;
+    }
+    let name = nm(in st, n.a);
+    (list_len(in a, n.b) == 0 && is_wire_integer(in st, name))
+        || name
+        == st
+        .s_bytes
+        || name
+        == st
+        .s_pad
+}
+
+// `wire_struct_names`.
+pub fn mark_blocks(in st: St, inout cx: Cx, in a: Ast) {
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind != 1 {
+            continue;
+        }
+        let x = adtn(in a, it.node);
+        if x.is_enum {
+            continue;
+        }
+        let mut wire = false;
+        for v in 0..list_len(in a, x.variants) {
+            let vn = variantn(in a, list_at(in a, x.variants, v));
+            for f in 0..list_len(in a, vn.fields) {
+                if wire_only(in st, in a, fieldn(in a, list_at(in a, vn.fields, f)).ty) {
+                    wire = true;
+                }
+            }
+        }
+        if wire {
+            set8(inout cx.blocks, nm(in st, x.name), 1);
+        }
+    }
+}
+
+pub fn is_block(in cx: Cx, n: u32) -> bool {
+    u8_at(in cx.blocks, widen_u64(n)) == 1
+}
+
+// ----- kinds (types.rs) ---------------------------------------------------------------------
+
+fn in_gset(in cx: Cx, n: u32) -> bool {
+    for i in 0..cx.gset.len() {
+        if u32_at(in cx.gset, i) == n {
+            return true;
+        }
+    }
+    false
+}
+
+// `out.entry(n).or_default().insert(k)`.
+fn use_kind(inout cx: Cx, n: u32, k: u8) {
+    let bit = wrapping_shl_u8(1, widen_u32(k));
+    for i in 0..cx.us_name.len() {
+        if u32_at(in cx.us_name, i) == n {
+            let m = u8_at(in cx.us_mask, i) | bit;
+            let ok = cx.us_mask.try_set(i, m);
+            return;
+        }
+    }
+    cx.us_name.push(n);
+    cx.us_mask.push(bit);
+}
+
+pub fn uses_of(in cx: Cx, n: u32) -> u8 {
+    for i in 0..cx.us_name.len() {
+        if u32_at(in cx.us_name, i) == n {
+            return u8_at(in cx.us_mask, i);
+        }
+    }
+    0
+}
+
+pub fn uses_clear(inout cx: Cx) {
+    cx.us_name.clear();
+    cx.us_mask.clear();
+}
+
+// `dim_names` with the `generics.contains` filter of its callers.
+fn dim_names(in st: St, inout cx: Cx, in a: Ast, t: u32) {
+    let n = type_at(in a, t);
+    if n.kind != 1 {
+        return;
+    }
+    let name = nm(in st, n.a);
+    if name == st.s_prod || name == st.s_shape {
+        for i in 0..list_len(in a, n.b) {
+            dim_names(in st, inout cx, in a, list_at(in a, n.b, i));
+        }
+    } else if list_len(in a, n.b) == 0 {
+        if in_gset(in cx, name) {
+            use_kind(inout cx, name, KD_DIM);
+        }
+    }
+}
+
+// Whether `t` is `Named(d, [])` with `d` a collected generic: `d`, or NONE.
+fn bare_generic(in st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
+    let n = type_at(in a, t);
+    if n.kind == 1 && list_len(in a, n.b) == 0 {
+        let d = nm(in st, n.a);
+        if in_gset(in cx, d) {
+            return d;
+        }
+    }
+    NONE
+}
+
+// `collect_kinds` over the generics in `cx.gset` into `cx.us_*`.
+pub fn collect_kinds(in st: St, inout cx: Cx, in a: Ast, t: u32) {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        let name = nm(in st, n.a);
+        let args = n.b;
+        let argc = list_len(in a, args);
+        if name == st.s_tensor && argc == 2 {
+            let d = bare_generic(in st, in cx, in a, list_at(in a, args, 0));
+            if d != NONE {
+                use_kind(inout cx, d, KD_DTYPE);
+            } else {
+                collect_kinds(in st, inout cx, in a, list_at(in a, args, 0));
+            }
+            dim_names(in st, inout cx, in a, list_at(in a, args, 1));
+        } else if name == st.s_lease || name == st.s_seq || name == st.s_shape {
+            for i in 0..argc {
+                dim_names(in st, inout cx, in a, list_at(in a, args, i));
+            }
+        } else if argc == 0 && in_gset(in cx, name) {
+            use_kind(inout cx, name, KD_TYPE);
+        } else {
+            let row = at32(in cx.ak_row, name);
+            for i in 0..argc {
+                let mut k: u8 = 9;
+                if row != NONE && i < widen_u64(u32_at(in cx.ak_n, widen_u64(row))) {
+                    k = u8_at(
+                        in cx.ak_k,
+                        wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i)
+                    );
+                }
+                let x = list_at(in a, args, i);
+                if k == KD_DIM {
+                    dim_names(in st, inout cx, in a, x);
+                } else if k == KD_DTYPE {
+                    let d = bare_generic(in st, in cx, in a, x);
+                    if d != NONE {
+                        use_kind(inout cx, d, KD_DTYPE);
+                    }
+                } else {
+                    collect_kinds(in st, inout cx, in a, x);
+                }
+            }
+        }
+    } else if n.kind == 2 {
+        for i in 0..list_len(in a, n.a) {
+            collect_kinds(in st, inout cx, in a, list_at(in a, n.a, i));
+        }
+    } else if n.kind == 3 {
+        let m = list_len(in a, n.a) >> 1;
+        for i in 0..m {
+            collect_kinds(in st, inout cx, in a, list_at(in a, n.a, inc(wrapping_mul(i, 2))));
+        }
+        collect_kinds(in st, inout cx, in a, n.b);
+        collect_row_kinds(in st, inout cx, in a, n.c);
+    } else if n.kind == 4 {
+        collect_row_kinds(in st, inout cx, in a, n.a);
+    }
+}
+
+pub fn collect_row_kinds(in st: St, inout cx: Cx, in a: Ast, r: u32) {
+    if r == NONE {
+        return;
+    }
+    let row = effectsn(in a, r);
+    for i in 0..list_len(in a, row.instances) {
+        let e = effectn(in a, list_at(in a, row.instances, i));
+        let kv = nm(in st, e.name) == st.s_kv;
+        for j in 0..list_len(in a, e.args) {
+            if kv {
+                dim_names(in st, inout cx, in a, list_at(in a, e.args, j));
+            } else {
+                collect_kinds(in st, inout cx, in a, list_at(in a, e.args, j));
+            }
+        }
+    }
+}
+
+// `resolve_kinds` of the generics `names` (in order) from `cx.us_*`: the
+// kinds, or NONE in the first slot's place with `err` set (the returned
+// list is then empty).
+pub fn resolve_kinds(inout st: St, in cx: Cx, in names: ChunkSeq[u32], inout out: ChunkSeq[u8])
+    -> bool {
+    out.clear();
+    for i in 0..names.len() {
+        let g = u32_at(in names, i);
+        let m = uses_of(in cx, g);
+        if m == 0 {
+            out.push(KD_TYPE);
+        } else if m == 1 {
+            out.push(KD_DIM);
+        } else if m == 2 {
+            out.push(KD_DTYPE);
+        } else if m == 4 {
+            out.push(KD_TYPE);
+        } else {
+            st.err.clear();
+            put(inout st.err, in "generic '");
+            st.names.write(g, inout st.err);
+            put(inout st.err, in "' is used both as a tensor dimension or dtype and as a type");
+            out.clear();
+            return false;
+        }
+    }
+    true
+}
+
+// Sets the `AdtKinds` of `name`.
+pub fn set_kinds(inout cx: Cx, name: u32, in ks: ChunkSeq[u8]) {
+    let row = wrapping_u32(cx.ak_a.len());
+    cx.ak_a.push(wrapping_u32(cx.ak_k.len()));
+    cx.ak_n.push(wrapping_u32(ks.len()));
+    cx.ak_k.extend(in ks.as_slice());
+    set32(inout cx.ak_row, name, row);
+}
+
+fn kinds_equal(in cx: Cx, row: u32, in ks: ChunkSeq[u8]) -> bool {
+    if row == NONE || widen_u64(u32_at(in cx.ak_n, widen_u64(row))) != ks.len() {
+        return false;
+    }
+    for i in 0..ks.len() {
+        if u8_at(in cx.ak_k, wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i))
+            != u8_at(in ks, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// `adt_kinds`: kinds of every ADT to a fixed point; the errors of the last
+// round are pushed as E0761 diagnostics at the ADT.
+pub fn adt_kinds(inout st: St, inout cx: Cx, in a: Ast) {
+    let base = st.dcode.len();
+    let rounds = inc(a.m_items.len());
+    let mut ks = ChunkSeq::new[u8]();
+    let mut names = ChunkSeq::new[u32]();
+    for round in 0..rounds {
+        let mut changed = false;
+        diag_truncate_to(inout st, base);
+        for i in 0..a.m_items.len() {
+            let it = item_at(in a, i);
+            if it.kind != 1 {
+                continue;
+            }
+            let x = adtn(in a, it.node);
+            names.clear();
+            for g in 0..list_len(in a, x.generics) {
+                names.push(nm(in st, genericn(in a, list_at(in a, x.generics, g)).name));
+            }
+            cx.gset.clear();
+            cx.gset.extend(in names.as_slice());
+            uses_clear(inout cx);
+            for v in 0..list_len(in a, x.variants) {
+                let vn = variantn(in a, list_at(in a, x.variants, v));
+                for f in 0..list_len(in a, vn.fields) {
+                    collect_kinds(
+                        in st,
+                        inout cx,
+                        in a,
+                        fieldn(in a, list_at(in a, vn.fields, f)).ty
+                    );
+                }
+            }
+            if !resolve_kinds(inout st, in cx, in names, inout ks) {
+                let mut m = ChunkSeq::new[u8]();
+                m.extend(in st.err.as_slice());
+                push_diag(inout st, 761, widen_u64(x.start), widen_u64(x.end), in m);
+                ks.clear();
+                for g in 0..names.len() {
+                    ks.push(KD_TYPE);
+                }
+            }
+            let name = nm(in st, x.name);
+            if !kinds_equal(in cx, at32(in cx.ak_row, name), in ks) {
+                set_kinds(inout cx, name, in ks);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+pub fn push_diag(inout st: St, code: u32, start: u64, end: u64, in m: ChunkSeq[u8]) {
+    st.dcode.push(code);
+    st.dstart.push(start);
+    st.dend.push(end);
+    st.dma.push(st.dtext.len());
+    st.dtext.extend(in m.as_slice());
+    st.dmb.push(st.dtext.len());
+}
+
+pub fn diag_truncate_to(inout st: St, n: u64) {
+    if n >= st.dcode.len() {
+        return;
+    }
+    let t = match st.dma.try_get(n) {
+        Option::Some(v) => v,
+        Option::None => st.dtext.len(),
+    };
+    st.dtext.truncate(t);
+    st.dcode.truncate(n);
+    st.dstart.truncate(n);
+    st.dend.truncate(n);
+    st.dma.truncate(n);
+    st.dmb.truncate(n);
+}
+
+// ----- Type Display and Debug (vesper_core::ast) -------------------------------------------
+
+fn put_types(in st: St, in a: Ast, inout o: ChunkSeq[u8], l: u32, step: u64, off: u64, disp: bool) {
+    let mut n = list_len(in a, l);
+    if step == 2 {
+        n = n >> 1;
+    }
+    for i in 0..n {
+        if i > 0 {
+            put(inout o, in ", ");
+        }
+        let t = list_at(in a, l, wrapping_add(wrapping_mul(i, step), off));
+        if disp {
+            put_type(in st, in a, inout o, t);
+        } else {
+            debug_type(in st, in a, inout o, t);
+        }
+    }
+}
+
+// `impl Display for ast::Type`.
+pub fn put_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        let name = nm(in st, n.a);
+        if name == st.s_dyn && list_len(in a, n.b) == 1 {
+            put(inout o, in "dyn ");
+            put_type(in st, in a, inout o, list_at(in a, n.b, 0));
+            return;
+        }
+        st.names.write(name, inout o);
+        if list_len(in a, n.b) > 0 {
+            o.push(91);
+            put_types(in st, in a, inout o, n.b, 1, 0, true);
+            o.push(93);
+        }
+    } else if n.kind == 2 {
+        o.push(40);
+        put_types(in st, in a, inout o, n.a, 1, 0, true);
+        o.push(41);
+    } else if n.kind == 3 {
+        put(inout o, in "fn(");
+        put_types(in st, in a, inout o, n.a, 2, 1, true);
+        put(inout o, in ") -> ");
+        put_type(in st, in a, inout o, n.b);
+    } else if n.kind == 4 {
+        put(inout o, in "eff ");
+        debug_row(in st, in a, inout o, n.a);
+    } else if n.kind == 6 {
+        put(inout o, in "integer literal ");
+        push_decimal(inout o, widen_u64(n.a));
+    } else {
+        o.push(95);
+    }
+}
+
+fn debug_name(in st: St, inout o: ChunkSeq[u8], s: u32) {
+    o.push(34);
+    st.names.write(s, inout o);
+    o.push(34);
+}
+
+fn debug_opt_name(in st: St, inout o: ChunkSeq[u8], s: u32) {
+    if s == NONE {
+        put(inout o, in "None");
+    } else {
+        put(inout o, in "Some(");
+        debug_name(in st, inout o, s);
+        o.push(41);
+    }
+}
+
+pub fn debug_row(in st: St, in a: Ast, inout o: ChunkSeq[u8], r: u32) {
+    let row = effectsn(in a, r);
+    put(inout o, in "Effects { instances: [");
+    for i in 0..list_len(in a, row.instances) {
+        if i > 0 {
+            put(inout o, in ", ");
+        }
+        let e = effectn(in a, list_at(in a, row.instances, i));
+        put(inout o, in "Effect { label: ");
+        debug_opt_name(in st, inout o, nm(in st, e.label));
+        put(inout o, in ", name: ");
+        debug_name(in st, inout o, nm(in st, e.name));
+        put(inout o, in ", args: [");
+        put_types(in st, in a, inout o, e.args, 1, 0, false);
+        put(inout o, in "] }");
+    }
+    put(inout o, in "], tail: ");
+    debug_opt_name(in st, inout o, nm(in st, row.tail));
+    put(inout o, in " }");
+}
+
+pub fn debug_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        put(inout o, in "Named(");
+        debug_name(in st, inout o, nm(in st, n.a));
+        put(inout o, in ", [");
+        put_types(in st, in a, inout o, n.b, 1, 0, false);
+        put(inout o, in "])");
+    } else if n.kind == 2 {
+        put(inout o, in "Tuple([");
+        put_types(in st, in a, inout o, n.a, 1, 0, false);
+        put(inout o, in "])");
+    } else if n.kind == 3 {
+        put(inout o, in "Function { params: [");
+        let m = list_len(in a, n.a) >> 1;
+        for i in 0..m {
+            if i > 0 {
+                put(inout o, in ", ");
+            }
+            o.push(40);
+            let p = list_at(in a, n.a, wrapping_mul(i, 2));
+            if p == 0 {
+                put(inout o, in "In");
+            } else if p == 1 {
+                put(inout o, in "Inout");
+            } else {
+                put(inout o, in "Sink");
+            }
+            put(inout o, in ", ");
+            debug_type(in st, in a, inout o, list_at(in a, n.a, inc(wrapping_mul(i, 2))));
+            o.push(41);
+        }
+        put(inout o, in "], result: ");
+        debug_type(in st, in a, inout o, n.b);
+        put(inout o, in ", effects: ");
+        debug_row(in st, in a, inout o, n.c);
+        put(inout o, in ", mode: ");
+        if n.d == 0 {
+            put(inout o, in "Copy");
+        } else if n.d == 1 {
+            put(inout o, in "Affine");
+        } else {
+            put(inout o, in "Linear");
+        }
+        put(inout o, in " }");
+    } else if n.kind == 4 {
+        put(inout o, in "Row(");
+        debug_row(in st, in a, inout o, n.a);
+        o.push(41);
+    } else if n.kind == 6 {
+        put(inout o, in "IntLiteral(");
+        push_decimal(inout o, widen_u64(n.a));
+        o.push(41);
+    } else {
+        put(inout o, in "Infer");
+    }
+}
+
+// `types::display_type`.
+pub fn display_type(in st: St, in a: Ast, inout o: ChunkSeq[u8], t: u32) {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        let name = nm(in st, n.a);
+        let argc = list_len(in a, n.b);
+        if name == st.s_shape {
+            o.push(91);
+            for i in 0..argc {
+                if i > 0 {
+                    put(inout o, in ", ");
+                }
+                display_type(in st, in a, inout o, list_at(in a, n.b, i));
+            }
+            o.push(93);
+            return;
+        }
+        if name == st.s_prod && argc == 2 {
+            display_type(in st, in a, inout o, list_at(in a, n.b, 0));
+            put(inout o, in " * ");
+            display_type(in st, in a, inout o, list_at(in a, n.b, 1));
+            return;
+        }
+        if argc > 0 {
+            st.names.write(name, inout o);
+            o.push(91);
+            for i in 0..argc {
+                if i > 0 {
+                    put(inout o, in ", ");
+                }
+                display_type(in st, in a, inout o, list_at(in a, n.b, i));
+            }
+            o.push(93);
+            return;
+        }
+    }
+    put_type(in st, in a, inout o, t);
+}
+
+// ----- Scope (types.rs) ----------------------------------------------------------------------
+
+// The kind of generic `n` in the scope, or 9 when it is not a generic.
+pub fn scope_kind(in cx: Cx, n: u32) -> u8 {
+    let mut i = cx.sc_name.len();
+    loop {
+        if i == 0 {
+            return 9;
+        }
+        i = wrapping_sub(i, 1);
+        if u32_at(in cx.sc_name, i) == n {
+            return u8_at(in cx.sc_kind, i);
+        }
+    }
+}
+
+// `Scope::dim`: a dimension, or NONE with `err`.
+pub fn scope_dim(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        let name = nm(in st, n.a);
+        let argc = list_len(in a, n.b);
+        if name == st.s_prod && argc == 2 {
+            let x = scope_dim(inout st, in cx, in a, list_at(in a, n.b, 0));
+            if x == NONE {
+                return NONE;
+            }
+            let y = scope_dim(inout st, in cx, in a, list_at(in a, n.b, 1));
+            if y == NONE {
+                return NONE;
+            }
+            let d = dim_mul(inout st, x, y);
+            if d == NONE {
+                return dim_fail(inout st);
+            }
+            return d;
+        }
+        if argc == 0 && is_digits(in st, name) {
+            let mut v: u64 = 0;
+            for i in 0..st.names.size(name) {
+                let c = widen_u64(st.names.byte(name, i));
+                v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, 48));
+                if v > MAX_DIM {
+                    st.derr = 1;
+                    return dim_fail(inout st);
+                }
+            }
+            let d = dim_const(inout st, v);
+            if d == NONE {
+                return dim_fail(inout st);
+            }
+            return d;
+        }
+        if argc == 0 {
+            if scope_kind(in cx, name) == KD_DIM {
+                return dim_var(inout st, name);
+            }
+            st.err.clear();
+            put(inout st.err, in "unknown dimension '");
+            st.names.write(name, inout st.err);
+            put(inout st.err, in "': declare it as a parameter `");
+            st.names.write(name, inout st.err);
+            put(inout st.err, in ": dim`");
+            return NONE;
+        }
+    }
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in "expected a dimension, found '");
+    display_type(in st, in a, inout m, t);
+    m.push(39);
+    st.err = m;
+    NONE
+}
+
+// `Scope::dtype`: a dtype word, or NONE with `err`.
+pub fn scope_dtype(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
+    let n = type_at(in a, t);
+    if n.kind == 1 && list_len(in a, n.b) == 0 {
+        let name = nm(in st, n.a);
+        if name == st.s_f32 {
+            return 0;
+        }
+        if name == st.s_bf16 {
+            return 1;
+        }
+        if scope_kind(in cx, name) == KD_DTYPE {
+            return wrapping_add(3, wrapping_mul(name, 2));
+        }
+        if (u8_at(in cx.blocks, widen_u64(name)) == 1) {
+            return wrapping_add(2, wrapping_mul(name, 2));
+        }
+    }
+    let mut m = ChunkSeq::new[u8]();
+    m.push(39);
+    display_type(in st, in a, inout m, t);
+    put(
+        inout m,
+        in "' is not a tensor dtype: use F32, Bf16, a quantized block wire struct or a dtype parameter"
+    );
+    st.err = m;
+    NONE
+}
+
+// `Scope::shape`: the dims into `out`, or false with `err`.
+pub fn scope_shape(inout st: St, in cx: Cx, in a: Ast, t: u32, inout out: ChunkSeq[u32]) -> bool {
+    out.clear();
+    let n = type_at(in a, t);
+    if n.kind == 1 && nm(in st, n.a) == st.s_shape {
+        let argc = list_len(in a, n.b);
+        if argc > 4 {
+            st.err.clear();
+            put(inout st.err, in "tensor rank ");
+            push_decimal(inout st.err, argc);
+            put(inout st.err, in " exceeds the supported rank 4");
+            return false;
+        }
+        for i in 0..argc {
+            let d = scope_dim(inout st, in cx, in a, list_at(in a, n.b, i));
+            if d == NONE {
+                return false;
+            }
+            out.push(d);
+        }
+        return true;
+    }
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in "expected a shape literal [d, ...], found '");
+    display_type(in st, in a, inout m, t);
+    m.push(39);
+    st.err = m;
+    false
+}
+
+fn err_named(inout st: St, in pre: Str, name: u32, in post: Str) -> u32 {
+    st.err.clear();
+    put(inout st.err, in pre);
+    st.names.write(name, inout st.err);
+    put(inout st.err, in post);
+    NONE
+}
+
+// `Scope::ty`: a type, or NONE with `err`.
+pub fn scope_ty(inout st: St, in cx: Cx, in a: Ast, t: u32) -> u32 {
+    let n = type_at(in a, t);
+    if n.kind == 1 {
+        let name = nm(in st, n.a);
+        let args = n.b;
+        let argc = list_len(in a, args);
+        if name == st.s_tensor {
+            if argc != 2 {
+                return fail(inout st, in "a tensor type is written Tensor[DType, [d, ...]]");
+            }
+            let dt = scope_dtype(inout st, in cx, in a, list_at(in a, args, 0));
+            if dt == NONE {
+                return NONE;
+            }
+            let mut shape = ChunkSeq::new[u32]();
+            if !scope_shape(inout st, in cx, in a, list_at(in a, args, 1), inout shape) {
+                return NONE;
+            }
+            return mk_ty(inout st, T_TENSOR, dt, 0, in shape);
+        }
+        if name == st.s_lease || name == st.s_seq {
+            if argc != 2 {
+                st.err.clear();
+                st.names.write(name, inout st.err);
+                put(inout st.err, in " takes two dimensions: ");
+                st.names.write(name, inout st.err);
+                put(inout st.err, in "[KvHeads, HeadDim]");
+                return NONE;
+            }
+            let kv = scope_dim(inout st, in cx, in a, list_at(in a, args, 0));
+            if kv == NONE {
+                return NONE;
+            }
+            let hd = scope_dim(inout st, in cx, in a, list_at(in a, args, 1));
+            if hd == NONE {
+                return NONE;
+            }
+            if name == st.s_lease {
+                return ty_pair(inout st, T_LEASE, kv, hd);
+            }
+            return ty_pair(inout st, T_SEQ, kv, hd);
+        }
+        if name == st.s_shape {
+            return fail(inout st, in "a shape literal is only valid as a tensor's second argument");
+        }
+        if argc == 0 {
+            let k = scope_kind(in cx, name);
+            if k == KD_TYPE {
+                return ty_named(inout st, T_VAR, name);
+            }
+            if k == KD_DTYPE {
+                return err_named(inout st, in "dtype parameter '", name, in "' is used as a type");
+            }
+            if k == KD_DIM {
+                return err_named(inout st, in "dimension '", name, in "' is used as a type");
+            }
+            if is_digits(in st, name) {
+                return err_named(inout st, in "'", name, in "' is a dimension, not a type");
+            }
+        }
+        let row = at32(in cx.ak_row, name);
+        if row != NONE || name == st.s_option || name == st.s_result {
+            let mut klen = argc;
+            if row != NONE {
+                klen = widen_u64(u32_at(in cx.ak_n, widen_u64(row)));
+            }
+            if klen != argc {
+                return st.unknown;
+            }
+            let mut items = ChunkSeq::new[u32]();
+            for i in 0..argc {
+                let mut k = KD_TYPE;
+                if row != NONE {
+                    k = u8_at(
+                        in cx.ak_k,
+                        wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(row))), i)
+                    );
+                }
+                let x = list_at(in a, args, i);
+                if k == KD_DIM {
+                    let d = scope_dim(inout st, in cx, in a, x);
+                    if d == NONE {
+                        return NONE;
+                    }
+                    items.push(1);
+                    items.push(d);
+                } else if k == KD_DTYPE {
+                    let d = scope_dtype(inout st, in cx, in a, x);
+                    if d == NONE {
+                        return NONE;
+                    }
+                    items.push(2);
+                    items.push(d);
+                } else {
+                    let y = scope_ty(inout st, in cx, in a, x);
+                    if y == NONE {
+                        return NONE;
+                    }
+                    items.push(0);
+                    items.push(y);
+                }
+            }
+            return mk_ty(inout st, T_ADT, name, 0, in items);
+        }
+        if is_wire_integer(in st, name) || name == st.s_bytes || name == st.s_pad {
+            return err_named(
+                inout st,
+                in "'",
+                name,
+                in "' is only valid as a wire struct field type"
+            );
+        }
+        for i in 0..argc {
+            let y = scope_ty(inout st, in cx, in a, list_at(in a, args, i));
+            if y == NONE {
+                return NONE;
+            }
+            if has_tensor(in st, y) {
+                return err_named(
+                    inout st,
+                    in "a tensor type cannot instantiate the parameters of '",
+                    name,
+                    in "'"
+                );
+            }
+        }
+        return ty_named(inout st, T_BASE, name);
+    }
+    if n.kind == 2 {
+        let mut items = ChunkSeq::new[u32]();
+        for i in 0..list_len(in a, n.a) {
+            let y = scope_ty(inout st, in cx, in a, list_at(in a, n.a, i));
+            if y == NONE {
+                return NONE;
+            }
+            items.push(y);
+        }
+        return mk_ty(inout st, T_TUPLE, 0, 0, in items);
+    }
+    if n.kind == 3 {
+        let mut items = ChunkSeq::new[u32]();
+        let m = list_len(in a, n.a) >> 1;
+        for i in 0..m {
+            let y = scope_ty(inout st, in cx, in a, list_at(in a, n.a, inc(wrapping_mul(i, 2))));
+            if y == NONE {
+                return NONE;
+            }
+            items.push(y);
+        }
+        let r = scope_ty(inout st, in cx, in a, n.b);
+        if r == NONE {
+            return NONE;
+        }
+        return mk_ty(inout st, T_FN, 0, r, in items);
+    }
+    st.unknown
+}

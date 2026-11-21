@@ -1,0 +1,3161 @@
+// Shape inference and the static tensor rules (src/tensor_types/infer.rs):
+// signatures, obligations, the body checker and `analyze`.
+
+use @vesper/ast::{
+    Ast,
+    lit_at,
+    list_len,
+    list_at,
+    type_at,
+    expr_at,
+    pat_at
+};
+use @vesper/check-data::util::{
+    push_decimal
+};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::state::{
+    St,
+    put,
+    put_dim,
+    put_dtype,
+    put_ty,
+    put_shape,
+    spells,
+    cmp_names,
+    cmp_dim,
+    last_segment,
+    strip_prefix,
+    first_colons,
+    name_prefix,
+    name_suffix,
+    dim_const,
+    dim_var,
+    dim_mul,
+    dim_node,
+    dim_var_at,
+    dim_divides,
+    put_dim_error,
+    mk_ty,
+    ty_node,
+    ty_item,
+    ty_items,
+    ty_named,
+    ty_pair,
+    has_tensor,
+    err_code,
+    diag_same,
+};
+use self::kinds::{
+    Cx,
+    Ob,
+    at32,
+    set32,
+    nm,
+    paramn,
+    fnn,
+    adtn,
+    variantn,
+    fieldn,
+    genericn,
+    effectsn,
+    effectn,
+    stmtn,
+    argn,
+    clausen,
+    item_at,
+    effdecln,
+    impln,
+    traitn,
+    confn,
+    scope_kind,
+    is_block,
+    collect_kinds,
+    collect_row_kinds,
+    resolve_kinds,
+    uses_clear,
+    adt_kinds,
+    mark_blocks,
+    push_diag,
+    diag_truncate_to,
+    function_mentions,
+    fns_mention,
+    type_mentions,
+    scope_ty,
+    scope_dim,
+    scope_dtype,
+    scope_shape,
+};
+use self::subst::{
+    Subst,
+    find,
+    Mark,
+    subst_new,
+    mark,
+    undo,
+    set_dim,
+    set_dtype,
+    set_ty,
+    dim_flexible,
+    dim_subst1,
+    sub_dim,
+    sub_dim_or,
+    sub_ty,
+    sub_ty_or,
+    unify,
+    unify_dim,
+    unify_settle,
+    settle,
+    binds_dim,
+};
+
+const NONE: u32 = 4294967295;
+
+const T_TENSOR: u8 = 1;
+const T_LEASE: u8 = 2;
+const T_SEQ: u8 = 3;
+const T_ADT: u8 = 4;
+const T_TUPLE: u8 = 5;
+const T_FN: u8 = 6;
+const T_VAR: u8 = 7;
+const T_BASE: u8 = 8;
+const T_UNKNOWN: u8 = 9;
+
+const KD_DIM: u8 = 0;
+const KD_DTYPE: u8 = 1;
+const KD_TYPE: u8 = 2;
+
+// Diagnostic codes (`tensor_types::codes`).
+const C_KIND: u32 = 761;
+const C_DIM: u32 = 762;
+const C_SHAPE: u32 = 763;
+const C_INFER: u32 = 764;
+const C_OBLIGATION: u32 = 765;
+const C_DTYPE: u32 = 766;
+const C_WIRE: u32 = 767;
+const C_OPAQUE: u32 = 768;
+const C_HANDLER: u32 = 769;
+const C_UNSUPPORTED: u32 = 770;
+const C_POOL: u32 = 771;
+
+// ----- small helpers ------------------------------------------------------------------
+
+fn err_s(inout st: St, code: u32, start: u64, end: u64, in m: Str) {
+    let mut t = ChunkSeq::new[u8]();
+    put(inout t, in m);
+    push_diag(inout st, code, start, end, in t);
+}
+
+// A diagnostic whose message is `err`.
+fn err_last(inout st: St, code: u32, start: u64, end: u64) {
+    let mut t = ChunkSeq::new[u8]();
+    t.extend(in st.err.as_slice());
+    push_diag(inout st, code, start, end, in t);
+}
+
+fn base_s(inout st: St, in s: Str) -> u32 {
+    let n = st.names.intern(in s.as_bytes());
+    ty_named(inout st, T_BASE, n)
+}
+
+fn name_s(inout st: St, in s: Str) -> u32 {
+    st.names.intern(in s.as_bytes())
+}
+
+fn adt1(inout st: St, name: u32, t: u32) -> u32 {
+    let mut items = ChunkSeq::new[u32]();
+    items.push(0);
+    items.push(t);
+    mk_ty(inout st, T_ADT, name, 0, in items)
+}
+
+fn adt2(inout st: St, name: u32, t: u32, u: u32) -> u32 {
+    let mut items = ChunkSeq::new[u32]();
+    items.push(0);
+    items.push(t);
+    items.push(0);
+    items.push(u);
+    mk_ty(inout st, T_ADT, name, 0, in items)
+}
+
+// The `Arg::Ty` argument `i` of an Adt type, or NONE.
+fn adt_ty_arg(in st: St, t: u32, i: u64) -> u32 {
+    let x = ty_node(in st, t);
+    if x.k != T_ADT || i >= widen_u64(x.n) {
+        return NONE;
+    }
+    if ty_item(in st, t, wrapping_mul(i, 2)) != 0 {
+        return NONE;
+    }
+    ty_item(in st, t, inc(wrapping_mul(i, 2)))
+}
+
+fn or_unknown(in st: St, t: u32) -> u32 {
+    if t == NONE {
+        st.unknown
+    } else {
+        t
+    }
+}
+
+// ----- obligations ------------------------------------------------------------------------
+
+fn put_ob(in st: St, inout o: ChunkSeq[u8], b: Ob) {
+    st.names.write(b.r, inout o);
+    put(inout o, in ": ");
+    if b.k == 0 {
+        put_dim(in st, inout o, b.d1);
+        put(inout o, in " must be even");
+    } else {
+        put_dim(in st, inout o, b.d2);
+        put(inout o, in " must be a multiple of ");
+        put_dim(in st, inout o, b.d1);
+    }
+}
+
+// The derived `Ord` of `Obligation`.
+fn cmp_ob(in st: St, x: Ob, y: Ob) -> i64 {
+    if x.k != y.k {
+        if x.k < y.k {
+            return -1;
+        }
+        return 1;
+    }
+    let c = cmp_dim(in st, x.d1, y.d1);
+    if c != 0 {
+        return c;
+    }
+    if x.k == 1 {
+        let c2 = cmp_dim(in st, x.d2, y.d2);
+        if c2 != 0 {
+            return c2;
+        }
+    }
+    cmp_names(in st, x.r, y.r)
+}
+
+// `Obligation::decide`: 1 true, 0 false, 2 depends on variables.
+fn decide(in st: St, b: Ob) -> u8 {
+    if b.k == 0 {
+        if dim_node(in st, b.d1).coeff % 2 == 0 {
+            return 1;
+        }
+        if (dim_node(in st, b.d1).n == 0) {
+            return 0;
+        }
+        return 2;
+    }
+    if dim_divides(in st, b.d1, b.d2) {
+        return 1;
+    }
+    if (dim_node(in st, b.d1).n == 0) && (dim_node(in st, b.d2).n == 0) {
+        return 0;
+    }
+    2
+}
+
+fn ob_get(in cx: Cx, i: u64) -> Ob {
+    match cx.obs.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => Ob {
+            k: 0,
+            d1: 0,
+            d2: 0,
+            r: 0
+        },
+    }
+}
+
+fn bo_get(in cx: Cx, i: u64) -> Ob {
+    match cx.bo.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => Ob {
+            k: 0,
+            d1: 0,
+            d2: 0,
+            r: 0
+        },
+    }
+}
+
+// Inserts into the body's sorted obligation set.
+fn bo_insert(in st: St, inout cx: Cx, b: Ob) {
+    let n = cx.bo.len();
+    let mut at = n;
+    for i in 0..n {
+        let c = cmp_ob(in st, bo_get(in cx, i), b);
+        if c == 0 {
+            return;
+        }
+        if c > 0 {
+            at = i;
+            break;
+        }
+    }
+    cx.bo.push(b);
+    let mut j = n;
+    loop {
+        if j <= at {
+            break;
+        }
+        let prev = bo_get(in cx, wrapping_sub(j, 1));
+        let ok = cx.bo.try_set(j, prev);
+        j = wrapping_sub(j, 1);
+    }
+    let ok2 = cx.bo.try_set(at, b);
+}
+
+// ----- signatures -------------------------------------------------------------------------
+
+fn sig_gen_count(in cx: Cx, row: u32) -> u64 {
+    widen_u64(u32_at(in cx.sg_gn, widen_u64(row)))
+}
+
+fn sig_gen_name(in cx: Cx, row: u32, i: u64) -> u32 {
+    u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+}
+
+fn sig_gen_kind(in cx: Cx, row: u32, i: u64) -> u8 {
+    u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+}
+
+fn sig_param_count(in cx: Cx, row: u32) -> u64 {
+    widen_u64(u32_at(in cx.sg_pn, widen_u64(row)))
+}
+
+fn sig_param_ty(in cx: Cx, row: u32, i: u64) -> u32 {
+    u32_at(in cx.sg_pty, wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i))
+}
+
+fn sig_param_pass(in cx: Cx, row: u32, i: u64) -> u8 {
+    u8_at(in cx.sg_ppass, wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i))
+}
+
+fn sig_ob_count(in cx: Cx, row: u32) -> u64 {
+    widen_u64(u32_at(in cx.sg_on, widen_u64(row)))
+}
+
+fn sig_ob(in cx: Cx, row: u32, i: u64) -> Ob {
+    ob_get(in cx, wrapping_add(widen_u64(u32_at(in cx.sg_oa, widen_u64(row))), i))
+}
+
+// Adds a signature row; generics and params are pushed by the caller
+// right before (their starts are given).
+fn add_sig(
+    inout cx: Cx,
+    name: u32,
+    ga: u64,
+    pa: u64,
+    res: u32,
+    pool: u8,
+    kv: u32,
+    hd: u32,
+    start: u64,
+    end: u64
+) -> u32 {
+    let row = wrapping_u32(cx.sg_name.len());
+    cx.sg_name.push(name);
+    cx.sg_ga.push(wrapping_u32(ga));
+    cx.sg_gn.push(wrapping_u32(wrapping_sub(cx.sg_gsym.len(), ga)));
+    cx.sg_pa.push(wrapping_u32(pa));
+    cx.sg_pn.push(wrapping_u32(wrapping_sub(cx.sg_pty.len(), pa)));
+    cx.sg_res.push(res);
+    cx.sg_pool.push(pool);
+    cx.sg_kv.push(kv);
+    cx.sg_hd.push(hd);
+    cx.sg_oa.push(0);
+    cx.sg_on.push(0);
+    cx.sg_start.push(start);
+    cx.sg_end.push(end);
+    row
+}
+
+fn set_scope_from(inout cx: Cx, in names: ChunkSeq[u32], in kinds: ChunkSeq[u8]) {
+    cx.sc_name.clear();
+    cx.sc_kind.clear();
+    let mut n = names.len();
+    if kinds.len() < n {
+        n = kinds.len();
+    }
+    for i in 0..n {
+        cx.sc_name.push(u32_at(in names, i));
+        cx.sc_kind.push(u8_at(in kinds, i));
+    }
+}
+
+// `signature`: adds the function's signature, or pushes its diagnostic.
+fn signature(inout st: St, inout cx: Cx, in a: Ast, f: u32) {
+    let x = fnn(in a, f);
+    let mut names = ChunkSeq::new[u32]();
+    for i in 0..list_len(in a, x.generics) {
+        let g = genericn(in a, list_at(in a, x.generics, i));
+        if !g.row {
+            names.push(nm(in st, g.name));
+        }
+    }
+    cx.gset.clear();
+    cx.gset.extend(in names.as_slice());
+    uses_clear(inout cx);
+    for i in 0..list_len(in a, x.params) {
+        collect_kinds(in st, inout cx, in a, paramn(in a, list_at(in a, x.params, i)).ty);
+    }
+    collect_kinds(in st, inout cx, in a, x.result);
+    collect_row_kinds(in st, inout cx, in a, x.effects);
+    let mut kinds = ChunkSeq::new[u8]();
+    let start = widen_u64(x.start);
+    let end = widen_u64(x.end);
+    if !resolve_kinds(inout st, in cx, in names, inout kinds) {
+        err_last(inout st, C_KIND, start, end);
+        return;
+    }
+    set_scope_from(inout cx, in names, in kinds);
+    let name = nm(in st, x.name);
+    let mut ptys = ChunkSeq::new[u32]();
+    let mut ppass = ChunkSeq::new[u8]();
+    for i in 0..list_len(in a, x.params) {
+        let p = paramn(in a, list_at(in a, x.params, i));
+        let t = scope_ty(inout st, in cx, in a, p.ty);
+        if t == NONE {
+            let code = err_code(in st);
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "parameter '");
+            st.names.write(nm(in st, p.name), inout m);
+            put(inout m, in "': ");
+            m.extend(in st.err.as_slice());
+            push_diag(inout st, code, (widen_u64(p.start)), (widen_u64(p.end)), in m);
+            return;
+        }
+        ptys.push(t);
+        ppass.push(p.pass);
+    }
+    let result = scope_ty(inout st, in cx, in a, x.result);
+    if result == NONE {
+        let code = err_code(in st);
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "result of '");
+        st.names.write(name, inout m);
+        put(inout m, in "': ");
+        m.extend(in st.err.as_slice());
+        push_diag(inout st, code, start, end, in m);
+        return;
+    }
+    let mut pool: u8 = 0;
+    let mut kv: u32 = 0;
+    let mut hd: u32 = 0;
+    if x.effects != NONE {
+        let row = effectsn(in a, x.effects);
+        for i in 0..list_len(in a, row.instances) {
+            let e = effectn(in a, list_at(in a, row.instances, i));
+            if nm(in st, e.name) == st.s_kv && list_len(in a, e.args) > 0 {
+                if list_len(in a, e.args) != 2 {
+                    err_s(
+                        inout st,
+                        C_KIND,
+                        start,
+                        end,
+                        in "KvCachePool takes two dimensions: KvCachePool[KvHeads, HeadDim]"
+                    );
+                    return;
+                }
+                let d1 = scope_dim(inout st, in cx, in a, list_at(in a, e.args, 0));
+                if d1 == NONE {
+                    err_last(inout st, C_KIND, start, end);
+                    return;
+                }
+                let d2 = scope_dim(inout st, in cx, in a, list_at(in a, e.args, 1));
+                if d2 == NONE {
+                    err_last(inout st, C_KIND, start, end);
+                    return;
+                }
+                pool = 1;
+                kv = d1;
+                hd = d2;
+            }
+        }
+    }
+    let ga = cx.sg_gsym.len();
+    cx.sg_gsym.extend(in names.as_slice());
+    cx.sg_gkind.extend(in kinds.as_slice());
+    let pa = cx.sg_pty.len();
+    cx.sg_pty.extend(in ptys.as_slice());
+    cx.sg_ppass.extend(in ppass.as_slice());
+    let row = add_sig(inout cx, name, ga, pa, result, pool, kv, hd, start, end);
+    set32(inout cx.sg_row, name, row);
+}
+
+// ----- ADT infos --------------------------------------------------------------------------
+
+fn info_gen_count(in cx: Cx, r: u32) -> u64 {
+    let g = widen_u64(u32_at(in cx.ai_gn, widen_u64(r)));
+    let k = widen_u64(u32_at(in cx.ai_kn, widen_u64(r)));
+    if k < g {
+        k
+    } else {
+        g
+    }
+}
+
+// All generics of the info (not zipped with kinds), for `adt_subst`.
+
+fn info_variant(in st: St, in cx: Cx, r: u32, variant: u32) -> u32 {
+    let a = widen_u64(u32_at(in cx.ai_va, widen_u64(r)));
+    let n = widen_u64(u32_at(in cx.ai_vn, widen_u64(r)));
+    for i in 0..n {
+        if u32_at(in cx.vr_name, wrapping_add(a, i)) == variant {
+            return wrapping_u32(wrapping_add(a, i));
+        }
+    }
+    NONE
+}
+
+// The first ADT in name order (optionally only enums) with a variant
+// named `variant`: its info row, or NONE.
+fn adt_with_variant(in st: St, in cx: Cx, variant: u32, enums: bool) -> u32 {
+    for i in 0..cx.ai_sorted.len() {
+        let r = u32_at(in cx.ai_sorted, i);
+        if enums && !(u8_at(in cx.ai_enum, widen_u64(r)) == 1) {
+            continue;
+        }
+        if info_variant(in st, in cx, r, variant) != NONE {
+            return r;
+        }
+    }
+    NONE
+}
+
+// `adt_subst(info, args)` of an Adt type `t`.
+fn adt_subst(in st: St, in cx: Cx, r: u32, t: u32) -> Subst {
+    let mut s = subst_new();
+    let x = ty_node(in st, t);
+    let mut n = widen_u64(u32_at(in cx.ai_gn, widen_u64(r)));
+    if x.k != T_ADT {
+        n = 0;
+    } else if widen_u64(x.n) < n {
+        n = widen_u64(x.n);
+    }
+    for i in 0..n {
+        let g = u32_at(
+            in cx.ai_syms,
+            wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(r))), i)
+        );
+        let tag = ty_item(in st, t, wrapping_mul(i, 2));
+        let id = ty_item(in st, t, inc(wrapping_mul(i, 2)));
+        if tag == 1 {
+            set_dim(inout s, g, id);
+        } else if tag == 2 {
+            set_dtype(inout s, g, id);
+        } else {
+            set_ty(inout s, g, id);
+        }
+    }
+    s
+}
+
+// The ADT field types (`analyze`'s "ADT field types" pass).
+fn adt_infos(inout st: St, inout cx: Cx, in a: Ast) {
+    let wire = st.s_wire;
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind != 1 {
+            continue;
+        }
+        let x = adtn(in a, it.node);
+        let name = nm(in st, x.name);
+        let krow = at32(in cx.ak_row, name);
+        let mut names = ChunkSeq::new[u32]();
+        for g in 0..list_len(in a, x.generics) {
+            names.push(nm(in st, genericn(in a, list_at(in a, x.generics, g)).name));
+        }
+        let mut kinds = ChunkSeq::new[u8]();
+        if krow != NONE {
+            for k in 0..widen_u64(u32_at(in cx.ak_n, widen_u64(krow))) {
+                kinds
+                    .push(
+                    u8_at(
+                        in cx.ak_k,
+                        wrapping_add(widen_u64(u32_at(in cx.ak_a, widen_u64(krow))), k)
+                    )
+                );
+            }
+        }
+        set_scope_from(inout cx, in names, in kinds);
+        let block = (u8_at(in cx.blocks, widen_u64(name)) == 1);
+        let va = cx.vr_name.len();
+        let start = widen_u64(x.start);
+        let end = widen_u64(x.end);
+        for v in 0..list_len(in a, x.variants) {
+            let vn = variantn(in a, list_at(in a, x.variants, v));
+            let fa = cx.fr_name.len();
+            for f in 0..list_len(in a, vn.fields) {
+                let fd = fieldn(in a, list_at(in a, vn.fields, f));
+                let fname = nm(in st, fd.name);
+                if block {
+                    cx.fr_name.push(fname);
+                    let bt = ty_named(inout st, T_BASE, wire);
+                    cx.fr_ty.push(bt);
+                    continue;
+                }
+                let t = scope_ty(inout st, in cx, in a, fd.ty);
+                if t != NONE {
+                    let k = ty_node(in st, t).k;
+                    if x.mode != 2 && (k == T_LEASE || k == T_SEQ) {
+                        let mut m = ChunkSeq::new[u8]();
+                        put(inout m, in "field '");
+                        st.names.write(fname, inout m);
+                        put(inout m, in "' holds a linear pool lease; '");
+                        st.names.write(name, inout m);
+                        put(inout m, in "' must be a linear type");
+                        push_diag(inout st, C_OPAQUE, start, end, in m);
+                    }
+                    cx.fr_name.push(fname);
+                    cx.fr_ty.push(t);
+                } else {
+                    let code = err_code(in st);
+                    let mut m = ChunkSeq::new[u8]();
+                    put(inout m, in "field '");
+                    st.names.write(fname, inout m);
+                    put(inout m, in "' of '");
+                    st.names.write(name, inout m);
+                    put(inout m, in "': ");
+                    m.extend(in st.err.as_slice());
+                    push_diag(inout st, code, start, end, in m);
+                    cx.fr_name.push(fname);
+                    cx.fr_ty.push(st.unknown);
+                }
+            }
+            cx.vr_name.push(nm(in st, vn.name));
+            cx.vr_fa.push(wrapping_u32(fa));
+            cx.vr_fn.push(wrapping_u32(wrapping_sub(cx.fr_name.len(), fa)));
+        }
+        let row = wrapping_u32(cx.ai_name.len());
+        cx.ai_name.push(name);
+        cx.ai_ka.push(wrapping_u32(cx.ai_kinds.len()));
+        cx.ai_kn.push(wrapping_u32(kinds.len()));
+        cx.ai_kinds.extend(in kinds.as_slice());
+        cx.ai_ga.push(wrapping_u32(cx.ai_syms.len()));
+        cx.ai_gn.push(wrapping_u32(names.len()));
+        cx.ai_syms.extend(in names.as_slice());
+        cx.ai_va.push(wrapping_u32(va));
+        cx.ai_vn.push(wrapping_u32(wrapping_sub(cx.vr_name.len(), va)));
+        let mut e: u8 = 0;
+        if x.is_enum {
+            e = 1;
+        }
+        cx.ai_enum.push(e);
+        set32(inout cx.ai_row, name, row);
+    }
+    // Distinct names in name order, each with its latest row.
+    let mut sorted = ChunkSeq::new[u32]();
+    for r in 0..cx.ai_name.len() {
+        let name = u32_at(in cx.ai_name, r);
+        if widen_u64(at32(in cx.ai_row, name)) != r {
+            continue;
+        }
+        let n = sorted.len();
+        let mut at = n;
+        for i in 0..n {
+            if cmp_names(in st, u32_at(in cx.ai_name, widen_u64(u32_at(in sorted, i))), name) > 0 {
+                at = i;
+                break;
+            }
+        }
+        sorted.push(wrapping_u32(r));
+        let mut j = n;
+        loop {
+            if j <= at {
+                break;
+            }
+            let prev = u32_at(in sorted, wrapping_sub(j, 1));
+            let ok = sorted.try_set(j, prev);
+            j = wrapping_sub(j, 1);
+        }
+        let ok2 = sorted.try_set(at, wrapping_u32(r));
+    }
+    cx.ai_sorted = sorted;
+}
+
+// ----- the body checker --------------------------------------------------------------------
+
+fn env_pop(inout cx: Cx) {
+    let n = cx.en_marks.len();
+    if n == 0 {
+        return;
+    }
+    let m = u64_at(in cx.en_marks, wrapping_sub(n, 1));
+    cx.en_marks.truncate(wrapping_sub(n, 1));
+    cx.en_name.truncate(m);
+    cx.en_ty.truncate(m);
+}
+
+fn bind(inout cx: Cx, n: u32, t: u32) {
+    if cx.en_marks.len() == 0 {
+        return;
+    }
+    cx.en_name.push(n);
+    cx.en_ty.push(t);
+}
+
+fn lookup(in cx: Cx, n: u32) -> u32 {
+    let mut i = cx.en_name.len();
+    loop {
+        if i == 0 {
+            return NONE;
+        }
+        i = wrapping_sub(i, 1);
+        if u32_at(in cx.en_name, i) == n {
+            return u32_at(in cx.en_ty, i);
+        }
+    }
+}
+
+fn scope_kind_of(in cx: Cx, n: u32) -> u8 {
+    let mut i = cx.sc_name.len();
+    loop {
+        if i == 0 {
+            return 9;
+        }
+        i = wrapping_sub(i, 1);
+        if u32_at(in cx.sc_name, i) == n {
+            return u8_at(in cx.sc_kind, i);
+        }
+    }
+}
+
+// `Body::expect`.
+fn expect(
+    inout st: St,
+    in cx: Cx,
+    expected: u32,
+    actual: u32,
+    start: u64,
+    end: u64,
+    in context: ChunkSeq[u8]
+) {
+    let mut s = subst_new();
+    let code = unify_settle(inout st, inout s, expected, actual);
+    if code != 0 {
+        let mut m = ChunkSeq::new[u8]();
+        m.extend(in context.as_slice());
+        put(inout m, in ": expected ");
+        put_ty(in st, inout m, expected);
+        put(inout m, in ", found ");
+        put_ty(in st, inout m, actual);
+        if st.err.len() > 0 {
+            put(inout m, in " (");
+            m.extend(in st.err.as_slice());
+            m.push(41);
+        }
+        push_diag(inout st, code, start, end, in m);
+    }
+}
+
+fn expect_s(
+    inout st: St,
+    in cx: Cx,
+    expected: u32,
+    actual: u32,
+    start: u64,
+    end: u64,
+    in context: Str
+) {
+    let mut c = ChunkSeq::new[u8]();
+    put(inout c, in context);
+    expect(inout st, in cx, expected, actual, start, end, in c);
+}
+
+fn ob_all_dims(in st: St, in cx: Cx, d: u32) -> bool {
+    for i in 0..widen_u64(dim_node(in st, d).n) {
+        if scope_kind(in cx, dim_var_at(in st, d, i)) != KD_DIM {
+            return false;
+        }
+    }
+    true
+}
+
+// `Body::require`.
+fn require(inout st: St, inout cx: Cx, b: Ob, start: u64, end: u64) {
+    let d = decide(in st, b);
+    if d == 1 {
+        return;
+    }
+    let mut m = ChunkSeq::new[u8]();
+    if d == 0 {
+        put_ob(in st, inout m, b);
+        push_diag(inout st, C_OBLIGATION, start, end, in m);
+        return;
+    }
+    let mut all = ob_all_dims(in st, in cx, b.d1);
+    if b.k == 1 && all {
+        all = ob_all_dims(in st, in cx, b.d2);
+    }
+    if all {
+        bo_insert(in st, inout cx, b);
+    } else {
+        put(inout m, in "cannot decide: ");
+        put_ob(in st, inout m, b);
+        push_diag(inout st, C_INFER, start, end, in m);
+    }
+}
+
+// `Body::tensor`: whether `t` is a tensor; reports otherwise.
+fn want_tensor(inout st: St, t: u32, start: u64, end: u64, in what: ChunkSeq[u8]) -> bool {
+    let k = ty_node(in st, t).k;
+    if k == T_TENSOR {
+        return true;
+    }
+    let mut m = ChunkSeq::new[u8]();
+    if k == T_UNKNOWN {
+        put(inout m, in "cannot determine the shape of ");
+        m.extend(in what.as_slice());
+        put(inout m, in "; annotate it with a tensor type");
+        push_diag(inout st, C_INFER, start, end, in m);
+    } else {
+        m.extend(in what.as_slice());
+        put(inout m, in " must be a tensor, found ");
+        put_ty(in st, inout m, t);
+        push_diag(inout st, C_SHAPE, start, end, in m);
+    }
+    false
+}
+
+// `Body::f32`.
+fn want_f32(inout st: St, d: u32, start: u64, end: u64, in what: ChunkSeq[u8]) -> bool {
+    if d == 0 {
+        return true;
+    }
+    let mut m = ChunkSeq::new[u8]();
+    m.extend(in what.as_slice());
+    put(inout m, in " must have element type F32, found ");
+    put_dtype(in st, inout m, d);
+    push_diag(inout st, C_DTYPE, start, end, in m);
+    false
+}
+
+// "argument {i + 1} of Tensor::{op}".
+fn arg_what(in st: St, i: u64, in pre: Str, op: u32) -> ChunkSeq[u8] {
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in "argument ");
+    push_decimal(inout m, inc(i));
+    put(inout m, in " of ");
+    put(inout m, in pre);
+    st.names.write(op, inout m);
+    m
+}
+
+// `Body::no_operator`.
+fn no_operator(inout st: St, t: u32, start: u64, end: u64) {
+    if (ty_node(in st, t).k == T_TENSOR) {
+        err_s(
+            inout st,
+            C_UNSUPPORTED,
+            start,
+            end,
+            in "tensor arithmetic uses Tensor::add, Tensor::mul and Tensor::matmul, not operators"
+        );
+    }
+}
+
+// `Body::join`.
+fn join(inout st: St, in cx: Cx, x: u32, y: u32, start: u64, end: u64, in what: Str) -> u32 {
+    if x == st.unknown {
+        return y;
+    }
+    expect_s(inout st, in cx, x, y, start, end, in what);
+    x
+}
+
+// `Body::opaque`.
+fn opaque(inout st: St, name: u32, start: u64, end: u64, in what: Str) -> bool {
+    let b = last_segment(inout st, name);
+    if b == st.s_tensor || b == st.s_lease || b == st.s_seq || b == st.s_dims {
+        let mut m = ChunkSeq::new[u8]();
+        m.push(39);
+        st.names.write(b, inout m);
+        put(
+            inout m,
+            in "' values are created and consumed only by Tensor and KvCachePool operations; a source program cannot "
+        );
+        put(inout m, in what);
+        put(inout m, in " one");
+        push_diag(inout st, C_OPAQUE, start, end, in m);
+        return true;
+    }
+    false
+}
+
+// `Body::variant_fields`: the (name, type) pairs into `names`/`tys`.
+fn variant_fields(
+    inout st: St,
+    in cx: Cx,
+    name: u32,
+    t: u32,
+    inout names: ChunkSeq[u32],
+    inout tys: ChunkSeq[u32]
+) {
+    names.clear();
+    tys.clear();
+    let variant = last_segment(inout st, name);
+    let x = ty_node(in st, t);
+    if x.k != T_ADT {
+        return;
+    }
+    let n = x.a;
+    if (n == st.s_option && variant == st.s_some) || (n == st.s_result && variant == st.s_ok) {
+        names.push(cx.s_zero);
+        tys.push(or_unknown(in st, adt_ty_arg(in st, t, 0)));
+        return;
+    }
+    if n == st.s_result && variant == st.s_err {
+        names.push(cx.s_zero);
+        tys.push(or_unknown(in st, adt_ty_arg(in st, t, 1)));
+        return;
+    }
+    let r = at32(in cx.ai_row, n);
+    if r == NONE {
+        return;
+    }
+    let v = info_variant(in st, in cx, r, variant);
+    if v == NONE {
+        return;
+    }
+    let s = adt_subst(in st, in cx, r, t);
+    for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
+        names
+            .push(
+            u32_at(in cx.fr_name, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
+        );
+        let ft = sub_ty_or(
+            inout st,
+            in s,
+            u32_at(in cx.fr_ty, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i)),
+            st.unknown
+        );
+        tys.push(ft);
+    }
+}
+
+// `Body::pattern`.
+fn pattern(inout st: St, inout cx: Cx, in a: Ast, p: u32, t: u32) {
+    let n = pat_at(in a, p);
+    if n.kind == 2 {
+        bind(inout cx, nm(in st, n.a), t);
+    } else if n.kind == 4 {
+        let x = ty_node(in st, t);
+        for i in 0..list_len(in a, n.a) {
+            let mut ti = st.unknown;
+            if x.k == T_TUPLE && i < widen_u64(x.n) {
+                ti = ty_item(in st, t, i);
+            }
+            pattern(inout st, inout cx, in a, list_at(in a, n.a, i), ti);
+        }
+    } else if n.kind == 5 {
+        let name = nm(in st, n.a);
+        if opaque(inout st, name, widen_u64(n.start), widen_u64(n.end), in "destructure") {
+            return;
+        }
+        let mut fnames = ChunkSeq::new[u32]();
+        let mut ftys = ChunkSeq::new[u32]();
+        variant_fields(inout st, in cx, name, t, inout fnames, inout ftys);
+        let m = list_len(in a, n.b) >> 1;
+        for i in 0..m {
+            let f = nm(in st, list_at(in a, n.b, wrapping_mul(i, 2)));
+            let q = list_at(in a, n.b, inc(wrapping_mul(i, 2)));
+            let mut ft = st.unknown;
+            for j in 0..fnames.len() {
+                if u32_at(in fnames, j) == f {
+                    ft = u32_at(in ftys, j);
+                    break;
+                }
+            }
+            pattern(inout st, inout cx, in a, q, ft);
+        }
+    }
+}
+
+// A tuple field name as an index (`f.parse::<usize>()`), or NONE64.
+fn field_index(in st: St, f: u32) -> u64 {
+    let n = st.names.size(f);
+    if n == 0 || n > 18 {
+        return 18446744073709551615;
+    }
+    let mut v: u64 = 0;
+    for i in 0..n {
+        let c = st.names.byte(f, i);
+        if c < 48 || c > 57 {
+            return 18446744073709551615;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(widen_u64(c), 48));
+    }
+    v
+}
+
+// `Body::field`.
+fn field(inout st: St, in cx: Cx, t: u32, f: u32, start: u64, end: u64) -> u32 {
+    let x = ty_node(in st, t);
+    if x.k == T_TENSOR || x.k == T_LEASE || x.k == T_SEQ {
+        let mut name = st.s_tensor;
+        if x.k == T_LEASE {
+            name = st.s_lease;
+        } else if x.k == T_SEQ {
+            name = st.s_seq;
+        }
+        let o = opaque(inout st, name, start, end, in "read a field of");
+        return st.unknown;
+    }
+    if x.k == T_TUPLE {
+        let i = field_index(in st, f);
+        if i < widen_u64(x.n) {
+            return ty_item(in st, t, i);
+        }
+        return st.unknown;
+    }
+    if x.k == T_ADT {
+        let r = at32(in cx.ai_row, x.a);
+        if r == NONE || (u8_at(in cx.ai_enum, widen_u64(r)) == 1) {
+            return st.unknown;
+        }
+        let vn = widen_u64(u32_at(in cx.ai_vn, widen_u64(r)));
+        if vn == 0 {
+            return st.unknown;
+        }
+        let v = u32_at(in cx.ai_va, widen_u64(r));
+        let s = adt_subst(in st, in cx, r, t);
+        for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
+            if u32_at(in cx.fr_name, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
+                == f {
+                return sub_ty_or(
+                    inout st,
+                    in s,
+                    u32_at(
+                        in cx.fr_ty,
+                        wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i)
+                    ),
+                    st.unknown
+                );
+            }
+        }
+        return st.unknown;
+    }
+    st.unknown
+}
+
+// `Body::fresh_generics`: binds each generic `(names[i], kinds[i])` to a
+// fresh `?n` in `s`; the fresh names go to `fresh`.
+fn fresh_generics(
+    inout st: St,
+    inout cx: Cx,
+    in names: ChunkSeq[u32],
+    in kinds: ChunkSeq[u8],
+    inout s: Subst,
+    inout fresh: ChunkSeq[u32]
+) {
+    for i in 0..names.len() {
+        cx.fresh = inc(cx.fresh);
+        let mut t = ChunkSeq::new[u8]();
+        t.push(63);
+        push_decimal(inout t, cx.fresh);
+        let v = st.names.intern(in t.as_slice());
+        let g = u32_at(in names, i);
+        let k = u8_at(in kinds, i);
+        if k == KD_DIM {
+            let d = dim_var(inout st, v);
+            set_dim(inout s, g, d);
+        } else if k == KD_DTYPE {
+            set_dtype(inout s, g, wrapping_add(3, wrapping_mul(v, 2)));
+        } else {
+            let y = ty_named(inout st, T_VAR, v);
+            set_ty(inout s, g, y);
+        }
+        fresh.push(v);
+    }
+}
+
+// The fresh name of the first generic named `g`.
+fn fresh_of(in names: ChunkSeq[u32], in fresh: ChunkSeq[u32], g: u32) -> u32 {
+    for i in 0..names.len() {
+        if u32_at(in names, i) == g {
+            return u32_at(in fresh, i);
+        }
+    }
+    NONE
+}
+
+fn exprs_none(inout st: St, inout cx: Cx, in a: Ast, l: u32, pairs: bool) {
+    if pairs {
+        let m = list_len(in a, l) >> 1;
+        for i in 0..m {
+            let t = expr(inout st, inout cx, in a, list_at(in a, l, inc(wrapping_mul(i, 2))), NONE);
+        }
+    } else {
+        for i in 0..list_len(in a, l) {
+            let t = expr(inout st, inout cx, in a, list_at(in a, l, i), NONE);
+        }
+    }
+}
+
+fn args_none(inout st: St, inout cx: Cx, in a: Ast, args: u32) -> ChunkSeq[u32] {
+    let mut out = ChunkSeq::new[u32]();
+    for i in 0..list_len(in a, args) {
+        let t = expr(inout st, inout cx, in a, argn(in a, list_at(in a, args, i)).expr, NONE);
+        out.push(t);
+    }
+    out
+}
+
+// `Body::struct_literal`.
+fn struct_literal(
+    inout st: St,
+    inout cx: Cx,
+    in a: Ast,
+    e: u32,
+    name: u32,
+    fields: u32,
+    expected: u32
+) -> u32 {
+    let start = widen_u64(expr_at(in a, e).start);
+    let end = widen_u64(expr_at(in a, e).end);
+    if opaque(inout st, name, start, end, in "construct") {
+        exprs_none(inout st, inout cx, in a, fields, true);
+        return st.unknown;
+    }
+    let c = first_colons(in st, name);
+    let mut adt = name;
+    let mut variant = name;
+    if c < st.names.size(name) {
+        adt = name_prefix(inout st, name, c);
+        variant = name_suffix(inout st, name, wrapping_add(c, 2));
+    }
+    let mut r = at32(in cx.ai_row, adt);
+    if r == NONE {
+        r = adt_with_variant(in st, in cx, variant, false);
+        if r == NONE {
+            exprs_none(inout st, inout cx, in a, fields, true);
+            return st.unknown;
+        }
+        adt = u32_at(in cx.ai_name, widen_u64(r));
+    }
+    let gn = info_gen_count(in cx, r);
+    let mut gnames = ChunkSeq::new[u32]();
+    let mut gkinds = ChunkSeq::new[u8]();
+    for i in 0..gn {
+        gnames
+            .push(
+            u32_at(in cx.ai_syms, wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(r))), i))
+        );
+        gkinds
+            .push(
+            u8_at(in cx.ai_kinds, wrapping_add(widen_u64(u32_at(in cx.ai_ka, widen_u64(r))), i))
+        );
+    }
+    let mut renaming = subst_new();
+    let mut fresh = ChunkSeq::new[u32]();
+    fresh_generics(inout st, inout cx, in gnames, in gkinds, inout renaming, inout fresh);
+    let mut items = ChunkSeq::new[u32]();
+    for i in 0..gn {
+        let g = u32_at(in gnames, i);
+        let k = u8_at(in gkinds, i);
+        if k == KD_DIM {
+            items.push(1);
+            items.push(find(in renaming.dk, in renaming.dv, g));
+        } else if k == KD_DTYPE {
+            items.push(2);
+            items.push(find(in renaming.ek, in renaming.ev, g));
+        } else {
+            items.push(0);
+            items.push(find(in renaming.yk, in renaming.yv, g));
+        }
+    }
+    let declared = mk_ty(inout st, T_ADT, adt, 0, in items);
+    let mut s = subst_new();
+    if expected != NONE {
+        let mk = mark(in s);
+        if unify(inout st, inout s, declared, expected) != 0 {
+            undo(inout s, mk);
+        }
+    }
+    let v = info_variant(in st, in cx, r, variant);
+    let mut any_tensor = false;
+    if v != NONE {
+        for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
+            if has_tensor(
+                in st,
+                u32_at(in cx.fr_ty, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
+            ) {
+                any_tensor = true;
+            }
+        }
+    }
+    let m = list_len(in a, fields) >> 1;
+    for i in 0..m {
+        let f = nm(in st, list_at(in a, fields, wrapping_mul(i, 2)));
+        let x = list_at(in a, fields, inc(wrapping_mul(i, 2)));
+        let mut ft = st.unknown;
+        if v != NONE {
+            for j in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
+                if u32_at(
+                    in cx.fr_name,
+                    wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), j)
+                )
+                    == f {
+                    ft = sub_ty_or(
+                        inout st,
+                        in renaming,
+                        u32_at(
+                            in cx.fr_ty,
+                            wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), j)
+                        ),
+                        st.unknown
+                    );
+                    break;
+                }
+            }
+        }
+        let want = sub_ty_or(inout st, in s, ft, st.unknown);
+        let got = expr(inout st, inout cx, in a, x, want);
+        let code = unify(inout st, inout s, ft, got);
+        if code != 0 {
+            let mut reason = ChunkSeq::new[u8]();
+            reason.extend(in st.err.as_slice());
+            let want2 = sub_ty_or(inout st, in s, ft, ft);
+            let mut msg = ChunkSeq::new[u8]();
+            put(inout msg, in "field '");
+            st.names.write(f, inout msg);
+            put(inout msg, in "' of '");
+            st.names.write(adt, inout msg);
+            put(inout msg, in "': expected ");
+            put_ty(in st, inout msg, want2);
+            put(inout msg, in ", found ");
+            put_ty(in st, inout msg, got);
+            put(inout msg, in " (");
+            msg.extend(in reason.as_slice());
+            msg.push(41);
+            push_diag(
+                inout st,
+                code,
+                (widen_u64(expr_at(in a, x).start)),
+                (widen_u64(expr_at(in a, x).end)),
+                in msg
+            );
+        }
+    }
+    let code = settle(inout st, inout s);
+    if code != 0 {
+        let mut msg = ChunkSeq::new[u8]();
+        msg.push(39);
+        st.names.write(adt, inout msg);
+        put(inout msg, in "' literal: ");
+        msg.extend(in st.err.as_slice());
+        push_diag(inout st, code, start, end, in msg);
+    }
+    for i in 0..gnames.len() {
+        let g = u32_at(in gnames, i);
+        let fv = u32_at(in fresh, i);
+        let mut is_dim = false;
+        for j in 0..gnames.len() {
+            if u32_at(in gnames, j) == g && u8_at(in gkinds, j) == KD_DIM {
+                is_dim = true;
+            }
+        }
+        if is_dim && !(find(in s.dk, in s.dv, fv) != NONE) && any_tensor {
+            let mut msg = ChunkSeq::new[u8]();
+            put(inout msg, in "cannot infer dimension '");
+            st.names.write(g, inout msg);
+            put(inout msg, in "' of '");
+            st.names.write(adt, inout msg);
+            put(inout msg, in "'; annotate the binding");
+            push_diag(inout st, C_INFER, start, end, in msg);
+        }
+    }
+    sub_ty_or(inout st, in s, declared, st.unknown)
+}
+
+// `Body::function_value`.
+fn function_value(inout st: St, in cx: Cx, n: u32, start: u64, end: u64) -> u32 {
+    let row = at32(in cx.sg_row, n);
+    if row == NONE {
+        return st.unknown;
+    }
+    let mut tensorish = has_tensor(in st, u32_at(in cx.sg_res, widen_u64(row)));
+    let mut ps = ChunkSeq::new[u32]();
+    for i in 0..widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) {
+        let t = u32_at(
+            in cx.sg_pty,
+            wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i)
+        );
+        if has_tensor(in st, t) {
+            tensorish = true;
+        }
+        ps.push(t);
+    }
+    if !tensorish {
+        return st.unknown;
+    }
+    if widen_u64(u32_at(in cx.sg_gn, widen_u64(row))) > 0 {
+        let mut m = ChunkSeq::new[u8]();
+        m.push(39);
+        st.names.write(n, inout m);
+        put(inout m, in "' has generic parameters and cannot be used as a value; call it directly");
+        push_diag(inout st, C_UNSUPPORTED, start, end, in m);
+        return st.unknown;
+    }
+    mk_ty(inout st, T_FN, 0, u32_at(in cx.sg_res, widen_u64(row)), in ps)
+}
+
+// `Body::indirect`.
+fn indirect(inout st: St, inout cx: Cx, in a: Ast, e: u32, f: u32, args: u32, expected: u32)
+    -> u32 {
+    let x = ty_node(in st, f);
+    let argc = list_len(in a, args);
+    if x.k == T_FN && widen_u64(x.n) == argc {
+        for i in 0..argc {
+            let p = ty_item(in st, f, i);
+            let ax = (argn(in a, list_at(in a, args, i)).expr);
+            let t = expr(inout st, inout cx, in a, ax, p);
+            expect_s(
+                inout st,
+                in cx,
+                p,
+                t,
+                widen_u64(expr_at(in a, ax).start),
+                widen_u64(expr_at(in a, ax).end),
+                in "argument"
+            );
+        }
+        return x.c;
+    }
+    let tys = args_none(inout st, inout cx, in a, args);
+    let mut any = expected != NONE && has_tensor(in st, expected);
+    for i in 0..tys.len() {
+        if has_tensor(in st, u32_at(in tys, i)) {
+            any = true;
+        }
+    }
+    if any {
+        err_s(
+            inout st,
+            C_UNSUPPORTED,
+            widen_u64(expr_at(in a, e).start),
+            widen_u64(expr_at(in a, e).end),
+            in "a call through a function value whose type is not known cannot pass or return tensors; annotate the function value with a `fn(..) -> ..` type"
+        );
+    }
+    st.unknown
+}
+
+// `strip_flexible`.
+fn strip_flexible(inout st: St, t: u32) -> u32 {
+    let x = ty_node(in st, t);
+    if x.k == T_VAR && (st.names.size(x.a) > 0 && st.names.byte(x.a, 0) == 63) {
+        return st.unknown;
+    }
+    if x.k == T_ADT {
+        let mut items = ChunkSeq::new[u32]();
+        for i in 0..widen_u64(x.n) {
+            let tag = ty_item(in st, t, wrapping_mul(i, 2));
+            let id = ty_item(in st, t, inc(wrapping_mul(i, 2)));
+            items.push(tag);
+            if tag == 0 {
+                items.push(strip_flexible(inout st, id));
+            } else {
+                items.push(id);
+            }
+        }
+        return mk_ty(inout st, T_ADT, x.a, 0, in items);
+    }
+    if x.k == T_TUPLE || x.k == T_FN {
+        let mut items = ChunkSeq::new[u32]();
+        for i in 0..widen_u64(x.n) {
+            items.push(strip_flexible(inout st, ty_item(in st, t, i)));
+        }
+        let mut r: u32 = 0;
+        if x.k == T_FN {
+            r = strip_flexible(inout st, x.c);
+        }
+        return mk_ty(inout st, x.k, 0, r, in items);
+    }
+    t
+}
+
+// `Obligation::subst` with the one-pass environment `env`: NONE `k` (255)
+// on overflow.
+fn ob_subst(inout st: St, in env: Subst, b: Ob) -> Ob {
+    let d1 = dim_subst1(inout st, in env, b.d1);
+    let mut d2 = b.d2;
+    if b.k == 1 && d1 != NONE {
+        d2 = dim_subst1(inout st, in env, b.d2);
+    }
+    if d1 == NONE || d2 == NONE {
+        return Ob {
+            k: 255,
+            d1: 0,
+            d2: 0,
+            r: 0
+        };
+    }
+    Ob {
+        k: b.k,
+        d1: d1,
+        d2: d2,
+        r: b.r
+    }
+}
+
+// `Body::apply`: instantiate signature `row` (or the constructor in the
+// `ctor_*` lists when `row` is NONE) at a call.
+fn apply(
+    inout st: St,
+    inout cx: Cx,
+    in a: Ast,
+    e: u32,
+    name: u32,
+    in gnames: ChunkSeq[u32],
+    in gkinds: ChunkSeq[u8],
+    in ptys: ChunkSeq[u32],
+    result0: u32,
+    pool: u8,
+    pkv: u32,
+    phd: u32,
+    in obs: ChunkSeq[Ob],
+    types: u32,
+    args: u32,
+    expected: u32
+) -> u32 {
+    let start = widen_u64(expr_at(in a, e).start);
+    let end = widen_u64(expr_at(in a, e).end);
+    let mut renaming = subst_new();
+    let mut fresh = ChunkSeq::new[u32]();
+    fresh_generics(inout st, inout cx, in gnames, in gkinds, inout renaming, inout fresh);
+    let mut s = subst_new();
+    let tn = list_len(in a, types);
+    if tn > 0 && tn == gnames.len() {
+        for i in 0..tn {
+            let g = u32_at(in gnames, i);
+            let k = u8_at(in gkinds, i);
+            let t = list_at(in a, types, i);
+            let v = fresh_of(in gnames, in fresh, g);
+            if k == KD_DIM {
+                let d = scope_dim(inout st, in cx, in a, t);
+                if d == NONE {
+                    err_last(inout st, C_KIND, start, end);
+                } else {
+                    set_dim(inout s, v, d);
+                }
+            } else if k == KD_DTYPE {
+                let d = scope_dtype(inout st, in cx, in a, t);
+                if d == NONE {
+                    err_last(inout st, C_KIND, start, end);
+                } else {
+                    set_dtype(inout s, v, d);
+                }
+            } else {
+                let y = scope_ty(inout st, in cx, in a, t);
+                if y == NONE {
+                    err_last(inout st, C_KIND, start, end);
+                } else {
+                    set_ty(inout s, v, y);
+                }
+            }
+        }
+    }
+    let result = sub_ty_or(inout st, in renaming, result0, st.unknown);
+    if expected != NONE {
+        let mk = mark(in s);
+        if unify(inout st, inout s, result, expected) != 0 {
+            undo(inout s, mk);
+        }
+    }
+    let cur = cx.cur;
+    if pool == 1 && cur != NONE && u8_at(in cx.sg_pool, widen_u64(cur)) == 1 {
+        let ch = u32_at(in cx.sg_kv, widen_u64(cur));
+        let cd = u32_at(in cx.sg_hd, widen_u64(cur));
+        let h = sub_dim_or(inout st, in renaming, pkv);
+        let d = sub_dim_or(inout st, in renaming, phd);
+        let mut bad = unify_dim(inout st, inout s, h, ch) != 0;
+        if !bad {
+            bad = unify_dim(inout st, inout s, d, cd) != 0;
+        }
+        if bad {
+            let hh = sub_dim_or(inout st, in s, h);
+            let dd = sub_dim_or(inout st, in s, d);
+            let mut m = ChunkSeq::new[u8]();
+            m.push(39);
+            st.names.write(name, inout m);
+            put(inout m, in "' uses KvCachePool[");
+            put_dim(in st, inout m, hh);
+            put(inout m, in ", ");
+            put_dim(in st, inout m, dd);
+            put(inout m, in "] but the caller's row has KvCachePool[");
+            put_dim(in st, inout m, ch);
+            put(inout m, in ", ");
+            put_dim(in st, inout m, cd);
+            m.push(93);
+            push_diag(inout st, C_POOL, start, end, in m);
+        }
+    }
+    for i in 0..list_len(in a, args) {
+        let ax = (argn(in a, list_at(in a, args, i)).expr);
+        if i >= ptys.len() {
+            let t = expr(inout st, inout cx, in a, ax, NONE);
+            continue;
+        }
+        let pt = sub_ty_or(inout st, in renaming, u32_at(in ptys, i), st.unknown);
+        let want = sub_ty_or(inout st, in s, pt, st.unknown);
+        let got = expr(inout st, inout cx, in a, ax, want);
+        if has_tensor(in st, pt) && got == st.unknown {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "cannot determine the shape of argument ");
+            push_decimal(inout m, inc(i));
+            put(inout m, in " of '");
+            st.names.write(name, inout m);
+            put(inout m, in "'; annotate it");
+            push_diag(
+                inout st,
+                C_INFER,
+                (widen_u64(expr_at(in a, ax).start)),
+                (widen_u64(expr_at(in a, ax).end)),
+                in m
+            );
+            continue;
+        }
+        let code = unify(inout st, inout s, pt, got);
+        if code != 0 {
+            let mut reason = ChunkSeq::new[u8]();
+            reason.extend(in st.err.as_slice());
+            let want2 = sub_ty_or(inout st, in s, pt, pt);
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "argument ");
+            push_decimal(inout m, inc(i));
+            put(inout m, in " of '");
+            st.names.write(name, inout m);
+            put(inout m, in "': expected ");
+            put_ty(in st, inout m, want2);
+            put(inout m, in ", found ");
+            put_ty(in st, inout m, got);
+            if reason.len() > 0 {
+                put(inout m, in " (");
+                m.extend(in reason.as_slice());
+                m.push(41);
+            }
+            push_diag(
+                inout st,
+                code,
+                (widen_u64(expr_at(in a, ax).start)),
+                (widen_u64(expr_at(in a, ax).end)),
+                in m
+            );
+        }
+    }
+    let code = settle(inout st, inout s);
+    if code != 0 {
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "call of '");
+        st.names.write(name, inout m);
+        put(inout m, in "': ");
+        m.extend(in st.err.as_slice());
+        push_diag(inout st, code, start, end, in m);
+    }
+    let mut env = subst_new();
+    for i in 0..gnames.len() {
+        if u8_at(in gkinds, i) != KD_DIM {
+            continue;
+        }
+        let g = u32_at(in gnames, i);
+        let v = fresh_of(in gnames, in fresh, g);
+        let dv = dim_var(inout st, v);
+        let d = sub_dim(inout st, in s, dv);
+        if d != NONE && !dim_flexible(in st, d) {
+            set_dim(inout env, g, d);
+        } else {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "cannot infer dimension '");
+            st.names.write(g, inout m);
+            put(inout m, in "' of '");
+            st.names.write(name, inout m);
+            put(inout m, in "'; annotate an argument or the result");
+            push_diag(inout st, C_INFER, start, end, in m);
+            return st.unknown;
+        }
+    }
+    for i in 0..obs.len() {
+        let b0 = match obs.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => Ob {
+                k: 0,
+                d1: 0,
+                d2: 0,
+                r: 0
+            },
+        };
+        let b = ob_subst(inout st, in env, b0);
+        if b.k == 255 {
+            let mut m = ChunkSeq::new[u8]();
+            put_dim_error(inout m, st.derr);
+            push_diag(inout st, C_DIM, start, end, in m);
+            continue;
+        }
+        if decide(in st, b) == 0 {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "call of '");
+            st.names.write(name, inout m);
+            put(inout m, in "' violates its precondition: ");
+            put_ob(in st, inout m, b);
+            push_diag(inout st, C_OBLIGATION, start, end, in m);
+        } else {
+            require(inout st, inout cx, b, start, end);
+        }
+    }
+    let out = sub_ty_or(inout st, in s, result, st.unknown);
+    strip_flexible(inout st, out)
+}
+
+// `apply` of the signature `row`.
+fn apply_sig(
+    inout st: St,
+    inout cx: Cx,
+    in a: Ast,
+    e: u32,
+    row: u32,
+    types: u32,
+    args: u32,
+    expected: u32
+) -> u32 {
+    let mut gnames = ChunkSeq::new[u32]();
+    let mut gkinds = ChunkSeq::new[u8]();
+    for i in 0..widen_u64(u32_at(in cx.sg_gn, widen_u64(row))) {
+        gnames
+            .push(
+            u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+        );
+        gkinds
+            .push(
+            u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+        );
+    }
+    let mut ptys = ChunkSeq::new[u32]();
+    for i in 0..widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) {
+        ptys
+            .push(
+            u32_at(in cx.sg_pty, wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i))
+        );
+    }
+    let mut obs = ChunkSeq::new[Ob]();
+    for i in 0..widen_u64(u32_at(in cx.sg_on, widen_u64(row))) {
+        obs.push(ob_get(in cx, wrapping_add(widen_u64(u32_at(in cx.sg_oa, widen_u64(row))), i)));
+    }
+    apply(
+        inout st,
+        inout cx,
+        in a,
+        e,
+        u32_at(in cx.sg_name, widen_u64(row)),
+        in gnames,
+        in gkinds,
+        in ptys,
+        u32_at(in cx.sg_res, widen_u64(row)),
+        u8_at(in cx.sg_pool, widen_u64(row)),
+        u32_at(in cx.sg_kv, widen_u64(row)),
+        u32_at(in cx.sg_hd, widen_u64(row)),
+        in obs,
+        types,
+        args,
+        expected
+    )
+}
+
+// `Body::call`.
+fn call(inout st: St, inout cx: Cx, in a: Ast, e: u32, expected: u32) -> u32 {
+    let n = expr_at(in a, e);
+    let callee = n.a;
+    let types = n.b;
+    let args = n.c;
+    let cn = expr_at(in a, callee);
+    if cn.kind != 2 {
+        let f = expr(inout st, inout cx, in a, callee, NONE);
+        return indirect(inout st, inout cx, in a, e, f, args, expected);
+    }
+    let name = nm(in st, cn.a);
+    let op = strip_prefix(inout st, name, in "Tensor::");
+    if op != NONE {
+        return tensor_op(inout st, inout cx, in a, e, op, types, args, expected);
+    }
+    let pop = strip_prefix(inout st, name, in "KvCachePool::");
+    if pop != NONE {
+        return pool_op(inout st, inout cx, in a, e, pop, args, expected);
+    }
+    let local = lookup(in cx, name);
+    if local != NONE {
+        return indirect(inout st, inout cx, in a, e, local, args, expected);
+    }
+    if (name == st.s_some || name == st.s_ok || name == st.s_err) && list_len(in a, args) == 1 {
+        let ex = ty_node(in st, expected);
+        let mut inner = NONE;
+        if expected != NONE && ex.k == T_ADT {
+            if name == st.s_err {
+                inner = adt_ty_arg(in st, expected, 1);
+            } else {
+                inner = adt_ty_arg(in st, expected, 0);
+            }
+        }
+        let t = expr(inout st, inout cx, in a, (argn(in a, list_at(in a, args, 0)).expr), inner);
+        let mut o0 = st.unknown;
+        let mut o1 = st.unknown;
+        if expected != NONE && ex.k == T_ADT {
+            o0 = or_unknown(in st, adt_ty_arg(in st, expected, 0));
+            o1 = or_unknown(in st, adt_ty_arg(in st, expected, 1));
+        }
+        if name == st.s_some {
+            return adt1(inout st, st.s_option, t);
+        }
+        if name == st.s_ok {
+            return adt2(inout st, st.s_result, t, o1);
+        }
+        return adt2(inout st, st.s_result, o0, t);
+    }
+    let row = at32(in cx.sg_row, name);
+    if row != NONE {
+        return apply_sig(inout st, inout cx, in a, e, row, types, args, expected);
+    }
+    // A tuple-variant constructor of a user enum.
+    let variant = last_segment(inout st, name);
+    let r = adt_with_variant(in st, in cx, variant, true);
+    if r != NONE {
+        let adt = u32_at(in cx.ai_name, widen_u64(r));
+        let v = info_variant(in st, in cx, r, variant);
+        let mut ptys = ChunkSeq::new[u32]();
+        for i in 0..widen_u64(u32_at(in cx.vr_fn, widen_u64(v))) {
+            ptys
+                .push(
+                u32_at(in cx.fr_ty, wrapping_add(widen_u64(u32_at(in cx.vr_fa, widen_u64(v))), i))
+            );
+        }
+        let gn = info_gen_count(in cx, r);
+        let mut gnames = ChunkSeq::new[u32]();
+        let mut gkinds = ChunkSeq::new[u8]();
+        let mut items = ChunkSeq::new[u32]();
+        for i in 0..gn {
+            let g = u32_at(
+                in cx.ai_syms,
+                wrapping_add(widen_u64(u32_at(in cx.ai_ga, widen_u64(r))), i)
+            );
+            let k = u8_at(
+                in cx.ai_kinds,
+                wrapping_add(widen_u64(u32_at(in cx.ai_ka, widen_u64(r))), i)
+            );
+            gnames.push(g);
+            gkinds.push(k);
+            if k == KD_DIM {
+                items.push(1);
+                items.push(dim_var(inout st, g));
+            } else if k == KD_DTYPE {
+                items.push(2);
+                items.push(wrapping_add(3, wrapping_mul(g, 2)));
+            } else {
+                items.push(0);
+                items.push(ty_named(inout st, T_VAR, g));
+            }
+        }
+        let res = mk_ty(inout st, T_ADT, adt, 0, in items);
+        let obs = ChunkSeq::new[Ob]();
+        return apply(
+            inout st,
+            inout cx,
+            in a,
+            e,
+            name,
+            in gnames,
+            in gkinds,
+            in ptys,
+            res,
+            0,
+            0,
+            0,
+            in obs,
+            0,
+            args,
+            expected
+        );
+    }
+    let tys = args_none(inout st, inout cx, in a, args);
+    st.unknown
+}
+
+// `Body::arity` of a tensor operation.
+fn arity(inout st: St, inout cx: Cx, in a: Ast, e: u32, op: u32, args: u32, n: u64) -> bool {
+    let argc = list_len(in a, args);
+    if argc == n {
+        return true;
+    }
+    let tys = args_none(inout st, inout cx, in a, args);
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in "Tensor::");
+    st.names.write(op, inout m);
+    put(inout m, in " takes ");
+    push_decimal(inout m, n);
+    put(inout m, in " argument(s), found ");
+    push_decimal(inout m, argc);
+    push_diag(
+        inout st,
+        C_SHAPE,
+        (widen_u64(expr_at(in a, e).start)),
+        (widen_u64(expr_at(in a, e).end)),
+        in m
+    );
+    false
+}
+
+// `Body::target_shape`: the shape into `out`, or false.
+fn target_shape(
+    inout st: St,
+    in cx: Cx,
+    in a: Ast,
+    e: u32,
+    op: u32,
+    types: u32,
+    expected: u32,
+    inout out: ChunkSeq[u32]
+) -> bool {
+    let start = widen_u64(expr_at(in a, e).start);
+    let end = widen_u64(expr_at(in a, e).end);
+    let tn = list_len(in a, types);
+    out.clear();
+    if tn == 1 {
+        if scope_shape(inout st, in cx, in a, list_at(in a, types, 0), inout out) {
+            return true;
+        }
+        err_last(inout st, C_KIND, start, end);
+        return false;
+    }
+    if tn == 0 {
+        if expected != NONE && (ty_node(in st, expected).k == T_TENSOR) {
+            for i in 0..widen_u64(ty_node(in st, expected).n) {
+                out.push(ty_item(in st, expected, i));
+            }
+            return true;
+        }
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "Tensor::");
+        st.names.write(op, inout m);
+        put(inout m, in " needs a target shape: Tensor::");
+        st.names.write(op, inout m);
+        put(inout m, in "[[d, ...]](...)");
+        push_diag(inout st, C_INFER, start, end, in m);
+        return false;
+    }
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in "Tensor::");
+    st.names.write(op, inout m);
+    put(inout m, in " takes one shape argument");
+    push_diag(inout st, C_KIND, start, end, in m);
+    false
+}
+
+// `elements(shape)`: the product, or NONE with `derr`.
+fn elements(inout st: St, in shape: ChunkSeq[u32]) -> u32 {
+    let mut acc = st.one;
+    for i in 0..shape.len() {
+        acc = dim_mul(inout st, acc, u32_at(in shape, i));
+        if acc == NONE {
+            return NONE;
+        }
+    }
+    acc
+}
+
+// `Tensor::{op}: {m}` (the `mismatch` closure).
+fn mismatch(inout st: St, op: u32, start: u64, end: u64, in m: ChunkSeq[u8]) -> u32 {
+    let mut t = ChunkSeq::new[u8]();
+    put(inout t, in "Tensor::");
+    st.names.write(op, inout t);
+    put(inout t, in ": ");
+    t.extend(in m.as_slice());
+    push_diag(inout st, C_SHAPE, start, end, in t);
+    st.unknown
+}
+
+// "expected {what}, found {shape}".
+fn rank_msg(in st: St, in what: Str, in s: ChunkSeq[u32]) -> ChunkSeq[u8] {
+    let mut m = ChunkSeq::new[u8]();
+    put(inout m, in "expected ");
+    put(inout m, in what);
+    put(inout m, in ", found ");
+    put_shape(in st, inout m, in s);
+    m
+}
+
+// `broadcast(a, b)`: the shape into `out`, or false with the message.
+fn broadcast(
+    inout st: St,
+    in x: ChunkSeq[u32],
+    in y: ChunkSeq[u32],
+    inout out: ChunkSeq[u32],
+    inout msg: ChunkSeq[u8]
+) -> bool {
+    let mut n = x.len();
+    if y.len() > n {
+        n = y.len();
+    }
+    let one = st.one;
+    out.clear();
+    for i in 0..n {
+        let mut p = one;
+        let mut q = one;
+        if wrapping_add(i, x.len()) >= n {
+            p = u32_at(in x, wrapping_sub(wrapping_add(i, x.len()), n));
+        }
+        if wrapping_add(i, y.len()) >= n {
+            q = u32_at(in y, wrapping_sub(wrapping_add(i, y.len()), n));
+        }
+        if p == q || q == one {
+            out.push(p);
+        } else if p == one {
+            out.push(q);
+        } else {
+            put_shape(in st, inout msg, in x);
+            put(inout msg, in " and ");
+            put_shape(in st, inout msg, in y);
+            put(inout msg, in " do not broadcast: axis ");
+            push_decimal(inout msg, i);
+            put(inout msg, in " has ");
+            put_dim(in st, inout msg, p);
+            put(inout msg, in " and ");
+            put_dim(in st, inout msg, q);
+            return false;
+        }
+    }
+    true
+}
+
+// The arity of a tensor operation, 0 for an unknown one.
+fn tensor_arity(in st: St, op: u32) -> u64 {
+    if spells(in st, op, in "matmul")
+        || spells(in st, op, in "matvec")
+        || spells(in st, op, in "add")
+        || spells(in st, op, in "mul")
+        || spells(in st, op, in "swiglu")
+        || spells(in st, op, in "qmatvec")
+        || spells(in st, op, in "rope") {
+        return 2;
+    }
+    if spells(in st, op, in "reshape")
+        || spells(in st, op, in "transpose")
+        || spells(in st, op, in "softmax")
+        || spells(in st, op, in "silu")
+        || spells(in st, op, in "to_bf16")
+        || spells(in st, op, in "to_f32")
+        || spells(in st, op, in "argmax")
+        || spells(in st, op, in "fill") {
+        return 1;
+    }
+    if spells(in st, op, in "rms_norm") || spells(in st, op, in "block_scale") {
+        return 3;
+    }
+    0
+}
+
+// `Body::tensor_op`.
+fn tensor_op(
+    inout st: St,
+    inout cx: Cx,
+    in a: Ast,
+    e: u32,
+    op: u32,
+    types: u32,
+    args: u32,
+    expected: u32
+) -> u32 {
+    let start = widen_u64(expr_at(in a, e).start);
+    let end = widen_u64(expr_at(in a, e).end);
+    let n = tensor_arity(in st, op);
+    if n == 0 {
+        let tys = args_none(inout st, inout cx, in a, args);
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "unknown tensor operation 'Tensor::");
+        st.names.write(op, inout m);
+        m.push(39);
+        push_diag(inout st, C_UNSUPPORTED, start, end, in m);
+        return st.unknown;
+    }
+    let is_reshape = spells(in st, op, in "reshape");
+    let is_fill = spells(in st, op, in "fill");
+    if !is_reshape && !is_fill && list_len(in a, types) > 0 {
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "Tensor::");
+        st.names.write(op, inout m);
+        put(inout m, in " takes no type arguments");
+        push_diag(inout st, C_KIND, start, end, in m);
+    }
+    if !arity(inout st, inout cx, in a, e, op, args, n) {
+        return st.unknown;
+    }
+    if is_fill {
+        let t0 = expr(inout st, inout cx, in a, (argn(in a, list_at(in a, args, 0)).expr), NONE);
+        let mut shape = ChunkSeq::new[u32]();
+        if !target_shape(inout st, in cx, in a, e, op, types, expected, inout shape) {
+            return st.unknown;
+        }
+        return mk_ty(inout st, T_TENSOR, 0, 0, in shape);
+    }
+    let tys = args_none(inout st, inout cx, in a, args);
+    let mut s0: u64 = 0;
+    let mut e0: u64 = 0;
+    let mut s1: u64 = 0;
+    let mut e1: u64 = 0;
+    if n >= 1 {
+        s0 = widen_u64(expr_at(in a, ((argn(in a, list_at(in a, args, 0)).expr))).start);
+        e0 = widen_u64(expr_at(in a, ((argn(in a, list_at(in a, args, 0)).expr))).end);
+    }
+    if n >= 2 {
+        s1 = widen_u64(expr_at(in a, ((argn(in a, list_at(in a, args, 1)).expr))).start);
+        e1 = widen_u64(expr_at(in a, ((argn(in a, list_at(in a, args, 1)).expr))).end);
+    }
+    let t0 = u32_at(in tys, 0);
+    let t1 = u32_at(in tys, 1);
+    let w0 = arg_what(in st, 0, in "Tensor::", op);
+    let w1 = arg_what(in st, 1, in "Tensor::", op);
+    let is_matmul = spells(in st, op, in "matmul");
+    if is_matmul
+        || spells(in st, op, in "matvec")
+        || spells(in st, op, in "add")
+        || spells(in st, op, in "mul")
+        || spells(in st, op, in "swiglu") {
+        let ok0 = want_tensor(inout st, t0, s0, e0, in w0);
+        let ok1 = want_tensor(inout st, t1, s1, e1, in w1);
+        if !ok0 || !ok1 {
+            return st.unknown;
+        }
+        if !want_f32(inout st, (ty_node(in st, t0).a), s0, e0, in w0)
+            || !want_f32(inout st, (ty_node(in st, t1).a), s1, e1, in w1) {
+            return st.unknown;
+        }
+        let sa = ty_items(in st, t0);
+        let sb = ty_items(in st, t1);
+        if is_matmul || spells(in st, op, in "matvec") {
+            let mut rb: u64 = 1;
+            if is_matmul {
+                rb = 2;
+            }
+            if sa.len() != 2 || sb.len() != rb {
+                let mut m = ChunkSeq::new[u8]();
+                put(inout m, in "expected ranks 2 and ");
+                push_decimal(inout m, rb);
+                put(inout m, in ", found ");
+                put_shape(in st, inout m, in sa);
+                put(inout m, in " and ");
+                put_shape(in st, inout m, in sb);
+                return mismatch(inout st, op, start, end, in m);
+            }
+            if u32_at(in sa, 1) != u32_at(in sb, 0) {
+                let mut m = ChunkSeq::new[u8]();
+                put(inout m, in "inner dimensions differ: ");
+                put_shape(in st, inout m, in sa);
+                put(inout m, in " has ");
+                put_dim(in st, inout m, u32_at(in sa, 1));
+                put(inout m, in " columns but ");
+                put_shape(in st, inout m, in sb);
+                put(inout m, in " has ");
+                put_dim(in st, inout m, u32_at(in sb, 0));
+                put(inout m, in " rows");
+                return mismatch(inout st, op, start, end, in m);
+            }
+            let mut shape = ChunkSeq::new[u32]();
+            shape.push(u32_at(in sa, 0));
+            if is_matmul {
+                shape.push(u32_at(in sb, 1));
+            }
+            return mk_ty(inout st, T_TENSOR, 0, 0, in shape);
+        }
+        if spells(in st, op, in "swiglu") {
+            if t0 != t1 {
+                let mut m = ChunkSeq::new[u8]();
+                put(inout m, in "gate ");
+                put_shape(in st, inout m, in sa);
+                put(inout m, in " and up ");
+                put_shape(in st, inout m, in sb);
+                put(inout m, in " must have the same shape");
+                return mismatch(inout st, op, start, end, in m);
+            }
+            return mk_ty(inout st, T_TENSOR, 0, 0, in sa);
+        }
+        let mut out = ChunkSeq::new[u32]();
+        let mut m = ChunkSeq::new[u8]();
+        if broadcast(inout st, in sa, in sb, inout out, inout m) {
+            return mk_ty(inout st, T_TENSOR, 0, 0, in out);
+        }
+        return mismatch(inout st, op, start, end, in m);
+    }
+    if is_reshape {
+        if !want_tensor(inout st, t0, s0, e0, in w0) {
+            return st.unknown;
+        }
+        let d = (ty_node(in st, t0).a);
+        let s = ty_items(in st, t0);
+        let mut target = ChunkSeq::new[u32]();
+        if !target_shape(inout st, in cx, in a, e, op, types, expected, inout target) {
+            return st.unknown;
+        }
+        let x = elements(inout st, in s);
+        let ex = st.derr;
+        let y = elements(inout st, in target);
+        let ey = st.derr;
+        if x == NONE || y == NONE {
+            let mut m = ChunkSeq::new[u8]();
+            if x == NONE {
+                put_dim_error(inout m, ex);
+            } else {
+                put_dim_error(inout m, ey);
+            }
+            return mismatch(inout st, op, start, end, in m);
+        }
+        if x != y {
+            let mut m = ChunkSeq::new[u8]();
+            put_shape(in st, inout m, in s);
+            put(inout m, in " has ");
+            put_dim(in st, inout m, x);
+            put(inout m, in " elements but ");
+            put_shape(in st, inout m, in target);
+            put(inout m, in " has ");
+            put_dim(in st, inout m, y);
+            return mismatch(inout st, op, start, end, in m);
+        }
+        return mk_ty(inout st, T_TENSOR, d, 0, in target);
+    }
+    if spells(in st, op, in "transpose")
+        || spells(in st, op, in "softmax")
+        || spells(in st, op, in "argmax")
+        || spells(in st, op, in "silu")
+        || spells(in st, op, in "rope") {
+        if !want_tensor(inout st, t0, s0, e0, in w0) {
+            return st.unknown;
+        }
+        let d = (ty_node(in st, t0).a);
+        if !want_f32(inout st, d, s0, e0, in w0) {
+            return st.unknown;
+        }
+        let s = ty_items(in st, t0);
+        if spells(in st, op, in "transpose") {
+            if s.len() != 2 {
+                let m = rank_msg(in st, in "rank 2", in s);
+                return mismatch(inout st, op, start, end, in m);
+            }
+            let mut shape = ChunkSeq::new[u32]();
+            shape.push(u32_at(in s, 1));
+            shape.push(u32_at(in s, 0));
+            return mk_ty(inout st, T_TENSOR, d, 0, in shape);
+        }
+        if spells(in st, op, in "silu") {
+            return t0;
+        }
+        if spells(in st, op, in "rope") {
+            if s.len() != 2 {
+                let m = rank_msg(in st, in "[Heads, HeadDim]", in s);
+                return mismatch(inout st, op, start, end, in m);
+            }
+            let r = name_s(inout st, in "RoPE head width");
+            require(
+                inout st,
+                inout cx,
+                Ob {
+                    k: 0,
+                    d1: u32_at(in s, 1),
+                    d2: 0,
+                    r: r
+                },
+                start,
+                end
+            );
+            return t0;
+        }
+        if s.len() != 1 {
+            let m = rank_msg(in st, in "rank 1", in s);
+            return mismatch(inout st, op, start, end, in m);
+        }
+        if spells(in st, op, in "argmax") {
+            return ty_named(inout st, T_BASE, st.s_u64);
+        }
+        return t0;
+    }
+    if spells(in st, op, in "to_bf16") || spells(in st, op, in "to_f32") {
+        if !want_tensor(inout st, t0, s0, e0, in w0) {
+            return st.unknown;
+        }
+        let d = (ty_node(in st, t0).a);
+        let mut from: u32 = 1;
+        let mut to: u32 = 0;
+        if spells(in st, op, in "to_bf16") {
+            from = 0;
+            to = 1;
+        }
+        if d != from {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "Tensor::");
+            st.names.write(op, inout m);
+            put(inout m, in " converts ");
+            put_dtype(in st, inout m, from);
+            put(inout m, in " tensors, found ");
+            put_dtype(in st, inout m, d);
+            push_diag(inout st, C_DTYPE, s0, e0, in m);
+            return st.unknown;
+        }
+        let s = ty_items(in st, t0);
+        return mk_ty(inout st, T_TENSOR, to, 0, in s);
+    }
+    if spells(in st, op, in "rms_norm") {
+        let ok0 = want_tensor(inout st, t0, s0, e0, in w0);
+        let ok1 = want_tensor(inout st, t1, s1, e1, in w1);
+        if !ok0 || !ok1 {
+            return st.unknown;
+        }
+        if !want_f32(inout st, (ty_node(in st, t0).a), s0, e0, in w0)
+            || !want_f32(inout st, (ty_node(in st, t1).a), s1, e1, in w1) {
+            return st.unknown;
+        }
+        let sx = ty_items(in st, t0);
+        let sw = ty_items(in st, t1);
+        if sx.len() != 1 || t0 != t1 {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "x ");
+            put_shape(in st, inout m, in sx);
+            put(inout m, in " and weight ");
+            put_shape(in st, inout m, in sw);
+            put(inout m, in " must be the same rank-1 shape");
+            return mismatch(inout st, op, start, end, in m);
+        }
+        return t0;
+    }
+    // qmatvec and block_scale.
+    if !want_tensor(inout st, t0, s0, e0, in w0) {
+        return st.unknown;
+    }
+    let dw = (ty_node(in st, t0).a);
+    if !(dw >= 2 && (dw & 1) == 0) {
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "argument 1 of Tensor::");
+        st.names.write(op, inout m);
+        put(inout m, in " must be a quantized block tensor, found ");
+        put_dtype(in st, inout m, dw);
+        push_diag(inout st, C_DTYPE, s0, e0, in m);
+        return st.unknown;
+    }
+    let block = (wrapping_sub(dw, 2) >> 1);
+    let ws = at32(in cx.wire, block);
+    if ws == NONE || ws == 0 {
+        return st.unknown;
+    }
+    if ws >= 2 {
+        let row = widen_u64(wrapping_sub(ws, 2));
+        let ma = u64_at(in cx.wa, row);
+        let mb = u64_at(in cx.wb, row);
+        let mut m = ChunkSeq::new[u8]();
+        for i in ma..mb {
+            m.push(u8_at(in cx.wtext, i));
+        }
+        push_diag(inout st, C_WIRE, s0, e0, in m);
+        return st.unknown;
+    }
+    let sw = ty_items(in st, t0);
+    if sw.len() != 2 {
+        let m = rank_msg(in st, in "[Rows, Cols]", in sw);
+        return mismatch(inout st, op, start, end, in m);
+    }
+    let mut rt = ChunkSeq::new[u8]();
+    put(inout rt, in "whole 32-element ");
+    st.names.write(block, inout rt);
+    put(inout rt, in " blocks per row");
+    let r = st.names.intern(in rt.as_slice());
+    let k32 = dim_const(inout st, 32);
+    require(
+        inout st,
+        inout cx,
+        Ob {
+            k: 1,
+            d1: k32,
+            d2: u32_at(in sw, 1),
+            r: r
+        },
+        start,
+        end
+    );
+    if spells(in st, op, in "block_scale") {
+        return ty_named(inout st, T_BASE, st.s_f64);
+    }
+    if !want_tensor(inout st, t1, s1, e1, in w1) {
+        return st.unknown;
+    }
+    if !want_f32(inout st, (ty_node(in st, t1).a), s1, e1, in w1) {
+        return st.unknown;
+    }
+    let sx = ty_items(in st, t1);
+    if sx.len() != 1 || u32_at(in sx, 0) != u32_at(in sw, 1) {
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "weights ");
+        put_shape(in st, inout m, in sw);
+        put(inout m, in " need an input of shape [");
+        put_dim(in st, inout m, u32_at(in sw, 1));
+        put(inout m, in "], found ");
+        put_shape(in st, inout m, in sx);
+        return mismatch(inout st, op, start, end, in m);
+    }
+    let mut shape = ChunkSeq::new[u32]();
+    shape.push(u32_at(in sw, 0));
+    mk_ty(inout st, T_TENSOR, 0, 0, in shape)
+}
+
+// `Body::pool_dims`.
+fn pool_dims(inout st: St, in cx: Cx, kv: u32, hd: u32, start: u64, end: u64) {
+    let cur = cx.cur;
+    if cur == NONE || u8_at(in cx.sg_pool, widen_u64(cur)) != 1 {
+        return;
+    }
+    let h = u32_at(in cx.sg_kv, widen_u64(cur));
+    let d = u32_at(in cx.sg_hd, widen_u64(cur));
+    if h != kv || d != hd {
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "this lease belongs to KvCachePool[");
+        put_dim(in st, inout m, kv);
+        put(inout m, in ", ");
+        put_dim(in st, inout m, hd);
+        put(inout m, in "] but the function's row has KvCachePool[");
+        put_dim(in st, inout m, h);
+        put(inout m, in ", ");
+        put_dim(in st, inout m, d);
+        m.push(93);
+        push_diag(inout st, C_POOL, start, end, in m);
+    }
+}
+
+fn pool_arity(in st: St, op: u32) -> u64 {
+    if spells(in st, op, in "begin_sequence") {
+        return 1;
+    }
+    if spells(in st, op, in "lease_page") {
+        return 0;
+    }
+    if spells(in st, op, in "append_kv_step") || spells(in st, op, in "write_page") {
+        return 3;
+    }
+    if spells(in st, op, in "attend") {
+        return 2;
+    }
+    if spells(in st, op, in "tokens")
+        || spells(in st, op, in "page_tokens")
+        || spells(in st, op, in "release_sequence")
+        || spells(in st, op, in "release_page") {
+        return 1;
+    }
+    9
+}
+
+fn result_of(inout st: St, t: u32) -> u32 {
+    let e = ty_named(inout st, T_ADT, st.s_kverr);
+    adt2(inout st, st.s_result, t, e)
+}
+
+// `Body::pool_op`.
+fn pool_op(inout st: St, inout cx: Cx, in a: Ast, e: u32, op: u32, args: u32, expected: u32)
+    -> u32 {
+    let start = widen_u64(expr_at(in a, e).start);
+    let end = widen_u64(expr_at(in a, e).end);
+    let n = pool_arity(in st, op);
+    let argc = list_len(in a, args);
+    if n == 9 {
+        let tys = args_none(inout st, inout cx, in a, args);
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "unknown pool operation 'KvCachePool::");
+        st.names.write(op, inout m);
+        m.push(39);
+        push_diag(inout st, C_UNSUPPORTED, start, end, in m);
+        return st.unknown;
+    }
+    if argc != n {
+        let tys = args_none(inout st, inout cx, in a, args);
+        let mut m = ChunkSeq::new[u8]();
+        put(inout m, in "KvCachePool::");
+        st.names.write(op, inout m);
+        put(inout m, in " takes ");
+        push_decimal(inout m, n);
+        put(inout m, in " argument(s), found ");
+        push_decimal(inout m, argc);
+        push_diag(inout st, C_SHAPE, start, end, in m);
+        return st.unknown;
+    }
+    let tys = args_none(inout st, inout cx, in a, args);
+    let begin = spells(in st, op, in "begin_sequence");
+    if begin || spells(in st, op, in "lease_page") {
+        let mut fkv = NONE;
+        let mut fhd = NONE;
+        if expected != NONE {
+            let ex = ty_node(in st, expected);
+            if ex.k == T_ADT && ex.a == st.s_result {
+                let f = adt_ty_arg(in st, expected, 0);
+                if f != NONE {
+                    let fk = ty_node(in st, f);
+                    if (begin && fk.k == T_SEQ) || (!begin && fk.k == T_LEASE) {
+                        fkv = fk.a;
+                        fhd = fk.c;
+                    }
+                }
+            }
+        }
+        let cur = cx.cur;
+        let mut kv = fkv;
+        let mut hd = fhd;
+        if cur != NONE && u8_at(in cx.sg_pool, widen_u64(cur)) == 1 {
+            kv = u32_at(in cx.sg_kv, widen_u64(cur));
+            hd = u32_at(in cx.sg_hd, widen_u64(cur));
+        }
+        if kv == NONE {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "KvCachePool::");
+            st.names.write(op, inout m);
+            put(
+                inout m,
+                in " needs the pool's dimensions: write KvCachePool[KvHeads, HeadDim] in the effect row or annotate the result"
+            );
+            push_diag(inout st, C_INFER, start, end, in m);
+            return st.unknown;
+        }
+        if fkv != NONE {
+            pool_dims(inout st, in cx, fkv, fhd, start, end);
+        }
+        if begin {
+            let t = ty_pair(inout st, T_SEQ, kv, hd);
+            return result_of(inout st, t);
+        }
+        let t = ty_pair(inout st, T_LEASE, kv, hd);
+        return result_of(inout st, t);
+    }
+    let page = spells(in st, op, in "write_page")
+        || spells(in st, op, in "page_tokens")
+        || spells(in st, op, in "release_page");
+    let t0 = u32_at(in tys, 0);
+    let x0 = ty_node(in st, t0);
+    let a0 = (argn(in a, list_at(in a, args, 0)).expr);
+    if !((x0.k == T_SEQ && !page) || (x0.k == T_LEASE && page)) {
+        let mut m = ChunkSeq::new[u8]();
+        if x0.k == T_UNKNOWN {
+            put(inout m, in "cannot determine the pool instance of argument 1 of KvCachePool::");
+            st.names.write(op, inout m);
+            push_diag(
+                inout st,
+                C_INFER,
+                (widen_u64(expr_at(in a, a0).start)),
+                (widen_u64(expr_at(in a, a0).end)),
+                in m
+            );
+        } else {
+            put(inout m, in "argument 1 of KvCachePool::");
+            st.names.write(op, inout m);
+            put(inout m, in " must be a ");
+            if page {
+                put(inout m, in "KvPageLease");
+            } else {
+                put(inout m, in "ActiveKvSeq");
+            }
+            put(inout m, in ", found ");
+            put_ty(in st, inout m, t0);
+            push_diag(
+                inout st,
+                C_SHAPE,
+                (widen_u64(expr_at(in a, a0).start)),
+                (widen_u64(expr_at(in a, a0).end)),
+                in m
+            );
+        }
+        return st.unknown;
+    }
+    let kv = x0.a;
+    let hd = x0.c;
+    pool_dims(
+        inout st,
+        in cx,
+        kv,
+        hd,
+        widen_u64(expr_at(in a, a0).start),
+        widen_u64(expr_at(in a, a0).end)
+    );
+    if spells(in st, op, in "append_kv_step") || spells(in st, op, in "write_page") {
+        for i in 1..3 {
+            let ti = u32_at(in tys, i);
+            let ai = (argn(in a, list_at(in a, args, i)).expr);
+            let what = arg_what(in st, i, in "KvCachePool::", op);
+            if !want_tensor(
+                inout st,
+                ti,
+                widen_u64(expr_at(in a, ai).start),
+                widen_u64(expr_at(in a, ai).end),
+                in what
+            ) {
+                return st.unknown;
+            }
+            let d = (ty_node(in st, ti).a);
+            if d != 1 {
+                let mut m = ChunkSeq::new[u8]();
+                m.extend(in what.as_slice());
+                put(inout m, in " must be a Bf16 K/V step, found ");
+                put_dtype(in st, inout m, d);
+                push_diag(
+                    inout st,
+                    C_DTYPE,
+                    (widen_u64(expr_at(in a, ai).start)),
+                    (widen_u64(expr_at(in a, ai).end)),
+                    in m
+                );
+            }
+            let s = ty_items(in st, ti);
+            let mut want = ChunkSeq::new[u32]();
+            want.push(kv);
+            want.push(hd);
+            let same = s.len() == 2 && u32_at(in s, 0) == kv && u32_at(in s, 1) == hd;
+            if !same {
+                let mut m = ChunkSeq::new[u8]();
+                m.extend(in what.as_slice());
+                put(inout m, in ": the pool stores ");
+                put_shape(in st, inout m, in want);
+                put(inout m, in " steps, found ");
+                put_shape(in st, inout m, in s);
+                push_diag(
+                    inout st,
+                    C_SHAPE,
+                    (widen_u64(expr_at(in a, ai).start)),
+                    (widen_u64(expr_at(in a, ai).end)),
+                    in m
+                );
+            }
+        }
+        return result_of(inout st, st.unit);
+    }
+    if spells(in st, op, in "attend") {
+        let t1 = u32_at(in tys, 1);
+        let a1 = (argn(in a, list_at(in a, args, 1)).expr);
+        let mut what = ChunkSeq::new[u8]();
+        put(inout what, in "argument 2 of KvCachePool::attend");
+        if !want_tensor(
+            inout st,
+            t1,
+            widen_u64(expr_at(in a, a1).start),
+            widen_u64(expr_at(in a, a1).end),
+            in what
+        ) {
+            return st.unknown;
+        }
+        if !want_f32(
+            inout st,
+            (ty_node(in st, t1).a),
+            widen_u64(expr_at(in a, a1).start),
+            widen_u64(expr_at(in a, a1).end),
+            in what
+        ) {
+            return st.unknown;
+        }
+        let s = ty_items(in st, t1);
+        if s.len() != 2 || u32_at(in s, 1) != hd {
+            let mut m = ChunkSeq::new[u8]();
+            put(inout m, in "KvCachePool::attend: queries must be [QHeads, ");
+            put_dim(in st, inout m, hd);
+            put(inout m, in "], found ");
+            put_shape(in st, inout m, in s);
+            push_diag(
+                inout st,
+                C_SHAPE,
+                (widen_u64(expr_at(in a, a1).start)),
+                (widen_u64(expr_at(in a, a1).end)),
+                in m
+            );
+            return st.unknown;
+        }
+        let r = name_s(inout st, in "grouped-query attention (QHeads % KvHeads == 0)");
+        require(
+            inout st,
+            inout cx,
+            Ob {
+                k: 1,
+                d1: kv,
+                d2: u32_at(in s, 0),
+                r: r
+            },
+            start,
+            end
+        );
+        return mk_ty(inout st, T_TENSOR, 0, 0, in s);
+    }
+    if spells(in st, op, in "tokens") || spells(in st, op, in "page_tokens") {
+        return ty_named(inout st, T_BASE, st.s_u64);
+    }
+    st.unit
+}
+
+// `Body::let_statement`.
+fn let_statement(inout st: St, inout cx: Cx, in a: Ast, p: u32, ty: u32, value: u32) {
+    let mut annotated = NONE;
+    if type_at(in a, ty).kind != 5 {
+        let t = scope_ty(inout st, in cx, in a, ty);
+        if t == NONE {
+            let code = err_code(in st);
+            let pn = pat_at(in a, p);
+            err_last(inout st, code, widen_u64(pn.start), widen_u64(pn.end));
+            annotated = st.unknown;
+        } else {
+            annotated = t;
+        }
+    }
+    let v = expr(inout st, inout cx, in a, value, annotated);
+    let mut t = v;
+    if annotated != NONE {
+        expect_s(
+            inout st,
+            in cx,
+            annotated,
+            v,
+            widen_u64(expr_at(in a, value).start),
+            widen_u64(expr_at(in a, value).end),
+            in "let binding"
+        );
+        if annotated != st.unknown {
+            t = annotated;
+        }
+    }
+    pattern(inout st, inout cx, in a, p, t);
+}
+
+fn is_comparison(in st: St, op: u32) -> bool {
+    spells(in st, op, in "==")
+        || spells(in st, op, in "!=")
+        || spells(in st, op, in "<")
+        || spells(in st, op, in "<=")
+        || spells(in st, op, in ">")
+        || spells(in st, op, in ">=")
+        || spells(in st, op, in "&&")
+        || spells(in st, op, in "||")
+}
+
+// `Body::expr` (`expected` NONE for `None`).
+pub fn expr(inout st: St, inout cx: Cx, in a: Ast, e: u32, expected: u32) -> u32 {
+    let n = expr_at(in a, e);
+    let k = n.kind;
+    let start = widen_u64(n.start);
+    let end = widen_u64(n.end);
+    if k == 1 {
+        let l = lit_at(in a, n.a);
+        if l.kind == 1 {
+            return ty_named(inout st, T_BASE, st.s_int);
+        }
+        if l.kind == 2 {
+            return ty_named(inout st, T_BASE, st.s_f64);
+        }
+        if l.kind == 3 {
+            return ty_named(inout st, T_BASE, st.s_bool);
+        }
+        return ty_named(inout st, T_BASE, st.s_string);
+    }
+    if k == 2 {
+        let name = nm(in st, n.a);
+        let t = lookup(in cx, name);
+        if t != NONE {
+            return t;
+        }
+        return function_value(inout st, in cx, name, start, end);
+    }
+    if k == 3 {
+        let count = list_len(in a, n.a);
+        let ex = ty_node(in st, expected);
+        let match_exp = expected != NONE && ex.k == T_TUPLE && widen_u64(ex.n) == count;
+        let mut items = ChunkSeq::new[u32]();
+        for i in 0..count {
+            let mut want = NONE;
+            if match_exp {
+                want = ty_item(in st, expected, i);
+            }
+            let t = expr(inout st, inout cx, in a, list_at(in a, n.a, i), want);
+            items.push(t);
+        }
+        return mk_ty(inout st, T_TUPLE, 0, 0, in items);
+    }
+    if k == 4 {
+        return struct_literal(inout st, inout cx, in a, e, nm(in st, n.a), n.b, expected);
+    }
+    if k == 5 {
+        cx.en_marks.push(cx.en_name.len());
+        for i in 0..list_len(in a, n.a) {
+            let s = stmtn(in a, list_at(in a, n.a, i));
+            if s.kind == 1 {
+                let_statement(inout st, inout cx, in a, s.pat, s.ty, s.value);
+            } else {
+                let t = expr(inout st, inout cx, in a, s.value, NONE);
+            }
+        }
+        let mut t = st.unit;
+        if n.b != NONE {
+            t = expr(inout st, inout cx, in a, n.b, expected);
+        }
+        env_pop(inout cx);
+        return t;
+    }
+    if k == 6 {
+        return call(inout st, inout cx, in a, e, expected);
+    }
+    if k == 7 {
+        let t = expr(inout st, inout cx, in a, n.a, NONE);
+        return field(inout st, in cx, t, nm(in st, n.b), start, end);
+    }
+    if k == 8 {
+        let t = expr(inout st, inout cx, in a, n.a, NONE);
+        let t2 = expr(inout st, inout cx, in a, n.b, NONE);
+        if has_tensor(in st, t) {
+            err_s(
+                inout st,
+                C_UNSUPPORTED,
+                start,
+                end,
+                in "tensors are not indexed with []: use Tensor operations"
+            );
+        }
+        return st.unknown;
+    }
+    if k == 9 {
+        let t = expr(inout st, inout cx, in a, n.a, NONE);
+        let x = ty_node(in st, t);
+        if x.k == T_ADT && (x.a == st.s_result || x.a == st.s_option) && x.n > 0 {
+            return or_unknown(in st, adt_ty_arg(in st, t, 0));
+        }
+        return st.unknown;
+    }
+    if k == 10 {
+        let t = expr(inout st, inout cx, in a, n.b, NONE);
+        no_operator(inout st, t, start, end);
+        return st.unknown;
+    }
+    if k == 11 {
+        let ta = expr(inout st, inout cx, in a, n.b, NONE);
+        let tb = expr(inout st, inout cx, in a, n.c, NONE);
+        no_operator(inout st, ta, start, end);
+        no_operator(inout st, tb, start, end);
+        if is_comparison(in st, nm(in st, n.a)) {
+            return ty_named(inout st, T_BASE, st.s_bool);
+        }
+        return st.unknown;
+    }
+    if k == 12 {
+        let t = expr(inout st, inout cx, in a, n.b, NONE);
+        let v = expr(inout st, inout cx, in a, n.c, t);
+        expect_s(
+            inout st,
+            in cx,
+            t,
+            v,
+            widen_u64(expr_at(in a, n.c).start),
+            widen_u64(expr_at(in a, n.c).end),
+            in "assignment"
+        );
+        return st.unit;
+    }
+    if k == 13 {
+        let c = expr(inout st, inout cx, in a, n.a, NONE);
+        let ta = expr(inout st, inout cx, in a, n.b, expected);
+        if n.c == NONE {
+            return st.unit;
+        }
+        let mut want = expected;
+        if want == NONE {
+            want = ta;
+        }
+        let tb = expr(inout st, inout cx, in a, n.c, want);
+        return join(
+            inout st,
+            in cx,
+            ta,
+            tb,
+            widen_u64(expr_at(in a, n.c).start),
+            widen_u64(expr_at(in a, n.c).end),
+            in "the else branch"
+        );
+    }
+    if k == 14 {
+        let scrutinee = expr(inout st, inout cx, in a, n.a, NONE);
+        let mut result = NONE;
+        let m = list_len(in a, n.b) >> 1;
+        for i in 0..m {
+            let p = list_at(in a, n.b, wrapping_mul(i, 2));
+            let body = list_at(in a, n.b, inc(wrapping_mul(i, 2)));
+            cx.en_marks.push(cx.en_name.len());
+            pattern(inout st, inout cx, in a, p, scrutinee);
+            let mut want = expected;
+            if want == NONE {
+                want = result;
+            }
+            let t = expr(inout st, inout cx, in a, body, want);
+            env_pop(inout cx);
+            if result == NONE {
+                result = t;
+            } else {
+                result = join(
+                    inout st,
+                    in cx,
+                    result,
+                    t,
+                    widen_u64(expr_at(in a, body).start),
+                    widen_u64(expr_at(in a, body).end),
+                    in "this match arm"
+                );
+            }
+        }
+        return or_unknown(in st, result);
+    }
+    if k == 17 {
+        let t = expr(inout st, inout cx, in a, n.a, NONE);
+        return st.unknown;
+    }
+    if k == 18 {
+        let element = expr(inout st, inout cx, in a, n.b, NONE);
+        cx.en_marks.push(cx.en_name.len());
+        pattern(inout st, inout cx, in a, n.a, element);
+        let t = expr(inout st, inout cx, in a, n.c, NONE);
+        env_pop(inout cx);
+        return st.unit;
+    }
+    if k == 19 {
+        let x = expr(inout st, inout cx, in a, n.a, NONE);
+        let y = expr(inout st, inout cx, in a, n.b, x);
+        return join(
+            inout st,
+            in cx,
+            x,
+            y,
+            widen_u64(expr_at(in a, n.b).start),
+            widen_u64(expr_at(in a, n.b).end),
+            in "the range end"
+        );
+    }
+    if k == 20 || k == 21 {
+        if n.a != NONE {
+            let t = expr(inout st, inout cx, in a, n.a, NONE);
+        }
+        return st.unknown;
+    }
+    if k == 15 {
+        cx.en_marks.push(cx.en_name.len());
+        let mut ps = ChunkSeq::new[u32]();
+        for i in 0..list_len(in a, n.a) {
+            let p = paramn(in a, list_at(in a, n.a, i));
+            let mut t = scope_ty(inout st, in cx, in a, p.ty);
+            if t == NONE {
+                err_last(inout st, C_KIND, widen_u64(p.start), widen_u64(p.end));
+                t = st.unknown;
+            }
+            bind(inout cx, nm(in st, p.name), t);
+            ps.push(t);
+        }
+        let r0 = scope_ty(inout st, in cx, in a, n.c);
+        let r = or_unknown(in st, r0);
+        let b = expr(inout st, inout cx, in a, n.e, r);
+        expect_s(
+            inout st,
+            in cx,
+            r,
+            b,
+            widen_u64(expr_at(in a, n.e).start),
+            widen_u64(expr_at(in a, n.e).end),
+            in "closure body"
+        );
+        env_pop(inout cx);
+        let mut res = r;
+        if r == st.unknown {
+            res = b;
+        }
+        return mk_ty(inout st, T_FN, 0, res, in ps);
+    }
+    if k == 16 {
+        let hfx = effectn(in a, n.a);
+        let en = nm(in st, hfx.name);
+        if en == st.s_tensor || en == st.s_kv {
+            let mut m = ChunkSeq::new[u8]();
+            m.push(39);
+            st.names.write(en, inout m);
+            put(
+                inout m,
+                in "' is implemented by the host; a source handler could forge or drop tensors and leases"
+            );
+            push_diag(inout st, C_HANDLER, start, end, in m);
+        }
+        cx.en_marks.push(cx.en_name.len());
+        if n.b != NONE {
+            let t = expr(inout st, inout cx, in a, n.c, NONE);
+            pattern(inout st, inout cx, in a, n.b, t);
+        }
+        let body_ty = expr(inout st, inout cx, in a, n.d, NONE);
+        for i in 0..list_len(in a, n.e) {
+            let c = clausen(in a, list_at(in a, n.e, i));
+            cx.en_marks.push(cx.en_name.len());
+            for j in 0..list_len(in a, c.pats) {
+                let mut pt = st.unknown;
+                if i == 0 {
+                    pt = body_ty;
+                }
+                pattern(inout st, inout cx, in a, list_at(in a, c.pats, j), pt);
+            }
+            let t = expr(inout st, inout cx, in a, c.body, NONE);
+            env_pop(inout cx);
+        }
+        env_pop(inout cx);
+        return st.unknown;
+    }
+    st.unknown
+}
+
+// `check_body`: the function's obligations into `cx.bo`.
+fn check_body(inout st: St, inout cx: Cx, in a: Ast, f: u32, row: u32) {
+    let x = fnn(in a, f);
+    cx.cur = row;
+    cx.bo.clear();
+    cx.fresh = 0;
+    cx.en_name.clear();
+    cx.en_ty.clear();
+    cx.en_marks.clear();
+    cx.en_marks.push(0);
+    cx.sc_name.clear();
+    cx.sc_kind.clear();
+    for i in 0..widen_u64(u32_at(in cx.sg_gn, widen_u64(row))) {
+        cx
+            .sc_name
+            .push(
+            u32_at(in cx.sg_gsym, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+        );
+        cx
+            .sc_kind
+            .push(
+            u8_at(in cx.sg_gkind, wrapping_add(widen_u64(u32_at(in cx.sg_ga, widen_u64(row))), i))
+        );
+    }
+    let mut pc = list_len(in a, x.params);
+    if widen_u64(u32_at(in cx.sg_pn, widen_u64(row))) < pc {
+        pc = widen_u64(u32_at(in cx.sg_pn, widen_u64(row)));
+    }
+    for i in 0..pc {
+        let p = paramn(in a, list_at(in a, x.params, i));
+        bind(
+            inout cx,
+            nm(in st, p.name),
+            u32_at(in cx.sg_pty, wrapping_add(widen_u64(u32_at(in cx.sg_pa, widen_u64(row))), i))
+        );
+    }
+    if x.body != NONE {
+        let res = u32_at(in cx.sg_res, widen_u64(row));
+        let t = expr(inout st, inout cx, in a, x.body, res);
+        let mut c = ChunkSeq::new[u8]();
+        put(inout c, in "body of '");
+        st.names.write(nm(in st, x.name), inout c);
+        c.push(39);
+        expect(
+            inout st,
+            in cx,
+            res,
+            t,
+            widen_u64(expr_at(in a, x.body).start),
+            widen_u64(expr_at(in a, x.body).end),
+            in c
+        );
+    }
+}
+
+fn sig_obs_equal(in cx: Cx, row: u32) -> bool {
+    if widen_u64(u32_at(in cx.sg_on, widen_u64(row))) != cx.bo.len() {
+        return false;
+    }
+    for i in 0..cx.bo.len() {
+        let x = ob_get(in cx, wrapping_add(widen_u64(u32_at(in cx.sg_oa, widen_u64(row))), i));
+        let y = bo_get(in cx, i);
+        if x.k != y.k || x.d1 != y.d1 || x.d2 != y.d2 || x.r != y.r {
+            return false;
+        }
+    }
+    true
+}
+
+// ----- analyze -----------------------------------------------------------------------------
+
+// `infer::analyze` up to the elaboration: the tensor diagnostics in `st`,
+// kinds, ADT infos and signatures in `cx`. Wire diagnostics and wires are
+// already in place.
+pub fn analyze(inout st: St, inout cx: Cx, in a: Ast) {
+    mark_blocks(in st, inout cx, in a);
+    adt_kinds(inout st, inout cx, in a);
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind == 3 {
+            let x = effdecln(in a, it.node);
+            let mut bad = fns_mention(inout st, in a, x.ops);
+            for g in 0..list_len(in a, x.generics) {
+                if at32(
+                    in cx.ak_row,
+                    (nm(in st, genericn(in a, list_at(in a, x.generics, g)).name))
+                )
+                    != NONE {
+                    bad = true;
+                }
+            }
+            if bad {
+                let mut m = ChunkSeq::new[u8]();
+                put(inout m, in "effect '");
+                st.names.write(nm(in st, x.name), inout m);
+                put(
+                    inout m,
+                    in "' mentions tensor types; only top-level functions and type declarations may (this slice)"
+                );
+                push_diag(inout st, C_UNSUPPORTED, (widen_u64(x.start)), (widen_u64(x.end)), in m);
+            }
+        } else if it.kind == 4 {
+            let x = impln(in a, it.node);
+            if type_mentions(in st, in a, x.ty) || fns_mention(inout st, in a, x.methods) {
+                let mut s: u64 = 0;
+                let mut e: u64 = 0;
+                if list_len(in a, x.methods) > 0 {
+                    let m0 = fnn(in a, list_at(in a, x.methods, 0));
+                    s = widen_u64(m0.start);
+                    e = widen_u64(m0.end);
+                }
+                err_s(
+                    inout st,
+                    C_UNSUPPORTED,
+                    s,
+                    e,
+                    in "impl blocks may not mention tensor types; use top-level functions (this slice)"
+                );
+            }
+        } else if it.kind == 6 {
+            let x = confn(in a, it.node);
+            if fns_mention(inout st, in a, x.methods) || type_mentions(in st, in a, x.self_ty) {
+                err_s(
+                    inout st,
+                    C_UNSUPPORTED,
+                    widen_u64(x.start),
+                    widen_u64(x.end),
+                    in "trait implementations may not mention tensor types (this slice)"
+                );
+            }
+        } else if it.kind == 5 {
+            let x = traitn(in a, it.node);
+            if fns_mention(inout st, in a, x.methods) {
+                err_s(
+                    inout st,
+                    C_UNSUPPORTED,
+                    widen_u64(x.start),
+                    widen_u64(x.end),
+                    in "traits may not mention tensor types (this slice)"
+                );
+            }
+        }
+    }
+    adt_infos(inout st, inout cx, in a);
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind == 2 {
+            signature(inout st, inout cx, in a, it.node);
+        }
+    }
+    // Functions with signatures, in item order.
+    let mut fns = ChunkSeq::new[u32]();
+    for i in 0..a.m_items.len() {
+        let it = item_at(in a, i);
+        if it.kind == 2 && at32(in cx.sg_row, (nm(in st, fnn(in a, it.node).name))) != NONE {
+            fns.push(it.node);
+        }
+    }
+    let base = st.dcode.len();
+    for round in 0..17 {
+        diag_truncate_to(inout st, base);
+        let mut changed = false;
+        for i in 0..fns.len() {
+            let f = u32_at(in fns, i);
+            let x = fnn(in a, f);
+            let row = at32(in cx.sg_row, (nm(in st, x.name)));
+            check_body(inout st, inout cx, in a, f, row);
+            if cx.bo.len() > 64 {
+                let mut m = ChunkSeq::new[u8]();
+                m.push(39);
+                st.names.write(nm(in st, x.name), inout m);
+                put(inout m, in "' infers more than 64 dimension preconditions");
+                push_diag(inout st, C_OBLIGATION, (widen_u64(x.start)), (widen_u64(x.end)), in m);
+                continue;
+            }
+            if !sig_obs_equal(in cx, row) {
+                let oa = cx.obs.len();
+                for j in 0..cx.bo.len() {
+                    cx.obs.push(bo_get(in cx, j));
+                }
+                let ok = cx.sg_oa.try_set(widen_u64(row), wrapping_u32(oa));
+                let ok2 = cx.sg_on.try_set(widen_u64(row), wrapping_u32(cx.bo.len()));
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        if round == 16 {
+            let mut s: u64 = 0;
+            let mut e: u64 = 0;
+            if fns.len() > 0 {
+                let f0 = fnn(in a, u32_at(in fns, 0));
+                s = widen_u64(f0.start);
+                e = widen_u64(f0.end);
+            }
+            err_s(
+                inout st,
+                C_OBLIGATION,
+                s,
+                e,
+                in "dimension preconditions did not converge across recursive calls"
+            );
+        }
+    }
+    // Keep the first of each (code, span, message).
+    let n = st.dcode.len();
+    let mut keep = ChunkSeq::new[u8]();
+    for i in 0..n {
+        let mut dup = false;
+        for j in 0..i {
+            if u8_at(in keep, j) == 1 && diag_same(in st, i, j) {
+                dup = true;
+                break;
+            }
+        }
+        if dup {
+            keep.push(0);
+        } else {
+            keep.push(1);
+        }
+    }
+    let mut code = ChunkSeq::new[u32]();
+    let mut ds = ChunkSeq::new[u64]();
+    let mut de = ChunkSeq::new[u64]();
+    let mut ma = ChunkSeq::new[u64]();
+    let mut mb = ChunkSeq::new[u64]();
+    let mut text = ChunkSeq::new[u8]();
+    for i in 0..n {
+        if u8_at(in keep, i) != 1 {
+            continue;
+        }
+        code.push(u32_at(in st.dcode, i));
+        ds.push(u64_at(in st.dstart, i));
+        de.push(u64_at(in st.dend, i));
+        ma.push(text.len());
+        let x = u64_at(in st.dma, i);
+        let y = u64_at(in st.dmb, i);
+        for k in x..y {
+            text.push(u8_at(in st.dtext, k));
+        }
+        mb.push(text.len());
+    }
+    st.dcode = code;
+    st.dstart = ds;
+    st.dend = de;
+    st.dma = ma;
+    st.dmb = mb;
+    st.dtext = text;
+}

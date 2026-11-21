@@ -252,11 +252,13 @@ test {
 
     // @case empty(in "", true, in "")
     // @case single(in "x", true, in "x")
+    // @case reversed_pair(in "ba", false, in "ab")
     // @case ordered(in "abc", true, in "abc")
     // @case descending(in "fedcba", false, in "abcdef")
     // @case duplicates(in "bbaacaa", false, in "aaaabbc")
     // @case all_equal(in "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true, in "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
     // @case larger_than_insertion_run(in "zyxwvutsrqponmlkjihgfedcba9876543210", false, in "0123456789abcdefghijklmnopqrstuvwxyz")
+    // @case pivot_matches_last(in "baaaaaaaaaaaaaaab", false, in "aaaaaaaaaaaaaaabb")
     fn test_sort(in input: Str, initially_sorted: bool, in expected: Str) -> bool {
         let mut items = ChunkSeq::new[u8]();
         items.extend(in input.as_bytes());
@@ -265,15 +267,16 @@ test {
         before == initially_sorted && same_bytes(in items.as_slice(), in expected)
     }
 
-    // @case whole(0, 5, in "abcdx")
-    // @case interior(1, 4, in "xabdc")
-    // @case single(1, 2, in "xdbac")
-    // @case empty(2, 2, in "xdbac")
-    fn test_sort_range(start: u64, end: u64, in expected: Str) -> bool {
+    // @case whole(in "xdbac", 0, 5, in "abcdx")
+    // @case interior(in "xdbac", 1, 4, in "xabdc")
+    // @case single(in "xdbac", 1, 2, in "xdbac")
+    // @case empty(in "xdbac", 2, 2, in "xdbac")
+    // @case heapify_ascending(in "xabcx", 1, 4, in "xabcx")
+    fn test_sort_range(in original: Str, start: u64, end: u64, in expected: Str) -> bool {
         let mut a = ChunkSeq::new[u8]();
         let mut b = ChunkSeq::new[u8]();
-        a.extend(in "xdbac".as_bytes());
-        b.extend(in "xdbac".as_bytes());
+        a.extend(in original.as_bytes());
+        b.extend(in original.as_bytes());
         insertion(inout a.as_slice_mut(), start, end);
         heapsort(inout b.as_slice_mut(), start, end);
         same_bytes(in a.as_slice(), in expected) && same_bytes(in b.as_slice(), in expected)
@@ -295,6 +298,12 @@ test {
     // @case equal(-2, -2, false)
     fn test_lt(a: i64, b: i64, expected: bool) -> bool {
         lt(a, b) == expected
+    }
+
+    // @case first_missing(3, 0)
+    // @case second_missing(0, 3)
+    fn test_lt_missing_index(i: u64, j: u64) -> bool {
+        !lt_at(in "abc".as_bytes(), i, j)
     }
 
     // @case zero(0, 0)

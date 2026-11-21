@@ -52,6 +52,8 @@
 //! `TiledSeq` requests one today, and no runnable entry can discharge it.
 use crate::{ast::*, check::World};
 
+#[path = "seq/element_paths.rs"]
+pub mod element_paths;
 #[path = "seq/native_runtime.rs"]
 pub mod native_runtime;
 
