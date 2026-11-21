@@ -309,12 +309,24 @@ pub(crate) fn log_frame(
     let mut cells = Vec::new();
     let mut counts = Vec::with_capacity(deltas.len());
     let ws: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
+    // Copy only what the codec reaches: it fails at the first input whose
+    // rows overflow or exceed the limit (before its cells), or after the
+    // first input that takes the payload over the byte limit. Inputs past
+    // that point, and the input of another width, are only counted as 0.
+    let (mut rows, mut bytes) = (0usize, 8usize);
     for d in &deltas[..schema_at] {
-        cells.extend_from_slice(&d.cells);
         counts.push(w(d.len()));
+        match rows.checked_add(d.len()) {
+            Some(total) if total <= limits.max_rows_per_frame => rows = total,
+            _ => break,
+        }
+        cells.extend_from_slice(&d.cells);
+        bytes = bytes.saturating_add(4 + d.cells.len().saturating_mul(8));
+        if bytes > limits.max_frame_bytes {
+            break;
+        }
     }
-    // The input of another width only has to be reached.
-    counts.extend(std::iter::repeat_n(0, deltas.len() - schema_at));
+    counts.resize(deltas.len(), 0);
     binding::log_frame(
         epoch,
         w(schema_at),
