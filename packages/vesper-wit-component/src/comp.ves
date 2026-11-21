@@ -26,13 +26,6 @@ use self::wit::{
     Def,
     Field,
     Func,
-    NONE32,
-    T_PRIM,
-    T_TUPLE,
-    T_NAMED,
-    T_UNIT_RESULT,
-    D_RECORD,
-    P_STRING,
     ty_at,
     def_at,
     field_at,
@@ -40,6 +33,16 @@ use self::wit::{
     arg_at,
     text_at
 };
+
+// wit.ves's constants (a `use` of a constant is not read by the Vesper
+// package assembler yet, so they are repeated here).
+const NONE32: u32 = 4294967295;
+const T_PRIM: u8 = 0;
+const T_TUPLE: u8 = 1;
+const T_NAMED: u8 = 2;
+const T_UNIT_RESULT: u8 = 3;
+const D_RECORD: u8 = 0;
+const P_STRING: u8 = 115;
 
 const NONE8: u8 = 255;
 

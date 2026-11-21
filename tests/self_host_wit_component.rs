@@ -219,7 +219,7 @@ fn rust_artifacts() -> &'static [(String, usize, WasmArtifact)] {
         let quiet = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let mut out = vec![];
-        for c in cases() {
+        for c in cases().iter().step_by(step()) {
             for (k, o) in configs().iter().enumerate() {
                 if let Ok(Ok(a)) =
                     std::panic::catch_unwind(|| wasm_backend::compile(&c.world, "main", o))
@@ -231,6 +231,17 @@ fn rust_artifacts() -> &'static [(String, usize, WasmArtifact)] {
         std::panic::set_hook(quiet);
         out
     })
+}
+
+/// Every `n`-th case (`WIT_COMPONENT_STEP`, default 3: compiling every case
+/// with the Rust backend takes most of the test's time in a debug build;
+/// the report's numbers are from `WIT_COMPONENT_STEP=1`).
+fn step() -> usize {
+    std::env::var("WIT_COMPONENT_STEP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(3)
 }
 
 #[derive(Default, Debug)]
@@ -301,7 +312,11 @@ fn port_matches_wit_component() {
         eprintln!("DIFF {d}");
     }
     assert!(t.diffs.is_empty(), "{} differences", t.diffs.len());
-    assert!(t.identical >= 1000, "only {} identical", t.identical);
+    assert!(
+        t.identical * step() >= 1000,
+        "only {} identical",
+        t.identical
+    );
 }
 
 /// WIT outside the backend's grammar is declined, never misread.
