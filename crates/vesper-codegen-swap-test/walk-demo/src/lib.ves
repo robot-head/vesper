@@ -1,0 +1,283 @@
+// The demonstration hook of the lent walk state (self-hosting SH5 lane 1,
+// #1324): every Place IR `Read`, `Bind` and `Write` answered from Vesper.
+//
+// The plain forms are emitted here over the lent walk state: a scalar
+// local's read (its variable, or its home slot's word), a binding of one
+// name, an assignment to a scalar local or field, and the forms whose Rust
+// arm emits only a zero (a binding the read already bound, a write built in
+// its destination). Every other form re-enters Rust: the place's value or
+// address (`REENTER_PLACE_VALUE`, `REENTER_PLACE_ADDRESS`), or the whole
+// instruction (`REENTER_INSTRUCTION`), and the hook answers with the value
+// Rust kept for it. So the hook owns every `Read`, `Bind` and `Write`, and
+// lowers itself the ones whose pieces it can.
+//
+// It is a test of the protocol, not a port: SH4 lane 6 owns the scalar
+// family's package (@vesper/codegen-scalar).
+
+use @vesper/cranelift::{
+    Value,
+    call_arg,
+    call_builder,
+    call_result_value,
+    call_return_builder,
+    ins_iconst,
+    ty_i64,
+    use_var,
+    value_of_word,
+    value_word
+};
+use @vesper/codegen-walk::{
+    ARRAY,
+    BOUND_EARLY,
+    DROP_SLOT,
+    ELEMENT_VIEWS,
+    FUSED,
+    HOISTED,
+    HOMED,
+    KIND_BIND,
+    KIND_READ,
+    KIND_WRITE,
+    NONE,
+    PASS_INOUT,
+    PASS_SINK,
+    PLACED,
+    PLACE_AGGREGATE,
+    PLACE_COERCES,
+    PLACE_CONSTRUCTOR,
+    PLACE_FUNCTION,
+    REENTER_INSTRUCTION,
+    REENTER_PLACE_ADDRESS,
+    REENTER_PLACE_VALUE,
+    REPLACES,
+    RESULT_AGGREGATE,
+    RESULT_COERCES,
+    RESULT_FUNCTION,
+    SPLIT,
+    SPLIT_SOURCE,
+    STATEMENT_COERCES,
+    assign,
+    flags,
+    has,
+    home,
+    keep,
+    kept_count,
+    kept_value,
+    kind,
+    narrow,
+    pass,
+    path_len,
+    place_var,
+    plan,
+    reenter,
+    var_of_word,
+    walk_def_var,
+    walk_store,
+    walk_temp,
+    walk_use_var
+};
+
+const HANDLED: u64 = 1;
+const DECLINED: u64 = 0;
+
+// How the hook answers one instruction.
+// Not a `Read`, `Bind` or `Write`: declined.
+const FORM_DECLINE: u64 = 0;
+// Re-entered: Rust emits the instruction, the place's value or its address.
+const FORM_INSTRUCTION: u64 = 1;
+const FORM_PLACE_VALUE: u64 = 2;
+const FORM_PLACE_ADDRESS: u64 = 3;
+// The Rust arm emits only `iconst.i64 0`.
+const FORM_ZERO: u64 = 4;
+// Emitted here.
+const FORM_READ: u64 = 5;
+const FORM_BIND: u64 = 6;
+const FORM_WRITE_LOCAL: u64 = 7;
+const FORM_WRITE_FIELD: u64 = 8;
+
+// The arms of `Op::Read` in `Codegen::ir_graph_at`, in order.
+fn read_form() -> u64 eff [Ffi[Walk]] {
+    let p = plan();
+    let f = flags();
+    let var = place_var();
+    let n = path_len();
+    let by = pass();
+    if has(p, HOISTED) || has(p, SPLIT) || has(p, HOMED) {
+        return FORM_INSTRUCTION;
+    }
+    if has(p, ARRAY) && has(f, RESULT_AGGREGATE) {
+        return FORM_INSTRUCTION;
+    }
+    // A function's tag, or no local at all.
+    if n == 0 && var == NONE {
+        return FORM_INSTRUCTION;
+    }
+    if (by != PASS_SINK || has(p, SPLIT_SOURCE))
+        && (has(f, RESULT_AGGREGATE) || (by == PASS_INOUT && has(f, RESULT_FUNCTION))) {
+        return FORM_PLACE_ADDRESS;
+    }
+    // A move frees or zeroes what the source owned.
+    if by == PASS_SINK {
+        return FORM_INSTRUCTION;
+    }
+    if n > 0 {
+        return FORM_PLACE_VALUE;
+    }
+    if has(f, PLACE_CONSTRUCTOR) || has(f, PLACE_AGGREGATE) || has(f, PLACE_FUNCTION) {
+        return FORM_INSTRUCTION;
+    }
+    // `Codegen::expr` normalizes a narrow or 128-bit integer.
+    if has(f, PLACE_COERCES) {
+        return FORM_INSTRUCTION;
+    }
+    if narrow(var_of_word(var)) {
+        return FORM_INSTRUCTION;
+    }
+    FORM_READ
+}
+
+// The arms of `Op::Bind`.
+fn bind_form(call: u64) -> u64 eff [Ffi[Cranelift], Ffi[Walk]] {
+    let p = plan();
+    if has(p, BOUND_EARLY) {
+        return FORM_ZERO;
+    }
+    let var = place_var();
+    if var == NONE || call_arg(call, 0) == NONE {
+        return FORM_INSTRUCTION;
+    }
+    if has(p, SPLIT) || has(p, FUSED) || has(p, ELEMENT_VIEWS) || has(p, DROP_SLOT) {
+        return FORM_INSTRUCTION;
+    }
+    if narrow(var_of_word(var)) {
+        return FORM_INSTRUCTION;
+    }
+    FORM_BIND
+}
+
+// The arms of `Op::Write`.
+fn write_form(call: u64) -> u64 eff [Ffi[Cranelift], Ffi[Walk]] {
+    let p = plan();
+    let f = flags();
+    if has(p, PLACED) {
+        return FORM_ZERO;
+    }
+    if has(p, ARRAY) || has(p, REPLACES) || has(p, DROP_SLOT) || has(p, SPLIT) {
+        return FORM_INSTRUCTION;
+    }
+    if has(f, RESULT_AGGREGATE) || has(f, RESULT_FUNCTION) {
+        return FORM_INSTRUCTION;
+    }
+    if !assign() || has(f, PLACE_COERCES) || has(f, PLACE_AGGREGATE) {
+        return FORM_INSTRUCTION;
+    }
+    if has(f, RESULT_COERCES) || has(f, STATEMENT_COERCES) {
+        return FORM_INSTRUCTION;
+    }
+    if call_arg(call, 0) == NONE {
+        return FORM_INSTRUCTION;
+    }
+    if path_len() > 0 {
+        return FORM_WRITE_FIELD;
+    }
+    let var = place_var();
+    if var == NONE {
+        return FORM_INSTRUCTION;
+    }
+    if narrow(var_of_word(var)) {
+        return FORM_INSTRUCTION;
+    }
+    FORM_WRITE_LOCAL
+}
+
+fn reentry_of(form: u64) -> u32 {
+    if form == FORM_PLACE_VALUE {
+        REENTER_PLACE_VALUE
+    } else if form == FORM_PLACE_ADDRESS {
+        REENTER_PLACE_ADDRESS
+    } else {
+        REENTER_INSTRUCTION
+    }
+}
+
+// `Codegen::ir_temp` of the written value, read back as `expr` of the
+// temporary reads it.
+fn written(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift], Ffi[Walk]] {
+    let t = walk_temp(inout b, 0, value_of_word(call_arg(call, 0)));
+    walk_use_var(inout b, t)
+}
+
+fn zero(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
+    let z = ins_iconst(inout b, ty_i64(), 0);
+    call_result_value(call, z);
+    HANDLED
+}
+
+fn emit(call: u64, inout b: Builder, form: u64) -> u64 eff [Ffi[Cranelift], Ffi[Walk]] {
+    if form == FORM_INSTRUCTION || form == FORM_PLACE_VALUE || form == FORM_PLACE_ADDRESS {
+        // Rust emits it, and the hook answers with its value.
+        if kept_count() == 0 {
+            reenter(reentry_of(form));
+            return DECLINED;
+        }
+        call_result_value(call, kept_value(0));
+        return HANDLED;
+    }
+    if form == FORM_ZERO {
+        return zero(call, inout b);
+    }
+    if form == FORM_READ {
+        let v = walk_use_var(inout b, var_of_word(place_var()));
+        call_result_value(call, v);
+        return HANDLED;
+    }
+    if form == FORM_BIND {
+        walk_def_var(inout b, var_of_word(place_var()), value_of_word(call_arg(call, 0)));
+        return zero(call, inout b);
+    }
+    if form == FORM_WRITE_LOCAL {
+        let value = written(call, inout b);
+        let var = var_of_word(place_var());
+        walk_def_var(inout b, var, value);
+        // `Assign` stores to the home slot again, through `store`.
+        let address = home(var);
+        if address != NONE {
+            let ptr = use_var(inout b, var_of_word(address));
+            walk_store(inout b, ptr, value);
+        }
+        return zero(call, inout b);
+    }
+    // FORM_WRITE_FIELD: the value first, then the field's address from
+    // Rust, then the store.
+    if kept_count() == 0 {
+        let value = written(call, inout b);
+        keep(value_word(value));
+        reenter(REENTER_PLACE_ADDRESS);
+        return DECLINED;
+    }
+    walk_store(inout b, kept_value(1), kept_value(0));
+    zero(call, inout b)
+}
+
+// The demonstration hook, installed as the `scalar` family's.
+pub fn walk_hook(call: u64) -> u64 eff [Ffi[Cranelift], Ffi[Walk]] {
+    let k = kind();
+    let form = if k == KIND_READ {
+        read_form()
+    } else if k == KIND_BIND {
+        bind_form(call)
+    } else if k == KIND_WRITE {
+        write_form(call)
+    } else {
+        FORM_DECLINE
+    };
+    if form == FORM_DECLINE {
+        return DECLINED;
+    }
+    let mut b = match call_builder(call) {
+        Some(b) => b,
+        None => return DECLINED,
+    };
+    let answer = emit(call, inout b, form);
+    call_return_builder(call, b);
+    answer
+}
