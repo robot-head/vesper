@@ -366,6 +366,16 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 15 (#1338): @vesper/doc against the Rust doc
+        # renderers; the package reads JSON through @vesper/serde.
+        "test/self_host_doc": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + [
+            "//bootstrap:files",
+            "//crates/vesper-serde:port_package",
+        ],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -404,6 +414,10 @@ vesper_crate(
     },
     # The sealed Logos root is a fresh external input on every CI run. Only
     # its acceptance test inherits the random path (and must rerun).
+    # The doc differential (#1338) documents every 4th corpus file here;
+    # Cargo (Platforms, Test all targets' Cargo legs) runs them all. Only
+    # tests/self_host_doc.rs reads it.
+    test_env = {"VESPER_DOC_STRIDE": "4"},
     test_env_inherit = {
         "test/logos42_acceptance": ["VESPER_LOGOS42_ROOT"],
         "test/self_host_front_end": ["SELF_HOST_TRACE"],
@@ -717,6 +731,8 @@ vesper_crate(
         # The capability-effect differential (#1180): corpus, fixtures, mutants.
         "test/self_host_check_effects": "long",
         "test/self_host_check_fip": "long",
+        # The doc differential (#1338) documents every corpus file twice.
+        "test/self_host_doc": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
         # The Lean head differential (#1341) checks every corpus world.
@@ -814,6 +830,14 @@ vesper_package(
     manifest = "packages/vesper-check-layout/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+vesper_package(
+    name = "doc_package",
+    srcs = glob(["packages/vesper-doc/src/**/*.ves"]),
+    manifest = "packages/vesper-doc/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//crates/vesper-serde:port_package"],
 )
 
 vesper_package(

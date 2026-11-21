@@ -9,7 +9,8 @@ name: Hybrid compiler
 # function-by-function check, the checker swaps' direct checks and the
 # manifest guard. Then it rebuilds the hybrid with a deliberately wrong
 # layout (`--features divergent`), parse and IR check, which the
-# differential harness must catch. Pull requests run Linux only; main,
+# differential harness must catch, and with wrong doc pages, which the doc
+# differential (tests/doc.rs, #1338) must catch. Pull requests run Linux only; main,
 # nightly and manual runs add macOS and Windows. Not a required check; Bazel
 # (Test all targets) builds the crate and runs the same tests on Linux.
 
@@ -28,6 +29,9 @@ on:
       - 'packages/vesper-check-data/**'
       - 'packages/vesper-check-layout/**'
       - 'packages/vesper-ir-check/**'
+      - 'packages/vesper-doc/**'
+      - 'crates/vesper-doc/**'
+      - 'crates/vesper-serde/vesper/**'
       - 'tests/common/check_words.rs'
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
@@ -45,6 +49,9 @@ on:
       - 'packages/vesper-check-data/**'
       - 'packages/vesper-check-layout/**'
       - 'packages/vesper-ir-check/**'
+      - 'packages/vesper-doc/**'
+      - 'crates/vesper-doc/**'
+      - 'crates/vesper-serde/vesper/**'
       - 'tests/common/check_words.rs'
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
@@ -106,3 +113,5 @@ jobs:
         # A wrong parse cannot compile the pilot test's program, so only the
         # harness runs here.
         run: cargo test --locked -p vesper-hybrid --features divergent-parse --test differential hybrid_matches_the_default_compiler -- --nocapture
+      - name: The doc differential catches a divergent doc module
+        run: cargo test --locked -p vesper-hybrid --features divergent-doc --test doc hybrid_docs_match_the_default_compiler -- --nocapture

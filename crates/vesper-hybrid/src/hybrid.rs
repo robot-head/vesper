@@ -35,6 +35,11 @@ mod ir_check_binding;
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/doc.rs"]
+mod doc_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -57,6 +62,8 @@ static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
+/// JSON texts and pages rendered by the Vesper doc module.
+static DOC_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -126,6 +133,23 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
     },
 };
 
+/// `vesper_doc::swap::RenderTable` from `modules/doc`: the JSON writer and
+/// the static and linked pages of `@vesper/doc`.
+const VESPER_DOC: vesper_doc::swap::RenderTable = vesper_doc::swap::RenderTable {
+    pretty_json: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_pretty_json(request)
+    },
+    static_page: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_static_page(request)
+    },
+    linked_page: |request| {
+        DOC_CALLS.fetch_add(1, Relaxed);
+        doc_binding::doc_linked_page(request)
+    },
+};
+
 /// `program` read into `@vesper/place-ir` tables and written back, in
 /// place: the identity Vesper pass. A program the format cannot encode
 /// stays as Rust made it.
@@ -180,6 +204,12 @@ extern "C" fn install() {
     if vesper::ir_swap::install(VESPER_IR_PASSES).is_err() {
         std::process::abort();
     }
+    // The request layout the Rust encoder writes must be the module's.
+    if doc_binding::doc_format() != vesper_doc::swap::FORMAT
+        || vesper_doc::swap::install_render(VESPER_DOC).is_err()
+    {
+        std::process::abort();
+    }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
         unsafe extern "C" {
             fn atexit(f: extern "C" fn()) -> std::ffi::c_int;
@@ -210,6 +240,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: place-ir round-tripped {} programs through Vesper",
         PLACE_IR_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: doc answered {} calls from Vesper",
+        DOC_CALLS.load(Relaxed)
     );
 }
 
