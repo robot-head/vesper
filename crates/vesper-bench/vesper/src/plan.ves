@@ -18,11 +18,14 @@ use self::{
     UnavailableReason
 };
 use self::stats::{
+    Limit,
     cadd,
-    do_paired_sample_new,
-    limit_body_calls
+    do_paired_sample_new
 };
 use self::util::{
+    BP_SCALE,
+    I64_MIN_MAGNITUDE,
+    MAX_EPOCHS,
     add,
     dec,
     div,
@@ -47,15 +50,45 @@ use self::wide::{
     w_udivrem
 };
 
+// The widest counter, in bits.
+const MAX_COUNTER_WIDTH: u64 = 64;
+// layout_offset_bytes: one of 64 cache lines in [0, 4096).
+const OFFSET_LINE_MASK: u64 = 63;
+const CACHE_LINE_BYTES: u64 = 64;
+// layout.rs: heap offsets are 256 steps of HEAP_OFFSET_STEP bytes, stack
+// padding 64 frames of STACK_FRAME_BYTES, env padding below MAX_ENV_PADDING.
+const HEAP_OFFSET_STEPS: u64 = 256;
+const HEAP_OFFSET_STEP: u64 = 16;
+const STACK_FRAMES: u64 = 64;
+const STACK_FRAME_BYTES: u64 = 64;
+const MAX_ENV_PADDING: u64 = 4096;
+// execution.rs RunConfig limits.
+const MAX_OPERATIONS_PER_WINDOW: u64 = 65536;
+const MAX_TOTAL_CALLS: u64 = 10000000;
+const MAX_ELAPSED_NANOS: u64 = 600000000000;
+// An A/B/B/A epoch: four windows, two for each arm.
+const WINDOWS_PER_EPOCH: u64 = 4;
+const WINDOWS_PER_ARM: u64 = 2;
+const PERCENT: u64 = 100;
+
+// Error::InvalidConfig codes (src/port.rs CONFIG_MESSAGES).
+enum ConfigCode: _ {
+    Epochs,
+    WarmupEpochs,
+    Operations,
+    TotalCalls,
+    ElapsedBudget
+}
+
 // ---------------------------------------------------------------------------
 // arithmetic.rs
 
 pub fn do_modular_counter_delta(start: u64, end: u64, width_bits: u8) -> u64 eff [Fail[PortError]] {
     let width = widen_u64(width_bits);
-    if width < 1 || width > 64 {
+    if width < 1 || width > MAX_COUNTER_WIDTH {
         Fail::raise(PortError::InvalidCounterWidth);
     }
-    if width == 64 {
+    if width == MAX_COUNTER_WIDTH {
         return wrapping_sub(end, start);
     }
     let modulus = pow2(width);
@@ -74,7 +107,7 @@ fn mix(x: u64) -> u64 {
 
 pub fn do_layout_offset_bytes(seed: u64, epoch: u64) -> u32 {
     let z = mix(wrapping_add(seed, wrapping_mul(epoch, 11400714819323198485)));
-    wrapping_u32(mul(z & 63, 64))
+    wrapping_u32(mul(z & OFFSET_LINE_MASK, CACHE_LINE_BYTES))
 }
 
 // ---------------------------------------------------------------------------
@@ -97,9 +130,9 @@ pub fn do_layout_plan(seed: u64, run: u32) -> LayoutPlan {
     LayoutPlan {
         seed: seed,
         run: run,
-        heap_offset_bytes: wrapping_u32(mul(rem(heap, 256), 16)),
-        stack_padding_bytes: wrapping_u32(mul(rem(stack, 64), 64)),
-        env_padding_bytes: wrapping_u32(rem(env, 4096)),
+        heap_offset_bytes: wrapping_u32(mul(rem(heap, HEAP_OFFSET_STEPS), HEAP_OFFSET_STEP)),
+        stack_padding_bytes: wrapping_u32(mul(rem(stack, STACK_FRAMES), STACK_FRAME_BYTES)),
+        env_padding_bytes: wrapping_u32(rem(env, MAX_ENV_PADDING)),
         run_seed: run_seed
     }
 }
@@ -136,26 +169,26 @@ pub fn do_validate_config(
     let w = widen_u64(warmup_epochs);
     let o = widen_u64(operations_per_window);
     let c = widen_u64(max_total_calls);
-    if e == 0 || e > 64 {
-        invalid(0);
+    if e == 0 || e > MAX_EPOCHS {
+        invalid(ConfigCode::Epochs);
     }
-    if w > 64 {
-        invalid(1);
+    if w > MAX_EPOCHS {
+        invalid(ConfigCode::WarmupEpochs);
     }
-    if o == 0 || o > 65536 {
-        invalid(2);
+    if o == 0 || o > MAX_OPERATIONS_PER_WINDOW {
+        invalid(ConfigCode::Operations);
     }
-    if c == 0 || c > 10000000 {
-        invalid(3);
+    if c == 0 || c > MAX_TOTAL_CALLS {
+        invalid(ConfigCode::TotalCalls);
     }
-    if max_elapsed_nanos == 0 || max_elapsed_nanos > 600000000000 {
-        invalid(4);
+    if max_elapsed_nanos == 0 || max_elapsed_nanos > MAX_ELAPSED_NANOS {
+        invalid(ConfigCode::ElapsedBudget);
     }
-    let calls = cmul(cmul(cadd(e, w), 4), o);
+    let calls = cmul(cmul(cadd(e, w), WINDOWS_PER_EPOCH), o);
     if calls > c {
         Fail::raise(
             PortError::Limit {
-                code: limit_body_calls()
+                code: Limit::BodyCalls
             }
         );
     }
@@ -168,7 +201,7 @@ pub fn do_fold_epoch(w0: u64, w1: u64, w2: u64, w3: u64, operations: u64)
     -> Sample eff [Fail[PortError]] {
     let a = cadd(w0, w3);
     let b = cadd(w1, w2);
-    do_paired_sample_new(a, b, cmul(operations, 2))
+    do_paired_sample_new(a, b, cmul(operations, WINDOWS_PER_ARM))
 }
 
 // ---------------------------------------------------------------------------
@@ -243,22 +276,22 @@ pub fn do_median_i64(in values: Slice[i64]) -> i64 {
     let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
         // Flipping the sign bit makes the i64 order the u64 order.
-        s.push(wrapping_u64(gi(in values, i)) ^ 9223372036854775808);
+        s.push(wrapping_u64(gi(in values, i)) ^ I64_MIN_MAGNITUDE);
     }
     sort_u64(inout s, n);
     let m = match s.try_get(div(n, 2)) {
         Option::Some(x) => x,
-        Option::None => 9223372036854775808,
+        Option::None => I64_MIN_MAGNITUDE,
     };
-    wrapping_i64(m ^ 9223372036854775808)
+    wrapping_i64(m ^ I64_MIN_MAGNITUDE)
 }
 
-// 10000 * (1 - period_s / period_0), floored. A product beyond `i128`
+// BP_SCALE * (1 - period_s / period_0), floored. A product beyond `i128`
 // (which Rust's `i128` arithmetic does not define) is ArithmeticOverflow.
 pub fn do_predicted_bp(baseline: ExperimentRun, run: ExperimentRun) -> i64 eff [Fail[PortError]] {
     let product = w_mul_u64(run.effective_ns, baseline.progress);
-    let num = w_mul_small(product, 10000);
-    let (back, r0) = w_udivrem(num, w_u64(10000));
+    let num = w_mul_small(product, BP_SCALE);
+    let (back, r0) = w_udivrem(num, w_u64(BP_SCALE));
     if w_is_neg(num) || w_ucmp(back, product) != 0 {
         Fail::raise(PortError::ArithmeticOverflow);
     }
@@ -270,7 +303,7 @@ pub fn do_predicted_bp(baseline: ExperimentRun, run: ExperimentRun) -> i64 eff [
         Fail::raise(PortError::EmptyEvidence);
     }
     let (q, r) = w_floor_divrem(num, den);
-    let mut result = w_sub(w_u64(10000), q);
+    let mut result = w_sub(w_u64(BP_SCALE), q);
     if !w_is_zero(r) {
         result = w_sub(result, w_u64(1));
     }
@@ -280,9 +313,9 @@ pub fn do_predicted_bp(baseline: ExperimentRun, run: ExperimentRun) -> i64 eff [
     wrapping_i64(result.lo)
 }
 
-// The delay a selected region's visit charges: elapsed * pct / 100.
+// The delay a selected region's visit charges: elapsed * pct / PERCENT.
 pub fn do_region_delay(elapsed: u64, speedup_pct: u32) -> u64 {
-    let (q, r) = w_udivrem(w_mul_u64(elapsed, widen_u64(speedup_pct)), w_u64(100));
+    let (q, r) = w_udivrem(w_mul_u64(elapsed, widen_u64(speedup_pct)), w_u64(PERCENT));
     q.lo
 }
 

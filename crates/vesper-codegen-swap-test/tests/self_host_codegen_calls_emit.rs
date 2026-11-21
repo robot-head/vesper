@@ -17,18 +17,16 @@
 //! - `the_call_swap_matches_on_test_sources`: the same over the programs
 //!   of the feature tests (`dyn` slots, the status ABI, register results),
 //!   every entry `main` or the first function with no parameters.
-#[path = "common/check_harness.rs"]
+#[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
-#[path = "common/clif_diff.rs"]
-mod clif_diff;
-#[path = "common/codegen_calls_sources.rs"]
+#[path = "../../../tests/common/codegen_calls_sources.rs"]
 mod codegen_calls_sources;
 
-use clif_diff::*;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use vesper::codegen_swap::{self, CodegenHooks, Lent};
 use vesper::native::WordFunction;
+use vesper_codegen_swap_test::*;
 use vesper_cranelift_sys::cranelift_codegen::ir::{self, AbiParam, InstBuilder, Signature, types};
 use vesper_cranelift_sys::cranelift_codegen::isa::CallConv;
 use vesper_cranelift_sys::cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};

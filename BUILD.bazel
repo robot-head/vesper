@@ -172,14 +172,14 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
-        "test/self_host_check_harness": glob([
+        # Self-hosting SH2 lane 14 (#1186): the tensor types checker port,
+        # differential over fixtures, checker sources, mutants and corpus.
+        "test/self_host_check_tensor_types": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
         ]),
-        # SH4 lane 1 (#1275): the codegen swap differential over the same
-        # corpus, with the Vesper hooks in packages/vesper-codegen-base.
-        "test/self_host_codegen_swap": glob([
+        "test/self_host_check_harness": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -207,33 +207,6 @@ vesper_crate(
         # native backend's declarations over the corpus and the source strings
         # of the feature test files it reads. Anchored globs.
         "test/self_host_codegen_calls": glob([
-            "examples/**",
-            "packages/**",
-            "tests/fixtures/**",
-        ]) + [
-            "tests/arrays.rs",
-            "tests/capability_effects.rs",
-            "tests/capability_verifiers.rs",
-            "tests/checked_arithmetic.rs",
-            "tests/dyn_box.rs",
-            "tests/dyn_effects.rs",
-            "tests/dyn_fn.rs",
-            "tests/dyn_trait.rs",
-            "tests/ffi_handles.rs",
-            "tests/fip.rs",
-            "tests/floats.rs",
-            "tests/integer_widths.rs",
-            "tests/native_block_param_homes.rs",
-            "tests/native_export_f32.rs",
-            "tests/native_fail_status.rs",
-            "tests/native_handlers.rs",
-            "tests/native_hoist_calls.rs",
-            "tests/native_spans.rs",
-            "tests/vector_f32.rs",
-            "tests/wide_integers.rs",
-        ],
-        # The `call` hook (#1281) over the same corpus and test sources.
-        "test/self_host_codegen_calls_emit": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -293,6 +266,12 @@ vesper_crate(
             "tests/fixtures/**",
         ]),
         "test/self_host_check_core_typing_exprs": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH2 lane 8 (#1180): @vesper/check-effects against capability_effects.
+        "test/self_host_check_effects": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -635,8 +614,10 @@ vesper_crate(
         "test/hybrid_ir_check": "long",
         "test/self_host_place_ir": "long",
         "test/self_host_codegen_calls": "long",
-        "test/self_host_codegen_calls_emit": "long",
         "test/self_host_check_harness": "long",
+        # The tensor types differential (#1186) JIT-compiles the port and
+        # replays mutants and the corpus.
+        "test/self_host_check_tensor_types": "eternal",
         # The region and sequence rules differential (#1181): ~7 min debug.
         "test/self_host_check_regions_seqs": "long",
         # The dyn differential runs both passes over every .ves source twice.
@@ -646,10 +627,11 @@ vesper_crate(
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
         "test/self_host_check_core_typing_exprs": "long",
+        # The capability-effect differential (#1180): corpus, fixtures, mutants.
+        "test/self_host_check_effects": "long",
         "test/self_host_check_fip": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
-        "test/self_host_codegen_swap": "long",
     },
 )
 
@@ -755,22 +737,14 @@ vesper_package(
     deps = [":std_hash_package"],
 )
 
-# The Cranelift shim's package and the codegen base as dependencies of the
-# hybrid compiler's codegen module (self-hosting SH4 lane 1, #1275).
-vesper_package(
-    name = "cranelift_package",
-    srcs = glob(["packages/vesper-cranelift/src/**/*.ves"]),
-    manifest = "packages/vesper-cranelift/Loom.toml",
-    visibility = ["//visibility:public"],
-    vsys = ["packages/vesper-cranelift/cranelift.vsys"],
-)
-
+# The codegen base as a dependency of the hybrid compiler's codegen module
+# (self-hosting SH4 lane 1, #1275); @vesper/cranelift is in its own package.
 vesper_package(
     name = "codegen_base_package",
     srcs = glob(["packages/vesper-codegen-base/src/**/*.ves"]),
     manifest = "packages/vesper-codegen-base/Loom.toml",
     visibility = ["//visibility:public"],
-    deps = [":cranelift_package"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
 )
 
 # The `call` family's emission (self-hosting SH4 lane 7, #1281), for the
@@ -782,7 +756,7 @@ vesper_package(
     visibility = ["//visibility:public"],
     deps = [
         ":codegen_base_package",
-        ":cranelift_package",
+        "//packages/vesper-cranelift:cranelift_package",
     ],
 )
 

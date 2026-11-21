@@ -1012,6 +1012,143 @@ pub fn kernel_next_task(inout k: Kernel) -> Next {
 }
 
 test {
+    // @case odd_tree_last(3, 2, 3)
+    // @case even_tree_first(4, 0, 1)
+    // @case even_tree_middle(4, 1, 2)
+    // @case even_tree_last(4, 3, 4)
+    fn test_fenwick_selection(size: u64, rank: u64, expected: u64) -> bool {
+        let mut weights = ChunkSeq::new[u64]();
+        weights.push(0);
+        for i in 0..size {
+            let weight = if i == 0 {
+                0
+            } else {
+                1
+            };
+            fen_push(inout weights, weight);
+        }
+        fen_add(inout weights, 0, 5);
+        fen_add(inout weights, 1, 1);
+        fen_prefix(in weights.as_slice(), size)
+            == size
+            && fen_select(in weights.as_slice(), rank)
+            == expected
+    }
+
+    fn test_heap_orders_equal_deadlines_by_completion() -> bool {
+        let mut kernel = kernel_new(0);
+        kernel.heap_push(30, 1);
+        kernel.heap_push(20, 2);
+        kernel.heap_push(15, 3);
+        kernel.heap_push(20, 4);
+        kernel.heap_push(10, 5);
+        kernel.heap_push(5, 6);
+        if kernel.heap_less(0, 0) {
+            return false;
+        }
+        let mut expected = ChunkSeq::new[u64]();
+        expected.push(6);
+        expected.push(5);
+        expected.push(3);
+        expected.push(2);
+        expected.push(4);
+        expected.push(1);
+        let count = expected.len();
+        for i in 0..count {
+            if kernel.h_completion.try_get(0) != expected.try_get(i) {
+                return false;
+            }
+            kernel.heap_pop();
+        }
+        kernel.heap_pop();
+        kernel.h_time.len() == 0 && kernel.h_completion.len() == 0
+    }
+
+    fn test_threshold_draw_is_accepted() -> bool {
+        // This seed makes the first SplitMix64 output equal 1, the threshold for 3 tasks.
+        let seed: u64 = 17885559969949501885;
+        let mut kernel = kernel_new(seed);
+        kernel_spawn(inout kernel);
+        kernel_spawn(inout kernel);
+        kernel_spawn(inout kernel);
+        let next = kernel_next_task(inout kernel);
+        next.code == 0 && next.task == 2 && kernel.rng == wrapping_add(seed, 0x9e3779b97f4a7c15)
+    }
+
+    fn test_yielded_tasks_wait_until_next_round() -> bool {
+        let mut kernel = kernel_new(42);
+        let idle = kernel_next_task(inout kernel);
+        if idle.cancel || kernel.round != 0 || atb(in kernel.t_seen.as_slice(), 0) {
+            return false;
+        }
+        kernel_spawn(inout kernel);
+        kernel_spawn(inout kernel);
+        if atb(in kernel.t_seen.as_slice(), 0) || atb(in kernel.t_seen.as_slice(), 1) {
+            return false;
+        }
+        let first = kernel_next_task(inout kernel);
+        kernel_yield_task(inout kernel, first.task, true);
+        if kernel.ready_total != 2 || kernel.cand_total != 1 {
+            return false;
+        }
+        let second = kernel_next_task(inout kernel);
+        kernel_yield_task(inout kernel, second.task, true);
+        if second.task == first.task || kernel.round != 0 || kernel.cand_total != 0 {
+            return false;
+        }
+        let next = kernel_next_task(inout kernel);
+        next.code == 0 && next.task != 0 && kernel.round == 1 && kernel.cand_total == 1
+    }
+
+    fn test_rejected_wake_restores_pending_timer() -> bool {
+        let mut journal = ChunkSeq::new[Ev]();
+        journal.push(ev(0, 1, 0, 0, 0));
+        journal.push(ev(1, 1, 0, 0, 0));
+        journal.push(ev(3, 1, 1, 17, 0));
+        let mut kernel = kernel_replay(0, in journal.as_slice());
+        let spawned = kernel_spawn(inout kernel);
+        let running = kernel_next_task(inout kernel);
+        let parked = kernel_sleep(inout kernel, spawned.value, true, 17);
+        if spawned.code != 0 || running.task != spawned.value || parked.code != 0 {
+            return false;
+        }
+        let refused = kernel_next_task(inout kernel);
+        refused
+            .code
+            == 10
+            && refused
+            .task
+            == 3
+            && kernel
+            .ready_total
+            == 0
+            && kernel
+            .cand_total
+            == 0
+            && kernel
+            .now
+            == 0
+            && kernel
+            .pending_n
+            == 1
+            && kernel
+            .heap_top()
+            == Option::Some(17)
+    }
+
+    fn test_completed_io_is_removed_from_deadline_heap() -> bool {
+        let mut kernel = kernel_new(0);
+        let task = kernel_spawn(inout kernel).value;
+        kernel_next_task(inout kernel);
+        let waiting = kernel_schedule_io(inout kernel, task, true, 17, 0, 45);
+        let completed = kernel_complete_io(inout kernel, waiting.value, 0, 99);
+        if waiting.code != 0 || completed.code != 0 || kernel.heap_top() != Option::None {
+            return false;
+        }
+        let next = kernel_next_task(inout kernel);
+        next.code == 0 && next.task == task && next.wrv == 99 && kernel.now == 0
+    }
+
     // @case seed_zero(0)
     // @case seed_nonzero(42)
     // @case seed_max(18446744073709551615)
@@ -1063,23 +1200,39 @@ test {
         if !sleep_started || !timer_matches || !pending {
             return false;
         }
+        if kernel.out.try_get(0) != Option::Some(ev(3, task, sleep.value, delay, 0)) {
+            return false;
+        }
+        let rejected = kernel_complete_io(inout kernel, sleep.value, 0, 0);
+        if rejected.code != 2 || kernel_pending_count(in kernel) != 1 {
+            return false;
+        }
         let wake = kernel_next_task(inout kernel);
+        let expected_event = if delay == 0 {
+            ev(6, task, sleep.value, 0, 0)
+        } else {
+            ev(5, 0, 0, 0, delay)
+        };
+        if kernel.out.try_get(0) != Option::Some(expected_event) {
+            return false;
+        }
         let resumed = wake.code == 0 && wake.task == task;
         let timer_finished = wake.wk == 2 && wake.wc == sleep.value;
         let advanced = kernel_pending_count(in kernel) == 0 && kernel_now_ns(in kernel) == delay;
         resumed && timer_finished && advanced
     }
 
-    // @case external_success(false, 0, 27, false)
-    // @case scheduled_success(true, 0, 27, false)
-    // @case external_error(false, 1, 5, false)
-    // @case scheduled_cancelled(true, 2, 0, true)
-    fn test_io(scheduled: bool, result: u64, payload: u64, cancel: bool) -> bool {
+    // @case external_success(false, 0, 27, false, 0)
+    // @case scheduled_success(true, 0, 27, false, 13)
+    // @case external_error(false, 1, 5, false, 0)
+    // @case scheduled_cancelled(true, 2, 0, true, 13)
+    // @case scheduled_zero_delay(true, 0, 27, false, 0)
+    fn test_io(scheduled: bool, result: u64, payload: u64, cancel: bool, delay: u64) -> bool {
         let mut kernel = kernel_new(0);
         let task = kernel_spawn(inout kernel).value;
         kernel_next_task(inout kernel);
         let wait = if scheduled {
-            kernel_schedule_io(inout kernel, task, true, 13, result, payload)
+            kernel_schedule_io(inout kernel, task, true, delay, result, payload)
         } else {
             kernel_park_io(inout kernel, task, true)
         };
@@ -1087,6 +1240,19 @@ test {
         let parked = wait.code == 0 && wait.value == 1 && state.kind == 3;
         let queued = state.completion == wait.value && kernel_pending_count(in kernel) == 1;
         if !parked || !queued || kernel_cancel_requested(in kernel, task) != 0 {
+            return false;
+        }
+        let expected_event = if scheduled {
+            ev_io(4, task, wait.value, delay, 1, result, payload)
+        } else {
+            ev(4, task, wait.value, 0, 0)
+        };
+        if kernel
+            .out
+            .try_get(0)
+            != Option::Some(expected_event)
+            || atb(in kernel.p_io.as_slice(), dec(wait.value))
+            != scheduled {
             return false;
         }
         if cancel {
@@ -1107,21 +1273,11 @@ test {
         }
         let wake = kernel_next_task(inout kernel);
         let duplicate = kernel_complete_io(inout kernel, wait.value, result, payload);
-        let expected_time: u64 = if scheduled {
-            13
-        } else {
-            0
-        };
         let resumed = wake.code == 0 && wake.task == task && wake.wk == 3 && wake.wc == wait.value;
         let result_matches = wake.wrk == result && wake.wrv == payload && wake.cancel == cancel;
         let consumed = duplicate.code == 2 && duplicate.value == wait.value;
         let drained = kernel_pending_count(in kernel) == 0;
-        resumed
-            && result_matches
-            && consumed
-            && drained
-            && kernel_now_ns(in kernel)
-            == expected_time
+        resumed && result_matches && consumed && drained && kernel_now_ns(in kernel) == delay
     }
 
     // @case foreign(1, false, 6)

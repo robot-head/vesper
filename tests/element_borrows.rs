@@ -457,15 +457,16 @@ fn f(inout xs: ChunkSeq[State]) -> u64 { match xs.try_get_mut(0) { Some(s) => ta
             "E0307",
             "",
         ),
-        // Two views of one sequence in one call overlap.
+        // Two views of one element in one call overlap. (Distinct elements
+        // are disjoint since SH3 lane 2, tests/disjoint_borrows.rs.)
         (
             "fn g(inout a: State, in b: State) {}
-fn f(inout xs: ChunkSeq[State]) eff [Fail[RuntimeError]] { g(inout xs[0], in xs[1]) }",
+fn f(inout xs: ChunkSeq[State]) eff [Fail[RuntimeError]] { g(inout xs[0], in xs[0]) }",
             "E0301",
             "overlapping",
         ),
         (
-            "fn f(inout xs: ChunkSeq[State]) eff [Fail[RuntimeError]] { swap(inout xs[0], inout xs[1]) }",
+            "fn f(inout xs: ChunkSeq[State]) eff [Fail[RuntimeError]] { swap(inout xs[1], inout xs[1]) }",
             "E0301",
             "overlapping",
         ),

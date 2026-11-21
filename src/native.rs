@@ -1343,6 +1343,8 @@ fn define_instances_observed_with_trace<M: Module>(
     operands_only: bool,
     abi: &NativeAbi,
 ) -> Result<String, String> {
+    let _module_kind =
+        crate::codegen_swap::module_kind_scope(std::any::type_name::<M>().ends_with("JITModule"));
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
     for (key, (name, generic_vars)) in instances {

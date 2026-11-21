@@ -10,6 +10,7 @@ use self::{
     ParseError
 };
 use self::util::{
+    NO_BYTE,
     add,
     gb,
     inc,
@@ -20,6 +21,50 @@ use self::wide::{
     w_mul_u64,
     w_ult
 };
+
+// The bytes the attribute grammar names.
+enum Ascii: _ {
+    Tab = 9,
+    Lf = 10,
+    FormFeed = 12,
+    Cr = 13,
+    Space = 32,
+    LParen = 40,
+    RParen = 41,
+    Comma = 44,
+    Dot = 46,
+    Zero = 48,
+    Nine = 57,
+    Equals = 61,
+    At = 64,
+    Underscore = 95,
+    LowerA = 97,
+    LowerZ = 122
+}
+
+// The longest attribute parsed (Error InputLimit past it).
+const MAX_ATTRIBUTE_BYTES: u64 = 4096;
+// The most fractional digits a decimal keeps (u64 holds 10^19).
+const MAX_DECIMAL_SCALE: u64 = 18;
+const DECIMAL_BASE: u64 = 10;
+// The largest value that still takes another digit: u64::MAX / 10.
+const MAX_BEFORE_DIGIT: u64 = 1844674407370955161;
+
+// The `@bench` fields, in the order of the parser's checks.
+enum Field: _ {
+    ZeroAlloc,
+    ExpectVectorized,
+    InstructionsPerByte,
+    StabilizerPages,
+    L1dMissesPerOp
+}
+
+// `zero_alloc` and `expect_vectorized` (ContractOut).
+enum Flag: _ {
+    Unset,
+    False,
+    True
+}
 
 fn perr(kind: ErrorKind, offset: u64) eff [Fail[ParseError]] {
     Fail::raise(
@@ -32,15 +77,15 @@ fn perr(kind: ErrorKind, offset: u64) eff [Fail[ParseError]] {
 
 // `u8::is_ascii_whitespace`: space, tab, line feed, form feed, return.
 fn is_space(b: u64) -> bool {
-    b == 32 || b == 9 || b == 10 || b == 12 || b == 13
+    b == Ascii::Space || b == Ascii::Tab || b == Ascii::Lf || b == Ascii::FormFeed || b == Ascii::Cr
 }
 
 fn is_name_byte(b: u64) -> bool {
-    (b >= 97 && b <= 122) || (b >= 48 && b <= 57) || b == 95
+    (b >= Ascii::LowerA && b <= Ascii::LowerZ) || is_digit(b) || b == Ascii::Underscore
 }
 
 fn is_digit(b: u64) -> bool {
-    b >= 48 && b <= 57
+    b >= Ascii::Zero && b <= Ascii::Nine
 }
 
 fn space(in input: Slice[u8], pos: u64) -> u64 {
@@ -82,7 +127,7 @@ fn name_is(in input: Slice[u8], start: u64, end: u64, in word: Str) -> bool {
     for i in 0..word.len() {
         let want = match word.try_byte_at(i) {
             Option::Some(b) => widen_u64(b),
-            Option::None => 256,
+            Option::None => NO_BYTE,
         };
         if gb(in input, add(start, i)) != want {
             return false;
@@ -107,10 +152,10 @@ fn boolean(in input: Slice[u8], pos: u64) -> (u64, bool) eff [Fail[ParseError]] 
 
 // value * 10 + digit, or None where Rust's checked arithmetic overflows.
 fn push_digit(value: u64, digit: u64) -> Option[u64] {
-    if value > 1844674407370955161 {
+    if value > MAX_BEFORE_DIGIT {
         return Option::None;
     }
-    let ten = mul(value, 10);
+    let ten = mul(value, DECIMAL_BASE);
     let next = wrapping_add(ten, digit);
     if next < ten {
         Option::None
@@ -130,7 +175,7 @@ fn number(in input: Slice[u8], pos: u64, fractional: bool)
         if !is_digit(b) {
             break;
         }
-        match push_digit(value, sub(b, 48)) {
+        match push_digit(value, sub(b, Ascii::Zero)) {
             Option::Some(v) => value = v,
             Option::None => perr(ErrorKind::NumberOverflow, p),
         }
@@ -140,7 +185,7 @@ fn number(in input: Slice[u8], pos: u64, fractional: bool)
         perr(ErrorKind::Syntax, p);
     }
     let mut scale: u64 = 0;
-    if fractional && gb(in input, p) == 46 {
+    if fractional && gb(in input, p) == Ascii::Dot {
         p = inc(p);
         let fraction_start = p;
         loop {
@@ -149,10 +194,10 @@ fn number(in input: Slice[u8], pos: u64, fractional: bool)
                 break;
             }
             scale = inc(scale);
-            if scale > 18 {
+            if scale > MAX_DECIMAL_SCALE {
                 perr(ErrorKind::NumberOverflow, p);
             }
-            match push_digit(value, sub(b, 48)) {
+            match push_digit(value, sub(b, Ascii::Zero)) {
                 Option::Some(v) => value = v,
                 Option::None => perr(ErrorKind::NumberOverflow, p),
             }
@@ -183,13 +228,13 @@ fn duplicate(start: u64) eff [Fail[ParseError]] {
     perr(ErrorKind::DuplicateField, start);
 }
 
-// `zero_alloc` and `expect_vectorized` are 0 unset, 1 false, 2 true.
+// `zero_alloc` and `expect_vectorized` are Flag codes.
 pub fn do_parse_attribute(in input: Slice[u8]) -> ContractOut eff [Fail[ParseError]] {
     let len = input.len();
-    if len > 4096 {
-        perr(ErrorKind::InputLimit, 4096);
+    if len > MAX_ATTRIBUTE_BYTES {
+        perr(ErrorKind::InputLimit, MAX_ATTRIBUTE_BYTES);
     }
-    let mut p = expect(in input, 0, 64);
+    let mut p = expect(in input, 0, Ascii::At);
     let name_start = space(in input, p);
     p = name_end(in input, name_start);
     if !name_is(in input, name_start, p, "bench") {
@@ -200,56 +245,56 @@ pub fn do_parse_attribute(in input: Slice[u8]) -> ContractOut eff [Fail[ParseErr
     if p == len {
         return r;
     }
-    p = expect(in input, p, 40);
+    p = expect(in input, p, Ascii::LParen);
     loop {
         p = space(in input, p);
-        if gb(in input, p) == 41 {
+        if gb(in input, p) == Ascii::RParen {
             p = inc(p);
             break;
         }
         let start = p;
         p = name_end(in input, start);
         let id: u64 = if name_is(in input, start, p, "zero_alloc") {
-            0
+            Field::ZeroAlloc
         } else if name_is(in input, start, p, "expect_vectorized") {
-            1
+            Field::ExpectVectorized
         } else if name_is(in input, start, p, "max_instructions_per_byte") {
-            2
+            Field::InstructionsPerByte
         } else if name_is(in input, start, p, "stabilizer_pages") {
-            3
+            Field::StabilizerPages
         } else if name_is(in input, start, p, "max_l1d_misses_per_op") {
-            4
+            Field::L1dMissesPerOp
         } else if p == start {
             perr(ErrorKind::Syntax, p);
-            0
+            Field::ZeroAlloc
         } else {
             perr(ErrorKind::UnknownField, start);
-            0
+            Field::ZeroAlloc
         };
-        p = expect(in input, p, 61);
-        if id == 0 {
-            if r.zero_alloc != 0 {
+        p = expect(in input, p, Ascii::Equals);
+        if id == Field::ZeroAlloc {
+            if r.zero_alloc != Flag::Unset {
                 duplicate(start);
             }
             let (q, v) = boolean(in input, p);
             p = q;
             r.zero_alloc = if v {
-                2
+                Flag::True
             } else {
-                1
+                Flag::False
             };
-        } else if id == 1 {
-            if r.expect_vectorized != 0 {
+        } else if id == Field::ExpectVectorized {
+            if r.expect_vectorized != Flag::Unset {
                 duplicate(start);
             }
             let (q, v) = boolean(in input, p);
             p = q;
             r.expect_vectorized = if v {
-                2
+                Flag::True
             } else {
-                1
+                Flag::False
             };
-        } else if id == 2 {
+        } else if id == Field::InstructionsPerByte {
             if r.has_instructions_per_byte {
                 duplicate(start);
             }
@@ -258,7 +303,7 @@ pub fn do_parse_attribute(in input: Slice[u8]) -> ContractOut eff [Fail[ParseErr
             r.has_instructions_per_byte = true;
             r.instructions_coefficient = c;
             r.instructions_scale = wrapping_u32(s);
-        } else if id == 3 {
+        } else if id == Field::StabilizerPages {
             if r.has_stabilizer_pages {
                 duplicate(start);
             }
@@ -277,9 +322,9 @@ pub fn do_parse_attribute(in input: Slice[u8]) -> ContractOut eff [Fail[ParseErr
         }
         p = space(in input, p);
         let b = gb(in input, p);
-        if b == 44 {
+        if b == Ascii::Comma {
             p = inc(p);
-        } else if b == 41 {
+        } else if b == Ascii::RParen {
             p = inc(p);
             break;
         } else {
@@ -296,16 +341,36 @@ pub fn do_parse_attribute(in input: Slice[u8]) -> ContractOut eff [Fail[ParseErr
 // ---------------------------------------------------------------------------
 // contract_gate.rs
 //
-// Status codes: 0 NotRequested, 1 Pass, 2 Fail, then Inconclusive with
-// 3 Counter(InstructionsRetired), 4 Counter(L1dReadMisses), 5 InputBytes,
-// 6 Operations, 7 ZeroInputBytes, 8 ZeroOperations, 9 AllocationEvidence,
-// 10 VectorizationEvidence, 11 LayoutEvidence. Overall: 0 NotRequested,
-// 1 Pass, 2 Fail, 3 Inconclusive.
+// GateReport status codes (src/port.rs): every status from
+// MissingInstructions on is Inconclusive with that reason.
+enum Status: _ {
+    NotRequested,
+    Pass,
+    Fail,
+    // Counter(InstructionsRetired) and Counter(L1dReadMisses).
+    MissingInstructions,
+    MissingL1dMisses,
+    MissingInputBytes,
+    MissingOperations,
+    ZeroInputBytes,
+    ZeroOperations,
+    AllocationEvidence,
+    VectorizationEvidence,
+    LayoutEvidence
+}
+
+// GateReport's overall decision.
+enum Overall: _ {
+    NotRequested,
+    Pass,
+    Fail,
+    Inconclusive
+}
 
 fn pow10(scale: u64) -> u64 {
     let mut p: u64 = 1;
     for i in 0..scale {
-        p = mul(p, 10);
+        p = mul(p, DECIMAL_BASE);
     }
     p
 }
@@ -333,15 +398,15 @@ fn ratio_gate(
     let left = w_mul_u64(counter, pow10(scale));
     let right = w_mul_u64(coefficient, denominator);
     if w_ult(right, left) {
-        2
+        Status::Fail
     } else {
-        1
+        Status::Pass
     }
 }
 
 pub fn do_gate_evaluate(g: GateIn) -> GateOut eff [Fail[GateError]] {
     let scale = widen_u64(g.instructions_scale);
-    if g.has_instructions_per_byte && scale > 18 {
+    if g.has_instructions_per_byte && scale > MAX_DECIMAL_SCALE {
         Fail::raise(GateError::InvalidDecimalScale);
     }
     let ipb = if g.has_instructions_per_byte {
@@ -352,12 +417,12 @@ pub fn do_gate_evaluate(g: GateIn) -> GateOut eff [Fail[GateError]] {
             g.input_bytes,
             g.instructions_coefficient,
             scale,
-            3,
-            5,
-            7
+            Status::MissingInstructions,
+            Status::MissingInputBytes,
+            Status::ZeroInputBytes
         )
     } else {
-        0
+        Status::NotRequested
     };
     let l1d = if g.has_l1d_misses_per_op {
         ratio_gate(
@@ -367,39 +432,41 @@ pub fn do_gate_evaluate(g: GateIn) -> GateOut eff [Fail[GateError]] {
             g.operations,
             g.l1d_misses_per_op,
             0,
-            4,
-            6,
-            8
+            Status::MissingL1dMisses,
+            Status::MissingOperations,
+            Status::ZeroOperations
         )
     } else {
-        0
+        Status::NotRequested
     };
     let zero_alloc: u64 = if g.zero_alloc {
-        9
+        Status::AllocationEvidence
     } else {
-        0
+        Status::NotRequested
     };
     let vectorized: u64 = if g.expect_vectorized {
-        10
+        Status::VectorizationEvidence
     } else {
-        0
+        Status::NotRequested
     };
     let pages: u64 = if g.has_stabilizer_pages {
-        11
+        Status::LayoutEvidence
     } else {
-        0
+        Status::NotRequested
     };
-    let any_fail = ipb == 2 || l1d == 2;
-    let any_inconclusive = ipb >= 3 || l1d >= 3 || zero_alloc != 0 || vectorized != 0 || pages != 0;
-    let any_pass = ipb == 1 || l1d == 1;
+    let any_fail = ipb == Status::Fail || l1d == Status::Fail;
+    let counters = ipb >= Status::MissingInstructions || l1d >= Status::MissingInstructions;
+    let evidence = zero_alloc != Status::NotRequested || vectorized != Status::NotRequested;
+    let any_inconclusive = counters || evidence || pages != Status::NotRequested;
+    let any_pass = ipb == Status::Pass || l1d == Status::Pass;
     let overall: u64 = if any_fail {
-        2
+        Overall::Fail
     } else if any_inconclusive {
-        3
+        Overall::Inconclusive
     } else if any_pass {
-        1
+        Overall::Pass
     } else {
-        0
+        Overall::NotRequested
     };
     GateOut {
         instructions_per_byte: ipb,

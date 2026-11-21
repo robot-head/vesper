@@ -11,7 +11,7 @@ lane builds what every later SH4 lane needs to do that:
   them back;
 - **the swap point** `src/codegen_swap.rs`: one optional hook per family,
   called where the Rust code dispatches it;
-- **the lowering differential** `tests/common/clif_diff.rs`: per-function
+- **the lowering differential** (`crates/vesper-codegen-swap-test`): per-function
   CLIF text, object bytes and JIT runs, with the optimizer on and off;
 - **the pilot**: the census lowering family emitted in Vesper
   (`@vesper/codegen-base`) through the `aggregate` hook, in the harness and
@@ -52,7 +52,21 @@ default compiler installs a hook.
 - Module extras: `vcl_module_function_count` and `vcl_module_function_name`
   (`declarations()`), and `vcl_compile` with `vcl_module_last_code` and
   `vcl_module_last_unwind` (code bytes and Windows x64 unwind info).
-- 23 new `.vsys` imports with typed wrappers in `packages/vesper-cranelift`.
+- For the family lanes (lanes 8 and 14):
+  - `vcl_module_get_function` is `Module::get_name`. A miss returns
+    `INVALID` without setting an error.
+  - `vcl_module_kind` returns object, JIT, or freestanding (an object for
+    an OS-less target). A host lends a module as JIT with `lend_as` or
+    `lend_module_as`. `codegen_swap` passes `Lent::jit` from the module
+    type of `define_instances`.
+  - `vcl_define_function` into a JIT module applies the Rust backend's
+    `DefinitionLinkage::Jit.normalize_references`: references are not
+    colocated.
+  - `vcl_module_last_traps` returns the trap records of the last compile,
+    as offset and code words.
+  - `vcl_import_data_colocated` is a data import with an explicit
+    colocated flag, which RISC-V freestanding objects need.
+- 27 new `.vsys` imports with typed wrappers in `packages/vesper-cranelift`.
   The `.vsys` text is now also a file, `cranelift.vsys`, named by the
   manifest's `[package] vsys` field, so packages that depend on it get the
   library (`tests/header.rs` checks that it matches the directive).
@@ -133,7 +147,15 @@ links the `.vsys` symbols from `vesper_cranelift_sys`.
 
 ### Harness
 
-`tests/common/clif_diff.rs` provides the comparison and the hook glue:
+The harness is its own workspace crate, `crates/vesper-codegen-swap-test`.
+The root package cannot depend on vesper-cranelift-sys, because the shim's
+own tests depend on the root package: Cargo accepts that, but Bazel
+reports a dependency cycle. Its tests include the root package's
+`tests/common/check_harness.rs` by path. That file's `repo()` now finds the
+nearest ancestor holding `packages/` and `examples/`, so it works from any
+crate.
+
+Its library (`src/lib.rs`) provides the comparison and the hook glue:
 
 - `compare(name, world, entry, hooks, optimize, run)` builds the world
   twice, once with no hook and once with the hooks, and compares:
@@ -149,7 +171,7 @@ links the `.vsys` symbols from `vesper_cranelift_sys`.
 Port lanes 6-17 use it unchanged: they install their family's hook and read
 the counts.
 
-`tests/self_host_codegen_swap.rs`:
+`tests/self_host_codegen_swap.rs` in that crate:
 
 - the default compiler installs no hook;
 - type codes match the shim's;
@@ -161,10 +183,10 @@ the counts.
 - a declining hook leaves the build unchanged, and a hook error fails the
   compile with its message.
 
-Bazel: `test/self_host_codegen_swap` takes the corpus as data and is marked
-`long`. `vesper_package` gained a `vsys` attribute so the cranelift
+Bazel: the crate's `test/self_host_codegen_swap` takes the corpus as data
+and is marked `long`. `vesper_package` gained a `vsys` attribute so the cranelift
 package's `.vsys` file reaches port builds. There are new
-`//:cranelift_package` and `//:codegen_base_package` targets.
+`//packages/vesper-cranelift:cranelift_package` and `//:codegen_base_package` targets.
 
 ## Stage 1 guard
 

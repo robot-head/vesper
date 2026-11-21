@@ -113,7 +113,7 @@ pub fn blake3_new() -> Blake3 {
     with_key(iv_words(), 0)
 }
 
-// Little-endian words of the first `8 * n` bytes of `b` (missing bytes are 0).
+// Read `n` little-endian words, using zero for any incomplete word.
 fn le_words(in b: Slice[u8], n: u64) -> ChunkSeq[u32] {
     let mut w: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
     let mut i: u64 = 0;
@@ -443,6 +443,15 @@ pub fn digest_hex(d: Digest, inout out: String) {
 }
 
 test {
+    // @case no_words(in "abcd", 0, Option::None, Option::None)
+    // @case exact_words(in "abcdWXYZ", 2, Option::Some(0x64636261), Option::Some(0x5a595857))
+    // @case incomplete_word(in "abcdW", 2, Option::Some(0x64636261), Option::Some(0))
+    fn test_little_endian_words(in bytes: Str, count: u64, first: Option[u32], second: Option[u32])
+        -> bool {
+        let words = le_words(in bytes.as_bytes(), count);
+        words.len() == count && words.try_get(0) == first && words.try_get(1) == second
+    }
+
     // BLAKE3 reference test_vectors.json uses input bytes 0..250, repeated.
     fn vector_input(count: u64) -> ChunkSeq[u8] {
         let mut input = ChunkSeq::with_capacity[u8](count);

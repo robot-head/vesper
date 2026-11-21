@@ -31,7 +31,7 @@
 //! - `Err(e)`: the compile fails with `e`.
 //!
 //! A hook must emit exactly what the Rust code would (the differential of
-//! tests/self_host_codegen_swap*.rs compares per-function CLIF text, object
+//! crates/vesper-codegen-swap-test compares per-function CLIF text, object
 //! bytes and JIT runs). The Rust bookkeeping around an emission (value
 //! infos, pointer parents) stays in Rust and still runs.
 //!
@@ -114,6 +114,11 @@ pub struct Lent<'a, 'f> {
     pub ty: Option<&'a Type>,
     /// The result words; push them in the order the op documents.
     pub results: &'a mut Vec<u64>,
+    /// Whether `module` is a JIT module (else an object module). Hooks
+    /// lend it with `vesper_cranelift_sys::lend_as` so the Vesper side reads
+    /// it back with `vcl_module_kind` and chooses linkage as Rust does
+    /// (`Preemptible` for JIT definitions, `Local` or `Export` in objects).
+    pub jit: bool,
 }
 
 /// A family hook (see the module documentation for the protocol).
@@ -274,6 +279,24 @@ static INSTALLED: OnceLock<CodegenHooks> = OnceLock::new();
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 thread_local! {
     static SCOPED: Cell<Option<CodegenHooks>> = const { Cell::new(None) };
+    /// Whether the module being emitted into is a JIT module
+    /// ([`module_kind_scope`]).
+    static JIT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Restores the previous module kind when dropped.
+pub struct ModuleKindScope(bool);
+impl Drop for ModuleKindScope {
+    fn drop(&mut self) {
+        JIT.with(|j| j.set(self.0));
+    }
+}
+
+/// Records, for the requests of one `define_instances` call, whether its
+/// module is a JIT module (`Lent::jit`). The native backend is generic over
+/// the module, which a hook only sees as `dyn Module`.
+pub fn module_kind_scope(jit: bool) -> ModuleKindScope {
+    ModuleKindScope(JIT.with(|j| j.replace(jit)))
 }
 
 /// Installs `hooks` for the rest of the process (the hybrid build, from its
@@ -351,6 +374,7 @@ pub fn request(
         args,
         ty,
         results: &mut results,
+        jit: JIT.with(Cell::get),
     })?;
     Ok(handled.then_some(results))
 }

@@ -314,6 +314,7 @@ test {
     // @case upper_bound(18446744073709551614, 1, 18446744073709551615)
     // @case overflow(18446744073709551615, 1, 18446744073709551615)
     // @case zero_identity(18446744073709551615, 0, 18446744073709551615)
+    // @case zero_identity_below_max(42, 0, 42)
     fn test_saturating_add_u64(a: u64, b: u64, expected: u64) -> bool {
         saturating_add_u64(a, b) == expected
     }
@@ -446,6 +447,7 @@ test {
     // @case above_max(9223372036854775807, -1, 9223372036854775807)
     // @case below_min(-9223372036854775808, 1, -9223372036854775808)
     // @case same_extreme(-9223372036854775808, -9223372036854775808, 0)
+    // @case subtract_minimum_from_zero(0, -9223372036854775808, 9223372036854775807)
     fn test_saturating_sub_i64(a: i64, b: i64, expected: i64) -> bool {
         saturating_sub_i64(a, b) == expected
     }
