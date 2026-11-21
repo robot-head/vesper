@@ -15,7 +15,7 @@ npm run check
 
 Serve `website/dist` using any static HTTP server. The build includes the three compiler examples from the repository and checks that the displayed/downloaded source preserves their tokens. The build runs Chroma (`vesper highlight`) on Vesper listings and embeds its HTML and theme colors. To annotate an intentional failure, add the expected checker code to its Vesper fence (for example, `~~~vesper E0302`) or its HTML listing (`data-error="E0302"`). The build checks the example and uses the reported source span for the underline and message. The source explorer and comparison tabs use the shared keyboard navigation in `assets/system.js`. The full examples and comparisons are readable with scripts disabled.
 
-`index.html` holds the comparison, compiler overview and build guide. `site.css` defines the responsive layout and themes. `site.js` handles the theme switch and clipboard. The field diagram in `brand/broker-fields.webp` illustrates the permissions in `examples/projections.ves`. The Vesper mark and favicon use Appendix B’s original geometry.
+`index.html` holds the comparison, compiler overview and build guide. `site.css` defines the responsive layout and themes. `site.js` handles the theme switch and clipboard. The field table uses the starting values and updates in `examples/projections.ves`. The Vesper mark and favicon use Appendix B’s original geometry.
 
 The [language guide](language.html) is a standalone HTML page. Its table of contents links directly to worked examples. Edit the guide in place and run the website checks to validate its links and section IDs.
 

@@ -29,3 +29,20 @@ for (const button of document.querySelectorAll('[data-copy]')) {
     setTimeout(() => { button.textContent = originalLabel; }, 2200);
   });
 }
+
+for (const figure of document.querySelectorAll('.broker-figure')) {
+  const control = figure.querySelector('.broker-control');
+  const select = control.querySelector('select');
+  const update = () => {
+    const config = Number(select.value);
+    for (const cell of figure.querySelectorAll('[data-config]')) cell.textContent = String(config);
+    figure.querySelector('[data-index]').textContent = String(1 + config);
+  };
+  select.addEventListener('change', () => {
+    update();
+    figure.querySelector('[role="status"]').textContent =
+      `After append, index is ${1 + Number(select.value)}, metrics is 1, and config is ${select.value}.`;
+  });
+  update();
+  control.hidden = false;
+}

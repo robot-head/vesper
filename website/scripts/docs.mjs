@@ -1,3 +1,4 @@
+import { insertFigures } from './figures.mjs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
@@ -95,7 +96,7 @@ export function page(file, title, description, body, directory = 'docs') {
     <a href="../language.html">Language guide</a>
     <label class="theme" title="Switch between dusk and dawn"><input type="checkbox" id="theme-toggle" role="switch" aria-label="Dawn theme"><span aria-hidden="true">◐</span></label>
   </div></header>
-  ${body}
+  ${insertFigures(body)}
   <footer><div class="wrap footer-bar"><a href="../docs/index.html">Documentation home</a><a href="#main">Back to top</a></div></footer>
   <script type="module" src="../site.js"></script>
 </body></html>\n`;
@@ -114,7 +115,7 @@ const practice = {
 };
 
 const figures = {
-  '4.3': `<figure class="concept-figure"><img src="../brand/broker-fields.webp" width="1360" height="840" loading="lazy" alt="The diagram separates the broker’s three fields into layers."><figcaption>The append operation borrows <code>index</code> and <code>metrics</code> for updates. A separate loan lets it read <code>config</code> during the same call.</figcaption></figure>`,
+  '4.3': '<!-- figure:broker -->',
   'B.1': `<figure class="concept-figure prism"><img data-brand-mark src="../brand/vesper-mark-dusk.svg" width="256" height="256" loading="lazy" alt="A V-shaped prism with an upper chevron and open channels between three blades."><figcaption>The blades mark consumption, exclusive access, and shared access or an effect. The gaps keep the three visible in monochrome.</figcaption></figure>`,
 };
 

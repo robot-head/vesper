@@ -118,6 +118,8 @@ echo $?
 
 The last command prints `255`. Use zero for success and a small positive failure code when another program needs to interpret your executable’s status.
 
+<!-- figure:exit -->
+
 # Data and patterns
 
 ## Group two fields
@@ -483,6 +485,8 @@ ask(resume) => {
 },
 ~~~
 
+<!-- figure:resume -->
+
 ## Capture a value
 
 A closure can remember a value from its enclosing scope. Calling `offset(10)` returns a function that adds ten. The caller supplies two and gets twelve.
@@ -561,6 +565,8 @@ Run these commands from a POSIX shell. Forge checks the expansion and writes it 
 vesper forge expand seats.ves > expanded.ves
 vesper run expanded.ves
 ~~~
+
+<!-- figure:tour-expansion -->
 
 ## Format a user-defined spelling
 

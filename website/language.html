@@ -59,6 +59,7 @@ fn main() -&gt; i64 {
           <h3>What the shell sees</h3>
           <p><code>vesper run</code> prints the value of <code>main</code>. For a native executable, <code>main</code> can return an integer or <code>Unit</code>. On Linux, the shell sees the low eight bits of an integer result after a normal exit. Choose <code>0</code> for success and a small positive status for failure when writing a command-line tool.</p>
           <p>The Fibonacci example returns <code>55</code> for <code>fib(10)</code>. Its overflow handler returns <code>-1</code>. If that handler runs, the evaluator prints <code>-1</code> and the native executable gives the Linux shell status <code>255</code>. <a href="tour/read-an-exit-status.html">Try both commands.</a> <a href="https://man7.org/linux/man-pages/man2/waitpid.2.html">Linux exit status reference</a>.</p>
+          <!-- figure:exit -->
           <h3>Run the example</h3>
           <ol>
             <li>Clone the repository and build the compiler. <a href="index.html#guide">Build Vesper from source.</a></li>
@@ -122,6 +123,7 @@ fn main() -&gt; u64 {
     tx.commit()
 }</code></pre>
           <p><code>sink self</code> transfers the transaction to <code>commit</code>. Destructuring <code>self</code> consumes the record and binds its slot number. The caller receives <code>42</code>. A second call on <code>tx</code> would use a moved value. Replacing the first call with a literal <code>42</code> would leave the transaction live at scope exit.</p>
+          <!-- figure:ownership -->
           <p>The full example also defines <code>abort(sink self)</code>. An application can choose either outcome while satisfying the same ownership rule. <a href="examples/transaction.ves">Read the complete transaction example.</a></p>
         </section>
         <section id="places">
@@ -139,6 +141,7 @@ fn main() -&gt; u64 {
     append(inout broker, in broker.config);
     broker.index
 }</code></pre>
+          <!-- figure:broker -->
           <p>Read the call together with the signature. The projection <code>.{index, metrics}</code> restricts the exclusive loan to those two fields. The separate argument reads <code>broker.config</code>, a disjoint field. After the call, <code>index</code> is <code>42</code> and <code>metrics</code> is <code>1</code>.</p>
           <p>Inside <code>append</code>, change the first assignment’s destination to <code>broker.config</code>. The checker reports <code>E0304</code> because <code>config</code> falls outside the declared projection. Restore the assignment to <code>broker.index</code> to make this call valid again. To give a helper permission to update a field, name that field in its <code>inout</code> projection. <a href="examples/projections.ves">Read the field projection example.</a></p>
         </section>
@@ -199,6 +202,7 @@ fn main() -&gt; i64 {
         },
     }
 }</code></pre>
+          <!-- figure:resume -->
           <p>At <code>Ask::ask()</code>, control passes to the <code>ask</code> clause. Calling <code>resume(20)</code> supplies <code>20</code> at that point. The addition produces <code>21</code>, which passes through the return clause and becomes the result of <code>resume</code>. The handler then doubles <code>21</code>, so <code>main</code> returns <code>42</code>. <a href="https://github.com/robot-head/vesper/blob/main/examples/resumptions.ves">See the same handler with checked arithmetic.</a></p>
         </section>
         <section id="closures">
@@ -290,6 +294,7 @@ fn main() -&gt; i64 { addone!(41) }</code></pre>
 target/debug/vesper fmt --check lesson.ves
 target/debug/vesper forge expand lesson.ves &gt; expanded.ves
 target/debug/vesper run expanded.ves</code></pre>
+          <!-- figure:guide-expansion -->
           <p>The second formatting pass accepts the first pass’s output. The expansion calls <code>wrapping_add(41, 1)</code> and prints <code>42</code> when run. The manuscript also proposes a <code>sugar</code> declaration for forms such as a guard with an <code>else</code> clause. <a href="docs/chapter-07.html#section-7-5">Read the design for extensible syntax.</a></p>
         </section>
       </div>

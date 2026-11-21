@@ -1,3 +1,4 @@
+import { insertFigures } from './figures.mjs';
 import { appendFile, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,9 +22,9 @@ for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
   await writeFile(resolve(out, 'examples', file), source + '\n');
 }
 if (/<!-- source:/.test(html)) throw new Error('Unresolved source inclusion');
-await writeFile(resolve(out, 'index.html'), html);
+await writeFile(resolve(out, 'index.html'), insertFigures(html));
 const guide = await readFile(resolve(root, 'language.html'), 'utf8');
-await writeFile(resolve(out, 'language.html'), guide);
+await writeFile(resolve(out, 'language.html'), insertFigures(guide));
 const chapters = await buildDocs(root, out);
 const tour = await buildTour(root, out);
 for (const file of ['search.js', 'docs.css']) {
