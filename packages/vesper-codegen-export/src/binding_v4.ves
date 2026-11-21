@@ -1,0 +1,693 @@
+// The export ABI v4 additions to a binding (src/native_export/binding_v4.rs):
+// owned `<Type>Tree`s with their encoders and decoders, `<Elem>Seq<'a>`
+// views of sequences of handles, and lent `.vsys` extern-type handles.
+
+use @vesper/check-data::util::{
+    inc,
+    u8_at,
+    w
+};
+use self::iface::{
+    DeclRow,
+    VarRow
+};
+use self::text::{
+    StrSet,
+    copy_of,
+    nl,
+    put,
+    put_seq,
+    put_u64,
+    str_set,
+    text
+};
+use self::binding::{
+    Gen
+};
+
+// `AbiType` kinds, passing modes and mirrors (iface.ves).
+const K_SCALAR: u8 = 0;
+const K_TUPLE: u8 = 1;
+const K_NAMED: u8 = 2;
+const K_SEQ: u8 = 3;
+const K_SLICE: u8 = 4;
+const K_BOX: u8 = 5;
+const K_STR: u8 = 6;
+const K_OBJECT: u8 = 7;
+const K_EXTERN: u8 = 8;
+const P_IN: u8 = 1;
+const P_INOUT: u8 = 2;
+const P_SINK: u8 = 3;
+const M_REPR_C: u8 = 1;
+
+impl Gen {
+    // `tree_types`: the greatest fixed point of handle types whose fields
+    // all have tree forms. `ok[d]` is 1 when declaration `d` has a tree.
+    pub fn tree_types(in self) -> ChunkSeq[u8] {
+        let n = self.i.decls.len();
+        let mut ok = ChunkSeq::with_capacity[u8](n);
+        for di in 0..n {
+            if self.i.decl(di).is_handle {
+                ok.push(1);
+            } else {
+                ok.push(0);
+            }
+        }
+        loop {
+            let mut next = ChunkSeq::with_capacity[u8](n);
+            let mut changed = false;
+            for di in 0..n {
+                let d = self.i.decl(di);
+                let mut keep = u8_at(in ok, di) == 1;
+                if keep {
+                    for vi in 0..d.vn {
+                        let v = self.i.var(wrapping_add(d.v0, vi));
+                        for j in 0..v.fc {
+                            let f = self.i.field(wrapping_add(v.f0, j));
+                            if !self.tree_form(in ok, f.ty) {
+                                keep = false;
+                            }
+                        }
+                    }
+                }
+                if keep {
+                    next.push(1);
+                } else {
+                    next.push(0);
+                }
+                if keep != (u8_at(in ok, di) == 1) {
+                    changed = true;
+                }
+            }
+            ok = next;
+            if !changed {
+                break;
+            }
+        }
+        ok
+    }
+
+    fn has_tree(in self, in ok: ChunkSeq[u8], s: u32) -> bool {
+        let d = self.i.decl_of(s);
+        d != 0 && u8_at(in ok, wrapping_sub(d, 1)) == 1
+    }
+
+    fn tree_form(in self, in ok: ChunkSeq[u8], t: u32) -> bool {
+        let n = self.i.node(t);
+        if !self.i.owning(t) && n.kind != K_EXTERN {
+            return true;
+        }
+        if n.kind == K_STR {
+            return n.owned;
+        }
+        if n.kind == K_BOX {
+            let inner = self.i.kid(t, 0);
+            return self.i.node(inner).kind != K_OBJECT && self.tree_form(in ok, inner);
+        }
+        if n.kind == K_SEQ {
+            let elem = self.i.kid(t, 0);
+            if !self.i.owning(elem) {
+                return true;
+            }
+            let h = self.i.handle_of(elem);
+            return h != 0 && u8_at(in ok, wrapping_sub(h, 1)) == 1;
+        }
+        if n.kind == K_NAMED && n.name == self.i.known.option {
+            return self.tree_form(in ok, self.i.kid(t, 0));
+        }
+        if n.kind == K_NAMED {
+            return self.has_tree(in ok, n.name);
+        }
+        false
+    }
+
+    // `tree_ty`: the Rust type of a tree field.
+    fn tree_ty(in self, t: u32, inout o: ChunkSeq[u8]) {
+        let n = self.i.node(t);
+        if !self.i.owning(t) {
+            self.copy_type(t, inout o);
+        } else if n.kind == K_STR {
+            put(inout o, "String");
+        } else if n.kind == K_BOX {
+            put(inout o, "Box<");
+            self.tree_ty(self.i.kid(t, 0), inout o);
+            put(inout o, ">");
+        } else if n.kind == K_SEQ {
+            put(inout o, "Vec<");
+            self.tree_ty(self.i.kid(t, 0), inout o);
+            put(inout o, ">");
+        } else if n.kind == K_NAMED && n.name == self.i.known.option {
+            put(inout o, "Option<");
+            self.tree_ty(self.i.kid(t, 0), inout o);
+            put(inout o, ">");
+        } else {
+            self.put_name(inout o, n.name);
+            put(inout o, "Tree");
+        }
+    }
+
+    // `decode`: converts the view value `e` of a field into its tree.
+    fn decode(in self, t: u32, in e: ChunkSeq[u8], inout o: ChunkSeq[u8]) {
+        let n = self.i.node(t);
+        if !self.i.owning(t) {
+            put_seq(inout o, in e);
+        } else if n.kind == K_STR {
+            put(inout o, "String::from(");
+            put_seq(inout o, in e);
+            put(inout o, ")");
+        } else if n.kind == K_BOX {
+            put(inout o, "Box::new(");
+            self.decode(self.i.kid(t, 0), in e, inout o);
+            put(inout o, ")");
+        } else if n.kind == K_SEQ && !self.i.owning(self.i.kid(t, 0)) {
+            put_seq(inout o, in e);
+            put(inout o, ".to_vec()");
+        } else if n.kind == K_SEQ {
+            put_seq(inout o, in e);
+            put(inout o, ".iter().map(|x| x.decode()).collect()");
+        } else if n.kind == K_NAMED && n.name == self.i.known.option {
+            put_seq(inout o, in e);
+            put(inout o, ".map(|x| ");
+            self.decode(self.i.kid(t, 0), in text("x"), inout o);
+            put(inout o, ")");
+        } else {
+            put_seq(inout o, in e);
+            put(inout o, ".decode()");
+        }
+    }
+
+    // `encode`: statements writing the tree value `e` into `w[at..]`.
+    fn encode(
+        in self,
+        t: u32,
+        in e: ChunkSeq[u8],
+        in wv: ChunkSeq[u8],
+        at: u64,
+        inout out: ChunkSeq[u8],
+        depth: u64
+    ) {
+        let mut pad = ChunkSeq::new[u8]();
+        for k in 0..depth {
+            put(inout pad, "    ");
+        }
+        let n = self.i.node(t);
+        if !self.i.owning(t) {
+            put_seq(inout out, in pad);
+            put(inout out, "Abi::put(");
+            put_seq(inout out, in e);
+            put(inout out, ", &mut ");
+            put_seq(inout out, in wv);
+            put(inout out, "[");
+            put_u64(inout out, at);
+            put(inout out, "..]);\n");
+        } else if n.kind == K_STR {
+            put_seq(inout out, in pad);
+            put_seq(inout out, in wv);
+            put(inout out, "[");
+            put_u64(inout out, at);
+            put(inout out, "..");
+            put_u64(inout out, wrapping_add(at, 3));
+            put(inout out, "].copy_from_slice(&unsafe { string_words(");
+            put_seq(inout out, in e);
+            put(inout out, ") });\n");
+        } else if n.kind == K_BOX {
+            let inner = self.i.kid(t, 0);
+            put_seq(inout out, in pad);
+            put(inout out, "{\n");
+            put_seq(inout out, in pad);
+            put(inout out, "    let block = unsafe { box_block(");
+            put_u64(inout out, self.i.words(inner));
+            put(inout out, ") };\n");
+            let mut inner_e = text("&**");
+            put_seq(inout inner_e, in e);
+            self.encode(inner, in inner_e, in text("block"), 0, inout out, inc(depth));
+            put_seq(inout out, in pad);
+            put(inout out, "    ");
+            put_seq(inout out, in wv);
+            put(inout out, "[");
+            put_u64(inout out, at);
+            put(inout out, "] = block.as_ptr() as usize as u64;\n");
+            put_seq(inout out, in pad);
+            put(inout out, "}\n");
+        } else if n.kind == K_SEQ && !self.i.owning(self.i.kid(t, 0)) {
+            put_seq(inout out, in pad);
+            put_seq(inout out, in wv);
+            put(inout out, "[");
+            put_u64(inout out, at);
+            put(inout out, "] = unsafe { vesper_port_abi::seq_from(RUNTIME, ");
+            put_seq(inout out, in e);
+            put(inout out, ") };\n");
+        } else if n.kind == K_SEQ {
+            let elem = self.i.kid(t, 0);
+            let h = self.i.handle_of(elem);
+            let d = self.i.decl(wrapping_sub(h, 1));
+            put_seq(inout out, in pad);
+            put_seq(inout out, in wv);
+            put(inout out, "[");
+            put_u64(inout out, at);
+            put(inout out, "] = unsafe { handle_seq((");
+            put_seq(inout out, in e);
+            put(inout out, ").len(), ");
+            put_u64(inout out, self.i.words(elem));
+            put(inout out, ", |i, slot| encode_");
+            self.put_snake(inout out, d.name);
+            put(inout out, "(&(");
+            put_seq(inout out, in e);
+            put(inout out, ")[i], slot)) };\n");
+        } else if n.kind == K_NAMED && n.name == self.i.known.option {
+            put_seq(inout out, in pad);
+            put(inout out, "match ");
+            put_seq(inout out, in e);
+            put(inout out, " {\n");
+            put_seq(inout out, in pad);
+            put(inout out, "    None => ");
+            put_seq(inout out, in wv);
+            put(inout out, "[");
+            put_u64(inout out, at);
+            put(inout out, "] = 0,\n");
+            put_seq(inout out, in pad);
+            put(inout out, "    Some(x) => {\n");
+            put_seq(inout out, in pad);
+            put(inout out, "        ");
+            put_seq(inout out, in wv);
+            put(inout out, "[");
+            put_u64(inout out, at);
+            put(inout out, "] = 1;\n");
+            self
+                .encode(
+                self.i.kid(t, 0),
+                in text("x"),
+                in wv,
+                inc(at),
+                inout out,
+                wrapping_add(depth, 2)
+            );
+            put_seq(inout out, in pad);
+            put(inout out, "    }\n");
+            put_seq(inout out, in pad);
+            put(inout out, "}\n");
+        } else {
+            put_seq(inout out, in pad);
+            put(inout out, "unsafe { encode_");
+            self.put_snake(inout out, n.name);
+            put(inout out, "(");
+            put_seq(inout out, in e);
+            put(inout out, ", &mut ");
+            put_seq(inout out, in wv);
+            put(inout out, "[");
+            put_u64(inout out, at);
+            put(inout out, "..");
+            put_u64(inout out, wrapping_add(at, self.i.words(t)));
+            put(inout out, "]) };\n");
+        }
+    }
+
+    // `field_name`: `fieldN` for a positional field, else the identifier.
+    fn field_name(in self, s: u32, inout o: ChunkSeq[u8]) {
+        if self.i.digits(s) {
+            put(inout o, "field");
+            self.put_name(inout o, s);
+        } else {
+            self.put_ident_sym(inout o, s);
+        }
+    }
+
+    // A variant's `(f0, f1)` / ` { a: f0, b: f1 }` binding pattern.
+    fn bind_fields(in self, v: VarRow, inout o: ChunkSeq[u8]) {
+        if v.fc == 0 {
+            return;
+        }
+        let pos = self.i.positional(v);
+        if pos {
+            put(inout o, "(");
+        } else {
+            put(inout o, " { ");
+        }
+        for j in 0..v.fc {
+            if j > 0 {
+                put(inout o, ", ");
+            }
+            let f = self.i.field(wrapping_add(v.f0, j));
+            if !pos {
+                self.put_ident_sym(inout o, f.name);
+                put(inout o, ": ");
+            }
+            put(inout o, "f");
+            put_u64(inout o, j);
+        }
+        if pos {
+            put(inout o, ")");
+        } else {
+            put(inout o, " }");
+        }
+    }
+
+    // `tree`: the `<Type>Tree` declaration, its decoder and encoder.
+    fn tree(in self, inout out: ChunkSeq[u8], d: DeclRow) {
+        let name = self.name(d.name);
+        let mut tree = copy_of(in name);
+        put(inout tree, "Tree");
+        let mut sn = ChunkSeq::new[u8]();
+        self.put_snake(inout sn, d.name);
+        put(inout out, "/// An owned Rust tree of a Vesper `");
+        put_seq(inout out, in name);
+        put(inout out, "` value (export ABI v4): `");
+        put_seq(inout out, in name);
+        put(inout out, "::encode`\n/// builds the Vesper value from it once, and `");
+        put_seq(inout out, in name);
+        put(inout out, "Ref::decode` reads one back.\n#[derive(Clone, Debug, PartialEq)]\n");
+        if d.is_enum {
+            put(inout out, "pub enum ");
+            put_seq(inout out, in tree);
+            put(inout out, " {\n");
+            for vi in 0..d.vn {
+                let v = self.i.var(wrapping_add(d.v0, vi));
+                put(inout out, "    ");
+                self.put_name(inout out, v.name);
+                if v.fc > 0 {
+                    let pos = self.i.positional(v);
+                    if pos {
+                        put(inout out, "(");
+                    } else {
+                        put(inout out, " { ");
+                    }
+                    for j in 0..v.fc {
+                        if j > 0 {
+                            put(inout out, ", ");
+                        }
+                        let f = self.i.field(wrapping_add(v.f0, j));
+                        if !pos {
+                            self.put_ident_sym(inout out, f.name);
+                            put(inout out, ": ");
+                        }
+                        self.tree_ty(f.ty, inout out);
+                    }
+                    if pos {
+                        put(inout out, ")");
+                    } else {
+                        put(inout out, " }");
+                    }
+                }
+                put(inout out, ",\n");
+            }
+            put(inout out, "}\n\n");
+        } else {
+            put(inout out, "pub struct ");
+            put_seq(inout out, in tree);
+            put(inout out, " {\n");
+            let v = self.i.var(d.v0);
+            for j in 0..v.fc {
+                let f = self.i.field(wrapping_add(v.f0, j));
+                put(inout out, "    pub ");
+                self.field_name(f.name, inout out);
+                put(inout out, ": ");
+                self.tree_ty(f.ty, inout out);
+                put(inout out, ",\n");
+            }
+            put(inout out, "}\n\n");
+        }
+        put(inout out, "impl ");
+        put_seq(inout out, in name);
+        put(
+            inout out,
+            "Ref<'_> {\n    /// Copies the value into an owned Rust tree (export ABI v4).\n    pub fn decode(&self) -> "
+        );
+        put_seq(inout out, in tree);
+        put(inout out, " {\n");
+        if d.is_enum {
+            put(inout out, "        match self.view() {\n");
+            for vi in 0..d.vn {
+                let v = self.i.var(wrapping_add(d.v0, vi));
+                put(inout out, "            ");
+                put_seq(inout out, in name);
+                put(inout out, "View::");
+                self.put_name(inout out, v.name);
+                self.bind_fields(v, inout out);
+                put(inout out, " => ");
+                put_seq(inout out, in tree);
+                put(inout out, "::");
+                self.put_name(inout out, v.name);
+                if v.fc > 0 {
+                    let pos = self.i.positional(v);
+                    if pos {
+                        put(inout out, "(");
+                    } else {
+                        put(inout out, " { ");
+                    }
+                    for j in 0..v.fc {
+                        if j > 0 {
+                            put(inout out, ", ");
+                        }
+                        let f = self.i.field(wrapping_add(v.f0, j));
+                        if !pos {
+                            self.put_ident_sym(inout out, f.name);
+                            put(inout out, ": ");
+                        }
+                        let mut b = text("f");
+                        put_u64(inout b, j);
+                        self.decode(f.ty, in b, inout out);
+                    }
+                    if pos {
+                        put(inout out, ")");
+                    } else {
+                        put(inout out, " }");
+                    }
+                }
+                put(inout out, ",\n");
+            }
+            put(inout out, "            ");
+            put_seq(inout out, in name);
+            put(inout out, "View::_Borrow(_) => unreachable!(),\n        }\n");
+        } else {
+            put(inout out, "        ");
+            put_seq(inout out, in tree);
+            put(inout out, " {\n");
+            let v = self.i.var(d.v0);
+            for j in 0..v.fc {
+                let f = self.i.field(wrapping_add(v.f0, j));
+                let mut getter = ChunkSeq::new[u8]();
+                self.field_name(f.name, inout getter);
+                put(inout out, "            ");
+                put_seq(inout out, in getter);
+                put(inout out, ": ");
+                let mut e = text("self.");
+                put_seq(inout e, in getter);
+                put(inout e, "()");
+                self.decode(f.ty, in e, inout out);
+                put(inout out, ",\n");
+            }
+            put(inout out, "        }\n");
+        }
+        put(inout out, "    }\n}\n\n");
+        put(inout out, "impl ");
+        put_seq(inout out, in name);
+        put(
+            inout out,
+            " {\n    /// Builds the Vesper value of `tree` once, in this library's allocations\n    /// (export ABI v4). Dropping the handle frees them.\n    pub fn encode(tree: &"
+        );
+        put_seq(inout out, in tree);
+        put(inout out, ") -> Self {\n        let mut words = [0u64; ");
+        put_u64(inout out, d.words);
+        put(
+            inout out,
+            "];\n        // SAFETY: `words` is the value's size, and every allocation the\n        // encoder makes belongs to this library and passes to the value.\n        unsafe { encode_"
+        );
+        put_seq(inout out, in sn);
+        put(
+            inout out,
+            "(tree, &mut words) };\n        Self { words }\n    }\n\n    /// Copies the value into an owned Rust tree (export ABI v4).\n    pub fn decode(&self) -> "
+        );
+        put_seq(inout out, in tree);
+        put(inout out, " {\n        self.as_ref().decode()\n    }\n}\n\n");
+        put(inout out, "/// # Safety\n/// `w` holds ");
+        put_u64(inout out, d.words);
+        put(
+            inout out,
+            " zeroed words; the value written there owns what it allocates.\nunsafe fn encode_"
+        );
+        put_seq(inout out, in sn);
+        put(inout out, "(tree: &");
+        put_seq(inout out, in tree);
+        put(inout out, ", w: &mut [u64]) {\n");
+        if d.is_enum {
+            put(inout out, "    match tree {\n");
+            for vi in 0..d.vn {
+                let v = self.i.var(wrapping_add(d.v0, vi));
+                put(inout out, "        ");
+                put_seq(inout out, in tree);
+                put(inout out, "::");
+                self.put_name(inout out, v.name);
+                self.bind_fields(v, inout out);
+                put(inout out, " => {\n            w[0] = ");
+                put_u64(inout out, vi);
+                put(inout out, ";\n");
+                for j in 0..v.fc {
+                    let f = self.i.field(wrapping_add(v.f0, j));
+                    let mut b = text("f");
+                    put_u64(inout b, j);
+                    self.encode(f.ty, in b, in text("w"), f.offset, inout out, 3);
+                }
+                put(inout out, "        }\n");
+            }
+            put(inout out, "    }\n");
+        } else {
+            let v = self.i.var(d.v0);
+            for j in 0..v.fc {
+                let f = self.i.field(wrapping_add(v.f0, j));
+                let mut e = text("&tree.");
+                self.field_name(f.name, inout e);
+                self.encode(f.ty, in e, in text("w"), f.offset, inout out, 1);
+            }
+        }
+        put(inout out, "}\n\n");
+    }
+}
+
+// `seq_view`: the `<Elem>Seq<'a>` view of a `ChunkSeq` of handles.
+fn seq_view(in g: Gen, inout out: ChunkSeq[u8], d: DeclRow) {
+    let name = g.name(d.name);
+    let words = d.words;
+    put(inout out, "/// A borrowed view of a Vesper `ChunkSeq[");
+    put_seq(inout out, in name);
+    put(inout out, "]` that a handle owns, read in\n/// place (export ABI v4): its elements are `");
+    put_seq(inout out, in name);
+    put(inout out, "Ref` views.\n#[derive(Clone, Copy)]\npub struct ");
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "Seq<'a> {\n    data: *const u64,\n    len: usize,\n    _owner: core::marker::PhantomData<&'a [u64]>,\n}\n\nimpl<'a> "
+    );
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "Seq<'a> {\n    /// # Safety\n    /// `handle` is 0 (an empty slot) or a live sequence of `"
+    );
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "` values that\n    /// stays alive and unchanged for `'a`.\n    unsafe fn from_handle(handle: u64) -> Self {\n        if handle == 0 {\n            return Self { data: core::ptr::null(), len: 0, _owner: core::marker::PhantomData };\n        }\n        // SAFETY: a sequence header is `{len, cap, data}`.\n        let h = handle as usize as *const u64;\n        unsafe { Self { data: *h.add(2) as usize as *const u64, len: *h as usize, _owner: core::marker::PhantomData } }\n    }\n\n    pub fn len(&self) -> usize {\n        self.len\n    }\n\n    pub fn is_empty(&self) -> bool {\n        self.len == 0\n    }\n\n    /// The element at `i`, read in place.\n    pub fn get(&self, i: usize) -> Option<"
+    );
+    put_seq(inout out, in name);
+    put(inout out, "Ref<'a>> {\n        // SAFETY: element `i < len` is the ");
+    put_u64(inout out, words);
+    put(inout out, " words at `data + i * ");
+    put_u64(inout out, words);
+    put(inout out, "`.\n        (i < self.len).then(|| ");
+    put_seq(inout out, in name);
+    put(inout out, "Ref { words: unsafe { core::slice::from_raw_parts(self.data.add(i * ");
+    put_u64(inout out, words);
+    put(inout out, "), ");
+    put_u64(inout out, words);
+    put(inout out, ") } })\n    }\n\n    pub fn iter(&self) -> impl Iterator<Item = ");
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "Ref<'a>> + 'a {\n        let s = *self;\n        (0..s.len).map(move |i| s.get(i).expect(\"in bounds\"))\n    }\n}\n\nimpl core::fmt::Debug for "
+    );
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "Seq<'_> {\n    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {\n        write!(f, \""
+    );
+    put_seq(inout out, in name);
+    put(inout out, "Seq(len {})\", self.len)\n    }\n}\n\n");
+}
+
+// `extern_handle`: the `H<'a>` lent handle of a `.vsys` extern type.
+fn extern_handle(inout out: ChunkSeq[u8], in name: ChunkSeq[u8]) {
+    put(inout out, "/// A Rust value lent to Vesper as the `.vsys` extern-type handle `");
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "` (export\n/// ABI v4). The handle word is the value's address: Vesper passes it to the\n/// library's accessor imports, which the linking crate implements over the\n/// same Rust type, and never reads or frees it.\n#[derive(Clone, Copy, Debug)]\npub struct "
+    );
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "<'a> {\n    word: u64,\n    _lent: core::marker::PhantomData<&'a ()>,\n}\n\nimpl<'a> "
+    );
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "<'a> {\n    /// Lends `value` for the calls this handle is passed to.\n    ///\n    /// # Safety\n    /// The library's accessor imports for `"
+    );
+    put_seq(inout out, in name);
+    put(
+        inout out,
+        "` (implemented by the linking\n    /// crate) must read the handle word as a `&T`: Vesper checks nothing\n    /// about `T`, so lending a value of another type is undefined behavior.\n    pub unsafe fn lend<T>(value: &'a T) -> Self {\n        Self { word: value as *const T as usize as u64, _lent: core::marker::PhantomData }\n    }\n\n    /// The handle word.\n    pub fn word(&self) -> u64 {\n        self.word\n    }\n}\n\n"
+    );
+}
+
+// `items`: every v4 item of the binding.
+pub fn v4_items(in g: Gen, inout out: ChunkSeq[u8]) {
+    let mut seqs = str_set();
+    for di in 0..g.i.decls.len() {
+        let d = g.i.decl(di);
+        if !d.is_handle {
+            continue;
+        }
+        for vi in 0..d.vn {
+            let v = g.i.var(wrapping_add(d.v0, vi));
+            for j in 0..v.fc {
+                let mut t = g.i.field(wrapping_add(v.f0, j)).ty;
+                loop {
+                    let n = g.i.node(t);
+                    if n.kind == K_BOX {
+                        t = g.i.kid(t, 0);
+                    } else if n.kind == K_NAMED && n.name == g.i.known.option {
+                        t = g.i.kid(t, 0);
+                    } else {
+                        break;
+                    }
+                }
+                if g.i.node(t).kind == K_SEQ {
+                    let h = g.i.handle_of(g.i.kid(t, 0));
+                    if h != 0 {
+                        let e = g.i.decl(wrapping_sub(h, 1));
+                        seqs.insert_key(in g.name(e.name), wrapping_sub(h, 1));
+                    }
+                }
+            }
+        }
+    }
+    for k in 0..seqs.len() {
+        seq_view(in g, inout out, g.i.decl(seqs.val(k)));
+    }
+    let trees = g.tree_types();
+    let mut any_tree = false;
+    for di in 0..g.i.decls.len() {
+        if u8_at(in trees, di) == 1 {
+            g.tree(inout out, g.i.decl(di));
+            any_tree = true;
+        }
+    }
+    if any_tree {
+        let mut box_new = ChunkSeq::new[u8]();
+        if g.i.box_new != 0 {
+            g.put_name(inout box_new, wrapping_sub(g.i.box_new, 1));
+        }
+        put(
+            inout out,
+            "/// # Safety\n/// The block is a zeroed box of this library, owned by the value it is stored in.\nunsafe fn box_block(words: usize) -> &'static mut [u64] {\n    // SAFETY: `box_new` returns a zeroed block of the requested size.\n    unsafe {\n        let p = "
+        );
+        put_seq(inout out, in box_new);
+        put(
+            inout out,
+            "((words.max(1) * 8) as i64) as usize as *mut u64;\n        core::slice::from_raw_parts_mut(p, words.max(1))\n    }\n}\n\n/// # Safety\n/// The returned words are a `String` that owns a buffer of this library.\nunsafe fn string_words(s: &str) -> [u64; 3] {\n    // SAFETY: as `vesper_port_abi::with_string_owned`: the header's buffer\n    // passes to the string and only the header is freed.\n    unsafe {\n        let handle = (RUNTIME.new)(s.len() as i64, 1) as u64;\n        let h = handle as usize as *mut u64;\n        let data = *h.add(2) as usize as *mut u8;\n        if !s.is_empty() {\n            core::ptr::copy_nonoverlapping(s.as_ptr(), data, s.len());\n        }\n        let words = [s.len() as u64, *h.add(1), *h.add(2)];\n        *h.add(1) = 0;\n        (RUNTIME.free)(handle as i64);\n        words\n    }\n}\n\n/// # Safety\n/// `fill(i, slot)` writes element `i` into its zeroed `words`-word slot; the\n/// sequence owns what the elements allocate.\nunsafe fn handle_seq(len: usize, words: usize, mut fill: impl FnMut(usize, &mut [u64])) -> u64 {\n    // SAFETY: `seq_new(len, stride)` returns a header `{len, cap, data}`\n    // whose buffer holds `len` elements of `words * 8` bytes.\n    unsafe {\n        let handle = (RUNTIME.new)(len as i64, (words * 8) as i64) as u64;\n        let h = handle as usize as *mut u64;\n        let data = *h.add(2) as usize as *mut u64;\n        for i in 0..len {\n            let slot = core::slice::from_raw_parts_mut(data.add(i * words), words);\n            slot.fill(0);\n            fill(i, slot);\n        }\n        *h = len as u64;\n        handle\n    }\n}\n\n"
+        );
+    }
+    let mut externs = str_set();
+    for fi in 0..g.i.fns.len() {
+        let f = g.i.func(fi);
+        for j in 0..f.pn {
+            let p = g.i.param(wrapping_add(f.p0, j));
+            let n = g.i.node(p.ty);
+            if n.kind == K_EXTERN {
+                externs.insert_key(in g.name(n.name), 0);
+            }
+        }
+    }
+    for k in 0..externs.len() {
+        extern_handle(inout out, in externs.get(k));
+    }
+}

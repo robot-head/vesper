@@ -1,0 +1,1383 @@
+// The Rust binding of an export ABI v2 library and its v3 additions
+// (src/native_export/binding_v2.rs): sequence, slice and string
+// parameters, owned handle types with their views and methods, the
+// runtime, and for v3 the `repr` mirrors.
+
+use @vesper/check-data::util::{
+    inc,
+    u64_at,
+    u8_at,
+    w
+};
+use self::iface::{
+    DeclRow,
+    FnRow,
+    ParamRow,
+    VarRow
+};
+use self::text::{
+    StrSet,
+    copy_of,
+    nl,
+    put,
+    put_seq,
+    put_u64,
+    same,
+    str_set,
+    text
+};
+use self::binding::{
+    Gen,
+    put_ident
+};
+use self::binding_v4::{
+    v4_items
+};
+
+// `AbiType` kinds, passing modes and mirrors (iface.ves).
+const K_SCALAR: u8 = 0;
+const K_TUPLE: u8 = 1;
+const K_NAMED: u8 = 2;
+const K_SEQ: u8 = 3;
+const K_SLICE: u8 = 4;
+const K_BOX: u8 = 5;
+const K_STR: u8 = 6;
+const K_OBJECT: u8 = 7;
+const K_EXTERN: u8 = 8;
+const P_IN: u8 = 1;
+const P_INOUT: u8 = 2;
+const P_SINK: u8 = 3;
+const M_REPR_C: u8 = 1;
+
+const NONE32: u32 = 4294967295;
+
+// `Names`: fresh local names that never shadow a parameter or each other.
+pub fn fresh(inout taken: StrSet, in base: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut n = copy_of(in base);
+    loop {
+        if !taken.contains(in n) {
+            break;
+        }
+        n.push(95);
+    }
+    taken.insert_key(in n, 0);
+    n
+}
+
+fn fresh_str(inout taken: StrSet, in base: Str) -> ChunkSeq[u8] {
+    fresh(inout taken, in text(base))
+}
+
+impl Gen {
+    // `copy_type`.
+    pub fn copy_type(in self, t: u32, inout o: ChunkSeq[u8]) {
+        self.rust_type(t, in self.tp, inout o);
+    }
+
+    // `mirror`: writes the mirror type and returns true, or false.
+    pub fn mirror(in self, t: u32, inout o: ChunkSeq[u8]) -> bool {
+        let n = self.i.node(t);
+        if n.kind == K_NAMED && self.i.mirrored(t) {
+            put(inout o, "repr::");
+            self.put_name(inout o, n.name);
+            return true;
+        }
+        if n.kind == K_NAMED && self.i.lent(t) {
+            put(inout o, "vesper_port_abi::");
+            self.put_name(inout o, n.name);
+            put(inout o, "Mirror<");
+            for j in 0..n.n {
+                if j > 0 {
+                    put(inout o, ", ");
+                }
+                self.payload_cell(self.i.kid(t, j), inout o);
+            }
+            put(inout o, ">");
+            return true;
+        }
+        false
+    }
+
+    pub fn has_mirror(in self, t: u32) -> bool {
+        let n = self.i.node(t);
+        n.kind == K_NAMED && (self.i.mirrored(t) || self.i.lent(t))
+    }
+
+    pub fn mirror_of(in self, t: u32) -> ChunkSeq[u8] {
+        let mut o = ChunkSeq::new[u8]();
+        let ok = self.mirror(t, inout o);
+        o
+    }
+
+    fn payload_cell(in self, t: u32, inout o: ChunkSeq[u8]) {
+        if !self.mirror(t, inout o) {
+            self.cell(t, in self.tp, inout o);
+        }
+    }
+
+    // `cell(ty, path)`: the mirror cell of a field.
+    pub fn cell(in self, t: u32, in path: ChunkSeq[u8], inout o: ChunkSeq[u8]) {
+        let n = self.i.node(t);
+        let k = self.i.known;
+        if n
+            .kind
+            == K_SCALAR
+            && (
+            n
+                .name
+                == k
+                .i64
+                || n
+                .name
+                == k
+                .u64
+                || n
+                .name
+                == k
+                .isize
+                || n
+                .name
+                == k
+                .usize
+                || n
+                .name
+                == k
+                .f64
+        ) {
+            self.put_name(inout o, n.name);
+        } else if n.kind == K_SCALAR {
+            put(inout o, "vesper_port_abi::Word<");
+            self.rust_type(t, in path, inout o);
+            put(inout o, ">");
+        } else if n.kind == K_NAMED && self.i.mirrored(t) {
+            self.put_name(inout o, n.name);
+        } else if n.kind == K_TUPLE && self.i.array_elem(t) != NONE32 {
+            put(inout o, "[");
+            self.cell(self.i.array_elem(t), in path, inout o);
+            put(inout o, "; ");
+            put_u64(inout o, n.n);
+            put(inout o, "]");
+        } else if self.i.words(t) == 1 {
+            put(inout o, "vesper_port_abi::Word<");
+            self.rust_type(t, in path, inout o);
+            put(inout o, ">");
+        } else {
+            put(inout o, "vesper_port_abi::Words<");
+            self.rust_type(t, in path, inout o);
+            put(inout o, ", ");
+            put_u64(inout o, self.i.words(t));
+            put(inout o, ">");
+        }
+    }
+
+    // `option_mirrors`: every `OptionMirror`/`ResultMirror` a wrapper uses.
+    fn option_mirrors(in self) -> StrSet {
+        let mut out = str_set();
+        for fi in 0..self.i.fns.len() {
+            let f = self.i.func(fi);
+            for j in 0..inc(f.pn) {
+                let t = if j < f.pn {
+                    self.i.param(wrapping_add(f.p0, j)).ty
+                } else {
+                    f.result
+                };
+                if !self.i.mirrored(t) && self.has_mirror(t) {
+                    out.insert_key(in self.mirror_of(t), self.i.words(t));
+                }
+            }
+        }
+        out
+    }
+
+    // `out_type`: the Rust type a value is handed out as.
+    pub fn out_type(in self, t: u32, inout o: ChunkSeq[u8]) {
+        if self.mirror(t, inout o) {
+            return;
+        }
+        if !self.i.owning(t) {
+            self.copy_type(t, inout o);
+            return;
+        }
+        let n = self.i.node(t);
+        if n.kind == K_SEQ {
+            put(inout o, "Vec<");
+            self.copy_type(self.i.kid(t, 0), inout o);
+            put(inout o, ">");
+        } else if n.kind == K_NAMED && n.name == self.i.known.option {
+            put(inout o, "Option<");
+            self.out_type(self.i.kid(t, 0), inout o);
+            put(inout o, ">");
+        } else if n.kind == K_NAMED {
+            self.put_name(inout o, n.name);
+        } else if n.kind == K_TUPLE && n.n == 1 {
+            put(inout o, "(");
+            self.out_type(self.i.kid(t, 0), inout o);
+            put(inout o, ",)");
+        } else if n.kind == K_TUPLE {
+            put(inout o, "(");
+            for j in 0..n.n {
+                if j > 0 {
+                    put(inout o, ", ");
+                }
+                self.out_type(self.i.kid(t, j), inout o);
+            }
+            put(inout o, ")");
+        } else {
+            self.copy_type(t, inout o);
+        }
+    }
+
+    // `param_type`.
+    pub fn param_type(in self, p: ParamRow, inout o: ChunkSeq[u8]) {
+        let pass = self.i.pass(p);
+        let inout_ = pass == P_INOUT;
+        let by_value = pass == P_SINK;
+        if self.has_mirror(p.ty) {
+            if pass == P_IN {
+                put(inout o, "&");
+            } else if inout_ {
+                put(inout o, "&mut ");
+            }
+            let ok = self.mirror(p.ty, inout o);
+            return;
+        }
+        let n = self.i.node(p.ty);
+        let k = n.kind;
+        if k == K_SEQ && by_value {
+            put(inout o, "Vec<");
+            self.copy_type(self.i.kid(p.ty, 0), inout o);
+            put(inout o, ">");
+        } else if k == K_SLICE && p.in_place {
+            if inout_ {
+                put(inout o, "&mut [");
+            } else {
+                put(inout o, "&[");
+            }
+            let ok = self.mirror(self.i.kid(p.ty, 0), inout o);
+            put(inout o, "]");
+        } else if (k == K_SLICE || k == K_SEQ) && !inout_ {
+            put(inout o, "&[");
+            self.copy_type(self.i.kid(p.ty, 0), inout o);
+            put(inout o, "]");
+        } else if k == K_STR && by_value {
+            put(inout o, "String");
+        } else if k == K_SLICE {
+            put(inout o, "&mut [");
+            self.copy_type(self.i.kid(p.ty, 0), inout o);
+            put(inout o, "]");
+        } else if k == K_SEQ {
+            put(inout o, "&mut Vec<");
+            self.copy_type(self.i.kid(p.ty, 0), inout o);
+            put(inout o, ">");
+        } else if k == K_STR && !inout_ {
+            put(inout o, "&str");
+        } else if k == K_STR {
+            put(inout o, "&mut String");
+        } else if k == K_EXTERN {
+            self.put_name(inout o, n.name);
+            put(inout o, "<'_>");
+        } else if self.i.handle_of(p.ty) != 0 {
+            if pass == P_IN {
+                put(inout o, "&");
+            } else if inout_ {
+                put(inout o, "&mut ");
+            }
+            self.put_name(inout o, n.name);
+        } else if inout_ {
+            put(inout o, "&mut ");
+            self.copy_type(p.ty, inout o);
+        } else {
+            self.copy_type(p.ty, inout o);
+        }
+    }
+
+    // `take(ty, buffer, offset)`.
+    pub fn take(in self, t: u32, in buffer: ChunkSeq[u8], offset: u64, inout o: ChunkSeq[u8]) {
+        if self.has_mirror(t) {
+            put(inout o, "vesper_port_abi::mirror_from_words::<");
+            let ok = self.mirror(t, inout o);
+            put(inout o, ">(&");
+            put_seq(inout o, in buffer);
+            put(inout o, "[");
+            put_u64(inout o, offset);
+            put(inout o, "..])");
+            return;
+        }
+        let n = self.i.node(t);
+        let owning = self.i.owning(t);
+        if owning && n.kind == K_SEQ {
+            put(inout o, "unsafe { vesper_port_abi::seq_take::<");
+            self.copy_type(self.i.kid(t, 0), inout o);
+            put(inout o, ">(RUNTIME, ");
+            put_seq(inout o, in buffer);
+            put(inout o, "[");
+            put_u64(inout o, offset);
+            put(inout o, "]) }");
+        } else if owning && n.kind == K_STR {
+            put(inout o, "unsafe { vesper_port_abi::string_take(RUNTIME, &");
+            put_seq(inout o, in buffer);
+            put(inout o, "[");
+            put_u64(inout o, offset);
+            put(inout o, "..]) }");
+        } else if owning && n.kind == K_NAMED && n.name == self.i.known.option {
+            put(inout o, "match ");
+            put_seq(inout o, in buffer);
+            put(inout o, "[");
+            put_u64(inout o, offset);
+            put(inout o, "] { 0 => None, 1 => Some(");
+            self.take(self.i.kid(t, 0), in buffer, inc(offset), inout o);
+            put(inout o, "), tag => panic!(\"invalid Option tag {tag} from Vesper\") }");
+        } else if owning && n.kind == K_NAMED {
+            put(inout o, "unsafe { ");
+            self.put_name(inout o, n.name);
+            put(inout o, "::from_words(&");
+            put_seq(inout o, in buffer);
+            put(inout o, "[");
+            put_u64(inout o, offset);
+            put(inout o, "..]) }");
+        } else if owning && n.kind == K_TUPLE {
+            let mut at = offset;
+            put(inout o, "(");
+            for j in 0..n.n {
+                if j > 0 {
+                    put(inout o, ", ");
+                }
+                let item = self.i.kid(t, j);
+                self.take(item, in buffer, at, inout o);
+                at = wrapping_add(at, self.i.words(item));
+            }
+            if n.n == 1 {
+                put(inout o, ",");
+            }
+            put(inout o, ")");
+        } else {
+            put(inout o, "<");
+            self.copy_type(t, inout o);
+            put(inout o, " as Abi>::get(&");
+            put_seq(inout o, in buffer);
+            put(inout o, "[");
+            put_u64(inout o, offset);
+            put(inout o, "..])");
+        }
+    }
+
+    // `field_view(ty, base, offset)`: the view's type into `ty` and its
+    // expression into `e`.
+    pub fn field_view(
+        in self,
+        t: u32,
+        in base: ChunkSeq[u8],
+        offset: u64,
+        inout ty: ChunkSeq[u8],
+        inout e: ChunkSeq[u8]
+    ) {
+        if !self.i.owning(t) {
+            self.copy_type(t, inout ty);
+            put(inout e, "<");
+            self.copy_type(t, inout e);
+            put(inout e, " as Abi>::get(&");
+            put_seq(inout e, in base);
+            put(inout e, "[");
+            put_u64(inout e, offset);
+            put(inout e, "..])");
+            return;
+        }
+        let n = self.i.node(t);
+        let k = n.kind;
+        if k == K_SEQ && self.i.is_v4() && self.i.handle_of(self.i.kid(t, 0)) != 0 {
+            let name = self.i.node(self.i.kid(t, 0)).name;
+            self.put_name(inout ty, name);
+            put(inout ty, "Seq<'a>");
+            put(inout e, "unsafe { ");
+            self.put_name(inout e, name);
+            put(inout e, "Seq::from_handle(");
+            put_seq(inout e, in base);
+            put(inout e, "[");
+            put_u64(inout e, offset);
+            put(inout e, "]) }");
+        } else if k == K_SEQ && self.i.owning(self.i.kid(t, 0)) {
+            put(inout ty, "vesper_port_abi::OpaqueSeq<'a>");
+            put(inout e, "unsafe { vesper_port_abi::OpaqueSeq::from_handle(");
+            put_seq(inout e, in base);
+            put(inout e, "[");
+            put_u64(inout e, offset);
+            put(inout e, "]) }");
+        } else if k == K_BOX && self.i.node(self.i.kid(t, 0)).kind == K_OBJECT {
+            put(inout ty, "vesper_port_abi::OpaqueObject<'a>");
+            put(inout e, "vesper_port_abi::OpaqueObject::from_word(");
+            put_seq(inout e, in base);
+            put(inout e, "[");
+            put_u64(inout e, offset);
+            put(inout e, "])");
+        } else if k == K_SEQ {
+            put(inout ty, "vesper_port_abi::SeqRef<'a, ");
+            self.copy_type(self.i.kid(t, 0), inout ty);
+            put(inout ty, ">");
+            put(inout e, "unsafe { vesper_port_abi::SeqRef::from_handle(");
+            put_seq(inout e, in base);
+            put(inout e, "[");
+            put_u64(inout e, offset);
+            put(inout e, "]) }");
+        } else if k == K_STR {
+            put(inout ty, "&'a str");
+            put(inout e, "unsafe { vesper_port_abi::str_view(&");
+            put_seq(inout e, in base);
+            put(inout e, "[");
+            put_u64(inout e, offset);
+            put(inout e, "..]) }");
+        } else if k == K_BOX {
+            let inner = self.i.kid(t, 0);
+            let mut pointee = text("(unsafe { vesper_port_abi::box_words(");
+            put_seq(inout pointee, in base);
+            put(inout pointee, "[");
+            put_u64(inout pointee, offset);
+            put(inout pointee, "], ");
+            put_u64(inout pointee, self.i.words(inner));
+            put(inout pointee, ") })");
+            self.field_view(inner, in pointee, 0, inout ty, inout e);
+        } else if k == K_NAMED && n.name == self.i.known.option {
+            let mut it = ChunkSeq::new[u8]();
+            let mut ie = ChunkSeq::new[u8]();
+            self.field_view(self.i.kid(t, 0), in base, inc(offset), inout it, inout ie);
+            put(inout ty, "Option<");
+            put_seq(inout ty, in it);
+            put(inout ty, ">");
+            put(inout e, "match ");
+            put_seq(inout e, in base);
+            put(inout e, "[");
+            put_u64(inout e, offset);
+            put(inout e, "] { 0 => None, _ => Some(");
+            put_seq(inout e, in ie);
+            put(inout e, ") }");
+        } else if k == K_NAMED {
+            let words = self.i.words(t);
+            self.put_name(inout ty, n.name);
+            put(inout ty, "Ref<'a>");
+            self.put_name(inout e, n.name);
+            put(inout e, "Ref { words: &");
+            put_seq(inout e, in base);
+            put(inout e, "[");
+            put_u64(inout e, offset);
+            put(inout e, "..");
+            put_u64(inout e, wrapping_add(offset, words));
+            put(inout e, "] }");
+        } else {
+            self.copy_type(t, inout ty);
+            put(inout e, "unreachable!()");
+        }
+    }
+
+    pub fn fv_type(in self, t: u32, offset: u64) -> ChunkSeq[u8] {
+        let mut ty = ChunkSeq::new[u8]();
+        let mut e = ChunkSeq::new[u8]();
+        self.field_view(t, in text("w"), offset, inout ty, inout e);
+        ty
+    }
+
+    pub fn fv_expr(in self, t: u32, offset: u64) -> ChunkSeq[u8] {
+        let mut ty = ChunkSeq::new[u8]();
+        let mut e = ChunkSeq::new[u8]();
+        self.field_view(t, in text("w"), offset, inout ty, inout e);
+        e
+    }
+
+    // `handle_type`: the owned handle, its `Ref` view and the view enum.
+    fn handle_type(in self, inout out: ChunkSeq[u8], d: DeclRow) {
+        let name = self.name(d.name);
+        put(inout out, "/// Owned handle of a Vesper `");
+        put_seq(inout out, in name);
+        put(inout out, "` value: its words, which own the Vesper\n/// allocations they point to.");
+        if d.drop != 0 {
+            put(inout out, " Dropping it calls `");
+            self.put_name(inout out, wrapping_sub(d.drop, 1));
+            put(inout out, "`.");
+        } else {
+            put(
+                inout out,
+                " It is linear: it has no `Drop`, and only a consuming call releases it."
+            );
+        }
+        nl(inout out);
+        if d.linear {
+            put(
+                inout out,
+                "#[must_use = \"a linear Vesper value must be released by a consuming call\"]\n"
+            );
+        }
+        put(inout out, "pub struct ");
+        put_seq(inout out, in name);
+        put(inout out, " {\n    words: [u64; ");
+        put_u64(inout out, d.words);
+        put(inout out, "],\n}\n\n");
+        put(inout out, "impl ");
+        put_seq(inout out, in name);
+        put(inout out, " {\n    /// # Safety\n    /// `words` must hold a `");
+        put_seq(inout out, in name);
+        put(
+            inout out,
+            "` value of this library that the caller owns.\n    unsafe fn from_words(words: &[u64]) -> Self {\n        let mut owned = [0u64; "
+        );
+        put_u64(inout out, d.words);
+        put(inout out, "];\n        owned.copy_from_slice(&words[..");
+        put_u64(inout out, d.words);
+        put(
+            inout out,
+            "]);\n        Self { words: owned }\n    }\n\n    /// A borrowed view of the value.\n    pub fn as_ref(&self) -> "
+        );
+        put_seq(inout out, in name);
+        put(inout out, "Ref<'_> {\n        ");
+        put_seq(inout out, in name);
+        put(inout out, "Ref { words: &self.words }\n    }\n}\n\n");
+        if d.drop != 0 {
+            put(inout out, "impl Drop for ");
+            put_seq(inout out, in name);
+            put(
+                inout out,
+                " {\n    fn drop(&mut self) {\n        // SAFETY: the handle owns its words and is dropped once.\n        unsafe { "
+            );
+            self.put_name(inout out, wrapping_sub(d.drop, 1));
+            put(inout out, "(self.words.as_mut_ptr()) };\n    }\n}\n\n");
+        }
+        put(inout out, "impl core::fmt::Debug for ");
+        put_seq(inout out, in name);
+        put(
+            inout out,
+            " {\n    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {\n        f.write_str(\""
+        );
+        put_seq(inout out, in name);
+        put(inout out, " { .. }\")\n    }\n}\n\n");
+        put(
+            inout out,
+            "// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper\n// code keeps a reference to them), and they are plain heap memory.\nunsafe impl Send for "
+        );
+        put_seq(inout out, in name);
+        put(
+            inout out,
+            " {}\n// SAFETY: shared access only reads the words and the memory they own.\nunsafe impl Sync for "
+        );
+        put_seq(inout out, in name);
+        put(inout out, " {}\n\n");
+        put(inout out, "/// A borrowed view of a Vesper `");
+        put_seq(inout out, in name);
+        put(inout out, "` value, read in place.\n#[derive(Clone, Copy)]\npub struct ");
+        put_seq(inout out, in name);
+        put(inout out, "Ref<'a> {\n    words: &'a [u64],\n}\n\n");
+        put(inout out, "impl<'a> ");
+        put_seq(inout out, in name);
+        put(inout out, "Ref<'a> {\n");
+        if d.is_enum {
+            put(inout out, "    /// The variant and its fields.\n    pub fn view(&self) -> ");
+            put_seq(inout out, in name);
+            put(
+                inout out,
+                "View<'a> {\n        let w: &'a [u64] = self.words;\n        match w[0] {\n"
+            );
+            for vi in 0..d.vn {
+                let v = self.i.var(wrapping_add(d.v0, vi));
+                put(inout out, "            ");
+                put_u64(inout out, vi);
+                put(inout out, " => ");
+                put_seq(inout out, in name);
+                put(inout out, "View::");
+                self.put_name(inout out, v.name);
+                if v.fc > 0 {
+                    let pos = self.i.positional(v);
+                    if pos {
+                        put(inout out, "(");
+                    } else {
+                        put(inout out, " { ");
+                    }
+                    for j in 0..v.fc {
+                        if j > 0 {
+                            put(inout out, ", ");
+                        }
+                        let f = self.i.field(wrapping_add(v.f0, j));
+                        if !pos {
+                            self.put_ident_sym(inout out, f.name);
+                            put(inout out, ": ");
+                        }
+                        put_seq(inout out, in self.fv_expr(f.ty, f.offset));
+                    }
+                    if pos {
+                        put(inout out, ")");
+                    } else {
+                        put(inout out, " }");
+                    }
+                }
+                put(inout out, ",\n");
+            }
+            put(inout out, "            tag => panic!(\"invalid ");
+            put_seq(inout out, in name);
+            put(inout out, " tag {tag} from Vesper\"),\n        }\n    }\n}\n\n");
+            put(inout out, "/// The variants of a Vesper `");
+            put_seq(inout out, in name);
+            put(inout out, "` value, with borrowed fields.\n#[derive(Clone, Copy)]\npub enum ");
+            put_seq(inout out, in name);
+            put(inout out, "View<'a> {\n");
+            for vi in 0..d.vn {
+                let v = self.i.var(wrapping_add(d.v0, vi));
+                put(inout out, "    ");
+                self.put_name(inout out, v.name);
+                if v.fc > 0 {
+                    let pos = self.i.positional(v);
+                    if pos {
+                        put(inout out, "(");
+                    } else {
+                        put(inout out, " { ");
+                    }
+                    for j in 0..v.fc {
+                        if j > 0 {
+                            put(inout out, ", ");
+                        }
+                        let f = self.i.field(wrapping_add(v.f0, j));
+                        if !pos {
+                            self.put_ident_sym(inout out, f.name);
+                            put(inout out, ": ");
+                        }
+                        put_seq(inout out, in self.fv_type(f.ty, f.offset));
+                    }
+                    if pos {
+                        put(inout out, ")");
+                    } else {
+                        put(inout out, " }");
+                    }
+                }
+                put(inout out, ",\n");
+            }
+            put(
+                inout out,
+                "    #[doc(hidden)]\n    _Borrow(core::marker::PhantomData<&'a ()>),\n}\n\n"
+            );
+        } else {
+            let v = self.i.var(d.v0);
+            for j in 0..v.fc {
+                let f = self.i.field(wrapping_add(v.f0, j));
+                put(inout out, "    pub fn ");
+                if self.i.digits(f.name) {
+                    put(inout out, "field");
+                    self.put_name(inout out, f.name);
+                } else {
+                    self.put_ident_sym(inout out, f.name);
+                }
+                put(inout out, "(&self) -> ");
+                put_seq(inout out, in self.fv_type(f.ty, f.offset));
+                put(inout out, " {\n        let w: &'a [u64] = self.words;\n        ");
+                put_seq(inout out, in self.fv_expr(f.ty, f.offset));
+                put(inout out, "\n    }\n");
+            }
+            put(inout out, "}\n\n");
+        }
+    }
+
+    // The `Result<value, error>` (or plain value) return type of `f`.
+    fn ret_type(in self, f: FnRow, in error: ChunkSeq[u8], inout o: ChunkSeq[u8]) {
+        if f.en == 0 {
+            self.out_type(f.result, inout o);
+        } else {
+            put(inout o, "Result<");
+            self.out_type(f.result, inout o);
+            put(inout o, ", ");
+            put_seq(inout o, in error);
+            put(inout o, ">");
+        }
+    }
+
+    // `function`: one safe wrapper.
+    fn function(in self, inout out: ChunkSeq[u8], f: FnRow) {
+        let error = self.error_type(f, true, inout out);
+        put(inout out, "/// Calls `");
+        self.put_name(inout out, f.name);
+        put(inout out, "` of the Vesper library `");
+        self.put_name(inout out, self.i.library);
+        put(inout out, "` (`");
+        self.put_name(inout out, f.symbol);
+        put(inout out, "`).\n");
+        put(inout out, "pub fn ");
+        self.put_ident_sym(inout out, f.name);
+        put(inout out, "(");
+        for j in 0..f.pn {
+            let p = self.i.param(wrapping_add(f.p0, j));
+            if j > 0 {
+                put(inout out, ", ");
+            }
+            self.put_ident_sym(inout out, p.name);
+            put(inout out, ": ");
+            self.param_type(p, inout out);
+        }
+        put(inout out, ") -> ");
+        self.ret_type(f, in error, inout out);
+        put(inout out, " {\n");
+        for j in 0..f.ln {
+            let lib = self.i.fn_lib(wrapping_add(f.l0, j));
+            for li in 0..self.i.libs.len() {
+                let l = self.i.lib(li);
+                if l.name == lib && l.rust_path != 0 {
+                    put(inout out, "    // Keep the crate's `");
+                    self.put_name(inout out, l.name);
+                    put(
+                        inout out,
+                        "` symbols linked: the Vesper object calls them.\n    let _ = core::hint::black_box(["
+                    );
+                    for s in 0..l.sn {
+                        if s > 0 {
+                            put(inout out, ", ");
+                        }
+                        self.put_name(inout out, wrapping_sub(l.rust_path, 1));
+                        put(inout out, "::");
+                        self.put_name(inout out, self.i.lib_sym(wrapping_add(l.s0, s)));
+                        put(inout out, " as *const ()");
+                    }
+                    put(inout out, "]);\n");
+                    break;
+                }
+            }
+        }
+        let mut names = str_set();
+        for j in 0..f.pn {
+            let p = self.i.param(wrapping_add(f.p0, j));
+            let mut n = ChunkSeq::new[u8]();
+            self.put_ident_sym(inout n, p.name);
+            names.insert_key(in n, 0);
+        }
+        let result = fresh_str(inout names, "result");
+        let fail = fresh_str(inout names, "fail");
+        let raw = fresh_str(inout names, "raw");
+        let mut args = ChunkSeq::new[u8]();
+        let mut first = true;
+        let mut opens = ChunkSeq::new[u8]();
+        let mut wraps: u64 = 0;
+        let mut after = ChunkSeq::new[u8]();
+        if f.result_pointer {
+            put(inout out, "    let mut ");
+            put_seq(inout out, in result);
+            put(inout out, " = [0u64; ");
+            put_u64(inout out, f.result_words);
+            put(inout out, "];\n");
+            put_seq(inout args, in result);
+            put(inout args, ".as_mut_ptr()");
+            first = false;
+        }
+        for j in 0..f.pn {
+            let p = self.i.param(wrapping_add(f.p0, j));
+            let mut n = ChunkSeq::new[u8]();
+            self.put_ident_sym(inout n, p.name);
+            let pass = self.i.pass(p);
+            let inout_ = pass == P_INOUT;
+            let mut b = text("view_");
+            self.put_name(inout b, p.name);
+            let view = fresh(inout names, in b);
+            let mut b2 = text("seq_");
+            self.put_name(inout b2, p.name);
+            let seq = fresh(inout names, in b2);
+            let mut b3 = text("arg_");
+            self.put_name(inout b3, p.name);
+            let arg = fresh(inout names, in b3);
+            if !first {
+                put(inout args, ", ");
+            }
+            first = false;
+            let node = self.i.node(p.ty);
+            let k = node.kind;
+            if k == K_SLICE && p.in_place {
+                put(inout opens, "vesper_port_abi::");
+                if inout_ {
+                    put(inout opens, "with_mirror_slice_mut");
+                } else {
+                    put(inout opens, "with_mirror_slice");
+                }
+                put(inout opens, "(");
+                put_seq(inout opens, in n);
+                put(inout opens, ", |");
+                put_seq(inout opens, in view);
+                put(inout opens, "| ");
+                wraps = inc(wraps);
+                put_seq(inout args, in view);
+            } else if self.has_mirror(p.ty) {
+                let m = self.mirror_of(p.ty);
+                if pass == P_IN {
+                    put(inout args, "(");
+                    put_seq(inout args, in n);
+                    put(inout args, " as *const ");
+                    put_seq(inout args, in m);
+                    put(inout args, ").cast_mut().cast::<u64>()");
+                } else if inout_ {
+                    put(inout args, "(");
+                    put_seq(inout args, in n);
+                    put(inout args, " as *mut ");
+                    put_seq(inout args, in m);
+                    put(inout args, ").cast::<u64>()");
+                } else {
+                    put(inout out, "    let mut ");
+                    put_seq(inout out, in arg);
+                    put(inout out, " = ");
+                    put_seq(inout out, in n);
+                    put(inout out, ";\n");
+                    put(inout args, "(&mut ");
+                    put_seq(inout args, in arg);
+                    put(inout args, " as *mut ");
+                    put_seq(inout args, in m);
+                    put(inout args, ").cast::<u64>()");
+                }
+            } else if k == K_SLICE {
+                put(inout opens, "vesper_port_abi::");
+                if inout_ {
+                    put(inout opens, "with_slice_mut");
+                } else {
+                    put(inout opens, "with_slice");
+                }
+                put(inout opens, "(");
+                put_seq(inout opens, in n);
+                put(inout opens, ", |");
+                put_seq(inout opens, in view);
+                put(inout opens, "| ");
+                wraps = inc(wraps);
+                put_seq(inout args, in view);
+            } else if k == K_STR {
+                put(inout opens, "vesper_port_abi::");
+                if inout_ {
+                    put(inout opens, "with_string_mut(RUNTIME, ");
+                } else if pass == P_SINK {
+                    put(inout opens, "with_string_owned(RUNTIME, &");
+                } else {
+                    put(inout opens, "with_str(");
+                }
+                put_seq(inout opens, in n);
+                put(inout opens, ", |");
+                put_seq(inout opens, in view);
+                put(inout opens, "| ");
+                wraps = inc(wraps);
+                put_seq(inout args, in view);
+            } else if k == K_SEQ && inout_ {
+                put(inout opens, "vesper_port_abi::with_seq_mut(RUNTIME, ");
+                put_seq(inout opens, in n);
+                put(inout opens, ", |");
+                put_seq(inout opens, in seq);
+                put(inout opens, "| ");
+                wraps = inc(wraps);
+                put_seq(inout args, in seq);
+            } else if k == K_SEQ && pass == P_SINK {
+                put(inout out, "    // SAFETY: RUNTIME is this library's runtime.\n    let ");
+                put_seq(inout out, in seq);
+                put(inout out, " = unsafe { vesper_port_abi::seq_from(RUNTIME, &");
+                put_seq(inout out, in n);
+                put(inout out, ") };\n");
+                put_seq(inout args, in seq);
+                put(inout args, " as i64");
+            } else if k == K_SEQ {
+                put(inout opens, "vesper_port_abi::with_seq(");
+                put_seq(inout opens, in n);
+                put(inout opens, ", |");
+                put_seq(inout opens, in seq);
+                put(inout opens, "| ");
+                wraps = inc(wraps);
+                put_seq(inout args, in seq);
+                put(inout args, " as i64");
+            } else if k == K_EXTERN && p.pointer {
+                put(inout out, "    let mut ");
+                put_seq(inout out, in arg);
+                put(inout out, " = [");
+                put_seq(inout out, in n);
+                put(inout out, ".word()];\n");
+                put_seq(inout args, in arg);
+                put(inout args, ".as_mut_ptr()");
+            } else if k == K_EXTERN {
+                put_seq(inout args, in n);
+                put(inout args, ".word() as i64");
+            } else if self.i.handle_of(p.ty) != 0 {
+                if pass == P_IN && p.in_place {
+                    put_seq(inout args, in n);
+                    put(inout args, ".words.as_ptr().cast_mut()");
+                } else if pass == P_IN {
+                    put(inout out, "    let mut ");
+                    put_seq(inout out, in arg);
+                    put(inout out, " = ");
+                    put_seq(inout out, in n);
+                    put(inout out, ".words;\n");
+                    put_seq(inout args, in arg);
+                    put(inout args, ".as_mut_ptr()");
+                } else if inout_ {
+                    put_seq(inout args, in n);
+                    put(inout args, ".words.as_mut_ptr()");
+                } else {
+                    put(inout out, "    let mut ");
+                    put_seq(inout out, in arg);
+                    put(inout out, " = core::mem::ManuallyDrop::new(");
+                    put_seq(inout out, in n);
+                    put(inout out, ");\n");
+                    put_seq(inout args, in arg);
+                    put(inout args, ".words.as_mut_ptr()");
+                }
+            } else if inout_ {
+                let mut t = ChunkSeq::new[u8]();
+                self.copy_type(p.ty, inout t);
+                put(inout out, "    let mut ");
+                put_seq(inout out, in arg);
+                put(inout out, " = [0u64; <");
+                put_seq(inout out, in t);
+                put(inout out, " as Abi>::WORDS];\n    Abi::put(&*");
+                put_seq(inout out, in n);
+                put(inout out, ", &mut ");
+                put_seq(inout out, in arg);
+                put(inout out, ");\n");
+                put_seq(inout args, in arg);
+                put(inout args, ".as_mut_ptr()");
+                put(inout after, "    *");
+                put_seq(inout after, in n);
+                put(inout after, " = <");
+                put_seq(inout after, in t);
+                put(inout after, " as Abi>::get(&");
+                put_seq(inout after, in arg);
+                put(inout after, ");\n");
+            } else if p.pointer {
+                let mut t = ChunkSeq::new[u8]();
+                self.copy_type(p.ty, inout t);
+                put(inout out, "    let mut ");
+                put_seq(inout out, in arg);
+                put(inout out, " = [0u64; <");
+                put_seq(inout out, in t);
+                put(inout out, " as Abi>::WORDS];\n    Abi::put(&");
+                put_seq(inout out, in n);
+                put(inout out, ", &mut ");
+                put_seq(inout out, in arg);
+                put(inout out, ");\n");
+                put_seq(inout args, in arg);
+                put(inout args, ".as_mut_ptr()");
+            } else {
+                self.scalar_in(in n, p.ty, inout args);
+            }
+        }
+        if f.fail != 0 {
+            put(inout out, "    let mut ");
+            put_seq(inout out, in fail);
+            put(inout out, " = [0u64; ");
+            put_u64(inout out, wrapping_sub(f.fail, 1));
+            put(inout out, "];\n");
+            if !first {
+                put(inout args, ", ");
+            }
+            put_seq(inout args, in fail);
+            put(inout args, ".as_mut_ptr()");
+        }
+        put(inout out, "    // SAFETY: `");
+        self.put_name(inout out, f.symbol);
+        put(
+            inout out,
+            "` has exactly this signature in the export ABI; every\n    // pointer is a live, writable buffer of the size the ABI requires, and\n    // every handle passed is owned or borrowed as its mode requires.\n    let "
+        );
+        put_seq(inout out, in raw);
+        put(inout out, " = ");
+        put_seq(inout out, in opens);
+        put(inout out, "unsafe { ");
+        self.put_name(inout out, f.symbol);
+        put(inout out, "(");
+        put_seq(inout out, in args);
+        put(inout out, ") }");
+        for k2 in 0..wraps {
+            put(inout out, ")");
+        }
+        put(inout out, ";\n");
+        put_seq(inout out, in after);
+        let mut produce = ChunkSeq::new[u8]();
+        if f.result_pointer {
+            self.take(f.result, in result, 0, inout produce);
+        } else if self.i.node(f.result).kind == K_SEQ {
+            put(inout produce, "unsafe { vesper_port_abi::seq_take::<");
+            self.copy_type(self.i.kid(f.result, 0), inout produce);
+            put(inout produce, ">(RUNTIME, ");
+            put_seq(inout produce, in raw);
+            put(inout produce, " as u64) }");
+        } else {
+            self.scalar_out(in raw, f.result, inout produce);
+        }
+        self.result_tail(f, in error, in fail, in produce, inout out);
+        put(inout out, "}\n");
+    }
+
+    // `mirrors`: the v3 `repr` module, layout asserts and conversions.
+    fn mirrors(in self, inout out: ChunkSeq[u8]) {
+        let mut inner = ChunkSeq::new[u8]();
+        if self.has_tp {
+            put_seq(inout inner, in self.tp);
+        } else {
+            put(inout inner, "super::");
+        }
+        put(
+            inout out,
+            "/// `#[repr(C)]` mirrors of the library's copy structs in the Vesper word\n/// layout (export ABI v3): `in`/`inout` parameters and slices of them are\n/// lent to Vesper in place.\npub mod repr {\n"
+        );
+        for di in 0..self.i.decls.len() {
+            let d = self.i.decl(di);
+            if d.mirror != M_REPR_C {
+                continue;
+            }
+            let v = self.i.var(d.v0);
+            put(inout out, "    /// Mirror of the Vesper copy struct `");
+            self.put_name(inout out, d.name);
+            put(inout out, "` (");
+            put_u64(inout out, d.words);
+            put(
+                inout out,
+                " words).\n    #[repr(C)]\n    #[derive(Clone, Copy, Debug, PartialEq)]\n"
+            );
+            // Fields in offset order (a stable sort).
+            let mut order = ChunkSeq::new[u64]();
+            for j in 0..v.fc {
+                let f = self.i.field(wrapping_add(v.f0, j));
+                let mut at = order.len();
+                for q in 0..order.len() {
+                    let g = self.i.field(wrapping_add(v.f0, u64_at(in order, q)));
+                    if g.offset > f.offset {
+                        at = q;
+                        break;
+                    }
+                }
+                order.push(j);
+                let mut p = wrapping_sub(order.len(), 1);
+                loop {
+                    if p <= at {
+                        break;
+                    }
+                    let prev = u64_at(in order, wrapping_sub(p, 1));
+                    let ok = order.try_set(p, prev);
+                    p = wrapping_sub(p, 1);
+                }
+                let ok2 = order.try_set(at, j);
+            }
+            if self.i.positional(v) {
+                put(inout out, "    pub struct ");
+                self.put_name(inout out, d.name);
+                put(inout out, "(");
+                for q in 0..order.len() {
+                    if q > 0 {
+                        put(inout out, ", ");
+                    }
+                    let f = self.i.field(wrapping_add(v.f0, u64_at(in order, q)));
+                    put(inout out, "pub ");
+                    self.cell(f.ty, in inner, inout out);
+                }
+                put(inout out, ");\n\n");
+            } else {
+                put(inout out, "    pub struct ");
+                self.put_name(inout out, d.name);
+                put(inout out, " {\n");
+                for q in 0..order.len() {
+                    let f = self.i.field(wrapping_add(v.f0, u64_at(in order, q)));
+                    put(inout out, "        pub ");
+                    self.put_ident_sym(inout out, f.name);
+                    put(inout out, ": ");
+                    self.cell(f.ty, in inner, inout out);
+                    put(inout out, ",\n");
+                }
+                put(inout out, "    }\n\n");
+            }
+        }
+        put(inout out, "}\n\n");
+        for di in 0..self.i.decls.len() {
+            let d = self.i.decl(di);
+            if d.mirror != M_REPR_C {
+                continue;
+            }
+            let name = self.name(d.name);
+            let mut value = copy_of(in self.tp);
+            put_seq(inout value, in name);
+            put(inout out, "// The mirror of `");
+            put_seq(inout out, in name);
+            put(
+                inout out,
+                "` has exactly the Vesper layout.\nconst _: () = {\n    assert!(core::mem::size_of::<repr::"
+            );
+            put_seq(inout out, in name);
+            put(inout out, ">() == ");
+            put_u64(inout out, d.words);
+            put(inout out, " * 8);\n    assert!(core::mem::align_of::<repr::");
+            put_seq(inout out, in name);
+            put(inout out, ">() == 8);\n");
+            let v = self.i.var(d.v0);
+            for j in 0..v.fc {
+                let f = self.i.field(wrapping_add(v.f0, j));
+                put(inout out, "    assert!(core::mem::offset_of!(repr::");
+                put_seq(inout out, in name);
+                put(inout out, ", ");
+                self.put_ident_sym(inout out, f.name);
+                put(inout out, ") == ");
+                put_u64(inout out, f.offset);
+                put(inout out, " * 8);\n");
+            }
+            put(inout out, "};\n\n");
+            put(inout out, "// SAFETY: `repr::");
+            put_seq(inout out, in name);
+            put(inout out, "` is `#[repr(C)]`, ");
+            put_u64(inout out, d.words);
+            put(
+                inout out,
+                " words, eight-byte aligned\n// (asserted above), and every field is a word cell or a mirror.\nunsafe impl vesper_port_abi::Mirror for repr::"
+            );
+            put_seq(inout out, in name);
+            put(inout out, " {\n    const WORDS: usize = ");
+            put_u64(inout out, d.words);
+            put(inout out, ";\n}\n\n");
+            put(inout out, "impl repr::");
+            put_seq(inout out, in name);
+            put(
+                inout out,
+                " {\n    /// The mirror of a Rust value.\n    pub fn from_value(value: &"
+            );
+            put_seq(inout out, in value);
+            put(inout out, ") -> Self {\n        let mut words = [0u64; ");
+            put_u64(inout out, d.words);
+            put(
+                inout out,
+                "];\n        Abi::put(value, &mut words);\n        vesper_port_abi::mirror_from_words(&words)\n    }\n\n    /// The Rust value of the mirror.\n    pub fn to_value(&self) -> "
+            );
+            put_seq(inout out, in value);
+            put(inout out, " {\n        <");
+            put_seq(inout out, in value);
+            put(inout out, " as Abi>::get(vesper_port_abi::mirror_words(self))\n    }\n}\n\n");
+        }
+    }
+
+    // `methods`: the functions named `<type>_<method>` of a handle type.
+    fn methods(in self, inout out: ChunkSeq[u8], d: DeclRow) {
+        let mut prefix = ChunkSeq::new[u8]();
+        self.put_snake(inout prefix, d.name);
+        prefix.push(95);
+        let mut lines = ChunkSeq::new[u8]();
+        let mut any = false;
+        for fi in 0..self.i.fns.len() {
+            let f = self.i.func(fi);
+            let fname = self.name(f.name);
+            if fname.len() <= prefix.len() {
+                continue;
+            }
+            let mut starts = true;
+            for k in 0..prefix.len() {
+                if u8_at(in fname, k) != u8_at(in prefix, k) {
+                    starts = false;
+                    break;
+                }
+            }
+            if !starts {
+                continue;
+            }
+            let mut method = ChunkSeq::new[u8]();
+            for k in prefix.len()..fname.len() {
+                method.push(u8_at(in fname, k));
+            }
+            // receiver: 0 none, 1 &self, 2 &mut self, 3 self
+            let mut receiver: u8 = 0;
+            if f.pn > 0 {
+                let p = self.i.param(f.p0);
+                if self.names_decl(p.ty, d.name) {
+                    let pass = self.i.pass(p);
+                    receiver = if pass == P_IN {
+                        1
+                    } else if pass == P_INOUT {
+                        2
+                    } else {
+                        3
+                    };
+                }
+            }
+            if receiver == 0 && !self.names_decl(f.result, d.name) {
+                continue;
+            }
+            let skip: u64 = if receiver == 0 {
+                0
+            } else {
+                1
+            };
+            if any {
+                put(inout lines, "\n\n");
+            }
+            any = true;
+            put(inout lines, "    /// `");
+            put_seq(inout lines, in fname);
+            put(inout lines, "` (`");
+            self.put_name(inout lines, f.symbol);
+            put(inout lines, "`).\n    pub fn ");
+            put_ident(inout lines, in method);
+            put(inout lines, "(");
+            let mut first = true;
+            if receiver == 1 {
+                put(inout lines, "&self");
+                first = false;
+            } else if receiver == 2 {
+                put(inout lines, "&mut self");
+                first = false;
+            } else if receiver == 3 {
+                put(inout lines, "self");
+                first = false;
+            }
+            for j in skip..f.pn {
+                let p = self.i.param(wrapping_add(f.p0, j));
+                if !first {
+                    put(inout lines, ", ");
+                }
+                first = false;
+                self.put_ident_sym(inout lines, p.name);
+                put(inout lines, ": ");
+                self.param_type(p, inout lines);
+            }
+            put(inout lines, ") -> ");
+            if f.en == 0 {
+                self.out_type(f.result, inout lines);
+            } else {
+                put(inout lines, "Result<");
+                self.out_type(f.result, inout lines);
+                put(inout lines, ", ");
+                if f.en == 1 {
+                    self.copy_type(self.i.err(f.e0), inout lines);
+                } else {
+                    if self.has_tp {
+                        put_seq(inout lines, in self.tp);
+                    }
+                    self.put_camel(inout lines, f.name);
+                    put(inout lines, "Error");
+                }
+                put(inout lines, ">");
+            }
+            put(inout lines, " {\n        ");
+            put_ident(inout lines, in fname);
+            put(inout lines, "(");
+            let mut first2 = true;
+            if receiver != 0 {
+                put(inout lines, "self");
+                first2 = false;
+            }
+            for j in skip..f.pn {
+                let p = self.i.param(wrapping_add(f.p0, j));
+                if !first2 {
+                    put(inout lines, ", ");
+                }
+                first2 = false;
+                self.put_ident_sym(inout lines, p.name);
+            }
+            put(inout lines, ")\n    }");
+        }
+        if any {
+            put(inout out, "\nimpl ");
+            self.put_name(inout out, d.name);
+            put(inout out, " {\n");
+            put_seq(inout out, in lines);
+            put(inout out, "\n}\n");
+        }
+    }
+
+    // Whether `t` is `Named { name == s }` (any arguments).
+    fn names_decl(in self, t: u32, s: u32) -> bool {
+        let n = self.i.node(t);
+        n.kind == K_NAMED && n.name == s
+    }
+}
+
+// `generate`: the binding text of a v2 (or later) library.
+pub fn binding_v2(in g: Gen, inout out: ChunkSeq[u8]) {
+    g.header(inout out);
+    put(
+        inout out,
+        "#![allow(clippy::all, unused_imports, unused_mut, unused_unsafe, unused_variables, non_snake_case, non_camel_case_types, dead_code)]\n\nuse vesper_port_abi::Abi;\n\n"
+    );
+    g.write_copy_types(inout out, false);
+    for di in 0..g.i.decls.len() {
+        let d = g.i.decl(di);
+        if d.is_handle {
+            g.handle_type(inout out, d);
+        }
+    }
+    if g.i.is_v4() {
+        v4_items(in g, inout out);
+    }
+    if g.i.is_v3() {
+        g.mirrors(inout out);
+        let ms = g.option_mirrors();
+        for k in 0..ms.len() {
+            let m = ms.get(k);
+            let words = ms.val(k);
+            put(inout out, "// `");
+            put_seq(inout out, in m);
+            put(
+                inout out,
+                "` has the Vesper layout of its value.\nconst _: () = assert!(core::mem::size_of::<"
+            );
+            put_seq(inout out, in m);
+            put(inout out, ">() == ");
+            put_u64(inout out, words);
+            put(inout out, " * 8 && <");
+            put_seq(inout out, in m);
+            put(inout out, " as vesper_port_abi::Mirror>::WORDS == ");
+            put_u64(inout out, words);
+            put(inout out, ");\n");
+        }
+        if g.i.option_mirrors {
+            nl(inout out);
+        }
+    }
+    let mut checked = str_set();
+    for fi in 0..g.i.fns.len() {
+        let f = g.i.func(fi);
+        if !g.i.owning(f.result) {
+            checked.insert_pair(in g.rt(f.result), f.result_words);
+        }
+    }
+    for di in 0..g.i.decls.len() {
+        let d = g.i.decl(di);
+        if !d.is_handle {
+            let mut full = copy_of(in g.tp);
+            g.put_name(inout full, d.name);
+            checked.insert_pair(in full, d.words);
+        }
+    }
+    g.word_asserts(in checked, inout out);
+    put(inout out, "\nunsafe extern \"C\" {\n");
+    put(inout out, "    fn ");
+    g.put_name(inout out, g.i.seq_new);
+    put(inout out, "(capacity: i64, stride: i64) -> i64;\n    fn ");
+    g.put_name(inout out, g.i.seq_free);
+    put(inout out, "(seq: i64) -> i64;\n    fn ");
+    g.put_name(inout out, g.i.live);
+    put(inout out, "() -> i64;\n");
+    if g.i.box_new != 0 {
+        put(inout out, "    fn ");
+        g.put_name(inout out, wrapping_sub(g.i.box_new, 1));
+        put(inout out, "(size: i64) -> i64;\n");
+    }
+    for di in 0..g.i.decls.len() {
+        let d = g.i.decl(di);
+        if d.drop != 0 {
+            put(inout out, "    fn ");
+            g.put_name(inout out, wrapping_sub(d.drop, 1));
+            put(inout out, "(value: *mut u64) -> i64;\n");
+        }
+    }
+    for fi in 0..g.i.fns.len() {
+        g.extern_line(g.i.func(fi), inout out);
+    }
+    put(inout out, "}\n\n");
+    put(inout out, "/// The sequence runtime of the Vesper library `");
+    g.put_name(inout out, g.i.library);
+    put(
+        inout out,
+        "`.\npub const RUNTIME: vesper_port_abi::SeqRuntime = vesper_port_abi::SeqRuntime {\n    new: "
+    );
+    g.put_name(inout out, g.i.seq_new);
+    put(inout out, ",\n    free: ");
+    g.put_name(inout out, g.i.seq_free);
+    put(inout out, ",\n};\n\n/// Live sequence and box allocations of the Vesper library `");
+    g.put_name(inout out, g.i.library);
+    put(
+        inout out,
+        "` (for leak tests).\npub fn live_allocations() -> i64 {\n    // SAFETY: the function only reads two counters.\n    unsafe { "
+    );
+    g.put_name(inout out, g.i.live);
+    put(inout out, "() }\n}\n");
+    for fi in 0..g.i.fns.len() {
+        nl(inout out);
+        g.function(inout out, g.i.func(fi));
+    }
+    for di in 0..g.i.decls.len() {
+        let d = g.i.decl(di);
+        if d.is_handle {
+            g.methods(inout out, d);
+        }
+    }
+}
