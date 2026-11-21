@@ -412,6 +412,10 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // SH1 lane 5 (#1148): or-patterns, which the Stage 1
                     // parser lacks.
                     || path.ends_with("tests/fixtures/ergonomics")
+                    // SH2 lane 10 (#1182): `pub fn` items, which the Stage 1
+                    // parser reads with a different tree (out.ves has no
+                    // loops, so the loop filter below keeps it).
+                    || path.ends_with("packages/vesper-check-loops-atomics")
                 {
                     continue;
                 }

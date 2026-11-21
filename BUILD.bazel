@@ -184,6 +184,12 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Loops, atomics and the stack bound (SH2 lane 10, #1182).
+        "test/self_host_check_loops_atomics": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH2 lane 5 (#1177): @vesper/check-layout and @vesper/ir-check over
         # the same corpus.
         "test/hybrid_layout": glob([
@@ -196,9 +202,22 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH3 lane 11 (#1250): the inliner differential on the same corpus.
+        "test/self_host_ir_inline": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH3 lane 1 (#1240): @vesper/place-ir round trips over the same
         # corpus at every native IR pass boundary.
         "test/self_host_place_ir": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH3 lane 13 (#1252): @vesper/place-ir-lower against
+        # `ir::lower_world` over the same corpus.
+        "test/self_host_ir_lower": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -610,14 +629,18 @@ vesper_crate(
         "test/self_host_check_data": "long",
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
-        "test/self_host_place_ir": "long",
+        "test/self_host_ir_inline": "long",
+        "test/self_host_place_ir": "eternal",
+        "test/self_host_ir_lower": "long",
         "test/self_host_check_harness": "long",
+        "test/self_host_check_loops_atomics": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
         "test/self_host_check_tensor_types": "eternal",
         # The region and sequence rules differential (#1181): ~7 min debug.
         "test/self_host_check_regions_seqs": "long",
-        "test/self_host_bounds_hoist": "long",
+        # The bounds-hoist differential also passed 900 s on loaded CI.
+        "test/self_host_bounds_hoist": "eternal",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
         # The package assembler differential (#1178) compiles the AST package.
@@ -633,7 +656,7 @@ vesper_crate(
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
         # The optimizer differential (#1249) checks every corpus world.
-        "test/self_host_optimize": "long",
+        "test/self_host_optimize": "eternal",
     },
 )
 
