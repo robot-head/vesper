@@ -476,8 +476,10 @@ pub fn closure_capabilities(f: &Function) -> BTreeSet<crate::capability_effects:
 /// places only by calls with an empty effect row. Such a call returns
 /// normally, so `call_function` restores the value from its scratch slot
 /// right after it; a call that may fail or perform an effect could leave
-/// through a handler first, so its places keep a home slot that the callee
-/// writes through.
+/// through a handler first, so the places it lends `inout` or `sink` keep a
+/// home slot that the callee writes through. Its `in` places are values
+/// (nothing writes them back), so whether they keep a home is a cost
+/// question ([`keeps_in_home`]).
 fn register_locals(
     world: &World,
     f: &crate::ir::FunctionIr,
@@ -493,7 +495,27 @@ fn register_locals(
             }
         }
     };
-    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+    // Loop-weighted counts: `in` loans to real impure calls, and every
+    // other read or write of each name.
+    let cyclic = aggregates::cyclic_blocks(f);
+    let weight = |b: usize| if cyclic.contains(&b) { aggregates::LOOP_WEIGHT } else { 1 };
+    let mut lent_in: BTreeMap<String, usize> = BTreeMap::new();
+    let mut touched: BTreeMap<String, usize> = BTreeMap::new();
+    for (b, inst) in f
+        .blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(b, block)| block.instructions.iter().map(move |i| (b, i)))
+    {
+        match &inst.op {
+            Op::Read { root, .. } => *touched.entry(root.clone()).or_default() += weight(b),
+            Op::Write { place, .. } => {
+                *touched
+                    .entry(place.split('.').next().unwrap_or(place).to_owned())
+                    .or_default() += weight(b)
+            }
+            _ => {}
+        }
         match &inst.op {
             Op::Call { callee, args, .. } => {
                 let g = world.functions.get(callee);
@@ -508,14 +530,22 @@ fn register_locals(
                 // handler that could change such a name while the call runs
                 // is a `handle` in this graph or an enclosing one, and every
                 // name in scope there keeps its home (below). Other impure
-                // calls keep homes for every place they borrow: keeping
-                // those names in registers across a real call measured
-                // slower (aegis policy +0.9%, silicon dtb +0.3%).
+                // calls keep homes for the places they lend `inout` or
+                // `sink`; their `in` places follow a cost rule
+                // (`keeps_in_home`, #1330).
                 let inlined = g.is_some_and(|g| specialized_function(world, g));
                 if !pure {
-                    for a in args.iter().filter(|a| !inlined || a.pass != Pass::In) {
-                        if let Some(p) = &a.place {
+                    for a in args {
+                        let Some(p) = &a.place else {
+                            continue;
+                        };
+                        if a.pass != Pass::In {
                             memory.insert(p.root.clone());
+                        } else if !inlined {
+                            // A real impure call takes an `in` scalar as a
+                            // value, so the home is a cost question only
+                            // (#1330): decided below.
+                            *lent_in.entry(p.root.clone()).or_default() += weight(b);
                         }
                     }
                 }
@@ -545,6 +575,15 @@ fn register_locals(
             _ => {}
         }
     }
+    // A name lent `in` to real impure calls keeps its home by the cost
+    // rule of `keeps_in_home` (#1330). Each loan comes with a read of its
+    // own, which the count of other uses leaves out.
+    for (n, loans) in lent_in {
+        let others = touched.get(&n).copied().unwrap_or(0).saturating_sub(loans);
+        if keeps_in_home(others, loans) {
+            memory.insert(n);
+        }
+    }
     f.locals
         .iter()
         .filter(|(n, t)| {
@@ -557,6 +596,23 @@ fn register_locals(
         .map(|(n, _)| n.clone())
         .chain(in_param_registers(world, f, generics, nested))
         .collect()
+}
+/// Whether a scalar lent `in` to real impure calls keeps its home slot
+/// (#1330), from loop-weighted counts of those loans (`loans`) and of its
+/// other reads and writes (`others`).
+///
+/// A real call takes an `in` scalar as a value, so the slot only decides
+/// where the name lives between uses. Lent outside loops, or only ever
+/// passed to calls, the name is cheaper in a register: the slot costs a
+/// store when it is bound and a load for each loan (Aegis `snp`, `tdx` and
+/// `sgx` 5-8% fewer instructions, Grammar 5-11%). A name lent inside a loop
+/// that the loop also computes with stays live in a register across every
+/// call of the loop, and with several of them Cranelift's register
+/// allocator spills in the loop instead (Aegis `policy` +0.9%, Silicon
+/// `dtb-parse` +0.3% when every home was dropped), so such a name keeps its
+/// home.
+fn keeps_in_home(others: usize, loans: usize) -> bool {
+    loans >= aggregates::LOOP_WEIGHT && others > 0
 }
 /// The `in` parameters of `f` whose word (a sequence, string or other
 /// handle; aggregates already arrive as pointers) can stay in the incoming
@@ -1489,6 +1545,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 reuse_slots: BTreeMap::new(),
                 register_locals: BTreeSet::new(),
                 bound_params: BTreeSet::new(),
+                scalar_enums: Default::default(),
                 split: BTreeMap::new(),
                 current_call_slot: None,
                 in_fip_fn: f.fip,
@@ -2399,6 +2456,9 @@ struct ExitTarget {
     /// a callee inlined into it.
     registers: Rc<BTreeMap<crate::ir::ValueId, Variable>>,
     scope: Rc<GraphScope>,
+    /// The words this graph passes to its join instead of an enum's address
+    /// ([`aggregates::EnumShape`], #1330).
+    scalar: Option<aggregates::EnumShape>,
 }
 struct Codegen<'a, 'b, M: Module> {
     b: FunctionBuilder<'a>,
@@ -2456,6 +2516,9 @@ struct Codegen<'a, 'b, M: Module> {
     /// registers like its own locals, unlike the names a nested control
     /// graph shares with its enclosing one.
     bound_params: BTreeSet<u32>,
+    /// Small enum results passed as words across a specialized call
+    /// ([`aggregates::EnumShape`], #1330).
+    scalar_enums: aggregates::ScalarEnumState,
     /// Copy-struct locals kept as one variable per word on the optimize
     /// path ([`aggregates::Split`]).
     /// Keyed by the local's own variable, so a specialized callee's local
@@ -3338,6 +3401,38 @@ impl<M: Module> Codegen<'_, '_, M> {
         return_to: Option<ir::Block>,
     ) -> Result<(), String> {
         use crate::ir::{Op, Terminator};
+        // Small enum values kept as words (#1330): the graph is rewritten
+        // so that their tags and fields are scalar values and locals.
+        let scalar_join = self.scalar_enums.join.take();
+        let scalar_graph = if self.operands_only && !self.in_fip_fn {
+            let world = self.world;
+            let shared: BTreeSet<String> = f
+                .locals
+                .keys()
+                .filter(|n| self.vars.contains_key(*n))
+                .cloned()
+                .collect();
+            aggregates::scalar_enums(
+                world,
+                f,
+                &self.generic_vars,
+                scalar_join.as_ref(),
+                &|callee| {
+                    world
+                        .functions
+                        .get(callee)
+                        .is_some_and(|g| specialized_function(world, g))
+                },
+                &shared,
+            )
+        } else {
+            None
+        };
+        let no_words = BTreeMap::new();
+        let (f, scalar_calls, scalar_returns) = match &scalar_graph {
+            Some(s) => (&s.f, &s.calls, &s.returns),
+            None => (f, &no_words, &BTreeMap::new()),
+        };
         let entry = self
             .b
             .current_block()
@@ -3445,9 +3540,55 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             vec![]
         };
-        // Only a function's own graph has its parameters.
+        // Aggregate `in` parameters whose memory nothing can change for the
+        // call (#1330): a function's own, or a specialized callee's bound to
+        // such an address. A graph that rebinds the name loses it.
+        let mut rebound = BTreeSet::new();
+        for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+            if let Op::Bind { pattern, .. } = &inst.op {
+                bound_names(pattern, &mut rebound);
+            }
+        }
+        let handles = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| matches!(i.op, Op::Handle { .. }));
+        for n in &rebound {
+            if let Some(var) = self.vars.get(n) {
+                self.scalar_enums.invariant_roots.remove(&var.as_u32());
+            }
+        }
+        for p in &f.params {
+            let Some(var) = self.vars.get(&p.name) else {
+                continue;
+            };
+            let ty = crate::numeric::default_type(&substitute(&p.ty, &self.generic_vars));
+            if p.pass != Pass::In || rebound.contains(&p.name) {
+                self.scalar_enums.invariant_roots.remove(&var.as_u32());
+            } else if return_to.is_none()
+                && !handles
+                && self.operands_only
+                && Layout::of(self.world, &ty)?.aggregate()
+                && !crate::seq::is_slice_type(&ty)
+            {
+                self.scalar_enums.invariant_roots.insert(var.as_u32());
+            }
+        }
+        // Only a function's own graph has its parameters, unless a field
+        // hoist reads through an invariant root: its words are then loaded
+        // as read-only memory that Cranelift moves out of the caller's
+        // loops.
         if return_to.is_some() {
-            header_hoists.retain(|h| !h.entry);
+            let roots = &self.scalar_enums.invariant_roots;
+            header_hoists.retain(|h| {
+                !h.entry
+                    || (!h.place.path.is_empty()
+                        && self
+                            .vars
+                            .get(&h.place.root)
+                            .is_some_and(|v| roots.contains(&v.as_u32())))
+            });
         }
         let mut hoisted_reads = BTreeMap::new();
         let mut entry_reads = BTreeMap::new();
@@ -3635,6 +3776,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.local_types.clone(),
                 self.generic_vars.clone(),
             )),
+            scalar: scalar_join.clone(),
         });
         // Seal each block once every predecessor is lowered (#1151): a block
         // left unsealed until `seal_all_blocks` gets a parameter for every
@@ -3673,7 +3815,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             // here, in the block that dominates every other.
             if i == 0 {
                 for hoist in header_hoists.iter().filter(|h| h.entry) {
-                    let receiver = self.seq_entry_view(&hoist.place, &hoist.ty)?;
+                    let receiver = if return_to.is_some() {
+                        self.seq_invariant_field_view(&hoist.place, &hoist.ty)?
+                    } else {
+                        self.seq_entry_view(&hoist.place, &hoist.ty)?
+                    };
                     for read in &hoist.reads {
                         hoisted_reads.insert(*read, receiver);
                         entry_reads.insert(*read, receiver);
@@ -4046,9 +4192,27 @@ impl<M: Module> Codegen<'_, '_, M> {
                             self.current_call_slot = f.fip_call_slots.get(&inst.dest).cloned();
                             let into =
                                 self.home_pointer(inst.dest, &homes, &mut home_pointers, sret)?;
+                            let words = scalar_calls.get(&inst.dest);
+                            self.scalar_enums.request = words.map(|(shape, _)| shape.clone());
+                            self.scalar_enums.result = None;
                             let call_res = self.call_function_into(callee, &es, &site, into);
                             self.current_call_slot = None;
-                            call_res?
+                            self.scalar_enums.request = None;
+                            let call_res = call_res?;
+                            if let Some((shape, ids)) = words {
+                                // The call passed its result's words, or
+                                // (when it was not specialized) its address.
+                                let ws = match self.scalar_enums.result.take() {
+                                    Some(ws) => ws,
+                                    None => self.enum_words(call_res, shape)?,
+                                };
+                                for ((id, w), t) in ids.iter().zip(ws).zip(&shape.words) {
+                                    let w = self.coerce(w, Some(t));
+                                    values.insert(*id, w);
+                                    self.def_var(registers[id], w);
+                                }
+                            }
+                            call_res
                         } else if let Some((effect, op)) = callee.split_once("::") {
                             self.perform(effect, capability.as_deref(), instance, op, &es)?
                         } else if let Some(v) = self.float_call(callee, &es, &site)? {
@@ -4266,6 +4430,19 @@ impl<M: Module> Codegen<'_, '_, M> {
                 } else {
                     value
                 };
+                if let Op::Read {
+                    root,
+                    path,
+                    pass: Pass::In,
+                    ..
+                } = &inst.op
+                    && path.is_empty()
+                    && self.vars.get(root).is_some_and(|v| {
+                        self.scalar_enums.invariant_roots.contains(&v.as_u32())
+                    })
+                {
+                    self.scalar_enums.invariant_pointers.insert(value);
+                }
                 values.insert(inst.dest, value);
                 self.def_var(registers[&inst.dest], value);
                 if inst.ty.name() != "Never" {
@@ -4310,6 +4487,28 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             match &block.terminator {
+                Terminator::Return(id) if scalar_join.is_some() => {
+                    self.seq_drop_exit(self.exits.len() - 1)?;
+                    let words = match scalar_returns.get(id) {
+                        Some(ws) => ws.iter().map(|w| self.use_var(registers[w])).collect(),
+                        None => {
+                            let ty = crate::numeric::default_type(&substitute(
+                                &f.result,
+                                &self.generic_vars,
+                            ));
+                            let value = if f.values[id].name() == "Never" {
+                                self.default_value(&ty)?
+                            } else {
+                                values[id]
+                            };
+                            let shape = scalar_join.as_ref().ok_or("native enum words lack a shape")?;
+                            self.enum_words(value, shape)?
+                        }
+                    };
+                    let join = return_to.ok_or("native enum words lack a join")?;
+                    let args: Vec<ir::BlockArg> = words.into_iter().map(Into::into).collect();
+                    self.jump(join, &args);
+                }
                 Terminator::Return(id) => {
                     self.seq_drop_exit(self.exits.len() - 1)?;
                     let ty =
@@ -4476,6 +4675,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             value
         };
+        if let (Some(shape), Some(join)) = (&target.scalar, target.join) {
+            let words = self.enum_words(value, shape)?;
+            let args: Vec<ir::BlockArg> = words.into_iter().map(Into::into).collect();
+            self.jump(join, &args);
+            let dead = self.b.create_block();
+            self.b.switch_to_block(dead);
+            return Ok(());
+        }
         let value = if let Some(output) = target.sret {
             if !placed {
                 let layout = Layout::of(self.world, &target.result)?;
@@ -6658,6 +6865,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         site: &Expr,
         into: Option<ir::Value>,
     ) -> Result<ir::Value, String> {
+        // A caller that keeps this call's enum result as words (#1330).
+        let scalar_request = self.scalar_enums.request.take();
         if name == crate::integer_widths::MUL_WIDE && args.len() == 2 {
             // The reserved prelude product (`integer_widths`): `(low, high)`.
             let a = self.expr(&args[0].expr)?;
@@ -6909,6 +7118,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let var = self.b.declare_var(self.b.func.dfg.value_type(value));
                 self.def_var(var, value);
                 self.bound_params.insert(var.as_u32());
+                if p.pass == Pass::In && self.scalar_enums.invariant_pointers.contains(&value) {
+                    self.scalar_enums.invariant_roots.insert(var.as_u32());
+                }
                 self.vars.insert(p.name.clone(), var);
                 self.local_types.insert(p.name.clone(), p.ty.clone());
                 if p.pass == Pass::Inout && !Layout::of(self.world, &p.ty)?.aggregate() {
@@ -6916,24 +7128,42 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             self.inline_depth += 1;
+            // An enum result the caller keeps as words reaches the join as
+            // its words, not through storage (#1330).
+            let words = scalar_request
+                .filter(|s| into.is_none() && aggregates::enum_shape(self.world, &f.result).as_ref() == Some(s));
+            let mut joined_words = None;
             let result = (|| {
                 let join = self.b.create_block();
-                self.b.append_block_param(
-                    join,
-                    if result_layout.aggregate() {
-                        self.m.target_config().pointer_type()
-                    } else {
-                        scalar(&f.result, &[])?
-                    },
-                );
+                if let Some(shape) = &words {
+                    for t in &shape.words {
+                        self.b.append_block_param(join, scalar(t, &[])?);
+                    }
+                } else {
+                    self.b.append_block_param(
+                        join,
+                        if result_layout.aggregate() {
+                            self.m.target_config().pointer_type()
+                        } else {
+                            scalar(&f.result, &[])?
+                        },
+                    );
+                }
                 let graph = self
                     .program
                     .functions
                     .get(name)
                     .ok_or("effectful function lacks IR")?
                     .clone();
-                self.ir_graph(&graph, None, Some(join))?;
+                self.scalar_enums.join = words.clone();
+                let lowered = self.ir_graph(&graph, None, Some(join));
+                self.scalar_enums.join = None;
+                lowered?;
                 self.b.switch_to_block(join);
+                if words.is_some() {
+                    joined_words = Some(self.b.block_params(join).to_vec());
+                    return Ok::<_, String>(self.b.ins().iconst(self.m.target_config().pointer_type(), 0));
+                }
                 Ok::<_, String>(self.b.block_params(join)[0])
             })();
             self.inline_depth -= 1;
@@ -6948,6 +7178,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.seq_element_writeback(writebacks)?;
             for lent in self.sink_blocks.split_off(lent) {
                 self.free_sink_block(lent)?;
+            }
+            if joined_words.is_some() {
+                self.scalar_enums.result = joined_words;
+                return Ok(result);
             }
             match into {
                 Some(out) if result_layout.aggregate() => {

@@ -1191,10 +1191,10 @@ pub(super) fn split_locals(
 
 /// How much more a use inside a loop counts than one outside
 /// ([`split_locals`]).
-const LOOP_WEIGHT: usize = 8;
+pub(super) const LOOP_WEIGHT: usize = 8;
 
 /// The blocks of `f` on a cycle: loop headers and bodies.
-fn cyclic_blocks(f: &FunctionIr) -> BTreeSet<usize> {
+pub(super) fn cyclic_blocks(f: &FunctionIr) -> BTreeSet<usize> {
     let mut graph = petgraph::graphmap::DiGraphMap::<usize, ()>::new();
     for (b, block) in f.blocks.iter().enumerate() {
         graph.add_node(b);
@@ -1423,4 +1423,633 @@ pub(super) fn split_sources(
         }
     }
     out
+}
+
+/// A small enum kept as words instead of storage (SH5 lane 7, #1330).
+///
+/// An `Option[u64]` built by a constructor in each arm of a `match`, joined
+/// through a block parameter and matched again (the result of an inlined
+/// `with_ref`, or the hand-written `let r = match .. { Some(v) => Some(..),
+/// None => None }`) lives in memory without this: each arm builds the value
+/// in a slot, the join passes the slot's address, a `let` copies it and the
+/// next `match` loads it back. [`scalar_enums`] rewrites such values into
+/// their words: the tag (the variant index, as in memory) and one word per
+/// field of every variant. A constructor becomes its tag constant and its
+/// field values, a block parameter becomes one parameter per word, a local
+/// one local per word, and a `match` tests the tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct EnumShape {
+    /// The word types: the tag (`u64`) first, then each variant's fields in
+    /// layout order.
+    pub(super) words: Vec<Type>,
+    /// Each variant in layout order: its name and its fields' names, words
+    /// and byte offsets in the enum's storage.
+    pub(super) variants: Vec<(String, Vec<(String, usize, i32)>)>,
+}
+
+impl EnumShape {
+    /// The index and fields of variant `name` (a `Type::Variant` or a bare
+    /// variant name).
+    fn variant(&self, name: &str) -> Option<(usize, &[(String, usize, i32)])> {
+        let short = name.rsplit("::").next()?;
+        self.variants
+            .iter()
+            .enumerate()
+            .find(|(_, (n, _))| n == short)
+            .map(|(i, (_, fs))| (i, fs.as_slice()))
+    }
+}
+
+/// The most words a scalar enum may have, its tag included.
+const MAX_ENUM_WORDS: usize = 4;
+
+/// Whether `ty` is a single integer or `bool` word.
+fn word_type(ty: &Type) -> bool {
+    let name = ty.name();
+    matches!(ty, Type::Named(_, args) if args.is_empty())
+        && ((crate::numeric::is_integer_name(name) && !crate::numeric::is_wide_name(name))
+            || name == "bool")
+}
+
+/// The words of enum type `ty` when every field of every variant is one
+/// integer or `bool` word and there are at most [`MAX_ENUM_WORDS`] of them.
+pub(super) fn enum_shape(world: &World, ty: &Type) -> Option<EnumShape> {
+    let ty = crate::numeric::default_type(ty);
+    if crate::fip::mentions_box(world, &ty) {
+        return None;
+    }
+    let layout = Layout::of(world, &ty).ok()?;
+    let LayoutKind::Enum(vs) = &layout.kind else {
+        return None;
+    };
+    let mut words = vec![Type::Named("u64".into(), vec![])];
+    let mut variants = Vec::with_capacity(vs.len());
+    for v in vs {
+        let mut fields = Vec::with_capacity(v.fields.len());
+        for f in &v.fields {
+            let t = crate::numeric::default_type(&f.ty);
+            if !word_type(&t) {
+                return None;
+            }
+            words.push(t);
+            fields.push((f.name.clone(), words.len() - 1, f.offset));
+        }
+        variants.push((v.name.clone(), fields));
+    }
+    (words.len() <= MAX_ENUM_WORDS).then_some(EnumShape { words, variants })
+}
+
+/// A graph whose small enum values are words ([`EnumShape`]).
+pub(super) struct ScalarEnums {
+    pub(super) f: FunctionIr,
+    /// Calls whose enum result the caller keeps as words: the shape and the
+    /// values that receive the words ([`Codegen::scalar_call_words`]).
+    pub(super) calls: BTreeMap<ValueId, (EnumShape, Vec<ValueId>)>,
+    /// Returned values that are words, for a graph whose join takes words.
+    pub(super) returns: BTreeMap<ValueId, Vec<ValueId>>,
+}
+
+#[derive(Clone, Copy)]
+enum Def {
+    Inst(usize, usize),
+    Param(usize, usize),
+}
+
+#[derive(Clone, Copy)]
+enum Use {
+    Inst(usize, usize),
+    Term(usize),
+}
+
+/// Whether the subpatterns of constructor pattern `fields` only bind or
+/// ignore words of variant `name` of `shape`.
+fn word_fields(shape: &EnumShape, name: &str, fields: &[(String, Pattern)]) -> bool {
+    let Some((_, fs)) = shape.variant(name) else {
+        return false;
+    };
+    fields.iter().all(|(n, p)| {
+        fs.iter().any(|(f, _, _)| f == n)
+            && matches!(p.kind, PatternKind::Bind(_) | PatternKind::Wild)
+    })
+}
+
+/// Rewrites the small enum values of graph `f` into words ([`EnumShape`]),
+/// or `None` when no value qualifies.
+///
+/// A value qualifies when it is defined by a constructor, by a whole read
+/// of a qualifying local, by a call of a function the native path
+/// specializes into its caller (`specialized`), or by a block parameter
+/// every incoming edge passes a qualifying value; and when every use binds
+/// it to a qualifying local, passes it to a qualifying parameter, matches
+/// it, binds its fields, or (when `returns` gives this graph's join words of
+/// the same shape) returns it. A local qualifies when it is not a
+/// parameter, not shared with an enclosing graph (`shared`), and every
+/// mention binds or reads it whole with a qualifying value. Anything else
+/// (a field path, a write, a place argument, a closure or handler that
+/// names it) keeps the old lowering for the whole connected set.
+///
+/// Graphs with `Box` values or FIP slots keep the old lowering: their drop
+/// plans index instructions and slots.
+pub(super) fn scalar_enums(
+    world: &World,
+    f: &FunctionIr,
+    generics: &BTreeMap<String, Type>,
+    returns: Option<&EnumShape>,
+    specialized: &dyn Fn(&str) -> bool,
+    shared: &BTreeSet<String>,
+) -> Option<ScalarEnums> {
+    if !f.fip_call_slots.is_empty()
+        || !f.fip_join_slots.is_empty()
+        || !f.box_drops_before_inst.is_empty()
+        || !f.box_drops_after_inst.is_empty()
+        || !f.box_drops_before_term.is_empty()
+    {
+        return None;
+    }
+    let ty = |t: &Type| crate::numeric::default_type(&substitute(t, generics));
+    let mut shapes: BTreeMap<String, Option<EnumShape>> = BTreeMap::new();
+    let mut shape_of = |t: &Type| -> Option<EnumShape> {
+        let t = ty(t);
+        shapes
+            .entry(t.to_string())
+            .or_insert_with(|| enum_shape(world, &t))
+            .clone()
+    };
+    let mut cv: BTreeMap<ValueId, EnumShape> = f
+        .values
+        .iter()
+        .filter_map(|(id, t)| Some((*id, shape_of(t)?)))
+        .collect();
+    if cv.is_empty() {
+        return None;
+    }
+    if f.values
+        .values()
+        .chain(f.locals.values())
+        .any(|t| crate::fip::mentions_box(world, &ty(t)))
+    {
+        return None;
+    }
+    let mut cl: BTreeMap<String, EnumShape> = f
+        .locals
+        .iter()
+        .filter(|(n, _)| {
+            !f.params.iter().any(|p| &p.name == *n)
+                && !f.external_captures.contains(*n)
+                && !shared.contains(*n)
+        })
+        .filter_map(|(n, t)| Some((n.clone(), shape_of(t)?)))
+        .collect();
+    // Locals some mention keeps in memory.
+    let mut banned = BTreeSet::new();
+    let mut defs = BTreeMap::new();
+    let mut uses: BTreeMap<ValueId, Vec<Use>> = BTreeMap::new();
+    let mut preds: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        for (k, p) in block.params.iter().enumerate() {
+            defs.insert(*p, Def::Param(b, k));
+        }
+        for (i, inst) in block.instructions.iter().enumerate() {
+            defs.insert(inst.dest, Def::Inst(b, i));
+            for id in crate::ir_inline::operands(&inst.op) {
+                uses.entry(id).or_default().push(Use::Inst(b, i));
+            }
+            let places = |args: &[crate::ir::Argument], banned: &mut BTreeSet<String>| {
+                banned.extend(
+                    args.iter()
+                        .filter_map(|a| a.place.as_ref())
+                        .map(|p| p.root.clone()),
+                );
+            };
+            match &inst.op {
+                Op::Read {
+                    root,
+                    path,
+                    projections,
+                    ..
+                } if !path.is_empty() || !projections.is_empty() => {
+                    banned.insert(root.clone());
+                }
+                Op::Write { place, .. } => {
+                    banned.insert(place.split('.').next().unwrap_or(place).to_owned());
+                }
+                Op::Bind { pattern, .. } if !matches!(pattern.kind, PatternKind::Bind(_)) => {
+                    pattern_binds(pattern, &mut banned);
+                }
+                Op::Call { args, .. }
+                | Op::Indirect { args, .. }
+                | Op::Seq { args, .. }
+                | Op::Fip { args, .. }
+                | Op::Tiled { args, .. } => places(args, &mut banned),
+                Op::Closure {
+                    expr,
+                    aliases,
+                    moves,
+                }
+                | Op::Handle {
+                    expr,
+                    aliases,
+                    moves,
+                    ..
+                } => {
+                    banned.extend(crate::check::free_names(expr));
+                    banned.extend(aliases.keys().cloned());
+                    banned.extend(aliases.values().cloned());
+                    banned.extend(moves.iter().map(|p| p.root.clone()));
+                }
+                _ => {}
+            }
+        }
+        for id in crate::ir_inline::terminator_operands(&block.terminator) {
+            uses.entry(id).or_default().push(Use::Term(b));
+        }
+        let targets: Vec<usize> = match &block.terminator {
+            Terminator::Jump { block, .. } => vec![*block],
+            Terminator::Branch { yes, no, .. } => vec![*yes, *no],
+            Terminator::Match { arms, .. } => arms.iter().map(|(_, b)| *b).collect(),
+            _ => vec![],
+        };
+        for t in targets {
+            preds.entry(t).or_default().push(b);
+        }
+    }
+    cl.retain(|n, _| !banned.contains(n));
+    let inst = |b: usize, i: usize| &f.blocks[b].instructions[i];
+    loop {
+        let mut drop_values = vec![];
+        for (v, shape) in &cv {
+            let def_ok = match defs.get(v) {
+                Some(Def::Inst(b, i)) => match &inst(*b, *i).op {
+                    Op::Data(name, fields) => shape.variant(name).is_some_and(|(_, fs)| {
+                        fs.len() == fields.len()
+                            && fs.iter().all(|(n, _, _)| fields.iter().any(|(m, _)| m == n))
+                    }),
+                    Op::Read { root, .. } => cl.get(root) == Some(shape),
+                    Op::Call { callee, .. } => specialized(callee),
+                    _ => false,
+                },
+                Some(Def::Param(b, k)) => preds.get(b).is_some_and(|ps| {
+                    ps.iter().all(|p| match &f.blocks[*p].terminator {
+                        Terminator::Jump { args, .. } => {
+                            args.get(*k).is_some_and(|a| cv.get(a) == Some(shape))
+                        }
+                        _ => false,
+                    })
+                }),
+                None => false,
+            };
+            let uses_ok = def_ok
+                && uses.get(v).into_iter().flatten().all(|u| match u {
+                    Use::Inst(b, i) => match &inst(*b, *i).op {
+                        Op::Bind { pattern, .. } => match &pattern.kind {
+                            PatternKind::Bind(n) => cl.get(n) == Some(shape),
+                            PatternKind::Wild => true,
+                            PatternKind::Constructor { name, fields, .. } => {
+                                word_fields(shape, name, fields)
+                            }
+                            _ => false,
+                        },
+                        _ => false,
+                    },
+                    Use::Term(b) => match &f.blocks[*b].terminator {
+                        Terminator::Jump { block, args } => args
+                            .iter()
+                            .zip(&f.blocks[*block].params)
+                            .filter(|(a, _)| *a == v)
+                            .all(|(_, p)| cv.get(p) == Some(shape)),
+                        Terminator::Match { arms, .. } => arms.iter().all(|(p, _)| match &p.kind {
+                            PatternKind::Wild => true,
+                            PatternKind::Constructor { name, fields, .. } => {
+                                word_fields(shape, name, fields)
+                            }
+                            _ => false,
+                        }),
+                        Terminator::Return(_) => returns == Some(shape),
+                        _ => false,
+                    },
+                });
+            if !uses_ok {
+                drop_values.push(*v);
+            }
+        }
+        let mut drop_locals = vec![];
+        for (b, block) in f.blocks.iter().enumerate() {
+            for (i, inst) in block.instructions.iter().enumerate() {
+                let _ = (b, i);
+                match &inst.op {
+                    Op::Bind {
+                        pattern:
+                            Pattern {
+                                kind: PatternKind::Bind(n),
+                                ..
+                            },
+                        value,
+                    } if cl.contains_key(n) && !cv.contains_key(value) => {
+                        drop_locals.push(n.clone());
+                    }
+                    Op::Read { root, .. }
+                        if cl.contains_key(root) && !cv.contains_key(&inst.dest) =>
+                    {
+                        drop_locals.push(root.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if drop_values.is_empty() && drop_locals.is_empty() {
+            break;
+        }
+        for v in drop_values {
+            cv.remove(&v);
+        }
+        for n in drop_locals {
+            cl.remove(&n);
+        }
+    }
+    if cv.is_empty() {
+        return None;
+    }
+    // Only a value that some `match` or field binding takes apart is worth
+    // its words; a set that is only passed along keeps its storage.
+    let taken_apart = cv.keys().any(|v| {
+        uses.get(v).into_iter().flatten().any(|u| match u {
+            Use::Inst(b, i) => matches!(
+                &inst(*b, *i).op,
+                Op::Bind { pattern, .. } if matches!(pattern.kind, PatternKind::Constructor { .. })
+            ),
+            Use::Term(b) => matches!(f.blocks[*b].terminator, Terminator::Match { .. }),
+        })
+    });
+    if !taken_apart && returns.is_none() {
+        return None;
+    }
+    let mut g = f.clone();
+    let mut next = f
+        .values
+        .keys()
+        .copied()
+        .chain(
+            f.blocks
+                .iter()
+                .flat_map(|b| b.params.iter().copied().chain(b.instructions.iter().map(|i| i.dest))),
+        )
+        .max()
+        .map_or(0, |m| m + 1);
+    let mut fresh = |t: &Type, values: &mut BTreeMap<ValueId, Type>| {
+        let id = next;
+        next += 1;
+        values.insert(id, t.clone());
+        id
+    };
+    let unit = Type::unit();
+    // The words of each value: a constructor's tag constant and field
+    // values (zero constants for the other variants' words), else fresh.
+    let mut words: BTreeMap<ValueId, Vec<ValueId>> = BTreeMap::new();
+    for (v, shape) in &cv {
+        let ws = match defs.get(v) {
+            Some(Def::Inst(b, i)) => match &inst(*b, *i).op {
+                Op::Data(name, fields) => {
+                    let (_, fs) = shape.variant(name)?;
+                    shape
+                        .words
+                        .iter()
+                        .enumerate()
+                        .map(|(w, t)| {
+                            fs.iter()
+                                .find(|(_, word, _)| *word == w)
+                                .and_then(|(n, _, _)| fields.iter().find(|(m, _)| m == n))
+                                .map(|(_, id)| *id)
+                                .unwrap_or_else(|| fresh(t, &mut g.values))
+                        })
+                        .collect()
+                }
+                _ => shape.words.iter().map(|t| fresh(t, &mut g.values)).collect(),
+            },
+            _ => shape.words.iter().map(|t| fresh(t, &mut g.values)).collect(),
+        };
+        words.insert(*v, ws);
+    }
+    let local = |n: &str, w: usize| format!("{n}$word{w}");
+    for (n, shape) in &cl {
+        g.locals.remove(n);
+        for (w, t) in shape.words.iter().enumerate() {
+            g.locals.insert(local(n, w), t.clone());
+        }
+    }
+    let mut calls = BTreeMap::new();
+    let mut returned = BTreeMap::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        let mut out = Vec::with_capacity(block.instructions.len());
+        let derived = |i: &crate::ir::Instruction, dest, op, ty: &Type| crate::ir::Instruction {
+            dest,
+            op,
+            ty: ty.clone(),
+            span: 0..0,
+            token: i.token,
+            fallible: false,
+        };
+        for i in &block.instructions {
+            match &i.op {
+                Op::Data(name, _) if cv.contains_key(&i.dest) => {
+                    let shape = &cv[&i.dest];
+                    let (tag, fs) = shape.variant(name)?;
+                    for (w, id) in words[&i.dest].iter().enumerate() {
+                        let literal = if w == 0 {
+                            Some(Literal::Int(tag as i128))
+                        } else if fs.iter().any(|(_, word, _)| *word == w) {
+                            None
+                        } else if shape.words[w].name() == "bool" {
+                            Some(Literal::Bool(false))
+                        } else {
+                            Some(Literal::Int(0))
+                        };
+                        if let Some(l) = literal {
+                            out.push(derived(i, *id, Op::Constant(l), &shape.words[w]));
+                        }
+                    }
+                }
+                Op::Read { root, pass, .. } if cv.contains_key(&i.dest) => {
+                    let shape = &cv[&i.dest];
+                    for (w, id) in words[&i.dest].iter().enumerate() {
+                        let mut read = derived(
+                            i,
+                            *id,
+                            Op::Read {
+                                root: local(root, w),
+                                path: vec![],
+                                pass: *pass,
+                                projections: vec![],
+                            },
+                            &shape.words[w],
+                        );
+                        read.span = i.span.clone();
+                        out.push(read);
+                    }
+                }
+                Op::Call { .. } if cv.contains_key(&i.dest) => {
+                    calls.insert(i.dest, (cv[&i.dest].clone(), words[&i.dest].clone()));
+                    out.push(i.clone());
+                }
+                Op::Bind { pattern, value } if cv.contains_key(value) => {
+                    let shape = &cv[value];
+                    let ws = &words[value];
+                    let mut binds = vec![];
+                    match &pattern.kind {
+                        PatternKind::Bind(n) => {
+                            for (w, id) in ws.iter().enumerate() {
+                                binds.push((local(n, w), *id, pattern.span.clone()));
+                            }
+                        }
+                        PatternKind::Constructor { name, fields, .. } => {
+                            let (_, fs) = shape.variant(name)?;
+                            for (n, p) in fields {
+                                if let PatternKind::Bind(x) = &p.kind {
+                                    let (_, w, _) = fs.iter().find(|(m, _, _)| m == n)?;
+                                    binds.push((x.clone(), ws[*w], p.span.clone()));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if binds.is_empty() {
+                        out.push(derived(i, i.dest, Op::Unit, &i.ty));
+                    }
+                    for (k, (n, id, span)) in binds.into_iter().enumerate() {
+                        let dest = if k == 0 {
+                            i.dest
+                        } else {
+                            fresh(&unit, &mut g.values)
+                        };
+                        let mut bind = derived(
+                            i,
+                            dest,
+                            Op::Bind {
+                                pattern: Pattern {
+                                    kind: PatternKind::Bind(n),
+                                    span,
+                                },
+                                value: id,
+                            },
+                            &i.ty,
+                        );
+                        bind.span = i.span.clone();
+                        out.push(bind);
+                    }
+                }
+                _ => out.push(i.clone()),
+            }
+        }
+        let nb = &mut g.blocks[b];
+        nb.instructions = out;
+        nb.params = block
+            .params
+            .iter()
+            .flat_map(|p| match words.get(p) {
+                Some(ws) if cv.contains_key(p) => ws.clone(),
+                _ => vec![*p],
+            })
+            .collect();
+        let expand = |args: &[ValueId]| -> Vec<ValueId> {
+            args.iter()
+                .flat_map(|a| match words.get(a) {
+                    Some(ws) if cv.contains_key(a) => ws.clone(),
+                    _ => vec![*a],
+                })
+                .collect()
+        };
+        nb.terminator = match &block.terminator {
+            Terminator::Jump { block, args } => Terminator::Jump {
+                block: *block,
+                args: expand(args),
+            },
+            Terminator::Match { value, arms } if cv.contains_key(value) => {
+                let shape = &cv[value];
+                let last = arms.len().saturating_sub(1);
+                Terminator::Match {
+                    value: words[value][0],
+                    arms: arms
+                        .iter()
+                        .enumerate()
+                        .map(|(k, (p, target))| {
+                            let kind = match &p.kind {
+                                PatternKind::Constructor { name, .. } if k != last => {
+                                    PatternKind::Literal(Literal::Int(
+                                        shape.variant(name).map_or(0, |(t, _)| t) as i128,
+                                    ))
+                                }
+                                _ => PatternKind::Wild,
+                            };
+                            (
+                                Pattern {
+                                    kind,
+                                    span: p.span.clone(),
+                                },
+                                *target,
+                            )
+                        })
+                        .collect(),
+                }
+            }
+            Terminator::Return(v) if cv.contains_key(v) => {
+                returned.insert(*v, words[v].clone());
+                Terminator::Return(*v)
+            }
+            t => t.clone(),
+        };
+    }
+    Some(ScalarEnums {
+        f: g,
+        calls,
+        returns: returned,
+    })
+}
+
+/// The words of a small enum on their way across a specialized call
+/// ([`EnumShape`]).
+#[derive(Default)]
+pub(super) struct ScalarEnumState {
+    /// Set by a caller that keeps the next call's result as words.
+    pub(super) request: Option<EnumShape>,
+    /// The words the specialized call passed through its join.
+    pub(super) result: Option<Vec<ir::Value>>,
+    /// The shape whose words the next nested graph passes to its join.
+    pub(super) join: Option<EnumShape>,
+    /// Variables holding the address of an aggregate that nothing can
+    /// change for the whole call of the function being emitted: an `in`
+    /// parameter it never rebinds, or a specialized callee's `in`
+    /// parameter bound to such an address (#1330). Header words read
+    /// through them are invariant ([`crate::bounds_hoist::stable_views`]).
+    pub(super) invariant_roots: BTreeSet<u32>,
+    /// Values read whole from an invariant root, which a specialized call
+    /// may bind to its `in` parameters.
+    pub(super) invariant_pointers: BTreeSet<ir::Value>,
+}
+
+impl<M: Module> Codegen<'_, '_, M> {
+    /// The words of the enum of `shape` stored at `ptr`: the tag, then
+    /// each field at its offset. The words of other variants than the one
+    /// stored are unspecified (§16.6), as in memory.
+    pub(super) fn enum_words(
+        &mut self,
+        ptr: ir::Value,
+        shape: &EnumShape,
+    ) -> Result<Vec<ir::Value>, String> {
+        let mut out = vec![
+            self.b
+                .ins()
+                .load(types::I64, ir::MemFlags::trusted(), ptr, 0),
+        ];
+        for (w, ty) in shape.words.iter().enumerate().skip(1) {
+            let offset = shape
+                .variants
+                .iter()
+                .flat_map(|(_, fs)| fs)
+                .find(|(_, word, _)| *word == w)
+                .map(|(_, _, o)| *o)
+                .ok_or("native enum word lacks a field")?;
+            let at = self.offset(ptr, offset);
+            out.push(self.load(at, ty)?);
+        }
+        Ok(out)
+    }
 }
