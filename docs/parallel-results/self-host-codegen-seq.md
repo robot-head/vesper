@@ -102,6 +102,15 @@ change.
    `numeric::is_scalar_name` accepts both since #1219. The package checks
    them itself (`Dec::is_scalar_name`). The fix belongs in
    `@vesper/check-data` (`Known::is_integer`).
+3. **check-layout has no 16-byte `i128`/`u128` layout.** `Layout::of` gives
+   them two words (#1174), but `@vesper/check-layout`'s `layout_of` refuses
+   them. The package gives a `ChunkSeq[i128]`/`ChunkSeq[u128]` element a
+   16-byte stride itself, and `wide_element_strides_match_rust` tests that
+   case, since no corpus file holds such a sequence. A sequence of an
+   aggregate that holds a wide integer still gets `stride=-` here, where Rust
+   gives its size. The fix belongs in `@vesper/check-layout` (SH2 lane 5).
+   No corpus program has such an element yet. Repro:
+   `struct P { a: u128 } fn f() -> u64 { let s: ChunkSeq[P] = ChunkSeq::new[P](); s.len() }`.
 
 ## Left
 

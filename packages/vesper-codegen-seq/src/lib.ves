@@ -439,7 +439,16 @@ impl Dec {
         if n.kind == K_NAMED && n.name == self.s.dyn_ && n.n == 1 {
             return true;
         }
-        if n.kind == K_NAMED && n.n == 0 && self.c.names.has_prefix(n.name, in "__dyn__".as_bytes()) {
+        if n
+            .kind
+            == K_NAMED
+            && n
+            .n
+            == 0
+            && self
+            .c
+            .names
+            .has_prefix(n.name, in "__dyn__".as_bytes()) {
             return true;
         }
         if n.kind == K_TUPLE {
@@ -461,10 +470,17 @@ impl Dec {
             let ai = self.c.world.lookup(n.name);
             if ai == NONE32 {
                 return unknown
-                    && !self.is_scalar_name(n.name)
-                    && n.name != self.s.never
-                    && !self.is_text(ty)
-                    && vector_words(in self.c.types, in self.c.names, self.c.world.k, ty) == 0;
+                    && !self
+                    .is_scalar_name(n.name)
+                    && n
+                    .name
+                    != self
+                    .s
+                    .never
+                    && !self
+                    .is_text(ty)
+                    && vector_words(in self.c.types, in self.c.names, self.c.world.k, ty)
+                    == 0;
             }
             let a = self.c.world.adt(ai);
             if w(a.gn) != w(n.n) {
@@ -590,8 +606,19 @@ impl Dec {
             if n.name == self.s.u32_ {
                 return 4;
             }
+            // `Layout::of` gives `i128` and `u128` two words; check-layout
+            // predates them (see the report's compiler gaps).
+            if n.name == self.s.i128_ || n.name == self.s.u128_ {
+                return 16;
+            }
         }
-        let l = layout_of(inout self.ls, inout self.c.types, inout self.c.names, in self.c.world, ty);
+        let l = layout_of(
+            inout self.ls,
+            inout self.c.types,
+            inout self.c.names,
+            in self.c.world,
+            ty
+        );
         if l == NONE32 {
             NO_STRIDE
         } else {
@@ -710,7 +737,14 @@ impl Dec {
                         if bool_at(in self.borrowed, v) {
                             self.scratch.clear();
                             let mut k = inc(inst.a);
-                            let info = walk_pattern(in p, inout k, 0, in self.s, box_active, inout self.scratch);
+                            let info = walk_pattern(
+                                in p,
+                                inout k,
+                                0,
+                                in self.s,
+                                box_active,
+                                inout self.scratch
+                            );
                             for j in 0..self.scratch.len() {
                                 let n = u32_at(in self.scratch, j);
                                 if !bool_at(in self.named, w(n)) {
@@ -779,7 +813,10 @@ impl Dec {
                 D_STR
             } else if param && self.needs_drop(ty) {
                 D_OWNED
-            } else if self.is_adt(ty) && !param && (self.holds_sequence(ty) || self.needs_drop(ty)) {
+            } else if self
+                .is_adt(ty)
+                && !param
+                && (self.holds_sequence(ty) || self.needs_drop(ty)) {
                 D_FIELDS
             } else {
                 D_NONE
@@ -804,9 +841,14 @@ impl Dec {
                     let path = p.op(inc(a));
                     let pass = p.op(add(a, 2));
                     if pass == P_SINK {
-                        let partial = p.path(path).n != 0
-                            && self.may_need_drop(inst.ty)
-                            && !self.owned_or_fields(root);
+                        let partial = p
+                            .path(path)
+                            .n
+                            != 0
+                            && self
+                            .may_need_drop(inst.ty)
+                            && !self
+                            .owned_or_fields(root);
                         if partial || self.plan_is(root, D_STR) {
                             self.refuse(root);
                         }
@@ -816,7 +858,10 @@ impl Dec {
                     let op = n32(p.op(inc(a)));
                     let root = self.place_root(place);
                     if (place != root && !self.owned_or_fields(root))
-                        || op != self.s.assign
+                        || op
+                        != self
+                        .s
+                        .assign
                         || (self.plan_is(root, D_STR) && self.fn_.is_param(root)) {
                         if root != NONE32 {
                             self.refuse(root);
@@ -826,7 +871,14 @@ impl Dec {
                     let v = p.op(a);
                     self.scratch.clear();
                     let mut k = inc(a);
-                    let info = walk_pattern(in p, inout k, 0, in self.s, box_active, inout self.scratch);
+                    let info = walk_pattern(
+                        in p,
+                        inout k,
+                        0,
+                        in self.s,
+                        box_active,
+                        inout self.scratch
+                    );
                     let d = self.fn_.def(v);
                     let borrow_read = if d == NONE32 {
                         false
@@ -875,7 +927,14 @@ impl Dec {
                 k = inc(k);
                 for j in 0..n {
                     self.scratch.clear();
-                    let info = walk_pattern(in p, inout k, 0, in self.s, box_active, inout self.scratch);
+                    let info = walk_pattern(
+                        in p,
+                        inout k,
+                        0,
+                        in self.s,
+                        box_active,
+                        inout self.scratch
+                    );
                     k = inc(k);
                     self.refuse_scratch();
                 }
@@ -975,7 +1034,9 @@ fn inner_is(in a: ChunkSeq[u8], o: OpInfo, in s: Str) -> bool {
 
 // `StrOp::mutates`.
 fn str_mutates(in a: ChunkSeq[u8], o: OpInfo) -> bool {
-    inner_is(in a, o, "PushStr") || inner_is(in a, o, "PushChar") || inner_is(in a, o, "Clear")
+    inner_is(in a, o, "PushStr")
+        || inner_is(in a, o, "PushChar")
+        || inner_is(in a, o, "Clear")
         || inner_is(in a, o, "Reserve")
 }
 
@@ -990,13 +1051,23 @@ fn op_mutates(in a: ChunkSeq[u8], o: OpInfo) -> bool {
     if head_is(in a, o, "Vector") {
         return contains(in a, "store: true");
     }
-    head_is(in a, o, "Push") || head_is(in a, o, "Pop") || head_is(in a, o, "Set")
-        || head_is(in a, o, "TrySet") || head_is(in a, o, "Clear") || head_is(in a, o, "Truncate")
-        || head_is(in a, o, "Reserve") || head_is(in a, o, "Extend")
-        || head_is(in a, o, "ExtendAsciiLowercase") || head_is(in a, o, "MakeAsciiLowercase")
-        || head_is(in a, o, "CopyFrom") || head_is(in a, o, "CopyWithin") || head_is(in a, o, "Fill")
-        || head_is(in a, o, "Resize") || head_is(in a, o, "FillRange")
-        || head_is(in a, o, "ExtendFromWithin") || head_is(in a, o, "ExtendReversed")
+    head_is(in a, o, "Push")
+        || head_is(in a, o, "Pop")
+        || head_is(in a, o, "Set")
+        || head_is(in a, o, "TrySet")
+        || head_is(in a, o, "Clear")
+        || head_is(in a, o, "Truncate")
+        || head_is(in a, o, "Reserve")
+        || head_is(in a, o, "Extend")
+        || head_is(in a, o, "ExtendAsciiLowercase")
+        || head_is(in a, o, "MakeAsciiLowercase")
+        || head_is(in a, o, "CopyFrom")
+        || head_is(in a, o, "CopyWithin")
+        || head_is(in a, o, "Fill")
+        || head_is(in a, o, "Resize")
+        || head_is(in a, o, "FillRange")
+        || head_is(in a, o, "ExtendFromWithin")
+        || head_is(in a, o, "ExtendReversed")
 }
 
 // `SeqOp::fallible`.
@@ -1004,13 +1075,19 @@ fn op_fallible(in a: ChunkSeq[u8], o: OpInfo) -> bool {
     if head_is(in a, o, "Str") {
         return inner_is(in a, o, "ByteAt");
     }
-    if head_is(in a, o, "Get") || head_is(in a, o, "Set") || head_is(in a, o, "Finish")
-        || head_is(in a, o, "SliceGet") || head_is(in a, o, "SliceSet") {
+    if head_is(in a, o, "Get")
+        || head_is(in a, o, "Set")
+        || head_is(in a, o, "Finish")
+        || head_is(in a, o, "SliceGet")
+        || head_is(in a, o, "SliceSet") {
         return true;
     }
-    if head_is(in a, o, "CopyFrom") || head_is(in a, o, "CopyWithin")
-        || head_is(in a, o, "MakeAsciiLowercase") || head_is(in a, o, "FillRange")
-        || head_is(in a, o, "ExtendFromWithin") || head_is(in a, o, "Wide") {
+    if head_is(in a, o, "CopyFrom")
+        || head_is(in a, o, "CopyWithin")
+        || head_is(in a, o, "MakeAsciiLowercase")
+        || head_is(in a, o, "FillRange")
+        || head_is(in a, o, "ExtendFromWithin")
+        || head_is(in a, o, "Wide") {
         return contains(in a, "total: false");
     }
     if head_is(in a, o, "Vector") {
@@ -1021,8 +1098,13 @@ fn op_fallible(in a: ChunkSeq[u8], o: OpInfo) -> bool {
 
 // `SeqOp::has_receiver`.
 fn op_has_receiver(in a: ChunkSeq[u8], o: OpInfo) -> bool {
-    !(head_is(in a, o, "New") || head_is(in a, o, "WithCapacity") || head_is(in a, o, "BoundsGuard")
-        || head_is(in a, o, "Swap") || head_is(in a, o, "Replace"))
+    !(
+        head_is(in a, o, "New")
+            || head_is(in a, o, "WithCapacity")
+            || head_is(in a, o, "BoundsGuard")
+            || head_is(in a, o, "Swap")
+            || head_is(in a, o, "Replace")
+    )
 }
 
 // `SeqOp::place_primitive`.
@@ -1032,10 +1114,15 @@ fn op_place_primitive(in a: ChunkSeq[u8], o: OpInfo) -> bool {
 
 // `SeqOp::byte_scan`.
 fn op_byte_scan(in a: ChunkSeq[u8], o: OpInfo) -> bool {
-    head_is(in a, o, "SumBe16") || head_is(in a, o, "BytesEq") || head_is(in a, o, "BytesCmp")
-        || head_is(in a, o, "FindByte") || head_is(in a, o, "FindEither")
-        || head_is(in a, o, "FindNotIn") || head_is(in a, o, "EqIgnoreAsciiCase")
-        || head_is(in a, o, "ExtendAsciiLowercase") || head_is(in a, o, "MakeAsciiLowercase")
+    head_is(in a, o, "SumBe16")
+        || head_is(in a, o, "BytesEq")
+        || head_is(in a, o, "BytesCmp")
+        || head_is(in a, o, "FindByte")
+        || head_is(in a, o, "FindEither")
+        || head_is(in a, o, "FindNotIn")
+        || head_is(in a, o, "EqIgnoreAsciiCase")
+        || head_is(in a, o, "ExtendAsciiLowercase")
+        || head_is(in a, o, "MakeAsciiLowercase")
 }
 
 // `StrOp::name`.

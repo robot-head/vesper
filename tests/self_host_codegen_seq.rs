@@ -53,6 +53,27 @@ pub struct Stage {
     pub program: Program,
 }
 
+/// `w` lowered as the native backend lowers it: optimize on (lowering,
+/// `ir_opt`, inliner, drop elaboration, bounds hoisting) and off
+/// (`fip_reuse_pass`, drop elaboration).
+fn native_programs(w: &World) -> Vec<(&'static str, Program)> {
+    let mut v = vec![];
+    let lowered = vesper::ffi_lowering::drops::lower_world(w);
+    let mut p = lowered.clone();
+    if vesper::ir_opt::optimize(w, &mut p).is_ok() {
+        vesper::ir_inline::inline(w, &mut p, &vesper::ir_inline::Budget::default());
+        vesper::fip::elaborate_non_fip_drops(w, &mut p);
+        vesper::bounds_hoist::run(&mut p);
+        v.push(("opt", p));
+    }
+    let mut q = lowered;
+    if vesper::ir_opt::fip_reuse_pass(w, &mut q).is_ok() {
+        vesper::fip::elaborate_non_fip_drops(w, &mut q);
+        v.push(("unopt", q));
+    }
+    v
+}
+
 /// Every corpus world's native-path program, optimized and not. A pass
 /// that refuses a program drops that stage.
 pub fn stages() -> &'static [Stage] {
@@ -63,23 +84,7 @@ pub fn stages() -> &'static [Stage] {
         std::panic::set_hook(Box::new(|_| {}));
         for c in corpus().iter().step_by(step()) {
             let w = &c.world;
-            let r = std::panic::catch_unwind(|| {
-                let mut v = vec![];
-                let lowered = vesper::ffi_lowering::drops::lower_world(w);
-                let mut p = lowered.clone();
-                if vesper::ir_opt::optimize(w, &mut p).is_ok() {
-                    vesper::ir_inline::inline(w, &mut p, &vesper::ir_inline::Budget::default());
-                    vesper::fip::elaborate_non_fip_drops(w, &mut p);
-                    vesper::bounds_hoist::run(&mut p);
-                    v.push(("opt", p));
-                }
-                let mut q = lowered;
-                if vesper::ir_opt::fip_reuse_pass(w, &mut q).is_ok() {
-                    vesper::fip::elaborate_non_fip_drops(w, &mut q);
-                    v.push(("unopt", q));
-                }
-                v
-            });
+            let r = std::panic::catch_unwind(|| native_programs(w));
             if let Ok(v) = r {
                 for (stage, program) in v {
                     out.push(Stage {
@@ -195,4 +200,35 @@ fn decisions_match_rust() {
     assert!(stages().len() > 50, "only {} programs", stages().len());
     assert!(drops > 0 && seqs > 0);
     assert_eq!(bad, 0);
+}
+
+/// Sequences of `i128`/`u128` (16-byte elements), which no corpus file
+/// holds.
+#[test]
+fn wide_element_strides_match_rust() {
+    let src = "fn f() -> u64 {
+    let mut s: ChunkSeq[u128] = ChunkSeq::new[u128]();
+    s.push(7);
+    let mut t: ChunkSeq[i128] = ChunkSeq::with_capacity[i128](2);
+    t.push(-1);
+    let a = match s.try_get(0) { Option::Some(x) => wrapping_u64(x), Option::None => 0 };
+    let b = match t.try_get(0) { Option::Some(x) => wrapping_u64(x), Option::None => 0 };
+    wrapping_add(wrapping_add(a, b), wrapping_add(s.len(), t.len()))
+}
+fn main() -> u64 { f() }
+";
+    let parsed = vesper::parser::parse(src);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let checked = vesper::check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let w = checked.world;
+    let entry = package().entry("codegen_seq_decisions", true);
+    let programs = native_programs(&w);
+    assert_eq!(programs.len(), 2);
+    for (stage, p) in &programs {
+        let r = rust_decisions(&w, p);
+        assert!(r.contains("stride=16"), "{stage}: {r}");
+        let v = entry.text(&input(&w, p).expect("encodable"));
+        assert_eq!(first_difference(&r, &v), None, "{stage}");
+    }
 }
