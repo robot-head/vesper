@@ -1,0 +1,198 @@
+// @vesper/codegen-control-emit: the `control` family's leaf requests
+// (self-hosting SH4 lane 10, #1284) over the lent Cranelift handles.
+//
+// The Rust `Codegen` (src/native.rs) keeps the state these read and write:
+// the closure descriptor table and the target sets, variables, and each
+// enclosing handler's selector and return blocks. A request is one builder
+// sequence: a tag constant, a capture's stack slot, `qualify_tag`'s
+// select, one candidate of `invoke_tag`'s dispatch chain, the chain's
+// trap, a non-tail resumption's save and restore, and one test of a
+// handler's return dispatch (`codegen_swap::control`).
+//
+// The hook protocol is lane 1's (packages/vesper-codegen-base): take the
+// builder and module, emit, answer with `call_result`, give both back and
+// return 1 (0 declines: the Rust code emits).
+
+use @vesper/cranelift::{
+    Block,
+    Slot,
+    Ty,
+    Value,
+    append_block_param,
+    block_of_word,
+    block_word,
+    call_arg,
+    call_builder,
+    call_module,
+    call_op,
+    call_result,
+    call_result_value,
+    call_return_builder,
+    call_return_module,
+    cc_eq,
+    create_block,
+    create_stack_slot,
+    ins_brif,
+    ins_brif0,
+    ins_iconst,
+    ins_icmp_imm,
+    ins_jump0,
+    ins_select,
+    ins_stack_addr,
+    ins_stack_load,
+    ins_stack_store,
+    ins_trap,
+    module_pointer_type,
+    slot_of_word,
+    slot_word,
+    switch_to_block,
+    trap_user,
+    ty_i64,
+    ty_of_word,
+    vals1,
+    value_of_word
+};
+
+// The request protocol (src/codegen_swap.rs): the answer of a hook.
+pub const HANDLED: u64 = 1;
+pub const DECLINED: u64 = 0;
+
+// The `control` family's ops (`codegen_swap::control`).
+pub const TAG: u32 = 1;
+pub const CAPTURE_SLOT: u32 = 2;
+pub const QUALIFY: u32 = 3;
+pub const DISPATCH: u32 = 4;
+pub const TRAP: u32 = 5;
+pub const RESUME_SAVE: u32 = 6;
+pub const RESUME_RESTORE: u32 = 7;
+pub const RETURN_TO: u32 = 8;
+
+// Stack slots are aligned to 1 << 3; a saved selector is one word.
+const WORD_ALIGN_SHIFT: u32 = 3;
+const SELECTOR_BYTES: u32 = 8;
+
+fn arg_value(call: u64, i: u64) -> Value eff [Ffi[Cranelift]] {
+    value_of_word(call_arg(call, i))
+}
+fn arg_block(call: u64, i: u64) -> Block eff [Ffi[Cranelift]] {
+    block_of_word(call_arg(call, i))
+}
+fn arg_i64(call: u64, i: u64) -> i64 eff [Ffi[Cranelift]] {
+    wrapping_i64(call_arg(call, i))
+}
+
+// `iconst.i64 id`.
+fn tag(inout b: Builder, id: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_iconst(inout b, ty_i64(), id)
+}
+
+// A capture's slot of `size` bytes and its address.
+fn capture_slot(call: u64, inout b: Builder, in m: Module) eff [Ffi[Cranelift]] {
+    let slot = create_stack_slot(inout b, wrapping_u32(call_arg(call, 0)), WORD_ALIGN_SHIFT);
+    let address = ins_stack_addr(inout b, module_pointer_type(in m), slot, 0);
+    call_result(call, slot_word(slot));
+    call_result_value(call, address);
+}
+
+// `select(tag == old, new, acc)`.
+fn qualify(call: u64, inout b: Builder) -> Value eff [Ffi[Cranelift]] {
+    let matches = ins_icmp_imm(inout b, cc_eq(), arg_value(call, 0), arg_i64(call, 1));
+    let qualified = ins_iconst(inout b, ty_i64(), arg_i64(call, 2));
+    ins_select(inout b, matches, qualified, arg_value(call, 3))
+}
+
+// One candidate of `invoke_tag`: answers `[yes, no]` and emits into `yes`.
+fn dispatch(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let yes = create_block(inout b);
+    let no = create_block(inout b);
+    if call_arg(call, 2) == 1 {
+        ins_jump0(inout b, yes);
+    } else {
+        let condition = ins_icmp_imm(inout b, cc_eq(), arg_value(call, 0), arg_i64(call, 1));
+        ins_brif0(inout b, condition, yes, no);
+    }
+    switch_to_block(inout b, yes);
+    call_result(call, block_word(yes));
+    call_result(call, block_word(no));
+}
+
+// A non-tail resumption's save: answers `[slot, returned, selected]`.
+fn resume_save(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let saved = create_stack_slot(inout b, SELECTOR_BYTES, WORD_ALIGN_SHIFT);
+    ins_stack_store(inout b, arg_value(call, 0), saved, 0);
+    let returned = create_block(inout b);
+    let ty: Ty = ty_of_word(call_arg(call, 1));
+    append_block_param(inout b, returned, ty);
+    let selected = ins_iconst(inout b, ty_i64(), arg_i64(call, 2));
+    call_result(call, slot_word(saved));
+    call_result(call, block_word(returned));
+    call_result_value(call, selected);
+}
+
+// One test of a handler's return dispatch; emission continues in `next`.
+fn return_to(call: u64, inout b: Builder) eff [Ffi[Cranelift]] {
+    let next = create_block(inout b);
+    let condition = ins_icmp_imm(inout b, cc_eq(), arg_value(call, 0), arg_i64(call, 1));
+    let output = vals1(arg_value(call, 3));
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ins_brif(
+        inout b,
+        condition,
+        arg_block(call, 2),
+        in output.as_slice(),
+        next,
+        in none.as_slice()
+    );
+    switch_to_block(inout b, next);
+}
+
+// One `control` request on the lent handles.
+fn control(call: u64, inout b: Builder, in m: Module) -> u64 eff [Ffi[Cranelift]] {
+    let op = call_op(call);
+    if op == TAG {
+        let v = tag(inout b, arg_i64(call, 0));
+        call_result_value(call, v);
+    } else if op == CAPTURE_SLOT {
+        capture_slot(call, inout b, in m);
+    } else if op == QUALIFY {
+        let v = qualify(call, inout b);
+        call_result_value(call, v);
+    } else if op == DISPATCH {
+        dispatch(call, inout b);
+    } else if op == TRAP {
+        ins_trap(inout b, trap_user(wrapping_u32(call_arg(call, 0))));
+    } else if op == RESUME_SAVE {
+        resume_save(call, inout b);
+    } else if op == RESUME_RESTORE {
+        let s: Slot = slot_of_word(call_arg(call, 0));
+        let v = ins_stack_load(inout b, ty_i64(), s, 0);
+        call_result_value(call, v);
+    } else if op == RETURN_TO {
+        return_to(call, inout b);
+    } else {
+        return DECLINED;
+    }
+    HANDLED
+}
+
+// The `control` hook: the family's leaf requests over the lent handles.
+// `INSTRUCTION` requests (`Op::Closure`, `Op::Handle`, effect operations)
+// are declined: their lowering walks AST expressions the Vesper tables do
+// not encode yet (docs/parallel-results/self-host-codegen-control.md).
+pub fn control_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut b = match call_builder(call) {
+        Some(b) => b,
+        None => return DECLINED,
+    };
+    let m = match call_module(call) {
+        Some(m) => m,
+        None => {
+            call_return_builder(call, b);
+            return DECLINED;
+        }
+    };
+    let handled = control(call, inout b, in m);
+    call_return_module(call, m);
+    call_return_builder(call, b);
+    handled
+}

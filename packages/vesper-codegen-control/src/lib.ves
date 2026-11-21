@@ -1,0 +1,159 @@
+// @vesper/codegen-control: native lowering of closures, handlers, effects,
+// `dyn` and sessions in Vesper (self-hosting wave SH4 lane 10, #1284).
+//
+// Part 1 ports the decisions of the family that do not emit code, each
+// checked against the Rust compiler over the corpus
+// (tests/self_host_codegen_control.rs):
+//
+// - session.ves: `native_session::plan`, the validated effect bindings and
+//   data-frame layout of a native session entry.
+// - keys.ves: the handler ABI's `Kind::of` and `effect_key`.
+//
+// Emission (closure tags and invocation, handler inlining, `perform`,
+// trace effects, `Fail` exits, vtables, session parks) goes through the
+// lent Cranelift builders of SH4 lane 1 (#1275) and lands after its first
+// pull request. docs/parallel-results/self-host-codegen-control.md has the
+// plan for it and the gaps found so far.
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    add,
+    n32,
+    u32_at,
+    w
+};
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/check-layout::{
+    layouts_new
+};
+use self::tables::{
+    read_tables
+};
+use self::session::{
+    EffBinding,
+    OpBinding,
+    planner_new
+};
+use self::keys::{
+    write_effect_key,
+    write_kind
+};
+
+// Task "sessions": the function and effect-declaration sections
+// (tables.ves), then cases: an entry name and its bindings, each an effect
+// name and its operation bindings (op, read, value, error, cancel kind,
+// cancel constructor name or code). One line per case: `{:?}` of the plan
+// or `err <message>`.
+pub fn control_session_plans(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let tb = read_tables(inout r, in b, in c);
+    let mut p = planner_new(inout c.names);
+    let mut ls = layouts_new();
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let cases = r.word(in b);
+    for i in 0..cases {
+        let entry = u32_at(in c.nmap, r.word(in b));
+        let mut bindings: ChunkSeq[EffBinding] = ChunkSeq::new[EffBinding]();
+        let mut ops: ChunkSeq[OpBinding] = ChunkSeq::new[OpBinding]();
+        let bn = r.word(in b);
+        for j in 0..bn {
+            let eff_name = u32_at(in c.nmap, r.word(in b));
+            let on = r.word(in b);
+            let a = n32(ops.len());
+            for k in 0..on {
+                let op = u32_at(in c.nmap, r.word(in b));
+                let read = r.word(in b) != 0;
+                let value = u32_at(in c.nmap, r.word(in b));
+                let error = u32_at(in c.nmap, r.word(in b));
+                let cancel_ctor = r.word(in b) == 0;
+                let x = r.word(in b);
+                let cancel = if cancel_ctor {
+                    u32_at(in c.nmap, x)
+                } else {
+                    0
+                };
+                ops
+                    .push(
+                    OpBinding {
+                        op: op,
+                        read: read,
+                        value: value,
+                        error: error,
+                        cancel_ctor: cancel_ctor,
+                        cancel: cancel,
+                        code: x
+                    }
+                );
+            }
+            bindings
+                .push(
+                EffBinding {
+                    eff_name: eff_name,
+                    a: a,
+                    n: n32(on)
+                }
+            );
+        }
+        let m = ls.mark();
+        let mut line: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if p
+            .plan(
+            inout ls,
+            inout c.types,
+            inout c.names,
+            in c.world,
+            in tb,
+            entry,
+            in bindings,
+            in ops,
+            inout line
+        ) {
+            o.extend(in line.as_slice());
+        } else {
+            o.extend(in "err ".as_bytes());
+            o.extend(in p.err.as_slice());
+        }
+        o.push(10);
+        ls.reset(m);
+    }
+    pack_text(in o)
+}
+
+// Task "keys": n row types, then m types. One line per effect instance of
+// each row (`K <effect_key>`, a blank `R` line before each row), then one
+// line per type (`T <Kind:?>`).
+pub fn control_handler_keys(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let rows = r.word(in b);
+    for i in 0..rows {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        let row = c.types.row(c.types.node(ty).r2);
+        o.extend(in "R\n".as_bytes());
+        for j in 0..w(row.n) {
+            let e = c.types.effect_at(add(w(row.a), j));
+            o.extend(in "K ".as_bytes());
+            write_effect_key(in c.types, in c.names, e, inout o);
+            o.push(10);
+        }
+    }
+    let types = r.word(in b);
+    for i in 0..types {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        o.extend(in "T ".as_bytes());
+        write_kind(in c.types, in c.names, ty, inout o);
+        o.push(10);
+    }
+    pack_text(in o)
+}

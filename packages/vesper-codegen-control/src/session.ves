@@ -1,0 +1,1192 @@
+// `native_session::plan` (src/native_session.rs): an embedding's explicit
+// bindings of the entry's linear external effects, validated against the
+// checked entry and effect declarations, and the session's data-frame
+// layout. Nothing executable exists before this passes; emission (the
+// park, fail and return sites) is lane 10's second half.
+//
+// A failed plan is the Rust message, byte for byte. A plan is written as
+// Rust's `{:?}` of `Plan`, so the differential compares every field the
+// emission reads (bound operations, buffer sizes, constructor names, the
+// failure order and the frame layout).
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    inc32,
+    n32,
+    push_decimal,
+    u32_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    debug_type,
+    default_type,
+    display,
+    substitute
+};
+use @vesper/check-data::world::{
+    World
+};
+use @vesper/check-layout::{
+    Layouts,
+    layout_of
+};
+use self::tables::{
+    Decl,
+    Func,
+    Param,
+    Tables
+};
+
+const NONE32: u32 = 4294967295;
+// Copies of @vesper/check-layout's layout kinds: Rust's loader imports a
+// `pub const` across packages (#1239), but the Vesper package assembler
+// (@vesper/check-names-packages) does not yet (report, gap 2).
+const L_PRODUCT: u8 = 1;
+const L_ENUM: u8 = 2;
+const NO_ADT: u32 = 4294967295;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const P_INOUT: u8 = 1;
+const MAX_READ: u32 = 4096;
+const MAX_U32: u64 = 4294967295;
+
+// ----- the embedding's bindings ------------------------------------------------
+
+// `OperationBinding`: `read` is `Operation::Read` (else `Yield`); the
+// cancellation is the constructor `cancel` when `cancel_ctor`, else the
+// error code `code`.
+pub copy struct OpBinding {
+    op: u32,
+    read: bool,
+    value: u32,
+    error: u32,
+    cancel_ctor: bool,
+    cancel: u32,
+    code: u64,
+}
+
+// `EffectBinding`: ops[a..a+n] of the case's operation bindings.
+pub copy struct EffBinding {
+    eff_name: u32,
+    a: u32,
+    n: u32,
+}
+
+// ----- the plan -----------------------------------------------------------------
+
+// `BoundOp`. `buffer` is a type or NONE32; `value_field` likewise.
+copy struct BoundOp {
+    op: u32,
+    read: bool,
+    buffer: u32,
+    buffer_size: u32,
+    result: u32,
+    value: u32,
+    value_field: u32,
+    error: u32,
+    error_field: u32,
+    cancel_ctor: bool,
+    cancel: u32,
+    code: u64,
+}
+
+// `BoundEffect`: bound[a..a+n].
+copy struct BoundEffect {
+    name: u32,
+    a: u32,
+    n: u32,
+}
+
+// One plan's state. `err` is the message of a failed step.
+pub struct Planner {
+    err: ChunkSeq[u8],
+    bound: ChunkSeq[BoundOp],
+    effects: ChunkSeq[BoundEffect],
+    fails: ChunkSeq[u32],
+    // reject_suspending_recursion: the DFS path and the finished functions.
+    path: ChunkSeq[u32],
+    done: ChunkSeq[bool],
+    // `contains_function`'s ADTs being visited.
+    seen: ChunkSeq[u32],
+    fail: u32,
+    unit_name: u32,
+    string_name: u32,
+    // `is_capability_effect` names, then `ffi_lowering::EFFECT_PREFIX`.
+    caps: ChunkSeq[u32],
+}
+
+pub fn planner_new(inout names: Names) -> Planner {
+    let mut caps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    caps.push(names.intern(in "ConstTime".as_bytes()));
+    caps.push(names.intern(in "Realtime".as_bytes()));
+    caps.push(names.intern(in "DetFloat".as_bytes()));
+    caps.push(names.intern(in "ConstDenorm".as_bytes()));
+    caps.push(names.intern(in "Isa".as_bytes()));
+    Planner {
+        err: ChunkSeq::new[u8](),
+        bound: ChunkSeq::new[BoundOp](),
+        effects: ChunkSeq::new[BoundEffect](),
+        fails: ChunkSeq::new[u32](),
+        path: ChunkSeq::new[u32](),
+        done: ChunkSeq::new[bool](),
+        seen: ChunkSeq::new[u32](),
+        fail: names.intern(in "Fail".as_bytes()),
+        unit_name: names.intern(in "Unit".as_bytes()),
+        string_name: names.intern(in "String".as_bytes()),
+        caps: caps,
+    }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn quoted(inout o: ChunkSeq[u8], in names: Names, s: u32) {
+    o.push(34);
+    names.write(s, inout o);
+    o.push(34);
+}
+
+fn bool_at(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn contains32(in s: ChunkSeq[u32], x: u32) -> bool {
+    for i in 0..s.len() {
+        if u32_at(in s, i) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether the bytes of `a` sort before those of `b` (`String` order).
+fn name_lt(in names: Names, a: u32, b: u32) -> bool {
+    let na = names.size(a);
+    let nb = names.size(b);
+    let mut i: u64 = 0;
+    loop {
+        if i >= na || i >= nb {
+            break;
+        }
+        let x = names.byte(a, i);
+        let y = names.byte(b, i);
+        if x != y {
+            return x < y;
+        }
+        i = inc(i);
+    }
+    na < nb
+}
+
+fn align8(x: u64) -> u64 {
+    wrapping_add(x, 7) & 18446744073709551608
+}
+
+// `ty == Named(n, [])` with `n` one of `a`, `b`.
+fn integer(in t: Types, ty: u32, a: u32, b: u32) -> bool {
+    let n = t.node(ty);
+    n.kind == K_NAMED && n.n == 0 && (n.name == a || n.name == b)
+}
+
+impl Planner {
+    fn clear(inout self, in names: Names) {
+        self.err.clear();
+        self.bound.clear();
+        self.effects.clear();
+        self.fails.clear();
+        self.path.clear();
+        self.done.clear();
+        self.seen.clear();
+    }
+
+    fn fail_text(inout self, in s: Str) -> bool {
+        self.err.clear();
+        put(inout self.err, in s);
+        false
+    }
+
+    // Prefixes the current message with `name` (a written prefix).
+    fn prefix(inout self, in head: ChunkSeq[u8]) {
+        let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        out.extend(in head.as_slice());
+        out.extend(in self.err.as_slice());
+        self.err = out;
+    }
+
+    fn is_cap(in self, in names: Names, name: u32) -> bool {
+        contains32(in self.caps, name)
+    }
+
+    fn is_foreign(in self, in names: Names, name: u32) -> bool {
+        names.has_prefix(name, in "Ffi$".as_bytes())
+    }
+
+    // `contains_function(world, t)`.
+    pub fn contains_function(inout self, inout t: Types, in wd: World, ty: u32) -> bool {
+        let n = t.node(ty);
+        if n.kind == K_FN {
+            return true;
+        }
+        if n.kind == K_TUPLE {
+            for i in 0..w(n.n) {
+                if self.contains_function(inout t, in wd, t.arg(ty, i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind != K_NAMED {
+            return false;
+        }
+        if contains32(in self.seen, n.name) {
+            for i in 0..w(n.n) {
+                if t.node(t.arg(ty, i)).kind == K_FN {
+                    return true;
+                }
+            }
+            return false;
+        }
+        let ai = wd.lookup(n.name);
+        if ai == NO_ADT {
+            return false;
+        }
+        self.seen.push(n.name);
+        let a = wd.adt(ai);
+        let vars = wd.vars_of(in t, a, ty);
+        let mut found = false;
+        for v in 0..w(a.vn) {
+            let variant = wd.variant(add(w(a.va), v));
+            for f in 0..w(variant.fc) {
+                let field = wd.field(add(w(variant.fa), f));
+                let ft = substitute(inout t, field.ty, in vars);
+                if self.contains_function(inout t, in wd, ft) {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        let depth = self.seen.len();
+        self.seen.truncate(wrapping_sub(depth, 1));
+        found
+    }
+
+    // `capability_only(f)`.
+    fn capability_only(in self, in t: Types, in names: Names, row: u32) -> bool {
+        let r = t.row(row);
+        for i in 0..w(r.n) {
+            let e = t.effect_at(add(w(r.a), i));
+            if !(self.is_cap(in names, e.name) || self.is_foreign(in names, e.name)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // `fail_only(world, f)`.
+    fn fail_only(inout self, inout t: Types, in names: Names, in wd: World, in tb: Tables, f: Func)
+        -> bool {
+        let r = t.row(f.row);
+        if r.tail != 0 {
+            return false;
+        }
+        let mut any_fail = false;
+        for i in 0..w(r.n) {
+            let e = t.effect_at(add(w(r.a), i));
+            if e.name == self.fail {
+                any_fail = true;
+            }
+            let fail = e.name == self.fail && e.label == 0 && e.n == 1;
+            let cap = (self.is_cap(in names, e.name) || self.is_foreign(in names, e.name))
+                && e
+                .label
+                == 0
+                && e
+                .n
+                == 0;
+            if !(fail || cap) {
+                return false;
+            }
+        }
+        if !any_fail {
+            return false;
+        }
+        ! self.signature_has_function(inout t, in wd, in tb, f)
+    }
+
+    fn signature_has_function(inout self, inout t: Types, in wd: World, in tb: Tables, f: Func)
+        -> bool {
+        if self.contains_function(inout t, in wd, f.result) {
+            return true;
+        }
+        for i in 0..w(f.pn) {
+            let p = tb.param(add(w(f.pa), i));
+            if self.contains_function(inout t, in wd, p.ty) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `specialized_function(world, f)`: inlined into its callers.
+    fn specialized(
+        inout self,
+        inout t: Types,
+        in names: Names,
+        in wd: World,
+        in tb: Tables,
+        f: Func
+    ) -> bool {
+        let tail = t.row(f.row).tail != 0;
+        let mut inlined = !self.capability_only(in t, in names, f.row) || tail;
+        if !inlined {
+            inlined = self.signature_has_function(inout t, in wd, in tb, f);
+        }
+        inlined && !self.fail_only(inout t, in names, in wd, in tb, f)
+    }
+
+    // `reject_suspending_recursion`'s depth-first search from `fi`.
+    fn dfs(inout self, inout t: Types, in names: Names, in wd: World, in tb: Tables, fi: u32)
+        -> bool {
+        if bool_at(in self.done, w(fi)) {
+            return true;
+        }
+        let mut at = self.path.len();
+        for i in 0..self.path.len() {
+            if u32_at(in self.path, i) == fi {
+                at = i;
+                break;
+            }
+        }
+        if at < self.path.len() {
+            self.err.clear();
+            put(inout self.err, "recursive suspending call cycle ");
+            for i in at..self.path.len() {
+                if i > at {
+                    put(inout self.err, " -> ");
+                }
+                names.write(tb.func(u32_at(in self.path, i)).name, inout self.err);
+            }
+            put(inout self.err, " -> ");
+            names.write(tb.func(fi).name, inout self.err);
+            put(inout self.err, " is unsupported: native sessions inline effectful calls");
+            return false;
+        }
+        let f = tb.func(fi);
+        self.path.push(fi);
+        for i in 0..w(f.cn) {
+            let callee = tb.callee(add(w(f.ca), i));
+            let g = tb.func(callee);
+            if self.specialized(inout t, in names, in wd, in tb, g) {
+                if !self.dfs(inout t, in names, in wd, in tb, callee) {
+                    return false;
+                }
+            }
+        }
+        let depth = self.path.len();
+        self.path.truncate(wrapping_sub(depth, 1));
+        let ok = self.done.try_set(w(fi), true);
+        true
+    }
+
+    // A layout's size, or NONE32 with Rust's message.
+    fn layout_size(
+        inout self,
+        inout ls: Layouts,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        ty: u32
+    ) -> u64 {
+        let l = layout_of(inout ls, inout t, inout names, in wd, ty);
+        if l == NONE32 {
+            self.err.clear();
+            self.err.extend(in ls.err.as_slice());
+            return 18446744073709551615;
+        }
+        w(ls.node(l).size)
+    }
+
+    // `word_buffer(world, ty, depth)`.
+    fn word_buffer(
+        inout self,
+        inout ls: Layouts,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        ty0: u32,
+        depth: u64
+    ) -> bool {
+        if depth > 16 {
+            return self.fail_text("read buffer nests too deeply");
+        }
+        let k = wd.k;
+        let ty = default_type(inout t, ty0);
+        if integer(in t, ty, k.u64_, k.i64_) {
+            return true;
+        }
+        let l = layout_of(inout ls, inout t, inout names, in wd, ty);
+        if l == NONE32 {
+            self.err.clear();
+            self.err.extend(in ls.err.as_slice());
+            return false;
+        }
+        let node = ls.node(l);
+        let n = t.node(ty);
+        let is_string = n.kind == K_NAMED && n.name == self.string_name;
+        if node.kind == L_PRODUCT && !is_string && node.n > 0 {
+            if n.kind == K_NAMED {
+                let ai = wd.lookup(n.name);
+                if ai != NO_ADT && wd.adt(ai).is_enum {
+                    self.err.clear();
+                    put(inout self.err, "read buffer ");
+                    display(in t, in names, ty, inout self.err);
+                    put(inout self.err, " is an enum");
+                    return false;
+                }
+            }
+            // The fields are read before recursing: a nested layout may
+            // reuse the table.
+            let mut fts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let mut fns: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for i in 0..w(node.n) {
+                let f = ls.lfield(add(w(node.a), i));
+                fts.push(f.ty);
+                fns.push(f.name);
+            }
+            for i in 0..fts.len() {
+                if !self
+                    .word_buffer(
+                    inout ls,
+                    inout t,
+                    inout names,
+                    in wd,
+                    u32_at(in fts, i),
+                    inc(depth)
+                ) {
+                    let mut head: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                    put(inout head, "read buffer ");
+                    display(in t, in names, ty, inout head);
+                    put(inout head, ": field ");
+                    names.write(u32_at(in fns, i), inout head);
+                    put(inout head, ": ");
+                    self.prefix(in head);
+                    return false;
+                }
+            }
+            return true;
+        }
+        self.err.clear();
+        put(inout self.err, "read buffer ");
+        display(in t, in names, ty, inout self.err);
+        put(
+            inout self.err,
+            " is not a u64/i64 word buffer (enums, bool, u8, u32, f64, strings and functions have invalid byte images)"
+        );
+        false
+    }
+
+    // `layout.variant(ctor)` of an enum layout `l`: the variant's field
+    // types, or false (Rust matches the last `::` segment).
+    fn variant_fields(
+        in self,
+        in ls: Layouts,
+        in names: Names,
+        l: u32,
+        ctor: u32,
+        inout out: ChunkSeq[u32]
+    ) -> bool {
+        out.clear();
+        let size = names.size(ctor);
+        let mut start: u64 = 0;
+        let mut i: u64 = 0;
+        loop {
+            if inc(i) >= size {
+                break;
+            }
+            if names.byte(ctor, i) == 58 && names.byte(ctor, inc(i)) == 58 {
+                start = add(i, 2);
+            }
+            i = inc(i);
+        }
+        let node = ls.node(l);
+        for v in 0..w(node.n) {
+            let variant = ls.lvariant(add(w(node.a), v));
+            let vsize = names.size(variant.name);
+            if wrapping_sub(size, start) != vsize {
+                continue;
+            }
+            let mut same = true;
+            for j in 0..vsize {
+                if names.byte(variant.name, j) != names.byte(ctor, add(start, j)) {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                for f in 0..w(variant.fc) {
+                    out.push(ls.lfield(add(w(variant.fa), f)).ty);
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    fn no_ctor(
+        inout self,
+        in t: Types,
+        in names: Names,
+        in head: ChunkSeq[u8],
+        result: u32,
+        in role: Str,
+        ctor: u32
+    ) -> bool {
+        self.err.clear();
+        self.err.extend(in head.as_slice());
+        put(inout self.err, ": result ");
+        display(in t, in names, result, inout self.err);
+        put(inout self.err, " has no ");
+        put(inout self.err, in role);
+        put(inout self.err, " constructor '");
+        names.write(ctor, inout self.err);
+        put(inout self.err, "'");
+        false
+    }
+
+    // `validate_op`: pushes the bound operation, or fails.
+    fn validate_op(
+        inout self,
+        inout ls: Layouts,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        in tb: Tables,
+        eff_name: u32,
+        sig: Func,
+        bind: OpBinding
+    ) -> bool {
+        let k = wd.k;
+        let mut head: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        names.write(eff_name, inout head);
+        put(inout head, "::");
+        names.write(sig.name, inout head);
+        if sig.generics > 0 {
+            self.err = head;
+            put(inout self.err, ": generic operations are unsupported");
+            return false;
+        }
+        let mut buffer = NONE32;
+        let mut buffer_size: u32 = 0;
+        if !bind.read {
+            if sig.pn != 0 {
+                self.err = head;
+                put(inout self.err, " is bound to Yield but takes ");
+                push_decimal(inout self.err, w(sig.pn));
+                put(inout self.err, " parameters");
+                return false;
+            }
+        } else {
+            if sig.pn != 1 {
+                self.err = head;
+                put(inout self.err, " is bound to Read and must take exactly one inout buffer");
+                return false;
+            }
+            let p = tb.param(w(sig.pa));
+            if p.pass != P_INOUT {
+                self.err = head;
+                put(inout self.err, " is bound to Read but its buffer is not passed inout");
+                return false;
+            }
+            if !self.word_buffer(inout ls, inout t, inout names, in wd, p.ty, 0) {
+                let mut h2: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                h2.extend(in head.as_slice());
+                put(inout h2, ": ");
+                self.prefix(in h2);
+                return false;
+            }
+            let size = self.layout_size(inout ls, inout t, inout names, in wd, p.ty);
+            if size == 18446744073709551615 {
+                return false;
+            }
+            if size == 0 || size > w(MAX_READ) {
+                self.err = head;
+                put(inout self.err, ": read buffer of ");
+                push_decimal(inout self.err, size);
+                put(inout self.err, " bytes exceeds 4096");
+                return false;
+            }
+            buffer = p.ty;
+            buffer_size = n32(size);
+        }
+        let result = default_type(inout t, sig.result);
+        let l = layout_of(inout ls, inout t, inout names, in wd, result);
+        if l == NONE32 {
+            self.err.clear();
+            self.err.extend(in ls.err.as_slice());
+            return false;
+        }
+        if ls.node(l).kind != L_ENUM {
+            self.err = head;
+            put(inout self.err, ": result ");
+            display(in t, in names, result, inout self.err);
+            put(inout self.err, " must be an enum with value, error and cancellation constructors");
+            return false;
+        }
+        if bind.value == bind.error {
+            self.err = head;
+            put(inout self.err, ": value and error constructors must differ");
+            return false;
+        }
+        let mut fields: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        if !self.variant_fields(in ls, in names, l, bind.value, inout fields) {
+            return self.no_ctor(in t, in names, in head, result, "value", bind.value);
+        }
+        let mut value_field = NONE32;
+        let mut shaped = false;
+        if !bind.read {
+            if fields.len() == 0 {
+                shaped = true;
+            } else if fields.len() == 1 {
+                let f = u32_at(in fields, 0);
+                let fnode = t.node(f);
+                shaped = f == t.unit || (fnode.kind == K_NAMED && fnode.name == self.unit_name);
+            }
+        } else if fields.len() == 1 {
+            let f = u32_at(in fields, 0);
+            if integer(in t, f, k.u64_, k.u64_) {
+                shaped = true;
+                value_field = f;
+            }
+        }
+        if !shaped {
+            self.err = head;
+            put(inout self.err, ": value constructor '");
+            names.write(bind.value, inout self.err);
+            put(inout self.err, "' must carry ");
+            if bind.read {
+                put(inout self.err, "exactly one u64 byte count");
+            } else {
+                put(inout self.err, "no value or a unit value");
+            }
+            return false;
+        }
+        if !self.variant_fields(in ls, in names, l, bind.error, inout fields) {
+            return self.no_ctor(in t, in names, in head, result, "error", bind.error);
+        }
+        let error_field = if fields.len() == 1 {
+            u32_at(in fields, 0)
+        } else {
+            NONE32
+        };
+        if error_field == NONE32 || !integer(in t, error_field, k.u32_, k.u64_) {
+            self.err = head;
+            put(inout self.err, ": error constructor '");
+            names.write(bind.error, inout self.err);
+            put(inout self.err, "' must carry one u32 or u64 code");
+            return false;
+        }
+        if bind.cancel_ctor {
+            let c = bind.cancel;
+            if c == bind.value || c == bind.error {
+                self.err = head;
+                put(inout self.err, ": cancellation constructor '");
+                names.write(c, inout self.err);
+                put(inout self.err, "' must differ from the value and error constructors");
+                return false;
+            }
+            if !self.variant_fields(in ls, in names, l, c, inout fields) {
+                return self.no_ctor(in t, in names, in head, result, "cancellation", c);
+            }
+            if fields.len() != 0 {
+                self.err = head;
+                put(inout self.err, ": cancellation constructor '");
+                names.write(c, inout self.err);
+                put(inout self.err, "' must not carry fields");
+                return false;
+            }
+        }
+        self
+            .bound
+            .push(
+            BoundOp {
+                op: bind.op,
+                read: bind.read,
+                buffer: buffer,
+                buffer_size: buffer_size,
+                result: result,
+                value: bind.value,
+                value_field: value_field,
+                error: bind.error,
+                error_field: error_field,
+                cancel_ctor: bind.cancel_ctor,
+                cancel: bind.cancel,
+                code: bind.code
+            }
+        );
+        true
+    }
+
+    fn effect_text(inout self, in names: Names, in a: Str, name: u32, in b: Str) -> bool {
+        self.err.clear();
+        put(inout self.err, in a);
+        names.write(name, inout self.err);
+        put(inout self.err, in b);
+        false
+    }
+
+    fn op_text(inout self, in names: Names, in a: Str, d: u32, op: u32, in b: Str) -> bool {
+        self.err.clear();
+        put(inout self.err, in a);
+        names.write(d, inout self.err);
+        put(inout self.err, "::");
+        names.write(op, inout self.err);
+        put(inout self.err, in b);
+        false
+    }
+
+    // `plan(world, entry, bindings)`; on success `out` holds `{:?}` of the
+    // plan, on failure `self.err` holds the message.
+    pub fn plan(
+        inout self,
+        inout ls: Layouts,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        in tb: Tables,
+        entry: u32,
+        in bindings: ChunkSeq[EffBinding],
+        in ops: ChunkSeq[OpBinding],
+        inout out: ChunkSeq[u8]
+    ) -> bool {
+        self.clear(in names);
+        let fi = tb.find(entry);
+        if fi == NONE32 {
+            return self.effect_text(in names, "unknown session entry '", entry, "'");
+        }
+        let f = tb.func(fi);
+        if !f.body {
+            return self.effect_text(in names, "session entry '", entry, "' has no body");
+        }
+        if f.pn != 0 {
+            return self.fail_text("session entries take no parameters in this slice");
+        }
+        if f.generics != 0 {
+            return self.fail_text("session entries cannot be generic");
+        }
+        let row = t.row(f.row);
+        if row.tail != 0 {
+            return self.fail_text("session entry requires a concrete effect row");
+        }
+        if self.contains_function(inout t, in wd, f.result) {
+            return self.fail_text("session entry cannot return closures or continuations");
+        }
+        for i in 0..tb.funcs.len() {
+            self.done.push(false);
+        }
+        if !self.dfs(inout t, in names, in wd, in tb, fi) {
+            return false;
+        }
+        let result = default_type(inout t, f.result);
+        let rl = layout_of(inout ls, inout t, inout names, in wd, result);
+        if rl == NONE32 {
+            self.err.clear();
+            self.err.extend(in ls.err.as_slice());
+            return false;
+        }
+        let result_size = if ls.aggregate(rl) {
+            w(ls.node(rl).size)
+        } else {
+            0
+        };
+        for i in 0..bindings.len() {
+            let b = binding_at(in bindings, i);
+            for j in 0..i {
+                if binding_at(in bindings, j).eff_name == b.eff_name {
+                    return self.effect_text(in names, "effect ", b.eff_name, " is bound twice");
+                }
+            }
+        }
+        let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for i in 0..w(row.n) {
+            let e = t.effect_at(add(w(row.a), i));
+            if e.name == self.fail && e.label == 0 && e.n == 1 {
+                let arg = u32_at(in t.items, w(e.a));
+                let d = default_type(inout t, arg);
+                self.fails.push(d);
+                continue;
+            }
+            let mut bi = bindings.len();
+            for j in 0..bindings.len() {
+                if binding_at(in bindings, j).eff_name == e.name {
+                    bi = j;
+                    break;
+                }
+            }
+            if bi == bindings.len() {
+                return self
+                    .effect_text(in names, "entry effect ", e.name, " has no native binding");
+            }
+            let b = binding_at(in bindings, bi);
+            if e.label != 0 {
+                return self
+                    .effect_text(
+                    in names,
+                    "labelled external effect instance ",
+                    e.name,
+                    " is unsupported"
+                );
+            }
+            if contains32(in seen, e.name) {
+                return self
+                    .effect_text(in names, "effect ", e.name, " appears twice in the entry row");
+            }
+            seen.push(e.name);
+            let di = tb.find_decl(e.name);
+            if di == NONE32 {
+                return self.effect_text(in names, "unknown effect ", e.name, "");
+            }
+            let d = tb.decl(di);
+            if !d.linear {
+                return self
+                    .effect_text(
+                    in names,
+                    "external effect ",
+                    e.name,
+                    " must be declared linear (one-shot resumption)"
+                );
+            }
+            if d.generics != 0 || e.n != 0 {
+                return self
+                    .effect_text(in names, "generic external effect ", e.name, " is unsupported");
+            }
+            let a = n32(self.bound.len());
+            for j in 0..w(b.n) {
+                let ob = op_at(in ops, add(w(b.a), j));
+                let mut si = NONE32;
+                for s in 0..w(d.on) {
+                    if tb.op(add(w(d.oa), s)).name == ob.op {
+                        si = n32(add(w(d.oa), s));
+                        break;
+                    }
+                }
+                if si == NONE32 {
+                    self.err.clear();
+                    put(inout self.err, "effect ");
+                    names.write(d.name, inout self.err);
+                    put(inout self.err, " has no operation '");
+                    names.write(ob.op, inout self.err);
+                    put(inout self.err, "'");
+                    return false;
+                }
+                let sig = tb.op(w(si));
+                if !self
+                    .validate_op(inout ls, inout t, inout names, in wd, in tb, d.name, sig, ob) {
+                    return false;
+                }
+                // `ops.insert` after validation: a second binding of the
+                // same operation is refused once it validated.
+                let last = wrapping_sub(self.bound.len(), 1);
+                for q in w(a)..last {
+                    if bound_at(in self.bound, q).op == ob.op {
+                        return self
+                            .op_text(in names, "operation ", d.name, ob.op, " is bound twice");
+                    }
+                }
+            }
+            for s in 0..w(d.on) {
+                let sig = tb.op(add(w(d.oa), s));
+                let mut found = false;
+                for q in w(a)..self.bound.len() {
+                    if bound_at(in self.bound, q).op == sig.name {
+                        found = true;
+                    }
+                }
+                if !found {
+                    return self
+                        .op_text(
+                        in names,
+                        "operation ",
+                        d.name,
+                        sig.name,
+                        " has no native binding"
+                    );
+                }
+            }
+            self
+                .effects
+                .push(
+                BoundEffect {
+                    name: d.name,
+                    a: a,
+                    n: n32(wrapping_sub(self.bound.len(), w(a)))
+                }
+            );
+        }
+        for i in 0..bindings.len() {
+            let b = binding_at(in bindings, i);
+            if !contains32(in seen, b.eff_name) {
+                return self
+                    .effect_text(
+                    in names,
+                    "binding names effect ",
+                    b.eff_name,
+                    " which the entry does not declare"
+                );
+            }
+        }
+        let mut failure_size: u64 = 0;
+        for i in 0..self.fails.len() {
+            let ty = u32_at(in self.fails, i);
+            if self.contains_function(inout t, in wd, ty) {
+                self.err.clear();
+                put(inout self.err, "entry failure type ");
+                display(in t, in names, ty, inout self.err);
+                put(
+                    inout self.err,
+                    " contains a function value, which a session exit cannot report"
+                );
+                return false;
+            }
+            let size = self.layout_size(inout ls, inout t, inout names, in wd, ty);
+            if size == 18446744073709551615 {
+                return false;
+            }
+            if size > failure_size {
+                failure_size = size;
+            }
+        }
+        let mut staging_size: u64 = 0;
+        for i in 0..self.bound.len() {
+            let o = bound_at(in self.bound, i);
+            if o.buffer != NONE32 && w(o.buffer_size) > staging_size {
+                staging_size = w(o.buffer_size);
+            }
+        }
+        // `u32` frame arithmetic: sizes are below 2^32, so a sum above it
+        // is Rust's overflow refusal.
+        let failure_offset = align8(result_size);
+        let staging_offset = align8(add(failure_offset, failure_size));
+        let mut bytes = align8(add(staging_offset, staging_size));
+        if wrapping_add(result_size, 7)
+            > MAX_U32
+            || add(failure_offset, failure_size)
+            > MAX_U32
+            || add(staging_offset, staging_size)
+            > MAX_U32
+            || wrapping_add(add(failure_offset, failure_size), 7)
+            > MAX_U32
+            || wrapping_add(add(staging_offset, staging_size), 7)
+            > MAX_U32 {
+            return self.fail_text("session data frame is too large");
+        }
+        if bytes < 8 {
+            bytes = 8;
+        }
+        self
+            .write_plan(
+            in t,
+            in names,
+            entry,
+            result,
+            result_size,
+            failure_offset,
+            failure_size,
+            staging_offset,
+            staging_size,
+            bytes,
+            inout out
+        );
+        true
+    }
+
+    fn write_plan(
+        in self,
+        in t: Types,
+        in names: Names,
+        entry: u32,
+        result: u32,
+        result_size: u64,
+        failure_offset: u64,
+        failure_size: u64,
+        staging_offset: u64,
+        staging_size: u64,
+        bytes: u64,
+        inout o: ChunkSeq[u8]
+    ) {
+        put(inout o, "Plan { entry: ");
+        quoted(inout o, in names, entry);
+        put(inout o, ", effects: [");
+        for i in 0..self.effects.len() {
+            let e = match self.effects.try_get(i) {
+                Option::Some(e) => e,
+                Option::None => BoundEffect {
+                    name: 0,
+                    a: 0,
+                    n: 0
+                },
+            };
+            if i > 0 {
+                put(inout o, ", ");
+            }
+            put(inout o, "BoundEffect { name: ");
+            quoted(inout o, in names, e.name);
+            put(inout o, ", ops: {");
+            // `BTreeMap<String, BoundOp>`: by operation name.
+            let mut done: ChunkSeq[bool] = ChunkSeq::new[bool]();
+            for j in 0..w(e.n) {
+                done.push(false);
+            }
+            for j in 0..w(e.n) {
+                let mut best = w(e.n);
+                for q in 0..w(e.n) {
+                    if bool_at(in done, q) {
+                        continue;
+                    }
+                    if best
+                        == w(e.n)
+                        || name_lt(
+                        in names,
+                        bound_at(in self.bound, add(w(e.a), q)).op,
+                        bound_at(in self.bound, add(w(e.a), best)).op
+                    ) {
+                        best = q;
+                    }
+                }
+                let ok = done.try_set(best, true);
+                if j > 0 {
+                    put(inout o, ", ");
+                }
+                write_op(in t, in names, bound_at(in self.bound, add(w(e.a), best)), inout o);
+            }
+            put(inout o, "} }");
+        }
+        put(inout o, "], fails: [");
+        for i in 0..self.fails.len() {
+            if i > 0 {
+                put(inout o, ", ");
+            }
+            debug_type(in t, in names, u32_at(in self.fails, i), inout o);
+        }
+        put(inout o, "], result: ");
+        debug_type(in t, in names, result, inout o);
+        put(inout o, ", frame: FrameLayout { result_offset: 0, result_size: ");
+        push_decimal(inout o, result_size);
+        put(inout o, ", failure_offset: ");
+        push_decimal(inout o, failure_offset);
+        put(inout o, ", failure_size: ");
+        push_decimal(inout o, failure_size);
+        put(inout o, ", staging_offset: ");
+        push_decimal(inout o, staging_offset);
+        put(inout o, ", staging_size: ");
+        push_decimal(inout o, staging_size);
+        put(inout o, ", bytes: ");
+        push_decimal(inout o, bytes);
+        put(inout o, " } }");
+    }
+}
+
+fn write_op(in t: Types, in names: Names, b: BoundOp, inout o: ChunkSeq[u8]) {
+    quoted(inout o, in names, b.op);
+    put(inout o, ": BoundOp { operation: ");
+    if b.read {
+        put(inout o, "Read");
+    } else {
+        put(inout o, "Yield");
+    }
+    put(inout o, ", buffer: ");
+    if b.buffer == NONE32 {
+        put(inout o, "None");
+    } else {
+        put(inout o, "Some((");
+        debug_type(in t, in names, b.buffer, inout o);
+        put(inout o, ", ");
+        push_decimal(inout o, w(b.buffer_size));
+        put(inout o, "))");
+    }
+    put(inout o, ", result: ");
+    debug_type(in t, in names, b.result, inout o);
+    put(inout o, ", value: ");
+    quoted(inout o, in names, b.value);
+    put(inout o, ", value_field: ");
+    if b.value_field == NONE32 {
+        put(inout o, "None");
+    } else {
+        put(inout o, "Some(");
+        debug_type(in t, in names, b.value_field, inout o);
+        put(inout o, ")");
+    }
+    put(inout o, ", error: ");
+    quoted(inout o, in names, b.error);
+    put(inout o, ", error_field: ");
+    debug_type(in t, in names, b.error_field, inout o);
+    put(inout o, ", cancel: ");
+    if b.cancel_ctor {
+        put(inout o, "Constructor(");
+        quoted(inout o, in names, b.cancel);
+        put(inout o, ")");
+    } else {
+        put(inout o, "Error(");
+        push_decimal(inout o, b.code);
+        put(inout o, ")");
+    }
+    put(inout o, " }");
+}
+
+fn bound_at(in s: ChunkSeq[BoundOp], i: u64) -> BoundOp {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => BoundOp {
+            op: 0,
+            read: false,
+            buffer: NONE32,
+            buffer_size: 0,
+            result: 0,
+            value: 0,
+            value_field: NONE32,
+            error: 0,
+            error_field: 0,
+            cancel_ctor: false,
+            cancel: 0,
+            code: 0
+        },
+    }
+}
+
+pub fn binding_at(in s: ChunkSeq[EffBinding], i: u64) -> EffBinding {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => EffBinding {
+            eff_name: 0,
+            a: 0,
+            n: 0
+        },
+    }
+}
+
+pub fn op_at(in s: ChunkSeq[OpBinding], i: u64) -> OpBinding {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => OpBinding {
+            op: 0,
+            read: false,
+            value: 0,
+            error: 0,
+            cancel_ctor: false,
+            cancel: 0,
+            code: 0
+        },
+    }
+}

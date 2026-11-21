@@ -1,0 +1,12 @@
+[package]
+name = "@vesper/codegen-control-emit"
+version = "0.1.0"
+edition = "2026"
+# The control family's emission (SH4 lane 10, #1284). It reaches Cranelift
+# through @vesper/cranelift's `.vsys` library, so it is kept apart from
+# @vesper/codegen-control, whose decisions the root package's tests run
+# without the shim.
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/cranelift" = { version = "^0.1", path = "../vesper-cranelift" }

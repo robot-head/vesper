@@ -1344,6 +1344,10 @@ fn define_instances_observed_with_trace<M: Module>(
     operands_only: bool,
     abi: &NativeAbi,
 ) -> Result<String, String> {
+    let _module_kind = crate::codegen_swap::module_kind_scope(
+        std::any::type_name::<M>().ends_with("JITModule"),
+        abi.optimize,
+    );
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
     for (key, (name, generic_vars)) in instances {
@@ -1529,6 +1533,8 @@ fn define_instances_observed_with_trace<M: Module>(
             c.b.seal_all_blocks();
             c.b.finalize();
         }
+        // A hook error at an infallible layout helper (#1275).
+        crate::codegen_swap::take_error()?;
         if let Some(rewrite) = instrument.as_mut() {
             rewrite(key, &mut ctx.func)?;
         }
@@ -1664,11 +1670,34 @@ impl WordFunction {
     /// parameter and the result must have an eight-byte native lane or be
     /// an `in` aggregate, and the row must be empty.
     pub fn compile(world: &World, entry: &str, optimize: bool) -> Result<Self, String> {
+        Self::compile_with(world, entry, optimize, false)
+    }
+    /// [`Self::compile`] for an entry whose row holds only foreign
+    /// (`.vsys`) effects, under the foreign-call plan
+    /// (`ffi_lowering::ForeignChecked::word_function`, #1275).
+    pub(crate) fn compile_foreign(
+        world: &World,
+        entry: &str,
+        optimize: bool,
+    ) -> Result<Self, String> {
+        Self::compile_with(world, entry, optimize, true)
+    }
+    fn compile_with(
+        world: &World,
+        entry: &str,
+        optimize: bool,
+        foreign: bool,
+    ) -> Result<Self, String> {
         let f = world.functions.get(entry).ok_or("unknown entry")?;
-        if !f.effects.instances.is_empty()
-            || f.effects.tail.is_some()
-            || f.params.len() > MAX_WORD_FUNCTION_ARGS
-        {
+        let effects_ok = if foreign {
+            f.effects
+                .instances
+                .iter()
+                .all(|e| crate::ffi_lowering::is_foreign_effect(&e.name))
+        } else {
+            f.effects.instances.is_empty()
+        };
+        if !effects_ok || f.effects.tail.is_some() || f.params.len() > MAX_WORD_FUNCTION_ARGS {
             return Err(format!(
                 "a word function takes at most {MAX_WORD_FUNCTION_ARGS} words and has no effects"
             ));
@@ -2661,7 +2690,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             generics: BTreeMap::new(),
             capabilities: caps,
         });
-        let tag = self.b.ins().iconst(types::I64, id as i64);
+        let tag = self.control_tag(id);
         self.write_info(
             tag,
             NativeInfo {
@@ -2710,26 +2739,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let layout = Layout::of(self.world, &ty)?;
                 if lent.contains(&name) && layout.aggregate() {
                     let pointer_type = self.m.target_config().pointer_type();
-                    let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
-                        ir::StackSlotKind::ExplicitSlot,
-                        pointer_type.bytes(),
-                        3,
-                    ));
-                    let pointer = self.b.ins().stack_addr(pointer_type, slot, 0);
+                    let (slot, pointer) = self.capture_slot(pointer_type.bytes());
                     let value = self.use_var(var);
                     self.b.ins().store(ir::MemFlags::new(), value, pointer, 0);
                     captures.push((name, ty, slot, self.info(value)));
                     continue;
                 }
-                let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
-                    ir::StackSlotKind::ExplicitSlot,
-                    layout.size,
-                    3,
-                ));
-                let pointer =
-                    self.b
-                        .ins()
-                        .stack_addr(self.m.target_config().pointer_type(), slot, 0);
+                let (slot, pointer) = self.capture_slot(layout.size);
                 let value = self.use_var(var);
                 self.store(pointer, value, &ty)?;
                 captures.push((name, ty, slot, self.info(value)));
@@ -2749,7 +2765,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             generics: self.generic_vars.clone(),
             capabilities: caps,
         });
-        let tag = self.b.ins().iconst(types::I64, id as i64);
+        let tag = self.control_tag(id);
         self.write_info(
             tag,
             NativeInfo {
@@ -2791,9 +2807,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.closures.push(closure);
             mapped.remove(&(index + 1));
             mapped.insert(id);
-            let matches = self.b.ins().icmp_imm(IntCC::Equal, tag, (index + 1) as i64);
-            let qualified = self.b.ins().iconst(types::I64, id as i64);
-            result = self.b.ins().select(matches, qualified, result);
+            result = self.qualify_select(tag, index + 1, id, result);
         }
         if !mapped.is_empty() {
             self.write_info(
@@ -2878,15 +2892,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             if !Self::callable_shape(&closure.ty, ty) {
                 continue;
             }
-            let yes = self.b.create_block();
-            let no = self.b.create_block();
-            if single {
-                self.jump(yes, &[]);
-            } else {
-                let condition = self.b.ins().icmp_imm(IntCC::Equal, tag, (index + 1) as i64);
-                self.branch(condition, yes, &[], no, &[]);
-            }
-            self.b.switch_to_block(yes);
+            let no = self.dispatch_candidate(tag, index + 1, single);
             self.inline_depth += 1;
             let value = match &closure.target {
                 ClosureTarget::Function(name) => {
@@ -2912,7 +2918,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.capabilities = caps_scope.clone();
             self.b.switch_to_block(no);
         }
-        self.b.ins().trap(ir::TrapCode::unwrap_user(3));
+        self.dispatch_trap(3);
         if branches == 0 {
             return Err("native call has no statically known closure target".into());
         }
@@ -2962,18 +2968,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             // returns.
             return Err(crate::native_handlers::LOOP_RESUME_REFUSAL.into());
         }
-        let saved = self.b.create_sized_stack_slot(ir::StackSlotData::new(
-            ir::StackSlotKind::ExplicitSlot,
-            8,
-            3,
-        ));
         let selector = self.use_var(control.selector);
-        self.b.ins().stack_store(selector, saved, 0);
-        let returned = self.b.create_block();
-        self.b.append_block_param(returned, result_type);
         let index = control.returns.borrow().len();
+        let (saved, returned, selected) = self.resume_save(selector, result_type, index);
         control.returns.borrow_mut().push(returned);
-        let selected = self.b.ins().iconst(types::I64, index as i64);
         self.def_var(control.selector, selected);
         self.jump(
             entry,
@@ -2983,7 +2981,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .collect::<Vec<_>>(),
         );
         self.b.switch_to_block(returned);
-        let selector = self.b.ins().stack_load(types::I64, saved, 0);
+        let selector = self.resume_restore(saved);
         self.def_var(control.selector, selector);
         Ok(self.b.block_params(returned)[0])
     }
@@ -3666,7 +3664,19 @@ impl<M: Module> Codegen<'_, '_, M> {
                 } else {
                     None
                 };
+                // SH4 swap point (#1275): a family hook may emit this
+                // instruction (`codegen_swap`); none is installed by default.
+                let swapped = crate::codegen_swap::instruction(
+                    &mut self.b,
+                    &mut *self.m,
+                    self.world,
+                    self.program,
+                    (&f.name, i, inst_idx, inst),
+                    &values,
+                    &ty,
+                )?;
                 let value = match &inst.op {
+                    _ if swapped.is_some() => swapped.expect("guarded by is_some"),
                     Op::Loop => self.zero(),
                     Op::Exit { value, owner } => {
                         let v = values
@@ -4492,6 +4502,12 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
     /// Stack storage that is written before it is read, so it is not zeroed.
     fn alloc_uninit(&mut self, size: u32) -> ir::Value {
+        if let Some(v) = self.swap_value(
+            crate::codegen_swap::aggregate::ALLOC_UNINIT,
+            &[u64::from(size)],
+        ) {
+            return v;
+        }
         let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
             ir::StackSlotKind::ExplicitSlot,
             size.max(8),
@@ -4502,6 +4518,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             .stack_addr(self.m.target_config().pointer_type(), slot, 0)
     }
     fn alloc(&mut self, size: u32) -> ir::Value {
+        if let Some(v) = self.swap_value(crate::codegen_swap::aggregate::ALLOC, &[u64::from(size)])
+        {
+            return v;
+        }
         let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
             ir::StackSlotKind::ExplicitSlot,
             size.max(8),
@@ -4521,6 +4541,19 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
     fn copy_bytes(&mut self, from: ir::Value, to: ir::Value, size: u32) {
         self.write_info(to, self.info(from));
+        if self
+            .swap_aggregate(
+                crate::codegen_swap::aggregate::COPY_BYTES,
+                &[
+                    crate::codegen_swap::word(from),
+                    crate::codegen_swap::word(to),
+                    u64::from(size),
+                ],
+            )
+            .is_some()
+        {
+            return;
+        }
         for off in (0..size).step_by(8) {
             let v = self
                 .b
@@ -4533,10 +4566,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         if Layout::of(self.world, ty)?.aggregate() {
             Ok(ptr)
         } else {
-            let value = self
-                .b
-                .ins()
-                .load(scalar(ty, &[])?, ir::MemFlags::new(), ptr, 0);
+            let lane = scalar(ty, &[])?;
+            let value = match self.swap_value(
+                crate::codegen_swap::aggregate::LOAD,
+                &[
+                    crate::codegen_swap::word(ptr),
+                    crate::codegen_swap::ty_code(lane),
+                ],
+            ) {
+                Some(v) => v,
+                None => self.b.ins().load(lane, ir::MemFlags::new(), ptr, 0),
+            };
             self.write_info(value, self.info(ptr));
             Ok(value)
         }
@@ -4548,12 +4588,29 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.copy_bytes(value, ptr, layout.size);
         } else {
             let value = self.coerce(value, Some(ty));
-            self.b.ins().store(ir::MemFlags::new(), value, ptr, 0);
+            if self
+                .swap_aggregate(
+                    crate::codegen_swap::aggregate::STORE,
+                    &[
+                        crate::codegen_swap::word(ptr),
+                        crate::codegen_swap::word(value),
+                    ],
+                )
+                .is_none()
+            {
+                self.b.ins().store(ir::MemFlags::new(), value, ptr, 0);
+            }
         }
         Ok(())
     }
     fn offset(&mut self, ptr: ir::Value, offset: i32) -> ir::Value {
-        let field = self.b.ins().iadd_imm(ptr, i64::from(offset));
+        let field = match self.swap_value(
+            crate::codegen_swap::aggregate::OFFSET,
+            &[crate::codegen_swap::word(ptr), offset as i64 as u64],
+        ) {
+            Some(v) => v,
+            None => self.b.ins().iadd_imm(ptr, i64::from(offset)),
+        };
         self.infos.insert(
             field,
             self.info(ptr)
@@ -4782,7 +4839,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         ty: &Type,
     ) -> Result<ir::Value, String> {
         Ok(match &p.kind {
-            PatternKind::Wild | PatternKind::Bind(_) => self.b.ins().iconst(types::I8, 1),
+            PatternKind::Wild | PatternKind::Bind(_) => self.pattern_true(),
             PatternKind::Literal(l) => match l {
                 Literal::Int(n) if self.b.func.dfg.value_type(value) == types::I128 => {
                     let n = self.wide_const(*n);
@@ -4805,12 +4862,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let LayoutKind::Product(fs) = layout.kind else {
                     return Ok(self.b.ins().iconst(types::I8, i64::from(ps.is_empty())));
                 };
-                let mut result = self.b.ins().iconst(types::I8, 1);
+                let mut result = self.pattern_true();
                 for (p, f) in ps.iter().zip(fs) {
                     let ptr = self.offset(value, f.offset);
                     let v = self.load(ptr, &f.ty)?;
                     let c = self.pattern_condition(p, v, &f.ty)?;
-                    result = self.b.ins().band(result, c);
+                    result = self.pattern_and(result, c);
                 }
                 result
             }
@@ -4827,23 +4884,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .variant(name)
                     .ok_or("native pattern has unknown variant")?;
                 if matches!(layout.kind, LayoutKind::Enum(_)) {
-                    let actual = self.b.ins().load(types::I64, ir::MemFlags::new(), value, 0);
-                    let matches_tag = self.b.ins().icmp_imm(IntCC::Equal, actual, tag as i64);
+                    let matches_tag = match self.swap_value(
+                        crate::codegen_swap::aggregate::TAG_TEST,
+                        &[crate::codegen_swap::word(value), tag as u64],
+                    ) {
+                        Some(v) => v,
+                        None => {
+                            let actual =
+                                self.b.ins().load(types::I64, ir::MemFlags::new(), value, 0);
+                            self.b.ins().icmp_imm(IntCC::Equal, actual, tag as i64)
+                        }
+                    };
                     if fields.is_empty() {
                         matches_tag
                     } else {
-                        let ok = self.b.create_block();
-                        let fail = self.b.create_block();
-                        let done = self.b.create_block();
-                        self.b.append_block_param(done, types::I8);
-                        self.b.ins().brif(matches_tag, ok, &[], fail, &[]);
-
-                        self.b.switch_to_block(fail);
-                        let zero = self.b.ins().iconst(types::I8, 0);
-                        self.b.ins().jump(done, &[zero.into()]);
-
-                        self.b.switch_to_block(ok);
-                        let mut result = self.b.ins().iconst(types::I8, 1);
+                        let done = self.pattern_open(matches_tag);
+                        let mut result = self.pattern_true();
                         for (n, p) in fields {
                             let f = fs
                                 .iter()
@@ -4852,15 +4908,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                             let ptr = self.offset(value, f.offset);
                             let v = self.load(ptr, &f.ty)?;
                             let c = self.pattern_condition(p, v, &f.ty)?;
-                            result = self.b.ins().band(result, c);
+                            result = self.pattern_and(result, c);
                         }
-                        self.b.ins().jump(done, &[result.into()]);
-
-                        self.b.switch_to_block(done);
-                        self.b.block_params(done)[0]
+                        self.pattern_close(done, result)
                     }
                 } else {
-                    let mut result = self.b.ins().iconst(types::I8, 1);
+                    let mut result = self.pattern_true();
                     for (n, p) in fields {
                         let f = fs
                             .iter()
@@ -4869,12 +4922,250 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let ptr = self.offset(value, f.offset);
                         let v = self.load(ptr, &f.ty)?;
                         let c = self.pattern_condition(p, v, &f.ty)?;
-                        result = self.b.ins().band(result, c);
+                        result = self.pattern_and(result, c);
                     }
                     result
                 }
             }
         })
+    }
+    /// SH4 swap point (#1275): an `aggregate` layout-helper request of
+    /// the pilot family; `None` when no hook took it. A hook error is
+    /// recorded and fails the compile (`codegen_swap::take_error`).
+    fn swap_aggregate(&mut self, op: u32, args: &[u64]) -> Option<Vec<u64>> {
+        crate::codegen_swap::request_or_record(
+            crate::codegen_swap::Family::Aggregate,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            op,
+            args,
+        )
+    }
+    /// [`Codegen::swap_aggregate`] for a request answering one value.
+    fn swap_value(&mut self, op: u32, args: &[u64]) -> Option<ir::Value> {
+        let results = self.swap_aggregate(op, args)?;
+        crate::codegen_swap::value_or_record(&results)
+    }
+    /// SH4 swap point (#1284): a `control` leaf request; `None` when no
+    /// hook took it. A hook error is recorded and fails the compile
+    /// (`codegen_swap::take_error`).
+    fn swap_control(&mut self, op: u32, args: &[u64]) -> Option<Vec<u64>> {
+        crate::codegen_swap::request_or_record(
+            crate::codegen_swap::Family::Control,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            op,
+            args,
+        )
+    }
+    /// The words of a `control` answer that must have `n` of them.
+    fn control_words<const N: usize>(&mut self, op: u32, args: &[u64]) -> Option<[u64; N]> {
+        let r = self.swap_control(op, args)?;
+        match <[u64; N]>::try_from(r.as_slice()) {
+            Ok(words) => Some(words),
+            Err(_) => {
+                crate::codegen_swap::record(format!(
+                    "codegen hook answered {} words for control op {op}, not {N}",
+                    r.len()
+                ));
+                None
+            }
+        }
+    }
+    /// A closure, function or continuation tag constant.
+    fn control_tag(&mut self, id: usize) -> ir::Value {
+        if let Some([v]) = self.control_words(crate::codegen_swap::control::TAG, &[id as u64]) {
+            return ir::Value::from_u32(v as u32);
+        }
+        self.b.ins().iconst(types::I64, id as i64)
+    }
+    /// A capture's stack slot and its address.
+    fn capture_slot(&mut self, size: u32) -> (ir::StackSlot, ir::Value) {
+        let op = crate::codegen_swap::control::CAPTURE_SLOT;
+        if let Some([slot, address]) = self.control_words(op, &[u64::from(size)]) {
+            return (
+                ir::StackSlot::from_u32(slot as u32),
+                ir::Value::from_u32(address as u32),
+            );
+        }
+        let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            size,
+            3,
+        ));
+        let pointer = self
+            .b
+            .ins()
+            .stack_addr(self.m.target_config().pointer_type(), slot, 0);
+        (slot, pointer)
+    }
+    /// `qualify_tag`'s re-numbering of descriptor `old` to `new`.
+    fn qualify_select(
+        &mut self,
+        tag: ir::Value,
+        old: usize,
+        new: usize,
+        acc: ir::Value,
+    ) -> ir::Value {
+        let args = [
+            crate::codegen_swap::word(tag),
+            old as u64,
+            new as u64,
+            crate::codegen_swap::word(acc),
+        ];
+        if let Some([v]) = self.control_words(crate::codegen_swap::control::QUALIFY, &args) {
+            return ir::Value::from_u32(v as u32);
+        }
+        let matches = self.b.ins().icmp_imm(IntCC::Equal, tag, old as i64);
+        let qualified = self.b.ins().iconst(types::I64, new as i64);
+        self.b.ins().select(matches, qualified, acc)
+    }
+    /// One candidate of `invoke_tag`: emits into its `yes` block and
+    /// returns its `no` block.
+    fn dispatch_candidate(&mut self, tag: ir::Value, index: usize, single: bool) -> ir::Block {
+        let args = [
+            crate::codegen_swap::word(tag),
+            index as u64,
+            u64::from(single),
+        ];
+        if let Some([_, no]) = self.control_words(crate::codegen_swap::control::DISPATCH, &args) {
+            return ir::Block::from_u32(no as u32);
+        }
+        let yes = self.b.create_block();
+        let no = self.b.create_block();
+        if single {
+            self.jump(yes, &[]);
+        } else {
+            let condition = self.b.ins().icmp_imm(IntCC::Equal, tag, index as i64);
+            self.branch(condition, yes, &[], no, &[]);
+        }
+        self.b.switch_to_block(yes);
+        no
+    }
+    /// The end of a dispatch chain: `trap user(code)`.
+    fn dispatch_trap(&mut self, code: u8) {
+        let op = crate::codegen_swap::control::TRAP;
+        if self.control_words::<0>(op, &[u64::from(code)]).is_some() {
+            return;
+        }
+        self.b.ins().trap(ir::TrapCode::unwrap_user(code));
+    }
+    /// A non-tail resumption's save of `selector`: the slot, the
+    /// `returned` block and the new selector `index`.
+    fn resume_save(
+        &mut self,
+        selector: ir::Value,
+        result_type: ir::Type,
+        index: usize,
+    ) -> (ir::StackSlot, ir::Block, ir::Value) {
+        let args = [
+            crate::codegen_swap::word(selector),
+            crate::codegen_swap::ty_code(result_type),
+            index as u64,
+        ];
+        let op = crate::codegen_swap::control::RESUME_SAVE;
+        if let Some([slot, returned, selected]) = self.control_words(op, &args) {
+            return (
+                ir::StackSlot::from_u32(slot as u32),
+                ir::Block::from_u32(returned as u32),
+                ir::Value::from_u32(selected as u32),
+            );
+        }
+        let saved = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+            ir::StackSlotKind::ExplicitSlot,
+            8,
+            3,
+        ));
+        self.b.ins().stack_store(selector, saved, 0);
+        let returned = self.b.create_block();
+        self.b.append_block_param(returned, result_type);
+        let selected = self.b.ins().iconst(types::I64, index as i64);
+        (saved, returned, selected)
+    }
+    /// The resumption's restore of the saved selector.
+    fn resume_restore(&mut self, saved: ir::StackSlot) -> ir::Value {
+        let op = crate::codegen_swap::control::RESUME_RESTORE;
+        if let Some([v]) = self.control_words(op, &[u64::from(saved.as_u32())]) {
+            return ir::Value::from_u32(v as u32);
+        }
+        self.b.ins().stack_load(types::I64, saved, 0)
+    }
+    /// One test of a handler's return dispatch: to `target` with `output`
+    /// when the selector is `index`; emission continues in the next test.
+    fn return_to(
+        &mut self,
+        selector: ir::Value,
+        index: usize,
+        target: ir::Block,
+        output: ir::Value,
+    ) {
+        let args = [
+            crate::codegen_swap::word(selector),
+            index as u64,
+            u64::from(target.as_u32()),
+            crate::codegen_swap::word(output),
+        ];
+        let op = crate::codegen_swap::control::RETURN_TO;
+        if self.control_words::<0>(op, &args).is_some() {
+            self.edge_info(target, &[output.into()]);
+            return;
+        }
+        let next = self.b.create_block();
+        let condition = self.b.ins().icmp_imm(IntCC::Equal, selector, index as i64);
+        self.branch(condition, target, &[output.into()], next, &[]);
+        self.b.switch_to_block(next);
+    }
+    /// `pattern_condition`'s constant true.
+    fn pattern_true(&mut self) -> ir::Value {
+        match self.swap_value(crate::codegen_swap::aggregate::TRUE, &[]) {
+            Some(v) => v,
+            None => self.b.ins().iconst(types::I8, 1),
+        }
+    }
+    /// `pattern_condition`'s conjunction.
+    fn pattern_and(&mut self, a: ir::Value, c: ir::Value) -> ir::Value {
+        let args = [crate::codegen_swap::word(a), crate::codegen_swap::word(c)];
+        match self.swap_value(crate::codegen_swap::aggregate::AND, &args) {
+            Some(v) => v,
+            None => self.b.ins().band(a, c),
+        }
+    }
+    /// Opens `pattern_condition`'s field diamond on `matches_tag`: returns
+    /// the join block, emitting into the matched arm.
+    fn pattern_open(&mut self, matches_tag: ir::Value) -> ir::Block {
+        let args = [crate::codegen_swap::word(matches_tag)];
+        if let Some(r) = self.swap_aggregate(crate::codegen_swap::aggregate::OPEN, &args)
+            && let [done] = r[..]
+        {
+            return ir::Block::from_u32(done as u32);
+        }
+        let ok = self.b.create_block();
+        let fail = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(done, types::I8);
+        self.b.ins().brif(matches_tag, ok, &[], fail, &[]);
+
+        self.b.switch_to_block(fail);
+        let zero = self.b.ins().iconst(types::I8, 0);
+        self.b.ins().jump(done, &[zero.into()]);
+
+        self.b.switch_to_block(ok);
+        done
+    }
+    /// Closes the diamond with the matched arm's `result`.
+    fn pattern_close(&mut self, done: ir::Block, result: ir::Value) -> ir::Value {
+        let args = [u64::from(done.as_u32()), crate::codegen_swap::word(result)];
+        if let Some(v) = self.swap_value(crate::codegen_swap::aggregate::CLOSE, &args) {
+            return v;
+        }
+        self.b.ins().jump(done, &[result.into()]);
+
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
     }
     fn string(&mut self, text: &str) -> Result<ir::Value, String> {
         self.string_literal(text)
@@ -4945,8 +5236,17 @@ impl<M: Module> Codegen<'_, '_, M> {
             } else {
                 layout.size.max(8)
             };
-            for off in (0..end).step_by(8) {
-                if !covered.contains(&off) {
+            let zeroed: Vec<u32> = (0..end)
+                .step_by(8)
+                .filter(|off| !covered.contains(off))
+                .collect();
+            let mut args = vec![crate::codegen_swap::word(ptr)];
+            args.extend(zeroed.iter().map(|&off| u64::from(off)));
+            if self
+                .swap_aggregate(crate::codegen_swap::aggregate::ZERO_WORDS, &args)
+                .is_none()
+            {
+                for off in zeroed {
                     let zero = self.zero();
                     self.b
                         .ins()
@@ -4957,7 +5257,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             self.alloc(layout.size)
         };
-        if let Some(tag) = tag {
+        if let Some(tag) = tag
+            && self
+                .swap_aggregate(
+                    crate::codegen_swap::aggregate::TAG,
+                    &[crate::codegen_swap::word(ptr), tag as u64],
+                )
+                .is_none()
+        {
             let tag = self.b.ins().iconst(types::I64, tag as i64);
             self.b.ins().store(ir::MemFlags::new(), tag, ptr, 0);
         }
@@ -5838,12 +6145,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let output = self.b.block_params(control.dispatch)[0];
                     let selector = self.use_var(control.selector);
                     for (index, target) in control.returns.borrow().iter().enumerate() {
-                        let next = self.b.create_block();
-                        let condition = self.b.ins().icmp_imm(IntCC::Equal, selector, index as i64);
-                        self.branch(condition, *target, &[output.into()], next, &[]);
-                        self.b.switch_to_block(next);
+                        self.return_to(selector, index, *target, output);
                     }
-                    self.b.ins().trap(ir::TrapCode::unwrap_user(4));
+                    self.dispatch_trap(4);
                 }
                 self.b.switch_to_block(exit);
                 self.vars = captured;
@@ -7135,6 +7439,23 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(())
     }
     fn drop_box_value(&mut self, value: ir::Value, ty: &Type) -> Result<(), String> {
+        // SH4 swap point (#1275): the `drops` hook may emit the drop.
+        if crate::codegen_swap::hook(crate::codegen_swap::Family::Drops).is_some()
+            && crate::codegen_swap::request(
+                crate::codegen_swap::Family::Drops,
+                &mut self.b,
+                &mut *self.m,
+                self.world,
+                self.program,
+                crate::codegen_swap::Site::NONE,
+                crate::codegen_swap::drops::DROP_BOX,
+                &[crate::codegen_swap::word(value)],
+                Some(ty),
+            )?
+            .is_some()
+        {
+            return Ok(());
+        }
         emit_drop_box_value(&mut self.b, self.m, self.world, value, ty)
     }
     fn emit_fip_drop(
@@ -7539,7 +7860,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 generics: self.generic_vars.clone(),
                 capabilities: self.capabilities.clone(),
             });
-            let tag = self.b.ins().iconst(types::I64, id as i64);
+            let tag = self.control_tag(id);
             self.write_info(
                 tag,
                 NativeInfo {
