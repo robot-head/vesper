@@ -124,11 +124,11 @@ pub fn mul_gain(x: u64, gain: u64) -> u64 {
     if x == INFINITY {
         INFINITY
     } else {
-        mul_div_sat(x, gain, GAIN_UNIT)
+        mul_div_sat(x, gain, Gain::Unit)
     }
 }
 
 // Saturating `bw * ns / 10^9`: bytes delivered at `bw` over `ns`.
 fn bw_volume(bw: u64, ns: u64) -> u64 {
-    mul_div_sat(bw, ns, NANOS_PER_SEC)
+    mul_div_sat(bw, ns, Nanos::PerSec)
 }

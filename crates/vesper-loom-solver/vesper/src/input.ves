@@ -31,11 +31,8 @@ use self::{
     S
 };
 use self::diag::{
-    c_conflicting_root,
-    c_duplicate_candidate,
-    c_duplicate_system_candidate,
-    c_invalid_system_name,
-    c_unsupported_schema,
+    SolverCode,
+    SolverSort,
     copy_calculus,
     dlit,
     dver,
@@ -45,6 +42,9 @@ use self::diag::{
     subj_id,
     subj_lit
 };
+
+// The local catalog schema version the solver accepts (`SCHEMA_VERSION`).
+const CATALOG_SCHEMA_VERSION: u64 = 1;
 
 pub fn mxv(in s: S, i: u64) -> Mx {
     match s.mx.try_get(i) {
@@ -260,10 +260,10 @@ pub fn find_meta(in s: S, name: u64, vt: u64) -> u64 {
 // newest first.
 pub fn index_inputs(inout s: S) {
     alloc_tables(inout s);
-    if s.cschema != 1 {
+    if s.cschema != CATALOG_SCHEMA_VERSION {
         let (so, sl, mo) = subj_lit(inout s, "catalog.schema_version");
         dlit(inout s, "unsupported local catalog schema version");
-        emit(inout s, c_unsupported_schema(), none(), so, sl, mo);
+        emit(inout s, SolverCode::UnsupportedSchema, none(), so, sl, mo);
     }
     let rm = man(in s.l, s.root);
     let rvt = ver(in s.l, rm.ver).text;
@@ -273,7 +273,7 @@ pub fn index_inputs(inout s: S) {
     for i in 0..s.cat_n {
         s.idx.push(add(s.cat_at, i));
     }
-    msort(inout s, 1);
+    msort(inout s, SolverSort::Manifests);
     let mut prev = none();
     for j in 0..s.idx.len() {
         let mi = sw(in s.idx, j);
@@ -291,7 +291,7 @@ pub fn index_inputs(inout s: S) {
                 let (so, sl, mo) = subj_id(inout s, m.name);
                 dlit(inout s, "duplicate candidate version ");
                 dver(inout s, m.ver);
-                emit(inout s, c_duplicate_candidate(), m.name, so, sl, mo);
+                emit(inout s, SolverCode::DuplicateCandidate, m.name, so, sl, mo);
             }
         }
         prev = mi;
@@ -300,7 +300,7 @@ pub fn index_inputs(inout s: S) {
             if !x.has_json || x.json != rjson {
                 let (so, sl, mo) = subj_id(inout s, m.name);
                 dlit(inout s, "catalog candidate contradicts supplied root at the same identity");
-                emit(inout s, c_conflicting_root(), m.name, so, sl, mo);
+                emit(inout s, SolverCode::ConflictingRoot, m.name, so, sl, mo);
             }
         }
     }
@@ -321,7 +321,7 @@ pub fn index_inputs(inout s: S) {
     for i in 0..s.sys.len() {
         s.idx.push(i);
     }
-    msort(inout s, 2);
+    msort(inout s, SolverSort::NativeCandidates);
     let mut prev = none();
     for j in 0..s.idx.len() {
         let yi = sw(in s.idx, j);
@@ -331,7 +331,7 @@ pub fn index_inputs(inout s: S) {
         if !system_name_valid(in s.l, y.name) {
             let (so, sl, mo) = subj_id(inout s, y.name);
             dlit(inout s, "native identities must use the calculus SemVer namespace");
-            emit(inout s, c_invalid_system_name(), none(), so, sl, mo);
+            emit(inout s, SolverCode::InvalidSystemName, none(), so, sl, mo);
         }
         let c = sw(in s.ycount, y.name);
         if c == 0 {
@@ -344,7 +344,7 @@ pub fn index_inputs(inout s: S) {
                 let (so, sl, mo) = subj_id(inout s, y.name);
                 dlit(inout s, "duplicate native candidate version ");
                 dver(inout s, y.ver);
-                emit(inout s, c_duplicate_system_candidate(), none(), so, sl, mo);
+                emit(inout s, SolverCode::DuplicateSystemCandidate, none(), so, sl, mo);
             }
         }
         prev = yi;

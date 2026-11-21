@@ -42,10 +42,10 @@ filegroup(
         target = VESPER_TARGET,
     )
     for module, old, new in [
-        ("input", "if s.cschema != 1 {", "if s.cschema == 0 {"),
+        ("input", "if s.cschema != CATALOG_SCHEMA_VERSION {", "if s.cschema == 0 {"),
         ("closure", "if sw(in s.pcnt, d.name) == none() || grew {", "if sw(in s.pcnt, d.name) == none() {"),
         ("search", "if s.sdec == s.maxd {", "if s.sdec > s.maxd {"),
-        ("snap", "if d.code != 10 && d.code != 11 {", "if d.code != 10 {"),
+        ("snap", "if d.code != Code::MissingDependency && d.code != Code::MissingSystemPackage {", "if d.code != Code::MissingDependency {"),
         ("locked", "if !ex.has_json || ex.json != json {", "if !ex.has_json {"),
         ("metrics", "cves = sat(cves, m.cve);", "cves = sat(cves, 0);"),
         ("diag", "let t = ver(in s.l, vi).text;", "let t = ver(in s.l, vi).pre;"),

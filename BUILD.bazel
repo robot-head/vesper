@@ -196,6 +196,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
+        # vector rules over the same corpus. Anchored globs.
+        "test/self_host_check_regions_seqs": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -222,9 +229,21 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        "test/self_host_check_core_typing_exprs": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 12 (#1184): @vesper/check-fip against
         # fip::check_world on the same corpus, its checker cases and mutants.
         "test/self_host_check_fip": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # Self-hosting SH3 lane 8 (#1247): @vesper/egraph against egg and
+        # egglog on the same corpus. Anchored globs.
+        "test/self_host_egraph": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -250,6 +269,8 @@ vesper_crate(
         "test/std_intern": [":files"],
         # SH2 lane 1 (#1173): collections and arenas of values that are not copy.
         "test/owning_collections": [":files"],
+        # SH3 lane 3 (#1242): collection view callbacks (lent closures).
+        "test/closure_modes_collections": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([
@@ -558,13 +579,18 @@ vesper_crate(
         "test/hybrid_ir_check": "long",
         "test/self_host_place_ir": "long",
         "test/self_host_check_harness": "long",
+        # The region and sequence rules differential (#1181): ~7 min debug.
+        "test/self_host_check_regions_seqs": "long",
         # The dyn differential runs both passes over every .ves source twice.
         "test/self_host_check_dyn": "long",
         # The package assembler differential (#1178) compiles the AST package.
         "test/self_host_check_names_packages": "long",
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
+        "test/self_host_check_core_typing_exprs": "long",
         "test/self_host_check_fip": "long",
+        # The e-graph differential (#1247) runs egg and egglog on the corpus.
+        "test/self_host_egraph": "long",
         # Loads every corpus world and runs about 1,900 session plans.
         "test/self_host_codegen_control": "long",
     },

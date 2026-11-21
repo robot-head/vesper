@@ -17,12 +17,65 @@
 //   are the trimmed header's byte range), 3 BadValue (`index`), 4 TooLong.
 // @export abi 3
 
+// `Draw.code` of `source_draw`.
+pub enum DrawCode: _ {
+    Ok,
+    Overrun
+}
+
+// `shrinker_record` outcomes.
+pub enum Outcome: _ {
+    FailedSameKind,
+    Invalid,
+    Other
+}
+
+// `Parsed.code`.
+pub enum ParseCode: _ {
+    Ok,
+    MissingHeader,
+    UnknownHeader,
+    BadValue,
+    TooLong
+}
+
+// Three-way comparison results, from less to greater.
+enum Order: _ {
+    Less,
+    Equal,
+    Greater
+}
+
+const TAB: u64 = 0x09;
+const LF: u64 = 0x0a;
+const CR: u64 = 0x0d;
+const SPACE: u64 = 0x20;
+const DIGIT_ZERO: u64 = 0x30;
+const DIGIT_NINE: u64 = 0x39;
+const LOWER_A: u64 = 0x61;
+const LOWER_F: u64 = 0x66;
+// `a` minus 10: the hex digit d >= 10 is the byte d + HEX_LETTER_BIAS.
+const HEX_LETTER_BIAS: u64 = 87;
+const HEX_DIGIT_BITS: u64 = 4;
+const HEX_DIGIT_MASK: u64 = 15;
+// A value line holds 1 to MAX_HEX_DIGITS digits.
+const MAX_HEX_DIGITS: u64 = 16;
+const NOT_HEX: u64 = 16;
+
 // ---------------------------------------------------------------------------
 // Helpers.
 
 fn max_u64() -> u64 {
-    18446744073709551615
+    0xffffffffffffffff
 }
+
+const U64_BITS: u64 = 64;
+const U64_BYTES: u64 = 8;
+const BYTE_BITS: u64 = 8;
+const BYTE_MASK: u64 = 0xff;
+const DECIMAL_DIGITS: u64 = 10;
+// `rng_chance` numerators are out of CHANCE_MAX + 1.
+const CHANCE_MAX: u64 = 1023;
 
 fn at(in s: Slice[u64], i: u64) -> u64 {
     match s.try_get(i) {
@@ -149,7 +202,7 @@ pub fn rng_below_inclusive(inout r: Rng, max_inclusive: u64) -> u64 {
 
 // True with probability `numerator / 1024`.
 pub fn rng_chance(inout r: Rng, numerator: u64) -> bool {
-    rng_below_inclusive(inout r, 1023) < numerator
+    rng_below_inclusive(inout r, CHANCE_MAX) < numerator
 }
 
 // ---------------------------------------------------------------------------
@@ -176,19 +229,19 @@ pub fn source_draw(
 ) -> Draw {
     if pos >= max_draws {
         return Draw {
-            code: 1,
+            code: DrawCode::Overrun,
             value: 0
         };
     }
     match prefix.try_get(pos) {
         Option::Some(v) => Draw {
-            code: 0,
+            code: DrawCode::Ok,
             value: min_u64(v, max)
         },
         Option::None => {
             if !random {
                 Draw {
-                    code: 1,
+                    code: DrawCode::Overrun,
                     value: 0
                 }
             } else if bernoulli {
@@ -198,12 +251,12 @@ pub fn source_draw(
                     0
                 };
                 Draw {
-                    code: 0,
+                    code: DrawCode::Ok,
                     value: min_u64(one, max)
                 }
             } else {
                 Draw {
-                    code: 0,
+                    code: DrawCode::Ok,
                     value: rng_below_inclusive(inout r, max)
                 }
             }
@@ -243,23 +296,23 @@ fn header() -> ChunkSeq[u8] {
 }
 
 fn hex_digit(d: u64) -> u8 {
-    if d < 10 {
-        wrapping_u8(wrapping_add(d, 48))
+    if d < DECIMAL_DIGITS {
+        wrapping_u8(wrapping_add(d, DIGIT_ZERO))
     } else {
-        wrapping_u8(wrapping_add(d, 87))
+        wrapping_u8(wrapping_add(d, HEX_LETTER_BIAS))
     }
 }
 
 // The header line, then one lowercase hex value per line.
 pub fn tape_to_text(in values: Slice[u64]) -> ChunkSeq[u8] {
     let mut out = header();
-    out.push(10);
+    out.push(wrapping_u8(LF));
     for i in 0..values.len() {
         let mut v = at(in values, i);
         let start = out.len();
         loop {
-            out.push(hex_digit(v & 15));
-            v = v >> 4;
+            out.push(hex_digit(v & HEX_DIGIT_MASK));
+            v = v >> HEX_DIGIT_BITS;
             if v == 0 {
                 break;
             }
@@ -284,7 +337,7 @@ pub fn tape_to_text(in values: Slice[u64]) -> ChunkSeq[u8] {
             lo = inc(lo);
             hi = wrapping_sub(hi, 1);
         }
-        out.push(10);
+        out.push(wrapping_u8(LF));
     }
     out
 }
@@ -296,7 +349,7 @@ fn space_at(in s: Slice[u8], i: u64, end: u64) -> u64 {
         return 0;
     }
     let a = byte(in s, i);
-    if (a >= 9 && a <= 13) || a == 32 {
+    if (a >= TAB && a <= CR) || a == SPACE {
         return 1;
     }
     if a == 0xc2 && inc(i) < end {
@@ -365,7 +418,7 @@ fn parsed(code: u64, index: u64, start: u64, end: u64, sink values: ChunkSeq[u64
 // with `ok` false.
 fn hex_value(in s: Slice[u8], start: u64, end: u64) -> (bool, u64) {
     let n = wrapping_sub(end, start);
-    if n == 0 || n > 16 {
+    if n == 0 || n > MAX_HEX_DIGITS {
         return (false, 0);
     }
     let mut v: u64 = 0;
@@ -375,17 +428,17 @@ fn hex_value(in s: Slice[u8], start: u64, end: u64) -> (bool, u64) {
             break(true, v);
         }
         let c = byte(in s, i);
-        let d = if c >= 48 && c <= 57 {
-            wrapping_sub(c, 48)
-        } else if c >= 97 && c <= 102 {
-            wrapping_sub(c, 87)
+        let d = if c >= DIGIT_ZERO && c <= DIGIT_NINE {
+            wrapping_sub(c, DIGIT_ZERO)
+        } else if c >= LOWER_A && c <= LOWER_F {
+            wrapping_sub(c, HEX_LETTER_BIAS)
         } else {
-            16
+            NOT_HEX
         };
-        if d == 16 {
+        if d == NOT_HEX {
             break(false, 0);
         }
-        v = (v << 4) | d;
+        v = (v << HEX_DIGIT_BITS) | d;
         i = inc(i);
     }
 }
@@ -408,7 +461,7 @@ fn parse_bytes(in s: Slice[u8], max_len: u64) -> Parsed {
         // The line `s[pos..stop]`, without its `\n`.
         let mut stop = pos;
         loop {
-            if stop >= total || byte(in s, stop) == 10 {
+            if stop >= total || byte(in s, stop) == LF {
                 break;
             }
             stop = inc(stop);
@@ -448,17 +501,17 @@ fn parse_bytes(in s: Slice[u8], max_len: u64) -> Parsed {
                     i = inc(i);
                 }
                 if !same {
-                    return parsed(2, 0, a, b, values);
+                    return parsed(ParseCode::UnknownHeader, 0, a, b, values);
                 }
                 seen_header = true;
             } else {
                 let index = values.len();
                 if index == max_len {
-                    return parsed(4, 0, 0, 0, values);
+                    return parsed(ParseCode::TooLong, 0, 0, 0, values);
                 }
                 let (ok, v) = hex_value(in s, a, b);
                 if !ok {
-                    return parsed(3, index, 0, 0, values);
+                    return parsed(ParseCode::BadValue, index, 0, 0, values);
                 }
                 values.push(v);
             }
@@ -466,9 +519,9 @@ fn parse_bytes(in s: Slice[u8], max_len: u64) -> Parsed {
         pos = next;
     }
     if !seen_header {
-        return parsed(1, 0, 0, 0, values);
+        return parsed(ParseCode::MissingHeader, 0, 0, 0, values);
     }
-    parsed(0, 0, 0, 0, values)
+    parsed(ParseCode::Ok, 0, 0, 0, values)
 }
 
 // ---------------------------------------------------------------------------
@@ -477,9 +530,38 @@ fn parse_bytes(in s: Slice[u8], max_len: u64) -> Parsed {
 // property run stops the machine there with the candidate in `cand`, and
 // `shrinker_record` resumes it at `after` with the result in `res`.
 //
-// pc: 1 round start, 2-4 span deletion, 5-7 span zeroing, 8-13 value
-// lowering (8 next value, 9-10 small values, 11-13 binary search), 14-16
-// lower-and-delete, 17 round end, 18 done, 19 waiting for an outcome.
+// The points of the pass loops, in pass order: the round start, span
+// deletion, span zeroing, value lowering (the next value, its small values,
+// then a binary search), lower-and-delete, the round end, done, and waiting
+// for an outcome.
+enum Pc: _ {
+    RoundStart = 1,
+    DeleteWidth,
+    DeleteSpan,
+    DeleteRecord,
+    ZeroWidth,
+    ZeroSpan,
+    ZeroRecord,
+    NextValue,
+    SmallValue,
+    SmallRecord,
+    BinaryStart,
+    BinaryStep,
+    BinaryRecord,
+    LowerNext,
+    LowerDelete,
+    LowerRecord,
+    RoundEnd,
+    Done,
+    Waiting
+}
+
+// Small values tried first when lowering, and the most following values
+// lower-and-delete removes.
+const SMALL_VALUES: u64 = 8;
+const MAX_LOWER_DELETE: u64 = 8;
+// Span zeroing tries the widths of `zero_width`.
+const ZERO_WIDTHS: u64 = 3;
 
 pub copy struct Stats {
     runs: u64,
@@ -525,7 +607,7 @@ pub fn shrinker_new(sink best: ChunkSeq[u64], max_runs: u64) -> Shrinker {
             not_reproducing: 0,
             budget_exhausted: false
         },
-        pc: 1,
+        pc: Pc::RoundStart,
         after: 0,
         res: false,
         improved: false,
@@ -598,7 +680,7 @@ impl Shrinker {
             return false;
         }
         self.stats.runs = inc(self.stats.runs);
-        self.pc = 19;
+        self.pc = Pc::Waiting;
         true
     }
 
@@ -606,17 +688,17 @@ impl Shrinker {
     fn advance(inout self) -> bool {
         loop {
             let pc = self.pc;
-            if pc >= 18 {
-                // 18 done; 19 waits for `shrinker_record`.
+            if pc >= Pc::Done {
+                // Done, or Waiting for `shrinker_record`.
                 break false;
             }
-            let ready = if pc <= 4 {
+            let ready = if pc <= Pc::DeleteRecord {
                 self.step_delete(pc)
-            } else if pc <= 7 {
+            } else if pc <= Pc::ZeroRecord {
                 self.step_zero(pc)
-            } else if pc <= 10 {
+            } else if pc <= Pc::SmallRecord {
                 self.step_small(pc)
-            } else if pc <= 13 {
+            } else if pc <= Pc::BinaryRecord {
                 self.step_binary(pc)
             } else {
                 self.step_lower_delete(pc)
@@ -630,31 +712,31 @@ impl Shrinker {
     // pc 1-4: round start and span deletion.
     fn step_delete(inout self, pc: u64) -> bool {
         let n = self.best.len();
-        if pc == 1 {
+        if pc == Pc::RoundStart {
             self.improved = false;
             self.chunk = n >> 1;
-            self.pc = 2;
+            self.pc = Pc::DeleteWidth;
             return false;
         }
-        if pc == 2 {
+        if pc == Pc::DeleteWidth {
             if self.chunk > 0 {
                 self.idx = 0;
-                self.pc = 3;
+                self.pc = Pc::DeleteSpan;
             } else {
                 self.wi = 0;
-                self.pc = 5;
+                self.pc = Pc::ZeroWidth;
             }
             return false;
         }
-        if pc == 3 {
+        if pc == Pc::DeleteSpan {
             if wrapping_add(self.idx, self.chunk) <= n && !self.out_of_budget() {
                 let from = self.idx;
                 let to = wrapping_add(from, self.chunk);
                 self.cand_without(from, to);
-                return self.attempt(4);
+                return self.attempt(Pc::DeleteRecord);
             }
             self.chunk = self.chunk >> 1;
-            self.pc = 2;
+            self.pc = Pc::DeleteWidth;
             return false;
         }
         if self.res {
@@ -662,25 +744,25 @@ impl Shrinker {
         } else {
             self.idx = inc(self.idx);
         }
-        self.pc = 3;
+        self.pc = Pc::DeleteSpan;
         false
     }
 
     // pc 5-7: span zeroing.
     fn step_zero(inout self, pc: u64) -> bool {
         let n = self.best.len();
-        if pc == 5 {
-            if self.wi < 3 {
+        if pc == Pc::ZeroWidth {
+            if self.wi < ZERO_WIDTHS {
                 self.width = zero_width(self.wi);
                 self.idx = 0;
-                self.pc = 6;
+                self.pc = Pc::ZeroSpan;
             } else {
                 self.i = 0;
-                self.pc = 8;
+                self.pc = Pc::NextValue;
             }
             return false;
         }
-        if pc == 6 {
+        if pc == Pc::ZeroSpan {
             if wrapping_add(self.idx, self.width) <= n && !self.out_of_budget() {
                 let from = self.idx;
                 let to = wrapping_add(from, self.width);
@@ -698,49 +780,49 @@ impl Shrinker {
                 for j in from..to {
                     self.cand.try_set(j, 0);
                 }
-                return self.attempt(7);
+                return self.attempt(Pc::ZeroRecord);
             }
             self.wi = inc(self.wi);
-            self.pc = 5;
+            self.pc = Pc::ZeroWidth;
             return false;
         }
         if self.res {
             self.improved = true;
         }
         self.idx = inc(self.idx);
-        self.pc = 6;
+        self.pc = Pc::ZeroSpan;
         false
     }
 
     // pc 8-10: the next value to lower, and its small values first.
     fn step_small(inout self, pc: u64) -> bool {
         let n = self.best.len();
-        if pc == 8 {
+        if pc == Pc::NextValue {
             if self.i < n && !self.out_of_budget() {
                 self.small = 0;
-                self.small_end = min_u64(self.best_at(self.i), 8);
-                self.pc = 9;
+                self.small_end = min_u64(self.best_at(self.i), SMALL_VALUES);
+                self.pc = Pc::SmallValue;
             } else {
                 self.i = 0;
-                self.pc = 14;
+                self.pc = Pc::LowerNext;
             }
             return false;
         }
-        if pc == 9 {
+        if pc == Pc::SmallValue {
             if self.small >= self.small_end || self.i >= n || self.small >= self.best_at(self.i) {
-                self.pc = 11;
+                self.pc = Pc::BinaryStart;
                 return false;
             }
             self.cand_from_best();
             self.cand.try_set(self.i, self.small);
-            return self.attempt(10);
+            return self.attempt(Pc::SmallRecord);
         }
         if self.res {
             self.improved = true;
-            self.pc = 11;
+            self.pc = Pc::BinaryStart;
         } else {
             self.small = inc(self.small);
-            self.pc = 9;
+            self.pc = Pc::SmallValue;
         }
         false
     }
@@ -748,26 +830,26 @@ impl Shrinker {
     // pc 11-13: binary-search lowering of one value.
     fn step_binary(inout self, pc: u64) -> bool {
         let n = self.best.len();
-        if pc == 11 {
+        if pc == Pc::BinaryStart {
             if self.i >= n {
                 self.i = 0;
-                self.pc = 14;
+                self.pc = Pc::LowerNext;
             } else {
                 self.lo = 0;
                 self.hi = self.best_at(self.i);
-                self.pc = 12;
+                self.pc = Pc::BinaryStep;
             }
             return false;
         }
-        if pc == 12 {
+        if pc == Pc::BinaryStep {
             if self.lo < self.hi && self.i < n && !self.out_of_budget() {
                 self.mid = wrapping_add(self.lo, wrapping_sub(self.hi, self.lo) >> 1);
                 self.cand_from_best();
                 self.cand.try_set(self.i, self.mid);
-                return self.attempt(13);
+                return self.attempt(Pc::BinaryRecord);
             }
             self.i = inc(self.i);
-            self.pc = 8;
+            self.pc = Pc::NextValue;
             return false;
         }
         if self.res {
@@ -776,54 +858,54 @@ impl Shrinker {
         } else {
             self.lo = inc(self.mid);
         }
-        self.pc = 12;
+        self.pc = Pc::BinaryStep;
         false
     }
 
     // pc 14-17: lower a count and delete what follows, then the round end.
     fn step_lower_delete(inout self, pc: u64) -> bool {
         let n = self.best.len();
-        if pc == 14 {
+        if pc == Pc::LowerNext {
             if self.i < n && !self.out_of_budget() {
                 if self.best_at(self.i) > 0 {
                     self.k = 1;
-                    self.pc = 15;
+                    self.pc = Pc::LowerDelete;
                 } else {
                     self.i = inc(self.i);
                 }
             } else {
-                self.pc = 17;
+                self.pc = Pc::RoundEnd;
             }
             return false;
         }
-        if pc == 15 {
+        if pc == Pc::LowerDelete {
             let from = inc(self.i);
             let to = wrapping_add(from, self.k);
-            if self.k > 8 || to > n || self.out_of_budget() {
+            if self.k > MAX_LOWER_DELETE || to > n || self.out_of_budget() {
                 self.i = inc(self.i);
-                self.pc = 14;
+                self.pc = Pc::LowerNext;
                 return false;
             }
             self.cand_without(from, to);
             let lowered = wrapping_sub(self.best_at(self.i), 1);
             self.cand.try_set(self.i, lowered);
-            return self.attempt(16);
+            return self.attempt(Pc::LowerRecord);
         }
-        if pc == 16 {
+        if pc == Pc::LowerRecord {
             if self.res {
                 self.improved = true;
                 self.i = inc(self.i);
-                self.pc = 14;
+                self.pc = Pc::LowerNext;
             } else {
                 self.k = inc(self.k);
-                self.pc = 15;
+                self.pc = Pc::LowerDelete;
             }
             return false;
         }
         if !self.improved || self.out_of_budget() {
-            self.pc = 18;
+            self.pc = Pc::Done;
         } else {
-            self.pc = 1;
+            self.pc = Pc::RoundStart;
         }
         false
     }
@@ -842,11 +924,11 @@ pub fn shrinker_candidate(in s: Shrinker) -> ChunkSeq[u64] {
 // Report the run of the candidate: `outcome` as in the header, `realized`
 // the tape the run consumed. True when the run is the new best.
 pub fn shrinker_record(inout s: Shrinker, outcome: u64, in realized: Slice[u64]) -> bool {
-    if s.pc != 19 {
+    if s.pc != Pc::Waiting {
         return false;
     }
     let mut accepted = false;
-    if outcome == 0 {
+    if outcome == Outcome::FailedSameKind {
         if key_smaller(tape_key(in realized), tape_key(in s.best.as_slice())) {
             // Refilled in place: the buffer is reused and nothing is
             // dropped by assignment.
@@ -857,7 +939,7 @@ pub fn shrinker_record(inout s: Shrinker, outcome: u64, in realized: Slice[u64])
             s.stats.accepted = inc(s.stats.accepted);
             accepted = true;
         }
-    } else if outcome == 1 {
+    } else if outcome == Outcome::Invalid {
         s.stats.invalid = inc(s.stats.invalid);
     } else {
         s.stats.not_reproducing = inc(s.stats.not_reproducing);
@@ -889,6 +971,70 @@ pub fn shrinker_best(in s: Shrinker) -> ChunkSeq[u64] {
 // Draw kind tags: 0 value, 1 byte, 2 flag, 3 schedule.
 // Comparison words: `0, kind, lhs, rhs` for integers (kind 0 Eq, 1 Ne,
 // 2-5 orderings), `1, nl, nr, lhs bytes.., rhs bytes..` for byte strings.
+
+// Fuzzer encodings shared with the wrapper (see above).
+pub enum Verdict: _ {
+    Pass,
+    Fail,
+    Invalid
+}
+
+pub enum Observed: _ {
+    Nothing,
+    NewCoverage,
+    Failure
+}
+
+enum FeatureTag: _ {
+    Edge,
+    Comparison,
+    Closeness
+}
+
+enum DrawKind: _ {
+    Value,
+    Byte,
+    Flag,
+    Schedule
+}
+
+enum CmpTag: _ {
+    Int,
+    Bytes
+}
+
+const FEATURE_TAG_SHIFT: u64 = 62;
+const FEATURE_SITE_MASK: u64 = 0xffffffff;
+// An integer comparison is `Int, kind, lhs, rhs`; a byte one starts
+// `Bytes, nl, nr`.
+const CMP_LHS: u64 = 2;
+const CMP_RHS: u64 = 3;
+const CMP_INT_WORDS: u64 = 4;
+const CMP_BYTES_HEADER: u64 = 3;
+
+// The mutations of `mutate_once`, drawn uniformly.
+enum Mutation: _ {
+    Random,
+    Zero,
+    Max,
+    Increase,
+    Decrease,
+    DeleteSpan,
+    CopySpan,
+    Truncate,
+    Splice,
+    FlipBit
+}
+
+const MUTATIONS: u64 = 10;
+const MAX_MUTATION_ROUNDS: u64 = 4;
+// Increase and Decrease move by 1 ..= MAX_DELTA; spans hold 1 ..= MAX_SPAN.
+const MAX_DELTA: u64 = 16;
+const MAX_SPAN: u64 = 8;
+// The solver keeps at most MAX_LANE_HITS byte-lane matches and tries
+// LANE_WIDTHS encodings.
+const MAX_LANE_HITS: u64 = 8;
+const LANE_WIDTHS: u64 = 4;
 
 pub copy struct FuzzStats {
     execs: u64,
@@ -1097,7 +1243,7 @@ impl Fuzzer {
         for j in start..end {
             self.cur.push(at(in self.c_vals.as_slice(), j));
         }
-        let rounds = inc(rng_index(inout self.rng, 4));
+        let rounds = inc(rng_index(inout self.rng, MAX_MUTATION_ROUNDS));
         for r in 0..rounds {
             self.mutate_once(start, klen, n);
         }
@@ -1116,20 +1262,20 @@ impl Fuzzer {
         } else {
             max_u64()
         };
-        let op = rng_index(inout self.rng, 10);
+        let op = rng_index(inout self.rng, MUTATIONS);
         let v = at(in self.cur.as_slice(), pos);
-        if op == 0 {
+        if op == Mutation::Random {
             let x = rng_below_inclusive(inout self.rng, max);
             self.cur.try_set(pos, x);
-        } else if op == 1 {
+        } else if op == Mutation::Zero {
             self.cur.try_set(pos, 0);
-        } else if op == 2 {
+        } else if op == Mutation::Max {
             self.cur.try_set(pos, max);
-        } else if op == 3 {
-            let delta = inc(rng_below_inclusive(inout self.rng, 15));
+        } else if op == Mutation::Increase {
+            let delta = inc(rng_below_inclusive(inout self.rng, MAX_DELTA - 1));
             self.cur.try_set(pos, min_u64(sat_add(v, delta), max));
-        } else if op == 4 {
-            let delta = inc(rng_below_inclusive(inout self.rng, 15));
+        } else if op == Mutation::Decrease {
+            let delta = inc(rng_below_inclusive(inout self.rng, MAX_DELTA - 1));
             self.cur.try_set(pos, sat_sub(v, delta));
         } else {
             self.mutate_span(op, pos, len, max, v, n);
@@ -1137,8 +1283,8 @@ impl Fuzzer {
     }
 
     fn mutate_span(inout self, op: u64, pos: u64, len: u64, max: u64, v: u64, n: u64) {
-        if op == 5 {
-            let span = min_u64(inc(rng_index(inout self.rng, 8)), wrapping_sub(len, pos));
+        if op == Mutation::DeleteSpan {
+            let span = min_u64(inc(rng_index(inout self.rng, MAX_SPAN)), wrapping_sub(len, pos));
             self.scratch.clear();
             for j in 0..len {
                 if j < pos || j >= wrapping_add(pos, span) {
@@ -1146,8 +1292,8 @@ impl Fuzzer {
                 }
             }
             self.take_scratch();
-        } else if op == 6 {
-            let span = min_u64(inc(rng_index(inout self.rng, 8)), wrapping_sub(len, pos));
+        } else if op == Mutation::CopySpan {
+            let span = min_u64(inc(rng_index(inout self.rng, MAX_SPAN)), wrapping_sub(len, pos));
             let at_pos = rng_index(inout self.rng, inc(len));
             self.scratch.clear();
             for j in 0..at_pos {
@@ -1160,9 +1306,9 @@ impl Fuzzer {
                 self.scratch.push(at(in self.cur.as_slice(), j));
             }
             self.take_scratch();
-        } else if op == 7 {
+        } else if op == Mutation::Truncate {
             self.cur.truncate(pos);
-        } else if op == 8 {
+        } else if op == Mutation::Splice {
             let other = rng_index(inout self.rng, n);
             let dstart = self.entry_start(other);
             let dend = self.entry_end(other);
@@ -1172,7 +1318,7 @@ impl Fuzzer {
                 self.cur.push(at(in self.c_vals.as_slice(), j));
             }
         } else {
-            let bit = rng_below_inclusive(inout self.rng, 63);
+            let bit = rng_below_inclusive(inout self.rng, U64_BITS - 1);
             self.cur.try_set(pos, min_u64(v ^ bit_of(bit), max));
         }
     }
@@ -1196,20 +1342,20 @@ impl Fuzzer {
         at(in self.cands.as_slice(), wrapping_add(wrapping_mul(row, self.width), j))
     }
 
-    // Compare `scratch` with candidate row `row`: 0 less, 1 equal, 2 greater.
+    // Compare `scratch` with candidate row `row`.
     fn cmp_row(in self, row: u64) -> u64 {
         let mut j: u64 = 0;
         loop {
             if j >= self.width {
-                break 1;
+                break Order::Equal;
             }
             let a = at(in self.scratch.as_slice(), j);
             let b = self.row_at(row, j);
             if a != b {
                 break if a < b {
-                    0
+                    Order::Less
                 } else {
-                    2
+                    Order::Greater
                 };
             }
             j = inc(j);
@@ -1240,11 +1386,11 @@ impl Fuzzer {
                 }
                 let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
                 let c = self.cmp_row(at(in self.order.as_slice(), mid));
-                if c == 1 {
+                if c == Order::Equal {
                     dup = true;
                     break;
                 }
-                if c == 2 {
+                if c == Order::Greater {
                     lo = inc(mid);
                 } else {
                     hi = mid;
@@ -1284,7 +1430,7 @@ impl Fuzzer {
         let last = wrapping_sub(ll, nl);
         let mut start: u64 = 0;
         loop {
-            if start > last || out.len() >= 8 {
+            if start > last || out.len() >= MAX_LANE_HITS {
                 break;
             }
             let mut all = true;
@@ -1359,7 +1505,7 @@ impl Fuzzer {
             }
         }
         // Byte-lane encodings, widths 2, 4, 8, 1.
-        for wi in 0..4 {
+        for wi in 0..LANE_WIDTHS {
             if self.full {
                 return;
             }
@@ -1396,7 +1542,7 @@ impl Fuzzer {
         self.full = false;
         self.lane.clear();
         for i in 0..self.width {
-            if at(in self.c_tag.as_slice(), wrapping_add(estart, i)) == 1 {
+            if at(in self.c_tag.as_slice(), wrapping_add(estart, i)) == DrawKind::Byte {
                 self.lane.push(i);
             }
         }
@@ -1407,19 +1553,19 @@ impl Fuzzer {
                 break;
             }
             let tag = at(in self.c_cmps.as_slice(), p);
-            if tag == 0 {
+            if tag == CmpTag::Int {
                 let kind = at(in self.c_cmps.as_slice(), inc(p));
-                let lhs = at(in self.c_cmps.as_slice(), wrapping_add(p, 2));
-                let rhs = at(in self.c_cmps.as_slice(), wrapping_add(p, 3));
+                let lhs = at(in self.c_cmps.as_slice(), wrapping_add(p, CMP_LHS));
+                let rhs = at(in self.c_cmps.as_slice(), wrapping_add(p, CMP_RHS));
                 self.solve_int(estart, kind, lhs, rhs);
                 if !self.full {
                     self.solve_int(estart, kind, rhs, lhs);
                 }
-                p = wrapping_add(p, 4);
+                p = wrapping_add(p, CMP_INT_WORDS);
             } else {
                 let nl = at(in self.c_cmps.as_slice(), inc(p));
                 let nr = at(in self.c_cmps.as_slice(), wrapping_add(p, 2));
-                let ls = wrapping_add(p, 3);
+                let ls = wrapping_add(p, CMP_BYTES_HEADER);
                 let rs = wrapping_add(ls, nl);
                 self.solve_bytes(estart, ls, nl, rs, nr);
                 if !self.full {
@@ -1454,12 +1600,12 @@ impl Fuzzer {
 
 // `value` fits in `w` bytes.
 fn fits(value: u64, w: u64) -> bool {
-    if w >= 8 {
+    if w >= U64_BYTES {
         return true;
     }
     let mut v = value;
     for i in 0..w {
-        v = v >> 8;
+        v = v >> BYTE_BITS;
     }
     v == 0
 }
@@ -1468,8 +1614,8 @@ fn le_bytes(value: u64, w: u64) -> ChunkSeq[u64] {
     let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut v = value;
     for i in 0..w {
-        out.push(v & 255);
-        v = v >> 8;
+        out.push(v & BYTE_MASK);
+        v = v >> BYTE_BITS;
     }
     out
 }
@@ -1550,18 +1696,18 @@ pub fn fuzzer_seed(in f: Fuzzer) -> u64 {
 // its features. Returns 0 (nothing new), 1 (new coverage: call
 // `fuzzer_keep` with the run) or 2 (the failure that ends the campaign).
 pub fn fuzzer_observe(inout f: Fuzzer, verdict: u64, in features: Slice[u64]) -> u64 {
-    let code = if verdict == 1 {
+    let code = if verdict == Verdict::Fail {
         f.found = true;
-        2
-    } else if verdict == 2 {
+        Observed::Failure
+    } else if verdict == Verdict::Invalid {
         f.stats.invalid = inc(f.stats.invalid);
-        0
+        Observed::Nothing
     } else if f.random {
-        0
+        Observed::Nothing
     } else {
         f.novelty(in features)
     };
-    if f.solver_run && code != 0 {
+    if f.solver_run && code != Observed::Nothing {
         f.stats.solver_hits = inc(f.stats.solver_hits);
     }
     code
@@ -1574,8 +1720,8 @@ impl Fuzzer {
         for i in 0..pairs {
             let key = at(in features, wrapping_add(i, i));
             let value = at(in features, inc(wrapping_add(i, i)));
-            if (key >> 62) == 2 {
-                let site = key & 0xffffffff;
+            if (key >> FEATURE_TAG_SHIFT) == FeatureTag::Closeness {
+                let site = key & FEATURE_SITE_MASK;
                 let pos = lower_bound(in self.close_site.as_slice(), site);
                 if pos < self.close_site.len() && at(in self.close_site.as_slice(), pos) == site {
                     if value > at(in self.close_val.as_slice(), pos) {
@@ -1594,9 +1740,9 @@ impl Fuzzer {
             }
         }
         if novel {
-            1
+            Observed::NewCoverage
         } else {
-            0
+            Observed::Nothing
         }
     }
 }
@@ -1661,22 +1807,42 @@ pub fn fuzzer_corpus_entry(in f: Fuzzer, e: u64) -> ChunkSeq[u64] {
 // `value`, 1 every enabled process sleeps, 2 the machine quiesced. State
 // keys are ids interned by the wrapper (`none` when not caching).
 
+enum Proc: _ {
+    Task,
+    Io,
+    Timer
+}
+
+const PROC_TAG_SHIFT: u64 = 62;
+const IO_TASK_SHIFT: u64 = 40;
+const IO_TASK_MASK: u64 = 0x3fffff;
+const IO_CHOICE_BITS: u64 = 8;
+const TIMER_TASK_SHIFT: u64 = 32;
+const TIMER_TASK_MASK: u64 = 0x3fffffff;
+
+// `search_choose` codes.
+pub enum Choose: _ {
+    Run,
+    AllSleep,
+    Quiesced
+}
+
 fn none() -> u64 {
     max_u64()
 }
 
 fn proc_tag(p: u64) -> u64 {
-    p >> 62
+    p >> PROC_TAG_SHIFT
 }
 
 fn proc_task(p: u64) -> u64 {
-    let tag = p >> 62;
-    if tag == 0 {
+    let tag = p >> PROC_TAG_SHIFT;
+    if tag == Proc::Task {
         p
-    } else if tag == 1 {
-        (p >> 40) & 0x3fffff
+    } else if tag == Proc::Io {
+        (p >> IO_TASK_SHIFT) & IO_TASK_MASK
     } else {
-        (p >> 32) & 0x3fffffff
+        (p >> TIMER_TASK_SHIFT) & TIMER_TASK_MASK
     }
 }
 
@@ -1685,10 +1851,10 @@ fn proc_task(p: u64) -> u64 {
 fn may_co_enable(a: u64, b: u64) -> bool {
     let ta = proc_tag(a);
     let tb = proc_tag(b);
-    if (ta == 0 && tb == 2) || (ta == 2 && tb == 0) {
+    if (ta == Proc::Task && tb == Proc::Timer) || (ta == Proc::Timer && tb == Proc::Task) {
         return false;
     }
-    if (ta == 0 && tb == 1) || (ta == 1 && tb == 0) {
+    if (ta == Proc::Task && tb == Proc::Io) || (ta == Proc::Io && tb == Proc::Task) {
         return proc_task(a) != proc_task(b);
     }
     true
@@ -1981,10 +2147,10 @@ impl Search {
     fn dep(in self, pa: u64, na: u64, pb: u64, nb: u64) -> bool {
         let ta = proc_tag(pa);
         let tb = proc_tag(pb);
-        if ta == 2 || tb == 2 {
+        if ta == Proc::Timer || tb == Proc::Timer {
             return true;
         }
-        if ta == 0 && tb == 0 {
+        if ta == Proc::Task && tb == Proc::Task {
             return pa
                 == pb
                 || self
@@ -1994,13 +2160,13 @@ impl Search {
                 || self
                 .cancels(nb, pa);
         }
-        if ta == 0 && tb == 1 {
+        if ta == Proc::Task && tb == Proc::Io {
             return pa == proc_task(pb);
         }
-        if ta == 1 && tb == 0 {
+        if ta == Proc::Io && tb == Proc::Task {
             return proc_task(pa) == pb;
         }
-        if ta == 1 && tb == 1 {
+        if ta == Proc::Io && tb == Proc::Io {
             return proc_task(pa) == proc_task(pb);
         }
         true
@@ -2132,7 +2298,7 @@ impl Search {
         let end = self.en_end(n);
         for i in start..end {
             let q = at(in self.en.as_slice(), i);
-            if (q >> 8) == (p >> 8) {
+            if (q >> IO_CHOICE_BITS) == (p >> IO_CHOICE_BITS) {
                 self.en_bt.try_set(i, true);
             }
         }
@@ -2657,13 +2823,13 @@ pub fn search_choose(inout s: Search) -> Draw {
     if p == none() {
         if at(in s.n_en_len.as_slice(), d) == 0 {
             return Draw {
-                code: 2,
+                code: Choose::Quiesced,
                 value: 0
             };
         }
         s.stats.sleep_blocked = inc(s.stats.sleep_blocked);
         return Draw {
-            code: 1,
+            code: Choose::AllSleep,
             value: 0
         };
     }
@@ -2731,7 +2897,7 @@ pub fn search_choose(inout s: Search) -> Draw {
     s.p_next = next;
     s.p_mark = mark;
     Draw {
-        code: 0,
+        code: Choose::Run,
         value: p
     }
 }
@@ -2762,7 +2928,7 @@ pub fn search_child(
 ) {
     let d = wrapping_sub(s.ev_proc.len(), 1);
     let p = s.p_proc;
-    let running = if proc_tag(p) == 0 {
+    let running = if proc_tag(p) == Proc::Task {
         if still_ready {
             p
         } else {

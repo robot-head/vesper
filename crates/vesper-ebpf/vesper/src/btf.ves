@@ -24,8 +24,6 @@
 
 // BTF (src/btf.rs, include/uapi/linux/btf.h): the header, its field
 // offsets, and the 12-byte `struct btf_type`.
-const BTF_MAGIC: u64 = 60319;
-const BTF_VERSION: u64 = 1;
 const BTF_HDR_LEN: u64 = 24;
 const HDR_VERSION: u64 = 2;
 const HDR_HDR_LEN: u64 = 4;
@@ -49,26 +47,37 @@ const INT_ENCODING_MASK: u64 = 15;
 const INT_OFFSET_SHIFT: u64 = 16;
 const INT_BYTE_MASK: u64 = 255;
 
-// `BTF_KIND_*`.
-const KIND_INT: u64 = 1;
-const KIND_PTR: u64 = 2;
-const KIND_ARRAY: u64 = 3;
-const KIND_STRUCT: u64 = 4;
-const KIND_UNION: u64 = 5;
-const KIND_ENUM: u64 = 6;
-const KIND_FWD: u64 = 7;
-const KIND_TYPEDEF: u64 = 8;
-const KIND_VOLATILE: u64 = 9;
-const KIND_CONST: u64 = 10;
-const KIND_RESTRICT: u64 = 11;
-const KIND_FUNC: u64 = 12;
-const KIND_FUNC_PROTO: u64 = 13;
-const KIND_VAR: u64 = 14;
-const KIND_DATASEC: u64 = 15;
-const KIND_FLOAT: u64 = 16;
-const KIND_DECL_TAG: u64 = 17;
-const KIND_TYPE_TAG: u64 = 18;
-const KIND_ENUM64: u64 = 19;
+// `BTF_KIND_*` (shared with btf_ext.ves and core.ves), and `Missing`,
+// core.ves `tkind`'s code for an id past the table.
+pub enum BtfKind: u64 {
+    Void,
+    Int,
+    Ptr,
+    Array,
+    Struct,
+    Union,
+    Enum,
+    Fwd,
+    Typedef,
+    Volatile,
+    Const,
+    Restrict,
+    Func,
+    FuncProto,
+    Var,
+    Datasec,
+    Float,
+    DeclTag,
+    TypeTag,
+    Enum64,
+    Missing = 99,
+}
+
+// The BTF magic and version of `struct btf_header` (also `.BTF.ext`).
+pub enum BtfHeader: u64 {
+    Magic = 60319,
+    Version = 1,
+}
 
 // Sign extension of a 32-bit enum value.
 const SIGN_BIT32: u64 = 2147483648;
@@ -121,11 +130,11 @@ fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 {
 
 // Entry words per kind after the seven-word record header.
 fn entry_words(kind: u64) -> u64 {
-    if kind == KIND_STRUCT || kind == KIND_UNION {
+    if kind == BtfKind::Struct || kind == BtfKind::Union {
         4
-    } else if kind == KIND_ENUM || kind == KIND_ENUM64 || kind == KIND_FUNC_PROTO {
+    } else if kind == BtfKind::Enum || kind == BtfKind::Enum64 || kind == BtfKind::FuncProto {
         2
-    } else if kind == KIND_DATASEC {
+    } else if kind == BtfKind::Datasec {
         3
     } else {
         0
@@ -268,28 +277,33 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         let vlen = info & INFO_VLEN_MASK;
         let kflag = (info >> INFO_KFLAG_SHIFT) != 0;
         // words the kind reads after the common 12 bytes
-        let fixed: u64 = if kind == KIND_INT || kind == KIND_VAR || kind == KIND_DECL_TAG {
+        let fixed: u64 = if kind
+            == BtfKind::Int
+            || kind
+            == BtfKind::Var
+            || kind
+            == BtfKind::DeclTag {
             1
-        } else if kind == KIND_ARRAY {
+        } else if kind == BtfKind::Array {
             3
         } else {
             0
         };
         let per: u64 = if kind
-            == KIND_STRUCT
+            == BtfKind::Struct
             || kind
-            == KIND_UNION
+            == BtfKind::Union
             || kind
-            == KIND_DATASEC
+            == BtfKind::Datasec
             || kind
-            == KIND_ENUM64 {
+            == BtfKind::Enum64 {
             3
-        } else if kind == KIND_ENUM || kind == KIND_FUNC_PROTO {
+        } else if kind == BtfKind::Enum || kind == BtfKind::FuncProto {
             2
         } else {
             0
         };
-        if kind == 0 || kind > KIND_ENUM64 {
+        if kind == 0 || kind > BtfKind::Enum64 {
             bad = kind;
             return 6;
         }
@@ -302,20 +316,20 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         let mut c: u64 = 0;
         let mut d: u64 = 0;
         let mut n: u64 = 0;
-        if kind == KIND_INT {
+        if kind == BtfKind::Int {
             let w = le32(in types, at);
             a = sot;
             b = (w >> INT_ENCODING_SHIFT) & INT_ENCODING_MASK;
             c = (w >> INT_OFFSET_SHIFT) & INT_BYTE_MASK;
             d = w & INT_BYTE_MASK;
-        } else if kind == KIND_ARRAY {
+        } else if kind == BtfKind::Array {
             a = le32(in types, at);
             b = le32(in types, wrapping_add(at, 4));
             c = le32(in types, wrapping_add(at, 8));
-        } else if kind == KIND_STRUCT || kind == KIND_UNION || kind == KIND_DATASEC {
+        } else if kind == BtfKind::Struct || kind == BtfKind::Union || kind == BtfKind::Datasec {
             a = sot;
             n = vlen;
-        } else if kind == KIND_ENUM || kind == KIND_ENUM64 {
+        } else if kind == BtfKind::Enum || kind == BtfKind::Enum64 {
             a = sot;
             b = if kflag {
                 1
@@ -323,19 +337,19 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                 0
             };
             n = vlen;
-        } else if kind == KIND_FWD {
+        } else if kind == BtfKind::Fwd {
             a = if kflag {
                 1
             } else {
                 0
             };
-        } else if kind == KIND_FUNC {
+        } else if kind == BtfKind::Func {
             a = sot;
             b = vlen;
-        } else if kind == KIND_FUNC_PROTO {
+        } else if kind == BtfKind::FuncProto {
             a = sot;
             n = vlen;
-        } else if kind == KIND_VAR || kind == KIND_DECL_TAG {
+        } else if kind == BtfKind::Var || kind == BtfKind::DeclTag {
             a = sot;
             b = le32(in types, at);
         } else {
@@ -345,17 +359,17 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         // `BtfType::name_off`: these kinds carry no name
         let named = !(
             kind
-                == KIND_PTR
+                == BtfKind::Ptr
                 || kind
-                == KIND_ARRAY
+                == BtfKind::Array
                 || kind
-                == KIND_VOLATILE
+                == BtfKind::Volatile
                 || kind
-                == KIND_CONST
+                == BtfKind::Const
                 || kind
-                == KIND_RESTRICT
+                == BtfKind::Restrict
                 || kind
-                == KIND_FUNC_PROTO
+                == BtfKind::FuncProto
         );
         out.push(kind);
         out
@@ -373,7 +387,7 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
         out.push(n);
         at = wrapping_add(at, wrapping_mul(fixed, 4));
         for i in 0..n {
-            if kind == KIND_STRUCT || kind == KIND_UNION {
+            if kind == BtfKind::Struct || kind == BtfKind::Union {
                 let off = le32(in types, wrapping_add(at, 8));
                 out.push(le32(in types, at));
                 out.push(le32(in types, wrapping_add(at, 4)));
@@ -384,7 +398,7 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                     out.push(off);
                     out.push(0);
                 }
-            } else if kind == KIND_ENUM {
+            } else if kind == BtfKind::Enum {
                 out.push(le32(in types, at));
                 let v = le32(in types, wrapping_add(at, 4));
                 out
@@ -395,7 +409,7 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                         v
                     }
                 );
-            } else if kind == KIND_ENUM64 {
+            } else if kind == BtfKind::Enum64 {
                 out.push(le32(in types, at));
                 out
                     .push(
@@ -403,7 +417,7 @@ fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -
                         le32(in types, wrapping_add(at, 8)) << 32
                     )
                 );
-            } else if kind == KIND_FUNC_PROTO {
+            } else if kind == BtfKind::FuncProto {
                 out.push(le32(in types, at));
                 out.push(le32(in types, wrapping_add(at, 4)));
             } else {
@@ -441,39 +455,39 @@ fn validate(
         let k = entry_words(kind);
         let mut past = false;
         if kind
-            == KIND_PTR
+            == BtfKind::Ptr
             || kind
-            == KIND_TYPEDEF
+            == BtfKind::Typedef
             || kind
-            == KIND_VOLATILE
+            == BtfKind::Volatile
             || kind
-            == KIND_CONST
+            == BtfKind::Const
             || kind
-            == KIND_RESTRICT
+            == BtfKind::Restrict
             || kind
-            == KIND_VAR
+            == BtfKind::Var
             || kind
-            == KIND_DECL_TAG
+            == BtfKind::DeclTag
             || kind
-            == KIND_TYPE_TAG
+            == BtfKind::TypeTag
             || kind
-            == KIND_FUNC {
+            == BtfKind::Func {
             past = a >= ntypes;
-        } else if kind == KIND_ARRAY {
+        } else if kind == BtfKind::Array {
             past = a >= ntypes || b >= ntypes;
-        } else if kind == KIND_FUNC_PROTO {
+        } else if kind == BtfKind::FuncProto {
             past = a >= ntypes;
         }
         if kind
-            == KIND_STRUCT
+            == BtfKind::Struct
             || kind
-            == KIND_UNION
+            == BtfKind::Union
             || kind
-            == KIND_FUNC_PROTO
+            == BtfKind::FuncProto
             || kind
-            == KIND_DATASEC {
+            == BtfKind::Datasec {
             // the type is entry word 1 of a member or param, word 0 of a var
-            let at: u64 = if kind == KIND_DATASEC {
+            let at: u64 = if kind == BtfKind::Datasec {
                 0
             } else {
                 1
@@ -495,15 +509,15 @@ fn validate(
             return c0;
         }
         if kind
-            == KIND_STRUCT
+            == BtfKind::Struct
             || kind
-            == KIND_UNION
+            == BtfKind::Union
             || kind
-            == KIND_ENUM
+            == BtfKind::Enum
             || kind
-            == KIND_ENUM64
+            == BtfKind::Enum64
             || kind
-            == KIND_FUNC_PROTO {
+            == BtfKind::FuncProto {
             for i in 0..n {
                 let o = word_at(in out, wrapping_add(e, wrapping_mul(i, k)));
                 let ci = check_name(in base, in own, o);
@@ -579,11 +593,11 @@ fn parse_sections(
 pub fn parse_btf(in btf: Slice[u8], split: bool, base_types: u64, in base_strings: Slice[u8])
     -> ChunkSeq[u64] {
     let len = btf.len();
-    if len < BTF_HDR_LEN || (byte(in btf, 0) | (byte(in btf, 1) << 8)) != BTF_MAGIC {
+    if len < BTF_HDR_LEN || (byte(in btf, 0) | (byte(in btf, 1) << 8)) != BtfHeader::Magic {
         return failed(0, 0);
     }
     let version = byte(in btf, HDR_VERSION);
-    if version != BTF_VERSION {
+    if version != BtfHeader::Version {
         return failed(1, version);
     }
     let hdr_len = le32(in btf, HDR_HDR_LEN);
