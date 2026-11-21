@@ -140,6 +140,26 @@ test {
         add(a, b) == sum && inc(a) == next && max64(a, b) == largest && narrow(a) == low
     }
 
+    // @case zero(0, 0, 0)
+    // @case right_zero(13, 0, 13)
+    // @case exactly_maximum(18446744073709551614, 1, 18446744073709551615)
+    // @case overflow(18446744073709551615, 1, 18446744073709551615)
+    fn test_saturating_sum(a: u64, b: u64, expected: u64) -> bool {
+        saturating_add_u64(a, b) == expected && saturating_add_u64(b, a) == expected
+    }
+
+    // @case zero(0, 18446744073709551615, 0)
+    // @case small(13, 7, 91)
+    // @case equal(5, 5, 25)
+    // @case one_high_half(4294967296, 3, 12884901888)
+    // @case two_high_halves(4294967296, 4294967296, 18446744073709551615)
+    // @case high_product_overflow(18446744073709551615, 2, 18446744073709551615)
+    // @case low_product_overflow(4294967298, 4294967295, 18446744073709551615)
+    // @case exactly_maximum(4294967297, 4294967295, 18446744073709551615)
+    fn test_saturating_product(a: u64, b: u64, expected: u64) -> bool {
+        saturating_mul_u64(a, b) == expected && saturating_mul_u64(b, a) == expected
+    }
+
     // @case no_shift(42, 0, 42)
     // @case highest_bit(1, 63, 9223372036854775808)
     // @case discards_high_bits(9223372036854775809, 1, 2)

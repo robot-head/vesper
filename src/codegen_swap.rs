@@ -31,7 +31,7 @@
 //! - `Err(e)`: the compile fails with `e`.
 //!
 //! A hook must emit exactly what the Rust code would (the differential of
-//! tests/self_host_codegen_swap*.rs compares per-function CLIF text, object
+//! crates/vesper-codegen-swap-test compares per-function CLIF text, object
 //! bytes and JIT runs). The Rust bookkeeping around an emission (value
 //! infos, pointer parents) stays in Rust and still runs.
 //!

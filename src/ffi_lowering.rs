@@ -684,7 +684,7 @@ impl ForeignChecked {
     /// JIT-compile `entry`, whose parameters and result are each one word
     /// and whose row holds only foreign effects, binding the foreign
     /// symbols as [`Self::jit`] does, for a Rust host that calls it many
-    /// times: the SH4 codegen hooks of tests/self_host_codegen_swap*.rs
+    /// times: the SH4 codegen hooks of crates/vesper-codegen-swap-test
     /// (#1275).
     pub fn word_function(
         &self,
@@ -736,6 +736,17 @@ impl ForeignChecked {
         &self,
         entry: &str,
         fuel: Option<u64>,
+        host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
+    ) -> Result<crate::runtime::Value, FfiError> {
+        self.evaluate_with_options(entry, fuel, true, host)
+    }
+
+    /// Run in the evaluator with a fuel limit and a choice of optimization mode.
+    pub fn evaluate_with_options(
+        &self,
+        entry: &str,
+        fuel: Option<u64>,
+        optimize: bool,
         mut host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
     ) -> Result<crate::runtime::Value, FfiError> {
         let fail = |m: String| FfiError::new(FfiErrorKind::Codegen, m, None);
@@ -748,6 +759,7 @@ impl ForeignChecked {
             }
         }
         let mut runtime = crate::runtime::Runtime::new(&world);
+        runtime.optimize = optimize;
         if let Some(fuel) = fuel {
             runtime.fuel = fuel;
         }

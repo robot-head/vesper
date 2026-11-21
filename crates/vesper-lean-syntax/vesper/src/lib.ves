@@ -1727,6 +1727,243 @@ pub fn references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
 }
 
 test {
+    fn text_matches(in actual: Str, in expected: Str) -> bool {
+        actual == expected
+    }
+
+    // The fixtures use the same prefix-order words as the Rust encoder.
+    // Decimal text keeps differently sized word streams in one test table.
+    fn syntax_words(in encoded: Str) -> ChunkSeq[u64] {
+        let mut words = ChunkSeq::new[u64]();
+        let mut value: u64 = 0;
+        for i in 0..encoded.len() {
+            let b = byte(in encoded, i);
+            if b == 32 {
+                words.push(value);
+                value = 0;
+            } else {
+                value = wrapping_add(wrapping_mul(value, 10), wrapping_sub(widen_u64(b), 48));
+            }
+        }
+        if encoded.len() > 0 {
+            words.push(value);
+        }
+        words
+    }
+
+    // @case hole(in "0", in "xyab", in "_")
+    // @case prop(in "2", in "xyab", in "Prop")
+    // @case type_zero(in "3 0", in "xyab", in "Type")
+    // @case type_level(in "3 42", in "xyab", in "(Type 42)")
+    // @case qualified(in "1 1 2 0 1 1 1", in "xyab", in "_root_.«x».«y»")
+    // @case local(in "1 0 1 0 1", in "xyab", in "«x»")
+    // @case literal(in "4 2 2", in "xyab", in "ab")
+    // @case false_value(in "5 0", in "xyab", in "false")
+    // @case true_value(in "5 1", in "xyab", in "true")
+    // @case application_without_arguments(in "8 0 1 2", in "xyab", in "Prop")
+    // @case application_with_named_argument(in "8 2 1 2 0 0 1 0 1 5 1", in "xyab", in "(Prop _ («x» := true))")
+    // @case lambda(in "9 2 0 1 0 1 2 1 0 3 0 5 1", in "xyab", in "(fun («x» : Prop) {_ : Type} => true)")
+    // @case forall(in "10 1 2 0 2 2", in "xyab", in "(∀ [Prop] , Prop)")
+    // @case arrow(in "11 2 3 0", in "xyab", in "(Prop → Type)")
+    // @case product(in "12 2 2 0", in "xyab", in "(Prop × _)")
+    // @case unit(in "13 0", in "xyab", in "()")
+    // @case tuple(in "13 2 2 0", in "xyab", in "(Prop, _)")
+    // @case list(in "14 2 2 0", in "xyab", in "[Prop, _]")
+    // @case typed_let(in "15 1 0 1 1 2 5 1 1 0 1 0 1", in "xyab", in "(let «x» : Prop := true; «x»)")
+    // @case conditional(in "16 5 1 2 0", in "xyab", in "(if true then Prop else _)")
+    // @case match_literals(in "17 3 0 4 2 2 2 5 0 0 6 0 1 25", in "xyab", in "(match _ with | ab => Prop | false => _ | \"x\" => rfl)")
+    // @case match_constructor(in "17 2 0 2 0 1 0 1 0 2 2 0 1 0 1 1 1 1 1 25", in "xyab", in "(match _ with | «x» => Prop | («x» «y») => rfl)")
+    // @case match_tuple(in "17 1 0 3 2 0 1 1 1 25", in "xyab", in "(match _ with | (_, «y») => rfl)")
+    // @case match_record(in "17 1 0 9 2 0 1 0 1 1 1 1 1 25", in "xyab", in "(match _ with | { «x» := _, «y» := «y» } => rfl)")
+    // @case match_quoted_char(in "17 1 0 7 0 1 25", in "xyab", in "(match _ with | 'x' => rfl)")
+    // @case match_signed_integer(in "17 1 0 8 18446744073709551615 18446744073709551615 25", in "xyab", in "(match _ with | -1 => rfl)")
+    // @case match_large_integer(in "17 1 0 8 0 1 25", in "xyab", in "(match _ with | 18446744073709551616 => rfl)")
+    // @case field_projection(in "18 0 0 1 1", in "xyab", in "(_).«y»")
+    // @case tuple_projection(in "18 0 1 2", in "xyab", in "(_).2")
+    // @case ascription(in "19 0 2", in "xyab", in "(_ : Prop)")
+    // @case negate(in "20 0 0", in "xyab", in "(-_)")
+    // @case proposition_not(in "20 1 0", in "xyab", in "(¬ _)")
+    // @case boolean_not(in "20 2 0", in "xyab", in "(!_)")
+    // @case record(in "22 2 0 1 2 1 1 0", in "xyab", in "{ «x» := Prop, «y» := _ }")
+    // @case record_update(in "23 1 0 0 1 2", in "xyab", in "{ _ with «x» := Prop }")
+    // @case do_let_assign(in "24 2 0 1 1 0 1 0 5 1 2 0 1 5 0 0", in "xyab", in "(do { let mut «x» := true; «x» := false; _ })")
+    // @case do_bind(in "24 1 1 0 2 0", in "xyab", in "(do { let _ ← Prop; _ })")
+    // @case do_typed_bind(in "24 1 4 1 0 1 2 5 1 0", in "xyab", in "(do { let («x» : Prop) ← true; _ })")
+    // @case do_local_instance(in "24 1 5 1 0 1 2 0 25", in "xyab", in "(do { letI «x» : Prop := _; rfl })")
+    // @case do_if_statement(in "24 1 6 5 1 0 1 2 3 2 3 0 25", in "xyab", in "(do { if true then { pure () } else { Prop; _ }; rfl })")
+    // @case do_match_statement(in "24 1 7 2 0 5 1 0 0 1 3 2 25", in "xyab", in "(do { match _ with | true => { pure () } | _ => { Prop }; rfl })")
+    // @case do_nested_actions(in "24 0 16 5 1 24 0 2 24 0 17 1 0 0 25", in "xyab", in "(do { if true then { Prop } else { match _ with | _ => { rfl } } })")
+    // @case do_action_nested_do(in "24 0 24 0 2", in "xyab", in "(do { do { Prop } })")
+    // @case reflexivity(in "25", in "xyab", in "rfl")
+    // @case decide(in "26", in "xyab", in "(by decide)")
+    // @case nomatch(in "27 0", in "xyab", in "(nomatch _)")
+    // @case binary_add(in "21 0 2 0", in "", in "(Prop + _)")
+    // @case binary_sub(in "21 1 2 0", in "", in "(Prop - _)")
+    // @case binary_mul(in "21 2 2 0", in "", in "(Prop * _)")
+    // @case binary_div(in "21 3 2 0", in "", in "(Prop / _)")
+    // @case binary_mod(in "21 4 2 0", in "", in "(Prop % _)")
+    // @case binary_eq(in "21 5 2 0", in "", in "(Prop = _)")
+    // @case binary_ne(in "21 6 2 0", in "", in "(Prop ≠ _)")
+    // @case binary_beq(in "21 7 2 0", in "", in "(Prop == _)")
+    // @case binary_bne(in "21 8 2 0", in "", in "(Prop != _)")
+    // @case binary_lt(in "21 9 2 0", in "", in "(Prop < _)")
+    // @case binary_le(in "21 10 2 0", in "", in "(Prop ≤ _)")
+    // @case binary_gt(in "21 11 2 0", in "", in "(Prop > _)")
+    // @case binary_ge(in "21 12 2 0", in "", in "(Prop ≥ _)")
+    // @case binary_and(in "21 13 2 0", in "", in "(Prop ∧ _)")
+    // @case binary_or(in "21 14 2 0", in "", in "(Prop ∨ _)")
+    // @case binary_band(in "21 15 2 0", in "", in "(Prop && _)")
+    // @case binary_bor(in "21 16 2 0", in "", in "(Prop || _)")
+    // @case binary_iff(in "21 17 2 0", in "", in "(Prop ↔ _)")
+    // @case escaped_string(in "6 0 7", in "a\\\n\r\t\"b", in "\"a\\\\\\n\\r\\t\\\"b\"")
+    // @case escaped_char(in "7 0 1", in "'", in "'\\''")
+    // @case string_controls(in "6 0 15", in "a\u000f\u001a\u001f  Ω", in "\"a\\x0f\\x1a\\x1f\\x7f\\x9f\\u2028\\u2029Ω\"")
+    // @case match_minimum_integer(in "17 1 0 8 0 9223372036854775808 25", in "", in "(match _ with | -170141183460469231731687303715884105728 => rfl)")
+    // @case match_maximum_integer(in "17 1 0 8 18446744073709551615 9223372036854775807 25", in "", in "(match _ with | 170141183460469231731687303715884105727 => rfl)")
+    // @case do_match_action_with_two_arms(in "24 0 17 2 0 0 25 5 1 26", in "", in "(do { match _ with | _ => { rfl } | true => { (by decide) } })")
+    fn test_render_encoded_term(in encoded: Str, in pool: Str, in expected: Str) -> bool {
+        let words = syntax_words(in encoded);
+        let result: Option[String] = handle Fail[LeanError] in {
+            render_term(in words.as_slice(), in pool)
+        } with {
+            return rendered => Option::Some(rendered),
+            raise(error, k) => Option::None,
+        };
+        match result {
+            Option::Some(rendered) => text_matches(in rendered.as_str(), in expected),
+            Option::None => false,
+        }
+    }
+
+    // @case imports(in "1 2 0 1 1 1 0", in "xyab", in "import «x».«y»\n\n")
+    // @case empty(in "0 0", in "xyab", in "")
+    // @case options(in "0 3 1 0 0 1 1 1 1 10 1 2 1 20", in "xyab", in "set_option linter.unusedVariables true\n\nset_option maxRecDepth 10\n\nset_option maxHeartbeats 20\n\n")
+    // @case definition(in "0 1 2 0 0 1 0 1 0 2 5 1", in "xyab", in "def «x»  : Prop := true\n\n")
+    // @case mutual_definitions(in "0 1 4 1 0 0 1 0 1 0 2 5 1", in "xyab", in "mutual\n  def «x»  : Prop := true\nend\n\n")
+    // @case namespace(in "0 1 6 0 1 0 1 2 9 2 10 0", in "xyab", in "namespace «x»\n#eval Prop\n#check _\nend «x»\n\n")
+    // @case theorem_and_example(in "0 2 7 0 1 0 1 0 2 25 8 0 2 26", in "xyab", in "theorem «x»  : Prop := rfl\n\nexample  : Prop := (by decide)\n\n")
+    // @case named_instance(in "0 1 0 1 0 1 0 1 0 2 0", in "xyab", in "instance «x»  : Prop := _\n\n")
+    // @case structure(in "0 1 3 2 0 1 0 1 0 2 0 1 2 1 0 1 1 2 0 2 0 1 2 1 0 1 3 1", in "xyab", in "structure «x»  where\n  «x» : Prop := _\n  «y» : Prop\n  deriving «a», «b»\n\n")
+    // @case class(in "0 1 3 0 0 1 0 1 0 1 1 1 2 0", in "xyab", in "class «x»  where\n  «y» : Prop\n\n")
+    // @case inductive(in "0 1 3 1 0 1 0 1 0 3 0 2 1 1 0 0 2 1 0 1 2 1 0 1 3 1", in "xyab", in "inductive «x»  : Type where\n  | «y» \n  | «a»  : Prop\n  deriving «b»\n\n")
+    // @case mutual_types(in "0 1 5 1 2 0 1 0 1 0 0 0", in "xyab", in "mutual\n  structure «x»  where\nend\n\n")
+    // @case definitions(in "0 4 2 1 0 1 0 1 0 2 0 2 2 0 1 0 1 0 2 0 2 3 0 1 0 1 0 2 0 2 4 0 1 0 1 0 2 0", in "xyab", in "noncomputable def «x»  : Prop := _\n\npartial def «x»  : Prop := _\n\nabbrev «x»  : Prop := _\n\n@[simp] def «x»  : Prop := _\n\n")
+    fn test_render_encoded_module(in encoded: Str, in pool: Str, in expected: Str) -> bool {
+        let words = syntax_words(in encoded);
+        let result: Option[String] = handle Fail[LeanError] in {
+            render_module(in words.as_slice(), in pool)
+        } with {
+            return rendered => Option::Some(rendered),
+            raise(error, k) => Option::None,
+        };
+        match result {
+            Option::Some(rendered) => text_matches(in rendered.as_str(), in expected),
+            Option::None => false,
+        }
+    }
+
+    // @case one_tuple(in "13 1", false, 1)
+    // @case lambda_without_binder(in "9 0", false, 2)
+    // @case short_product(in "12 1", false, 3)
+    // @case empty_match(in "17 0", false, 4)
+    // @case empty_update(in "23 0", false, 5)
+    // @case mutable_wildcard(in "24 1 0 1 0", false, 6)
+    // @case empty_do_match(in "24 1 7 0", false, 7)
+    // @case wrong_option_kind(in "0 1 1 0 1 0", true, 8)
+    // @case empty_mutual(in "0 1 4 0", true, 9)
+    // @case rooted_namespace(in "0 1 6 1", true, 10)
+    // @case argument_error_precedes_function_error(in "8 1 2 9 0 0 13 1", false, 1)
+    fn test_render_error(in encoded: Str, module: bool, expected: u64) -> bool {
+        let words = syntax_words(in encoded);
+        let actual: u64 = handle Fail[LeanError] in {
+            if module {
+                render_module(in words.as_slice(), in "")
+            } else {
+                render_term(in words.as_slice(), in "")
+            }
+        } with {
+            return rendered => 0,
+            raise(error, k) => match error {
+                LeanError::OneTuple => 1,
+                LeanError::NoBinders => 2,
+                LeanError::ShortProduct => 3,
+                LeanError::EmptyMatch => 4,
+                LeanError::EmptyUpdate => 5,
+                LeanError::MutablePattern => 6,
+                LeanError::EmptyStatementMatch => 7,
+                LeanError::OptionType => 8,
+                LeanError::EmptyMutual => 9,
+                LeanError::RootedNamespace => 10,
+            },
+        };
+        actual == expected
+    }
+
+    fn word_stream_matches(in actual: ChunkSeq[u64], in expected: Str) -> bool {
+        let words = syntax_words(in expected);
+        if actual.len() != words.len() {
+            return false;
+        }
+        for i in 0..words.len() {
+            if actual.try_get(i) != words.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case simple(in "1 0 1 0 1", in "xyab", in "2", in "1")
+    // @case lambda_scope(in "9 1 0 1 0 1 2 13 2 1 0 1 0 1 1 0 1 1 1", in "xyab", in "16", in "10 15")
+    // @case rooted_remains_free(in "9 1 0 1 0 1 2 1 1 1 0 1", in "xyab", in "9", in "8")
+    // @case qualified_remains_free(in "9 1 0 1 0 1 2 1 0 2 0 1 1 1", in "xyab", in "9", in "8")
+    // @case let_value_outside_scope(in "15 1 0 1 0 1 0 1 0 1 1 0 1 0 1", in "xyab", in "7", in "6 11")
+    // @case type_outside_binder_scope(in "9 1 0 1 0 1 1 0 1 0 1 1 0 1 0 1", in "xyab", in "8", in "7 12")
+    // @case projection_and_ascription(in "19 18 1 0 1 0 1 0 0 1 1 0 1 1 1", in "xyab", in "4 12", in "3 11")
+    // @case names_after_literals(in "14 5 3 1 5 1 4 0 1 7 0 1 1 0 1 0 1", in "xyab", in "14", in "13")
+    // @case bound_name_outside_lambda(in "13 2 9 1 0 1 0 1 2 1 0 1 0 1 1 0 1 0 1", in "xyab", in "16", in "10 15")
+    // @case forall_scope(in "10 1 1 1 0 1 1 0 1 1 1 1 0 1 0 1", in "xyab", in "8", in "7 12")
+    // @case unnamed_instance_binder(in "9 1 2 0 1 0 1 1 1 1 0 1 0 1", in "xyab", in "6 11", in "5 10")
+    // @case name_after_arrow(in "13 2 11 1 0 1 0 1 1 0 1 1 1 1 0 1 0 1", in "xyab", in "5 10 15", in "4 9 14")
+    // @case name_after_tuple_projection(in "11 18 1 0 1 0 1 1 2 1 0 1 1 1", in "xyab", in "4 11", in "3 10")
+    // @case named_and_positional_arguments(in "8 2 5 1 0 1 0 1 0 1 0 1 1 1 1 0 1 1 0 1 0 1", in "xyab", in "5 11 19", in "4 10 18")
+    // @case conditional_branches(in "16 1 0 1 0 1 1 0 1 1 1 1 0 1 0 1", in "xyab", in "3 8 13", in "2 7 12")
+    // @case unary_and_binary(in "21 13 20 1 1 0 1 0 1 1 0 1 1 1", in "xyab", in "6 11", in "5 10")
+    // @case product_and_list(in "12 2 14 1 1 0 1 0 1 13 1 1 0 1 1 1", in "xyab", in "6 13", in "5 12")
+    // @case record_fields(in "22 2 0 1 1 0 1 1 1 1 1 1 0 1 0 1", in "xyab", in "6 13", in "5 12")
+    // @case record_updates(in "23 2 1 0 1 0 1 0 1 1 0 1 1 1 1 1 1 0 1 0 1", in "xyab", in "4 11 18", in "3 10 17")
+    // @case nomatch_name(in "27 1 0 1 0 1", in "xyab", in "3", in "2")
+    // @case typed_let_scopes(in "15 1 0 1 1 1 0 1 0 1 1 0 1 0 1 1 0 1 0 1", in "xyab", in "7 12", in "6 11 16")
+    // @case match_arm_scope(in "17 2 1 0 1 1 1 2 0 1 1 1 1 1 0 1 1 0 1 0 1 0 1 0 1 0 1", in "xyab", in "4 24", in "3 17 23")
+    // @case match_tuple_pattern(in "17 1 1 0 1 1 1 3 2 5 1 1 0 1 1 0 1 0 1", in "xyab", in "4", in "3 15")
+    // @case match_literal_patterns(in "17 4 1 0 1 1 1 4 0 1 1 0 1 0 1 6 0 1 1 0 1 0 1 7 0 1 1 0 1 0 1 8 0 0 1 0 1 0 1", in "xyab", in "4 12 20 28 36", in "3 11 19 27 35")
+    // @case match_record_pattern(in "17 1 1 0 1 1 1 9 2 0 1 0 1 1 1 0 1 1 0 1 0 1", in "xyab", in "4", in "3 18")
+    // @case do_let_scope(in "24 2 0 0 1 0 1 1 1 0 1 0 1 1 0 1 0 1 3 1 0 1 0 1 1 0 1 0 1", in "xyab", in "10 15", in "9 14 20 25")
+    // @case do_bind_assignment_scope(in "24 2 1 1 0 1 1 0 1 0 1 2 0 1 1 0 1 0 1 1 0 1 0 1", in "xyab", in "8", in "7 15 20")
+    // @case do_typed_bind_scope(in "24 1 4 1 0 1 1 0 1 0 1 1 0 1 1 1 1 0 1 0 1", in "xyab", in "8 13", in "7 12 17")
+    // @case do_named_instance_scope(in "24 1 5 1 0 1 1 0 1 0 1 1 0 1 0 1 1 0 1 0 1", in "xyab", in "8 13", in "7 12 17")
+    // @case do_unnamed_instance_scope(in "24 1 5 0 1 0 1 0 1 1 0 1 1 1 1 0 1 0 1", in "xyab", in "6 11 16", in "5 10 15")
+    // @case do_branch_scope(in "24 1 6 1 0 1 0 1 1 1 1 0 1 1 0 1 1 1 1 1 3 1 0 1 0 1 1 0 1 0 1", in "xyab", in "5 15 23 28", in "4 14 22 27")
+    // @case do_without_else(in "24 1 6 1 0 1 0 1 0 0 1 0 1 1 1", in "xyab", in "5 12", in "4 11")
+    // @case do_match_scope(in "24 1 7 2 1 0 1 1 1 1 0 1 1 3 1 0 1 0 1 0 1 3 1 0 1 0 1 1 0 1 0 1", in "xyab", in "6 24 29", in "5 15 23 28")
+    // @case repeated_text_at_different_offsets(in "9 1 0 1 0 2 2 13 3 1 0 1 2 2 1 0 1 4 2 1 0 1 4 1", in "aaaaab", in "16 21", in "10 15 20")
+    // @case references_multiple_binders(in "9 2 0 1 0 1 2 0 1 1 1 2 13 2 1 0 1 0 1 1 0 1 1 1", in "xy", in "", in "15 20")
+    fn test_reference_offsets(in encoded: Str, in pool: Str, in free: Str, in all: Str) -> bool {
+        let words = syntax_words(in encoded);
+        let mut with_parameters = ChunkSeq::new[u64]();
+        with_parameters.push(0);
+        with_parameters.extend(in words.as_slice());
+        let free_refs = free_references(in with_parameters.as_slice(), in pool);
+        let refs = references(in words.as_slice(), in pool);
+        word_stream_matches(in free_refs, in free) && word_stream_matches(in refs, in all)
+    }
+
+    fn test_initial_parameters_bind_body_names() -> bool {
+        // One parameter with a free type reference, followed by its use in the body.
+        let words = syntax_words(in "1 0 1 0 1 1 0 1 1 1 1 0 1 0 1");
+        let refs = free_references(in words.as_slice(), in "xT");
+        refs.len() == 1 && refs.try_get(0) == Option::Some(6)
+    }
+
     // @case plain(in "lemma", true)
     // @case unicode(in "αβ", true)
     // @case quoted_by_printer(in "two words", true)
@@ -1741,6 +1978,11 @@ test {
     // @case direction_override(in "a\u202eb", false)
     // @case direction_isolate(in "a\u2066b", false)
     // @case byte_order_mark(in "\ufeffname", false)
+    // @case c1_first(in "a\u007fb", false)
+    // @case c1_last(in "a\u009fb", false)
+    // @case after_c1(in "a\u00a0b", true)
+    // @case direction_embedding(in "a\u202ab", false)
+    // @case direction_isolate_end(in "a\u2069b", false)
     fn test_ident(in text: Str, expected: bool) -> bool {
         valid_ident(in text) == expected
     }
@@ -1769,6 +2011,11 @@ test {
     // @case underscore_at_start(in "Data._List", false)
     // @case punctuation(in "Data.List-2", false)
     // @case unicode_component(in "Data.α", false)
+    // @case ascii_letter_bounds(in "Az.Za.zA.aZ", true)
+    // @case punctuation_before_upper(in "@data", false)
+    // @case punctuation_after_upper(in "[data", false)
+    // @case punctuation_before_lower(in "`data", false)
+    // @case punctuation_after_lower(in "{data", false)
     fn test_module_name(in text: Str, expected: bool) -> bool {
         valid_module(in text) == expected
     }

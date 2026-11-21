@@ -9,7 +9,11 @@
 //! (`ForeignChecked::word_function`) that gets the address of the lent
 //! call. Port lanes 6-17 use this harness unchanged: they install their
 //! family's hook and read the counts.
-#![allow(dead_code)]
+//!
+//! The tests live in this crate, not the root package's tests/: the root
+//! package cannot depend on vesper-cranelift-sys, whose own tests depend on
+//! it. They reach the shared corpus through `tests/common/check_harness.rs`
+//! by path, and the repository through its `repo()`.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -159,4 +159,11 @@ test {
             _ => false,
         }
     }
+
+    // @case empty(in "")
+    // @case nonempty(in "x")
+    fn test_record_rejects_out_of_range_type(in payload: Str) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        !put_record(inout out, 4611686018427387904, in payload.as_bytes())
+    }
 }

@@ -33,7 +33,7 @@ filegroup(
 vesper_port_object(
     name = "crucible_vesper_divergent_rng",
     edit_src = "vesper/src/lib.ves",
-    edits = {"0x9e3779b97f4a7c15)": "0x9e3779b97f4a7c17)"},
+    edits = {"r.word = wrapping_add(r.word, 0x9e3779b97f4a7c15);": "r.word = wrapping_add(r.word, 0x9e3779b97f4a7c17);"},
     library = "crucible",
     package = ":port_package",
     target = VESPER_TARGET,

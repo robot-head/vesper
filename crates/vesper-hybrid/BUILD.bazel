@@ -44,7 +44,7 @@ vesper_hybrid(
         # The codegen swap (#1275) emits through the Cranelift shim.
         "hybrid_codegen": [
             "//:codegen_base_package",
-            "//:cranelift_package",
+            "//packages/vesper-cranelift:cranelift_package",
         ],
         "hybrid_ir_check": [
             "//:check_data_package",

@@ -34,7 +34,7 @@ const DEFAULT_FUEL: u64 = 1_000_000;
 const DEFAULT_MAX_MUTANTS: usize = 256;
 const HARD_MAX_MUTANTS: usize = 2048;
 
-pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--filter <PAT>] [--max-mutants <N>] [--fuel <N>] [--no-cache] [--json]";
+pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--no-cache] [--json]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -105,8 +105,11 @@ pub enum MutantStatus {
 struct Options {
     path: String,
     mutate: bool,
+    mutate_dependency: Option<PathBuf>,
+    optimize: bool,
     filter: Option<String>,
     max_mutants: usize,
+    mutant_offset: usize,
     fuel: u64,
     no_cache: bool,
     json: bool,
@@ -133,8 +136,11 @@ fn parse_u64(text: &str, flag: &str) -> Result<u64, String> {
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut path = None;
     let mut mutate = false;
+    let mut mutate_dependency = None;
+    let mut optimize = true;
     let mut filter = None;
     let mut max_mutants = None;
+    let mut mutant_offset = None;
     let mut fuel = DEFAULT_FUEL;
     let mut no_cache = false;
     let mut json = false;
@@ -142,6 +148,11 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--mutate" if !mutate => mutate = true,
+            "--no-opt" if optimize => optimize = false,
+            "--mutate-dependency" if mutate_dependency.is_none() => {
+                let path = it.next().ok_or("--mutate-dependency requires a file")?;
+                mutate_dependency = Some(PathBuf::from(path));
+            }
             "--no-cache" if !no_cache => no_cache = true,
             "--json" if !json => json = true,
             "--filter" => {
@@ -167,6 +178,15 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 }
                 max_mutants = Some(n);
             }
+            "--mutant-offset" => {
+                if mutant_offset.is_some() {
+                    return Err("duplicate --mutant-offset option".into());
+                }
+                let value = it.next().ok_or("--mutant-offset requires an integer")?;
+                let n = parse_u64(value, "--mutant-offset")?;
+                mutant_offset =
+                    Some(usize::try_from(n).map_err(|_| "--mutant-offset is too large")?);
+            }
             "--fuel" => {
                 let val = it.next().ok_or("--fuel requires a positive integer")?;
                 let n = parse_u64(val, "--fuel")?;
@@ -182,12 +202,24 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     if max_mutants.is_some() && !mutate {
         return Err("--max-mutants requires --mutate".into());
     }
+    if mutant_offset.is_some() && !mutate {
+        return Err("--mutant-offset requires --mutate".into());
+    }
+    if mutate_dependency.is_some() && !mutate {
+        return Err("--mutate-dependency requires --mutate".into());
+    }
+    if !optimize && !mutate {
+        return Err("--no-opt requires --mutate".into());
+    }
     let path = path.ok_or_else(|| USAGE.to_string())?;
     Ok(Options {
         path,
         mutate,
+        mutate_dependency,
+        optimize,
         filter,
         max_mutants: max_mutants.unwrap_or(DEFAULT_MAX_MUTANTS),
+        mutant_offset: mutant_offset.unwrap_or(0),
         fuel,
         no_cache,
         json,
@@ -772,14 +804,23 @@ impl From<&DiscoveredTest> for UnitEntry {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UnitExecution {
+    Standard,
+    MutationBaseline,
+    Mutant,
+}
+
 fn run_tests_on_world(
     source: &str,
     world: &World,
     selected: &[UnitEntry],
     fuel: u64,
-    prefer_jit: bool,
+    execution: UnitExecution,
     foreign: Option<(&ForeignChecked, &EvalHost)>,
+    optimize: bool,
 ) -> (bool, Vec<UnitTestCaseReport>) {
+    let prefer_jit = execution == UnitExecution::Standard;
     let mut fallback: BTreeMap<&str, String> = Default::default();
     let mut batch = None;
     if foreign.is_none() && prefer_jit && !selected.is_empty() {
@@ -826,13 +867,16 @@ fn run_tests_on_world(
                 if let Some((checked, host)) = foreign {
                     let (passed, result, message) = evaluate_outcome(
                         checked
-                            .evaluate_with_fuel(entry, Some(fuel), |call| host.call(call))
+                            .evaluate_with_options(entry, Some(fuel), optimize, |call| {
+                                host.call(call)
+                            })
                             .map_err(|error| error.to_string()),
                     );
                     (passed, result, message, TestEngine::Evaluator, None)
                 } else if let Some(reason) = fallback.get(entry) {
                     let runtime = evaluator.get_or_insert_with(|| Runtime::new(world));
                     runtime.fuel = fuel;
+                    runtime.optimize = optimize;
                     let (passed, result, message) = evaluate_outcome(runtime.run(entry, vec![]));
                     (
                         passed,
@@ -871,6 +915,9 @@ fn run_tests_on_world(
             test_case_pin: None,
             vchrono_capsule: None,
         });
+        if !passed && execution == UnitExecution::Mutant {
+            break;
+        }
     }
     (all_passed, cases)
 }
@@ -1088,6 +1135,7 @@ struct TestProgram {
     module: Module,
     files: Vec<TestSource>,
     sources: Option<SourceMap>,
+    root_file_count: usize,
     imports: Option<Imports>,
 }
 
@@ -1138,6 +1186,7 @@ impl TestProgram {
                 module: parsed.module,
                 files: vec![file],
                 sources: None,
+                root_file_count: 1,
                 imports: None,
             }),
             Err(error) => Err(Box::new(FileUnitTests::failed(display, source, error))),
@@ -1185,7 +1234,7 @@ impl TestProgram {
     fn package(target: &PackageTarget, replacement: Option<(&Path, &str)>) -> Result<Self, String> {
         let mut files = Vec::new();
         let mut found = target.file.is_none();
-        let assembled = packages::load_with_root_parser(&target.root, &mut |path| {
+        let mut parse_root = |path: &Path| {
             let mut source = match replacement {
                 Some((replaced, text)) if path == replaced => text.to_owned(),
                 _ => read_source(path)?,
@@ -1207,7 +1256,15 @@ impl TestProgram {
                 .map_err(|error| format!("{}: {error}", path.display()))?;
             files.push(Some(tested));
             Ok((source, parsed))
-        })?;
+        };
+        let assembled = match replacement {
+            Some(replacement) => packages::load_with_dependency_replacement(
+                &target.root,
+                &mut parse_root,
+                replacement,
+            )?,
+            None => packages::load_with_root_parser(&target.root, &mut parse_root)?,
+        };
         if let Some((path, d)) = assembled.manifest_errors.first() {
             return Err(format!("{path}: {} {}", d.code, d.message));
         }
@@ -1259,6 +1316,7 @@ impl TestProgram {
             })
             .collect();
         let mut prepared = Vec::new();
+        let root_file_count = root_package_files.len();
         for (file, id) in files.into_iter().zip(root_package_files) {
             let Some(mut file) = file else {
                 continue;
@@ -1278,6 +1336,7 @@ impl TestProgram {
             module,
             files: prepared,
             sources: Some(sources),
+            root_file_count,
             imports,
         })
     }
@@ -1774,8 +1833,13 @@ impl TestExecution<'_> {
                 world,
                 &unit_batch_selected,
                 opts.fuel,
-                !opts.mutate,
+                if opts.mutate {
+                    UnitExecution::MutationBaseline
+                } else {
+                    UnitExecution::Standard
+                },
                 foreign,
+                opts.optimize,
             );
             for mut rep in unit_cases {
                 if let Some(plan) = unit_plans.get(&rep.name) {
@@ -2126,7 +2190,48 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
         .map(test_host)
         .transpose()?;
     let mut all_candidates = Vec::new();
-    if let Some(program) = &package_program {
+    let dependency_source = if let Some(path) = &opts.mutate_dependency {
+        let program = package_program
+            .as_ref()
+            .ok_or("--mutate-dependency requires a Loom package")?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Some(
+            program
+                .sources
+                .as_ref()
+                .expect("package source map")
+                .files
+                .iter()
+                .skip(program.root_file_count)
+                .find(|file| {
+                    Path::new(&file.display)
+                        .canonicalize()
+                        .is_ok_and(|p| p == canonical)
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "{} is not a source file in the package dependencies",
+                        path.display()
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    if let Some(file) = dependency_source {
+        if files
+            .iter()
+            .any(|f| !f.selected.is_empty() || !f.replay.is_empty())
+        {
+            all_candidates.extend(
+                collect_source_mutants(&file.display, &file.text, &BTreeSet::new())
+                    .into_iter()
+                    .map(|candidate| (0, candidate)),
+            );
+        }
+    } else if let Some(program) = &package_program {
         if files
             .iter()
             .any(|f| !f.selected.is_empty() || !f.replay.is_empty())
@@ -2160,19 +2265,27 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
             opts.path
         ));
     }
-    let capped = total_candidates > opts.max_mutants;
-    let limit = total_candidates.min(opts.max_mutants);
+    let start = opts.mutant_offset;
+    if start >= total_candidates {
+        return Err(format!(
+            "--mutant-offset {start} is outside the {total_candidates} mutation candidate(s)"
+        ));
+    }
+    let limit = (total_candidates - start).min(opts.max_mutants);
+    let end = start + limit;
+    let capped = end < total_candidates;
 
     let mut reports = Vec::with_capacity(limit);
     let mut killed = 0usize;
     let mut survived = 0usize;
     let mut ill_typed = 0usize;
 
-    for (idx, (file_index, cand)) in all_candidates.iter().take(limit).enumerate() {
+    for (idx, (file_index, cand)) in all_candidates.iter().enumerate().skip(start).take(limit) {
         let file_index = *file_index;
-        let source = match &package_program {
-            Some(program) => &program.files[file_index].source,
-            None => &files[file_index].source,
+        let source = match (dependency_source, &package_program) {
+            (Some(file), _) => &file.text,
+            (None, Some(program)) => &program.files[file_index].source,
+            (None, None) => &files[file_index].source,
         };
         let (line, column) = location(source, cand.start);
         let mut mutated =
@@ -2221,8 +2334,9 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                         checked.world(),
                         &unit.selected,
                         opts.fuel,
-                        false,
+                        UnitExecution::Mutant,
                         checked.foreign(host.as_ref()),
+                        opts.optimize,
                     );
                     cases
                         .into_iter()
@@ -2283,6 +2397,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
                 "mode": "mutate",
                 "passed": gate_passed,
                 "total_candidates": total_candidates,
+                "offset": start,
                 "tested": limit,
                 "capped": capped,
                 "killed": killed,
@@ -2432,5 +2547,39 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         Err(format!(
             "{failed_tests} test(s) failed ({file_errors} file error(s))"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutant_replay_stops_after_the_first_failure() {
+        let source = "fn first() -> bool { false } fn second() -> bool { true }";
+        let checked = check::check(&parser::parse(source).module);
+        assert!(checked.diagnostics.is_empty());
+        let selected = ["first", "second"].map(|name| UnitEntry {
+            name: name.into(),
+            entry: name.into(),
+            span: 0..0,
+        });
+        for (execution, expected_count) in [
+            (UnitExecution::MutationBaseline, 2),
+            (UnitExecution::Mutant, 1),
+        ] {
+            let (passed, reports) = run_tests_on_world(
+                source,
+                &checked.world,
+                &selected,
+                10_000,
+                execution,
+                None,
+                true,
+            );
+            assert!(!passed);
+            assert_eq!(reports.len(), expected_count);
+            assert_eq!(reports[0].name, "first");
+        }
     }
 }

@@ -9,20 +9,15 @@
 //! object and every sampled JIT run must equal the Rust build's, with the
 //! optimizer on and off. `CODEGEN_SWAP_STEP=n` compares every n-th world
 //! (default 1 under Cargo).
-#[path = "common/check_harness.rs"]
+#[path = "../../../tests/common/check_harness.rs"]
 mod check_harness;
-#[path = "common/clif_diff.rs"]
-mod clif_diff;
 
-use clif_diff::*;
+use check_harness::repo;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use vesper::codegen_swap::{self, CodegenHooks, Family, Lent};
 use vesper::native::WordFunction;
-
-fn repo() -> std::path::PathBuf {
-    check_harness::repo()
-}
+use vesper_codegen_swap_test::*;
 
 /// `@vesper/codegen-base`, checked once, and its hooks JIT-compiled.
 struct Hooks {

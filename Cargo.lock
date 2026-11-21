@@ -5567,7 +5567,6 @@ dependencies = [
  "vesper-bench-seed",
  "vesper-chrono",
  "vesper-core",
- "vesper-cranelift-sys",
  "vesper-crucible-seed",
  "vesper-diagnostics-seed",
  "vesper-doc",
@@ -5788,6 +5787,14 @@ dependencies = [
  "vesper-ffi",
  "vesper-fiber-abi",
  "vesper-simpulse-seed",
+]
+
+[[package]]
+name = "vesper-codegen-swap-test"
+version = "0.1.0"
+dependencies = [
+ "vesper",
+ "vesper-cranelift-sys",
 ]
 
 [[package]]

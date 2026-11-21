@@ -11,7 +11,7 @@ lane builds what every later SH4 lane needs to do that:
   them back;
 - **the swap point** `src/codegen_swap.rs`: one optional hook per family,
   called where the Rust code dispatches it;
-- **the lowering differential** `tests/common/clif_diff.rs`: per-function
+- **the lowering differential** (`crates/vesper-codegen-swap-test`): per-function
   CLIF text, object bytes and JIT runs, with the optimizer on and off;
 - **the pilot**: the census lowering family emitted in Vesper
   (`@vesper/codegen-base`) through the `aggregate` hook, in the harness and
@@ -133,7 +133,15 @@ links the `.vsys` symbols from `vesper_cranelift_sys`.
 
 ### Harness
 
-`tests/common/clif_diff.rs` provides the comparison and the hook glue:
+The harness is its own workspace crate, `crates/vesper-codegen-swap-test`.
+The root package cannot depend on vesper-cranelift-sys, because the shim's
+own tests depend on the root package: Cargo accepts that, but Bazel
+reports a dependency cycle. Its tests include the root package's
+`tests/common/check_harness.rs` by path. That file's `repo()` now finds the
+nearest ancestor holding `packages/` and `examples/`, so it works from any
+crate.
+
+Its library (`src/lib.rs`) provides the comparison and the hook glue:
 
 - `compare(name, world, entry, hooks, optimize, run)` builds the world
   twice, once with no hook and once with the hooks, and compares:
@@ -149,7 +157,7 @@ links the `.vsys` symbols from `vesper_cranelift_sys`.
 Port lanes 6-17 use it unchanged: they install their family's hook and read
 the counts.
 
-`tests/self_host_codegen_swap.rs`:
+`tests/self_host_codegen_swap.rs` in that crate:
 
 - the default compiler installs no hook;
 - type codes match the shim's;
@@ -161,10 +169,10 @@ the counts.
 - a declining hook leaves the build unchanged, and a hook error fails the
   compile with its message.
 
-Bazel: `test/self_host_codegen_swap` takes the corpus as data and is marked
-`long`. `vesper_package` gained a `vsys` attribute so the cranelift
+Bazel: the crate's `test/self_host_codegen_swap` takes the corpus as data
+and is marked `long`. `vesper_package` gained a `vsys` attribute so the cranelift
 package's `.vsys` file reaches port builds. There are new
-`//:cranelift_package` and `//:codegen_base_package` targets.
+`//packages/vesper-cranelift:cranelift_package` and `//:codegen_base_package` targets.
 
 ## Stage 1 guard
 
