@@ -1,0 +1,1538 @@
+// The decisions of src/bounds_hoist.rs, each on one function as it stands:
+// `compared_checks` (facts.rs), the counted-loop order and `counted_plan`
+// of `hoist_function`, `next_loop` (facts.rs), `dominated_checks`. Each
+// writes the decision text `Step::decision` holds.
+
+use self::fun::{
+    Arg,
+    Blk,
+    Fun,
+    Ins,
+    add,
+    calls_out,
+    has,
+    has_receiver,
+    hoistable,
+    inc,
+    insert,
+    is_hoisted,
+    keeps_length,
+    n32,
+    set_u32,
+    set_u8,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::graph::{
+    Graph,
+    entered_inside,
+    graph,
+    is_loop_header,
+    natural_loop,
+    no_cut,
+    outside_preds
+};
+use self::rules::{
+    all_blocks,
+    escapes,
+    invariant_local,
+    opaque,
+    single_binding,
+    stable_place,
+    stable_root
+};
+use self::facts::{
+    Edge,
+    Facts,
+    TermNode,
+    facts_new
+};
+use self::text::{
+    Keys,
+    keys_new,
+    put,
+    put_blocks,
+    put_bool,
+    put_i128,
+    put_u128,
+    put_u64
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+const MAX_DEPTH: u64 = 6;
+const MAX_TERMS: u64 = 4;
+const GUARD_COST: u64 = 7;
+
+const OP_INT: u8 = 0;
+const OP_CONST: u8 = 1;
+const OP_LOOP: u8 = 2;
+const OP_READ: u8 = 3;
+const OP_BIND: u8 = 4;
+const OP_WRITE: u8 = 5;
+const OP_BINARY: u8 = 7;
+const OP_SEQ: u8 = 10;
+const T_JUMP: u8 = 1;
+const T_BRANCH: u8 = 2;
+const T_MATCH: u8 = 3;
+const B_LT: u64 = 1;
+const B_LE: u64 = 2;
+const B_ADD: u64 = 5;
+const B_WADD: u64 = 6;
+const B_SUB: u64 = 7;
+const B_WSUB: u64 = 8;
+const S_GET: u64 = 2;
+const S_SLICE_SET: u64 = 5;
+const S_GUARD: u64 = 18;
+const N_INDEX: u8 = 1;
+const N_BOUND: u8 = 2;
+const K_CONST: u8 = 0;
+const K_FIXED: u8 = 2;
+const K_SLOT: u8 = 3;
+const K_PARAM: u8 = 5;
+const K_VALUE: u8 = 6;
+
+pub fn put_access(inout o: ChunkSeq[u8], a: u64) {
+    if a == 0 {
+        put(inout o, "get");
+    } else if a == 1 {
+        put(inout o, "set");
+    } else if a == 2 {
+        put(inout o, "try_get");
+    } else {
+        put(inout o, "try_set");
+    }
+}
+
+fn sep(inout o: ChunkSeq[u8], inout first: bool) {
+    if !first {
+        o.push(32);
+    }
+    first = false;
+}
+
+// ----- compared checks -----------------------------------------------------------
+
+// `compared_checks`: `b:k:access` for each access the dominating comparisons
+// put below its receiver's length.
+pub fn compared_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let mut fa = facts_new(in f);
+    if fa.nedges() == 0 {
+        return;
+    }
+    let mut first = true;
+    for j in 0..fa.g.order.len() {
+        let b = u32_at(in fa.g.order, j);
+        let k = f.block(w(b));
+        for kk in 0..w(k.ic) {
+            let x = add(w(k.i0), kk);
+            let a = fa.access_at(in f, x);
+            if a == 4 {
+                continue;
+            }
+            let i = f.inst(x);
+            let place = f.arg(w(i.g0)).place;
+            let index = f.arg(inc(w(i.g0))).value;
+            let target = fa.length_place(in f, place);
+            let t = fa.term(in f, index);
+            if fa.below_len(in f, t, target, b, kk, b, 0) {
+                sep(inout o, inout first);
+                put_u64(inout o, w(b));
+                o.push(58);
+                put_u64(inout o, kk);
+                o.push(58);
+                put_access(inout o, a);
+            }
+        }
+    }
+}
+
+// ----- counted loops -------------------------------------------------------------
+
+// The counted-loop header shape `crate::loops` lowers `for` to (`header`).
+pub copy struct Head {
+    ok: bool,
+    index: u32,
+    bound: u32,
+    inclusive: bool,
+    body: u32,
+}
+
+pub fn header(in f: Fun, h: u64) -> Head {
+    let no = Head {
+        ok: false,
+        index: 0,
+        bound: 0,
+        inclusive: false,
+        body: 0
+    };
+    let k = f.block(h);
+    if k.ic != 4 {
+        return no;
+    }
+    let first = f.inst(w(k.i0));
+    let i = f.inst(add(w(k.i0), 1));
+    let n = f.inst(add(w(k.i0), 2));
+    let test = f.inst(add(w(k.i0), 3));
+    if first.op != OP_LOOP {
+        return no;
+    }
+    if i.op != OP_READ || f.depth(i.place) != 1 || f.class(f.root_of(i.place)) != N_INDEX {
+        return no;
+    }
+    if n.op != OP_READ || f.depth(n.place) != 1 || f.class(f.root_of(n.place)) != N_BOUND {
+        return no;
+    }
+    if test.op != OP_BINARY || !(test.sub == B_LT || test.sub == B_LE) {
+        return no;
+    }
+    if test.a != i.dest || test.b != n.dest || !f.is_u64(i.dest) || !f.is_u64(n.dest) {
+        return no;
+    }
+    if k.term != T_BRANCH || k.tv != test.dest {
+        return no;
+    }
+    Head {
+        ok: true,
+        index: f.root_of(i.place),
+        bound: f.root_of(n.place),
+        inclusive: test.sub == B_LE,
+        body: k.yes
+    }
+}
+
+// The counted-loop headers, innermost first, each with the innermost loop
+// around it: `h(b,..)` or `h(-)`.
+pub fn order_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let g = graph(in f, in no_cut());
+    let n = f.nblocks();
+    // (loop size, header) of each counted loop, sorted.
+    let mut keys: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for h in 0..n {
+        if header(in f, h).ok {
+            let lp = natural_loop(in g, n32(h));
+            let size = lp.len();
+            keys.push(wrapping_shl_u64(size, 32) | h);
+        }
+    }
+    sort_u64(inout keys);
+    let mut first = true;
+    for j in 0..keys.len() {
+        let h = n32(u64_at(in keys, j) & 4294967295);
+        sep(inout o, inout first);
+        put_u64(inout o, w(h));
+        o.push(40);
+        // The innermost loop around `h`: the first smallest in header order.
+        let mut best = NONE32;
+        let mut best_len = NONE64;
+        for x in 0..n {
+            if n32(x) == h || !is_loop_header(in g, n32(x)) {
+                continue;
+            }
+            let l = natural_loop(in g, n32(x));
+            if has(in l, h) && l.len() < best_len {
+                best = n32(x);
+                best_len = l.len();
+            }
+        }
+        if best == NONE32 {
+            o.push(45);
+        } else {
+            let l = natural_loop(in g, best);
+            put_blocks(inout o, in l);
+        }
+        o.push(41);
+    }
+}
+
+pub fn sort_u64(inout s: ChunkSeq[u64]) {
+    for i in 1..s.len() {
+        let x = u64_at(in s, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let y = u64_at(in s, wrapping_sub(j, 1));
+            if y <= x {
+                break;
+            }
+            let ok = s.try_set(j, y);
+            j = wrapping_sub(j, 1);
+        }
+        let ok = s.try_set(j, x);
+    }
+}
+
+// A linear index form: `sign * i + plus.. - minus..`, its terms in
+// `Counted.offs` (kind << 62 | value or instruction index).
+pub copy struct Lin {
+    ok: bool,
+    sign: i64,
+    p0: u32,
+    pn: u32,
+    m0: u32,
+    mn: u32,
+}
+
+const O_VALUE: u64 = 0;
+const O_LOCAL: u64 = 1;
+const O_CONST: u64 = 2;
+
+fn fail_lin() -> Lin {
+    Lin {
+        ok: false,
+        sign: 0,
+        p0: 0,
+        pn: 0,
+        m0: 0,
+        mn: 0
+    }
+}
+
+// The index analysis of one counted loop (`Affine`).
+pub struct Counted {
+    blocks: ChunkSeq[u32],
+    defined: ChunkSeq[u32],
+    induction: ChunkSeq[u32],
+    // value -> 1 + global index of its last definition / read in the loop
+    defs: ChunkSeq[u64],
+    reads: ChunkSeq[u64],
+    // name -> 1 + the value a once-bound local of the loop holds
+    bound_locals: ChunkSeq[u64],
+    offs: ChunkSeq[u64],
+}
+
+fn set_grow(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    if i >= s.len() {
+        s.resize(inc(i), 0);
+    }
+    let ok = s.try_set(i, x);
+}
+
+impl Counted {
+    fn term(inout self, kind: u64, x: u64) -> Lin {
+        let p0 = n32(self.offs.len());
+        self.offs.push(wrapping_shl_u64(kind, 62) | x);
+        Lin {
+            ok: true,
+            sign: 0,
+            p0: p0,
+            pn: 1,
+            m0: 0,
+            mn: 0
+        }
+    }
+
+    fn copy_range(inout self, a: u32, n: u32) -> u32 {
+        let start = n32(self.offs.len());
+        for i in 0..w(n) {
+            let x = u64_at(in self.offs, add(w(a), i));
+            self.offs.push(x);
+        }
+        start
+    }
+
+    // `Linear::combine`: `x + y` (`x - y` when `negate`).
+    fn combine(inout self, x: Lin, y: Lin, negate: bool) -> Lin {
+        let sign = if negate {
+            wrapping_neg_i64(y.sign)
+        } else {
+            y.sign
+        };
+        if x.sign != 0 && sign != 0 {
+            return fail_lin();
+        }
+        let ya = if negate {
+            y.m0
+        } else {
+            y.p0
+        };
+        let yn = if negate {
+            y.mn
+        } else {
+            y.pn
+        };
+        let za = if negate {
+            y.p0
+        } else {
+            y.m0
+        };
+        let zn = if negate {
+            y.pn
+        } else {
+            y.mn
+        };
+        let p0 = self.copy_range(x.p0, x.pn);
+        let more = self.copy_range(ya, yn);
+        let m0 = self.copy_range(x.m0, x.mn);
+        let more2 = self.copy_range(za, zn);
+        Lin {
+            ok: true,
+            sign: wrapping_add(x.sign, sign),
+            p0: p0,
+            pn: wrapping_add(x.pn, yn),
+            m0: m0,
+            mn: wrapping_add(x.mn, zn)
+        }
+    }
+
+    // `Affine::linear`: the linear form of the `u64` value `v`.
+    fn linear (inout self, in f: Fun, v: u32, depth: u64) -> Lin {
+        if depth > MAX_DEPTH || !f.is_u64(v) {
+            return fail_lin();
+        }
+        if has(in self.induction, v) {
+            return Lin {
+                ok: true,
+                sign: 1,
+                p0: 0,
+                pn: 0,
+                m0: 0,
+                mn: 0
+            };
+        }
+        if !has(in self.defined, v) {
+            return self.term(O_VALUE, w(v));
+        }
+        let d = u64_at(in self.defs, w(v));
+        if d == 0 {
+            return fail_lin();
+        }
+        let x = wrapping_sub(d, 1);
+        let i = f.inst(x);
+        if i.op == OP_INT && !i.neg {
+            return self.term(O_CONST, x);
+        }
+        if i.op == OP_READ && f.depth(i.place) == 1 {
+            let root = f.root_of(i.place);
+            let bl = u64_at(in self.bound_locals, w(root));
+            if bl != 0 {
+                return self.linear (in f, n32(wrapping_sub(bl, 1)), inc(depth));
+            }
+            let r = u64_at(in self.reads, w(v));
+            if r == 0 {
+                return fail_lin();
+            }
+            if invariant_local(in f, in self.blocks, root) {
+                return self.term(O_LOCAL, wrapping_sub(r, 1));
+            }
+            return fail_lin();
+        }
+        if i
+            .op
+            == OP_BINARY
+            && (i.sub == B_ADD || i.sub == B_WADD || i.sub == B_SUB || i.sub == B_WSUB) {
+            let negate = i.sub == B_SUB || i.sub == B_WSUB;
+            let a = self.linear (in f, i.a, inc(depth));
+            if !a.ok {
+                return fail_lin();
+            }
+            let b = self.linear (in f, i.b, inc(depth));
+            if !b.ok {
+                return fail_lin();
+            }
+            return self.combine(a, b, negate);
+        }
+        fail_lin()
+    }
+
+    // `Offset::key`.
+    fn put_offset(in self, in f: Fun, x: u64, inout o: ChunkSeq[u8]) {
+        let kind = x >> 62;
+        let v = x & 4611686018427387903;
+        if kind == O_VALUE {
+            o.push(37);
+            put_u64(inout o, v);
+        } else if kind == O_LOCAL {
+            f.put_name(f.root_of(f.inst(v).place), inout o);
+        } else {
+            let c = f.inst(v);
+            o.push(35);
+            put_u128(inout o, c.lo, c.hi);
+        }
+    }
+
+    // The sorted keys of `n` offsets from `a`, joined by `join`.
+    fn put_terms(in self, in f: Fun, a: u32, n: u32, join: u8, inout o: ChunkSeq[u8]) {
+        let mut keys = keys_new();
+        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for i in 0..w(n) {
+            buf.clear();
+            self.put_offset(in f, u64_at(in self.offs, add(w(a), i)), inout buf);
+            let k = keys.add_key(in buf);
+        }
+        let order = keys.sorted();
+        for i in 0..order.len() {
+            if i > 0 {
+                o.push(join);
+            }
+            keys.put_key(w(u32_at(in order, i)), inout o);
+        }
+    }
+
+    // `Linear::key`.
+    fn put_key(in self, in f: Fun, l: Lin, inout o: ChunkSeq[u8]) {
+        if l.sign < 0 {
+            put(inout o, "-1");
+        } else {
+            put_u64(inout o, wrapping_u64(l.sign));
+        }
+        put(inout o, "i+");
+        self.put_terms(in f, l.p0, l.pn, 43, inout o);
+        o.push(45);
+        self.put_terms(in f, l.m0, l.mn, 45, inout o);
+    }
+}
+
+// A signed 128-bit number as two's-complement words.
+pub copy struct I128 {
+    lo: u64,
+    hi: u64,
+}
+
+fn i128_of(neg: bool, lo: u64, hi: u64) -> I128 {
+    if !neg {
+        return I128 {
+            lo: lo,
+            hi: hi
+        };
+    }
+    // -(hi, lo)
+    let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
+    let carry: u64 = if nlo == 0 {
+        1
+    } else {
+        0
+    };
+    I128 {
+        lo: nlo,
+        hi: wrapping_add(hi ^ 18446744073709551615, carry)
+    }
+}
+
+fn negative(x: I128) -> bool {
+    (x.hi >> 63) != 0
+}
+
+// A slot's constant: whether found, and its value.
+pub copy struct SlotConst {
+    ok: bool,
+    neg: bool,
+    lo: u64,
+    hi: u64,
+}
+
+fn no_const() -> SlotConst {
+    SlotConst {
+        ok: false,
+        neg: false,
+        lo: 0,
+        hi: 0
+    }
+}
+
+// `constant_value`: the integer constant `v` always holds.
+fn constant_value(in f: Fun, v: u32, depth: u64) -> SlotConst {
+    if depth > MAX_DEPTH {
+        return no_const();
+    }
+    for b in 0..f.nblocks() {
+        let k = f.block(b);
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i.dest != v {
+                continue;
+            }
+            if i.op == OP_INT {
+                return SlotConst {
+                    ok: true,
+                    neg: i.neg,
+                    lo: i.lo,
+                    hi: i.hi
+                };
+            }
+            if i
+                .op
+                == OP_READ
+                && f
+                .depth(i.place)
+                == 1
+                && single_binding(in f, f.root_of(i.place)) {
+                let root = f.root_of(i.place);
+                for x in 0..f.insts.len() {
+                    let d = f.inst(x);
+                    if d.op == OP_BIND && f.binds(d, root) {
+                        return constant_value(in f, d.a, inc(depth));
+                    }
+                }
+                return no_const();
+            }
+            return no_const();
+        }
+        for j in 0..w(k.pn) {
+            if f.at(add(w(k.p0), j)) != v {
+                continue;
+            }
+            let mut found = no_const();
+            for p in 0..f.nblocks() {
+                let pk = f.block(p);
+                if pk.term == T_JUMP && w(pk.yes) == b {
+                    if j >= w(pk.tn) {
+                        return no_const();
+                    }
+                    let c = constant_value(in f, f.at(add(w(pk.t0), j)), inc(depth));
+                    if !c.ok {
+                        return no_const();
+                    }
+                    if found.ok && !(found.neg == c.neg && found.lo == c.lo && found.hi == c.hi) {
+                        return no_const();
+                    }
+                    found = c;
+                } else if pk.term == T_BRANCH && (w(pk.yes) == b || w(pk.no) == b) {
+                    return no_const();
+                } else if pk.term == T_MATCH {
+                    for t in 0..w(pk.tn) {
+                        if w(f.at(add(w(pk.t0), t))) == b {
+                            return no_const();
+                        }
+                    }
+                }
+            }
+            return found;
+        }
+    }
+    no_const()
+}
+
+// `slot_constant`: the constant every binding of `slot` gives it.
+fn slot_constant(in f: Fun, slot: u32) -> SlotConst {
+    let mut found = no_const();
+    for x in 0..f.insts.len() {
+        let i = f.inst(x);
+        if i.op == OP_BIND && f.binds(i, slot) {
+            let c = constant_value(in f, i.a, 0);
+            if !c.ok {
+                return no_const();
+            }
+            if found.ok && !(found.neg == c.neg && found.lo == c.lo && found.hi == c.hi) {
+                return no_const();
+            }
+            found = c;
+        }
+    }
+    found
+}
+
+// `trip_count`: whether both range ends are constants, and the count.
+fn trip_count(in f: Fun, head: Head) -> (bool, u64) {
+    let lo = slot_constant(in f, head.index);
+    if !lo.ok {
+        return (false, 0);
+    }
+    let hi = slot_constant(in f, head.bound);
+    if !hi.ok {
+        return (false, 0);
+    }
+    let a = i128_of(lo.neg, lo.lo, lo.hi);
+    let mut b = i128_of(hi.neg, hi.lo, hi.hi);
+    if head.inclusive {
+        // i128::MAX + 1 overflows
+        if b.lo == 18446744073709551615 && b.hi == 9223372036854775807 {
+            return (false, 0);
+        }
+        let nlo = wrapping_add(b.lo, 1);
+        let carry: u64 = if nlo == 0 {
+            1
+        } else {
+            0
+        };
+        b = I128 {
+            lo: nlo,
+            hi: wrapping_add(b.hi, carry)
+        };
+    }
+    // d = b - a, saturating
+    let borrow: u64 = if b.lo < a.lo {
+        1
+    } else {
+        0
+    };
+    let mut d = I128 {
+        lo: wrapping_sub(b.lo, a.lo),
+        hi: wrapping_sub(wrapping_sub(b.hi, a.hi), borrow)
+    };
+    if negative(b) != negative(a) && negative(d) != negative(b) {
+        // overflow: saturate toward b's sign
+        d = if negative(b) {
+            I128 {
+                lo: 0,
+                hi: 9223372036854775808
+            }
+        } else {
+            I128 {
+                lo: 18446744073709551615,
+                hi: 9223372036854775807
+            }
+        };
+    }
+    if negative(d) {
+        return (true, 0);
+    }
+    if d.hi != 0 {
+        return (true, NONE64);
+    }
+    (true, d.lo)
+}
+
+// `bound_invariant`: whether every binding of `head`'s range slots in
+// `outer` takes a value `outer` does not change.
+fn bound_invariant(in f: Fun, head: Head, in outer: ChunkSeq[u32]) -> bool {
+    for bi in 0..outer.len() {
+        let k = f.block(w(u32_at(in outer, bi)));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i.op != OP_BIND || !(f.binds(i, head.bound) || f.binds(i, head.index)) {
+                continue;
+            }
+            // The first definition of the value in `outer`.
+            let mut found = NONE64;
+            for bj in 0..outer.len() {
+                let kk = f.block(w(u32_at(in outer, bj)));
+                for jj in 0..w(kk.ic) {
+                    if f.inst(add(w(kk.i0), jj)).dest == i.a && found == NONE64 {
+                        found = add(w(kk.i0), jj);
+                    }
+                }
+            }
+            let ok = if found == NONE64 {
+                let mut param = false;
+                for bj in 0..outer.len() {
+                    let kk = f.block(w(u32_at(in outer, bj)));
+                    for jj in 0..w(kk.pn) {
+                        if f.at(add(w(kk.p0), jj)) == i.a {
+                            param = true;
+                        }
+                    }
+                }
+                ! param
+            } else {
+                let d = f.inst(found);
+                if d.op == OP_INT || d.op == OP_CONST {
+                    true
+                } else if d.op == OP_READ {
+                    !changed_in(in f, in outer, f.root_of(d.place))
+                } else {
+                    false
+                }
+            };
+            if !ok {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn changed_in(in f: Fun, in outer: ChunkSeq[u32], root: u32) -> bool {
+    for bi in 0..outer.len() {
+        let k = f.block(w(u32_at(in outer, bi)));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if (i.op == OP_BIND && f.binds(i, root))
+                || (i.op == OP_WRITE && f.write_root(i) == root) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// The decision of a `Counted` step: `none`, or the plan's text.
+pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let h = f.header;
+    let head = header(in f, w(h));
+    if !head.ok {
+        put(inout o, "none");
+        return;
+    }
+    let g = graph(in f, in no_cut());
+    if g.npreds(w(h)) == 0 {
+        put(inout o, "none");
+        return;
+    }
+    let blocks = natural_loop(in g, h);
+    if !has(in blocks, head.body) {
+        put(inout o, "none");
+        return;
+    }
+    let outside = outside_preds(in g, h, in blocks);
+    if outside.len() != 1 {
+        put(inout o, "none");
+        return;
+    }
+    let pre = u32_at(in outside, 0);
+    let pk = f.block(w(pre));
+    if pk.term != T_JUMP || pk.yes != h || pk.tn != 0 {
+        put(inout o, "none");
+        return;
+    }
+    if entered_inside(in g, h, in blocks) {
+        put(inout o, "none");
+        return;
+    }
+    for bi in 0..blocks.len() {
+        if f.join_slots(w(u32_at(in blocks, bi))) {
+            put(inout o, "none");
+            return;
+        }
+    }
+    if opaque(in f, in blocks) || escapes(in f, in blocks) {
+        put(inout o, "none");
+        return;
+    }
+    // The bound never changes; the index changes only in latch blocks that
+    // jump straight back to the header.
+    let mut latches: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for bi in 0..blocks.len() {
+        let b = u32_at(in blocks, bi);
+        let k = f.block(w(b));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i.op == OP_WRITE {
+                let r = f.write_root(i);
+                if r == head.bound {
+                    put(inout o, "none");
+                    return;
+                }
+                if r == head.index {
+                    if k.term != T_JUMP || k.yes != h {
+                        put(inout o, "none");
+                        return;
+                    }
+                    let new = insert(inout latches, b);
+                }
+            } else if i.op == OP_BIND && (f.binds(i, head.index) || f.binds(i, head.bound)) {
+                put(inout o, "none");
+                return;
+            }
+        }
+    }
+    let mut c = Counted {
+        blocks: blocks,
+        defined: ChunkSeq::new[u32](),
+        induction: ChunkSeq::new[u32](),
+        defs: ChunkSeq::new[u64](),
+        reads: ChunkSeq::new[u64](),
+        bound_locals: ChunkSeq::new[u64](),
+        offs: ChunkSeq::new[u64]()
+    };
+    // Induction values: reads of the index slot after the header test, and
+    // reads of a local bound once from one.
+    for bi in 0..c.blocks.len() {
+        let b = u32_at(in c.blocks, bi);
+        let k = f.block(w(b));
+        for j in 0..w(k.ic) {
+            let x = add(w(k.i0), j);
+            let i = f.inst(x);
+            let new = insert(inout c.defined, i.dest);
+            set_grow(inout c.defs, w(i.dest), inc(x));
+            if i.op == OP_READ {
+                set_grow(inout c.reads, w(i.dest), inc(x));
+                if b != h && f.is_root(i.place, head.index) {
+                    let n2 = insert(inout c.induction, i.dest);
+                }
+            }
+        }
+        for j in 0..w(k.pn) {
+            let new = insert(inout c.defined, f.at(add(w(k.p0), j)));
+        }
+    }
+    let mut locals: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for bi in 0..c.blocks.len() {
+        let k = f.block(w(u32_at(in c.blocks, bi)));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i.op == OP_BIND && i.bind != 0 && has(in c.induction, i.a) {
+                let name = wrapping_sub(i.bind, 1);
+                if single_binding(in f, name) {
+                    let new = insert(inout locals, name);
+                }
+            }
+        }
+    }
+    for bi in 0..c.blocks.len() {
+        let b = u32_at(in c.blocks, bi);
+        let k = f.block(w(b));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i
+                .op
+                == OP_READ
+                && b
+                != h
+                && f
+                .depth(i.place)
+                == 1
+                && has(in locals, f.root_of(i.place)) {
+                let new = insert(inout c.induction, i.dest);
+            }
+        }
+    }
+    // Locals bound once in the loop to a `u64` value, read like the value.
+    for bi in 0..c.blocks.len() {
+        let k = f.block(w(u32_at(in c.blocks, bi)));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i.op == OP_BIND && i.bind != 0 {
+                let name = wrapping_sub(i.bind, 1);
+                if !has(in locals, name) && f.is_u64(i.a) && single_binding(in f, name) {
+                    set_grow(inout c.bound_locals, w(name), inc(w(i.a)));
+                }
+            }
+        }
+    }
+    // Candidate accesses, by receiver place and index form.
+    let mut keys = keys_new();
+    // per key: place, read instruction, form
+    let mut kplace: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut kread: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut kstable: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    // candidates: (dest, access, key), the last insertion of a dest wins
+    let mut cdest: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut cacc: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ckey: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for bi in 0..c.blocks.len() {
+        let b = u32_at(in c.blocks, bi);
+        let k = f.block(w(b));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i.op != OP_SEQ || i.gn < 2 {
+                continue;
+            }
+            let access = hoistable(i.sub);
+            if access == 4 {
+                continue;
+            }
+            let recv = f.arg(w(i.g0));
+            let index = f.arg(inc(w(i.g0)));
+            let rd = u64_at(in c.reads, w(recv.value));
+            if recv.place == 0 || rd == 0 {
+                continue;
+            }
+            if has(in latches, b) {
+                continue;
+            }
+            let form = c.linear (in f, index.value, 0);
+            if !form.ok || form.sign == 0 || add(w(form.pn), w(form.mn)) > MAX_TERMS {
+                continue;
+            }
+            let read = f.inst(wrapping_sub(rd, 1));
+            if read.place != recv.place {
+                continue;
+            }
+            buf.clear();
+            f.put_place(recv.place, inout buf);
+            buf.push(64);
+            c.put_key(in f, form, inout buf);
+            let mut key = NONE64;
+            for q in 0..keys.count() {
+                if keys.equals(q, in buf) {
+                    key = q;
+                }
+            }
+            if key == NONE64 {
+                key = keys.add_key(in buf);
+                kplace.push(recv.place);
+                kread.push(wrapping_sub(rd, 1));
+                kstable.push(0);
+            }
+            let mut found = false;
+            for q in 0..cdest.len() {
+                if u32_at(in cdest, q) == i.dest {
+                    let ok1 = cacc.try_set(q, access);
+                    let ok2 = ckey.try_set(q, key);
+                    found = true;
+                }
+            }
+            if !found {
+                cdest.push(i.dest);
+                cacc.push(access);
+                ckey.push(key);
+            }
+        }
+    }
+    // Keep only receivers whose length the loop cannot change.
+    let mut nrecv: u64 = 0;
+    for q in 0..keys.count() {
+        if stable_root(in f, in c.blocks, f.root_of(u32_at(in kplace, q))) {
+            let ok = kstable.try_set(q, 1);
+            nrecv = inc(nrecv);
+        }
+    }
+    let mut ncand: u64 = 0;
+    for q in 0..cdest.len() {
+        if u8_at(in kstable, u64_at(in ckey, q)) != 0 {
+            ncand = inc(ncand);
+        }
+    }
+    if ncand == 0 {
+        put(inout o, "none");
+        return;
+    }
+    let (known, trips) = trip_count(in f, head);
+    if known {
+        // trips.saturating_mul(candidates) < GUARD_COST * receivers; the
+        // candidates are at least one, so a trip count past the limit
+        // fails it without a product.
+        let limit = wrapping_mul(GUARD_COST, nrecv);
+        if trips < limit && wrapping_mul(trips, ncand) < limit {
+            put(inout o, "none");
+            return;
+        }
+    } else if f.has_enclosing && !bound_invariant(in f, head, in f.enclosing) && ncand <= nrecv {
+        put(inout o, "none");
+        return;
+    }
+    put(inout o, "pre=");
+    put_u64(inout o, w(pre));
+    put(inout o, " inclusive=");
+    put_bool(inout o, head.inclusive);
+    put(inout o, " blocks=");
+    put_blocks(inout o, in c.blocks);
+    put(inout o, " receivers=[");
+    let order = keys.sorted();
+    let mut first = true;
+    for q in 0..order.len() {
+        let key = w(u32_at(in order, q));
+        if u8_at(in kstable, key) == 0 {
+            continue;
+        }
+        sep(inout o, inout first);
+        keys.put_key(key, inout o);
+        o.push(58);
+        put_u64(inout o, w(f.inst(u64_at(in kread, key)).dest));
+    }
+    put(inout o, "] accesses=[");
+    // by dest
+    let mut byd: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for q in 0..cdest.len() {
+        if u8_at(in kstable, u64_at(in ckey, q)) != 0 {
+            byd.push(wrapping_shl_u64(w(u32_at(in cdest, q)), 8) | u64_at(in cacc, q));
+        }
+    }
+    sort_u64(inout byd);
+    first = true;
+    for q in 0..byd.len() {
+        let x = u64_at(in byd, q);
+        sep(inout o, inout first);
+        put_u64(inout o, x >> 8);
+        o.push(58);
+        put_access(inout o, x & 255);
+    }
+    o.push(93);
+}
+
+// ----- compared loops ------------------------------------------------------------
+
+// `loop_entry`: the preheader of loop `blocks` when it can be versioned,
+// NONE32 otherwise.
+fn loop_entry(in f: Fun, in g: Graph, h: u32, in blocks: ChunkSeq[u32]) -> u32 {
+    let outside = outside_preds(in g, h, in blocks);
+    if outside.len() != 1 {
+        return NONE32;
+    }
+    let pre = u32_at(in outside, 0);
+    let pk = f.block(w(pre));
+    if pk.term != T_JUMP || pk.yes != h || pk.tn != 0 {
+        return NONE32;
+    }
+    if entered_inside(in g, h, in blocks) {
+        return NONE32;
+    }
+    for bi in 0..blocks.len() {
+        if f.join_slots(w(u32_at(in blocks, bi))) {
+            return NONE32;
+        }
+    }
+    if opaque(in f, in blocks) || escapes(in f, in blocks) {
+        return NONE32;
+    }
+    pre
+}
+
+// A guard bound: kind 0 local (a = name), 1 constant (a, b = words), 2
+// value (a = value).
+pub copy struct BoundRow {
+    kind: u8,
+    a: u64,
+    b: u64,
+}
+
+// `loop_candidate`: what to guard in loop `blocks` headed by `h`; writes
+// the decision text and returns whether there is one.
+fn loop_candidate(
+    in f: Fun,
+    inout fa: Facts,
+    in g: Graph,
+    h: u32,
+    in blocks: ChunkSeq[u32],
+    inout o: ChunkSeq[u8]
+) -> bool {
+    let pre = loop_entry(in f, in g, h, in blocks);
+    if pre == NONE32 {
+        return false;
+    }
+    let pk = f.block(w(pre));
+    if pk.term == T_BRANCH {
+        let d = fa.def(pk.tv);
+        if d != NONE64 {
+            let ci = f.inst(d);
+            if ci.op == OP_SEQ && ci.sub == S_GUARD {
+                return false;
+            }
+        }
+    }
+    let pre_len = w(pk.ic);
+    // guards: (length place, bound, receiver read)
+    let mut gplace: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut gbound: ChunkSeq[BoundRow] = ChunkSeq::new[BoundRow]();
+    let mut gread: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // converted accesses: (block, instruction, access)
+    let mut conv: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for bi in 0..blocks.len() {
+        let b = u32_at(in blocks, bi);
+        let k = f.block(w(b));
+        for kk in 0..w(k.ic) {
+            let x = add(w(k.i0), kk);
+            let access = fa.access_at(in f, x);
+            if access == 4 {
+                continue;
+            }
+            let i = f.inst(x);
+            let place = f.arg(w(i.g0)).place;
+            let index = f.arg(inc(w(i.g0))).value;
+            if !stable_place(in f, in blocks, place) {
+                continue;
+            }
+            let len = fa.length_place(in f, place);
+            let t = fa.term(in f, index);
+            let mut found = false;
+            let mut bound = BoundRow {
+                kind: 0,
+                a: 0,
+                b: 0
+            };
+            for ei in 0..fa.nedges() {
+                let e = fa.edge(ei);
+                if !fa.holds(e, b) {
+                    continue;
+                }
+                if !e.strict || !has(in blocks, e.from) {
+                    continue;
+                }
+                let l = fa.term(in f, e.lhs);
+                if !fa.index_is(in f, l, t) {
+                    continue;
+                }
+                let r = fa.term(in f, e.rhs);
+                let rn = fa.node(r);
+                if rn.kind == K_CONST {
+                    bound = BoundRow {
+                        kind: 1,
+                        a: rn.a,
+                        b: rn.b
+                    };
+                    found = true;
+                } else if rn.kind == K_FIXED && f.depth(n32(rn.a)) == 1 {
+                    bound = BoundRow {
+                        kind: 0,
+                        a: w(f.root_of(n32(rn.a))),
+                        b: 0
+                    };
+                    found = true;
+                } else if rn.kind == K_SLOT {
+                    let root = n32(rn.a);
+                    if invariant_local(in f, in blocks, root)
+                        && (
+                        has(in blocks, n32(rn.b))
+                            || fa
+                            .unchanged(in f, root, n32(rn.b), rn.c, pre, pre_len)
+                    ) {
+                        bound = BoundRow {
+                            kind: 0,
+                            a: rn.a,
+                            b: 0
+                        };
+                        found = true;
+                    }
+                } else if rn.kind == K_PARAM || rn.kind == K_VALUE {
+                    let v = n32(rn.a);
+                    let pb = fa.param_block(v);
+                    let db = if pb != NONE32 {
+                        pb
+                    } else {
+                        let d = fa.def(v);
+                        if d == NONE64 {
+                            NONE32
+                        } else {
+                            fa.def_block(d)
+                        }
+                    };
+                    if db != NONE32 && !has(in blocks, db) {
+                        bound = BoundRow {
+                            kind: 2,
+                            a: rn.a,
+                            b: 0
+                        };
+                        found = true;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            if !found {
+                continue;
+            }
+            let rd = fa.def(f.arg(w(i.g0)).value);
+            if rd == NONE64 {
+                continue;
+            }
+            let mut dup = false;
+            for q in 0..gplace.len() {
+                let gb = match gbound.try_get(q) {
+                    Option::Some(x) => x,
+                    Option::None => bound,
+                };
+                if u32_at(in gplace, q)
+                    == len
+                    && gb
+                    .kind
+                    == bound
+                    .kind
+                    && gb
+                    .a
+                    == bound
+                    .a
+                    && gb
+                    .b
+                    == bound
+                    .b {
+                    dup = true;
+                }
+            }
+            if !dup {
+                gplace.push(len);
+                gbound.push(bound);
+                gread.push(rd);
+            }
+            conv.push(wrapping_shl_u64(w(b), 40) | wrapping_shl_u64(kk, 8) | access);
+        }
+    }
+    if gplace.len() == 0 || conv.len() < gplace.len() || gplace.len() > MAX_TERMS {
+        return false;
+    }
+    put(inout o, "header=");
+    put_u64(inout o, w(h));
+    put(inout o, " pre=");
+    put_u64(inout o, w(pre));
+    put(inout o, " blocks=");
+    put_blocks(inout o, in blocks);
+    put(inout o, " guards=[");
+    for q in 0..gplace.len() {
+        if q > 0 {
+            o.push(32);
+        }
+        f.put_place(u32_at(in gplace, q), inout o);
+        o.push(60);
+        let gb = match gbound.try_get(q) {
+            Option::Some(x) => x,
+            Option::None => BoundRow {
+                kind: 2,
+                a: 0,
+                b: 0
+            },
+        };
+        if gb.kind == 0 {
+            put(inout o, "local:");
+            f.put_name(n32(gb.a), inout o);
+        } else if gb.kind == 1 {
+            put(inout o, "const:");
+            put_u128(inout o, gb.a, gb.b);
+        } else {
+            put(inout o, "value:");
+            put_u64(inout o, gb.a);
+        }
+        o.push(58);
+        put_u64(inout o, w(f.inst(u64_at(in gread, q)).dest));
+    }
+    put(inout o, "] accesses=[");
+    for q in 0..conv.len() {
+        if q > 0 {
+            o.push(32);
+        }
+        let x = u64_at(in conv, q);
+        put_u64(inout o, x >> 40);
+        o.push(58);
+        put_u64(inout o, (x >> 8) & 4294967295);
+        o.push(58);
+        put_access(inout o, x & 255);
+    }
+    o.push(93);
+    true
+}
+
+// `next_loop`: the next untried loop with something to guard, then
+// ` tried=..`, the headers tried after it.
+pub fn compared_loop_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let mut tried = copy_u32(in f.tried);
+    let g = graph(in f, in no_cut());
+    // (loop size, header) of the untried non-counted loops.
+    let mut keys: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for j in 0..g.order.len() {
+        let h = u32_at(in g.order, j);
+        if has(in tried, h) {
+            continue;
+        }
+        let k = f.block(w(h));
+        if k.ic == 0 || f.inst(w(k.i0)).op != OP_LOOP {
+            continue;
+        }
+        if !is_loop_header(in g, h) || header(in f, w(h)).ok {
+            continue;
+        }
+        let lp = natural_loop(in g, h);
+        let size = lp.len();
+        keys.push(wrapping_shl_u64(size, 32) | w(h));
+    }
+    let mut done = false;
+    if keys.len() > 0 {
+        sort_u64(inout keys);
+        let mut fa = facts_new(in f);
+        if fa.nedges() > 0 {
+            for j in 0..keys.len() {
+                let h = n32(u64_at(in keys, j) & 4294967295);
+                let new = insert(inout tried, h);
+                let blocks = natural_loop(in g, h);
+                if loop_candidate(in f, inout fa, in g, h, in blocks, inout o) {
+                    done = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !done {
+        put(inout o, "none");
+    }
+    put(inout o, " tried=");
+    put_blocks(inout o, in tried);
+}
+
+fn copy_u32(in s: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut o: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](s.len());
+    for i in 0..s.len() {
+        o.push(u32_at(in s, i));
+    }
+    o
+}
+
+// ----- dominated checks ----------------------------------------------------------
+
+// `dominated_checks`: `b:k` for each element access a checked access of
+// the same stable place dominates at the same index (or, for constant
+// indices, at a larger or equal one).
+pub fn dominated_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let g = graph(in f, in no_cut());
+    let all = all_blocks(in f);
+    // value -> 1 + global index of its last definition
+    let mut defs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    // name -> 1 + the value its last whole-value binding binds
+    let mut bound: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for x in 0..f.insts.len() {
+        let i = f.inst(x);
+        set_grow(inout defs, w(i.dest), inc(x));
+        if i.op == OP_BIND && i.bind != 0 {
+            set_grow(inout bound, w(wrapping_sub(i.bind, 1)), inc(w(i.a)));
+        }
+    }
+    // Accesses: per block, rows (k, place, key kind, key, key hi, checked).
+    let mut ab: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut ak: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ap: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut aconst: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut alo: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ahi: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut achecked: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    // place -> 0 unknown, 1 unstable, 2 stable
+    let mut stable: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](f.pparent.len());
+    stable.resize(f.pparent.len(), 0);
+    for j in 0..g.order.len() {
+        let b = u32_at(in g.order, j);
+        let k = f.block(w(b));
+        for kk in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), kk));
+            if i.op != OP_SEQ || hoistable(i.sub) == 4 || i.gn < 2 {
+                continue;
+            }
+            let recv = f.arg(w(i.g0));
+            let index = f.arg(inc(w(i.g0)));
+            if recv.place == 0 {
+                continue;
+            }
+            let d = u64_at(in defs, w(recv.value));
+            if d == 0 {
+                continue;
+            }
+            let rdi = f.inst(wrapping_sub(d, 1));
+            if rdi.op != OP_READ || rdi.place != recv.place {
+                continue;
+            }
+            let s = u8_at(in stable, w(recv.place));
+            let mut is_stable = s == 2;
+            if s == 0 {
+                is_stable = stable_place(in f, in all, recv.place);
+                let mark: u8 = if is_stable {
+                    2
+                } else {
+                    1
+                };
+                let set = stable.try_set(w(recv.place), mark);
+            }
+            if !is_stable {
+                continue;
+            }
+            // The index key: a non-negative constant, or a value (reads of
+            // once-bound locals followed).
+            let mut v = index.value;
+            let mut is_const = false;
+            let mut lo: u64 = 0;
+            let mut hi: u64 = 0;
+            for step in 0..MAX_DEPTH {
+                let dd = u64_at(in defs, w(v));
+                if dd == 0 {
+                    break;
+                }
+                let di = f.inst(wrapping_sub(dd, 1));
+                if di.op == OP_INT && !di.neg {
+                    is_const = true;
+                    lo = di.lo;
+                    hi = di.hi;
+                    break;
+                }
+                if di.op == OP_READ && f.depth(di.place) == 1 {
+                    let root = f.root_of(di.place);
+                    let bv = u64_at(in bound, w(root));
+                    if bv != 0 && single_binding(in f, root) {
+                        v = n32(wrapping_sub(bv, 1));
+                        continue;
+                    }
+                }
+                break;
+            }
+            if !is_const {
+                lo = w(v);
+            }
+            ab.push(b);
+            ak.push(kk);
+            ap.push(recv.place);
+            aconst
+                .push(
+                if is_const {
+                    1
+                } else {
+                    0
+                }
+            );
+            alo.push(lo);
+            ahi.push(hi);
+            achecked
+                .push(
+                if i.sub >= S_GET && i.sub <= S_SLICE_SET {
+                    1
+                } else {
+                    0
+                }
+            );
+        }
+    }
+    // Facts per block: the checked accesses of the blocks that strictly
+    // dominate it, then its own as they go.
+    let mut first = true;
+    let mut fp: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut fc: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut flo: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut fhi: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut r: u64 = 0;
+    loop {
+        if r >= ab.len() {
+            break;
+        }
+        let b = u32_at(in ab, r);
+        let mut end = r;
+        loop {
+            if end >= ab.len() || u32_at(in ab, end) != b {
+                break;
+            }
+            end = inc(end);
+        }
+        fp.clear();
+        fc.clear();
+        flo.clear();
+        fhi.clear();
+        let mut up = g.idom_of(w(b));
+        loop {
+            if up == NONE32 {
+                break;
+            }
+            for q in 0..ab.len() {
+                if u32_at(in ab, q) == up && u8_at(in achecked, q) != 0 {
+                    fp.push(u32_at(in ap, q));
+                    fc.push(u8_at(in aconst, q));
+                    flo.push(u64_at(in alo, q));
+                    fhi.push(u64_at(in ahi, q));
+                }
+            }
+            up = g.idom_of(w(up));
+        }
+        for q in r..end {
+            let place = u32_at(in ap, q);
+            let c = u8_at(in aconst, q);
+            let lo = u64_at(in alo, q);
+            let hi = u64_at(in ahi, q);
+            let mut covered = false;
+            for z in 0..fp.len() {
+                if u32_at(in fp, z) != place {
+                    continue;
+                }
+                let zc = u8_at(in fc, z);
+                let zl = u64_at(in flo, z);
+                let zh = u64_at(in fhi, z);
+                let ok = if zc != 0 && c != 0 {
+                    zh > hi || (zh == hi && zl >= lo)
+                } else {
+                    zc == c && zl == lo && zh == hi
+                };
+                if ok {
+                    covered = true;
+                    break;
+                }
+            }
+            if covered {
+                sep(inout o, inout first);
+                put_u64(inout o, w(b));
+                o.push(58);
+                put_u64(inout o, u64_at(in ak, q));
+            } else if u8_at(in achecked, q) != 0 {
+                fp.push(place);
+                fc.push(c);
+                flo.push(lo);
+                fhi.push(hi);
+            }
+        }
+        r = end;
+    }
+}
