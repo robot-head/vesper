@@ -114,6 +114,29 @@ fn jit_definitions_are_not_colocated() {
 }
 
 #[test]
+fn data_objects_are_found_by_name() {
+    let mut m = object_module(host_triple());
+    let d = m.declare_data("d", Linkage::Local, false, false).unwrap();
+    let mut sig = m.make_signature();
+    sig.returns.push(AbiParam::new(types::I64));
+    m.declare_function("f", Linkage::Local, &sig).unwrap();
+    let (found, _) = lend_module(&mut m, 0, &[], |call| {
+        // SAFETY: the lent call's address, live for this closure.
+        unsafe {
+            let m = vcl_call_module(call);
+            let found = (
+                vcl_module_get_data(m, b"d".as_ptr(), 1),
+                vcl_module_get_data(m, b"f".as_ptr(), 1),
+                vcl_module_get_function(m, b"d".as_ptr(), 1),
+            );
+            vcl_call_return_module(call, m);
+            found
+        }
+    });
+    assert_eq!(found, (d.as_u32(), INVALID, INVALID));
+}
+
+#[test]
 fn compiles_report_their_traps_and_data_imports_take_a_colocated_flag() {
     let mut m = object_module(host_triple());
     let d = m.declare_data("d", Linkage::Local, false, false).unwrap();
