@@ -48,10 +48,40 @@ pub copy struct StoreLimits {
 // `size_of::<Line>()` of vesper-span: two `usize`s.
 const LINE_SIZE: u64 = 16;
 const U64_MAX: u64 = 18446744073709551615;
-const MIB: u64 = 1048576;
 // Compact the arena once it holds more than this many dead bytes and more
 // dead than live ones.
 const COMPACT_SLACK: u64 = 65536;
+
+// `StoreLimits::HARD` (the index limits are `hard_index`).
+enum Hard: _ {
+    DocumentBytes = 1048576,
+    Documents = 256,
+    TotalBytes = 16777216,
+    UriBytes = 16384,
+    Changes = 4096,
+    Work = 134217728
+}
+
+// The work a mutation charges per byte: `open` per text byte, `change` per
+// byte of the old text it copies, of the text a range is resolved in and
+// of each candidate text.
+enum Cost: _ {
+    Open = 3,
+    Copy = 2,
+    Range = 2,
+    Candidate = 4
+}
+
+// The bytes `char::is_control` looks at in UTF-8: the C0 controls end at
+// the space, DEL, and the C1 controls U+0080 to U+009F are `C2 80` to
+// `C2 9F`.
+enum Control: _ {
+    C0End = 0x20,
+    Del = 0x7f,
+    C1Lead = 0xc2,
+    C1First = 0x80,
+    C1End = 0xa0
+}
 
 pub struct Store {
     l: StoreLimits,
@@ -150,27 +180,25 @@ fn validate(l: StoreLimits) -> Unit eff [Fail[StoreError]] {
     }
     if l
         .max_document_bytes
-        > MIB
+        > Hard::DocumentBytes
         || l
         .max_document_bytes
         > widen_u64(l.index.max_source_bytes)
         || l
         .max_documents
-        > 256
+        > Hard::Documents
         || l
         .max_total_bytes
-        > 16
-        * MIB
+        > Hard::TotalBytes
         || l
         .max_uri_bytes
-        > 16384
+        > Hard::UriBytes
         || l
         .max_changes
-        > 4096
+        > Hard::Changes
         || l
         .max_work
-        > 128
-        * MIB {
+        > Hard::Work {
         Fail::raise(StoreError::SInvalidLimits);
     }
 }
@@ -223,15 +251,15 @@ fn has_control(in u: Str) -> bool {
             Option::Some(x) => x,
             Option::None => 0,
         };
-        if c < 32 || c == 127 {
+        if c < Control::C0End || c == Control::Del {
             return true;
         }
-        if c == 194 {
+        if c == Control::C1Lead {
             let d = match b.try_get(wrapping_add(i, 1)) {
                 Option::Some(x) => x,
                 Option::None => 0,
             };
-            if d >= 128 && d < 160 {
+            if d >= Control::C1First && d < Control::C1End {
                 return true;
             }
         }
@@ -410,7 +438,7 @@ pub fn store_open(inout s: Store, in uri: Str, version: i64, in text: Str)
     }
     let total = text_size(in s, text.len(), 0);
     let revision = next_revision(in s);
-    spend(inout k, mul(text.len(), 3));
+    spend(inout k, mul(text.len(), Cost::Open));
     let lines = index_lines(in text, s.l);
     let ua = append(inout s, in uri);
     let ta = append(inout s, in text);
@@ -457,7 +485,7 @@ pub fn store_change(inout s: Store, in uri: Str, version: i64, in changes: Chunk
     };
     spend(inout k, uri.len());
     spend(inout k, lookup_work(in s));
-    spend(inout k, mul(old_len, 2));
+    spend(inout k, mul(old_len, Cost::Copy));
     let mut text = text_copy(in s, at);
     let mut lines = index_lines(in text, s.l);
     let mut total = s.total;
@@ -468,7 +496,7 @@ pub fn store_change(inout s: Store, in uri: Str, version: i64, in changes: Chunk
                 let mut start: u64 = 0;
                 let mut end = text.len();
                 if c.has_range {
-                    spend(inout k, mul(text.len(), 2));
+                    spend(inout k, mul(text.len(), Cost::Range));
                     let (a, b) = span_of(in text, in lines, s.l, c.range);
                     if c.has_len {
                         spend(inout k, wrapping_sub(b, a));
@@ -487,7 +515,7 @@ pub fn store_change(inout s: Store, in uri: Str, version: i64, in changes: Chunk
                 }
                 let n = wrapping_add(keep, c.text.len());
                 total = text_size(in s, n, old_len);
-                spend(inout k, mul(n, 4));
+                spend(inout k, mul(n, Cost::Candidate));
                 let mut next = String::new();
                 next.push_str(in text[0..start]);
                 next.push_str(in c.text);

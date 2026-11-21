@@ -34,11 +34,19 @@ use @vesper/span::{
 };
 use @vesper/span::Error as SpanError;
 
-const OP_OPEN: u64 = 1;
-const OP_CHANGE: u64 = 2;
-const OP_CLOSE: u64 = 3;
-const OP_GET: u64 = 4;
-const OP_SET_REVISION: u64 = 5;
+// An op's tag.
+enum Op: _ {
+    Open = 1,
+    Change = 2,
+    Close = 3,
+    Get = 4,
+    SetRevision = 5
+}
+
+// The harness's little-endian words.
+enum Le: _ {
+    WordBytes = 8
+}
 // The status of a `get` that finds nothing.
 const STATUS_ABSENT: u64 = 1000;
 // `Error::Budget(r)` of vesper-span as `BUDGET_BASE + r`.
@@ -55,7 +63,7 @@ fn word(in b: Slice[u8], inout r: Reader) -> u64 {
         Option::Some(x) => x,
         Option::None => 0,
     };
-    r.pos = wrapping_add(r.pos, 8);
+    r.pos = wrapping_add(r.pos, Le::WordBytes);
     x
 }
 
@@ -167,7 +175,7 @@ fn put_bytes(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
         };
         x = x | wrapping_shl_u64(c, wrapping_mul(k, 8));
         k = wrapping_add(k, 1);
-        if k == 8 {
+        if k == Le::WordBytes {
             out.push(x);
             x = 0;
             k = 0;
@@ -258,7 +266,7 @@ fn after(inout out: ChunkSeq[u64], in s: Store, r: Result[u64, StoreError]) {
 // Task "documents": the input is the store limits (six words, then the
 // ten `vesper_span::Limits` words), the number of op words, the ops and the
 // text pool. Each op is a tag and its operands (URIs and texts as pool
-// offset and length); see `OP_*`. The result is the status of
+// offset and length); see `Op`. The result is the status of
 // `DocumentStore::new`, then `put_state` per op.
 pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
     let b = input.as_bytes();
@@ -268,7 +276,7 @@ pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
     let l = read_limits(in b, inout r);
     let n = word(in b, inout r);
     let start = r.pos;
-    let end = wrapping_add(start, wrapping_mul(n, 8));
+    let end = wrapping_add(start, wrapping_mul(n, Le::WordBytes));
     let pool = b[end..b.len()];
     let mut out: ChunkSeq[u64] = ChunkSeq::new();
     let mut s = match try_new(l) {
@@ -284,7 +292,7 @@ pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
             break;
         }
         let op = word(in b, inout r);
-        if op == OP_SET_REVISION {
+        if op == Op::SetRevision {
             store_set_revision(inout s, word(in b, inout r));
             put_state(inout out, in s, 0, Option::None);
             continue;
@@ -292,14 +300,14 @@ pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
         let uri_off = word(in b, inout r);
         let uri_len = word(in b, inout r);
         let uri = text_at(in pool, uri_off, uri_len);
-        if op == OP_OPEN {
+        if op == Op::Open {
             let version = wrapping_i64(word(in b, inout r));
             let t_off = word(in b, inout r);
             let t_len = word(in b, inout r);
             let text = text_at(in pool, t_off, t_len);
             let got = try_open(inout s, in uri, version, in text);
             after(inout out, in s, got);
-        } else if op == OP_CHANGE {
+        } else if op == Op::Change {
             let version = wrapping_i64(word(in b, inout r));
             let count = word(in b, inout r);
             let mut changes: ChunkSeq[Change] = ChunkSeq::new();
@@ -335,12 +343,12 @@ pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
             }
             let got = try_change(inout s, in uri, version, in changes);
             after(inout out, in s, got);
-        } else if op == OP_CLOSE {
+        } else if op == Op::Close {
             match try_close(inout s, in uri) {
                 Result::Ok(c) => put_closed(inout out, in s, in c),
                 Result::Err(e) => put_state(inout out, in s, error_code(e), Option::None),
             }
-        } else if op == OP_GET {
+        } else if op == Op::Get {
             match store_get(in s, in uri) {
                 Option::Some(at) => put_state(inout out, in s, 0, Option::Some(at)),
                 Option::None => put_state(inout out, in s, STATUS_ABSENT, Option::None),
