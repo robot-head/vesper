@@ -187,12 +187,27 @@ const FN_ARG: &str = "$fn:";
 pub(crate) const MAX_NATIVE_INSTANCE_TYPE_SIZE: usize = 256;
 /// Type nodes in an instance's type arguments ([`MAX_NATIVE_INSTANCE_TYPE_SIZE`]).
 fn instance_type_size(vars: &BTreeMap<String, Type>) -> usize {
+    // Effect arguments count too: polymorphic recursion can grow a type
+    // through `eff [E[T]]` as well as through type arguments.
+    fn row(effects: &crate::ast::Effects) -> usize {
+        effects
+            .instances
+            .iter()
+            .map(|e| 1 + e.args.iter().map(size).sum::<usize>())
+            .sum()
+    }
     fn size(t: &Type) -> usize {
         match t {
             Type::Named(_, args) | Type::Tuple(args) => 1 + args.iter().map(size).sum::<usize>(),
-            Type::Function { params, result, .. } => {
-                1 + params.iter().map(|(_, t)| size(t)).sum::<usize>() + size(result)
+            Type::Function {
+                params,
+                result,
+                effects,
+                ..
+            } => {
+                1 + params.iter().map(|(_, t)| size(t)).sum::<usize>() + size(result) + row(effects)
             }
+            Type::Row(effects) => 1 + row(effects),
             _ => 1,
         }
     }
