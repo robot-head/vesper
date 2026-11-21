@@ -77,8 +77,11 @@ builds), and its libssl has TLS 1.3 with the QUIC API
 (`SSL_set_quic_method`) and X.509 path validation. The costs: a C build
 of aws-lc on every platform (CMake, plus NASM on Windows for the
 assembly), libcrux's formally verified ML-KEM replaced by aws-lc's, and
-the libssl state machine in place of rustls. This lane does not switch
-without the owner.
+the libssl state machine in place of rustls.
+
+**Owner decision (2026-11-21):** keep the small Rust shim ("crypto is
+hard"); any replacement of the vetted libraries happens last, with an
+expert. This lane does not pursue the C route.
 
 ### Compiler gaps
 
