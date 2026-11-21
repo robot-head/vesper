@@ -203,6 +203,35 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 7 (#1281): @vesper/codegen-calls against the
+        # native backend's declarations over the corpus and the source strings
+        # of the feature test files it reads. Anchored globs.
+        "test/self_host_codegen_calls": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + [
+            "tests/arrays.rs",
+            "tests/capability_effects.rs",
+            "tests/capability_verifiers.rs",
+            "tests/checked_arithmetic.rs",
+            "tests/dyn_box.rs",
+            "tests/dyn_effects.rs",
+            "tests/dyn_fn.rs",
+            "tests/dyn_trait.rs",
+            "tests/ffi_handles.rs",
+            "tests/fip.rs",
+            "tests/floats.rs",
+            "tests/integer_widths.rs",
+            "tests/native_block_param_homes.rs",
+            "tests/native_export_f32.rs",
+            "tests/native_fail_status.rs",
+            "tests/native_handlers.rs",
+            "tests/native_hoist_calls.rs",
+            "tests/native_spans.rs",
+            "tests/vector_f32.rs",
+            "tests/wide_integers.rs",
+        ],
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
@@ -584,6 +613,7 @@ vesper_crate(
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
         "test/self_host_place_ir": "long",
+        "test/self_host_codegen_calls": "long",
         "test/self_host_check_harness": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
@@ -705,6 +735,29 @@ vesper_package(
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":std_hash_package"],
+)
+
+# The codegen base as a dependency of the hybrid compiler's codegen module
+# (self-hosting SH4 lane 1, #1275); @vesper/cranelift is in its own package.
+vesper_package(
+    name = "codegen_base_package",
+    srcs = glob(["packages/vesper-codegen-base/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-base/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//packages/vesper-cranelift:cranelift_package"],
+)
+
+# The `call` family's emission (self-hosting SH4 lane 7, #1281), for the
+# hybrid compiler's codegen_calls module.
+vesper_package(
+    name = "codegen_calls_emit_package",
+    srcs = glob(["packages/vesper-codegen-calls/emit/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-calls/emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":codegen_base_package",
+        "//packages/vesper-cranelift:cranelift_package",
+    ],
 )
 
 filegroup(

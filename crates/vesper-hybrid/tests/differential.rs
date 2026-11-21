@@ -280,4 +280,12 @@ fn pilot_module_runs_from_vesper() {
             .unwrap_or_else(|| panic!("no {module} report in {stderr:?}"));
         assert!(calls > 0, "the Vesper {module} module answered no calls");
     }
+    // SH4 lane 7 (#1281): the `call` hook is installed (counter.ves makes
+    // no direct calls; tests/self_host_codegen_calls_emit.rs counts them).
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l.starts_with("vesper-hybrid: codegen_calls emitted ")),
+        "no codegen_calls report in {stderr:?}"
+    );
 }
