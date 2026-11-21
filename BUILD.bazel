@@ -196,6 +196,24 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 13 (#1287): the .vsys type mapping and call
+        # plans in Vesper against src/ffi_lowering over every .vsys source the
+        # root package can declare (crates/* are their own Bazel packages;
+        # Cargo also reads theirs). Anchored globs.
+        "test/self_host_ffi_lowering": glob([
+            "packages/**",
+            "tests/fixtures/**",
+            "tests/borrowed_box_match.rs",
+            "tests/dyn_effects.rs",
+            "tests/ffi_affine_drops.rs",
+            "tests/ffi_handles.rs",
+            "tests/ffi_lowering.rs",
+            "tests/package_submodule_exports.rs",
+            "tests/test_runner_cli.rs",
+            "tests/tree_abi.rs",
+            "tests/vsys_packages.rs",
+            "src/native_export/directives.rs",
+        ]),
         # Self-hosting SH2 lane 11 (#1183): the dyn passes in Vesper against
         # src/dyn_fn.rs and src/dyn_trait.rs over the dyn suites, mutants and
         # the repository's .ves sources. Anchored globs.
@@ -558,6 +576,8 @@ vesper_crate(
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",
         "test/self_host_check_fip": "long",
+        # The FFI type mapping differential (#1287) compiles its package once.
+        "test/self_host_ffi_lowering": "long",
     },
 )
 
