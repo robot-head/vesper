@@ -225,3 +225,141 @@ pub fn main() -> i64 eff [Ffi[Dl]] {{
     let v = checked.evaluate("main", |call| host.call(call)).unwrap();
     assert_eq!(v.to_string(), "409");
 }
+
+// ---------------------------------------------------------------- C calls Vesper
+
+/// `fold(f, n)`: `f(f(..f(0, 1).., n-1), n)`, C calling a Vesper function
+/// it was lent (`nocapture`).
+extern "C" fn fold(f: extern "C" fn(u64, u64) -> u64, n: u64) -> u64 {
+    (1..=n).fold(0, |acc, i| f(acc, i))
+}
+static HANDLER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static BUMPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// `on_signal(h)`: keeps `h` (`retain`), as `signal(2)` does.
+extern "C" fn on_signal(h: extern "C" fn(i32)) -> i32 {
+    HANDLER.store(h as *const () as usize, std::sync::atomic::Ordering::SeqCst);
+    0
+}
+/// `raise_signal(sig)`: calls the kept handler later, from another thread.
+extern "C" fn raise_signal(sig: i32) -> i32 {
+    let h = HANDLER.load(std::sync::atomic::Ordering::SeqCst);
+    if h == 0 {
+        return -1;
+    }
+    // SAFETY: `on_signal` stored a pointer of this type.
+    let h: extern "C" fn(i32) = unsafe { std::mem::transmute(h) };
+    std::thread::spawn(move || h(sig)).join().unwrap();
+    0
+}
+extern "C" fn bump(by: u64) {
+    BUMPS.fetch_add(by, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn host_library() -> String {
+    let (t, a) = target();
+    format!(
+        "sys library Host (target = \"{t}\", abi = \"{a}\", link = \"dynamic\", name = \"host\", \
+         artifact = \"blake3:{}\") {{
+    callback Step(acc: u64, i: u64) -> ForeignVal[u64];
+    callback Handler(sig: i32) -> ForeignVal[Unit];
+    fn fold(nocapture f: Step, n: u64) -> ForeignVal[u64];
+    fn on_signal(retain h: Handler) -> ForeignVal[i32];
+    fn raise_signal(sig: i32) -> ForeignVal[i32];
+    fn bump(by: u64) -> ForeignVal[Unit];
+}}\n",
+        "0".repeat(64)
+    )
+}
+
+const HOST_SOURCE: &str = "\
+fn square_sum(acc: u64, i: u64) -> u64 { wrapping_add(acc, wrapping_mul(i, i)) }
+fn handler(sig: i32) eff [Ffi[Host]] { Host::bump(wrapping_u64(sig)); }
+pub fn main() -> u64 eff [Ffi[Host]] {
+    let sum = Host::fold(square_sum, 10);
+    let again = Host::fold(square_sum, 3);
+    if Host::on_signal(handler) != 0 { return 1; }
+    if Host::raise_signal(7) != 0 { return 2; }
+    if Host::raise_signal(5) != 0 { return 3; }
+    wrapping_add(sum, wrapping_mul(again, 1000))
+}
+";
+
+#[test]
+fn c_calls_vesper_functions_it_was_handed() {
+    if !host_jit() {
+        return;
+    }
+    let mut imports = Imports::new();
+    imports.add(&host_library(), Handler::Direct).unwrap();
+    let checked =
+        ffi_lowering::check_source(HOST_SOURCE, &imports).unwrap_or_else(|e| panic!("{e:#?}"));
+    let symbols = [
+        ("fold", fold as *const u8),
+        ("on_signal", on_signal as *const u8),
+        ("raise_signal", raise_signal as *const u8),
+        ("bump", bump as *const u8),
+    ];
+    for optimize in [true, false] {
+        BUMPS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let v = checked
+            .jit_with_options("main", &symbols, optimize)
+            .unwrap_or_else(|e| panic!("{e}"));
+        // 1 + 4 + ... + 100 = 385; 1 + 4 + 9 = 14.
+        assert_eq!(v.to_string(), "14385", "optimize {optimize}");
+        assert_eq!(BUMPS.load(std::sync::atomic::Ordering::SeqCst), 12);
+    }
+    // Objects carry the trampolines too.
+    let object = checked.object("main", Some(target().0)).unwrap();
+    assert!(object.bytes.windows(4).any(|w| w == b"fold"));
+    // The evaluator cannot hand C a pointer back into itself.
+    let host = ffi_lowering::EvalHost::new(&imports, &symbols).unwrap();
+    let e = checked
+        .evaluate("main", |call| host.call(call))
+        .unwrap_err();
+    assert!(format!("{e:?}").contains("compiled code"), "{e:?}");
+}
+
+#[test]
+fn callbacks_are_named_functions_with_foreign_rows() {
+    let mut imports = Imports::new();
+    imports.add(&host_library(), Handler::Direct).unwrap();
+    let kind = |source: &str| match ffi_lowering::check_source(source, &imports) {
+        Ok(_) => panic!("accepted: {source}"),
+        Err(e) => e.kind,
+    };
+    // A closure is not a named function.
+    assert_eq!(
+        kind("pub fn main() -> u64 eff [Ffi[Host]] { Host::fold(|a, i| a, 3) }"),
+        FfiErrorKind::CallbackArgument
+    );
+    // A generic function is not either.
+    assert_eq!(
+        kind(
+            "fn id[T](a: u64, i: u64) -> u64 { a } pub fn main() -> u64 eff [Ffi[Host]] { Host::fold(id, 3) }"
+        ),
+        FfiErrorKind::CallbackArgument
+    );
+    // The signature must match the callback type.
+    assert_eq!(
+        kind("fn f(a: u64) -> u64 { a } pub fn main() -> u64 eff [Ffi[Host]] { Host::fold(f, 3) }"),
+        FfiErrorKind::Check
+    );
+    // A retained function may run on another thread, so it cannot hold
+    // thread-affine runtime values.
+    let e = match ffi_lowering::check_source(
+        "fn h(sig: i32) { let b = Box::new(sig); } pub fn main() -> i32 eff [Ffi[Host]] { Host::on_signal(h) }",
+        &imports,
+    ) {
+        Ok(_) => panic!("a thread-affine retained function was accepted"),
+        Err(e) => e,
+    };
+    assert_eq!(e.kind, FfiErrorKind::CallbackArgument, "{e}");
+    assert!(e.message.contains("E0832"), "{e}");
+    // A callback cannot fail through C, or use effects that need a handler.
+    assert_eq!(
+        kind(
+            "fn f(a: u64, i: u64) -> u64 eff [Fail[u64]] { a } pub fn main() -> u64 eff [Ffi[Host]] { Host::fold(f, 3) }"
+        ),
+        FfiErrorKind::Check
+    );
+}

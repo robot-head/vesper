@@ -194,6 +194,9 @@ pub enum FfiErrorKind {
     HandleMisuse,
     /// `Realtime` code may not call foreign code (§32.2).
     Realtime,
+    /// A Vesper function handed to C is not a named top-level function, or
+    /// C cannot call it this way yet (§16.3, `E0831`).
+    CallbackArgument,
     /// The ordinary checker rejected the elaborated module.
     Check,
     /// The library's `.vsys` target differs from the object target.
@@ -355,6 +358,28 @@ thread_local! {
     static USED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     /// The typed error behind a backend failure in [`op_plan`].
     static FAULT: RefCell<Option<FfiError>> = const { RefCell::new(None) };
+    /// The C-ABI trampolines the module being built has, by (Vesper
+    /// function instance, library, callback type): one each (§16.3).
+    pub(crate) static TRAMPOLINES: RefCell<BTreeMap<(String, String, String), u32>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+/// The call of callback type `callback` of `library` (its signature, with
+/// the pointer first), for the trampoline that lets C call a Vesper
+/// function of that type.
+pub(crate) fn callback_plan(library: &str, callback: &str) -> Result<FunctionDescriptor, String> {
+    PLAN.with(|p| {
+        let plan = p.borrow();
+        let plan = plan
+            .as_ref()
+            .ok_or("foreign calls compile only through vesper::ffi_lowering")?;
+        plan.libraries
+            .values()
+            .find(|l| l.name == library)
+            .and_then(|l| l.descriptor.function(callback))
+            .filter(|f| f.is_indirect())
+            .cloned()
+            .ok_or_else(|| format!("library '{library}' has no callback type '{callback}'"))
+    })
 }
 struct PlanGuard;
 impl Drop for PlanGuard {
@@ -362,6 +387,7 @@ impl Drop for PlanGuard {
         PLAN.with(|p| *p.borrow_mut() = None);
         USED.with(|u| u.borrow_mut().clear());
         FAULT.with(|f| *f.borrow_mut() = None);
+        TRAMPOLINES.with(|t| t.borrow_mut().clear());
     }
 }
 /// The foreign symbols [`ForeignChecked::jit`] binds for the JIT module
@@ -948,6 +974,7 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
     rewriter.finish()?;
     let instances = rewriter.instances;
     let calls = rewriter.calls;
+    let retained = rewriter.retained;
     // An isolated call is a generated trampoline around a named symbol;
     // the trampoline for a function pointer does not exist yet (§16.3).
     for call in &calls {
@@ -988,6 +1015,19 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
     }
     drops::check_rows(&checked.world)?;
     check_isolated_workers(&checked.world, imports, &generated)?;
+    // A retained function runs on whatever thread C calls it from, where
+    // the runtime state of thread-affine values does not exist (§16.3).
+    for (function, span) in &retained {
+        if crate::atomics::thread_affine(&checked.world, function, &Type::unit()) {
+            return Err(FfiError::new(
+                FfiErrorKind::CallbackArgument,
+                format!(
+                    "'{function}' is retained by C, which may call it from any thread, but it uses a value whose runtime state is per thread (TiledSeq, Box or a region) (E0832)"
+                ),
+                Some(span.clone()),
+            ));
+        }
+    }
     let mut plan = Plan::default();
     for (name, import) in &imports.libraries {
         plan.libraries.insert(
@@ -1131,6 +1171,12 @@ struct Rewriter<'a> {
     /// Pass 2: (library, symbol) -> slice-length vectors used.
     instances: Instances,
     calls: Vec<ForeignCall>,
+    /// Top-level functions that are not generic: what a callback argument
+    /// may name.
+    plain_functions: BTreeSet<String>,
+    /// Functions handed to C as `retain` callbacks, which C may call from
+    /// any thread, with the span of the argument.
+    retained: Vec<(String, Span)>,
 }
 impl<'a> Rewriter<'a> {
     fn new(
@@ -1146,6 +1192,8 @@ impl<'a> Rewriter<'a> {
             slice_sites: vec![],
             instances: BTreeMap::new(),
             calls: vec![],
+            plain_functions: BTreeSet::new(),
+            retained: vec![],
         }
     }
     fn finish(&mut self) -> Result<(), FfiError> {
@@ -1161,6 +1209,16 @@ impl<'a> Rewriter<'a> {
             .push(FfiError::new(kind, message, Some(span.clone())));
     }
     fn module(&mut self, m: &mut Module) {
+        self.plain_functions = m
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(f) if f.generics.is_empty() && f.body.is_some() => {
+                    Some(f.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
         for item in &mut m.items {
             match item {
                 Item::Adt(a) => {
@@ -1485,6 +1543,32 @@ impl<'a> Rewriter<'a> {
                 return None;
             }
         };
+        // A function handed to C is named, so the compiler can emit its
+        // trampoline: a top-level function that is not generic (§16.3).
+        for (p, a) in function.parameters().iter().zip(args) {
+            if let ParameterType::Function { callback, retain } = p.ty() {
+                let named =
+                    matches!(&a.expr.kind, ExprKind::Name(n) if self.plain_functions.contains(n));
+                if *retain
+                    && let ExprKind::Name(n) = &a.expr.kind
+                    && named
+                    && self.arities.is_some()
+                {
+                    self.retained.push((n.clone(), a.expr.span.clone()));
+                }
+                if !named {
+                    self.error(
+                        FfiErrorKind::CallbackArgument,
+                        format!(
+                            "{library}::{symbol}: the `{}` argument (a {}) must name a top-level function that is not generic (E0831)",
+                            p.name(),
+                            callback.name()
+                        ),
+                        &a.expr.span,
+                    );
+                }
+            }
+        }
         let effect = effect_name(library);
         let handler = import.handler;
         let Some(arities) = self.arities else {
@@ -1577,7 +1661,14 @@ pub fn describe_parameter(p: &ParameterType) -> String {
             )
         }
         ParameterType::CStr => "in Slice[u8]".into(),
+        ParameterType::Function { callback, retain } => describe_function(callback.name(), *retain),
     }
+}
+fn describe_function(callback: &str, retain: bool) -> String {
+    format!(
+        "{} fn {callback}",
+        if retain { "retain" } else { "nocapture" }
+    )
 }
 fn describe_value(v: &ValueType) -> String {
     match v {

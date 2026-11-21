@@ -532,6 +532,14 @@ pub enum ParameterType {
     /// bytes are copied into a fresh buffer with the terminator appended; an
     /// argument holding a NUL byte is refused before the call.
     CStr,
+    /// `nocapture f: Cb` or `retain f: Cb`: a Vesper function handed to C as
+    /// a pointer of the callback type `Cb` (a compiler-generated C-ABI
+    /// trampoline). `nocapture` C calls it only during the call; `retain`
+    /// C may keep it and call it later, from any thread.
+    Function {
+        callback: ExternTypeDescriptor,
+        retain: bool,
+    },
 }
 impl ParameterType {
     /// Size, alignment and direction of a single-element pointer parameter.
@@ -702,7 +710,8 @@ impl FunctionDescriptor {
                 }
                 ParameterType::Pointer { .. }
                 | ParameterType::Handle { .. }
-                | ParameterType::CStr => parameters.push(AbiType::Pointer),
+                | ParameterType::CStr
+                | ParameterType::Function { .. } => parameters.push(AbiType::Pointer),
             }
         }
         AbiSignature {
@@ -910,6 +919,11 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                         e.text(handle.name())?;
                     }
                     ParameterType::CStr => e.text("nocapture-cstr")?,
+                    ParameterType::Function { callback, retain } => {
+                        e.text("callback-function")?;
+                        e.text(if *retain { "retain" } else { "nocapture" })?;
+                        e.text(callback.name())?;
+                    }
                 }
             }
             e.value(&f.result)?;

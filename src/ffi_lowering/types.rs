@@ -6,8 +6,8 @@ use super::{
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
 use vesper_ffi::sys::{
-    Access, ExternTypeDescriptor, FunctionDescriptor, HandleAccess, Linearity, ParameterType,
-    Pointee, PointerAccess, Scalar, ValueType,
+    Access, ExternTypeDescriptor, FunctionDescriptor, HandleAccess, LibraryDescriptor, Linearity,
+    ParameterType, Pointee, PointerAccess, Scalar, ValueType,
 };
 use vesper_ffi::{FieldKind, WireLayout};
 
@@ -149,6 +149,9 @@ pub(super) struct Generated {
     handles: BTreeMap<String, Adt>,
     /// Library names, for demangling.
     libraries: Vec<String>,
+    /// The effects of the directly called libraries: what a Vesper function
+    /// handed to C as a callback may perform.
+    callback_row: Effects,
     /// Per library: symbol -> shape.
     shapes: BTreeMap<String, BTreeMap<String, Result<OpShape, String>>>,
     invalid: bool,
@@ -214,6 +217,28 @@ fn handle_adt(t: &ExternTypeDescriptor) -> Adt {
         span: 0..0,
     }
 }
+/// The row of a Vesper function handed to C: every directly called
+/// library's `Ffi[Lib]` and `Realtime`, so a signal handler may be one. An
+/// isolated library's gate is the calling thread's, so a callback cannot
+/// call one.
+fn callback_row(imports: &Imports) -> Effects {
+    let mut row = Effects::default();
+    for (name, import) in &imports.libraries {
+        if import.handler == super::Handler::Direct {
+            row.instances.push(Effect {
+                label: None,
+                name: effect_name(name),
+                args: vec![],
+            });
+        }
+    }
+    row.instances.push(Effect {
+        label: None,
+        name: crate::capability_effects::REALTIME.into(),
+        args: vec![],
+    });
+    row
+}
 fn collect_structs(layout: &WireLayout, out: &mut Vec<WireLayout>) {
     for f in layout.fields() {
         if let FieldKind::Struct(inner) = f.kind() {
@@ -230,6 +255,7 @@ impl Generated {
             enums: BTreeMap::new(),
             handles: BTreeMap::new(),
             libraries: imports.libraries.keys().cloned().collect(),
+            callback_row: callback_row(imports),
             shapes: BTreeMap::new(),
             invalid: false,
         };
@@ -299,7 +325,7 @@ impl Generated {
         for (name, import) in &imports.libraries {
             let mut shapes = BTreeMap::new();
             for f in import.descriptor.functions() {
-                let shape = g.compute_shape(f);
+                let shape = g.compute_shape(&import.descriptor, f);
                 if let Ok(s) = &shape
                     && mentions_result(&s.result)
                 {
@@ -321,7 +347,48 @@ impl Generated {
             },
         }
     }
-    fn compute_shape(&self, f: &FunctionDescriptor) -> Result<OpShape, String> {
+    /// The source type of a Vesper function C calls as `callback`: its
+    /// parameters and result are integers (each crosses as one C word), and
+    /// its row may hold the direct libraries' effects and `Realtime`.
+    fn callback_type(&self, library: &LibraryDescriptor, callback: &str) -> Result<Type, String> {
+        let f = library
+            .function(callback)
+            .filter(|f| f.is_indirect())
+            .ok_or_else(|| format!("{callback} is not a callback type"))?;
+        let unsupported = || {
+            format!(
+                "C calls a Vesper function of callback type {callback} only with integer parameters and an integer or Unit result, without errno, for now"
+            )
+        };
+        let mut params = vec![];
+        for p in &f.parameters()[1..] {
+            match p.ty() {
+                ParameterType::Value(ValueType::Scalar(s)) => {
+                    params.push((Pass::In, Type::named(parameter_scalar(*s)?)));
+                }
+                _ => return Err(unsupported()),
+            }
+        }
+        let result = match f.result() {
+            ValueType::Unit => Type::unit(),
+            ValueType::Scalar(s) => Type::named(result_scalar(*s)),
+            _ => return Err(unsupported()),
+        };
+        if f.reads_errno() {
+            return Err(unsupported());
+        }
+        Ok(Type::Function {
+            params,
+            result: Box::new(result),
+            effects: self.callback_row.clone(),
+            mode: Mode::Copy,
+        })
+    }
+    fn compute_shape(
+        &self,
+        library: &LibraryDescriptor,
+        f: &FunctionDescriptor,
+    ) -> Result<OpShape, String> {
         let mut params = vec![];
         for p in f.parameters() {
             let (pass, kind) = match p.ty() {
@@ -384,6 +451,11 @@ impl Generated {
                         HandleAccess::Sink => Pass::Sink,
                     },
                     ParamKind::Value(Type::named(handle.name())),
+                ),
+                // A named Vesper function, handed to C as a trampoline.
+                ParameterType::Function { callback, .. } => (
+                    Pass::In,
+                    ParamKind::Value(self.callback_type(library, callback.name())?),
                 ),
                 // A C string is the caller's bytes, copied and terminated.
                 ParameterType::CStr => (

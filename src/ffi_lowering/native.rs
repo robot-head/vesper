@@ -93,6 +93,26 @@ fn identical(p: &Pointee, little: bool) -> bool {
     }
 }
 
+/// Converts a word of type `from` to `to` (both integers): sign or zero
+/// extension, or truncation.
+fn convert_word(
+    b: &mut FunctionBuilder<'_>,
+    v: ir::Value,
+    to: ir::Type,
+    signed: bool,
+) -> ir::Value {
+    let from = b.func.dfg.value_type(v);
+    if from == to {
+        v
+    } else if from.bits() > to.bits() {
+        b.ins().ireduce(to, v)
+    } else if signed {
+        b.ins().sextend(to, v)
+    } else {
+        b.ins().uextend(to, v)
+    }
+}
+
 /// What a foreign call calls: an imported symbol, or (a callback type's
 /// call) the C function pointer it was handed.
 enum Callee {
@@ -101,6 +121,131 @@ enum Callee {
 }
 
 impl<M: Module> Codegen<'_, '_, M> {
+    /// The address of the C-ABI trampoline that calls the Vesper function
+    /// `arg` names as a pointer of `library`'s callback type `callback`
+    /// (§16.3): it widens or narrows each C word to the function's own
+    /// parameter, calls it, and hands its result back as the C result. One
+    /// trampoline per (function, callback type) in a module.
+    fn foreign_trampoline(
+        &mut self,
+        arg: &Expr,
+        library: &str,
+        callback: &str,
+    ) -> Result<ir::Value, String> {
+        // The function value, as `parallel_for` resolves its body: the
+        // optimize path may hand it over as a renamed operand.
+        let value = self.expr(arg)?;
+        let info = self.info(value);
+        let refuse =
+            || format!("{library}::{callback}: the callback argument is not a named function");
+        let [target] = info.targets.iter().copied().collect::<Vec<_>>()[..] else {
+            return Err(refuse());
+        };
+        let closure = target
+            .checked_sub(1)
+            .and_then(|i| self.closures.get(i))
+            .ok_or_else(refuse)?;
+        let ClosureTarget::Function(function) = &closure.target else {
+            return Err(refuse());
+        };
+        if !closure.captures.is_empty() {
+            return Err(refuse());
+        }
+        let function = function.clone();
+        let id = *self
+            .ids
+            .get(&instance_key(&function, &BTreeMap::new()))
+            .ok_or_else(|| format!("callback function '{function}' was not compiled"))?;
+        let key = (function.clone(), library.to_owned(), callback.to_owned());
+        let existing = ffi::TRAMPOLINES.with(|t| t.borrow().get(&key).copied());
+        let trampoline = match existing {
+            Some(t) => FuncId::from_u32(t),
+            None => {
+                let t = self.define_trampoline(&function, id, library, callback)?;
+                ffi::TRAMPOLINES.with(|m| m.borrow_mut().insert(key, t.as_u32()));
+                t
+            }
+        };
+        let pointer = self.m.target_config().pointer_type();
+        let f = self.m.declare_func_in_func(trampoline, self.b.func);
+        Ok(self.b.ins().func_addr(pointer, f))
+    }
+    fn define_trampoline(
+        &mut self,
+        function: &str,
+        id: FuncId,
+        library: &str,
+        callback: &str,
+    ) -> Result<FuncId, String> {
+        let descriptor = ffi::callback_plan(library, callback)?;
+        let abi = descriptor.abi();
+        let pointer = self.m.target_config().pointer_type();
+        let mut c_sig = self.m.make_signature();
+        for t in &abi.parameters {
+            c_sig.params.push(abi_param(*t, pointer));
+        }
+        if let Some(t) = abi.result {
+            c_sig.returns.push(abi_param(t, pointer));
+        }
+        let trampoline = self
+            .m
+            .declare_anonymous_function(&c_sig)
+            .map_err(|e| format!("trampoline of '{function}': {e}"))?;
+        let mut ctx = self.m.make_context();
+        ctx.func.signature = c_sig.clone();
+        let mut fbctx = FunctionBuilderContext::new();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let block = b.create_block();
+            b.append_block_params_for_function_params(block);
+            b.switch_to_block(block);
+            let c_args = b.block_params(block).to_vec();
+            let callee = self.m.declare_func_in_func(id, b.func);
+            let v_sig = b.func.dfg.signatures[b.func.dfg.ext_funcs[callee].signature].clone();
+            if v_sig.params.len() != c_args.len() || v_sig.returns.len() > 1 {
+                return Err(format!(
+                    "'{function}' cannot be called by C as {library}::{callback}: its compiled signature takes {} words, C passes {}",
+                    v_sig.params.len(),
+                    c_args.len()
+                ));
+            }
+            let signed: Vec<bool> = abi
+                .parameters
+                .iter()
+                .map(|t| matches!(t, AbiType::Integer(s) if s.signed()))
+                .collect();
+            let args: Vec<ir::Value> = c_args
+                .iter()
+                .zip(&v_sig.params)
+                .zip(&signed)
+                .map(|((v, p), s)| convert_word(&mut b, *v, p.value_type, *s))
+                .collect();
+            let call = b.ins().call(callee, &args);
+            let results = b.inst_results(call).to_vec();
+            match (abi.result, results.first(), c_sig.returns.first()) {
+                (Some(t), Some(r), Some(ret)) => {
+                    let signed = matches!(t, AbiType::Integer(s) if s.signed());
+                    let r = convert_word(&mut b, *r, ret.value_type, signed);
+                    b.ins().return_(&[r]);
+                }
+                (None, _, _) => {
+                    b.ins().return_(&[]);
+                }
+                _ => {
+                    return Err(format!(
+                        "'{function}' returns nothing, but {library}::{callback} returns a value"
+                    ));
+                }
+            }
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        self.m
+            .define_function(trampoline, &mut ctx)
+            .map_err(|e| format!("trampoline of '{function}': {e}"))?;
+        self.m.clear_context(&mut ctx);
+        Ok(trampoline)
+    }
     pub(super) fn foreign_perform(
         &mut self,
         effect: &str,
@@ -127,6 +272,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         // (`codegen_swap::ffi`); none is installed by default. A callback
         // type's call is not offered: the steps name a symbol.
         if !plan.function.is_indirect()
+            && !descriptors
+                .iter()
+                .any(|d| matches!(d.ty(), ParameterType::Function { .. }))
             && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
         {
             return Ok(v);
@@ -139,6 +287,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         // first NUL byte (or -1).
         let mut strings: Vec<(ir::Value, ir::Value)> = vec![];
         for ((arg, param), descriptor) in args.iter().zip(&signature.params).zip(descriptors) {
+            if let ParameterType::Function { callback, .. } = descriptor.ty() {
+                let trampoline =
+                    self.foreign_trampoline(&arg.expr, &plan.library, callback.name())?;
+                c_args.push(trampoline);
+                continue;
+            }
             if let ParameterType::CStr = descriptor.ty() {
                 let (data, len) = self.foreign_view(&arg.expr, 1)?;
                 strings.push(self.foreign_cstr(data, len)?);
@@ -175,6 +329,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 // every mode: C never replaces the handle itself.
                 ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
                 ParameterType::CStr => unreachable!("C strings are lowered above"),
+                ParameterType::Function { .. } => unreachable!("functions are lowered above"),
                 ParameterType::Pointer {
                     pointee,
                     access,
@@ -1326,6 +1481,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                         }
                         ParameterType::Handle { .. } => words.push(1),
                         ParameterType::CStr => unreachable!("C strings are lowered above"),
+                        ParameterType::Function { .. } => {
+                            unreachable!("calls taking functions are not offered to the hook")
+                        }
                         ParameterType::Pointer {
                             pointee,
                             access,
