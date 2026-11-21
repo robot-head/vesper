@@ -264,14 +264,10 @@ pub fn walk_store(inout b: Builder, ptr: Value, v: Value) eff [Ffi[Cranelift], F
 
 // `Codegen::ir_temp` of operand `operand`, whose value is `v`: a fresh
 // variable holding it, named as the operand's temporary.
-pub fn walk_temp(inout b: Builder, operand: u64, v: Value) -> Var eff [
-    Ffi[Cranelift],
-    Ffi[Walk]
-] {
+pub fn walk_temp(inout b: Builder, operand: u64, v: Value) -> Var eff [Ffi[Cranelift], Ffi[Walk]] {
     let ty = value_type(inout b, v);
     let t = declare_var(inout b, ty);
     walk_def_var(inout b, t, v);
     temp(operand, t);
     t
 }
-
