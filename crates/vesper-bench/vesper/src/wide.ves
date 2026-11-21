@@ -208,3 +208,24 @@ pub fn w_fits_i64(a: W) -> bool {
         a.hi == 0
     }
 }
+
+// A native u128 as a W.
+pub fn w_from_u128(x: u128) -> W {
+    w(wrapping_u64(wrapping_shr_u128(x, 64)), wrapping_u64(x))
+}
+
+// (x / d, whether d divides x) for d > 0; (0, true) for d = 0.
+pub fn udiv_u128(x: u128, d: u64) -> (u128, bool) {
+    let dd = widen_u128(d);
+    handle Fail[RuntimeError] in {
+        (x / dd, x % dd == widen_u128(0))
+    } with {
+        return v => v,
+        raise(e, k) => (widen_u128(0), true),
+    }
+}
+
+// A W's bit pattern as a native i128.
+pub fn w_to_i128(a: W) -> i128 {
+    wrapping_i128(wrapping_shl_u128(widen_u128(a.hi), 64) | widen_u128(a.lo))
+}
