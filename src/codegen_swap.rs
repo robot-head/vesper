@@ -119,6 +119,11 @@ pub struct Lent<'a, 'f> {
     /// it back with `vcl_module_kind` and chooses linkage as Rust does
     /// (`Preemptible` for JIT definitions, `Local` or `Export` in objects).
     pub jit: bool,
+    /// Whether this is an optimized build (the Place IR optimizer ran and
+    /// the native backend uses its optimized lowerings, such as register
+    /// locals and the internal calling conventions). A hook must emit what
+    /// the Rust code emits for the same setting.
+    pub optimize: bool,
 }
 
 /// A family hook (see the module documentation for the protocol).
@@ -282,21 +287,28 @@ thread_local! {
     /// Whether the module being emitted into is a JIT module
     /// ([`module_kind_scope`]).
     static JIT: Cell<bool> = const { Cell::new(false) };
+    /// Whether the build being emitted is optimized ([`module_kind_scope`]).
+    static OPTIMIZE: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Restores the previous module kind when dropped.
-pub struct ModuleKindScope(bool);
+/// Restores the previous module kind and optimize setting when dropped.
+pub struct ModuleKindScope(bool, bool);
 impl Drop for ModuleKindScope {
     fn drop(&mut self) {
         JIT.with(|j| j.set(self.0));
+        OPTIMIZE.with(|o| o.set(self.1));
     }
 }
 
 /// Records, for the requests of one `define_instances` call, whether its
-/// module is a JIT module (`Lent::jit`). The native backend is generic over
-/// the module, which a hook only sees as `dyn Module`.
-pub fn module_kind_scope(jit: bool) -> ModuleKindScope {
-    ModuleKindScope(JIT.with(|j| j.replace(jit)))
+/// module is a JIT module (`Lent::jit`) and whether the build is optimized
+/// (`Lent::optimize`). The native backend is generic over the module, which
+/// a hook only sees as `dyn Module`.
+pub fn module_kind_scope(jit: bool, optimize: bool) -> ModuleKindScope {
+    ModuleKindScope(
+        JIT.with(|j| j.replace(jit)),
+        OPTIMIZE.with(|o| o.replace(optimize)),
+    )
 }
 
 /// Installs `hooks` for the rest of the process (the hybrid build, from its
@@ -375,6 +387,7 @@ pub fn request(
         ty,
         results: &mut results,
         jit: JIT.with(Cell::get),
+        optimize: OPTIMIZE.with(Cell::get),
     })?;
     Ok(handled.then_some(results))
 }

@@ -130,6 +130,8 @@ uint32_t vcl_module_function_count(const vcl_module *m);
 uint64_t vcl_module_function_name(const vcl_module *m, uint32_t func, uint8_t *out, size_t out_len);
 /* The function declared as `name`, or UINT32_MAX. */
 uint32_t vcl_module_get_function(vcl_module *m, const uint8_t *name, size_t name_len);
+/* The data object declared as `name`, or UINT32_MAX. */
+uint32_t vcl_module_get_data(vcl_module *m, const uint8_t *name, size_t name_len);
 /* 0 object, 1 JIT, 2 object for a target with no operating system. */
 uint32_t vcl_module_kind(const vcl_module *m);
 uint64_t vcl_compile(vcl_module *m, vcl_builder *b);
