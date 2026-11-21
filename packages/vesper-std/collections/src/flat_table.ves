@@ -9,6 +9,15 @@
 //
 // Slot values: 0 is empty, `none_id()` is a tombstone, anything else is an
 // entry position plus one.
+//
+// `V` need not be copy (self-hosting SH2 lane 1): `vals` holds the values in
+// entry order, `insert` moves a value in (and the replaced one out) and
+// `remove` moves the value out. A value that is not copy is read in place,
+// as an element view of `vals`:
+// `t.with_ref(k, |in v| ..)` and `t.with_mut(k, |inout v| ..)` lend it to a
+// closure; `match t.vals.try_get(t.position(k)) { Some(v) => .., None => .. }`
+// (`try_get_mut` to update) is the same lookup written out. `position` is
+// `none_id()` for an absent key.
 
 fn none_id() -> u64 {
     18446744073709551615
@@ -39,7 +48,7 @@ pub struct FlatTable[K, V] {
 }
 
 // An empty table.
-pub fn flat_table_new[K: mod copy + Eq + Hash, V: mod copy]() -> FlatTable[K, V] {
+pub fn flat_table_new[K: mod copy + Eq + Hash, V: mod affine]() -> FlatTable[K, V] {
     let mut slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut i: u64 = 0;
     loop {
@@ -59,7 +68,7 @@ pub fn flat_table_new[K: mod copy + Eq + Hash, V: mod copy]() -> FlatTable[K, V]
     }
 }
 
-impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
+impl [K: mod copy + Eq + Hash, V: mod affine] FlatTable[K, V] {
     pub fn len(in self) -> u64 {
         self.keys.len()
     }
@@ -146,15 +155,17 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
         }
     }
 
-    // Insert or replace; the previous value for `k`, if any.
-    pub fn insert(inout self, k: K, v: V) -> Option[V] {
+    // Insert or replace; the previous value for `k`, if any. The value is
+    // moved in, and the previous one moved out.
+    pub fn insert(inout self, k: K, sink v: V) -> Option[V] {
         let h = mix(k.hash());
         let s = self.find_slot(k, h);
         if s != none_id() {
             let e = wrapping_sub(at(in self.slots.as_slice(), s, 1), 1);
-            let old = self.vals.try_get(e);
-            self.vals.try_set(e, v);
-            return old;
+            return match self.vals.try_get_mut(e) {
+                Option::Some(slot) => Option::Some(replace(inout slot, v)),
+                Option::None => Option::None,
+            };
         }
         // Keep occupied slots plus tombstones at most 7/8 of capacity.
         let capacity = wrapping_add(self.mask, 1);
@@ -176,14 +187,15 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
         Option::None
     }
 
-    // The value for `k`, if present.
-    pub fn get(in self, k: K) -> Option[V] {
+    // The entry position of `k` (its value's index in `vals`), or
+    // `none_id()` when `k` is absent.
+    pub fn position(in self, k: K) -> u64 {
         let h = mix(k.hash());
         let s = self.find_slot(k, h);
         if s == none_id() {
-            return Option::None;
+            return none_id();
         }
-        self.vals.try_get(wrapping_sub(at(in self.slots.as_slice(), s, 1), 1))
+        wrapping_sub(at(in self.slots.as_slice(), s, 1), 1)
     }
 
     pub fn contains_key(in self, k: K) -> bool {
@@ -200,7 +212,6 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
             return Option::None;
         }
         let e = wrapping_sub(at(in self.slots.as_slice(), s, 1), 1);
-        let old = self.vals.try_get(e);
         self.slots.try_set(s, none_id());
         self.tombs = wrapping_add(self.tombs, 1);
         let last = wrapping_sub(self.keys.len(), 1);
@@ -214,18 +225,24 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
                 },
                 Option::None => {},
             }
-            match self.vals.try_get(last) {
-                Option::Some(x) => {
-                    self.vals.try_set(e, x);
-                },
-                Option::None => {},
-            }
             self.hashes.try_set(e, lh);
         }
         self.keys.pop();
-        self.vals.pop();
         self.hashes.pop();
-        old
+        // The last value moves into the hole and the removed one out.
+        match self.vals.pop() {
+            Option::Some(moved) => {
+                if e == last {
+                    Option::Some(moved)
+                } else {
+                    match self.vals.try_get_mut(e) {
+                        Option::Some(slot) => Option::Some(replace(inout slot, moved)),
+                        Option::None => Option::None,
+                    }
+                }
+            },
+            Option::None => Option::None,
+        }
     }
 
     // Remove every entry.
@@ -234,6 +251,43 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
         self.vals.clear();
         self.hashes.clear();
         self.rebuild(8);
+    }
+
+    // Append every key to `out`, in entry order.
+    pub fn keys_into(in self, inout out: ChunkSeq[K]) {
+        out.extend(in self.keys.as_slice());
+    }
+
+    // The key at entry position `i` (0 ..< len).
+    pub fn key_at(in self, i: u64) -> Option[K] {
+        self.keys.try_get(i)
+    }
+
+    // Call `f` on the value of `k`, read in place, and return its result;
+    // `None` (and `f` not called) when `k` is absent. `f` is a lent closure
+    // (§4.2): it may read the caller's names, and nothing is copied.
+    pub fn with_ref[R, e: eff](in self, k: K, f: fn(in V) -> R eff [e]) -> Option[R] eff [e] {
+        match self.vals.try_get(self.position(k)) {
+            Option::Some(v) => Option::Some(f(in v)),
+            Option::None => Option::None,
+        }
+    }
+
+    // Call `f` on the value of `k`, lent `inout` in place, and return its
+    // result; `None` (and `f` not called) when `k` is absent.
+    pub fn with_mut[R, e: eff](inout self, k: K, f: fn(inout V) -> R eff [e]) -> Option[R] eff [e] {
+        let i = self.position(k);
+        match self.vals.try_get_mut(i) {
+            Option::Some(v) => Option::Some(f(inout v)),
+            Option::None => Option::None,
+        }
+    }
+}
+
+impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
+    // The value for `k`, if present.
+    pub fn get(in self, k: K) -> Option[V] {
+        self.vals.try_get(self.position(k))
     }
 
     // The entry at position `i` (0 ..< len), in the deterministic entry
@@ -248,11 +302,6 @@ impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
             },
             Option::None => Option::None,
         }
-    }
-
-    // Append every key to `out`, in entry order.
-    pub fn keys_into(in self, inout out: ChunkSeq[K]) {
-        out.extend(in self.keys.as_slice());
     }
 }
 

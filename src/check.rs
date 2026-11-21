@@ -17,6 +17,10 @@ mod tiled_rules;
 
 #[path = "arrays/check.rs"]
 mod array_rules;
+#[path = "check/call_facts.rs"]
+mod call_facts;
+#[path = "loops/for_sequences.rs"]
+mod for_sequences;
 #[path = "integer_widths/literal_typing.rs"]
 mod literal_typing;
 #[path = "loops/check.rs"]
@@ -44,6 +48,14 @@ pub struct World {
     /// Checked integer operations which can raise Fail[ArithOverflow]. Spans
     /// absent here were proved in range (see `vesper.arith.checked/1`).
     pub overflow_ops: BTreeSet<(usize, usize)>,
+    /// `try_get`/`try_get_mut` calls that are the scrutinee of an element
+    /// view `match` (§13): their `Some` binding names the element in place
+    /// instead of a copy of it.
+    pub element_views: BTreeMap<(usize, usize), Pass>,
+    /// Lent closures (§4.2), by the name of their body's function
+    /// ([`crate::ir::nested_name`]): the names each borrows `in` from its
+    /// enclosing scope for the call it is lent to.
+    pub lent_closures: BTreeMap<String, BTreeSet<String>>,
     pub string_capacity: usize,
     pub calls: BTreeMap<(usize, usize), BTreeMap<String, Type>>,
     /// Source trait/model elaboration metadata (empty without traits).
@@ -436,6 +448,7 @@ impl World {
 
         let mut diagnostics;
         let mut option_tries;
+        let mut for_plans;
         let mut iteration = 0usize;
         loop {
             iteration += 1;
@@ -451,6 +464,8 @@ impl World {
                 state_guards: vec![],
                 partial_ops: BTreeSet::new(),
                 overflow_ops: BTreeSet::new(),
+                element_views: BTreeMap::new(),
+                element_view: None,
                 dead: 0,
                 string_capacity: 0,
                 static_text: false,
@@ -462,6 +477,9 @@ impl World {
                 loans: vec![],
                 match_borrows: vec![],
                 reserved_loans: BTreeSet::new(),
+                lent_closures: BTreeSet::new(),
+                lent_captures: vec![],
+                lent_bodies: BTreeMap::new(),
                 handler_frames: vec![],
                 slice_args: BTreeMap::new(),
                 effect_inference: vec![],
@@ -472,6 +490,10 @@ impl World {
                 shadowed: vec![],
                 literals: Default::default(),
                 option_tries: BTreeSet::new(),
+                for_sequences: BTreeMap::new(),
+                loop_borrows: vec![],
+                view_sources: vec![],
+                result_ranges: Default::default(),
             };
             c.function_with_literal_typing(&func_norm);
             let Checker {
@@ -479,9 +501,11 @@ impl World {
                 results,
                 handler_effects,
                 option_tries: tries,
+                for_sequences: plans,
                 ..
             } = c;
             option_tries = tries;
+            for_plans = plans;
             let changed =
                 world.function_results != results || world.handler_effects != handler_effects;
             world.function_results = results;
@@ -500,6 +524,23 @@ impl World {
             }
         }
 
+        if !for_plans.is_empty() {
+            // Check the index loop a `for` over a sequence means instead.
+            let after = func_norm
+                .span
+                .end
+                .max(world.types.keys().map(|k| k.1).max().unwrap_or(0))
+                + 1;
+            let single = Module {
+                items: vec![Item::Function(Box::new(func_norm))],
+                ..Module::default()
+            };
+            let desugared = for_sequences::desugar(&single, &for_plans, after);
+            if let Some(Item::Function(desugared_fn)) = desugared.items.into_iter().next() {
+                return self.check_isolated_item(&desugared_fn);
+            }
+            return diagnostics;
+        }
         if !option_tries.is_empty() {
             let after = func_norm
                 .span
@@ -662,6 +703,12 @@ pub struct Checked {
 /// [`crate::pact_frontend`] into ordinary core functions and calls first;
 /// the returned World then contains only the existing core schema.
 pub fn check(module: &Module) -> Checked {
+    // Untyped value enum members are literals at every use (§2.2).
+    if let Some((module, diagnostics)) = crate::arrays::untyped_members(module) {
+        let mut checked = check(&module);
+        checked.diagnostics.extend(diagnostics);
+        return checked;
+    }
     // Source tensor types (§28.2): a module that uses them is checked and
     // elaborated by `tensor_types`, which runs the core checker itself.
     if let Some(checked) = crate::tensor_types::check(module) {
@@ -727,6 +774,7 @@ pub(crate) fn check_core(
     let mut diagnostics = vec![];
     let mut iteration = 0;
     let mut option_tries: BTreeSet<(usize, usize)>;
+    let mut for_plans: BTreeMap<(usize, usize), for_sequences::Plan>;
     loop {
         iteration += 1;
         let mut c = Checker {
@@ -741,6 +789,8 @@ pub(crate) fn check_core(
             state_guards: vec![],
             partial_ops: BTreeSet::new(),
             overflow_ops: BTreeSet::new(),
+            element_views: BTreeMap::new(),
+            element_view: None,
             dead: 0,
             string_capacity: 0,
             static_text: false,
@@ -752,6 +802,9 @@ pub(crate) fn check_core(
             loans: vec![],
             match_borrows: vec![],
             reserved_loans: BTreeSet::new(),
+            lent_closures: BTreeSet::new(),
+            lent_captures: vec![],
+            lent_bodies: BTreeMap::new(),
             handler_frames: vec![],
             slice_args: BTreeMap::new(),
             effect_inference: vec![],
@@ -762,6 +815,10 @@ pub(crate) fn check_core(
             shadowed: vec![],
             literals: Default::default(),
             option_tries: BTreeSet::new(),
+            for_sequences: BTreeMap::new(),
+            loop_borrows: vec![],
+            view_sources: vec![],
+            result_ranges: Default::default(),
         };
         c.declarations();
         for f in world.functions.values() {
@@ -776,12 +833,16 @@ pub(crate) fn check_core(
             handler_effects,
             partial_ops,
             overflow_ops,
+            element_views,
+            lent_bodies,
             string_capacity,
             resolved: trait_calls,
             option_tries: tries,
+            for_sequences: plans,
             ..
         } = c;
         option_tries = tries;
+        for_plans = plans;
         resolved = trait_calls;
         let changed = world.function_results != results || world.handler_effects != handler_effects;
         world.types = types;
@@ -791,6 +852,8 @@ pub(crate) fn check_core(
         world.handler_effects = handler_effects;
         world.partial_ops = partial_ops;
         world.overflow_ops = overflow_ops;
+        world.element_views = element_views;
+        world.lent_closures = lent_bodies;
         world.string_capacity = string_capacity;
         diagnostics = errors;
         if !changed {
@@ -800,6 +863,19 @@ pub(crate) fn check_core(
             diagnostics.push(Diagnostic::new("E0408","capability and continuation effect inference did not converge; add explicit type/effect annotations",0..0));
             break;
         }
+    }
+    if !for_plans.is_empty() {
+        // Check the index loops `for` over a sequence means instead
+        // (`for_sequences`).
+        let after = world
+            .functions
+            .values()
+            .map(|f| f.span.end)
+            .chain(world.types.keys().map(|k| k.1))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        return check_core(&for_sequences::desugar(module, &for_plans, after), traits);
     }
     if !option_tries.is_empty() {
         // Check the early exits `?` on `Option` means instead (`try_option`).
@@ -863,6 +939,10 @@ struct Checker<'a> {
     state_guards: Vec<(usize, usize, Type, Span)>,
     partial_ops: BTreeSet<(usize, usize)>,
     overflow_ops: BTreeSet<(usize, usize)>,
+    element_views: BTreeMap<(usize, usize), Pass>,
+    /// Set while the scrutinee of an element view `match` is checked: how
+    /// the view borrows the element (§13).
+    element_view: Option<Pass>,
     dead: usize,
     string_capacity: usize,
     /// Checking the body of a `-> Str` function: string literals the
@@ -877,12 +957,22 @@ struct Checker<'a> {
     /// Places that an enclosing borrowed `match` lends to its arms' `in`
     /// bindings (§4.3), with the scrutinee's span: inside the arms they may
     /// be read but not written, lent `inout` or moved.
-    match_borrows: Vec<(Place, Span)>,
+    match_borrows: Vec<(Place, Span, Pass)>,
     /// Origin spans of the `inout` argument loans in `loans` (receivers and
     /// plain arguments): two-phase borrows (§4.3) reserve them while the
     /// call's other arguments are evaluated, so those arguments may read the
     /// loaned place.
     reserved_loans: BTreeSet<(usize, usize)>,
+    /// Spans of closure literals lent to a function parameter (§4.2, lent
+    /// closures): written directly as the argument for an `in` parameter
+    /// whose function type is not `copy`. Such a closure borrows the names
+    /// it uses `in` for the call instead of capturing them.
+    lent_closures: BTreeSet<(usize, usize)>,
+    /// The places the lent closure just checked borrows, with its span: the
+    /// call adds them to its argument loans.
+    lent_captures: Vec<(Place, Span)>,
+    /// What becomes [`World::lent_closures`].
+    lent_bodies: BTreeMap<String, BTreeSet<String>>,
     /// Lexical handlers being checked: the capability index each installs,
     /// the declaration span of every binding declared outside it, and the
     /// outer linear bindings that were live at an abortable checkpoint this
@@ -902,6 +992,18 @@ struct Checker<'a> {
     literals: literal_typing::LiteralTyping,
     /// Spans of `?` on `Option` ([`try_option`]), rewritten after checking.
     option_tries: BTreeSet<(usize, usize)>,
+    /// `for` loops over arrays and sequences by the span of their iterable
+    /// ([`for_sequences`]), rewritten to index loops after checking.
+    for_sequences: BTreeMap<(usize, usize), for_sequences::Plan>,
+    /// Places an enclosing `for` loop iterates: its body may read them but
+    /// not write, lend `inout` or move them ([`for_sequences`]).
+    loop_borrows: Vec<(Place, Span)>,
+    /// Bound views of immutable owned bindings: the viewed place, the view
+    /// binding's name and declaration span. While the view is in scope the
+    /// place cannot be moved (`E1531`).
+    view_sources: Vec<(Place, String, Span)>,
+    /// Result-range summaries of called functions ([`call_facts`]).
+    result_ranges: std::cell::RefCell<call_facts::ResultRanges>,
 }
 impl Checker<'_> {
     fn error(&mut self, code: &str, msg: impl Into<String>, span: Span) {
@@ -1486,24 +1588,38 @@ impl Checker<'_> {
                 self.help("An exclusive argument loan cannot overlap another access while the call's arguments are evaluated.");
             }
         }
-        if matches!(usage, Usage::Borrow(Pass::Inout))
-            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy)
+        if (matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy))
+            && !self.loop_borrows.is_empty()
+            && !self.check_loop_borrows(p, &span)
         {
-            for (borrowed, origin) in self.match_borrows.clone() {
-                if borrowed.overlaps(p) {
-                    transfer_allowed = false;
-                    self.error(
-                        "E0301",
-                        format!(
-                            "access to '{}' conflicts with the borrow of '{}' by an enclosing match",
-                            p.display(),
-                            borrowed.display()
-                        ),
-                        span.clone(),
-                    );
-                    self.related(origin, "this match lends the place to its arms");
-                    self.help("The bindings of a match on a borrowed place borrow its payloads; the place cannot be written, lent `inout` or moved until the match ends.");
-                }
+            transfer_allowed = false;
+        }
+        if matches!(usage, Usage::Own)
+            && self.mode(&ty) != Mode::Copy
+            && !self.view_sources.is_empty()
+            && !self.check_view_sources(p, env, &span)
+        {
+            transfer_allowed = false;
+        }
+        let writes = matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy);
+        for (borrowed, origin, lent) in self.match_borrows.clone() {
+            // An `inout` element view (§13) lends its sequence
+            // exclusively: the arms cannot even read it.
+            if (writes || lent == Pass::Inout) && borrowed.overlaps(p) {
+                transfer_allowed = false;
+                self.error(
+                    "E0301",
+                    format!(
+                        "access to '{}' conflicts with the borrow of '{}' by an enclosing match",
+                        p.display(),
+                        borrowed.display()
+                    ),
+                    span.clone(),
+                );
+                self.related(origin, "this match lends the place to its arms");
+                self.help("The bindings of a match on a borrowed place borrow its payloads; the place cannot be written, lent `inout` or moved until the match ends.");
             }
         }
         match usage {
@@ -1834,6 +1950,10 @@ impl Checker<'_> {
                                     at: Arc::clone(&binding.mutation),
                                     looped: false,
                                 });
+                                if bound_view {
+                                    let span = binding.span.clone();
+                                    self.record_view_source(value, n, span, env);
+                                }
                             }
                             for n in pattern_names(pat) {
                                 if let Some(binding) = env.bindings.get_mut(&n) {
@@ -1902,7 +2022,7 @@ impl Checker<'_> {
                     if let Some(kind) = crate::numeric::IntegerKind::from_type(&t)
                         && self
                             .integer_fact(v, env)
-                            .and_then(|n| kind.checked_neg(n))
+                            .and_then(|n| integer_widths_rules::fact_neg(kind, n))
                             .is_none()
                     {
                         self.overflow_failure(env, e.span.clone());
@@ -2118,9 +2238,9 @@ impl Checker<'_> {
                 let fact = if op == "=" {
                     value
                 } else {
-                    kind.zip(old)
-                        .zip(value)
-                        .and_then(|((k, a), b)| k.checked(&op[..1], a, b).ok())
+                    kind.zip(old).zip(value).and_then(|((k, a), b)| {
+                        integer_widths_rules::fact_checked(k, &op[..1], a, b).ok()
+                    })
                 };
                 let nonzero = fact.is_some_and(|n| n != 0) || (op == "=" && self.nonzero(r, env));
                 // A write to a field never establishes a fact about its root.
@@ -2192,15 +2312,29 @@ impl Checker<'_> {
                 // type is not copy borrows it: the pattern's bindings are
                 // `in` borrows of its payloads, `Box` contents included, so a
                 // borrowed tree can be walked any number of times (§4.3).
-                let borrowed = self.borrowed_scrutinee(value, env);
+                let view = self.element_view_scrutinee(value, arms, env);
+                let borrowed = view
+                    .as_ref()
+                    .map(|(pass, _)| *pass)
+                    .or_else(|| self.borrowed_scrutinee(value, env));
                 let usage = borrowed.map_or(Usage::Own, |_| Usage::Borrow(Pass::In));
+                self.element_view = view.as_ref().map(|(pass, _)| *pass);
                 let t = self.expr(value, env, usage);
+                self.element_view = None;
                 self.coverage(arms, &t, e.span.clone());
                 let borrow_base = self.match_borrows.len();
-                if borrowed.is_some()
-                    && let Some(p) = Place::from_expr(value)
-                {
-                    self.match_borrows.push((p, value.span.clone()));
+                match view {
+                    // An element view (§13) borrows its sequence for the
+                    // whole match: `in` lets the arms read it, `inout`
+                    // lends it exclusively.
+                    Some((pass, p)) => self.match_borrows.push((p, value.span.clone(), pass)),
+                    None => {
+                        if borrowed.is_some()
+                            && let Some(p) = Place::from_expr(value)
+                        {
+                            self.match_borrows.push((p, value.span.clone(), Pass::In));
+                        }
+                    }
                 }
                 let original = env.clone();
                 let mut branches = vec![];
@@ -2738,7 +2872,22 @@ impl Checker<'_> {
                 };
             }
         }
-        let t = self.expr(callee, env, Usage::Own);
+        // Calling a lent function parameter (`f: fn(..)` passed `in` with a
+        // function type that is not `copy`, §4.2) reads it: it may be
+        // called any number of times and is never consumed.
+        let lent_callee = matches!(&callee.kind, ExprKind::Name(n)
+            if env.bindings.get(n).is_some_and(|b| b.pass != Pass::Sink
+                && b.projections.is_empty()
+                && matches!(&b.ty, Type::Function { mode, .. } if *mode != Mode::Copy)));
+        let t = self.expr(
+            callee,
+            env,
+            if lent_callee {
+                Usage::Borrow(Pass::In)
+            } else {
+                Usage::Own
+            },
+        );
         if let Type::Function {
             params,
             result,
@@ -2875,7 +3024,13 @@ impl Checker<'_> {
         }
         let element = self.receiver_type(e, env);
         if !crate::dyn_trait::is_boxed(&element) {
-            return None;
+            // An element whose type is not copy is lent in place (an
+            // element view, §13): the call borrows the whole sequence as it
+            // borrows the element.
+            if element == Type::Infer || self.mode(&element) == Mode::Copy {
+                return None;
+            }
+            return Place::from_expr(base);
         }
         // An `inout` lend may only reach the object: a vtable stub's
         // receiver or a `dyn` parameter. A callee taking the box itself
@@ -3326,6 +3481,17 @@ impl Checker<'_> {
                 &substitute(&bind_signature_capabilities(&param.ty, f), &context_vars),
                 &cap_labels,
             );
+            // A closure literal for a lent function parameter is a lent
+            // closure (§4.2); any other argument must be a copy function
+            // value or a lent function parameter passed on.
+            let lending = param.pass == Pass::In
+                && param.projections.is_empty()
+                && matches!(&target, Type::Function { mode, .. } if *mode != Mode::Copy);
+            let lent_closure = lending && matches!(expr.kind, ExprKind::Closure { .. });
+            if lent_closure {
+                self.lent_closures.insert((expr.span.start, expr.span.end));
+            }
+            let captures_base = self.lent_captures.len();
             let mut actual = if !param.projections.is_empty() {
                 if let Some(p) = &place {
                     for path in &param.projections {
@@ -3347,7 +3513,57 @@ impl Checker<'_> {
                     self.expr_expected(expr, env, usage, &target)
                 }
             };
-            if param.pass != Pass::Sink && place.is_none() && self.mode(&actual) == Mode::Linear {
+            if lent_closure {
+                self.lent_closures.remove(&(expr.span.start, expr.span.end));
+                let captured = self.lent_captures.split_off(captures_base);
+                for (p, origin) in captured {
+                    for (old, mode, old_origin) in &loans {
+                        // Unreserved loans were checked when the closure
+                        // borrowed the name; a reserved (two-phase) `inout`
+                        // loan stays active for the whole call.
+                        let reserved = *mode == Pass::Inout
+                            && self
+                                .reserved_loans
+                                .contains(&(old_origin.start, old_origin.end));
+                        if p.overlaps(old) && reserved {
+                            self.error(
+                                "E0301",
+                                format!(
+                                    "lent closure borrows '{}', which overlaps the '{}' argument loan",
+                                    p.display(),
+                                    old.display()
+                                ),
+                                origin.clone(),
+                            );
+                            self.related(old_origin.clone(), "overlapping argument passed here");
+                            self.help("A lent closure borrows the names it uses `in` for the whole call, so they cannot also be lent `inout` or moved by it.");
+                        }
+                    }
+                    loans.push((p, Pass::In, origin));
+                }
+                if let Type::Function { mode, .. } = &target
+                    && let Type::Function { mode: m, .. } = &mut actual
+                {
+                    *m = *mode;
+                }
+            } else if lending
+                && matches!(&actual, Type::Function { mode, .. } if *mode != Mode::Copy)
+                && !matches!(&expr.kind, ExprKind::Name(n)
+                    if env.bindings.get(n).is_some_and(|b| b.pass != Pass::Sink))
+            {
+                self.error(
+                    "E0310",
+                    "a function parameter that is not `copy` is lent: pass a closure literal, a `copy` function or a lent function parameter",
+                    expr.span.clone(),
+                );
+            }
+            // A lent closure owns nothing (§4.2): its mode is the
+            // parameter's, so it is no linear temporary.
+            if param.pass != Pass::Sink
+                && place.is_none()
+                && !lent_closure
+                && self.mode(&actual) == Mode::Linear
+            {
                 self.error(
                     "E0302",
                     "bind a temporary linear value before borrowing it, then consume it explicitly",
@@ -3917,7 +4133,8 @@ impl Checker<'_> {
     ) -> bool {
         match (a, b) {
             (Some(a), Some(b)) => {
-                kind.checked(op, a, b) != Err(crate::numeric::ArithFailure::Overflow)
+                integer_widths_rules::fact_checked(kind, op, a, b)
+                    != Err(crate::numeric::ArithFailure::Overflow)
             }
             _ if op == "/" => b.is_some_and(|b| b != -1) || a.is_some_and(|a| a != kind.min()),
             _ => false,
@@ -4044,12 +4261,12 @@ impl Checker<'_> {
             ExprKind::Name(n) => env.bindings.get(n)?.integer?,
             ExprKind::Unary(op, v) if op == "-" => {
                 let k = kind(v).or_else(|| kind(e))?;
-                k.checked_neg(self.integer_fact(v, env)?)?
+                integer_widths_rules::fact_neg(k, self.integer_fact(v, env)?)?
             }
             ExprKind::Binary(op, a, b) => {
                 let k = kind(a).or_else(|| kind(e))?;
                 let (a, b) = (self.integer_fact(a, env)?, self.integer_fact(b, env)?);
-                k.checked(op, a, b).ok()?
+                integer_widths_rules::fact_checked(k, op, a, b).ok()?
             }
             ExprKind::Call { callee, args, .. } => {
                 let ExprKind::Name(name) = &callee.kind else {
@@ -4088,7 +4305,7 @@ impl Checker<'_> {
             _ => return None,
         };
         match kind(e) {
-            Some(k) if !k.fits(n) => None,
+            Some(k) if !integer_widths_rules::fact_fits(k, n) => None,
             _ => Some(n),
         }
     }
@@ -4249,11 +4466,12 @@ impl Checker<'_> {
         Some((lo, hi))
     }
     /// Inclusive bounds of an integer expression: its exact fact, a name's
-    /// kind and current range, `x & m` with `m >= 0` in `0..=m`, and a
-    /// nonnegative `x % m` with `m > 0` in `0..m`.
+    /// kind and current range, `x & m` with `m >= 0` in `0..=m`, a
+    /// nonnegative `x % m` with `m > 0` in `0..m`, and a call's result range.
     fn integer_bounds(&self, e: &Expr, env: &Env) -> Option<(i128, i128)> {
         if let Some(n) = self.integer_fact(e, env) {
-            return Some((n, n));
+            // A `u128` fact above `i128::MAX` is a bit pattern, not a bound.
+            return (n >= 0 || !self.u128_expr(e, env)).then_some((n, n));
         }
         match &e.kind {
             ExprKind::Name(n) => Self::binding_bounds(env.bindings.get(n)?),
@@ -4274,6 +4492,11 @@ impl Checker<'_> {
                 let (blo, bhi) = self.integer_bounds(b, env)?;
                 (alo >= 0 && blo > 0).then(|| (0, ahi.min(bhi - 1)))
             }
+            // A call of a function whose returns are bounded ([`call_facts`]).
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Name(n) if !env.bindings.contains_key(n) => self.call_range(n)?,
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -4469,9 +4692,39 @@ impl Checker<'_> {
         }
         let mut captured = Env::default();
         let mut inferred = Mode::Copy;
+        let lent = self.lent_closures.remove(&(span.start, span.end));
+        if lent {
+            self.lent_bodies
+                .entry(crate::ir::nested_name("closure", &body.span))
+                .or_default();
+        }
         for name in free {
             if let Some(b) = env.bindings.get(&name).cloned() {
-                if b.pass != Pass::Sink {
+                if lent {
+                    // A lent closure (§4.2) borrows what it uses `in` for
+                    // the call it is lent to, as an `in` argument would:
+                    // nothing is moved, a borrowed parameter may be used,
+                    // and inside the body the name is read-only.
+                    let place = Place {
+                        root: name.clone(),
+                        path: vec![],
+                    };
+                    self.place(&place, env, Usage::Borrow(Pass::In), span.clone());
+                    self.lent_captures.push((place, span.clone()));
+                    let mut inner = b;
+                    if inner.pass != Pass::In {
+                        inner.pass = Pass::In;
+                        inner.projections = vec![];
+                    }
+                    self.lent_bodies
+                        .entry(crate::ir::nested_name("closure", &body.span))
+                        .or_default()
+                        .insert(name.clone());
+                    captured.bindings.insert(name, inner);
+                    continue;
+                }
+                // A copy value lent `in` is captured as a copy (§4.2).
+                if b.pass != Pass::Sink && !(b.pass == Pass::In && self.mode(&b.ty) == Mode::Copy) {
                     self.error(
                         "E0310",
                         format!("closure cannot capture borrowed parameter '{name}'"),
@@ -5161,7 +5414,7 @@ pub fn free_names(e: &Expr) -> BTreeSet<String> {
     out
 }
 
-fn pattern_names(p: &Pattern) -> BTreeSet<String> {
+pub(crate) fn pattern_names(p: &Pattern) -> BTreeSet<String> {
     match &p.kind {
         PatternKind::Bind(n) => BTreeSet::from([n.clone()]),
         PatternKind::Tuple(ps) => ps.iter().flat_map(pattern_names).collect(),

@@ -1,0 +1,64 @@
+// Total reads of the flat tables, and small helpers. Table indices stay far
+// below 2^32, so index arithmetic uses wrapping_* (checked `+` is a Fail
+// effect).
+
+pub fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn ati(in s: ChunkSeq[i64], i: u64) -> i64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+pub fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn filled32(n: u64, v: u32) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    s.resize(n, v);
+    s
+}
+
+// FNV-1a over one word.
+pub fn fold(h: u64, x: u64) -> u64 {
+    wrapping_mul(h ^ x, 1099511628211)
+}
+
+// A 64-bit mix of a node key, for the hash-cons table.
+pub fn mix(op: u32, data: i64, c0: u32, c1: u32) -> u64 {
+    let mut h = fold(14695981039346656037, w(op));
+    h = fold(h, wrapping_u64(data));
+    h = fold(h, w(c0));
+    h = fold(h, w(c1));
+    let a = wrapping_mul(h ^ (h >> 32), 13787848793156543929);
+    a ^ (a >> 29)
+}

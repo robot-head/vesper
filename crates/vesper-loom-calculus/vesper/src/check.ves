@@ -6,6 +6,8 @@ use self::{
     Man
 };
 use self::util::{
+    Ascii,
+    Code,
     add,
     dep,
     feat,
@@ -23,21 +25,19 @@ use self::util::{
     sys
 };
 
-// Diagnostic codes, in the order of `Code`.
-pub fn code_manifest_syntax() -> u64 {
-    0
-}
+// The length of the `std` scope that unscoped package names must have.
+const STD_SCOPE_LEN: u64 = 3;
 
 pub fn lower(c: u8) -> bool {
-    c >= 97 && c <= 122
+    c >= Ascii::LowerA && c <= Ascii::LowerZ
 }
 
 pub fn upper(c: u8) -> bool {
-    c >= 65 && c <= 90
+    c >= Ascii::UpperA && c <= Ascii::UpperZ
 }
 
 pub fn digit(c: u8) -> bool {
-    c >= 48 && c <= 57
+    c >= Ascii::Zero && c <= Ascii::Nine
 }
 
 pub fn alnum(c: u8) -> bool {
@@ -59,7 +59,7 @@ fn component(in s: Str, from: u64, to: u64) -> bool {
     }
     for i in from..to {
         let c = str_byte(in s, i);
-        if !(lower(c) || digit(c) || c == 45 || c == 95) {
+        if !(lower(c) || digit(c) || c == Ascii::Minus || c == Ascii::Underscore) {
             return false;
         }
     }
@@ -69,7 +69,7 @@ fn component(in s: Str, from: u64, to: u64) -> bool {
 // `PackageName::parse`.
 pub fn name_valid(in s: Str) -> bool {
     let n = s.len();
-    let at = n > 0 && str_byte(in s, 0) == 64;
+    let at = n > 0 && str_byte(in s, 0) == Ascii::At;
     let start: u64 = if at {
         1
     } else {
@@ -77,7 +77,7 @@ pub fn name_valid(in s: Str) -> bool {
     };
     let mut slash = none();
     for i in start..n {
-        if str_byte(in s, i) == 47 {
+        if str_byte(in s, i) == Ascii::Slash {
             if slash != none() {
                 return false;
             }
@@ -93,7 +93,14 @@ pub fn name_valid(in s: Str) -> bool {
     if at {
         return true;
     }
-    slash == 3 && str_byte(in s, 0) == 115 && str_byte(in s, 1) == 116 && str_byte(in s, 2) == 100
+    slash
+        == STD_SCOPE_LEN
+        && str_byte(in s, 0)
+        == Ascii::LowerS
+        && str_byte(in s, 1)
+        == Ascii::LowerT
+        && str_byte(in s, 2)
+        == Ascii::LowerD
 }
 
 // `capability_valid`: an uppercase head, balanced brackets with no empty
@@ -108,18 +115,32 @@ pub fn capability_valid(in l: L, id: u64) -> bool {
     let mut prev: u8 = 0;
     for i in 0..n {
         let c = gb(in l, add(off, i));
-        if c == 91 {
+        if c == Ascii::LBracket {
             depth = inc(depth);
-        } else if c == 93 {
+        } else if c == Ascii::RBracket {
             if depth == 0 {
                 return false;
             }
-            if prev == 91 {
+            if prev == Ascii::LBracket {
                 return false;
             }
             depth = wrapping_sub(depth, 1);
         } else if !(
-            alnum(c) || c == 95 || c == 44 || c == 58 || c == 45 || c == 47 || c == 64 || c == 46
+            alnum(c)
+                || c
+                == Ascii::Underscore
+                || c
+                == Ascii::Comma
+                || c
+                == Ascii::Colon
+                || c
+                == Ascii::Minus
+                || c
+                == Ascii::Slash
+                || c
+                == Ascii::At
+                || c
+                == Ascii::Dot
         ) {
             return false;
         }
@@ -137,7 +158,7 @@ pub fn feature_valid(in l: L, id: u64) -> bool {
     }
     for i in 0..n {
         let c = gb(in l, add(off, i));
-        if !(alnum(c) || c == 95 || c == 45) {
+        if !(alnum(c) || c == Ascii::Underscore || c == Ascii::Minus) {
             return false;
         }
     }
@@ -153,7 +174,17 @@ pub fn system_name_valid(in l: L, id: u64) -> bool {
     }
     for i in 0..n {
         let c = gb(in l, add(off, i));
-        if !(alnum(c) || c == 45 || c == 95 || c == 46 || c == 43) {
+        if !(
+            alnum(c)
+                || c
+                == Ascii::Minus
+                || c
+                == Ascii::Underscore
+                || c
+                == Ascii::Dot
+                || c
+                == Ascii::Plus
+        ) {
             return false;
         }
     }
@@ -165,22 +196,22 @@ pub fn system_name_valid(in l: L, id: u64) -> bool {
 fn relative(in l: L, id: u64) -> bool {
     let off = soff(in l, id);
     let n = slen(in l, id);
-    if n == 0 || gb(in l, off) == 47 {
+    if n == 0 || gb(in l, off) == Ascii::Slash {
         return false;
     }
     let mut part: u64 = 0;
     for i in 0..n {
         let c = gb(in l, add(off, i));
-        if c == 92 || c == 58 || c == 0 {
+        if c == Ascii::Backslash || c == Ascii::Colon || c == Ascii::Nul {
             return false;
         }
-        if c == 47 {
+        if c == Ascii::Slash {
             if wrapping_sub(i, part)
                 == 2
                 && gb(in l, add(off, part))
-                == 46
+                == Ascii::Dot
                 && gb(in l, add(off, inc(part)))
-                == 46 {
+                == Ascii::Dot {
                 return false;
             }
             part = inc(i);
@@ -190,9 +221,9 @@ fn relative(in l: L, id: u64) -> bool {
         wrapping_sub(n, part)
             == 2
             && gb(in l, add(off, part))
-            == 46
+            == Ascii::Dot
             && gb(in l, add(off, inc(part)))
-            == 46
+            == Ascii::Dot
     )
 }
 
@@ -272,7 +303,16 @@ fn check_caps(inout l: L, at: u64, n: u64, owner: u64, so: u64, sl: u64) {
     for i in 0..n {
         let cap = id_at(in l, add(at, i));
         if !capability_valid(in l, cap) {
-            emit_quoted(inout l, 1, owner, so, sl, "non-canonical capability '", cap, "'");
+            emit_quoted(
+                inout l,
+                Code::InvalidCapability,
+                owner,
+                so,
+                sl,
+                "non-canonical capability '",
+                cap,
+                "'"
+            );
         }
     }
 }
@@ -289,7 +329,7 @@ pub fn check_manifest(inout l: L, mi: u64) {
         if m.net {
             emit_lit(
                 inout l,
-                2,
+                Code::UnsupportedBuildPolicy,
                 owner,
                 "build-sandbox.allow_network",
                 "Loom build components have no network authority"
@@ -303,7 +343,7 @@ pub fn check_manifest(inout l: L, mi: u64) {
             if !relative(in l, path) {
                 emit_quoted(
                     inout l,
-                    2,
+                    Code::UnsupportedBuildPolicy,
                     owner,
                     so,
                     sl,
@@ -325,7 +365,7 @@ pub fn check_manifest(inout l: L, mi: u64) {
         let so = soff(in l, f.name);
         let sl = slen(in l, f.name);
         if !feature_valid(in l, f.name) {
-            emit_id(inout l, 3, owner, f.name, "invalid feature name");
+            emit_id(inout l, Code::InvalidFeature, owner, f.name, "invalid feature name");
         }
         check_caps(inout l, f.eff_at, f.eff_n, owner, so, sl);
         for j in 0..f.deps_n {
@@ -333,7 +373,7 @@ pub fn check_manifest(inout l: L, mi: u64) {
             if find_dep(in l, in m, d) == none() {
                 emit_quoted(
                     inout l,
-                    5,
+                    Code::UnknownDependency,
                     owner,
                     so,
                     sl,
@@ -348,7 +388,7 @@ pub fn check_manifest(inout l: L, mi: u64) {
             if find_feat(in l, in m, nested) == none() {
                 emit_quoted(
                     inout l,
-                    4,
+                    Code::UnknownFeature,
                     owner,
                     so,
                     sl,
@@ -363,7 +403,7 @@ pub fn check_manifest(inout l: L, mi: u64) {
             if !s.ok || !system_name_valid(in l, s.name) {
                 emit_quoted(
                     inout l,
-                    6,
+                    Code::InvalidSystemRequirement,
                     owner,
                     so,
                     sl,

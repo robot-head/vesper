@@ -1234,18 +1234,14 @@ fn compile_exports<M: Module>(
     exports: &BTreeMap<String, String>,
     optimize: bool,
 ) -> Result<String, String> {
-    let mut all = InstanceMap::new();
+    let roots: Vec<&str> = exports.keys().map(String::as_str).collect();
+    let all = crate::native::instances_for_roots(world, &roots, false)?;
     for name in exports.keys() {
-        let reached = instances(world, name)?;
-        if !reached.contains_key(name) {
+        if !all.contains_key(name) {
             return Err(format!(
                 "'{name}' is not compiled as a standalone native function"
             ));
         }
-        all.extend(reached);
-    }
-    if all.len() > 1024 {
-        return Err("native monomorphization exceeds 1024 function instances".into());
     }
     let mut program = crate::ffi_lowering::drops::lower_world(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
@@ -1541,8 +1537,7 @@ fn instance_wrappers(
     }
     // Parse past the end of the source (and of any package's combined
     // sources, which `source_len` covers).
-    let padded = format!("{}\n{text}", " ".repeat(source_len));
-    let parsed = crate::parser::parse(&padded);
+    let parsed = crate::integer_widths::parse_at(&text, source_len + 1);
     if !parsed.diagnostics.is_empty() {
         return Err(ExportError::Directive(format!(
             "generated instance wrappers do not parse: {}",

@@ -687,7 +687,7 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "pop" => SeqOp::Pop,
                 "get" => SeqOp::Get,
                 "set" => SeqOp::Set,
-                "try_get" => SeqOp::TryGet,
+                "try_get" | "try_get_mut" => SeqOp::TryGet,
                 "try_set" => SeqOp::TrySet,
                 "clear" => SeqOp::Clear,
                 "truncate" => SeqOp::Truncate,
@@ -707,7 +707,7 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "len" => SeqOp::SliceLen,
                 "get" => SeqOp::SliceGet,
                 "set" => SeqOp::SliceSet,
-                "try_get" => SeqOp::TryGet,
+                "try_get" | "try_get_mut" => SeqOp::TryGet,
                 "try_set" => SeqOp::TrySet,
                 _ => return shared_method(method),
             });
@@ -731,7 +731,9 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
 
 /// Where `Slice[T]` may appear: only as the whole type of an `in` or `inout`
 /// parameter. Element types of a sequence must be storable values.
-pub(crate) fn check_world(world: &World) -> Vec<Diagnostic> {
+/// Public for the self-hosting differential (SH2 lane 9, #1181).
+#[doc(hidden)]
+pub fn check_world(world: &World) -> Vec<Diagnostic> {
     let mut diagnostics = vec![];
     let second_class = |what: &str, span: &Span| {
         Diagnostic::new(

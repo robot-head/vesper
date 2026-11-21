@@ -176,7 +176,18 @@ impl Checker<'_> {
                     span.clone(),
                 );
             }
-            let Some(place) = Place::from_expr(&a.expr) else {
+            // An element view (§13) of a sequence place is a place of the
+            // whole sequence for disjointness.
+            let element = match &a.expr.kind {
+                ExprKind::Index(base, _) if interval(&a.expr).is_none() => {
+                    let base_ty = self.peek_type(base, env);
+                    elem(&base_ty)
+                        .filter(|t| **t != Type::Infer && self.mode(t) != Mode::Copy)
+                        .and_then(|_| Place::from_expr(base))
+                }
+                _ => None,
+            };
+            let Some(place) = Place::from_expr(&a.expr).or(element) else {
                 self.error(
                     "E0300",
                     format!("{name} requires a place, such as a binding or a field"),
@@ -362,8 +373,22 @@ impl Checker<'_> {
             self.types
                 .insert((base.span.start, base.span.end), base_ty.clone());
         }
+        // The scrutinee of an element view `match` borrows its element in
+        // place (§13); `try_get_mut` is only that.
+        let element_view = if op == SeqOp::TryGet {
+            self.element_view.take()
+        } else {
+            None
+        };
+        if method == "try_get_mut" && element_view.is_none() {
+            self.error(
+                "E1522",
+                "'try_get_mut' lends an element in place: write it as the scrutinee of a match (`match s.try_get_mut(i) { Some(x) => .., None => .. }`)",
+                span.clone(),
+            );
+        }
         let loan_base = self.loans.len();
-        self.seq_receiver(base, env, op.receiver_pass());
+        self.seq_receiver(base, env, element_view.unwrap_or(op.receiver_pass()));
         // The view's source stays borrowed `in` while the arguments are
         // evaluated, so they cannot move or update it.
         if view.is_some()
@@ -375,14 +400,18 @@ impl Checker<'_> {
         let mode = self.mode(&elem_ty);
         let known = elem_ty != Type::Infer;
         match op {
-            SeqOp::Get | SeqOp::SliceGet | SeqOp::TryGet if known && mode != Mode::Copy => self
+            SeqOp::Get | SeqOp::SliceGet | SeqOp::TryGet
+                if known && mode != Mode::Copy && element_view.is_none() =>
+            {
+                self
                 .error(
                     "E1522",
                     format!(
-                        "cannot copy '{elem_ty}' out of a sequence because it is not copy; use pop"
+                        "cannot copy '{elem_ty}' out of a sequence because it is not copy; use pop, or borrow it in place: `f(in s[i])`, `f(inout s[i])`, `match s.try_get(i) {{ Some(x) => .. }}`"
                     ),
                     span.clone(),
-                ),
+                )
+            }
             SeqOp::Extend
             | SeqOp::CopyFrom { .. }
             | SeqOp::CopyWithin { .. }
@@ -539,6 +568,68 @@ impl Checker<'_> {
         })
     }
 
+    /// An element view `match` (§13): `match s.try_get(i)` on a place `s`
+    /// whose element type is not copy, or `match s.try_get_mut(i)` on any
+    /// place `s`, binds `Some(x)` to the element in place: `x` is an `in`
+    /// (or `inout`) borrow of it, and the sequence stays borrowed until the
+    /// match ends. Returns the pass and the sequence's place, and records
+    /// the call for the backends. The arms may only be `Some(x)`,
+    /// `Some(_)`, `None` and `_` (`E1522`).
+    pub(super) fn element_view_scrutinee(
+        &mut self,
+        value: &Expr,
+        arms: &[(Pattern, Expr)],
+        env: &Env,
+    ) -> Option<(Pass, Place)> {
+        let ExprKind::Call { callee, args, .. } = &value.kind else {
+            return None;
+        };
+        let ExprKind::Field(base, method) = &callee.kind else {
+            return None;
+        };
+        let pass = match method.as_str() {
+            "try_get" => Pass::In,
+            "try_get_mut" => Pass::Inout,
+            _ => return None,
+        };
+        if args.len() != 1 {
+            return None;
+        }
+        let base_ty = self.peek_type(base, env);
+        if !is_seq_or_slice(&base_ty) {
+            return None;
+        }
+        let elem_ty = elem(&base_ty).cloned().unwrap_or(Type::Infer);
+        if pass == Pass::In && (elem_ty == Type::Infer || self.mode(&elem_ty) == Mode::Copy) {
+            return None;
+        }
+        let p = Place::from_expr(base)?;
+        for (pat, _) in arms {
+            let simple = match &pat.kind {
+                PatternKind::Wild => true,
+                PatternKind::Constructor { name, fields, .. } => match name.as_str() {
+                    "Option::Some" | "Some" => {
+                        fields.len() == 1
+                            && matches!(fields[0].1.kind, PatternKind::Bind(_) | PatternKind::Wild)
+                    }
+                    "Option::None" | "None" => fields.is_empty(),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if !simple {
+                self.error(
+                    "E1522",
+                    "the arms of an element view match are `Some(x)`, `Some(_)`, `None` and `_`: bind the element, then match on it",
+                    pat.span.clone(),
+                );
+            }
+        }
+        self.element_views
+            .insert((value.span.start, value.span.end), pass);
+        Some((pass, p))
+    }
+
     /// Borrows a method receiver: `in` reads may use any expression, `inout`
     /// updates need a place.
     fn seq_receiver(&mut self, base: &Expr, env: &mut Env, pass: Pass) {
@@ -589,7 +680,11 @@ impl Checker<'_> {
         let elem_ty = elem(&base_ty).cloned().unwrap_or(Type::Infer);
         // A boxed object (§7.3) element may be lent to a call, which borrows
         // the sequence as it borrows the element.
-        let lend_boxed = crate::dyn_trait::is_boxed(&elem_ty) && matches!(usage, Usage::Borrow(_));
+        // So is an element whose type is not copy (an element view, §13):
+        // it is borrowed in place, never copied out.
+        let lend_boxed = matches!(usage, Usage::Borrow(_))
+            && (crate::dyn_trait::is_boxed(&elem_ty)
+                || (elem_ty != Type::Infer && self.mode(&elem_ty) != Mode::Copy));
         self.expr(
             base,
             env,
@@ -606,7 +701,7 @@ impl Checker<'_> {
             self.error(
                 "E1522",
                 format!(
-                    "cannot copy '{elem_ty}' out of a sequence because it is not copy; use pop"
+                    "cannot copy '{elem_ty}' out of a sequence because it is not copy; use pop, or borrow it in place: `f(in s[i])`, `f(inout s[i])`, `match s.try_get(i) {{ Some(x) => .. }}`"
                 ),
                 e.span.clone(),
             );

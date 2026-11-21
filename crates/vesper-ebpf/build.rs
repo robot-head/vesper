@@ -43,8 +43,8 @@ fn main() {
 const EDITS: &[(&str, &str)] = &[
     // 0 insn.rs: `lsh` encodes as `rsh`.
     (
-        "        AluOp::Lsh => (OP_LSH, 0),\n",
-        "        AluOp::Lsh => (OP_RSH, 0),\n",
+        "        AluOp::Lsh => (BpfAlu::Lsh, 0),\n",
+        "        AluOp::Lsh => (BpfAlu::Rsh, 0),\n",
     ),
     // 1 scalar.rs: tnum addition forgets the second operand's unknown bits.
     (
@@ -63,8 +63,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 4 helpers.rs: tc programs may call bpf_xdp_adjust_head.
     (
-        "        ProgramType::SchedCls => id == SK_LOOKUP_TCP || id == SK_RELEASE,\n",
-        "        ProgramType::SchedCls => id == XDP_ADJUST_HEAD || id == SK_LOOKUP_TCP || id == SK_RELEASE,\n",
+        "        ProgramType::SchedCls => id == Helper::SkLookupTcp || id == Helper::SkRelease,\n",
+        "        ProgramType::SchedCls => id == Helper::XdpAdjustHead || id == Helper::SkLookupTcp || id == Helper::SkRelease,\n",
     ),
     // 5 program.rs: a ringbuf of 2048 bytes is accepted.
     (
@@ -89,8 +89,8 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 9 btf.rs: an unknown kind 20 is read as a pointer.
     (
-        "        if kind == 0 || kind > KIND_ENUM64 {\n",
-        "        if kind == 0 || kind > wrapping_add(KIND_ENUM64, 1) {\n",
+        "        if kind == 0 || kind > BtfKind::Enum64 {\n",
+        "        if kind == 0 || kind > wrapping_add(BtfKind::Enum64, 1) {\n",
     ),
     // 10 core.rs: members are not found through anonymous aggregates.
     (
@@ -104,7 +104,7 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // 12 interp.rs (the run): the byte just before `data` is readable.
     (
-        "    if kind == KIND_PACKET && at < i.data_off {\n",
-        "    if kind == KIND_PACKET && wrapping_add(at, 1) < i.data_off {\n",
+        "    if kind == Region::Packet && at < i.data_off {\n",
+        "    if kind == Region::Packet && wrapping_add(at, 1) < i.data_off {\n",
     ),
 ];
