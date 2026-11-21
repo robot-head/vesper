@@ -114,7 +114,12 @@ lent handles cover it.
    the test) and passes them in. Closure shapes and handler plans (captures,
    clause kinds, tail resumptions) need an expression encoding first. That
    belongs with #1259's follow-ups or lane 2 (#1276); this lane will use it.
-2. **`effect` is a keyword, not a contextual name.** A local or field named
+2. **The Vesper package assembler does not import constants across
+   packages.** Rust's loader accepts `use @vesper/check-layout::{L_ENUM};`
+   since #1239, but `@vesper/check-names-packages` reports E0111 "module
+   @vesper/check-layout has no item 'L_ENUM'", so `self_host_check_names_packages`
+   fails on any package that does it. `L_PRODUCT` and `L_ENUM` stay copied.
+3. **`effect` is a keyword, not a contextual name.** A local or field named
    `effect` is a parse error (E0002 "expected a lower-case identifier, found
    the keyword `effect`"). #1264 makes it a name; until it merges the port
    uses `eff_name`.

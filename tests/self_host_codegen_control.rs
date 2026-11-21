@@ -477,14 +477,14 @@ fn session_input(w: &World, cases: &[(String, Vec<EffectBinding>)]) -> Option<Ve
 
 /// Refusals of `plan` the corpus cases must make fire (a fragment of each
 /// message). `handwritten_refusals_match_rust` covers the read-buffer and
-/// constructor-shape refusals; "has no body" and "appears twice in the
+/// constructor-shape refusals and a closure result (which only crates/
+/// reaches, and Bazel's corpus has no crates/); "has no body" and "appears twice in the
 /// entry row" are not reached (the checker merges a repeated row instance,
 /// `twice` below; no case names a function without a body).
 const REFUSALS: &[&str] = &[
     "unknown session entry",
     "session entries take no parameters",
     "session entries cannot be generic",
-    "cannot return closures or continuations",
     "recursive suspending call cycle",
     "is bound twice",
     "has no native binding",
@@ -704,6 +704,9 @@ fn main() -> u64 eff [Source] {
 fn twice() -> u64 eff [Source, Source] {
     0
 }
+fn maker() -> fn(u64) -> u64 eff [Source] {
+    |x: u64| x
+}
 "#;
 
 #[test]
@@ -772,6 +775,7 @@ fn handwritten_refusals_match_rust() {
             }],
         ),
         ("twice".to_string(), with(ok_read.clone())),
+        ("maker".to_string(), with(ok_read.clone())),
         ("Io::Got".to_string(), vec![]),
     ];
     let rust = rust_plans(w, &cases).expect("plan panicked");
@@ -784,6 +788,7 @@ fn handwritten_refusals_match_rust() {
         "has no cancellation constructor",
         "error constructor '",
         "must not carry fields",
+        "cannot return closures or continuations",
     ] {
         assert!(rust.contains(r), "no case refused with {r:?}");
     }

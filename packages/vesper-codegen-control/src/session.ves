@@ -32,8 +32,6 @@ use @vesper/check-data::world::{
     World
 };
 use @vesper/check-layout::{
-    L_ENUM,
-    L_PRODUCT,
     Layouts,
     layout_of
 };
@@ -45,6 +43,11 @@ use self::tables::{
 };
 
 const NONE32: u32 = 4294967295;
+// Copies of @vesper/check-layout's layout kinds: Rust's loader imports a
+// `pub const` across packages (#1239), but the Vesper package assembler
+// (@vesper/check-names-packages) does not yet (report, gap 2).
+const L_PRODUCT: u8 = 1;
+const L_ENUM: u8 = 2;
 const NO_ADT: u32 = 4294967295;
 const K_NAMED: u8 = 1;
 const K_TUPLE: u8 = 2;
