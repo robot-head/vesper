@@ -297,12 +297,7 @@ impl Directives {
                 out.vsys.push(VsysImport {
                     library: descriptor.name().into(),
                     handler,
-                    symbols: descriptor
-                        .functions()
-                        .iter()
-                        .filter(|f| !f.is_indirect())
-                        .map(|f| f.symbol().to_string())
-                        .collect(),
+                    symbols: linked_symbols(&descriptor),
                     source: text,
                     rust_path,
                 });
@@ -343,12 +338,7 @@ impl Directives {
             self.vsys.push(VsysImport {
                 handler: link.and_then(|l| l.handler).unwrap_or(Handler::Direct),
                 rust_path: link.and_then(|l| l.rust_path.clone()),
-                symbols: descriptor
-                    .functions()
-                    .iter()
-                    .filter(|f| !f.is_indirect())
-                    .map(|f| f.symbol().to_string())
-                    .collect(),
+                symbols: linked_symbols(&descriptor),
                 library,
                 source: text,
             });
@@ -365,4 +355,17 @@ impl Directives {
         }
         Ok(())
     }
+}
+
+/// The C symbols a library's direct calls import, once each and in
+/// descriptor order: `#[link_name]` aliases share one symbol, and a
+/// callback type's call imports none.
+fn linked_symbols(descriptor: &vesper_ffi::sys::LibraryDescriptor) -> Vec<String> {
+    let mut symbols: Vec<String> = vec![];
+    for f in descriptor.functions().iter().filter(|f| !f.is_indirect()) {
+        if !symbols.iter().any(|s| s == f.link_symbol()) {
+            symbols.push(f.link_symbol().to_string());
+        }
+    }
+    symbols
 }
