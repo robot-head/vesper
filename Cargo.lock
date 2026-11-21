@@ -5837,6 +5837,7 @@ version = "0.1.0"
 dependencies = [
  "vesper",
  "vesper-cranelift-sys",
+ "vesper-port-abi",
 ]
 
 [[package]]

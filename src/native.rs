@@ -2689,12 +2689,97 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
     }
     fn def_var(&mut self, variable: Variable, value: ir::Value) {
+        self.note_def(variable, value);
+        self.b.def_var(variable, value);
+        self.def_homes(variable, value);
+    }
+    /// The facts a definition of `variable` adds (no code).
+    fn note_def(&mut self, variable: Variable, value: ir::Value) {
         let info = self.info(value);
         self.variable_infos
             .entry(variable.as_u32())
             .or_default()
             .merge(&info);
-        self.b.def_var(variable, value);
+    }
+    /// Whether `variable` lives only in its Cranelift variable: no
+    /// narrow element home and no pointer to store through.
+    fn plain_var(&self, variable: Variable) -> bool {
+        !self.narrow_homes.contains_key(&variable.as_u32())
+            && !self.pointers.contains_key(&variable.as_u32())
+    }
+    /// [`Self::def_var`] of a plain local, emitted by the `scalar` hook's
+    /// `WRITE_LOCAL` when one is installed (SH4 lane 6, #1280).
+    fn def_local(&mut self, variable: Variable, value: ir::Value) {
+        use crate::codegen_swap::{scalar, word};
+        if self.plain_var(variable)
+            && self
+                .swap_scalar_words(
+                    scalar::WRITE_LOCAL,
+                    &[u64::from(variable.as_u32()), word(value)],
+                )
+                .is_some()
+        {
+            self.note_def(variable, value);
+            return;
+        }
+        self.def_var(variable, value);
+    }
+    /// A fresh variable of `value`'s type defined as `value`, declared and
+    /// defined by the `scalar` hook's `BIND_LOCAL` when one is installed.
+    fn bind_local(&mut self, value: ir::Value) -> Variable {
+        use crate::codegen_swap::{scalar, word};
+        if let Some(results) = self.swap_scalar_words(scalar::BIND_LOCAL, &[word(value)])
+            && let [var] = results[..]
+            && let Ok(var) = u32::try_from(var)
+        {
+            let var = Variable::from_u32(var);
+            self.note_def(var, value);
+            self.def_homes(var, value);
+            return var;
+        }
+        let var = self.b.declare_var(self.b.func.dfg.value_type(value));
+        self.def_var(var, value);
+        var
+    }
+    /// [`Self::use_var`] of a plain local then [`Self::coerce`] to `ty`, by
+    /// the `scalar` hook's `READ_LOCAL` when one is installed; `None` (no
+    /// hook, a decline, or a type the request does not carry) leaves the
+    /// read to the Rust code.
+    fn read_local(&mut self, variable: Variable, ty: &Type) -> Option<ir::Value> {
+        use crate::codegen_swap::{scalar, value_of};
+        if !self.plain_var(variable) || matches!(ty, Type::Function { .. }) {
+            return None;
+        }
+        let layout = Layout::of(self.world, ty).ok()?;
+        if layout.aggregate() || wide_native::is_wide(ty) {
+            return None;
+        }
+        let kind = match crate::numeric::IntegerKind::from_type(ty) {
+            Some(k) if k.wide() => return None,
+            Some(k) if k.bits() < 64 => scalar::kind_word(k)?,
+            _ => 0,
+        };
+        let results =
+            self.swap_scalar_words(scalar::READ_LOCAL, &[u64::from(variable.as_u32()), kind])?;
+        let [value, raw] = results[..] else {
+            crate::codegen_swap::record("READ_LOCAL answers [value, raw]".into());
+            return None;
+        };
+        let value = value_of(&[value]).ok()?;
+        let raw = value_of(&[raw]).ok()?;
+        debug_assert!(
+            self.b.func.dfg.value_is_valid(raw),
+            "READ_LOCAL's raw value is not of this function"
+        );
+        let mut info = self.info(raw);
+        if let Some(stored) = self.variable_infos.get(&variable.as_u32()) {
+            info.merge(stored);
+        }
+        self.infos.insert(raw, info);
+        Some(value)
+    }
+    /// The narrow home and pointer stores of a definition of `variable`.
+    fn def_homes(&mut self, variable: Variable, value: ir::Value) {
         if let Some((address, elem)) = self.narrow_homes.get(&variable.as_u32()).cloned() {
             let pointer = self.b.use_var(address);
             // The element is stored at its width; a failure here is a type
@@ -3360,7 +3445,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 } else {
                     value
                 };
-                self.def_var(var, bound_value);
+                self.def_local(var, bound_value);
                 Ok(())
             }
             PatternKind::Tuple(ps) => {
@@ -4015,7 +4100,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                         {
                             self.address(&e)?
                         } else {
-                            let value = self.expr(&e)?;
+                            // A plain scalar local's read (SH4 lane 6).
+                            let local = if path.is_empty()
+                                && self.world.constructor(root).is_none()
+                                && self.split_of(root).is_none()
+                            {
+                                self.vars.get(root).copied()
+                            } else {
+                                None
+                            };
+                            let read_ty = self.ty(&e);
+                            let swapped = local.and_then(|var| self.read_local(var, &read_ty));
+                            let value = match swapped {
+                                Some(value) => value,
+                                None => self.expr(&e)?,
+                            };
                             if *pass == Pass::Sink && path.is_empty() {
                                 self.seq_drop_moved(root);
                             } else if *pass == Pass::Sink
@@ -5051,8 +5150,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 } else {
                     value
                 };
-                let var = self.b.declare_var(self.b.func.dfg.value_type(bound_value));
-                self.def_var(var, bound_value);
+                let var = self.bind_local(bound_value);
                 self.vars.insert(n.clone(), var);
                 self.local_types.insert(n.clone(), ty.clone());
                 Ok(())
@@ -5271,6 +5369,41 @@ impl<M: Module> Codegen<'_, '_, M> {
             op,
             args,
         )
+    }
+    /// A `scalar` family request outside the graph walk (SH4 lane 6,
+    /// #1280), answering one value; `None` emits the Rust code.
+    fn swap_scalar(&mut self, op: u32, args: &[u64]) -> Option<ir::Value> {
+        let results = self.swap_scalar_words(op, args)?;
+        crate::codegen_swap::value_or_record(&results)
+    }
+    /// A `scalar` family request answering its result words.
+    fn swap_scalar_words(&mut self, op: u32, args: &[u64]) -> Option<Vec<u64>> {
+        crate::codegen_swap::request_or_record(
+            crate::codegen_swap::Family::Scalar,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            op,
+            args,
+        )
+    }
+    /// `checked_arithmetic`'s overflow test from the `scalar` hook.
+    fn swap_overflow(
+        &mut self,
+        op: &str,
+        kind: crate::numeric::IntegerKind,
+        a: ir::Value,
+        b: ir::Value,
+    ) -> Option<ir::Value> {
+        use crate::codegen_swap::{scalar, word};
+        let args = [
+            scalar::op_word(op)?,
+            scalar::kind_word(kind)?,
+            word(a),
+            word(b),
+        ];
+        self.swap_scalar(scalar::OVERFLOW, &args)
     }
     /// [`Codegen::swap_aggregate`] for a request answering one value.
     fn swap_value(&mut self, op: u32, args: &[u64]) -> Option<ir::Value> {
@@ -5759,7 +5892,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .contains(&(e.span.start, e.span.end))
                 {
                     // Signed MIN and every nonzero unsigned value overflow.
-                    let overflow = if kind.unsigned() {
+                    // SH4 swap point (#1280): the `scalar` hook may emit
+                    // the test of a one-word kind.
+                    let swapped = crate::codegen_swap::scalar::kind_word(kind).and_then(|k| {
+                        self.swap_scalar(
+                            crate::codegen_swap::scalar::NEGATE,
+                            &[k, crate::codegen_swap::word(v)],
+                        )
+                    });
+                    let overflow = if let Some(flag) = swapped {
+                        flag
+                    } else if kind.unsigned() {
                         self.b.ins().icmp_imm(IntCC::NotEqual, v, 0)
                     } else if kind.wide() {
                         let min = self.wide_const(i128::MIN);
@@ -5949,7 +6092,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let ptr = self.use_var(var);
                         self.store(ptr, value, &ty)?;
                     } else {
-                        self.def_var(var, value);
+                        self.def_local(var, value);
                         if let Some(destination) = self.pointer(var) {
                             self.store(destination, value, &ty)?;
                         }
@@ -6451,10 +6594,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         if crate::numeric::is_shift(op) && self.world.overflow_ops.contains(&(span.start, span.end))
         {
             // Negative amounts are huge as unsigned lanes.
-            let bad =
-                self.b
-                    .ins()
-                    .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, n, i64::from(kind.bits()));
+            // SH4 swap point (#1280): the `scalar` hook may emit the test.
+            let args = [crate::codegen_swap::word(n), u64::from(kind.bits())];
+            let bad = match self.swap_scalar(crate::codegen_swap::scalar::SHIFT_RANGE, &args) {
+                Some(v) => v,
+                None => self.b.ins().icmp_imm(
+                    IntCC::UnsignedGreaterThanOrEqual,
+                    n,
+                    i64::from(kind.bits()),
+                ),
+            };
             self.check_overflow(bad)?;
         }
         if let Some(r) = self.wide_shift_const(op, kind, a, n) {
@@ -6750,7 +6899,22 @@ impl<M: Module> Codegen<'_, '_, M> {
             Conversion::Widen => Ok(v),
             Conversion::Wrapping => Ok(self.coerce(v, Some(&to.ty()))),
             Conversion::Narrow => {
-                if self.world.overflow_ops.contains(&(span.start, span.end)) {
+                // SH4 swap point (#1280): the `scalar` hook may emit the
+                // bounds test (a decline when there is none to emit).
+                let swapped = if self.world.overflow_ops.contains(&(span.start, span.end)) {
+                    use crate::codegen_swap::scalar;
+                    match (scalar::kind_word(from), scalar::kind_word(to)) {
+                        (Some(f), Some(t)) => {
+                            self.swap_scalar(scalar::NARROW, &[f, t, crate::codegen_swap::word(v)])
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(overflow) = swapped {
+                    self.check_overflow(overflow)?;
+                } else if self.world.overflow_ops.contains(&(span.start, span.end)) {
                     let (low, high) = if from.unsigned() {
                         // The lane is the value as a u64; the target
                         // minimum is at most 0.
@@ -6817,7 +6981,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         if kind.wide() {
             return self.wide_checked(op, kind, a, b);
         }
+        // SH4 swap point (#1280): the `scalar` hook may emit the test.
+        let swapped = self.swap_overflow(op, kind, a, b);
         let overflow = match (op, kind) {
+            _ if swapped.is_some() => swapped,
             ("+" | "-" | "*", K::I8 | K::I16 | K::I32) => {
                 // Exact in 64 bits; overflow iff the result leaves the kind.
                 let r = match op {
@@ -6941,7 +7108,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(())
     }
     fn check_divisor(&mut self, divisor: ir::Value) -> Result<(), String> {
-        let nonzero = self.b.ins().icmp_imm(IntCC::NotEqual, divisor, 0);
+        // SH4 swap point (#1280): the `scalar` hook may emit the test.
+        let args = [crate::codegen_swap::word(divisor)];
+        let nonzero = match self.swap_scalar(crate::codegen_swap::scalar::DIVISOR, &args) {
+            Some(v) => v,
+            None => self.b.ins().icmp_imm(IntCC::NotEqual, divisor, 0),
+        };
         let good = self.b.create_block();
         let bad = self.b.create_block();
         self.branch(nonzero, good, &[], bad, &[]);
