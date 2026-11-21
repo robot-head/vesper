@@ -482,6 +482,7 @@ fn register_locals(
     world: &World,
     f: &crate::ir::FunctionIr,
     generics: &BTreeMap<String, Type>,
+    nested: bool,
 ) -> BTreeSet<String> {
     use crate::ir::Op;
     let mut memory = BTreeSet::new();
@@ -495,22 +496,42 @@ fn register_locals(
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
         match &inst.op {
             Op::Call { callee, args, .. } => {
-                let pure = world
-                    .functions
-                    .get(callee)
-                    .is_some_and(|g| g.effects.instances.is_empty() && g.effects.tail.is_none());
+                let g = world.functions.get(callee);
+                let pure =
+                    g.is_some_and(|g| g.effects.instances.is_empty() && g.effects.tail.is_none());
+                // A specialized callee (a `with_ref`-style method with a
+                // lent callback, or an effectful one) is inlined here, and
+                // binds each `in` scalar argument as a value: nothing is
+                // written through it and there is no call to keep it across
+                // (#1278). That covers the key and the names a lent closure
+                // borrows (§4.2), which the call takes as `in` arguments. A
+                // handler that could change such a name while the call runs
+                // is a `handle` in this graph or an enclosing one, and every
+                // name in scope there keeps its home (below). Other impure
+                // calls keep homes for every place they borrow: keeping
+                // those names in registers across a real call measured
+                // slower (aegis policy +0.9%, silicon dtb +0.3%).
+                let inlined = g.is_some_and(|g| specialized_function(world, g));
                 if !pure {
-                    place_roots(args, &mut memory);
+                    for a in args.iter().filter(|a| !inlined || a.pass != Pass::In) {
+                        if let Some(p) = &a.place {
+                            memory.insert(p.root.clone());
+                        }
+                    }
                 }
             }
             // Sequence and `Box` operations take their operands as values.
             Op::Indirect { args, .. } | Op::Tiled { args, .. } => place_roots(args, &mut memory),
-            Op::Closure {
-                expr,
-                aliases,
-                moves,
+            // A closure literal copies each name it captures into its own
+            // slot when it is made (`closure_tag`), or for a lent aggregate
+            // stores the address the name already holds, and its body never
+            // writes the caller's names (#1278). Its `aliases` list every
+            // name in scope, not just the ones it uses. So only what it
+            // moves needs a home.
+            Op::Closure { moves, .. } => {
+                memory.extend(moves.iter().map(|p| p.root.clone()));
             }
-            | Op::Handle {
+            Op::Handle {
                 expr,
                 aliases,
                 moves,
@@ -534,7 +555,7 @@ fn register_locals(
                         || matches!(name.as_str(), "f32" | "f64" | "bool")))
         })
         .map(|(n, _)| n.clone())
-        .chain(in_param_registers(world, f, generics))
+        .chain(in_param_registers(world, f, generics, nested))
         .collect()
 }
 /// The `in` parameters of `f` whose word (a sequence, string or other
@@ -547,12 +568,20 @@ fn register_locals(
 /// the word read at entry is the word at every later read, and a use that
 /// needs an address gets a scratch copy ([`Codegen::address`]), which is
 /// never written. A name that the body rebinds, writes, moves or lends
-/// mutably, or that a closure or handler captures, keeps its slot, and so
-/// does every parameter of a function that calls.
+/// mutably, or that a handler captures, keeps its slot, and so does every
+/// parameter of a function that calls.
+///
+/// A graph inlined by a specialized call (`nested`) has no incoming
+/// argument registers: its parameters are values of the caller's code, so
+/// the calling rule does not apply to them. A function-typed parameter (a
+/// lent callback, §4.2) is one tag word; a call through it reads the tag
+/// (its `Sink` read does not change it), and keeping it in a register keeps
+/// the closure target its value carries (#1278).
 fn in_param_registers<'a>(
     world: &'a World,
     f: &'a crate::ir::FunctionIr,
     generics: &'a BTreeMap<String, Type>,
+    nested: bool,
 ) -> impl Iterator<Item = String> + 'a {
     use crate::ir::Op;
     let mut kept = BTreeSet::new();
@@ -565,13 +594,24 @@ fn in_param_registers<'a>(
             }
         }
     };
+    let callback = |name: &str| {
+        f.params.iter().any(|p| {
+            p.name == name
+                && matches!(
+                    crate::numeric::default_type(&substitute(&p.ty, generics)),
+                    Type::Function { .. }
+                )
+        })
+    };
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
         match &inst.op {
             Op::Write { place, .. } => {
                 kept.insert(place.split('.').next().unwrap_or(place).to_owned());
             }
             Op::Bind { pattern, .. } => bound_names(pattern, &mut kept),
-            Op::Read { root, pass, .. } if *pass != Pass::In => {
+            Op::Read {
+                root, pass, path, ..
+            } if *pass != Pass::In && !(path.is_empty() && callback(root)) => {
                 kept.insert(root.clone());
             }
             Op::Call { args, .. }
@@ -579,12 +619,9 @@ fn in_param_registers<'a>(
             | Op::Tiled { args, .. }
             | Op::Fip { args, .. }
             | Op::Seq { args, .. } => lent(args, &mut kept),
-            Op::Closure {
-                expr,
-                aliases,
-                moves,
-            }
-            | Op::Handle {
+            // See `register_locals`: a closure copies what it captures.
+            Op::Closure { moves, .. } => kept.extend(moves.iter().map(|p| p.root.clone())),
+            Op::Handle {
                 expr,
                 aliases,
                 moves,
@@ -602,10 +639,11 @@ fn in_param_registers<'a>(
     // word would need a callee-saved register (saved and restored around
     // the whole body) or a spill, which costs more than the home slot's
     // store and reloads (Quarry's planner ran 0.07% more instructions).
-    if f.blocks
-        .iter()
-        .flat_map(|b| &b.instructions)
-        .any(|i| crate::bounds_hoist::calls_out(&i.op))
+    if !nested
+        && f.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| crate::bounds_hoist::calls_out(&i.op))
     {
         kept.extend(f.params.iter().map(|p| p.name.clone()));
     }
@@ -614,7 +652,6 @@ fn in_param_registers<'a>(
         (p.pass == Pass::In
             && !kept.contains(&p.name)
             && f.locals.contains_key(&p.name)
-            && !matches!(ty, Type::Function { .. })
             && Layout::of(world, &ty).is_ok_and(|l| !l.aggregate()))
         .then(|| p.name.clone())
     })
@@ -1451,6 +1488,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 caller_slot,
                 reuse_slots: BTreeMap::new(),
                 register_locals: BTreeSet::new(),
+                bound_params: BTreeSet::new(),
                 split: BTreeMap::new(),
                 current_call_slot: None,
                 in_fip_fn: f.fip,
@@ -2280,11 +2318,23 @@ impl NativeInfo {
         }
     }
 }
+/// Where a closure keeps one captured name from its creation to its calls.
+#[derive(Clone, Copy)]
+enum CaptureHome {
+    /// A copy of an aggregate.
+    Slot(ir::StackSlot),
+    /// One word: a scalar, a handle, a function tag, or the address a lent
+    /// aggregate capture borrows (§4.2). A frontend variable defined where
+    /// the closure is made, so the call reads the word from a register
+    /// instead of a stack slot (#1278); like the slot it held before, it
+    /// keeps the word of the closure made last at that site.
+    Word(Variable),
+}
 #[derive(Clone)]
 struct NativeClosure {
     ty: Type,
     target: ClosureTarget,
-    captures: Vec<(String, Type, ir::StackSlot, NativeInfo)>,
+    captures: Vec<(String, Type, CaptureHome, NativeInfo)>,
     generics: BTreeMap<String, Type>,
     capabilities: BTreeMap<String, String>,
 }
@@ -2400,6 +2450,12 @@ struct Codegen<'a, 'b, M: Module> {
     /// Scalar locals kept in registers on the optimize path
     /// ([`register_locals`]): a place use spills them to a scratch slot.
     register_locals: BTreeSet<u32>,
+    /// Variables a specialized call or a closure invocation binds for the
+    /// parameters (and a closure's captures) of the graph it inlines
+    /// (#1278). They belong to that graph, so it may keep them in
+    /// registers like its own locals, unlike the names a nested control
+    /// graph shares with its enclosing one.
+    bound_params: BTreeSet<u32>,
     /// Copy-struct locals kept as one variable per word on the optimize
     /// path ([`aggregates::Split`]).
     /// Keyed by the local's own variable, so a specialized callee's local
@@ -2696,7 +2752,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         let mut captures = vec![];
         // A lent closure (§4.2) borrows its aggregate captures for the
-        // call: the slot keeps the caller's address, not a copy.
+        // call: its word is the caller's address, not a copy. A word-sized
+        // capture lives in a variable (`CaptureHome::Word`), and only an
+        // owned aggregate copy needs a slot.
         let lent = self
             .world
             .lent_closures
@@ -2707,17 +2765,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             if let Some(var) = self.vars.get(&name).copied() {
                 let ty = self.local_types[&name].clone();
                 let layout = Layout::of(self.world, &ty)?;
-                if lent.contains(&name) && layout.aggregate() {
-                    let pointer_type = self.m.target_config().pointer_type();
-                    let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
-                        ir::StackSlotKind::ExplicitSlot,
-                        pointer_type.bytes(),
-                        3,
-                    ));
-                    let pointer = self.b.ins().stack_addr(pointer_type, slot, 0);
+                if !layout.aggregate() || lent.contains(&name) {
                     let value = self.use_var(var);
-                    self.b.ins().store(ir::MemFlags::new(), value, pointer, 0);
-                    captures.push((name, ty, slot, self.info(value)));
+                    let word = self.b.declare_var(self.b.func.dfg.value_type(value));
+                    self.b.def_var(word, value);
+                    captures.push((name, ty, CaptureHome::Word(word), self.info(value)));
                     continue;
                 }
                 let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
@@ -2731,7 +2783,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .stack_addr(self.m.target_config().pointer_type(), slot, 0);
                 let value = self.use_var(var);
                 self.store(pointer, value, &ty)?;
-                captures.push((name, ty, slot, self.info(value)));
+                captures.push((name, ty, CaptureHome::Slot(slot), self.info(value)));
             }
         }
         let mut caps = self.capabilities.clone();
@@ -2827,7 +2879,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 prepared.push(arg.clone());
                 continue;
             }
-            let value = self.expr(&arg.expr)?;
+            // An `in` aggregate is lent for the call, as `call_function`
+            // lends it: the body reads it through the caller's address and
+            // never writes it, so it is not copied (#1278).
+            let value = if *pass == Pass::In
+                && Layout::of(self.world, t)?.aggregate()
+                && crate::check::Place::from_expr(&arg.expr).is_some()
+            {
+                self.address(&arg.expr)?
+            } else {
+                self.expr(&arg.expr)?
+            };
             let name = format!("$closure_arg{}_{}", value.as_u32(), index);
             let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
             self.def_var(variable, value);
@@ -3028,6 +3090,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                     restores.push((self.vars[n], ptr, param.ty.clone()));
                 }
                 ptr
+            } else if param.pass == Pass::In
+                && Layout::of(self.world, &param.ty)?.aggregate()
+                && crate::check::Place::from_expr(&arg.expr).is_some()
+            {
+                // Lent, not copied (`invoke_tag`, #1278).
+                self.address(&arg.expr)?
             } else {
                 self.expr(&arg.expr)?
             };
@@ -3039,32 +3107,29 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut caps = self.capabilities.clone();
         caps.extend(closure.capabilities.clone());
         self.capabilities = caps;
-        let lent = self
-            .world
-            .lent_closures
-            .get(name)
-            .cloned()
-            .unwrap_or_default();
-        for (name, ty, slot, info) in &closure.captures {
-            let pointer_type = self.m.target_config().pointer_type();
-            let ptr = self.b.ins().stack_addr(pointer_type, *slot, 0);
-            self.write_info(ptr, info.clone());
-            let layout = Layout::of(self.world, ty)?;
-            let value = if lent.contains(name) && layout.aggregate() {
-                // Borrowed in place (`closure_tag`): read-only, no copy.
-                let value = self.b.ins().load(pointer_type, ir::MemFlags::new(), ptr, 0);
-                self.write_info(value, info.clone());
-                value
-            } else if layout.aggregate() {
-                let value = self.load(ptr, ty)?;
-                let copy = self.alloc(layout.size);
-                self.copy_bytes(value, copy, layout.size);
-                copy
-            } else {
-                self.load(ptr, ty)?
+        for (name, ty, home, info) in &closure.captures {
+            let value = match *home {
+                // A word, or a lent aggregate borrowed in place
+                // (`closure_tag`): read-only, no copy.
+                CaptureHome::Word(word) => {
+                    let value = self.b.use_var(word);
+                    self.write_info(value, info.clone());
+                    value
+                }
+                CaptureHome::Slot(slot) => {
+                    let pointer_type = self.m.target_config().pointer_type();
+                    let ptr = self.b.ins().stack_addr(pointer_type, slot, 0);
+                    self.write_info(ptr, info.clone());
+                    let layout = Layout::of(self.world, ty)?;
+                    let value = self.load(ptr, ty)?;
+                    let copy = self.alloc(layout.size);
+                    self.copy_bytes(value, copy, layout.size);
+                    copy
+                }
             };
             let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
             self.def_var(variable, value);
+            self.bound_params.insert(variable.as_u32());
             self.vars.insert(name.clone(), variable);
             self.local_types.insert(name.clone(), ty.clone());
         }
@@ -3077,6 +3142,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             };
             let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
             self.def_var(variable, value);
+            self.bound_params.insert(variable.as_u32());
             self.vars.insert(p.name.clone(), variable);
             self.local_types.insert(p.name.clone(), p.ty.clone());
             if p.pass == Pass::Inout && !Layout::of(self.world, &p.ty)?.aggregate() {
@@ -3292,7 +3358,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         // handled body, shares the names its caller already has).
         let mut fresh_locals = BTreeSet::new();
         let registers_ok = if self.operands_only {
-            register_locals(self.world, f, &self.generic_vars)
+            register_locals(self.world, f, &self.generic_vars, return_to.is_some())
         } else {
             BTreeSet::new()
         };
@@ -3338,8 +3404,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             // A function's own by-value parameters qualify too; a nested
             // graph keeps whatever its enclosing graph chose for a shared
             // name.
+            // So do the parameters a specialized call or a closure
+            // invocation bound for this graph (#1278).
             let owned = existing.is_none()
-                || (return_to.is_none() && !self.pointers.contains_key(&var.as_u32()));
+                || (!self.pointers.contains_key(&var.as_u32())
+                    && (return_to.is_none() || self.bound_params.contains(&var.as_u32())));
             if owned && registers_ok.contains(n) {
                 self.register_locals.insert(var.as_u32());
             } else if !layout.aggregate()
@@ -6839,6 +6908,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 };
                 let var = self.b.declare_var(self.b.func.dfg.value_type(value));
                 self.def_var(var, value);
+                self.bound_params.insert(var.as_u32());
                 self.vars.insert(p.name.clone(), var);
                 self.local_types.insert(p.name.clone(), p.ty.clone());
                 if p.pass == Pass::Inout && !Layout::of(self.world, &p.ty)?.aggregate() {
