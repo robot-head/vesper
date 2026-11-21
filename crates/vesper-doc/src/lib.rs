@@ -820,7 +820,7 @@ pub fn render_document_html(
         }
     }
     if let Some(table) = swap::table() {
-        let compact = swap::compact(report)?;
+        let compact = swap::compact(report, limits.max_output_bytes)?;
         let targets: Vec<(String, &str)> = targets
             .iter()
             .map(|t| (links::anchor_id(t.kind, &t.path), t.path.as_str()))
@@ -928,7 +928,10 @@ pub fn render_document_html(
 pub fn render_html(value: &impl Serialize, limits: Limits) -> Result<Vec<u8>, String> {
     limits.validate()?;
     if let Some(table) = swap::table() {
-        let request = swap::pretty_request(&swap::compact(value)?, limits.max_output_bytes);
+        let request = swap::pretty_request(
+            &swap::compact(value, limits.max_output_bytes)?,
+            limits.max_output_bytes,
+        );
         return swap::decode((table.static_page)(&request));
     }
     let json = to_json(value, limits.max_output_bytes)?;
@@ -1015,9 +1018,9 @@ fn escape_html(output: &mut Bounded, bytes: &[u8]) -> Result<(), String> {
     }
     Ok(())
 }
-struct Bounded {
-    bytes: Vec<u8>,
-    limit: usize,
+pub(crate) struct Bounded {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) limit: usize,
 }
 impl Write for Bounded {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -1038,7 +1041,7 @@ impl Write for Bounded {
 }
 pub fn to_json(value: &impl Serialize, max_bytes: usize) -> Result<Vec<u8>, String> {
     if let Some(table) = swap::table() {
-        let request = swap::pretty_request(&swap::compact(value)?, max_bytes);
+        let request = swap::pretty_request(&swap::compact(value, max_bytes)?, max_bytes);
         return swap::decode((table.pretty_json)(&request));
     }
     let mut output = Bounded {

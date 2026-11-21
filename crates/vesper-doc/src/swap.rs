@@ -11,9 +11,16 @@
 //! differential tests (`tests/self_host_doc.rs`) alike.
 //!
 //! What crosses is JSON: the compact serialization of the value
-//! (`serde_json::to_vec`), which the Vesper writer re-indents into the exact
-//! bytes of `serde_json::to_writer_pretty`, plus, for a linked page, the
-//! targets, comments and references the Rust link checks validated.
+//! (`serde_json::to_writer`), which the Vesper writer re-indents into the
+//! exact bytes of `serde_json::to_writer_pretty`, plus, for a linked page,
+//! the targets, comments and references the Rust link checks validated.
+//!
+//! Two preconditions hold for every value this crate renders (its DTOs and
+//! the CLI's reports) and are not checked for other values:
+//! - No `serde_json::value::RawValue`: the pretty writer copies a raw
+//!   value's text unchanged, which the compact stream cannot mark.
+//! - No duplicate object keys: the overview's reader (the @vesper/serde
+//!   tape) refuses them, where `serde_json::Value` keeps the last one.
 use std::sync::OnceLock;
 
 /// The request and result layout version; `format()` of `@vesper/doc`.
@@ -57,10 +64,18 @@ fn bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(b);
 }
 
-/// The compact JSON of `value`, with serde_json's serializer errors worded
-/// as [`crate::to_json`] words them.
-pub fn compact(value: &impl serde::Serialize) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(value).map_err(|e| format!("bounded JSON output: {e}"))
+/// The compact JSON of `value`, bounded by `max_bytes`, with serde_json's
+/// errors worded as [`crate::to_json`] words them. The compact text is never
+/// longer than the pretty one, so a value whose compact text does not fit
+/// fails here with the pretty writer's own error, before any request is
+/// built.
+pub fn compact(value: &impl serde::Serialize, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let mut output = crate::Bounded {
+        bytes: Vec::new(),
+        limit: max_bytes,
+    };
+    serde_json::to_writer(&mut output, value).map_err(|e| format!("bounded JSON output: {e}"))?;
+    Ok(output.bytes)
 }
 
 /// The request of `pretty_json` and `static_page`: the byte budget, then

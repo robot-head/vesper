@@ -277,11 +277,13 @@ vesper_crate(
         # Self-hosting SH5 lane 15 (#1338): @vesper/doc against the Rust doc
         # renderers; the package reads JSON through @vesper/serde.
         "test/self_host_doc": glob([
-            "bootstrap/corpus/**",
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
-        ]) + ["//crates/vesper-serde:port_package"],
+        ]) + [
+            "//bootstrap:files",
+            "//crates/vesper-serde:port_package",
+        ],
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],

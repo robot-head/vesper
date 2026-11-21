@@ -735,18 +735,14 @@ fn speed() {
     let vesper = |values: &[J]| {
         let t = Instant::now();
         for v in values {
-            let compact = swap::compact(v).unwrap();
+            let compact = swap::compact(v, max).unwrap();
             std::hint::black_box(
                 swap::decode(pretty_fn(&swap::pretty_request(&compact, max))).unwrap(),
             );
-            let compact = swap::compact(v).unwrap();
-            std::hint::black_box(
-                swap::decode(page_fn(&swap::pretty_request(
-                    &compact,
-                    limits.max_output_bytes,
-                )))
-                .ok(),
-            );
+            if let Ok(compact) = swap::compact(v, limits.max_output_bytes) {
+                let request = swap::pretty_request(&compact, limits.max_output_bytes);
+                std::hint::black_box(swap::decode(page_fn(&request)).ok());
+            }
         }
         t.elapsed()
     };
