@@ -1,0 +1,283 @@
+// @vesper/optimize: the AST arithmetic optimizer of src/optimize.rs in
+// Vesper (self-hosting wave SH3, lane 10, #1249). Rust stays the default
+// optimizer; this is a non-default port with a differential
+// (tests/self_host_optimize.rs).
+//
+// - budget.ves: `WitnessBudget` and the Rust vector capacities it charges.
+// - input.ves: the decoded expressions (an `@vesper/ast` `Ast`), the
+//   expression types and a certificate.
+// - witness.ves: the certificate checker and the candidate builder of
+//   src/optimize/witness.rs.
+//
+// The equality-saturation search (src/optimize.rs, the producer half of
+// src/optimize/certificate.rs) follows on `@vesper/egraph` (lane 8).
+
+use @vesper/ast::{
+    ArgNode,
+    expr_at,
+    list_at,
+    list_len,
+    lit_at,
+    none
+};
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use self::budget::{
+    Budget,
+    valid_limits
+};
+use self::input::{
+    Cert,
+    Reader,
+    Tree,
+    TypeRow,
+    cert_new,
+    mapped,
+    read_cert,
+    read_exprs,
+    read_names,
+    read_types,
+    tree_new
+};
+use self::witness::{
+    Bound,
+    Ops,
+    bind_source,
+    bound_new,
+    build_candidate,
+    ops_new,
+    rust_sizes,
+    verify
+};
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+fn put_sym(inout o: ChunkSeq[u8], in t: Tree, sym: u32) {
+    if sym == none() {
+        put(inout o, "<none>");
+        return;
+    }
+    let (a, z) = t.ast.names.span(symbol_from_id(sym));
+    for i in a..z {
+        match t.ast.names.text_byte(i) {
+            Option::Some(c) => o.push(c),
+            Option::None => {}
+        }
+    }
+}
+
+fn put_span(inout o: ChunkSeq[u8], start: u32, end: u32) {
+    o.push(64);
+    put_u64(inout o, widen_u64(start));
+    o.push(58);
+    put_u64(inout o, widen_u64(end));
+}
+
+// The candidate dump the differential compares (the Rust side writes the
+// same text from a Rust `Expr`).
+pub fn dump_expr(inout o: ChunkSeq[u8], in t: Tree, e: u32) {
+    let x = expr_at(in t.ast, e);
+    if x.kind == 1 {
+        let l = lit_at(in t.ast, x.a);
+        if l.kind != 1 {
+            put(inout o, "lit");
+        } else {
+            if l.neg && l.bits != 0 {
+                o.push(45);
+            }
+            put_u64(inout o, l.bits);
+        }
+        put_span(inout o, x.start, x.end);
+    } else if x.kind == 2 {
+        put_sym(inout o, in t, x.a);
+        put_span(inout o, x.start, x.end);
+    } else if x.kind == 11 {
+        o.push(40);
+        put_sym(inout o, in t, x.a);
+        put_span(inout o, x.start, x.end);
+        o.push(32);
+        dump_expr(inout o, in t, x.b);
+        o.push(32);
+        dump_expr(inout o, in t, x.c);
+        o.push(41);
+    } else if x.kind == 6 {
+        put(inout o, "(call");
+        put_span(inout o, x.start, x.end);
+        o.push(32);
+        dump_expr(inout o, in t, x.a);
+        put(inout o, " [");
+        put_u64(inout o, list_len(in t.ast, x.b));
+        o.push(93);
+        for i in 0..list_len(in t.ast, x.c) {
+            let a = t
+                .ast
+                .args
+                .get_or(
+                idx_from_raw[ArgNode](list_at(in t.ast, x.c, i)),
+                ArgNode {
+                    pass: 255,
+                    explicit: false,
+                    expr: none()
+                }
+            );
+            o.push(32);
+            put_u64(inout o, widen_u64(a.pass));
+            if a.explicit {
+                o.push(33);
+            }
+            o.push(58);
+            dump_expr(inout o, in t, a.expr);
+        }
+        o.push(41);
+    } else {
+        o.push(63);
+        put_u64(inout o, widen_u64(x.kind));
+        put_span(inout o, x.start, x.end);
+    }
+}
+
+pub fn pack_text(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let n = text.len();
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
+    out.push(n);
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        let c = match text.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        x = x | wrapping_shl_u64(c, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+    out
+}
+
+fn read_budget(inout r: Reader, in b: Slice[u8]) -> Budget {
+    Budget {
+        max_terms: r.word(in b),
+        max_proofs: r.word(in b),
+        max_input_nodes: r.word(in b),
+        max_output_nodes: r.word(in b),
+        max_depth: r.word(in b),
+        max_variables: r.word(in b),
+        max_name_bytes: r.word(in b),
+        max_metadata_bytes: r.word(in b),
+        max_work: r.word(in b),
+        work: r.word(in b),
+        metadata: r.word(in b),
+        names: r.word(in b)
+    }
+}
+
+// Task "verify": a count of cases, each self-contained: the limits and
+// spent counters, names, types, expressions, the source and candidate
+// expressions, the certificate, and whether to build the candidate too.
+// Per case it writes `R code work metadata names` (`verify_spent`'s
+// result and counters; code 0 is `Ok`) and, when asked, `B code dump`:
+// `build_candidate` of the certificate's output on a fresh budget.
+pub fn optimize_verify(in input: Str) -> ChunkSeq[u64] {
+    run_cases(in input, true)
+}
+
+// The same cases decoded only, with every result line `R 0 0 0 0`: the
+// decode cost, which the speed test subtracts.
+pub fn optimize_decode(in input: Str) -> ChunkSeq[u64] {
+    run_cases(in input, false)
+}
+
+fn run_cases(in input: Str, check: bool) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut o = ChunkSeq::new[u8]();
+    let mut map = ChunkSeq::new[u32]();
+    let mut types = ChunkSeq::new[TypeRow]();
+    let mut cert = cert_new();
+    let cases = r.word(in b);
+    for k in 0..cases {
+        let mut budget = read_budget(inout r, in b);
+        let mut t = tree_new();
+        read_names(inout r, in input, inout t);
+        read_types(inout r, in b, inout types);
+        read_exprs(inout r, in b, inout t, inout map);
+        let source = mapped(in map, r.word(in b));
+        let candidate = mapped(in map, r.word(in b));
+        read_cert(inout r, in b, inout cert);
+        let build = r.word(in b) != 0;
+        let ops = ops_new(inout t);
+        let fresh = budget;
+        let mut code = valid_limits(in budget);
+        if !check {
+            budget.work = 0;
+            budget.metadata = 0;
+            budget.names = 0;
+        } else if code == 0 {
+            code = verify(inout t, in ops, in types, source, candidate, in cert, inout budget);
+        }
+        put(inout o, "R ");
+        put_u64(inout o, widen_u64(code));
+        o.push(32);
+        put_u64(inout o, budget.work);
+        o.push(32);
+        put_u64(inout o, budget.metadata);
+        o.push(32);
+        put_u64(inout o, budget.names);
+        o.push(10);
+        if build && check {
+            let mut nb = fresh;
+            nb.work = 0;
+            nb.metadata = 0;
+            nb.names = 0;
+            let mut bound = bound_new();
+            let mut code = bind_source(in t, in ops, in types, source, inout nb, inout bound);
+            let mut out = none();
+            if code == 0 {
+                code = build_candidate(
+                    inout t,
+                    in ops,
+                    in bound,
+                    in cert.terms,
+                    cert.output,
+                    inout nb,
+                    inout out
+                );
+            }
+            put(inout o, "B ");
+            put_u64(inout o, widen_u64(code));
+            if code == 0 {
+                o.push(32);
+                dump_expr(inout o, in t, out);
+            }
+            o.push(10);
+        }
+    }
+    pack_text(in o)
+}
+
+// The Rust `size_of` values the checker charges with (the input is unused).
+pub fn optimize_sizes(in input: Str) -> ChunkSeq[u64] {
+    rust_sizes()
+}

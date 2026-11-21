@@ -103,6 +103,10 @@ const VESPER_LAYOUT: vesper::layout::LayoutTable = vesper::layout::LayoutTable {
 /// stays in Rust.
 const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrCheckTable {
     validate: |world, program| {
+        // `ir_input` refuses what `@vesper/ir-check` does not cover yet,
+        // among them every world with element view matches (#1221): those
+        // go to `rust_validate` (test: `element_views_stay_on_rust` in
+        // tests/hybrid_ir_check.rs).
         let Some(input) = check_words::ir_input(world, program) else {
             return vesper::ir_check::rust_validate(world, program);
         };

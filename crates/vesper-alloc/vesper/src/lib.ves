@@ -19,9 +19,8 @@
 // the same call with `fresh_base`/`fresh_cap` set; the book is unchanged in
 // between, so the repeated call takes the same path and adopts the chunk.
 //
-// Codes shared with src/region/port.rs:
-// - Slot kind: 0 Bytes, 1 Value, 2 Elements, 3 Frozen.
-// - Slot state: 0 Live, 1 Moved, 2 Released.
+// Codes shared with src/region/port.rs: the slot `Kind` and `State`, and
+// the `ConfigError` index of `Fault::Config`.
 // - A finalizer (`fin`, `edrop`) is the address of a Rust drop function, or 0.
 
 // RegionConfig.
@@ -47,7 +46,7 @@ copy struct Chunk {
 // One tracked allocation. `prior` is the chunk cursor before it (including
 // alignment padding) and `addr` its address. The `e*` fields are the element
 // metadata of Elements and Frozen slots (`elems` is true for those). Stored as
-// `slot_words()` words per slot in `Book::slots` (see `slot_at`), so the hot
+// `SLOT_WORDS` words per slot in `Book::slots` (see `slot_at`), so the hot
 // paths read only the words they need.
 copy struct Slot {
     serial: u64,
@@ -118,9 +117,7 @@ pub copy enum Fault {
     Linear(u64),
     TooManyCheckpoints(u64),
     Protected,
-    // ConfigError by index: 0 ZeroInitialChunk, 1 InitialExceedsMaxChunk,
-    // 2 InitialExceedsReservation, 3 MaxAlignNotPowerOfTwo, 4 ChunkLayout,
-    // 5 AllocationLimitTooLarge.
+    // A `ConfigError`.
     Config(u64)
 }
 
@@ -253,44 +250,44 @@ copy enum Place {
     Fail(Fault)
 }
 
-fn max_u64() -> u64 {
-    18446744073709551615
+const MAX_U64: u64 = 18446744073709551615;
+const ISIZE_MAX: u64 = 9223372036854775807;
+// The alignment of every chunk layout, at least `max_align`.
+const CHUNK_ALIGN: u64 = 16;
+// RegionConfig's allocation limit: slot indices fit in u32.
+const MAX_ALLOCATIONS: u64 = 4294967295;
+// Chunks and element buffers grow by doubling.
+const GROWTH_FACTOR: u64 = 2;
+// The smallest nonzero element capacity (Rust's `RawVec` minimum): 8 for
+// one-byte elements, 4 up to SMALL_ELEMENT_MAX bytes, then 1.
+const MIN_CAP_BYTES: u64 = 8;
+const SMALL_ELEMENT_MAX: u64 = 1024;
+const MIN_CAP_SMALL: u64 = 4;
+const MIN_CAP_LARGE: u64 = 1;
+
+// Slot kinds.
+enum Kind: _ {
+    Bytes,
+    Value,
+    Elements,
+    Frozen
 }
 
-fn isize_max() -> u64 {
-    9223372036854775807
+// Slot states.
+enum State: _ {
+    Live,
+    Moved,
+    Released
 }
 
-fn chunk_align() -> u64 {
-    16
-}
-
-fn k_bytes() -> u64 {
-    0
-}
-
-fn k_value() -> u64 {
-    1
-}
-
-fn k_elements() -> u64 {
-    2
-}
-
-fn k_frozen() -> u64 {
-    3
-}
-
-fn s_live() -> u64 {
-    0
-}
-
-fn s_moved() -> u64 {
-    1
-}
-
-fn s_released() -> u64 {
-    2
+// `Fault::Config` indices of the crate's ConfigError variants.
+enum ConfigError: _ {
+    ZeroInitialChunk,
+    InitialExceedsMaxChunk,
+    InitialExceedsReservation,
+    MaxAlignNotPowerOfTwo,
+    ChunkLayout,
+    AllocationLimitTooLarge
 }
 
 fn max(a: u64, b: u64) -> u64 {
@@ -332,7 +329,7 @@ fn mul_bytes(a: u64, b: u64) -> Option[u64] {
         return Option::Some(0);
     }
     let (low, high) = mul_wide(a, b);
-    if high != 0 || low > isize_max() {
+    if high != 0 || low > ISIZE_MAX {
         Option::None
     } else {
         Option::Some(low)
@@ -341,7 +338,7 @@ fn mul_bytes(a: u64, b: u64) -> Option[u64] {
 
 // Layout::from_size_align(size, align) for a power-of-two align.
 fn layout_ok(size: u64, align: u64) -> bool {
-    size <= wrapping_sub(isize_max(), dec(align))
+    size <= wrapping_sub(ISIZE_MAX, dec(align))
 }
 
 fn empty_chunk() -> Chunk {
@@ -377,102 +374,67 @@ fn empty_slot() -> Slot {
 
 // ----- storage ------------------------------------------------------------------
 
-fn chunk_words() -> u64 {
-    4
+// Chunk words.
+enum ChunkWord: _ {
+    Base,
+    Cap,
+    Align,
+    Cursor
 }
 
-fn slot_words() -> u64 {
-    13
+const CHUNK_WORDS: u64 = 4;
+
+// Slot words.
+enum SlotWord: _ {
+    Serial,
+    Chunk,
+    Prior,
+    Start,
+    Len,
+    Align,
+    Flags,
+    Fin,
+    Addr,
+    Elen,
+    Ecap,
+    Esize,
+    Edrop
 }
 
-// Slot words: 0 serial, 1 chunk, 2 prior, 3 start, 4 len, 5 align, 6 flags,
-// 7 fin, 8 addr, 9 elen, 10 ecap, 11 esize, 12 edrop. The flags word holds
-// the kind (bits 0-1), the state (bits 2-3), `lin` (bit 4), `elems` (bit 5)
-// and `elin` (bit 6).
-fn f_serial() -> u64 {
-    0
-}
+const SLOT_WORDS: u64 = 13;
 
-fn f_chunk() -> u64 {
-    1
-}
+// The flags word holds the kind (bits 0-1), the state (bits 2-3) and these
+// flag bits.
+const KIND_MASK: u64 = 3;
+const STATE_SHIFT: u64 = 2;
+const STATE_MASK: u64 = 3;
 
-fn f_prior() -> u64 {
-    2
-}
-
-fn f_start() -> u64 {
-    3
-}
-
-fn f_len() -> u64 {
-    4
-}
-
-fn f_align() -> u64 {
-    5
-}
-
-fn f_flags() -> u64 {
-    6
-}
-
-fn f_fin() -> u64 {
-    7
-}
-
-fn f_addr() -> u64 {
-    8
-}
-
-fn f_elen() -> u64 {
-    9
-}
-
-fn f_ecap() -> u64 {
-    10
-}
-
-fn f_esize() -> u64 {
-    11
-}
-
-fn f_edrop() -> u64 {
-    12
-}
-
-fn bit_lin() -> u64 {
-    16
-}
-
-fn bit_elems() -> u64 {
-    32
-}
-
-fn bit_elin() -> u64 {
-    64
+enum Flag: _ {
+    Lin = 16,
+    Elems = 32,
+    Elin = 64
 }
 
 fn cget(in b: Book, i: u64, f: u64) -> u64 {
-    match b.chunks.try_get(wrapping_add(wrapping_mul(i, chunk_words()), f)) {
+    match b.chunks.try_get(wrapping_add(wrapping_mul(i, CHUNK_WORDS), f)) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
 fn cset(inout b: Book, i: u64, f: u64, v: u64) {
-    b.chunks.try_set(wrapping_add(wrapping_mul(i, chunk_words()), f), v);
+    b.chunks.try_set(wrapping_add(wrapping_mul(i, CHUNK_WORDS), f), v);
 }
 
 fn sget(in b: Book, i: u64, f: u64) -> u64 {
-    match b.slots.try_get(wrapping_add(wrapping_mul(i, slot_words()), f)) {
+    match b.slots.try_get(wrapping_add(wrapping_mul(i, SLOT_WORDS), f)) {
         Option::Some(v) => v,
         Option::None => 0,
     }
 }
 
 fn sset(inout b: Book, i: u64, f: u64, v: u64) {
-    b.slots.try_set(wrapping_add(wrapping_mul(i, slot_words()), f), v);
+    b.slots.try_set(wrapping_add(wrapping_mul(i, SLOT_WORDS), f), v);
 }
 
 fn flag(flags: u64, bit: u64) -> bool {
@@ -480,41 +442,41 @@ fn flag(flags: u64, bit: u64) -> bool {
 }
 
 fn kind_of(flags: u64) -> u64 {
-    flags & 3
+    flags & KIND_MASK
 }
 
 fn state_of(flags: u64) -> u64 {
-    (flags >> 2) & 3
+    (flags >> STATE_SHIFT) & STATE_MASK
 }
 
 fn pack(kind: u64, st: u64, lin: bool, elems: bool, elin: bool) -> u64 {
-    let mut f = kind | (st << 2);
+    let mut f = kind | (st << STATE_SHIFT);
     if lin {
-        f = f | bit_lin();
+        f = f | Flag::Lin;
     }
     if elems {
-        f = f | bit_elems();
+        f = f | Flag::Elems;
     }
     if elin {
-        f = f | bit_elin();
+        f = f | Flag::Elin;
     }
     f
 }
 
 fn chunk_at(in b: Book, i: u64) -> Chunk {
     Chunk {
-        base: cget(in b, i, 0),
-        cap: cget(in b, i, 1),
-        align: cget(in b, i, 2),
-        cursor: cget(in b, i, 3)
+        base: cget(in b, i, ChunkWord::Base),
+        cap: cget(in b, i, ChunkWord::Cap),
+        align: cget(in b, i, ChunkWord::Align),
+        cursor: cget(in b, i, ChunkWord::Cursor)
     }
 }
 
 fn set_chunk(inout b: Book, i: u64, c: Chunk) {
-    cset(inout b, i, 0, c.base);
-    cset(inout b, i, 1, c.cap);
-    cset(inout b, i, 2, c.align);
-    cset(inout b, i, 3, c.cursor);
+    cset(inout b, i, ChunkWord::Base, c.base);
+    cset(inout b, i, ChunkWord::Cap, c.cap);
+    cset(inout b, i, ChunkWord::Align, c.align);
+    cset(inout b, i, ChunkWord::Cursor, c.cursor);
 }
 
 fn push_chunk(inout b: Book, c: Chunk) {
@@ -526,61 +488,61 @@ fn push_chunk(inout b: Book, c: Chunk) {
 }
 
 fn truncate_chunks(inout b: Book, n: u64) {
-    b.chunks.truncate(wrapping_mul(n, chunk_words()));
+    b.chunks.truncate(wrapping_mul(n, CHUNK_WORDS));
     b.nchunks = n;
 }
 
 fn cursor_of(in b: Book, i: u64) -> u64 {
-    cget(in b, i, 3)
+    cget(in b, i, ChunkWord::Cursor)
 }
 
 fn set_cursor(inout b: Book, i: u64, cursor: u64) {
     if i < b.nchunks {
-        cset(inout b, i, 3, cursor);
+        cset(inout b, i, ChunkWord::Cursor, cursor);
     }
 }
 
 fn slot_at(in b: Book, i: u64) -> Slot {
-    let flags = sget(in b, i, f_flags());
+    let flags = sget(in b, i, SlotWord::Flags);
     Slot {
-        serial: sget(in b, i, f_serial()),
-        addr: sget(in b, i, f_addr()),
-        chunk: sget(in b, i, f_chunk()),
-        prior: sget(in b, i, f_prior()),
-        start: sget(in b, i, f_start()),
-        len: sget(in b, i, f_len()),
-        align: sget(in b, i, f_align()),
+        serial: sget(in b, i, SlotWord::Serial),
+        addr: sget(in b, i, SlotWord::Addr),
+        chunk: sget(in b, i, SlotWord::Chunk),
+        prior: sget(in b, i, SlotWord::Prior),
+        start: sget(in b, i, SlotWord::Start),
+        len: sget(in b, i, SlotWord::Len),
+        align: sget(in b, i, SlotWord::Align),
         kind: kind_of(flags),
         st: state_of(flags),
-        fin: sget(in b, i, f_fin()),
-        lin: flag(flags, bit_lin()),
-        elems: flag(flags, bit_elems()),
-        elen: sget(in b, i, f_elen()),
-        ecap: sget(in b, i, f_ecap()),
-        esize: sget(in b, i, f_esize()),
-        edrop: sget(in b, i, f_edrop()),
-        elin: flag(flags, bit_elin())
+        fin: sget(in b, i, SlotWord::Fin),
+        lin: flag(flags, Flag::Lin),
+        elems: flag(flags, Flag::Elems),
+        elen: sget(in b, i, SlotWord::Elen),
+        ecap: sget(in b, i, SlotWord::Ecap),
+        esize: sget(in b, i, SlotWord::Esize),
+        edrop: sget(in b, i, SlotWord::Edrop),
+        elin: flag(flags, Flag::Elin)
     }
 }
 
 fn set_slot(inout b: Book, i: u64, s: Slot) {
-    sset(inout b, i, f_serial(), s.serial);
-    sset(inout b, i, f_chunk(), s.chunk);
-    sset(inout b, i, f_prior(), s.prior);
-    sset(inout b, i, f_start(), s.start);
-    sset(inout b, i, f_len(), s.len);
-    sset(inout b, i, f_align(), s.align);
-    sset(inout b, i, f_flags(), pack(s.kind, s.st, s.lin, s.elems, s.elin));
-    sset(inout b, i, f_fin(), s.fin);
-    sset(inout b, i, f_addr(), s.addr);
-    sset(inout b, i, f_elen(), s.elen);
-    sset(inout b, i, f_ecap(), s.ecap);
-    sset(inout b, i, f_esize(), s.esize);
-    sset(inout b, i, f_edrop(), s.edrop);
+    sset(inout b, i, SlotWord::Serial, s.serial);
+    sset(inout b, i, SlotWord::Chunk, s.chunk);
+    sset(inout b, i, SlotWord::Prior, s.prior);
+    sset(inout b, i, SlotWord::Start, s.start);
+    sset(inout b, i, SlotWord::Len, s.len);
+    sset(inout b, i, SlotWord::Align, s.align);
+    sset(inout b, i, SlotWord::Flags, pack(s.kind, s.st, s.lin, s.elems, s.elin));
+    sset(inout b, i, SlotWord::Fin, s.fin);
+    sset(inout b, i, SlotWord::Addr, s.addr);
+    sset(inout b, i, SlotWord::Elen, s.elen);
+    sset(inout b, i, SlotWord::Ecap, s.ecap);
+    sset(inout b, i, SlotWord::Esize, s.esize);
+    sset(inout b, i, SlotWord::Edrop, s.edrop);
 }
 
 fn truncate_slots(inout b: Book, n: u64) {
-    b.slots.truncate(wrapping_mul(n, slot_words()));
+    b.slots.truncate(wrapping_mul(n, SLOT_WORDS));
     b.nslots = n;
 }
 
@@ -592,22 +554,22 @@ fn addr_of(in b: Book, s: Slot) -> u64 {
 
 pub fn config_check(c: Cfg) -> Option[Fault] {
     if c.initial == 0 {
-        return Option::Some(Fault::Config(0));
+        return Option::Some(Fault::Config(ConfigError::ZeroInitialChunk));
     }
     if c.initial > c.max_chunk {
-        return Option::Some(Fault::Config(1));
+        return Option::Some(Fault::Config(ConfigError::InitialExceedsMaxChunk));
     }
     if c.initial > c.max_reserved {
-        return Option::Some(Fault::Config(2));
+        return Option::Some(Fault::Config(ConfigError::InitialExceedsReservation));
     }
     if !is_pow2(c.max_align) {
-        return Option::Some(Fault::Config(3));
+        return Option::Some(Fault::Config(ConfigError::MaxAlignNotPowerOfTwo));
     }
-    if !layout_ok(c.max_chunk, max(chunk_align(), c.max_align)) {
-        return Option::Some(Fault::Config(4));
+    if !layout_ok(c.max_chunk, max(CHUNK_ALIGN, c.max_align)) {
+        return Option::Some(Fault::Config(ConfigError::ChunkLayout));
     }
-    if c.max_allocations > 4294967295 {
-        return Option::Some(Fault::Config(5));
+    if c.max_allocations > MAX_ALLOCATIONS {
+        return Option::Some(Fault::Config(ConfigError::AllocationLimitTooLarge));
     }
     Option::None
 }
@@ -676,25 +638,25 @@ fn check_align(in b: Book, align: u64) -> Option[Fault] {
 }
 
 // Offset of an aligned `size`-byte block at the cursor of `c`, if it fits;
-// `max_u64()` otherwise.
+// `MAX_U64` otherwise.
 fn fit(c: Chunk, size: u64, align: u64) -> u64 {
     if add_overflows(c.base, c.cursor) {
-        return max_u64();
+        return MAX_U64;
     }
     let at = wrapping_add(c.base, c.cursor);
     if add_overflows(at, dec(align)) {
-        return max_u64();
+        return MAX_U64;
     }
     let bumped = wrapping_add(at, dec(align));
     let aligned = bumped & ~dec(align);
     let start = wrapping_sub(aligned, c.base);
     if add_overflows(start, size) {
-        return max_u64();
+        return MAX_U64;
     }
     if wrapping_add(start, size) <= c.cap {
         start
     } else {
-        max_u64()
+        MAX_U64
     }
 }
 
@@ -748,13 +710,13 @@ fn place(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64) 
         },
         Option::None => (),
     }
-    if size > isize_max() {
+    if size > ISIZE_MAX {
         return Place::Fail(Fault::SizeOverflow);
     }
     let n = b.nchunks;
     if b.current < n {
         let start = fit(chunk_at(in b, b.current), size, align);
-        if start != max_u64() {
+        if start != MAX_U64 {
             let cur = b.current;
             return commit_placement(inout b, cur, start, size);
         }
@@ -767,18 +729,18 @@ fn place(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64) 
     } else {
         inc(b.current)
     };
-    let mut found = max_u64();
+    let mut found = MAX_U64;
     let mut found_start: u64 = 0;
     for i in first_spare..n {
-        if found == max_u64() {
+        if found == MAX_U64 {
             let s = fit(chunk_at(in b, i), size, align);
-            if s != max_u64() {
+            if s != MAX_U64 {
                 found = i;
                 found_start = s;
             }
         }
     }
-    if found != max_u64() {
+    if found != MAX_U64 {
         release_chunks(inout b, first_spare, found);
         b.current = first_spare;
         return commit_placement(inout b, first_spare, found_start, size);
@@ -793,10 +755,10 @@ fn place(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64) 
         b.cfg.initial
     } else {
         let last = chunk_at(in b, dec(first_spare)).cap;
-        let doubled = if last > isize_max() {
-            max_u64()
+        let doubled = if last > ISIZE_MAX {
+            MAX_U64
         } else {
-            wrapping_mul(last, 2)
+            wrapping_mul(last, GROWTH_FACTOR)
         };
         min(doubled, b.cfg.max_chunk)
     };
@@ -814,7 +776,7 @@ fn place(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64) 
     if capacity == 0 {
         return Place::Fail(exceeded);
     }
-    let lay = max(chunk_align(), align);
+    let lay = max(CHUNK_ALIGN, align);
     if !layout_ok(capacity, lay) {
         return Place::Fail(Fault::SizeOverflow);
     }
@@ -832,7 +794,7 @@ fn place(inout b: Book, size: u64, align: u64, fresh_base: u64, fresh_cap: u64) 
     };
     b.reserved = wrapping_add(b.reserved, fresh_cap);
     let start = fit(c, size, align);
-    if fresh_cap != capacity || start == max_u64() {
+    if fresh_cap != capacity || start == MAX_U64 {
         queue_release(inout b, c);
         return Place::Fail(Fault::SizeOverflow);
     }
@@ -847,7 +809,7 @@ fn reserve_slot(in b: Book) -> Option[Fault] {
     if b.nslots >= b.cfg.max_allocations {
         return Option::Some(Fault::TooManyAllocations(b.cfg.max_allocations));
     }
-    if b.next_serial == max_u64() {
+    if b.next_serial == MAX_U64 {
         return Option::Some(Fault::ExhaustedSerials);
     }
     Option::None
@@ -865,7 +827,7 @@ fn push_slot(
 ) -> u64 {
     let serial = b.next_serial;
     b.next_serial = inc(serial);
-    let addr = wrapping_add(cget(in b, chunk, 0), start);
+    let addr = wrapping_add(cget(in b, chunk, ChunkWord::Base), start);
     b.slots.push(serial);
     b.slots.push(chunk);
     b.slots.push(prior);
@@ -914,12 +876,12 @@ fn is_tip(in b: Book, index: u64) -> bool {
     if inc(index) != b.nslots || index < mark_floor(in b) {
         return false;
     }
-    let chunk = sget(in b, index, f_chunk());
+    let chunk = sget(in b, index, SlotWord::Chunk);
     chunk
         == b
         .current
         && cursor_of(in b, chunk)
-        == wrapping_add(sget(in b, index, f_start()), sget(in b, index, f_len()))
+        == wrapping_add(sget(in b, index, SlotWord::Start), sget(in b, index, SlotWord::Len))
 }
 
 // Pops released or moved allocations at the tip so their bytes are reused.
@@ -946,7 +908,7 @@ fn reclaim_tail(inout b: Book) {
         }
         let last = dec(n);
         let s = slot_at(in b, last);
-        if s.st == s_live() || !is_tip(in b, last) {
+        if s.st == State::Live || !is_tip(in b, last) {
             break;
         }
         truncate_slots(inout b, last);
@@ -957,17 +919,17 @@ fn reclaim_tail(inout b: Book) {
 // ----- handle validation -------------------------------------------------------
 
 fn resolve(in b: Book, slot: u64, serial: u64, kind: u64) -> Result[u64, Fault] {
-    if slot >= b.nslots || sget(in b, slot, f_serial()) != serial {
+    if slot >= b.nslots || sget(in b, slot, SlotWord::Serial) != serial {
         return Result::Err(Fault::Stale);
     }
-    let flags = sget(in b, slot, f_flags());
+    let flags = sget(in b, slot, SlotWord::Flags);
     if kind_of(flags) != kind {
         return Result::Err(Fault::Stale);
     }
     let st = state_of(flags);
-    if st == s_live() {
+    if st == State::Live {
         Result::Ok(slot)
-    } else if st == s_moved() {
+    } else if st == State::Moved {
         Result::Err(Fault::Moved)
     } else {
         Result::Err(Fault::Stale)
@@ -978,11 +940,11 @@ pub fn book_view(in b: Book, slot: u64, serial: u64, kind: u64) -> Result[View, 
     match resolve(in b, slot, serial, kind) {
         Result::Ok(i) => Result::Ok(
             View {
-                addr: sget(in b, i, f_addr()),
-                len: sget(in b, i, f_len()),
-                elen: sget(in b, i, f_elen()),
-                ecap: sget(in b, i, f_ecap()),
-                lin: flag(sget(in b, i, f_flags()), bit_lin())
+                addr: sget(in b, i, SlotWord::Addr),
+                len: sget(in b, i, SlotWord::Len),
+                elen: sget(in b, i, SlotWord::Elen),
+                ecap: sget(in b, i, SlotWord::Ecap),
+                lin: flag(sget(in b, i, SlotWord::Flags), Flag::Lin)
             }
         ),
         Result::Err(f) => Result::Err(f),
@@ -994,7 +956,7 @@ pub fn book_view(in b: Book, slot: u64, serial: u64, kind: u64) -> Result[View, 
 fn done(in b: Book, slot: u64, addr: u64) -> Placed {
     Placed::Done {
         slot: slot,
-        serial: sget(in b, slot, f_serial()),
+        serial: sget(in b, slot, SlotWord::Serial),
         addr: addr,
         pending: b.pending.len()
     }
@@ -1032,13 +994,13 @@ pub fn book_alloc(
                 start,
                 size,
                 align,
-                pack(kind, s_live(), lin, false, false),
+                pack(kind, State::Live, lin, false, false),
                 fin
             );
             if lin {
                 b.live_linear = inc(b.live_linear);
             }
-            let addr = sget(in b, i, f_addr());
+            let addr = sget(in b, i, SlotWord::Addr);
             done(in b, i, addr)
         },
         Place::Need {
@@ -1063,7 +1025,7 @@ pub fn book_alloc_raw(inout b: Book, size: u64, align: u64, fresh_base: u64, fre
             start
         }
         => Placed::Done {
-            slot: max_u64(),
+            slot: MAX_U64,
             serial: 0,
             addr: wrapping_add(chunk_at(in b, chunk).base, start),
             pending: b.pending.len()
@@ -1081,7 +1043,7 @@ pub fn book_alloc_raw(inout b: Book, size: u64, align: u64, fresh_base: u64, fre
 }
 
 // An element buffer (kind 2) for `cap` elements of `esize` bytes. A
-// zero-sized element type has capacity `max_u64()` and no bytes.
+// zero-sized element type has capacity `MAX_U64` and no bytes.
 pub fn book_alloc_elems(
     inout b: Book,
     cap: u64,
@@ -1093,7 +1055,7 @@ pub fn book_alloc_elems(
     fresh_cap: u64
 ) -> Placed {
     let ecap = if esize == 0 {
-        max_u64()
+        MAX_U64
     } else {
         cap
     };
@@ -1120,7 +1082,7 @@ pub fn book_alloc_elems(
             start
         }
         => {
-            let i = push_slot(inout b, chunk, prior, start, bytes, align, k_elements(), 0);
+            let i = push_slot(inout b, chunk, prior, start, bytes, align, Kind::Elements, 0);
             let mut s = slot_at(in b, i);
             s.elems = true;
             s.elen = 0;
@@ -1150,7 +1112,7 @@ pub fn book_alloc_elems(
 // otherwise by relocation (the old slot is released).
 pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: u64, fresh_cap: u64)
     -> Extended {
-    let index = match resolve(in b, slot, serial, k_bytes()) {
+    let index = match resolve(in b, slot, serial, Kind::Bytes) {
         Result::Ok(i) => i,
         Result::Err(f) => {
             return Extended::Fail(f);
@@ -1163,7 +1125,7 @@ pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: 
         return Extended::Fail(Fault::Protected);
     }
     let s = slot_at(in b, index);
-    if add_overflows(s.len, add) || wrapping_add(s.len, add) > isize_max() {
+    if add_overflows(s.len, add) || wrapping_add(s.len, add) > ISIZE_MAX {
         return Extended::Fail(Fault::SizeOverflow);
     }
     let new_len = wrapping_add(s.len, add);
@@ -1190,9 +1152,9 @@ pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: 
             start
         }
         => {
-            let i = push_slot(inout b, chunk, prior, start, new_len, s.align, k_bytes(), 0);
+            let i = push_slot(inout b, chunk, prior, start, new_len, s.align, Kind::Bytes, 0);
             let mut old = s;
-            old.st = s_released();
+            old.st = State::Released;
             set_slot(inout b, index, old);
             let fresh = slot_at(in b, i);
             Extended::Relocated {
@@ -1218,10 +1180,10 @@ pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: 
 
 // Releases a byte allocation; its bytes are reused at once at the tip.
 pub fn book_release(inout b: Book, slot: u64, serial: u64) -> Result[u64, Fault] {
-    match resolve(in b, slot, serial, k_bytes()) {
+    match resolve(in b, slot, serial, Kind::Bytes) {
         Result::Ok(i) => {
             let mut s = slot_at(in b, i);
-            s.st = s_released();
+            s.st = State::Released;
             set_slot(inout b, i, s);
             reclaim_tail(inout b);
             Result::Ok(0)
@@ -1233,10 +1195,10 @@ pub fn book_release(inout b: Book, slot: u64, serial: u64) -> Result[u64, Fault]
 // Moves a value out of its box: no finalizer runs for it and a linear
 // obligation is discharged. Returns the value's address.
 pub fn book_take(inout b: Book, slot: u64, serial: u64) -> Result[u64, Fault] {
-    match resolve(in b, slot, serial, k_value()) {
+    match resolve(in b, slot, serial, Kind::Value) {
         Result::Ok(i) => {
             let mut s = slot_at(in b, i);
-            s.st = s_moved();
+            s.st = State::Moved;
             s.fin = 0;
             if s.lin {
                 s.lin = false;
@@ -1257,7 +1219,7 @@ pub fn book_checkpoint(inout b: Book) -> Result[u64, Fault] {
     if b.marks.len() >= b.cfg.max_checkpoints {
         return Result::Err(Fault::TooManyCheckpoints(b.cfg.max_checkpoints));
     }
-    if b.next_serial == max_u64() {
+    if b.next_serial == MAX_U64 {
         return Result::Err(Fault::ExhaustedSerials);
     }
     let serial = b.next_serial;
@@ -1281,7 +1243,7 @@ pub fn book_checkpoint(inout b: Book) -> Result[u64, Fault] {
 }
 
 fn find_mark(in b: Book, serial: u64) -> u64 {
-    let mut found = max_u64();
+    let mut found = MAX_U64;
     for i in 0..b.marks.len() {
         match b.marks.try_get(i) {
             Option::Some(m) => {
@@ -1307,13 +1269,13 @@ fn finalize_from(inout b: Book, floor: u64) {
             break;
         }
         i = dec(i);
-        let flags = sget(in b, i, f_flags());
-        if state_of(flags) == s_live() {
-            if flag(flags, bit_lin()) {
+        let flags = sget(in b, i, SlotWord::Flags);
+        if state_of(flags) == State::Live {
+            if flag(flags, Flag::Lin) {
                 b.live_linear = dec(b.live_linear);
             }
-            let addr = sget(in b, i, f_addr());
-            let fin = sget(in b, i, f_fin());
+            let addr = sget(in b, i, SlotWord::Addr);
+            let fin = sget(in b, i, SlotWord::Fin);
             if fin != 0 {
                 b
                     .pending
@@ -1324,9 +1286,9 @@ fn finalize_from(inout b: Book, floor: u64) {
                     }
                 );
             }
-            if flag(flags, bit_elems()) {
-                let edrop = sget(in b, i, f_edrop());
-                let elen = sget(in b, i, f_elen());
+            if flag(flags, Flag::Elems) {
+                let edrop = sget(in b, i, SlotWord::Edrop);
+                let elen = sget(in b, i, SlotWord::Elen);
                 if edrop != 0 && elen > 0 {
                     b
                         .pending
@@ -1348,7 +1310,7 @@ fn finalize_from(inout b: Book, floor: u64) {
 // everything unchanged. Returns the number of queued actions.
 pub fn book_rewind(inout b: Book, serial: u64) -> Result[u64, Fault] {
     let pos = find_mark(in b, serial);
-    if pos == max_u64() {
+    if pos == MAX_U64 {
         return Result::Err(Fault::Stale);
     }
     let record = match b.marks.try_get(pos) {
@@ -1360,8 +1322,8 @@ pub fn book_rewind(inout b: Book, serial: u64) -> Result[u64, Fault] {
     let floor = record.slot_len;
     let mut count: u64 = 0;
     for i in floor..b.nslots {
-        let flags = sget(in b, i, f_flags());
-        if state_of(flags) == s_live() && flag(flags, bit_lin()) {
+        let flags = sget(in b, i, SlotWord::Flags);
+        if state_of(flags) == State::Live && flag(flags, Flag::Lin) {
             count = inc(count);
         }
     }
@@ -1384,7 +1346,7 @@ pub fn book_rewind(inout b: Book, serial: u64) -> Result[u64, Fault] {
 // Discards a watermark without rewinding.
 pub fn book_commit(inout b: Book, serial: u64) -> Result[u64, Fault] {
     let pos = find_mark(in b, serial);
-    if pos == max_u64() {
+    if pos == MAX_U64 {
         return Result::Err(Fault::Stale);
     }
     let n = b.marks.len();
@@ -1417,7 +1379,7 @@ pub fn book_reset(inout b: Book) -> Result[u64, Fault] {
         if !stop {
             let c = chunk_at(in b, i);
             let total = if add_overflows(retained, c.cap) {
-                max_u64()
+                MAX_U64
             } else {
                 wrapping_add(retained, c.cap)
             };
@@ -1452,31 +1414,31 @@ pub fn book_finish(inout b: Book) -> u64 {
 
 fn min_growth_cap(esize: u64) -> u64 {
     if esize == 1 {
-        8
-    } else if esize <= 1024 {
-        4
+        MIN_CAP_BYTES
+    } else if esize <= SMALL_ELEMENT_MAX {
+        MIN_CAP_SMALL
     } else {
-        1
+        MIN_CAP_LARGE
     }
 }
 
 // Keeps the slot's linear flag and the book's counter in step with the
 // element count.
 fn sync_linear(inout b: Book, index: u64) {
-    let flags = sget(in b, index, f_flags());
+    let flags = sget(in b, index, SlotWord::Flags);
     let want = state_of(flags)
-        == s_live()
-        && flag(flags, bit_elems())
-        && flag(flags, bit_elin())
-        && sget(in b, index, f_elen())
+        == State::Live
+        && flag(flags, Flag::Elems)
+        && flag(flags, Flag::Elin)
+        && sget(in b, index, SlotWord::Elen)
         > 0;
-    if want != flag(flags, bit_lin()) {
+    if want != flag(flags, Flag::Lin) {
         let next = if want {
-            flags | bit_lin()
+            flags | Flag::Lin
         } else {
-            flags & ~bit_lin()
+            flags & ~Flag::Lin
         };
-        sset(inout b, index, f_flags(), next);
+        sset(inout b, index, SlotWord::Flags, next);
         if want {
             b.live_linear = inc(b.live_linear);
         } else {
@@ -1526,11 +1488,11 @@ fn resize(inout b: Book, index: u64, new_cap: u64, fresh_base: u64, fresh_cap: u
             start
         }
         => {
-            let i = push_slot(inout b, chunk, prior, start, new_bytes, s.align, k_elements(), 0);
+            let i = push_slot(inout b, chunk, prior, start, new_bytes, s.align, Kind::Elements, 0);
             let mut old = s;
             old.elems = false;
             old.lin = false;
-            old.st = s_released();
+            old.st = State::Released;
             set_slot(inout b, index, old);
             let mut fresh = slot_at(in b, i);
             fresh.elems = true;
@@ -1608,8 +1570,8 @@ fn claim_elems(inout b: Book, g: Grown, claim: u64) -> Grown {
             return g;
         },
     };
-    let elen = wrapping_add(sget(in b, index, f_elen()), claim);
-    sset(inout b, index, f_elen(), elen);
+    let elen = wrapping_add(sget(in b, index, SlotWord::Elen), claim);
+    sset(inout b, index, SlotWord::Elen, elen);
     sync_linear(inout b, index);
     g
 }
@@ -1630,29 +1592,29 @@ pub fn book_grow(
     fresh_base: u64,
     fresh_cap: u64
 ) -> Grown {
-    let index = match resolve(in b, slot, serial, k_elements()) {
+    let index = match resolve(in b, slot, serial, Kind::Elements) {
         Result::Ok(i) => i,
         Result::Err(f) => {
             return Grown::Fail(f);
         },
     };
-    let elen = sget(in b, index, f_elen());
+    let elen = sget(in b, index, SlotWord::Elen);
     if add_overflows(elen, additional) {
         return Grown::Fail(Fault::SizeOverflow);
     }
     let required = wrapping_add(elen, additional);
-    if required <= sget(in b, index, f_ecap()) {
+    if required <= sget(in b, index, SlotWord::Ecap) {
         // The fast path: room already reserved.
         if claim != 0 {
-            sset(inout b, index, f_elen(), wrapping_add(elen, claim));
-            if flag(sget(in b, index, f_flags()), bit_elin()) {
+            sset(inout b, index, SlotWord::Elen, wrapping_add(elen, claim));
+            if flag(sget(in b, index, SlotWord::Flags), Flag::Elin) {
                 sync_linear(inout b, index);
             }
         }
         return Grown::Ready {
             slot: index,
             serial: serial,
-            base: sget(in b, index, f_addr()),
+            base: sget(in b, index, SlotWord::Addr),
             len: elen
         };
     }
@@ -1664,10 +1626,10 @@ pub fn book_grow(
         let g = resize(inout b, index, required, fresh_base, fresh_cap);
         return claim_elems(inout b, g, claim);
     }
-    let doubled = if s.ecap > isize_max() {
-        max_u64()
+    let doubled = if s.ecap > ISIZE_MAX {
+        MAX_U64
     } else {
-        wrapping_mul(s.ecap, 2)
+        wrapping_mul(s.ecap, GROWTH_FACTOR)
     };
     let target = max(max(required, doubled), min_growth_cap(s.esize));
     let g = resize(inout b, index, target, fresh_base, fresh_cap);
@@ -1708,13 +1670,13 @@ pub fn book_grow(
     claim_elems(inout b, g, claim)
 }
 
-// Moves the last element out: its address, or `max_u64()` when empty.
+// Moves the last element out: its address, or `MAX_U64` when empty.
 pub fn book_pop(inout b: Book, slot: u64, serial: u64) -> Result[u64, Fault] {
-    match resolve(in b, slot, serial, k_elements()) {
+    match resolve(in b, slot, serial, Kind::Elements) {
         Result::Ok(i) => {
             let mut s = slot_at(in b, i);
             if s.elen == 0 {
-                return Result::Ok(max_u64());
+                return Result::Ok(MAX_U64);
             }
             s.elen = dec(s.elen);
             set_slot(inout b, i, s);
@@ -1727,7 +1689,7 @@ pub fn book_pop(inout b: Book, slot: u64, serial: u64) -> Result[u64, Fault] {
 
 // Shortens the buffer to `new_len`; the Rust side drops `from..to`.
 pub fn book_truncate(inout b: Book, slot: u64, serial: u64, new_len: u64) -> Result[Span, Fault] {
-    match resolve(in b, slot, serial, k_elements()) {
+    match resolve(in b, slot, serial, Kind::Elements) {
         Result::Ok(i) => {
             let mut s = slot_at(in b, i);
             let base = addr_of(in b, s);
@@ -1762,7 +1724,7 @@ pub fn book_truncate(inout b: Book, slot: u64, serial: u64, new_len: u64) -> Res
 
 // Empties the buffer, keeping its capacity; the Rust side moves `0..to` out.
 pub fn book_drain(inout b: Book, slot: u64, serial: u64) -> Result[Span, Fault] {
-    match resolve(in b, slot, serial, k_elements()) {
+    match resolve(in b, slot, serial, Kind::Elements) {
         Result::Ok(i) => {
             let mut s = slot_at(in b, i);
             let len = s.elen;
@@ -1799,7 +1761,7 @@ pub fn book_release_elems(inout b: Book, slot: u64, serial: u64, kind: u64) -> R
             set_slot(inout b, i, t);
             sync_linear(inout b, i);
             let mut u = slot_at(in b, i);
-            u.st = s_released();
+            u.st = State::Released;
             set_slot(inout b, i, u);
             reclaim_tail(inout b);
             Result::Ok(
@@ -1817,14 +1779,14 @@ pub fn book_release_elems(inout b: Book, slot: u64, serial: u64, kind: u64) -> R
 
 // Freezes a vector into a read-only slice naming the same buffer.
 pub fn book_freeze(inout b: Book, slot: u64, serial: u64) -> Result[u64, Fault] {
-    match resolve(in b, slot, serial, k_elements()) {
+    match resolve(in b, slot, serial, Kind::Elements) {
         Result::Ok(i) => {
             let mut s = slot_at(in b, i);
             if s.lin {
                 return Result::Err(Fault::Linear(s.elen));
             }
             s.elin = false;
-            s.kind = k_frozen();
+            s.kind = Kind::Frozen;
             set_slot(inout b, i, s);
             Result::Ok(0)
         },

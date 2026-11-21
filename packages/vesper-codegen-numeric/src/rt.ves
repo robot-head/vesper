@@ -1,0 +1,124 @@
+// Shared emission helpers of the generated AOT runtimes (regions.ves,
+// tiled.ves, boxes.ves): the `sig`/`import`/`local` closures and the
+// `ld`/`st`/`k`/`call` methods of the Rust generators, as functions over
+// the module and builder handles of @vesper/cranelift.
+//
+// Every helper emits exactly the Cranelift calls of its Rust original in
+// the same order, so values, blocks, function references and global values
+// are numbered as in the Rust lowering.
+
+// A signature of `params` `i64` parameters and, with `ret`, one `i64`
+// result, in the target's default calling convention (`m.make_signature()`).
+fn rt_sig(inout m: Module, params: u32, ret: bool) -> SigId eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    for _ in 0..params {
+        sig_param(inout m, s, ty_i64());
+    }
+    if ret {
+        sig_return(inout m, s, ty_i64());
+    }
+    s
+}
+
+fn rt_declare(inout m: Module, in name: Slice[u8], linkage: u32, params: u32, ret: bool)
+    -> FuncId eff [Ffi[Cranelift]] {
+    let s = rt_sig(inout m, params, ret);
+    declare_function(inout m, in name, linkage, s)
+}
+
+// `declare_function(name, Linkage::Import, sig)`.
+fn rt_import(inout m: Module, in name: Slice[u8], params: u32, ret: bool)
+    -> FuncId eff [Ffi[Cranelift]] {
+    rt_declare(inout m, in name, linkage_import(), params, ret)
+}
+
+// `declare_function(name, Linkage::Local, sig)`.
+fn rt_local(inout m: Module, in name: Slice[u8], params: u32, ret: bool)
+    -> FuncId eff [Ffi[Cranelift]] {
+    rt_declare(inout m, in name, linkage_local(), params, ret)
+}
+
+// A local, read-only data object holding `bytes`.
+fn rt_message(inout m: Module, in name: Slice[u8], in bytes: Slice[u8])
+    -> Option[DataId] eff [Ffi[Cranelift]] {
+    let id = declare_data(inout m, in name, linkage_local(), false);
+    let mut d = match data_new() {
+        Some(d) => d,
+        None => return None,
+    };
+    data_define(inout d, in bytes);
+    if define_data(inout m, id, d) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+// `prefix ++ text ++ "\n"`.
+fn rt_text(in prefix: Str, in text: Str) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    s.extend(in prefix.as_bytes());
+    s.extend(in text.as_bytes());
+    s.push(10);
+    s
+}
+
+// `name ++ decimal(i)` for a one-digit `i`.
+fn rt_numbered(in name: Str, i: u32) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    s.extend(in name.as_bytes());
+    s.push(wrapping_add(48, wrapping_u8(i)));
+    s
+}
+
+fn rt_k(inout b: Builder, v: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_iconst(inout b, ty_i64(), v)
+}
+
+// The entry block with the function's parameters, as both Rust generators
+// open a body; returns the block. `seal` seals it at once (the tiled
+// runtime's `compile`).
+fn rt_entry(inout b: Builder, seal: bool) -> Block eff [Ffi[Cranelift]] {
+    let entry = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    if seal {
+        seal_block(inout b, entry);
+    }
+    entry
+}
+
+// `declare_func_in_func` then `call`; the call's instruction is the
+// builder's last, so `inst_result(inout b, 0)` reads its result.
+fn rt_call(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32]) eff [Ffi[Cranelift]] {
+    let r = import_function(inout b, inout m, f);
+    ins_call(inout b, r, in args);
+}
+
+fn rt_call1(inout b: Builder, inout m: Module, f: FuncId, in args: Slice[u32])
+    -> Value eff [Ffi[Cranelift]] {
+    let r = import_function(inout b, inout m, f);
+    ins_call(inout b, r, in args);
+    inst_result(inout b, 0)
+}
+
+// The value list of 4 arguments (vals1-vals3 cover fewer).
+fn vals4(a: Value, c: Value, d: Value, e: Value) -> ChunkSeq[u32] {
+    let mut s = ChunkSeq::with_capacity[u32](4);
+    s.push(a.id);
+    s.push(c.id);
+    s.push(d.id);
+    s.push(e.id);
+    s
+}
+
+fn no_vals() -> ChunkSeq[u32] {
+    ChunkSeq::new[u32]()
+}
+
+// Seal every block and compile the function into `func`.
+fn rt_finish(inout m: Module, func: FuncId, sink b: Builder) -> bool eff [Ffi[Cranelift]] {
+    let mut b = b;
+    seal_all_blocks(inout b);
+    define_function(inout m, func, b)
+}
