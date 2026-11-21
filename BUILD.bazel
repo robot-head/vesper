@@ -189,6 +189,12 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH3 lane 11 (#1250): the inliner differential on the same corpus.
+        "test/self_host_ir_inline": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 7 (#1179): core typing on the same corpus.
         "test/self_host_check_core_typing": glob([
             "examples/**",
@@ -513,6 +519,7 @@ vesper_crate(
         "test/self_host_check_data": "long",
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
+        "test/self_host_ir_inline": "long",
         "test/self_host_check_harness": "long",
         # The core typing differential (#1179) checks every corpus world.
         "test/self_host_check_core_typing": "long",

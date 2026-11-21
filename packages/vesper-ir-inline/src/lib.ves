@@ -1,0 +1,4277 @@
+// @vesper/ir-inline: the Place IR inliner of `src/ir_inline.rs` and
+// `src/ir_inline/site.rs` (self-hosting SH3 lane 11, #1250).
+//
+// The whole pass runs here: literal constants, the call graph and its
+// cycles (petgraph's Tarjan, node for node), the callee and caller rules,
+// the cost model, site folding, partial inlining, the growth budgets and the
+// splicing that later decisions read. What the pass asks of the world (a
+// type's layout, whether it holds a sequence, a `Box` or a function, a
+// function's `fip` flag and the checker's type arguments per call span)
+// belongs to other ports; tests/common/inline_words.rs answers it as fact
+// bits per type and per function.
+//
+// The program is decoded into flat pools: instructions, an operand pool, a
+// pattern pool, block and function rows whose lists are ranges of an id
+// pool. A list that grows (a caller's blocks, locals and values) is moved
+// to the end of its pool the first time it grows while something else is
+// there (a `ChunkSeq` of structs that own sequences cannot be indexed in
+// place until element borrows land, SH2 lane 1).
+//
+// - `inline_report_words`: the `Report` and every function's size and cost
+//   after inlining (`decode_report` in tests/common/inline_words.rs).
+// - `inline_dump`: the inlined program as the canonical text `dump` writes.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    inc32,
+    n32,
+    push_decimal,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names,
+    names_new
+};
+use @vesper/check-data::input::{
+    Reader
+};
+
+const NONE32: u32 = 4294967295;
+const MAX64: u64 = 18446744073709551615;
+
+// Type facts (tests/common/inline_words.rs `type_facts`).
+const F_SCALAR: u64 = 1;
+const F_AGGREGATE: u64 = 2;
+const F_SEQUENCE: u64 = 4;
+const F_SLICE: u64 = 8;
+const F_BOX: u64 = 16;
+const F_FUNCTION: u64 = 32;
+const F_PLAIN: u64 = 64;
+const F_NEVER: u64 = 128;
+
+// Function facts.
+const W_WORLD: u64 = 1;
+const W_FIP: u64 = 2;
+const W_GENERIC: u64 = 4;
+const W_DYN: u64 = 8;
+const W_SLOTS: u64 = 16;
+const W_CAPTURES: u64 = 32;
+const W_BORROWED_MATCH: u64 = 64;
+
+// Instruction flags.
+const I_FALLIBLE: u64 = 1;
+const I_GENERIC_CALL: u64 = 2;
+
+// Operations.
+const O_CONST: u8 = 0;
+const O_UNIT: u8 = 1;
+const O_LOOP: u8 = 2;
+const O_READ: u8 = 3;
+const O_BIND: u8 = 4;
+const O_WRITE: u8 = 5;
+const O_UNARY: u8 = 6;
+const O_BINARY: u8 = 7;
+const O_INDEX: u8 = 8;
+const O_PROJECT: u8 = 9;
+const O_TRY: u8 = 10;
+const O_TUPLE: u8 = 11;
+const O_VECTOR: u8 = 12;
+const O_DATA: u8 = 13;
+const O_CALL: u8 = 14;
+const O_TILED: u8 = 15;
+const O_SEQ: u8 = 16;
+const O_FIP: u8 = 17;
+const O_INDIRECT: u8 = 18;
+const O_EXIT: u8 = 19;
+const O_HANDLE: u8 = 20;
+const O_CLOSURE: u8 = 21;
+
+// Terminators.
+const T_RETURN: u8 = 0;
+const T_JUMP: u8 = 1;
+const T_BRANCH: u8 = 2;
+const T_MATCH: u8 = 3;
+const T_UNREACHABLE: u8 = 4;
+
+// Pattern kinds.
+const PK_WILD: u64 = 0;
+const PK_BIND: u64 = 1;
+const PK_TUPLE: u64 = 2;
+const PK_CTOR: u64 = 3;
+const PK_LIT: u64 = 4;
+
+// Literal kinds.
+const L_INT: u64 = 0;
+const L_BOOL: u64 = 1;
+
+// Pass modes.
+const P_IN: u64 = 0;
+const P_INOUT: u64 = 1;
+const P_SINK: u64 = 2;
+
+// Refusal reasons (`REASONS` in tests/common/inline_words.rs).
+const R_OK: u32 = 4294967295;
+const R_RECURSIVE: u32 = 0;
+const R_CALLER: u32 = 1;
+const R_SIZE: u32 = 2;
+const R_GROWTH: u32 = 3;
+const R_NOT_WORLD: u32 = 4;
+const R_FIP: u32 = 5;
+const R_DYN: u32 = 6;
+const R_GENERIC_HANDLER: u32 = 7;
+const R_GENERIC_TYPES: u32 = 8;
+const R_GENERIC_CALLS: u32 = 9;
+const R_GENERIC_OPERATORS: u32 = 10;
+const R_CAPTURES: u32 = 11;
+const R_EFFECT_ROW: u32 = 12;
+const R_SLOTS: u32 = 13;
+const R_NEVER: u32 = 14;
+const R_BORROWED_MATCH: u32 = 15;
+const R_ENTRY: u32 = 16;
+const R_BOX: u32 = 17;
+const R_FUNCTION_TYPE: u32 = 18;
+const R_SINK_SLICE: u32 = 19;
+const R_CLOSURE: u32 = 20;
+const R_TRY: u32 = 21;
+const R_INDIRECT: u32 = 22;
+const R_TILED: u32 = 23;
+const R_FOREIGN_EXIT: u32 = 24;
+const R_HANDLER_RETURN: u32 = 25;
+const R_SITE_TYPES: u32 = 26;
+const R_SITE_UNRECORDED: u32 = 27;
+const R_SITE_SIGNATURE: u32 = 28;
+const R_SITE_ROW: u32 = 29;
+const R_SITE_GENERICS: u32 = 30;
+const R_SITE_INOUT: u32 = 31;
+const R_SITE_SEQUENCE: u32 = 32;
+const R_SITE_FIELD: u32 = 33;
+const R_SITE_REBIND: u32 = 34;
+const REASONS: u64 = 35;
+
+// site.rs: smallest cold side worth a call, and what the call adds.
+const MIN_COLD: u64 = 16;
+const CALL_COST: u64 = 2;
+// The fold's round bound.
+const FOLD_ROUNDS: u64 = 32;
+
+fn sub(a: u64, b: u64) -> u64 {
+    wrapping_sub(a, b)
+}
+
+fn n8(x: u64) -> u8 {
+    wrapping_u8(x)
+}
+
+// ----- tables -------------------------------------------------------------------
+
+pub copy struct Inst {
+    dest: u32,
+    ty: u32,
+    s0: u64,
+    s1: u64,
+    flags: u64,
+    opq: u32,
+    op: u8,
+    // operands: ops[a..]
+    a: u32,
+}
+
+pub copy struct Blk {
+    // block parameters: ids[pa..pa+pn]
+    pa: u32,
+    pn: u32,
+    // instruction ids: ids[ia..ia+ic]
+    ia: u32,
+    ic: u32,
+    term: u8,
+    // terminator operands: ops[ta..]
+    ta: u32,
+}
+
+pub copy struct ParamRow {
+    name: u32,
+    pass: u64,
+    ty: u32,
+}
+
+pub copy struct Fun {
+    name: u32,
+    flags: u64,
+    result: u32,
+    row: u32,
+    // parameters: prm[pa..pa+pn]
+    pa: u32,
+    pn: u32,
+    // bound names: ids[ba..ba+bn]
+    ba: u32,
+    bn: u32,
+    // locals: loc_name/loc_ty[la..la+ln]
+    la: u32,
+    ln: u32,
+    // value types, by id: val[va+id] is the type + 1 (0: none)
+    va: u32,
+    vn: u32,
+    // block ids: fblk[fa..fa+fc]
+    fa: u32,
+    fc: u32,
+}
+
+// A generic call site's type arguments (`instance`).
+pub copy struct Instance {
+    callee: u32,
+    s0: u64,
+    s1: u64,
+    has: bool,
+    // substitution pairs: sub_from/sub_to[pa..pa+pn], sorted by `from`
+    pa: u32,
+    pn: u32,
+    row: u32,
+}
+
+// What a site inlines: a program function, or an instance of a generic one.
+pub copy struct Tgt {
+    f: u32,
+    // instance index, or NONE32
+    inst: u32,
+}
+
+// An open-addressing map from u64 keys to u32 values.
+pub struct MapU {
+    keys: ChunkSeq[u64],
+    vals: ChunkSeq[u32],
+    used: ChunkSeq[u8],
+    mask: u64,
+    count: u64,
+}
+
+pub fn map_new(cap: u64) -> MapU {
+    let mut keys: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    keys.resize(cap, 0);
+    let mut vals: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    vals.resize(cap, 0);
+    let mut used: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    used.resize(cap, 0);
+    MapU {
+        keys: keys,
+        vals: vals,
+        used: used,
+        mask: sub(cap, 1),
+        count: 0
+    }
+}
+
+fn hash64(k: u64) -> u64 {
+    let h = wrapping_mul(k ^ (k >> 29), 11400714819323198485);
+    h ^ (h >> 32)
+}
+
+impl MapU {
+    pub fn get(in self, k: u64) -> u32 {
+        let mut at = hash64(k) & self.mask;
+        loop {
+            if u8_at(in self.used, at) == 0 {
+                return NONE32;
+            }
+            if u64_at(in self.keys, at) == k {
+                return u32_at(in self.vals, at);
+            }
+            at = inc(at) & self.mask;
+        }
+    }
+
+    fn grow(inout self) {
+        let cap = wrapping_mul(inc(self.mask), 2);
+        let mut m = map_new(cap);
+        for i in 0..inc(self.mask) {
+            if u8_at(in self.used, i) != 0 {
+                m.set(u64_at(in self.keys, i), u32_at(in self.vals, i));
+            }
+        }
+        self.keys = m.keys;
+        self.vals = m.vals;
+        self.used = m.used;
+        self.mask = m.mask;
+        self.count = m.count;
+    }
+
+    pub fn set(inout self, k: u64, v: u32) {
+        let mut at = hash64(k) & self.mask;
+        loop {
+            if u8_at(in self.used, at) == 0 {
+                break;
+            }
+            if u64_at(in self.keys, at) == k {
+                let ok = self.vals.try_set(at, v);
+                return;
+            }
+            at = inc(at) & self.mask;
+        }
+        let ok1 = self.keys.try_set(at, k);
+        let ok2 = self.vals.try_set(at, v);
+        let ok3 = self.used.try_set(at, 1);
+        self.count = inc(self.count);
+        if wrapping_mul(self.count, 2) > self.mask {
+            self.grow();
+        }
+    }
+
+    pub fn clear(inout self) {
+        if self.count == 0 {
+            return;
+        }
+        for i in 0..inc(self.mask) {
+            let ok = self.used.try_set(i, 0);
+        }
+        self.count = 0;
+    }
+}
+
+fn pair(a: u32, b: u32) -> u64 {
+    wrapping_add(wrapping_mul(w(a), 4294967296), w(b))
+}
+
+fn set_u8(inout s: ChunkSeq[u8], i: u64, v: u8) {
+    let ok = s.try_set(i, v);
+}
+
+fn set_u32(inout s: ChunkSeq[u32], i: u64, v: u32) {
+    let ok = s.try_set(i, v);
+}
+
+fn set_u64(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    let ok = s.try_set(i, v);
+}
+
+fn zeros8(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    s.resize(n, 0);
+    s
+}
+
+fn fill32(n: u64, v: u32) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    s.resize(n, v);
+    s
+}
+
+fn zeros64(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.resize(n, 0);
+    s
+}
+
+fn none32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE32,
+    }
+}
+
+// The program and everything the pass reads about it.
+pub struct Prog {
+    names: Names,
+    // types: facts, kind (0 other, 1 named, 2 tuple, 3 function), name and
+    // arguments targs[targa..targa+targn]
+    tfacts: ChunkSeq[u64],
+    tkind: ChunkSeq[u8],
+    tname: ChunkSeq[u32],
+    targa: ChunkSeq[u32],
+    targn: ChunkSeq[u32],
+    targs: ChunkSeq[u32],
+    // effect rows: row_words[row_a[r]..]: count, (label + 1, name, args)*,
+    // tail + 1
+    row_a: ChunkSeq[u32],
+    row_words: ChunkSeq[u64],
+    unit_ty: u32,
+    bind_opq: u32,
+    funs: ChunkSeq[Fun],
+    // symbol -> function index
+    fun_of: ChunkSeq[u32],
+    prm: ChunkSeq[ParamRow],
+    ids: ChunkSeq[u32],
+    loc_name: ChunkSeq[u32],
+    loc_ty: ChunkSeq[u32],
+    val: ChunkSeq[u32],
+    fblk: ChunkSeq[u32],
+    blks: ChunkSeq[Blk],
+    insts: ChunkSeq[Inst],
+    ops: ChunkSeq[u64],
+    pats: ChunkSeq[u64],
+    instances: ChunkSeq[Instance],
+    sub_from: ChunkSeq[u32],
+    sub_to: ChunkSeq[u32],
+    // Budget
+    small_callee: u64,
+    single_site_callee: u64,
+    caller_growth: u64,
+    program_growth: u64,
+    callee_growth: u64,
+    caller_handles: u64,
+    // well-known names
+    s_fail: u32,
+    s_caps: ChunkSeq[u32],
+    // name -> short name (after the last `::`)
+    shorts: MapU,
+    // symbol -> input name index
+    input_index: ChunkSeq[u32],
+}
+
+fn no_fun() -> Fun {
+    Fun {
+        name: 0,
+        flags: 0,
+        result: 0,
+        row: 0,
+        pa: 0,
+        pn: 0,
+        ba: 0,
+        bn: 0,
+        la: 0,
+        ln: 0,
+        va: 0,
+        vn: 0,
+        fa: 0,
+        fc: 0
+    }
+}
+
+fn no_inst() -> Inst {
+    Inst {
+        dest: 0,
+        ty: 0,
+        s0: 0,
+        s1: 0,
+        flags: 0,
+        opq: 0,
+        op: O_UNIT,
+        a: 0
+    }
+}
+
+fn no_blk() -> Blk {
+    Blk {
+        pa: 0,
+        pn: 0,
+        ia: 0,
+        ic: 0,
+        term: T_UNREACHABLE,
+        ta: 0
+    }
+}
+
+impl Prog {
+    pub fn fun(in self, f: u32) -> Fun {
+        match self.funs.try_get(w(f)) {
+            Option::Some(x) => x,
+            Option::None => no_fun(),
+        }
+    }
+
+    pub fn set_fun(inout self, f: u32, x: Fun) {
+        let ok = self.funs.try_set(w(f), x);
+    }
+
+    pub fn inst(in self, i: u32) -> Inst {
+        match self.insts.try_get(w(i)) {
+            Option::Some(x) => x,
+            Option::None => no_inst(),
+        }
+    }
+
+    pub fn blk(in self, b: u32) -> Blk {
+        match self.blks.try_get(w(b)) {
+            Option::Some(x) => x,
+            Option::None => no_blk(),
+        }
+    }
+
+    pub fn param(in self, f: Fun, k: u64) -> ParamRow {
+        match self.prm.try_get(add(w(f.pa), k)) {
+            Option::Some(x) => x,
+            Option::None => ParamRow {
+                name: 0,
+                pass: 0,
+                ty: 0
+            },
+        }
+    }
+
+    pub fn op(in self, i: u64) -> u64 {
+        u64_at(in self.ops, i)
+    }
+
+    pub fn pat(in self, i: u64) -> u64 {
+        u64_at(in self.pats, i)
+    }
+
+    pub fn id(in self, i: u64) -> u32 {
+        u32_at(in self.ids, i)
+    }
+
+    // Block `k` of function `f`, by id.
+    pub fn block_id(in self, f: Fun, k: u64) -> u32 {
+        u32_at(in self.fblk, add(w(f.fa), k))
+    }
+
+    pub fn block(in self, f: Fun, k: u64) -> Blk {
+        self.blk(self.block_id(f, k))
+    }
+
+    // Instruction `i` of block `b`.
+    pub fn inst_of(in self, b: Blk, i: u64) -> Inst {
+        self.inst(self.id(add(w(b.ia), i)))
+    }
+
+    pub fn fun_index(in self, name: u32) -> u32 {
+        none32_at(in self.fun_of, w(name))
+    }
+
+    pub fn facts(in self, t: u32) -> u64 {
+        u64_at(in self.tfacts, w(t))
+    }
+
+    pub fn has(in self, t: u32, fact: u64) -> bool {
+        (self.facts(t) & fact) != 0
+    }
+
+    // A type of a target: an instance maps the callee's types.
+    pub fn map(in self, inst: u32, t: u32) -> u32 {
+        if inst == NONE32 {
+            return t;
+        }
+        let x = match self.instances.try_get(w(inst)) {
+            Option::Some(x) => x,
+            Option::None => return t,
+        };
+        let mut lo = w(x.pa);
+        let mut hi = add(w(x.pa), w(x.pn));
+        loop {
+            if lo >= hi {
+                return t;
+            }
+            let mid = add(lo, hi) / 2;
+            let from = u32_at(in self.sub_from, mid);
+            if from == t {
+                return u32_at(in self.sub_to, mid);
+            }
+            if from < t {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+    }
+
+    pub fn row_of(in self, g: Tgt) -> u32 {
+        if g.inst != NONE32 {
+            match self.instances.try_get(w(g.inst)) {
+                Option::Some(x) => return x.row,
+                Option::None => {},
+            }
+        }
+        self.fun(g.f).row
+    }
+
+    // The type of value `v` in function `f`, NONE32 when it has none.
+    pub fn value_ty(in self, f: Fun, v: u64) -> u32 {
+        if v >= w(f.vn) {
+            return NONE32;
+        }
+        let t = u32_at(in self.val, add(w(f.va), v));
+        if t == 0 {
+            NONE32
+        } else {
+            wrapping_sub(t, 1)
+        }
+    }
+
+    pub fn local_ty(in self, f: Fun, name: u32) -> u32 {
+        for k in 0..w(f.ln) {
+            let at = add(w(f.la), k);
+            if u32_at(in self.loc_name, at) == name {
+                return u32_at(in self.loc_ty, at);
+            }
+        }
+        NONE32
+    }
+
+    pub fn row_count(in self, r: u32) -> u64 {
+        u64_at(in self.row_words, w(u32_at(in self.row_a, w(r))))
+    }
+
+    pub fn input_name(in self, s: u32) -> u64 {
+        w(none32_at(in self.input_index, w(s)))
+    }
+
+    pub fn budget_off(in self) -> bool {
+        self.small_callee == 0 && self.single_site_callee == 0
+    }
+}
+
+// ----- growing lists ------------------------------------------------------------
+
+fn push_block(inout p: Prog, fi: u32, id: u32) {
+    let mut f = p.fun(fi);
+    let end = add(w(f.fa), w(f.fc));
+    if end != p.fblk.len() {
+        let start = p.fblk.len();
+        for k in 0..w(f.fc) {
+            let x = u32_at(in p.fblk, add(w(f.fa), k));
+            p.fblk.push(x);
+        }
+        f.fa = n32(start);
+    }
+    p.fblk.push(id);
+    f.fc = inc32(f.fc);
+    p.set_fun(fi, f);
+}
+
+fn set_block(inout p: Prog, fi: u32, k: u64, id: u32) {
+    let f = p.fun(fi);
+    let ok = p.fblk.try_set(add(w(f.fa), k), id);
+}
+
+fn push_local(inout p: Prog, fi: u32, name: u32, ty: u32) {
+    let mut f = p.fun(fi);
+    let end = add(w(f.la), w(f.ln));
+    if end != p.loc_name.len() {
+        let start = p.loc_name.len();
+        for k in 0..w(f.ln) {
+            let n = u32_at(in p.loc_name, add(w(f.la), k));
+            let t = u32_at(in p.loc_ty, add(w(f.la), k));
+            p.loc_name.push(n);
+            p.loc_ty.push(t);
+        }
+        f.la = n32(start);
+    }
+    p.loc_name.push(name);
+    p.loc_ty.push(ty);
+    f.ln = inc32(f.ln);
+    p.set_fun(fi, f);
+}
+
+// `values.insert(v, ty)`.
+fn set_value(inout p: Prog, fi: u32, v: u64, ty: u32) {
+    let mut f = p.fun(fi);
+    if v >= w(f.vn) {
+        let end = add(w(f.va), w(f.vn));
+        if end != p.val.len() {
+            let start = p.val.len();
+            for k in 0..w(f.vn) {
+                let x = u32_at(in p.val, add(w(f.va), k));
+                p.val.push(x);
+            }
+            f.va = n32(start);
+        }
+        let mut n = w(f.vn);
+        loop {
+            if n > v {
+                break;
+            }
+            p.val.push(0);
+            n = inc(n);
+        }
+        f.vn = n32(n);
+        p.set_fun(fi, f);
+    }
+    let ok = p.val.try_set(add(w(f.va), v), inc32(ty));
+}
+
+// ----- decoding -----------------------------------------------------------------
+
+fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+    u32_at(in nmap, x)
+}
+
+fn opt_sym(in nmap: ChunkSeq[u32], x: u64) -> u64 {
+    if x == 0 {
+        0
+    } else {
+        inc(w(u32_at(in nmap, sub(x, 1))))
+    }
+}
+
+fn read_path(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout ops: ChunkSeq[u64]) {
+    let n = r.word(in b);
+    ops.push(n);
+    for i in 0..n {
+        ops.push(w(sym(in nmap, r.word(in b))));
+    }
+}
+
+fn read_literal(inout r: Reader, in b: Slice[u8], inout out: ChunkSeq[u64]) {
+    out.push(r.word(in b));
+    out.push(r.word(in b));
+    out.push(r.word(in b));
+}
+
+// A pattern node: kind, start, stop, then Bind: name; Tuple: n, children;
+// Constructor: name, named, n, (field, child)*; Literal: kind, lo, hi,
+// opaque. Children are pool offsets.
+fn read_pattern(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout pats: ChunkSeq[u64])
+    -> u64 {
+    let kind = r.word(in b);
+    let mut body: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if kind == PK_BIND {
+        body.push(w(sym(in nmap, r.word(in b))));
+    } else if kind == PK_TUPLE {
+        let n = r.word(in b);
+        body.push(n);
+        for i in 0..n {
+            let c = read_pattern(inout r, in b, in nmap, inout pats);
+            body.push(c);
+        }
+    } else if kind == PK_CTOR {
+        body.push(w(sym(in nmap, r.word(in b))));
+        body.push(r.word(in b));
+        let n = r.word(in b);
+        body.push(n);
+        for i in 0..n {
+            body.push(w(sym(in nmap, r.word(in b))));
+            let c = read_pattern(inout r, in b, in nmap, inout pats);
+            body.push(c);
+        }
+    } else if kind == PK_LIT {
+        read_literal(inout r, in b, inout body);
+        body.push(r.word(in b));
+    }
+    let s0 = r.word(in b);
+    let s1 = r.word(in b);
+    let at = pats.len();
+    pats.push(kind);
+    pats.push(s0);
+    pats.push(s1);
+    pats.extend(in body.as_slice());
+    at
+}
+
+fn read_args(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout ops: ChunkSeq[u64]) {
+    let n = r.word(in b);
+    ops.push(n);
+    for i in 0..n {
+        ops.push(r.word(in b));
+        ops.push(r.word(in b));
+        let has = r.word(in b);
+        ops.push(has);
+        if has != 0 {
+            ops.push(w(sym(in nmap, r.word(in b))));
+            read_path(inout r, in b, in nmap, inout ops);
+        }
+    }
+}
+
+fn read_op(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout p: Prog, op: u8) {
+    if op == O_CONST {
+        read_literal(inout r, in b, inout p.ops);
+    } else if op == O_READ {
+        p.ops.push(w(sym(in nmap, r.word(in b))));
+        read_path(inout r, in b, in nmap, inout p.ops);
+    } else if op == O_BIND {
+        p.ops.push(r.word(in b));
+        let at = read_pattern(inout r, in b, in nmap, inout p.pats);
+        p.ops.push(at);
+    } else if op == O_WRITE {
+        p.ops.push(r.word(in b));
+        p.ops.push(w(sym(in nmap, r.word(in b))));
+        read_path(inout r, in b, in nmap, inout p.ops);
+    } else if op == O_UNARY || op == O_INDEX {
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+    } else if op == O_BINARY {
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+    } else if op == O_PROJECT || op == O_TRY {
+        p.ops.push(r.word(in b));
+    } else if op == O_TUPLE || op == O_VECTOR {
+        let n = r.word(in b);
+        p.ops.push(n);
+        for i in 0..n {
+            p.ops.push(r.word(in b));
+        }
+    } else if op == O_DATA {
+        p.ops.push(w(sym(in nmap, r.word(in b))));
+        let n = r.word(in b);
+        p.ops.push(n);
+        for i in 0..n {
+            p.ops.push(r.word(in b));
+        }
+    } else if op == O_CALL {
+        p.ops.push(w(sym(in nmap, r.word(in b))));
+        p.ops.push(r.word(in b));
+        read_args(inout r, in b, in nmap, inout p.ops);
+    } else if op == O_TILED || op == O_SEQ || op == O_FIP {
+        read_args(inout r, in b, in nmap, inout p.ops);
+    } else if op == O_INDIRECT {
+        p.ops.push(r.word(in b));
+        read_args(inout r, in b, in nmap, inout p.ops);
+    } else if op == O_EXIT {
+        p.ops.push(w(sym(in nmap, r.word(in b))));
+        p.ops.push(r.word(in b));
+    } else if op == O_HANDLE {
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+        let na = r.word(in b);
+        p.ops.push(na);
+        for i in 0..na {
+            p.ops.push(w(sym(in nmap, r.word(in b))));
+            p.ops.push(w(sym(in nmap, r.word(in b))));
+        }
+        let nm = r.word(in b);
+        p.ops.push(nm);
+        for i in 0..nm {
+            p.ops.push(w(sym(in nmap, r.word(in b))));
+            read_path(inout r, in b, in nmap, inout p.ops);
+        }
+        let ng = r.word(in b);
+        p.ops.push(ng);
+        for i in 0..ng {
+            p.ops.push(w(sym(in nmap, r.word(in b))));
+        }
+    }
+}
+
+fn read_terminator(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout p: Prog, t: u8) {
+    if t == T_RETURN {
+        p.ops.push(r.word(in b));
+    } else if t == T_JUMP {
+        p.ops.push(r.word(in b));
+        let n = r.word(in b);
+        p.ops.push(n);
+        for i in 0..n {
+            p.ops.push(r.word(in b));
+        }
+    } else if t == T_BRANCH {
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+    } else if t == T_MATCH {
+        p.ops.push(r.word(in b));
+        let n = r.word(in b);
+        p.ops.push(n);
+        for i in 0..n {
+            let at = read_pattern(inout r, in b, in nmap, inout p.pats);
+            p.ops.push(at);
+            p.ops.push(r.word(in b));
+        }
+    }
+}
+
+fn read_function(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout p: Prog) {
+    let name = sym(in nmap, r.word(in b));
+    let flags = r.word(in b);
+    let result = n32(r.word(in b));
+    let row = n32(r.word(in b));
+    let pa = n32(p.prm.len());
+    let pn = r.word(in b);
+    for i in 0..pn {
+        let pname = sym(in nmap, r.word(in b));
+        let pass = r.word(in b);
+        let ty = n32(r.word(in b));
+        p
+            .prm
+            .push(
+            ParamRow {
+                name: pname,
+                pass: pass,
+                ty: ty
+            }
+        );
+    }
+    let ba = n32(p.ids.len());
+    let bn = r.word(in b);
+    for i in 0..bn {
+        p.ids.push(sym(in nmap, r.word(in b)));
+    }
+    let la = n32(p.loc_name.len());
+    let ln = r.word(in b);
+    for i in 0..ln {
+        p.loc_name.push(sym(in nmap, r.word(in b)));
+        p.loc_ty.push(n32(r.word(in b)));
+    }
+    // Value types, dense by id.
+    let va = p.val.len();
+    let nv = r.word(in b);
+    let mut vn: u64 = 0;
+    for i in 0..nv {
+        let id = r.word(in b);
+        let ty = n32(r.word(in b));
+        loop {
+            if vn > id {
+                break;
+            }
+            p.val.push(0);
+            vn = inc(vn);
+        }
+        let ok = p.val.try_set(add(va, id), inc32(ty));
+    }
+    let fa = n32(p.fblk.len());
+    let nb = r.word(in b);
+    for bi in 0..nb {
+        let bpa = n32(p.ids.len());
+        let bpn = r.word(in b);
+        for i in 0..bpn {
+            p.ids.push(n32(r.word(in b)));
+        }
+        let ic = r.word(in b);
+        let mut list: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for ii in 0..ic {
+            let dest = n32(r.word(in b));
+            let ty = n32(r.word(in b));
+            let s0 = r.word(in b);
+            let s1 = r.word(in b);
+            let iflags = r.word(in b);
+            let opq = n32(r.word(in b));
+            let op = n8(r.word(in b));
+            let a = n32(p.ops.len());
+            read_op(inout r, in b, in nmap, inout p, op);
+            list.push(n32(p.insts.len()));
+            p
+                .insts
+                .push(
+                Inst {
+                    dest: dest,
+                    ty: ty,
+                    s0: s0,
+                    s1: s1,
+                    flags: iflags,
+                    opq: opq,
+                    op: op,
+                    a: a
+                }
+            );
+        }
+        let ia = n32(p.ids.len());
+        p.ids.extend(in list.as_slice());
+        let term = n8(r.word(in b));
+        let ta = n32(p.ops.len());
+        read_terminator(inout r, in b, in nmap, inout p, term);
+        p.fblk.push(n32(p.blks.len()));
+        p
+            .blks
+            .push(
+            Blk {
+                pa: bpa,
+                pn: n32(bpn),
+                ia: ia,
+                ic: n32(ic),
+                term: term,
+                ta: ta
+            }
+        );
+    }
+    let index = n32(p.funs.len());
+    p
+        .funs
+        .push(
+        Fun {
+            name: name,
+            flags: flags,
+            result: result,
+            row: row,
+            pa: pa,
+            pn: n32(pn),
+            ba: ba,
+            bn: n32(bn),
+            la: la,
+            ln: n32(ln),
+            va: n32(va),
+            vn: n32(vn),
+            fa: fa,
+            fc: n32(nb)
+        }
+    );
+    if w(name) >= p.fun_of.len() {
+        p.fun_of.resize(inc(w(name)), NONE32);
+    }
+    let ok = p.fun_of.try_set(w(name), index);
+}
+
+fn intern_text(inout names: Names, in s: Str) -> u32 {
+    names.intern(in s.as_bytes())
+}
+
+pub fn read_input(in b: Slice[u8]) -> Prog {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut names = names_new();
+    let mut nmap: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let count = r.word(in b);
+    for i in 0..count {
+        let len = r.word(in b);
+        let start = r.pos;
+        let s = names.intern(in b[start..add(start, len)]);
+        nmap.push(s);
+        r.pos = add(start, wrapping_mul(add(len, 7) / 8, 8));
+    }
+    let s_fail = intern_text(inout names, "Fail");
+    let mut caps: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    caps.push(intern_text(inout names, "ConstTime"));
+    caps.push(intern_text(inout names, "Realtime"));
+    caps.push(intern_text(inout names, "DetFloat"));
+    caps.push(intern_text(inout names, "ConstDenorm"));
+    caps.push(intern_text(inout names, "Isa"));
+    let mut p = Prog {
+        names: names,
+        tfacts: ChunkSeq::new[u64](),
+        tkind: ChunkSeq::new[u8](),
+        tname: ChunkSeq::new[u32](),
+        targa: ChunkSeq::new[u32](),
+        targn: ChunkSeq::new[u32](),
+        targs: ChunkSeq::new[u32](),
+        row_a: ChunkSeq::new[u32](),
+        row_words: ChunkSeq::new[u64](),
+        unit_ty: 0,
+        bind_opq: 0,
+        funs: ChunkSeq::new[Fun](),
+        fun_of: ChunkSeq::new[u32](),
+        prm: ChunkSeq::new[ParamRow](),
+        ids: ChunkSeq::new[u32](),
+        loc_name: ChunkSeq::new[u32](),
+        loc_ty: ChunkSeq::new[u32](),
+        val: ChunkSeq::new[u32](),
+        fblk: ChunkSeq::new[u32](),
+        blks: ChunkSeq::new[Blk](),
+        insts: ChunkSeq::new[Inst](),
+        ops: ChunkSeq::new[u64](),
+        pats: ChunkSeq::new[u64](),
+        instances: ChunkSeq::new[Instance](),
+        sub_from: ChunkSeq::new[u32](),
+        sub_to: ChunkSeq::new[u32](),
+        small_callee: 0,
+        single_site_callee: 0,
+        caller_growth: 0,
+        program_growth: 0,
+        callee_growth: 0,
+        caller_handles: 0,
+        s_fail: s_fail,
+        s_caps: caps,
+        shorts: map_new(1024),
+        input_index: ChunkSeq::new[u32](),
+    };
+    p.input_index.resize(p.names.len(), NONE32);
+    for i in 0..nmap.len() {
+        set_u32(inout p.input_index, w(u32_at(in nmap, i)), n32(i));
+    }
+    let nt = r.word(in b);
+    for i in 0..nt {
+        p.tfacts.push(r.word(in b));
+        p.tkind.push(n8(r.word(in b)));
+        p.tname.push(sym(in nmap, r.word(in b)));
+        let n = r.word(in b);
+        p.targa.push(n32(p.targs.len()));
+        p.targn.push(n32(n));
+        for k in 0..n {
+            p.targs.push(n32(r.word(in b)));
+        }
+    }
+    let nr = r.word(in b);
+    for i in 0..nr {
+        p.row_a.push(n32(p.row_words.len()));
+        let n = r.word(in b);
+        p.row_words.push(n);
+        for k in 0..n {
+            p.row_words.push(opt_sym(in nmap, r.word(in b)));
+            p.row_words.push(w(sym(in nmap, r.word(in b))));
+            p.row_words.push(r.word(in b));
+        }
+        p.row_words.push(opt_sym(in nmap, r.word(in b)));
+    }
+    p.unit_ty = n32(r.word(in b));
+    p.bind_opq = n32(r.word(in b));
+    p.small_callee = r.word(in b);
+    p.single_site_callee = r.word(in b);
+    p.caller_growth = r.word(in b);
+    p.program_growth = r.word(in b);
+    p.callee_growth = r.word(in b);
+    p.caller_handles = r.word(in b);
+    let nf = r.word(in b);
+    p.fun_of.resize(p.names.len(), NONE32);
+    for i in 0..nf {
+        read_function(inout r, in b, in nmap, inout p);
+    }
+    let ni = r.word(in b);
+    for i in 0..ni {
+        let callee = sym(in nmap, r.word(in b));
+        let s0 = r.word(in b);
+        let s1 = r.word(in b);
+        let has = r.word(in b) != 0;
+        let pa = n32(p.sub_from.len());
+        let mut pn: u64 = 0;
+        let mut row: u32 = 0;
+        if has {
+            pn = r.word(in b);
+            for k in 0..pn {
+                p.sub_from.push(n32(r.word(in b)));
+                p.sub_to.push(n32(r.word(in b)));
+            }
+            row = n32(r.word(in b));
+        }
+        p
+            .instances
+            .push(
+            Instance {
+                callee: callee,
+                s0: s0,
+                s1: s1,
+                has: has,
+                pa: pa,
+                pn: n32(pn),
+                row: row
+            }
+        );
+    }
+    p
+}
+
+// ----- operands -----------------------------------------------------------------
+
+// The offset of the argument count of an operation with arguments.
+fn args_at(op: u8, a: u64) -> u64 {
+    if op == O_CALL {
+        add(a, 2)
+    } else if op == O_INDIRECT {
+        inc(a)
+    } else {
+        a
+    }
+}
+
+fn has_args(op: u8) -> bool {
+    op == O_CALL || op == O_TILED || op == O_SEQ || op == O_FIP || op == O_INDIRECT
+}
+
+// The offset just past the argument at `off`.
+fn arg_end(in p: Prog, off: u64) -> u64 {
+    if p.op(add(off, 2)) != 0 {
+        add(add(off, 5), p.op(add(off, 4)))
+    } else {
+        add(off, 3)
+    }
+}
+
+// The offset of the graph count of a handle at `a`.
+fn handle_graphs_at(in p: Prog, a: u64) -> u64 {
+    let na = p.op(add(a, 2));
+    let mut at = add(add(a, 3), wrapping_mul(na, 2));
+    let nm = p.op(at);
+    at = inc(at);
+    for i in 0..nm {
+        at = add(add(at, 2), p.op(inc(at)));
+    }
+    at
+}
+
+// Successors of a terminator.
+fn successors(in p: Prog, bk: Blk, inout out: ChunkSeq[u32]) {
+    out.clear();
+    let ta = w(bk.ta);
+    if bk.term == T_JUMP {
+        out.push(n32(p.op(ta)));
+    } else if bk.term == T_BRANCH {
+        out.push(n32(p.op(inc(ta))));
+        out.push(n32(p.op(add(ta, 2))));
+    } else if bk.term == T_MATCH {
+        let n = p.op(inc(ta));
+        for i in 0..n {
+            out.push(n32(p.op(add(add(ta, 3), wrapping_mul(i, 2)))));
+        }
+    }
+}
+
+// Names a pattern binds (`pattern_binds`), appended to `out`.
+fn pattern_binds(in p: Prog, at: u64, inout out: ChunkSeq[u32]) {
+    let kind = p.pat(at);
+    if kind == PK_BIND {
+        out.push(n32(p.pat(add(at, 3))));
+    } else if kind == PK_TUPLE {
+        let n = p.pat(add(at, 3));
+        for i in 0..n {
+            pattern_binds(in p, p.pat(add(add(at, 4), i)), inout out);
+        }
+    } else if kind == PK_CTOR {
+        let n = p.pat(add(at, 5));
+        for i in 0..n {
+            pattern_binds(in p, p.pat(add(add(at, 7), wrapping_mul(i, 2))), inout out);
+        }
+    }
+}
+
+fn pattern_binds_any(in p: Prog, at: u64) -> bool {
+    let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    pattern_binds(in p, at, inout names);
+    names.len() > 0
+}
+
+// ----- names --------------------------------------------------------------------
+
+fn name_byte(in p: Prog, s: u32, i: u64) -> u8 {
+    p.names.byte(s, i)
+}
+
+// `arrays::is_const_function`: `const$NAME`, or a package's
+// `{scope}__{package}__{module}__const$NAME`.
+fn is_const_function(in p: Prog, s: u32) -> bool {
+    let n = p.names.size(s);
+    let word = "const$".as_bytes();
+    let k = word.len();
+    if n < k {
+        return false;
+    }
+    let mut at: u64 = 0;
+    loop {
+        if add(at, k) > n {
+            return false;
+        }
+        let mut same = true;
+        for j in 0..k {
+            let c = match word.try_get(j) {
+                Option::Some(c) => c,
+                Option::None => 0,
+            };
+            if name_byte(in p, s, add(at, j)) != c {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            if at == 0 {
+                return true;
+            }
+            if at >= 2 && name_byte(in p, s, sub(at, 1)) == 95 && name_byte(in p, s, sub(at, 2)) == 95 {
+                return true;
+            }
+        }
+        at = inc(at);
+    }
+}
+
+// The name after the last `::` (`site::short`), interned.
+fn short(inout p: Prog, s: u32) -> u32 {
+    let cached = p.shorts.get(w(s));
+    if cached != NONE32 {
+        return cached;
+    }
+    let n = p.names.size(s);
+    let mut from: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if inc(i) >= n {
+            break;
+        }
+        if name_byte(in p, s, i) == 58 && name_byte(in p, s, inc(i)) == 58 {
+            from = add(i, 2);
+        }
+        i = inc(i);
+    }
+    let mut out = s;
+    if from > 0 {
+        let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for k in from..n {
+            buf.push(name_byte(in p, s, k));
+        }
+        out = p.names.intern(in buf.as_slice());
+    }
+    p.shorts.set(w(s), out);
+    out
+}
+
+// `name$inlN`.
+fn renamed(inout p: Prog, s: u32, serial: u64) -> u32 {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    p.names.write(s, inout buf);
+    buf.extend(in "$inl".as_bytes());
+    push_decimal(inout buf, serial);
+    p.names.intern(in buf.as_slice())
+}
+
+// ----- rows ---------------------------------------------------------------------
+
+// `fail_row_only`: no tail, and only unlabeled one-argument `Fail`s.
+fn fail_row_only(in p: Prog, r: u32) -> bool {
+    let at = w(u32_at(in p.row_a, w(r)));
+    let n = u64_at(in p.row_words, at);
+    for i in 0..n {
+        let e = add(inc(at), wrapping_mul(i, 3));
+        if u64_at(in p.row_words, e) != 0
+            || u64_at(in p.row_words, inc(e)) != w(p.s_fail)
+            || u64_at(in p.row_words, add(e, 2)) != 1 {
+            return false;
+        }
+    }
+    u64_at(in p.row_words, add(inc(at), wrapping_mul(n, 3))) == 0
+}
+
+// A capability effect (`capability_effects::is_capability_effect`) in row `r`.
+fn row_has_capability(in p: Prog, r: u32) -> bool {
+    let at = w(u32_at(in p.row_a, w(r)));
+    let n = u64_at(in p.row_words, at);
+    for i in 0..n {
+        let name = n32(u64_at(in p.row_words, add(add(inc(at), wrapping_mul(i, 3)), 1)));
+        for k in 0..p.s_caps.len() {
+            if u32_at(in p.s_caps, k) == name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ----- types --------------------------------------------------------------------
+
+// `mentions_names`: a bare named type in `names`, or any function type.
+fn mentions_names(in p: Prog, t: u32, in names: ChunkSeq[u32]) -> bool {
+    let kind = u8_at(in p.tkind, w(t));
+    let a = w(u32_at(in p.targa, w(t)));
+    let n = w(u32_at(in p.targn, w(t)));
+    if kind == 1 {
+        if n == 0 {
+            let name = u32_at(in p.tname, w(t));
+            for k in 0..names.len() {
+                if u32_at(in names, k) == name {
+                    return true;
+                }
+            }
+        }
+        for k in 0..n {
+            if mentions_names(in p, u32_at(in p.targs, add(a, k)), in names) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if kind == 2 {
+        for k in 0..n {
+            if mentions_names(in p, u32_at(in p.targs, add(a, k)), in names) {
+                return true;
+            }
+        }
+        return false;
+    }
+    kind == 3
+}
+
+// The types of a target: parameters, values, locals and result.
+fn any_type(in p: Prog, g: Tgt, fact: u64, values: bool, locals: bool, params: bool, result: bool)
+    -> bool {
+    let f = p.fun(g.f);
+    if values {
+        for v in 0..w(f.vn) {
+            let t = p.value_ty(f, v);
+            if t != NONE32 && p.has(p.map(g.inst, t), fact) {
+                return true;
+            }
+        }
+    }
+    if locals {
+        for k in 0..w(f.ln) {
+            let t = u32_at(in p.loc_ty, add(w(f.la), k));
+            if p.has(p.map(g.inst, t), fact) {
+                return true;
+            }
+        }
+    }
+    if params {
+        for k in 0..w(f.pn) {
+            if p.has(p.map(g.inst, p.param(f, k).ty), fact) {
+                return true;
+            }
+        }
+    }
+    result && p.has(p.map(g.inst, f.result), fact)
+}
+
+// ----- cost ---------------------------------------------------------------------
+
+// What a site's known arguments decide in a callee (`site::Folded`).
+pub struct Folded {
+    // per block: reachable
+    live: ChunkSeq[u8],
+    // per block: the one successor a decided Branch or Match takes, or NONE32
+    jumps: ChunkSeq[u32],
+    // per value: determined by the arguments
+    known: ChunkSeq[u8],
+    njumps: u64,
+}
+
+fn folded_none(blocks: u64) -> Folded {
+    let mut live = zeros8(blocks);
+    for k in 0..blocks {
+        set_u8(inout live, k, 1);
+    }
+    Folded {
+        live: live,
+        jumps: fill32(blocks, NONE32),
+        known: ChunkSeq::new[u8](),
+        njumps: 0
+    }
+}
+
+impl Folded {
+    // `Folded::decides`.
+    pub fn decides(in self) -> bool {
+        if self.njumps > 0 {
+            return true;
+        }
+        for k in 0..self.live.len() {
+            if u8_at(in self.live, k) == 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn jump(in self, b: u64) -> u32 {
+        none32_at(in self.jumps, b)
+    }
+}
+
+// `Folded::successors`.
+fn folded_successors(in p: Prog, f: Fun, in fd: Folded, b: u64, inout out: ChunkSeq[u32]) {
+    let j = fd.jump(b);
+    if j != NONE32 {
+        out.clear();
+        out.push(j);
+        return;
+    }
+    successors(in p, p.block(f, b), inout out);
+}
+
+// Free in `cost` (`cost_parts`).
+fn free(in p: Prog, g: Tgt, f: Fun, i: Inst) -> bool {
+    let a = w(i.a);
+    if i.op == O_CONST || i.op == O_UNIT || i.op == O_LOOP {
+        return true;
+    }
+    if i.op == O_READ {
+        return p.op(inc(a)) == 0;
+    }
+    if i.op == O_DATA {
+        return p.op(inc(a)) == 0 && p.has(p.map(g.inst, i.ty), F_SCALAR);
+    }
+    if i.op == O_BIND {
+        let kind = p.pat(p.op(inc(a)));
+        if kind != PK_BIND && kind != PK_WILD {
+            return false;
+        }
+        let t = p.value_ty(f, p.op(a));
+        return t != NONE32 && p.has(p.map(g.inst, t), F_SCALAR);
+    }
+    false
+}
+
+// `Folded::cost_of`: the cost of the blocks `blocks` marks under `fd`.
+fn cost_of(in p: Prog, g: Tgt, in fd: Folded, in blocks: ChunkSeq[u8]) -> u64 {
+    let f = p.fun(g.f);
+    let mut total: u64 = 0;
+    for b in 0..w(f.fc) {
+        if u8_at(in blocks, b) == 0 {
+            continue;
+        }
+        let bk = p.block(f, b);
+        let mut work: u64 = 0;
+        for k in 0..w(bk.ic) {
+            let i = p.inst_of(bk, k);
+            if free(in p, g, f, i) {
+                continue;
+            }
+            if u8_at(in fd.known, w(i.dest)) != 0
+                && (i.op == O_BINARY || i.op == O_UNARY || i.op == O_READ || i.op == O_DATA) {
+                continue;
+            }
+            work = inc(work);
+        }
+        let jump = bk.term == T_JUMP || fd.jump(b) != NONE32;
+        total = add(total, work);
+        if !(work == 0 && jump) {
+            total = inc(total);
+        }
+    }
+    total
+}
+
+fn folded_cost(in p: Prog, g: Tgt, in fd: Folded) -> u64 {
+    cost_of(in p, g, in fd, in fd.live)
+}
+
+// `cost`.
+fn cost(in p: Prog, g: Tgt) -> u64 {
+    let fd = folded_none(w(p.fun(g.f).fc));
+    folded_cost(in p, g, in fd)
+}
+
+// `size`: instructions plus one per block.
+fn size(in p: Prog, fi: u32) -> u64 {
+    let f = p.fun(fi);
+    let mut total: u64 = 0;
+    for b in 0..w(f.fc) {
+        total = add(total, inc(w(p.block(f, b).ic)));
+    }
+    total
+}
+
+// The handler graphs of function `fi` (`handler_graphs`), as names.
+fn handler_graphs(in p: Prog, fi: u32, inout out: ChunkSeq[u32]) {
+    let f = p.fun(fi);
+    for b in 0..w(f.fc) {
+        let bk = p.block(f, b);
+        for k in 0..w(bk.ic) {
+            let i = p.inst_of(bk, k);
+            if i.op == O_HANDLE {
+                let at = handle_graphs_at(in p, w(i.a));
+                let n = p.op(at);
+                for j in 0..n {
+                    out.push(n32(p.op(add(inc(at), j))));
+                }
+            }
+        }
+    }
+}
+
+fn own_handles(in p: Prog, fi: u32) -> u64 {
+    let f = p.fun(fi);
+    let mut n: u64 = 0;
+    for b in 0..w(f.fc) {
+        let bk = p.block(f, b);
+        for k in 0..w(bk.ic) {
+            if p.inst_of(bk, k).op == O_HANDLE {
+                n = inc(n);
+            }
+        }
+    }
+    n
+}
+
+// `handles` (count = true) or the handler graphs' part of
+// `cost_with_handlers` (count = false): over every graph `fi` holds,
+// transitively, each once.
+fn handler_sum(in p: Prog, fi: u32, count: bool) -> u64 {
+    let mut total: u64 = 0;
+    if count {
+        total = own_handles(in p, fi);
+    }
+    let mut pending: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    handler_graphs(in p, fi, inout pending);
+    let mut seen = map_new(16);
+    loop {
+        let n = pending.len();
+        if n == 0 {
+            break;
+        }
+        let name = u32_at(in pending, sub(n, 1));
+        pending.truncate(sub(n, 1));
+        if seen.get(w(name)) != NONE32 {
+            continue;
+        }
+        seen.set(w(name), 1);
+        let g = p.fun_index(name);
+        if g == NONE32 {
+            continue;
+        }
+        if count {
+            total = add(total, own_handles(in p, g));
+        } else {
+            total = add(
+                total,
+                cost(in p, Tgt {
+                    f: g,
+                    inst: NONE32
+                })
+            );
+        }
+        handler_graphs(in p, g, inout pending);
+    }
+    total
+}
+
+// ----- callee and caller rules ----------------------------------------------------
+
+// `generic_body_ok`.
+fn generic_body(in p: Prog, f: Fun) -> u32 {
+    for b in 0..w(f.fc) {
+        let bk = p.block(f, b);
+        for k in 0..w(bk.ic) {
+            let i = p.inst_of(bk, k);
+            if i.op == O_HANDLE {
+                return R_GENERIC_HANDLER;
+            }
+            if i.op == O_CALL && (p.op(inc(w(i.a))) & 1) != 0 {
+                return R_GENERIC_TYPES;
+            }
+            if (i.op == O_CALL || i.op == O_SEQ) && (i.flags & I_GENERIC_CALL) != 0 {
+                return R_GENERIC_CALLS;
+            }
+            if i.op == O_UNARY || i.op == O_BINARY || i.op == O_INDEX || i.op == O_PROJECT {
+                return R_GENERIC_OPERATORS;
+            }
+        }
+    }
+    R_OK
+}
+
+// `inlinable`: callee properties that do not depend on the call site.
+fn inlinable(in p: Prog, fi: u32) -> u32 {
+    let f = p.fun(fi);
+    let g = Tgt {
+        f: fi,
+        inst: NONE32
+    };
+    if (f.flags & W_WORLD) == 0 {
+        return R_NOT_WORLD;
+    }
+    if (f.flags & W_FIP) != 0 {
+        return R_FIP;
+    }
+    if (f.flags & W_DYN) != 0 {
+        return R_DYN;
+    }
+    if (f.flags & W_GENERIC) != 0 {
+        let why = generic_body(in p, f);
+        if why != R_OK {
+            return why;
+        }
+    }
+    if (f.flags & W_CAPTURES) != 0 {
+        return R_CAPTURES;
+    }
+    if !fail_row_only(in p, f.row) {
+        return R_EFFECT_ROW;
+    }
+    if (f.flags & W_SLOTS) != 0 {
+        return R_SLOTS;
+    }
+    if p.has(f.result, F_NEVER) {
+        return R_NEVER;
+    }
+    if (f.flags & W_BORROWED_MATCH) != 0 {
+        return R_BORROWED_MATCH;
+    }
+    if f.fc == 0 || p.block(f, 0).pn != 0 {
+        return R_ENTRY;
+    }
+    if any_type(in p, g, F_BOX, true, true, true, true) {
+        return R_BOX;
+    }
+    if any_type(in p, g, F_FUNCTION, true, true, true, true) {
+        return R_FUNCTION_TYPE;
+    }
+    for k in 0..w(f.pn) {
+        let q = p.param(f, k);
+        if q.pass == P_SINK && p.has(q.ty, F_SLICE) {
+            return R_SINK_SLICE;
+        }
+    }
+    for b in 0..w(f.fc) {
+        let bk = p.block(f, b);
+        for k in 0..w(bk.ic) {
+            let i = p.inst_of(bk, k);
+            if i.op == O_CLOSURE {
+                return R_CLOSURE;
+            }
+            if i.op == O_TRY {
+                return R_TRY;
+            }
+            if i.op == O_INDIRECT {
+                return R_INDIRECT;
+            }
+            if i.op == O_TILED || i.op == O_FIP {
+                return R_TILED;
+            }
+            if i.op == O_EXIT && n32(p.op(w(i.a))) != f.name {
+                return R_FOREIGN_EXIT;
+            }
+        }
+    }
+    R_OK
+}
+
+// `caller_eligible`.
+fn caller_eligible(in p: Prog, fi: u32) -> bool {
+    let f = p.fun(fi);
+    if (f.flags & W_WORLD) != 0 && (f.flags & W_FIP) != 0 {
+        return false;
+    }
+    if (f.flags & W_SLOTS) != 0 || row_has_capability(in p, f.row) {
+        return false;
+    }
+    !any_type(
+        in p,
+        Tgt {
+            f: fi,
+            inst: NONE32
+        },
+        F_BOX,
+        true,
+        true,
+        true,
+        false
+    )
+}
+
+// ----- literal constants ----------------------------------------------------------
+
+// `fold_literal_constants`: calls of a constant function that returns one
+// literal become that literal. Returns the uses replaced.
+fn fold_literal_constants(inout p: Prog) -> u64 {
+    let nf = p.funs.len();
+    // function -> its literal instruction, or NONE32
+    let mut literal = fill32(nf, NONE32);
+    let mut any = false;
+    for fi in 0..nf {
+        let f = p.fun(n32(fi));
+        if f.pn != 0 || f.fc != 1 || !is_const_function(in p, f.name) {
+            continue;
+        }
+        let bk = p.block(f, 0);
+        if bk.ic != 1 || bk.term != T_RETURN {
+            continue;
+        }
+        let id = p.id(w(bk.ia));
+        let i = p.inst(id);
+        if w(i.dest) == p.op(w(bk.ta)) && (i.flags & I_FALLIBLE) == 0 && i.op == O_CONST {
+            set_u32(inout literal, fi, id);
+            any = true;
+        }
+    }
+    if !any {
+        return 0;
+    }
+    let mut folded: u64 = 0;
+    for fi in 0..nf {
+        if !caller_eligible(in p, n32(fi)) {
+            continue;
+        }
+        let f = p.fun(n32(fi));
+        for b in 0..w(f.fc) {
+            let bk = p.block(f, b);
+            for k in 0..w(bk.ic) {
+                let id = p.id(add(w(bk.ia), k));
+                let i = p.inst(id);
+                if i.op != O_CALL {
+                    continue;
+                }
+                let a = w(i.a);
+                if p.op(add(a, 2)) != 0 {
+                    continue;
+                }
+                let callee = p.fun_index(n32(p.op(a)));
+                if callee == NONE32 {
+                    continue;
+                }
+                let lit = u32_at(in literal, w(callee));
+                if lit == NONE32 {
+                    continue;
+                }
+                let l = p.inst(lit);
+                let ok = p
+                    .insts
+                    .try_set(
+                    w(id),
+                    Inst {
+                        dest: i.dest,
+                        ty: i.ty,
+                        s0: i.s0,
+                        s1: i.s1,
+                        flags: i.flags & I_GENERIC_CALL,
+                        opq: l.opq,
+                        op: O_CONST,
+                        a: l.a
+                    }
+                );
+                folded = inc(folded);
+            }
+        }
+    }
+    folded
+}
+
+// ----- the call graph ---------------------------------------------------------------
+
+// petgraph's `DiGraphMap` as `inline` builds it: nodes in the order they
+// first appear (as a node or an edge end), each node's distinct successors
+// in the order their edges were first added.
+pub struct Graph {
+    // node position -> function index
+    nodes: ChunkSeq[u32],
+    // function index -> node position
+    pos: ChunkSeq[u32],
+    // adjacency: per node a linked list of (target node, next) in insertion
+    // order (head, tail)
+    head: ChunkSeq[u32],
+    tail: ChunkSeq[u32],
+    to: ChunkSeq[u32],
+    next: ChunkSeq[u32],
+    edges: MapU,
+    self_edge: ChunkSeq[u8],
+}
+
+impl Graph {
+    fn node(inout self, f: u32) -> u32 {
+        let at = u32_at(in self.pos, w(f));
+        if at != NONE32 {
+            return at;
+        }
+        let n = n32(self.nodes.len());
+        self.nodes.push(f);
+        set_u32(inout self.pos, w(f), n);
+        self.head.push(NONE32);
+        self.tail.push(NONE32);
+        self.self_edge.push(0);
+        n
+    }
+
+    fn edge(inout self, a: u32, b: u32) {
+        let na = self.node(a);
+        let key = pair(a, b);
+        if self.edges.get(key) != NONE32 {
+            return;
+        }
+        self.edges.set(key, 1);
+        let nb = self.node(b);
+        let e = n32(self.to.len());
+        self.to.push(nb);
+        self.next.push(NONE32);
+        let t = u32_at(in self.tail, w(na));
+        if t == NONE32 {
+            set_u32(inout self.head, w(na), e);
+        } else {
+            set_u32(inout self.next, w(t), e);
+        }
+        set_u32(inout self.tail, w(na), e);
+        if a == b {
+            set_u8(inout self.self_edge, w(na), 1);
+        }
+    }
+}
+
+// petgraph's `TarjanScc` (Pearce's variant), components callees first.
+pub struct Tarjan {
+    index: u64,
+    count: u64,
+    root: ChunkSeq[u64],
+    stack: ChunkSeq[u32],
+    // components: members comp_nodes[comp_a[c]..comp_a[c+1]]
+    comp_a: ChunkSeq[u32],
+    comp_nodes: ChunkSeq[u32],
+}
+
+fn visit(in g: Graph, inout t: Tarjan, v: u32) {
+    let mut local_root = true;
+    set_u64(inout t.root, w(v), t.index);
+    t.index = inc(t.index);
+    let mut e = u32_at(in g.head, w(v));
+    loop {
+        if e == NONE32 {
+            break;
+        }
+        let x = u32_at(in g.to, w(e));
+        if u64_at(in t.root, w(x)) == 0 {
+            visit(in g, inout t, x);
+        }
+        if u64_at(in t.root, w(x)) < u64_at(in t.root, w(v)) {
+            set_u64(inout t.root, w(v), u64_at(in t.root, w(x)));
+            local_root = false;
+        }
+        e = u32_at(in g.next, w(e));
+    }
+    if local_root {
+        let mut adjust: u64 = 1;
+        let c = t.count;
+        let rv = u64_at(in t.root, w(v));
+        let mut start: u64 = 0;
+        let mut k = t.stack.len();
+        loop {
+            if k == 0 {
+                break;
+            }
+            let x = u32_at(in t.stack, sub(k, 1));
+            if rv > u64_at(in t.root, w(x)) {
+                start = k;
+                break;
+            }
+            set_u64(inout t.root, w(x), c);
+            adjust = inc(adjust);
+            k = sub(k, 1);
+        }
+        set_u64(inout t.root, w(v), c);
+        t.stack.push(v);
+        t.comp_a.push(n32(t.comp_nodes.len()));
+        for j in start..t.stack.len() {
+            t.comp_nodes.push(u32_at(in t.stack, j));
+        }
+        t.stack.truncate(start);
+        t.index = sub(t.index, adjust);
+        t.count = sub(t.count, 1);
+    } else {
+        t.stack.push(v);
+    }
+}
+
+fn tarjan(in g: Graph) -> Tarjan {
+    let mut t = Tarjan {
+        index: 1,
+        count: MAX64,
+        root: zeros64(g.nodes.len()),
+        stack: ChunkSeq::new[u32](),
+        comp_a: ChunkSeq::new[u32](),
+        comp_nodes: ChunkSeq::new[u32](),
+    };
+    for v in 0..g.nodes.len() {
+        if u64_at(in t.root, v) == 0 {
+            visit(in g, inout t, n32(v));
+        }
+    }
+    t.comp_a.push(n32(t.comp_nodes.len()));
+    t
+}
+
+// ----- call sites ---------------------------------------------------------------------
+
+// How each callee parameter is supplied (`Binding`): bound by value to a
+// fresh local, or replaced by the caller's place (an operand-pool offset:
+// root, path length, path).
+pub struct Bindings {
+    place: ChunkSeq[u8],
+    value: ChunkSeq[u32],
+    at: ChunkSeq[u64],
+}
+
+fn bindings_new() -> Bindings {
+    Bindings {
+        place: ChunkSeq::new[u8](),
+        value: ChunkSeq::new[u32](),
+        at: ChunkSeq::new[u64]()
+    }
+}
+
+impl Bindings {
+    fn push(inout self, place: bool, value: u32, at: u64) {
+        self.place.push(if place {
+            1
+        } else {
+            0
+        });
+        self.value.push(value);
+        self.at.push(at);
+    }
+
+    fn is_place(in self, k: u64) -> bool {
+        u8_at(in self.place, k) != 0
+    }
+}
+
+// `site_bindings`: the bindings for a call, or why it stays a call.
+fn site_bindings(in p: Prog, c: u32, g: Tgt, dest: u32, args: u64, inout out: Bindings) -> u32 {
+    let caller = p.fun(c);
+    let f = p.fun(g.f);
+    let n = p.op(args);
+    if n != w(f.pn) || p.value_ty(caller, w(dest)) != p.map(g.inst, f.result) {
+        return R_SITE_SIGNATURE;
+    }
+    let row = p.row_of(g);
+    if p.row_count(row) != 0 && row != caller.row {
+        return R_SITE_ROW;
+    }
+    if caller.bn != 0 {
+        let mut generics: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for k in 0..w(caller.bn) {
+            generics.push(p.id(add(w(caller.ba), k)));
+        }
+        for v in 0..w(f.vn) {
+            let t = p.value_ty(f, v);
+            if t != NONE32 && mentions_names(in p, p.map(g.inst, t), in generics) {
+                return R_SITE_GENERICS;
+            }
+        }
+        for k in 0..w(f.ln) {
+            let t = u32_at(in p.loc_ty, add(w(f.la), k));
+            if mentions_names(in p, p.map(g.inst, t), in generics) {
+                return R_SITE_GENERICS;
+            }
+        }
+    }
+    let mut at = inc(args);
+    for k in 0..n {
+        let value = n32(p.op(at));
+        let has = p.op(add(at, 2)) != 0;
+        let place = add(at, 3);
+        let local = has && p.local_ty(caller, n32(p.op(place))) != NONE32;
+        let q = p.param(f, k);
+        let ty = p.map(g.inst, q.ty);
+        let aggregate = p.has(ty, F_AGGREGATE);
+        let sequence = p.has(ty, F_SEQUENCE);
+        if p.has(ty, F_SLICE) {
+            let same = local
+                && p.op(inc(place)) == 0
+                && p.local_ty(caller, n32(p.op(place))) == ty;
+            out.push(same, value, place);
+        } else if q.pass == P_INOUT {
+            if !local {
+                return R_SITE_INOUT;
+            }
+            out.push(true, value, place);
+        } else if q.pass == P_IN && (aggregate || sequence) {
+            if local {
+                out.push(true, value, place);
+            } else if !sequence {
+                out.push(false, value, place);
+            } else {
+                return R_SITE_SEQUENCE;
+            }
+        } else {
+            out.push(false, value, place);
+        }
+        at = arg_end(in p, at);
+    }
+    if own_handles(in p, g.f) > 0 {
+        for k in 0..n {
+            if out.is_place(k) && p.op(inc(u64_at(in out.at, k))) != 0 {
+                return R_SITE_FIELD;
+            }
+        }
+    }
+    // A borrowed parameter is replaced by the caller's place, so the callee
+    // must never re-bind its name.
+    let mut replaced: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..n {
+        if out.is_place(k) {
+            replaced.push(p.param(f, k).name);
+        }
+    }
+    if replaced.len() > 0 {
+        let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for b in 0..w(f.fc) {
+            let bk = p.block(f, b);
+            for k in 0..w(bk.ic) {
+                let i = p.inst_of(bk, k);
+                if i.op == O_BIND {
+                    pattern_binds(in p, p.op(inc(w(i.a))), inout bound);
+                }
+            }
+            if bk.term == T_MATCH {
+                let ta = w(bk.ta);
+                let arms = p.op(inc(ta));
+                for j in 0..arms {
+                    pattern_binds(in p, p.op(add(add(ta, 2), wrapping_mul(j, 2))), inout bound);
+                }
+            }
+        }
+        for j in 0..bound.len() {
+            let x = u32_at(in bound, j);
+            for k in 0..replaced.len() {
+                if u32_at(in replaced, k) == x {
+                    return R_SITE_REBIND;
+                }
+            }
+        }
+    }
+    R_OK
+}
+
+// `partial_ok`: every by-value argument can be passed twice.
+fn partial_ok(in p: Prog, g: Tgt, in bs: Bindings) -> bool {
+    let f = p.fun(g.f);
+    for k in 0..w(f.pn) {
+        if bs.is_place(k) {
+            continue;
+        }
+        let ty = p.map(g.inst, p.param(f, k).ty);
+        if !p.has(ty, F_SLICE) && !p.has(ty, F_PLAIN) {
+            return false;
+        }
+    }
+    true
+}
+
+// ----- site folding (site.rs `fold`) ------------------------------------------------
+
+// A value the site's arguments determine: 0 unknown, 1 an integer (lo, hi
+// as an i128), 2 a bool (lo), 3 a nullary constructor (lo: its short name).
+pub copy struct Kn {
+    k: u8,
+    lo: u64,
+    hi: u64,
+}
+
+fn unknown() -> Kn {
+    Kn {
+        k: 0,
+        lo: 0,
+        hi: 0
+    }
+}
+
+fn kn_at(in s: ChunkSeq[Kn], i: u64) -> Kn {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => unknown(),
+    }
+}
+
+fn kn_eq(a: Kn, b: Kn) -> bool {
+    a.k == b.k && a.lo == b.lo && a.hi == b.hi
+}
+
+fn set_kn(inout s: ChunkSeq[Kn], i: u64, x: Kn) {
+    let ok = s.try_set(i, x);
+}
+
+// `site::constant`.
+fn constant(inout p: Prog, g: Tgt, i: Inst) -> Kn {
+    let a = w(i.a);
+    if i.op == O_CONST {
+        let kind = p.op(a);
+        if kind == L_INT {
+            return Kn {
+                k: 1,
+                lo: p.op(inc(a)),
+                hi: p.op(add(a, 2))
+            };
+        }
+        if kind == L_BOOL {
+            return Kn {
+                k: 2,
+                lo: p.op(inc(a)),
+                hi: 0
+            };
+        }
+        return unknown();
+    }
+    if i.op == O_DATA && p.op(inc(a)) == 0 && p.has(p.map(g.inst, i.ty), F_PLAIN) {
+        let s = short(inout p, n32(p.op(a)));
+        return Kn {
+            k: 3,
+            lo: w(s),
+            hi: 0
+        };
+    }
+    unknown()
+}
+
+// Signed 128-bit comparison: -1, 0 or 1.
+fn cmp128(a: Kn, b: Kn) -> i64 {
+    let ah = a.hi ^ 9223372036854775808;
+    let bh = b.hi ^ 9223372036854775808;
+    if ah < bh {
+        return -1;
+    }
+    if ah > bh {
+        return 1;
+    }
+    if a.lo < b.lo {
+        return -1;
+    }
+    if a.lo > b.lo {
+        return 1;
+    }
+    0
+}
+
+// `site::binary`: comparison codes 1 `==`, 2 `!=`, 3 `<`, 4 `<=`, 5 `>`,
+// 6 `>=`.
+fn binary(code: u64, a: Kn, b: Kn) -> Kn {
+    let eqop = code == 1 || code == 2;
+    let mut order: i64 = 0;
+    if a.k == 1 && b.k == 1 {
+        order = cmp128(a, b);
+    } else if a.k == 2 && b.k == 2 && eqop {
+        if a.lo < b.lo {
+            order = -1;
+        } else if a.lo > b.lo {
+            order = 1;
+        }
+    } else if a.k == 3 && b.k == 3 && eqop {
+        if a.lo != b.lo {
+            order = -1;
+        }
+    } else {
+        return unknown();
+    }
+    let r = if code == 1 {
+        order == 0
+    } else if code == 2 {
+        order != 0
+    } else if code == 3 {
+        order < 0
+    } else if code == 4 {
+        order <= 0
+    } else if code == 5 {
+        order > 0
+    } else if code == 6 {
+        order >= 0
+    } else {
+        return unknown();
+    };
+    Kn {
+        k: 2,
+        lo: if r {
+            1
+        } else {
+            0
+        },
+        hi: 0
+    }
+}
+
+// `site::arm`: the arm a known value takes, NONE32 when undecided.
+fn arm(inout p: Prog, ta: u64, x: Kn) -> u32 {
+    let n = p.op(inc(ta));
+    for j in 0..n {
+        let at = p.op(add(add(ta, 2), wrapping_mul(j, 2)));
+        let kind = p.pat(at);
+        let mut hit = false;
+        if kind == PK_WILD || kind == PK_BIND {
+            hit = true;
+        } else if kind == PK_CTOR && x.k == 3 {
+            hit = w(short(inout p, n32(p.pat(add(at, 3))))) == x.lo;
+        } else if kind == PK_LIT && p.pat(add(at, 3)) == L_INT && x.k == 1 {
+            hit = p.pat(add(at, 4)) == x.lo && p.pat(add(at, 5)) == x.hi;
+        } else if kind == PK_LIT && p.pat(add(at, 3)) == L_BOOL && x.k == 2 {
+            hit = p.pat(add(at, 4)) == x.lo;
+        } else {
+            return NONE32;
+        }
+        if hit {
+            return n32(j);
+        }
+    }
+    NONE32
+}
+
+// An association list from names to known values (locals of one fold).
+pub struct Assoc {
+    keys: ChunkSeq[u32],
+    vals: ChunkSeq[Kn],
+}
+
+fn assoc_new() -> Assoc {
+    Assoc {
+        keys: ChunkSeq::new[u32](),
+        vals: ChunkSeq::new[Kn]()
+    }
+}
+
+impl Assoc {
+    fn find(in self, k: u32) -> u64 {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == k {
+                return i;
+            }
+        }
+        MAX64
+    }
+
+    fn get(in self, k: u32) -> Kn {
+        let i = self.find(k);
+        if i == MAX64 {
+            return unknown();
+        }
+        kn_at(in self.vals, i)
+    }
+
+    fn set(inout self, k: u32, v: Kn) {
+        let i = self.find(k);
+        if i == MAX64 {
+            self.keys.push(k);
+            self.vals.push(v);
+        } else {
+            let ok = self.vals.try_set(i, v);
+        }
+    }
+}
+
+// `stable_locals`: names bound once (or a parameter never re-bound), never
+// written or lent `inout`; empty when the callee has a handle or closure.
+fn stable_locals(in p: Prog, f: Fun, inout out: ChunkSeq[u32]) {
+    let mut names = map_new(64);
+    let mut list: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut counts: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut unstable = map_new(16);
+    let mut bound: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..w(f.pn) {
+        bound.push(p.param(f, k).name);
+    }
+    for b in 0..w(f.fc) {
+        let bk = p.block(f, b);
+        for k in 0..w(bk.ic) {
+            let i = p.inst_of(bk, k);
+            let a = w(i.a);
+            if i.op == O_BIND {
+                pattern_binds(in p, p.op(inc(a)), inout bound);
+            } else if i.op == O_WRITE {
+                unstable.set(p.op(inc(a)), 1);
+            } else if has_args(i.op) {
+                let start = args_at(i.op, a);
+                let n = p.op(start);
+                let mut at = inc(start);
+                for j in 0..n {
+                    if p.op(inc(at)) == P_INOUT && p.op(add(at, 2)) != 0 {
+                        unstable.set(p.op(add(at, 3)), 1);
+                    }
+                    at = arg_end(in p, at);
+                }
+            } else if i.op == O_HANDLE || i.op == O_CLOSURE {
+                out.clear();
+                return;
+            }
+        }
+        if bk.term == T_MATCH {
+            let ta = w(bk.ta);
+            let arms = p.op(inc(ta));
+            for j in 0..arms {
+                pattern_binds(in p, p.op(add(add(ta, 2), wrapping_mul(j, 2))), inout bound);
+            }
+        }
+    }
+    // Rust counts binds per name in a BTreeMap (parameters once each).
+    for j in 0..bound.len() {
+        let x = u32_at(in bound, j);
+        let at = names.get(w(x));
+        if at == NONE32 {
+            names.set(w(x), n32(list.len()));
+            list.push(x);
+            counts.push(1);
+        } else {
+            set_u32(inout counts, w(at), inc32(u32_at(in counts, w(at))));
+        }
+    }
+    out.clear();
+    for j in 0..list.len() {
+        let x = u32_at(in list, j);
+        if u32_at(in counts, j) == 1 && unstable.get(w(x)) == NONE32 {
+            out.push(x);
+        }
+    }
+}
+
+// One past the largest value id `f` defines or types (`splice`'s
+// `next_value` / `callee_values`).
+fn value_bound(in p: Prog, f: Fun) -> u64 {
+    let mut top: u64 = 0;
+    let mut any = false;
+    for v in 0..w(f.vn) {
+        if u32_at(in p.val, add(w(f.va), v)) != 0 {
+            top = v;
+            any = true;
+        }
+    }
+    for b in 0..w(f.fc) {
+        let bk = p.block(f, b);
+        for k in 0..w(bk.ic) {
+            let d = w(p.inst_of(bk, k).dest);
+            if !any || d > top {
+                top = d;
+                any = true;
+            }
+        }
+        for k in 0..w(bk.pn) {
+            let d = w(p.id(add(w(bk.pa), k)));
+            if !any || d > top {
+                top = d;
+                any = true;
+            }
+        }
+    }
+    if any {
+        inc(top)
+    } else {
+        0
+    }
+}
+
+// The seeds of a fold: the caller's constants passed by value to stable
+// locals, by parameter name (`seeds`, filtered by `stable_locals`).
+fn fold_seeds(inout p: Prog, c: u32, g: Tgt, in bs: Bindings, in stable: ChunkSeq[u32]) -> Assoc {
+    let caller = p.fun(c);
+    let f = p.fun(g.f);
+    let mut kept = assoc_new();
+    // defs of the wanted values, last definition wins
+    let mut defs = map_new(16);
+    for k in 0..w(f.pn) {
+        if !bs.is_place(k) {
+            defs.set(w(u32_at(in bs.value, k)), NONE32);
+        }
+    }
+    for b in 0..w(caller.fc) {
+        let bk = p.block(caller, b);
+        for k in 0..w(bk.ic) {
+            let id = p.id(add(w(bk.ia), k));
+            let d = w(p.inst(id).dest);
+            if defs_has(in defs, d) {
+                defs.set(d, id);
+            }
+        }
+    }
+    let own = Tgt {
+        f: c,
+        inst: NONE32
+    };
+    let mut seeds = assoc_new();
+    for k in 0..w(f.pn) {
+        if bs.is_place(k) {
+            continue;
+        }
+        let id = defs.get(w(u32_at(in bs.value, k)));
+        if id == NONE32 {
+            continue;
+        }
+        let x = constant(inout p, own, p.inst(id));
+        if x.k != 0 {
+            seeds.set(p.param(f, k).name, x);
+        }
+    }
+    for j in 0..seeds.keys.len() {
+        let name = u32_at(in seeds.keys, j);
+        if contains32(in stable, name) {
+            kept.set(name, kn_at(in seeds.vals, j));
+        }
+    }
+    kept
+}
+
+fn contains32(in s: ChunkSeq[u32], x: u32) -> bool {
+    for k in 0..s.len() {
+        if u32_at(in s, k) == x {
+            return true;
+        }
+    }
+    false
+}
+
+// One round of a fold: live blocks, decided terminators, known values and
+// the jump arguments reaching each block.
+pub struct Round {
+    locals: Assoc,
+    values: ChunkSeq[Kn],
+    live: ChunkSeq[u8],
+    jumps: ChunkSeq[u32],
+    njumps: u64,
+    in_head: ChunkSeq[u32],
+    in_tail: ChunkSeq[u32],
+    in_at: ChunkSeq[u64],
+    in_next: ChunkSeq[u32],
+}
+
+// The value an instruction folds to, given the round so far.
+fn eval_inst(inout p: Prog, g: Tgt, i: Inst, inout st: Round, in stable: ChunkSeq[u32]) -> Kn {
+    let a = w(i.a);
+    if i.op == O_CONST || i.op == O_DATA {
+        return constant(inout p, g, i);
+    }
+    if i.op == O_READ {
+        if p.op(inc(a)) == 0 {
+            return st.locals.get(n32(p.op(a)));
+        }
+        return unknown();
+    }
+    if i.op == O_UNARY {
+        if p.op(a) == 1 {
+            let v = kn_at(in st.values, p.op(inc(a)));
+            if v.k == 2 {
+                return Kn {
+                    k: 2,
+                    lo: 1 ^ v.lo,
+                    hi: 0
+                };
+            }
+        }
+        return unknown();
+    }
+    if i.op == O_BINARY {
+        if (i.flags & I_FALLIBLE) == 0 {
+            let l = kn_at(in st.values, p.op(inc(a)));
+            let r = kn_at(in st.values, p.op(add(a, 2)));
+            if l.k != 0 && r.k != 0 {
+                return binary(p.op(a), l, r);
+            }
+        }
+        return unknown();
+    }
+    if i.op == O_BIND {
+        let at = p.op(inc(a));
+        if p.pat(at) == PK_BIND {
+            let name = n32(p.pat(add(at, 3)));
+            let v = kn_at(in st.values, p.op(a));
+            if v.k != 0 && contains32(in stable, name) {
+                st.locals.set(name, v);
+            }
+        }
+    }
+    unknown()
+}
+
+fn decide(inout st: Round, b: u64, t: u32, inout succ: ChunkSeq[u32]) {
+    set_u32(inout st.jumps, b, t);
+    st.njumps = inc(st.njumps);
+    succ.push(t);
+}
+
+// The successors a block's terminator leads to in this round.
+fn eval_terminator(inout p: Prog, bk: Blk, b: u64, inout st: Round, inout succ: ChunkSeq[u32]) {
+    let ta = w(bk.ta);
+    if bk.term == T_BRANCH {
+        let v = kn_at(in st.values, p.op(ta));
+        let yes = n32(p.op(inc(ta)));
+        let no = n32(p.op(add(ta, 2)));
+        if v.k == 2 && v.lo == 1 {
+            decide(inout st, b, yes, inout succ);
+        } else if v.k == 2 {
+            decide(inout st, b, no, inout succ);
+        } else {
+            succ.push(yes);
+            succ.push(no);
+        }
+    } else if bk.term == T_MATCH {
+        let v = kn_at(in st.values, p.op(ta));
+        let mut taken = NONE32;
+        if v.k != 0 {
+            taken = arm(inout p, ta, v);
+            if taken != NONE32
+                && pattern_binds_any(in p, p.op(add(add(ta, 2), wrapping_mul(w(taken), 2)))) {
+                taken = NONE32;
+            }
+        }
+        if taken != NONE32 {
+            let t = n32(p.op(add(add(ta, 3), wrapping_mul(w(taken), 2))));
+            decide(inout st, b, t, inout succ);
+        } else {
+            successors(in p, bk, inout succ);
+        }
+    } else if bk.term == T_JUMP {
+        let t = p.op(ta);
+        let e = n32(st.in_at.len());
+        st.in_at.push(inc(ta));
+        st.in_next.push(NONE32);
+        let tail = u32_at(in st.in_tail, t);
+        if tail == NONE32 {
+            set_u32(inout st.in_head, t, e);
+        } else {
+            set_u32(inout st.in_next, w(tail), e);
+        }
+        set_u32(inout st.in_tail, t, e);
+        succ.push(n32(t));
+    }
+}
+
+// Visits the live blocks once each, in discovery order.
+fn fold_round(
+    inout p: Prog,
+    g: Tgt,
+    in kept: Assoc,
+    in stable: ChunkSeq[u32],
+    in params: ChunkSeq[Kn]
+) -> Round {
+    let nblocks = w(p.fun(g.f).fc);
+    let mut st = Round {
+        locals: assoc_new(),
+        values: ChunkSeq::new[Kn](),
+        live: zeros8(nblocks),
+        jumps: fill32(nblocks, NONE32),
+        njumps: 0,
+        in_head: fill32(nblocks, NONE32),
+        in_tail: fill32(nblocks, NONE32),
+        in_at: ChunkSeq::new[u64](),
+        in_next: ChunkSeq::new[u32]()
+    };
+    for j in 0..kept.keys.len() {
+        st.locals.set(u32_at(in kept.keys, j), kn_at(in kept.vals, j));
+    }
+    st.values.extend(in params.as_slice());
+    set_u8(inout st.live, 0, 1);
+    let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    work.push(0);
+    let mut seen = zeros8(nblocks);
+    let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    loop {
+        let wn = work.len();
+        if wn == 0 {
+            break;
+        }
+        let b = w(u32_at(in work, sub(wn, 1)));
+        work.truncate(sub(wn, 1));
+        if u8_at(in seen, b) != 0 {
+            continue;
+        }
+        set_u8(inout seen, b, 1);
+        let bk = p.block(p.fun(g.f), b);
+        let mut ends = false;
+        for k in 0..w(bk.ic) {
+            let i = p.inst_of(bk, k);
+            if i.op == O_EXIT {
+                ends = true;
+            }
+        }
+        for k in 0..w(bk.ic) {
+            let i = p.inst_of(bk, k);
+            let x = eval_inst(inout p, g, i, inout st, in stable);
+            if x.k != 0 {
+                set_kn(inout st.values, w(i.dest), x);
+            }
+            if i.op == O_EXIT {
+                break;
+            }
+        }
+        succ.clear();
+        if !ends {
+            eval_terminator(inout p, bk, b, inout st, inout succ);
+        }
+        for s in 0..succ.len() {
+            let t = u32_at(in succ, s);
+            set_u8(inout st.live, w(t), 1);
+            work.push(t);
+        }
+    }
+    st
+}
+
+// Block parameters: known when every live predecessor passes the same known
+// value.
+fn round_params(in p: Prog, f: Fun, in st: Round, nv: u64) -> ChunkSeq[Kn] {
+    let mut next: ChunkSeq[Kn] = ChunkSeq::new[Kn]();
+    next.resize(nv, unknown());
+    for b in 0..w(f.fc) {
+        let bk = p.block(f, b);
+        if u8_at(in st.live, b) == 0 || bk.pn == 0 {
+            continue;
+        }
+        let h = u32_at(in st.in_head, b);
+        if h == NONE32 {
+            continue;
+        }
+        for index in 0..w(bk.pn) {
+            let mut agreed = unknown();
+            let mut good = true;
+            let mut e = h;
+            loop {
+                if e == NONE32 {
+                    break;
+                }
+                let at = u64_at(in st.in_at, w(e));
+                let mut v = unknown();
+                if index < p.op(at) {
+                    v = kn_at(in st.values, p.op(add(inc(at), index)));
+                }
+                if v.k != 0 && (agreed.k == 0 || kn_eq(agreed, v)) {
+                    agreed = v;
+                } else {
+                    good = false;
+                }
+                e = u32_at(in st.in_next, w(e));
+            }
+            if good && agreed.k != 0 {
+                set_kn(inout next, w(p.id(add(w(bk.pa), index))), agreed);
+            }
+        }
+    }
+    next
+}
+
+fn same_kns(in a: ChunkSeq[Kn], in b: ChunkSeq[Kn], n: u64) -> bool {
+    for v in 0..n {
+        if !kn_eq(kn_at(in a, v), kn_at(in b, v)) {
+            return false;
+        }
+    }
+    true
+}
+
+fn same_round(in a: Round, in b: Round, nblocks: u64, nv: u64) -> bool {
+    for k in 0..nblocks {
+        if u8_at(in a.live, k) != u8_at(in b.live, k) || u32_at(in a.jumps, k) != u32_at(in b.jumps, k) {
+            return false;
+        }
+    }
+    same_kns(in a.values, in b.values, nv)
+}
+
+// `site::fold`. `ok` is false when there is nothing to fold or the
+// propagation did not settle (the result is then `folded_none`).
+fn fold(inout p: Prog, c: u32, g: Tgt, in bs: Bindings, inout ok: bool) -> Folded {
+    ok = false;
+    let f = p.fun(g.f);
+    let nblocks = w(f.fc);
+    let mut wanted = false;
+    for k in 0..w(f.pn) {
+        if !bs.is_place(k) {
+            wanted = true;
+        }
+    }
+    if !wanted {
+        return folded_none(nblocks);
+    }
+    let mut stable: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    stable_locals(in p, f, inout stable);
+    let kept = fold_seeds(inout p, c, g, in bs, in stable);
+    if kept.keys.len() == 0 {
+        return folded_none(nblocks);
+    }
+    let nv = value_bound(in p, f);
+    let mut params: ChunkSeq[Kn] = ChunkSeq::new[Kn]();
+    params.resize(nv, unknown());
+    let mut prev = fold_round(inout p, g, in kept, in stable, in params);
+    params = round_params(in p, f, in prev, nv);
+    for round in 1..FOLD_ROUNDS {
+        let st = fold_round(inout p, g, in kept, in stable, in params);
+        let next = round_params(in p, f, in st, nv);
+        if same_round(in st, in prev, nblocks, nv) && same_kns(in next, in params, nv) {
+            let mut known = zeros8(nv);
+            for v in 0..nv {
+                if kn_at(in st.values, v).k != 0 {
+                    set_u8(inout known, v, 1);
+                }
+            }
+            ok = true;
+            return Folded {
+                live: st.live,
+                jumps: st.jumps,
+                known: known,
+                njumps: st.njumps
+            };
+        }
+        prev = st;
+        params = next;
+    }
+    folded_none(nblocks)
+}
+
+fn defs_has(in m: MapU, k: u64) -> bool {
+    let mut at = hash64(k) & m.mask;
+    loop {
+        if u8_at(in m.used, at) == 0 {
+            return false;
+        }
+        if u64_at(in m.keys, at) == k {
+            return true;
+        }
+        at = inc(at) & m.mask;
+    }
+}
+
+// ----- partial inlining (site.rs `split`) ------------------------------------------
+
+pub struct Split {
+    found: bool,
+    block: u32,
+    cold: u32,
+    hot: ChunkSeq[u8],
+    hot_cost: u64,
+    cold_cost: u64,
+}
+
+fn no_split() -> Split {
+    Split {
+        found: false,
+        block: 0,
+        cold: 0,
+        hot: ChunkSeq::new[u8](),
+        hot_cost: 0,
+        cold_cost: 0
+    }
+}
+
+// `site::pure`: an instruction a head may run twice.
+fn pure(in p: Prog, g: Tgt, f: Fun, i: Inst) -> bool {
+    if (i.flags & I_FALLIBLE) != 0 {
+        return false;
+    }
+    if i.op == O_CONST || i.op == O_UNIT {
+        return true;
+    }
+    if i.op == O_READ
+        || i.op == O_BINARY
+        || i.op == O_UNARY
+        || i.op == O_PROJECT
+        || i.op == O_DATA
+        || i.op == O_TUPLE {
+        return p.has(p.map(g.inst, i.ty), F_PLAIN);
+    }
+    if i.op == O_BIND {
+        let t = p.value_ty(f, p.op(w(i.a)));
+        return t != NONE32 && p.has(p.map(g.inst, t), F_PLAIN);
+    }
+    false
+}
+
+// `site::reach`: blocks reachable from `from` under `fd`, without the edge
+// cut_b -> cut_s (cut_b NONE32: no cut).
+fn reach(in p: Prog, f: Fun, in fd: Folded, from: u32, cut_b: u32, cut_s: u32) -> ChunkSeq[u8] {
+    let n = w(f.fc);
+    let mut seen = zeros8(n);
+    let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    work.push(from);
+    loop {
+        let wn = work.len();
+        if wn == 0 {
+            break;
+        }
+        let b = u32_at(in work, sub(wn, 1));
+        work.truncate(sub(wn, 1));
+        if u8_at(in seen, w(b)) != 0 || u8_at(in fd.live, w(b)) == 0 {
+            continue;
+        }
+        set_u8(inout seen, w(b), 1);
+        folded_successors(in p, f, in fd, w(b), inout succ);
+        for k in 0..succ.len() {
+            let s = u32_at(in succ, k);
+            if !(cut_b == b && cut_s == s) {
+                work.push(s);
+            }
+        }
+    }
+    seen
+}
+
+fn heavy(in p: Prog, f: Fun, in blocks: ChunkSeq[u8]) -> bool {
+    for b in 0..w(f.fc) {
+        if u8_at(in blocks, b) == 0 {
+            continue;
+        }
+        let bk = p.block(f, b);
+        for k in 0..w(bk.ic) {
+            let op = p.inst_of(bk, k).op;
+            if op == O_LOOP || op == O_CALL || op == O_SEQ {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// `site::split`: the best partial inlining whose copy costs at most `budget`.
+fn split(in p: Prog, g: Tgt, in fd: Folded, budget: u64) -> Split {
+    let f = p.fun(g.f);
+    if own_handles(in p, g.f) > 0 {
+        return no_split();
+    }
+    let n = w(f.fc);
+    let mut pure_block = zeros8(n);
+    for b in 0..n {
+        let bk = p.block(f, b);
+        let mut all = true;
+        for k in 0..w(bk.ic) {
+            if !pure(in p, g, f, p.inst_of(bk, k)) {
+                all = false;
+                break;
+            }
+        }
+        if all {
+            set_u8(inout pure_block, b, 1);
+        }
+    }
+    // Predecessors: counts, and a flat list per block.
+    let mut pred_from: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut pred_to: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for b in 0..n {
+        if u8_at(in fd.live, b) == 0 {
+            continue;
+        }
+        folded_successors(in p, f, in fd, b, inout succ);
+        for k in 0..succ.len() {
+            pred_from.push(n32(b));
+            pred_to.push(u32_at(in succ, k));
+        }
+    }
+    let mut head = zeros8(n);
+    if u8_at(in pure_block, 0) != 0 && u8_at(in fd.live, 0) != 0 {
+        set_u8(inout head, 0, 1);
+    }
+    let mut changed = true;
+    loop {
+        if !changed {
+            break;
+        }
+        changed = false;
+        for b in 1..n {
+            if u8_at(in head, b) != 0 || u8_at(in fd.live, b) == 0 || u8_at(in pure_block, b) == 0 {
+                continue;
+            }
+            let mut any = false;
+            let mut all = true;
+            for e in 0..pred_to.len() {
+                if w(u32_at(in pred_to, e)) == b {
+                    any = true;
+                    if u8_at(in head, w(u32_at(in pred_from, e))) == 0 {
+                        all = false;
+                    }
+                }
+            }
+            if any && all {
+                set_u8(inout head, b, 1);
+                changed = true;
+            }
+        }
+    }
+    let mut best = no_split();
+    let mut best_heavy = false;
+    let mut targets: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for b in 0..n {
+        if u8_at(in head, b) == 0 || fd.jump(b) != NONE32 {
+            continue;
+        }
+        let bk = p.block(f, b);
+        let ta = w(bk.ta);
+        targets.clear();
+        if bk.term == T_BRANCH {
+            let yes = n32(p.op(inc(ta)));
+            let no = n32(p.op(add(ta, 2)));
+            if yes == no {
+                continue;
+            }
+            targets.push(yes);
+            targets.push(no);
+        } else if bk.term == T_MATCH {
+            let arms = p.op(inc(ta));
+            for j in 0..arms {
+                let t = n32(p.op(add(add(ta, 3), wrapping_mul(j, 2))));
+                // sorted, deduplicated
+                let mut at: u64 = 0;
+                let mut dup = false;
+                loop {
+                    if at >= targets.len() {
+                        break;
+                    }
+                    let x = u32_at(in targets, at);
+                    if x == t {
+                        dup = true;
+                        break;
+                    }
+                    if x > t {
+                        break;
+                    }
+                    at = inc(at);
+                }
+                if !dup {
+                    targets.push(t);
+                    let mut k = sub(targets.len(), 1);
+                    loop {
+                        if k <= at {
+                            break;
+                        }
+                        set_u32(inout targets, k, u32_at(in targets, sub(k, 1)));
+                        k = sub(k, 1);
+                    }
+                    set_u32(inout targets, at, t);
+                }
+            }
+            if targets.len() != arms {
+                continue;
+            }
+        } else {
+            continue;
+        }
+        for k in 0..targets.len() {
+            let cold = u32_at(in targets, k);
+            if p.block(f, w(cold)).pn != 0 {
+                continue;
+            }
+            let hot = reach(in p, f, in fd, 0, n32(b), cold);
+            if u8_at(in hot, w(cold)) != 0 {
+                continue;
+            }
+            let from_cold = reach(in p, f, in fd, cold, NONE32, NONE32);
+            let mut cold_blocks = zeros8(n);
+            for j in 0..n {
+                if u8_at(in from_cold, j) != 0 && u8_at(in hot, j) == 0 {
+                    set_u8(inout cold_blocks, j, 1);
+                }
+            }
+            let hot_cost = add(cost_of(in p, g, in fd, in hot), CALL_COST);
+            let cold_cost = cost_of(in p, g, in fd, in cold_blocks);
+            if hot_cost > budget || cold_cost < MIN_COLD || cold_cost < hot_cost {
+                continue;
+            }
+            let hv = heavy(in p, f, in cold_blocks) && !heavy(in p, f, in hot);
+            let better = !best.found
+                || (hv && !best_heavy)
+                || (hv == best_heavy && hot_cost > best.hot_cost);
+            if better {
+                best_heavy = hv;
+                best = Split {
+                    found: true,
+                    block: n32(b),
+                    cold: cold,
+                    hot: hot,
+                    hot_cost: hot_cost,
+                    cold_cost: cold_cost
+                };
+            }
+        }
+    }
+    best
+}
+
+// ----- splicing -------------------------------------------------------------------------
+
+// How a callee's names, values and blocks map into the caller (`Rename`).
+pub struct Rename {
+    values: u64,
+    blocks: u64,
+    // callee local -> renamed local
+    names: MapU,
+    // borrowed parameter -> operand offset of the caller's place
+    places: MapU,
+}
+
+// Writes root and path (root, n, names) of `root`.`path` (the path at
+// operand offset `path_at`) renamed (`Rename::root`).
+fn put_root(inout p: Prog, in rn: Rename, root: u64, path_at: u64) {
+    let place = rn.places.get(root);
+    let n = p.op(path_at);
+    if place != NONE32 {
+        let pa = w(place);
+        let pn = p.op(inc(pa));
+        p.ops.push(p.op(pa));
+        p.ops.push(add(pn, n));
+        for k in 0..pn {
+            let x = p.op(add(add(pa, 2), k));
+            p.ops.push(x);
+        }
+    } else {
+        let name = rn.names.get(root);
+        if name != NONE32 {
+            p.ops.push(w(name));
+        } else {
+            p.ops.push(root);
+        }
+        p.ops.push(n);
+    }
+    for k in 0..n {
+        let x = p.op(add(inc(path_at), k));
+        p.ops.push(x);
+    }
+}
+
+// The root alone (`self.root(slot, &[]).0`).
+fn renamed_root(in p: Prog, in rn: Rename, root: u64) -> u64 {
+    let place = rn.places.get(root);
+    if place != NONE32 {
+        return p.op(w(place));
+    }
+    let name = rn.names.get(root);
+    if name != NONE32 {
+        w(name)
+    } else {
+        root
+    }
+}
+
+// A renamed copy of the pattern at `at` (`Rename::pattern`).
+fn copy_pattern(inout p: Prog, in rn: Rename, at: u64) -> u64 {
+    let kind = p.pat(at);
+    let mut body: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if kind == PK_BIND {
+        let name = p.pat(add(at, 3));
+        let r = rn.names.get(name);
+        body.push(if r != NONE32 {
+            w(r)
+        } else {
+            name
+        });
+    } else if kind == PK_TUPLE {
+        let n = p.pat(add(at, 3));
+        body.push(n);
+        for i in 0..n {
+            let c = copy_pattern(inout p, in rn, p.pat(add(add(at, 4), i)));
+            body.push(c);
+        }
+    } else if kind == PK_CTOR {
+        body.push(p.pat(add(at, 3)));
+        body.push(p.pat(add(at, 4)));
+        let n = p.pat(add(at, 5));
+        body.push(n);
+        for i in 0..n {
+            body.push(p.pat(add(add(at, 6), wrapping_mul(i, 2))));
+            let c = copy_pattern(inout p, in rn, p.pat(add(add(at, 7), wrapping_mul(i, 2))));
+            body.push(c);
+        }
+    } else if kind == PK_LIT {
+        for i in 0..4 {
+            body.push(p.pat(add(add(at, 3), i)));
+        }
+    }
+    let out = p.pats.len();
+    p.pats.push(kind);
+    p.pats.push(p.pat(inc(at)));
+    p.pats.push(p.pat(add(at, 2)));
+    p.pats.extend(in body.as_slice());
+    out
+}
+
+fn put_args(inout p: Prog, in rn: Rename, start: u64) {
+    let n = p.op(start);
+    p.ops.push(n);
+    let mut at = inc(start);
+    for k in 0..n {
+        p.ops.push(add(p.op(at), rn.values));
+        p.ops.push(p.op(inc(at)));
+        let has = p.op(add(at, 2));
+        p.ops.push(has);
+        if has != 0 {
+            put_root(inout p, in rn, p.op(add(at, 3)), add(at, 4));
+        }
+        at = arg_end(in p, at);
+    }
+}
+
+// The renamed operands of `i` (`Rename::op`), as a new operand offset.
+fn copy_op(inout p: Prog, in rn: Rename, i: Inst) -> u32 {
+    let a = w(i.a);
+    let op = i.op;
+    if op == O_CONST || op == O_UNIT || op == O_LOOP || op == O_CLOSURE {
+        return i.a;
+    }
+    let out = n32(p.ops.len());
+    let vb = rn.values;
+    if op == O_READ {
+        put_root(inout p, in rn, p.op(a), inc(a));
+    } else if op == O_BIND {
+        p.ops.push(add(p.op(a), vb));
+        let at = copy_pattern(inout p, in rn, p.op(inc(a)));
+        p.ops.push(at);
+    } else if op == O_WRITE {
+        p.ops.push(add(p.op(a), vb));
+        put_root(inout p, in rn, p.op(inc(a)), add(a, 2));
+    } else if op == O_UNARY {
+        p.ops.push(p.op(a));
+        p.ops.push(add(p.op(inc(a)), vb));
+    } else if op == O_INDEX {
+        p.ops.push(add(p.op(a), vb));
+        p.ops.push(add(p.op(inc(a)), vb));
+    } else if op == O_BINARY {
+        p.ops.push(p.op(a));
+        p.ops.push(add(p.op(inc(a)), vb));
+        p.ops.push(add(p.op(add(a, 2)), vb));
+    } else if op == O_PROJECT || op == O_TRY {
+        p.ops.push(add(p.op(a), vb));
+    } else if op == O_TUPLE || op == O_VECTOR {
+        let n = p.op(a);
+        p.ops.push(n);
+        for k in 0..n {
+            p.ops.push(add(p.op(add(inc(a), k)), vb));
+        }
+    } else if op == O_DATA {
+        p.ops.push(p.op(a));
+        let n = p.op(inc(a));
+        p.ops.push(n);
+        for k in 0..n {
+            p.ops.push(add(p.op(add(add(a, 2), k)), vb));
+        }
+    } else if op == O_CALL {
+        p.ops.push(p.op(a));
+        p.ops.push(p.op(inc(a)));
+        put_args(inout p, in rn, add(a, 2));
+    } else if op == O_TILED || op == O_SEQ || op == O_FIP {
+        put_args(inout p, in rn, a);
+    } else if op == O_INDIRECT {
+        p.ops.push(add(p.op(a), vb));
+        put_args(inout p, in rn, inc(a));
+    } else if op == O_EXIT {
+        p.ops.push(p.op(a));
+        p.ops.push(add(p.op(inc(a)), vb));
+    } else if op == O_HANDLE {
+        let has = p.op(a);
+        p.ops.push(has);
+        p.ops.push(if has != 0 {
+            add(p.op(inc(a)), vb)
+        } else {
+            p.op(inc(a))
+        });
+        let na = p.op(add(a, 2));
+        p.ops.push(na);
+        let mut at = add(a, 3);
+        for k in 0..na {
+            p.ops.push(p.op(at));
+            p.ops.push(renamed_root(in p, in rn, p.op(inc(at))));
+            at = add(at, 2);
+        }
+        let nm = p.op(at);
+        p.ops.push(nm);
+        at = inc(at);
+        for k in 0..nm {
+            put_root(inout p, in rn, p.op(at), inc(at));
+            at = add(add(at, 2), p.op(inc(at)));
+        }
+        let ng = p.op(at);
+        p.ops.push(ng);
+        for k in 0..ng {
+            p.ops.push(p.op(add(inc(at), k)));
+        }
+    }
+    out
+}
+
+fn new_block(inout p: Prog, in params: ChunkSeq[u32], in list: ChunkSeq[u32], term: u8, ta: u32) -> u32 {
+    let pa = n32(p.ids.len());
+    p.ids.extend(in params.as_slice());
+    let ia = n32(p.ids.len());
+    p.ids.extend(in list.as_slice());
+    let id = n32(p.blks.len());
+    p
+        .blks
+        .push(
+        Blk {
+            pa: pa,
+            pn: n32(params.len()),
+            ia: ia,
+            ic: n32(list.len()),
+            term: term,
+            ta: ta
+        }
+    );
+    id
+}
+
+// `back(v)`: a jump to the continuation with `v`.
+fn put_back(inout p: Prog, continuation: u64, v: u64) -> u32 {
+    let ta = n32(p.ops.len());
+    p.ops.push(continuation);
+    p.ops.push(1);
+    p.ops.push(v);
+    ta
+}
+
+fn new_inst(inout p: Prog, i: Inst) -> u32 {
+    let id = n32(p.insts.len());
+    p.insts.push(i);
+    id
+}
+
+// Replace the call at instruction `i` of caller block `b` with the
+// target's body (`splice`). Returns the first block copied.
+fn splice(
+    inout p: Prog,
+    c: u32,
+    b: u64,
+    i: u64,
+    g: Tgt,
+    in bs: Bindings,
+    serial: u64,
+    in fd: Folded,
+    in s: Split
+) -> u64 {
+    let callee = p.fun(g.f);
+    let next_value = value_bound(in p, p.fun(c));
+    let callee_values = value_bound(in p, callee);
+    let continuation = w(p.fun(c).fc);
+    let first = inc(continuation);
+    let mut rn = Rename {
+        values: next_value,
+        blocks: first,
+        names: map_new(64),
+        places: map_new(16)
+    };
+    for k in 0..w(callee.pn) {
+        if bs.is_place(k) {
+            rn.places.set(w(p.param(callee, k).name), n32(u64_at(in bs.at, k)));
+        }
+    }
+    for k in 0..w(callee.ln) {
+        let name = u32_at(in p.loc_name, add(w(callee.la), k));
+        if rn.places.get(w(name)) == NONE32 {
+            let r = renamed(inout p, name, serial);
+            rn.names.set(w(name), r);
+        }
+    }
+    for k in 0..w(callee.ln) {
+        let name = u32_at(in p.loc_name, add(w(callee.la), k));
+        let r = rn.names.get(w(name));
+        if r != NONE32 {
+            let ty = p.map(g.inst, u32_at(in p.loc_ty, add(w(callee.la), k)));
+            push_local(inout p, c, r, ty);
+        }
+    }
+    for v in 0..w(callee.vn) {
+        let t = p.value_ty(callee, v);
+        if t != NONE32 {
+            let ty = p.map(g.inst, t);
+            set_value(inout p, c, add(v, next_value), ty);
+        }
+    }
+    let mut fresh = add(next_value, callee_values);
+    // Split the caller's block at the call.
+    let bk = p.block(p.fun(c), b);
+    let call_id = p.id(add(w(bk.ia), i));
+    let call = p.inst(call_id);
+    let mut prefix: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..i {
+        prefix.push(p.id(add(w(bk.ia), k)));
+    }
+    let mut rest: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in inc(i)..w(bk.ic) {
+        rest.push(p.id(add(w(bk.ia), k)));
+    }
+    for k in 0..w(callee.pn) {
+        if bs.is_place(k) {
+            continue;
+        }
+        let dest = fresh;
+        fresh = inc(fresh);
+        set_value(inout p, c, dest, p.unit_ty);
+        let name = rn.names.get(w(p.param(callee, k).name));
+        let pat = p.pats.len();
+        p.pats.push(PK_BIND);
+        p.pats.push(call.s0);
+        p.pats.push(call.s1);
+        p.pats.push(w(name));
+        let a = n32(p.ops.len());
+        p.ops.push(w(u32_at(in bs.value, k)));
+        p.ops.push(pat);
+        let id = new_inst(
+            inout p,
+            Inst {
+                dest: n32(dest),
+                ty: p.unit_ty,
+                s0: call.s0,
+                s1: call.s1,
+                flags: 0,
+                opq: p.bind_opq,
+                op: O_BIND,
+                a: a
+            }
+        );
+        prefix.push(id);
+    }
+    let jt = n32(p.ops.len());
+    p.ops.push(first);
+    p.ops.push(0);
+    let empty: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    // The caller's block keeps its parameters.
+    let mut own: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..w(bk.pn) {
+        own.push(p.id(add(w(bk.pa), k)));
+    }
+    let pre = new_block(inout p, in own, in prefix, T_JUMP, jt);
+    set_block(inout p, c, b, pre);
+    let mut cparams: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    cparams.push(call.dest);
+    let cont = new_block(inout p, in cparams, in rest, bk.term, bk.ta);
+    push_block(inout p, c, cont);
+    let cold_block = add(first, w(callee.fc));
+    let mut list: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut bparams: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..w(callee.fc) {
+        let source = p.block(callee, k);
+        bparams.clear();
+        for j in 0..w(source.pn) {
+            bparams.push(n32(add(w(p.id(add(w(source.pa), j))), next_value)));
+        }
+        let keep = if s.found {
+            u8_at(in s.hot, k) != 0
+        } else {
+            u8_at(in fd.live, k) != 0
+        };
+        if !keep {
+            let id = new_block(inout p, in bparams, in empty, T_UNREACHABLE, 0);
+            push_block(inout p, c, id);
+            continue;
+        }
+        list.clear();
+        let mut exit_ta = NONE32;
+        for j in 0..w(source.ic) {
+            let x = p.inst_of(source, j);
+            let a = copy_op(inout p, in rn, x);
+            if x.op == O_EXIT {
+                // `return value`: the rest of this block is unreachable.
+                let v = p.op(inc(w(a)));
+                exit_ta = put_back(inout p, continuation, v);
+                break;
+            }
+            let id = new_inst(
+                inout p,
+                Inst {
+                    dest: n32(add(w(x.dest), next_value)),
+                    ty: p.map(g.inst, x.ty),
+                    s0: x.s0,
+                    s1: x.s1,
+                    flags: x.flags,
+                    opq: x.opq,
+                    op: x.op,
+                    a: a
+                }
+            );
+            list.push(id);
+        }
+        let mut term = T_JUMP;
+        let mut ta = exit_ta;
+        if ta == NONE32 {
+            let decided = fd.jump(k);
+            if decided != NONE32 {
+                ta = n32(p.ops.len());
+                p.ops.push(target(in s, k, w(decided), first, cold_block));
+                p.ops.push(0);
+            } else {
+                let sa = w(source.ta);
+                ta = n32(p.ops.len());
+                if source.term == T_RETURN {
+                    let v = add(p.op(sa), next_value);
+                    ta = put_back(inout p, continuation, v);
+                } else if source.term == T_JUMP {
+                    p.ops.push(target(in s, k, p.op(sa), first, cold_block));
+                    let n = p.op(inc(sa));
+                    p.ops.push(n);
+                    for j in 0..n {
+                        p.ops.push(add(p.op(add(add(sa, 2), j)), next_value));
+                    }
+                } else if source.term == T_BRANCH {
+                    term = T_BRANCH;
+                    p.ops.push(add(p.op(sa), next_value));
+                    p.ops.push(target(in s, k, p.op(inc(sa)), first, cold_block));
+                    p.ops.push(target(in s, k, p.op(add(sa, 2)), first, cold_block));
+                } else if source.term == T_MATCH {
+                    term = T_MATCH;
+                    let arms = p.op(inc(sa));
+                    let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                    words.push(add(p.op(sa), next_value));
+                    words.push(arms);
+                    for j in 0..arms {
+                        let pat = copy_pattern(inout p, in rn, p.op(add(add(sa, 2), wrapping_mul(j, 2))));
+                        words.push(pat);
+                        words.push(
+                            target(in s, k, p.op(add(add(sa, 3), wrapping_mul(j, 2))), first, cold_block)
+                        );
+                    }
+                    ta = n32(p.ops.len());
+                    p.ops.extend(in words.as_slice());
+                } else {
+                    term = T_UNREACHABLE;
+                }
+            }
+        }
+        let id = new_block(inout p, in bparams, in list, term, ta);
+        push_block(inout p, c, id);
+    }
+    if s.found {
+        let dest = fresh;
+        set_value(inout p, c, dest, p.map(g.inst, callee.result));
+        let again = new_inst(
+            inout p,
+            Inst {
+                dest: n32(dest),
+                ty: call.ty,
+                s0: call.s0,
+                s1: call.s1,
+                flags: call.flags,
+                opq: call.opq,
+                op: call.op,
+                a: call.a
+            }
+        );
+        list.clear();
+        list.push(again);
+        let ta = put_back(inout p, continuation, dest);
+        let id = new_block(inout p, in empty, in list, T_JUMP, ta);
+        push_block(inout p, c, id);
+    }
+    first
+}
+
+// A callee block target in the copy (`target` in `splice`).
+fn target(in s: Split, k: u64, t: u64, first: u64, cold_block: u64) -> u64 {
+    if s.found && w(s.block) == k && w(s.cold) == t {
+        cold_block
+    } else {
+        add(t, first)
+    }
+}
+
+// ----- the report -----------------------------------------------------------------------
+
+pub struct Report {
+    sites: u64,
+    added: u64,
+    folded: u64,
+    constants: u64,
+    // per function
+    callees: ChunkSeq[u64],
+    partial: ChunkSeq[u64],
+    growth: ChunkSeq[u64],
+    grown: ChunkSeq[u8],
+    // per function and reason
+    refused: ChunkSeq[u64],
+    // contents: per function a list of (callee, units)
+    c_head: ChunkSeq[u32],
+    c_key: ChunkSeq[u32],
+    c_units: ChunkSeq[u64],
+    c_next: ChunkSeq[u32],
+    c_map: MapU,
+    // inlined_into: per function a list of members
+    i_head: ChunkSeq[u32],
+    i_member: ChunkSeq[u32],
+    i_next: ChunkSeq[u32],
+    i_map: MapU,
+}
+
+fn report_new(nf: u64) -> Report {
+    Report {
+        sites: 0,
+        added: 0,
+        folded: 0,
+        constants: 0,
+        callees: zeros64(nf),
+        partial: zeros64(nf),
+        growth: zeros64(nf),
+        grown: zeros8(nf),
+        refused: zeros64(wrapping_mul(nf, REASONS)),
+        c_head: fill32(nf, NONE32),
+        c_key: ChunkSeq::new[u32](),
+        c_units: ChunkSeq::new[u64](),
+        c_next: ChunkSeq::new[u32](),
+        c_map: map_new(256),
+        i_head: fill32(nf, NONE32),
+        i_member: ChunkSeq::new[u32](),
+        i_next: ChunkSeq::new[u32](),
+        i_map: map_new(256)
+    }
+}
+
+impl Report {
+    fn refuse(inout self, f: u32, why: u32) {
+        let at = add(wrapping_mul(w(f), REASONS), w(why));
+        set_u64(inout self.refused, at, inc(u64_at(in self.refused, at)));
+    }
+
+    fn grow(inout self, f: u32, units: u64) {
+        set_u64(inout self.growth, w(f), add(u64_at(in self.growth, w(f)), units));
+        set_u8(inout self.grown, w(f), 1);
+    }
+
+    fn hold(inout self, f: u32, key: u32, units: u64) {
+        let k = pair(f, key);
+        let e = self.c_map.get(k);
+        if e == NONE32 {
+            let e2 = n32(self.c_key.len());
+            self.c_key.push(key);
+            self.c_units.push(units);
+            self.c_next.push(u32_at(in self.c_head, w(f)));
+            set_u32(inout self.c_head, w(f), e2);
+            self.c_map.set(k, e2);
+        } else {
+            set_u64(inout self.c_units, w(e), add(u64_at(in self.c_units, w(e)), units));
+        }
+    }
+
+    fn into(inout self, f: u32, member: u32) {
+        let k = pair(f, member);
+        if self.i_map.get(k) != NONE32 {
+            return;
+        }
+        self.i_map.set(k, 1);
+        let e = n32(self.i_member.len());
+        self.i_member.push(member);
+        self.i_next.push(u32_at(in self.i_head, w(f)));
+        set_u32(inout self.i_head, w(f), e);
+    }
+}
+
+// ----- the pass -------------------------------------------------------------------------
+
+fn find_instance(in p: Prog, callee: u32, s0: u64, s1: u64) -> u32 {
+    for k in 0..p.instances.len() {
+        match p.instances.try_get(k) {
+            Option::Some(x) => {
+                if x.callee == callee && x.s0 == s0 && x.s1 == s1 {
+                    if x.has {
+                        return n32(k);
+                    }
+                    return NONE32;
+                }
+            },
+            Option::None => {},
+        }
+    }
+    NONE32
+}
+
+// `inline_into`: inline the eligible calls of caller `c`.
+fn inline_into(
+    inout p: Prog,
+    c: u32,
+    in cand: ChunkSeq[u32],
+    in sites: ChunkSeq[u64],
+    inout serial: u64,
+    inout rep: Report
+) {
+    let mut added: u64 = 0;
+    let mut handles_added: u64 = 0;
+    // Blocks spliced in from a callee were already processed bottom-up.
+    let mut spliced = zeros8(w(p.fun(c).fc));
+    let mut b: u64 = 0;
+    loop {
+        if b >= w(p.fun(c).fc) {
+            break;
+        }
+        if u8_at(in spliced, b) != 0 {
+            b = inc(b);
+            continue;
+        }
+        let mut i: u64 = 0;
+        loop {
+            let bk = p.block(p.fun(c), b);
+            if i >= w(bk.ic) {
+                break;
+            }
+            let inst = p.inst_of(bk, i);
+            if inst.op != O_CALL {
+                i = inc(i);
+                continue;
+            }
+            let a = w(inst.a);
+            let fi = p.fun_index(n32(p.op(a)));
+            if fi == NONE32 {
+                i = inc(i);
+                continue;
+            }
+            let mut why = u32_at(in cand, w(fi));
+            let mut g = Tgt {
+                f: fi,
+                inst: NONE32
+            };
+            let mut bs = bindings_new();
+            let mut fd = folded_none(0);
+            let mut s = no_split();
+            let mut cost_here: u64 = 0;
+            if why == R_OK && (p.op(inc(a)) != 0 || fi == c) {
+                why = R_SITE_TYPES;
+            }
+            if why == R_OK && (p.fun(fi).flags & W_GENERIC) != 0 {
+                g.inst = find_instance(in p, p.fun(fi).name, inst.s0, inst.s1);
+                if g.inst == NONE32 {
+                    why = R_SITE_UNRECORDED;
+                }
+            }
+            if why == R_OK {
+                why = site_bindings(in p, c, g, inst.dest, add(a, 2), inout bs);
+            }
+            if why == R_OK {
+                let handlers = handler_sum(in p, fi, false);
+                let mut folded_ok = false;
+                fd = fold(inout p, c, g, in bs, inout folded_ok);
+                let at_site = add(folded_cost(in p, g, in fd), handlers);
+                let single = u64_at(in sites, w(fi)) == 1;
+                let fits = at_site <= p.small_callee || (single && at_site <= p.single_site_callee);
+                if fits {
+                    cost_here = at_site;
+                } else {
+                    if handlers == 0 && partial_ok(in p, g, in bs) {
+                        s = split(in p, g, in fd, p.small_callee);
+                    }
+                    if s.found {
+                        cost_here = s.hot_cost;
+                    } else {
+                        why = R_SIZE;
+                    }
+                }
+            }
+            if why == R_OK {
+                // The copy also duplicates every body already inlined into
+                // the callee: charge those callees' caps too.
+                let cap = p.callee_growth;
+                let mut over_cap = add(u64_at(in rep.growth, w(fi)), cost_here) > cap;
+                let mut e = u32_at(in rep.c_head, w(fi));
+                loop {
+                    if e == NONE32 || over_cap {
+                        break;
+                    }
+                    let key = u32_at(in rep.c_key, w(e));
+                    if add(u64_at(in rep.growth, w(key)), u64_at(in rep.c_units, w(e))) > cap {
+                        over_cap = true;
+                    }
+                    e = u32_at(in rep.c_next, w(e));
+                }
+                if add(added, cost_here) > p.caller_growth
+                    || add(rep.added, cost_here) > p.program_growth
+                    || over_cap
+                    || add(handles_added, handler_sum(in p, fi, true)) > p.caller_handles {
+                    why = R_GROWTH;
+                }
+            }
+            if why != R_OK {
+                rep.refuse(fi, why);
+                i = inc(i);
+                continue;
+            }
+            serial = inc(serial);
+            let first = splice(inout p, c, b, i, g, in bs, serial, in fd, in s);
+            let total = w(p.fun(c).fc);
+            loop {
+                if spliced.len() >= total {
+                    break;
+                }
+                spliced.push(0);
+            }
+            for k in first..total {
+                set_u8(inout spliced, k, 1);
+            }
+            added = add(added, cost_here);
+            handles_added = add(handles_added, handler_sum(in p, fi, true));
+            rep.added = add(rep.added, cost_here);
+            rep.sites = inc(rep.sites);
+            // nested = contents[target], taken before the caller's update
+            let mut nk: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let mut nu: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let mut e = u32_at(in rep.c_head, w(fi));
+            loop {
+                if e == NONE32 {
+                    break;
+                }
+                nk.push(u32_at(in rep.c_key, w(e)));
+                nu.push(u64_at(in rep.c_units, w(e)));
+                e = u32_at(in rep.c_next, w(e));
+            }
+            rep.hold(c, fi, cost_here);
+            for k in 0..nk.len() {
+                rep.hold(c, u32_at(in nk, k), u64_at(in nu, k));
+            }
+            rep.grow(fi, cost_here);
+            for k in 0..nk.len() {
+                rep.grow(u32_at(in nk, k), u64_at(in nu, k));
+            }
+            set_u64(inout rep.callees, w(fi), inc(u64_at(in rep.callees, w(fi))));
+            if s.found {
+                set_u64(inout rep.partial, w(fi), inc(u64_at(in rep.partial, w(fi))));
+            }
+            if fd.decides() {
+                rep.folded = inc(rep.folded);
+            }
+            let mut members: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let mut m = u32_at(in rep.i_head, w(fi));
+            loop {
+                if m == NONE32 {
+                    break;
+                }
+                members.push(u32_at(in rep.i_member, w(m)));
+                m = u32_at(in rep.i_next, w(m));
+            }
+            rep.into(c, fi);
+            for k in 0..members.len() {
+                rep.into(c, u32_at(in members, k));
+            }
+            // The rest of this block moved to the continuation block, which
+            // the outer loop reaches later.
+            break;
+        }
+        b = inc(b);
+    }
+}
+
+// `inline`: small, non-recursive direct calls, bottom-up over the call
+// graph, within the budget.
+pub fn inline(inout p: Prog) -> Report {
+    let nf = p.funs.len();
+    let mut rep = report_new(nf);
+    if p.budget_off() {
+        return rep;
+    }
+    rep.constants = fold_literal_constants(inout p);
+    let mut gr = Graph {
+        nodes: ChunkSeq::new[u32](),
+        pos: fill32(nf, NONE32),
+        head: ChunkSeq::new[u32](),
+        tail: ChunkSeq::new[u32](),
+        to: ChunkSeq::new[u32](),
+        next: ChunkSeq::new[u32](),
+        edges: map_new(1024),
+        self_edge: ChunkSeq::new[u8]()
+    };
+    let mut sites = zeros64(nf);
+    let mut graphs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for fi in 0..nf {
+        let f32 = n32(fi);
+        let x = gr.node(f32);
+        let f = p.fun(f32);
+        for b in 0..w(f.fc) {
+            let bk = p.block(f, b);
+            for k in 0..w(bk.ic) {
+                let i = p.inst_of(bk, k);
+                if i.op != O_CALL {
+                    continue;
+                }
+                let callee = p.fun_index(n32(p.op(w(i.a))));
+                if callee != NONE32 {
+                    gr.edge(f32, callee);
+                    set_u64(inout sites, w(callee), inc(u64_at(in sites, w(callee))));
+                }
+            }
+        }
+        graphs.clear();
+        handler_graphs(in p, f32, inout graphs);
+        for k in 0..graphs.len() {
+            let nested = p.fun_index(u32_at(in graphs, k));
+            if nested != NONE32 {
+                gr.edge(f32, nested);
+            }
+        }
+    }
+    let t = tarjan(in gr);
+    let mut recursive = zeros8(nf);
+    let mut order: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for c in 0..sub(t.comp_a.len(), 1) {
+        let lo = w(u32_at(in t.comp_a, c));
+        let hi = w(u32_at(in t.comp_a, inc(c)));
+        let first = u32_at(in t.comp_nodes, lo);
+        let cyclic = sub(hi, lo) > 1 || u8_at(in gr.self_edge, w(first)) != 0;
+        for k in lo..hi {
+            let f = u32_at(in gr.nodes, w(u32_at(in t.comp_nodes, k)));
+            if cyclic {
+                set_u8(inout recursive, w(f), 1);
+            }
+            order.push(f);
+        }
+    }
+    // Functions that a `return` in another graph leaves.
+    let mut exited = zeros8(nf);
+    for fi in 0..nf {
+        let f = p.fun(n32(fi));
+        for b in 0..w(f.fc) {
+            let bk = p.block(f, b);
+            for k in 0..w(bk.ic) {
+                let i = p.inst_of(bk, k);
+                if i.op == O_EXIT {
+                    let owner = n32(p.op(w(i.a)));
+                    if owner != f.name {
+                        let o = p.fun_index(owner);
+                        if o != NONE32 {
+                            set_u8(inout exited, w(o), 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cand = fill32(nf, R_OK);
+    for fi in 0..nf {
+        let why = if u8_at(in recursive, fi) != 0 {
+            R_RECURSIVE
+        } else if u8_at(in exited, fi) != 0 {
+            R_HANDLER_RETURN
+        } else {
+            inlinable(in p, n32(fi))
+        };
+        set_u32(inout cand, fi, why);
+    }
+    let mut serial: u64 = 0;
+    for k in 0..order.len() {
+        if rep.added >= p.program_growth {
+            break;
+        }
+        let c = u32_at(in order, k);
+        if caller_eligible(in p, c) {
+            inline_into(inout p, c, in cand, in sites, inout serial, inout rep);
+        } else {
+            let f = p.fun(c);
+            for b in 0..w(f.fc) {
+                let bk = p.block(f, b);
+                for j in 0..w(bk.ic) {
+                    let i = p.inst_of(bk, j);
+                    if i.op == O_CALL {
+                        let callee = p.fun_index(n32(p.op(w(i.a))));
+                        if callee != NONE32 {
+                            rep.refuse(callee, R_CALLER);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    rep
+}
+
+// ----- output ---------------------------------------------------------------------------
+
+// The report (`decode_report` in tests/common/inline_words.rs). Names are
+// symbols, which equal input name indexes for every input name (the input
+// names are interned first, in order, after the empty name).
+fn put_report(in p: Prog, in rep: Report, inout o: ChunkSeq[u64]) {
+    o.push(rep.sites);
+    o.push(rep.added);
+    o.push(rep.folded);
+    o.push(rep.constants);
+    let nf = p.funs.len();
+    let mut rows: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut count: u64 = 0;
+    for f in 0..nf {
+        let n = u64_at(in rep.callees, f);
+        if n > 0 {
+            rows.push(p.input_name(p.fun(n32(f)).name));
+            rows.push(n);
+            count = inc(count);
+        }
+    }
+    o.push(count);
+    o.extend(in rows.as_slice());
+    rows.clear();
+    count = 0;
+    for f in 0..nf {
+        let h = u32_at(in rep.i_head, f);
+        if h == NONE32 {
+            continue;
+        }
+        count = inc(count);
+        rows.push(p.input_name(p.fun(n32(f)).name));
+        let mut members: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut e = h;
+        loop {
+            if e == NONE32 {
+                break;
+            }
+            members.push(p.input_name(p.fun(u32_at(in rep.i_member, w(e))).name));
+            e = u32_at(in rep.i_next, w(e));
+        }
+        rows.push(members.len());
+        rows.extend(in members.as_slice());
+    }
+    o.push(count);
+    o.extend(in rows.as_slice());
+    rows.clear();
+    count = 0;
+    for f in 0..nf {
+        for r in 0..REASONS {
+            let n = u64_at(in rep.refused, add(wrapping_mul(f, REASONS), r));
+            if n > 0 {
+                rows.push(p.input_name(p.fun(n32(f)).name));
+                rows.push(r);
+                rows.push(n);
+                count = inc(count);
+            }
+        }
+    }
+    o.push(count);
+    o.extend(in rows.as_slice());
+    rows.clear();
+    count = 0;
+    for f in 0..nf {
+        let n = u64_at(in rep.partial, f);
+        if n > 0 {
+            rows.push(p.input_name(p.fun(n32(f)).name));
+            rows.push(n);
+            count = inc(count);
+        }
+    }
+    o.push(count);
+    o.extend(in rows.as_slice());
+    rows.clear();
+    count = 0;
+    for f in 0..nf {
+        if u8_at(in rep.grown, f) != 0 {
+            rows.push(p.input_name(p.fun(n32(f)).name));
+            rows.push(u64_at(in rep.growth, f));
+            count = inc(count);
+        }
+    }
+    o.push(count);
+    o.extend(in rows.as_slice());
+    o.push(nf);
+    for f in 0..nf {
+        let fi = n32(f);
+        o.push(p.input_name(p.fun(fi).name));
+        o.push(size(in p, fi));
+        o.push(
+            cost(in p, Tgt {
+                f: fi,
+                inst: NONE32
+            })
+        );
+    }
+}
+
+
+// ----- the canonical text (`dump` in tests/common/inline_words.rs) ----------------------
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_name(in p: Prog, inout o: ChunkSeq[u8], s: u64) {
+    p.names.write(n32(s), inout o);
+}
+
+// root.path from operand offset `at` (root, n, path*).
+fn put_path(in p: Prog, inout o: ChunkSeq[u8], at: u64) {
+    put_name(in p, inout o, p.op(at));
+    let n = p.op(inc(at));
+    for k in 0..n {
+        o.push(46);
+        put_name(in p, inout o, p.op(add(add(at, 2), k)));
+    }
+}
+
+fn put_pattern(in p: Prog, inout o: ChunkSeq[u8], at: u64) {
+    let kind = p.pat(at);
+    if kind == PK_WILD {
+        o.push(95);
+    } else if kind == PK_BIND {
+        put_name(in p, inout o, p.pat(add(at, 3)));
+    } else if kind == PK_TUPLE {
+        o.push(40);
+        let n = p.pat(add(at, 3));
+        for i in 0..n {
+            put_pattern(in p, inout o, p.pat(add(add(at, 4), i)));
+            o.push(44);
+        }
+        o.push(41);
+    } else if kind == PK_CTOR {
+        put_name(in p, inout o, p.pat(add(at, 3)));
+        if p.pat(add(at, 4)) != 0 {
+            o.push(33);
+        }
+        o.push(123);
+        let n = p.pat(add(at, 5));
+        for i in 0..n {
+            put_name(in p, inout o, p.pat(add(add(at, 6), wrapping_mul(i, 2))));
+            o.push(58);
+            put_pattern(in p, inout o, p.pat(add(add(at, 7), wrapping_mul(i, 2))));
+            o.push(44);
+        }
+        o.push(125);
+    } else if kind == PK_LIT {
+        o.push(35);
+        push_decimal(inout o, p.pat(add(at, 6)));
+    }
+    o.push(64);
+    push_decimal(inout o, p.pat(inc(at)));
+    o.push(45);
+    push_decimal(inout o, p.pat(add(at, 2)));
+}
+
+fn put_space_num(inout o: ChunkSeq[u8], x: u64) {
+    o.push(32);
+    push_decimal(inout o, x);
+}
+
+fn put_dump_args(in p: Prog, inout o: ChunkSeq[u8], start: u64) {
+    let n = p.op(start);
+    let mut at = inc(start);
+    for k in 0..n {
+        put_space_num(inout o, p.op(at));
+        o.push(58);
+        push_decimal(inout o, p.op(inc(at)));
+        if p.op(add(at, 2)) != 0 {
+            o.push(61);
+            put_path(in p, inout o, add(at, 3));
+        }
+        at = arg_end(in p, at);
+    }
+}
+
+fn put_inst(in p: Prog, inout o: ChunkSeq[u8], i: Inst) {
+    put_space_num(inout o, w(i.dest));
+    put_space_num(inout o, w(i.ty));
+    put_space_num(inout o, i.s0);
+    o.push(45);
+    push_decimal(inout o, i.s1);
+    put_space_num(inout o, i.flags & I_FALLIBLE);
+    put(inout o, " #");
+    push_decimal(inout o, w(i.opq));
+    let a = w(i.a);
+    let op = i.op;
+    if op == O_READ {
+        o.push(32);
+        put_path(in p, inout o, a);
+    } else if op == O_BIND {
+        put_space_num(inout o, p.op(a));
+        o.push(32);
+        put_pattern(in p, inout o, p.op(inc(a)));
+    } else if op == O_WRITE {
+        o.push(32);
+        put_path(in p, inout o, inc(a));
+        put_space_num(inout o, p.op(a));
+    } else if op == O_UNARY {
+        put_space_num(inout o, p.op(inc(a)));
+    } else if op == O_PROJECT || op == O_TRY {
+        put_space_num(inout o, p.op(a));
+    } else if op == O_BINARY {
+        put_space_num(inout o, p.op(inc(a)));
+        put_space_num(inout o, p.op(add(a, 2)));
+    } else if op == O_INDEX {
+        put_space_num(inout o, p.op(a));
+        put_space_num(inout o, p.op(inc(a)));
+    } else if op == O_TUPLE || op == O_VECTOR {
+        let n = p.op(a);
+        for k in 0..n {
+            put_space_num(inout o, p.op(add(inc(a), k)));
+        }
+    } else if op == O_DATA {
+        let n = p.op(inc(a));
+        for k in 0..n {
+            put_space_num(inout o, p.op(add(add(a, 2), k)));
+        }
+    } else if op == O_CALL {
+        o.push(32);
+        put_name(in p, inout o, p.op(a));
+        put_dump_args(in p, inout o, add(a, 2));
+    } else if op == O_TILED || op == O_SEQ || op == O_FIP {
+        put_dump_args(in p, inout o, a);
+    } else if op == O_INDIRECT {
+        put_space_num(inout o, p.op(a));
+        put_dump_args(in p, inout o, inc(a));
+    } else if op == O_EXIT {
+        put_space_num(inout o, p.op(inc(a)));
+    } else if op == O_HANDLE {
+        if p.op(a) != 0 {
+            put(inout o, " state");
+            put_space_num(inout o, p.op(inc(a)));
+        }
+        let na = p.op(add(a, 2));
+        let mut at = add(a, 3);
+        for k in 0..na {
+            o.push(32);
+            put_name(in p, inout o, p.op(at));
+            o.push(61);
+            put_name(in p, inout o, p.op(inc(at)));
+            at = add(at, 2);
+        }
+        let nm = p.op(at);
+        at = inc(at);
+        for k in 0..nm {
+            put(inout o, " move ");
+            put_path(in p, inout o, at);
+            at = add(add(at, 2), p.op(inc(at)));
+        }
+    }
+    o.push(10);
+}
+
+fn put_term(in p: Prog, inout o: ChunkSeq[u8], bk: Blk) {
+    let ta = w(bk.ta);
+    if bk.term == T_RETURN {
+        put(inout o, " return");
+        put_space_num(inout o, p.op(ta));
+    } else if bk.term == T_JUMP {
+        put(inout o, " jump");
+        put_space_num(inout o, p.op(ta));
+        let n = p.op(inc(ta));
+        for k in 0..n {
+            put_space_num(inout o, p.op(add(add(ta, 2), k)));
+        }
+    } else if bk.term == T_BRANCH {
+        put(inout o, " branch");
+        put_space_num(inout o, p.op(ta));
+        put_space_num(inout o, p.op(inc(ta)));
+        put_space_num(inout o, p.op(add(ta, 2)));
+    } else if bk.term == T_MATCH {
+        put(inout o, " match");
+        put_space_num(inout o, p.op(ta));
+        let n = p.op(inc(ta));
+        for k in 0..n {
+            o.push(32);
+            put_pattern(in p, inout o, p.op(add(add(ta, 2), wrapping_mul(k, 2))));
+            put(inout o, "=>");
+            push_decimal(inout o, p.op(add(add(ta, 3), wrapping_mul(k, 2))));
+        }
+    } else {
+        put(inout o, " unreachable");
+    }
+    o.push(10);
+}
+
+// The program as `dump` writes it; locals in pool order (the harness sorts
+// them by name).
+fn put_dump(in p: Prog, inout o: ChunkSeq[u8]) {
+    for fi in 0..p.funs.len() {
+        let f = p.fun(n32(fi));
+        put(inout o, "fn ");
+        put_name(in p, inout o, w(f.name));
+        put(inout o, " ->");
+        put_space_num(inout o, w(f.result));
+        o.push(10);
+        for k in 0..w(f.pn) {
+            let q = p.param(f, k);
+            put(inout o, "param ");
+            put_name(in p, inout o, w(q.name));
+            put_space_num(inout o, q.pass);
+            put_space_num(inout o, w(q.ty));
+            o.push(10);
+        }
+        for k in 0..w(f.ln) {
+            put(inout o, "local ");
+            put_name(in p, inout o, w(u32_at(in p.loc_name, add(w(f.la), k))));
+            put_space_num(inout o, w(u32_at(in p.loc_ty, add(w(f.la), k))));
+            o.push(10);
+        }
+        for v in 0..w(f.vn) {
+            let t = p.value_ty(f, v);
+            if t != NONE32 {
+                put(inout o, "value");
+                put_space_num(inout o, v);
+                put_space_num(inout o, w(t));
+                o.push(10);
+            }
+        }
+        for b in 0..w(f.fc) {
+            let bk = p.block(f, b);
+            put(inout o, "block");
+            put_space_num(inout o, b);
+            for k in 0..w(bk.pn) {
+                put_space_num(inout o, w(p.id(add(w(bk.pa), k))));
+            }
+            o.push(10);
+            for k in 0..w(bk.ic) {
+                put_inst(in p, inout o, p.inst_of(bk, k));
+            }
+            put_term(in p, inout o, bk);
+        }
+    }
+}
+
+// ----- entries --------------------------------------------------------------------------
+
+// The text packed as words: a byte length, then the bytes eight per word.
+fn pack(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(text.len());
+    let mut word: u64 = 0;
+    let mut shift: u64 = 0;
+    for i in 0..text.len() {
+        word = word | wrapping_shl_u64(widen_u64(u8_at(in text, i)), n32(shift));
+        shift = add(shift, 8);
+        if shift == 64 {
+            o.push(word);
+            word = 0;
+            shift = 0;
+        }
+    }
+    if shift > 0 {
+        o.push(word);
+    }
+    o
+}
+
+// What `inline_entry` returns, by its first input word.
+const MODE_REPORT: u64 = 0;
+const MODE_DUMP: u64 = 1;
+const MODE_INPUT: u64 = 2;
+
+// The harness's one entry: the first word picks the result, the rest is
+// the inliner's input.
+// - 0: the report and every function's size and cost after inlining;
+// - 1: the inlined program as text (`dump`);
+// - 2: the input program as text, not inlined (the decoder's round trip).
+pub fn inline_entry(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mode = match b.try_read_u64_le(0) {
+        Option::Some(x) => x,
+        Option::None => MODE_REPORT,
+    };
+    let mut p = read_input(in b[8..b.len()]);
+    if mode == MODE_INPUT {
+        let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_dump(in p, inout o);
+        return pack(in o);
+    }
+    let rep = inline(inout p);
+    if mode == MODE_DUMP {
+        let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_dump(in p, inout o);
+        return pack(in o);
+    }
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_report(in p, in rep, inout o);
+    o
+}
