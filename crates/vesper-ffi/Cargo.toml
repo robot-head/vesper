@@ -2,6 +2,7 @@
 name = "vesper-ffi"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Checked wire layouts, views and declarative C ABI contracts for Vesper Bridge"
 
 [dependencies]

@@ -234,9 +234,11 @@ jobs:
   # names the affected ports (scripts/ci/port_harness_selection.py): a change
   # inside some ports' crates tests only those ports and their dependents;
   # anything else, and every push to main and nightly, tests them all.
+  # When the plan names no affected port, the shards are skipped as jobs, so
+  # they take no runners (#1321); `complete` accepts that skip.
   ports:
     needs: [plan, ports-compiler]
-    if: ${{ always() && !cancelled() }}
+    if: ${{ always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.ports != 'none' }}
     name: Vesper ports (Linux ${{ matrix.shard }}/7)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     strategy:
       fail-fast: false
@@ -307,12 +309,16 @@ jobs:
           MAC_RESULT: ${{ needs.platform.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
           PORTS_RESULT: ${{ needs.ports.result }}
+          PORTS: ${{ needs.plan.outputs.ports }}
           CHECKED_SHA: ${{ needs.plan.outputs.sha }}
           PROFILE: ${{ needs.plan.outputs.profile }}
         run: |
           test "$PLAN_RESULT" = success
           test "$MAC_RESULT" = success
           test "$WINDOWS_RESULT" = success
-          test "$PORTS_RESULT" = success
+          # The shards are skipped only when no port is affected.
+          if [ "$PORTS_RESULT" != skipped ] || [ "$PORTS" != none ]; then
+            test "$PORTS_RESULT" = success
+          fi
           echo "checked_sha=$CHECKED_SHA" >> "$GITHUB_OUTPUT"
           echo "validation_profile=$PROFILE" >> "$GITHUB_OUTPUT"

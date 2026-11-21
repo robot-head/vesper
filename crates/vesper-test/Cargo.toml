@@ -2,6 +2,7 @@
 name = "vesper-test"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Anvil unified test harness DTOs, mode classifier, verdict cache schema, obligation ledger, mutant plans, and reporters"
 publish = false
 

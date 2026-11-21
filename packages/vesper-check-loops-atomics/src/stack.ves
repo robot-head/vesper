@@ -1,0 +1,1194 @@
+// The single stack-bound report of `src/stack_bound.rs` (self-hosting wave
+// SH2 lane 10, #1182): the graph check, Silicon's shared analysis
+// (`vesper_silicon::stack::analyze_stack`: Tarjan's SCCs, then the longest
+// path in reverse topological order), the eBPF kernel rules
+// (`vesper_ebpf::callgraph::check_stack`, 512 bytes and 8 frames) with the
+// cross-check of the two analyzers, and `render`.
+//
+// Function names, external symbols and policy keys are symbols. Rust's
+// `BTreeSet<Succ>` of one function's successors (functions by id, then
+// bounded externals by symbol text) is a sorted run of one key array.
+
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::input::{
+    Reader
+};
+use self::out::{
+    put,
+    put_u64
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+const BPF_MAX_STACK_BYTES: u64 = 512;
+const MAX_CALL_FRAMES: u64 = 8;
+
+pub copy struct StackFn {
+    id: u32,
+    name: u32,
+    frame: u32,
+}
+
+pub copy struct Site {
+    caller: u32,
+    // the symbol of an external call (NONE32 for an indirect one)
+    symbol: u32,
+    // the instruction, NONE64 when unknown
+    inst: u64,
+}
+
+pub copy struct Pair {
+    key: u32,
+    value: u32,
+}
+
+pub struct Graph {
+    ebpf: bool,
+    fns: ChunkSeq[StackFn],
+    calls: ChunkSeq[u64],
+    indirect: ChunkSeq[Site],
+    external: ChunkSeq[Site],
+    // policy
+    roots: ChunkSeq[Pair],
+    bounds: ChunkSeq[Pair],
+    // indirect_targets: caller symbol -> targets[ta..ta+tn]
+    target_rows: ChunkSeq[Site],
+    targets: ChunkSeq[u32],
+}
+
+fn opt(x: u64) -> u64 {
+    if x == 0 {
+        NONE64
+    } else {
+        wrapping_sub(x, 1)
+    }
+}
+
+fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+    match nmap.try_get(x) {
+        Option::Some(s) => s,
+        Option::None => NONE32,
+    }
+}
+
+// The graph and policy: origin, n functions (id, name, frame bytes),
+// calls, indirect sites (caller, inst + 1 or 0), external calls (caller,
+// symbol, inst + 1 or 0), roots (name, budget), external bounds (symbol,
+// bytes), indirect targets (caller, k, k targets).
+pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> Graph {
+    let mut g = Graph {
+        ebpf: r.word(in b) != 0,
+        fns: ChunkSeq::new[StackFn](),
+        calls: ChunkSeq::new[u64](),
+        indirect: ChunkSeq::new[Site](),
+        external: ChunkSeq::new[Site](),
+        roots: ChunkSeq::new[Pair](),
+        bounds: ChunkSeq::new[Pair](),
+        target_rows: ChunkSeq::new[Site](),
+        targets: ChunkSeq::new[u32]()
+    };
+    let n = r.word(in b);
+    for i in 0..n {
+        let id = wrapping_u32(r.word(in b));
+        let name = sym(in nmap, r.word(in b));
+        let frame = wrapping_u32(r.word(in b));
+        g
+            .fns
+            .push(
+            StackFn {
+                id: id,
+                name: name,
+                frame: frame
+            }
+        );
+    }
+    let n = r.word(in b);
+    for i in 0..n {
+        let a = r.word(in b);
+        let c = r.word(in b);
+        g.calls.push(a);
+        g.calls.push(c);
+    }
+    let n = r.word(in b);
+    for i in 0..n {
+        let caller = wrapping_u32(r.word(in b));
+        let inst = opt(r.word(in b));
+        g
+            .indirect
+            .push(
+            Site {
+                caller: caller,
+                symbol: NONE32,
+                inst: inst
+            }
+        );
+    }
+    let n = r.word(in b);
+    for i in 0..n {
+        let caller = wrapping_u32(r.word(in b));
+        let symbol = sym(in nmap, r.word(in b));
+        let inst = opt(r.word(in b));
+        g
+            .external
+            .push(
+            Site {
+                caller: caller,
+                symbol: symbol,
+                inst: inst
+            }
+        );
+    }
+    let n = r.word(in b);
+    for i in 0..n {
+        let key = sym(in nmap, r.word(in b));
+        let value = wrapping_u32(r.word(in b));
+        g
+            .roots
+            .push(
+            Pair {
+                key: key,
+                value: value
+            }
+        );
+    }
+    let n = r.word(in b);
+    for i in 0..n {
+        let key = sym(in nmap, r.word(in b));
+        let value = wrapping_u32(r.word(in b));
+        g
+            .bounds
+            .push(
+            Pair {
+                key: key,
+                value: value
+            }
+        );
+    }
+    let n = r.word(in b);
+    for i in 0..n {
+        let caller = sym(in nmap, r.word(in b));
+        let k = r.word(in b);
+        let a = g.targets.len();
+        for j in 0..k {
+            g.targets.push(sym(in nmap, r.word(in b)));
+        }
+        g
+            .target_rows
+            .push(
+            Site {
+                caller: caller,
+                symbol: wrapping_u32(k),
+                inst: a
+            }
+        );
+    }
+    g
+}
+
+fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE32,
+    }
+}
+
+fn set64(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    let ok = s.try_set(i, v);
+}
+
+fn set32(inout s: ChunkSeq[u32], i: u64, v: u32) {
+    let ok = s.try_set(i, v);
+}
+
+// Heap sort of `s` ascending.
+pub fn sort_u64(inout s: ChunkSeq[u64]) {
+    let n = s.len();
+    if n < 2 {
+        return;
+    }
+    let mut start = n / 2;
+    loop {
+        if start == 0 {
+            break;
+        }
+        start = wrapping_sub(start, 1);
+        sift(inout s, start, n);
+    }
+    let mut end = n;
+    loop {
+        if end <= 1 {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+        let top = u64_at(in s, 0);
+        set64(inout s, 0, u64_at(in s, end));
+        set64(inout s, end, top);
+        sift(inout s, 0, end);
+    }
+}
+
+fn sift(inout s: ChunkSeq[u64], root: u64, n: u64) {
+    let mut at = root;
+    loop {
+        let child = wrapping_add(wrapping_mul(at, 2), 1);
+        if child >= n {
+            return;
+        }
+        let mut big = child;
+        if wrapping_add(child, 1)
+            < n
+            && u64_at(in s, wrapping_add(child, 1))
+            > u64_at(in s, child) {
+            big = wrapping_add(child, 1);
+        }
+        if u64_at(in s, big) <= u64_at(in s, at) {
+            return;
+        }
+        let x = u64_at(in s, at);
+        set64(inout s, at, u64_at(in s, big));
+        set64(inout s, big, x);
+        at = big;
+    }
+}
+
+// Byte order of two names (`String`'s `Ord`): -1, 0 or 1.
+fn cmp_names(in names: Names, a: u32, b: u32) -> i64 {
+    let na = names.size(a);
+    let nb = names.size(b);
+    let n = if na < nb {
+        na
+    } else {
+        nb
+    };
+    for i in 0..n {
+        let x = names.byte(a, i);
+        let y = names.byte(b, i);
+        if x < y {
+            return -1;
+        }
+        if x > y {
+            return 1;
+        }
+    }
+    if na < nb {
+        -1
+    } else if na > nb {
+        1
+    } else {
+        0
+    }
+}
+
+impl Graph {
+    fn function(in self, i: u64) -> StackFn {
+        match self.fns.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => StackFn {
+                id: NONE32,
+                name: NONE32,
+                frame: 0
+            },
+        }
+    }
+
+    fn name(in self, id: u64) -> u32 {
+        self.function(id).name
+    }
+
+    // `policy.external_bounds.get(symbol)`: bytes, NONE64 when absent.
+    fn bound(in self, symbol: u32) -> u64 {
+        for i in 0..self.bounds.len() {
+            let p = match self.bounds.try_get(i) {
+                Option::Some(p) => p,
+                Option::None => Pair {
+                    key: NONE32,
+                    value: 0
+                },
+            };
+            if p.key == symbol {
+                return widen_u64(p.value);
+            }
+        }
+        NONE64
+    }
+
+    // `by_name.get(name)`: the last function with that name (a `HashMap`
+    // collected in order keeps the last), NONE64 when absent.
+    fn by_name(in self, name: u32) -> u64 {
+        let mut i = self.fns.len();
+        loop {
+            if i == 0 {
+                return NONE64;
+            }
+            i = wrapping_sub(i, 1);
+            if self.function(i).name == name {
+                return i;
+            }
+        }
+    }
+
+    fn first_named(in self, name: u32) -> u64 {
+        for i in 0..self.fns.len() {
+            if self.function(i).name == name {
+                return i;
+            }
+        }
+        NONE64
+    }
+
+    // The target row of `caller` in `indirect_targets`, NONE64 when absent.
+    fn target_row(in self, caller: u32) -> u64 {
+        for i in 0..self.target_rows.len() {
+            let t = match self.target_rows.try_get(i) {
+                Option::Some(t) => t,
+                Option::None => Site {
+                    caller: NONE32,
+                    symbol: 0,
+                    inst: 0
+                },
+            };
+            if t.caller == caller {
+                return i;
+            }
+        }
+        NONE64
+    }
+}
+
+// A finding of the report, written as one line.
+fn finding(inout o: ChunkSeq[u8], in names: Names, function: u32, inst: u64, in rule: Str) {
+    put(inout o, "finding ");
+    names.write(function, inout o);
+    put(inout o, " inst ");
+    if inst == NONE64 {
+        put(inout o, "-");
+    } else {
+        put_u64(inout o, inst);
+    }
+    o.push(32);
+    put(inout o, rule);
+    put(inout o, ": ");
+}
+
+fn write_path(inout o: ChunkSeq[u8], in names: Names, in path: ChunkSeq[u32]) {
+    for i in 0..path.len() {
+        if i > 0 {
+            put(inout o, " -> ");
+        }
+        names.write(u32_at(in path, i), inout o);
+    }
+}
+
+pub copy struct RootRow {
+    root: u32,
+    budget: u32,
+    // NONE64 when unbounded
+    worst: u64,
+    pa: u32,
+    pn: u32,
+    within: bool,
+}
+
+pub struct Report {
+    findings: ChunkSeq[u8],
+    roots: ChunkSeq[RootRow],
+    paths: ChunkSeq[u32],
+}
+
+// Tarjan's algorithm, iterative (`tarjan`): the SCCs in reverse
+// topological order, each sorted, as `members[starts[k]..starts[k+1]]`.
+fn tarjan(
+    n: u64,
+    in adj_start: ChunkSeq[u64],
+    in adj: ChunkSeq[u32],
+    inout members: ChunkSeq[u32],
+    inout starts: ChunkSeq[u64]
+) {
+    let mut index: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    index.resize(n, NONE64);
+    let mut low: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    low.resize(n, 0);
+    let mut on_stack: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    on_stack.resize(n, 0);
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut next: u64 = 0;
+    // work items: vertex and child position, two words each
+    let mut work: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for start in 0..n {
+        if u64_at(in index, start) != NONE64 {
+            continue;
+        }
+        work.push(start);
+        work.push(0);
+        loop {
+            let len = work.len();
+            if len == 0 {
+                break;
+            }
+            let v = u64_at(in work, wrapping_sub(len, 2));
+            let child = u64_at(in work, wrapping_sub(len, 1));
+            if child == 0 && u64_at(in index, v) == NONE64 {
+                set64(inout index, v, next);
+                set64(inout low, v, next);
+                next = wrapping_add(next, 1);
+                stack.push(v);
+                set64(inout on_stack, v, 1);
+            }
+            let a = u64_at(in adj_start, v);
+            let deg = wrapping_sub(u64_at(in adj_start, wrapping_add(v, 1)), a);
+            if child < deg {
+                let w = widen_u64(u32_at(in adj, wrapping_add(a, child)));
+                set64(inout work, wrapping_sub(len, 1), wrapping_add(child, 1));
+                if u64_at(in index, w) == NONE64 {
+                    work.push(w);
+                    work.push(0);
+                } else if u64_at(in on_stack, w) != 0 {
+                    let iw = u64_at(in index, w);
+                    if iw < u64_at(in low, v) {
+                        set64(inout low, v, iw);
+                    }
+                }
+                continue;
+            }
+            let x = work.pop();
+            let y = work.pop();
+            let len = work.len();
+            if len > 0 {
+                let parent = u64_at(in work, wrapping_sub(len, 2));
+                if u64_at(in low, v) < u64_at(in low, parent) {
+                    set64(inout low, parent, u64_at(in low, v));
+                }
+            }
+            if u64_at(in low, v) == u64_at(in index, v) {
+                let mut scc: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                loop {
+                    let w = match stack.pop() {
+                        Option::Some(w) => w,
+                        Option::None => break,
+                    };
+                    set64(inout on_stack, w, 0);
+                    scc.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                sort_u64(inout scc);
+                starts.push(members.len());
+                for i in 0..scc.len() {
+                    members.push(wrapping_u32(u64_at(in scc, i)));
+                }
+            }
+        }
+    }
+    starts.push(members.len());
+}
+
+// `analyze_stack`, then the eBPF rules: the report lines.
+pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
+    let n = g.fns.len();
+    let mut rep = Report {
+        findings: ChunkSeq::new[u8](),
+        roots: ChunkSeq::new[RootRow](),
+        paths: ChunkSeq::new[u32]()
+    };
+    let mut unbounded_here: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    unbounded_here.resize(n, 0);
+    // Function successors as (caller << 32 | callee), bounded ones as
+    // (caller << 32 | symbol) in a second array, each sorted and unique.
+    let mut fn_edges: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut bounded: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..wrapping_div_pairs(g.calls.len()) {
+        let a = u64_at(in g.calls, wrapping_mul(i, 2));
+        let c = u64_at(in g.calls, wrapping_add(wrapping_mul(i, 2), 1));
+        fn_edges.push(wrapping_shl_u64(a, 32) | c);
+    }
+    for i in 0..g.external.len() {
+        let e = match g.external.try_get(i) {
+            Option::Some(e) => e,
+            Option::None => Site {
+                caller: 0,
+                symbol: NONE32,
+                inst: NONE64
+            },
+        };
+        let c = widen_u64(e.caller);
+        if g.bound(e.symbol) != NONE64 {
+            bounded.push(wrapping_shl_u64(c, 32) | widen_u64(e.symbol));
+        } else {
+            set64(inout unbounded_here, c, 1);
+            finding(
+                inout rep.findings,
+                in names,
+                g.name(c),
+                e.inst,
+                "silicon.stack.unbounded_external_call"
+            );
+            put(inout rep.findings, "call to `");
+            names.write(e.symbol, inout rep.findings);
+            put(
+                inout rep.findings,
+                "` has no declared stack bound; list it in StackPolicy::external_bounds\n"
+            );
+        }
+    }
+    for i in 0..g.indirect.len() {
+        let s = match g.indirect.try_get(i) {
+            Option::Some(s) => s,
+            Option::None => Site {
+                caller: 0,
+                symbol: NONE32,
+                inst: NONE64
+            },
+        };
+        let c = widen_u64(s.caller);
+        let caller = g.name(c);
+        // `to_silicon` gives an unknown instruction 0.
+        let inst = if s.inst == NONE64 {
+            0
+        } else {
+            s.inst
+        };
+        let row = g.target_row(caller);
+        if row == NONE64 {
+            set64(inout unbounded_here, c, 1);
+            finding(
+                inout rep.findings,
+                in names,
+                caller,
+                inst,
+                "silicon.stack.unresolved_indirect_call"
+            );
+            put(inout rep.findings, "indirect call without a policy-listed target set\n");
+        } else {
+            let t = match g.target_rows.try_get(row) {
+                Option::Some(t) => t,
+                Option::None => Site {
+                    caller: NONE32,
+                    symbol: 0,
+                    inst: 0
+                },
+            };
+            for j in 0..widen_u64(t.symbol) {
+                let target = u32_at(in g.targets, wrapping_add(t.inst, j));
+                let id = g.by_name(target);
+                if id != NONE64 {
+                    fn_edges.push(wrapping_shl_u64(c, 32) | id);
+                } else if g.bound(target) != NONE64 {
+                    bounded.push(wrapping_shl_u64(c, 32) | widen_u64(target));
+                } else {
+                    set64(inout unbounded_here, c, 1);
+                    finding(
+                        inout rep.findings,
+                        in names,
+                        caller,
+                        inst,
+                        "silicon.stack.unknown_indirect_target"
+                    );
+                    put(inout rep.findings, "indirect target `");
+                    names.write(target, inout rep.findings);
+                    put(inout rep.findings, "` is neither defined nor bounded\n");
+                }
+            }
+        }
+    }
+    sort_u64(inout fn_edges);
+    // Adjacency: unique callees of each caller, ascending.
+    let mut adj_start: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(n, 1));
+    let mut adj: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut k: u64 = 0;
+    for v in 0..n {
+        adj_start.push(adj.len());
+        loop {
+            if k >= fn_edges.len() {
+                break;
+            }
+            let e = u64_at(in fn_edges, k);
+            if wrapping_shr_u64(e, 32) != v {
+                break;
+            }
+            let callee = wrapping_u32(e & 4294967295);
+            let m = adj.len();
+            if m == u64_at(in adj_start, v) || u32_at(in adj, wrapping_sub(m, 1)) != callee {
+                adj.push(callee);
+            }
+            k = wrapping_add(k, 1);
+        }
+    }
+    adj_start.push(adj.len());
+    // Bounded successors of each caller, unique, by symbol text.
+    let mut bstart: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(n, 1));
+    let mut bsyms: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    sort_u64(inout bounded);
+    let mut k: u64 = 0;
+    for v in 0..n {
+        let a = bsyms.len();
+        bstart.push(a);
+        loop {
+            if k >= bounded.len() {
+                break;
+            }
+            let e = u64_at(in bounded, k);
+            if wrapping_shr_u64(e, 32) != v {
+                break;
+            }
+            let s = wrapping_u32(e & 4294967295);
+            // insert in text order, skipping duplicates
+            let mut at = bsyms.len();
+            let mut dup = false;
+            loop {
+                if at == a {
+                    break;
+                }
+                let c = cmp_names(in names, u32_at(in bsyms, wrapping_sub(at, 1)), s);
+                if c == 0 {
+                    dup = true;
+                    break;
+                }
+                if c < 0 {
+                    break;
+                }
+                at = wrapping_sub(at, 1);
+            }
+            if !dup {
+                bsyms.push(s);
+                let mut j = wrapping_sub(bsyms.len(), 1);
+                loop {
+                    if j <= at {
+                        break;
+                    }
+                    set32(inout bsyms, j, u32_at(in bsyms, wrapping_sub(j, 1)));
+                    j = wrapping_sub(j, 1);
+                }
+                set32(inout bsyms, at, s);
+            }
+            k = wrapping_add(k, 1);
+        }
+    }
+    bstart.push(bsyms.len());
+    let mut members: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    tarjan(n, in adj_start, in adj, inout members, inout starts);
+    let sccs = wrapping_sub(starts.len(), 1);
+    let mut cyclic: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    cyclic.resize(n, 0);
+    for s in 0..sccs {
+        let a = u64_at(in starts, s);
+        let b = u64_at(in starts, wrapping_add(s, 1));
+        let first = widen_u64(u32_at(in members, a));
+        let mut cycle = wrapping_sub(b, a) > 1;
+        if !cycle {
+            for j in u64_at(in adj_start, first)..u64_at(in adj_start, wrapping_add(first, 1)) {
+                if widen_u64(u32_at(in adj, j)) == first {
+                    cycle = true;
+                }
+            }
+        }
+        if cycle {
+            for j in a..b {
+                set64(inout cyclic, widen_u64(u32_at(in members, j)), 1);
+            }
+            finding(inout rep.findings, in names, g.name(first), NONE64, "silicon.stack.recursion");
+            put(inout rep.findings, "recursive call cycle among {");
+            for j in a..b {
+                if j > a {
+                    put(inout rep.findings, ", ");
+                }
+                names.write(g.name(widen_u64(u32_at(in members, j))), inout rep.findings);
+            }
+            put(inout rep.findings, "}\n");
+        }
+    }
+    // Longest path in reverse topological order. NONE64 = unbounded.
+    // best: a function id, or 2^32 + k for the k-th bounded symbol slot.
+    let mut depth: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    depth.resize(n, NONE64);
+    let mut best: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    best.resize(n, NONE64);
+    for s in 0..sccs {
+        for j in u64_at(in starts, s)..u64_at(in starts, wrapping_add(s, 1)) {
+            let v = widen_u64(u32_at(in members, j));
+            if u64_at(in cyclic, v) != 0 || u64_at(in unbounded_here, v) != 0 {
+                continue;
+            }
+            let mut deepest: u64 = 0;
+            let mut pick = NONE64;
+            let mut ok = true;
+            for q in u64_at(in adj_start, v)..u64_at(in adj_start, wrapping_add(v, 1)) {
+                let id = widen_u64(u32_at(in adj, q));
+                let d = u64_at(in depth, id);
+                if d == NONE64 {
+                    ok = false;
+                    break;
+                }
+                if pick == NONE64 || d > deepest {
+                    deepest = d;
+                    pick = id;
+                }
+            }
+            if ok {
+                for q in u64_at(in bstart, v)..u64_at(in bstart, wrapping_add(v, 1)) {
+                    let d = g.bound(u32_at(in bsyms, q));
+                    if pick == NONE64 || d > deepest {
+                        deepest = d;
+                        pick = wrapping_add(4294967296, q);
+                    }
+                }
+                set64(inout depth, v, wrapping_add(widen_u64(g.function(v).frame), deepest));
+                set64(inout best, v, pick);
+            }
+        }
+    }
+    for i in 0..g.roots.len() {
+        let root = match g.roots.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => Pair {
+                key: NONE32,
+                value: 0
+            },
+        };
+        let id = g.by_name(root.key);
+        let pa = wrapping_u32(rep.paths.len());
+        if id == NONE64 {
+            finding(inout rep.findings, in names, root.key, NONE64, "silicon.stack.unknown_root");
+            put(inout rep.findings, "stack root is not a function of this program\n");
+            rep
+                .roots
+                .push(
+                RootRow {
+                    root: root.key,
+                    budget: root.value,
+                    worst: NONE64,
+                    pa: pa,
+                    pn: 0,
+                    within: false
+                }
+            );
+            continue;
+        }
+        let worst = u64_at(in depth, id);
+        if worst != NONE64 {
+            let mut cur = id;
+            loop {
+                if cur == NONE64 {
+                    break;
+                }
+                if cur >= 4294967296 {
+                    rep.paths.push(u32_at(in bsyms, wrapping_sub(cur, 4294967296)));
+                    break;
+                }
+                rep.paths.push(g.name(cur));
+                cur = u64_at(in best, cur);
+            }
+        }
+        let pn = wrapping_sub(wrapping_u32(rep.paths.len()), pa);
+        let within = worst != NONE64 && worst <= widen_u64(root.value);
+        if worst != NONE64 && !within {
+            finding(
+                inout rep.findings,
+                in names,
+                root.key,
+                NONE64,
+                "silicon.stack.budget_exceeded"
+            );
+            put(inout rep.findings, "worst-case stack ");
+            put_u64(inout rep.findings, worst);
+            put(inout rep.findings, " bytes exceeds @stack_limit(");
+            put_u64(inout rep.findings, widen_u64(root.value));
+            put(inout rep.findings, ") along ");
+            for j in 0..widen_u64(pn) {
+                if j > 0 {
+                    put(inout rep.findings, " -> ");
+                }
+                names
+                    .write(
+                    u32_at(in rep.paths, wrapping_add(widen_u64(pa), j)),
+                    inout rep.findings
+                );
+            }
+            rep.findings.push(10);
+        } else if worst == NONE64 {
+            finding(
+                inout rep.findings,
+                in names,
+                root.key,
+                NONE64,
+                "silicon.stack.budget_exceeded"
+            );
+            put(
+                inout rep.findings,
+                "worst-case stack depth is unbounded (recursion or unresolved call reachable)\n"
+            );
+        }
+        rep
+            .roots
+            .push(
+            RootRow {
+                root: root.key,
+                budget: root.value,
+                worst: worst,
+                pa: pa,
+                pn: pn,
+                within: within
+            }
+        );
+    }
+    if g.ebpf {
+        ebpf_rules(in names, in g, in adj_start, in adj, inout rep);
+    }
+    rep
+}
+
+fn wrapping_div_pairs(n: u64) -> u64 {
+    n / 2
+}
+
+fn write_ids(inout o: ChunkSeq[u8], in path: ChunkSeq[u64]) {
+    o.push(91);
+    for i in 0..path.len() {
+        if i > 0 {
+            put(inout o, ", ");
+        }
+        put(inout o, "FnId(");
+        put_u64(inout o, u64_at(in path, i));
+        o.push(41);
+    }
+    o.push(93);
+}
+
+fn write_id_names(inout o: ChunkSeq[u8], in names: Names, in g: Graph, in path: ChunkSeq[u64]) {
+    for i in 0..path.len() {
+        if i > 0 {
+            put(inout o, " -> ");
+        }
+        let id = u64_at(in path, i);
+        if id < g.fns.len() {
+            names.write(g.name(id), inout o);
+        } else {
+            put(inout o, "<unknown>");
+        }
+    }
+}
+
+// `vesper_ebpf::callgraph::check_stack` from `root` with the kernel's
+// limits, and the finding it gives against the shared analysis.
+fn ebpf_rules(
+    in names: Names,
+    in g: Graph,
+    in adj_start: ChunkSeq[u64],
+    in adj: ChunkSeq[u32],
+    inout rep: Report
+) {
+    for i in 0..rep.roots.len() {
+        let root = match rep.roots.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => RootRow {
+                root: NONE32,
+                budget: 0,
+                worst: NONE64,
+                pa: 0,
+                pn: 0,
+                within: false
+            },
+        };
+        let at = g.first_named(root.root);
+        if at == NONE64 {
+            continue;
+        }
+        let rid = widen_u64(g.function(at).id);
+        // 0 ok (bytes), 1 exceeded, 2 too deep, 3 recursion, 4 indirect
+        let mut status: u64 = 0;
+        let mut bytes: u64 = 0;
+        let mut path: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if g.indirect.len() > 0 {
+            status = 4;
+            bytes = match g.indirect.try_get(0) {
+                Option::Some(s) => widen_u64(s.caller),
+                Option::None => 0,
+            };
+        } else {
+            // explicit-stack DFS over paths: entries are (path start in
+            // `paths`, path length, bytes)
+            let mut paths: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            let mut worst: u64 = 0;
+            paths.push(rid);
+            stack.push(0);
+            stack.push(1);
+            stack.push(widen_u64(g.function(rid).frame));
+            loop {
+                let len = stack.len();
+                if len == 0 {
+                    break;
+                }
+                let pb = u64_at(in stack, wrapping_sub(len, 1));
+                let pn = u64_at(in stack, wrapping_sub(len, 2));
+                let ps = u64_at(in stack, wrapping_sub(len, 3));
+                let x = stack.pop();
+                let y = stack.pop();
+                let z = stack.pop();
+                if pb > BPF_MAX_STACK_BYTES {
+                    status = 1;
+                    bytes = pb;
+                    for j in 0..pn {
+                        path.push(u64_at(in paths, wrapping_add(ps, j)));
+                    }
+                    break;
+                }
+                if pn > MAX_CALL_FRAMES {
+                    status = 2;
+                    for j in 0..pn {
+                        path.push(u64_at(in paths, wrapping_add(ps, j)));
+                    }
+                    break;
+                }
+                if pb > worst {
+                    worst = pb;
+                }
+                let last = u64_at(in paths, wrapping_add(ps, wrapping_sub(pn, 1)));
+                let mut recursion = false;
+                for q in u64_at(in adj_start, last)..u64_at(in adj_start, wrapping_add(last, 1)) {
+                    let c = widen_u64(u32_at(in adj, q));
+                    let mut seen = false;
+                    for j in 0..pn {
+                        if u64_at(in paths, wrapping_add(ps, j)) == c {
+                            seen = true;
+                        }
+                    }
+                    if seen {
+                        status = 3;
+                        for j in 0..pn {
+                            path.push(u64_at(in paths, wrapping_add(ps, j)));
+                        }
+                        path.push(c);
+                        recursion = true;
+                        break;
+                    }
+                    let start = paths.len();
+                    for j in 0..pn {
+                        paths.push(u64_at(in paths, wrapping_add(ps, j)));
+                    }
+                    paths.push(c);
+                    let mut nb = wrapping_add(pb, widen_u64(g.function(c).frame));
+                    if nb < pb {
+                        nb = 4294967295;
+                    }
+                    if nb > 4294967295 {
+                        nb = 4294967295;
+                    }
+                    stack.push(start);
+                    stack.push(wrapping_add(pn, 1));
+                    stack.push(nb);
+                }
+                if recursion {
+                    break;
+                }
+            }
+            if status == 0 {
+                bytes = worst;
+            }
+        }
+        if status == 0 {
+            if root.worst != bytes {
+                finding(
+                    inout rep.findings,
+                    in names,
+                    root.root,
+                    NONE64,
+                    "stack.analyzers_disagree"
+                );
+                put(inout rep.findings, "the shared analysis gives ");
+                if root.worst == NONE64 {
+                    put(inout rep.findings, "None");
+                } else {
+                    put(inout rep.findings, "Some(");
+                    put_u64(inout rep.findings, root.worst);
+                    put(inout rep.findings, ")");
+                }
+                put(inout rep.findings, " bytes but the eBPF analysis gives ");
+                put_u64(inout rep.findings, bytes);
+                rep.findings.push(10);
+            }
+        } else {
+            finding(inout rep.findings, in names, root.root, NONE64, "ebpf.stack.kernel_limit");
+            if status == 1 {
+                put_u64(inout rep.findings, bytes);
+                put(inout rep.findings, " bytes exceed the kernel's 512 byte limit along ");
+                write_id_names(inout rep.findings, in names, in g, in path);
+            } else if status == 2 {
+                put(inout rep.findings, "more than 8 call frames along ");
+                write_id_names(inout rep.findings, in names, in g, in path);
+            } else if status == 3 {
+                put(inout rep.findings, "recursion along ");
+                write_ids(inout rep.findings, in path);
+            } else {
+                put(inout rep.findings, "indirect call in FnId(");
+                put_u64(inout rep.findings, bytes);
+                put(inout rep.findings, ")");
+            }
+            rep.findings.push(10);
+        }
+    }
+}
+
+// `StackGraph::validate`: the error text, or nothing.
+pub fn validate(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> bool {
+    for i in 0..g.fns.len() {
+        let f = g.function(i);
+        if widen_u64(f.id) != i {
+            put(inout o, "error: stack graph ids must be dense: function `");
+            names.write(f.name, inout o);
+            put(inout o, "` has id ");
+            put_u64(inout o, widen_u64(f.id));
+            put(inout o, " at position ");
+            put_u64(inout o, i);
+            o.push(10);
+            return false;
+        }
+    }
+    let n = g.fns.len();
+    let mut bad = NONE64;
+    for i in 0..g.calls.len() {
+        let x = u64_at(in g.calls, i);
+        if x >= n {
+            bad = x;
+            break;
+        }
+    }
+    if bad == NONE64 {
+        for i in 0..g.indirect.len() {
+            let x = match g.indirect.try_get(i) {
+                Option::Some(s) => widen_u64(s.caller),
+                Option::None => 0,
+            };
+            if x >= n {
+                bad = x;
+                break;
+            }
+        }
+    }
+    if bad == NONE64 {
+        for i in 0..g.external.len() {
+            let x = match g.external.try_get(i) {
+                Option::Some(s) => widen_u64(s.caller),
+                Option::None => 0,
+            };
+            if x >= n {
+                bad = x;
+                break;
+            }
+        }
+    }
+    if bad != NONE64 {
+        put(inout o, "error: stack graph names unknown function id ");
+        put_u64(inout o, bad);
+        o.push(10);
+        return false;
+    }
+    true
+}
+
+// The whole result: `stack_bound_report`'s roots and findings, then
+// `render`.
+pub fn write_report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) {
+    if !validate(inout o, in names, in g) {
+        return;
+    }
+    let rep = report(inout o, in names, in g);
+    for i in 0..rep.roots.len() {
+        let r = match rep.roots.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => RootRow {
+                root: NONE32,
+                budget: 0,
+                worst: NONE64,
+                pa: 0,
+                pn: 0,
+                within: false
+            },
+        };
+        put(inout o, "root ");
+        names.write(r.root, inout o);
+        put(inout o, " budget ");
+        put_u64(inout o, widen_u64(r.budget));
+        put(inout o, " worst ");
+        if r.worst == NONE64 {
+            put(inout o, "-");
+        } else {
+            put_u64(inout o, r.worst);
+        }
+        if r.within {
+            put(inout o, " within 1 path ");
+        } else {
+            put(inout o, " within 0 path ");
+        }
+        for j in 0..widen_u64(r.pn) {
+            if j > 0 {
+                o.push(44);
+            }
+            names.write(u32_at(in rep.paths, wrapping_add(widen_u64(r.pa), j)), inout o);
+        }
+        o.push(10);
+    }
+    o.extend(in rep.findings.as_slice());
+    let mut accepted = rep.findings.len() == 0;
+    for i in 0..rep.roots.len() {
+        let r = match rep.roots.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => RootRow {
+                root: NONE32,
+                budget: 0,
+                worst: NONE64,
+                pa: 0,
+                pn: 0,
+                within: false
+            },
+        };
+        if !r.within {
+            accepted = false;
+        }
+        // render
+        put(inout o, "stack ");
+        names.write(r.root, inout o);
+        put(inout o, ": worst case ");
+        if r.worst == NONE64 {
+            put(inout o, "unbounded");
+        } else {
+            put_u64(inout o, r.worst);
+            put(inout o, " bytes");
+        }
+        put(inout o, " of ");
+        put_u64(inout o, widen_u64(r.budget));
+        put(inout o, " byte budget (");
+        if r.within {
+            put(inout o, "ok");
+        } else {
+            put(inout o, "exceeded");
+        }
+        put(inout o, ") via ");
+        if r.pn == 0 {
+            put(inout o, "-");
+        } else {
+            for j in 0..widen_u64(r.pn) {
+                if j > 0 {
+                    put(inout o, " -> ");
+                }
+                names.write(u32_at(in rep.paths, wrapping_add(widen_u64(r.pa), j)), inout o);
+            }
+        }
+        o.push(10);
+    }
+    if accepted {
+        put(inout o, "accepted\n");
+    } else {
+        put(inout o, "rejected\n");
+    }
+}

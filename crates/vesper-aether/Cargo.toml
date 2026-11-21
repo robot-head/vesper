@@ -2,6 +2,7 @@
 name = "vesper-aether"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Bounded host memory-layout and verified CAS snapshot-page planning, KVM slot plans, snapshot forks, userfaultfd lazy restore, VirtIO MMIO devices, PVH boot and a VMM seccomp profile"
 publish = false
 

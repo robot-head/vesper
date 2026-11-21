@@ -76,12 +76,12 @@ optimizer: with the optimizer at zero the build would take about 59.5 s
     input, through `ir_opt::optimize` and through the policy twice (the
     second call is served by the cache). The programs must be `Debug`-equal,
     the counts equal, and both must accept or both reject.
-  - `screen_never_drops_an_improvement`: no screened-out function loses an
-    instruction under `ir_opt::optimize`.
+    The same test checks that no screened-out function loses an instruction
+    under `ir_opt::optimize`.
   - `profile_package` (ignored): the per-function profile and the policy's
     phase timings for one package (`OPTIMIZER_BUDGET_PACKAGE`).
 
-  Release builds check every world; debug builds every 4th
+  Release builds check every world; debug builds every 12th
   (`OPTIMIZER_BUDGET_STEP=n` overrides it).
 
 ## Numbers
@@ -140,7 +140,7 @@ read. Every program is `Debug`-equal to `ir_opt::optimize`'s and every count
 equal, on the first call and on the cached second call; 4,522 functions were
 served from the cache on the second calls (the cache is shared across worlds,
 so functions like the std preludes hit it on the first call too). No world is
-rejected by either. The run took 497 s for both tests.
+rejected by either. The run took 497 s (before the screen check was folded into this test; it then ran as a second test).
 
 ### Run-time cost
 

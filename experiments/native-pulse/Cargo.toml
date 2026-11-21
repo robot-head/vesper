@@ -2,6 +2,7 @@
 name = "native-pulse-experiment"
 version = "0.0.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 publish = false
 description = "Runs the vesper-fiber-abi park/resume prototype under the Pulse scheduler"
 

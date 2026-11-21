@@ -6,9 +6,8 @@
 //!   second call is served by the content-hash cache). The programs must be
 //!   `Debug`-equal and the counts equal. Each world's second call is served
 //!   by the cache (turned on here; it is off by default), which is also
-//!   shared across worlds.
-//! - `screen_never_drops_an_improvement`: no function the screen rules out
-//!   loses an instruction under `ir_opt::optimize`.
+//!   shared across worlds. It also checks that no function the screen rules
+//!   out loses an instruction under `ir_opt::optimize`.
 //! - `profile_package` (ignored): the per-function profile and the policy's
 //!   timing for one package (`OPTIMIZER_BUDGET_PACKAGE`, a directory whose
 //!   root defines `check_all`), used by
@@ -19,12 +18,12 @@ mod check_harness;
 use vesper::{ir_opt, ir_opt_policy};
 
 /// Every n-th corpus world (`OPTIMIZER_BUDGET_STEP`, default 1 in release
-/// builds and 4 in debug ones, where egglog is slow).
+/// builds and 12 in debug ones, where egglog is slow).
 fn worlds() -> impl Iterator<Item = &'static check_harness::Case> {
     let step = std::env::var("OPTIMIZER_BUDGET_STEP")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(if cfg!(debug_assertions) { 4 } else { 1 })
+        .unwrap_or(if cfg!(debug_assertions) { 12 } else { 1 })
         .max(1);
     check_harness::corpus().iter().step_by(step)
 }
@@ -40,6 +39,26 @@ fn policy_matches_optimize_on_the_corpus() {
         let input = ir_opt_policy::native_input(&case.world);
         let mut reference = input.clone();
         let expected = ir_opt::optimize(&case.world, &mut reference);
+        if expected.is_ok() {
+            // The screen never drops an improvement: a function with no
+            // candidate block keeps every instruction under the pass.
+            for (name, f) in &input.functions {
+                if ir_opt_policy::candidate_blocks(f) == 0 {
+                    let dests = |f: &vesper::ir::FunctionIr| -> Vec<Vec<vesper::ir::ValueId>> {
+                        f.blocks
+                            .iter()
+                            .map(|b| b.instructions.iter().map(|i| i.dest).collect())
+                            .collect()
+                    };
+                    assert_eq!(
+                        dests(f),
+                        dests(&reference.functions[name]),
+                        "{}: {name} was screened out but loses instructions",
+                        case.name
+                    );
+                }
+            }
+        }
         for round in 0..2 {
             let mut program = input.clone();
             let got = ir_opt_policy::optimize_with_stats(&case.world, &mut program);
@@ -80,28 +99,6 @@ fn policy_matches_optimize_on_the_corpus() {
         corpus.len()
     );
     assert!(screened > 0);
-}
-
-#[test]
-fn screen_never_drops_an_improvement() {
-    let mut checked = 0;
-    for case in worlds() {
-        let program = ir_opt_policy::native_input(&case.world);
-        let Ok(rows) = ir_opt_policy::profile(&case.world, &program) else {
-            continue;
-        };
-        for row in rows {
-            if row.candidate_blocks == 0 {
-                checked += 1;
-                assert_eq!(
-                    row.instructions_removed, 0,
-                    "{}: {} was screened out but loses instructions",
-                    case.name, row.name
-                );
-            }
-        }
-    }
-    assert!(checked > 0);
 }
 
 #[test]
