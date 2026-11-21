@@ -3,7 +3,8 @@
 > Written 2026-11-19 against `main` at `9e801e7` (claim #1122). Updated
 > 2026-11-19 at `b35b515` with the SH0 results and the SH1 plan (part of
 > #1130), and 2026-11-20 at `bb5cee6` with the checker census and the SH2
-> plan (#1130). The
+> plan (#1130), and 2026-11-20 at `736d756` with the SH2 scoreboard (from the
+> lanes' reports) and the SH3 plan (#1187). The
 > [manuscript](../manuscript/README.md) is the sole specification; §10
 > ("Verified Bootstrap") defines Stage 0 to Stage 2. This plan orders the work
 > to get there. Confirm live ownership on the issue board before acting.
@@ -22,6 +23,17 @@ row S19 below. SH2 is planned in
 [self-host-sh2](../agent-prompts/self-host-sh2/README.md) (#1173-#1187).
 The SH0 reports are `docs/parallel-results/self-host-*.md`; their gaps are
 S12-S18.
+
+**SH3 started 2026-11-20 on top of open SH2 work, at the owner's request.**
+SH2's ports match Rust exactly wherever they have a differential and run at
+0.28x to 1.2x of Rust's time when they keep the census data design; one swap
+(#1232) is in review and the rest follow in each lane's later PRs
+([scoreboard](../parallel-results/self-host-sh2-scoreboard.md), assembled
+from the lanes' reports). SH3 is planned in
+[self-host-sh3](../agent-prompts/self-host-sh3/README.md) (#1240-#1253):
+the Place IR data package and swap point, an e-graph, six gap lanes (row S20),
+the IR pipeline ports, and the single-build re-measurement of SH2 and SH3
+with the SH4 plan last.
 
 ## Where we are
 
@@ -166,7 +178,7 @@ measures them on compiler code before SH1 and SH2 are claimed.
 | S4 | **Compiler data.** Graphs (SCC, dominators, toposort), interning, typed index arenas, BLAKE3 | checker, PCG, IR, packages | SH0-5 |
 | S5 | **Real CST.** A lossless front end over `Str` into sequences, matching `vesper-syntax` | SH1, fmt, LSP | SH0-7 |
 | S6 | **Compile speed.** Library ports run 0.3x to 5x of Rust. A compiler that is 3x slower fails the parity rule. Allocation per AST node, map lookups and string building are the likely hot spots | every wave's parity bar | measured per lane; scoreboard in SH0-8 |
-| S7 | **E-graphs.** `optimize` uses egg and egglog | SH3 | port a small e-graph in Vesper (preferred) or extern; decided in SH3 |
+| S7 | **E-graphs.** `optimize` uses egg and `ir_opt` uses egglog | SH3 | `@vesper/egraph` in Vesper, SH3-8 (#1247); the extern alternative is flagged for the owner if egg's extraction cannot be matched |
 | S8 | **Incremental queries.** `database/` and the LSP use salsa | SH5 | memo tables in Vesper; the batch compiler does not need them |
 | S9 | **Wasm encoding.** `wasm_backend` uses wasm-encoder and wit-component | SH4 | the encoder ports; WIT component wrapping may stay extern |
 | S10 | **Verified backend breadth.** §10.1 builds `@vesper-lang/compiler` with the verified backend, which still refuses closures, strings, sequences, heap memory, resuming handlers and macOS/Windows | the DDC part of Stage 2 | separate track (SH6b); does not block a Cranelift-built Stage 2 |
@@ -179,6 +191,7 @@ measures them on compiler code before SH1 and SH2 are claimed.
 | S17 | **`.vsys` in packages.** Imports only from the root module of a library; no `bool`, no `CStr` | the driver (SH5), Cranelift users (SH4) | SH1-7 (#1150) |
 | S18 | **Compile time of large functions.** Superlinear `--no-opt` JIT, shared values rematerialized | compile-speed parity (S6) | SH1-8 (#1151) |
 | S19 | **Checker and IR shapes.** Measured by the census: a struct that owns a sequence cannot be read out of a sequence (E1522) and std collections take only copy values; no `i128`/`u128`; `eff` cannot be a name; the checker's data (types, names, `World`, diagnostics) and a corpus harness exist only as local samples. The census samples keep a hash-consed type arena and interned names, which is why they beat Rust; SH2 keeps that design | SH2 | SH2-1 (#1173), SH2-2 (#1174), SH2-3 (#1175), SH2-4 (#1176) |
+| S20 | **Gaps SH2's ports worked around.** Constants not importable (every port); disjoint element and field borrows; closure parameter modes; `for` over sequences and bound string views; `effect`/`handle`/pass-mode words as names, literals past `u64::MAX`, fmt on long chains; callee result ranges as facts; the native instance cap and three-word entries; the AST and IR crossing the ABI as hand-encoded words | SH3 ports, and SH2's speed (decode is 27-42% of some ports' time) | #1239 (constants); SH3-2 to SH3-7 (#1241-#1246); ABI v4 input (SH2-4 follow-up) and SH3-1 (#1240) for the IR |
 
 ## Waves
 
@@ -187,7 +200,7 @@ measures them on compiler code before SH1 and SH2 are claimed.
 | **SH0** | Groundwork: hybrid build, tool split, std I/O, Cranelift shim, std data, toolchain pilots, front end v2, census | ~3k (pilots) | merged except #1128 part 2 and #1130, which moved into SH1 ([plan](../agent-prompts/self-host-sh0/README.md)) |
 | **SH1** | Front end: `vesper-diagnostics`, the `vesper-core` AST, front end v2 speed and editor mode, `vesper-fmt`, lexical `vesper-highlight`, `vesper-lint`, `vesper-forge` + `forge_frontend` (the wasm macro host stays extern), the parser swap into the hybrid build; seven gap lanes for S12-S18; the census that plans SH2 | ~36k | now ([plan](../agent-prompts/self-host-sh1/README.md), #1128, #1145-#1157, #1130) |
 | **SH2** | Checker: four gap lanes (element borrows and owning collections, `i128`, contextual `eff`, the checker data package and corpus harness); the layout and IR-check swaps the census finished; name resolution and packages, core typing and modes, effects, regions and sequences, loops and atomics, `dyn`, `fip`, Pact trait resolution, tensor types; scoreboard and SH3 plan | ~36k | gap lanes now; ports after SH2-4 and SH1's AST lane (9); swaps after SH1's parser swap (12) ([plan](../agent-prompts/self-host-sh2/README.md), #1173-#1187) |
-| **SH3** | Place IR lowering, inliner, optimizer, bounds hoisting, e-graph rules (the IR check moved to SH2 lane 5) | ~9k | after SH2's core typing lane; planned by SH2 lane 15 |
+| **SH3** | The Place IR data package, harness and native-path swap point; `@vesper/egraph`; six gap lanes (S20); ports of `ir_opt`, the AST optimizer and its certificates, the inliner, bounds hoisting and Place IR lowering (the IR check moved to SH2 lane 5); SH2 and SH3 scoreboard and SH4 plan | ~9.8k | started 2026-11-20 on top of open SH2 PRs ([plan](../agent-prompts/self-host-sh3/README.md), #1240-#1253) |
 | **SH4** | Backends: native lowering through the shim (split by file family into about six lanes), export ABI, FFI lowering, freestanding, wasm, eBPF, backend verifiers | ~49k | after SH3 and SH0-4 |
 | **SH5** | Driver and tools: CLI, test runner, doctests, docs, LSP, Lean extraction, sim-session | ~50k | the driver lane after SH4; the rest in parallel |
 | **SH6** | Stage 2: the Vesper compiler built by the Rust compiler (Stage 1) rebuilds itself; stage 2 and stage 3 are bit-identical; `bootstrap/stage2.lock` and a CI gate; compile-time parity scoreboard against the Rust compiler; seed copies lose their users. SH6b: widen the verified backend to the compiler for the DDC check of §10.2 | none new | after SH5's driver lane |
@@ -214,7 +227,9 @@ corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
 | Swap | Lane | Whole corpus wall | Whole corpus Ir | Swapped module alone | Report |
 |---|---|--:|--:|---|---|
 | `parse` (front end v2 + AST, read back into `Parse`) | SH1-12 (#1155) | 1.03x | 1.06x | 1.00x wall, 1.19x Ir over 911 sources | [self-host-parser-swap.md](../parallel-results/self-host-parser-swap.md) |
+| `dyn` (`dyn_fn` + `dyn_trait`; differential only, swap is a follow-up) | SH2-11 (#1183) | not swapped | not swapped | 0.28x wall over 930 sources forced, 0.70x on the dyn suites | [self-host-check-dyn.md](../parallel-results/self-host-check-dyn.md) |
 | `names_packages` (package assembler: imports, re-exports, renaming; not swapped yet) | SH2-6 (#1178) | not swapped | not swapped | 0.72x-0.87x wall and 1.54x Ir of `packages::load` (two parses per module until SH2-1); assembler alone 0.37x-0.44x wall, 0.99x Ir | [self-host-check-names-packages.md](../parallel-results/self-host-check-names-packages.md) |
+| `fip` checks (`fip::check_world`; not swapped yet, part 1 of the lane) | SH2-12 (#1184) | not swapped | not swapped | 0.92x wall with decoding (0.56x checks only) over 315 worlds; encoding the input costs 2.5x of Rust's check | [self-host-check-fip.md](../parallel-results/self-host-check-fip.md) |
 
 ## Estimates
 

@@ -9,11 +9,21 @@
 //
 // `IdxMap[K, V]` is a side table keyed by `Idx[K]` (types of expressions,
 // spans of nodes): dense, growing on write, reading a default where unset.
+// Its values need not be copy (self-hosting SH2 lane 1): `idx_map_owning`
+// builds one, `put` moves a value in at the next index or over an existing
+// one (moving that one out), and values are read in place as element views
+// of `vals`: `match m.vals.try_get(i.index()) { Some(v) => .., None => .. }`
+// (`m.dflt` is the default), `try_get_mut` to update one.
 //
 // Access is checked: `get` is an `Option`, `set` and `update` return
 // `false` and write nothing for an index the arena never handed out, so no
 // operation raises. An arena holds at most 2^32 - 1 values; `alloc` past
 // that returns `idx_none()`, which no `get` accepts.
+
+// Values need not be copy (self-hosting SH2 lane 1): `alloc` moves a value
+// in, and a value that is not copy is read in place, as an element view of
+// `items`: `match a.items.try_get(i.index()) { Some(v) => .., None => .. }`,
+// and `try_get_mut` to update one.
 
 // A typed index into an `Arena[T]`.
 pub copy struct Idx[T] {
@@ -63,14 +73,14 @@ pub struct Arena[T] {
 }
 
 // An empty arena.
-pub fn arena_new[T: mod copy]() -> Arena[T] {
+pub fn arena_new[T: mod affine]() -> Arena[T] {
     Arena {
         items: ChunkSeq::new[T]()
     }
 }
 
 // An empty arena with room for `n` values.
-pub fn arena_with_capacity[T: mod copy](n: u64) -> Arena[T] {
+pub fn arena_with_capacity[T: mod affine](n: u64) -> Arena[T] {
     Arena {
         items: ChunkSeq::with_capacity[T](n)
     }
@@ -80,7 +90,7 @@ fn at_capacity(len: u64) -> bool {
     len >= 4294967295
 }
 
-impl [T: mod copy] Arena[T] {
+impl [T: mod affine] Arena[T] {
     // The number of values allocated.
     pub fn len(in self) -> u64 {
         self.items.len()
@@ -90,8 +100,9 @@ impl [T: mod copy] Arena[T] {
         self.items.len() == 0
     }
 
-    // Store `v` and return its index (`idx_none()` once the arena is full).
-    pub fn alloc(inout self, v: T) -> Idx[T] {
+    // Store `v` and return its index (`idx_none()` once the arena is full,
+    // and `v` is dropped).
+    pub fn alloc(inout self, sink v: T) -> Idx[T] {
         let n = self.items.len();
         if at_capacity(n) {
             Idx {
@@ -124,6 +135,19 @@ impl [T: mod copy] Arena[T] {
         widen_u64(i.raw) < self.items.len()
     }
 
+    // Drop every value allocated after the first `n` (rollback after a failed
+    // parse, for example). Indices at or past `n` stop resolving.
+    pub fn truncate(inout self, n: u64) {
+        self.items.truncate(n);
+    }
+
+    // Remove every value.
+    pub fn clear(inout self) {
+        self.items.clear();
+    }
+}
+
+impl [T: mod copy] Arena[T] {
     // The value at `i`.
     pub fn get(in self, i: Idx[T]) -> Option[T] {
         self.items.try_get(widen_u64(i.raw))
@@ -147,17 +171,6 @@ impl [T: mod copy] Arena[T] {
     pub fn at(in self, k: u64) -> Option[T] {
         self.items.try_get(k)
     }
-
-    // Drop every value allocated after the first `n` (rollback after a failed
-    // parse, for example). Indices at or past `n` stop resolving.
-    pub fn truncate(inout self, n: u64) {
-        self.items.truncate(n);
-    }
-
-    // Remove every value.
-    pub fn clear(inout self) {
-        self.items.clear();
-    }
 }
 
 // A dense side table from `Idx[K]` to `V`: unset entries read as the
@@ -175,12 +188,44 @@ pub fn idx_map_new[K, V: mod copy](dflt: V) -> IdxMap[K, V] {
     }
 }
 
-impl [K, V: mod copy] IdxMap[K, V] {
+// An empty side table of values that need not be copy, whose unset
+// entries read as `dflt` (in place: `m.dflt`).
+pub fn idx_map_owning[K, V: mod affine](sink dflt: V) -> IdxMap[K, V] {
+    IdxMap {
+        vals: ChunkSeq::new[V](),
+        dflt: dflt
+    }
+}
+
+impl [K, V: mod affine] IdxMap[K, V] {
     // One past the highest index written.
     pub fn len(in self) -> u64 {
         self.vals.len()
     }
 
+    // Move `v` in at `i` and return the value no longer in the table: the
+    // one `i` held (`i < len`), nothing when `i` is the next index
+    // (`i == len`, the table grows by one), or `v` itself, unwritten, when
+    // `i` is past that or `idx_none()` (a table of values that are not
+    // copy cannot fill the gap with defaults).
+    pub fn put(inout self, i: Idx[K], sink v: V) -> Option[V] {
+        let k = widen_u64(i.raw);
+        let n = self.vals.len();
+        if i.raw == 4294967295 || k > n {
+            Option::Some(v)
+        } else if k == n {
+            self.vals.push(v);
+            Option::None
+        } else {
+            match self.vals.try_get_mut(k) {
+                Option::Some(slot) => Option::Some(replace(inout slot, v)),
+                Option::None => Option::None,
+            }
+        }
+    }
+}
+
+impl [K, V: mod copy] IdxMap[K, V] {
     // The value for `i`, or the default.
     pub fn get(in self, i: Idx[K]) -> V {
         match self.vals.try_get(widen_u64(i.raw)) {

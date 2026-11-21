@@ -497,7 +497,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.seq_load_elem(addr, elem)
     }
 
-    fn seq_load_elem(&mut self, addr: ir::Value, elem: &Type) -> Result<ir::Value, String> {
+    pub(super) fn seq_load_elem(
+        &mut self,
+        addr: ir::Value,
+        elem: &Type,
+    ) -> Result<ir::Value, String> {
         let layout = Layout::of(self.world, elem)?;
         if layout.aggregate() {
             // The copy writes every word.
@@ -519,7 +523,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         })
     }
 
-    fn seq_store_elem(
+    pub(super) fn seq_store_elem(
         &mut self,
         addr: ir::Value,
         value: ir::Value,
@@ -1235,6 +1239,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         let ty = crate::numeric::default_type(&ty.unwrap_or_else(|| self.ty(a)));
         let layout = Layout::of(self.world, &ty)?;
+        let writebacks = self.element_writebacks.len();
         let swap = op == SeqOp::Swap;
         let value = if swap { None } else { Some(self.expr(b)?) };
         let pa = self.address(a)?;
@@ -1274,10 +1279,100 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
         }
+        self.seq_element_writeback(writebacks)?;
         Ok(result)
     }
 
     /// The AST form of a sequence call, element index or slice view.
+    /// The address of element `index` of the sequence or slice `base`, for
+    /// an element view lent `inout` (§13). The index is checked as `s[i]`
+    /// checks it.
+    pub(super) fn seq_element_address(
+        &mut self,
+        base: &Expr,
+        index: &Expr,
+    ) -> Result<ir::Value, String> {
+        let ty = self.ty(base);
+        let elem = seq::elem(&ty)
+            .cloned()
+            .ok_or_else(|| format!("an element view needs a ChunkSeq or Slice, found {ty}"))?;
+        let elem = crate::numeric::default_type(&elem);
+        let stride = self.seq_stride(&elem)?;
+        let value = self.expr(base)?;
+        let (h, start, len) = self.seq_view(value, &ty);
+        let i = self.expr(index)?;
+        let valid = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        self.seq_guard(valid)?;
+        let addr = self.seq_elem_addr(h, start, i, stride);
+        if stride == 8 || Layout::of(self.world, &elem)?.aggregate() {
+            return Ok(addr);
+        }
+        // A `u8`, `bool` or `u32` element is lent as a word of scratch and
+        // written back when the borrowing call ends.
+        let value = self.seq_load_elem(addr, &elem)?;
+        let scratch = self.alloc_uninit(8);
+        self.b.ins().store(MemFlags::new(), value, scratch, 0);
+        self.element_writebacks.push((scratch, addr, elem));
+        Ok(scratch)
+    }
+
+    /// Writes back the narrow element views lent since `from`
+    /// ([`Self::seq_element_address`]).
+    pub(super) fn seq_element_writeback(&mut self, from: usize) -> Result<(), String> {
+        if self.element_writebacks.len() <= from {
+            return Ok(());
+        }
+        for (scratch, addr, elem) in self.element_writebacks.split_off(from) {
+            let value = self.b.ins().load(types::I64, MemFlags::new(), scratch, 0);
+            self.seq_store_elem(addr, value, &elem)?;
+        }
+        Ok(())
+    }
+
+    /// An `inout` call argument that lends a sequence element in place (an
+    /// element view, §13): the IR reads it as `Get`/`SliceGet` of a
+    /// sequence place, and the call lends `place[index]` instead of the
+    /// copy the read made.
+    pub(super) fn element_view_arg(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        a: &crate::ir::Argument,
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+        span: &Span,
+    ) -> Result<Option<Expr>, String> {
+        if a.pass != Pass::Inout || a.place.is_some() {
+            return Ok(None);
+        }
+        let def = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .find(|i| i.dest == a.value);
+        let Some(crate::ir::Instruction {
+            op:
+                crate::ir::Op::Seq {
+                    op: SeqOp::Get | SeqOp::SliceGet | SeqOp::Hoisted(crate::seq::Access::Get),
+                    args,
+                },
+            ..
+        }) = def
+        else {
+            return Ok(None);
+        };
+        let (Some(base), Some(index)) = (args.first(), args.get(1)) else {
+            return Ok(None);
+        };
+        let Some(place) = &base.place else {
+            return Ok(None);
+        };
+        let base = super::ir_place_expr(place, span.clone());
+        let index = self.ir_temp(index.value, values, &f.values)?;
+        Ok(Some(Expr {
+            kind: ExprKind::Index(Box::new(base), Box::new(index)),
+            span: span.clone(),
+        }))
+    }
+
     pub(super) fn seq_ast_expr(&mut self, e: &Expr) -> Option<Result<ir::Value, String>> {
         let (op, operands): (SeqOp, Vec<&Expr>) = match &e.kind {
             ExprKind::Index(base, index) => {
@@ -1353,6 +1448,9 @@ pub(super) struct FusedRead {
     elem: Type,
     /// The read is hoisted out of its loop's bounds checks: always `Some`.
     always: bool,
+    /// The scrutinee of an element view `match` (§13): `Some(x)` names the
+    /// element in place.
+    view: bool,
 }
 
 fn fused_pattern(p: &Pattern) -> bool {
@@ -1439,6 +1537,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         [receiver, i]: [ir::Value; 2],
         receiver_type: &Type,
         checked: bool,
+        view: bool,
     ) -> Result<ir::Value, String> {
         let elem = seq::elem(receiver_type)
             .cloned()
@@ -1465,6 +1564,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     addr: addr_var,
                     elem,
                     always: !checked,
+                    view,
                 }),
             );
         }
@@ -1508,6 +1608,57 @@ impl<M: Module> Codegen<'_, '_, M> {
         })
     }
 
+    /// Binds `x` of an element view's `Some(x)` (§13) to the element at
+    /// `addr`: an aggregate is its address and a word is a variable whose
+    /// home is the element, so the arm's reads and writes reach the buffer.
+    fn seq_bind_view(&mut self, p: &Pattern, addr: ir::Value, elem: &Type) -> Result<(), String> {
+        let layout = Layout::of(self.world, elem)?;
+        if layout.aggregate() || self.seq_stride(elem)? == 8 {
+            return self.bind_alias(p, addr, elem);
+        }
+        // A `u8`, `bool` or `u32` element: the variable reads and writes it
+        // at its width.
+        let PatternKind::Bind(n) = &p.kind else {
+            return Ok(());
+        };
+        let value = self.seq_load_elem(addr, elem)?;
+        self.bind(p, value, elem)?;
+        let address = self.b.declare_var(self.b.func.dfg.value_type(addr));
+        self.b.def_var(address, addr);
+        let var = self.vars[n];
+        self.narrow_homes
+            .insert(var.as_u32(), (address, elem.clone()));
+        Ok(())
+    }
+
+    /// An element view whose `try_get` was not fused with its `match` would
+    /// bind a copy: refused, so no write is lost.
+    pub(super) fn seq_unfused_view(
+        &self,
+        f: &crate::ir::FunctionIr,
+        value: crate::ir::ValueId,
+    ) -> Result<(), String> {
+        if self.world.element_views.is_empty() {
+            return Ok(());
+        }
+        let view = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .find(|i| i.dest == value)
+            .is_some_and(|i| {
+                matches!(i.op, crate::ir::Op::Seq { .. })
+                    && self
+                        .world
+                        .element_views
+                        .contains_key(&(i.span.start, i.span.end))
+            });
+        if view {
+            return Err("native element view match was not lowered in place".into());
+        }
+        Ok(())
+    }
+
     /// Binds arm pattern `pattern` on fused read `value`: `Some(x)` loads the
     /// element into `x`. Returns whether `value` is fused.
     pub(super) fn seq_fused_bind(
@@ -1530,6 +1681,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             )) = fields.first()
         {
             let addr = self.b.use_var(read.addr);
+            if read.view {
+                // An element view (§13) names the element in its buffer.
+                return self.seq_bind_view(inner, addr, &read.elem).map(|()| true);
+            }
             // A split local (#1090) loads its words from the element
             // itself, not from a copy of it: the words no later use reads
             // are dead loads, so `Some(h) => h.f` is one load.

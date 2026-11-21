@@ -1590,7 +1590,8 @@ fn path_is_covered(path: &[String], moved: &[Vec<String>]) -> bool {
 
 /// The `match` scrutinees of `f` that are borrows (§4.3): by-value reads
 /// of a non-copy place rooted at an `in`/`inout` parameter, or at a name
-/// that an earlier borrowed `match` bound. The checker types such a `match`
+/// that an earlier borrowed `match` bound, and element views (a matched
+/// `try_get`, §13). The checker types such a `match`
 /// as a borrow, so its pattern binds `in` borrows: no `Box` it unpacks is
 /// freed and nothing it binds is dropped.
 pub fn borrowed_scrutinees(f: &crate::ir::FunctionIr) -> BTreeSet<ValueId> {
@@ -1615,6 +1616,17 @@ pub fn borrowed_scrutinees(f: &crate::ir::FunctionIr) -> BTreeSet<ValueId> {
         for i in f.blocks.iter().flat_map(|b| &b.instructions) {
             match &i.op {
                 Op::Read { root, .. } if matched.contains(&i.dest) && names.contains(root) => {
+                    out.insert(i.dest);
+                }
+                // An element view (`match s.try_get(i)`, §13) binds the
+                // element in place: its sequence frees it. A copy element
+                // has nothing to free, so every matched `try_get` counts.
+                Op::Seq {
+                    op:
+                        crate::seq::SeqOp::TryGet
+                        | crate::seq::SeqOp::Hoisted(crate::seq::Access::TryGet),
+                    ..
+                } if matched.contains(&i.dest) => {
                     out.insert(i.dest);
                 }
                 Op::Bind { pattern, value } if out.contains(value) => {

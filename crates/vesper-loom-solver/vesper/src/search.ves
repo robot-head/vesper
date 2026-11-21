@@ -29,16 +29,10 @@ use self::closure::{
     matches_req
 };
 use self::diag::{
-    c_budget_exhausted,
-    c_insufficient_repro_attestations,
-    c_invalid_max_solutions,
-    c_missing_candidate_metadata,
-    c_no_candidate,
-    c_no_system_candidate,
-    c_unknown_optimize_objective,
-    c_unsupported_policy,
-    c_unvetted_namespace,
-    c_version_conflict,
+    ErrorKind,
+    Objective,
+    ResultTag,
+    SolverCode,
     did,
     dlit,
     dmark,
@@ -86,7 +80,7 @@ pub fn emit_unsupported(inout s: S, mi: u64) {
         "offline search cannot enforce optimization, namespace vetting, or reproducibility attestation policies for version "
     );
     dver(inout s, m.ver);
-    emit(inout s, c_unsupported_policy(), m.name, so, sl, mo);
+    emit(inout s, SolverCode::UnsupportedPolicy, m.name, so, sl, mo);
 }
 
 // `unsupported_dependency_policy` (optimizer): emits and returns whether
@@ -100,7 +94,7 @@ fn dependency_policy(inout s: S, mi: u64) -> bool {
     let (so, sl, mo) = subj_lit(inout s, "resolver.policy");
     dlit(inout s, "optimizer cannot enforce dependency-level optimization policy for version ");
     dver(inout s, m.ver);
-    emit(inout s, c_unsupported_policy(), m.name, so, sl, mo);
+    emit(inout s, SolverCode::UnsupportedPolicy, m.name, so, sl, mo);
     true
 }
 
@@ -126,7 +120,7 @@ fn trust_ok(inout s: S, owner: u64, cand: u64) -> bool {
         dnum(inout s, repro);
         dlit(inout s, " reproducibility attestation(s), fewer than required ");
         dnum(inout s, x.min);
-        emit(inout s, c_insufficient_repro_attestations(), m.name, so, sl, mo);
+        emit(inout s, SolverCode::InsufficientReproAttestations, m.name, so, sl, mo);
         return false;
     }
     if x.block && !vetted {
@@ -134,7 +128,7 @@ fn trust_ok(inout s: S, owner: u64, cand: u64) -> bool {
         dlit(inout s, "version ");
         dver(inout s, m.ver);
         dlit(inout s, " is in an unvetted namespace blocked by resolver.policy");
-        emit(inout s, c_unvetted_namespace(), m.name, so, sl, mo);
+        emit(inout s, SolverCode::UnvettedNamespace, m.name, so, sl, mo);
         return false;
     }
     true
@@ -235,9 +229,9 @@ fn emit_none_satisfies(inout s: S, x: u64, systems: bool) {
         };
     }
     if systems {
-        emit(inout s, c_no_system_candidate(), none(), so, sl, mo);
+        emit(inout s, SolverCode::NoSystemCandidate, none(), so, sl, mo);
     } else {
-        emit(inout s, c_no_candidate(), x, so, sl, mo);
+        emit(inout s, SolverCode::NoCandidate, x, so, sl, mo);
     }
 }
 
@@ -252,32 +246,32 @@ fn active_objectives(inout s: S) -> bool {
         for i in 0..x.opt_n {
             let raw = id_at(in s.l, add(x.opt_at, i));
             let o = objective_of_id(in s, raw);
-            if o == 5 {
+            if o == Objective::Unknown {
                 reset_diags(inout s);
                 let root = man(in s.l, s.root).name;
                 let (so, sl, mo) = subj_lit(inout s, "resolver.policy.optimize");
                 dlit(inout s, "unknown optimization objective '");
                 did(inout s, raw);
                 dlit(inout s, "'");
-                emit(inout s, c_unknown_optimize_objective(), root, so, sl, mo);
-                out_error(inout s, 1, 0);
+                emit(inout s, SolverCode::UnknownOptimizeObjective, root, so, sl, mo);
+                out_error(inout s, ErrorKind::UnsupportedPolicy, 0);
                 return false;
             }
             s.objs.push(o);
         }
         return true;
     }
-    s.objs.push(0);
-    s.objs.push(1);
-    s.objs.push(2);
-    s.objs.push(3);
+    s.objs.push(Objective::ZeroCve);
+    s.objs.push(Objective::MinCapabilitySurface);
+    s.objs.push(Objective::MinDupMajors);
+    s.objs.push(Objective::MinStaleness);
     true
 }
 
 // table, 0, best solution, metrics, evaluated, nobj, objective*.
 fn out_best(inout s: S, evaluated: u64) {
     table(inout s);
-    w(inout s, 0);
+    w(inout s, ResultTag::Solution);
     for i in 0..s.bsel.len() {
         let x = sw(in s.bsel, i);
         w(inout s, x);
@@ -341,7 +335,7 @@ fn admit(inout s: S, mi: u64, needs_meta: bool) -> bool {
             dlit(inout s, "version ");
             dver(inout s, m.ver);
             dlit(inout s, " lacks required candidate metadata for active optimization objectives");
-            emit(inout s, c_missing_candidate_metadata(), m.name, so, sl, mo);
+            emit(inout s, SolverCode::MissingCandidateMetadata, m.name, so, sl, mo);
             return false;
         }
     }
@@ -447,7 +441,7 @@ fn version_conflicts(inout s: S) -> bool {
                     dver(inout s, vi);
                     dlit(inout s, " does not satisfy ");
                     dreq(inout s, r);
-                    emit(inout s, c_version_conflict(), x, so, sl, mo);
+                    emit(inout s, SolverCode::VersionConflict, x, so, sl, mo);
                     conflict = true;
                 }
                 at = sw(in s.rl_next, at);
@@ -511,7 +505,14 @@ fn score(inout s: S) -> bool {
     s.seval >= s.max_solutions
 }
 
-// One popped node: 0 go on, 1 finished (out written), 2 stop searching.
+// What one popped node tells the search loop.
+enum Step: _ {
+    Continue,
+    Finished,
+    Stop
+}
+
+// One popped node: go on, finished (out written) or stop searching.
 fn step(inout s: S, n: u64, opt: bool, needs_meta: bool) -> u64 {
     let root = man(in s.l, s.root).name;
     materialize(inout s, n);
@@ -520,15 +521,15 @@ fn step(inout s: S, n: u64, opt: bool, needs_meta: bool) -> u64 {
             if opt && s.has_best {
                 let e = s.seval;
                 out_best(inout s, e);
-                return 1;
+                return Step::Finished;
             }
             reset_diags(inout s);
             let (so, sl, mo) = subj_lit(inout s, "max_decisions");
             dlit(inout s, "search budget exhausted; satisfiability is unknown");
-            emit(inout s, c_budget_exhausted(), none(), so, sl, mo);
+            emit(inout s, SolverCode::BudgetExhausted, none(), so, sl, mo);
             let d = s.sdec;
-            out_error(inout s, 3, d);
-            return 1;
+            out_error(inout s, ErrorKind::BudgetExhausted, d);
+            return Step::Finished;
         }
         s.sdec = inc(s.sdec);
     }
@@ -547,20 +548,20 @@ fn step(inout s: S, n: u64, opt: bool, needs_meta: bool) -> u64 {
     }
     if blocked {
         s.sunsup = true;
-        return 0;
+        return Step::Continue;
     }
     if !closure(inout s) {
-        return 0;
+        return Step::Continue;
     }
     if opt && !policies_hold(inout s) {
-        return 0;
+        return Step::Continue;
     }
     let mut conflict = version_conflicts(inout s);
     if run_solve(inout s, false, true) {
         conflict = true;
     }
     if conflict {
-        return 0;
+        return Step::Continue;
     }
     let mut next = none();
     for i in 0..s.rnames.len() {
@@ -571,21 +572,21 @@ fn step(inout s: S, n: u64, opt: bool, needs_meta: bool) -> u64 {
     }
     if next != none() {
         branch(inout s, n, next, opt, needs_meta);
-        return 0;
+        return Step::Continue;
     }
     if !select_systems(inout s) {
-        return 0;
+        return Step::Continue;
     }
     if run_solve(inout s, true, false) {
         if !opt {
             out_solution(inout s);
-            return 1;
+            return Step::Finished;
         }
         if score(inout s) {
-            return 2;
+            return Step::Stop;
         }
     }
-    0
+    Step::Continue
 }
 
 pub fn search(inout s: S, opt: bool) {
@@ -594,8 +595,8 @@ pub fn search(inout s: S, opt: bool) {
             reset_diags(inout s);
             let (so, sl, mo) = subj_lit(inout s, "max_solutions");
             dlit(inout s, "max_solutions must be positive");
-            emit(inout s, c_invalid_max_solutions(), none(), so, sl, mo);
-            out_error(inout s, 0, 0);
+            emit(inout s, SolverCode::InvalidMaxSolutions, none(), so, sl, mo);
+            out_error(inout s, ErrorKind::InvalidInput, 0);
             return;
         }
         if !active_objectives(inout s) {
@@ -603,19 +604,19 @@ pub fn search(inout s: S, opt: bool) {
         }
     }
     if s.ds.len() > 0 {
-        out_error(inout s, 0, 0);
+        out_error(inout s, ErrorKind::InvalidInput, 0);
         return;
     }
     let rm = s.root;
     if !opt && unsupported(in s, rm) {
         emit_unsupported(inout s, rm);
-        out_error(inout s, 1, 0);
+        out_error(inout s, ErrorKind::UnsupportedPolicy, 0);
         return;
     }
     let mut needs_meta = false;
     for i in 0..s.objs.len() {
         let o = sw(in s.objs, i);
-        if o == 0 || o == 3 || o == 4 {
+        if o == Objective::ZeroCve || o == Objective::MinStaleness || o == Objective::MinTrustCost {
             needs_meta = true;
         }
     }
@@ -645,10 +646,10 @@ pub fn search(inout s: S, opt: bool) {
         s.stack.truncate(wrapping_sub(depth, 1));
         s.nodes.truncate(inc(n));
         let r = step(inout s, n, opt, needs_meta);
-        if r == 1 {
+        if r == Step::Finished {
             return;
         }
-        if r == 2 {
+        if r == Step::Stop {
             break;
         }
     }
@@ -659,8 +660,8 @@ pub fn search(inout s: S, opt: bool) {
     }
     let d = s.sdec;
     if s.sunsup {
-        out_error(inout s, 1, d);
+        out_error(inout s, ErrorKind::UnsupportedPolicy, d);
     } else {
-        out_error(inout s, 2, d);
+        out_error(inout s, ErrorKind::Unsatisfiable, d);
     }
 }

@@ -17,6 +17,8 @@ mod tiled_rules;
 
 #[path = "arrays/check.rs"]
 mod array_rules;
+#[path = "check/call_facts.rs"]
+mod call_facts;
 #[path = "integer_widths/literal_typing.rs"]
 mod literal_typing;
 #[path = "loops/check.rs"]
@@ -44,6 +46,10 @@ pub struct World {
     /// Checked integer operations which can raise Fail[ArithOverflow]. Spans
     /// absent here were proved in range (see `vesper.arith.checked/1`).
     pub overflow_ops: BTreeSet<(usize, usize)>,
+    /// `try_get`/`try_get_mut` calls that are the scrutinee of an element
+    /// view `match` (§13): their `Some` binding names the element in place
+    /// instead of a copy of it.
+    pub element_views: BTreeMap<(usize, usize), Pass>,
     pub string_capacity: usize,
     pub calls: BTreeMap<(usize, usize), BTreeMap<String, Type>>,
     /// Source trait/model elaboration metadata (empty without traits).
@@ -451,6 +457,8 @@ impl World {
                 state_guards: vec![],
                 partial_ops: BTreeSet::new(),
                 overflow_ops: BTreeSet::new(),
+                element_views: BTreeMap::new(),
+                element_view: None,
                 dead: 0,
                 string_capacity: 0,
                 static_text: false,
@@ -472,6 +480,7 @@ impl World {
                 shadowed: vec![],
                 literals: Default::default(),
                 option_tries: BTreeSet::new(),
+                result_ranges: Default::default(),
             };
             c.function_with_literal_typing(&func_norm);
             let Checker {
@@ -662,6 +671,12 @@ pub struct Checked {
 /// [`crate::pact_frontend`] into ordinary core functions and calls first;
 /// the returned World then contains only the existing core schema.
 pub fn check(module: &Module) -> Checked {
+    // Untyped value enum members are literals at every use (§2.2).
+    if let Some((module, diagnostics)) = crate::arrays::untyped_members(module) {
+        let mut checked = check(&module);
+        checked.diagnostics.extend(diagnostics);
+        return checked;
+    }
     // Source tensor types (§28.2): a module that uses them is checked and
     // elaborated by `tensor_types`, which runs the core checker itself.
     if let Some(checked) = crate::tensor_types::check(module) {
@@ -741,6 +756,8 @@ pub(crate) fn check_core(
             state_guards: vec![],
             partial_ops: BTreeSet::new(),
             overflow_ops: BTreeSet::new(),
+            element_views: BTreeMap::new(),
+            element_view: None,
             dead: 0,
             string_capacity: 0,
             static_text: false,
@@ -762,6 +779,7 @@ pub(crate) fn check_core(
             shadowed: vec![],
             literals: Default::default(),
             option_tries: BTreeSet::new(),
+            result_ranges: Default::default(),
         };
         c.declarations();
         for f in world.functions.values() {
@@ -776,6 +794,7 @@ pub(crate) fn check_core(
             handler_effects,
             partial_ops,
             overflow_ops,
+            element_views,
             string_capacity,
             resolved: trait_calls,
             option_tries: tries,
@@ -791,6 +810,7 @@ pub(crate) fn check_core(
         world.handler_effects = handler_effects;
         world.partial_ops = partial_ops;
         world.overflow_ops = overflow_ops;
+        world.element_views = element_views;
         world.string_capacity = string_capacity;
         diagnostics = errors;
         if !changed {
@@ -863,6 +883,10 @@ struct Checker<'a> {
     state_guards: Vec<(usize, usize, Type, Span)>,
     partial_ops: BTreeSet<(usize, usize)>,
     overflow_ops: BTreeSet<(usize, usize)>,
+    element_views: BTreeMap<(usize, usize), Pass>,
+    /// Set while the scrutinee of an element view `match` is checked: how
+    /// the view borrows the element (§13).
+    element_view: Option<Pass>,
     dead: usize,
     string_capacity: usize,
     /// Checking the body of a `-> Str` function: string literals the
@@ -877,7 +901,7 @@ struct Checker<'a> {
     /// Places that an enclosing borrowed `match` lends to its arms' `in`
     /// bindings (§4.3), with the scrutinee's span: inside the arms they may
     /// be read but not written, lent `inout` or moved.
-    match_borrows: Vec<(Place, Span)>,
+    match_borrows: Vec<(Place, Span, Pass)>,
     /// Origin spans of the `inout` argument loans in `loans` (receivers and
     /// plain arguments): two-phase borrows (§4.3) reserve them while the
     /// call's other arguments are evaluated, so those arguments may read the
@@ -902,6 +926,8 @@ struct Checker<'a> {
     literals: literal_typing::LiteralTyping,
     /// Spans of `?` on `Option` ([`try_option`]), rewritten after checking.
     option_tries: BTreeSet<(usize, usize)>,
+    /// Result-range summaries of called functions ([`call_facts`]).
+    result_ranges: std::cell::RefCell<call_facts::ResultRanges>,
 }
 impl Checker<'_> {
     fn error(&mut self, code: &str, msg: impl Into<String>, span: Span) {
@@ -1486,24 +1512,24 @@ impl Checker<'_> {
                 self.help("An exclusive argument loan cannot overlap another access while the call's arguments are evaluated.");
             }
         }
-        if matches!(usage, Usage::Borrow(Pass::Inout))
-            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy)
-        {
-            for (borrowed, origin) in self.match_borrows.clone() {
-                if borrowed.overlaps(p) {
-                    transfer_allowed = false;
-                    self.error(
-                        "E0301",
-                        format!(
-                            "access to '{}' conflicts with the borrow of '{}' by an enclosing match",
-                            p.display(),
-                            borrowed.display()
-                        ),
-                        span.clone(),
-                    );
-                    self.related(origin, "this match lends the place to its arms");
-                    self.help("The bindings of a match on a borrowed place borrow its payloads; the place cannot be written, lent `inout` or moved until the match ends.");
-                }
+        let writes = matches!(usage, Usage::Borrow(Pass::Inout))
+            || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy);
+        for (borrowed, origin, lent) in self.match_borrows.clone() {
+            // An `inout` element view (§13) lends its sequence
+            // exclusively: the arms cannot even read it.
+            if (writes || lent == Pass::Inout) && borrowed.overlaps(p) {
+                transfer_allowed = false;
+                self.error(
+                    "E0301",
+                    format!(
+                        "access to '{}' conflicts with the borrow of '{}' by an enclosing match",
+                        p.display(),
+                        borrowed.display()
+                    ),
+                    span.clone(),
+                );
+                self.related(origin, "this match lends the place to its arms");
+                self.help("The bindings of a match on a borrowed place borrow its payloads; the place cannot be written, lent `inout` or moved until the match ends.");
             }
         }
         match usage {
@@ -1902,7 +1928,7 @@ impl Checker<'_> {
                     if let Some(kind) = crate::numeric::IntegerKind::from_type(&t)
                         && self
                             .integer_fact(v, env)
-                            .and_then(|n| kind.checked_neg(n))
+                            .and_then(|n| integer_widths_rules::fact_neg(kind, n))
                             .is_none()
                     {
                         self.overflow_failure(env, e.span.clone());
@@ -2118,9 +2144,9 @@ impl Checker<'_> {
                 let fact = if op == "=" {
                     value
                 } else {
-                    kind.zip(old)
-                        .zip(value)
-                        .and_then(|((k, a), b)| k.checked(&op[..1], a, b).ok())
+                    kind.zip(old).zip(value).and_then(|((k, a), b)| {
+                        integer_widths_rules::fact_checked(k, &op[..1], a, b).ok()
+                    })
                 };
                 let nonzero = fact.is_some_and(|n| n != 0) || (op == "=" && self.nonzero(r, env));
                 // A write to a field never establishes a fact about its root.
@@ -2192,15 +2218,29 @@ impl Checker<'_> {
                 // type is not copy borrows it: the pattern's bindings are
                 // `in` borrows of its payloads, `Box` contents included, so a
                 // borrowed tree can be walked any number of times (§4.3).
-                let borrowed = self.borrowed_scrutinee(value, env);
+                let view = self.element_view_scrutinee(value, arms, env);
+                let borrowed = view
+                    .as_ref()
+                    .map(|(pass, _)| *pass)
+                    .or_else(|| self.borrowed_scrutinee(value, env));
                 let usage = borrowed.map_or(Usage::Own, |_| Usage::Borrow(Pass::In));
+                self.element_view = view.as_ref().map(|(pass, _)| *pass);
                 let t = self.expr(value, env, usage);
+                self.element_view = None;
                 self.coverage(arms, &t, e.span.clone());
                 let borrow_base = self.match_borrows.len();
-                if borrowed.is_some()
-                    && let Some(p) = Place::from_expr(value)
-                {
-                    self.match_borrows.push((p, value.span.clone()));
+                match view {
+                    // An element view (§13) borrows its sequence for the
+                    // whole match: `in` lets the arms read it, `inout`
+                    // lends it exclusively.
+                    Some((pass, p)) => self.match_borrows.push((p, value.span.clone(), pass)),
+                    None => {
+                        if borrowed.is_some()
+                            && let Some(p) = Place::from_expr(value)
+                        {
+                            self.match_borrows.push((p, value.span.clone(), Pass::In));
+                        }
+                    }
                 }
                 let original = env.clone();
                 let mut branches = vec![];
@@ -2875,7 +2915,13 @@ impl Checker<'_> {
         }
         let element = self.receiver_type(e, env);
         if !crate::dyn_trait::is_boxed(&element) {
-            return None;
+            // An element whose type is not copy is lent in place (an
+            // element view, §13): the call borrows the whole sequence as it
+            // borrows the element.
+            if element == Type::Infer || self.mode(&element) == Mode::Copy {
+                return None;
+            }
+            return Place::from_expr(base);
         }
         // An `inout` lend may only reach the object: a vtable stub's
         // receiver or a `dyn` parameter. A callee taking the box itself
@@ -3917,7 +3963,8 @@ impl Checker<'_> {
     ) -> bool {
         match (a, b) {
             (Some(a), Some(b)) => {
-                kind.checked(op, a, b) != Err(crate::numeric::ArithFailure::Overflow)
+                integer_widths_rules::fact_checked(kind, op, a, b)
+                    != Err(crate::numeric::ArithFailure::Overflow)
             }
             _ if op == "/" => b.is_some_and(|b| b != -1) || a.is_some_and(|a| a != kind.min()),
             _ => false,
@@ -4044,12 +4091,12 @@ impl Checker<'_> {
             ExprKind::Name(n) => env.bindings.get(n)?.integer?,
             ExprKind::Unary(op, v) if op == "-" => {
                 let k = kind(v).or_else(|| kind(e))?;
-                k.checked_neg(self.integer_fact(v, env)?)?
+                integer_widths_rules::fact_neg(k, self.integer_fact(v, env)?)?
             }
             ExprKind::Binary(op, a, b) => {
                 let k = kind(a).or_else(|| kind(e))?;
                 let (a, b) = (self.integer_fact(a, env)?, self.integer_fact(b, env)?);
-                k.checked(op, a, b).ok()?
+                integer_widths_rules::fact_checked(k, op, a, b).ok()?
             }
             ExprKind::Call { callee, args, .. } => {
                 let ExprKind::Name(name) = &callee.kind else {
@@ -4088,7 +4135,7 @@ impl Checker<'_> {
             _ => return None,
         };
         match kind(e) {
-            Some(k) if !k.fits(n) => None,
+            Some(k) if !integer_widths_rules::fact_fits(k, n) => None,
             _ => Some(n),
         }
     }
@@ -4249,11 +4296,12 @@ impl Checker<'_> {
         Some((lo, hi))
     }
     /// Inclusive bounds of an integer expression: its exact fact, a name's
-    /// kind and current range, `x & m` with `m >= 0` in `0..=m`, and a
-    /// nonnegative `x % m` with `m > 0` in `0..m`.
+    /// kind and current range, `x & m` with `m >= 0` in `0..=m`, a
+    /// nonnegative `x % m` with `m > 0` in `0..m`, and a call's result range.
     fn integer_bounds(&self, e: &Expr, env: &Env) -> Option<(i128, i128)> {
         if let Some(n) = self.integer_fact(e, env) {
-            return Some((n, n));
+            // A `u128` fact above `i128::MAX` is a bit pattern, not a bound.
+            return (n >= 0 || !self.u128_expr(e, env)).then_some((n, n));
         }
         match &e.kind {
             ExprKind::Name(n) => Self::binding_bounds(env.bindings.get(n)?),
@@ -4274,6 +4322,11 @@ impl Checker<'_> {
                 let (blo, bhi) = self.integer_bounds(b, env)?;
                 (alo >= 0 && blo > 0).then(|| (0, ahi.min(bhi - 1)))
             }
+            // A call of a function whose returns are bounded ([`call_facts`]).
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Name(n) if !env.bindings.contains_key(n) => self.call_range(n)?,
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -5161,7 +5214,7 @@ pub fn free_names(e: &Expr) -> BTreeSet<String> {
     out
 }
 
-fn pattern_names(p: &Pattern) -> BTreeSet<String> {
+pub(crate) fn pattern_names(p: &Pattern) -> BTreeSet<String> {
     match &p.kind {
         PatternKind::Bind(n) => BTreeSet::from([n.clone()]),
         PatternKind::Tuple(ps) => ps.iter().flat_map(pattern_names).collect(),
