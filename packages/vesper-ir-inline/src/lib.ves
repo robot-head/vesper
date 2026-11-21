@@ -1243,7 +1243,12 @@ fn is_const_function(in p: Prog, s: u32) -> bool {
             if at == 0 {
                 return true;
             }
-            if at >= 2 && name_byte(in p, s, sub(at, 1)) == 95 && name_byte(in p, s, sub(at, 2)) == 95 {
+            if at
+                >= 2
+                && name_byte(in p, s, sub(at, 1))
+                == 95
+                && name_byte(in p, s, sub(at, 2))
+                == 95 {
                 return true;
             }
         }
@@ -1298,9 +1303,12 @@ fn fail_row_only(in p: Prog, r: u32) -> bool {
     let n = u64_at(in p.row_words, at);
     for i in 0..n {
         let e = add(inc(at), wrapping_mul(i, 3));
-        if u64_at(in p.row_words, e) != 0
-            || u64_at(in p.row_words, inc(e)) != w(p.s_fail)
-            || u64_at(in p.row_words, add(e, 2)) != 1 {
+        if u64_at(in p.row_words, e)
+            != 0
+            || u64_at(in p.row_words, inc(e))
+            != w(p.s_fail)
+            || u64_at(in p.row_words, add(e, 2))
+            != 1 {
             return false;
         }
     }
@@ -1480,7 +1488,8 @@ fn cost_of(in p: Prog, g: Tgt, in fd: Folded, in blocks: ChunkSeq[u8]) -> u64 {
             if free(in p, g, f, i) {
                 continue;
             }
-            if u8_at(in fd.known, w(i.dest)) != 0
+            if u8_at(in fd.known, w(i.dest))
+                != 0
                 && (i.op == O_BINARY || i.op == O_UNARY || i.op == O_READ || i.op == O_DATA) {
                 continue;
             }
@@ -1578,10 +1587,13 @@ fn handler_sum(in p: Prog, fi: u32, count: bool) -> u64 {
         } else {
             total = add(
                 total,
-                cost(in p, Tgt {
-                    f: g,
-                    inst: NONE32
-                })
+                cost(
+                    in p,
+                    Tgt {
+                        f: g,
+                        inst: NONE32
+                    }
+                )
             );
         }
         handler_graphs(in p, g, inout pending);
@@ -1699,7 +1711,7 @@ fn caller_eligible(in p: Prog, fi: u32) -> bool {
     if (f.flags & W_SLOTS) != 0 || row_has_capability(in p, f.row) {
         return false;
     }
-    !any_type(
+    ! any_type(
         in p,
         Tgt {
             f: fi,
@@ -1951,11 +1963,15 @@ fn bindings_new() -> Bindings {
 
 impl Bindings {
     fn push(inout self, place: bool, value: u32, at: u64) {
-        self.place.push(if place {
-            1
-        } else {
-            0
-        });
+        self
+            .place
+            .push(
+            if place {
+                1
+            } else {
+                0
+            }
+        );
         self.value.push(value);
         self.at.push(at);
     }
@@ -2006,9 +2022,7 @@ fn site_bindings(in p: Prog, c: u32, g: Tgt, dest: u32, args: u64, inout out: Bi
         let aggregate = p.has(ty, F_AGGREGATE);
         let sequence = p.has(ty, F_SEQUENCE);
         if p.has(ty, F_SLICE) {
-            let same = local
-                && p.op(inc(place)) == 0
-                && p.local_ty(caller, n32(p.op(place))) == ty;
+            let same = local && p.op(inc(place)) == 0 && p.local_ty(caller, n32(p.op(place))) == ty;
             out.push(same, value, place);
         } else if q.pass == P_INOUT {
             if !local {
@@ -2531,7 +2545,8 @@ fn eval_terminator(inout p: Prog, bk: Blk, b: u64, inout st: Round, inout succ: 
         let mut taken = NONE32;
         if v.k != 0 {
             taken = arm(inout p, ta, v);
-            if taken != NONE32
+            if taken
+                != NONE32
                 && pattern_binds_any(in p, p.op(add(add(ta, 2), wrapping_mul(w(taken), 2)))) {
                 taken = NONE32;
             }
@@ -2682,7 +2697,10 @@ fn same_kns(in a: ChunkSeq[Kn], in b: ChunkSeq[Kn], n: u64) -> bool {
 
 fn same_round(in a: Round, in b: Round, nblocks: u64, nv: u64) -> bool {
     for k in 0..nblocks {
-        if u8_at(in a.live, k) != u8_at(in b.live, k) || u32_at(in a.jumps, k) != u32_at(in b.jumps, k) {
+        if u8_at(in a.live, k)
+            != u8_at(in b.live, k)
+            || u32_at(in a.jumps, k)
+            != u32_at(in b.jumps, k) {
             return false;
         }
     }
@@ -2782,12 +2800,24 @@ fn pure(in p: Prog, g: Tgt, f: Fun, i: Inst) -> bool {
     if i.op == O_CONST || i.op == O_UNIT {
         return true;
     }
-    if i.op == O_READ
-        || i.op == O_BINARY
-        || i.op == O_UNARY
-        || i.op == O_PROJECT
-        || i.op == O_DATA
-        || i.op == O_TUPLE {
+    if i
+        .op
+        == O_READ
+        || i
+        .op
+        == O_BINARY
+        || i
+        .op
+        == O_UNARY
+        || i
+        .op
+        == O_PROJECT
+        || i
+        .op
+        == O_DATA
+        || i
+        .op
+        == O_TUPLE {
         return p.has(p.map(g.inst, i.ty), F_PLAIN);
     }
     if i.op == O_BIND {
@@ -2988,7 +3018,8 @@ fn split(in p: Prog, g: Tgt, in fd: Folded, budget: u64) -> Split {
                 continue;
             }
             let hv = heavy(in p, f, in cold_blocks) && !heavy(in p, f, in hot);
-            let better = !best.found
+            let better = !best
+                .found
                 || (hv && !best_heavy)
                 || (hv == best_heavy && hot_cost > best.hot_cost);
             if better {
@@ -3069,11 +3100,14 @@ fn copy_pattern(inout p: Prog, in rn: Rename, at: u64) -> u64 {
     if kind == PK_BIND {
         let name = p.pat(add(at, 3));
         let r = rn.names.get(name);
-        body.push(if r != NONE32 {
-            w(r)
-        } else {
-            name
-        });
+        body
+            .push(
+            if r != NONE32 {
+                w(r)
+            } else {
+                name
+            }
+        );
     } else if kind == PK_TUPLE {
         let n = p.pat(add(at, 3));
         body.push(n);
@@ -3178,11 +3212,15 @@ fn copy_op(inout p: Prog, in rn: Rename, i: Inst) -> u32 {
     } else if op == O_HANDLE {
         let has = p.op(a);
         p.ops.push(has);
-        p.ops.push(if has != 0 {
-            add(p.op(inc(a)), vb)
-        } else {
-            p.op(inc(a))
-        });
+        p
+            .ops
+            .push(
+            if has != 0 {
+                add(p.op(inc(a)), vb)
+            } else {
+                p.op(inc(a))
+            }
+        );
         let na = p.op(add(a, 2));
         p.ops.push(na);
         let mut at = add(a, 3);
@@ -3207,7 +3245,8 @@ fn copy_op(inout p: Prog, in rn: Rename, i: Inst) -> u32 {
     out
 }
 
-fn new_block(inout p: Prog, in params: ChunkSeq[u32], in list: ChunkSeq[u32], term: u8, ta: u32) -> u32 {
+fn new_block(inout p: Prog, in params: ChunkSeq[u32], in list: ChunkSeq[u32], term: u8, ta: u32)
+    -> u32 {
     let pa = n32(p.ids.len());
     p.ids.extend(in params.as_slice());
     let ia = n32(p.ids.len());
@@ -3431,10 +3470,21 @@ fn splice(
                     words.push(add(p.op(sa), next_value));
                     words.push(arms);
                     for j in 0..arms {
-                        let pat = copy_pattern(inout p, in rn, p.op(add(add(sa, 2), wrapping_mul(j, 2))));
+                        let pat = copy_pattern(
+                            inout p,
+                            in rn,
+                            p.op(add(add(sa, 2), wrapping_mul(j, 2)))
+                        );
                         words.push(pat);
-                        words.push(
-                            target(in s, k, p.op(add(add(sa, 3), wrapping_mul(j, 2))), first, cold_block)
+                        words
+                            .push(
+                            target(
+                                in s,
+                                k,
+                                p.op(add(add(sa, 3), wrapping_mul(j, 2))),
+                                first,
+                                cold_block
+                            )
                         );
                     }
                     ta = n32(p.ops.len());
@@ -3685,10 +3735,16 @@ fn inline_into(
                     }
                     e = u32_at(in rep.c_next, w(e));
                 }
-                if add(added, cost_here) > p.caller_growth
-                    || add(rep.added, cost_here) > p.program_growth
+                if add(added, cost_here)
+                    > p
+                    .caller_growth
+                    || add(rep.added, cost_here)
+                    > p
+                    .program_growth
                     || over_cap
-                    || add(handles_added, handler_sum(in p, fi, true)) > p.caller_handles {
+                    || add(handles_added, handler_sum(in p, fi, true))
+                    > p
+                    .caller_handles {
                     why = R_GROWTH;
                 }
             }
@@ -3972,15 +4028,18 @@ fn put_report(in p: Prog, in rep: Report, inout o: ChunkSeq[u64]) {
         let fi = n32(f);
         o.push(p.input_name(p.fun(fi).name));
         o.push(size(in p, fi));
-        o.push(
-            cost(in p, Tgt {
-                f: fi,
-                inst: NONE32
-            })
+        o
+            .push(
+            cost(
+                in p,
+                Tgt {
+                    f: fi,
+                    inst: NONE32
+                }
+            )
         );
     }
 }
-
 
 // ----- the canonical text (`dump` in tests/common/inline_words.rs) ----------------------
 
