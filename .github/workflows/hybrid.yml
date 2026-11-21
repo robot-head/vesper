@@ -6,9 +6,10 @@ name: Hybrid compiler
 # `vesper-hybrid` with it, and runs the crate's tests: the differential
 # harness (both compilers over the bootstrap corpus, examples/ and tests/
 # must agree on exit status, stdout, stderr and object bytes), the pilot's
-# function-by-function check and the manifest guard. Then it rebuilds the
-# hybrid with a deliberately wrong pilot module (`--features divergent`),
-# which the differential harness must catch. Not a required check; Bazel
+# function-by-function check, the checker swaps' direct checks and the
+# manifest guard. Then it rebuilds the hybrid with a deliberately wrong
+# layout (`--features divergent`), parse and IR check, which the
+# differential harness must catch. Not a required check; Bazel
 # (Test all targets) builds the crate and runs the same tests on Linux.
 
 on:
@@ -23,6 +24,10 @@ on:
       - 'packages/vesper-front/**'
       - 'packages/vesper-ast/**'
       - 'packages/vesper-std/**'
+      - 'packages/vesper-check-data/**'
+      - 'packages/vesper-check-layout/**'
+      - 'packages/vesper-ir-check/**'
+      - 'tests/common/check_words.rs'
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
       - 'crates/vesper-port-abi/**'
@@ -36,6 +41,10 @@ on:
       - 'packages/vesper-front/**'
       - 'packages/vesper-ast/**'
       - 'packages/vesper-std/**'
+      - 'packages/vesper-check-data/**'
+      - 'packages/vesper-check-layout/**'
+      - 'packages/vesper-ir-check/**'
+      - 'tests/common/check_words.rs'
       - 'crates/vesper-hybrid/**'
       - 'crates/vesper-port-harness/**'
       - 'crates/vesper-port-abi/**'
@@ -87,8 +96,13 @@ jobs:
           echo "VESPER_DEFAULT_COMPILER=$GITHUB_WORKSPACE/target/debug/$exe" >> "$GITHUB_ENV"
       - name: Build and test the hybrid compiler
         run: cargo test --locked -p vesper-hybrid -- --nocapture
-      - name: The differential harness catches a divergent pilot module
-        run: cargo test --locked -p vesper-hybrid --features divergent --test differential -- --nocapture
+      - name: The differential harness catches a divergent layout
+        # The pilot's word arithmetic and the whole layout (#1177) are both
+        # wrong; a wrong layout cannot compile the pilot test's program, so
+        # only the harness runs here.
+        run: cargo test --locked -p vesper-hybrid --features divergent --test differential hybrid_matches_the_default_compiler -- --nocapture
+      - name: The differential harness catches a divergent IR check
+        run: cargo test --locked -p vesper-hybrid --features divergent-ir-check --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent parse module
         # A wrong parse cannot compile the pilot test's program, so only the
         # harness runs here.

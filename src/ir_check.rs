@@ -149,7 +149,38 @@ impl Origins {
         })
     }
 }
+/// The ownership and evidence diagnostics of `program`: [`rust_validate`],
+/// or the installed [`IrCheckTable`] (the hybrid build's Vesper IR check).
 pub fn validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
+    (IR_CHECK_TABLE.get().unwrap_or(&RUST_IR_CHECK).validate)(world, program)
+}
+
+/// [`validate`] as a function table: the swap-in point of this module for
+/// the hybrid Stage 2 build (self-hosting SH2 lane 5, #1177), which installs
+/// `@vesper/ir-check` here. Nothing in the default compiler installs one, so
+/// it always runs [`rust_validate`]. An installed `validate` must return
+/// exactly what [`rust_validate`] returns (the hybrid's tests check it).
+#[derive(Debug, Clone, Copy)]
+pub struct IrCheckTable {
+    /// [`validate`].
+    pub validate: fn(&World, &ir::Program) -> Vec<Diagnostic>,
+}
+
+/// The Rust IR check, the default [`IrCheckTable`].
+pub const RUST_IR_CHECK: IrCheckTable = IrCheckTable {
+    validate: rust_validate,
+};
+
+static IR_CHECK_TABLE: std::sync::OnceLock<IrCheckTable> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_IR_CHECK`] for the rest of the process. Only the first
+/// call takes effect; a later one returns its table back.
+pub fn install_ir_check(table: IrCheckTable) -> Result<(), IrCheckTable> {
+    IR_CHECK_TABLE.set(table)
+}
+
+/// [`validate`] by the Rust IR check, whatever table is installed.
+pub fn rust_validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
     let mut diagnostics = evidence(program);
     for f in program.functions.values() {
         let mut checker = Flow {

@@ -184,6 +184,18 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH2 lane 5 (#1177): @vesper/check-layout and @vesper/ir-check over
+        # the same corpus.
+        "test/hybrid_layout": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        "test/hybrid_ir_check": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
@@ -562,6 +574,8 @@ vesper_crate(
         "test/self_host_check": "long",
         # The checker data differential (#1176) checks every corpus world.
         "test/self_host_check_data": "long",
+        "test/hybrid_layout": "long",
+        "test/hybrid_ir_check": "long",
         "test/self_host_check_harness": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
@@ -649,6 +663,32 @@ vesper_package(
         ":std_arena_package",
         ":std_intern_package",
     ],
+)
+
+# The checker data, layout and IR check as dependencies of the hybrid
+# compiler's check_layout and ir_check modules (self-hosting SH2 lane 5,
+# #1177).
+vesper_package(
+    name = "check_data_package",
+    srcs = glob(["packages/vesper-check-data/src/**/*.ves"]),
+    manifest = "packages/vesper-check-data/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "check_layout_package",
+    srcs = glob(["packages/vesper-check-layout/src/**/*.ves"]),
+    manifest = "packages/vesper-check-layout/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
+)
+
+vesper_package(
+    name = "ir_check_package",
+    srcs = glob(["packages/vesper-ir-check/src/**/*.ves"]),
+    manifest = "packages/vesper-ir-check/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
 )
 
 vesper_package(

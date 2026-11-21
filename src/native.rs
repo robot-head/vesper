@@ -1076,6 +1076,7 @@ fn compile_entry<M: Module>(
     let instances = instances_for_entry(world, entry, trace_ok)?;
     let mut program = crate::ffi_lowering::drops::lower_world(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
+    wide_native::refine_wide_tuples(&mut program);
     let mut inlined_into = BTreeMap::new();
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;

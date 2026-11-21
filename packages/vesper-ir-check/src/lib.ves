@@ -1,0 +1,3473 @@
+// @vesper/ir-check: `src/ir_check.rs` (state-token evidence and the
+// ownership abstract interpretation over Place IR: `validate`, `evidence`,
+// `Flow`) over the @vesper/check-data tables (self-hosting SH2 lane 5,
+// #1177). The census translation (SH1 lane 15, #1130) promoted to a
+// package; it matched Rust on every corpus world and five mutants of each
+// (190,875 diagnostics) at 0.57x of its time.
+//
+// The IR is decoded into flat tables (instructions, an operand pool, a
+// pattern pool); a dataflow `State` is a set of sorted rows, and the
+// per-block incoming states live in one append-only pool (a `ChunkSeq` of
+// structs that own sequences cannot be indexed in place until element
+// borrows land, SH2 lane 1).
+//
+// - `validate_into`: `validate`, the kept (deduplicated) diagnostics.
+// - `ir_check_words`: the hybrid build's entry: the diagnostics as words
+//   (read back by `decode_diagnostics` in tests/common/check_words.rs).
+// - `check_ir_text` / `check_ir_words`: the harness entries
+//   (tests/hybrid_ir_check.rs).
+
+use @vesper/check-data::pack_text;
+use @vesper/check-data::util::{
+    add,
+    fold,
+    inc,
+    inc32,
+    n32,
+    push_decimal,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    default_type,
+    substitute,
+    vars_new,
+    zero_slots
+};
+use @vesper/check-data::world::{
+    Bounds,
+    Known,
+    World,
+    bounds_new,
+    constructor,
+    field_step,
+    mode_of
+};
+use @vesper/check-data::diag::{
+    DiagRow,
+    Diags,
+    RelRow,
+    diags_new
+};
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+
+// Constants cannot be imported across modules yet (check-data gap 1); these
+// copies equal check-data's.
+const NONE32: u32 = 4294967295;
+const NO_ADT: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+const K_INFER: u8 = 5;
+const M_COPY: u8 = 0;
+const M_AFFINE: u8 = 1;
+const M_LINEAR: u8 = 2;
+const P_IN: u8 = 0;
+const P_INOUT: u8 = 1;
+const P_SINK: u8 = 2;
+
+// Input name index -> symbol (`sym` of check-data's input.ves).
+fn sym(in nmap: ChunkSeq[u32], x: u64) -> u32 {
+    u32_at(in nmap, x)
+}
+
+// src/ir_check.rs: state-token evidence and the ownership abstract
+// interpretation over Place IR (`validate`, `evidence`, `Flow`). The IR is
+// decoded into flat tables (instructions, an operand pool, a pattern pool);
+// a dataflow `State` is a set of sorted rows, and the per-block incoming
+// states live in one append-only pool (a `ChunkSeq` of structs that own
+// sequences cannot be indexed in place).
+
+// ----- paths and places -------------------------------------------------------
+
+pub copy struct PathNode {
+    parent: u32,
+    last: u32,
+    len: u32,
+}
+
+pub struct Paths {
+    nodes: ChunkSeq[PathNode],
+    hashes: ChunkSeq[u64],
+    slots: ChunkSeq[u32],
+    mask: u64,
+}
+
+pub fn paths_new() -> Paths {
+    let mut p = Paths {
+        nodes: ChunkSeq::new[PathNode](),
+        hashes: ChunkSeq::new[u64](),
+        slots: zero_slots(1024),
+        mask: 1023
+    };
+    p
+        .nodes
+        .push(
+        PathNode {
+            parent: 0,
+            last: 0,
+            len: 0
+        }
+    );
+    p.hashes.push(0);
+    p
+}
+
+impl Paths {
+    pub fn node(in self, p: u32) -> PathNode {
+        match self.nodes.try_get(w(p)) {
+            Option::Some(n) => n,
+            Option::None => PathNode {
+                parent: 0,
+                last: 0,
+                len: 0
+            },
+        }
+    }
+
+    pub fn len(in self, p: u32) -> u32 {
+        self.node(p).len
+    }
+
+    fn grow(inout self) {
+        let cap = wrapping_mul(add(self.mask, 1), 2);
+        let mut slots = zero_slots(cap);
+        let mask = wrapping_sub(cap, 1);
+        for id in 1..self.hashes.len() {
+            let mut at = u64_at(in self.hashes, id) & mask;
+            loop {
+                if u32_at(in slots, at) == 0 {
+                    break;
+                }
+                at = inc(at) & mask;
+            }
+            let ok = slots.try_set(at, n32(id));
+        }
+        self.slots = slots;
+        self.mask = mask;
+    }
+
+    // The path `parent` followed by field `sym`.
+    pub fn child(inout self, parent: u32, sym: u32) -> u32 {
+        let h = fold(fold(14695981039346656037, w(parent)), w(sym));
+        let mut at = h & self.mask;
+        loop {
+            let slot = u32_at(in self.slots, at);
+            if slot == 0 {
+                break;
+            }
+            let n = self.node(slot);
+            if n.parent == parent && n.last == sym {
+                return slot;
+            }
+            at = inc(at) & self.mask;
+        }
+        let id = n32(self.nodes.len());
+        let len = inc32(self.len(parent));
+        self
+            .nodes
+            .push(
+            PathNode {
+                parent: parent,
+                last: sym,
+                len: len
+            }
+        );
+        self.hashes.push(h);
+        let ok = self.slots.try_set(at, id);
+        if wrapping_mul(self.nodes.len(), 2) > self.mask {
+            self.grow();
+        }
+        id
+    }
+
+    // The prefix of `p` with `len` fields.
+    pub fn prefix(in self, p: u32, len: u32) -> u32 {
+        let mut x = p;
+        loop {
+            let n = self.node(x);
+            if n.len <= len {
+                return x;
+            }
+            x = n.parent;
+        }
+    }
+
+    // `a.starts_with(b)`.
+    pub fn starts_with(in self, a: u32, b: u32) -> bool {
+        let lb = self.len(b);
+        self.len(a) >= lb && self.prefix(a, lb) == b
+    }
+
+    pub fn overlaps(in self, a: u32, b: u32) -> bool {
+        self.starts_with(a, b) || self.starts_with(b, a)
+    }
+
+    // ".f.g" for path f.g.
+    pub fn write(in self, in names: Names, p: u32, inout out: ChunkSeq[u8]) {
+        if p == 0 {
+            return;
+        }
+        let n = self.node(p);
+        self.write(in names, n.parent, inout out);
+        out.push(46);
+        names.write(n.last, inout out);
+    }
+
+    // `World::field(ty, path)`; NONE32 for None.
+    pub fn field_type(in self, inout t: Types, inout names: Names, in wd: World, ty: u32, p: u32)
+        -> u32 {
+        if p == 0 {
+            return ty;
+        }
+        let n = self.node(p);
+        let base = self.field_type(inout t, inout names, in wd, ty, n.parent);
+        if base == NONE32 {
+            return NONE32;
+        }
+        let seg = names.size(n.last) > 0 && names.byte(n.last, 0) == 91;
+        field_step(inout t, inout names, in wd, base, n.last, seg)
+    }
+}
+
+// A place is root symbol * 2^32 + path id.
+fn place(root: u32, path: u32) -> u64 {
+    wrapping_add(wrapping_mul(w(root), 4294967296), w(path))
+}
+
+fn place_root(p: u64) -> u32 {
+    n32(p >> 32)
+}
+
+fn place_path(p: u64) -> u32 {
+    n32(p & 4294967295)
+}
+
+// ----- the decoded program ----------------------------------------------------
+
+const OP_NONE: u8 = 0;
+const OP_READ: u8 = 1;
+const OP_BIND: u8 = 2;
+const OP_WRITE: u8 = 3;
+const OP_CONSUME1: u8 = 4;
+const OP_BINARY: u8 = 5;
+const OP_CONSUME_N: u8 = 6;
+const OP_VECTOR: u8 = 7;
+const OP_SEQ: u8 = 8;
+const OP_PROJECT: u8 = 9;
+const OP_INDEX: u8 = 10;
+const OP_CALL: u8 = 11;
+const OP_INDIRECT: u8 = 12;
+const OP_TRY: u8 = 13;
+const OP_MOVES: u8 = 14;
+const OP_HANDLE: u8 = 15;
+
+// Instruction flags.
+const F_ABORT: u64 = 1;
+const F_EFFECTFUL: u64 = 2;
+const F_ACTION: u64 = 4;
+const F_TOKEN: u64 = 8;
+const F_NEVER: u64 = 16;
+
+pub copy struct Inst {
+    dest: u32,
+    ty: u32,
+    s0: u64,
+    s1: u64,
+    tok_in: u32,
+    tok_out: u32,
+    flags: u64,
+    op: u8,
+    // operands: ops[a..]
+    a: u32,
+}
+
+pub copy struct Blk {
+    entry: u32,
+    // incoming tokens: pairs (block, token) in ops[ia..ia+2*in_n]
+    ia: u32,
+    in_n: u32,
+    out_tok: u32,
+    // block params: ops[pa..pa+pn]
+    pa: u32,
+    pn: u32,
+    // instructions: insts[i0..i0+ic]
+    i0: u32,
+    ic: u32,
+    // terminator kind and operands ops[ta..]
+    term: u8,
+    ta: u32,
+}
+
+pub copy struct ParamRow {
+    name: u32,
+    pass: u8,
+    ty: u32,
+    s0: u64,
+    s1: u64,
+}
+
+pub copy struct FnRow {
+    pa: u32,
+    pn: u32,
+    // bounds: ops[ba..ba+2*bn] pairs (name, mode)
+    ba: u32,
+    bn: u32,
+    // external captures: ops[ea..ea+en]
+    ea: u32,
+    en: u32,
+    // block-param value types: ops[va..va+2*vn] pairs (id, ty)
+    va: u32,
+    vn: u32,
+    b0: u32,
+    bc: u32,
+}
+
+pub struct Program {
+    fns: ChunkSeq[FnRow],
+    params: ChunkSeq[ParamRow],
+    blocks: ChunkSeq[Blk],
+    insts: ChunkSeq[Inst],
+    ops: ChunkSeq[u64],
+    pats: ChunkSeq[u64],
+    paths: Paths,
+    // symbol -> name order rank (BTreeMap<String, _> order)
+    rank: ChunkSeq[u32],
+    // non-linear effect names
+    nonlinear: ChunkSeq[u32],
+}
+
+impl Program {
+    pub fn op(in self, i: u64) -> u64 {
+        u64_at(in self.ops, i)
+    }
+
+    pub fn pat(in self, i: u64) -> u64 {
+        u64_at(in self.pats, i)
+    }
+
+    pub fn inst(in self, i: u64) -> Inst {
+        match self.insts.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Inst {
+                dest: 0,
+                ty: 0,
+                s0: 0,
+                s1: 0,
+                tok_in: 0,
+                tok_out: 0,
+                flags: 0,
+                op: 0,
+                a: 0
+            },
+        }
+    }
+
+    pub fn block(in self, i: u64) -> Blk {
+        match self.blocks.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => Blk {
+                entry: 0,
+                ia: 0,
+                in_n: 0,
+                out_tok: 0,
+                pa: 0,
+                pn: 0,
+                i0: 0,
+                ic: 0,
+                term: 4,
+                ta: 0
+            },
+        }
+    }
+
+    pub fn rank_of(in self, s: u32) -> u32 {
+        u32_at(in self.rank, w(s))
+    }
+
+    pub fn is_nonlinear(in self, s: u32) -> bool {
+        for i in 0..self.nonlinear.len() {
+            if u32_at(in self.nonlinear, i) == s {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// ----- decoding ---------------------------------------------------------------
+
+fn read_path(
+    inout r: Reader,
+    in b: Slice[u8],
+    in nmap: ChunkSeq[u32],
+    inout paths: Paths,
+    base: u32
+) -> u32 {
+    let n = r.word(in b);
+    let mut p = base;
+    for i in 0..n {
+        p = paths.child(p, sym(in nmap, r.word(in b)));
+    }
+    p
+}
+
+// A pattern: kind, start, stop, then Bind: name; Tuple: n, children;
+// Constructor: qualifier + 1 (0 none), short, n, (field, child)*;
+// multi-segment path constructors are kind 3 (never resolve). Children are
+// pool positions.
+fn read_pattern(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout pats: ChunkSeq[u64])
+    -> u64 {
+    let kind = r.word(in b);
+    let s0 = r.word(in b);
+    let s1 = r.word(in b);
+    if kind == 1 {
+        let at = pats.len();
+        pats.push(kind);
+        pats.push(s0);
+        pats.push(s1);
+        pats.push(w(sym(in nmap, r.word(in b))));
+        return at;
+    }
+    if kind == 2 {
+        let n = r.word(in b);
+        let mut kids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let c = read_pattern(inout r, in b, in nmap, inout pats);
+            kids.push(c);
+        }
+        let at = pats.len();
+        pats.push(kind);
+        pats.push(s0);
+        pats.push(s1);
+        pats.push(n);
+        for i in 0..n {
+            pats.push(u64_at(in kids, i));
+        }
+        return at;
+    }
+    // A constructor (4), or one whose multi-component path the checker
+    // cannot resolve (3): binding skips the latter, but the origin index
+    // still walks its fields.
+    if kind == 4 || kind == 3 {
+        let q = r.word(in b);
+        let qual = if q == 0 {
+            NONE32
+        } else {
+            sym(in nmap, wrapping_sub(q, 1))
+        };
+        let short = sym(in nmap, r.word(in b));
+        let n = r.word(in b);
+        let mut fs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut kids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for i in 0..n {
+            fs.push(w(sym(in nmap, r.word(in b))));
+            let c = read_pattern(inout r, in b, in nmap, inout pats);
+            kids.push(c);
+        }
+        let at = pats.len();
+        pats.push(kind);
+        pats.push(s0);
+        pats.push(s1);
+        pats.push(w(qual));
+        pats.push(w(short));
+        pats.push(n);
+        for i in 0..n {
+            pats.push(u64_at(in fs, i));
+            pats.push(u64_at(in kids, i));
+        }
+        return at;
+    }
+    // Wild (0), literal and the rest (5).
+    let at = pats.len();
+    pats.push(kind);
+    pats.push(s0);
+    pats.push(s1);
+    at
+}
+
+fn read_args(inout r: Reader, in b: Slice[u8], inout ops: ChunkSeq[u64]) {
+    let n = r.word(in b);
+    ops.push(n);
+    for i in 0..n {
+        ops.push(r.word(in b));
+        ops.push(r.word(in b));
+    }
+}
+
+fn read_op(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], inout p: Program, op: u8) {
+    if op == OP_READ {
+        let root = sym(in nmap, r.word(in b));
+        let pass = r.word(in b);
+        let is_fn = r.word(in b);
+        let base = read_path(inout r, in b, in nmap, inout p.paths, 0);
+        let np = r.word(in b);
+        p.ops.push(w(root));
+        p.ops.push(pass);
+        p.ops.push(is_fn);
+        if np == 0 {
+            p.ops.push(1);
+            p.ops.push(w(base));
+        } else {
+            p.ops.push(np);
+            for i in 0..np {
+                let q = read_path(inout r, in b, in nmap, inout p.paths, base);
+                p.ops.push(w(q));
+            }
+        }
+    } else if op == OP_BIND {
+        p.ops.push(r.word(in b));
+        let at = read_pattern(inout r, in b, in nmap, inout p.pats);
+        p.ops.push(at);
+    } else if op == OP_WRITE {
+        p.ops.push(r.word(in b));
+        p.ops.push(w(sym(in nmap, r.word(in b))));
+        let q = read_path(inout r, in b, in nmap, inout p.paths, 0);
+        p.ops.push(w(q));
+        p.ops.push(r.word(in b));
+    } else if op == OP_CONSUME1 || op == OP_PROJECT || op == OP_TRY {
+        p.ops.push(r.word(in b));
+    } else if op == OP_BINARY {
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+    } else if op == OP_INDEX {
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+    } else if op == OP_CONSUME_N || op == OP_VECTOR {
+        let n = r.word(in b);
+        p.ops.push(n);
+        for i in 0..n {
+            p.ops.push(r.word(in b));
+        }
+    } else if op == OP_SEQ || op == OP_CALL {
+        read_args(inout r, in b, inout p.ops);
+    } else if op == OP_INDIRECT {
+        p.ops.push(r.word(in b));
+        read_args(inout r, in b, inout p.ops);
+    } else if op == OP_MOVES || op == OP_HANDLE {
+        let n = r.word(in b);
+        p.ops.push(n);
+        for i in 0..n {
+            let root = sym(in nmap, r.word(in b));
+            let q = read_path(inout r, in b, in nmap, inout p.paths, 0);
+            p.ops.push(place(root, q));
+        }
+        p.ops.push(r.word(in b));
+        p.ops.push(r.word(in b));
+    }
+}
+
+pub fn read_program(
+    inout r: Reader,
+    in b: Slice[u8],
+    in names: Names,
+    in nmap: ChunkSeq[u32],
+    in tmap: ChunkSeq[u32]
+) -> Program {
+    let mut p = Program {
+        fns: ChunkSeq::new[FnRow](),
+        params: ChunkSeq::new[ParamRow](),
+        blocks: ChunkSeq::new[Blk](),
+        insts: ChunkSeq::new[Inst](),
+        ops: ChunkSeq::new[u64](),
+        pats: ChunkSeq::new[u64](),
+        paths: paths_new(),
+        rank: ChunkSeq::new[u32](),
+        nonlinear: ChunkSeq::new[u32](),
+    };
+    // Name ranks, by input name index.
+    p.rank.resize(names.len(), 0);
+    for i in 0..nmap.len() {
+        let ok = p.rank.try_set(w(u32_at(in nmap, i)), n32(r.word(in b)));
+    }
+    let nl = r.word(in b);
+    for i in 0..nl {
+        p.nonlinear.push(sym(in nmap, r.word(in b)));
+    }
+    let nf = r.word(in b);
+    for fi in 0..nf {
+        let pa = n32(p.params.len());
+        let pn = r.word(in b);
+        for i in 0..pn {
+            let name = sym(in nmap, r.word(in b));
+            let pass = wrapping_u8(r.word(in b));
+            let ty = u32_at(in tmap, r.word(in b));
+            let s0 = r.word(in b);
+            let s1 = r.word(in b);
+            p
+                .params
+                .push(
+                ParamRow {
+                    name: name,
+                    pass: pass,
+                    ty: ty,
+                    s0: s0,
+                    s1: s1
+                }
+            );
+        }
+        let ba = n32(p.ops.len());
+        let bn = r.word(in b);
+        for i in 0..bn {
+            p.ops.push(w(sym(in nmap, r.word(in b))));
+            p.ops.push(r.word(in b));
+        }
+        let ea = n32(p.ops.len());
+        let en = r.word(in b);
+        for i in 0..en {
+            p.ops.push(w(sym(in nmap, r.word(in b))));
+        }
+        let va = n32(p.ops.len());
+        let vn = r.word(in b);
+        for i in 0..vn {
+            p.ops.push(r.word(in b));
+            p.ops.push(w(u32_at(in tmap, r.word(in b))));
+        }
+        let b0 = n32(p.blocks.len());
+        let nb = r.word(in b);
+        for bi in 0..nb {
+            let entry = n32(r.word(in b));
+            let ia = n32(p.ops.len());
+            let inn = r.word(in b);
+            for i in 0..inn {
+                p.ops.push(r.word(in b));
+                p.ops.push(r.word(in b));
+            }
+            let out_tok = n32(r.word(in b));
+            let bpa = n32(p.ops.len());
+            let bpn = r.word(in b);
+            for i in 0..bpn {
+                p.ops.push(r.word(in b));
+            }
+            let i0 = n32(p.insts.len());
+            let ic = r.word(in b);
+            for ii in 0..ic {
+                let dest = n32(r.word(in b));
+                let ty = u32_at(in tmap, r.word(in b));
+                let s0 = r.word(in b);
+                let s1 = r.word(in b);
+                let flags = r.word(in b);
+                let tin = n32(r.word(in b));
+                let tout = n32(r.word(in b));
+                let op = wrapping_u8(r.word(in b));
+                let a = n32(p.ops.len());
+                read_op(inout r, in b, in nmap, inout p, op);
+                p
+                    .insts
+                    .push(
+                    Inst {
+                        dest: dest,
+                        ty: ty,
+                        s0: s0,
+                        s1: s1,
+                        tok_in: tin,
+                        tok_out: tout,
+                        flags: flags,
+                        op: op,
+                        a: a
+                    }
+                );
+            }
+            let term = wrapping_u8(r.word(in b));
+            let ta = n32(p.ops.len());
+            if term == 0 {
+                p.ops.push(r.word(in b));
+            } else if term == 1 || term == 3 {
+                let n = if term == 1 {
+                    p.ops.push(r.word(in b));
+                    r.word(in b)
+                } else {
+                    r.word(in b)
+                };
+                p.ops.push(n);
+                for i in 0..n {
+                    p.ops.push(r.word(in b));
+                }
+                // A match's scrutinee value follows its arms.
+                if term == 3 {
+                    p.ops.push(r.word(in b));
+                }
+            } else if term == 2 {
+                p.ops.push(r.word(in b));
+                p.ops.push(r.word(in b));
+            }
+            p
+                .blocks
+                .push(
+                Blk {
+                    entry: entry,
+                    ia: ia,
+                    in_n: n32(inn),
+                    out_tok: out_tok,
+                    pa: bpa,
+                    pn: n32(bpn),
+                    i0: i0,
+                    ic: n32(ic),
+                    term: term,
+                    ta: ta
+                }
+            );
+        }
+        p
+            .fns
+            .push(
+            FnRow {
+                pa: pa,
+                pn: n32(pn),
+                ba: ba,
+                bn: n32(bn),
+                ea: ea,
+                en: n32(en),
+                va: va,
+                vn: n32(vn),
+                b0: b0,
+                bc: n32(nb)
+            }
+        );
+    }
+    p
+}
+
+// Successor blocks of block `bk` (absolute), as relative indices.
+fn targets(in p: Program, bk: Blk, inout out: ChunkSeq[u32]) {
+    out.clear();
+    let ta = w(bk.ta);
+    if bk.term == 1 {
+        out.push(n32(p.op(ta)));
+    } else if bk.term == 2 {
+        out.push(n32(p.op(ta)));
+        out.push(n32(p.op(inc(ta))));
+    } else if bk.term == 3 {
+        let n = p.op(ta);
+        for i in 0..n {
+            out.push(n32(p.op(add(inc(ta), i))));
+        }
+    }
+}
+
+// ----- evidence ---------------------------------------------------------------
+
+fn e0411(inout d: Diags, in msg: Str, s0: u64, s1: u64) {
+    let c = d.open("E0411");
+    let m = d.text.len();
+    d.text.extend(in msg.as_bytes());
+    d.close(c, m, "", s0, s1);
+}
+
+fn sorted_insert(inout s: ChunkSeq[u64], x: u64) {
+    s.push(x);
+    let mut i = wrapping_sub(s.len(), 1);
+    loop {
+        if i == 0 {
+            break;
+        }
+        let a = u64_at(in s, wrapping_sub(i, 1));
+        if a <= x {
+            break;
+        }
+        let ok = s.try_set(i, a);
+        i = wrapping_sub(i, 1);
+    }
+    let ok = s.try_set(i, x);
+}
+
+// Sorted set of u32: insert, false when present.
+// One unit of origin-indexing work (`charge` in Origins::try_build); false
+// once the budget is spent.
+fn charge(inout work: u64) -> bool {
+    if work == 0 {
+        return false;
+    }
+    work = wrapping_sub(work, 1);
+    true
+}
+
+// A slot name against the origin text budget: false for a name over
+// MAX_CAUSE_NAME bytes or once the budget cannot hold it.
+fn charge_name(in names: Names, name: u32, inout text: u64) -> bool {
+    let n = names.size(name);
+    if n > MAX_CAUSE_NAME || n > text {
+        return false;
+    }
+    text = wrapping_sub(text, n);
+    true
+}
+
+// Whether sorted `s` holds `x`.
+fn sorted_contains(in s: ChunkSeq[u32], x: u32) -> bool {
+    let mut lo: u64 = 0;
+    let mut hi = s.len();
+    loop {
+        if lo >= hi {
+            return false;
+        }
+        let mid = wrapping_add(lo, hi) / 2;
+        let y = u32_at(in s, mid);
+        if y == x {
+            return true;
+        }
+        if y < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+fn set_insert(inout s: ChunkSeq[u32], x: u32) -> bool {
+    let mut lo: u64 = 0;
+    let mut hi = s.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) / 2;
+        let v = u32_at(in s, mid);
+        if v == x {
+            return false;
+        }
+        if v < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    s.push(x);
+    let mut i = wrapping_sub(s.len(), 1);
+    loop {
+        if i <= lo {
+            break;
+        }
+        let ok = s.try_set(i, u32_at(in s, wrapping_sub(i, 1)));
+        i = wrapping_sub(i, 1);
+    }
+    let ok = s.try_set(lo, x);
+    true
+}
+
+pub fn evidence(in p: Program, inout d: Diags) {
+    let mut tg: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for fi in 0..p.fns.len() {
+        let f = match p.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => FnRow {
+                pa: 0,
+                pn: 0,
+                ba: 0,
+                bn: 0,
+                ea: 0,
+                en: 0,
+                va: 0,
+                vn: 0,
+                b0: 0,
+                bc: 0
+            },
+        };
+        let mut defs: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        // incoming edges per block: (source << 32 | token), sorted later
+        let mut edges: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut edge_block: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        for bi in 0..w(f.bc) {
+            let bk = p.block(add(w(f.b0), bi));
+            if !set_insert(inout defs, bk.entry) {
+                e0411(inout d, "duplicate state-token parameter", 0, 0);
+            }
+        }
+        for bi in 0..w(f.bc) {
+            let bk = p.block(add(w(f.b0), bi));
+            let mut current = bk.entry;
+            for ii in 0..w(bk.ic) {
+                let i = p.inst(add(w(bk.i0), ii));
+                let action = (i.flags & F_ACTION) != 0;
+                let read = i.op == OP_READ;
+                let has = (i.flags & F_TOKEN) != 0;
+                if action || read {
+                    if has {
+                        if i
+                            .tok_in
+                            != current
+                            || (action && i.tok_out == i.tok_in)
+                            || (read && i.tok_in != i.tok_out) {
+                            e0411(
+                                inout d,
+                                "instruction uses stale or invalid state-token evidence",
+                                i.s0,
+                                i.s1
+                            );
+                        }
+                        if action && !set_insert(inout defs, i.tok_out) {
+                            e0411(inout d, "state token is defined twice", i.s0, i.s1);
+                        }
+                        current = i.tok_out;
+                    } else {
+                        e0411(inout d, "stateful instruction lacks evidence", i.s0, i.s1);
+                    }
+                } else if has {
+                    e0411(
+                        inout d,
+                        "pure instruction unexpectedly defines state evidence",
+                        i.s0,
+                        i.s1
+                    );
+                }
+            }
+            if current != bk.out_tok {
+                e0411(inout d, "block returns stale state evidence", 0, 0);
+            }
+            targets(in p, bk, inout tg);
+            for k in 0..tg.len() {
+                let target = u32_at(in tg, k);
+                if w(target) < w(f.bc) {
+                    edge_block.push(target);
+                    edges.push(wrapping_add(wrapping_mul(bi, 4294967296), w(current)));
+                } else {
+                    e0411(inout d, "control-flow edge targets a missing block", 0, 0);
+                }
+            }
+        }
+        let mut actual: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut expect: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for bi in 0..w(f.bc) {
+            let bk = p.block(add(w(f.b0), bi));
+            actual.clear();
+            expect.clear();
+            for k in 0..w(bk.in_n) {
+                let at = add(w(bk.ia), wrapping_mul(k, 2));
+                sorted_insert(
+                    inout actual,
+                    wrapping_add(wrapping_mul(p.op(at), 4294967296), p.op(inc(at)))
+                );
+            }
+            for k in 0..edges.len() {
+                if w(u32_at(in edge_block, k)) == bi {
+                    sorted_insert(inout expect, u64_at(in edges, k));
+                }
+            }
+            let mut same = actual.len() == expect.len();
+            if same {
+                for k in 0..actual.len() {
+                    if u64_at(in actual, k) != u64_at(in expect, k) {
+                        same = false;
+                    }
+                }
+            }
+            if !same {
+                e0411(inout d, "state-token phi does not match predecessor evidence", 0, 0);
+            }
+        }
+    }
+}
+// src/ir_check.rs, part 2: the ownership dataflow (`Flow`).
+
+pub copy struct SlotS {
+    rank: u32,
+    name: u32,
+    ty: u32,
+    pass: u8,
+}
+
+pub copy struct ValS {
+    id: u32,
+    ty: u32,
+    owned: bool,
+    consumed: bool,
+    // loan pass, or 255 for no loan; places loans[la..la+ln]
+    lpass: u8,
+    la: u32,
+    ln: u32,
+}
+
+// `State`: slots sorted by name rank, moved paths as sorted
+// (rank * 2^32 + path) keys, values sorted by id, loan places in `loans`.
+pub struct State {
+    slots: ChunkSeq[SlotS],
+    moved: ChunkSeq[u64],
+    values: ChunkSeq[ValS],
+    loans: ChunkSeq[u64],
+}
+
+pub fn state_new() -> State {
+    State {
+        slots: ChunkSeq::new[SlotS](),
+        moved: ChunkSeq::new[u64](),
+        values: ChunkSeq::new[ValS](),
+        loans: ChunkSeq::new[u64]()
+    }
+}
+
+const NOSLOT: SlotS = SlotS {
+    rank: 0,
+    name: 0,
+    ty: 0,
+    pass: 0
+};
+const NOVAL: ValS = ValS {
+    id: 0,
+    ty: 0,
+    owned: false,
+    consumed: false,
+    lpass: 255,
+    la: 0,
+    ln: 0
+};
+
+fn key(rank: u32, path: u32) -> u64 {
+    wrapping_add(wrapping_mul(w(rank), 4294967296), w(path))
+}
+
+impl State {
+    pub fn clear(inout self) {
+        self.slots.clear();
+        self.moved.clear();
+        self.values.clear();
+        self.loans.clear();
+    }
+
+    pub fn slot_at(in self, i: u64) -> SlotS {
+        match self.slots.try_get(i) {
+            Option::Some(s) => s,
+            Option::None => NOSLOT,
+        }
+    }
+
+    pub fn val_at(in self, i: u64) -> ValS {
+        match self.values.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => NOVAL,
+        }
+    }
+
+    // Index of the slot with `rank`, or the insertion point with bit 63.
+    pub fn find_slot(in self, rank: u32) -> u64 {
+        let mut lo: u64 = 0;
+        let mut hi = self.slots.len();
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = wrapping_add(lo, hi) / 2;
+            let r = self.slot_at(mid).rank;
+            if r == rank {
+                return mid;
+            }
+            if r < rank {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+        lo | 9223372036854775808
+    }
+
+    pub fn find_val(in self, id: u32) -> u64 {
+        let mut lo: u64 = 0;
+        let mut hi = self.values.len();
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = wrapping_add(lo, hi) / 2;
+            let x = self.val_at(mid).id;
+            if x == id {
+                return mid;
+            }
+            if x < id {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+        lo | 9223372036854775808
+    }
+
+    // `slots.insert(n, slot)` with an empty moved set.
+    pub fn put_slot(inout self, s: SlotS) {
+        let at = self.find_slot(s.rank);
+        if at < 9223372036854775808 {
+            let ok = self.slots.try_set(at, s);
+        } else {
+            let pos = at & 9223372036854775807;
+            self.slots.push(s);
+            let mut i = wrapping_sub(self.slots.len(), 1);
+            loop {
+                if i <= pos {
+                    break;
+                }
+                let ok = self.slots.try_set(i, self.slot_at(wrapping_sub(i, 1)));
+                i = wrapping_sub(i, 1);
+            }
+            let ok = self.slots.try_set(pos, s);
+        }
+        self.moved_clear(s.rank);
+    }
+
+    // `values.insert(id, v)`.
+    pub fn put_val(inout self, v: ValS) {
+        let at = self.find_val(v.id);
+        if at < 9223372036854775808 {
+            let ok = self.values.try_set(at, v);
+        } else {
+            let pos = at & 9223372036854775807;
+            self.values.push(v);
+            let mut i = wrapping_sub(self.values.len(), 1);
+            loop {
+                if i <= pos {
+                    break;
+                }
+                let ok = self.values.try_set(i, self.val_at(wrapping_sub(i, 1)));
+                i = wrapping_sub(i, 1);
+            }
+            let ok = self.values.try_set(pos, v);
+        }
+    }
+
+    pub fn set_val_at(inout self, i: u64, v: ValS) {
+        let ok = self.values.try_set(i, v);
+    }
+
+    // Moved keys of `rank`: [lo, hi).
+    fn moved_range(in self, rank: u32) -> (u64, u64) {
+        let k0 = key(rank, 0);
+        let mut lo: u64 = 0;
+        let mut hi = self.moved.len();
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = wrapping_add(lo, hi) / 2;
+            if u64_at(in self.moved, mid) < k0 {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+        let mut end = lo;
+        loop {
+            if end >= self.moved.len() || place_root(u64_at(in self.moved, end)) != rank {
+                break;
+            }
+            end = inc(end);
+        }
+        (lo, end)
+    }
+
+    pub fn moved_has(in self, rank: u32, path: u32) -> bool {
+        let (a, b) = self.moved_range(rank);
+        for i in a..b {
+            if u64_at(in self.moved, i) == key(rank, path) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn moved_insert(inout self, rank: u32, path: u32) {
+        if self.moved_has(rank, path) {
+            return;
+        }
+        sorted_insert(inout self.moved, key(rank, path));
+    }
+
+    fn moved_clear(inout self, rank: u32) {
+        let (a, b) = self.moved_range(rank);
+        if a == b {
+            return;
+        }
+        let n = wrapping_sub(b, a);
+        for i in b..self.moved.len() {
+            let ok = self.moved.try_set(wrapping_sub(i, n), u64_at(in self.moved, i));
+        }
+        self.moved.truncate(wrapping_sub(self.moved.len(), n));
+    }
+
+    // `moved.retain(|q| !q.starts_with(path))`.
+    pub fn moved_retain_not_under(inout self, in paths: Paths, rank: u32, path: u32) {
+        let mut out: u64 = 0;
+        for i in 0..self.moved.len() {
+            let k = u64_at(in self.moved, i);
+            let drop = place_root(k) == rank && paths.starts_with(place_path(k), path);
+            if !drop {
+                let ok = self.moved.try_set(out, k);
+                out = inc(out);
+            }
+        }
+        self.moved.truncate(out);
+    }
+
+    // Some moved q of `rank` with q.starts_with(path) || path.starts_with(q).
+    pub fn moved_overlaps(in self, in paths: Paths, rank: u32, path: u32) -> bool {
+        let (a, b) = self.moved_range(rank);
+        for i in a..b {
+            if paths.overlaps(place_path(u64_at(in self.moved, i)), path) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn loan(in self, i: u64) -> u64 {
+        u64_at(in self.loans, i)
+    }
+
+    pub fn copy_from(inout self, in o: State) {
+        self.clear();
+        self.slots.extend(in o.slots.as_slice());
+        self.moved.extend(in o.moved.as_slice());
+        self.values.extend(in o.values.as_slice());
+        self.loans.extend(in o.loans.as_slice());
+    }
+
+    // `State == State` (loans by content).
+    pub fn same(in self, in o: State) -> bool {
+        if self
+            .slots
+            .len()
+            != o
+            .slots
+            .len()
+            || self
+            .moved
+            .len()
+            != o
+            .moved
+            .len()
+            || self
+            .values
+            .len()
+            != o
+            .values
+            .len() {
+            return false;
+        }
+        for i in 0..self.slots.len() {
+            let a = self.slot_at(i);
+            let b = o.slot_at(i);
+            if a.rank != b.rank || a.ty != b.ty || a.pass != b.pass {
+                return false;
+            }
+        }
+        for i in 0..self.moved.len() {
+            if u64_at(in self.moved, i) != u64_at(in o.moved, i) {
+                return false;
+            }
+        }
+        for i in 0..self.values.len() {
+            let a = self.val_at(i);
+            let b = o.val_at(i);
+            if a
+                .id
+                != b
+                .id
+                || a
+                .ty
+                != b
+                .ty
+                || a
+                .owned
+                != b
+                .owned
+                || a
+                .consumed
+                != b
+                .consumed
+                || a
+                .lpass
+                != b
+                .lpass {
+                return false;
+            }
+            if a.lpass != 255 {
+                if a.ln != b.ln {
+                    return false;
+                }
+                for j in 0..w(a.ln) {
+                    if self.loan(add(w(a.la), j)) != o.loan(add(w(b.la), j)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+// Incoming states of a function's blocks, in one append-only pool.
+pub copy struct Stored {
+    sa: u64,
+    sn: u64,
+    ma: u64,
+    mn: u64,
+    va: u64,
+    vn: u64,
+    la: u64,
+    ln: u64,
+}
+
+pub struct Pool {
+    slots: ChunkSeq[SlotS],
+    moved: ChunkSeq[u64],
+    values: ChunkSeq[ValS],
+    loans: ChunkSeq[u64],
+    // per block: 0 = no state yet, else index + 1 into `stored`
+    at: ChunkSeq[u32],
+    stored: ChunkSeq[Stored],
+}
+
+pub fn pool_new() -> Pool {
+    Pool {
+        slots: ChunkSeq::new[SlotS](),
+        moved: ChunkSeq::new[u64](),
+        values: ChunkSeq::new[ValS](),
+        loans: ChunkSeq::new[u64](),
+        at: ChunkSeq::new[u32](),
+        stored: ChunkSeq::new[Stored]()
+    }
+}
+
+impl Pool {
+    pub fn reset(inout self, blocks: u64) {
+        self.slots.clear();
+        self.moved.clear();
+        self.values.clear();
+        self.loans.clear();
+        self.stored.clear();
+        self.at.clear();
+        self.at.resize(blocks, 0);
+    }
+
+    pub fn has(in self, b: u64) -> bool {
+        u32_at(in self.at, b) != 0
+    }
+
+    pub fn store(inout self, b: u64, in s: State) {
+        let rec = Stored {
+            sa: self.slots.len(),
+            sn: s.slots.len(),
+            ma: self.moved.len(),
+            mn: s.moved.len(),
+            va: self.values.len(),
+            vn: s.values.len(),
+            la: self.loans.len(),
+            ln: s.loans.len(),
+        };
+        self.slots.extend(in s.slots.as_slice());
+        self.moved.extend(in s.moved.as_slice());
+        self.values.extend(in s.values.as_slice());
+        self.loans.extend(in s.loans.as_slice());
+        self.stored.push(rec);
+        let ok = self.at.try_set(b, n32(self.stored.len()));
+    }
+
+    pub fn load(in self, b: u64, inout s: State) {
+        s.clear();
+        let x = u32_at(in self.at, b);
+        if x == 0 {
+            return;
+        }
+        let rec = match self.stored.try_get(w(wrapping_sub(x, 1))) {
+            Option::Some(r) => r,
+            Option::None => Stored {
+                sa: 0,
+                sn: 0,
+                ma: 0,
+                mn: 0,
+                va: 0,
+                vn: 0,
+                la: 0,
+                ln: 0
+            },
+        };
+        s.slots.extend(in self.slots[rec.sa..add(rec.sa, rec.sn)]);
+        s.moved.extend(in self.moved[rec.ma..add(rec.ma, rec.mn)]);
+        s.values.extend(in self.values[rec.va..add(rec.va, rec.vn)]);
+        s.loans.extend(in self.loans[rec.la..add(rec.la, rec.ln)]);
+    }
+}
+
+// ----- origins (diagnostic evidence) -----------------------------------------
+
+const MAX_CAUSE_WORK: u64 = 65536;
+const MAX_CAUSE_TEXT: u64 = 1048576;
+const MAX_CAUSE_NAME: u64 = 1024;
+
+// Per value id / name rank: 0 absent, 1 unique span, 2 ambiguous (None).
+pub struct Origins {
+    vstate: ChunkSeq[u8],
+    vs0: ChunkSeq[u64],
+    vs1: ChunkSeq[u64],
+    sstate: ChunkSeq[u8],
+    ss0: ChunkSeq[u64],
+    ss1: ChunkSeq[u64],
+    sparam: ChunkSeq[u8],
+    vtouched: ChunkSeq[u32],
+    stouched: ChunkSeq[u32],
+}
+
+pub fn origins_new() -> Origins {
+    Origins {
+        vstate: ChunkSeq::new[u8](),
+        vs0: ChunkSeq::new[u64](),
+        vs1: ChunkSeq::new[u64](),
+        sstate: ChunkSeq::new[u8](),
+        ss0: ChunkSeq::new[u64](),
+        ss1: ChunkSeq::new[u64](),
+        sparam: ChunkSeq::new[u8](),
+        vtouched: ChunkSeq::new[u32](),
+        stouched: ChunkSeq::new[u32]()
+    }
+}
+
+impl Origins {
+    fn clear(inout self) {
+        for i in 0..self.vtouched.len() {
+            let ok = self.vstate.try_set(w(u32_at(in self.vtouched, i)), 0);
+        }
+        for i in 0..self.stouched.len() {
+            let ok = self.sstate.try_set(w(u32_at(in self.stouched, i)), 0);
+        }
+        self.vtouched.clear();
+        self.stouched.clear();
+    }
+
+    fn ensure_v(inout self, id: u32) {
+        if w(id) >= self.vstate.len() {
+            let n = inc(w(id));
+            self.vstate.resize(n, 0);
+            self.vs0.resize(n, 0);
+            self.vs1.resize(n, 0);
+        }
+    }
+
+    fn ensure_s(inout self, r: u32) {
+        if w(r) >= self.sstate.len() {
+            let n = inc(w(r));
+            self.sstate.resize(n, 0);
+            self.ss0.resize(n, 0);
+            self.ss1.resize(n, 0);
+            self.sparam.resize(n, 0);
+        }
+    }
+
+    fn value(inout self, id: u32, has: bool, s0: u64, s1: u64) {
+        self.ensure_v(id);
+        let st = u8_at(in self.vstate, w(id));
+        if st == 0 {
+            self.vtouched.push(id);
+            if has && s0 < s1 {
+                let ok = self.vstate.try_set(w(id), 1);
+                let ok2 = self.vs0.try_set(w(id), s0);
+                let ok3 = self.vs1.try_set(w(id), s1);
+            } else {
+                let ok = self.vstate.try_set(w(id), 2);
+            }
+        } else {
+            let ok = self.vstate.try_set(w(id), 2);
+        }
+    }
+
+    fn slot(inout self, rank: u32, s0: u64, s1: u64, param: bool) {
+        self.ensure_s(rank);
+        let st = u8_at(in self.sstate, w(rank));
+        if st == 0 {
+            self.stouched.push(rank);
+            if s0 < s1 {
+                let ok = self.sstate.try_set(w(rank), 1);
+                let ok2 = self.ss0.try_set(w(rank), s0);
+                let ok3 = self.ss1.try_set(w(rank), s1);
+                let ok4 = self
+                    .sparam
+                    .try_set(
+                    w(rank),
+                    if param {
+                        1
+                    } else {
+                        0
+                    }
+                );
+            } else {
+                let ok = self.sstate.try_set(w(rank), 2);
+            }
+        } else {
+            let ok = self.sstate.try_set(w(rank), 2);
+        }
+    }
+
+    pub fn has_value(in self, id: u32) -> bool {
+        u8_at(in self.vstate, w(id)) == 1
+    }
+
+    pub fn has_slot(in self, rank: u32) -> bool {
+        u8_at(in self.sstate, w(rank)) == 1
+    }
+}
+
+// ----- Flow -------------------------------------------------------------------
+
+pub struct Flow {
+    bounds: Bounds,
+    external: ChunkSeq[u32],
+    reservable: ChunkSeq[u32],
+    // The values a `match` terminator inspects (`scrutinees`), sorted.
+    scrutinees: ChunkSeq[u32],
+    // The function values `f` calls indirectly (`callees`, #1242), sorted.
+    callees: ChunkSeq[u32],
+    origins: Origins,
+    // local consume witnesses: id -> span, cleared per block
+    lc_has: ChunkSeq[u8],
+    lc0: ChunkSeq[u64],
+    lc1: ChunkSeq[u64],
+    lc_touched: ChunkSeq[u32],
+    d: Diags,
+    msg: ChunkSeq[u8],
+}
+
+pub fn flow_new() -> Flow {
+    Flow {
+        bounds: bounds_new(),
+        external: ChunkSeq::new[u32](),
+        reservable: ChunkSeq::new[u32](),
+        scrutinees: ChunkSeq::new[u32](),
+        callees: ChunkSeq::new[u32](),
+        origins: origins_new(),
+        lc_has: ChunkSeq::new[u8](),
+        lc0: ChunkSeq::new[u64](),
+        lc1: ChunkSeq::new[u64](),
+        lc_touched: ChunkSeq::new[u32](),
+        d: diags_new(),
+        msg: ChunkSeq::new[u8]()
+    }
+}
+
+// One cause of `caused`: kind 0 none, 1 value origin, 2 slot origin,
+// 3 a span; `msg` picks the label text.
+pub copy struct Cause {
+    kind: u8,
+    id: u32,
+    s0: u64,
+    s1: u64,
+    msg: u8,
+}
+
+const NOCAUSE: Cause = Cause {
+    kind: 0,
+    id: 0,
+    s0: 0,
+    s1: 0,
+    msg: 0
+};
+
+fn value_cause(id: u32) -> Cause {
+    Cause {
+        kind: 1,
+        id: id,
+        s0: 0,
+        s1: 0,
+        msg: 0
+    }
+}
+
+fn value_cause_as(id: u32, msg: u8) -> Cause {
+    Cause {
+        kind: 1,
+        id: id,
+        s0: 0,
+        s1: 0,
+        msg: msg
+    }
+}
+
+fn slot_cause(rank: u32) -> Cause {
+    Cause {
+        kind: 2,
+        id: rank,
+        s0: 0,
+        s1: 0,
+        msg: 0
+    }
+}
+
+fn push_label(inout d: Diags, m: u8, param: bool) {
+    if m == 1 {
+        d.text.extend(in "this IR read requests the conflicting access".as_bytes());
+    } else if m == 2 {
+        d.text.extend(in "the overlapping argument loan is taken here".as_bytes());
+    } else if m == 3 {
+        d.text.extend(in "an earlier consuming use in this block is here".as_bytes());
+    } else if m == 4 {
+        if param {
+            d.text.extend(in "source span for this IR parameter".as_bytes());
+        } else {
+            d.text.extend(in "this IR binding is introduced here".as_bytes());
+        }
+    } else {
+        d.text.extend(in "this IR temporary is defined here".as_bytes());
+    }
+}
+
+impl Flow {
+    fn mode(in self, inout t: Types, in names: Names, in wd: World, ty: u32) -> u8 {
+        mode_of(inout t, in names, in wd, ty, in self.bounds)
+    }
+
+    // `Flow::error`: E0410 with the message in `self.msg`.
+    fn error(inout self, s0: u64, s1: u64) {
+        let c = self.d.open("E0410");
+        let m = self.d.text.len();
+        self.d.text.extend(in self.msg.as_slice());
+        self.d.close(c, m, "", s0, s1);
+    }
+
+    fn resolve(in self, c: Cause) -> Cause {
+        if c.kind == 1 {
+            if self.origins.has_value(c.id) {
+                return Cause {
+                    kind: 3,
+                    id: 0,
+                    s0: u64_at(in self.origins.vs0, w(c.id)),
+                    s1: u64_at(in self.origins.vs1, w(c.id)),
+                    msg: c.msg
+                };
+            }
+            return NOCAUSE;
+        }
+        if c.kind == 2 {
+            if self.origins.has_slot(c.id) {
+                return Cause {
+                    kind: 3,
+                    id: if u8_at(in self.origins.sparam, w(c.id)) == 1 {
+                        1
+                    } else {
+                        0
+                    },
+                    s0: u64_at(in self.origins.ss0, w(c.id)),
+                    s1: u64_at(in self.origins.ss1, w(c.id)),
+                    msg: 4
+                };
+            }
+            return NOCAUSE;
+        }
+        c
+    }
+
+    // `Flow::caused` with up to two causes; message in `self.msg`.
+    fn caused(inout self, s0: u64, s1: u64, a: Cause, b: Cause, in help: Str) {
+        let c = self.d.open("E0410");
+        let m = self.d.text.len();
+        self.d.text.extend(in self.msg.as_slice());
+        let mend = self.d.text.len();
+        let ra = n32(self.d.rel.len());
+        let x = self.resolve(a);
+        let y = self.resolve(b);
+        let mut n: u32 = 0;
+        if x.kind == 3 && x.s0 < x.s1 && !(x.s0 == s0 && x.s1 == s1) {
+            let la = self.d.text.len();
+            push_label(inout self.d, x.msg, x.id == 1);
+            self
+                .d
+                .rel
+                .push(
+                RelRow {
+                    a: la,
+                    b: self.d.text.len(),
+                    start: x.s0,
+                    stop: x.s1
+                }
+            );
+            n = 1;
+        }
+        if y
+            .kind
+            == 3
+            && y
+            .s0
+            < y
+            .s1
+            && !(y.s0 == s0 && y.s1 == s1)
+            && !(n == 1 && x.s0 == y.s0 && x.s1 == y.s1) {
+            let la = self.d.text.len();
+            push_label(inout self.d, y.msg, y.id == 1);
+            self
+                .d
+                .rel
+                .push(
+                RelRow {
+                    a: la,
+                    b: self.d.text.len(),
+                    start: y.s0,
+                    stop: y.s1
+                }
+            );
+            n = inc32(n);
+        }
+        if n > 0 {
+            self.d.close(c, m, help, s0, s1);
+        } else {
+            self.d.close(c, m, "", s0, s1);
+        }
+        let last = wrapping_sub(self.d.rows.len(), 1);
+        let row = self.d.row(last);
+        let ok = self
+            .d
+            .rows
+            .try_set(
+            last,
+            DiagRow {
+                code_a: row.code_a,
+                msg_a: row.msg_a,
+                msg_b: mend,
+                help_a: row.help_a,
+                end: row.end,
+                start: row.start,
+                stop: row.stop,
+                ra: ra,
+                rn: n
+            }
+        );
+    }
+
+    fn say(inout self, in s: Str) {
+        self.msg.clear();
+        self.msg.extend(in s.as_bytes());
+    }
+
+    fn say_id(inout self, in a: Str, id: u32, in b: Str) {
+        self.msg.clear();
+        self.msg.extend(in a.as_bytes());
+        self.msg.push(37);
+        push_decimal(inout self.msg, w(id));
+        self.msg.extend(in b.as_bytes());
+    }
+
+    fn say_name(inout self, in names: Names, in a: Str, n: u32, in b: Str) {
+        self.msg.clear();
+        self.msg.extend(in a.as_bytes());
+        names.write(n, inout self.msg);
+        self.msg.extend(in b.as_bytes());
+    }
+
+    fn say_place(inout self, in names: Names, in paths: Paths, in a: Str, p: u64, in b: Str) {
+        self.msg.clear();
+        self.msg.extend(in a.as_bytes());
+        names.write(place_root(p), inout self.msg);
+        paths.write(in names, place_path(p), inout self.msg);
+        self.msg.extend(in b.as_bytes());
+    }
+
+    fn note_consume(inout self, id: u32, s0: u64, s1: u64) {
+        if s0 < s1 && self.origins.has_value(id) {
+            if w(id) >= self.lc_has.len() {
+                let n = inc(w(id));
+                self.lc_has.resize(n, 0);
+                self.lc0.resize(n, 0);
+                self.lc1.resize(n, 0);
+            }
+            if u8_at(in self.lc_has, w(id)) == 0 {
+                let ok = self.lc_has.try_set(w(id), 1);
+                let ok2 = self.lc0.try_set(w(id), s0);
+                let ok3 = self.lc1.try_set(w(id), s1);
+                self.lc_touched.push(id);
+            }
+        }
+    }
+
+    fn clear_consumes(inout self) {
+        for i in 0..self.lc_touched.len() {
+            let ok = self.lc_has.try_set(w(u32_at(in self.lc_touched, i)), 0);
+        }
+        self.lc_touched.clear();
+    }
+
+    pub fn consume(
+        inout self,
+        inout s: State,
+        inout t: Types,
+        in names: Names,
+        in wd: World,
+        id: u32,
+        s0: u64,
+        s1: u64
+    ) {
+        let at = s.find_val(id);
+        if at >= 9223372036854775808 {
+            self.say_id("IR uses undefined value ", id, "");
+            self.error(s0, s1);
+            return;
+        }
+        let v = s.val_at(at);
+        if self.mode(inout t, in names, in wd, v.ty) == M_COPY {
+            return;
+        }
+        if !v.owned {
+            self.say("a borrowed non-copy temporary cannot be moved into an owned value");
+            self
+                .caused(
+                s0,
+                s1,
+                value_cause(id),
+                NOCAUSE,
+                "A borrowed non-copy temporary cannot transfer ownership to an owned value."
+            );
+        }
+        if v.consumed {
+            let prior = if u8_at(in self.lc_has, w(id)) == 1 {
+                Cause {
+                    kind: 3,
+                    id: 0,
+                    s0: u64_at(in self.lc0, w(id)),
+                    s1: u64_at(in self.lc1, w(id)),
+                    msg: 3
+                }
+            } else {
+                NOCAUSE
+            };
+            self.say_id("IR temporary ", id, " is consumed more than once");
+            self
+                .caused(
+                s0,
+                s1,
+                value_cause(id),
+                prior,
+                "A non-copy IR temporary may be consumed only once on an execution path."
+            );
+        }
+        if v.owned && !v.consumed {
+            self.note_consume(id, s0, s1);
+        }
+        s
+            .set_val_at(
+            at,
+            ValS {
+                id: v.id,
+                ty: v.ty,
+                owned: v.owned,
+                consumed: true,
+                lpass: 255,
+                la: 0,
+                ln: 0
+            }
+        );
+    }
+
+    fn release(inout self, inout s: State, id: u32) -> bool {
+        let at = s.find_val(id);
+        if at >= 9223372036854775808 {
+            return false;
+        }
+        let v = s.val_at(at);
+        s
+            .set_val_at(
+            at,
+            ValS {
+                id: v.id,
+                ty: v.ty,
+                owned: v.owned,
+                consumed: true,
+                lpass: 255,
+                la: 0,
+                ln: 0
+            }
+        );
+        true
+    }
+
+    fn scrutinee(in self, id: u32) -> bool {
+        sorted_contains(in self.scrutinees, id)
+    }
+
+    // Whether `f` calls the value `id` (`callees`).
+    fn callee(in self, id: u32) -> bool {
+        sorted_contains(in self.callees, id)
+    }
+
+    fn reserved(in self, id: u32) -> bool {
+        let mut lo: u64 = 0;
+        let mut hi = self.reservable.len();
+        loop {
+            if lo >= hi {
+                return false;
+            }
+            let mid = wrapping_add(lo, hi) / 2;
+            let x = u32_at(in self.reservable, mid);
+            if x == id {
+                return true;
+            }
+            if x < id {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+    }
+
+    pub fn access(
+        inout self,
+        inout s: State,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        in p: Program,
+        pl: u64,
+        pass: u8,
+        s0: u64,
+        s1: u64
+    ) {
+        let root = place_root(pl);
+        let path = place_path(pl);
+        let rank = p.rank_of(root);
+        let si = s.find_slot(rank);
+        if si >= 9223372036854775808 {
+            self.say_place(in names, in p.paths, "IR uses undefined place '", pl, "'");
+            self.error(s0, s1);
+            return;
+        }
+        let slot = s.slot_at(si);
+        if s.moved_overlaps(in p.paths, rank, path) {
+            self.say_place(in names, in p.paths, "IR uses moved place '", pl, "'");
+            self
+                .caused(
+                s0,
+                s1,
+                slot_cause(rank),
+                NOCAUSE,
+                "A moved place cannot be used again until ownership is re-established."
+            );
+        }
+        let ft = p.paths.field_type(inout t, inout names, in wd, slot.ty, path);
+        let ty = if ft == NONE32 {
+            t.infer
+        } else {
+            ft
+        };
+        let tymode = self.mode(inout t, in names, in wd, ty);
+        let exclusive = pass == P_INOUT || (pass == P_SINK && tymode != M_COPY);
+        for vi in 0..s.values.len() {
+            let v = s.val_at(vi);
+            if v
+                .lpass
+                != 255
+                && !v
+                .consumed
+                && (exclusive || (v.lpass == P_INOUT && !self.reserved(v.id))) {
+                let mut hit = false;
+                for j in 0..w(v.ln) {
+                    let q = s.loan(add(w(v.la), j));
+                    if place_root(q) == root && p.paths.overlaps(path, place_path(q)) {
+                        hit = true;
+                    }
+                }
+                if hit {
+                    self.msg.clear();
+                    self.msg.extend(in "IR access to '".as_bytes());
+                    names.write(root, inout self.msg);
+                    p.paths.write(in names, path, inout self.msg);
+                    self.msg.extend(in "' overlaps active loan '".as_bytes());
+                    for j in 0..w(v.ln) {
+                        if j > 0 {
+                            self.msg.extend(in ", ".as_bytes());
+                        }
+                        let q = s.loan(add(w(v.la), j));
+                        names.write(place_root(q), inout self.msg);
+                        p.paths.write(in names, place_path(q), inout self.msg);
+                    }
+                    self.msg.push(39);
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        value_cause_as(v.id, 1),
+                        slot_cause(rank),
+                        "Overlapping access must respect the shared or exclusive permission of each active loan."
+                    );
+                }
+            }
+        }
+        if pass == P_INOUT && slot.pass == P_IN {
+            self.say("IR mutates a shared parameter");
+            self
+                .caused(
+                s0,
+                s1,
+                slot_cause(rank),
+                NOCAUSE,
+                "Shared parameters do not grant mutation permission."
+            );
+        }
+        if pass == P_SINK && tymode != M_COPY {
+            if slot.pass != P_SINK {
+                self.say("IR moves from a borrowed parameter");
+                self
+                    .caused(
+                    s0,
+                    s1,
+                    slot_cause(rank),
+                    NOCAUSE,
+                    "Borrowed parameters do not transfer ownership to this function."
+                );
+            }
+            if path != 0 && self.mode(inout t, in names, in wd, slot.ty) == M_LINEAR {
+                self.say("IR must destructure a linear aggregate before moving fields");
+                self
+                    .caused(
+                    s0,
+                    s1,
+                    slot_cause(rank),
+                    NOCAUSE,
+                    "Consume the full linear aggregate through its supported destructuring rules."
+                );
+            }
+            s.moved_insert(rank, path);
+        }
+    }
+
+    // `Flow::activate` over the (pass, value) pairs at ops[a..].
+    fn activate(
+        inout self,
+        in s: State,
+        inout t: Types,
+        in names: Names,
+        k: Known,
+        in p: Program,
+        a: u64,
+        s0: u64,
+        s1: u64
+    ) {
+        let n = p.op(a);
+        for i in 0..n {
+            let av = n32(p.op(add(a, add(2, wrapping_mul(i, 2)))));
+            let x = s.find_val(av);
+            if x >= 9223372036854775808 {
+                continue;
+            }
+            let va = s.val_at(x);
+            if va.lpass != P_INOUT || va.consumed {
+                continue;
+            }
+            for j in 0..n {
+                let bpass = wrapping_u8(p.op(add(a, inc(wrapping_mul(j, 2)))));
+                let bv = n32(p.op(add(a, add(2, wrapping_mul(j, 2)))));
+                let y = s.find_val(bv);
+                if y >= 9223372036854775808 {
+                    continue;
+                }
+                let vb = s.val_at(y);
+                if vb.lpass != P_IN || vb.consumed {
+                    continue;
+                }
+                if bpass != P_INOUT && is_scalar_type(in t, k, vb.ty) {
+                    continue;
+                }
+                let mut found: u64 = 18446744073709551615;
+                for qi in 0..w(vb.ln) {
+                    let q = s.loan(add(w(vb.la), qi));
+                    for pi in 0..w(va.ln) {
+                        let pp = s.loan(add(w(va.la), pi));
+                        if found
+                            == 18446744073709551615
+                            && place_root(pp)
+                            == place_root(q)
+                            && p
+                            .paths
+                            .overlaps(place_path(pp), place_path(q)) {
+                            found = q;
+                        }
+                    }
+                }
+                if found != 18446744073709551615 {
+                    self.msg.clear();
+                    self.msg.extend(in "IR call activates inout loan '".as_bytes());
+                    for pi in 0..w(va.ln) {
+                        if pi > 0 {
+                            self.msg.extend(in ", ".as_bytes());
+                        }
+                        let pp = s.loan(add(w(va.la), pi));
+                        names.write(place_root(pp), inout self.msg);
+                        p.paths.write(in names, place_path(pp), inout self.msg);
+                    }
+                    self.msg.extend(in "' while its argument loan '".as_bytes());
+                    names.write(place_root(found), inout self.msg);
+                    p.paths.write(in names, place_path(found), inout self.msg);
+                    self.msg.extend(in "' is live".as_bytes());
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        value_cause_as(bv, 2),
+                        NOCAUSE,
+                        "A reserved inout loan becomes exclusive when its call runs, so no argument of the same call may borrow its place."
+                    );
+                }
+            }
+        }
+    }
+}
+
+// `check::is_scalar_type`: a scalar name without arguments after
+// `default_type` (an integer literal is i64).
+fn is_scalar_type(in t: Types, k: Known, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_LIT {
+        return true;
+    }
+    n.kind == K_NAMED && n.n == 0 && k.is_scalar(n.name)
+}
+// src/ir_check.rs, part 3: bind, frame, end, the instruction transfer,
+// merge, the worklist and `validate`.
+
+impl Flow {
+    fn bind(
+        inout self,
+        inout s: State,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        in p: Program,
+        pat: u64,
+        ty: u32,
+        origin: u32,
+        pass: u8
+    ) {
+        let kind = p.pat(pat);
+        let s0 = p.pat(inc(pat));
+        let s1 = p.pat(add(pat, 2));
+        if kind == 1 {
+            let name = n32(p.pat(add(pat, 3)));
+            s
+                .put_slot(
+                SlotS {
+                    rank: p.rank_of(name),
+                    name: name,
+                    ty: ty,
+                    pass: pass
+                }
+            );
+        } else if kind == 0 {
+            if pass == P_SINK && self.mode(inout t, in names, in wd, ty) == M_LINEAR {
+                self.say("IR wildcard discards a linear value");
+                self
+                    .caused(
+                    s0,
+                    s1,
+                    value_cause(origin),
+                    NOCAUSE,
+                    "Linear components must be consumed rather than discarded by a wildcard."
+                );
+            }
+        } else if kind == 2 {
+            if t.kind(ty) == K_TUPLE {
+                let n = p.pat(add(pat, 3));
+                let m = t.arity(ty);
+                for i in 0..n {
+                    if i >= m {
+                        break;
+                    }
+                    let child = p.pat(add(add(pat, 4), i));
+                    self
+                        .bind(
+                        inout s,
+                        inout t,
+                        inout names,
+                        in wd,
+                        in p,
+                        child,
+                        t.arg(ty, i),
+                        origin,
+                        pass
+                    );
+                }
+            }
+        } else if kind == 4 {
+            let qual = n32(p.pat(add(pat, 3)));
+            let short = n32(p.pat(add(pat, 4)));
+            let c = constructor(in wd, qual, short);
+            if c != 18446744073709551615 {
+                let a = wd.adt(n32(c >> 32));
+                let v = wd.variant(c & 4294967295);
+                let vars = if t.kind(ty) == K_NAMED {
+                    wd.vars_of(in t, a, ty)
+                } else {
+                    vars_new()
+                };
+                let n = p.pat(add(pat, 5));
+                for i in 0..n {
+                    let fname = n32(p.pat(add(add(pat, 6), wrapping_mul(i, 2))));
+                    let child = p.pat(add(add(pat, 7), wrapping_mul(i, 2)));
+                    let fi = wd.find_field(v, fname);
+                    if fi != NONE32 {
+                        let ft = substitute(inout t, wd.field(w(fi)).ty, in vars);
+                        self
+                            .bind(
+                            inout s,
+                            inout t,
+                            inout names,
+                            in wd,
+                            in p,
+                            child,
+                            ft,
+                            origin,
+                            pass
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn external_has(in self, n: u32) -> bool {
+        for i in 0..self.external.len() {
+            if u32_at(in self.external, i) == n {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn live_linear_slot(
+        inout self,
+        in s: State,
+        inout t: Types,
+        in names: Names,
+        in wd: World,
+        sl: SlotS
+    ) -> bool {
+        sl
+            .pass
+            == P_SINK
+            && self
+            .mode(inout t, in names, in wd, sl.ty)
+            == M_LINEAR
+            && !s
+            .moved_has(sl.rank, 0)
+    }
+
+    // `Flow::frame` (end = false) and `Flow::end` (end = true).
+    fn frame(
+        inout self,
+        in s: State,
+        inout t: Types,
+        in names: Names,
+        in wd: World,
+        s0: u64,
+        s1: u64,
+        end: bool
+    ) {
+        for i in 0..s.slots.len() {
+            let sl = s.slot_at(i);
+            if self
+                .live_linear_slot(in s, inout t, in names, in wd, sl)
+                && !self
+                .external_has(sl.name) {
+                if end {
+                    self
+                        .say_name(
+                        in names,
+                        "linear place '",
+                        sl.name,
+                        "' remains live at IR return"
+                    );
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        slot_cause(sl.rank),
+                        NOCAUSE,
+                        "Each owned linear place must be consumed on every returning path."
+                    );
+                } else {
+                    self
+                        .say_name(
+                        in names,
+                        "abortable effect may abandon linear place '",
+                        sl.name,
+                        "'"
+                    );
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        slot_cause(sl.rank),
+                        NOCAUSE,
+                        "An abortable operation must not abandon a live owned linear place."
+                    );
+                }
+            }
+        }
+        for i in 0..s.values.len() {
+            let v = s.val_at(i);
+            if v.owned && !v.consumed && self.mode(inout t, in names, in wd, v.ty) == M_LINEAR {
+                if end {
+                    self.say_id("linear temporary ", v.id, " remains live at IR return");
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        value_cause(v.id),
+                        NOCAUSE,
+                        "Each owned linear temporary must be consumed on every returning path."
+                    );
+                } else {
+                    self.say_id("abortable effect may abandon linear temporary ", v.id, "");
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        value_cause(v.id),
+                        NOCAUSE,
+                        "An abortable operation must not abandon a live owned linear temporary."
+                    );
+                }
+            }
+        }
+    }
+
+    // Arguments (pass, value)* at ops[a..]: sink arguments are consumed,
+    // borrowed ones release their loans.
+    fn args(
+        inout self,
+        inout s: State,
+        inout t: Types,
+        in names: Names,
+        in wd: World,
+        in p: Program,
+        a: u64,
+        s0: u64,
+        s1: u64
+    ) {
+        let n = p.op(a);
+        for i in 0..n {
+            let pass = wrapping_u8(p.op(add(a, inc(wrapping_mul(i, 2)))));
+            let v = n32(p.op(add(a, add(2, wrapping_mul(i, 2)))));
+            if pass == P_SINK {
+                self.consume(inout s, inout t, in names, in wd, v, s0, s1);
+            } else {
+                let x = self.release(inout s, v);
+            }
+        }
+    }
+
+    fn row_effectful(in self, in t: Types, in p: Program, ty: u32) -> bool {
+        let n = t.node(ty);
+        if n.kind != K_FN {
+            return false;
+        }
+        let row = t.row(n.r2);
+        if row.tail != 0 {
+            return true;
+        }
+        for i in 0..w(row.n) {
+            if p.is_nonlinear(t.effect_at(add(w(row.a), i)).name) {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn instruction(
+        inout self,
+        inout s: State,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        in p: Program,
+        i: Inst
+    ) {
+        let k = wd.k;
+        let a = w(i.a);
+        let s0 = i.s0;
+        let s1 = i.s1;
+        let mut owned = true;
+        let mut lpass: u8 = 255;
+        let mut loan_from: u64 = 0;
+        let mut loan_n: u64 = 0;
+        if i.op == OP_READ {
+            let root = n32(p.op(a));
+            let read_pass = wrapping_u8(p.op(inc(a)));
+            let is_fn = p.op(add(a, 2)) != 0;
+            let np = p.op(add(a, 3));
+            // A by-value read that only a `match` inspects, of a borrowed
+            // slot's non-copy place, is a borrow (§4.3).
+            let mut pass = read_pass;
+            if pass == P_SINK && self.scrutinee(i.dest) {
+                let si = s.find_slot(p.rank_of(root));
+                if si
+                    < 9223372036854775808
+                    && s
+                    .slot_at(si)
+                    .pass
+                    != P_SINK
+                    && self
+                    .mode(inout t, in names, in wd, i.ty)
+                    != M_COPY {
+                    pass = P_IN;
+                }
+            }
+            // Calling a borrowed slot's function value that is not `copy`
+            // reads it (a lent function parameter, §4.2).
+            if pass == P_SINK && np == 1 && p.op(add(a, 4)) == 0 && self.callee(i.dest) {
+                let si = s.find_slot(p.rank_of(root));
+                let tn = t.node(i.ty);
+                if si
+                    < 9223372036854775808
+                    && s
+                    .slot_at(si)
+                    .pass
+                    != P_SINK
+                    && tn
+                    .kind
+                    == K_FN
+                    && tn
+                    .mode
+                    != M_COPY {
+                    pass = P_IN;
+                }
+            }
+            if s.find_slot(p.rank_of(root)) < 9223372036854775808 || !is_fn {
+                for j in 0..np {
+                    let path = n32(p.op(add(add(a, 4), j)));
+                    self
+                        .access(
+                        inout s,
+                        inout t,
+                        inout names,
+                        in wd,
+                        in p,
+                        place(root, path),
+                        pass,
+                        s0,
+                        s1
+                    );
+                }
+            }
+            if pass != P_SINK {
+                owned = false;
+                // A borrowed scrutinee lends its place to the arms'
+                // bindings, which the checker keeps from conflicting with
+                // any write (§4.3); it takes no value loan.
+                if read_pass != P_SINK {
+                    lpass = pass;
+                    loan_from = add(a, 4);
+                    loan_n = np;
+                }
+            }
+        } else if i.op == OP_BIND {
+            let value = n32(p.op(a));
+            let at = s.find_val(value);
+            let ty = if at < 9223372036854775808 {
+                s.val_at(at).ty
+            } else {
+                t.infer
+            };
+            // A borrowed scrutinee binds borrows of its payloads.
+            let borrowed = self.scrutinee(value) && at < 9223372036854775808 && !s.val_at(at).owned;
+            let pass = if borrowed {
+                P_IN
+            } else {
+                self.consume(inout s, inout t, in names, in wd, value, s0, s1);
+                P_SINK
+            };
+            self.bind(inout s, inout t, inout names, in wd, in p, p.op(inc(a)), ty, value, pass);
+        } else if i.op == OP_WRITE {
+            let value = n32(p.op(a));
+            let root = n32(p.op(inc(a)));
+            let path = n32(p.op(add(a, 2)));
+            let assign = p.op(add(a, 3)) != 0;
+            self.consume(inout s, inout t, in names, in wd, value, s0, s1);
+            let rank = p.rank_of(root);
+            if assign && s.find_slot(rank) < 9223372036854775808 {
+                s.moved_retain_not_under(in p.paths, rank, path);
+            }
+            self
+                .access(
+                inout s,
+                inout t,
+                inout names,
+                in wd,
+                in p,
+                place(root, path),
+                P_INOUT,
+                s0,
+                s1
+            );
+            let si = s.find_slot(rank);
+            if si < 9223372036854775808 {
+                let ft = p.paths.field_type(inout t, inout names, in wd, s.slot_at(si).ty, path);
+                let fty = if ft == NONE32 {
+                    t.infer
+                } else {
+                    ft
+                };
+                if self.mode(inout t, in names, in wd, fty) == M_LINEAR {
+                    self.say("IR assignment overwrites a linear obligation");
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        slot_cause(rank),
+                        NOCAUSE,
+                        "Overwriting an owned linear obligation would discard it."
+                    );
+                }
+            }
+        } else if i.op == OP_CONSUME1 {
+            self.consume(inout s, inout t, in names, in wd, n32(p.op(a)), s0, s1);
+        } else if i.op == OP_BINARY {
+            let cmp = p.op(a) != 0;
+            for j in 1..3 {
+                let v = n32(p.op(add(a, j)));
+                let at = s.find_val(v);
+                let mut done = false;
+                if cmp && at < 9223372036854775808 {
+                    let x = s.val_at(at);
+                    let n = t.node(x.ty);
+                    if !x
+                        .owned
+                        && n
+                        .kind
+                        == K_NAMED
+                        && n
+                        .n
+                        == 0
+                        && (n.name == k.string || n.name == k.str_) {
+                        s
+                            .set_val_at(
+                            at,
+                            ValS {
+                                id: x.id,
+                                ty: x.ty,
+                                owned: x.owned,
+                                consumed: true,
+                                lpass: 255,
+                                la: 0,
+                                ln: 0
+                            }
+                        );
+                        done = true;
+                    }
+                }
+                if !done {
+                    self.consume(inout s, inout t, in names, in wd, v, s0, s1);
+                }
+            }
+        } else if i.op == OP_CONSUME_N {
+            let n = p.op(a);
+            for j in 0..n {
+                self.consume(inout s, inout t, in names, in wd, n32(p.op(add(inc(a), j))), s0, s1);
+            }
+        } else if i.op == OP_VECTOR {
+            let n = p.op(a);
+            for j in 0..n {
+                let v = n32(p.op(add(inc(a), j)));
+                if !self.release(inout s, v) {
+                    self.consume(inout s, inout t, in names, in wd, v, s0, s1);
+                }
+            }
+        } else if i.op == OP_SEQ || i.op == OP_CALL {
+            self.activate(in s, inout t, in names, k, in p, a, s0, s1);
+            self.args(inout s, inout t, in names, in wd, in p, a, s0, s1);
+            if i.op == OP_CALL && (i.flags & F_EFFECTFUL) != 0 {
+                self.frame(in s, inout t, in names, in wd, s0, s1, false);
+            }
+        } else if i.op == OP_PROJECT {
+            let v = n32(p.op(a));
+            let at = s.find_val(v);
+            if at
+                < 9223372036854775808
+                && self
+                .mode(inout t, in names, in wd, s.val_at(at).ty)
+                == M_LINEAR {
+                self.say("projection would abandon a temporary linear aggregate");
+                self
+                    .caused(
+                    s0,
+                    s1,
+                    value_cause(v),
+                    NOCAUSE,
+                    "A linear aggregate must retain all of its ownership obligations when destructured."
+                );
+            }
+            self.consume(inout s, inout t, in names, in wd, v, s0, s1);
+        } else if i.op == OP_INDEX {
+            self.consume(inout s, inout t, in names, in wd, n32(p.op(a)), s0, s1);
+            self.consume(inout s, inout t, in names, in wd, n32(p.op(inc(a))), s0, s1);
+        } else if i.op == OP_INDIRECT {
+            let callee = n32(p.op(a));
+            let at = s.find_val(callee);
+            let effectful = at
+                < 9223372036854775808
+                && self
+                .row_effectful(in t, in p, s.val_at(at).ty);
+            let lent = if at < 9223372036854775808 {
+                let v = s.val_at(at);
+                let tn = t.node(v.ty);
+                !v.owned && tn.kind == K_FN && tn.mode != M_COPY
+            } else {
+                false
+            };
+            if lent {
+                // A lent function parameter is read by its call (§4.2).
+                let v = s.val_at(at);
+                s
+                    .set_val_at(
+                    at,
+                    ValS {
+                        id: v.id,
+                        ty: v.ty,
+                        owned: v.owned,
+                        consumed: true,
+                        lpass: 255,
+                        la: 0,
+                        ln: 0
+                    }
+                );
+            } else {
+                self.consume(inout s, inout t, in names, in wd, callee, s0, s1);
+            }
+            self.activate(in s, inout t, in names, k, in p, inc(a), s0, s1);
+            self.args(inout s, inout t, in names, in wd, in p, inc(a), s0, s1);
+            if effectful {
+                self.frame(in s, inout t, in names, in wd, s0, s1, false);
+            }
+        } else if i.op == OP_TRY {
+            self.consume(inout s, inout t, in names, in wd, n32(p.op(a)), s0, s1);
+            self.frame(in s, inout t, in names, in wd, s0, s1, false);
+        } else if i.op == OP_MOVES || i.op == OP_HANDLE {
+            let n = p.op(a);
+            for j in 0..n {
+                self
+                    .access(
+                    inout s,
+                    inout t,
+                    inout names,
+                    in wd,
+                    in p,
+                    p.op(add(inc(a), j)),
+                    P_SINK,
+                    s0,
+                    s1
+                );
+            }
+        }
+        if (i.flags & F_ABORT) != 0 {
+            self.frame(in s, inout t, in names, in wd, s0, s1, false);
+        }
+        if i.op == OP_HANDLE {
+            let n = p.op(a);
+            if p.op(add(inc(a), n)) != 0 {
+                self
+                    .consume(
+                    inout s,
+                    inout t,
+                    in names,
+                    in wd,
+                    n32(p.op(add(add(a, 2), n))),
+                    s0,
+                    s1
+                );
+            }
+            if (i.flags & F_EFFECTFUL) != 0 {
+                self.frame(in s, inout t, in names, in wd, s0, s1, false);
+            }
+        }
+        let ty = if i.op == OP_BIND || i.op == OP_WRITE {
+            t.unit
+        } else {
+            i.ty
+        };
+        let la = n32(s.loans.len());
+        if lpass != 255 {
+            for j in 0..loan_n {
+                s.loans.push(place(n32(p.op(a)), n32(p.op(add(loan_from, j)))));
+            }
+        }
+        s
+            .put_val(
+            ValS {
+                id: i.dest,
+                ty: ty,
+                owned: owned,
+                consumed: false,
+                lpass: lpass,
+                la: la,
+                ln: n32(loan_n)
+            }
+        );
+    }
+
+    // `out = merge(out, b)`: `out` holds a clone of the old state.
+    fn merge(
+        inout self,
+        inout out: State,
+        in b: State,
+        inout t: Types,
+        in names: Names,
+        in wd: World,
+        s0: u64,
+        s1: u64
+    ) {
+        for i in 0..b.slots.len() {
+            let sl = b.slot_at(i);
+            let at = out.find_slot(sl.rank);
+            if at < 9223372036854775808 {
+                let old = out.slot_at(at);
+                let x = self.live_linear_slot(in out, inout t, in names, in wd, old);
+                let y = self.live_linear_slot(in b, inout t, in names, in wd, sl);
+                if x != y {
+                    self
+                        .say_name(
+                        in names,
+                        "linear place '",
+                        sl.name,
+                        "' has inconsistent ownership at a CFG join"
+                    );
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        slot_cause(sl.rank),
+                        NOCAUSE,
+                        "Ownership of a linear place must agree on the incoming control-flow edges."
+                    );
+                }
+                let (ma, mb) = b.moved_range(sl.rank);
+                for j in ma..mb {
+                    out.moved_insert(sl.rank, place_path(u64_at(in b.moved, j)));
+                }
+            } else {
+                if self.live_linear_slot(in b, inout t, in names, in wd, sl) {
+                    self
+                        .say_name(
+                        in names,
+                        "linear place '",
+                        sl.name,
+                        "' survives only one CFG edge"
+                    );
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        slot_cause(sl.rank),
+                        NOCAUSE,
+                        "An owned linear place cannot disappear on another incoming control-flow edge."
+                    );
+                }
+                out.put_slot(sl);
+                let (ma, mb) = b.moved_range(sl.rank);
+                for j in ma..mb {
+                    out.moved_insert(sl.rank, place_path(u64_at(in b.moved, j)));
+                }
+            }
+        }
+        for i in 0..b.values.len() {
+            let v = b.val_at(i);
+            let at = out.find_val(v.id);
+            if at < 9223372036854775808 {
+                let old = out.val_at(at);
+                if self
+                    .mode(inout t, in names, in wd, old.ty)
+                    == M_LINEAR
+                    && old
+                    .owned
+                    && old
+                    .consumed
+                    != v
+                    .consumed {
+                    self
+                        .say_id(
+                        "linear temporary ",
+                        v.id,
+                        " has inconsistent ownership at a CFG join"
+                    );
+                    self
+                        .caused(
+                        s0,
+                        s1,
+                        value_cause(v.id),
+                        NOCAUSE,
+                        "Ownership of a linear temporary must agree on incoming control-flow edges."
+                    );
+                }
+                let consumed = old.consumed || v.consumed;
+                if consumed {
+                    out
+                        .set_val_at(
+                        at,
+                        ValS {
+                            id: old.id,
+                            ty: old.ty,
+                            owned: old.owned,
+                            consumed: true,
+                            lpass: 255,
+                            la: 0,
+                            ln: 0
+                        }
+                    );
+                }
+            } else {
+                let la = n32(out.loans.len());
+                if v.lpass != 255 {
+                    for j in 0..w(v.ln) {
+                        out.loans.push(b.loan(add(w(v.la), j)));
+                    }
+                }
+                out
+                    .put_val(
+                    ValS {
+                        id: v.id,
+                        ty: v.ty,
+                        owned: v.owned,
+                        consumed: v.consumed,
+                        lpass: v.lpass,
+                        la: la,
+                        ln: v.ln
+                    }
+                );
+            }
+        }
+    }
+
+    fn origins_build(inout self, in names: Names, in p: Program, f: FnRow) {
+        self.origins.clear();
+        let mut work = MAX_CAUSE_WORK;
+        let mut text = MAX_CAUSE_TEXT;
+        // Rust's `try_build` charges one unit of work per parameter, block,
+        // block parameter, instruction and pattern node, and a name's bytes
+        // against the text budget (a name over 1,024 bytes fails at once);
+        // at the first exhausted limit it keeps no origins at all.
+        let mut ok = true;
+        for i in 0..w(f.pn) {
+            let pr = match p.params.try_get(add(w(f.pa), i)) {
+                Option::Some(x) => x,
+                Option::None => ParamRow {
+                    name: 0,
+                    pass: 0,
+                    ty: 0,
+                    s0: 0,
+                    s1: 0
+                },
+            };
+            if !charge(inout work) || !charge_name(in names, pr.name, inout text) {
+                ok = false;
+                break;
+            }
+            self.origins.slot(p.rank_of(pr.name), pr.s0, pr.s1, true);
+        }
+        let mut pending: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for bi in 0..w(f.bc) {
+            if !ok || !charge(inout work) {
+                ok = false;
+                break;
+            }
+            let bk = p.block(add(w(f.b0), bi));
+            for j in 0..w(bk.pn) {
+                if !charge(inout work) {
+                    ok = false;
+                    break;
+                }
+                self.origins.value(n32(p.op(add(w(bk.pa), j))), false, 0, 0);
+            }
+            for ii in 0..w(bk.ic) {
+                if !ok || !charge(inout work) {
+                    ok = false;
+                    break;
+                }
+                let i = p.inst(add(w(bk.i0), ii));
+                self.origins.value(i.dest, true, i.s0, i.s1);
+                if i.op == OP_BIND {
+                    pending.clear();
+                    pending.push(p.op(inc(w(i.a))));
+                    loop {
+                        if pending.len() == 0 || !ok {
+                            break;
+                        }
+                        if !charge(inout work) {
+                            ok = false;
+                            break;
+                        }
+                        let at = u64_at(in pending, wrapping_sub(pending.len(), 1));
+                        pending.truncate(wrapping_sub(pending.len(), 1));
+                        let kind = p.pat(at);
+                        if kind == 1 {
+                            let name = n32(p.pat(add(at, 3)));
+                            if !charge_name(in names, name, inout text) {
+                                ok = false;
+                                break;
+                            }
+                            self
+                                .origins
+                                .slot(p.rank_of(name), p.pat(inc(at)), p.pat(add(at, 2)), false);
+                        } else if kind == 2 {
+                            let n = p.pat(add(at, 3));
+                            for c in 0..n {
+                                if !charge(inout work) {
+                                    ok = false;
+                                    break;
+                                }
+                                pending.push(p.pat(add(add(at, 4), c)));
+                            }
+                        } else if kind == 4 || kind == 3 {
+                            let n = p.pat(add(at, 5));
+                            for c in 0..n {
+                                if !charge(inout work) {
+                                    ok = false;
+                                    break;
+                                }
+                                pending.push(p.pat(add(add(at, 7), wrapping_mul(c, 2))));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !ok {
+            self.origins.clear();
+        }
+    }
+
+    pub fn function(
+        inout self,
+        inout t: Types,
+        inout names: Names,
+        in wd: World,
+        in p: Program,
+        f: FnRow,
+        inout pool: Pool,
+        inout state: State,
+        inout edge: State,
+        inout next: State,
+        inout old: State
+    ) {
+        if f.bc == 0 {
+            return;
+        }
+        self.bounds = bounds_new();
+        for i in 0..w(f.bn) {
+            let at = add(w(f.ba), wrapping_mul(i, 2));
+            self.bounds.set(n32(p.op(at)), wrapping_u8(p.op(inc(at))));
+        }
+        self.external.clear();
+        for i in 0..w(f.en) {
+            self.external.push(n32(p.op(add(w(f.ea), i))));
+        }
+        // `reservable`: values some call-like operation takes as inout.
+        self.reservable.clear();
+        for bi in 0..w(f.bc) {
+            let bk = p.block(add(w(f.b0), bi));
+            for ii in 0..w(bk.ic) {
+                let i = p.inst(add(w(bk.i0), ii));
+                let a = if i.op == OP_SEQ || i.op == OP_CALL {
+                    w(i.a)
+                } else if i.op == OP_INDIRECT {
+                    inc(w(i.a))
+                } else {
+                    18446744073709551615
+                };
+                if a != 18446744073709551615 {
+                    let n = p.op(a);
+                    for j in 0..n {
+                        if wrapping_u8(p.op(add(a, inc(wrapping_mul(j, 2))))) == P_INOUT {
+                            let x = set_insert(
+                                inout self.reservable,
+                                n32(p.op(add(a, add(2, wrapping_mul(j, 2)))))
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // `scrutinees`: the values a `match` terminator inspects. A by-value
+        // read of a borrowed slot's non-copy place that only a `match`
+        // inspects is a borrow (§4.3).
+        self.scrutinees.clear();
+        for bi in 0..w(f.bc) {
+            let bk = p.block(add(w(f.b0), bi));
+            if bk.term == 3 {
+                let n = p.op(w(bk.ta));
+                let x = set_insert(inout self.scrutinees, n32(p.op(add(inc(w(bk.ta)), n))));
+            }
+        }
+        // `callees`: the function values `f` calls. Calling a borrowed slot
+        // of a function type that is not `copy` (a lent function
+        // parameter, §4.2) reads it.
+        self.callees.clear();
+        for bi in 0..w(f.bc) {
+            let bk = p.block(add(w(f.b0), bi));
+            for ii in 0..w(bk.ic) {
+                let ins = p.inst(add(w(bk.i0), ii));
+                if ins.op == OP_INDIRECT {
+                    let x = set_insert(inout self.callees, n32(p.op(w(ins.a))));
+                }
+            }
+        }
+        self.origins_build(in names, in p, f);
+        pool.reset(w(f.bc));
+        state.clear();
+        for i in 0..w(f.pn) {
+            let pr = match p.params.try_get(add(w(f.pa), i)) {
+                Option::Some(x) => x,
+                Option::None => ParamRow {
+                    name: 0,
+                    pass: 0,
+                    ty: 0,
+                    s0: 0,
+                    s1: 0
+                },
+            };
+            state
+                .put_slot(
+                SlotS {
+                    rank: p.rank_of(pr.name),
+                    name: pr.name,
+                    ty: pr.ty,
+                    pass: pr.pass
+                }
+            );
+        }
+        pool.store(0, in state);
+        let mut queue: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut queued: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        queued.resize(w(f.bc), 0);
+        let mut head: u64 = 0;
+        queue.push(0);
+        let ok0 = queued.try_set(0, 1);
+        let mut visits: u64 = 0;
+        let limit = if wrapping_mul(w(f.bc), 32) > 32 {
+            wrapping_mul(w(f.bc), 32)
+        } else {
+            32
+        };
+        let mut tg: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        loop {
+            if head >= queue.len() {
+                break;
+            }
+            let block = u32_at(in queue, head);
+            head = inc(head);
+            let okq = queued.try_set(w(block), 0);
+            visits = inc(visits);
+            if visits > limit {
+                self.say("IR ownership dataflow did not converge");
+                self.error(0, 0);
+                break;
+            }
+            pool.load(w(block), inout state);
+            self.clear_consumes();
+            let bk = p.block(add(w(f.b0), w(block)));
+            let mut diverges = false;
+            let mut s0: u64 = 0;
+            let mut s1: u64 = 0;
+            for ii in 0..w(bk.ic) {
+                let i = p.inst(add(w(bk.i0), ii));
+                self.instruction(inout state, inout t, inout names, in wd, in p, i);
+                s0 = i.s0;
+                s1 = i.s1;
+                if (i.flags & F_NEVER) != 0 {
+                    diverges = true;
+                    break;
+                }
+            }
+            if diverges {
+                continue;
+            }
+            let ta = w(bk.ta);
+            if bk.term == 0 {
+                self.consume(inout state, inout t, in names, in wd, n32(p.op(ta)), s0, s1);
+                self.frame(in state, inout t, in names, in wd, s0, s1, true);
+            }
+            targets(in p, bk, inout tg);
+            for e in 0..tg.len() {
+                let target = u32_at(in tg, e);
+                let tb = p.block(add(w(f.b0), w(target)));
+                edge.copy_from(in state);
+                if bk.term == 1 {
+                    let nargs = p.op(inc(ta));
+                    for j in 0..nargs {
+                        if j >= w(tb.pn) {
+                            break;
+                        }
+                        let arg = n32(p.op(add(add(ta, 2), j)));
+                        let param = n32(p.op(add(w(tb.pa), j)));
+                        self.consume(inout edge, inout t, in names, in wd, arg, s0, s1);
+                        edge
+                            .put_val(
+                            ValS {
+                                id: param,
+                                ty: param_type(in p, f, param),
+                                owned: true,
+                                consumed: false,
+                                lpass: 255,
+                                la: 0,
+                                ln: 0
+                            }
+                        );
+                    }
+                }
+                let had = pool.has(w(target));
+                if had {
+                    pool.load(w(target), inout old);
+                    next.copy_from(in old);
+                    self.merge(inout next, in edge, inout t, in names, in wd, s0, s1);
+                    if !next.same(in old) {
+                        pool.store(w(target), in next);
+                        if u8_at(in queued, w(target)) == 0 {
+                            queue.push(target);
+                            let okq2 = queued.try_set(w(target), 1);
+                        }
+                    }
+                } else {
+                    pool.store(w(target), in edge);
+                    if u8_at(in queued, w(target)) == 0 {
+                        queue.push(target);
+                        let okq3 = queued.try_set(w(target), 1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn param_type(in p: Program, f: FnRow, id: u32) -> u32 {
+    for i in 0..w(f.vn) {
+        let at = add(w(f.va), wrapping_mul(i, 2));
+        if n32(p.op(at)) == id {
+            return n32(p.op(inc(at)));
+        }
+    }
+    0
+}
+
+// `validate`: evidence, then each function's flow; duplicates (code, span,
+// message) removed, first kept. The digest folds what remains.
+pub fn validate_digest(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in p: Program,
+    inout fl: Flow,
+    inout pool: Pool,
+    inout a: State,
+    inout b: State,
+    inout c: State,
+    inout e: State
+) -> u64 {
+    fl.d.clear();
+    evidence(in p, inout fl.d);
+    for fi in 0..p.fns.len() {
+        let f = match p.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => FnRow {
+                pa: 0,
+                pn: 0,
+                ba: 0,
+                bn: 0,
+                ea: 0,
+                en: 0,
+                va: 0,
+                vn: 0,
+                b0: 0,
+                bc: 0
+            },
+        };
+        fl
+            .function(
+            inout t,
+            inout names,
+            in wd,
+            in p,
+            f,
+            inout pool,
+            inout a,
+            inout b,
+            inout c,
+            inout e
+        );
+    }
+    let mut seen: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut h: u64 = 14695981039346656037;
+    let mut kept: u64 = 0;
+    for i in 0..fl.d.len() {
+        let r = fl.d.row(i);
+        let k = fl
+            .d
+            .fold_range(
+            fl.d.fold_range(fold(fold(14695981039346656037, r.start), r.stop), r.code_a, r.msg_a),
+            r.msg_a,
+            r.msg_b
+        );
+        let mut dup = false;
+        for j in 0..seen.len() {
+            if u64_at(in seen, j) == k {
+                dup = true;
+            }
+        }
+        if !dup {
+            seen.push(k);
+            kept = inc(kept);
+            h = fl.d.digest_row(h, i);
+        }
+    }
+    fold(h, kept)
+}
+
+// ----- entries ----------------------------------------------------------------
+
+// `validate`: evidence, then each function's flow, into `fl.d`; returns the
+// rows kept after removing duplicates of (code, span, message), first kept.
+pub fn validate_into(
+    inout t: Types,
+    inout names: Names,
+    in wd: World,
+    in p: Program,
+    inout fl: Flow,
+    inout pool: Pool,
+    inout a: State,
+    inout b: State,
+    inout c: State,
+    inout e: State
+) -> ChunkSeq[u64] {
+    fl.d.clear();
+    evidence(in p, inout fl.d);
+    for fi in 0..p.fns.len() {
+        let f = match p.fns.try_get(fi) {
+            Option::Some(f) => f,
+            Option::None => FnRow {
+                pa: 0,
+                pn: 0,
+                ba: 0,
+                bn: 0,
+                ea: 0,
+                en: 0,
+                va: 0,
+                vn: 0,
+                b0: 0,
+                bc: 0
+            },
+        };
+        fl
+            .function(
+            inout t,
+            inout names,
+            in wd,
+            in p,
+            f,
+            inout pool,
+            inout a,
+            inout b,
+            inout c,
+            inout e
+        );
+    }
+    let mut seen: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut kept: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..fl.d.len() {
+        let r = fl.d.row(i);
+        let k = fl
+            .d
+            .fold_range(
+            fl.d.fold_range(fold(fold(14695981039346656037, r.start), r.stop), r.code_a, r.msg_a),
+            r.msg_a,
+            r.msg_b
+        );
+        let mut dup = false;
+        for j in 0..seen.len() {
+            if u64_at(in seen, j) == k && same_key(in fl.d, u64_at(in kept, j), i) {
+                dup = true;
+            }
+        }
+        if !dup {
+            seen.push(k);
+            kept.push(i);
+        }
+    }
+    kept
+}
+
+// Rows `i` and `j` have the same code, span and message (the digest above
+// only narrows the candidates).
+fn same_key(in d: Diags, i: u64, j: u64) -> bool {
+    let a = d.row(i);
+    let b = d.row(j);
+    a
+        .start
+        == b
+        .start
+        && a
+        .stop
+        == b
+        .stop
+        && same_range(in d, a.code_a, a.msg_a, b.code_a, b.msg_a)
+        && same_range(in d, a.msg_a, a.msg_b, b.msg_a, b.msg_b)
+}
+
+fn same_range(in d: Diags, a0: u64, a1: u64, b0: u64, b1: u64) -> bool {
+    if wrapping_sub(a1, a0) != wrapping_sub(b1, b0) {
+        return false;
+    }
+    for i in 0..wrapping_sub(a1, a0) {
+        if u8_at(in d.text, add(a0, i)) != u8_at(in d.text, add(b0, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// Bytes `a..b` of `text` after their length, eight per word, little-endian.
+fn put_range(inout o: ChunkSeq[u64], in text: ChunkSeq[u8], a: u64, b: u64) {
+    o.push(wrapping_sub(b, a));
+    let mut acc: u64 = 0;
+    let mut k: u32 = 0;
+    for i in a..b {
+        acc = acc | wrapping_shl_u64(widen_u64(u8_at(in text, i)), wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            o.push(acc);
+            acc = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        o.push(acc);
+    }
+}
+
+fn rel_at(in d: Diags, i: u64) -> RelRow {
+    match d.rel.try_get(i) {
+        Option::Some(l) => l,
+        Option::None => RelRow {
+            a: 0,
+            b: 0,
+            start: 0,
+            stop: 0
+        },
+    }
+}
+
+// The kept diagnostics as words: a count, then per diagnostic its code,
+// message, start, end, help (empty for none) and related labels (count,
+// then start, end and message each).
+fn put_diags(in d: Diags, in kept: ChunkSeq[u64], inout o: ChunkSeq[u64]) {
+    o.push(kept.len());
+    for k in 0..kept.len() {
+        let r = d.row(u64_at(in kept, k));
+        put_range(inout o, in d.text, r.code_a, r.msg_a);
+        put_range(inout o, in d.text, r.msg_a, r.msg_b);
+        o.push(r.start);
+        o.push(r.stop);
+        put_range(inout o, in d.text, r.help_a, r.end);
+        o.push(w(r.rn));
+        for j in 0..w(r.rn) {
+            let l = rel_at(in d, add(w(r.ra), j));
+            o.push(l.start);
+            o.push(l.stop);
+            put_range(inout o, in d.text, l.a, l.b);
+        }
+    }
+}
+
+// The hybrid task: the world and the program; the diagnostics as words.
+pub fn ir_check_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in input);
+    let p = read_program(inout r, in input, in c.names, in c.nmap, in c.tmap);
+    let mut fl = flow_new();
+    let mut pool = pool_new();
+    let mut s1 = state_new();
+    let mut s2 = state_new();
+    let mut s3 = state_new();
+    let mut s4 = state_new();
+    let kept = validate_into(
+        inout c.types,
+        inout c.names,
+        in c.world,
+        in p,
+        inout fl,
+        inout pool,
+        inout s1,
+        inout s2,
+        inout s3,
+        inout s4
+    );
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_diags(in fl.d, in kept, inout o);
+    o
+}
+
+// `ir_check_words` from the harness's `Str` input.
+pub fn check_ir_words(in input: Str) -> ChunkSeq[u64] {
+    ir_check_words(in input.as_bytes())
+}
+
+fn put_text(inout o: ChunkSeq[u8], in text: ChunkSeq[u8], a: u64, b: u64) {
+    for i in a..b {
+        o.push(u8_at(in text, i));
+    }
+}
+
+// The diagnostics as text, one line each, the format of `rust_text` in
+// tests/hybrid_ir_check.rs: `code start-end message`, then each related
+// label as ` [start-end message]`, then ` help: text` when there is help.
+pub fn check_ir_text(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let p = read_program(inout r, in b, in c.names, in c.nmap, in c.tmap);
+    let mut fl = flow_new();
+    let mut pool = pool_new();
+    let mut s1 = state_new();
+    let mut s2 = state_new();
+    let mut s3 = state_new();
+    let mut s4 = state_new();
+    let kept = validate_into(
+        inout c.types,
+        inout c.names,
+        in c.world,
+        in p,
+        inout fl,
+        inout pool,
+        inout s1,
+        inout s2,
+        inout s3,
+        inout s4
+    );
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for k in 0..kept.len() {
+        let row = fl.d.row(u64_at(in kept, k));
+        put_text(inout o, in fl.d.text, row.code_a, row.msg_a);
+        o.push(32);
+        push_decimal(inout o, row.start);
+        o.push(45);
+        push_decimal(inout o, row.stop);
+        o.push(32);
+        put_text(inout o, in fl.d.text, row.msg_a, row.msg_b);
+        for j in 0..w(row.rn) {
+            let l = rel_at(in fl.d, add(w(row.ra), j));
+            o.extend(in " [".as_bytes());
+            push_decimal(inout o, l.start);
+            o.push(45);
+            push_decimal(inout o, l.stop);
+            o.push(32);
+            put_text(inout o, in fl.d.text, l.a, l.b);
+            o.push(93);
+        }
+        if row.end > row.help_a {
+            o.extend(in " help: ".as_bytes());
+            put_text(inout o, in fl.d.text, row.help_a, row.end);
+        }
+        o.push(10);
+    }
+    pack_text(in o)
+}

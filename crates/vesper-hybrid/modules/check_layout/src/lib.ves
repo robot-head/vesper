@@ -1,0 +1,23 @@
+// @vesper/hybrid-check-layout: `vesper::layout::Layout::of` served from
+// Vesper in the hybrid Stage 2 build (self-hosting SH2 lane 5, #1177).
+//
+// `layout_of_words` takes one call's input as little-endian words (names,
+// types, the ADTs the layout can reach, then the type's index; written by
+// `layout_input` in tests/common/check_words.rs) and returns the layout as
+// the word stream of `put_layout_words` (@vesper/check-layout), which
+// `decode_layout` reads back into a Rust `Layout`.
+
+// @export abi 4
+
+use @vesper/check-layout::{
+    layout_words
+};
+
+// The layout version of `layout_of_words`; tests/check_words.rs checks it.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn layout_of_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    layout_words(in input)
+}

@@ -243,6 +243,15 @@ corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
 | `fip` checks (`fip::check_world`; not swapped yet, part 1 of the lane) | SH2-12 (#1184) | not swapped | not swapped | 0.92x wall with decoding (0.56x checks only) over 315 worlds; encoding the input costs 2.5x of Rust's check | [self-host-check-fip.md](../parallel-results/self-host-check-fip.md) |
 | tensor types (`infer`, `dim`, `types`; not `elaborate`; not swapped yet, part 1 of the lane) | SH2-14 (#1186) | not swapped | not swapped | 0.28x wall on 40 rejected fixtures, 0.49x on 852 corpus sources (parse + check) | [self-host-check-tensor-types.md](../parallel-results/self-host-check-tensor-types.md) |
 
+**SH2 compile-time scoreboard.** The same corpus and profile, with two
+commands: `vesper check --json`, and `vesper emit --emit object`, which
+asks for many more layouts. Each ratio is against the default (Rust)
+compiler, and the hybrid includes the swaps above it.
+
+| Swap | Lane | `check` wall | `check` Ir | `emit object` wall | `emit object` Ir | Swapped module alone | Report |
+|---|---|--:|--:|--:|--:|---|---|
+| `Layout::of` (`@vesper/check-layout`) and `ir_check::validate` (`@vesper/ir-check`), both in one build | SH2-5 (#1177) | 1.08x | 1.070x | 1.14x | 1.312x | layout 5.43x per call (one call per type, world rebuilt each call); IR check 0.53x per call, boundary included | [self-host-layout-ir-check-swap.md](../parallel-results/self-host-layout-ir-check-swap.md) |
+
 **SH2 checker ports.** Each row is one checker port. Until its swap into
 the hybrid build lands, the numbers are the ported rules alone against the
 Rust rules they replace, over lane 4's corpus (ABBA, release build, Vesper

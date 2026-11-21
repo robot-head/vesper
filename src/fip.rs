@@ -158,6 +158,13 @@ fn dropped_handles<R>(f: impl FnOnce(Option<&BTreeSet<String>>) -> R) -> R {
     DROPPED_HANDLES.with(|h| f(h.borrow().as_ref()))
 }
 
+/// Whether a [`handle_drop_plan`] runs on this thread (`Box` detection then
+/// reads its handle types; the hybrid build's Vesper layout, which does not
+/// see them, defers to Rust).
+pub fn handle_drops_active() -> bool {
+    dropped_handles(|h| h.is_some())
+}
+
 /// Whether `ty` is the built-in `Box[T]`.
 pub fn is_box_type(world: &World, ty: &Type) -> bool {
     if let Some(handle) = dropped_handles(|h| {

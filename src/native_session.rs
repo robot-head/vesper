@@ -855,6 +855,7 @@ fn compile_session_with_linkage<M: Module>(
     let instances: InstanceMap = super::instances(world, &plan.entry)?;
     let mut program = crate::ffi_lowering::drops::lower_world(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
+    super::wide_native::refine_wide_tuples(&mut program);
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
         crate::ir_inline::inline(world, &mut program, &crate::ir_inline::Budget::default());

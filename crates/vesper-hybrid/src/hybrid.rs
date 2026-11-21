@@ -20,13 +20,32 @@ mod layout_binding;
 #[path = "../port/parse.rs"]
 mod parse_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/check_layout.rs"]
+mod check_layout_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/ir_check.rs"]
+mod ir_check_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
+
+// The checker swaps' input encoder and result decoders (#1177), shared with
+// the root package's tests/hybrid_layout.rs and tests/hybrid_ir_check.rs.
+#[path = "../../../tests/common/check_words.rs"]
+mod check_words;
 
 /// Calls answered by the Vesper word-layout module.
 static LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Sources parsed by the Vesper parse module.
 static PARSE_CALLS: AtomicU64 = AtomicU64::new(0);
+/// `Layout::of` calls answered by the Vesper check-layout module.
+static CHECK_LAYOUT_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs checked by the Vesper IR-check module.
+static IR_CHECK_CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn count() {
     LAYOUT_CALLS.fetch_add(1, Relaxed);
@@ -66,12 +85,44 @@ const VESPER_PARSE: vesper_syntax::parser::ParseTable = vesper_syntax::parser::P
     },
 };
 
+/// `vesper::layout::LayoutTable` from `modules/check_layout`: the layout of
+/// `@vesper/check-layout`, over the ADTs the type can reach. A type whose
+/// literals the decoder cannot read (over 64 bits) stays in Rust.
+const VESPER_LAYOUT: vesper::layout::LayoutTable = vesper::layout::LayoutTable {
+    of: |world, ty| {
+        let Some(input) = check_words::layout_input(world, ty) else {
+            return vesper::layout::rust_layout_of(world, ty);
+        };
+        CHECK_LAYOUT_CALLS.fetch_add(1, Relaxed);
+        check_words::decode_layout(&check_layout_binding::layout_of_words(&input))
+    },
+};
+
+/// `vesper::ir_check::IrCheckTable` from `modules/ir_check`: the IR check
+/// of `@vesper/ir-check`. A program whose literals the decoder cannot read
+/// stays in Rust.
+const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrCheckTable {
+    validate: |world, program| {
+        let Some(input) = check_words::ir_input(world, program) else {
+            return vesper::ir_check::rust_validate(world, program);
+        };
+        IR_CHECK_CALLS.fetch_add(1, Relaxed);
+        check_words::decode_diagnostics(&ir_check_binding::validate_words(&input))
+    },
+};
+
 extern "C" fn install() {
     // Nothing runs before this constructor, so the slots are empty.
     if vesper::layout::install_word_layout(VESPER_WORD_LAYOUT).is_err() {
         std::process::abort();
     }
     if vesper_syntax::parser::install_parse(VESPER_PARSE).is_err() {
+        std::process::abort();
+    }
+    if vesper::layout::install_layout(VESPER_LAYOUT).is_err() {
+        std::process::abort();
+    }
+    if vesper::ir_check::install_ir_check(VESPER_IR_CHECK).is_err() {
         std::process::abort();
     }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1") {
@@ -92,6 +143,14 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: parse answered {} calls from Vesper",
         PARSE_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: check-layout answered {} calls from Vesper",
+        CHECK_LAYOUT_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: ir-check answered {} calls from Vesper",
+        IR_CHECK_CALLS.load(Relaxed)
     );
 }
 
