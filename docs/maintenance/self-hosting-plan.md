@@ -243,6 +243,7 @@ corpus: `vesper check` on 537 files under `bootstrap/corpus`, `examples/` and
 | `names_packages` (package assembler: imports, re-exports, renaming; not swapped yet) | SH2-6 (#1178) | not swapped | not swapped | 0.72x-0.87x wall and 1.54x Ir of `packages::load` at first (two parses per module until SH2-1); 1.62x Ir with value enums and constants (#1310) | [self-host-check-names-packages.md](../parallel-results/self-host-check-names-packages.md) |
 | `fip` checks (`fip::check_world`; not swapped yet, part 1 of the lane) | SH2-12 (#1184) | not swapped | not swapped | 0.92x wall with decoding (0.56x checks only) over 315 worlds; encoding the input costs 2.5x of Rust's check | [self-host-check-fip.md](../parallel-results/self-host-check-fip.md) |
 | tensor types (`infer`, `dim`, `types`; not `elaborate`; not swapped yet, part 1 of the lane) | SH2-14 (#1186) | not swapped | not swapped | 0.28x wall on 40 rejected fixtures, 0.49x on 852 corpus sources (parse + check) | [self-host-check-tensor-types.md](../parallel-results/self-host-check-tensor-types.md) |
+| bounds hoisting (`bounds_hoist::run` through the `hoist` hook; whole pass, rewrite included) | SH3-12 (#1251) | not measured (lane 14) | not measured | 1.44x wall alone, 1.50x on input bytes, 2.05x with encode and decode, over 294 corpus programs (1,225 loops versioned, 0 diffs) | [self-host-bounds-hoist.md](../parallel-results/self-host-bounds-hoist.md) |
 
 **SH2 compile-time scoreboard.** The same corpus and profile, with two
 commands: `vesper check --json`, and `vesper emit --emit object`, which
