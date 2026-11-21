@@ -14,6 +14,7 @@ const broker = `<figure class="worked-figure broker-figure">
     <select><option>0</option><option>8</option><option selected>41</option></select>
   </label>
   <span class="sr-only" role="status"></span>
+  <details class="loan-map"><summary>Trace the two field loans</summary><!-- diagram:field-loans --></details>
 </figure>`;
 
 function flow(caption, stages) {
@@ -33,26 +34,31 @@ function expansion(macro) {
 
 export const figures = {
   broker,
-  ownership: `<figure class="worked-figure"><figcaption>Who owns the transaction at return?</figcaption>
-    <div class="branch-root">Caller owns <code>tx</code></div>
-    <ul class="ownership-branches">
-      <li><strong>Commit</strong><span>The method consumes <code>tx</code> and returns its slot.</span></li>
-      <li><strong>Abort</strong><span>The method consumes <code>tx</code> and returns <code>Unit</code>.</span></li>
-      <li><strong>Skip both</strong><span>The caller still owns <code>tx</code>. The checker reports <code>E0302</code>.</span></li>
-    </ul></figure>`,
+  ownership: '<!-- diagram:linear-transaction -->',
   exit: flow('One return value, seen at two boundaries', [
     ['Vesper integer', '−1'], ['Low eight bits', '1111 1111'], ['Linux shell status', '255'],
   ]),
-  resume: flow('Where the handler gets 42', [
-    ['Handler resumes', '20'], ['Computation adds 1', '21'], ['Handler doubles', '42'],
-  ]),
+  resume: '<!-- diagram:effect-resumption -->',
   'guide-expansion': expansion('addone'),
   'tour-expansion': expansion('next_seat'),
 };
 
-export function insertFigures(html) {
+const diagrams = {
+  'field-loans': ['Two loans into one record', 'The inout loan reaches index and metrics. A separate in loan reads config.', 260],
+  'linear-transaction': ['Three ways to leave a transaction', 'Commit and abort both consume the transaction. Returning while it is still live produces E0302.', 296],
+  'effect-resumption': ['Follow the request and its reply', 'The computation asks for a value. The handler resumes with 20, receives 21, then doubles it to 42.', 340],
+  'macro-substitution': ['Where the two operands come from', 'The call supplies 41 through the expression slot. The template supplies the constant 1. The resulting addition gives 42.', 312],
+};
+
+export function insertFigures(html, prefix = '') {
   return html.replace(/<!-- figure:([\w-]+) -->/g, (_, name) => {
     if (!Object.hasOwn(figures, name)) throw new Error(`Unknown figure: ${name}`);
     return figures[name];
+  }).replace(/<!-- diagram:([\w-]+) -->/g, (_, name) => {
+    const [title, description, height] = diagrams[name];
+    const url = `${prefix}diagrams/${name}.svg`;
+    return `<figure class="teaching-diagram"><figcaption>${title}</figcaption>
+      <img src="${url}" width="560" height="${height}" loading="lazy" alt="${description}">
+      <a href="${url}">Open full-size diagram<span class="sr-only"> · ${title}</span></a></figure>`;
   });
 }

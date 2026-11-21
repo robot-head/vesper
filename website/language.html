@@ -294,6 +294,7 @@ fn main() -&gt; i64 { addone!(41) }</code></pre>
 target/debug/vesper fmt --check lesson.ves
 target/debug/vesper forge expand lesson.ves &gt; expanded.ves
 target/debug/vesper run expanded.ves</code></pre>
+          <!-- diagram:macro-substitution -->
           <!-- figure:guide-expansion -->
           <p>The second formatting pass accepts the first pass’s output. The expansion calls <code>wrapping_add(41, 1)</code> and prints <code>42</code> when run. The manuscript also proposes a <code>sugar</code> declaration for forms such as a guard with an <code>else</code> clause. <a href="docs/chapter-07.html#section-7-5">Read the design for extensible syntax.</a></p>
         </section>

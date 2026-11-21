@@ -33,7 +33,7 @@ for (const file of ['search.js', 'docs.css']) {
 const sitemap = await readFile(resolve(root, 'sitemap.xml'), 'utf8');
 const chapterUrls = [...chapters, ...tour].map(path => `  <url><loc>https://vesper-lang.org/${path.replace(/index\.html$/, '')}</loc></url>`).join('\n');
 await writeFile(resolve(out, 'sitemap.xml'), sitemap.replace('</urlset>', `${chapterUrls}\n</urlset>`));
-for (const path of ['assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
+for (const path of ['assets', 'brand', 'diagrams', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
   await cp(resolve(root, path), resolve(out, path), { recursive: true });
 }
 const css = await highlightSite(out, ['index.html', 'language.html', 'docs/index.html', ...chapters, ...tour]);

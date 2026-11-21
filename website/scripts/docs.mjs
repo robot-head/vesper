@@ -96,7 +96,7 @@ export function page(file, title, description, body, directory = 'docs') {
     <a href="../language.html">Language guide</a>
     <label class="theme" title="Switch between dusk and dawn"><input type="checkbox" id="theme-toggle" role="switch" aria-label="Dawn theme"><span aria-hidden="true">◐</span></label>
   </div></header>
-  ${insertFigures(body)}
+  ${insertFigures(body, '../')}
   <footer><div class="wrap footer-bar"><a href="../docs/index.html">Documentation home</a><a href="#main">Back to top</a></div></footer>
   <script type="module" src="../site.js"></script>
 </body></html>\n`;
@@ -115,6 +115,9 @@ const practice = {
 };
 
 const figures = {
+  '3.2': '<!-- diagram:linear-transaction -->',
+  '5.1': '<!-- diagram:effect-resumption -->',
+  '7.4': '<!-- diagram:macro-substitution -->',
   '4.3': '<!-- figure:broker -->',
   'B.1': `<figure class="concept-figure prism"><img data-brand-mark src="../brand/vesper-mark-dusk.svg" width="256" height="256" loading="lazy" alt="A V-shaped prism with an upper chevron and open channels between three blades."><figcaption>The blades mark consumption, exclusive access, and shared access or an effect. The gaps keep the three visible in monochrome.</figcaption></figure>`,
 };

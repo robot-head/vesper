@@ -9,7 +9,7 @@ function renderLesson(body) {
       const [, language, error, code] = part.match(/^~~~(vesper|sh)(?: ([A-Z0-9_]+))?\n([\s\S]*)\n~~~$/);
       return `<pre tabindex="0"><code data-lang="${language}"${error ? ` data-error="${error}"` : ''}>${escape(code)}</code></pre>`;
     }
-    return part.trim().split(/\n\n+/).map(p => /^<!-- figure:[\w-]+ -->$/.test(p) ? p : `<p>${escape(p).replace(/`([^`]+)`/g, '<code>$1</code>')}</p>`).join('\n');
+    return part.trim().split(/\n\n+/).map(p => /^<!-- (?:figure|diagram):[\w-]+ -->$/.test(p) ? p : `<p>${escape(p).replace(/`([^`]+)`/g, '<code>$1</code>')}</p>`).join('\n');
   }).join('\n');
 }
 

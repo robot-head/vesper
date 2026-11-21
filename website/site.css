@@ -84,20 +84,23 @@ h1 em { color: var(--accent); font-style: normal; }
 .broker-figure p { font-size: .92rem; }
 .broker-control { display: block; margin-top: .8rem; font-size: .9rem; }
 .broker-control select { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: .25rem .4rem; margin-left: .3rem; }
-.value-flow, .ownership-branches { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 1.5rem; list-style: none; margin: 0; padding: 0; }
+.value-flow { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 1.5rem; list-style: none; margin: 0; padding: 0; }
 .value-flow li { position: relative; min-width: 0; }
 .value-flow li + li::before { content: "→"; position: absolute; left: -1.25rem; top: 50%; color: var(--muted); }
-.value-flow li > span, .ownership-branches li > span { display: block; color: var(--muted); font-size: .87rem; }
+.value-flow li > span { display: block; color: var(--muted); font-size: .87rem; }
 .value-flow strong { font: 600 1.1rem var(--mono); }
 .value-flow pre { margin-top: .2rem; padding: .4rem; }
 .expansion { grid-template-columns: 1.4fr 1.9fr .8fr; align-items: start; }
-.branch-root { padding-bottom: .65rem; font: 1rem var(--mono); }
-.ownership-branches { gap: 1rem; }
-.ownership-branches li { border-top: 2px solid var(--line); padding-top: .55rem; }
 @container (max-width: 31rem) {
-  .value-flow, .ownership-branches { grid-template-columns: 1fr; }
+  .value-flow { grid-template-columns: 1fr; }
   .value-flow li + li::before { content: "↓"; top: -1.5rem; left: .2rem; }
 }
+.teaching-diagram { max-width: 38rem; min-width: 0; margin: 1rem 0; }
+.teaching-diagram img { display: block; max-width: 100%; height: auto; border-radius: .5rem; }
+.teaching-diagram figcaption { margin: 0 0 .65rem; color: var(--ink); font: 600 1.1rem/1.4 var(--display); }
+.teaching-diagram > a { display: inline-block; margin-top: .45rem; font-size: .85rem; color: var(--accent); text-decoration: underline; }
+.loan-map { margin-top: .9rem; padding-top: .8rem; border-top: 1px solid var(--line); }
+.loan-map > summary { cursor: pointer; }
 .rail { border-block: 1px solid var(--line); background: var(--surface); }
 .feature-row, .pipeline { display: grid; grid-template-columns: repeat(3,1fr); }
 .feature { display: flex; gap: 16px; align-items: center; padding: 24px 0; }

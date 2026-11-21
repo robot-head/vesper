@@ -557,6 +557,8 @@ macro next_seat($n: expr) -> expr {
 fn main() -> i64 { next_seat!(41) }
 ~~~
 
+<!-- diagram:macro-substitution -->
+
 ## Inspect the expansion
 
 Run these commands from a POSIX shell. Forge checks the expansion and writes it as ordinary Vesper source. Look at `expanded.ves` to find the call to `wrapping_add`, then run it to get `42`.
