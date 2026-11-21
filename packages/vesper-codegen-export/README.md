@@ -11,9 +11,10 @@ Rust stays the default build: nothing in the compiler calls this package yet.
 | `rust_binding` (binding.rs, binding_v2.rs, binding_v4.rs): ABI v1-v4 | `binding.ves`, `binding_v2.ves`, `binding_v4.ves` | byte-identical text |
 | `Directives::parse` (directives.rs) | `directives.ves` | equal dumps |
 
+| `glue::define` after the runtime prelude (glue.rs) | `glue/` (`@vesper/codegen-export-glue`) | byte-identical objects (crates/vesper-hybrid/tests/codegen_export.rs) |
+
 Not yet: `plan_with` (the interface planner, which reads the checked
-`World`), `glue::define` and the wrapper signatures (emission, after SH4
-lane 1's lent Cranelift handles), `Directives::add_packages` and the `.vsys`
+`World`), the wrapper signatures, `Directives::add_packages` and the `.vsys`
 descriptor parse.
 
 ## Entries

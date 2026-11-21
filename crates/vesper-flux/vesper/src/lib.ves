@@ -1,6 +1,8 @@
 // @export abi 3
 // @vesper/flux: Vesper port of the vesper-flux Z-set kernels and frontier
-// (port wave P3b lane 7, #1069).
+// (port wave P3b lane 7, #1069), the accumulator that builds sets from
+// decoded records and the CDC batch decoder (Rust-exit wave SH6 lane 6,
+// #1401).
 //
 // A Z-set crosses the boundary as one flat sequence of cells: each row is
 // `width` i64 columns followed by its i64 weight (stride width + 1), rows
@@ -28,6 +30,14 @@ use self::sort::{
     sort_by_column,
     sort_u64
 };
+use self::acc::{
+    ROWS_FULL,
+    SUM_OVERFLOW,
+    acc_finish,
+    acc_insert,
+    acc_new
+};
+use self::cdc::cdc_decode;
 use self::wide::{
     Acc,
     acc_add,
@@ -736,4 +746,94 @@ pub fn frontier_retire(
     }
     live.try_set(slot, 0);
     watermark = publish(in holds, in live, watermark);
+}
+
+// ---------------------------------------------------------------------
+// the accumulator (zset.rs `Accumulator`, module acc)
+
+// Every input's distinct rows and their i128 sums (see acc.ves).
+pub struct ZAcc {
+    widths: ChunkSeq[u64],
+    max_rows: u64,
+    // The table's hash key.
+    k0: u64,
+    k1: u64,
+    // Distinct rows per input.
+    counts: ChunkSeq[u64],
+    // Per distinct row, in insertion order: its input, the offset of its
+    // cells in `rows`, and its sum (hi:lo, two's complement).
+    tags: ChunkSeq[u64],
+    offs: ChunkSeq[u64],
+    rows: ChunkSeq[i64],
+    his: ChunkSeq[i64],
+    los: ChunkSeq[u64],
+    // Open addressing: 0 is empty, otherwise the distinct row's index + 1.
+    // Its length is a power of two, at least twice the distinct rows.
+    table: ChunkSeq[u64]
+}
+
+// `Accumulator::new` for inputs of these widths (the wrapper checks them
+// against the column limit); (k0, k1) is a random hash key.
+pub fn zacc_new(in widths: Slice[u64], max_rows: u64, k0: u64, k1: u64) -> ZAcc {
+    acc_new(in widths, max_rows, k0, k1)
+}
+
+// `Accumulator::add` of one row of `input` after the wrapper's work charge
+// and width check; the weight is the i128 whi:wlo.
+pub fn zacc_add(inout a: ZAcc, input: u64, in row: Slice[i64], whi: i64, wlo: u64) eff [
+    Fail[ZErr]
+] {
+    let status = acc_insert(inout a, input, in row, 0, whi, wlo);
+    if status == ROWS_FULL {
+        Fail::raise(ZErr::Rows);
+    }
+    if status == SUM_OVERFLOW {
+        Fail::raise(ZErr::Overflow);
+    }
+}
+
+// `Accumulator::finish` of one input: its nonzero sums in row order.
+pub fn zacc_finish(in a: ZAcc, input: u64) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    acc_finish(in a, input)
+}
+
+// ---------------------------------------------------------------------
+// CDC batches (cdc.rs `Executor::ingest_cdc`, module cdc)
+
+// Every way a CDC batch fails after the wrapper's empty and size checks.
+pub copy enum CdcErr {
+    Work,
+    Rows,
+    Overflow,
+    Records,
+    TruncatedHeader,
+    Partition,
+    Schema,
+    Flags,
+    Weight,
+    Offset,
+    TruncatedRow
+}
+
+// Decodes a batch into the accumulator (see cdc.ves for the arguments).
+pub fn cdc_ingest(
+    inout a: ZAcc,
+    in bytes: Slice[u8],
+    in parts: Slice[u64],
+    in binds: Slice[u64],
+    inout next: ChunkSeq[u64],
+    max_records: u64,
+    inout budget: u64,
+    inout stats: ChunkSeq[i64]
+) eff [Fail[CdcErr]] {
+    cdc_decode(
+        inout a,
+        in bytes,
+        in parts,
+        in binds,
+        inout next,
+        max_records,
+        inout budget,
+        inout stats
+    );
 }

@@ -43,7 +43,7 @@ filegroup(
         (
             "delimiters",
             "vesper/src/parse.ves",
-            "            if wrapping_add(top, 3) != k {",
+            "            if wrapping_add(top, Tk::Close) != k {",
             "            if top == 0 {",
         ),
         (
@@ -55,14 +55,14 @@ filegroup(
         (
             "resolve",
             "vesper/src/resolve.ves",
-            "            if rank <= sq(in ctx, wrapping_add(wrapping_mul(j, 2), 1)) {",
+            "            if rank <= sq(in ctx, wrapping_add(wrapping_mul(j, Ctx::Words), Ctx::Rank)) {",
             "            if rank <= 18446744073709551615 {",
         ),
         (
             "registry",
             "vesper/src/resolve.ves",
-            "    if def_word(in w, in g, d, 3) != 0 {",
-            "    if def_word(in w, in g, d, 3) > 1 {",
+            "    if def_word(in w, in g, d, Def::Visibility) != Vis::Public {",
+            "    if def_word(in w, in g, d, Def::Visibility) > 1 {",
         ),
     ]
 ]

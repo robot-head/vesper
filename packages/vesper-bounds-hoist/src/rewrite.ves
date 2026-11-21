@@ -1,0 +1,837 @@
+// The rewrites of src/bounds_hoist.rs on a `@vesper/place-ir` program:
+// `make_unchecked` (an access becomes `SeqOp::Hoisted`), `clone_loop` (a
+// counted loop's guards and fast copy), `guard_and_copy` (facts.rs: a
+// compared loop's) and `copy_loop`, which both end with.
+//
+// The tables only grow: a changed block gets new header words and, when
+// instructions are added, a new instruction range; a function that gains
+// blocks gets a new block range (its old rows are left unused); the
+// function row then points at the new ranges. `put_program` writes only
+// what the function rows reach.
+//
+// New payloads are pool rows of two kinds this package adds, which the
+// Rust decoder (tests/common/ir_words.rs `decode_program`) builds itself:
+// POOL_HOISTED (label: the access) and POOL_GUARD (label: `inclusive`,
+// `negated << 1`, `plus << 8`, `minus << 16`).
+
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types
+};
+use @vesper/place-ir::{
+    BlockRow,
+    FnRow,
+    InstRow,
+    PoolRow,
+    Program
+};
+use self::fun::{
+    Fun,
+    add,
+    has,
+    hoistable,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    w
+};
+use self::encode::{
+    POOL_GUARD,
+    POOL_HOISTED,
+    seq_class
+};
+
+const T_RAW: u8 = 0;
+const T_NAME: u8 = 1;
+const T_OPT_NAME: u8 = 2;
+const T_TYPE: u8 = 3;
+const T_PATH: u8 = 4;
+const T_POOL: u8 = 5;
+const T_VALUE: u8 = 6;
+const T_BLOCK: u8 = 7;
+
+const OP_CONST: u8 = 0;
+const OP_READ: u8 = 2;
+const OP_HANDLE: u8 = 15;
+const OP_SEQ: u8 = 18;
+const TERM_RETURN: u8 = 0;
+const TERM_JUMP: u8 = 1;
+const TERM_BRANCH: u8 = 2;
+const TERM_MATCH: u8 = 3;
+const P_IN: u64 = 0;
+const P_SINK: u64 = 2;
+const NONE64: u64 = 18446744073709551615;
+
+pub fn inst_row(in p: Program, i: u64) -> InstRow {
+    p.inst(i)
+}
+
+// The pool row of a new payload, shared by kind and label.
+pub fn pool_entry(inout p: Program, kind: u64, label: u32) -> u64 {
+    for i in 0..p.pool.len() {
+        let r = p.pool_row(i);
+        if r.kind == kind && r.label == label {
+            return i;
+        }
+    }
+    let i = p.pool.len();
+    p
+        .pool
+        .push(
+        PoolRow {
+            kind: kind,
+            label: label
+        }
+    );
+    i
+}
+
+fn set_word(inout p: Program, i: u64, x: u64) {
+    let ok = p.ops.try_set(i, x);
+}
+
+fn set_inst(inout p: Program, i: u64, row: InstRow) {
+    let ok = p.insts.try_set(i, row);
+}
+
+fn set_block(inout p: Program, i: u64, row: BlockRow) {
+    let ok = p.blocks.try_set(i, row);
+}
+
+fn set_fn(inout p: Program, i: u64, row: FnRow) {
+    let ok = p.fns.try_set(i, row);
+}
+
+// The program instruction of `Fun` instruction `x` of function `fi`.
+pub fn prog_inst(in p: Program, fi: u64, in f: Fun, x: u64) -> u64 {
+    let fr = p.function(fi);
+    for b in 0..f.nblocks() {
+        let k = f.block(b);
+        if x >= w(k.i0) && x < add(w(k.i0), w(k.ic)) {
+            let bk = p.block(add(fr.b0, b));
+            return add(bk.i0, wrapping_sub(x, w(k.i0)));
+        }
+    }
+    NONE64
+}
+
+// The access an instruction's sequence operation has (`hoistable`), or 4.
+fn access_of(in p: Program, in names: Names, i: InstRow) -> u64 {
+    if i.op != OP_SEQ {
+        return 4;
+    }
+    hoistable(seq_class(in p, in names, p.op(i.a)))
+}
+
+// `make_unchecked`: the accesses at (block, instruction) become unchecked.
+pub fn make_unchecked(inout p: Program, in names: Names, fi: u64, in at: ChunkSeq[u64]) {
+    let fr = p.function(fi);
+    for q in 0..at.len() {
+        let x = u64_at(in at, q);
+        let b = x >> 32;
+        let k = x & 4294967295;
+        let bk = p.block(add(fr.b0, b));
+        let ii = add(bk.i0, k);
+        let mut i = p.inst(ii);
+        let access = access_of(in p, in names, i);
+        if access == 4 {
+            continue;
+        }
+        let e = pool_entry(inout p, POOL_HOISTED, n32(access));
+        set_word(inout p, i.a, e);
+        i.fallible = 0;
+        set_inst(inout p, ii, i);
+    }
+}
+
+// ----- fresh values and tokens ------------------------------------------------
+
+// `Fresh`, and the values the rewrite adds to the function's value table.
+pub struct Fresh {
+    next_value: u64,
+    next_token: u64,
+    vals: ChunkSeq[u64],
+    tys: ChunkSeq[u32],
+}
+
+fn max_plus(m: u64, x: u64) -> u64 {
+    if inc(x) > m {
+        inc(x)
+    } else {
+        m
+    }
+}
+
+// The header's value table: (start of its pairs, count).
+fn values_at(in p: Program, fr: FnRow) -> (u64, u64) {
+    let mut x = fr.ha;
+    let np = p.op(x);
+    x = inc(x);
+    for i in 0..np {
+        let k = p.op(add(x, 2));
+        x = add(add(x, 6), k);
+    }
+    x = add(x, 2);
+    let nb = p.op(x);
+    x = add(inc(x), wrapping_mul(nb, 2));
+    let nc = p.op(x);
+    x = add(inc(x), nc);
+    (inc(x), p.op(x))
+}
+
+pub fn fresh_new(in p: Program, fi: u64) -> Fresh {
+    let fr = p.function(fi);
+    let mut nv: u64 = 0;
+    let mut nt: u64 = 0;
+    let (va, vn) = values_at(in p, fr);
+    for i in 0..vn {
+        nv = max_plus(nv, p.op(add(va, wrapping_mul(i, 2))));
+    }
+    for bi in 0..fr.bc {
+        let bk = p.block(add(fr.b0, bi));
+        for k in 0..bk.ic {
+            let i = p.inst(add(bk.i0, k));
+            nv = max_plus(nv, w(i.dest));
+            if i.has_token != 0 {
+                nt = max_plus(nt, i.tin);
+                nt = max_plus(nt, i.tout);
+            }
+        }
+        let h = bk.ha;
+        nt = max_plus(nt, p.op(h));
+        let ni = p.op(inc(h));
+        for j in 0..ni {
+            nt = max_plus(nt, p.op(add(add(h, 3), wrapping_mul(j, 2))));
+        }
+        let po = add(add(h, 2), wrapping_mul(ni, 2));
+        nt = max_plus(nt, p.op(po));
+        let np = p.op(inc(po));
+        for j in 0..np {
+            nv = max_plus(nv, p.op(add(add(po, 2), j)));
+        }
+    }
+    Fresh {
+        next_value: nv,
+        next_token: nt,
+        vals: ChunkSeq::new[u64](),
+        tys: ChunkSeq::new[u32](),
+    }
+}
+
+impl Fresh {
+    pub fn value(inout self, ty: u32) -> u64 {
+        let v = self.next_value;
+        self.next_value = inc(v);
+        self.vals.push(v);
+        self.tys.push(ty);
+        v
+    }
+
+    pub fn token(inout self) -> u64 {
+        let t = self.next_token;
+        self.next_token = inc(t);
+        t
+    }
+}
+
+// The type of value `v` in the function's value table, or `infer`.
+fn value_type(in p: Program, fr: FnRow, in fresh: Fresh, v: u64, infer: u32) -> u32 {
+    let (va, vn) = values_at(in p, fr);
+    for i in 0..vn {
+        let at = add(va, wrapping_mul(i, 2));
+        if p.op(at) == v {
+            return n32(p.op(inc(at)));
+        }
+    }
+    for i in 0..fresh.vals.len() {
+        if u64_at(in fresh.vals, i) == v {
+            return u32_at(in fresh.tys, i);
+        }
+    }
+    infer
+}
+
+// ----- new instructions -----------------------------------------------------------
+
+// A guard instruction to add: its row (operands already in the pool).
+pub struct Guards {
+    rows: ChunkSeq[InstRow],
+}
+
+fn read_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, tok: u64, root: u32)
+    -> InstRow {
+    let a = p.ops.len();
+    p.put(w(root), T_NAME);
+    p.put(0, T_PATH);
+    p.put(P_SINK, T_RAW);
+    p.put(0, T_RAW);
+    InstRow {
+        dest: n32(dest),
+        ty: ty,
+        s0: s0,
+        s1: s1,
+        has_token: 1,
+        tin: tok,
+        tout: tok,
+        fallible: 0,
+        op: OP_READ,
+        a: a,
+        n: 4
+    }
+}
+
+fn const_inst(inout p: Program, dest: u64, ty: u32, s0: u64, s1: u64, lo: u64, hi: u64) -> InstRow {
+    let a = p.ops.len();
+    p.put(0, T_RAW);
+    p.put(lo, T_RAW);
+    p.put(hi, T_RAW);
+    InstRow {
+        dest: n32(dest),
+        ty: ty,
+        s0: s0,
+        s1: s1,
+        has_token: 0,
+        tin: 0,
+        tout: 0,
+        fallible: 0,
+        op: OP_CONST,
+        a: a,
+        n: 3
+    }
+}
+
+// An argument: pass, value, optional place (root symbol + 1, path).
+fn put_arg(inout p: Program, pass: u64, v: u64, root1: u64, path: u64) {
+    p.put(pass, T_RAW);
+    p.put(v, T_VALUE);
+    p.put(root1, T_OPT_NAME);
+    p.put(path, T_PATH);
+}
+
+// ----- copy_loop ------------------------------------------------------------------
+
+// A value or token map: sorted keys with their images.
+struct Map {
+    keys: ChunkSeq[u64],
+    vals: ChunkSeq[u64],
+}
+
+fn map_new() -> Map {
+    Map {
+        keys: ChunkSeq::new[u64](),
+        vals: ChunkSeq::new[u64](),
+    }
+}
+
+impl Map {
+    fn find(in self, k: u64) -> u64 {
+        let mut lo: u64 = 0;
+        let mut hi = self.keys.len();
+        loop {
+            if lo >= hi {
+                return NONE64;
+            }
+            let mid = add(lo, hi) >> 1;
+            let x = u64_at(in self.keys, mid);
+            if x == k {
+                return mid;
+            }
+            if x < k {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+    }
+
+    // `BTreeMap::insert`: the last insertion wins.
+    fn insert(inout self, k: u64, v: u64) {
+        let at = self.find(k);
+        if at != NONE64 {
+            let ok = self.vals.try_set(at, v);
+            return;
+        }
+        let mut lo: u64 = 0;
+        let mut hi = self.keys.len();
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = add(lo, hi) >> 1;
+            if u64_at(in self.keys, mid) < k {
+                lo = inc(mid);
+            } else {
+                hi = mid;
+            }
+        }
+        self.keys.push(0);
+        self.vals.push(0);
+        let mut j = wrapping_sub(self.keys.len(), 1);
+        loop {
+            if j <= lo {
+                break;
+            }
+            let pk = u64_at(in self.keys, wrapping_sub(j, 1));
+            let pv = u64_at(in self.vals, wrapping_sub(j, 1));
+            let o1 = self.keys.try_set(j, pk);
+            let o2 = self.vals.try_set(j, pv);
+            j = wrapping_sub(j, 1);
+        }
+        let o1 = self.keys.try_set(lo, k);
+        let o2 = self.vals.try_set(lo, v);
+    }
+
+    fn get(in self, k: u64) -> u64 {
+        let at = self.find(k);
+        if at == NONE64 {
+            k
+        } else {
+            u64_at(in self.vals, at)
+        }
+    }
+}
+
+// The block header's parts: entry, incoming (block, token) pairs, outgoing,
+// params.
+struct Head {
+    entry: u64,
+    inb: ChunkSeq[u64],
+    intok: ChunkSeq[u64],
+    out: u64,
+    params: ChunkSeq[u64],
+}
+
+fn read_head(in p: Program, bk: BlockRow) -> Head {
+    let h = bk.ha;
+    let ni = p.op(inc(h));
+    let mut hd = Head {
+        entry: p.op(h),
+        inb: ChunkSeq::new[u64](),
+        intok: ChunkSeq::new[u64](),
+        out: 0,
+        params: ChunkSeq::new[u64](),
+    };
+    for j in 0..ni {
+        hd.inb.push(p.op(add(add(h, 2), wrapping_mul(j, 2))));
+        hd.intok.push(p.op(add(add(h, 3), wrapping_mul(j, 2))));
+    }
+    let po = add(add(h, 2), wrapping_mul(ni, 2));
+    hd.out = p.op(po);
+    let np = p.op(inc(po));
+    for j in 0..np {
+        hd.params.push(p.op(add(add(po, 2), j)));
+    }
+    hd
+}
+
+// Writes `hd` as header words; returns (start, length).
+fn put_head(inout p: Program, in hd: Head) -> (u64, u64) {
+    let a = p.ops.len();
+    p.put(hd.entry, T_RAW);
+    p.put(hd.inb.len(), T_RAW);
+    for j in 0..hd.inb.len() {
+        p.put(u64_at(in hd.inb, j), T_BLOCK);
+        p.put(u64_at(in hd.intok, j), T_RAW);
+    }
+    p.put(hd.out, T_RAW);
+    p.put(hd.params.len(), T_RAW);
+    for j in 0..hd.params.len() {
+        p.put(u64_at(in hd.params, j), T_VALUE);
+    }
+    (a, wrapping_sub(p.ops.len(), a))
+}
+
+// Copies words [a, a+n) mapping values through `vm` and blocks through
+// `bm` (`bm` keys are original blocks); returns the copy's start.
+fn copy_words(inout p: Program, a: u64, n: u64, in vm: Map, in bm: Map, handle_none: bool) -> u64 {
+    let start = p.ops.len();
+    for i in 0..n {
+        let x = p.op(add(a, i));
+        let t = p.tag(add(a, i));
+        let y = if t == T_VALUE && !(handle_none && i == 1) {
+            vm.get(x)
+        } else if t == T_BLOCK {
+            bm.get(x)
+        } else {
+            x
+        };
+        p.put(y, t);
+    }
+    start
+}
+
+// The successors of a block's terminator, in `successors` order.
+fn successors(in p: Program, bk: BlockRow) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if bk.term == TERM_JUMP {
+        s.push(p.op(bk.ta));
+    } else if bk.term == TERM_BRANCH {
+        s.push(p.op(inc(bk.ta)));
+        s.push(p.op(add(bk.ta, 2)));
+    } else if bk.term == TERM_MATCH {
+        for i in 0..bk.tn {
+            if p.tag(add(bk.ta, i)) == T_BLOCK {
+                s.push(p.op(add(bk.ta, i)));
+            }
+        }
+    }
+    s
+}
+
+// A block's drop entries in one of the trailer's maps.
+fn skip_drop(in p: Program, x: u64) -> u64 {
+    let kind = p.op(x);
+    if kind == 1 || kind == 2 {
+        return add(x, 4);
+    }
+    add(x, 3)
+}
+
+// The new trailer: the old one with the copies' box drops added.
+fn put_trailer(inout p: Program, fr: FnRow, in bm: Map, in vm: Map, in copies: ChunkSeq[u64])
+    -> (u64, u64) {
+    let start = p.ops.len();
+    let mut x = fr.ta;
+    // call slots, join slots: as they are
+    let ns = p.op(x);
+    let mut y = add(inc(x), wrapping_mul(ns, 5));
+    let nj = p.op(y);
+    y = inc(y);
+    for i in 0..nj {
+        let k = p.op(inc(y));
+        y = add(y, 2);
+        for j in 0..k {
+            let m = p.op(add(y, 2));
+            y = add(add(y, 3), wrapping_mul(m, 3));
+        }
+    }
+    let first = copy_words(inout p, x, wrapping_sub(y, x), in map_new(), in map_new(), false);
+    // the two instruction drop maps, then the terminator map
+    for which in 0..3 {
+        let n = p.op(y);
+        let mut z = inc(y);
+        // entries: (block, start, end)
+        let mut eb: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut ee: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for i in 0..n {
+            let s0 = z;
+            let b = p.op(z);
+            let k = p.op(inc(z));
+            z = add(z, 2);
+            for j in 0..k {
+                if which < 2 {
+                    z = skip_drop(in p, inc(z));
+                } else {
+                    z = skip_drop(in p, z);
+                }
+            }
+            eb.push(b);
+            es.push(s0);
+            ee.push(z);
+        }
+        // the copies of the loop blocks that have entries
+        let mut extra: u64 = 0;
+        for i in 0..copies.len() {
+            let b = u64_at(in copies, i);
+            for e in 0..eb.len() {
+                if u64_at(in eb, e) == b {
+                    extra = inc(extra);
+                }
+            }
+        }
+        p.put(add(n, extra), T_RAW);
+        let body = copy_words(
+            inout p,
+            inc(y),
+            wrapping_sub(z, inc(y)),
+            in map_new(),
+            in map_new(),
+            false
+        );
+        for i in 0..copies.len() {
+            let b = u64_at(in copies, i);
+            for e in 0..eb.len() {
+                if u64_at(in eb, e) == b {
+                    let s0 = u64_at(in es, e);
+                    p.put(bm.get(b), T_BLOCK);
+                    let rest = copy_words(
+                        inout p,
+                        inc(s0),
+                        wrapping_sub(u64_at(in ee, e), inc(s0)),
+                        in vm,
+                        in map_new(),
+                        false
+                    );
+                }
+            }
+        }
+        y = z;
+    }
+    (start, wrapping_sub(p.ops.len(), start))
+}
+
+// The new header words: the old ones with the fresh values' types added.
+fn put_fn_header(inout p: Program, fr: FnRow, in fresh: Fresh) -> (u64, u64) {
+    let (va, vn) = values_at(in p, fr);
+    let start = p.ops.len();
+    let pre = copy_words(
+        inout p,
+        fr.ha,
+        wrapping_sub(wrapping_sub(va, 1), fr.ha),
+        in map_new(),
+        in map_new(),
+        false
+    );
+    p.put(add(vn, fresh.vals.len()), T_RAW);
+    let old = copy_words(inout p, va, wrapping_mul(vn, 2), in map_new(), in map_new(), false);
+    for i in 0..fresh.vals.len() {
+        p.put(u64_at(in fresh.vals, i), T_VALUE);
+        p.put(w(u32_at(in fresh.tys, i)), T_TYPE);
+    }
+    let end = add(va, wrapping_mul(vn, 2));
+    let rest = copy_words(
+        inout p,
+        end,
+        wrapping_sub(add(fr.ha, fr.hn), end),
+        in map_new(),
+        in map_new(),
+        false
+    );
+    (start, wrapping_sub(p.ops.len(), start))
+}
+
+// What the fast copy converts: by value (a counted loop) or by
+// (block << 32 | instruction) (a compared loop), with the access.
+pub struct Convert {
+    by_value: bool,
+    keys: Map,
+}
+
+pub fn convert_new(by_value: bool) -> Convert {
+    Convert {
+        by_value: by_value,
+        keys: map_new(),
+    }
+}
+
+impl Convert {
+    pub fn add(inout self, k: u64, access: u64) {
+        self.keys.insert(k, access);
+    }
+}
+
+// `copy_loop`: ends `pre` with the guard and adds the fast copy of `blocks`
+// (headed by `h`) that the guard enters.
+pub fn copy_loop(
+    inout p: Program,
+    fi: u64,
+    h: u64,
+    pre: u64,
+    in blocks: ChunkSeq[u32],
+    in guards: Guards,
+    guard: u64,
+    guard_token: u64,
+    inout fresh: Fresh,
+    in conv: Convert,
+    infer: u32
+) {
+    let fr = p.function(fi);
+    let base = fr.bc;
+    let mut bm = map_new();
+    for k in 0..blocks.len() {
+        bm.insert(w(u32_at(in blocks, k)), add(base, k));
+    }
+    let mut vm = map_new();
+    let mut tm = map_new();
+    for k in 0..blocks.len() {
+        let b = w(u32_at(in blocks, k));
+        let bk = p.block(add(fr.b0, b));
+        let hd = read_head(in p, bk);
+        for j in 0..hd.params.len() {
+            let v = u64_at(in hd.params, j);
+            let ty = value_type(in p, fr, in fresh, v, infer);
+            let n = fresh.value(ty);
+            vm.insert(v, n);
+        }
+        let t0 = fresh.token();
+        tm.insert(hd.entry, t0);
+        for q in 0..bk.ic {
+            let i = p.inst(add(bk.i0, q));
+            if i.has_token != 0 && i.tin != i.tout {
+                let t = fresh.token();
+                tm.insert(i.tout, t);
+            }
+        }
+    }
+    // The copies: (header, instructions, terminator) rows, and the exits.
+    let nb0 = p.blocks.len();
+    let mut copy_rows: ChunkSeq[BlockRow] = ChunkSeq::new[BlockRow]();
+    let mut exit_s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut exit_from: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut exit_tok: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..blocks.len() {
+        let b = w(u32_at(in blocks, k));
+        let bk = p.block(add(fr.b0, b));
+        let hd = read_head(in p, bk);
+        let mut nh = Head {
+            entry: tm.get(hd.entry),
+            inb: ChunkSeq::new[u64](),
+            intok: ChunkSeq::new[u64](),
+            out: tm.get(hd.out),
+            params: ChunkSeq::new[u64](),
+        };
+        for j in 0..hd.params.len() {
+            nh.params.push(vm.get(u64_at(in hd.params, j)));
+        }
+        for j in 0..hd.inb.len() {
+            let s = u64_at(in hd.inb, j);
+            if has(in blocks, n32(s)) {
+                nh.inb.push(bm.get(s));
+                nh.intok.push(tm.get(u64_at(in hd.intok, j)));
+            }
+        }
+        if b == h {
+            nh.inb.push(pre);
+            nh.intok.push(guard_token);
+        }
+        let (ha, hn) = put_head(inout p, in nh);
+        let i0 = p.insts.len();
+        for q in 0..bk.ic {
+            let mut i = p.inst(add(bk.i0, q));
+            let key = if conv.by_value {
+                w(i.dest)
+            } else {
+                wrapping_shl_u64(b, 32) | q
+            };
+            let access = conv.keys.find(key);
+            let handle_none = i.op == OP_HANDLE && p.op(i.a) == 0;
+            let a = copy_words(inout p, i.a, i.n, in vm, in map_new(), handle_none);
+            if access != NONE64 && i.op == OP_SEQ {
+                let e = pool_entry(inout p, POOL_HOISTED, n32(u64_at(in conv.keys.vals, access)));
+                set_word(inout p, a, e);
+                i.fallible = 0;
+            }
+            i.a = a;
+            i.dest = n32(vm.get(w(i.dest)));
+            if i.has_token != 0 {
+                i.tin = tm.get(i.tin);
+                i.tout = tm.get(i.tout);
+            }
+            p.insts.push(i);
+        }
+        let ta = copy_words(inout p, bk.ta, bk.tn, in vm, in bm, false);
+        let row = BlockRow {
+            ha: ha,
+            hn: hn,
+            i0: i0,
+            ic: bk.ic,
+            term: bk.term,
+            ta: ta,
+            tn: bk.tn
+        };
+        copy_rows.push(row);
+        let succ = successors(in p, row);
+        for j in 0..succ.len() {
+            let s = u64_at(in succ, j);
+            if s < base {
+                exit_s.push(s);
+                exit_from.push(add(base, k));
+                exit_tok.push(nh.out);
+            }
+        }
+    }
+    // The function's blocks: the originals (some changed), then the copies.
+    let b0 = p.blocks.len();
+    for bi in 0..base {
+        let bk = p.block(add(fr.b0, bi));
+        p.blocks.push(bk);
+    }
+    for k in 0..copy_rows.len() {
+        let row = match copy_rows.try_get(k) {
+            Option::Some(x) => x,
+            Option::None => p.block(0),
+        };
+        p.blocks.push(row);
+    }
+    // Exits gain the copy's edges; the header's edge from `pre` carries the
+    // guard's token.
+    for bi in 0..base {
+        let mut touched = false;
+        let bk = p.block(add(b0, bi));
+        let mut hd = read_head(in p, bk);
+        for j in 0..exit_s.len() {
+            if u64_at(in exit_s, j) == bi {
+                hd.inb.push(u64_at(in exit_from, j));
+                hd.intok.push(u64_at(in exit_tok, j));
+                touched = true;
+            }
+        }
+        if bi == h {
+            for j in 0..hd.inb.len() {
+                if u64_at(in hd.inb, j) == pre {
+                    let ok = hd.intok.try_set(j, guard_token);
+                    touched = true;
+                }
+            }
+        }
+        if bi == pre {
+            hd.out = guard_token;
+            touched = true;
+        }
+        if touched {
+            let (ha, hn) = put_head(inout p, in hd);
+            let mut row = p.block(add(b0, bi));
+            row.ha = ha;
+            row.hn = hn;
+            set_block(inout p, add(b0, bi), row);
+        }
+    }
+    // The preheader: its instructions, the guard's, and the branch.
+    let mut prow = p.block(add(b0, pre));
+    let i0 = p.insts.len();
+    for q in 0..prow.ic {
+        let i = p.inst(add(prow.i0, q));
+        p.insts.push(i);
+    }
+    for q in 0..guards.rows.len() {
+        let i = match guards.rows.try_get(q) {
+            Option::Some(x) => x,
+            Option::None => p.inst(0),
+        };
+        p.insts.push(i);
+    }
+    prow.i0 = i0;
+    prow.ic = add(prow.ic, guards.rows.len());
+    prow.term = TERM_BRANCH;
+    prow.ta = p.ops.len();
+    p.put(guard, T_VALUE);
+    p.put(bm.get(h), T_BLOCK);
+    p.put(h, T_BLOCK);
+    prow.tn = 3;
+    set_block(inout p, add(b0, pre), prow);
+    // The function row: new blocks, the trailer with the copies' drops, the
+    // header with the new values.
+    let mut copies: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..blocks.len() {
+        copies.push(w(u32_at(in blocks, k)));
+    }
+    let (ta, tn) = put_trailer(inout p, fr, in bm, in vm, in copies);
+    let (ha, hn) = put_fn_header(inout p, fr, in fresh);
+    set_fn(
+        inout p,
+        fi,
+        FnRow {
+            name: fr.name,
+            ha: ha,
+            hn: hn,
+            b0: b0,
+            bc: add(base, blocks.len()),
+            ta: ta,
+            tn: tn
+        }
+    );
+}

@@ -48,7 +48,7 @@
 //! | `numeric` | the same | [`INSTRUCTION`] for `Op::Vector` and `Op::Tiled` |
 //! | `drops` (fip) | the same | [`INSTRUCTION`] for `Op::Fip` |
 //! | `ffi` | the same | [`INSTRUCTION`] for a call of a foreign (`.vsys`) effect operation |
-//! | `export` | `native_export::compile_exports`, the v2 glue | the whole glue over a lent module ([`ExportHook`]) |
+//! | `export` | `native_export::glue::define`, after the sequence runtime and `vesper_box_alloc` | the rest of the v2 glue over a lent module ([`ExportHook`]) |
 //! | `freestanding` | `native_freestanding::build_image` | whole image ([`FreestandingHook`]) |
 //! | `wasm` | `wasm_backend::compile` | whole component ([`WasmHook`]) |
 //! | `ebpf` | `ebpf_backend::compile_world` | whole program ([`EbpfHook`]) |
@@ -142,8 +142,10 @@ pub struct Lent<'a, 'f> {
 /// A family hook (see the module documentation for the protocol).
 pub type Hook = for<'a, 'f> fn(&mut Lent<'a, 'f>) -> Result<bool, String>;
 
-/// The export glue hook: `native_export::glue::define` over the lent
-/// module (`vesper_cranelift_sys::lend_module`); `None` declines.
+/// The export glue hook, called by `native_export::glue::define` over the
+/// lent module (`vesper_cranelift_sys::lend_module`) once the sequence
+/// runtime and `vesper_box_alloc` are defined. The hook finds those by name
+/// and must not redefine them. `None` declines.
 pub type ExportHook = fn(
     &mut dyn Module,
     &World,
@@ -595,4 +597,69 @@ pub mod drops {
     /// Drop the `Box` contents a value owns (`Codegen::drop_box_value`).
     /// Args `[value]`, with the value's type; no result.
     pub const DROP_BOX: u32 = 1;
+}
+
+/// The `scalar` family's requests besides [`INSTRUCTION`] (SH4 lane 6,
+/// #1280): the run-time tests of `expr_at`'s raising arms. The hook
+/// answers the test's flag; the Rust code raises and emits the rest as it
+/// always has, so the hook never needs `Codegen`'s raise machinery.
+pub mod scalar {
+    use crate::numeric::IntegerKind;
+    /// `Codegen::checked_arithmetic`'s overflow test of a one-word kind.
+    /// Args `[op, kind, a, b]` (op [`ADD`], [`SUB`], [`MUL`] or [`DIV`];
+    /// kind [`kind_word`]); result `[overflow]`, an `i8` flag. A decline
+    /// leaves the test to the Rust code.
+    pub const OVERFLOW: u32 = 1;
+    /// `Codegen::check_divisor`'s test. Args `[divisor]`; result
+    /// `[nonzero]`, an `i8` flag.
+    pub const DIVISOR: u32 = 2;
+    /// `expr_at`'s checked negation of a one-word kind. Args `[kind, v]`;
+    /// result `[overflow]` (`v` is the signed minimum, or any nonzero
+    /// unsigned value).
+    pub const NEGATE: u32 = 3;
+    /// `Codegen::shift`'s range test. Args `[amount, bits]`; result
+    /// `[bad]` (the amount, as an unsigned lane, is at least `bits`).
+    pub const SHIFT_RANGE: u32 = 4;
+    /// `Codegen::convert`'s checked narrowing bounds. Args
+    /// `[from kind, to kind, v]`; result `[overflow]`. The hook declines
+    /// when the target holds every value of the source (no test).
+    pub const NARROW: u32 = 5;
+    /// The read of a plain scalar local (no home, pointer or split):
+    /// `use_var`, then `coerce` to the read's type. Args
+    /// `[var, kind]` (kind the [`kind_word`] of a kind narrower than 64
+    /// bits, else 0); result `[value, raw]`, the coerced value and the
+    /// `use_var` value (the Rust code keeps the variable's facts on it).
+    /// `raw` must be the `use_var` result itself, not a copy or a coerce
+    /// of it: any other value silently loses the variable's facts rather
+    /// than failing.
+    pub const READ_LOCAL: u32 = 6;
+    /// A fresh local bound to a value: `declare_var` of the value's type,
+    /// then `def_var`. Args `[value]`; result `[var]`.
+    pub const BIND_LOCAL: u32 = 7;
+    /// The definition of a plain local (no home or pointer): `def_var`.
+    /// Args `[var, value]`; no result.
+    pub const WRITE_LOCAL: u32 = 8;
+    /// [`OVERFLOW`]'s operators.
+    pub const ADD: u64 = 1;
+    pub const SUB: u64 = 2;
+    pub const MUL: u64 = 3;
+    pub const DIV: u64 = 4;
+    /// The word of operator `op`, when [`OVERFLOW`] takes it.
+    pub fn op_word(op: &str) -> Option<u64> {
+        match op {
+            "+" => Some(ADD),
+            "-" => Some(SUB),
+            "*" => Some(MUL),
+            "/" => Some(DIV),
+            _ => None,
+        }
+    }
+    /// The word of a one-word integer kind: its position in
+    /// [`crate::numeric::INTEGER_KINDS`] from 1 (`u8` 1 ... `isize` 10).
+    pub fn kind_word(kind: IntegerKind) -> Option<u64> {
+        crate::numeric::INTEGER_KINDS
+            .iter()
+            .position(|k| *k == kind)
+            .map(|i| i as u64 + 1)
+    }
 }

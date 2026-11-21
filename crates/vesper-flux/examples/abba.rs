@@ -11,6 +11,10 @@
 //! - `resume`: the shared-input join of `checkpoint_resume` fed through CDC
 //!   for [`RESUME_TICKS`] ticks, checkpointed half way, restored into a
 //!   fresh executor and finished there; the final checkpoint is digested.
+//! - `ingest`: CDC decoding and accumulation on their own: [`INGEST_TICKS`]
+//!   pre-encoded batches of [`INGEST_RECORDS`] width-4 records over 1024
+//!   keys (repeats and cancellations), ingested by a fresh executor whose
+//!   circuit is its input.
 //!
 //! The two arms are two builds of this example, in separate worker
 //! processes: before #1069 replaced the Rust kernels they were the Rust
@@ -22,8 +26,8 @@
 //! both builds agree.
 //!
 //! ```text
-//! abba worker <join|example|resume>                  # one arm
-//! abba drive <join|example|resume> <rust-worker> <vesper-worker>
+//! abba worker <join|example|resume|ingest>                  # one arm
+//! abba drive <join|example|resume|ingest> <rust-worker> <vesper-worker>
 //! ```
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -39,6 +43,9 @@ const JOIN_TICKS: u64 = 32;
 const EXAMPLE_RUNS: u64 = 64;
 /// Ticks per `resume` batch.
 const RESUME_TICKS: u64 = 16;
+/// CDC batches per `ingest` batch, and records per CDC batch.
+const INGEST_TICKS: u64 = 8;
+const INGEST_RECORDS: u64 = 4096;
 
 fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     for &b in bytes {
@@ -238,11 +245,73 @@ fn resume_batch(seed: u64) -> u64 {
     fnv(h, &live.checkpoint(limits).expect("checkpoint"))
 }
 
+fn ingest_executor() -> Executor {
+    let mut b = CircuitBuilder::new(wide()).expect("builder");
+    let a = b.input(4).expect("input");
+    let mut e = b.finish(a).expect("finish").executor();
+    e.bind_sources(&CdcPolicy {
+        bindings: vec![SourceBinding {
+            partition_id: 7,
+            schema_id: 1,
+            input: 0,
+            first_lsn: 0,
+            weights: WeightPolicy::NonZero,
+        }],
+        max_batch_bytes: 1 << 20,
+        max_records: INGEST_RECORDS as usize,
+    })
+    .expect("bind");
+    e
+}
+
+/// The `ingest` workload's CDC batches, encoded once per worker.
+fn ingest_batches() -> Vec<Vec<u8>> {
+    let e = ingest_executor();
+    let mut rng = Lcg(0x1d6e57);
+    let mut lsn = 0;
+    (0..INGEST_TICKS)
+        .map(|tick| {
+            let mut bytes = Vec::new();
+            for _ in 0..INGEST_RECORDS {
+                let key = (rng.next() % 1024) as i64;
+                let header = CdcHeader {
+                    source_lsn: lsn,
+                    event_ts_ms: tick as i64,
+                    z_weight: [1, 1, 2, -1][(rng.next() % 4) as usize],
+                    partition_id: 7,
+                    schema_id: 1,
+                    flags: 0,
+                };
+                lsn += 1;
+                let row = [key % 16, key, -key, key * 1_000_003];
+                bytes.extend(e.encode_cdc_record(header, &row).expect("encode"));
+            }
+            bytes
+        })
+        .collect()
+}
+
+/// One `ingest` batch: every pre-encoded CDC batch into a fresh executor.
+fn ingest_batch(batches: &[Vec<u8>]) -> u64 {
+    let mut e = ingest_executor();
+    let mut h = 0xcbf2_9ce4_8422_2325;
+    for bytes in batches {
+        let ingested = e.ingest_cdc(bytes).expect("ingest");
+        h = digest_set(fnv(h, &ingested.records.to_le_bytes()), &ingested.delta);
+    }
+    h
+}
+
 /// Serve batches: each stdin line `go <n>` runs batch `n` and answers with
 /// its digest.
 fn worker(workload: &str) {
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
+    let batches = if workload == "ingest" {
+        ingest_batches()
+    } else {
+        Vec::new()
+    };
     for line in stdin.lock().lines() {
         let line = line.expect("read request");
         let n: u64 = line
@@ -253,6 +322,7 @@ fn worker(workload: &str) {
             "join" => join_batch(n + 1),
             "example" => example_batch(),
             "resume" => resume_batch(n + 1),
+            "ingest" => ingest_batch(&batches),
             other => panic!("unknown workload {other}"),
         };
         writeln!(out, "{digest}").expect("answer");
@@ -316,6 +386,7 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "join" => (4, JOIN_TICKS),
         "example" => (4, EXAMPLE_RUNS * 3),
         "resume" => (4, RESUME_TICKS),
+        "ingest" => (4, INGEST_TICKS),
         other => panic!("unknown workload {other}"),
     };
     let config = RunConfig {
@@ -395,7 +466,7 @@ fn main() {
         ["drive", workload, rust, vesper] => drive(workload, rust, vesper),
         _ => {
             eprintln!(
-                "usage: abba worker <join|example|resume> | abba drive <join|example|resume> <rust-worker> <vesper-worker>"
+                "usage: abba worker <join|example|resume|ingest> | abba drive <join|example|resume|ingest> <rust-worker> <vesper-worker>"
             );
             std::process::exit(2);
         }
