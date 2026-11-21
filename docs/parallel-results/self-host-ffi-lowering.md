@@ -1,8 +1,9 @@
-# Self-hosting SH4 lane 13: FFI lowering in Vesper (part 1)
+# Self-hosting SH4 lane 13: FFI lowering in Vesper (parts 1 and 3)
 
 Claim: #1287. Prompt: `docs/agent-prompts/self-host-sh4/13-ffi-lowering.md`.
 Stacks on #1259 (branched from its head `8ac0f94`; `origin/main` was
-`e73cfd6`). Rust stays the default build: nothing here replaces Rust code,
+`e73cfd6`) and on lane 1's #1309 (merged in at `14c6729` for the
+emission). Rust stays the default build: nothing here replaces Rust code,
 and the default compiler installs no hook.
 
 ## What changed
@@ -35,6 +36,28 @@ and the default compiler installs no hook.
   timing, and the input word format in its header. BUILD.bazel data and
   size entries.
 
+### Part 3: native emission of foreign calls
+
+- **`src/codegen_swap.rs`**: `pub mod ffi`, the `ffi` family's step
+  requests (`BEGIN`, `ARG`, `REFUSE`, `CALL`, `RESULT`, `FINISH`) and their
+  word encodings. It is appended after lane 1's modules, and nothing else
+  in the file changes.
+- **`src/ffi_lowering/native.rs`**: one dispatch line in `foreign_perform`
+  and `foreign_perform_swapped` at the end of the file. When an `ffi` hook
+  is in effect, the call is offered in steps. If the hook declines `BEGIN`,
+  the unchanged Rust emission runs. Flagged for the owner: these are
+  dispatch hunks in the Rust lowering. The coordinator approved them on
+  2026-11-21, and lane 1 was told.
+- **`packages/vesper-ffi-lowering/emit`** (`@vesper/ffi-emit`): `ffi_hook`,
+  the emission in Vesper through `@vesper/cranelift`. It covers scalar,
+  bool and enum arguments, handles, `Option` guards, pointers and copied
+  slices with wire structs (byte order, byte arrays, padding, nesting),
+  slices lent in place, C strings and their refusal block, the call,
+  `errno`/`GetLastError`, copy-backs, result widening, and validation of
+  bool, enum and handle results, `NonNull` traps and C string frees.
+- **`crates/vesper-codegen-swap-test/tests/self_host_ffi_emission.rs`**:
+  the differential, using lane 1's harness crate.
+
 ## Design decisions
 
 - **Input = canonical descriptor bytes.** They are public, complete (every
@@ -47,6 +70,20 @@ and the default compiler installs no hook.
 - **One file, no dependencies.** On this base constants are not importable
   across modules (#1239 is not under #1259 yet), so the package is one
   `lib.ves` with its own small interner.
+
+- **Emission in steps, not one `INSTRUCTION` request.** The graph walk's
+  `ffi` request carries only operand values. Rust's `foreign_perform`
+  evaluates each argument against `Codegen` state a hook cannot see:
+  variables passed to a foreign call are memory-homed, and `in`/`inout`
+  arguments are place loads. The steps leave that state in Rust, which
+  evaluates the arguments, declares the callee, does the `inout` restores,
+  builds the `errno` pair and does a refused call's `Ok` store. The hook
+  emits everything between those points, in the order Rust does, so CLIF
+  can match line for line. Layout facts (option tags, field offsets, wire
+  fields' source offsets) cross as words.
+- **`isolated(mpk)` stays in Rust.** Its trampolines need
+  `define_function_bytes`, which the shim does not have, so the hook
+  declines `BEGIN` for those calls.
 
 ## Numbers
 
@@ -69,11 +106,35 @@ while the Vesper entry is compiled with `optimize`. It is not a parity
 number; the parity bar for this lane is the whole compile with emission
 swapped (part 3).
 
+**Part 3, emission.** The corpus has three parts:
+
+- the `.vsys` fixtures with their programs (bridge, with both handler
+  tiers, plus sandbox and aead), for all four targets;
+- a hand-written `Forms` library and program reaching every parameter and
+  result form, for all four targets;
+- the `.vsys` packages (std fs, process, env, cranelift, codegen-base), for
+  the host, with every 8th entry.
+
+Every function that performs a foreign effect is an entry, built with the
+optimizer on and off.
+
+| Check | Result |
+|---|---|
+| CLIF and object differences (358 builds, 732 functions) | **0** |
+| Requests answered from Vesper | 7,946 (2,288 declined: graph-walk `INSTRUCTION` requests and `isolated(mpk)` calls) |
+| Mutation check (`select` operands swapped in the `Option` guard) | caught: CLIF and object differ |
+| Default build, 159 corpus files with and without `--no-opt` (base #1309 `cda32d9` vs this branch) | **318 of 318 objects byte-identical** (760 builds failed on both sides) |
+| Test time (debug) | 6 min |
+
 ## Stage 1 guard
 
 No guarded path is touched (`src/verified_codegen/**`, `src/ir.rs`,
 `ir_opt::optimize`, `lean/**`, `bootstrap/**`, `packages/vesper-compiler/**`),
-no swap point is added, and the probe module is not called by the compiler.
+and the part 1 probe module is not called by the compiler. Part 3's only
+compiler changes are the behaviour-free `ffi` dispatch hunk in
+`src/ffi_lowering/native.rs` (native object path only; no hook is installed
+by default, so the default build is byte-identical, see the 318-object check
+above) and the `codegen_swap::ffi` step constants in `src/codegen_swap.rs`.
 The Bootstrap Stage 1 workflow on this branch is the evidence (linked from
 the PR).
 
@@ -83,15 +144,23 @@ the PR).
    (`fn f(affine: bool)`), E0002. Known: #1244 (SH3 lane 5).
 2. Constants are not importable across modules on this base (#1239 not
    merged under #1259), which keeps the package in one file.
+3. `while k < n { ... }` does not parse: `n { ... }` is read as a struct
+   literal (E0002 "expected RBrace, found Lower"). Repro:
+   `fn f(n: u64) { let mut k: u64 = 0; while k < n { k = wrapping_add(k, 1); } }`.
+   The emitter uses `for` loops instead.
+4. The shim has no `AbiParam` extension in `vcl_sig_param`/`vcl_sig_return`,
+   no `define_function_bytes` and no declarations lookup. The first two
+   keep the callee's signature and the `isolated(mpk)` trampolines in Rust.
+   The third keeps the symbol collision checks in Rust (they emit no
+   code).
 
 ## What is left
 
 - Part 2: the `Rewriter` (`Ffi[Lib]` rows, `Lib::f` call sites, handle
   misuse, slice sites and instances) over `@vesper/ast`, compared through the
   public `check_source` outcome (`ForeignChecked::calls`, errors).
-- Part 3, after lane 1's (#1275) first PR: emission of `native.rs`
-  (marshalling, copy-back, `CStr`, `errno`, result validation, `isolated(mpk)`
-  trampolines) through `@vesper/cranelift`, with CLIF and object
-  differentials.
+- Part 3 remainder: `isolated(mpk)` trampolines and the callee's signature
+  in Vesper, once the shim has `define_function_bytes` and parameter
+  extensions.
 - Part 4: the hybrid `ffi_lowering` module and its `ffi` hook install, the
   full suite and the SH4 scoreboard row.
