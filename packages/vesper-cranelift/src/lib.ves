@@ -96,9 +96,13 @@
 // |     fn vcl_function_address(inout m: Module, func: u32) -> ForeignVal[u64];
 // |     fn vcl_module_function_count(in m: Module) -> ForeignVal[u32];
 // |     fn vcl_module_function_name(in m: Module, func: u32, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_module_get_function(inout m: Module, nocapture in name: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcl_module_kind(in m: Module) -> ForeignVal[u32];
 // |     fn vcl_compile(inout m: Module, sink b: Builder) -> ForeignVal[u64];
 // |     fn vcl_module_last_code(in m: Module, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
 // |     fn vcl_module_last_unwind(in m: Module, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_module_last_traps(in m: Module, nocapture inout out: CSlice[u64]) -> ForeignVal[u64];
+// |     fn vcl_import_data_colocated(inout b: Builder, in m: Module, data: u32, colocated: bool) -> ForeignVal[u32];
 // |     fn vcl_set_srcloc(inout b: Builder, loc: u32) -> ForeignVal[Unit];
 // |     fn vcl_set_cold_block(inout b: Builder, blk: u32) -> ForeignVal[Unit];
 // |     fn vcl_current_block(inout b: Builder) -> ForeignVal[u32];
@@ -468,6 +472,13 @@ pub fn import_data(inout b: Builder, in m: Module, data: DataId)
     -> GlobalValue eff [Ffi[Cranelift]] {
     GlobalValue {
         id: Cranelift::vcl_import_data(inout b, in m, data.id)
+    }
+}
+// `import_data` with an explicit `colocated` flag.
+pub fn import_data_colocated(inout b: Builder, in m: Module, data: DataId, colocated: bool)
+    -> GlobalValue eff [Ffi[Cranelift]] {
+    GlobalValue {
+        id: Cranelift::vcl_import_data_colocated(inout b, in m, data.id, colocated)
     }
 }
 pub fn create_block(inout b: Builder) -> Block eff [Ffi[Cranelift]] {
@@ -1012,6 +1023,34 @@ pub fn module_function_name(in m: Module, func: FuncId) -> ChunkSeq[u8] eff [Ffi
     Cranelift::vcl_module_function_name(in m, func.id, inout out.as_slice_mut());
     out
 }
+// The function declared as `name` (`Module::get_name`), if there is one.
+pub fn module_get_function(inout m: Module, in name: Slice[u8])
+    -> Option[FuncId] eff [Ffi[Cranelift]] {
+    let id = Cranelift::vcl_module_get_function(inout m, in name);
+    if id == invalid() {
+        None
+    } else {
+        Some(
+            FuncId {
+                id: id
+            }
+        )
+    }
+}
+// What kind of module `m` is: `module_object()`, `module_jit()` (or a lent
+// JIT module) or `module_freestanding()` (an object for an OS-less target).
+pub fn module_kind(in m: Module) -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_kind(in m)
+}
+pub fn module_object() -> u32 {
+    0
+}
+pub fn module_jit() -> u32 {
+    1
+}
+pub fn module_freestanding() -> u32 {
+    2
+}
 // Compile `b` (consumed) without defining it; the code size, or None
 // (`module_error_len`). `module_last_code` copies the code.
 pub fn compile(inout m: Module, sink b: Builder) -> Option[u64] eff [Ffi[Cranelift]] {
@@ -1042,6 +1081,18 @@ pub fn module_last_unwind(in m: Module) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
         out.push(0);
     }
     Cranelift::vcl_module_last_unwind(in m, inout out.as_slice_mut());
+    out
+}
+// The trap records of the last compiled or defined function: the code
+// offset and the trap code of each trap, two words per trap.
+pub fn module_last_traps(in m: Module) -> ChunkSeq[u64] eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = Cranelift::vcl_module_last_traps(in m, inout none.as_slice_mut());
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_module_last_traps(in m, inout out.as_slice_mut());
     out
 }
 

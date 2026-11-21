@@ -123,7 +123,13 @@ const VESPER_IR_CHECK: vesper::ir_check::IrCheckTable = vesper::ir_check::IrChec
 /// the census lowering family, emitted in Vesper through the lent builder
 /// and module (`vesper_cranelift_sys::lend`).
 fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<bool, String> {
-    let (answer, crossing) = vesper_cranelift_sys::lend(
+    let kind = if lent.jit {
+        vesper_cranelift_sys::ModuleKind::Jit
+    } else {
+        vesper_cranelift_sys::ModuleKind::Object
+    };
+    let (answer, crossing) = vesper_cranelift_sys::lend_as(
+        kind,
         lent.builder,
         &mut *lent.module,
         lent.op,

@@ -8,6 +8,14 @@
 // is exact in `i128`/`u128`, so the wrapped result is the exact one.
 use self::W;
 
+// The sign bit of a word, all ones and the low 32 bits.
+const SIGN_BIT: u64 = 9223372036854775808;
+const ALL_ONES: u64 = 18446744073709551615;
+const LOW_HALF: u64 = 4294967295;
+const HALF_BITS: u32 = 32;
+const W_BITS: u64 = 128;
+const WORD_BITS: u64 = 64;
+
 pub fn w(hi: u64, lo: u64) -> W {
     W {
         hi: hi,
@@ -25,7 +33,7 @@ pub fn w_u64(x: u64) -> W {
 
 pub fn w_i64(x: i64) -> W {
     if x < 0 {
-        w(18446744073709551615, wrapping_u64(x))
+        w(ALL_ONES, wrapping_u64(x))
     } else {
         w(0, wrapping_u64(x))
     }
@@ -62,7 +70,7 @@ pub fn w_is_zero(a: W) -> bool {
 }
 
 pub fn w_is_neg(a: W) -> bool {
-    a.hi >= 9223372036854775808
+    a.hi >= SIGN_BIT
 }
 
 // Unsigned a < b.
@@ -73,8 +81,8 @@ pub fn w_ult(a: W, b: W) -> bool {
 // Signed a < b: flipping the sign bit of the high word makes the signed
 // order the unsigned one.
 pub fn w_slt(a: W, b: W) -> bool {
-    let ah = a.hi ^ 9223372036854775808;
-    let bh = b.hi ^ 9223372036854775808;
+    let ah = a.hi ^ SIGN_BIT;
+    let bh = b.hi ^ SIGN_BIT;
     ah < bh || (ah == bh && a.lo < b.lo)
 }
 
@@ -131,7 +139,7 @@ pub fn w_udivrem(a: W, d: W) -> (W, W) {
             raise(e, k) => (w_zero(), w_zero()),
         };
     }
-    if d.hi == 0 && d.lo != 0 && d.lo <= 4294967295 {
+    if d.hi == 0 && d.lo != 0 && d.lo <= LOW_HALF {
         return handle Fail[RuntimeError] in {
             w_udivrem_small(a, d.lo)
         } with {
@@ -141,14 +149,14 @@ pub fn w_udivrem(a: W, d: W) -> (W, W) {
     }
     let mut q = w_zero();
     let mut r = w_zero();
-    let mut i: u64 = 128;
+    let mut i: u64 = W_BITS;
     loop {
         if i == 0 {
             break;
         }
         i = wrapping_sub(i, 1);
         let top = r.hi >> 63;
-        let bit = if i >= 64 {
+        let bit = if i >= WORD_BITS {
             wrapping_shr_u64(a.hi, wrapping_u32(i)) & 1
         } else {
             wrapping_shr_u64(a.lo, wrapping_u32(i)) & 1
@@ -167,18 +175,15 @@ pub fn w_udivrem(a: W, d: W) -> (W, W) {
 // Schoolbook division by a divisor below 2^32, one 32-bit limb at a time:
 // each partial remainder is below the divisor, so every step fits a u64.
 fn w_udivrem_small(a: W, d: u64) -> (W, W) eff [Fail[RuntimeError]] {
-    let q3 = wrapping_shr_u64(a.hi, wrapping_u32(32)) / d;
-    let r3 = wrapping_shr_u64(a.hi, wrapping_u32(32)) % d;
-    let x2 = wrapping_shl_u64(r3, wrapping_u32(32)) | (a.hi & 4294967295);
+    let q3 = wrapping_shr_u64(a.hi, HALF_BITS) / d;
+    let r3 = wrapping_shr_u64(a.hi, HALF_BITS) % d;
+    let x2 = wrapping_shl_u64(r3, HALF_BITS) | (a.hi & LOW_HALF);
     let q2 = x2 / d;
-    let x1 = wrapping_shl_u64(x2 % d, wrapping_u32(32)) | wrapping_shr_u64(a.lo, wrapping_u32(32));
+    let x1 = wrapping_shl_u64(x2 % d, HALF_BITS) | wrapping_shr_u64(a.lo, HALF_BITS);
     let q1 = x1 / d;
-    let x0 = wrapping_shl_u64(x1 % d, wrapping_u32(32)) | (a.lo & 4294967295);
+    let x0 = wrapping_shl_u64(x1 % d, HALF_BITS) | (a.lo & LOW_HALF);
     let q0 = x0 / d;
-    (
-        w(wrapping_shl_u64(q3, wrapping_u32(32)) | q2, wrapping_shl_u64(q1, wrapping_u32(32)) | q0),
-        w_u64(x0 % d)
-    )
+    (w(wrapping_shl_u64(q3, HALF_BITS) | q2, wrapping_shl_u64(q1, HALF_BITS) | q0), w_u64(x0 % d))
 }
 
 // Floor division of a signed value by d > 0 (`i128::div_euclid` and
@@ -197,8 +202,8 @@ pub fn w_floor_divrem(a: W, d: W) -> (W, W) {
 
 // Whether a signed W is an i64.
 pub fn w_fits_i64(a: W) -> bool {
-    if a.lo >= 9223372036854775808 {
-        a.hi == 18446744073709551615
+    if a.lo >= SIGN_BIT {
+        a.hi == ALL_ONES
     } else {
         a.hi == 0
     }

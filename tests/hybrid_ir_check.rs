@@ -45,8 +45,10 @@ fn diagnostics_text(ds: &[Diagnostic]) -> String {
     o
 }
 
-fn input(c: &IrCase) -> Vec<u8> {
-    check_words::ir_input(c.world, &c.program).expect("encodable corpus program")
+/// The hybrid build's input for `c`, or `None` when Rust answers for it
+/// (a world with element views, which `@vesper/ir-check` does not have yet).
+fn input(c: &IrCase) -> Option<Vec<u8>> {
+    check_words::ir_input(c.world, &c.program)
 }
 
 /// Every case (each world's IR and `mutants` mutants of it, every `step`-th
@@ -59,14 +61,17 @@ fn differential_cases(
     mutants: usize,
     step: usize,
 ) -> (usize, usize, usize) {
-    let (mut bad, mut diags, mut cases) = (0, 0, 0);
+    let (mut bad, mut diags, mut cases, mut rust_only) = (0, 0, 0, 0);
     let start = std::time::Instant::now();
     for c in ir_cases(mutants).iter().step_by(step) {
+        let Some(input) = input(c) else {
+            rust_only += 1;
+            continue;
+        };
         let rust = vesper::ir_check::validate(c.world, &c.program);
         diags += rust.len();
         cases += 1;
         let r = diagnostics_text(&rust);
-        let input = input(c);
         let mut differs = false;
         if let Some(d) = first_difference(&r, &text.text(&input)) {
             differs = true;
@@ -90,8 +95,13 @@ fn differential_cases(
         bad += differs as usize;
     }
     eprintln!(
-        "ir check: {bad} of {cases} cases differ ({diags} Rust diagnostics, {:.1} s)",
+        "ir check: {bad} of {cases} cases differ ({diags} Rust diagnostics, \
+         {rust_only} left to Rust, {:.1} s)",
         start.elapsed().as_secs_f64()
+    );
+    assert!(
+        rust_only * 10 < cases,
+        "{rust_only} cases left to Rust against {cases} compared"
     );
     (bad, diags, cases)
 }
@@ -173,10 +183,12 @@ fn ir_check_origin_limits_match_rust() {
                 }
             }
         }
+        let Some(input) = check_words::ir_input(c.world, &program) else {
+            continue;
+        };
         let rust = vesper::ir_check::validate(c.world, &program);
         diags += rust.len();
         unlabeled += rust.iter().filter(|d| d.related.is_empty()).count();
-        let input = check_words::ir_input(c.world, &program).unwrap();
         if check_words::decode_diagnostics(&words.words(&input)) != rust {
             bad += 1;
             if bad <= 3 {
@@ -191,6 +203,36 @@ fn ir_check_origin_limits_match_rust() {
     assert_eq!(bad, 0);
 }
 
+/// Element view matches (#1221) are not in `@vesper/ir-check` yet, so the
+/// hybrid build leaves their programs to Rust: `ir_input` refuses them, and
+/// the Rust check of the valid linear-element program reports nothing.
+#[test]
+fn element_views_stay_on_rust() {
+    let source = "linear struct Ticket { id: u64 }
+fn id(in t: Ticket) -> u64 { t.id }
+fn stamp(inout t: Ticket) { t.id = wrapping_add(t.id, 10); }
+fn body() -> u64 eff [Fail[RuntimeError]] {
+    let mut s = ChunkSeq::new[Ticket]();
+    s.push(Ticket { id: 1 });
+    match s.try_get_mut(0) { Some(t) => stamp(inout t), None => {} }
+    let seen = match s.try_get(0) { Some(t) => id(in t), None => 0 };
+    let back = match s.pop() { Some(Ticket { id }) => id, None => 0 };
+    ChunkSeq::finish(sink s);
+    wrapping_add(wrapping_mul(seen, 100), back)
+}
+fn main() -> u64 { handle Fail[RuntimeError] in { body() } with { return x => x, raise(e, k) => 999, } }
+";
+    let parsed = vesper::parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let checked = vesper::check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let w = &checked.world;
+    assert!(!w.element_views.is_empty(), "no element views recorded");
+    let program = vesper::ir::lower_world(w);
+    assert!(check_words::ir_input(w, &program).is_none());
+    assert_eq!(vesper::ir_check::validate(w, &program), vec![]);
+}
+
 /// ABBA: `validate` in Rust against the Vesper check with its input
 /// encoding and result decoding (the hybrid build's cost per call).
 #[test]
@@ -201,7 +243,8 @@ fn ir_check_speed() {
     }
     let f = package().entry("check_ir_words", true);
     let cases = ir_cases(IR_MUTANTS);
-    let inputs: Vec<Vec<u8>> = cases.iter().map(input).collect();
+    let cases: Vec<_> = cases.into_iter().filter(|c| input(c).is_some()).collect();
+    let inputs: Vec<Vec<u8>> = cases.iter().filter_map(input).collect();
     abba(
         "ir check per call (encode + Vesper + decode)",
         &mut || {
@@ -214,7 +257,9 @@ fn ir_check_speed() {
         &mut || {
             time(|| {
                 for c in &cases {
-                    std::hint::black_box(check_words::decode_diagnostics(&f.words(&input(c))));
+                    std::hint::black_box(check_words::decode_diagnostics(
+                        &f.words(&input(c).unwrap()),
+                    ));
                 }
             })
         },

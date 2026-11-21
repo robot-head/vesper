@@ -567,11 +567,15 @@ fn effectful_row(w: &World, row: &Effects) -> bool {
 
 /// Whether every type the IR check reads can be encoded.
 fn program_encodable(w: &World, p: &vesper::ir::Program) -> bool {
-    w.adts.values().all(|a| {
-        a.variants
-            .iter()
-            .all(|v| v.fields.iter().all(|f| encodable(&f.ty)))
-    }) && w.types.values().all(encodable)
+    // Element view matches (#1173) are not in `@vesper/ir-check` yet: Rust
+    // checks the worlds that have them.
+    w.element_views.is_empty()
+        && w.adts.values().all(|a| {
+            a.variants
+                .iter()
+                .all(|v| v.fields.iter().all(|f| encodable(&f.ty)))
+        })
+        && w.types.values().all(encodable)
         && p.functions.values().all(|f| {
             f.params.iter().all(|p| encodable(&p.ty))
                 && f.values.values().all(encodable)
@@ -609,9 +613,13 @@ pub fn ir_input(w: &World, program: &vesper::ir::Program) -> Option<Vec<u8>> {
     body.push(program.functions.len() as u64);
     for f in program.functions.values() {
         body.push(f.params.len() as u64);
+        // A lent closure's body (§4.2, #1242) borrows its captures `in`.
+        let lent = w.lent_closures.get(&f.name);
         for p in &f.params {
             body.push(e.name(&p.name));
-            body.push(pass_word(p.pass));
+            let borrowed =
+                p.pass == Pass::Sink && lent.is_some_and(|names| names.contains(&p.name));
+            body.push(pass_word(if borrowed { Pass::In } else { p.pass }));
             body.push(e.ty(&p.ty));
             body.push(p.span.start as u64);
             body.push(p.span.end as u64);
