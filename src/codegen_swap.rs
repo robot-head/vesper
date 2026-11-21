@@ -40,7 +40,7 @@
 //! | Hook | Dispatch site | Requests |
 //! |---|---|---|
 //! | `scalar` | `Codegen::ir_graph_at`, each instruction | [`INSTRUCTION`] for constants, unit, reads, writes, binds, unary and binary operators, `try`, loop and exit |
-//! | `call` | the same | [`INSTRUCTION`] for `Op::Call` and `Op::Indirect` |
+//! | `call` | the same, and `Codegen::call_function_into` | [`INSTRUCTION`] for `Op::Call` and `Op::Indirect`; the [`call`] ops |
 //! | `aggregate` | the same, and the layout helpers | [`INSTRUCTION`] for tuples, data, projections and indexing; the [`aggregate`] ops |
 //! | `drops` | `Codegen::drop_box_value` | [`drops::DROP_BOX`] |
 //! | `seq` | `Codegen::ir_graph_at` | [`INSTRUCTION`] for `Op::Seq` |
@@ -545,4 +545,17 @@ pub mod drops {
     /// Drop the `Box` contents a value owns (`Codegen::drop_box_value`).
     /// Args `[value]`, with the value's type; no result.
     pub const DROP_BOX: u32 = 1;
+}
+
+/// The `call` family's requests (SH4 lane 7, #1281), made by
+/// `Codegen::call_function_into` once it has decided the callee, its ABI
+/// and every argument. Each answers the call's result values in order
+/// (`inst_results`); a call whose signature has no result is not requested.
+pub mod call {
+    /// `call` of a function already imported into the function
+    /// (`declare_func_in_func`). Args `[func_ref, value...]`.
+    pub const CALL: u32 = 1;
+    /// `call_indirect` of a vtable slot's target under an imported
+    /// signature. Args `[sig_ref, target, value...]`.
+    pub const CALL_INDIRECT: u32 = 2;
 }

@@ -1,0 +1,100 @@
+// @vesper/codegen-calls-emit: the `call` family's emission (self-hosting
+// SH4 lane 7, #1281), installed through the `call` hook of
+// src/codegen_swap.rs.
+//
+// Native lowering (src/native.rs, `Codegen::call_function_into`) decides
+// the callee, its ABI and every argument value; @vesper/codegen-calls
+// ports those decisions. The request here is the call instruction itself,
+// at the point the Rust code would emit it:
+//
+// - `CALL`: args `[func_ref, value...]`, the callee already imported into
+//   the function (`declare_func_in_func`); emits `call`.
+// - `CALL_INDIRECT`: args `[sig_ref, target, value...]`, a vtable slot's
+//   target under an imported signature; emits `call_indirect`.
+//
+// Both answer the call's result values, in order (`inst_results`). Every
+// other request, including the graph walk's `INSTRUCTION` for `Op::Call`
+// and `Op::Indirect`, is declined, so the Rust code emits it.
+
+use @vesper/cranelift::{
+    FuncRef,
+    SigRef,
+    Value,
+    call_arg,
+    call_arg_count,
+    call_builder,
+    call_op,
+    call_result_value,
+    call_return_builder,
+    inst_result,
+    ins_call,
+    ins_call_indirect,
+    value_of_word
+};
+use @vesper/codegen-base::{
+    DECLINED,
+    HANDLED,
+    arg_u32,
+    arg_value
+};
+
+// `codegen_swap::call`.
+pub const CALL: u32 = 1;
+pub const CALL_INDIRECT: u32 = 2;
+
+// Argument words `from..` as the value numbers of a call's arguments.
+fn call_values(call: u64, from: u64) -> ChunkSeq[u32] eff [Ffi[Cranelift]] {
+    let n = call_arg_count(call);
+    let mut out = ChunkSeq::with_capacity[u32](n);
+    for i in from..n {
+        out.push(value_of_word(call_arg(call, i)).id);
+    }
+    out
+}
+
+// Answer the `count` results of the call just emitted.
+fn answer_results(call: u64, inout b: Builder, count: u32) eff [Ffi[Cranelift]] {
+    for i in 0..count {
+        let v = inst_result(inout b, i);
+        call_result_value(call, v);
+    }
+}
+
+// One `call` request on the lent builder.
+fn emit(call: u64, inout b: Builder) -> u64 eff [Ffi[Cranelift]] {
+    let op = call_op(call);
+    if op == CALL {
+        let f = FuncRef {
+            id: arg_u32(call, 0)
+        };
+        let args = call_values(call, 1);
+        let count = ins_call(inout b, f, in args.as_slice());
+        answer_results(call, inout b, count);
+    } else if op == CALL_INDIRECT {
+        let sig = SigRef {
+            id: arg_u32(call, 0)
+        };
+        let target = arg_value(call, 1);
+        let args = call_values(call, 2);
+        let count = ins_call_indirect(inout b, sig, target, in args.as_slice());
+        answer_results(call, inout b, count);
+    } else {
+        return DECLINED;
+    }
+    HANDLED
+}
+
+// The `call` hook.
+pub fn call_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let op = call_op(call);
+    if op != CALL && op != CALL_INDIRECT {
+        return DECLINED;
+    }
+    let mut b = match call_builder(call) {
+        Some(b) => b,
+        None => return DECLINED,
+    };
+    let handled = emit(call, inout b);
+    call_return_builder(call, b);
+    handled
+}

@@ -4974,6 +4974,70 @@ impl<M: Module> Codegen<'_, '_, M> {
         let results = self.swap_aggregate(op, args)?;
         crate::codegen_swap::value_or_record(&results)
     }
+    /// SH4 swap point (#1281): the `call` family's request for the call
+    /// instruction of [`Codegen::call_function_into`] (a direct call of
+    /// imported `fun`, or an indirect one of `target` under `sig`), whose
+    /// arguments are `values`. `None` when no hook took it; the hook
+    /// answers the call's results, and this returns the call.
+    fn swap_call(
+        &mut self,
+        fun: Option<ir::FuncRef>,
+        sig: ir::SigRef,
+        target: Option<ir::Value>,
+        values: &[ir::Value],
+    ) -> Result<Option<ir::Inst>, String> {
+        use crate::codegen_swap as swap;
+        // A call with no result could not be found again from its answer.
+        if swap::hook(swap::Family::Call).is_none()
+            || self.b.func.dfg.signatures[sig].returns.is_empty()
+        {
+            return Ok(None);
+        }
+        let (op, mut args) = match (fun, target) {
+            (Some(fun), _) => (swap::call::CALL, vec![u64::from(fun.as_u32())]),
+            (None, Some(t)) => (
+                swap::call::CALL_INDIRECT,
+                vec![u64::from(sig.as_u32()), swap::word(t)],
+            ),
+            (None, None) => return Ok(None),
+        };
+        args.extend(values.iter().map(|v| swap::word(*v)));
+        let Some(results) = swap::request(
+            swap::Family::Call,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            swap::Site::NONE,
+            op,
+            &args,
+            None,
+        )?
+        else {
+            return Ok(None);
+        };
+        let first = swap::value_of(results.get(..1).unwrap_or(&[]))?;
+        let inst = self
+            .b
+            .func
+            .dfg
+            .value_def(first)
+            .inst()
+            .ok_or("call hook answered a value no instruction defines")?;
+        let answered = results.iter().map(|w| *w as u32);
+        if !self
+            .b
+            .func
+            .dfg
+            .inst_results(inst)
+            .iter()
+            .map(|v| v.as_u32())
+            .eq(answered)
+        {
+            return Err("call hook answered values that are not its call's results".into());
+        }
+        Ok(Some(inst))
+    }
     /// `pattern_condition`'s constant true.
     fn pattern_true(&mut self) -> ir::Value {
         match self.swap_value(crate::codegen_swap::aggregate::TRUE, &[]) {
@@ -7136,10 +7200,14 @@ impl<M: Module> Codegen<'_, '_, M> {
             {
                 return Err(format!("native call ABI mismatch in '{name}'"));
             }
-            let call = match (fun, dyn_target) {
-                (Some(fun), _) => self.b.ins().call(fun, &values),
-                (None, Some(target)) => self.b.ins().call_indirect(sig, target, &values),
-                (None, None) => return Err("native call lacks a callee".into()),
+            // SH4 swap point (#1281): the `call` hook may emit the call
+            // instruction (`codegen_swap::call`); none is installed by default.
+            let swapped = self.swap_call(fun, sig, dyn_target, &values)?;
+            let call = match (swapped, fun, dyn_target) {
+                (Some(call), _, _) => call,
+                (None, Some(fun), _) => self.b.ins().call(fun, &values),
+                (None, None, Some(target)) => self.b.ins().call_indirect(sig, target, &values),
+                (None, None, None) => return Err("native call lacks a callee".into()),
             };
             // The callee owns a `sink` object's value, not the block of the
             // box it was lent from. Free the blocks before a failure status
