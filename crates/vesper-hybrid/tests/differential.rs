@@ -288,7 +288,8 @@ fn pilot_module_runs_from_vesper() {
 }
 
 /// The wasm backend module (#1289) really compiles from Vesper in the
-/// hybrid build: `transaction.ves` has no handler and no host capability.
+/// hybrid build, and its component is wrapped from Vesper (#1334):
+/// `transaction.ves` has no handler and no host capability.
 #[test]
 fn wasm_module_runs_from_vesper() {
     let root = repository();
@@ -310,4 +311,11 @@ fn wasm_module_runs_from_vesper() {
         .and_then(|l| l.split(' ').next())
         .and_then(|n| n.parse().ok());
     assert_eq!(compiled, Some(1), "{stderr}");
+    // ... and @vesper/wit-component wraps its component (#1334).
+    let wrapped: Option<u64> = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: wit-component wrapped "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok());
+    assert_eq!(wrapped, Some(1), "{stderr}");
 }

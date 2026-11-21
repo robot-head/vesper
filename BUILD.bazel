@@ -210,6 +210,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]) + ["tests/wasm_backend.rs"],
+        # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
+        # over the same programs.
+        "test/self_host_wit_component": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + ["tests/wasm_backend.rs"],
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
@@ -593,6 +600,8 @@ vesper_crate(
         "test/self_host_place_ir": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
+        # The component wrapping differential (#1334): ~2 min release.
+        "test/self_host_wit_component": "long",
         "test/self_host_check_harness": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
@@ -727,6 +736,14 @@ vesper_package(
         ":check_data_package",
         ":place_ir_package",
     ],
+)
+
+vesper_package(
+    name = "wit_component_package",
+    srcs = glob(["packages/vesper-wit-component/src/**/*.ves"]),
+    manifest = "packages/vesper-wit-component/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":check_data_package"],
 )
 
 vesper_package(

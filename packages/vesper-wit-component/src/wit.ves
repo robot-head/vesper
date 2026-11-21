@@ -1,0 +1,673 @@
+// The WIT the wasm backend writes (src/wasm_backend/component.rs
+// `exports`), read into a type table. Only that grammar is accepted:
+//
+//   package vesper:program@0.1.0;
+//   interface entry {
+//     record %name { %field: ty, ... }
+//     variant %name { %case, %case(ty), ... }
+//     main: func(%param: ty, ...) -> ty;
+//   }
+//   world program { export wasi:cli/run@0.2.0; export entry; }
+//
+// where `ty` is a scalar, `string`, `tuple<ty, ...>` or a `%name`
+// defined above it. Anything else sets `err`, and the caller hands the
+// module to Rust's wit-component instead.
+//
+// Types are interned: a scalar, a tuple of the same elements, or a
+// definition is one row of `tys`, so a row number is the identity
+// wit-component's type maps key on (`TypeId` for definitions, the
+// structure for anonymous types).
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    w
+};
+
+pub const NONE32: u32 = 4294967295;
+
+// `Ty::kind`.
+pub const T_PRIM: u8 = 0;
+pub const T_TUPLE: u8 = 1;
+pub const T_NAMED: u8 = 2;
+// `result` without payloads (`wasi:cli/run`'s result type).
+pub const T_UNIT_RESULT: u8 = 3;
+
+// `Def::kind`.
+pub const D_RECORD: u8 = 0;
+pub const D_VARIANT: u8 = 1;
+
+// Primitive value type bytes of the component binary format.
+const P_BOOL: u8 = 127;
+const P_S8: u8 = 126;
+const P_U8: u8 = 125;
+const P_S16: u8 = 124;
+const P_U16: u8 = 123;
+const P_S32: u8 = 122;
+pub const P_U32: u8 = 121;
+const P_S64: u8 = 120;
+const P_U64: u8 = 119;
+const P_F32: u8 = 118;
+const P_F64: u8 = 117;
+const P_CHAR: u8 = 116;
+pub const P_STRING: u8 = 115;
+
+// Why a WIT is outside the subset (`Wit::err`).
+pub const E_SYNTAX: u64 = 1;
+pub const E_UNKNOWN_TYPE: u64 = 2;
+pub const E_WORLD: u64 = 3;
+pub const E_IMPORT: u64 = 4;
+
+// Characters.
+const C_TAB: u8 = 9;
+const C_LF: u8 = 10;
+const C_CR: u8 = 13;
+const C_SPACE: u8 = 32;
+const C_PERCENT: u8 = 37;
+const C_LPAREN: u8 = 40;
+const C_RPAREN: u8 = 41;
+const C_COMMA: u8 = 44;
+const C_MINUS: u8 = 45;
+const C_COLON: u8 = 58;
+const C_SEMI: u8 = 59;
+const C_LT: u8 = 60;
+const C_GT: u8 = 62;
+const C_LBRACE: u8 = 123;
+const C_RBRACE: u8 = 125;
+
+// A type: a primitive (`a` is its byte), a tuple (`args[a..a+n]`), a
+// definition (`a` is its `defs` row) or the unit result.
+pub copy struct Ty {
+    kind: u8,
+    a: u64,
+    n: u64,
+}
+
+// A record or variant: its name `text[n0..n0+nn]`, its fields or cases
+// `fields[f0..f0+fnum]`, and its `tys` row.
+pub copy struct Def {
+    kind: u8,
+    n0: u64,
+    nn: u64,
+    f0: u64,
+    fnum: u64,
+    ty: u32,
+}
+
+// A record field, variant case (`ty` is NONE32 without a payload) or
+// function parameter.
+pub copy struct Field {
+    n0: u64,
+    nn: u64,
+    ty: u32,
+}
+
+// A function: its name, its parameters `fields[p0..p0+pn]` and its result
+// (NONE32 for none).
+pub copy struct Func {
+    n0: u64,
+    nn: u64,
+    p0: u64,
+    pn: u64,
+    res: u32,
+}
+
+pub struct Wit {
+    text: ChunkSeq[u8],
+    tys: ChunkSeq[Ty],
+    args: ChunkSeq[u32],
+    defs: ChunkSeq[Def],
+    fields: ChunkSeq[Field],
+    funcs: ChunkSeq[Func],
+    // The world's exports in order: 0 = wasi:cli/run, 1 = entry.
+    exports: ChunkSeq[u8],
+    // `funcs` row of wasi:cli/run's `run`.
+    run_func: u64,
+    // `funcs[e0..]` are the entry interface's functions.
+    e0: u64,
+    err: u64,
+}
+
+pub fn wit_new() -> Wit {
+    Wit {
+        text: ChunkSeq::new[u8](),
+        tys: ChunkSeq::new[Ty](),
+        args: ChunkSeq::new[u32](),
+        defs: ChunkSeq::new[Def](),
+        fields: ChunkSeq::new[Field](),
+        funcs: ChunkSeq::new[Func](),
+        exports: ChunkSeq::new[u8](),
+        run_func: 0,
+        e0: 0,
+        err: 0,
+    }
+}
+
+pub fn ty_at(in w: Wit, t: u32) -> Ty {
+    match w.tys.try_get(widen_u64(t)) {
+        Option::Some(x) => x,
+        Option::None => Ty {
+            kind: T_PRIM,
+            a: 0,
+            n: 0
+        },
+    }
+}
+
+pub fn def_at(in w: Wit, d: u64) -> Def {
+    match w.defs.try_get(d) {
+        Option::Some(x) => x,
+        Option::None => Def {
+            kind: 0,
+            n0: 0,
+            nn: 0,
+            f0: 0,
+            fnum: 0,
+            ty: 0
+        },
+    }
+}
+
+pub fn field_at(in w: Wit, i: u64) -> Field {
+    match w.fields.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Field {
+            n0: 0,
+            nn: 0,
+            ty: NONE32
+        },
+    }
+}
+
+pub fn func_at(in w: Wit, i: u64) -> Func {
+    match w.funcs.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Func {
+            n0: 0,
+            nn: 0,
+            p0: 0,
+            pn: 0,
+            res: NONE32
+        },
+    }
+}
+
+pub fn arg_at(in w: Wit, i: u64) -> u32 {
+    match w.args.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn text_at(in w: Wit, i: u64) -> u8 {
+    match w.text.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn is_word(c: u8) -> bool {
+    (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == C_MINUS
+}
+
+fn is_space(c: u8) -> bool {
+    c == C_SPACE || c == C_LF || c == C_TAB || c == C_CR
+}
+
+// The reader: a position in the WIT bytes.
+pub copy struct Cur {
+    pos: u64,
+}
+
+fn skip(inout c: Cur, in b: Slice[u8]) {
+    loop {
+        if c.pos >= b.len() || !is_space(byte(in b, c.pos)) {
+            break;
+        }
+        c.pos = inc(c.pos);
+    }
+}
+
+// The next byte after blanks (0 at the end), not consumed.
+fn peek(inout c: Cur, in b: Slice[u8]) -> u8 {
+    skip(inout c, in b);
+    byte(in b, c.pos)
+}
+
+fn punct(inout c: Cur, in b: Slice[u8], inout w: Wit, ch: u8) {
+    if peek(inout c, in b) == ch {
+        c.pos = inc(c.pos);
+    } else {
+        w.err = E_SYNTAX;
+    }
+}
+
+// A word (`%` stripped): its bytes `b[start..end]`.
+fn word(inout c: Cur, in b: Slice[u8], inout w: Wit) -> (u64, u64) {
+    skip(inout c, in b);
+    if byte(in b, c.pos) == C_PERCENT {
+        c.pos = inc(c.pos);
+    }
+    let start = c.pos;
+    loop {
+        if c.pos >= b.len() || !is_word(byte(in b, c.pos)) {
+            break;
+        }
+        c.pos = inc(c.pos);
+    }
+    if c.pos == start {
+        w.err = E_SYNTAX;
+    }
+    (start, c.pos)
+}
+
+fn same(in b: Slice[u8], start: u64, end: u64, in lit: Slice[u8]) -> bool {
+    if wrapping_sub(end, start) != lit.len() {
+        return false;
+    }
+    for i in 0..lit.len() {
+        if byte(in b, add(start, i)) != byte(in lit, i) {
+            return false;
+        }
+    }
+    true
+}
+
+fn keyword(inout c: Cur, in b: Slice[u8], inout w: Wit, in lit: Slice[u8]) {
+    let (s, e) = word(inout c, in b, inout w);
+    if !same(in b, s, e, in lit) {
+        w.err = E_SYNTAX;
+    }
+}
+
+// Copy `b[s..e]` into the name text; its start.
+fn name(inout w: Wit, in b: Slice[u8], s: u64, e: u64) -> u64 {
+    let at = w.text.len();
+    w.text.extend(in b[s..e]);
+    at
+}
+
+fn intern(inout w: Wit, kind: u8, a: u64, n: u64) -> u32 {
+    for i in 0..w.tys.len() {
+        match w.tys.try_get(i) {
+            Option::Some(t) => {
+                if t.kind == kind && t.kind != T_TUPLE && t.a == a {
+                    return wrapping_u32(i);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let at = wrapping_u32(w.tys.len());
+    w
+        .tys
+        .push(
+        Ty {
+            kind: kind,
+            a: a,
+            n: n
+        }
+    );
+    at
+}
+
+// A tuple of the `n` element rows at `args[a..]`: an existing row with the
+// same elements (dropping the new copy), else a new one.
+fn intern_tuple(inout w: Wit, a: u64, n: u64) -> u32 {
+    for i in 0..w.tys.len() {
+        let t = match w.tys.try_get(i) {
+            Option::Some(t) => t,
+            Option::None => Ty {
+                kind: T_PRIM,
+                a: 0,
+                n: 0
+            },
+        };
+        if t.kind == T_TUPLE && t.n == n {
+            let mut eq = true;
+            for k in 0..n {
+                if arg_at(in w, add(t.a, k)) != arg_at(in w, add(a, k)) {
+                    eq = false;
+                    break;
+                }
+            }
+            if eq {
+                w.args.truncate(a);
+                return wrapping_u32(i);
+            }
+        }
+    }
+    let at = wrapping_u32(w.tys.len());
+    w
+        .tys
+        .push(
+        Ty {
+            kind: T_TUPLE,
+            a: a,
+            n: n
+        }
+    );
+    at
+}
+
+fn prim(in b: Slice[u8], s: u64, e: u64) -> u8 {
+    if same(in b, s, e, in "bool".as_bytes()) {
+        return P_BOOL;
+    }
+    if same(in b, s, e, in "s8".as_bytes()) {
+        return P_S8;
+    }
+    if same(in b, s, e, in "u8".as_bytes()) {
+        return P_U8;
+    }
+    if same(in b, s, e, in "s16".as_bytes()) {
+        return P_S16;
+    }
+    if same(in b, s, e, in "u16".as_bytes()) {
+        return P_U16;
+    }
+    if same(in b, s, e, in "s32".as_bytes()) {
+        return P_S32;
+    }
+    if same(in b, s, e, in "u32".as_bytes()) {
+        return P_U32;
+    }
+    if same(in b, s, e, in "s64".as_bytes()) {
+        return P_S64;
+    }
+    if same(in b, s, e, in "u64".as_bytes()) {
+        return P_U64;
+    }
+    if same(in b, s, e, in "f32".as_bytes()) {
+        return P_F32;
+    }
+    if same(in b, s, e, in "f64".as_bytes()) {
+        return P_F64;
+    }
+    if same(in b, s, e, in "char".as_bytes()) {
+        return P_CHAR;
+    }
+    if same(in b, s, e, in "string".as_bytes()) {
+        return P_STRING;
+    }
+    0
+}
+
+// The definition named `b[s..e]`, or NONE32.
+fn find_def(in w: Wit, in b: Slice[u8], s: u64, e: u64) -> u32 {
+    for i in 0..w.defs.len() {
+        let d = def_at(in w, i);
+        if d.nn == wrapping_sub(e, s) {
+            let mut eq = true;
+            for k in 0..d.nn {
+                if text_at(in w, add(d.n0, k)) != byte(in b, add(s, k)) {
+                    eq = false;
+                    break;
+                }
+            }
+            if eq {
+                return d.ty;
+            }
+        }
+    }
+    NONE32
+}
+
+fn ty(inout c: Cur, in b: Slice[u8], inout w: Wit, depth: u64) -> u32 {
+    if depth > 64 {
+        w.err = E_SYNTAX;
+        return 0;
+    }
+    let named = peek(inout c, in b) == C_PERCENT;
+    let (s, e) = word(inout c, in b, inout w);
+    if w.err != 0 {
+        return 0;
+    }
+    if !named && same(in b, s, e, in "tuple".as_bytes()) {
+        punct(inout c, in b, inout w, C_LT);
+        let mut elems = ChunkSeq::new[u32]();
+        loop {
+            if w.err != 0 {
+                return 0;
+            }
+            elems.push(ty(inout c, in b, inout w, inc(depth)));
+            if peek(inout c, in b) == C_COMMA {
+                c.pos = inc(c.pos);
+            } else {
+                break;
+            }
+        }
+        punct(inout c, in b, inout w, C_GT);
+        let a = w.args.len();
+        w.args.extend(in elems.as_slice());
+        return intern_tuple(inout w, a, elems.len());
+    }
+    if !named {
+        let p = prim(in b, s, e);
+        if p != 0 {
+            return intern(inout w, T_PRIM, widen_u64(p), 0);
+        }
+    }
+    let d = find_def(in w, in b, s, e);
+    if d == NONE32 {
+        w.err = E_UNKNOWN_TYPE;
+        return 0;
+    }
+    d
+}
+
+// `record %n { %f: ty, ... }` or `variant %n { %c, %c(ty), ... }`.
+fn def(inout c: Cur, in b: Slice[u8], inout w: Wit, kind: u8) {
+    let (s, e) = word(inout c, in b, inout w);
+    punct(inout c, in b, inout w, C_LBRACE);
+    let mut items = ChunkSeq::new[Field]();
+    loop {
+        if w.err != 0 || peek(inout c, in b) == C_RBRACE {
+            break;
+        }
+        let (fs, fe) = word(inout c, in b, inout w);
+        let mut t = NONE32;
+        if kind == D_RECORD {
+            punct(inout c, in b, inout w, C_COLON);
+            t = ty(inout c, in b, inout w, 0);
+        } else if peek(inout c, in b) == C_LPAREN {
+            c.pos = inc(c.pos);
+            t = ty(inout c, in b, inout w, 0);
+            punct(inout c, in b, inout w, C_RPAREN);
+        }
+        let n0 = name(inout w, in b, fs, fe);
+        items
+            .push(
+            Field {
+                n0: n0,
+                nn: wrapping_sub(fe, fs),
+                ty: t
+            }
+        );
+        if peek(inout c, in b) == C_COMMA {
+            c.pos = inc(c.pos);
+        }
+    }
+    punct(inout c, in b, inout w, C_RBRACE);
+    if w.err != 0 {
+        return;
+    }
+    let f0 = w.fields.len();
+    w.fields.extend(in items.as_slice());
+    let n0 = name(inout w, in b, s, e);
+    let d = w.defs.len();
+    let t = intern(inout w, T_NAMED, d, 0);
+    w
+        .defs
+        .push(
+        Def {
+            kind: kind,
+            n0: n0,
+            nn: wrapping_sub(e, s),
+            f0: f0,
+            fnum: items.len(),
+            ty: t
+        }
+    );
+}
+
+// `name: func(%p: ty, ...) [-> ty];` after its name `b[s..e]`.
+fn func(inout c: Cur, in b: Slice[u8], inout w: Wit, s: u64, e: u64) {
+    punct(inout c, in b, inout w, C_COLON);
+    keyword(inout c, in b, inout w, in "func".as_bytes());
+    punct(inout c, in b, inout w, C_LPAREN);
+    let mut params = ChunkSeq::new[Field]();
+    loop {
+        if w.err != 0 || peek(inout c, in b) == C_RPAREN {
+            break;
+        }
+        let (ps, pe) = word(inout c, in b, inout w);
+        punct(inout c, in b, inout w, C_COLON);
+        let t = ty(inout c, in b, inout w, 0);
+        let n0 = name(inout w, in b, ps, pe);
+        params
+            .push(
+            Field {
+                n0: n0,
+                nn: wrapping_sub(pe, ps),
+                ty: t
+            }
+        );
+        if peek(inout c, in b) == C_COMMA {
+            c.pos = inc(c.pos);
+        }
+    }
+    punct(inout c, in b, inout w, C_RPAREN);
+    let mut res = NONE32;
+    if peek(inout c, in b) == C_MINUS {
+        c.pos = inc(c.pos);
+        punct(inout c, in b, inout w, C_GT);
+        res = ty(inout c, in b, inout w, 0);
+    }
+    punct(inout c, in b, inout w, C_SEMI);
+    if w.err != 0 {
+        return;
+    }
+    let p0 = w.fields.len();
+    w.fields.extend(in params.as_slice());
+    let n0 = name(inout w, in b, s, e);
+    w
+        .funcs
+        .push(
+        Func {
+            n0: n0,
+            nn: wrapping_sub(e, s),
+            p0: p0,
+            pn: params.len(),
+            res: res
+        }
+    );
+}
+
+// The text of a world item up to its `;`, blanks removed.
+fn item(inout c: Cur, in b: Slice[u8], inout w: Wit) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    loop {
+        if c.pos >= b.len() {
+            w.err = E_SYNTAX;
+            break;
+        }
+        let ch = byte(in b, c.pos);
+        c.pos = inc(c.pos);
+        if ch == C_SEMI {
+            break;
+        }
+        if !is_space(ch) {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn world(inout c: Cur, in b: Slice[u8], inout w: Wit) {
+    keyword(inout c, in b, inout w, in "program".as_bytes());
+    punct(inout c, in b, inout w, C_LBRACE);
+    loop {
+        if w.err != 0 || peek(inout c, in b) == C_RBRACE {
+            break;
+        }
+        let (s, e) = word(inout c, in b, inout w);
+        let it = item(inout c, in b, inout w);
+        if !same(in b, s, e, in "export".as_bytes()) {
+            w.err = E_IMPORT;
+            return;
+        }
+        let x = it.as_slice();
+        if same(in x, 0, x.len(), in "wasi:cli/run@0.2.0".as_bytes()) {
+            w.exports.push(0);
+        } else if same(in x, 0, x.len(), in "entry".as_bytes()) {
+            w.exports.push(1);
+        } else {
+            w.err = E_WORLD;
+            return;
+        }
+    }
+    punct(inout c, in b, inout w, C_RBRACE);
+}
+
+// Read the backend's WIT; `err` is 0 when it is inside the subset.
+pub fn parse(in b: Slice[u8]) -> Wit {
+    let mut w = wit_new();
+    let mut c = Cur {
+        pos: 0
+    };
+    keyword(inout c, in b, inout w, in "package".as_bytes());
+    let it = item(inout c, in b, inout w);
+    let x = it.as_slice();
+    if !same(in x, 0, x.len(), in "vesper:program@0.1.0".as_bytes()) {
+        w.err = E_WORLD;
+        return w;
+    }
+    // wasi:cli/run's `run: func() -> result`.
+    let result_ty = intern(inout w, T_UNIT_RESULT, 0, 0);
+    let run_name = w.text.len();
+    w.text.extend(in "run".as_bytes());
+    w.run_func = w.funcs.len();
+    w
+        .funcs
+        .push(
+        Func {
+            n0: run_name,
+            nn: 3,
+            p0: 0,
+            pn: 0,
+            res: result_ty
+        }
+    );
+    w.e0 = w.funcs.len();
+    keyword(inout c, in b, inout w, in "interface".as_bytes());
+    keyword(inout c, in b, inout w, in "entry".as_bytes());
+    punct(inout c, in b, inout w, C_LBRACE);
+    loop {
+        if w.err != 0 || peek(inout c, in b) == C_RBRACE {
+            break;
+        }
+        let (s, e) = word(inout c, in b, inout w);
+        if same(in b, s, e, in "record".as_bytes()) {
+            def(inout c, in b, inout w, D_RECORD);
+        } else if same(in b, s, e, in "variant".as_bytes()) {
+            def(inout c, in b, inout w, D_VARIANT);
+        } else {
+            func(inout c, in b, inout w, s, e);
+        }
+    }
+    punct(inout c, in b, inout w, C_RBRACE);
+    keyword(inout c, in b, inout w, in "world".as_bytes());
+    world(inout c, in b, inout w);
+    if w.err == 0 && peek(inout c, in b) != 0 {
+        w.err = E_SYNTAX;
+    }
+    w
+}
