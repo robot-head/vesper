@@ -300,6 +300,7 @@ impl Directives {
                     symbols: descriptor
                         .functions()
                         .iter()
+                        .filter(|f| !f.is_indirect())
                         .map(|f| f.symbol().to_string())
                         .collect(),
                     source: text,
@@ -345,6 +346,7 @@ impl Directives {
                 symbols: descriptor
                     .functions()
                     .iter()
+                    .filter(|f| !f.is_indirect())
                     .map(|f| f.symbol().to_string())
                     .collect(),
                 library,

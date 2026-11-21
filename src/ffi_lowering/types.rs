@@ -195,6 +195,8 @@ fn handle_adt(t: &ExternTypeDescriptor) -> Adt {
         mode: match t.linearity() {
             Linearity::Linear => Mode::Linear,
             Linearity::Affine => Mode::Affine,
+            // A C function pointer is a plain word.
+            Linearity::Callback => Mode::Copy,
         },
         generics: vec![],
         variants: vec![Variant {

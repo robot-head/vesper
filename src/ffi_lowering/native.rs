@@ -93,6 +93,13 @@ fn identical(p: &Pointee, little: bool) -> bool {
     }
 }
 
+/// What a foreign call calls: an imported symbol, or (a callback type's
+/// call) the C function pointer it was handed.
+enum Callee {
+    Direct(ir::FuncRef),
+    Indirect(ir::SigRef, ir::Value),
+}
+
 impl<M: Module> Codegen<'_, '_, M> {
     pub(super) fn foreign_perform(
         &mut self,
@@ -117,8 +124,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             ));
         }
         // SH4 swap point (#1287): the `ffi` hook may emit this call
-        // (`codegen_swap::ffi`); none is installed by default.
-        if let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)? {
+        // (`codegen_swap::ffi`); none is installed by default. A callback
+        // type's call is not offered: the steps name a symbol.
+        if !plan.function.is_indirect()
+            && let Some(v) = self.foreign_perform_swapped(&plan, &signature, args)?
+        {
             return Ok(v);
         }
         let pointer = self.m.target_config().pointer_type();
@@ -232,12 +242,20 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(t) = abi.result {
             sig.returns.push(abi_param(t, pointer));
         }
-        self.foreign_symbol_free(plan.function.symbol(), Linkage::Import)?;
-        let callee = self
-            .m
-            .declare_function(plan.function.symbol(), Linkage::Import, &sig)
-            .map_err(|e| format!("foreign symbol '{}': {e}", plan.function.symbol()))?;
-        let callee = self.m.declare_func_in_func(callee, self.b.func);
+        // A callback type's call goes through the pointer in its first
+        // argument (the handle word); every other call imports its symbol.
+        let callee = if plan.function.is_indirect() {
+            let pointer = c_args.remove(0);
+            Callee::Indirect(self.b.import_signature(sig), pointer)
+        } else {
+            let symbol = plan.function.link_symbol();
+            self.foreign_symbol_free(symbol, Linkage::Import)?;
+            let callee = self
+                .m
+                .declare_function(symbol, Linkage::Import, &sig)
+                .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
+            Callee::Direct(self.m.declare_func_in_func(callee, self.b.func))
+        };
         // A `CStr` argument holding a NUL byte refuses the whole call:
         // `Err(ForeignInvalid { raw: offset })` of the first such argument.
         let refusal = if strings.is_empty() {
@@ -280,7 +298,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             None
         };
-        let call = self.b.ins().call(callee, &c_args);
+        let call = match callee {
+            Callee::Direct(f) => self.b.ins().call(f, &c_args),
+            Callee::Indirect(sig, pointer) => self.b.ins().call_indirect(sig, pointer, &c_args),
+        };
         let raw = self.b.inst_results(call).first().copied();
         if let Some(saved) = saved {
             let wrpkru = self.foreign_helper(WRPKRU_SYMBOL, &[types::I32], None, &WRPKRU)?;
@@ -1417,11 +1438,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(t) = abi.result {
             sig.returns.push(abi_param(t, pointer));
         }
-        self.foreign_symbol_free(plan.function.symbol(), Linkage::Import)?;
+        let symbol = plan.function.link_symbol();
+        self.foreign_symbol_free(symbol, Linkage::Import)?;
         let callee = self
             .m
-            .declare_function(plan.function.symbol(), Linkage::Import, &sig)
-            .map_err(|e| format!("foreign symbol '{}': {e}", plan.function.symbol()))?;
+            .declare_function(symbol, Linkage::Import, &sig)
+            .map_err(|e| format!("foreign symbol '{symbol}': {e}"))?;
         let callee = self.m.declare_func_in_func(callee, self.b.func);
         let refusal = if strings.is_empty() {
             None

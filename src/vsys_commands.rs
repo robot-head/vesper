@@ -128,14 +128,17 @@ fn host_symbols(
                 library.link().name()
             ));
         }
-        for f in library.functions() {
-            let (name, address) = std.iter().find(|(n, _)| *n == f.symbol()).ok_or_else(|| {
-                format!(
-                    "{command}: {}::{} is not a function of {STD_HOST}",
-                    library.name(),
-                    f.symbol()
-                )
-            })?;
+        for f in library.functions().iter().filter(|f| !f.is_indirect()) {
+            let (name, address) =
+                std.iter()
+                    .find(|(n, _)| *n == f.link_symbol())
+                    .ok_or_else(|| {
+                        format!(
+                            "{command}: {}::{} is not a function of {STD_HOST}",
+                            library.name(),
+                            f.symbol()
+                        )
+                    })?;
             out.push((*name, *address));
         }
     }
