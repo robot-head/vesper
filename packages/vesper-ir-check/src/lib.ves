@@ -114,12 +114,12 @@ pub fn paths_new() -> Paths {
     p
         .nodes
         .push(
-        PathNode {
-            parent: 0,
-            last: 0,
-            len: 0
-        }
-    );
+            PathNode {
+                parent: 0,
+                last: 0,
+                len: 0
+            }
+        );
     p.hashes.push(0);
     p
 }
@@ -178,12 +178,12 @@ impl Paths {
         self
             .nodes
             .push(
-            PathNode {
-                parent: parent,
-                last: sym,
-                len: len
-            }
-        );
+                PathNode {
+                    parent: parent,
+                    last: sym,
+                    len: len
+                }
+            );
         self.hashes.push(h);
         let ok = self.slots.try_set(at, id);
         if wrapping_mul(self.nodes.len(), 2) > self.mask {
@@ -609,14 +609,14 @@ pub fn read_program(
             p
                 .params
                 .push(
-                ParamRow {
-                    name: name,
-                    pass: pass,
-                    ty: ty,
-                    s0: s0,
-                    s1: s1
-                }
-            );
+                    ParamRow {
+                        name: name,
+                        pass: pass,
+                        ty: ty,
+                        s0: s0,
+                        s1: s1
+                    }
+                );
         }
         let ba = n32(p.ops.len());
         let bn = r.word(in b);
@@ -667,18 +667,18 @@ pub fn read_program(
                 p
                     .insts
                     .push(
-                    Inst {
-                        dest: dest,
-                        ty: ty,
-                        s0: s0,
-                        s1: s1,
-                        tok_in: tin,
-                        tok_out: tout,
-                        flags: flags,
-                        op: op,
-                        a: a
-                    }
-                );
+                        Inst {
+                            dest: dest,
+                            ty: ty,
+                            s0: s0,
+                            s1: s1,
+                            tok_in: tin,
+                            tok_out: tout,
+                            flags: flags,
+                            op: op,
+                            a: a
+                        }
+                    );
             }
             let term = wrapping_u8(r.word(in b));
             let ta = n32(p.ops.len());
@@ -706,36 +706,36 @@ pub fn read_program(
             p
                 .blocks
                 .push(
-                Blk {
-                    entry: entry,
-                    ia: ia,
-                    in_n: n32(inn),
-                    out_tok: out_tok,
-                    pa: bpa,
-                    pn: n32(bpn),
-                    i0: i0,
-                    ic: n32(ic),
-                    term: term,
-                    ta: ta
-                }
-            );
+                    Blk {
+                        entry: entry,
+                        ia: ia,
+                        in_n: n32(inn),
+                        out_tok: out_tok,
+                        pa: bpa,
+                        pn: n32(bpn),
+                        i0: i0,
+                        ic: n32(ic),
+                        term: term,
+                        ta: ta
+                    }
+                );
         }
         p
             .fns
             .push(
-            FnRow {
-                pa: pa,
-                pn: n32(pn),
-                ba: ba,
-                bn: n32(bn),
-                ea: ea,
-                en: n32(en),
-                va: va,
-                vn: n32(vn),
-                b0: b0,
-                bc: n32(nb)
-            }
-        );
+                FnRow {
+                    pa: pa,
+                    pn: n32(pn),
+                    ba: ba,
+                    bn: n32(bn),
+                    ea: ea,
+                    en: n32(en),
+                    va: va,
+                    vn: n32(vn),
+                    b0: b0,
+                    bc: n32(nb)
+                }
+            );
     }
     p
 }
@@ -895,9 +895,7 @@ pub fn evidence(in p: Program, inout d: Diags) {
                 let has = (i.flags & F_TOKEN) != 0;
                 if action || read {
                     if has {
-                        if i
-                            .tok_in
-                            != current
+                        if i.tok_in != current
                             || (action && i.tok_out == i.tok_in)
                             || (read && i.tok_in != i.tok_out) {
                             e0411(
@@ -1231,24 +1229,9 @@ impl State {
 
     // `State == State` (loans by content).
     pub fn same(in self, in o: State) -> bool {
-        if self
-            .slots
-            .len()
-            != o
-            .slots
-            .len()
-            || self
-            .moved
-            .len()
-            != o
-            .moved
-            .len()
-            || self
-            .values
-            .len()
-            != o
-            .values
-            .len() {
+        if self.slots.len() != o.slots.len()
+            || self.moved.len() != o.moved.len()
+            || self.values.len() != o.values.len() {
             return false;
         }
         for i in 0..self.slots.len() {
@@ -1266,26 +1249,11 @@ impl State {
         for i in 0..self.values.len() {
             let a = self.val_at(i);
             let b = o.val_at(i);
-            if a
-                .id
-                != b
-                .id
-                || a
-                .ty
-                != b
-                .ty
-                || a
-                .owned
-                != b
-                .owned
-                || a
-                .consumed
-                != b
-                .consumed
-                || a
-                .lpass
-                != b
-                .lpass {
+            if a.id != b.id
+                || a.ty != b.ty
+                || a.owned != b.owned
+                || a.consumed != b.consumed
+                || a.lpass != b.lpass {
                 return false;
             }
             if a.lpass != 255 {
@@ -1489,13 +1457,13 @@ impl Origins {
                 let ok4 = self
                     .sparam
                     .try_set(
-                    w(rank),
-                    if param {
-                        1
-                    } else {
-                        0
-                    }
-                );
+                        w(rank),
+                        if param {
+                            1
+                        } else {
+                            0
+                        }
+                    );
             } else {
                 let ok = self.sstate.try_set(w(rank), 2);
             }
@@ -1678,22 +1646,17 @@ impl Flow {
                 .d
                 .rel
                 .push(
-                RelRow {
-                    a: la,
-                    b: self.d.text.len(),
-                    start: x.s0,
-                    stop: x.s1
-                }
-            );
+                    RelRow {
+                        a: la,
+                        b: self.d.text.len(),
+                        start: x.s0,
+                        stop: x.s1
+                    }
+                );
             n = 1;
         }
-        if y
-            .kind
-            == 3
-            && y
-            .s0
-            < y
-            .s1
+        if y.kind == 3
+            && y.s0 < y.s1
             && !(y.s0 == s0 && y.s1 == s1)
             && !(n == 1 && x.s0 == y.s0 && x.s1 == y.s1) {
             let la = self.d.text.len();
@@ -1702,13 +1665,13 @@ impl Flow {
                 .d
                 .rel
                 .push(
-                RelRow {
-                    a: la,
-                    b: self.d.text.len(),
-                    start: y.s0,
-                    stop: y.s1
-                }
-            );
+                    RelRow {
+                        a: la,
+                        b: self.d.text.len(),
+                        start: y.s0,
+                        stop: y.s1
+                    }
+                );
             n = inc32(n);
         }
         if n > 0 {
@@ -1722,19 +1685,19 @@ impl Flow {
             .d
             .rows
             .try_set(
-            last,
-            DiagRow {
-                code_a: row.code_a,
-                msg_a: row.msg_a,
-                msg_b: mend,
-                help_a: row.help_a,
-                end: row.end,
-                start: row.start,
-                stop: row.stop,
-                ra: ra,
-                rn: n
-            }
-        );
+                last,
+                DiagRow {
+                    code_a: row.code_a,
+                    msg_a: row.msg_a,
+                    msg_b: mend,
+                    help_a: row.help_a,
+                    end: row.end,
+                    start: row.start,
+                    stop: row.stop,
+                    ra: ra,
+                    rn: n
+                }
+            );
     }
 
     fn say(inout self, in s: Str) {
@@ -1813,12 +1776,12 @@ impl Flow {
             self.say("a borrowed non-copy temporary cannot be moved into an owned value");
             self
                 .caused(
-                s0,
-                s1,
-                value_cause(id),
-                NOCAUSE,
-                "A borrowed non-copy temporary cannot transfer ownership to an owned value."
-            );
+                    s0,
+                    s1,
+                    value_cause(id),
+                    NOCAUSE,
+                    "A borrowed non-copy temporary cannot transfer ownership to an owned value."
+                );
         }
         if v.consumed {
             let prior = if u8_at(in self.lc_has, w(id)) == 1 {
@@ -1835,29 +1798,29 @@ impl Flow {
             self.say_id("IR temporary ", id, " is consumed more than once");
             self
                 .caused(
-                s0,
-                s1,
-                value_cause(id),
-                prior,
-                "A non-copy IR temporary may be consumed only once on an execution path."
-            );
+                    s0,
+                    s1,
+                    value_cause(id),
+                    prior,
+                    "A non-copy IR temporary may be consumed only once on an execution path."
+                );
         }
         if v.owned && !v.consumed {
             self.note_consume(id, s0, s1);
         }
         s
             .set_val_at(
-            at,
-            ValS {
-                id: v.id,
-                ty: v.ty,
-                owned: v.owned,
-                consumed: true,
-                lpass: 255,
-                la: 0,
-                ln: 0
-            }
-        );
+                at,
+                ValS {
+                    id: v.id,
+                    ty: v.ty,
+                    owned: v.owned,
+                    consumed: true,
+                    lpass: 255,
+                    la: 0,
+                    ln: 0
+                }
+            );
     }
 
     fn release(inout self, inout s: State, id: u32) -> bool {
@@ -1868,17 +1831,17 @@ impl Flow {
         let v = s.val_at(at);
         s
             .set_val_at(
-            at,
-            ValS {
-                id: v.id,
-                ty: v.ty,
-                owned: v.owned,
-                consumed: true,
-                lpass: 255,
-                la: 0,
-                ln: 0
-            }
-        );
+                at,
+                ValS {
+                    id: v.id,
+                    ty: v.ty,
+                    owned: v.owned,
+                    consumed: true,
+                    lpass: 255,
+                    la: 0,
+                    ln: 0
+                }
+            );
         true
     }
 
@@ -1937,12 +1900,12 @@ impl Flow {
             self.say_place(in names, in p.paths, "IR uses moved place '", pl, "'");
             self
                 .caused(
-                s0,
-                s1,
-                slot_cause(rank),
-                NOCAUSE,
-                "A moved place cannot be used again until ownership is re-established."
-            );
+                    s0,
+                    s1,
+                    slot_cause(rank),
+                    NOCAUSE,
+                    "A moved place cannot be used again until ownership is re-established."
+                );
         }
         let ft = p.paths.field_type(inout t, inout names, in wd, slot.ty, path);
         let ty = if ft == NONE32 {
@@ -1954,11 +1917,8 @@ impl Flow {
         let exclusive = pass == P_INOUT || (pass == P_SINK && tymode != M_COPY);
         for vi in 0..s.values.len() {
             let v = s.val_at(vi);
-            if v
-                .lpass
-                != 255
-                && !v
-                .consumed
+            if v.lpass != 255
+                && !v.consumed
                 && (exclusive || (v.lpass == P_INOUT && !self.reserved(v.id))) {
                 let mut hit = false;
                 for j in 0..w(v.ln) {
@@ -1984,12 +1944,12 @@ impl Flow {
                     self.msg.push(39);
                     self
                         .caused(
-                        s0,
-                        s1,
-                        value_cause_as(v.id, 1),
-                        slot_cause(rank),
-                        "Overlapping access must respect the shared or exclusive permission of each active loan."
-                    );
+                            s0,
+                            s1,
+                            value_cause_as(v.id, 1),
+                            slot_cause(rank),
+                            "Overlapping access must respect the shared or exclusive permission of each active loan."
+                        );
                 }
             }
         }
@@ -1997,35 +1957,35 @@ impl Flow {
             self.say("IR mutates a shared parameter");
             self
                 .caused(
-                s0,
-                s1,
-                slot_cause(rank),
-                NOCAUSE,
-                "Shared parameters do not grant mutation permission."
-            );
+                    s0,
+                    s1,
+                    slot_cause(rank),
+                    NOCAUSE,
+                    "Shared parameters do not grant mutation permission."
+                );
         }
         if pass == P_SINK && tymode != M_COPY {
             if slot.pass != P_SINK {
                 self.say("IR moves from a borrowed parameter");
                 self
                     .caused(
-                    s0,
-                    s1,
-                    slot_cause(rank),
-                    NOCAUSE,
-                    "Borrowed parameters do not transfer ownership to this function."
-                );
+                        s0,
+                        s1,
+                        slot_cause(rank),
+                        NOCAUSE,
+                        "Borrowed parameters do not transfer ownership to this function."
+                    );
             }
             if path != 0 && self.mode(inout t, in names, in wd, slot.ty) == M_LINEAR {
                 self.say("IR must destructure a linear aggregate before moving fields");
                 self
                     .caused(
-                    s0,
-                    s1,
-                    slot_cause(rank),
-                    NOCAUSE,
-                    "Consume the full linear aggregate through its supported destructuring rules."
-                );
+                        s0,
+                        s1,
+                        slot_cause(rank),
+                        NOCAUSE,
+                        "Consume the full linear aggregate through its supported destructuring rules."
+                    );
             }
             s.moved_insert(rank, path);
         }
@@ -2073,13 +2033,9 @@ impl Flow {
                     let q = s.loan(add(w(vb.la), qi));
                     for pi in 0..w(va.ln) {
                         let pp = s.loan(add(w(va.la), pi));
-                        if found
-                            == 18446744073709551615
-                            && place_root(pp)
-                            == place_root(q)
-                            && p
-                            .paths
-                            .overlaps(place_path(pp), place_path(q)) {
+                        if found == 18446744073709551615
+                            && place_root(pp) == place_root(q)
+                            && p.paths.overlaps(place_path(pp), place_path(q)) {
                             found = q;
                         }
                     }
@@ -2101,12 +2057,12 @@ impl Flow {
                     self.msg.extend(in "' is live".as_bytes());
                     self
                         .caused(
-                        s0,
-                        s1,
-                        value_cause_as(bv, 2),
-                        NOCAUSE,
-                        "A reserved inout loan becomes exclusive when its call runs, so no argument of the same call may borrow its place."
-                    );
+                            s0,
+                            s1,
+                            value_cause_as(bv, 2),
+                            NOCAUSE,
+                            "A reserved inout loan becomes exclusive when its call runs, so no argument of the same call may borrow its place."
+                        );
                 }
             }
         }
@@ -2145,24 +2101,24 @@ impl Flow {
             let name = n32(p.pat(add(pat, 3)));
             s
                 .put_slot(
-                SlotS {
-                    rank: p.rank_of(name),
-                    name: name,
-                    ty: ty,
-                    pass: pass
-                }
-            );
+                    SlotS {
+                        rank: p.rank_of(name),
+                        name: name,
+                        ty: ty,
+                        pass: pass
+                    }
+                );
         } else if kind == 0 {
             if pass == P_SINK && self.mode(inout t, in names, in wd, ty) == M_LINEAR {
                 self.say("IR wildcard discards a linear value");
                 self
                     .caused(
-                    s0,
-                    s1,
-                    value_cause(origin),
-                    NOCAUSE,
-                    "Linear components must be consumed rather than discarded by a wildcard."
-                );
+                        s0,
+                        s1,
+                        value_cause(origin),
+                        NOCAUSE,
+                        "Linear components must be consumed rather than discarded by a wildcard."
+                    );
             }
         } else if kind == 2 {
             if t.kind(ty) == K_TUPLE {
@@ -2175,16 +2131,16 @@ impl Flow {
                     let child = p.pat(add(add(pat, 4), i));
                     self
                         .bind(
-                        inout s,
-                        inout t,
-                        inout names,
-                        in wd,
-                        in p,
-                        child,
-                        t.arg(ty, i),
-                        origin,
-                        pass
-                    );
+                            inout s,
+                            inout t,
+                            inout names,
+                            in wd,
+                            in p,
+                            child,
+                            t.arg(ty, i),
+                            origin,
+                            pass
+                        );
                 }
             }
         } else if kind == 4 {
@@ -2208,16 +2164,16 @@ impl Flow {
                         let ft = substitute(inout t, wd.field(w(fi)).ty, in vars);
                         self
                             .bind(
-                            inout s,
-                            inout t,
-                            inout names,
-                            in wd,
-                            in p,
-                            child,
-                            ft,
-                            origin,
-                            pass
-                        );
+                                inout s,
+                                inout t,
+                                inout names,
+                                in wd,
+                                in p,
+                                child,
+                                ft,
+                                origin,
+                                pass
+                            );
                     }
                 }
             }
@@ -2241,14 +2197,9 @@ impl Flow {
         in wd: World,
         sl: SlotS
     ) -> bool {
-        sl
-            .pass
-            == P_SINK
-            && self
-            .mode(inout t, in names, in wd, sl.ty)
-            == M_LINEAR
-            && !s
-            .moved_has(sl.rank, 0)
+        sl.pass == P_SINK
+            && self.mode(inout t, in names, in wd, sl.ty) == M_LINEAR
+            && !s.moved_has(sl.rank, 0)
     }
 
     // `Flow::frame` (end = false) and `Flow::end` (end = true).
@@ -2264,42 +2215,40 @@ impl Flow {
     ) {
         for i in 0..s.slots.len() {
             let sl = s.slot_at(i);
-            if self
-                .live_linear_slot(in s, inout t, in names, in wd, sl)
-                && !self
-                .external_has(sl.name) {
+            if self.live_linear_slot(in s, inout t, in names, in wd, sl)
+                && !self.external_has(sl.name) {
                 if end {
                     self
                         .say_name(
-                        in names,
-                        "linear place '",
-                        sl.name,
-                        "' remains live at IR return"
-                    );
+                            in names,
+                            "linear place '",
+                            sl.name,
+                            "' remains live at IR return"
+                        );
                     self
                         .caused(
-                        s0,
-                        s1,
-                        slot_cause(sl.rank),
-                        NOCAUSE,
-                        "Each owned linear place must be consumed on every returning path."
-                    );
+                            s0,
+                            s1,
+                            slot_cause(sl.rank),
+                            NOCAUSE,
+                            "Each owned linear place must be consumed on every returning path."
+                        );
                 } else {
                     self
                         .say_name(
-                        in names,
-                        "abortable effect may abandon linear place '",
-                        sl.name,
-                        "'"
-                    );
+                            in names,
+                            "abortable effect may abandon linear place '",
+                            sl.name,
+                            "'"
+                        );
                     self
                         .caused(
-                        s0,
-                        s1,
-                        slot_cause(sl.rank),
-                        NOCAUSE,
-                        "An abortable operation must not abandon a live owned linear place."
-                    );
+                            s0,
+                            s1,
+                            slot_cause(sl.rank),
+                            NOCAUSE,
+                            "An abortable operation must not abandon a live owned linear place."
+                        );
                 }
             }
         }
@@ -2310,22 +2259,22 @@ impl Flow {
                     self.say_id("linear temporary ", v.id, " remains live at IR return");
                     self
                         .caused(
-                        s0,
-                        s1,
-                        value_cause(v.id),
-                        NOCAUSE,
-                        "Each owned linear temporary must be consumed on every returning path."
-                    );
+                            s0,
+                            s1,
+                            value_cause(v.id),
+                            NOCAUSE,
+                            "Each owned linear temporary must be consumed on every returning path."
+                        );
                 } else {
                     self.say_id("abortable effect may abandon linear temporary ", v.id, "");
                     self
                         .caused(
-                        s0,
-                        s1,
-                        value_cause(v.id),
-                        NOCAUSE,
-                        "An abortable operation must not abandon a live owned linear temporary."
-                    );
+                            s0,
+                            s1,
+                            value_cause(v.id),
+                            NOCAUSE,
+                            "An abortable operation must not abandon a live owned linear temporary."
+                        );
                 }
             }
         }
@@ -2400,15 +2349,9 @@ impl Flow {
             let mut pass = read_pass;
             if pass == P_SINK && self.scrutinee(i.dest) {
                 let si = s.find_slot(p.rank_of(root));
-                if si
-                    < 9223372036854775808
-                    && s
-                    .slot_at(si)
-                    .pass
-                    != P_SINK
-                    && self
-                    .mode(inout t, in names, in wd, i.ty)
-                    != M_COPY {
+                if si < 9223372036854775808
+                    && s.slot_at(si).pass != P_SINK
+                    && self.mode(inout t, in names, in wd, i.ty) != M_COPY {
                     pass = P_IN;
                 }
             }
@@ -2417,18 +2360,10 @@ impl Flow {
             if pass == P_SINK && np == 1 && p.op(add(a, 4)) == 0 && self.callee(i.dest) {
                 let si = s.find_slot(p.rank_of(root));
                 let tn = t.node(i.ty);
-                if si
-                    < 9223372036854775808
-                    && s
-                    .slot_at(si)
-                    .pass
-                    != P_SINK
-                    && tn
-                    .kind
-                    == K_FN
-                    && tn
-                    .mode
-                    != M_COPY {
+                if si < 9223372036854775808
+                    && s.slot_at(si).pass != P_SINK
+                    && tn.kind == K_FN
+                    && tn.mode != M_COPY {
                     pass = P_IN;
                 }
             }
@@ -2437,16 +2372,16 @@ impl Flow {
                     let path = n32(p.op(add(add(a, 4), j)));
                     self
                         .access(
-                        inout s,
-                        inout t,
-                        inout names,
-                        in wd,
-                        in p,
-                        place(root, path),
-                        pass,
-                        s0,
-                        s1
-                    );
+                            inout s,
+                            inout t,
+                            inout names,
+                            in wd,
+                            in p,
+                            place(root, path),
+                            pass,
+                            s0,
+                            s1
+                        );
                 }
             }
             if pass != P_SINK {
@@ -2489,16 +2424,16 @@ impl Flow {
             }
             self
                 .access(
-                inout s,
-                inout t,
-                inout names,
-                in wd,
-                in p,
-                place(root, path),
-                P_INOUT,
-                s0,
-                s1
-            );
+                    inout s,
+                    inout t,
+                    inout names,
+                    in wd,
+                    in p,
+                    place(root, path),
+                    P_INOUT,
+                    s0,
+                    s1
+                );
             let si = s.find_slot(rank);
             if si < 9223372036854775808 {
                 let ft = p.paths.field_type(inout t, inout names, in wd, s.slot_at(si).ty, path);
@@ -2511,12 +2446,12 @@ impl Flow {
                     self.say("IR assignment overwrites a linear obligation");
                     self
                         .caused(
-                        s0,
-                        s1,
-                        slot_cause(rank),
-                        NOCAUSE,
-                        "Overwriting an owned linear obligation would discard it."
-                    );
+                            s0,
+                            s1,
+                            slot_cause(rank),
+                            NOCAUSE,
+                            "Overwriting an owned linear obligation would discard it."
+                        );
                 }
             }
         } else if i.op == OP_CONSUME1 {
@@ -2530,28 +2465,23 @@ impl Flow {
                 if cmp && at < 9223372036854775808 {
                     let x = s.val_at(at);
                     let n = t.node(x.ty);
-                    if !x
-                        .owned
-                        && n
-                        .kind
-                        == K_NAMED
-                        && n
-                        .n
-                        == 0
+                    if !x.owned
+                        && n.kind == K_NAMED
+                        && n.n == 0
                         && (n.name == k.string || n.name == k.str_) {
                         s
                             .set_val_at(
-                            at,
-                            ValS {
-                                id: x.id,
-                                ty: x.ty,
-                                owned: x.owned,
-                                consumed: true,
-                                lpass: 255,
-                                la: 0,
-                                ln: 0
-                            }
-                        );
+                                at,
+                                ValS {
+                                    id: x.id,
+                                    ty: x.ty,
+                                    owned: x.owned,
+                                    consumed: true,
+                                    lpass: 255,
+                                    la: 0,
+                                    ln: 0
+                                }
+                            );
                         done = true;
                     }
                 }
@@ -2581,20 +2511,17 @@ impl Flow {
         } else if i.op == OP_PROJECT {
             let v = n32(p.op(a));
             let at = s.find_val(v);
-            if at
-                < 9223372036854775808
-                && self
-                .mode(inout t, in names, in wd, s.val_at(at).ty)
-                == M_LINEAR {
+            if at < 9223372036854775808
+                && self.mode(inout t, in names, in wd, s.val_at(at).ty) == M_LINEAR {
                 self.say("projection would abandon a temporary linear aggregate");
                 self
                     .caused(
-                    s0,
-                    s1,
-                    value_cause(v),
-                    NOCAUSE,
-                    "A linear aggregate must retain all of its ownership obligations when destructured."
-                );
+                        s0,
+                        s1,
+                        value_cause(v),
+                        NOCAUSE,
+                        "A linear aggregate must retain all of its ownership obligations when destructured."
+                    );
             }
             self.consume(inout s, inout t, in names, in wd, v, s0, s1);
         } else if i.op == OP_INDEX {
@@ -2603,10 +2530,8 @@ impl Flow {
         } else if i.op == OP_INDIRECT {
             let callee = n32(p.op(a));
             let at = s.find_val(callee);
-            let effectful = at
-                < 9223372036854775808
-                && self
-                .row_effectful(in t, in p, s.val_at(at).ty);
+            let effectful = at < 9223372036854775808
+                && self.row_effectful(in t, in p, s.val_at(at).ty);
             let lent = if at < 9223372036854775808 {
                 let v = s.val_at(at);
                 let tn = t.node(v.ty);
@@ -2619,17 +2544,17 @@ impl Flow {
                 let v = s.val_at(at);
                 s
                     .set_val_at(
-                    at,
-                    ValS {
-                        id: v.id,
-                        ty: v.ty,
-                        owned: v.owned,
-                        consumed: true,
-                        lpass: 255,
-                        la: 0,
-                        ln: 0
-                    }
-                );
+                        at,
+                        ValS {
+                            id: v.id,
+                            ty: v.ty,
+                            owned: v.owned,
+                            consumed: true,
+                            lpass: 255,
+                            la: 0,
+                            ln: 0
+                        }
+                    );
             } else {
                 self.consume(inout s, inout t, in names, in wd, callee, s0, s1);
             }
@@ -2646,16 +2571,16 @@ impl Flow {
             for j in 0..n {
                 self
                     .access(
-                    inout s,
-                    inout t,
-                    inout names,
-                    in wd,
-                    in p,
-                    p.op(add(inc(a), j)),
-                    P_SINK,
-                    s0,
-                    s1
-                );
+                        inout s,
+                        inout t,
+                        inout names,
+                        in wd,
+                        in p,
+                        p.op(add(inc(a), j)),
+                        P_SINK,
+                        s0,
+                        s1
+                    );
             }
         }
         if (i.flags & F_ABORT) != 0 {
@@ -2666,14 +2591,14 @@ impl Flow {
             if p.op(add(inc(a), n)) != 0 {
                 self
                     .consume(
-                    inout s,
-                    inout t,
-                    in names,
-                    in wd,
-                    n32(p.op(add(add(a, 2), n))),
-                    s0,
-                    s1
-                );
+                        inout s,
+                        inout t,
+                        in names,
+                        in wd,
+                        n32(p.op(add(add(a, 2), n))),
+                        s0,
+                        s1
+                    );
             }
             if (i.flags & F_EFFECTFUL) != 0 {
                 self.frame(in s, inout t, in names, in wd, s0, s1, false);
@@ -2692,16 +2617,16 @@ impl Flow {
         }
         s
             .put_val(
-            ValS {
-                id: i.dest,
-                ty: ty,
-                owned: owned,
-                consumed: false,
-                lpass: lpass,
-                la: la,
-                ln: n32(loan_n)
-            }
-        );
+                ValS {
+                    id: i.dest,
+                    ty: ty,
+                    owned: owned,
+                    consumed: false,
+                    lpass: lpass,
+                    la: la,
+                    ln: n32(loan_n)
+                }
+            );
     }
 
     // `out = merge(out, b)`: `out` holds a clone of the old state.
@@ -2725,19 +2650,19 @@ impl Flow {
                 if x != y {
                     self
                         .say_name(
-                        in names,
-                        "linear place '",
-                        sl.name,
-                        "' has inconsistent ownership at a CFG join"
-                    );
+                            in names,
+                            "linear place '",
+                            sl.name,
+                            "' has inconsistent ownership at a CFG join"
+                        );
                     self
                         .caused(
-                        s0,
-                        s1,
-                        slot_cause(sl.rank),
-                        NOCAUSE,
-                        "Ownership of a linear place must agree on the incoming control-flow edges."
-                    );
+                            s0,
+                            s1,
+                            slot_cause(sl.rank),
+                            NOCAUSE,
+                            "Ownership of a linear place must agree on the incoming control-flow edges."
+                        );
                 }
                 let (ma, mb) = b.moved_range(sl.rank);
                 for j in ma..mb {
@@ -2747,19 +2672,19 @@ impl Flow {
                 if self.live_linear_slot(in b, inout t, in names, in wd, sl) {
                     self
                         .say_name(
-                        in names,
-                        "linear place '",
-                        sl.name,
-                        "' survives only one CFG edge"
-                    );
+                            in names,
+                            "linear place '",
+                            sl.name,
+                            "' survives only one CFG edge"
+                        );
                     self
                         .caused(
-                        s0,
-                        s1,
-                        slot_cause(sl.rank),
-                        NOCAUSE,
-                        "An owned linear place cannot disappear on another incoming control-flow edge."
-                    );
+                            s0,
+                            s1,
+                            slot_cause(sl.rank),
+                            NOCAUSE,
+                            "An owned linear place cannot disappear on another incoming control-flow edge."
+                        );
                 }
                 out.put_slot(sl);
                 let (ma, mb) = b.moved_range(sl.rank);
@@ -2773,45 +2698,39 @@ impl Flow {
             let at = out.find_val(v.id);
             if at < 9223372036854775808 {
                 let old = out.val_at(at);
-                if self
-                    .mode(inout t, in names, in wd, old.ty)
-                    == M_LINEAR
-                    && old
-                    .owned
-                    && old
-                    .consumed
-                    != v
-                    .consumed {
+                if self.mode(inout t, in names, in wd, old.ty) == M_LINEAR
+                    && old.owned
+                    && old.consumed != v.consumed {
                     self
                         .say_id(
-                        "linear temporary ",
-                        v.id,
-                        " has inconsistent ownership at a CFG join"
-                    );
+                            "linear temporary ",
+                            v.id,
+                            " has inconsistent ownership at a CFG join"
+                        );
                     self
                         .caused(
-                        s0,
-                        s1,
-                        value_cause(v.id),
-                        NOCAUSE,
-                        "Ownership of a linear temporary must agree on incoming control-flow edges."
-                    );
+                            s0,
+                            s1,
+                            value_cause(v.id),
+                            NOCAUSE,
+                            "Ownership of a linear temporary must agree on incoming control-flow edges."
+                        );
                 }
                 let consumed = old.consumed || v.consumed;
                 if consumed {
                     out
                         .set_val_at(
-                        at,
-                        ValS {
-                            id: old.id,
-                            ty: old.ty,
-                            owned: old.owned,
-                            consumed: true,
-                            lpass: 255,
-                            la: 0,
-                            ln: 0
-                        }
-                    );
+                            at,
+                            ValS {
+                                id: old.id,
+                                ty: old.ty,
+                                owned: old.owned,
+                                consumed: true,
+                                lpass: 255,
+                                la: 0,
+                                ln: 0
+                            }
+                        );
                 }
             } else {
                 let la = n32(out.loans.len());
@@ -2822,16 +2741,16 @@ impl Flow {
                 }
                 out
                     .put_val(
-                    ValS {
-                        id: v.id,
-                        ty: v.ty,
-                        owned: v.owned,
-                        consumed: v.consumed,
-                        lpass: v.lpass,
-                        la: la,
-                        ln: v.ln
-                    }
-                );
+                        ValS {
+                            id: v.id,
+                            ty: v.ty,
+                            owned: v.owned,
+                            consumed: v.consumed,
+                            lpass: v.lpass,
+                            la: la,
+                            ln: v.ln
+                        }
+                    );
             }
         }
     }
@@ -3025,13 +2944,13 @@ impl Flow {
             };
             state
                 .put_slot(
-                SlotS {
-                    rank: p.rank_of(pr.name),
-                    name: pr.name,
-                    ty: pr.ty,
-                    pass: pr.pass
-                }
-            );
+                    SlotS {
+                        rank: p.rank_of(pr.name),
+                        name: pr.name,
+                        ty: pr.ty,
+                        pass: pr.pass
+                    }
+                );
         }
         pool.store(0, in state);
         let mut queue: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -3100,16 +3019,16 @@ impl Flow {
                         self.consume(inout edge, inout t, in names, in wd, arg, s0, s1);
                         edge
                             .put_val(
-                            ValS {
-                                id: param,
-                                ty: param_type(in p, f, param),
-                                owned: true,
-                                consumed: false,
-                                lpass: 255,
-                                la: 0,
-                                ln: 0
-                            }
-                        );
+                                ValS {
+                                    id: param,
+                                    ty: param_type(in p, f, param),
+                                    owned: true,
+                                    consumed: false,
+                                    lpass: 255,
+                                    la: 0,
+                                    ln: 0
+                                }
+                            );
                     }
                 }
                 let had = pool.has(w(target));
@@ -3180,17 +3099,17 @@ pub fn validate_digest(
         };
         fl
             .function(
-            inout t,
-            inout names,
-            in wd,
-            in p,
-            f,
-            inout pool,
-            inout a,
-            inout b,
-            inout c,
-            inout e
-        );
+                inout t,
+                inout names,
+                in wd,
+                in p,
+                f,
+                inout pool,
+                inout a,
+                inout b,
+                inout c,
+                inout e
+            );
     }
     let mut seen: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut h: u64 = 14695981039346656037;
@@ -3200,10 +3119,16 @@ pub fn validate_digest(
         let k = fl
             .d
             .fold_range(
-            fl.d.fold_range(fold(fold(14695981039346656037, r.start), r.stop), r.code_a, r.msg_a),
-            r.msg_a,
-            r.msg_b
-        );
+                fl
+                    .d
+                    .fold_range(
+                        fold(fold(14695981039346656037, r.start), r.stop),
+                        r.code_a,
+                        r.msg_a
+                    ),
+                r.msg_a,
+                r.msg_b
+            );
         let mut dup = false;
         for j in 0..seen.len() {
             if u64_at(in seen, j) == k {
@@ -3255,17 +3180,17 @@ pub fn validate_into(
         };
         fl
             .function(
-            inout t,
-            inout names,
-            in wd,
-            in p,
-            f,
-            inout pool,
-            inout a,
-            inout b,
-            inout c,
-            inout e
-        );
+                inout t,
+                inout names,
+                in wd,
+                in p,
+                f,
+                inout pool,
+                inout a,
+                inout b,
+                inout c,
+                inout e
+            );
     }
     let mut seen: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut kept: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -3274,10 +3199,16 @@ pub fn validate_into(
         let k = fl
             .d
             .fold_range(
-            fl.d.fold_range(fold(fold(14695981039346656037, r.start), r.stop), r.code_a, r.msg_a),
-            r.msg_a,
-            r.msg_b
-        );
+                fl
+                    .d
+                    .fold_range(
+                        fold(fold(14695981039346656037, r.start), r.stop),
+                        r.code_a,
+                        r.msg_a
+                    ),
+                r.msg_a,
+                r.msg_b
+            );
         let mut dup = false;
         for j in 0..seen.len() {
             if u64_at(in seen, j) == k && same_key(in fl.d, u64_at(in kept, j), i) {
@@ -3297,14 +3228,8 @@ pub fn validate_into(
 fn same_key(in d: Diags, i: u64, j: u64) -> bool {
     let a = d.row(i);
     let b = d.row(j);
-    a
-        .start
-        == b
-        .start
-        && a
-        .stop
-        == b
-        .stop
+    a.start == b.start
+        && a.stop == b.stop
         && same_range(in d, a.code_a, a.msg_a, b.code_a, b.msg_a)
         && same_range(in d, a.msg_a, a.msg_b, b.msg_a, b.msg_b)
 }

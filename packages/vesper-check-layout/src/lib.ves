@@ -183,14 +183,14 @@ impl Layouts {
         self
             .nodes
             .push(
-            LNode {
-                ty: ty,
-                size: 8,
-                kind: L_SCALAR,
-                a: 0,
-                n: 0
-            }
-        );
+                LNode {
+                    ty: ty,
+                    size: 8,
+                    kind: L_SCALAR,
+                    a: 0,
+                    n: 0
+                }
+            );
         id
     }
 
@@ -206,14 +206,14 @@ impl Layouts {
         self
             .nodes
             .push(
-            LNode {
-                ty: ty,
-                size: size,
-                kind: L_PRODUCT,
-                a: a,
-                n: n32(fs.len())
-            }
-        );
+                LNode {
+                    ty: ty,
+                    size: size,
+                    kind: L_PRODUCT,
+                    a: a,
+                    n: n32(fs.len())
+                }
+            );
         id
     }
 
@@ -281,15 +281,15 @@ fn retag(inout ls: Layouts, l: u32, ty: u32) -> u32 {
     let ok = ls
         .nodes
         .try_set(
-        w(l),
-        LNode {
-            ty: ty,
-            size: n.size,
-            kind: n.kind,
-            a: n.a,
-            n: n.n
-        }
-    );
+            w(l),
+            LNode {
+                ty: ty,
+                size: n.size,
+                kind: n.kind,
+                a: n.a,
+                n: n.n
+            }
+        );
     l
 }
 
@@ -299,12 +299,12 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
     if depth > 128 {
         return ls
             .fail(
-            in t,
-            in names,
-            "value layout exceeds 128 levels; use an owning indirection for recursive data",
-            NONE32,
-            ""
-        );
+                in t,
+                in names,
+                "value layout exceeds 128 levels; use an owning indirection for recursive data",
+                NONE32,
+                ""
+            );
     }
     let n = t.node(ty);
     let name = if n.kind == K_NAMED {
@@ -312,20 +312,14 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
     } else {
         0
     };
-    let scalar = n
-        .kind
-        == K_LIT
-        || n
-        .kind
-        == K_FN
+    let scalar = n.kind == K_LIT
+        || n.kind == K_FN
         || (n.kind == K_NAMED && k.is_scalar(name))
         || (n.kind == K_NAMED && (name == k.region_box || name == k.watermark))
         || (name == k.tiled_seq && (n.n == 1 || n.n == 2))
         || (name == k.chunk_seq && n.n == 1)
         || (wd.box_active && name == k.box_ && n.n == 1)
-        || ty
-        == t
-        .unit;
+        || ty == t.unit;
     if scalar {
         return ls.scalar(ty);
     }
@@ -359,13 +353,13 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
             let fname = ls.digit_name(inout names, i);
             fs
                 .push(
-                LField {
-                    name: fname,
-                    ty: ft,
-                    offset: offset,
-                    layout: l
-                }
-            );
+                    LField {
+                        name: fname,
+                        ty: ft,
+                        offset: offset,
+                        layout: l
+                    }
+                );
             let next = next_offset(offset, ls.node(l).size);
             if !fits_i32(next) {
                 return ls.fail(in t, in names, "value layout is too large", NONE32, "");
@@ -387,13 +381,13 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
             let fname = names.intern(in text.as_slice());
             fs
                 .push(
-                LField {
-                    name: fname,
-                    ty: word_ty,
-                    offset: wrapping_i32(wrapping_mul(i, 8)),
-                    layout: wl
-                }
-            );
+                    LField {
+                        name: fname,
+                        ty: word_ty,
+                        offset: wrapping_i32(wrapping_mul(i, 8)),
+                        layout: wl
+                    }
+                );
         }
         return ls.product(ty, wrapping_mul(words, 8), in fs);
     }
@@ -404,33 +398,33 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
         let l0 = ls.scalar(word_ty);
         fs
             .push(
-            LField {
-                name: k.len,
-                ty: word_ty,
-                offset: 0,
-                layout: l0
-            }
-        );
+                LField {
+                    name: k.len,
+                    ty: word_ty,
+                    offset: 0,
+                    layout: l0
+                }
+            );
         let l1 = ls.scalar(word_ty);
         fs
             .push(
-            LField {
-                name: k.cap,
-                ty: word_ty,
-                offset: 8,
-                layout: l1
-            }
-        );
+                LField {
+                    name: k.cap,
+                    ty: word_ty,
+                    offset: 8,
+                    layout: l1
+                }
+            );
         let l2 = ls.scalar(word_ty);
         fs
             .push(
-            LField {
-                name: k.data,
-                ty: word_ty,
-                offset: 16,
-                layout: l2
-            }
-        );
+                LField {
+                    name: k.data,
+                    ty: word_ty,
+                    offset: 16,
+                    layout: l2
+                }
+            );
         return ls.product(ty, 24, in fs);
     }
     if n.kind != K_NAMED {
@@ -448,12 +442,12 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
         if u32_at(in ls.seen, i) == ty {
             return ls
                 .fail(
-                in t,
-                in names,
-                "recursive inline layout of ",
-                ty,
-                "; an owning indirection is required"
-            );
+                    in t,
+                    in names,
+                    "recursive inline layout of ",
+                    ty,
+                    "; an owning indirection is required"
+                );
         }
     }
     ls.seen.push(ty);
@@ -478,13 +472,13 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
             }
             all
                 .push(
-                LField {
-                    name: f.name,
-                    ty: ft,
-                    offset: offset,
-                    layout: l
-                }
-            );
+                    LField {
+                        name: f.name,
+                        ty: ft,
+                        offset: offset,
+                        layout: l
+                    }
+                );
             let next = next_offset(offset, ls.node(l).size);
             if !fits_i32(next) {
                 return ls.fail(in t, in names, "value layout is too large", NONE32, "");
@@ -494,12 +488,12 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
         size = max_u32(size, wrapping_u32(offset));
         vs
             .push(
-            LVariant {
-                name: v.name,
-                fa: fa,
-                fc: v.fc
-            }
-        );
+                LVariant {
+                    name: v.name,
+                    fa: fa,
+                    fc: v.fc
+                }
+            );
     }
     let last = wrapping_sub(ls.seen.len(), 1);
     ls.seen.truncate(last);
@@ -517,12 +511,12 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
                 Option::Some(v) => ls
                     .variants
                     .push(
-                    LVariant {
-                        name: v.name,
-                        fa: wrapping_add(v.fa, base),
-                        fc: v.fc
-                    }
-                ),
+                        LVariant {
+                            name: v.name,
+                            fa: wrapping_add(v.fa, base),
+                            fc: v.fc
+                        }
+                    ),
                 Option::None => {}
             }
         }
@@ -530,14 +524,14 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
         ls
             .nodes
             .push(
-            LNode {
-                ty: ty,
-                size: size,
-                kind: L_ENUM,
-                a: va,
-                n: n32(vs.len())
-            }
-        );
+                LNode {
+                    ty: ty,
+                    size: size,
+                    kind: L_ENUM,
+                    a: va,
+                    n: n32(vs.len())
+                }
+            );
         id
     } else {
         let first = match vs.try_get(0) {
@@ -552,14 +546,14 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
         ls
             .nodes
             .push(
-            LNode {
-                ty: ty,
-                size: size,
-                kind: L_PRODUCT,
-                a: wrapping_add(first.fa, base),
-                n: first.fc
-            }
-        );
+                LNode {
+                    ty: ty,
+                    size: size,
+                    kind: L_PRODUCT,
+                    a: wrapping_add(first.fa, base),
+                    n: first.fc
+                }
+            );
         id
     }
 }
@@ -684,11 +678,11 @@ impl Out {
             for j in 0..args.len() {
                 out
                     .push(
-                    match args.try_get(j) {
-                        Option::Some(a) => a,
-                        Option::None => 0,
-                    }
-                );
+                        match args.try_get(j) {
+                            Option::Some(a) => a,
+                            Option::None => 0,
+                        }
+                    );
             }
         }
         let tail = self.opt_name(in names, row.tail);
@@ -725,11 +719,11 @@ impl Out {
             for i in 0..args.len() {
                 words
                     .push(
-                    match args.try_get(i) {
-                        Option::Some(a) => a,
-                        Option::None => 0,
-                    }
-                );
+                        match args.try_get(i) {
+                            Option::Some(a) => a,
+                            Option::None => 0,
+                        }
+                    );
             }
         } else if n.kind == K_FN {
             let mut ps: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -744,11 +738,11 @@ impl Out {
                 words.push(widen_u64(t.param_pass(ty, i)));
                 words
                     .push(
-                    match ps.try_get(i) {
-                        Option::Some(a) => a,
-                        Option::None => 0,
-                    }
-                );
+                        match ps.try_get(i) {
+                            Option::Some(a) => a,
+                            Option::None => 0,
+                        }
+                    );
             }
             words.push(r);
             self.row(in t, in names, n.r2, inout words);
