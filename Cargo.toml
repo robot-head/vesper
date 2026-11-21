@@ -359,6 +359,9 @@ vesper-bench = { path = "crates/vesper-bench/seed", package = "vesper-bench-seed
 vesper-nexus = { path = "crates/vesper-nexus" }
 # HostCall drives the JIT-compiled front end v2 in tests/self_host_front_v2.rs (#1147).
 vesper-port-abi = { path = "crates/vesper-port-abi" }
+# The SH4 codegen swap harness lends Cranelift to Vesper hooks through the
+# shim (tests/self_host_codegen_swap.rs, #1275).
+vesper-cranelift-sys = { path = "crates/vesper-cranelift-sys" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 
