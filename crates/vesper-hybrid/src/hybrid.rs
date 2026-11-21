@@ -52,6 +52,11 @@ mod ir_inline_binding;
 
 #[rustfmt::skip]
 #[allow(clippy::all)]
+#[path = "../port/ir_opt.rs"]
+mod ir_opt_binding;
+
+#[rustfmt::skip]
+#[allow(clippy::all)]
 #[path = "../port/place_ir.rs"]
 mod place_ir_binding;
 
@@ -84,6 +89,11 @@ mod test_runner_words;
 #[path = "../../../tests/common/inline_words.rs"]
 mod inline_words;
 
+// The IR optimizer swap's encoder and decoder (#1248), shared with the root
+// package's tests/self_host_ir_opt.rs.
+#[path = "../../../tests/common/ir_opt_words.rs"]
+mod ir_opt_words;
+
 // Place IR words both ways (#1240), shared with tests/self_host_place_ir*.rs.
 #[path = "../../../tests/common/ir_words.rs"]
 mod ir_words;
@@ -106,6 +116,8 @@ static EXPORT_DECLINED: AtomicU64 = AtomicU64::new(0);
 static TEST_RUNNER_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs inlined by the Vesper inliner module.
 static IR_INLINE_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Programs optimized by the Vesper IR optimizer module.
+static IR_OPT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs `modules/bounds_hoist` hoisted.
@@ -291,6 +303,26 @@ fn vesper_inline(
     report
 }
 
+/// `ir_swap`'s `opt` hook from `modules/ir_opt`: `ir_opt::optimize` of
+/// `@vesper/ir-opt` (memory forwarding and `@fip` reuse), then Rust's
+/// token threading and IR check on the decoded program
+/// (`ir_opt_words::finish`). A program the Place IR words cannot encode,
+/// or a block egglog would refuse (the message is egglog's own), stays in
+/// Rust.
+fn vesper_optimize(
+    world: &vesper::check::World,
+    program: &mut vesper::ir::Program,
+) -> Result<usize, String> {
+    let ours = ir_opt_words::optimize_with(world, program, ir_opt_binding::opt_words);
+    match ours {
+        Some(result) => {
+            IR_OPT_CALLS.fetch_add(1, Relaxed);
+            result
+        }
+        None => vesper::ir_opt::optimize(world, program),
+    }
+}
+
 /// `program` read into `@vesper/place-ir` tables and written back, in
 /// place: the identity Vesper pass. A program the format cannot encode
 /// stays as Rust made it.
@@ -311,8 +343,9 @@ const VESPER_IR_PASSES: vesper::ir_swap::IrPasses = vesper::ir_swap::IrPasses {
         place_ir_round_trip(Some(world), &mut program);
         program
     }),
+    // SH3 lane 9 (#1248): the IR optimizer of `@vesper/ir-opt`.
     opt: Some(|world, program| {
-        let n = vesper::ir_opt::optimize(world, program)?;
+        let n = vesper_optimize(world, program)?;
         place_ir_round_trip(Some(world), program);
         Ok(n)
     }),
@@ -435,6 +468,10 @@ extern "C" fn report() {
     eprintln!(
         "vesper-hybrid: ir-inline answered {} calls from Vesper",
         IR_INLINE_CALLS.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: ir-opt answered {} calls from Vesper",
+        IR_OPT_CALLS.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: place-ir round-tripped {} programs through Vesper",

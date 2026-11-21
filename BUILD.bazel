@@ -9,14 +9,24 @@ exports_files([
 
 # The `vesper-<tool>` binaries (crates/vesper-tools, self-hosting SH0 lane 2).
 _TOOLS = [
+    "//crates/vesper-tools:bin/vesper-attest",
     "//crates/vesper-tools:bin/vesper-audit",
     "//crates/vesper-tools:bin/vesper-bench",
+    "//crates/vesper-tools:bin/vesper-cas",
+    "//crates/vesper-tools:bin/vesper-fuzz",
     "//crates/vesper-tools:bin/vesper-grammar",
     "//crates/vesper-tools:bin/vesper-json",
+    "//crates/vesper-tools:bin/vesper-migrate",
     "//crates/vesper-tools:bin/vesper-publish",
+    "//crates/vesper-tools:bin/vesper-refute",
+    "//crates/vesper-tools:bin/vesper-replay",
     "//crates/vesper-tools:bin/vesper-resolve",
     "//crates/vesper-tools:bin/vesper-sbom",
+    "//crates/vesper-tools:bin/vesper-semver",
+    "//crates/vesper-tools:bin/vesper-simd",
     "//crates/vesper-tools:bin/vesper-tee",
+    "//crates/vesper-tools:bin/vesper-top",
+    "//crates/vesper-tools:bin/vesper-traceparent",
 ]
 
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
@@ -253,6 +263,11 @@ vesper_crate(
             "//crates/vesper-warp-tcp:files",
             "//crates/vesper-warp-wheel:files",
         ],
+        # SH4 lane 14 (#1288): @vesper/codegen-freestanding against the
+        # freestanding image builder.
+        "test/self_host_freestanding": glob([
+            "packages/vesper-codegen-freestanding/**",
+        ]),
         # SH3 lane 11 (#1250): the inliner differential on the same corpus.
         "test/self_host_ir_inline": glob([
             "examples/**",
@@ -262,6 +277,13 @@ vesper_crate(
         # SH3 lane 1 (#1240): @vesper/place-ir round trips over the same
         # corpus at every native IR pass boundary.
         "test/self_host_place_ir": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH4 lane 6 (#1280): @vesper/codegen-scalar's decisions against the
+        # native Codegen core over the same corpus.
+        "test/self_host_codegen_scalar": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -860,12 +882,16 @@ vesper_crate(
         # Four round-trip tests and the pass harness share one stage build;
         # past 900 s on a busy runner.
         "test/self_host_place_ir": "eternal",
+        # SH4 lane 14 (#1288): 22 Cranelift image builds and the package's
+        # JIT compile before the comparisons; 5-8 minutes unoptimized.
+        "test/self_host_freestanding": "eternal",
         # Builds 51 port libraries with the vesper binary.
         "test/self_host_codegen_export": "long",
         "test/self_host_place_ir_jit": "long",
         "test/self_host_ir_lower": "long",
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
+        "test/self_host_codegen_scalar": "long",
         "test/self_host_check_harness": "long",
         # The loops and atomics differential (#1182) passed 900 s on loaded CI.
         "test/self_host_check_loops_atomics": "eternal",
@@ -1053,6 +1079,27 @@ vesper_package(
     manifest = "packages/vesper-ir-inline/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":check_data_package"],
+)
+
+# The IR optimizer for the hybrid compiler's ir_opt module (SH3 lane 9,
+# #1248).
+vesper_package(
+    name = "egraph_package",
+    srcs = glob(["packages/vesper-egraph/src/**/*.ves"]),
+    manifest = "packages/vesper-egraph/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
+vesper_package(
+    name = "ir_opt_package",
+    srcs = glob(["packages/vesper-ir-opt/src/**/*.ves"]),
+    manifest = "packages/vesper-ir-opt/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":egraph_package",
+        ":place_ir_package",
+    ],
 )
 
 vesper_package(

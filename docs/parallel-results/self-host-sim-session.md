@@ -3,7 +3,8 @@
 Part 1 (#1357, merged as `b647460`) ported the datagram link model. Part 2
 (#1380, merged as `97de64f`) ported SHA-256 and the WAL frame codec and
 recovery scan. Part 3 (#1384, merged as `ce75623`) ported the virtual
-message network `net-v1`. Part 4 ports the write-ahead log state machine.
+message network `net-v1`. Part 4 (#1390, merged as `af7dd90`) ported the
+write-ahead log state machine. Part 5 makes the Vesper SHA-256 faster.
 
 ## Part 1: the datagram link model
 
@@ -272,10 +273,40 @@ vanish before either are never hashed), and every recovery rescans the
 medium. A faster SHA-256 is the first step toward parity. Rust stays the
 default.
 
+## Part 5: a faster SHA-256
+
+Base: `main` at `af7dd90`.
+
+`port/src/sha256.ves` now keeps its words as `u32`, using `wrapping_add`
+and the total `rotate_right`, where it used to mask them in `u64`. The state
+is a `[u32; 8]` value, and the message schedule is a local `[u32; 64]` array
+in place of a `ChunkSeq[u64]` behind checked `try_get`/`try_set`. Each block
+reads its 16 message words straight from the input slice.
+
+| Measure (release, best of 5) | Rust | Vesper before | Vesper now |
+|---|---|---|---|
+| SHA-256, 1 MiB | 0.77 ns/byte (SHA-NI) | 11.91 ns/byte | **7.54 ns/byte** |
+| SHA-256, 1 MiB, `sha2` with `force-soft` (scalar) | 7.28 ns/byte | | 1.04x of it |
+| WAL scan, 10,000 frames | 327 ns/frame | 2,892 ns/frame | 1,944 ns/frame |
+| `wal_ops` | 742 ns/op | 4,152 ns/op | 3,001 ns/op |
+
+The port now matches scalar Rust within 4%. This machine's CPU has the SHA
+extensions (`sha_ni`), and the Rust build's `sha2` uses them, which is the
+whole remaining 10x gap. Closing it needs a SHA-256 intrinsic in Vesper (a
+compiler feature, gap 8 below) or a hashing call the port can reach. The
+transcript differential still shows 0 differences in all 11 cases.
+
+### More compiler gaps
+
+8. **No access to hardware SHA instructions.** There is no intrinsic for
+   x86 `sha256rnds2`/`sha256msg1`/`sha256msg2` or the AArch64 SHA2
+   instructions, so a Vesper SHA-256 tops out at scalar speed. This is
+   where the WAL and the identity digests miss parity.
+
 ## What is left (later parts of #1342)
 
-- A faster SHA-256 (it bounds the WAL's speed), and building frames at
-  flush rather than at append.
+- Hardware SHA-256 (gap 8), and building WAL frames at flush rather than
+  at append.
 - `model/umem.rs` and `model/warp.rs` (3,100 lines, over the
   `vesper-warp-umem` crate).
 - `model/mod.rs` process epochs, scenario validation, the canonical-JSON

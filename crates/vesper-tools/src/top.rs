@@ -1052,7 +1052,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 
     if let Some(out) = write_trace.as_deref() {
         let bytes = serde_json::to_vec_pretty(&snapshot).map_err(|e| e.to_string())?;
-        crate::package_commands::atomic_write(out, &bytes)?;
+        vesper::atomic_file::atomic_write(out, &bytes)?;
     }
 
     let report = analyze_snapshot(&snapshot);

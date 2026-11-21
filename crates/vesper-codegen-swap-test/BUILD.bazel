@@ -14,5 +14,7 @@ vesper_crate(
         "test/self_host_codegen_swap": "long",
         # SH4 lane 13 (#1287): the foreign-call emission differential.
         "test/self_host_ffi_emission": "long",
+        # SH4 lane 6 (#1280): scalar emission from @vesper/codegen-scalar.
+        "test/self_host_codegen_scalar_emit": "long",
     },
 )

@@ -22,12 +22,16 @@ Imagine a broker with an index, counters, and configuration. A helper can update
 
 In the repository’s broker example, compare the function’s parameter list with the arguments at its call site.
 
-    fn append(inout broker.{index, metrics}: Broker, in config: u64) {
-        broker.index = wrapping_add(broker.index, config);
-        broker.metrics = wrapping_add(broker.metrics, 1);
-    }
+~~~vesper
+fn append(inout broker.{index, metrics}: Broker, in config: u64) {
+    broker.index = wrapping_add(broker.index, config);
+    broker.metrics = wrapping_add(broker.metrics, 1);
+}
+~~~
 
-    append(inout broker, in broker.config);
+~~~vesper
+append(inout broker, in broker.config);
+~~~
 
 The callee can update exactly two fields through its first parameter. Its second parameter supplies a readable configuration value. Starting with index 1, metrics 0, and config 41 yields index 42, metrics 1, and config 41.
 
