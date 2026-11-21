@@ -1394,7 +1394,7 @@ fn declare_instances_with_trace<M: Module>(
             let symbol = if key == entry {
                 entry.to_owned()
             } else {
-                format!("vesper_function_{i}")
+                local_symbol(i, key)
             };
             let id = m
                 .declare_function(
@@ -1913,6 +1913,25 @@ impl WordFunction {
             })
         }
     }
+}
+/// The symbol of the local (not exported) function instance `i`, whose
+/// instance key is `key`: `vesper_function_{i}_` and the key with every
+/// character outside `[A-Za-z0-9_]` as `_` (at most 96 of them), so
+/// profilers and disassemblers name the Vesper function. The index keeps
+/// symbols unique.
+pub(crate) fn local_symbol(i: usize, key: &str) -> String {
+    let name: String = key
+        .chars()
+        .take(96)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("vesper_function_{i}_{name}")
 }
 pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host: bool) {
     builder.symbol("fmod", native_float_remainder as *const u8);
