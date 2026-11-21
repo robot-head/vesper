@@ -1,0 +1,175 @@
+// The `wal-frame-v1` frame codec and recovery scan (src/model/wal.rs
+// `WalRecord::frame`, `check` and `scan`). A frame is
+// `[payload_len: u32 LE][lsn: u64 LE][check: 8 bytes][payload]`, where
+// `check` is the first eight bytes of SHA-256 over `lsn LE || payload`.
+use self::sha256::{
+    sha256_digest
+};
+
+const FRAME_HEADER_BYTES: u64 = 20;
+const LEN_AT: u64 = 0;
+const LSN_AT: u64 = 4;
+const CHECK_AT: u64 = 12;
+const CHECK_BYTES: u64 = 8;
+const LSN_BYTES: u64 = 8;
+// Damage codes, in the order of `TailDamage` in wal.rs (0 is none).
+const DAMAGE_NONE: u8 = 0;
+const DAMAGE_TORN_HEADER: u8 = 1;
+const DAMAGE_TORN_PAYLOAD: u8 = 2;
+const DAMAGE_BAD_CHECK: u8 = 3;
+const DAMAGE_OUT_OF_ORDER: u8 = 4;
+const DAMAGE_BAD_PAYLOAD: u8 = 5;
+
+// What a scan accepted: `(lsn, payload offset, payload length)` triples in
+// `records`, and the reason it stopped early, if any.
+pub struct ScanResult {
+    records: ChunkSeq[u64],
+    valid_bytes: u64,
+    damage: u8,
+    expected: u64,
+    found: u64
+}
+
+fn byte_at(in bytes: Slice[u8], i: u64) -> u64 {
+    match bytes.try_get(i) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 0,
+    }
+}
+
+// The 8-byte check of a frame: SHA-256 over `lsn LE || payload`.
+fn check(lsn: u64, in payload: Slice[u8]) -> ChunkSeq[u8] {
+    let n = payload.len();
+    let mut input: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_add(n, LSN_BYTES));
+    input.resize(LSN_BYTES, 0);
+    input.try_write_u64_le(0, lsn);
+    input.extend(in payload);
+    let digest = sha256_digest(in input.as_slice());
+    let mut out = digest;
+    out.truncate(CHECK_BYTES);
+    out
+}
+
+// The frame of one record.
+pub fn frame_bytes(lsn: u64, in payload: Slice[u8]) -> ChunkSeq[u8] {
+    let n = payload.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](wrapping_add(FRAME_HEADER_BYTES, n));
+    out.resize(CHECK_AT, 0);
+    out.try_write_u32_le(LEN_AT, wrapping_u32(n));
+    out.try_write_u64_le(LSN_AT, lsn);
+    let c = check(lsn, in payload);
+    out.extend(in c.as_slice());
+    out.extend(in payload);
+    out
+}
+
+// Whether `bytes[at..at + len]` is well-formed UTF-8 (the rules of Rust's
+// `str::from_utf8`: no overlong forms, no surrogates, at most U+10FFFF).
+fn valid_utf8(in bytes: Slice[u8], at: u64, len: u64) -> bool {
+    let end = wrapping_add(at, len);
+    let mut i = at;
+    loop {
+        if i >= end {
+            return true;
+        }
+        let b0 = byte_at(in bytes, i);
+        if b0 < 128 {
+            i = wrapping_add(i, 1);
+            continue;
+        }
+        let width = if b0 >= 194 && b0 <= 223 {
+            2
+        } else if b0 >= 224 && b0 <= 239 {
+            3
+        } else if b0 >= 240 && b0 <= 244 {
+            4
+        } else {
+            return false;
+        };
+        if wrapping_sub(end, i) < width {
+            return false;
+        }
+        let b1 = byte_at(in bytes, wrapping_add(i, 1));
+        // The second byte's range depends on the first (overlongs,
+        // surrogates and the U+10FFFF bound).
+        let (lo, hi) = if b0 == 224 {
+            (160, 191)
+        } else if b0 == 237 {
+            (128, 159)
+        } else if b0 == 240 {
+            (144, 191)
+        } else if b0 == 244 {
+            (128, 143)
+        } else {
+            (128, 191)
+        };
+        if b1 < lo || b1 > hi {
+            return false;
+        }
+        for k in 2..width {
+            let b = byte_at(in bytes, wrapping_add(i, k));
+            if b < 128 || b > 191 {
+                return false;
+            }
+        }
+        i = wrapping_add(i, width);
+    }
+}
+
+fn stop(sink records: ChunkSeq[u64], offset: u64, damage: u8, expected: u64, found: u64)
+    -> ScanResult {
+    ScanResult {
+        records: records,
+        valid_bytes: offset,
+        damage: damage,
+        expected: expected,
+        found: found
+    }
+}
+
+// Scan a medium with the `wal-frame-v1` policy: the longest prefix of
+// complete frames with matching checks, UTF-8 payloads and LSNs 1, 2, 3, ...
+pub fn scan_bytes(in bytes: Slice[u8]) -> ScanResult {
+    let n = bytes.len();
+    let mut records: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut offset: u64 = 0;
+    let mut count: u64 = 0;
+    loop {
+        if offset >= n {
+            return stop(records, offset, DAMAGE_NONE, 0, 0);
+        }
+        let rest = wrapping_sub(n, offset);
+        if rest < FRAME_HEADER_BYTES {
+            return stop(records, offset, DAMAGE_TORN_HEADER, 0, 0);
+        }
+        let len = match bytes.try_read_u32_le(wrapping_add(offset, LEN_AT)) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        let lsn = match bytes.try_read_u64_le(wrapping_add(offset, LSN_AT)) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        if wrapping_sub(rest, FRAME_HEADER_BYTES) < len {
+            return stop(records, offset, DAMAGE_TORN_PAYLOAD, 0, 0);
+        }
+        let start = wrapping_add(offset, FRAME_HEADER_BYTES);
+        let c = check(lsn, in bytes[start..wrapping_add(start, len)]);
+        let stored_at = wrapping_add(offset, CHECK_AT);
+        if !c.as_slice().eq(in bytes[stored_at..wrapping_add(stored_at, CHECK_BYTES)]) {
+            return stop(records, offset, DAMAGE_BAD_CHECK, 0, 0);
+        }
+        let expected = wrapping_add(count, 1);
+        if lsn != expected {
+            return stop(records, offset, DAMAGE_OUT_OF_ORDER, expected, lsn);
+        }
+        if !valid_utf8(in bytes, start, len) {
+            return stop(records, offset, DAMAGE_BAD_PAYLOAD, 0, 0);
+        }
+        records.push(lsn);
+        records.push(start);
+        records.push(len);
+        count = expected;
+        offset = wrapping_add(start, len);
+    }
+}

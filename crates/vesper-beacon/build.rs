@@ -25,18 +25,18 @@ fn main() {
 const EDITS: &[(&str, &str)] = &[
     // histogram.rs: the last bin of each octave lands in the next octave.
     (
-        "widen_usize(16 + (octave - 4) * 8 + ((value >> (octave - 3)) - 8))",
-        "widen_usize(16 + (octave - 4) * 8 + ((value >> (octave - 3)) - 7))",
+        "            + ((value >> (octave - SUB_BITS)) - OCTAVE_BINS)",
+        "            + ((value >> (octave - SUB_BITS)) - (OCTAVE_BINS - 1))",
     ),
     // exponential.rs: the window keeps only half the buckets it may.
     (
-        "if (hi >> shift) - (lo >> shift) + 1 <= 160 {",
+        "if (hi >> shift) - (lo >> shift) + 1 <= EXP_BUCKETS {",
         "if (hi >> shift) - (lo >> shift) + 1 <= 80 {",
     ),
     // traceparent.rs: uppercase hex letters are accepted.
     (
-        "} else if c >= 97 && c <= 102 {",
-        "} else if (c >= 97 && c <= 102) || (c >= 65 && c <= 70) {",
+        "} else if c >= Ascii::LowerA && c <= Ascii::LowerF {",
+        "} else if (c >= Ascii::LowerA && c <= Ascii::LowerF) || (c >= 65 && c <= 70) {",
     ),
     // spans.rs: a child may get its imported parent's span ID.
     (
