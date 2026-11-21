@@ -121,6 +121,37 @@ void vcl_trap(vcl_builder *b, uint32_t code);
 void vcl_trap_if(vcl_builder *b, uint32_t c, bool if_nonzero, uint32_t code);
 uint32_t vcl_emit(vcl_builder *b, const uint64_t *code, size_t code_len, uint32_t *out, size_t out_len);
 
+/* JIT modules, compiling without defining, symbol names and Windows unwind
+ * information (SH4 lane 1, #1275). */
+vcl_module *vcl_jit_module_new(const uint8_t *flags, size_t flags_len, const uint8_t *symbols, size_t symbols_len, const uint64_t *addrs, size_t addrs_len);
+uint32_t vcl_module_finalize(vcl_module *m);
+uint64_t vcl_function_address(vcl_module *m, uint32_t func);
+uint32_t vcl_module_function_count(const vcl_module *m);
+uint64_t vcl_module_function_name(const vcl_module *m, uint32_t func, uint8_t *out, size_t out_len);
+uint64_t vcl_compile(vcl_module *m, vcl_builder *b);
+uint64_t vcl_module_last_code(const vcl_module *m, uint64_t offset, uint8_t *out, size_t out_len);
+uint64_t vcl_module_last_unwind(const vcl_module *m, uint8_t *out, size_t out_len);
+
+/* Builder extras. */
+void vcl_set_srcloc(vcl_builder *b, uint32_t loc);
+void vcl_set_cold_block(vcl_builder *b, uint32_t blk);
+uint32_t vcl_current_block(vcl_builder *b);
+void vcl_set_func_name(vcl_builder *b, uint32_t ns, uint32_t index);
+uint32_t vcl_import_function_colocated(vcl_builder *b, vcl_module *m, uint32_t func, bool colocated);
+void vcl_switch(vcl_builder *b, uint32_t x, uint32_t otherwise, const uint64_t *indices, size_t indices_len, const uint32_t *blocks, size_t blocks_len);
+
+/* Lent handles: a hook's view of one call a Rust host lends its builder and
+ * module to (src/lend.rs). `call` is the word the hook was given. */
+uint32_t vcl_call_op(uint64_t call);
+uint64_t vcl_call_arg_count(uint64_t call);
+uint64_t vcl_call_arg(uint64_t call, uint64_t i);
+uint64_t vcl_call_args(uint64_t call, uint64_t *out, size_t out_len);
+void vcl_call_result(uint64_t call, uint64_t w);
+vcl_builder *vcl_call_builder(uint64_t call);
+vcl_module *vcl_call_module(uint64_t call);
+void vcl_call_return_builder(uint64_t call, vcl_builder *b);
+void vcl_call_return_module(uint64_t call, vcl_module *m);
+
 #ifdef __cplusplus
 }
 #endif

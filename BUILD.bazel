@@ -177,6 +177,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 1 (#1275): the codegen swap differential over the same
+        # corpus, with the Vesper hooks in packages/vesper-codegen-base.
+        "test/self_host_codegen_swap": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH2 lane 5 (#1177): @vesper/check-layout and @vesper/ir-check over
         # the same corpus.
         "test/hybrid_layout": glob([
@@ -593,6 +600,7 @@ vesper_crate(
         "test/self_host_egraph": "long",
         # Loads every corpus world and runs about 1,900 session plans.
         "test/self_host_codegen_control": "long",
+        "test/self_host_codegen_swap": "long",
     },
 )
 
@@ -696,6 +704,24 @@ vesper_package(
     manifest = "packages/vesper-std/hash/sys/Loom.toml",
     visibility = ["//visibility:public"],
     deps = [":std_hash_package"],
+)
+
+# The Cranelift shim's package and the codegen base as dependencies of the
+# hybrid compiler's codegen module (self-hosting SH4 lane 1, #1275).
+vesper_package(
+    name = "cranelift_package",
+    srcs = glob(["packages/vesper-cranelift/src/**/*.ves"]),
+    manifest = "packages/vesper-cranelift/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-cranelift/cranelift.vsys"],
+)
+
+vesper_package(
+    name = "codegen_base_package",
+    srcs = glob(["packages/vesper-codegen-base/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-base/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":cranelift_package"],
 )
 
 filegroup(

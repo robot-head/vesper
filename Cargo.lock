@@ -5567,6 +5567,7 @@ dependencies = [
  "vesper-bench-seed",
  "vesper-chrono",
  "vesper-core",
+ "vesper-cranelift-sys",
  "vesper-crucible-seed",
  "vesper-diagnostics-seed",
  "vesper-doc",
@@ -5816,6 +5817,7 @@ version = "0.1.0"
 dependencies = [
  "cranelift-codegen 0.125.4",
  "cranelift-frontend 0.125.4",
+ "cranelift-jit",
  "cranelift-module",
  "cranelift-native 0.125.4",
  "cranelift-object",
@@ -6117,6 +6119,7 @@ dependencies = [
  "vesper-bench-seed",
  "vesper-chrono",
  "vesper-core",
+ "vesper-cranelift-sys",
  "vesper-crucible-seed",
  "vesper-diagnostics-seed",
  "vesper-doc",

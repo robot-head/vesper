@@ -19,6 +19,7 @@ pub mod atomics;
 pub mod bounds_hoist;
 pub mod capability_effects;
 pub mod check;
+pub mod codegen_swap;
 pub mod database;
 pub mod doctest;
 pub mod dyn_fn;
