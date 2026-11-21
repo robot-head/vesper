@@ -8,19 +8,57 @@
 //! compiler retires, CI runs the same command directly.
 
 use serde_json::Value;
-use std::{collections::BTreeMap, path::PathBuf, process::Command};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The command CI runs: the same as tests/vesper/README.md's.
+/// A copy of tests/vesper made of regular files: Bazel's runfiles are
+/// symlinks, which `vesper test` never follows.
+struct Copy(PathBuf);
+
+impl Copy {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("vesper-suite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_tree(&root().join("tests/vesper"), &dir.join("vesper"));
+        Self(dir)
+    }
+}
+
+impl Drop for Copy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        // `metadata` follows the runfiles symlink to the file it names.
+        if std::fs::metadata(&path).unwrap().is_dir() {
+            copy_tree(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+/// The command CI runs: the same as tests/vesper/README.md's, on a copy.
 fn run_suite() -> Value {
+    let copy = Copy::new();
     let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
-        .current_dir(root())
+        .current_dir(&copy.0)
         .args([
             "test",
-            "tests/vesper",
+            "vesper",
             "--engines",
             "all",
             "--no-cache",
@@ -73,7 +111,7 @@ fn every_vesper_test_passes_on_every_engine() {
     for file in report["files"].as_array().unwrap() {
         let path = file["file"].as_str().unwrap().replace('\\', "/");
         let family = path
-            .trim_start_matches("tests/vesper/")
+            .trim_start_matches("vesper/")
             .split('/')
             .next()
             .unwrap()
