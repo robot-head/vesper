@@ -22,6 +22,9 @@ use @vesper/serde::dragon::{
     shortest
 };
 use self::limits::{
+    Ascii,
+    Crlf,
+    F64,
     Perr,
     Plimits,
     add,
@@ -30,23 +33,107 @@ use self::limits::{
     validate
 };
 use self::envelope::{
-    ENV_NOTIFICATION,
-    ENV_REQUEST,
-    ID_INT,
-    ID_STRING
+    Envelope,
+    Id
 };
 
-const TAG_NULL: u64 = 0;
-const TAG_BOOL: u64 = 1;
-const TAG_U64: u64 = 2;
-const TAG_I64: u64 = 3;
-const TAG_F64: u64 = 4;
-const TAG_STRING: u64 = 5;
-const TAG_ARRAY: u64 = 6;
-const TAG_OBJECT: u64 = 7;
-const PAYLOAD_ERROR: u64 = 1;
+// A `Value`'s tag.
+enum Tag: _ {
+    Null = 0,
+    Bool = 1,
+    U64 = 2,
+    I64 = 3,
+    F64 = 4,
+    String = 5,
+    Array = 6,
+    Object = 7
+}
+
+// A value's words: a tag, then its payload (a scalar, a string's offset or
+// a container's count) and a string's length. `Null` is the tag alone, a
+// string three words, every other value two.
+enum Value: _ {
+    Payload = 1,
+    StringLen = 2,
+    NullWords = 1,
+    Words = 2,
+    StringWords = 3
+}
+
+// The words of a request (`Envelope::Request`) and a response.
+enum Head: _ {
+    Kind = 0,
+    IdTag = 1,
+    IdInt = 2,
+    IdOff = 3,
+    IdLen = 4,
+    // A request's method, or a response's payload tag.
+    Method = 5,
+    Payload = 5,
+    // A result, or an error's code.
+    Result = 6,
+    Code = 6,
+    MessageOff = 7,
+    MessageLen = 8,
+    HasData = 9,
+    Data = 10
+}
+
+// A request's or notification's method part, from its first word: the
+// method's offset and length, whether params follow, then the params.
+enum Call: _ {
+    MethodOff = 0,
+    MethodLen = 1,
+    HasParams = 2,
+    Params = 3,
+    // Where a notification's method part starts.
+    NotificationAt = 1
+}
+
+// A response's payload.
+enum Payload: _ {
+    Result = 0,
+    Error = 1
+}
+
+// The bytes of the member names serde_json writes (`JsonBudget::key`).
+enum Key: _ {
+    Jsonrpc = 7,
+    Version = 3,
+    Id = 2,
+    Method = 6,
+    Params = 6,
+    Result = 6,
+    Error = 5,
+    Code = 4,
+    Message = 7,
+    Data = 4
+}
+
+// The JSON depth of a value under the envelope, of the error object and
+// of a value under it.
+enum Depth: _ {
+    Envelope = 1,
+    Member = 2,
+    ErrorMember = 3
+}
+
 // "Content-Length: " and two CRLFs.
 const HEADER_FIXED: u64 = 20;
+// The words of a pending value on `value`'s stack: its position and depth.
+const FRAME_WORDS: u64 = 2;
+// An object field is two values: its key and its value.
+const FIELD_VALUES: u64 = 2;
+// `\u00` and two hex digits.
+const UNICODE_ESCAPE_LEN: u64 = 6;
+// The offset from the digits of a halfway value to the two candidates.
+const HALF_ULP_DIGIT: u64 = 5;
+// The exponent of a subnormal's last bit.
+const SUBNORMAL_EXPONENT: i64 = -1074;
+// ryu writes a value without an exponent while its decimal point is at
+// most `PLAIN_EXPONENT` digits in and above `SMALL_EXPONENT`.
+const PLAIN_EXPONENT: i64 = 16;
+const SMALL_EXPONENT: i64 = -5;
 
 fn word(in w: Slice[u64], i: u64) -> u64 {
     match w.try_get(i) {
@@ -98,18 +185,21 @@ fn skip(in w: Slice[u64], p0: u64) -> u64 {
         }
         pending = wrapping_sub(pending, 1);
         let tag = word(in w, p);
-        if tag == TAG_NULL {
-            p = wrapping_add(p, 1);
-        } else if tag == TAG_STRING {
-            p = wrapping_add(p, 3);
-        } else if tag == TAG_ARRAY {
-            pending = wrapping_add(pending, word(in w, wrapping_add(p, 1)));
-            p = wrapping_add(p, 2);
-        } else if tag == TAG_OBJECT {
-            pending = wrapping_add(pending, wrapping_mul(word(in w, wrapping_add(p, 1)), 2));
-            p = wrapping_add(p, 2);
+        if tag == Tag::Null {
+            p = wrapping_add(p, Value::NullWords);
+        } else if tag == Tag::String {
+            p = wrapping_add(p, Value::StringWords);
+        } else if tag == Tag::Array {
+            pending = wrapping_add(pending, word(in w, wrapping_add(p, Value::Payload)));
+            p = wrapping_add(p, Value::Words);
+        } else if tag == Tag::Object {
+            pending = wrapping_add(
+                pending,
+                wrapping_mul(word(in w, wrapping_add(p, Value::Payload)), FIELD_VALUES)
+            );
+            p = wrapping_add(p, Value::Words);
         } else {
-            p = wrapping_add(p, 2);
+            p = wrapping_add(p, Value::Words);
         }
     }
 }
@@ -135,34 +225,34 @@ fn value(inout b: Budget, in w: Slice[u64], p0: u64, depth0: u64) -> Unit eff [F
         };
         node(inout b);
         let tag = word(in w, p);
-        if tag == TAG_ARRAY || tag == TAG_OBJECT {
+        if tag == Tag::Array || tag == Tag::Object {
             bound(depth, b.l.max_json_depth, Perr::PJsonLimit);
         }
-        let pending = stack.len() / 2;
-        if tag == TAG_STRING {
-            text(inout b, word(in w, wrapping_add(p, 2)));
-        } else if tag == TAG_ARRAY {
-            let n = word(in w, wrapping_add(p, 1));
+        let pending = stack.len() / FRAME_WORDS;
+        if tag == Tag::String {
+            text(inout b, word(in w, wrapping_add(p, Value::StringLen)));
+        } else if tag == Tag::Array {
+            let n = word(in w, wrapping_add(p, Value::Payload));
             bound(add(b.nodes, add(pending, n)), b.l.max_json_nodes, Perr::PJsonLimit);
             work(inout b, n);
-            let mut q = wrapping_add(p, 2);
+            let mut q = wrapping_add(p, Value::Words);
             for i in 0..n {
                 stack.push(q);
                 stack.push(wrapping_add(depth, 1));
                 q = skip(in w, q);
             }
-        } else if tag == TAG_OBJECT {
-            let n = word(in w, wrapping_add(p, 1));
-            let (twice, hi) = mul_wide(n, 2);
+        } else if tag == Tag::Object {
+            let n = word(in w, wrapping_add(p, Value::Payload));
+            let (twice, hi) = mul_wide(n, FIELD_VALUES);
             if hi != 0 {
                 Fail::raise(Perr::PJsonLimit);
             }
             bound(add(b.nodes, add(pending, twice)), b.l.max_json_nodes, Perr::PJsonLimit);
             work(inout b, n);
-            let mut q = wrapping_add(p, 2);
+            let mut q = wrapping_add(p, Value::Words);
             for i in 0..n {
-                key(inout b, word(in w, wrapping_add(q, 2)));
-                q = wrapping_add(q, 3);
+                key(inout b, word(in w, wrapping_add(q, Value::StringLen)));
+                q = wrapping_add(q, Value::StringWords);
                 stack.push(q);
                 stack.push(wrapping_add(depth, 1));
                 q = skip(in w, q);
@@ -173,7 +263,7 @@ fn value(inout b: Budget, in w: Slice[u64], p0: u64, depth0: u64) -> Unit eff [F
 
 fn id(inout b: Budget, tag: u64, len: u64) -> Unit eff [Fail[Perr]] {
     node(inout b);
-    if tag == ID_STRING {
+    if tag == Id::String {
         bound(len, b.l.max_id_bytes, Perr::PInvalidId);
         text(inout b, len);
     }
@@ -187,13 +277,13 @@ fn check_method(len: u64, l: Plimits) -> Unit eff [Fail[Perr]] {
 
 fn container(in w: Slice[u64], p: u64) -> bool {
     let t = word(in w, p);
-    t == TAG_ARRAY || t == TAG_OBJECT
+    t == Tag::Array || t == Tag::Object
 }
 
 // `validate_output`.
 fn validate_output(in w: Slice[u64], l: Plimits) -> Budget eff [Fail[Perr]] {
     validate(l);
-    bound(1, l.max_json_depth, Perr::PJsonLimit);
+    bound(Depth::Envelope, l.max_json_depth, Perr::PJsonLimit);
     let mut b = Budget {
         l: l,
         nodes: 0,
@@ -201,49 +291,49 @@ fn validate_output(in w: Slice[u64], l: Plimits) -> Budget eff [Fail[Perr]] {
         remaining: l.max_json_work
     };
     node(inout b);
-    key(inout b, 7);
+    key(inout b, Key::Jsonrpc);
     node(inout b);
-    text(inout b, 3);
-    let kind = word(in w, 0);
-    if kind == ENV_REQUEST || kind == ENV_NOTIFICATION {
-        let mut p: u64 = 1;
-        if kind == ENV_REQUEST {
-            key(inout b, 2);
-            id(inout b, word(in w, 1), word(in w, 4));
-            p = 5;
+    text(inout b, Key::Version);
+    let kind = word(in w, Head::Kind);
+    if kind == Envelope::Request || kind == Envelope::Notification {
+        let mut p: u64 = Call::NotificationAt;
+        if kind == Envelope::Request {
+            key(inout b, Key::Id);
+            id(inout b, word(in w, Head::IdTag), word(in w, Head::IdLen));
+            p = Head::Method;
         }
-        let method_len = word(in w, wrapping_add(p, 1));
+        let method_len = word(in w, wrapping_add(p, Call::MethodLen));
         check_method(method_len, l);
-        key(inout b, 6);
+        key(inout b, Key::Method);
         node(inout b);
         text(inout b, method_len);
-        if word(in w, wrapping_add(p, 2)) == 1 {
-            let at = wrapping_add(p, 3);
+        if word(in w, wrapping_add(p, Call::HasParams)) == 1 {
+            let at = wrapping_add(p, Call::Params);
             if !container(in w, at) {
                 Fail::raise(Perr::PInvalidEnvelope);
             }
-            key(inout b, 6);
-            value(inout b, in w, at, 2);
+            key(inout b, Key::Params);
+            value(inout b, in w, at, Depth::Member);
         }
     } else {
-        key(inout b, 2);
-        id(inout b, word(in w, 1), word(in w, 4));
-        if word(in w, 5) == PAYLOAD_ERROR {
-            key(inout b, 5);
-            bound(2, l.max_json_depth, Perr::PJsonLimit);
+        key(inout b, Key::Id);
+        id(inout b, word(in w, Head::IdTag), word(in w, Head::IdLen));
+        if word(in w, Head::Payload) == Payload::Error {
+            key(inout b, Key::Error);
+            bound(Depth::Member, l.max_json_depth, Perr::PJsonLimit);
             node(inout b);
-            key(inout b, 4);
+            key(inout b, Key::Code);
             node(inout b);
-            key(inout b, 7);
+            key(inout b, Key::Message);
             node(inout b);
-            text(inout b, word(in w, 8));
-            if word(in w, 9) == 1 {
-                key(inout b, 4);
-                value(inout b, in w, 10, 3);
+            text(inout b, word(in w, Head::MessageLen));
+            if word(in w, Head::HasData) == 1 {
+                key(inout b, Key::Data);
+                value(inout b, in w, Head::Data, Depth::ErrorMember);
             }
         } else {
-            key(inout b, 6);
-            value(inout b, in w, 6, 2);
+            key(inout b, Key::Result);
+            value(inout b, in w, Head::Result, Depth::Member);
         }
     }
     b
@@ -276,9 +366,9 @@ fn put_pool(inout o: Out, in pool: Slice[u8], a: u64, b: u64) -> Unit eff [Fail[
 
 fn hex_digit(n: u8) -> u8 {
     if n < 10 {
-        wrapping_add(n, 48)
+        wrapping_add(n, Ascii::Zero)
     } else {
-        wrapping_add(n, 87)
+        wrapping_add(n, Ascii::LowerHexBase)
     }
 }
 
@@ -290,26 +380,26 @@ fn put_string(inout o: Out, in pool: Slice[u8], off: u64, len: u64) -> Unit eff 
     let mut start = off;
     for i in off..end {
         let c = byte(in pool, i);
-        if c < 32 || c == 34 || c == 92 {
+        if c < Ascii::Space || c == Ascii::Quote || c == Ascii::Backslash {
             if start < i {
                 put_pool(inout o, in pool, start, i);
             }
-            if c == 34 {
+            if c == Ascii::Quote {
                 put(inout o, "\\\"");
-            } else if c == 92 {
+            } else if c == Ascii::Backslash {
                 put(inout o, "\\\\");
-            } else if c == 8 {
+            } else if c == Ascii::Backspace {
                 put(inout o, "\\b");
-            } else if c == 9 {
+            } else if c == Ascii::Tab {
                 put(inout o, "\\t");
-            } else if c == 10 {
+            } else if c == Ascii::Lf {
                 put(inout o, "\\n");
-            } else if c == 12 {
+            } else if c == Ascii::FormFeed {
                 put(inout o, "\\f");
-            } else if c == 13 {
+            } else if c == Ascii::Cr {
                 put(inout o, "\\r");
             } else {
-                charge_write(inout o, 6);
+                charge_write(inout o, UNICODE_ESCAPE_LEN);
                 o.bytes.extend(in "\\u00".as_bytes());
                 o.bytes.push(hex_digit(c >> 4));
                 o.bytes.push(hex_digit(c & 15));
@@ -327,7 +417,7 @@ fn put_string(inout o: Out, in pool: Slice[u8], off: u64, len: u64) -> Unit eff 
 fn put_integer(inout o: Out, neg: bool, v: u64) -> Unit eff [Fail[Perr]] {
     let mut digits: ChunkSeq[u8] = ChunkSeq::new();
     if neg {
-        digits.push(45);
+        digits.push(Ascii::Dash);
     }
     push_decimal(inout digits, v);
     charge_write(inout o, digits.len());
@@ -338,7 +428,7 @@ fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
     if v >= 10 {
         push_decimal(inout out, v / 10);
     }
-    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+    out.push(wrapping_u8(wrapping_add(v % 10, Ascii::Zero)));
 }
 
 // The `n` decimal digits of `d`, most significant first.
@@ -346,7 +436,7 @@ fn digits_of(d: u64, n: u64) -> ChunkSeq[u8] {
     let mut rev: ChunkSeq[u8] = ChunkSeq::new();
     let mut x = d;
     for i in 0..n {
-        rev.push(wrapping_u8(wrapping_add(x % 10, 48)));
+        rev.push(wrapping_u8(wrapping_add(x % 10, Ascii::Zero)));
         x = x / 10;
     }
     let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity(n);
@@ -366,11 +456,11 @@ fn digits_of(d: u64, n: u64) -> ChunkSeq[u8] {
 
 fn push_exponent(inout out: ChunkSeq[u8], e: i64) {
     if e < 0 {
-        out.push(45);
+        out.push(Ascii::Dash);
         push_decimal(inout out, wrapping_u64(wrapping_sub(0, e)));
     } else {
         // serde_json's writer signs positive exponents ("1e+16").
-        out.push(43);
+        out.push(Ascii::Plus);
         push_decimal(inout out, wrapping_u64(e));
     }
 }
@@ -385,12 +475,12 @@ fn even_tie(bits: u64, s: Shortest) -> Shortest {
     if s.n == 0 || s.digits & 1 == 0 {
         return s;
     }
-    let biased = (bits >> 52) & 2047;
-    let mut m = bits & 4503599627370495;
-    let mut e: i64 = -1074;
+    let biased = (bits >> F64::SignificandBits) & F64::ExponentMask;
+    let mut m = bits & F64::SignificandMask;
+    let mut e: i64 = SUBNORMAL_EXPONENT;
     if biased != 0 {
-        m = m | 4503599627370496;
-        e = wrapping_sub(wrapping_i64(biased), 1075);
+        m = m | F64::HiddenBit;
+        e = wrapping_sub(wrapping_i64(biased), F64::ExponentBias);
     }
     loop {
         if m & 1 == 1 {
@@ -405,10 +495,10 @@ fn even_tie(bits: u64, s: Shortest) -> Shortest {
     }
     let ten = wrapping_mul(s.digits, 10);
     let mut out = s;
-    if exact_odd(wrapping_sub(ten, 5), m, scale) {
+    if exact_odd(wrapping_sub(ten, HALF_ULP_DIGIT), m, scale) {
         // Rounded up from the midpoint: the even candidate is below.
         out.digits = wrapping_sub(s.digits, 1);
-    } else if exact_odd(wrapping_add(ten, 5), m, scale) {
+    } else if exact_odd(wrapping_add(ten, HALF_ULP_DIGIT), m, scale) {
         out.digits = wrapping_add(s.digits, 1);
     } else {
         return s;
@@ -451,10 +541,10 @@ fn exact_odd(x: u64, m: u64, scale: i64) -> bool {
 // `s.digits` holds `s.n` digits and the value is `0.digits * 10^s.k`.
 fn put_float(inout o: Out, bits: u64) -> Unit eff [Fail[Perr]] {
     let mut t: ChunkSeq[u8] = ChunkSeq::new();
-    if bits >> 63 == 1 {
-        t.push(45);
+    if bits >> F64::SignShift == 1 {
+        t.push(Ascii::Dash);
     }
-    if bits & 9223372036854775807 == 0 {
+    if bits & F64::MagnitudeMask == 0 {
         t.extend(in "0.0".as_bytes());
     } else {
         let s = even_tie(bits, shortest(bits));
@@ -462,32 +552,32 @@ fn put_float(inout o: Out, bits: u64) -> Unit eff [Fail[Perr]] {
         let length = wrapping_i64(s.n);
         let kk = s.k;
         let e = wrapping_sub(kk, length);
-        if e >= 0 && kk <= 16 {
+        if e >= 0 && kk <= PLAIN_EXPONENT {
             t.extend(in ds[0..ds.len()]);
             for i in 0..wrapping_u64(e) {
-                t.push(48);
+                t.push(Ascii::Zero);
             }
             t.extend(in ".0".as_bytes());
-        } else if kk > 0 && kk <= 16 {
+        } else if kk > 0 && kk <= PLAIN_EXPONENT {
             let point = wrapping_u64(kk);
             t.extend(in ds[0..point]);
-            t.push(46);
+            t.push(Ascii::Dot);
             t.extend(in ds[point..ds.len()]);
-        } else if kk > -5 && kk <= 0 {
+        } else if kk > SMALL_EXPONENT && kk <= 0 {
             t.extend(in "0.".as_bytes());
             for i in 0..wrapping_u64(wrapping_sub(0, kk)) {
-                t.push(48);
+                t.push(Ascii::Zero);
             }
             t.extend(in ds[0..ds.len()]);
         } else if length == 1 {
             t.extend(in ds[0..ds.len()]);
-            t.push(101);
+            t.push(Ascii::LowerE);
             push_exponent(inout t, wrapping_sub(kk, 1));
         } else {
             t.extend(in ds[0..1]);
-            t.push(46);
+            t.push(Ascii::Dot);
             t.extend(in ds[1..ds.len()]);
-            t.push(101);
+            t.push(Ascii::LowerE);
             push_exponent(inout t, wrapping_sub(kk, 1));
         }
     }
@@ -498,43 +588,43 @@ fn put_float(inout o: Out, bits: u64) -> Unit eff [Fail[Perr]] {
 // The `Serialize` of a `Value`, in serde_json's compact writes.
 fn put_value(inout o: Out, in w: Slice[u64], in pool: Slice[u8], p: u64) -> u64 eff [Fail[Perr]] {
     let tag = word(in w, p);
-    if tag == TAG_NULL {
+    if tag == Tag::Null {
         put(inout o, "null");
-        return wrapping_add(p, 1);
+        return wrapping_add(p, Value::NullWords);
     }
-    let a = word(in w, wrapping_add(p, 1));
-    if tag == TAG_BOOL {
+    let a = word(in w, wrapping_add(p, Value::Payload));
+    if tag == Tag::Bool {
         if a == 1 {
             put(inout o, "true");
         } else {
             put(inout o, "false");
         }
-        return wrapping_add(p, 2);
+        return wrapping_add(p, Value::Words);
     }
-    if tag == TAG_U64 {
+    if tag == Tag::U64 {
         put_integer(inout o, false, a);
-        return wrapping_add(p, 2);
+        return wrapping_add(p, Value::Words);
     }
-    if tag == TAG_I64 {
+    if tag == Tag::I64 {
         let v = wrapping_i64(a);
         if v < 0 {
             put_integer(inout o, true, wrapping_u64(wrapping_sub(0, v)));
         } else {
             put_integer(inout o, false, a);
         }
-        return wrapping_add(p, 2);
+        return wrapping_add(p, Value::Words);
     }
-    if tag == TAG_F64 {
+    if tag == Tag::F64 {
         put_float(inout o, a);
-        return wrapping_add(p, 2);
+        return wrapping_add(p, Value::Words);
     }
-    if tag == TAG_STRING {
-        put_string(inout o, in pool, a, word(in w, wrapping_add(p, 2)));
-        return wrapping_add(p, 3);
+    if tag == Tag::String {
+        put_string(inout o, in pool, a, word(in w, wrapping_add(p, Value::StringLen)));
+        return wrapping_add(p, Value::StringWords);
     }
-    if tag == TAG_ARRAY {
+    if tag == Tag::Array {
         put(inout o, "[");
-        let mut q = wrapping_add(p, 2);
+        let mut q = wrapping_add(p, Value::Words);
         for i in 0..a {
             if i != 0 {
                 put(inout o, ",");
@@ -545,7 +635,7 @@ fn put_value(inout o: Out, in w: Slice[u64], in pool: Slice[u8], p: u64) -> u64 
         return q;
     }
     put(inout o, "{");
-    let mut q = wrapping_add(p, 2);
+    let mut q = wrapping_add(p, Value::Words);
     for i in 0..a {
         if i != 0 {
             put(inout o, ",");
@@ -553,11 +643,11 @@ fn put_value(inout o: Out, in w: Slice[u64], in pool: Slice[u8], p: u64) -> u64 
         put_string(
             inout o,
             in pool,
-            word(in w, wrapping_add(q, 1)),
-            word(in w, wrapping_add(q, 2))
+            word(in w, wrapping_add(q, Value::Payload)),
+            word(in w, wrapping_add(q, Value::StringLen))
         );
         put(inout o, ":");
-        q = put_value(inout o, in w, in pool, wrapping_add(q, 3));
+        q = put_value(inout o, in w, in pool, wrapping_add(q, Value::StringWords));
     }
     put(inout o, "}");
     q
@@ -575,16 +665,16 @@ fn put_key(inout o: Out, in name: Str, first: bool) -> Unit eff [Fail[Perr]] {
 
 // serialize_i32 or the string of an `Id`, or `null`.
 fn put_id(inout o: Out, in w: Slice[u64], in pool: Slice[u8]) -> Unit eff [Fail[Perr]] {
-    let tag = word(in w, 1);
-    if tag == ID_INT {
-        let v = wrapping_i64(word(in w, 2));
+    let tag = word(in w, Head::IdTag);
+    if tag == Id::Int {
+        let v = wrapping_i64(word(in w, Head::IdInt));
         if v < 0 {
             put_integer(inout o, true, wrapping_u64(wrapping_sub(0, v)));
         } else {
             put_integer(inout o, false, wrapping_u64(v));
         }
-    } else if tag == ID_STRING {
-        put_string(inout o, in pool, word(in w, 3), word(in w, 4));
+    } else if tag == Id::String {
+        put_string(inout o, in pool, word(in w, Head::IdOff), word(in w, Head::IdLen));
     } else {
         put(inout o, "null");
     }
@@ -597,43 +687,53 @@ fn put_envelope(inout o: Out, in w: Slice[u64], in pool: Slice[u8]) -> Unit eff 
     put(inout o, "\"");
     put(inout o, "2.0");
     put(inout o, "\"");
-    let kind = word(in w, 0);
-    if kind == ENV_REQUEST || kind == ENV_NOTIFICATION {
-        let mut p: u64 = 1;
-        if kind == ENV_REQUEST {
+    let kind = word(in w, Head::Kind);
+    if kind == Envelope::Request || kind == Envelope::Notification {
+        let mut p: u64 = Call::NotificationAt;
+        if kind == Envelope::Request {
             put_key(inout o, "id", false);
             put_id(inout o, in w, in pool);
-            p = 5;
+            p = Head::Method;
         }
         put_key(inout o, "method", false);
-        put_string(inout o, in pool, word(in w, p), word(in w, wrapping_add(p, 1)));
-        if word(in w, wrapping_add(p, 2)) == 1 {
+        put_string(
+            inout o,
+            in pool,
+            word(in w, wrapping_add(p, Call::MethodOff)),
+            word(in w, wrapping_add(p, Call::MethodLen))
+        );
+        if word(in w, wrapping_add(p, Call::HasParams)) == 1 {
             put_key(inout o, "params", false);
-            put_value(inout o, in w, in pool, wrapping_add(p, 3));
+            put_value(inout o, in w, in pool, wrapping_add(p, Call::Params));
         }
     } else {
         put_key(inout o, "id", false);
         put_id(inout o, in w, in pool);
-        if word(in w, 5) == PAYLOAD_ERROR {
+        if word(in w, Head::Payload) == Payload::Error {
             put_key(inout o, "error", false);
             put(inout o, "{");
             put_key(inout o, "code", true);
-            let code = wrapping_i64(word(in w, 6));
+            let code = wrapping_i64(word(in w, Head::Code));
             if code < 0 {
                 put_integer(inout o, true, wrapping_u64(wrapping_sub(0, code)));
             } else {
                 put_integer(inout o, false, wrapping_u64(code));
             }
             put_key(inout o, "message", false);
-            put_string(inout o, in pool, word(in w, 7), word(in w, 8));
-            if word(in w, 9) == 1 {
+            put_string(
+                inout o,
+                in pool,
+                word(in w, Head::MessageOff),
+                word(in w, Head::MessageLen)
+            );
+            if word(in w, Head::HasData) == 1 {
                 put_key(inout o, "data", false);
-                put_value(inout o, in w, in pool, 10);
+                put_value(inout o, in w, in pool, Head::Data);
             }
             put(inout o, "}");
         } else {
             put_key(inout o, "result", false);
-            put_value(inout o, in w, in pool, 6);
+            put_value(inout o, in w, in pool, Head::Result);
         }
     }
     put(inout o, "}");
@@ -659,7 +759,8 @@ pub fn encode_frame(in w: Slice[u64], in pool: Slice[u8], l: Plimits)
     let n = o.bytes.len();
     let header_bytes = wrapping_add(HEADER_FIXED, decimal_len(n));
     bound(header_bytes, l.max_header_bytes, Perr::PHeaderLimit);
-    bound(wrapping_sub(header_bytes, 2), l.max_header_line_bytes, Perr::PHeaderLimit);
+    // The header line without the CRLF that ends the headers.
+    bound(wrapping_sub(header_bytes, Crlf::Len), l.max_header_line_bytes, Perr::PHeaderLimit);
     bound(1, l.max_headers, Perr::PHeaderLimit);
     let mut frame: ChunkSeq[u8] = ChunkSeq::with_capacity(wrapping_add(header_bytes, n));
     frame.extend(in "Content-Length: ".as_bytes());
