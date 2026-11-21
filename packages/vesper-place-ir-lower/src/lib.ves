@@ -1,0 +1,57 @@
+// @vesper/place-ir-lower: Place IR lowering (`ir::lower_world` and
+// `thread_tokens` of src/ir.rs) in Vesper (self-hosting SH3 lane 13,
+// #1252), writing @vesper/place-ir tables. Rust stays the default
+// lowering; this is a non-default port with a differential
+// (tests/self_host_ir_lower.rs).
+//
+// - ast.ves: the input after check-data's context (the function table,
+//   effect operation signatures, bodies as expression and pattern rows).
+// - lower.ves: the lowering, token threading and the program rows.
+
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/place-ir::{
+    put_program
+};
+use self::ast::{
+    read_ast
+};
+use self::lower::{
+    L,
+    l_new,
+    lower_all
+};
+
+// The lowered program as `put_program` words (names, types, the program
+// section), then two words: functions lowered and functions skipped.
+pub fn ir_lower_words(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let a = read_ast(inout r, in b, in c);
+    let mut l = l_new(sink c, sink a);
+    lower_all(inout l);
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_program(in l.p, in l.c.types, in l.c.names, inout o);
+    o.push(l.lowered);
+    o.push(l.skipped);
+    o
+}
+
+// Reads the input and lowers nothing: the decoding cost the timing test
+// subtracts from `ir_lower_words`. Returns the expression row count.
+pub fn ir_lower_read(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let a = read_ast(inout r, in b, in c);
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(a.exs.len());
+    o
+}
