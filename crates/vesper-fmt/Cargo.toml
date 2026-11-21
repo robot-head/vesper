@@ -18,7 +18,7 @@ build = "build.rs"
 # (docs/parallel-results/self-host-fmt-highlight.md).
 
 [features]
-vesper-port = ["dep:vesper-port-abi"]
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-blake3-sys"]
 # Deliberately wrong Vesper builds, one edit per ported area: the port test
 # runs must fail (port/test-port.sh asserts which tests do).
 vesper-port-divergent = ["vesper-port"]
@@ -28,6 +28,8 @@ blake3 = "1.8"
 # The frozen Rust seed copy (seed-copy rule, #1128).
 vesper-lean-syntax = { path = "../vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
 vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+# The `.vsys` library `Blake3` in C, linked by the port build.
+vesper-blake3-sys = { path = "../vesper-blake3-sys", optional = true }
 vesper-syntax = { path = "../vesper-syntax" }
 
 [dev-dependencies]

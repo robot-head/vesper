@@ -22,13 +22,11 @@ pub mod recovery;
 mod port_binding;
 #[cfg(vesper_port)]
 mod port;
-// The Rust side of @vesper-std/hash-sys's `.vsys` library `Blake3`, which the
-// port imports for the BLAKE3 digests of `format_for_verification`.
+// @vesper-std/hash-sys's `.vsys` library `Blake3` (the official BLAKE3 C
+// implementation, built by vesper-blake3-sys), which the port imports for
+// the BLAKE3 digests of `format_for_verification`.
 #[cfg(vesper_port)]
-#[allow(dead_code)]
-#[rustfmt::skip]
-#[path = "../../../packages/vesper-std/hash/sys/shim.rs"]
-mod blake3_shim;
+use vesper_blake3_sys as blake3_shim;
 
 /// Which build this is: `"vesper"` for `vesper-fmt` with the `vesper-port`
 /// feature, `"rust"` otherwise (and for the seed copy `vesper-fmt-seed` that

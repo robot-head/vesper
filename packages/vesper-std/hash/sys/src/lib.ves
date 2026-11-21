@@ -17,10 +17,11 @@
 // @vesper-std/hash-sys: BLAKE3 through the vetted `blake3` crate
 // (self-hosting SH0 lane 5, #1127).
 //
-// The `.vsys` library `Blake3` above is provided by the Rust host that links
-// the Vesper object: `packages/vesper-std/hash/sys/shim.rs` defines its
-// symbols over the `blake3` crate (SIMD on every target the crate supports).
-// A port names the shim module with `rust=` on its own `@export vsys` line.
+// The `.vsys` library `Blake3` above is C: the official BLAKE3 C
+// implementation (upstream 1.8.7, SIMD kernels picked at run time) and the
+// glue `c/vesper_blake3.c`, built into the static library
+// `vesper_std_blake3` by crates/vesper-blake3-sys for Cargo and Bazel hosts.
+// A port names that crate with `rust=` on its own `@export vsys` line.
 // Results are `@vesper-std/hash::blake3::Digest` values, equal to those of
 // the portable Vesper implementation.
 //

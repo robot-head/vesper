@@ -94,8 +94,6 @@ vesper_crate(
         "tools/resource-model42/KernelSnapshot.lean",
         "docs/rfcs/resource-model42-source-manifest.json",
         "lean/**",
-        # tests/std_hash.rs includes the Rust side of @vesper-std/hash-sys.
-        "packages/vesper-std/hash/sys/shim.rs",
     ],
     # `vesper <tool>` runs `vesper-<tool>` (crates/vesper-tools, self-hosting
     # SH0 lane 2, #1124). Building //:bin/vesper builds them beside it at
@@ -1132,6 +1130,22 @@ vesper_package(
 filegroup(
     name = "examples",
     srcs = glob(["examples/**"]),
+    visibility = ["//visibility:public"],
+)
+
+# The BLAKE3 C library of @vesper-std/hash-sys (the official C
+# implementation, upstream 1.8.7, and its `.vsys` glue), compiled by
+# crates/vesper-blake3-sys's build script (SH6 lane 17, #1412). The header
+# alone names the directory to the build script.
+filegroup(
+    name = "blake3_c_sources",
+    srcs = glob(["packages/vesper-std/hash/sys/c/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "blake3_c_header",
+    srcs = ["packages/vesper-std/hash/sys/c/blake3.h"],
     visibility = ["//visibility:public"],
 )
 
