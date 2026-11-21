@@ -35,7 +35,7 @@ by up to 30% between runs; the instruction counts are steadier.
 | Lane | Module | PR | State | Differences | Speed vs Rust | Hybrid swap |
 |---|---|---|---|---|---|---|
 | SH2-4 | `@vesper/check-data` (types, names, `World`, diagnostics) and harness | #1217 | merged | 0 on 281 worlds | not timed (correctness tasks) | n/a (shared package) |
-| SH2-5 | layout and the IR check | #1232 | open | 0: every corpus type; IR check 1,710 cases, 322,908 diagnostics | census: layout 0.34x, IR check 0.57x; hybrid vs default 0.97x wall over 1,611 runs (debug) | **swapped** (non-default), ABBA and callgrind to follow on the branch |
+| SH2-5 | layout and the IR check | #1232 | open | 0: every corpus type; IR check 1,710 cases, 322,908 diagnostics | per call with the boundary: layout 5.43x (world rebuilt each call), IR check 0.53x; hybrid corpus `check` 1.08x wall / 1.070x Ir, `emit object` 1.14x / 1.312x ([report](self-host-layout-ir-check-swap.md)) | **swapped** (non-default) |
 | SH2-6 | package assembler (names, packages) | #1227 | open | 0 of 80 | whole 0.72-0.87x; assembler alone 0.37-0.44x; **1.54x Ir** (two parses per module, gap N1) | follow-up (`AssembleTable`) |
 | SH2-7 | core typing: relations, exhaustiveness (part 1) | #1222 | merged | 0 on 282 worlds | relations 1.18x, patterns 1.21x (with decode) | needs the checker spine (part 3+) |
 | SH2-7 | core typing: expression typing (part 2) | #1237 | open | 0 on its cases | no fair Rust subset; timed at the swap | same |

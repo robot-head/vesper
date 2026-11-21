@@ -105,9 +105,14 @@ fn layout_matches_rust_on_the_examples() {
 
 #[test]
 fn ir_check_matches_rust_on_the_examples() {
+    let mut checked = 0;
     for (name, w) in worlds() {
         let program = vesper::ir::lower_world(&w);
-        let input = check_words::ir_input(&w, &program).unwrap();
+        // Worlds with element views go to Rust (tests/common/check_words.rs).
+        let Some(input) = check_words::ir_input(&w, &program) else {
+            continue;
+        };
+        checked += 1;
         let vesper = check_words::decode_diagnostics(&ir_check_binding::validate_words(&input));
         assert_eq!(
             vesper,
@@ -115,4 +120,5 @@ fn ir_check_matches_rust_on_the_examples() {
             "{name}"
         );
     }
+    assert!(checked >= 20, "only {checked} worlds checked");
 }
