@@ -52,6 +52,7 @@ unchanged and the default `vesper` binary links none of this.
 | Test | What | Result (Linux, this branch) |
 |---|---|---|
 | `self_host_cli_commands.rs` `command_layers_match_the_default_compiler` | 183 argument vectors: every vector of `tests/foundation_cli.rs`'s traceparent tests and `tests/simd_cli.rs`, each argument-loop edge (options after errors, `--help` late, `--`, a lone `-`, non-ASCII and control bytes in an echoed option, leading zeros and overflow in `--delimiter`, a missing profile value), 37 headers covering every parser error at each offset (each alone, before and after `--json`), every profile, missing and directory inputs, and two commands handed back. `simd scan input` runs on 9 inputs (0 to 131,089 bytes, across the 64 KiB chunk edge). Each run is in a fresh directory: exit status, stdout, stderr and every file afterwards | 399 runs, 0 differ |
+| `full_stdout_fails_as_in_rust` (Linux) | stdout on `/dev/full`: each ported path panics with std's `failed printing to stdout` and exits 101, as the Rust CLI's `println!` does (the host prints with `print!`/`eprint!` and turns the caught panic into exit 101) | ok |
 | `ported_commands_run_in_vesper` | the stats line: each ported path prints from Vesper; `fmt --help` and `check --fuel` do not | ok |
 | `driver.rs` (lane 12's) | the driver's own differential, rerun with the new dispatch | 3 tests pass |
 

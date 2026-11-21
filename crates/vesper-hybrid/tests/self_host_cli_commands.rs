@@ -414,3 +414,57 @@ fn ported_commands_run_in_vesper() {
     assert_eq!(prints(&["check", "--fuel"]), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A failed write of the output is the Rust CLI's panic and exit 101, not
+/// a silent success (`println!` panics when stdout is full).
+#[cfg(target_os = "linux")]
+#[test]
+fn full_stdout_fails_as_in_rust() {
+    let default = default_compiler();
+    let hybrid = hybrid();
+    let dir = std::env::temp_dir().join(format!(
+        "vesper-hybrid-commands-full-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("input"), b"abc").unwrap();
+    for args in [
+        &[][..],
+        &["--help"],
+        &["--version"],
+        &["traceparent", VALID],
+        &["traceparent", VALID, "--json"],
+        &["traceparent", "bad", "--json"],
+        &["simd", "--help"],
+        &["simd", "scan", "input", "--delimiter", "97"],
+        &["simd", "scan", "input", "--delimiter", "97", "--json"],
+    ] {
+        let mut both = vec![];
+        for compiler in [&default, &hybrid] {
+            let full = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap();
+            let out = Command::new(compiler)
+                .current_dir(&dir)
+                .env_remove("VESPER_HYBRID_STATS")
+                .env("RUST_BACKTRACE", "0")
+                .args(args)
+                .stdout(full)
+                .output()
+                .unwrap();
+            both.push(out);
+        }
+        assert_eq!(both[0].status.code(), both[1].status.code(), "{args:?}");
+        // The panic line names the thread's id, so compare the message.
+        for out in &both {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains("failed printing to stdout: No space left on device"),
+                "{args:?}: {stderr}"
+            );
+        }
+        assert_eq!(both[1].status.code(), Some(101), "{args:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -5,7 +5,7 @@
 //! messages, output) are Vesper; the driver hands them every command that
 //! is not on the compile path.
 use std::cell::RefCell;
-use std::io::{self, Write};
+use std::io;
 
 /// Prints of the Vesper command layers (`hc_print` and `hc_help`);
 /// `VESPER_HYBRID_STATS=1` reports it. A command handed back to the Rust
@@ -61,6 +61,16 @@ fn io_error(word: u64) -> io::Error {
     io::Error::from(kind)
 }
 
+/// Print as the Rust commands do (`print!`, `println!`, `eprintln!`): a
+/// failed write panics with std's own message, and the CLI exits 101 as the
+/// Rust CLI does when its thread panics. The panic must not unwind into
+/// the Vesper caller, so it is caught here and the process exits.
+fn rust_print(print: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(print)).is_err() {
+        std::process::exit(101);
+    }
+}
+
 /// The `HybridCommands` import's symbols (named by `// @export vsys
 /// HybridCommands rust=crate::commands::host` in modules/driver).
 pub mod host {
@@ -100,19 +110,19 @@ pub mod host {
     pub unsafe extern "C" fn hc_print(stream: u32, text: *const u8, len: usize) {
         PRINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // SAFETY: lent for the call.
-        let text = unsafe { bytes(text, len) };
-        let _ = if stream == 2 {
-            io::stderr().lock().write_all(text)
+        let text = String::from_utf8_lossy(unsafe { bytes(text, len) });
+        if stream == 2 {
+            rust_print(|| eprint!("{text}"));
         } else {
-            io::stdout().lock().write_all(text)
-        };
+            rust_print(|| print!("{text}"));
+        }
     }
 
     /// The CLI's help (no command, `--help` or `-h`).
     #[unsafe(no_mangle)]
     pub extern "C" fn hc_help() {
         PRINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        print!("{}", crate::HELP);
+        rust_print(|| print!("{}", crate::HELP));
     }
 
     /// Text `which` (item `index` of a list): see `text_*` in the package.
