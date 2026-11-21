@@ -24,6 +24,12 @@ const MODULES: &[(&str, &str, &str)] = &[
     // SH4 lane 1 (#1275): the census lowering family, emitted through
     // lent Cranelift handles.
     ("hybrid_codegen", "modules/codegen", "port/codegen.rs"),
+    // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
+    (
+        "hybrid_codegen_export",
+        "modules/codegen_export",
+        "port/codegen_export.rs",
+    ),
     // SH5 lane 14 (#1337): test discovery of `vesper test`.
     (
         "hybrid_test_runner",
@@ -34,6 +40,12 @@ const MODULES: &[(&str, &str, &str)] = &[
     ("hybrid_ir_inline", "modules/ir_inline", "port/ir_inline.rs"),
     // SH3 lane 1 (#1240): the IR swap point's identity round trip.
     ("hybrid_place_ir", "modules/place_ir", "port/place_ir.rs"),
+    // SH3 lane 12 (#1251): bounds hoisting through the `hoist` hook.
+    (
+        "hybrid_bounds_hoist",
+        "modules/bounds_hoist",
+        "port/bounds_hoist.rs",
+    ),
 ];
 
 /// The divergence check of the differential harness: the enum tag word
