@@ -51,7 +51,7 @@ Rust stays the default and nothing is deleted. No file under `src/` changes in e
   - The parts it copies without reading (operators, literals, call types, sequence, vector, tiled and `fip` operations, handled expressions) come from the first input instruction with the same opaque index.
   - State tokens are threaded again with `ir::thread_tokens`, as `ir_inline::inline` does.
 - **Hybrid module `modules/ir_inline`** (`@vesper/hybrid-ir-inline`, ABI v4) has one function, `inline_words(in Slice[u8]) -> ChunkSeq[u64]`.
-  - `src/hybrid.rs` installs `ir_swap::IrPasses { inline: Some(vesper_inline), .. }` from the static constructor. The later SH3 lanes add their hooks to that one table.
+  - `src/hybrid.rs` puts `vesper_inline` in the `inline` slot of lane 1's `VESPER_IR_PASSES` table (#1320). The program then still goes through lane 1's `@vesper/place-ir` round trip, as every other hook's does. The later SH3 lanes fill the other slots of that table.
   - `VESPER_HYBRID_STATS=1` reports `ir-inline answered N calls`, and `pilot_module_runs_from_vesper` requires calls.
   - The `divergent-ir-inline` feature makes the module return an empty report, so nothing is inlined. The hybrid workflow checks that the differential harness catches it.
 - **Decision: the package keeps its own tables instead of moving onto lane 1's `@vesper/place-ir`.** Lane 1's tables carry the same program. Rewriting the 4,300-line pass over them would change no result. The words above already round-trip exactly, and lane 1's payload pool plays the same role as this package's opaque indexes. A shared table is worth adopting when several SH3 passes run back to back without going through Rust: lanes 9-13 chained in one module.

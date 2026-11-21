@@ -23,6 +23,8 @@ const MODULES: &[(&str, &str, &str)] = &[
     ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
     // SH3 lane 11 (#1250): the inliner, through `ir_swap`'s `inline` hook.
     ("hybrid_ir_inline", "modules/ir_inline", "port/ir_inline.rs"),
+    // SH3 lane 1 (#1240): the IR swap point's identity round trip.
+    ("hybrid_place_ir", "modules/place_ir", "port/place_ir.rs"),
 ];
 
 /// The divergence check of the differential harness: the enum tag word

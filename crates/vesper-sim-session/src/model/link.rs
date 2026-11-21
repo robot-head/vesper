@@ -28,6 +28,7 @@
 //! The generator is SplitMix64 (not cryptographic). It never reads a real
 //! clock or random source.
 use serde::{Deserialize, Serialize};
+#[cfg(not(feature = "vesper-port"))]
 use std::collections::VecDeque;
 
 pub const PPM: u32 = 1_000_000;
@@ -39,6 +40,15 @@ impl SplitMix64 {
     pub fn new(seed: u64) -> Self {
         Self(seed)
     }
+    #[cfg(feature = "vesper-port")]
+    pub fn next_u64(&mut self) -> u64 {
+        port::splitmix_next(&mut self.0)
+    }
+    #[cfg(feature = "vesper-port")]
+    pub fn chance(&mut self, ppm: u32) -> bool {
+        port::splitmix_chance(&mut self.0, ppm)
+    }
+    #[cfg(not(feature = "vesper-port"))]
     pub fn next_u64(&mut self) -> u64 {
         // Wrapping arithmetic is the definition of SplitMix64.
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
@@ -49,12 +59,20 @@ impl SplitMix64 {
     }
     /// One Bernoulli draw with probability `ppm / 10^6`. Always consumes one
     /// value, so the draw sequence does not depend on the probabilities.
+    #[cfg(not(feature = "vesper-port"))]
     pub fn chance(&mut self, ppm: u32) -> bool {
         (self.next_u64() % u64::from(PPM)) < u64::from(ppm)
     }
 }
 
 /// FNV-1a of a name, used to derive per-link and per-flow seeds.
+#[cfg(feature = "vesper-port")]
+pub fn name_seed(seed: u64, name: &str) -> u64 {
+    port::name_seed(seed, name)
+}
+
+/// FNV-1a of a name, used to derive per-link and per-flow seeds.
+#[cfg(not(feature = "vesper-port"))]
 pub fn name_seed(seed: u64, name: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in name.bytes() {
@@ -74,6 +92,22 @@ pub struct GilbertElliott {
 }
 impl GilbertElliott {
     /// Stationary probability of the Bad state, in ppm (rounded down).
+    #[cfg(feature = "vesper-port")]
+    pub fn stationary_bad_ppm(&self) -> u32 {
+        port::stationary_bad_ppm(self.good_to_bad_ppm, self.bad_to_good_ppm)
+    }
+    /// Stationary loss probability of the chain alone, in ppm.
+    #[cfg(feature = "vesper-port")]
+    pub fn stationary_loss_ppm(&self) -> u32 {
+        port::stationary_loss_ppm(
+            self.good_to_bad_ppm,
+            self.bad_to_good_ppm,
+            self.loss_good_ppm,
+            self.loss_bad_ppm,
+        )
+    }
+    /// Stationary probability of the Bad state, in ppm (rounded down).
+    #[cfg(not(feature = "vesper-port"))]
     pub fn stationary_bad_ppm(&self) -> u32 {
         let (g, b) = (
             u64::from(self.good_to_bad_ppm),
@@ -85,6 +119,7 @@ impl GilbertElliott {
         (g * u64::from(PPM) / (g + b)) as u32
     }
     /// Stationary loss probability of the chain alone, in ppm.
+    #[cfg(not(feature = "vesper-port"))]
     pub fn stationary_loss_ppm(&self) -> u32 {
         let bad = u64::from(self.stationary_bad_ppm());
         let good = u64::from(PPM) - bad;
@@ -162,6 +197,7 @@ pub enum LinkError {
     TimeOverflow,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
     spec: LinkSpec,
@@ -171,6 +207,7 @@ pub struct Link {
     departures: VecDeque<u64>,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 impl Link {
     pub fn new(spec: LinkSpec, seed: u64) -> Self {
         let rng = SplitMix64::new(name_seed(seed, &spec.name));
@@ -283,6 +320,152 @@ impl Link {
         })
     }
 }
+
+/// The Vesper build of the link (port/src/lib.ves), with the same API.
+#[cfg(feature = "vesper-port")]
+pub struct Link {
+    spec: LinkSpec,
+    state: port::LinkState,
+}
+
+#[cfg(feature = "vesper-port")]
+impl Link {
+    pub fn new(spec: LinkSpec, seed: u64) -> Self {
+        let ge = spec.gilbert_elliott;
+        let reorder = spec.reorder;
+        let params = port::LinkParams {
+            base_delay_ns: spec.base_delay_ns,
+            has_gilbert_elliott: ge.is_some(),
+            good_to_bad_ppm: ge.map_or(0, |g| g.good_to_bad_ppm),
+            bad_to_good_ppm: ge.map_or(0, |g| g.bad_to_good_ppm),
+            loss_good_ppm: ge.map_or(0, |g| g.loss_good_ppm),
+            loss_bad_ppm: ge.map_or(0, |g| g.loss_bad_ppm),
+            loss_ppm: spec.loss_ppm,
+            duplicate_ppm: spec.duplicate_ppm,
+            has_reorder: reorder.is_some(),
+            reorder_ppm: reorder.map_or(0, |r| r.ppm),
+            reorder_extra_delay_ns: reorder.map_or(0, |r| r.extra_delay_ns),
+            buffer_packets: spec.bottleneck.buffer_packets,
+            rate_bytes_per_sec: spec.bottleneck.rate_bytes_per_sec,
+        };
+        let state = port::LinkState::new(params, seed, &spec.name);
+        Self { spec, state }
+    }
+    pub fn spec(&self) -> &LinkSpec {
+        &self.spec
+    }
+    pub fn in_bad_state(&self) -> bool {
+        self.state.in_bad_state()
+    }
+    /// Datagrams queued in the bottleneck at `at_ns`.
+    pub fn queued_at(&self, at_ns: u64) -> u32 {
+        self.state.queued_at(at_ns)
+    }
+    /// Service time of a datagram of `bytes`, rounded up (at least 1 ns).
+    pub fn service_ns(&self, bytes: u32) -> u64 {
+        self.state.service_ns(bytes)
+    }
+    /// Whether the next datagram is duplicated (one draw).
+    pub fn duplicates(&mut self) -> bool {
+        self.state.duplicates()
+    }
+    pub fn transmit(
+        &mut self,
+        now_ns: u64,
+        at_ns: u64,
+        bytes: u32,
+    ) -> Result<Transmission, LinkError> {
+        use port::TransmitOutcome as T;
+        Ok(match self.state.transmit(now_ns, at_ns, bytes) {
+            T::TimeOverflow => return Err(LinkError::TimeOverflow),
+            T::Lost(ge_bad, cause) => Transmission {
+                ge_bad,
+                fate: Fate::Lost {
+                    cause: match cause {
+                        0 => LossCause::GilbertElliott,
+                        1 => LossCause::Independent,
+                        2 => LossCause::QueueOverflow,
+                        other => panic!("invalid loss cause {other} from Vesper"),
+                    },
+                },
+            },
+            T::Delivered(ge_bad, queue_delay_ns, reorder_extra_ns, arrive_at_ns) => Transmission {
+                ge_bad,
+                fate: Fate::Delivered {
+                    queue_delay_ns,
+                    reorder_extra_ns,
+                    arrive_at_ns,
+                },
+            },
+        })
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl Clone for Link {
+    fn clone(&self) -> Self {
+        Self {
+            spec: self.spec.clone(),
+            state: port::LinkState::clone(&self.state),
+        }
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl PartialEq for Link {
+    fn eq(&self, other: &Self) -> bool {
+        self.spec == other.spec && port::LinkState::same(&self.state, &other.state)
+    }
+}
+#[cfg(feature = "vesper-port")]
+impl Eq for Link {}
+
+#[cfg(feature = "vesper-port")]
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Link")
+            .field("spec", &self.spec)
+            .field("bad", &self.in_bad_state())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The records that cross the port boundary, and the generated binding.
+#[cfg(feature = "vesper-port")]
+pub(crate) mod port {
+    /// `LinkSpec` without its name, with the options flattened.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct LinkParams {
+        pub base_delay_ns: u64,
+        pub has_gilbert_elliott: bool,
+        pub good_to_bad_ppm: u32,
+        pub bad_to_good_ppm: u32,
+        pub loss_good_ppm: u32,
+        pub loss_bad_ppm: u32,
+        pub loss_ppm: u32,
+        pub duplicate_ppm: u32,
+        pub has_reorder: bool,
+        pub reorder_ppm: u32,
+        pub reorder_extra_delay_ns: u64,
+        pub buffer_packets: u32,
+        pub rate_bytes_per_sec: u64,
+    }
+
+    /// `Result<Transmission, LinkError>`, flattened.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum TransmitOutcome {
+        TimeOverflow,
+        Lost(bool, u8),
+        Delivered(bool, u64, u64, u64),
+    }
+
+    pub use super::port_binding::*;
+}
+
+#[cfg(feature = "vesper-port")]
+#[rustfmt::skip]
+#[path = "../../port/binding.rs"]
+mod port_binding;
 
 #[cfg(test)]
 mod tests {
