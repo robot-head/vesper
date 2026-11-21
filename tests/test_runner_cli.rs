@@ -776,7 +776,7 @@ fn standard_library_collection_source_unit_tests_pass() {
 #[test]
 fn frontend_source_unit_tests_pass() {
     check_source_unit_tests(&[
-        ("packages/vesper-ast/src/text.ves", 29),
+        ("packages/vesper-ast/src/text.ves", 63),
         ("packages/vesper-front/src/util.ves", 36),
     ]);
 }
@@ -784,8 +784,8 @@ fn frontend_source_unit_tests_pass() {
 #[test]
 fn ported_crate_source_unit_tests_pass() {
     check_source_unit_tests(&[
-        ("crates/vesper-crucible/vesper/src/lib.ves", 40),
-        ("crates/vesper-lean-syntax/vesper/src/lib.ves", 158),
+        ("crates/vesper-crucible/vesper/src/lib.ves", 186),
+        ("crates/vesper-lean-syntax/vesper/src/lib.ves", 174),
         ("crates/vesper-simpulse/vesper/src/lib.ves", 25),
     ]);
 }

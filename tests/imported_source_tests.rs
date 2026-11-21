@@ -44,7 +44,7 @@ fn ast_lowering() {
 #[test]
 fn ported_crate_packages() {
     run_suites(&[
-        ("crates/vesper-semver/vesper", 77),
+        ("crates/vesper-semver/vesper", 83),
         ("crates/vesper-prism-h3/vesper", 22),
     ]);
 }

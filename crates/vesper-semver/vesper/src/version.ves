@@ -831,6 +831,24 @@ test {
         parsed.err == error && parsed.pos == position && parsed.at == offset
     }
 
+    // @case equal_prefixes(in "az", 1, in "ab", 1, 0)
+    // @case shorter_prefix(in "az", 1, in "ab", 2, -1)
+    // @case empty_prefix(in "z", 0, in "a", 1, -1)
+    fn test_byte_comparison_stays_in_range(
+        in left: Str,
+        left_end: u64,
+        in right: Str,
+        right_end: u64,
+        expected: i64
+    ) -> bool {
+        let a = input_bytes(in left);
+        let b = input_bytes(in right);
+        cmp_bytes(in a, 0, left_end, in b, 0, right_end)
+            == expected
+            && cmp_bytes(in b, 0, right_end, in a, 0, left_end)
+            == wrapping_neg_i64(expected)
+    }
+
     // @case patch(in "1.2.3", in "1.2.4", -1)
     // @case major(in "2.0.0", in "1.99.99", 1)
     // @case release_beats_prerelease(in "1.0.0-rc.1", in "1.0.0", -1)
@@ -838,6 +856,9 @@ test {
     // @case numeric_before_alpha(in "1.0.0-2", in "1.0.0-alpha", -1)
     // @case shorter_prerelease(in "1.0.0-alpha", in "1.0.0-alpha.1", -1)
     // @case build_is_ignored(in "1.0.0+a", in "1.0.0+b", 0)
+    // @case numeric_before_lettered_zero(in "1.0.0-9", in "1.0.0-0a", -1)
+    // @case numeric_before_short_alpha(in "1.0.0-10", in "1.0.0-a", -1)
+    // @case alpha_order_is_not_by_length(in "1.0.0-az", in "1.0.0-b", -1)
     // @case alpha_prefix(in "1.0.0-alpha", in "1.0.0-alphabet", -1)
     // @case alpha_prefix_build_is_ignored(in "1.0.0-alpha+z", in "1.0.0-alphabet+a", -1)
     // @case numeric_equal_length(in "1.0.0-rc.2", in "1.0.0-rc.3", -1)
