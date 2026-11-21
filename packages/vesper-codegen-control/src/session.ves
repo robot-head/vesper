@@ -32,6 +32,8 @@ use @vesper/check-data::world::{
     World
 };
 use @vesper/check-layout::{
+    L_ENUM,
+    L_PRODUCT,
     Layouts,
     layout_of
 };
@@ -43,10 +45,6 @@ use self::tables::{
 };
 
 const NONE32: u32 = 4294967295;
-// Constants cannot be imported across packages yet (check-data gap 1);
-// these copies equal @vesper/check-layout's.
-const L_PRODUCT: u8 = 1;
-const L_ENUM: u8 = 2;
 const NO_ADT: u32 = 4294967295;
 const K_NAMED: u8 = 1;
 const K_TUPLE: u8 = 2;

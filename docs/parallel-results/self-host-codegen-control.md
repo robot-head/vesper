@@ -4,7 +4,7 @@ Claim: #1284. Prompt: [10-codegen-control.md](../agent-prompts/self-host-sh4/10-
 Package: `packages/vesper-codegen-control` (`@vesper/codegen-control`).
 Differential: `tests/self_host_codegen_control.rs`.
 
-Part 1, 2026-11-21. Stacked on #1259 (SH3 lane 1 part 1) at `8ac0f94`;
+Part 1, 2026-11-21. Stacked on #1259 (SH3 lane 1 part 1), first at `8ac0f94`, then merged up to its head `5b50435`;
 `origin/main` was `e73cfd6`. Lane 1 (#1275, lent Cranelift handles and
 `src/codegen_swap.rs`) has no pull request yet, so this part ports only the
 decisions that emit nothing. Rust stays the default build; nothing here
@@ -114,14 +114,10 @@ lent handles cover it.
    the test) and passes them in. Closure shapes and handler plans (captures,
    clause kinds, tail resumptions) need an expression encoding first. That
    belongs with #1259's follow-ups or lane 2 (#1276); this lane will use it.
-2. **Constants cannot be imported across packages.** `L_PRODUCT` and
-   `L_ENUM` are copied from `@vesper/check-layout` (check-data gap 1, still
-   open on this base). Repro: `use @vesper/check-layout::{L_ENUM};` gives
-   E0111 "module @vesper/check-layout has no item 'L_ENUM'".
-3. **`effect` is a keyword, not a contextual name.** A local or field named
+2. **`effect` is a keyword, not a contextual name.** A local or field named
    `effect` is a parse error (E0002 "expected a lower-case identifier, found
-   the keyword `effect`"), unlike `eff` since #1218. Repro:
-   `fn f() { let effect = 1; }`. The port uses `eff_name`.
+   the keyword `effect`"). #1264 makes it a name; until it merges the port
+   uses `eff_name`.
 
 No Rust bug was found: every case matched.
 
