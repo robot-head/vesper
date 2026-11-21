@@ -100,17 +100,15 @@ fn polymorphic_recursion_reports_its_cycle() {
     );
 }
 
-/// `fN(w1, .., wN) = sum of i * wi`, so a swapped or dropped word changes
-/// the result.
+/// `fN(w1, .., wN) = sum of i * wi` (wrapping), so a swapped or dropped
+/// word changes the result.
 fn weighted(n: usize) -> String {
     let params: Vec<String> = (1..=n).map(|i| format!("w{i}: u64")).collect();
-    let mut terms: Vec<String> = (1..=n).map(|i| format!("{i} * w{i}")).collect();
-    terms.push("0".into());
-    format!(
-        "fn f{n}({}) -> u64 {{ {} }}\n",
-        params.join(", "),
-        terms.join(" + ")
-    )
+    let mut sum = "0".to_string();
+    for i in 1..=n {
+        sum = format!("wrapping_add({sum}, wrapping_mul({i}, w{i}))");
+    }
+    format!("fn f{n}({}) -> u64 {{ {sum} }}\n", params.join(", "))
 }
 
 #[test]
