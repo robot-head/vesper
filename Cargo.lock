@@ -5790,6 +5790,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-codegen-numeric-test"
+version = "0.1.0"
+dependencies = [
+ "object 0.37.3",
+ "vesper",
+ "vesper-cranelift-sys",
+]
+
+[[package]]
 name = "vesper-codegen-verified"
 version = "0.1.0"
 dependencies = [

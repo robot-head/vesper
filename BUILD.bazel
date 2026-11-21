@@ -202,9 +202,22 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH3 lane 11 (#1250): the inliner differential on the same corpus.
+        "test/self_host_ir_inline": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # SH3 lane 1 (#1240): @vesper/place-ir round trips over the same
         # corpus at every native IR pass boundary.
         "test/self_host_place_ir": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        # SH3 lane 13 (#1252): @vesper/place-ir-lower against
+        # `ir::lower_world` over the same corpus.
+        "test/self_host_ir_lower": glob([
             "examples/**",
             "packages/**",
             "tests/fixtures/**",
@@ -602,7 +615,9 @@ vesper_crate(
         "test/self_host_check_data": "long",
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
+        "test/self_host_ir_inline": "long",
         "test/self_host_place_ir": "long",
+        "test/self_host_ir_lower": "long",
         "test/self_host_check_harness": "long",
         "test/self_host_check_loops_atomics": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
