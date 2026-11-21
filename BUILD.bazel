@@ -791,6 +791,22 @@ vesper_package(
     deps = [":std_fmt_package"],
 )
 
+# @vesper/driver-commands, the command layers the hybrid's driver hands on
+# (self-hosting SH5 lane 13, #1336), with its `HybridCommands` import.
+vesper_package(
+    name = "driver_commands_package",
+    srcs = glob(["packages/vesper-driver-commands/src/**/*.ves"]),
+    manifest = "packages/vesper-driver-commands/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-driver-commands/commands.vsys"],
+    deps = [
+        ":driver_package",
+        ":std_fmt_package",
+        ":std_fs_package",
+        "//crates/vesper-beacon:port_package",
+    ],
+)
+
 filegroup(
     name = "examples",
     srcs = glob(["examples/**"]),

@@ -160,6 +160,10 @@ extern "C" fn report() {
         "vesper-hybrid: the driver ran {} passes from Vesper",
         crate::driver::PASSES.load(Relaxed)
     );
+    eprintln!(
+        "vesper-hybrid: the command layers printed {} times from Vesper",
+        crate::commands::PRINTS.load(Relaxed)
+    );
 }
 
 // Run `install` before `main` (the platform's static-constructor section).

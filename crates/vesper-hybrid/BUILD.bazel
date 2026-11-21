@@ -42,7 +42,9 @@ vesper_hybrid(
             "//:check_layout_package",
         ],
         # The driver (#1335) builds on @vesper/driver and @vesper-std I/O.
+        # The command layers (#1336) add @vesper/driver-commands.
         "hybrid_driver": [
+            "//:driver_commands_package",
             "//:driver_package",
             "//:std_env_package",
             "//:std_fmt_package",
@@ -73,6 +75,10 @@ vesper_hybrid(
             "//:bin/vesper",
         ],
         "test/driver": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+        "test/self_host_cli_commands": [
             ":bin/vesper-hybrid",
             "//:bin/vesper",
         ],
