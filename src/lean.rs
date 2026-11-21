@@ -1021,6 +1021,30 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
     })
 }
 
+/// What the CFG extractor returns for one function.
+#[doc(hidden)]
+pub type CfgNodes = Option<Result<Vec<Declaration>, String>>;
+/// Per source function (name order), what the CFG extractor
+/// (`lean_ir::extract_function_nodes`) returns for it: `None` when the
+/// structured extractor handles the function instead. `program` is
+/// `ir::lower_world(world)`. Self-hosting SH5
+/// lane 18 compares it with the Vesper port
+/// (tests/self_host_lean_extract.rs).
+#[doc(hidden)]
+pub fn cfg_function_nodes(world: &World, program: &crate::ir::Program) -> Vec<(String, CfgNodes)> {
+    world
+        .functions
+        .values()
+        .filter_map(|f| {
+            let ir = program.functions.get(&f.name)?;
+            Some((
+                f.name.clone(),
+                crate::lean_ir::extract_function_nodes(world, ir),
+            ))
+        })
+        .collect()
+}
+
 /// How the kernel can reason about one source function's extraction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Totality {

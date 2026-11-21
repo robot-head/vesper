@@ -60,6 +60,29 @@ every port, and so do pushes to main, merge queue groups and the nightly.
 Each block of the script names its crate directory with `if ported vesper-x;
 then ... fi` or `skip_port vesper-x || ...`; a line without a guard always
 runs.
+When the plan names no port, the seven shard jobs are skipped as jobs, so
+they take no runners, and `Platform validation complete` accepts that skip
+(#1321).
+
+## Keeping the queue short
+
+GitHub runs a limited number of jobs at once per account (5 on macOS), and
+every push to a pull request reruns its workflows. On 2026-11-21 that left 78
+runs queued and every Platforms run cancelled by the next push before it
+finished (#1321). To keep pull requests within the limit:
+
+- `Hybrid compiler` runs only its Linux leg on pull requests; main, the
+  nightly schedule and manual runs add macOS and Windows.
+- The narrow integration lanes (Kafka, lavapipe GPU, Ignis Vulkan, Aura GTK,
+  QEMU vectors) are not triggered on pull requests by `Cargo.toml` or
+  `Cargo.lock` alone; pushes to main still run them on those changes.
+- A push to main cancels the older main run of the same workflow.
+- `Merge gate` (`.github/workflows/merge-gate.yml`, `scripts/ci/merge_gate.py`)
+  enforces the project rule that pull requests which cannot merge yet get no
+  CI: when a pull request's base is not main, its branch carries another open
+  pull request's commits (a merged-in parent that has not landed), or it
+  conflicts with main, the gate cancels the other Actions runs for that push
+  and fails with the reason. Push again once the parent has merged.
 
 The native executable cases are shared with `scripts/test-native-host.sh`;
 `scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.

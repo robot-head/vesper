@@ -8,10 +8,10 @@
 //! `VESPER_PORT_COMPILER` (CI builds it once), else the in-tree one built by
 //! `cargo build -p vesper --bin vesper` into this build's target directory.
 //!
-//! Under the `divergent` (or `divergent-parse`, `divergent-ir-check`)
-//! feature the hybrid's layout (or parse, IR-check) module is deliberately
-//! wrong (build.rs), and the harness must report differences instead: that
-//! is the proof it can fail.
+//! Under the `divergent` (or `divergent-parse`, `divergent-ir-check`,
+//! `divergent-ir-inline`) feature the hybrid's layout (or parse, IR-check,
+//! inliner) module is deliberately wrong (build.rs), and the harness must
+//! report differences instead: that is the proof it can fail.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
@@ -219,7 +219,8 @@ fn hybrid_matches_the_default_compiler() {
     if cfg!(any(
         feature = "divergent",
         feature = "divergent-parse",
-        feature = "divergent-ir-check"
+        feature = "divergent-ir-check",
+        feature = "divergent-ir-inline"
     )) {
         assert!(
             !mismatches.is_empty(),
@@ -270,7 +271,8 @@ fn pilot_module_runs_from_vesper() {
     // SH2 lane 5 (#1177): the whole layout and the IR check. With the whole
     // layout swapped, the pilot's word arithmetic runs only under the Rust
     // fallback, so its count may be 0 here (tests/kernel.rs still checks it).
-    for module in ["check-layout", "ir-check"] {
+    // SH3 lane 11 (#1250): the inliner, on the optimized object.
+    for module in ["check-layout", "ir-check", "ir-inline"] {
         let prefix = format!("vesper-hybrid: {module} answered ");
         let calls: u64 = stderr
             .lines()

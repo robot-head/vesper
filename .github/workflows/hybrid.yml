@@ -9,7 +9,8 @@ name: Hybrid compiler
 # function-by-function check, the checker swaps' direct checks and the
 # manifest guard. Then it rebuilds the hybrid with a deliberately wrong
 # layout (`--features divergent`), parse and IR check, which the
-# differential harness must catch. Not a required check; Bazel
+# differential harness must catch. Pull requests run Linux only; main,
+# nightly and manual runs add macOS and Windows. Not a required check; Bazel
 # (Test all targets) builds the crate and runs the same tests on Linux.
 
 on:
@@ -56,7 +57,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: hybrid-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: hybrid-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -70,13 +71,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-          - name: macOS AArch64
-            os: macos-latest
-          - name: Windows x86_64 MSVC
-            os: windows-latest
+        # Pull requests run the Linux leg only (#1321): the macOS and Windows
+        # legs took ~30-45 min each and, with 5 macOS jobs per account, kept
+        # the required Platforms macOS job queued for hours. main, the
+        # nightly schedule and manual runs still cover all three hosts.
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"name":"Linux x86_64","os":"ubuntu-latest"}]' || '[{"name":"Linux x86_64","os":"ubuntu-latest"},{"name":"macOS AArch64","os":"macos-latest"},{"name":"Windows x86_64 MSVC","os":"windows-latest"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 75
     defaults:
@@ -103,6 +102,8 @@ jobs:
         run: cargo test --locked -p vesper-hybrid --features divergent --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent IR check
         run: cargo test --locked -p vesper-hybrid --features divergent-ir-check --test differential hybrid_matches_the_default_compiler -- --nocapture
+      - name: The differential harness catches a divergent inliner
+        run: cargo test --locked -p vesper-hybrid --features divergent-ir-inline --test differential hybrid_matches_the_default_compiler -- --nocapture
       - name: The differential harness catches a divergent parse module
         # A wrong parse cannot compile the pilot test's program, so only the
         # harness runs here.

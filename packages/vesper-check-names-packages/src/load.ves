@@ -16,6 +16,7 @@
 
 use @vesper/ast::{
     Ast,
+    lit_at,
     AdtNode,
     EffectDeclNode,
     FnNode,
@@ -28,6 +29,7 @@ use @vesper/ast::{
     none as ast_none
 };
 use @vesper/ast::lower::{
+    L,
     lower_source
 };
 use @vesper-std/arena::{
@@ -39,6 +41,13 @@ use @vesper-std/intern::{
 use self::state::{
     St,
     at32,
+    at8,
+    const_of,
+    const_prefix,
+    sym_byte,
+    sym_len,
+    sym_slice,
+    sym_starts,
     find_module,
     inc,
     kind_both,
@@ -313,7 +322,10 @@ pub fn collect(inout s: St, in a: Ast, m: u32) {
         let (name, kind) = item_name(in a, it);
         if kind != 0 {
             let g = tr(inout s, in a, name);
-            s.item_kind.insert(pair(m, g), kind);
+            match s.item_kind.insert(pair(m, g), kind) {
+                Option::Some(_) => {},
+                Option::None => index_constant(inout s, m, g),
+            }
             s.item_list.push(g);
         }
         if it.kind == 1 {
@@ -377,6 +389,72 @@ pub fn collect(inout s: St, in a: Ast, m: u32) {
     }
 }
 
+// A constant `const$P::M` of module `m`: (m, every prefix P) for the
+// "declared and imported" check, and `M` as a member of the value enum
+// `P` (`Table::group`).
+fn index_constant(inout s: St, m: u32, g: u32) {
+    if !sym_starts(in s, g, in const_prefix()) {
+        return;
+    }
+    let p = const_prefix().len();
+    let n = sym_len(in s, g);
+    let mut last = n;
+    let mut i = p;
+    loop {
+        if inc(i) >= n {
+            break;
+        }
+        if sym_byte(in s, g, i) == 58 && sym_byte(in s, g, inc(i)) == 58 {
+            let pre = sym_slice(inout s, g, p, i);
+            s.own_prefix.insert(pair(m, pre), 1);
+            last = i;
+            i = wrapping_add(i, 2);
+        } else {
+            i = inc(i);
+        }
+    }
+    if last == n {
+        return;
+    }
+    let group = sym_slice(inout s, g, p, last);
+    let member = sym_slice(inout s, g, wrapping_add(last, 2), n);
+    let key = pair(m, group);
+    let next = match s.grp_head.get(key) {
+        Option::Some(r) => r,
+        Option::None => none(),
+    };
+    s.grp_head.insert(key, n32(s.grp_member.len()));
+    s.grp_member.push(member);
+    s.grp_item.push(g);
+    s.grp_next.push(next);
+}
+
+// The constants of module `m` with a literal value (`const_literal`).
+fn constants(inout s: St, in l: L, m: u32) {
+    for i in 0..l.consts.len() {
+        let c = at32(in l.const_lits, i);
+        if c != ast_none() {
+            let g = tr(inout s, in l.ast, at32(in l.consts, i));
+            let f = const_of(inout s, g);
+            let v = lit_at(in l.ast, c);
+            s.cl_mod.push(m);
+            s.cl_item.push(f);
+            s.cl_kind.push(v.kind);
+            s
+                .cl_neg
+                .push(
+                if v.neg {
+                    1
+                } else {
+                    0
+                }
+            );
+            s.cl_bits.push(v.bits);
+            s.cl_untyped.push(at8(in l.const_untyped, i));
+        }
+    }
+}
+
 // Parses every module and collects its tables.
 pub fn collect_all(inout s: St, in input: Str) {
     for m in 0..s.mod_pkg.len() {
@@ -392,5 +470,6 @@ pub fn collect_all(inout s: St, in input: Str) {
         let l = lower_source(in input[x..y]);
         begin_module(inout s);
         collect(inout s, in l.ast, n32(m));
+        constants(inout s, in l, n32(m));
     }
 }

@@ -200,6 +200,7 @@ impl Generator<'_> {
                 crate::lean_nodes::unit()
             }
             SeqOp::TryGet => Term::app(global(&["GetElem?", "getElem?"]), [at(0), nat(at(1))]),
+            SeqOp::Last => Term::app(global(&["Array", "back?"]), [at(0)]),
             SeqOp::TrySet => {
                 let t = self.temp();
                 let_local(out, t.clone(), in_bounds(at(0), at(1)), None, false);

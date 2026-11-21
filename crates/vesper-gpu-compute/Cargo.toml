@@ -2,6 +2,7 @@
 name = "vesper-gpu-compute"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper GPU compute (design sections 28 and 36): a small Vulkan compute runtime with naga-compiled WGSL kernels for Tensor inference and the Kinetic broadphase, validated on Mesa lavapipe"
 publish = false
 

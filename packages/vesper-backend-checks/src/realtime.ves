@@ -1,0 +1,507 @@
+// Module realtime of @vesper/backend-checks (see lib.ves): the realtime
+// verifier half of `verify_emitted` (src/native_verifiers.rs): the call
+// graph of crates/vesper-resonance/src/clif.rs (`call_graph_from_clif`)
+// over the emitted CLIF tables, and Resonance's confinement verifier,
+// which @vesper/resonance already ports (`verify_realtime`, confine.ves),
+// with the Rust wrapper's effect numbering and finding text.
+
+use @vesper/resonance::{
+    verify_realtime
+};
+use self::input::{
+    Cx,
+    block_row,
+    fw,
+    iw,
+    pw
+};
+use self::report::{
+    raw_finding
+};
+use self::util::{
+    contains,
+    filled,
+    find_row,
+    g,
+    intern_str,
+    put,
+    putn,
+    puts,
+    st
+};
+
+const EXT_LIBCALL: u64 = 2;
+const EXT_TESTCASE: u64 = 1;
+const EXT_USER: u64 = 0;
+const F_INLINED: u64 = 5;
+const F_INSTS: u64 = 33;
+const F_KEY: u64 = 0;
+const F_NBLOCKS: u64 = 32;
+const F_NINSTS: u64 = 34;
+const F_SLOTS: u64 = 29;
+const I_CALL: u64 = 15;
+const I_DESTS: u64 = 21;
+const I_EXT: u64 = 19;
+const I_FLAGS: u64 = 2;
+const IS_CALL: u64 = 1;
+const X_INDEX: u64 = 2;
+const X_KIND: u64 = 0;
+const X_NS: u64 = 1;
+const X_S1: u64 = 4;
+const X_S2: u64 = 5;
+const CALL_DIRECT: u64 = 1;
+const CALL_INDIRECT: u64 = 2;
+const NONE: u64 = 18446744073709551615;
+
+// Whether function `f`'s CFG has a cycle reachable from its entry block
+// (`has_loops`: natural loops are such cycles, and the DFS also finds the
+// irreducible ones).
+fn has_loops(in c: Cx, f: u64) -> bool {
+    let nb = fw(in c, f, F_NBLOCKS);
+    if nb == 0 {
+        return false;
+    }
+    let mut state = filled(nb, 0);
+    // (block, next successor index)
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    stack.push(0);
+    stack.push(0);
+    st(inout state, 0, 1);
+    loop {
+        let top = stack.len();
+        if top == 0 {
+            break;
+        }
+        let blk = g(in stack, wrapping_sub(top, 2));
+        let next = g(in stack, wrapping_sub(top, 1));
+        let ni = block_row(in c, f, blk, 3);
+        let mut succ = NONE;
+        if ni > 0 {
+            let row = wrapping_add(block_row(in c, f, blk, 2), wrapping_sub(ni, 1));
+            let nd = iw(in c, row, wrapping_add(I_DESTS, 1));
+            if next < nd {
+                let mut d = iw(in c, row, I_DESTS);
+                for j in 0..next {
+                    d = wrapping_add(
+                        d,
+                        wrapping_add(2, wrapping_mul(pw(in c, wrapping_add(d, 1)), 2))
+                    );
+                }
+                succ = pw(in c, d);
+            }
+        }
+        if succ == NONE {
+            st(inout state, blk, 2);
+            stack.truncate(wrapping_sub(top, 2));
+        } else {
+            st(inout stack, wrapping_sub(top, 1), wrapping_add(next, 1));
+            let s = g(in state, succ);
+            if s == 0 {
+                st(inout state, succ, 1);
+                stack.push(succ);
+                stack.push(0);
+            } else if s == 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// The realtime graph: per node name, known, frame, loops, bound, effects
+// (at, n) and call sites (at, n) in `pool`.
+struct Rg {
+    nodes: ChunkSeq[u64],
+    pool: ChunkSeq[u64],
+    calls: ChunkSeq[u64],
+    indirect: ChunkSeq[u64],
+    // per node: call sites as (callee, index), gathered before pooling
+    sites: ChunkSeq[u64],
+}
+
+const NW: u64 = 9;
+
+fn node_name(in rg: Rg, i: u64) -> u64 {
+    g(in rg.nodes, wrapping_mul(i, NW))
+}
+
+fn find_node(in rg: Rg, name: u64) -> u64 {
+    let n = rg.nodes.len() / NW;
+    for i in 0..n {
+        if node_name(in rg, i) == name {
+            return i;
+        }
+    }
+    NONE
+}
+
+fn add_node(
+    inout rg: Rg,
+    name: u64,
+    known: u64,
+    frame: u64,
+    loops: u64,
+    bound: u64,
+    in effects: ChunkSeq[u64]
+) -> u64 {
+    let i = rg.nodes.len() / NW;
+    rg.nodes.push(name);
+    rg.nodes.push(known);
+    rg.nodes.push(frame);
+    rg.nodes.push(loops);
+    rg.nodes.push(bound);
+    rg.nodes.push(rg.pool.len());
+    rg.nodes.push(effects.len());
+    rg.nodes.push(0);
+    rg.nodes.push(0);
+    rg.pool.extend(in effects.as_slice());
+    i
+}
+
+// Appends the effects of policy `realtime.effects[name]`.
+fn policy_effects(in c: Cx, name: u64, inout out: ChunkSeq[u64]) {
+    let r = find_row(in c.p.reff, 3, name);
+    if r == NONE {
+        return;
+    }
+    let at = g(in c.p.reff, wrapping_add(wrapping_mul(r, 3), 1));
+    let n = g(in c.p.reff, wrapping_add(wrapping_mul(r, 3), 2));
+    for k in 0..n {
+        out.push(g(in c.p.pp, wrapping_add(at, k)));
+    }
+}
+
+fn err_fn(inout c: Cx, in head: Str, name: u64, in tail: Str) {
+    put(inout c.emsg, "realtime verifier: ");
+    put(inout c.emsg, head);
+    puts(inout c.emsg, in c.nm, name);
+    put(inout c.emsg, tail);
+    c.err = true;
+}
+
+// The realtime half of `verify_emitted`; `by_id` maps func id -> name + 1,
+// `by_name` name -> func id + 1, `defined` the defined func ids.
+pub fn verify(
+    inout c: Cx,
+    in by_id: ChunkSeq[u64],
+    in by_name: ChunkSeq[u64],
+    in defined: ChunkSeq[u64]
+) {
+    // Symbols: a source function may not be described as a symbol.
+    for k in 0..c.p.rsym.len() / 4 {
+        let sym = g(in c.p.rsym, wrapping_mul(k, 4));
+        let id = g(in by_name, sym);
+        if id != 0 && g(in defined, wrapping_sub(id, 1)) == 1 {
+            put(inout c.emsg, "verifier policy: realtime symbol '");
+            puts(inout c.emsg, in c.nm, sym);
+            put(inout c.emsg, "' is a source function; use realtime.effects");
+            c.err = true;
+            return;
+        }
+    }
+    let mut rg = Rg {
+        nodes: ChunkSeq::new[u64](),
+        pool: ChunkSeq::new[u64](),
+        calls: ChunkSeq::new[u64](),
+        indirect: ChunkSeq::new[u64](),
+        sites: ChunkSeq::new[u64](),
+    };
+    for i in 0..c.nfns {
+        let name = fw(in c, i, F_KEY);
+        if find_node(in rg, name) != NONE {
+            err_fn(inout c, "duplicate function `", name, "`");
+            return;
+        }
+        let mut frame: u64 = 0;
+        let sa = fw(in c, i, F_SLOTS);
+        for k in 0..fw(in c, i, wrapping_add(F_SLOTS, 1)) {
+            let sz = pw(in c, wrapping_add(sa, k));
+            if frame > wrapping_sub(NONE, sz) {
+                err_fn(inout c, "stack slots of `", name, "` overflow u64");
+                return;
+            }
+            frame = wrapping_add(frame, sz);
+        }
+        let mut loops: u64 = 0;
+        let mut bound: u64 = 0;
+        if has_loops(in c, i) {
+            let r = find_row(in c.p.rloop, 2, name);
+            if r == NONE {
+                loops = 2;
+            } else {
+                loops = 1;
+                bound = g(in c.p.rloop, wrapping_add(wrapping_mul(r, 2), 1));
+            }
+        }
+        let mut effects: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        policy_effects(in c, name, inout effects);
+        // Effects of inlined functions (#959).
+        let ia = fw(in c, i, F_INLINED);
+        for k in 0..fw(in c, i, wrapping_add(F_INLINED, 1)) {
+            policy_effects(in c, pw(in c, wrapping_add(ia, k)), inout effects);
+        }
+        let node = add_node(inout rg, name, 1, frame, loops, bound, in effects);
+    }
+    // Calls, with call-site positions in layout order.
+    let mut sites: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..c.nfns {
+        let caller_name = fw(in c, i, F_KEY);
+        let first = fw(in c, i, F_INSTS);
+        for k in 0..fw(in c, i, F_NINSTS) {
+            let row = wrapping_add(first, k);
+            if iw(in c, row, I_FLAGS) & IS_CALL != 0 {
+                let kind = iw(in c, row, I_CALL);
+                if kind == CALL_DIRECT {
+                    let x = iw(in c, row, I_EXT);
+                    let ek = pw(in c, wrapping_add(x, X_KIND));
+                    let mut callee_name = NONE;
+                    if ek == EXT_USER {
+                        let ns = pw(in c, wrapping_add(x, X_NS));
+                        let idx = pw(in c, wrapping_add(x, X_INDEX));
+                        if ns == 0 && g(in by_id, idx) != 0 {
+                            callee_name = wrapping_sub(g(in by_id, idx), 1);
+                        } else {
+                            put(inout c.emsg, "realtime verifier: `");
+                            puts(inout c.emsg, in c.nm, caller_name);
+                            put(inout c.emsg, "` calls unnamed user symbol u");
+                            putn(inout c.emsg, ns);
+                            put(inout c.emsg, ":");
+                            putn(inout c.emsg, idx);
+                            c.err = true;
+                            return;
+                        }
+                    } else if ek == EXT_TESTCASE || ek == EXT_LIBCALL {
+                        callee_name = pw(in c, wrapping_add(x, X_S1));
+                    } else {
+                        put(inout c.emsg, "realtime verifier: `");
+                        puts(inout c.emsg, in c.nm, caller_name);
+                        put(inout c.emsg, "` calls unsupported external name KnownSymbol(");
+                        puts(inout c.emsg, in c.nm, pw(in c, wrapping_add(x, X_S2)));
+                        put(inout c.emsg, ")");
+                        c.err = true;
+                        return;
+                    }
+                    let mut callee = find_node(in rg, callee_name);
+                    if callee == NONE {
+                        let r = find_row(in c.p.rsym, 4, callee_name);
+                        let mut effects: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                        if r == NONE {
+                            callee = add_node(inout rg, callee_name, 0, 0, 0, 0, in effects);
+                        } else {
+                            let b = wrapping_mul(r, 4);
+                            let at = g(in c.p.rsym, wrapping_add(b, 1));
+                            for q in 0..g(in c.p.rsym, wrapping_add(b, 2)) {
+                                effects.push(g(in c.p.pp, wrapping_add(at, q)));
+                            }
+                            callee = add_node(
+                                inout rg,
+                                callee_name,
+                                1,
+                                g(in c.p.rsym, wrapping_add(b, 3)),
+                                0,
+                                0,
+                                in effects
+                            );
+                        }
+                    }
+                    rg.calls.push(i);
+                    rg.calls.push(callee);
+                    sites.push(i);
+                    sites.push(callee);
+                    sites.push(k);
+                } else if kind == CALL_INDIRECT {
+                    rg.indirect.push(i);
+                    rg.indirect.push(k);
+                }
+            }
+        }
+    }
+    let n = rg.nodes.len() / NW;
+    // Roots.
+    let mut roots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..c.p.rroots.len() / 3 {
+        let root = g(in c.p.rroots, wrapping_mul(k, 3));
+        let id = find_node(in rg, root);
+        if id == NONE {
+            put(inout c.emsg, "verifier policy: realtime root '");
+            puts(inout c.emsg, in c.nm, root);
+            put(inout c.emsg, "' was not emitted");
+            c.err = true;
+            return;
+        }
+        roots.push(id);
+        roots.push(g(in c.p.rroots, wrapping_add(wrapping_mul(k, 3), 1)));
+        roots.push(g(in c.p.rroots, wrapping_add(wrapping_mul(k, 3), 2)));
+    }
+    // Effect codes: distinct effect names in first-use order.
+    let mut effects: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut fns: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut pool: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        let b = wrapping_mul(i, NW);
+        let eff_first = pool.len();
+        let ea = g(in rg.nodes, wrapping_add(b, 5));
+        let en = g(in rg.nodes, wrapping_add(b, 6));
+        for k in 0..en {
+            let e = g(in rg.pool, wrapping_add(ea, k));
+            pool.push(intern_effect(inout effects, e));
+        }
+        let site_first = pool.len();
+        let mut count: u64 = 0;
+        for s in 0..sites.len() / 3 {
+            if g(in sites, wrapping_mul(s, 3)) == i {
+                pool.push(g(in sites, wrapping_add(wrapping_mul(s, 3), 1)));
+                pool.push(g(in sites, wrapping_add(wrapping_mul(s, 3), 2)));
+                count = wrapping_add(count, 1);
+            }
+        }
+        fns.push(g(in rg.nodes, wrapping_add(b, 1)));
+        fns.push(g(in rg.nodes, wrapping_add(b, 2)));
+        fns.push(g(in rg.nodes, wrapping_add(b, 3)));
+        fns.push(g(in rg.nodes, wrapping_add(b, 4)));
+        fns.push(eff_first);
+        fns.push(en);
+        fns.push(site_first);
+        fns.push(count);
+    }
+    let mut allowed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if c.p.rallowed_has {
+        for k in 0..c.p.rallowed.len() {
+            let code = intern_effect(inout effects, g(in c.p.rallowed, k));
+            if !contains(in allowed, code) {
+                allowed.push(code);
+            }
+        }
+    } else {
+        let d1 = intern_str(inout c.nm, "Realtime");
+        let d2 = intern_str(inout c.nm, "ConstDenorm");
+        let d3 = intern_str(inout c.nm, "RtBus");
+        let d4 = intern_str(inout c.nm, "Isa");
+        let d5 = intern_str(inout c.nm, "Mmio");
+        let d6 = intern_str(inout c.nm, "WaitFreeAtomic");
+        allowed.push(intern_effect(inout effects, d1));
+        allowed.push(intern_effect(inout effects, d2));
+        allowed.push(intern_effect(inout effects, d3));
+        allowed.push(intern_effect(inout effects, d4));
+        allowed.push(intern_effect(inout effects, d5));
+        allowed.push(intern_effect(inout effects, d6));
+    }
+    let entries: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let w = verify_realtime(
+        in fns.as_slice(),
+        in pool.as_slice(),
+        in rg.calls.as_slice(),
+        in rg.indirect.as_slice(),
+        in entries.as_slice(),
+        in roots.as_slice(),
+        in allowed.as_slice(),
+        c.p.rreject,
+        c.p.rhas_max,
+        c.p.rmax
+    );
+    let status = g(in w, 0);
+    if status == 1 {
+        put(inout c.emsg, "realtime verifier: unknown function id ");
+        putn(inout c.emsg, g(in w, 1));
+        c.err = true;
+        return;
+    }
+    if status == 2 {
+        put(inout c.emsg, "realtime verifier: indirect target listed for unknown site ");
+        putn(inout c.emsg, g(in w, 2));
+        put(inout c.emsg, " in fn ");
+        putn(inout c.emsg, g(in w, 1));
+        c.err = true;
+        return;
+    }
+    let mut k: u64 = 2;
+    for q in 0..g(in w, 1) {
+        let root = g(in w, k);
+        let has_inst = g(in w, wrapping_add(k, 1)) == 1;
+        let inst = g(in w, wrapping_add(k, 2));
+        let rule = g(in w, wrapping_add(k, 3));
+        let subject = node_name(in rg, g(in w, wrapping_add(k, 4)));
+        let p1 = g(in w, wrapping_add(k, 5));
+        let p2 = g(in w, wrapping_add(k, 6));
+        let path_len = g(in w, wrapping_add(k, 7));
+        let path_at = wrapping_add(k, 8);
+        k = wrapping_add(path_at, path_len);
+        let root_name = node_name(in rg, root);
+        let m = c.r.tx.len();
+        put(inout c.r.tx, "@realtime root `");
+        puts(inout c.r.tx, in c.nm, root_name);
+        put(inout c.r.tx, "` reaches ");
+        if rule == 0 {
+            put(inout c.r.tx, "forbidden effect `");
+            puts(inout c.r.tx, in c.nm, g(in effects, p1));
+            put(inout c.r.tx, "` in `");
+            puts(inout c.r.tx, in c.nm, subject);
+            put(inout c.r.tx, "`");
+        } else if rule == 1 {
+            put(inout c.r.tx, "unknown callee `");
+            puts(inout c.r.tx, in c.nm, subject);
+            put(inout c.r.tx, "` with no effect declaration");
+        } else if rule == 2 {
+            put(inout c.r.tx, "indirect call site ");
+            putn(inout c.r.tx, p1);
+            put(inout c.r.tx, " in `");
+            puts(inout c.r.tx, in c.nm, subject);
+            put(inout c.r.tx, "` with no policy-listed targets");
+        } else if rule == 3 {
+            put(inout c.r.tx, "a loop with no known bound in `");
+            puts(inout c.r.tx, in c.nm, subject);
+            put(inout c.r.tx, "`");
+        } else if rule == 4 {
+            put(inout c.r.tx, "a loop bounded by ");
+            putn(inout c.r.tx, p1);
+            put(inout c.r.tx, " > policy maximum ");
+            putn(inout c.r.tx, p2);
+            put(inout c.r.tx, " in `");
+            puts(inout c.r.tx, in c.nm, subject);
+            put(inout c.r.tx, "`");
+        } else if rule == 5 {
+            put(inout c.r.tx, "recursion through `");
+            puts(inout c.r.tx, in c.nm, subject);
+            put(inout c.r.tx, "` (unbounded stack depth)");
+        } else if rule == 6 {
+            put(inout c.r.tx, "worst-case stack depth ");
+            putn(inout c.r.tx, p1);
+            put(inout c.r.tx, " bytes over budget ");
+            putn(inout c.r.tx, p2);
+        } else {
+            put(inout c.r.tx, "a worst-case stack depth that overflows u64");
+        }
+        put(inout c.r.tx, " via ");
+        for j in 0..path_len {
+            if j > 0 {
+                put(inout c.r.tx, " -> ");
+            }
+            puts(inout c.r.tx, in c.nm, node_name(in rg, g(in w, wrapping_add(path_at, j))));
+        }
+        if rule == 0 {
+            raw_finding(inout c, root_name, has_inst, inst, "rt-forbidden-effect", m);
+        } else if rule == 1 {
+            raw_finding(inout c, root_name, has_inst, inst, "rt-unknown-callee", m);
+        } else if rule == 2 {
+            raw_finding(inout c, root_name, has_inst, inst, "rt-unresolved-indirect-call", m);
+        } else if rule == 3 {
+            raw_finding(inout c, root_name, has_inst, inst, "rt-unbounded-loop", m);
+        } else if rule == 4 {
+            raw_finding(inout c, root_name, has_inst, inst, "rt-loop-bound", m);
+        } else if rule == 5 {
+            raw_finding(inout c, root_name, has_inst, inst, "rt-recursion", m);
+        } else {
+            raw_finding(inout c, root_name, has_inst, inst, "rt-stack-budget", m);
+        }
+    }
+}
+
+fn intern_effect(inout effects: ChunkSeq[u64], e: u64) -> u64 {
+    for i in 0..effects.len() {
+        if g(in effects, i) == e {
+            return i;
+        }
+    }
+    effects.push(e);
+    wrapping_sub(effects.len(), 1)
+}
