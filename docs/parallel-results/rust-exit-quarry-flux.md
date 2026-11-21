@@ -64,7 +64,7 @@ the CDC record loop (~55 lines); the adapters added in `src/port.rs` are
 
 ## Part 2: the Flux input log's frame codec
 
-Stacked on part 1 (lands after #1419).
+Base: `main` at `979cfa8` (part 1, #1419, merged).
 
 ### What changed
 
