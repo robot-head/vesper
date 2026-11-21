@@ -1,0 +1,12 @@
+[package]
+name = "@vesper/check-dyn"
+version = "0.1.0"
+edition = "2026"
+# The dyn lowering only computes: no I/O, clock or network (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/ast" = { version = "^0.1", path = "../vesper-ast" }
+"@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
+"@vesper-std/arena" = { version = "^0.1", path = "../vesper-std/arena" }
+"@vesper-std/intern" = { version = "^0.1", path = "../vesper-std/intern" }

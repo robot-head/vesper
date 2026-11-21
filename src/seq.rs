@@ -687,7 +687,7 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "pop" => SeqOp::Pop,
                 "get" => SeqOp::Get,
                 "set" => SeqOp::Set,
-                "try_get" => SeqOp::TryGet,
+                "try_get" | "try_get_mut" => SeqOp::TryGet,
                 "try_set" => SeqOp::TrySet,
                 "clear" => SeqOp::Clear,
                 "truncate" => SeqOp::Truncate,
@@ -707,7 +707,7 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "len" => SeqOp::SliceLen,
                 "get" => SeqOp::SliceGet,
                 "set" => SeqOp::SliceSet,
-                "try_get" => SeqOp::TryGet,
+                "try_get" | "try_get_mut" => SeqOp::TryGet,
                 "try_set" => SeqOp::TrySet,
                 _ => return shared_method(method),
             });

@@ -213,7 +213,8 @@ pub copy struct Syms {
     fn_once: u32,
     brk: u32,
     cont: u32,
-    for_: u32
+    for_: u32,
+    minus: u32
 }
 
 // The lowering state.
@@ -237,8 +238,16 @@ pub struct L {
     stk: ChunkSeq[u32],
     // `pending_bounds`: BoundNode indices.
     pending: ChunkSeq[u32],
-    // Names of the module's constants.
+    // Names of the module's constants, and the literal (Lit index) of each
+    // or NONE (`const_literal`).
     consts: ChunkSeq[u32],
+    const_lits: ChunkSeq[u32],
+    // 1 for an untyped value enum member (`enum E: _`), whose uses are its
+    // literal.
+    const_untyped: ChunkSeq[u8],
+    // Further items of the latest declaration: the member constants of a
+    // value enum after its first (`Parser::extra_items`).
+    extra: ChunkSeq[u32],
     // CST event position of each token, and the cursor of the sync check.
     evpos: ChunkSeq[u32],
     evc: u64,
@@ -1311,8 +1320,19 @@ fn item(inout l: L) {
         if n != none() {
             l.ast.m_public.push(n);
         }
+        for i in 0..l.extra.len() {
+            let x = item_name(in l, u32_at(in l.extra, i));
+            if x != none() {
+                l.ast.m_public.push(x);
+            }
+        }
     }
     l.ast.m_items.push(it);
+    for i in 0..l.extra.len() {
+        let x = u32_at(in l.extra, i);
+        l.ast.m_items.push(x);
+    }
+    l.extra.clear();
 }
 
 // `Parser::declaration`: an ItemNode index, or NONE.
@@ -1449,6 +1469,9 @@ fn declaration(inout l: L) -> u32 {
         let name = upper(inout l);
         let gs = generics(inout l);
         own_type_bounds(inout l, name);
+        if eat(inout l, k_colon()) {
+            return value_enum(inout l, name);
+        }
         expect(inout l, k_l_brace());
         let m = mark(in l);
         loop {
@@ -1802,6 +1825,9 @@ fn const_item(inout l: L, start: u64) -> u32 {
     push_name(inout l, name);
     let fname = intern_buf(inout l);
     l.consts.push(name);
+    let cl = const_lit(inout l, value);
+    l.const_lits.push(cl);
+    l.const_untyped.push(0);
     let vs = espan_start(in l, value);
     let ve = espan_end(in l, value);
     let body = mk(inout l, 5, vs, ve, 0, value, none());
@@ -1823,6 +1849,280 @@ fn const_item(inout l: L, start: u64) -> u32 {
         }
     );
     f.raw()
+}
+
+// `int_value`: the integer a constant initializer spells, as (spells one,
+// negative, magnitude): a literal, a negated one or an empty block's tail.
+fn int_of(in l: L, e: u32) -> (bool, bool, u64) {
+    let x = ex(in l, e);
+    if x.kind == 1 {
+        let v = lit_at(in l.ast, x.a);
+        if v.kind == 1 {
+            return (true, v.neg, v.bits);
+        }
+        return (false, false, 0);
+    }
+    if x.kind == 10 && x.a == l.s.minus {
+        let (ok, neg, bits) = int_of(in l, x.b);
+        return (ok, !neg && bits != 0, bits);
+    }
+    if x.kind == 5 && x.a == 0 && x.b != none() {
+        return int_of(in l, x.b);
+    }
+    (false, false, 0)
+}
+
+// `const_literal` of a constant whose initializer is `value`: a new Lit for
+// an integer, the Bool literal itself, else NONE.
+fn const_lit(inout l: L, value: u32) -> u32 {
+    let (ok, neg, bits) = int_of(in l, value);
+    if ok {
+        return lit(inout l, 1, neg, bits);
+    }
+    let x = ex(in l, value);
+    if x.kind == 5 && x.a == 0 && x.b != none() {
+        return const_lit(inout l, x.b);
+    }
+    if x.kind == 1 && lit_at(in l.ast, x.a).kind == 3 {
+        return x.a;
+    }
+    none()
+}
+
+// `fold_member`: the value of a member initializer built from non-negative
+// literals, earlier non-negative members (`names`/`negs`/`bits`, latest
+// last) and `ops` (`+ - * / % & | ^ << >>`, in that order), as (folds,
+// value), when every step stays within u64.
+fn fold_member(
+    in l: L,
+    e: u32,
+    in ops: ChunkSeq[u32],
+    in names: ChunkSeq[u32],
+    in negs: ChunkSeq[u8],
+    in bits: ChunkSeq[u64]
+) -> (bool, u64) {
+    let x = ex(in l, e);
+    if x.kind == 1 {
+        let v = lit_at(in l.ast, x.a);
+        return (v.kind == 1 && !v.neg, v.bits);
+    }
+    if x.kind == 2 {
+        let mut i = names.len();
+        loop {
+            if i == 0 {
+                return (false, 0);
+            }
+            i = wrapping_sub(i, 1);
+            if u32_at(in names, i) == x.a {
+                let v = match bits.try_get(i) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                return (u8_at(in negs, i) == 0, v);
+            }
+        }
+    }
+    if x.kind == 5 && x.a == 0 && x.b != none() {
+        return fold_member(in l, x.b, in ops, in names, in negs, in bits);
+    }
+    if x.kind != 11 {
+        return (false, 0);
+    }
+    let (oka, a) = fold_member(in l, x.b, in ops, in names, in negs, in bits);
+    let (okb, b) = fold_member(in l, x.c, in ops, in names, in negs, in bits);
+    if !oka || !okb {
+        return (false, 0);
+    }
+    let mut op: u64 = 10;
+    for i in 0..ops.len() {
+        if u32_at(in ops, i) == x.a {
+            op = i;
+            break;
+        }
+    }
+    let r = if op == 0 {
+        checked_add_u64(a, b)
+    } else if op == 1 {
+        checked_sub_u64(a, b)
+    } else if op == 2 {
+        checked_mul_u64(a, b)
+    } else if op == 3 {
+        if b > 0 {
+            Option::Some(a / b)
+        } else {
+            None
+        }
+    } else if op == 4 {
+        if b > 0 {
+            Some(a % b)
+        } else {
+            None
+        }
+    } else if op == 5 {
+        Some(a & b)
+    } else if op == 6 {
+        Some(a | b)
+    } else if op == 7 {
+        Some(a ^ b)
+    } else if op == 8 {
+        if b < 64 {
+            let shifted = a << b;
+            if shifted >> b == a {
+                Some(shifted)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else if op == 9 {
+        if b < 64 {
+            Some(a >> b)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    match r {
+        Some(v) => (true, v),
+        None => (false, 0)
+    }
+}
+
+// `Parser::value_enum`: the rest of `enum Name: T { A = e, B, .. }` after
+// its `:`, as one constant `const$Name::A` per member. Returns the first
+// member's item (or NONE) and leaves the others in `l.extra`.
+fn value_enum(inout l: L, name: u32) -> u32 {
+    // `enum Name: _ { .. }`: untyped members (result type Infer).
+    let untyped = at_word(in l, 0, w_underscore());
+    let repr = if untyped {
+        bump(inout l);
+        infer(inout l)
+    } else {
+        ty(inout l)
+    };
+    expect(inout l, k_l_brace());
+    let mut ops = ChunkSeq::new[u32]();
+    ops.push(l.ast.names.intern(in "+").id());
+    ops.push(l.ast.names.intern(in "-").id());
+    ops.push(l.ast.names.intern(in "*").id());
+    ops.push(l.ast.names.intern(in "/").id());
+    ops.push(l.ast.names.intern(in "%").id());
+    ops.push(l.ast.names.intern(in "&").id());
+    ops.push(l.ast.names.intern(in "|").id());
+    ops.push(l.ast.names.intern(in "^").id());
+    ops.push(l.ast.names.intern(in "<<").id());
+    ops.push(l.ast.names.intern(in ">>").id());
+    let mut names = ChunkSeq::new[u32]();
+    let mut negs = ChunkSeq::new[u8]();
+    let mut bits = ChunkSeq::new[u64]();
+    let mut first = none();
+    let mut has_prev = false;
+    let mut prev_name = none();
+    let mut prev_ok = false;
+    let mut prev_neg = false;
+    let mut prev_bits: u64 = 0;
+    loop {
+        if at(in l, k_r_brace()) || at(in l, k_eof()) {
+            break;
+        }
+        let start = cur_start(in l);
+        let member = upper(inout l);
+        let full = join_names(inout l, name, in "::", member);
+        let raw = if eat(inout l, k_eq()) {
+            expr(inout l)
+        } else {
+            let end = l.last;
+            if !has_prev {
+                let z = lit(inout l, 1, false, 0);
+                mk(inout l, 1, start, end, z, none(), none())
+            } else if prev_ok && (prev_neg || prev_bits < 18446744073709551615) {
+                let next = if prev_neg {
+                    lit(inout l, 1, prev_bits != 1, wrapping_sub(prev_bits, 1))
+                } else {
+                    lit(inout l, 1, false, inc(prev_bits))
+                };
+                mk(inout l, 1, start, end, next, none(), none())
+            } else {
+                let pn = mk(inout l, 2, start, end, prev_name, none(), none());
+                let one = lit(inout l, 1, false, 1);
+                let on = mk(inout l, 1, start, end, one, none(), none());
+                let plus = u32_at(in ops, 0);
+                mk(inout l, 11, start, end, plus, pn, on)
+            }
+        };
+        let (folds, v) = fold_member(in l, raw, in ops, in names, in negs, in bits);
+        let value = if folds {
+            let li = lit(inout l, 1, false, v);
+            let vs = espan_start(in l, raw);
+            let ve = espan_end(in l, raw);
+            mk(inout l, 1, vs, ve, li, none(), none())
+        } else {
+            raw
+        };
+        let (ok, neg, mag) = int_of(in l, value);
+        if ok {
+            names.push(full);
+            let sign: u8 = if neg {
+                1
+            } else {
+                0
+            };
+            negs.push(sign);
+            bits.push(mag);
+        }
+        has_prev = true;
+        prev_name = full;
+        prev_ok = ok;
+        prev_neg = neg;
+        prev_bits = mag;
+        let end = l.last;
+        l.buf.clear();
+        l.buf.push_str(in "const$");
+        push_name(inout l, full);
+        let fname = intern_buf(inout l);
+        l.consts.push(full);
+        let cl = const_lit(inout l, value);
+        l.const_lits.push(cl);
+        let mark: u8 = if untyped {
+            1
+        } else {
+            0
+        };
+        l.const_untyped.push(mark);
+        let vs = espan_start(in l, value);
+        let ve = espan_end(in l, value);
+        let body = mk(inout l, 5, vs, ve, 0, value, none());
+        let effs = effects_node(inout l, 0, none());
+        let f = l
+            .ast
+            .fns
+            .alloc(
+            FnNode {
+                name: fname,
+                fip: false,
+                generics: 0,
+                params: 0,
+                result: repr,
+                effects: effs,
+                body: body,
+                start: n32(start),
+                end: n32(end)
+            }
+        );
+        let it = item_node(inout l, 2, f.raw());
+        if first == none() {
+            first = it;
+        } else {
+            l.extra.push(it);
+        }
+        if !eat(inout l, k_comma()) {
+            break;
+        }
+    }
+    expect(inout l, k_r_brace());
+    first
 }
 
 fn params(inout l: L, end: u8) -> u32 {
@@ -3824,25 +4124,65 @@ fn lower_const_uses(inout l: L) {
     }
     let mut is_const = ChunkSeq::new[u8]();
     is_const.resize(l.ast.names.len(), 0);
+    // The literal (Lit index or NONE) of each constant name, and whether
+    // it is an untyped member (latest declaration last, as a map insert).
+    let mut lit_of = ChunkSeq::new[u32]();
+    lit_of.resize(l.ast.names.len(), none());
+    let mut untyped_of = ChunkSeq::new[u8]();
+    untyped_of.resize(l.ast.names.len(), 0);
     for i in 0..l.consts.len() {
-        is_const.try_set(widen_u64(u32_at(in l.consts, i)), 1);
+        let c = widen_u64(u32_at(in l.consts, i));
+        is_const.try_set(c, 1);
+        lit_of.try_set(c, u32_at(in l.const_lits, i));
+        untyped_of.try_set(c, u8_at(in l.const_untyped, i));
     }
     let n = l.ast.exprs.len();
     for i in 0..n {
         let e = ex(in l, n32(i));
         if e.kind == 2 && u8_at(in is_const, widen_u64(e.a)) == 1 {
-            l.buf.clear();
-            l.buf.push_str(in "const$");
-            push_name(inout l, e.a);
-            let cn = intern_buf(inout l);
-            let s = widen_u64(e.start);
-            let callee = mk(inout l, 2, s, s, cn, none(), none());
+            let c = match lit_of.try_get(widen_u64(e.a)) {
+                Option::Some(c) => c,
+                Option::None => none(),
+            };
             let mut v = e;
-            v.kind = 6;
-            v.a = callee;
-            v.b = 0;
-            v.c = 0;
+            if u8_at(in untyped_of, widen_u64(e.a)) == 1 && c != none() {
+                // An untyped value enum member is its literal.
+                v.kind = 1;
+                v.a = c;
+                v.b = none();
+                v.c = none();
+            } else {
+                l.buf.clear();
+                l.buf.push_str(in "const$");
+                push_name(inout l, e.a);
+                let cn = intern_buf(inout l);
+                let s = widen_u64(e.start);
+                let callee = mk(inout l, 2, s, s, cn, none(), none());
+                v.kind = 6;
+                v.a = callee;
+                v.b = 0;
+                v.c = 0;
+            }
             l.ast.exprs.set(idx_from_raw[ExprNode](n32(i)), v);
+        }
+    }
+    // A field-less constructor pattern of a literal constant is the literal.
+    let np = l.ast.pats.len();
+    for i in 0..np {
+        let p = pat_at(in l.ast, n32(i));
+        if p.kind == 5 && p.c == 0 && list_len(in l.ast, p.b) == 0 {
+            let c = match lit_of.try_get(widen_u64(p.a)) {
+                Option::Some(c) => c,
+                Option::None => none(),
+            };
+            if c != none() {
+                let mut v = p;
+                v.kind = 3;
+                v.a = c;
+                v.b = none();
+                v.c = none();
+                l.ast.pats.set(idx_from_raw[PatNode](n32(i)), v);
+            }
         }
     }
 }
@@ -3866,7 +4206,8 @@ fn syms_new(inout a: Ast) -> Syms {
         fn_once: a.names.intern(in "FnOnce").id(),
         brk: a.names.intern(in "break").id(),
         cont: a.names.intern(in "continue").id(),
-        for_: a.names.intern(in "for").id()
+        for_: a.names.intern(in "for").id(),
+        minus: a.names.intern(in "-").id()
     }
 }
 
@@ -3899,6 +4240,9 @@ pub fn lower_source(in source: Str) -> L {
         stk: ChunkSeq::new[u32](),
         pending: ChunkSeq::new[u32](),
         consts: ChunkSeq::new[u32](),
+        const_lits: ChunkSeq::new[u32](),
+        const_untyped: ChunkSeq::new[u8](),
+        extra: ChunkSeq::new[u32](),
         evpos: ChunkSeq::new[u32](),
         evc: 0,
         desync: 0,

@@ -1053,6 +1053,28 @@ pub(super) fn split_locals(
             _ => {}
         }
     }
+    // An element view's binding (§13) names the element in its buffer.
+    if !world.element_views.is_empty() {
+        let views: BTreeSet<ValueId> = f
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| {
+                matches!(i.op, Op::Seq { .. })
+                    && world
+                        .element_views
+                        .contains_key(&(i.span.start, i.span.end))
+            })
+            .map(|i| i.dest)
+            .collect();
+        for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+            if let Op::Bind { pattern, value } = &inst.op
+                && views.contains(value)
+            {
+                memory.extend(crate::check::pattern_names(pattern));
+            }
+        }
+    }
     let candidates: BTreeMap<String, Vec<(Vec<String>, i32, Type)>> = f
         .locals
         .iter()
