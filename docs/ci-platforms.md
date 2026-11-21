@@ -77,6 +77,12 @@ finished (#1321). To keep pull requests within the limit:
   QEMU vectors) are not triggered on pull requests by `Cargo.toml` or
   `Cargo.lock` alone; pushes to main still run them on those changes.
 - A push to main cancels the older main run of the same workflow.
+- `Merge gate` (`.github/workflows/merge-gate.yml`, `scripts/ci/merge_gate.py`)
+  enforces the project rule that pull requests which cannot merge yet get no
+  CI: when a pull request's base is not main, its branch carries another open
+  pull request's commits (a merged-in parent that has not landed), or it
+  conflicts with main, the gate cancels the other Actions runs for that push
+  and fails with the reason. Push again once the parent has merged.
 
 The native executable cases are shared with `scripts/test-native-host.sh`;
 `scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.
