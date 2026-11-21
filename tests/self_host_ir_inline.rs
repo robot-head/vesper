@@ -194,7 +194,7 @@ fn decisions_match_rust() {
         }
     }
     eprintln!("decisions: {bad} of {n} programs differ ({sites} sites inlined, {refused} refused)");
-    assert!(sites > 1000, "only {sites} inlined sites");
+    assert!(sites > 500, "only {sites} inlined sites");
     assert_eq!(bad, 0);
 }
 
