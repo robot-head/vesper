@@ -1,0 +1,255 @@
+// Vesper port of vesper-warp-umem (SH6 lane 14, #1409): the AF_XDP ring
+// model (src/ring.rs), the UMEM geometry (src/config.rs), the software NIC
+// (src/soft.rs), the application-side driver (src/driver.rs) and the
+// conservation auditor (src/accounting.rs).
+//
+// The port is one library in several files, joined in the order of PARTS
+// in build.rs (types, util, ring, config, soft, driver, audit). This file
+// holds the types that cross the boundary; their names, fields and variants
+// are the Rust crate's, so the binding converts them to the crate's types.
+//
+// Ownership split (pattern d, as in vesper-warp-wheel): Vesper keeps every
+// ring, the device-side state, the driver's location table, free list,
+// census and statistics. The Rust wrappers keep the UMEM bytes (lent to each
+// call that touches them as `inout Slice[u8]`, in place) and the linear frame
+// owners with their drop ledger, which is Rust ownership of Rust values.
+
+// ---------------------------------------------------------------------------
+// Types shared with the Rust crate (same names, fields and variants).
+
+copy struct UmemConfig {
+    frame_count: u32,
+    frame_size: u32,
+    headroom: u32,
+    fill_size: u32,
+    rx_size: u32,
+    tx_size: u32,
+    completion_size: u32
+}
+
+copy struct XdpDesc {
+    addr: u64,
+    len: u32,
+    options: u32
+}
+
+copy enum RingError {
+    InvalidSize,
+    IndexOutsideWindow {
+        idx: u32
+    },
+    CountExceedsWindow {
+        requested: u32,
+        outstanding: u32
+    }
+}
+
+copy enum DescError {
+    OutOfUmem {
+        addr: u64
+    },
+    HeadroomOverlap {
+        offset: u32,
+        headroom: u32
+    },
+    OverLength {
+        offset: u32,
+        len: u32,
+        frame_size: u32
+    },
+    ZeroLength,
+    UnsupportedOptions {
+        options: u32
+    },
+    NotKernelOwned {
+        chunk: u32
+    }
+}
+
+copy struct RxRejected {
+    reason: DescError,
+    chunk: Option[u32],
+    recycled: bool
+}
+
+copy enum LeaseMark {
+    Live,
+    Retired,
+    Leaked
+}
+
+copy enum DriverLoc {
+    Free,
+    FillPosted,
+    AppRx,
+    AppTx,
+    TxPosted(LeaseMark),
+    InFlight,
+    Leaked
+}
+
+copy struct DriverCensus {
+    free: u32,
+    fill_posted: u32,
+    app_rx: u32,
+    app_tx: u32,
+    tx_posted: u32,
+    tx_posted_leased: u32,
+    in_flight: u32,
+    leaked: u32
+}
+
+copy struct DriverStats {
+    rx_harvested: u64,
+    rx_rejected: u64,
+    rx_rejected_recycled: u64,
+    tx_submitted: u64,
+    tx_ring_full: u64,
+    completions: u64,
+    completions_invalid: u64,
+    retired: u64,
+    wake_errors: u64,
+    leaks_detected: u64
+}
+
+copy struct CompletionReport {
+    completed_leased: u32,
+    freed: u32,
+    leaked: u32,
+    invalid: u32
+}
+
+copy enum RetireOutcome {
+    Freed,
+    AwaitingCompletion
+}
+
+copy enum SoftNicMode {
+    Loopback,
+    Scripted
+}
+
+copy enum Fault {
+    RxOutOfRange,
+    RxHeadroomOverlap,
+    RxOverLength,
+    RxZeroLength,
+    CompletionOutOfRange,
+    StallTx(u32),
+    StallCompletion(u32)
+}
+
+copy enum DeliverOutcome {
+    Delivered {
+        chunk: u32
+    },
+    NoBuffer,
+    RxRingFull,
+    Oversize
+}
+
+copy struct SoftNicStats {
+    rx_delivered: u64,
+    rx_dropped_no_buffer: u64,
+    rx_dropped_ring_full: u64,
+    rx_dropped_oversize: u64,
+    tx_consumed: u64,
+    tx_invalid: u64,
+    completions_posted: u64,
+    faults_applied: u64
+}
+
+copy struct SoftStepReport {
+    completed: u32,
+    fill_pulled: u32,
+    tx_consumed: u32,
+    rx_delivered: u32,
+    faults_applied: u32
+}
+
+copy struct KernelCensus {
+    fill_ring: u32,
+    nic_rx: u32,
+    rx_ring: u32,
+    tx_ring: u32,
+    nic_tx: u32,
+    completion_ring: u32,
+    spurious_rx: u32,
+    spurious_completion: u32
+}
+
+// ---------------------------------------------------------------------------
+// Port-only types: `XdpUmemAccounting::counts` as a struct, in `Location`
+// order, so an audit returns it without allocating.
+
+copy struct LocationCounts {
+    free: u32,
+    fill: u32,
+    nic_rx: u32,
+    rx: u32,
+    app_rx: u32,
+    app_tx: u32,
+    tx: u32,
+    nic_tx: u32,
+    comp: u32,
+    in_flight: u32,
+    leaked: u32
+}
+
+// ---------------------------------------------------------------------------
+// Port-only types: the Rust wrappers map them to the crate's errors, whose
+// `&'static str` payloads do not cross.
+
+// `UmemError` without its string payloads. `InvalidConfig(code)` names the
+// message in `config_message` (src/port/error.rs).
+copy enum PortError {
+    InvalidConfig(u32),
+    WrongLocation {
+        chunk: u32
+    },
+    TxRingFull,
+    NoFreeFrame,
+    LengthOutOfFrame {
+        offset: u32,
+        len: u32,
+        frame_size: u32
+    },
+    HeadroomOverlap {
+        offset: u32,
+        headroom: u32
+    },
+    PacketNumberOutOfRange {
+        pn: u64
+    },
+    Ring(RingError)
+}
+
+// `ConservationError` with the side and the device location as codes
+// (`Location::index()` order; side 0 is the free list, 1 the kernel receive
+// side, 2 the kernel transmit side). `driver` is a `DriverLoc`.
+copy enum AuditError {
+    TotalMismatch {
+        expected: u32,
+        actual: u64
+    },
+    Leaked {
+        count: u32,
+        first_chunk: Option[u32]
+    },
+    SideMismatch {
+        side: u32,
+        driver: u32,
+        device: u32
+    },
+    Duplicate {
+        chunk: u32
+    },
+    Missing {
+        chunk: u32
+    },
+    Misplaced {
+        chunk: u32,
+        device: u32,
+        driver: DriverLoc
+    }
+}

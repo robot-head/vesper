@@ -1,0 +1,85 @@
+// ---------------------------------------------------------------------------
+// Constants and total helpers.
+
+// MAX_FRAME_SIZE etc., as in src/config.rs.
+const MIN_FRAME_SIZE: u32 = 2048;
+const MAX_FRAME_SIZE: u32 = 32768;
+const MIN_FRAME_PAYLOAD: u32 = 64;
+const MAX_RING_SIZE: u32 = 1048576;
+const MAX_FRAMES: u32 = 1048576;
+
+// MAX_PACKET_NUMBER_EXCLUSIVE = 2^62.
+fn max_packet_number_exclusive() -> u64 {
+    4611686018427387904
+}
+
+fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn filled(n: u64, v: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    s.resize(n, v);
+    s
+}
+
+fn min32(a: u32, b: u32) -> u32 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn is_power_of_two(x: u32) -> bool {
+    x != 0 && (x & wrapping_sub(x, 1)) == 0
+}
+
+// log2 of a power of two.
+fn log2(x: u32) -> u64 {
+    let mut n: u64 = 0;
+    let mut v = widen_u64(x);
+    loop {
+        if v <= 1 {
+            break;
+        }
+        v = shr(v, 1);
+        n = wrapping_add(n, 1);
+    }
+    n
+}
+
+fn shl(x: u64, s: u64) -> u64 {
+    if s >= 64 {
+        0
+    } else {
+        wrapping_shl_u64(x, wrapping_u32(s))
+    }
+}
+
+fn shr(x: u64, s: u64) -> u64 {
+    if s >= 64 {
+        0
+    } else {
+        wrapping_shr_u64(x, wrapping_u32(s))
+    }
+}
+
+fn sat_add32(a: u32, b: u32) -> u32 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        4294967295
+    } else {
+        s
+    }
+}

@@ -2,8 +2,8 @@
 //! fill + rx + tx to every location a frame can be, plus an auditor that
 //! cross-checks the driver's table against the device's rings chunk by chunk.
 
-use crate::driver::{DriverLoc, LeaseMark, Xsk, XskBackend};
-use crate::soft::SoftNic;
+use super::driver::{DriverLoc, LeaseMark, Xsk, XskBackend};
+use super::soft::SoftNic;
 use crate::trace::{LOCATIONS, Location, TransitionKind};
 
 /// Per-location frame counts.

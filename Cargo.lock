@@ -6959,7 +6959,10 @@ name = "vesper-warp-umem"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "vesper-bench",
  "vesper-ffi",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-warp-umem",
 ]
 

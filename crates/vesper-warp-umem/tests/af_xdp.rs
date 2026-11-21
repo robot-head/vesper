@@ -4,7 +4,8 @@
 //! returns when the host refuses (no CAP_NET_RAW/CAP_BPF, no AF_XDP, no
 //! generic XDP on `lo`). Passing here is evidence about this host's kernel
 //! path for `lo`, not about any NIC driver, zero-copy DMA or line rate.
-#![cfg(target_os = "linux")]
+// The AF_XDP backend is not in the Vesper build yet (SH6 lane 14, #1409).
+#![cfg(all(target_os = "linux", not(feature = "vesper-port")))]
 
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};

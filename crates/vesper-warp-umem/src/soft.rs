@@ -21,11 +21,11 @@
 
 use std::collections::VecDeque;
 
+use super::driver::sealed::BackendAccess;
+use super::driver::{Xsk, XskBackend};
+use super::ring::{ProducerRing, Ring, pop_one, push_one};
 use crate::config::UmemConfig;
-use crate::driver::sealed::BackendAccess;
-use crate::driver::{Xsk, XskBackend};
 use crate::error::UmemError;
-use crate::ring::{ProducerRing, Ring, pop_one, push_one};
 use crate::trace::{Transition, TransitionKind};
 use crate::wire::XdpDesc;
 

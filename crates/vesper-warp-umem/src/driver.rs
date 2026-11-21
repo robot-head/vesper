@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
+use super::ring::{ConsumerRing, ProducerRing, push_one};
 use crate::config::UmemConfig;
 use crate::error::{DescError, Refused, RxRejected, UmemError};
 use crate::frame::{InFlightQuicPkt, Ledger, RxHarvested, Submitted, TxStaged, UmemFrame};
-use crate::ring::{ConsumerRing, ProducerRing, push_one};
 use crate::trace::{Transition, TransitionKind};
 use crate::wire::XdpDesc;
 
@@ -19,8 +19,8 @@ pub const MAX_PACKET_NUMBER_EXCLUSIVE: u64 = 1 << 62;
 /// memory the kernel writes. Only the driver calls these, and only for
 /// ranges it has checked belong to application-owned chunks.
 pub(crate) mod sealed {
+    use super::super::ring::{ConsumerRing, ProducerRing};
     use crate::error::UmemError;
-    use crate::ring::{ConsumerRing, ProducerRing};
     use crate::trace::Transition;
     use crate::wire::XdpDesc;
 

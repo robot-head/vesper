@@ -1,8 +1,77 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
 
+# The Rust build (default features), with its tests.
 vesper_crate(
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so these run in a copy of regular files.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
 )
+
+# The Vesper build (SH6 lane 14, #1409): the same API forwarding to the port
+# in vesper/src/ through the committed binding, and the crate's tests run
+# unchanged against it. The port's files joined in order, as build.rs does
+# (PARTS).
+UMEM_PARTS = [
+    "vesper/src/types.ves",
+    "vesper/src/util.ves",
+    "vesper/src/ring.ves",
+    "vesper/src/config.ves",
+    "vesper/src/soft.ves",
+    "vesper/src/driver.ves",
+    "vesper/src/audit.ves",
+]
+
+genrule(
+    name = "umem_source",
+    srcs = UMEM_PARTS,
+    outs = ["umem.ves"],
+    cmd = "for f in %s; do cat $$f; echo; done > $@" % " ".join(["$(location %s)" % p for p in UMEM_PARTS]),
+)
+
+vesper_port_object(
+    name = "umem_vesper",
+    src = ":umem_source",
+    library = "umem",
+    target = VESPER_TARGET,
+)
+
+# The divergence check (one bug per ported module, DIVERGENT_EDITS in
+# build.rs) runs under Cargo in port/test-port.sh.
+
+rust_library(
+    name = "port",
+    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
+    crate_features = ["vesper-port"],
+    crate_name = "vesper_warp_umem",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = [
+        "//crates/vesper-ffi",
+        "//crates/vesper-port-abi",
+    ],
+)
+
+[
+    rust_test(
+        name = name,
+        srcs = [src] + (["tests/common/mod.rs"] if common else []),
+        compile_data = [obj] + UMEM_PARTS,
+        crate_features = ["vesper-port"],
+        crate_name = crate,
+        crate_root = src,
+        edition = "2024",
+        rustc_flags = ["-Clink-arg=$(location %s)" % obj],
+        tags = tags,
+        deps = [":port"] + extra,
+    )
+    for name, src, crate, obj, common, extra, tags in [
+        ("port_rings_test", "tests/rings.rs", "rings", ":umem_vesper", False, [], []),
+        ("port_soft_nic_test", "tests/soft_nic.rs", "soft_nic", ":umem_vesper", True, [], []),
+        ("port_wire_test", "tests/wire.rs", "wire", ":umem_vesper", False, [], []),
+        ("port_zero_alloc_test", "tests/zero_alloc.rs", "zero_alloc", ":umem_vesper", False, [], []),
+        ("port_abba_test", "tests/abba.rs", "abba", ":umem_vesper", False, ["//crates/vesper-bench"], []),
+    ]
+]
