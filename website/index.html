@@ -124,7 +124,7 @@ fn main() {
               </article>
               <article>
                 <h4>Vesper · rejected at scope exit</h4>
-                <pre tabindex="0"><code data-lang="vesper">linear struct WriteTxn {}
+                <pre tabindex="0"><code data-lang="vesper" data-error="E0302">linear struct WriteTxn {}
 fn main() {
     let tx = WriteTxn {};
     // Forgot to commit or abort.
@@ -185,7 +185,7 @@ fn main() {
             <div id="source-linear" role="tabpanel" aria-labelledby="source-tab-linear" tabindex="0">
               <div class="source-body">
                 <div class="source-code">
-                  <pre id="code-linear" tabindex="0" aria-label="transaction.ves source"><code><!-- source:transaction.ves --></code></pre>
+                  <pre id="code-linear" tabindex="0" aria-label="transaction.ves source"><code data-lang="vesper"><!-- source:transaction.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-linear" type="button">Copy source</button>
                     <a href="examples/transaction.ves" download>Download transaction.ves</a>
@@ -200,7 +200,7 @@ fn main() {
             <div id="source-projections" role="tabpanel" aria-labelledby="source-tab-projections" tabindex="0" hidden>
               <div class="source-body">
                 <div class="source-code">
-                  <pre id="code-projections" tabindex="0" aria-label="projections.ves source"><code><!-- source:projections.ves --></code></pre>
+                  <pre id="code-projections" tabindex="0" aria-label="projections.ves source"><code data-lang="vesper"><!-- source:projections.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-projections" type="button">Copy source</button>
                     <a href="examples/projections.ves" download>Download projections.ves</a>
@@ -215,7 +215,7 @@ fn main() {
             <div id="source-effects" role="tabpanel" aria-labelledby="source-tab-effects" tabindex="0" hidden>
               <div class="source-body">
                 <div class="source-code">
-                  <pre id="code-effects" tabindex="0" aria-label="checked_math.ves source"><code><!-- source:checked_math.ves --></code></pre>
+                  <pre id="code-effects" tabindex="0" aria-label="checked_math.ves source"><code data-lang="vesper"><!-- source:checked_math.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-effects" type="button">Copy source</button>
                     <a href="examples/checked_math.ves" download>Download checked_math.ves</a>
@@ -267,7 +267,7 @@ fn main() {
               <span><svg width="16" height="16" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 6 6-6 6m9 0h7"></path></svg> Shell</span>
               <button type="button" class="copy-source" data-copy="setup-code">Copy commands</button>
             </div>
-            <pre id="setup-code" tabindex="0"><code>git clone https://github.com/robot-head/vesper.git
+            <pre id="setup-code" tabindex="0"><code data-lang="sh">git clone https://github.com/robot-head/vesper.git
 cd vesper
 cargo build --locked -p vesper
 

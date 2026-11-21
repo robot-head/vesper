@@ -9,9 +9,15 @@ const parts = [
 const escape = text => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 const inline = text => escape(text).replace(/`([^`]+)`/g, '<code>$1</code>');
 function renderBlocks(blocks) {
-  return blocks.map(block => block.startsWith('    ')
-    ? `<pre tabindex="0"><code>${escape(block.replace(/^    /gm, ''))}</code></pre>`
-    : `<p>${inline(block)}</p>`).join('\n');
+  return blocks.map(block => {
+    if (block.startsWith('~~~vesper\n')) {
+      return `<pre tabindex="0"><code data-lang="vesper">${escape(block.slice('~~~vesper\n'.length, -4))}</code></pre>`;
+    }
+    if (block.startsWith('    ')) {
+      return `<pre tabindex="0"><code data-lang="text">${escape(block.replace(/^    /gm, ''))}</code></pre>`;
+    }
+    return `<p>${inline(block)}</p>`;
+  }).join('\n');
 }
 const filename = id => /^\d+$/.test(id) ? `chapter-${id.padStart(2, '0')}.html` : `appendix-${id.toLowerCase()}.html`;
 const label = id => /^\d+$/.test(id) ? `Chapter ${id}` : `Appendix ${id}`;
@@ -39,12 +45,12 @@ function manuscriptOutline(source) {
 function readLessons(source, part, outline, covered) {
   const chapters = [];
   let chapter, entry;
-  for (const block of source.trimEnd().split(/\r?\n(?:[ \t]*\r?\n)+/)) {
+  for (const block of source.replaceAll('\r\n', '\n').trimEnd().split(/\r?\n(?:[ \t]*\r?\n)+/)) {
     const line = block.trim().replace(/\s*\r?\n\s*/g, ' ');
     const heading = line.match(/^(#{1,2}) ([\dAB]+(?:\.\d+)?) (.+)$/);
     if (!heading) {
       if (!entry || line.startsWith('#')) throw new Error(`Unexpected lesson text: ${line}`);
-      entry.blocks.push(block.startsWith('    ') ? block : line);
+      entry.blocks.push(block.startsWith('    ') || block.startsWith('~~~vesper\n') ? block : line);
       continue;
     }
     const [, level, id, title] = heading;

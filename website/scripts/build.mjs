@@ -1,7 +1,7 @@
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { highlight, highlightListings } from './highlight.mjs';
+import { escape, highlightSite } from './highlight.mjs';
 import { buildTour } from './tour.mjs';
 import { buildDocs } from './docs.mjs';
 
@@ -16,14 +16,14 @@ for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
     .replace(/WriteTxn \{\s+wal_slot\s+\}\s+= self;/g, 'WriteTxn { wal_slot } = self;')
     .replace(/WriteTxn \{\s+wal_slot: 42\s+\};/g, 'WriteTxn { wal_slot: 42 };')
     .replace(/\n{2,}/g, '\n');
-  html = html.replace(`<!-- source:${file} -->`, highlight(source));
+  html = html.replace(`<!-- source:${file} -->`, escape(source));
   await mkdir(resolve(out, 'examples'), { recursive: true });
   await writeFile(resolve(out, 'examples', file), source + '\n');
 }
 if (/<!-- source:/.test(html)) throw new Error('Unresolved source inclusion');
-await writeFile(resolve(out, 'index.html'), highlightListings(html));
+await writeFile(resolve(out, 'index.html'), html);
 const guide = await readFile(resolve(root, 'language.html'), 'utf8');
-await writeFile(resolve(out, 'language.html'), highlightListings(guide));
+await writeFile(resolve(out, 'language.html'), guide);
 const chapters = await buildDocs(root, out);
 const tour = await buildTour(root, out);
 for (const file of ['search.js', 'docs.css']) {
@@ -35,6 +35,8 @@ await writeFile(resolve(out, 'sitemap.xml'), sitemap.replace('</urlset>', `${cha
 for (const path of ['assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
   await cp(resolve(root, path), resolve(out, path), { recursive: true });
 }
+const css = await highlightSite(out, ['index.html', 'language.html', 'docs/index.html', ...chapters, ...tour]);
+await appendFile(resolve(out, 'site.css'), '\n' + css);
 try { await cp(resolve(root, 'share.jpg'), resolve(out, 'share.jpg')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 await writeFile(resolve(out, '.nojekyll'), '');
 console.log('Built Vesper website in website/dist (no third-party build dependencies).');

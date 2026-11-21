@@ -192,7 +192,7 @@ fn main() -> u64 {
 
 What happens if two writable arguments name the same counter? Check this program. Both parameters would have exclusive access to `count` during one call. To fix the overlap, introduce a second mutable counter and lend it as the second argument.
 
-~~~vesper
+~~~vesper E0301
 fn reset(inout first: u64, inout second: u64) {
     first = 0;
     second = 0;
@@ -272,18 +272,24 @@ fn main() -> u64 {
 
 ## Detect a second use
 
-Insert this pair of calls into the previous program in place of its one call. The second call tries to move a ticket the caller has already given away. Check the file and identify which call must be removed.
+The second call below tries to move a ticket the caller has already given away. Check the file and identify which call must be removed.
 
-~~~vesper
-release(sink t);
-release(sink t);
+~~~vesper E0303
+affine struct Ticket { seat: u64 }
+fn release(sink ticket: Ticket) {}
+fn main() -> u64 {
+    let t = Ticket { seat: 3 };
+    release(sink t);
+    release(sink t);
+    0
+}
 ~~~
 
 ## Require a decision at scope exit
 
 Change the declaration to `linear` when forgetting the ticket is a bug. This complete program has an error. Run `vesper check lesson.ves` to see `E0302` at the unfinished obligation.
 
-~~~vesper
+~~~vesper E0302
 linear struct Ticket { seat: u64 }
 fn main() -> u64 {
     let t = Ticket { seat: 3 };
@@ -567,12 +573,15 @@ vesper fmt --check seats.ves
 
 The second command succeeds without changing the file. You can use it in CI to check that a committed file already has the formatter’s output.
 
-## Decide what a rule introduces
+## Check a quoted expression
 
-The seat macro uses wrapping arithmetic. Replacing the wrapping addition with `$n + 1` introduces the possibility of overflow. Run `vesper forge check seats.ves` after this change. The checker reports the undeclared effect. Restore the original body before continuing.
+Try writing an infix addition directly inside the quotation. Forge accepts a limited set of expression templates. It rejects this spelling at the plus sign while parsing the macro. Check it with `vesper forge check seats.ves`, then replace the quoted expression with `wrapping_add($n, 1)` and check again.
 
-~~~vesper
-quote { $n + 1 }
+~~~vesper FORGE_PARSE
+macro next_seat($n: expr) -> expr {
+    quote { $n + 1 }
+}
+fn main() -> i64 { next_seat!(41) }
 ~~~
 
 ## Read a proposed sugar declaration

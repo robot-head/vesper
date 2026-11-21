@@ -235,6 +235,17 @@ footer { border-top: 1px solid var(--line); }
 .tour-contents [aria-current] { font-weight: bold; color: var(--ink); }
 .lesson > * { margin: 1.2rem 0; }
 .tour .neighbors { margin-top: 2rem; }
+.diagnostic-example { --error-ink: #ffa3ac; }
+[data-vesper-theme="dawn"] .diagnostic-example { --error-ink: #9e2438; }
+.lens-range { text-decoration: underline wavy var(--error-ink); text-underline-offset: 3px; }
+.error-lens { margin-inline-start: 1.25em; color: var(--error-ink); user-select: none; }
+.error-lens::before { content: attr(data-code); font-weight: 600; }
+.error-lens::after { content: "  " attr(data-message); }
+.diagnostic-example figcaption { padding: .65rem .9rem; border-inline-start: 3px solid var(--error-ink); color: var(--ink); font-size: .9rem; }
+.diagnostic-example figcaption strong { color: var(--error-ink); }
+@media (max-width: 760px) {
+  .error-lens::after { content: none; }
+}
 @media (max-width: 760px) {
   .reader { display: block; }
   .reader-intro { padding-bottom: 24px; }

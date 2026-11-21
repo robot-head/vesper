@@ -1,13 +1,13 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { page } from './docs.mjs';
-import { escape, highlight } from './highlight.mjs';
+import { escape } from './highlight.mjs';
 
 function renderLesson(body) {
-  return body.trim().split(/(^~~~\w+\n[\s\S]*?^~~~$)/m).filter(part => part.trim()).map(part => {
+  return body.trim().split(/(^~~~\w+(?: [A-Z0-9_]+)?\n[\s\S]*?^~~~$)/m).filter(part => part.trim()).map(part => {
     if (part.startsWith('~~~')) {
-      const [, language, code] = part.match(/^~~~(vesper|sh)\n([\s\S]*)\n~~~$/);
-      return `<pre tabindex="0"><code>${language === 'sh' ? escape(code) : highlight(code)}</code></pre>`;
+      const [, language, error, code] = part.match(/^~~~(vesper|sh)(?: ([A-Z0-9_]+))?\n([\s\S]*)\n~~~$/);
+      return `<pre tabindex="0"><code data-lang="${language}"${error ? ` data-error="${error}"` : ''}>${escape(code)}</code></pre>`;
     }
     return part.trim().split(/\n\n+/).map(p => `<p>${escape(p).replace(/`([^`]+)`/g, '<code>$1</code>')}</p>`).join('\n');
   }).join('\n');
@@ -27,6 +27,10 @@ export async function buildTour(root, out) {
   if (new Set(lessons.map(step => step.file)).size !== lessons.length) throw new Error('Duplicate tour URL');
   const dir = resolve(out, 'tour');
   await mkdir(dir, { recursive: true });
+  const filenames = new Set(lessons.map(s => s.file));
+  for (const name of await readdir(dir)) {
+    if (name.endsWith('.html') && !filenames.has(name)) await unlink(resolve(dir, name));
+  }
   for (const [i, step] of lessons.entries()) {
     const subjects = [...new Set(lessons.map(s => s.subject))];
     const menu = subjects.map(subject => `<li>${escape(subject)}<ol start="${1 + lessons.findIndex(s => s.subject === subject)}">${lessons.filter(s => s.subject === subject).map(s =>
