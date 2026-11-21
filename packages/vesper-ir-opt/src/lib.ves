@@ -1,0 +1,101 @@
+// @vesper/ir-opt: the compiler's `ir_opt` pass (src/ir_opt.rs) in Vesper
+// (self-hosting SH3, lane 9, #1248), on @vesper/place-ir's tables and
+// @vesper/egraph's e-graph. Rust stays the default; `ir_opt::optimize` is
+// Stage 1 guarded and unchanged (the verified backend runs it).
+//
+// - forward.ves: memory forwarding, `optimize`'s per-block equality
+//   saturation (egglog `RULES` on @vesper/egraph's memory terms).
+// - reuse.ves: `fip_reuse_pass`, `@fip` constructor reuse (egglog
+//   `FIP_RULES`, which @vesper/egraph does not cover, as a tag check).
+// - view.ves: what both read from a function of the tables.
+//
+// `ir_opt::optimize` ends with `ir::thread_tokens` and `ir_check::validate`;
+// those stay with the caller (tests/self_host_ir_opt.rs runs the Rust ones
+// on the decoded program; the hybrid build will run its own).
+//
+// The entry's input is @vesper/place-ir's (names, types, world, program),
+// then: the mode (0 `optimize`, 1 `fip_reuse_pass` alone) and the world
+// facts reuse.ves reads. The output: status (0 ok, 1 a read lacks state
+// evidence, 2 egglog would refuse a block, 3 a `slot_key` error), the error
+// index, the count `optimize` returns, the number of `BoxReuse` payloads
+// made and per payload (bind dest, slot index, size) for the pool rows
+// appended after the input's, then (status 0) `put_program`'s words.
+
+use @vesper/check-data::input::{
+    Reader,
+    read_ctx
+};
+use @vesper/place-ir::{
+    put_program,
+    read_program
+};
+use self::view::{
+    type_classes
+};
+use self::forward::{
+    forward_program
+};
+use self::reuse::{
+    read_facts,
+    reuse_new,
+    reuse_program
+};
+
+// Constants are copied, not imported: the Vesper package assembler
+// (@vesper/check-names-packages) does not resolve an imported constant
+// yet (E0111), and tests/self_host_check_names_packages.rs assembles this
+// package too.
+const S_OK: u8 = 0;
+
+const MODE_OPTIMIZE: u64 = 0;
+
+pub fn ir_opt_entry(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let mut p = read_program(inout r, in b, in c);
+    let mode = r.word(in b);
+    let facts = read_facts(inout r, in b, in p);
+    let cls = type_classes(in c.types, in c.names);
+    let n = p.insts.len();
+    let mut orig: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for k in 0..n {
+        orig.push(k);
+    }
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut count: u64 = 0;
+    if mode == MODE_OPTIMIZE {
+        let (st, forwarded) = forward_program(inout p, in c.names, in cls, inout orig);
+        if st != S_OK {
+            out.push(widen_u64(st));
+            out.push(0);
+            out.push(0);
+            out.push(0);
+            return out;
+        }
+        count = forwarded;
+    }
+    let mut reuse = reuse_new();
+    reuse_program(inout p, in c.names, in cls, in facts, in orig, inout reuse);
+    out.push(widen_u64(reuse.status));
+    out.push(reuse.error);
+    out.push(wrapping_add(count, reuse.matched));
+    let np = reuse.payloads.len() / 3;
+    out.push(np);
+    if reuse.status != 0 {
+        return out;
+    }
+    for k in 0..reuse.payloads.len() {
+        out
+            .push(
+            match reuse.payloads.try_get(k) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            }
+        );
+    }
+    put_program(in p, in c.types, in c.names, inout out);
+    out
+}

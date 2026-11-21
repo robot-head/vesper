@@ -345,6 +345,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH3 lane 9 (#1248): @vesper/ir-opt against ir_opt on
+        # the same corpus. Anchored globs.
+        "test/self_host_ir_opt": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH3 lane 10 (#1249): the optimizer's certificate
         # checker over every proposal of the same corpus. Anchored globs.
         "test/self_host_optimize": glob([
@@ -712,6 +719,9 @@ vesper_crate(
         "test/self_host_check_fip": "long",
         # The e-graph differential (#1247) runs egg and egglog on the corpus.
         "test/self_host_egraph": "long",
+        # The ir_opt differential (#1248) runs Rust's egglog on a corpus slice;
+        # it ran past 900 s on loaded CI (unoptimized).
+        "test/self_host_ir_opt": "eternal",
         # The Lean head differential (#1341) checks every corpus world.
         "test/self_host_lean_extract": "long",
         # The optimizer differential (#1249) checks every corpus world.

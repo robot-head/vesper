@@ -1,0 +1,955 @@
+// `@fip` constructor reuse: `ir_opt::fip_reuse_pass`.
+//
+// Per `@fip` function whose blocks are acyclic, in topological order: the
+// reuse slots live on entry (one predecessor's exit slots, or at a join the
+// slots every live predecessor shares, first by identity, then by slot key
+// with a merged join slot), the slots each `Bind` unpacks, and the
+// allocations that take one: a `Box::new` takes the first live slot of its
+// key (`BoxReuse`); a call to a caller-slot function takes the function's
+// own caller slot in tail position or else the first live slot of its key
+// (`fip_call_slots`).
+//
+// The Rust pass confirms each pairing with a second egglog program
+// (`FIP_RULES`): `AllocRef a` and `SlotRef s` are unioned when their
+// `(key, rank)` tags agree. Every object has one tag and a slot's rank is
+// unique per key in a block, so the classes are exactly the tag classes and
+// a pairing is confirmed iff the allocation's tag is its slot's tag; the
+// port compares the tags (`confirmed`) instead of running a relation join.
+//
+// What the world answers (whether `Box` is the built-in one, which
+// functions are `@fip`, the slot key of a function's result, of each slot a
+// `Bind` unpacks and of each `Box::new` or caller-slot call, and the
+// `slot_key` errors) comes in as facts (`Facts`, written by
+// tests/self_host_ir_opt.rs from `fip::pattern_box_slots`, `box_inner`,
+// `caller_slot_functions` and `slot_key`).
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::input::{
+    Reader
+};
+use @vesper/place-ir::{
+    BlockRow,
+    FnRow,
+    InstRow,
+    PoolRow,
+    Program
+};
+use self::view::{
+    FnView,
+    at32,
+    block_params_at,
+    class_of,
+    fn_view
+};
+
+// Constants are copied, not imported: the Vesper package assembler
+// (@vesper/check-names-packages) does not resolve an imported constant
+// yet (E0111), and tests/self_host_check_names_packages.rs assembles this
+// package too.
+const C_NEVER: u8 = 2;
+const NONE: u32 = 4294967295;
+const OP_BIND: u8 = 3;
+const OP_CALL: u8 = 11;
+const OP_FIP: u8 = 19;
+const TERM_JUMP: u8 = 1;
+const TERM_RETURN: u8 = 0;
+const T_BLOCK: u8 = 7;
+const T_RAW: u8 = 0;
+const T_VALUE: u8 = 6;
+
+// Instruction facts.
+pub const F_NONE: u8 = 0;
+pub const F_BIND: u8 = 1;
+pub const F_BIND_ERR: u8 = 2;
+pub const F_NEED: u8 = 3;
+pub const F_NEED_ERR: u8 = 4;
+
+// The `Fip` payload kind of the pool.
+const POOL_FIP: u64 = 3;
+
+// Call slot kinds (the trailer's words).
+const CS_CALLER: u64 = 0;
+const CS_REUSE: u64 = 1;
+
+pub struct Facts {
+    active: bool,
+    keys: u64,
+    // per function: 1 if `@fip`; the result's slot key + 1, or 0
+    fip: ChunkSeq[u8],
+    ret: ChunkSeq[u64],
+    // per input instruction row
+    kind: ChunkSeq[u8],
+    // F_BIND: slots[a..a+n]; F_NEED: a = key; errors: a = error index
+    a: ChunkSeq[u64],
+    n: ChunkSeq[u64],
+    skey: ChunkSeq[u64],
+    ssize: ChunkSeq[u64]
+}
+
+fn u64_of(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn u8_of(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// active; if active: key count, then per function: fip; if fip: result key
+// (0 or key + 1), instruction count n and n records (kind; F_BIND n,
+// n x (key, size); F_BIND_ERR e; F_NEED key; F_NEED_ERR e; F_NONE).
+pub fn read_facts(inout r: Reader, in b: Slice[u8], in p: Program) -> Facts {
+    let mut f = Facts {
+        active: false,
+        keys: 0,
+        fip: ChunkSeq::new[u8](),
+        ret: ChunkSeq::new[u64](),
+        kind: ChunkSeq::new[u8](),
+        a: ChunkSeq::new[u64](),
+        n: ChunkSeq::new[u64](),
+        skey: ChunkSeq::new[u64](),
+        ssize: ChunkSeq::new[u64]()
+    };
+    if r.word(in b) == 0 {
+        return f;
+    }
+    f.active = true;
+    f.keys = r.word(in b);
+    let total = p.insts.len();
+    f.kind.resize(total, F_NONE);
+    f.a.resize(total, 0);
+    f.n.resize(total, 0);
+    for fi in 0..p.fn_count() {
+        let row = p.function(fi);
+        let is_fip = r.word(in b);
+        if is_fip == 0 {
+            f.fip.push(0);
+            f.ret.push(0);
+            continue;
+        }
+        f.fip.push(1);
+        f.ret.push(r.word(in b));
+        let count = r.word(in b);
+        let base = if row.bc == 0 {
+            0
+        } else {
+            p.block(row.b0).i0
+        };
+        for k in 0..count {
+            let at = add(base, k);
+            let kind = wrapping_u8(r.word(in b));
+            f.kind.try_set(at, kind);
+            if kind == F_BIND {
+                let n = r.word(in b);
+                f.a.try_set(at, f.skey.len());
+                f.n.try_set(at, n);
+                for j in 0..n {
+                    f.skey.push(r.word(in b));
+                    f.ssize.push(r.word(in b));
+                }
+            } else if kind != F_NONE {
+                f.a.try_set(at, r.word(in b));
+            }
+        }
+    }
+    f
+}
+
+pub copy struct Slot {
+    slot_id: i64,
+    bind: u32,
+    sidx: u64,
+    key: u64,
+    rank: i64,
+    size: u64
+}
+
+// A block's live slots: slab[start..start+len].
+pub copy struct Range {
+    start: u64,
+    len: u64
+}
+
+fn slot_at(in s: ChunkSeq[Slot], i: u64) -> Slot {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Slot {
+            slot_id: 0,
+            bind: 0,
+            sidx: 0,
+            key: 0,
+            rank: 0,
+            size: 0
+        },
+    }
+}
+
+fn range_at(in s: ChunkSeq[Range], i: u64) -> Range {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Range {
+            start: 0,
+            len: 0
+        },
+    }
+}
+
+// The pass's output beyond the tables: the `BoxReuse` payloads it made
+// (pool rows appended to the input's pool) and the status.
+pub struct Reuse {
+    // per new pool row: bind dest, slot index, size
+    payloads: ChunkSeq[u64],
+    matched: u64,
+    // 0, or 3 with `error` the fact's error index
+    status: u8,
+    error: u64
+}
+
+pub fn reuse_new() -> Reuse {
+    Reuse {
+        payloads: ChunkSeq::new[u64](),
+        matched: 0,
+        status: 0,
+        error: 0
+    }
+}
+
+pub const S_FIP_ERROR: u8 = 3;
+
+// A function's call slots: value -> (kind, bind dest, slot index, size).
+pub struct CallSlots {
+    v: ChunkSeq[u32],
+    kind: ChunkSeq[u64],
+    bind: ChunkSeq[u32],
+    sidx: ChunkSeq[u64],
+    size: ChunkSeq[u64]
+}
+
+impl CallSlots {
+    fn set(inout self, v: u32, kind: u64, bind: u32, sidx: u64, size: u64) {
+        for k in 0..self.v.len() {
+            if at32(in self.v, k) == v {
+                self.kind.try_set(k, kind);
+                self.bind.try_set(k, bind);
+                self.sidx.try_set(k, sidx);
+                self.size.try_set(k, size);
+                return;
+            }
+        }
+        self.v.push(v);
+        self.kind.push(kind);
+        self.bind.push(bind);
+        self.sidx.push(sidx);
+        self.size.push(size);
+    }
+}
+
+// The successor blocks of a terminator, in order, without repeats (Rust's
+// `succs`): its block operands.
+fn successors(in p: Program, bk: BlockRow, inout out: ChunkSeq[u64]) {
+    out.clear();
+    for j in 0..bk.tn {
+        let x = add(bk.ta, j);
+        if p.tag(x) == T_BLOCK {
+            let t = p.op(x);
+            let mut seen = false;
+            for k in 0..out.len() {
+                if u64_of(in out, k) == t {
+                    seen = true;
+                }
+            }
+            if !seen {
+                out.push(t);
+            }
+        }
+    }
+}
+
+// Whether `pb` ends in a jump to `b` passing a `Never` value.
+fn never_edge(in p: Program, in cls: ChunkSeq[u8], in v: FnView, pb: BlockRow, b: u64) -> bool {
+    if pb.term != TERM_JUMP || p.op(pb.ta) != b {
+        return false;
+    }
+    let n = p.op(inc(pb.ta));
+    for k in 0..n {
+        let x = p.op(add(pb.ta, add(2, k)));
+        if class_of(in cls, v.vtype(x)) == C_NEVER {
+            return true;
+        }
+    }
+    false
+}
+
+// `flows_to_return`: the value reaches the function's return through
+// empty one-parameter blocks.
+fn flows_to_return(in p: Program, f: FnRow, b0: u64, v0: u64) -> bool {
+    let mut b = b0;
+    let mut v = v0;
+    for step in 0..inc(f.bc) {
+        let bk = p.block(add(f.b0, b));
+        if bk.term == TERM_RETURN {
+            return p.op(bk.ta) == v;
+        }
+        if bk.term != TERM_JUMP {
+            return false;
+        }
+        let t = p.op(bk.ta);
+        let n = p.op(inc(bk.ta));
+        if n != 1 || p.op(add(bk.ta, 2)) != v || t >= f.bc {
+            return false;
+        }
+        let tb = p.block(add(f.b0, t));
+        let pa = block_params_at(in p, tb);
+        if tb.ic != 0 || p.op(pa) != 1 {
+            return false;
+        }
+        v = p.op(inc(pa));
+        b = t;
+    }
+    false
+}
+
+// The first slot of `live` (from `from`) with key `key`, or `len`.
+fn first_with_key(in live: ChunkSeq[Slot], key: u64) -> u64 {
+    for k in 0..live.len() {
+        if slot_at(in live, k).key == key {
+            return k;
+        }
+    }
+    live.len()
+}
+
+fn remove_at(inout live: ChunkSeq[Slot], at: u64) -> Slot {
+    let s = slot_at(in live, at);
+    let n = live.len();
+    for k in inc(at)..n {
+        live.try_set(wrapping_sub(k, 1), slot_at(in live, k));
+    }
+    live.truncate(wrapping_sub(n, 1));
+    s
+}
+
+fn bump_rank(inout ranks: ChunkSeq[i64], inout touched: ChunkSeq[u64], key: u64) -> i64 {
+    if key >= ranks.len() {
+        ranks.resize(inc(key), 0);
+    }
+    let r = match ranks.try_get(key) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    if r == 0 {
+        touched.push(key);
+    }
+    ranks.try_set(key, wrapping_add(r, 1));
+    r
+}
+
+// The tag check `FIP_RULES` makes: the allocation's (key, rank) against the
+// slot's.
+fn confirmed(need: u64, rank: i64, s: Slot) -> bool {
+    need == s.key && rank == s.rank
+}
+
+pub fn reuse_program(
+    inout p: Program,
+    in names: Names,
+    in cls: ChunkSeq[u8],
+    in facts: Facts,
+    in orig: ChunkSeq[u64],
+    inout out: Reuse
+) {
+    if !facts.active {
+        return;
+    }
+    for fi in 0..p.fn_count() {
+        if u8_of(in facts.fip, fi) == 0 {
+            continue;
+        }
+        let f = p.function(fi);
+        if f.bc == 0 {
+            continue;
+        }
+        if !reuse_function(inout p, in names, in cls, in facts, in orig, fi, inout out) {
+            return;
+        }
+    }
+}
+
+// One `@fip` function; false on an error (in `out`).
+fn reuse_function(
+    inout p: Program,
+    in names: Names,
+    in cls: ChunkSeq[u8],
+    in facts: Facts,
+    in orig: ChunkSeq[u64],
+    fi: u64,
+    inout out: Reuse
+) -> bool {
+    let f = p.function(fi);
+    let nb = f.bc;
+    let v = fn_view(in p, f);
+    // edges in (source, target-order) order, Rust's preds/succs
+    let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut et: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut tmp: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut indeg: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](nb);
+    indeg.resize(nb, 0);
+    let mut sstart: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](inc(nb));
+    for b in 0..nb {
+        sstart.push(es.len());
+        successors(in p, p.block(add(f.b0, b)), inout tmp);
+        for k in 0..tmp.len() {
+            let t = u64_of(in tmp, k);
+            es.push(b);
+            et.push(t);
+            indeg.try_set(t, inc(u64_of(in indeg, t)));
+        }
+    }
+    sstart.push(es.len());
+    // preds in edge order
+    let mut pstart: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](inc(nb));
+    let mut acc: u64 = 0;
+    for b in 0..nb {
+        pstart.push(acc);
+        acc = add(acc, u64_of(in indeg, b));
+    }
+    pstart.push(acc);
+    let mut pfill: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](nb);
+    for b in 0..nb {
+        pfill.push(u64_of(in pstart, b));
+    }
+    let mut preds: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](es.len());
+    preds.resize(es.len(), 0);
+    for k in 0..es.len() {
+        let t = u64_of(in et, k);
+        let at = u64_of(in pfill, t);
+        preds.try_set(at, u64_of(in es, k));
+        pfill.try_set(t, inc(at));
+    }
+    // reachable from block 0
+    let mut reach: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](nb);
+    reach.resize(nb, 0);
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    stack.push(0);
+    loop {
+        let n = stack.len();
+        if n == 0 {
+            break;
+        }
+        let b = u64_of(in stack, wrapping_sub(n, 1));
+        stack.truncate(wrapping_sub(n, 1));
+        if b >= nb || u8_of(in reach, b) != 0 {
+            continue;
+        }
+        reach.try_set(b, 1);
+        for k in u64_of(in sstart, b)..u64_of(in sstart, inc(b)) {
+            stack.push(u64_of(in et, k));
+        }
+    }
+    // Kahn's order
+    let mut order: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](nb);
+    let mut deg: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](nb);
+    for b in 0..nb {
+        let d = u64_of(in indeg, b);
+        deg.push(d);
+        if d == 0 {
+            order.push(b);
+        }
+    }
+    let mut head: u64 = 0;
+    loop {
+        if head >= order.len() {
+            break;
+        }
+        let b = u64_of(in order, head);
+        head = inc(head);
+        for k in u64_of(in sstart, b)..u64_of(in sstart, inc(b)) {
+            let s = u64_of(in et, k);
+            let d = wrapping_sub(u64_of(in deg, s), 1);
+            deg.try_set(s, d);
+            if d == 0 {
+                order.push(s);
+            }
+        }
+    }
+    if order.len() != nb {
+        return true;
+    }
+
+    let ret_key = u64_of(in facts.ret, fi);
+    let mut next_join: u64 = v.next_value;
+    let mut slab: ChunkSeq[Slot] = ChunkSeq::new[Slot]();
+    let mut exits: ChunkSeq[Range] = ChunkSeq::with_capacity[Range](nb);
+    let mut exit_caller: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](nb);
+    for b in 0..nb {
+        exits
+            .push(
+            Range {
+                start: 0,
+                len: 0
+            }
+        );
+        exit_caller.push(0);
+    }
+    let mut calls = read_call_slots(in p, f);
+    // join slots in block order: block, dest value, incoming
+    // (block, value, slot) triples in jin[js..je]
+    let mut jb: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut jv: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut jstart: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut jin: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ranks: ChunkSeq[i64] = ChunkSeq::new[i64]();
+    ranks.resize(inc(facts.keys), 0);
+    let mut touched: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut active: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut rp: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut live: ChunkSeq[Slot] = ChunkSeq::new[Slot]();
+    for oi in 0..nb {
+        let b = u64_of(in order, oi);
+        if u8_of(in reach, b) == 0 {
+            continue;
+        }
+        let bk = p.block(add(f.b0, b));
+        rp.clear();
+        active.clear();
+        for k in u64_of(in pstart, b)..u64_of(in pstart, inc(b)) {
+            let q = u64_of(in preds, k);
+            if u8_of(in reach, q) != 0 {
+                rp.push(q);
+                if !never_edge(in p, in cls, in v, p.block(add(f.b0, q)), b) {
+                    active.push(q);
+                }
+            }
+        }
+        if active.len() == 0 {
+            for k in 0..rp.len() {
+                active.push(u64_of(in rp, k));
+            }
+        }
+        live.clear();
+        if active.len() == 1 {
+            let r = range_at(in exits, u64_of(in active, 0));
+            for k in 0..r.len {
+                live.push(slot_at(in slab, add(r.start, k)));
+            }
+        } else if active.len() > 1 {
+            join(
+                in slab,
+                in exits,
+                in active,
+                b,
+                inout live,
+                inout next_join,
+                inout jb,
+                inout jv,
+                inout jstart,
+                inout jin
+            );
+        }
+        let mut caller_used = false;
+        for k in 0..active.len() {
+            if u8_of(in exit_caller, u64_of(in active, k)) != 0 {
+                caller_used = true;
+            }
+        }
+        let mut next_slot: i64 = 0;
+        for k in 0..live.len() {
+            let mut s = slot_at(in live, k);
+            s.rank = bump_rank(inout ranks, inout touched, s.key);
+            s.slot_id = next_slot;
+            next_slot = wrapping_add(next_slot, 1);
+            live.try_set(k, s);
+        }
+        let n_inst = bk.ic;
+        for k in 0..n_inst {
+            let row = add(bk.i0, k);
+            let i = p.inst(row);
+            let src = match orig.try_get(row) {
+                Option::Some(o) => o,
+                Option::None => row,
+            };
+            let kind = u8_of(in facts.kind, src);
+            let fa = u64_of(in facts.a, src);
+            if i.op == OP_BIND {
+                if kind == F_BIND_ERR {
+                    out.status = S_FIP_ERROR;
+                    out.error = fa;
+                    return false;
+                }
+                if kind == F_BIND {
+                    for j in 0..u64_of(in facts.n, src) {
+                        let key = u64_of(in facts.skey, add(fa, j));
+                        let size = u64_of(in facts.ssize, add(fa, j));
+                        let r = bump_rank(inout ranks, inout touched, key);
+                        live
+                            .push(
+                            Slot {
+                                slot_id: next_slot,
+                                bind: i.dest,
+                                sidx: j,
+                                key: key,
+                                rank: r,
+                                size: size
+                            }
+                        );
+                        next_slot = wrapping_add(next_slot, 1);
+                    }
+                }
+            } else if i.op == OP_FIP {
+                let pool = p.op(i.a);
+                let label = p.pool_row(pool).label;
+                if names.spells(label, in "BoxNew".as_bytes()) {
+                    if kind == F_NEED_ERR {
+                        out.status = S_FIP_ERROR;
+                        out.error = fa;
+                        return false;
+                    }
+                    if kind == F_NEED {
+                        let at = first_with_key(in live, fa);
+                        if at < live.len() {
+                            let chosen = remove_at(inout live, at);
+                            if confirmed(fa, chosen.rank, chosen) {
+                                out.matched = inc(out.matched);
+                                let np = p.pool.len();
+                                p
+                                    .pool
+                                    .push(
+                                    PoolRow {
+                                        kind: POOL_FIP,
+                                        label: 0
+                                    }
+                                );
+                                out.payloads.push(w(chosen.bind));
+                                out.payloads.push(chosen.sidx);
+                                out.payloads.push(chosen.size);
+                                p.ops.try_set(i.a, np);
+                            }
+                        }
+                    }
+                } else if names.spells(label, in "BoxNewInCaller".as_bytes()) {
+                    caller_used = true;
+                }
+            } else if i.op == OP_CALL {
+                if kind == F_NEED_ERR {
+                    out.status = S_FIP_ERROR;
+                    out.error = fa;
+                    return false;
+                }
+                if kind == F_NEED {
+                    let tail = inc(k)
+                        == n_inst
+                        && flows_to_return(in p, f, b, w(i.dest))
+                        && !caller_used
+                        && ret_key
+                        == inc(fa);
+                    if tail {
+                        caller_used = true;
+                        calls.set(i.dest, CS_CALLER, 0, 0, 0);
+                    } else {
+                        let at = first_with_key(in live, fa);
+                        if at < live.len() {
+                            let chosen = remove_at(inout live, at);
+                            if confirmed(fa, chosen.rank, chosen) {
+                                out.matched = inc(out.matched);
+                                calls.set(i.dest, CS_REUSE, chosen.bind, chosen.sidx, chosen.size);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for k in 0..touched.len() {
+            ranks.try_set(u64_of(in touched, k), 0);
+        }
+        touched.clear();
+        exits
+            .try_set(
+            b,
+            Range {
+                start: slab.len(),
+                len: live.len()
+            }
+        );
+        for k in 0..live.len() {
+            slab.push(slot_at(in live, k));
+        }
+        if caller_used {
+            exit_caller.try_set(b, 1);
+        }
+    }
+    write_trailer(inout p, fi, in calls, in jb, in jv, in jstart, in jin);
+    true
+}
+
+// The slots every active predecessor shares (src/ir_opt.rs's two passes:
+// identical slots, then slots of one key merged into a join slot).
+fn join(
+    in slab: ChunkSeq[Slot],
+    in exits: ChunkSeq[Range],
+    in active: ChunkSeq[u64],
+    b: u64,
+    inout live: ChunkSeq[Slot],
+    inout next_join: u64,
+    inout jb: ChunkSeq[u64],
+    inout jv: ChunkSeq[u64],
+    inout jstart: ChunkSeq[u64],
+    inout jin: ChunkSeq[u64]
+) {
+    let first = range_at(in exits, u64_of(in active, 0));
+    let rest = wrapping_sub(active.len(), 1);
+    // used flags of the rest's slots, by slab position
+    let mut used: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](slab.len());
+    used.resize(slab.len(), 0);
+    let mut used_first: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](first.len);
+    used_first.resize(first.len, 0);
+    let mut matched: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i0 in 0..first.len {
+        let s0 = slot_at(in slab, add(first.start, i0));
+        matched.clear();
+        let mut all = true;
+        for pi in 0..rest {
+            let r = range_at(in exits, u64_of(in active, inc(pi)));
+            let mut found: u64 = NONE64;
+            for k in 0..r.len {
+                let at = add(r.start, k);
+                let o = slot_at(in slab, at);
+                if u8_of(in used, at) == 0 && o.bind == s0.bind && o.sidx == s0.sidx {
+                    found = at;
+                    break;
+                }
+            }
+            if found == NONE64 {
+                all = false;
+                break;
+            }
+            matched.push(found);
+        }
+        if all {
+            used_first.try_set(i0, 1);
+            for k in 0..matched.len() {
+                used.try_set(u64_of(in matched, k), 1);
+            }
+            live.push(s0);
+        }
+    }
+    for i0 in 0..first.len {
+        if u8_of(in used_first, i0) != 0 {
+            continue;
+        }
+        let s0 = slot_at(in slab, add(first.start, i0));
+        matched.clear();
+        let mut all = true;
+        for pi in 0..rest {
+            let r = range_at(in exits, u64_of(in active, inc(pi)));
+            let mut found: u64 = NONE64;
+            for k in 0..r.len {
+                let at = add(r.start, k);
+                let o = slot_at(in slab, at);
+                if u8_of(in used, at) == 0 && o.key == s0.key {
+                    found = at;
+                    break;
+                }
+            }
+            if found == NONE64 {
+                all = false;
+                break;
+            }
+            matched.push(found);
+        }
+        if all {
+            used_first.try_set(i0, 1);
+            let canon = next_join;
+            next_join = inc(next_join);
+            jb.push(b);
+            jv.push(canon);
+            jstart.push(jin.len());
+            jin.push(u64_of(in active, 0));
+            jin.push(w(s0.bind));
+            jin.push(s0.sidx);
+            for k in 0..matched.len() {
+                let at = u64_of(in matched, k);
+                used.try_set(at, 1);
+                let sp = slot_at(in slab, at);
+                jin.push(u64_of(in active, inc(k)));
+                jin.push(w(sp.bind));
+                jin.push(sp.sidx);
+            }
+            live
+                .push(
+                Slot {
+                    slot_id: 0,
+                    bind: n32(canon),
+                    sidx: 0,
+                    key: s0.key,
+                    rank: 0,
+                    size: s0.size
+                }
+            );
+        }
+    }
+}
+
+const NONE64: u64 = 18446744073709551615;
+
+// The input's call slots (the trailer's first table).
+fn read_call_slots(in p: Program, f: FnRow) -> CallSlots {
+    let mut c = CallSlots {
+        v: ChunkSeq::new[u32](),
+        kind: ChunkSeq::new[u64](),
+        bind: ChunkSeq::new[u32](),
+        sidx: ChunkSeq::new[u64](),
+        size: ChunkSeq::new[u64]()
+    };
+    let mut at = f.ta;
+    let n = p.op(at);
+    at = inc(at);
+    for k in 0..n {
+        c.v.push(n32(p.op(at)));
+        c.kind.push(p.op(inc(at)));
+        c.bind.push(n32(p.op(add(at, 2))));
+        c.sidx.push(p.op(add(at, 3)));
+        c.size.push(p.op(add(at, 4)));
+        at = add(at, 5);
+    }
+    c
+}
+
+// The trailer after its call and join slot tables.
+fn trailer_rest(in p: Program, f: FnRow) -> u64 {
+    let mut at = f.ta;
+    let n = p.op(at);
+    at = add(inc(at), wrapping_mul(n, 5));
+    let nj = p.op(at);
+    at = inc(at);
+    for i in 0..nj {
+        let k = p.op(inc(at));
+        at = add(at, 2);
+        for j in 0..k {
+            let m = p.op(add(at, 2));
+            at = add(at, add(3, wrapping_mul(m, 3)));
+        }
+    }
+    at
+}
+
+// Rewrites the function's trailer: the call slots in value order, the new
+// join slots (`fip_join_slots` cleared, then the merges in block order),
+// then the rest as it was.
+fn write_trailer(
+    inout p: Program,
+    fi: u64,
+    in calls: CallSlots,
+    in jb: ChunkSeq[u64],
+    in jv: ChunkSeq[u64],
+    in jstart: ChunkSeq[u64],
+    in jin: ChunkSeq[u64]
+) {
+    let f = p.function(fi);
+    let rest = trailer_rest(in p, f);
+    let end = add(f.ta, f.tn);
+    let ta = p.ops.len();
+    let n = calls.v.len();
+    p.put(n, T_RAW);
+    // call slots by value: selection of the next smallest
+    let mut done: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    done.resize(n, 0);
+    for step in 0..n {
+        let mut best: u64 = n;
+        for k in 0..n {
+            if u8_of(in done, k)
+                == 0
+                && (best == n || at32(in calls.v, k) < at32(in calls.v, best)) {
+                best = k;
+            }
+        }
+        done.try_set(best, 1);
+        p.put(w(at32(in calls.v, best)), T_VALUE);
+        p.put(u64_of(in calls.kind, best), T_RAW);
+        p.put(w(at32(in calls.bind, best)), T_VALUE);
+        p.put(u64_of(in calls.sidx, best), T_RAW);
+        p.put(u64_of(in calls.size, best), T_RAW);
+    }
+    // join slots: entries of a block are contiguous (one visit per block);
+    // blocks in ascending order
+    let ne = jb.len();
+    let mut blocks: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..ne {
+        let b = u64_of(in jb, k);
+        let mut seen = false;
+        for j in 0..blocks.len() {
+            if u64_of(in blocks, j) == b {
+                seen = true;
+            }
+        }
+        if !seen {
+            blocks.push(b);
+        }
+    }
+    let nbk = blocks.len();
+    p.put(nbk, T_RAW);
+    let mut bdone: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](nbk);
+    bdone.resize(nbk, 0);
+    for step in 0..nbk {
+        let mut best: u64 = nbk;
+        for k in 0..nbk {
+            if u8_of(in bdone, k)
+                == 0
+                && (best == nbk || u64_of(in blocks, k) < u64_of(in blocks, best)) {
+                best = k;
+            }
+        }
+        bdone.try_set(best, 1);
+        let b = u64_of(in blocks, best);
+        let mut count: u64 = 0;
+        for k in 0..ne {
+            if u64_of(in jb, k) == b {
+                count = inc(count);
+            }
+        }
+        p.put(b, T_BLOCK);
+        p.put(count, T_RAW);
+        for k in 0..ne {
+            if u64_of(in jb, k) != b {
+                continue;
+            }
+            let s = u64_of(in jstart, k);
+            let e = if inc(k) < ne {
+                u64_of(in jstart, inc(k))
+            } else {
+                jin.len()
+            };
+            p.put(u64_of(in jv, k), T_VALUE);
+            p.put(0, T_RAW);
+            let m = wrapping_sub(e, s) / 3;
+            p.put(m, T_RAW);
+            for q in 0..m {
+                let at = add(s, wrapping_mul(q, 3));
+                p.put(u64_of(in jin, at), T_BLOCK);
+                p.put(u64_of(in jin, inc(at)), T_VALUE);
+                p.put(u64_of(in jin, add(at, 2)), T_RAW);
+            }
+        }
+    }
+    for x in rest..end {
+        let word = p.op(x);
+        let tag = p.tag(x);
+        p.put(word, tag);
+    }
+    let mut nf = f;
+    nf.ta = ta;
+    nf.tn = wrapping_sub(p.ops.len(), ta);
+    p.fns.try_set(fi, nf);
+}
