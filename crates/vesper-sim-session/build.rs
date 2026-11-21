@@ -7,22 +7,38 @@ fn main() {
     {
         let port = vesper_port_harness::Port::new("sim", "port")
             .binding("port/binding.rs")
-            .rust_types("crate::model::link::port");
+            .rust_types("crate::port");
+        // The divergent build applies the edit of one module, picked by
+        // VESPER_SIM_DIVERGE (port/test-port.sh runs each).
         #[cfg(feature = "vesper-port-divergent")]
-        let port = DIVERGENT_EDITS
-            .iter()
-            .fold(port, |port, (from, to)| port.edit(from, to));
+        let port = {
+            println!("cargo:rerun-if-env-changed=VESPER_SIM_DIVERGE");
+            let module = std::env::var("VESPER_SIM_DIVERGE")
+                .expect("vesper-port-divergent needs VESPER_SIM_DIVERGE=<module>");
+            let (_, from, to) = DIVERGENT_EDITS
+                .iter()
+                .find(|(name, _, _)| *name == module)
+                .unwrap_or_else(|| panic!("no divergent edit for module {module}"));
+            port.edit(from, to)
+        };
         port.build();
     }
 }
 
-/// One deliberate bug per ported model (mirrored in
-/// port/test-port.sh's expectations). Each must make its tests fail.
+/// One deliberate bug per ported module, `(module, from, to)` (asserted by
+/// port/test-port.sh). Each must make its tests fail.
 #[cfg(feature = "vesper-port-divergent")]
-const DIVERGENT_EDITS: &[(&str, &str)] = &[
+const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     // link: a datagram that finds one free buffer slot is tail-dropped.
     (
+        "link",
         "    if link_state_queued_at(in l, at_ns) >= p.buffer_packets {",
         "    if wrapping_add(link_state_queued_at(in l, at_ns), 1) >= p.buffer_packets {",
+    ),
+    // wal: UTF-8 surrogates (ED A0..BF) are accepted.
+    (
+        "wal",
+        "        } else if b0 == 237 {\n            (128, 159)",
+        "        } else if b0 == 237 {\n            (128, 191)",
     ),
 ];

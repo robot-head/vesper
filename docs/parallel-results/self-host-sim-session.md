@@ -1,4 +1,10 @@
-# Self-hosting SH5 lane 19: `vesper-sim-session` in Vesper, part 1
+# Self-hosting SH5 lane 19: `vesper-sim-session` in Vesper
+
+Part 1 (#1357, merged as `b647460`) ported the datagram link model. Part 2
+(below the part 1 sections) ports SHA-256 and the WAL frame codec and
+recovery scan.
+
+## Part 1: the datagram link model
 
 Claim: #1342 (part 1). Base: `main` at `bbda89e`. Prompt:
 `docs/agent-prompts/self-host-sh5/19-sim-session.md`.
@@ -78,11 +84,83 @@ verified artifacts cannot change. The bootstrap-stage1 workflow
    with a `try_set` loop, and front removal is a head index plus compaction.
    `VecDeque::partition_point` is a hand-written binary search.
 
+## Part 2: SHA-256 and the write-ahead log codec
+
+Base: `main` at `b647460`.
+
+### What changed
+
+- `port/src/sha256.ves` is SHA-256 (FIPS 180-4). It holds 32-bit words in
+  `u64` and masks them, so every step is total. Under `vesper-port`,
+  `program::sha256_hex` forwards to it. That covers every digest the crate
+  makes: the source, scenario, bindings and options digests of the
+  execution identity, the executable digest, and the durable-log digests in
+  model snapshots and events.
+- `port/src/wal.ves` is the `wal-frame-v1` codec. `wal_frame` builds a frame
+  (`[len u32 LE][lsn u64 LE][8-byte SHA-256 check][payload]`). `wal_scan` is
+  the recovery policy. It accepts the longest prefix of complete frames whose
+  checks match, whose payloads are UTF-8 and whose LSNs run 1, 2, 3, ..., and
+  it reports the first damage. Its UTF-8 check follows Rust's
+  `str::from_utf8` (no overlong forms, no surrogates, at most U+10FFFF).
+  `WalRecord::frame` and `wal::scan` forward to it. The `Wal` state machine
+  (regions, flushes, crash clamping) stays in Rust and calls the codec.
+- The binding module moved from `model::link::port` to `crate::port`
+  (`src/port.rs`), because the link, the WAL and the digests all share it.
+- The transcript differential now also hashes each run's final model
+  snapshot, which includes the durable bytes' SHA-256. It also adds a
+  `wal_codec` case: frames of every payload length from 0 to 200 bytes,
+  which crosses both SHA-256 padding boundaries, then 400 cut mediums, a
+  flipped bit in each frame region, out-of-order LSNs, and 8 UTF-8 edge
+  cases. The digests were reblessed from the Rust build.
+- The divergence check now takes one edit per module, picked with
+  `VESPER_SIM_DIVERGE`:
+  - `link`: a free buffer slot tail-drops. This changes the 4 Warp
+    transcripts and fails the link unit test.
+  - `wal`: surrogates are accepted. The Rust wrapper's UTF-8 assertion
+    catches it in the `wal_codec` case.
+
+### Results
+
+| Check | Rust | Vesper |
+|---|---|---|
+| Crate tests | 65 pass | 65 pass |
+| Transcript differential (9 cases, now with model snapshots) | blessed | **0 differences** |
+
+| Measure (release, best of 5) | Rust | Vesper | Ratio |
+|---|---|---|---|
+| SHA-256, 1 MiB | 0.83 ns/byte | 12.06 ns/byte | 14.5x |
+| WAL scan, 10,000 frames of 193 bytes | 322 ns/frame | 2,660 ns/frame | 8.3x |
+| Link (part 1 benchmark, rerun) | 47.6 ns | 60.3 ns | 1.27x |
+
+The Rust `sha2` crate uses the CPU's SHA extensions where present, so the
+gap is mostly hardware against scalar code. The Vesper rounds also read and
+write the message schedule through checked `ChunkSeq` accesses, because a
+mutable local fixed array was not tried. The scan is dominated by the
+per-frame check, which hashes each payload again. Each process hashes its own
+executable once for the identity, and through the port that is about 0.6 s
+for a 50 MB binary. Rust stays the default build under the parity rule.
+
+### More compiler gaps
+
+4. **Variable shift amounts raise.** `x >> n` and `x << n` with a
+   non-constant `n` carry `Fail[ArithOverflow]` even when `n < 32` is known.
+   The rotate uses `wrapping_shr_u64` and `wrapping_shl_u64`. Repro:
+   `fn rotr(x: u64, n: u64) -> u64 { (x >> n) | (x << wrapping_sub(32, n)) }`
+   gives E0401.
+5. **Array bounds need a literal.** `if i < ROUNDS { K[i] }` with
+   `const ROUNDS: u64 = 64` is E0401. `if i < 64 { K[i] }` is accepted.
+6. **Types from a submodule get mangled names in the binding.**
+   `ScanResult` in `wal.ves` becomes `vesper__sim_2session__wal__ScanResult`,
+   and `scan_result_*` functions do not become methods. Declaring the type in
+   the root module avoids this.
+
 ## What is left (later parts of #1342)
 
-- `model/net.rs` (`net-v1`) and `model/wal.rs` (`wal-frame-v1`). The WAL
-  hashes frames with SHA-256, and `@vesper/hash` has only BLAKE3, so it needs
-  a SHA-256 `.vsys` import or a Vesper SHA-256.
+- `model/net.rs` (`net-v1`). It is mostly ordered maps of message records
+  whose payloads are strings. The plan is a token slab: Vesper keeps the ids,
+  reservations, partitions and FIFO order, and Rust keeps the payloads.
+- The `Wal` state machine itself (part 2 ported only its codec), and a
+  faster SHA-256.
 - `model/umem.rs` and `model/warp.rs` (3,100 lines, over the
   `vesper-warp-umem` crate).
 - `model/mod.rs` process epochs, scenario validation, the canonical-JSON
