@@ -65,6 +65,7 @@ pub fn fusion_run(in program: Str, in root: Str, mode: u64) -> ChunkSeq[u64] {
     }
     let mut src: u32 = 0;
     if !e.failed() && (mode & 2) == 2 {
+        e.settle();
         e.explain_extracted(r);
         src = e.source_slot(r);
     }

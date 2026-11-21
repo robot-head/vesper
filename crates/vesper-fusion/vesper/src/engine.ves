@@ -188,6 +188,7 @@ pub struct Eng {
     stamp: ChunkSeq[u64],
     token: u64,
     t_slot: ChunkSeq[u32],
+    settled: ChunkSeq[u8],
     t_words: ChunkSeq[u64],
     t_count: u64,
     st_words: ChunkSeq[u64],
@@ -278,6 +279,7 @@ pub fn eng_new(in program: Str) -> Eng {
         stamp: ChunkSeq::new[u64](),
         token: 0,
         t_slot: ChunkSeq::new[u32](),
+        settled: ChunkSeq::new[u8](),
         t_words: ChunkSeq::new[u64](),
         t_count: 0,
         st_words: ChunkSeq::new[u64](),
@@ -367,7 +369,14 @@ impl Eng {
             }
             let id = wrapping_sub(s, 1);
             if at64(in self.sym_hash, w(id)) == h && w(at32(in self.sym_len, w(id))) == len {
-                if self.range_eq(w(at32(in self.sym_start, w(id))), start, len) {
+                let at = w(at32(in self.sym_start, w(id)));
+                if self.range_eq(at, start, len) {
+                    // A spelling interned from outside the program (a
+                    // keyword) points at its program occurrence once there is
+                    // one, so every range the output names is the program's.
+                    if at >= self.prog_len && start < self.prog_len {
+                        self.sym_start.try_set(w(id), n32(start));
+                    }
                     return id;
                 }
             }
@@ -1673,29 +1682,64 @@ impl Eng {
 
     // The extracted term of class `c` as arena slots (children first, in
     // order); returns the slot.
+    // The extracted e-node of class `c`: the literal itself or the chosen
+    // e-node.
+    fn chosen(in self, c: u32) -> u32 {
+        let op = at32(in self.n_op, w(c));
+        if op == OP_INT || op == OP_STR {
+            c
+        } else {
+            at32(in self.best_node, w(c))
+        }
+    }
+
+    // The extracted term of class `c` as arena slots (children first, in
+    // order); returns the slot. An explicit stack keeps deep terms off the
+    // native stack.
     pub fn emit_extracted(inout self, c: u32) -> u32 {
         if self.x_slot.len() == 0 {
             self.x_slot = filled32(self.n_op.len(), NONE);
         }
-        let done = at32(in self.x_slot, w(c));
-        if done != NONE {
-            return done;
-        }
-        let op = at32(in self.n_op, w(c));
-        let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        let mut m = c;
-        if op != OP_INT && op != OP_STR {
-            m = at32(in self.best_node, w(c));
-            for k in 0..self.klen(m) {
-                let s = self.emit_extracted(self.find(self.kid_of(m, k)));
-                kids.push(s);
+        let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        stack.push(c);
+        loop {
+            if stack.len() == 0 {
+                break;
             }
+            let top = at32(in stack, wrapping_sub(stack.len(), 1));
+            if at32(in self.x_slot, w(top)) != NONE {
+                stack.truncate(wrapping_sub(stack.len(), 1));
+                continue;
+            }
+            let m = self.chosen(top);
+            let mut ready = true;
+            let mut k = self.klen(m);
+            loop {
+                if k == 0 {
+                    break;
+                }
+                k = wrapping_sub(k, 1);
+                let kc = self.find(self.kid_of(m, k));
+                if at32(in self.x_slot, w(kc)) == NONE {
+                    stack.push(kc);
+                    ready = false;
+                }
+            }
+            if !ready {
+                continue;
+            }
+            let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for j in 0..self.klen(m) {
+                let kc = self.find(self.kid_of(m, j));
+                kids.push(at32(in self.x_slot, w(kc)));
+            }
+            self.write_node(true, at32(in self.n_op, w(m)), ati(in self.n_data, w(m)), in kids);
+            let slot = n32(self.x_count);
+            self.x_count = inc(self.x_count);
+            self.x_slot.try_set(w(top), slot);
+            stack.truncate(wrapping_sub(stack.len(), 1));
         }
-        self.write_node(true, at32(in self.n_op, w(m)), ati(in self.n_data, w(m)), in kids);
-        let slot = n32(self.x_count);
-        self.x_count = inc(self.x_count);
-        self.x_slot.try_set(w(c), slot);
-        slot
+        at32(in self.x_slot, w(c))
     }
 
     pub fn has_extraction(in self, c: u32) -> bool {
@@ -1713,25 +1757,56 @@ impl Eng {
 
     // ------------------------------------------------------------ explanations
 
-    // The witness arena slot of id `n`'s term.
+    // The witness arena slot of id `n`'s term (children first; an explicit
+    // stack keeps deep terms off the native stack).
     fn term_slot(inout self, n: u32) -> u32 {
         if self.t_slot.len() < self.n_op.len() {
             self.t_slot.resize(self.n_op.len(), NONE);
         }
-        let done = at32(in self.t_slot, w(n));
-        if done != NONE {
-            return done;
+        let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        stack.push(n);
+        loop {
+            if stack.len() == 0 {
+                break;
+            }
+            let top = at32(in stack, wrapping_sub(stack.len(), 1));
+            if at32(in self.t_slot, w(top)) != NONE {
+                stack.truncate(wrapping_sub(stack.len(), 1));
+                continue;
+            }
+            let mut ready = true;
+            let mut k = self.klen(top);
+            loop {
+                if k == 0 {
+                    break;
+                }
+                k = wrapping_sub(k, 1);
+                let kid = self.kid_of(top, k);
+                if at32(in self.t_slot, w(kid)) == NONE {
+                    stack.push(kid);
+                    ready = false;
+                }
+            }
+            if !ready {
+                continue;
+            }
+            let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for j in 0..self.klen(top) {
+                kids.push(at32(in self.t_slot, w(self.kid_of(top, j))));
+            }
+            self
+                .write_node(
+                false,
+                at32(in self.n_op, w(top)),
+                ati(in self.n_data, w(top)),
+                in kids
+            );
+            let slot = n32(self.t_count);
+            self.t_count = inc(self.t_count);
+            self.t_slot.try_set(w(top), slot);
+            stack.truncate(wrapping_sub(stack.len(), 1));
         }
-        let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        for k in 0..self.klen(n) {
-            let s = self.term_slot(self.kid_of(n, k));
-            kids.push(s);
-        }
-        self.write_node(false, at32(in self.n_op, w(n)), ati(in self.n_data, w(n)), in kids);
-        let slot = n32(self.t_count);
-        self.t_count = inc(self.t_count);
-        self.t_slot.try_set(w(n), slot);
-        slot
+        at32(in self.t_slot, w(n))
     }
 
     // One step: rule, direction (0 forward, 1 backward), the path, then the
@@ -1853,8 +1928,37 @@ impl Eng {
     }
 
     // Steps from term(n) to the extracted term of n's class.
+    // Per id: whether its term already is the extracted term of its class
+    // (it is its class's chosen e-node and every child is settled).
+    // Original children precede their parents, so one pass in id order.
+    pub fn settle(inout self) {
+        let n = self.n_op.len();
+        self.settled = ChunkSeq::with_capacity[u8](n);
+        for i in 0..n {
+            let id = n32(i);
+            let mut ok = self.chosen(self.find(id)) == id;
+            for k in 0..self.klen(id) {
+                if ok && at8(in self.settled, w(self.kid_of(id, k))) == 0 {
+                    ok = false;
+                }
+            }
+            self
+                .settled
+                .push(
+                if ok {
+                    1
+                } else {
+                    0
+                }
+            );
+        }
+    }
+
+    // Steps from term(n) to the extracted term of n's class. A settled
+    // subterm needs none and is not walked, so shared unchanged subgraphs
+    // are not expanded into trees.
     pub fn explain_extracted(inout self, n: u32) {
-        if self.err != 0 {
+        if self.err != 0 || at8(in self.settled, w(n)) == 1 {
             return;
         }
         let c = self.find(n);
