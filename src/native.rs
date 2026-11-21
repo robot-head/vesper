@@ -823,7 +823,7 @@ pub(crate) fn instances_for_roots(
     roots: &[&str],
     include_entry: bool,
 ) -> Result<InstanceMap, String> {
-    let program = crate::ffi_lowering::drops::lower_world(world);
+    let program = crate::ir_swap::lower(world);
     let references = program
         .functions
         .values()
@@ -1074,18 +1074,18 @@ fn compile_entry<M: Module>(
         return Err("native entry cannot expose specialized closure values; invoke them within the entry function".into());
     }
     let instances = instances_for_entry(world, entry, trace_ok)?;
-    let mut program = crate::ffi_lowering::drops::lower_world(world);
+    let mut program = crate::ir_swap::lower(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     wide_native::refine_wide_tuples(&mut program);
     let mut inlined_into = BTreeMap::new();
     if optimize {
-        crate::ir_opt::optimize(world, &mut program)?;
+        crate::ir_swap::optimize(world, &mut program)?;
         // Executable objects inline too (#959). The decision depends only on
         // the world, never on the observer or instrument hooks, so a
         // verified build stays byte-identical to the plain one and the
         // verifiers check the code that ships.
         inlined_into =
-            crate::ir_inline::inline(world, &mut program, &crate::ir_inline::Budget::default())
+            crate::ir_swap::inline(world, &mut program, &crate::ir_inline::Budget::default())
                 .inlined_into;
     } else {
         crate::ir_opt::fip_reuse_pass(world, &mut program)?;
@@ -1093,7 +1093,7 @@ fn compile_entry<M: Module>(
     crate::fip::elaborate_non_fip_drops(world, &mut program);
     if optimize {
         // Native only, never the verified backend (Stage 1 perf lane 3).
-        crate::bounds_hoist::run(&mut program);
+        crate::ir_swap::hoist(&mut program);
     }
     let abi = NativeAbi::plan(world, &instances, optimize, |key| key == entry)?;
     let (ids, trace_entry_id) =

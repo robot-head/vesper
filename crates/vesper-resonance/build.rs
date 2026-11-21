@@ -28,7 +28,10 @@ const EDITS: &[(&str, &str)] = &[
     // pdc.ves: a node's arrival is its earliest forward input, not its latest.
     ("if l > a {", "if l < a || a == 0 {"),
     // slab.ves: every delay line's head returns to 0 when it wraps.
-    ("slots.set(m + 4, next % cap);", "slots.set(m + 4, 0);"),
+    (
+        "slots.set(m + Slot::Head, next % cap);",
+        "slots.set(m + Slot::Head, 0);",
+    ),
     // lease.ves: frames may be written out of order.
     ("if frame != written {", "if frame > frames {"),
     // confine.ves: allowed effects are reported instead of forbidden ones.

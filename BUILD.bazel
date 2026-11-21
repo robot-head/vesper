@@ -196,6 +196,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH3 lane 1 (#1240): @vesper/place-ir round trips over the same
+        # corpus at every native IR pass boundary.
+        "test/self_host_place_ir": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH2 lane 9 (#1181): the region, sequence, tiled and
         # vector rules over the same corpus. Anchored globs.
         "test/self_host_check_regions_seqs": glob([
@@ -576,6 +583,7 @@ vesper_crate(
         "test/self_host_check_data": "long",
         "test/hybrid_layout": "long",
         "test/hybrid_ir_check": "long",
+        "test/self_host_place_ir": "long",
         "test/self_host_check_harness": "long",
         # The tensor types differential (#1186) JIT-compiles the port and
         # replays mutants and the corpus.
