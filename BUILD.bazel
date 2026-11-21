@@ -9,14 +9,24 @@ exports_files([
 
 # The `vesper-<tool>` binaries (crates/vesper-tools, self-hosting SH0 lane 2).
 _TOOLS = [
+    "//crates/vesper-tools:bin/vesper-attest",
     "//crates/vesper-tools:bin/vesper-audit",
     "//crates/vesper-tools:bin/vesper-bench",
+    "//crates/vesper-tools:bin/vesper-cas",
+    "//crates/vesper-tools:bin/vesper-fuzz",
     "//crates/vesper-tools:bin/vesper-grammar",
     "//crates/vesper-tools:bin/vesper-json",
+    "//crates/vesper-tools:bin/vesper-migrate",
     "//crates/vesper-tools:bin/vesper-publish",
+    "//crates/vesper-tools:bin/vesper-refute",
+    "//crates/vesper-tools:bin/vesper-replay",
     "//crates/vesper-tools:bin/vesper-resolve",
     "//crates/vesper-tools:bin/vesper-sbom",
+    "//crates/vesper-tools:bin/vesper-semver",
+    "//crates/vesper-tools:bin/vesper-simd",
     "//crates/vesper-tools:bin/vesper-tee",
+    "//crates/vesper-tools:bin/vesper-top",
+    "//crates/vesper-tools:bin/vesper-traceparent",
 ]
 
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
