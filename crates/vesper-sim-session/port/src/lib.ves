@@ -1,0 +1,387 @@
+// @vesper/sim-session: Vesper port of vesper-sim-session's deterministic
+// models (self-hosting wave SH5 lane 19, #1342), part 1.
+//
+// Part 2 adds SHA-256 (sha256.ves) and the WAL frame codec and recovery
+// scan (wal.ves, src/model/wal.rs).
+//
+// Ported in part 1: the datagram link model `datagram-v1` (src/model/link.rs): the
+// SplitMix64 generator, the FNV-1a name seeds, the Gilbert-Elliott chain and
+// its stationary rates, independent loss, the finite bottleneck queue and
+// reordering. The Rust crate keeps the scenario JSON, the session driver
+// (which steps the compiler's reference evaluator) and the other models;
+// src/model/link.rs forwards to this library under the `vesper-port`
+// feature. Every function is total: a virtual-clock overflow is a returned
+// outcome, never a raise.
+
+use self::sha256::{
+    sha256_digest
+};
+use self::wal::{
+    ScanResult,
+    frame_bytes,
+    scan_bytes
+};
+
+const PPM: u64 = 1000000;
+const NS_PER_SEC: u64 = 1000000000;
+const U64_MAX: u64 = 18446744073709551615;
+const SPLITMIX_GAMMA: u64 = 11400714819323198485;
+const SPLITMIX_MUL1: u64 = 13787848793156543929;
+const SPLITMIX_MUL2: u64 = 10723151780598845931;
+const FNV_OFFSET: u64 = 14695981039346656037;
+const FNV_PRIME: u64 = 1099511628211;
+// The amount `name_seed` rotates the scenario seed left by.
+const SEED_ROTATION: u64 = 17;
+// Loss causes, in the order of `LossCause` in link.rs.
+const CAUSE_GILBERT_ELLIOTT: u8 = 0;
+const CAUSE_INDEPENDENT: u8 = 1;
+const CAUSE_QUEUE_OVERFLOW: u8 = 2;
+// Served departures kept at the front of the queue before it is compacted.
+const COMPACT_AT: u64 = 256;
+
+// A link's configuration (`LinkSpec` without its name), flattened: the
+// optional chain and reorder are a flag and their fields.
+copy struct LinkParams {
+    base_delay_ns: u64,
+    has_gilbert_elliott: bool,
+    good_to_bad_ppm: u32,
+    bad_to_good_ppm: u32,
+    loss_good_ppm: u32,
+    loss_bad_ppm: u32,
+    loss_ppm: u32,
+    duplicate_ppm: u32,
+    has_reorder: bool,
+    reorder_ppm: u32,
+    reorder_extra_delay_ns: u64,
+    buffer_packets: u32,
+    rate_bytes_per_sec: u64
+}
+
+// What one transmission did (`Result<Transmission, LinkError>`): the
+// Gilbert-Elliott state the datagram saw, then its fate.
+copy enum TransmitOutcome {
+    TimeOverflow,
+    Lost(bool, u8),
+    Delivered(bool, u64, u64, u64)
+}
+
+// One direction of a WAN path. `departures[head..]` are the departure times
+// of queued datagrams, ascending; `head` skips the served ones.
+struct LinkState {
+    params: LinkParams,
+    rng: u64,
+    bad: bool,
+    departures: ChunkSeq[u64],
+    head: u64
+}
+
+fn max(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// `a + b`, or None when it overflows.
+fn add(a: u64, b: u64) -> Option[u64] {
+    if a > wrapping_sub(U64_MAX, b) {
+        Option::None
+    } else {
+        Option::Some(wrapping_add(a, b))
+    }
+}
+
+// SplitMix64: advance the state and return the next output.
+pub fn splitmix_next(inout state: u64) -> u64 {
+    state = wrapping_add(state, SPLITMIX_GAMMA);
+    let mut z = state;
+    z = wrapping_mul(z ^ (z >> 30), SPLITMIX_MUL1);
+    z = wrapping_mul(z ^ (z >> 27), SPLITMIX_MUL2);
+    z ^ (z >> 31)
+}
+
+// One Bernoulli draw with probability `ppm / 10^6`. Always consumes one
+// value, so the draw sequence does not depend on the probabilities.
+pub fn splitmix_chance(inout state: u64, ppm: u32) -> bool {
+    let x = splitmix_next(inout state);
+    x % PPM < widen_u64(ppm)
+}
+
+// FNV-1a of a name, xor the seed rotated left by 17.
+pub fn name_seed(seed: u64, in name: Str) -> u64 {
+    let bytes = name.as_bytes();
+    let n = bytes.len();
+    let mut h = FNV_OFFSET;
+    for i in 0..n {
+        let b = match bytes.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ widen_u64(b), FNV_PRIME);
+    }
+    h ^ ((seed << SEED_ROTATION) | (seed >> wrapping_sub(64, SEED_ROTATION)))
+}
+
+// Stationary probability of the Bad state, in ppm (rounded down).
+pub fn stationary_bad_ppm(good_to_bad_ppm: u32, bad_to_good_ppm: u32) -> u32 {
+    let g = widen_u64(good_to_bad_ppm);
+    let total = wrapping_add(g, widen_u64(bad_to_good_ppm));
+    if total == 0 {
+        0
+    } else {
+        wrapping_u32(wrapping_mul(g, PPM) / total)
+    }
+}
+
+// Stationary loss probability of the chain alone, in ppm.
+pub fn stationary_loss_ppm(
+    good_to_bad_ppm: u32,
+    bad_to_good_ppm: u32,
+    loss_good_ppm: u32,
+    loss_bad_ppm: u32
+) -> u32 {
+    let bad = widen_u64(stationary_bad_ppm(good_to_bad_ppm, bad_to_good_ppm));
+    let good = wrapping_sub(PPM, bad);
+    let sum = wrapping_add(
+        wrapping_mul(good, widen_u64(loss_good_ppm)),
+        wrapping_mul(bad, widen_u64(loss_bad_ppm))
+    );
+    wrapping_u32(sum / PPM)
+}
+
+pub fn link_state_new(params: LinkParams, seed: u64, in name: Str) -> LinkState {
+    LinkState {
+        params: params,
+        rng: name_seed(seed, in name),
+        bad: false,
+        departures: ChunkSeq::new[u64](),
+        head: 0
+    }
+}
+
+pub fn link_state_clone(in l: LinkState) -> LinkState {
+    let n = l.departures.len();
+    let mut departures: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_sub(n, l.head));
+    for i in l.head..n {
+        departures.push(at(in l.departures, i));
+    }
+    LinkState {
+        params: l.params,
+        rng: l.rng,
+        bad: l.bad,
+        departures: departures,
+        head: 0
+    }
+}
+
+// The same state: configuration, generator, chain state and queue.
+pub fn link_state_same(in a: LinkState, in b: LinkState) -> bool {
+    let na = wrapping_sub(a.departures.len(), a.head);
+    let nb = wrapping_sub(b.departures.len(), b.head);
+    if a.rng != b.rng || a.bad != b.bad || na != nb {
+        return false;
+    }
+    for i in 0..na {
+        if at(in a.departures, wrapping_add(a.head, i))
+            != at(in b.departures, wrapping_add(b.head, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn link_state_in_bad_state(in l: LinkState) -> bool {
+    l.bad
+}
+
+// The first queued index whose departure is after `t`.
+fn served_until(in l: LinkState, t: u64) -> u64 {
+    let mut lo = l.head;
+    let mut hi = l.departures.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if at(in l.departures, mid) <= t {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// Datagrams queued in the bottleneck at `at_ns`.
+pub fn link_state_queued_at(in l: LinkState, at_ns: u64) -> u32 {
+    wrapping_u32(wrapping_sub(l.departures.len(), served_until(in l, at_ns)))
+}
+
+// Service time of a datagram of `bytes`, rounded up (at least 1 ns). The
+// product fits: bytes < 2^32 and 10^9 < 2^30.
+pub fn link_state_service_ns(in l: LinkState, bytes: u32) -> u64 {
+    service_ns(l.params.rate_bytes_per_sec, bytes)
+}
+
+fn service_ns(rate_bytes_per_sec: u64, bytes: u32) -> u64 {
+    let rate = max(rate_bytes_per_sec, 1);
+    let n = wrapping_mul(widen_u64(bytes), NS_PER_SEC);
+    let mut ns = 0;
+    if rate != 0 {
+        ns = n / rate;
+        if n % rate != 0 {
+            ns = wrapping_add(ns, 1);
+        }
+    }
+    max(ns, 1)
+}
+
+// Whether the next datagram is duplicated (one draw).
+pub fn link_state_duplicates(inout l: LinkState) -> bool {
+    splitmix_chance(inout l.rng, l.params.duplicate_ppm)
+}
+
+// Drop served departures: advance `head`, and compact once it is large.
+fn discard_served(inout l: LinkState, now_ns: u64) {
+    l.head = served_until(in l, now_ns);
+    let n = l.departures.len();
+    if l.head == n {
+        l.departures.clear();
+        l.head = 0;
+    } else if l.head >= COMPACT_AT {
+        for i in l.head..n {
+            l.departures.try_set(wrapping_sub(i, l.head), at(in l.departures, i));
+        }
+        l.departures.truncate(wrapping_sub(n, l.head));
+        l.head = 0;
+    }
+}
+
+// Insert `departure` keeping the queue ascending (after equal entries).
+fn insert_departure(inout l: LinkState, departure: u64) {
+    let index = served_until(in l, departure);
+    l.departures.push(departure);
+    let mut i = wrapping_sub(l.departures.len(), 1);
+    loop {
+        if i <= index {
+            break;
+        }
+        l.departures.try_set(i, at(in l.departures, wrapping_sub(i, 1)));
+        i = wrapping_sub(i, 1);
+    }
+    l.departures.try_set(index, departure);
+}
+
+// Draw the fate of one datagram of `bytes` handed to the link at `at_ns`.
+// `now_ns` is the virtual clock (never later than `at_ns`); queue entries
+// that departed by then are discarded. Fixed draw order: GE step, GE loss,
+// independent loss, reorder.
+pub fn link_state_transmit(inout l: LinkState, now_ns: u64, at_ns: u64, bytes: u32)
+    -> TransmitOutcome {
+    discard_served(inout l, now_ns);
+    let p = l.params;
+    let mut ge_lost = false;
+    if p.has_gilbert_elliott {
+        let flip = if l.bad {
+            splitmix_chance(inout l.rng, p.bad_to_good_ppm)
+        } else {
+            splitmix_chance(inout l.rng, p.good_to_bad_ppm)
+        };
+        if flip {
+            l.bad = !l.bad;
+        }
+        let loss = if l.bad {
+            p.loss_bad_ppm
+        } else {
+            p.loss_good_ppm
+        };
+        ge_lost = splitmix_chance(inout l.rng, loss);
+    }
+    let independent = splitmix_chance(inout l.rng, p.loss_ppm);
+    let mut reordered = false;
+    if p.has_reorder {
+        reordered = splitmix_chance(inout l.rng, p.reorder_ppm);
+    }
+    let ge_bad = l.bad;
+    if ge_lost {
+        return TransmitOutcome::Lost(ge_bad, CAUSE_GILBERT_ELLIOTT);
+    }
+    if independent {
+        return TransmitOutcome::Lost(ge_bad, CAUSE_INDEPENDENT);
+    }
+    if link_state_queued_at(in l, at_ns) >= p.buffer_packets {
+        return TransmitOutcome::Lost(ge_bad, CAUSE_QUEUE_OVERFLOW);
+    }
+    let n = l.departures.len();
+    let start = if n > l.head {
+        max(at(in l.departures, wrapping_sub(n, 1)), at_ns)
+    } else {
+        at_ns
+    };
+    let departure = match add(start, service_ns(p.rate_bytes_per_sec, bytes)) {
+        Option::Some(d) => d,
+        Option::None => {
+            return TransmitOutcome::TimeOverflow;
+        },
+    };
+    let reorder_extra_ns = if reordered {
+        p.reorder_extra_delay_ns
+    } else {
+        0
+    };
+    let arrive_at_ns = match add(departure, p.base_delay_ns) {
+        Option::Some(t) => match add(t, reorder_extra_ns) {
+            Option::Some(t) => t,
+            Option::None => {
+                return TransmitOutcome::TimeOverflow;
+            },
+        },
+        Option::None => {
+            return TransmitOutcome::TimeOverflow;
+        },
+    };
+    insert_departure(inout l, departure);
+    TransmitOutcome::Delivered(
+        ge_bad,
+        wrapping_sub(departure, at_ns),
+        reorder_extra_ns,
+        arrive_at_ns
+    )
+}
+
+// SHA-256 of `bytes` (program.rs `sha256_hex`, before hex).
+pub fn sha256(in bytes: Slice[u8]) -> ChunkSeq[u8] {
+    sha256_digest(in bytes)
+}
+
+// The `wal-frame-v1` frame of one record (wal.rs `WalRecord::frame`).
+pub fn wal_frame(lsn: u64, in payload: Str) -> ChunkSeq[u8] {
+    frame_bytes(lsn, in payload.as_bytes())
+}
+
+// Recovery scan of a medium (wal.rs `scan`).
+pub fn wal_scan(in bytes: Slice[u8]) -> ScanResult {
+    scan_bytes(in bytes)
+}
+
+pub fn scan_result_records(in s: ScanResult) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](s.records.len());
+    out.extend(in s.records.as_slice());
+    out
+}
+
+pub fn scan_result_valid_bytes(in s: ScanResult) -> u64 {
+    s.valid_bytes
+}
+
+pub fn scan_result_damage(in s: ScanResult) -> (u8, u64, u64) {
+    (s.damage, s.expected, s.found)
+}
