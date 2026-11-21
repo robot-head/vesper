@@ -416,6 +416,8 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // parser reads with a different tree (out.ves has no
                     // loops, so the loop filter below keeps it).
                     || path.ends_with("packages/vesper-check-loops-atomics")
+                    // SH5 lane 14 (#1337): `use` (#880) and `pub fn`.
+                    || path.ends_with("packages/vesper-test-runner")
                 {
                     continue;
                 }

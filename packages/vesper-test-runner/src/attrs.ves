@@ -1,0 +1,739 @@
+// `extract_test_attrs` of crates/vesper-syntax/src/test_attrs.rs: the
+// `@test`, `@test(...)` and `@test_case(...)` attributes attached to
+// top-level functions (and functions of a `test { }` block), read from the
+// non-trivia tokens of @vesper/front's lexer. The attribute-argument
+// diagnostics are not kept: discovery drops them.
+
+use @vesper/front::lex::{
+    trivia_kind
+};
+use @vesper/front::kinds::{
+    k_at,
+    k_comma,
+    k_eof,
+    k_eq,
+    k_false,
+    k_float,
+    k_fn,
+    k_int,
+    k_l_brace,
+    k_l_bracket,
+    k_l_paren,
+    k_lower,
+    k_minus,
+    k_r_brace,
+    k_r_bracket,
+    k_r_paren,
+    k_string,
+    k_true,
+    k_upper
+};
+use self::big::{
+    Big,
+    as_u64,
+    parse_int
+};
+use self::util::{
+    add,
+    byte,
+    inc,
+    is_text,
+    push_range,
+    sub,
+    trim_end,
+    trim_start,
+    u8_at,
+    u64_at
+};
+
+// `AttrValue` tags.
+pub const V_IDENT: u8 = 0;
+pub const V_STRING: u8 = 1;
+pub const V_INT: u8 = 2;
+pub const V_FLOAT: u8 = 3;
+pub const V_BOOL: u8 = 4;
+pub const V_RAW: u8 = 5;
+
+// One `AttrValue`: the text of Ident, String, Float and Raw is `txt[a..b]`.
+pub copy struct Val {
+    tag: u8,
+    a: u64,
+    b: u64,
+    int: Big,
+    flag: bool,
+}
+
+// An optional text (`txt[a..b]`).
+pub copy struct OptText {
+    has: bool,
+    a: u64,
+    b: u64,
+}
+
+pub copy struct OptNum {
+    has: bool,
+    v: u64,
+}
+
+// `TestAttr` (without `extra`, which nothing reads).
+pub copy struct TestAttr {
+    start: u64,
+    end: u64,
+    expect_error: OptText,
+    primary: OptText,
+    related: OptText,
+    expected_span: OptText,
+    cases: OptNum,
+    sim_schedules: OptNum,
+    fault_profile: OptText,
+    max_stack: OptNum,
+    max_cycles: OptNum,
+    zero_alloc_has: bool,
+    zero_alloc: bool,
+}
+
+// One `TestCaseArg`: the name is the source range `na..nb`.
+pub copy struct Arg {
+    has_name: bool,
+    na: u64,
+    nb: u64,
+    val: Val,
+    start: u64,
+    end: u64,
+}
+
+// One `TestCaseAttr`: `args[a..a + n]`.
+pub copy struct CaseAttr {
+    a: u64,
+    n: u64,
+    start: u64,
+    end: u64,
+}
+
+// One `FunctionTestAttrs`: the name is the source range `na..nb`, the pins
+// `cases[ca..ca + cn]`.
+pub copy struct FnAttrs {
+    na: u64,
+    nb: u64,
+    has_test: bool,
+    test: TestAttr,
+    ca: u64,
+    cn: u64,
+}
+
+pub struct Attrs {
+    txt: ChunkSeq[u8],
+    args: ChunkSeq[Arg],
+    cases: ChunkSeq[CaseAttr],
+    fns: ChunkSeq[FnAttrs],
+}
+
+fn no_text() -> OptText {
+    OptText {
+        has: false,
+        a: 0,
+        b: 0
+    }
+}
+
+fn no_num() -> OptNum {
+    OptNum {
+        has: false,
+        v: 0
+    }
+}
+
+fn no_big() -> Big {
+    Big {
+        ok: false,
+        neg: false,
+        hi: 0,
+        lo: 0
+    }
+}
+
+pub fn test_attr_new(start: u64, end: u64) -> TestAttr {
+    TestAttr {
+        start: start,
+        end: end,
+        expect_error: no_text(),
+        primary: no_text(),
+        related: no_text(),
+        expected_span: no_text(),
+        cases: no_num(),
+        sim_schedules: no_num(),
+        fault_profile: no_text(),
+        max_stack: no_num(),
+        max_cycles: no_num(),
+        zero_alloc_has: false,
+        zero_alloc: false
+    }
+}
+
+// The token stream without trivia, and the extraction state.
+struct Stream {
+    kind: ChunkSeq[u8],
+    start: ChunkSeq[u64],
+    end: ChunkSeq[u64],
+    pos: u64,
+    len: u64,
+    out: Attrs,
+    // The pins of the attribute set being read (moved into `out.cases`
+    // when a function takes them).
+    pending: ChunkSeq[CaseAttr],
+}
+
+impl Stream {
+    fn kind(in self) -> u8 {
+        self.nth_kind(0)
+    }
+
+    fn nth_kind(in self, offset: u64) -> u8 {
+        match self.kind.try_get(add(self.pos, offset)) {
+            Option::Some(k) => k,
+            Option::None => k_eof(),
+        }
+    }
+
+    fn start_at(in self, offset: u64) -> u64 {
+        match self.start.try_get(add(self.pos, offset)) {
+            Option::Some(s) => s,
+            Option::None => self.len,
+        }
+    }
+
+    fn end_at(in self, offset: u64) -> u64 {
+        match self.end.try_get(add(self.pos, offset)) {
+            Option::Some(e) => e,
+            Option::None => self.len,
+        }
+    }
+
+    fn at_word(in self, in b: Slice[u8], offset: u64, in w: Str) -> bool {
+        let lower = self.nth_kind(offset) == k_lower();
+        lower && is_text(in b, self.start_at(offset), self.end_at(offset), in w)
+    }
+
+    // `bump`: the token's range; Eof does not advance.
+    fn bump(inout self) -> (u64, u64) {
+        let s = self.start_at(0);
+        let e = self.end_at(0);
+        if self.pos < self.kind.len() && self.kind() != k_eof() {
+            self.pos = inc(self.pos);
+        }
+        (s, e)
+    }
+
+    fn is_open(in self) -> bool {
+        let k = self.kind();
+        k == k_l_paren() || k == k_l_bracket() || k == k_l_brace()
+    }
+
+    fn is_close(in self) -> bool {
+        let k = self.kind();
+        k == k_r_paren() || k == k_r_bracket() || k == k_r_brace()
+    }
+
+    fn skip_to_comma_or_rparen(inout self) {
+        let mut depth: u64 = 0;
+        loop {
+            if self.kind() == k_eof() {
+                break;
+            }
+            if depth == 0 && (self.kind() == k_comma() || self.kind() == k_r_paren()) {
+                break;
+            }
+            if self.is_open() {
+                depth = inc(depth);
+            } else if self.is_close() {
+                if depth > 0 {
+                    depth = sub(depth, 1);
+                }
+            }
+            self.bump();
+        }
+    }
+
+    // Skips a recovered entry and the comma after it.
+    fn recover(inout self) {
+        self.skip_to_comma_or_rparen();
+        if self.kind() == k_comma() {
+            self.bump();
+        }
+    }
+
+    fn put_text(inout self, in b: Slice[u8], s: u64, e: u64) -> (u64, u64) {
+        let a = self.out.txt.len();
+        push_range(inout self.out.txt, in b, s, e);
+        (a, self.out.txt.len())
+    }
+
+    fn text_val(inout self, tag: u8, in b: Slice[u8], s: u64, e: u64) -> Val {
+        let (a, z) = self.put_text(in b, s, e);
+        Val {
+            tag: tag,
+            a: a,
+            b: z,
+            int: no_big(),
+            flag: false
+        }
+    }
+
+    // `unescape_string` of a String token `b[s..e]`.
+    fn string_val(inout self, in b: Slice[u8], s: u64, e: u64) -> Val {
+        let mut i = s;
+        let mut j = e;
+        if j > i && byte(in b, i) == 34 {
+            i = inc(i);
+            if j > i && byte(in b, sub(j, 1)) == 34 {
+                j = sub(j, 1);
+            } else {
+                // No closing quote: `strip_suffix` fails, so the raw text
+                // stays whole.
+                i = s;
+            }
+        }
+        let a = self.out.txt.len();
+        loop {
+            if i >= j {
+                break;
+            }
+            let c = byte(in b, i);
+            i = inc(i);
+            if c != 92 {
+                self.out.txt.push(c);
+                continue;
+            }
+            if i >= j {
+                self.out.txt.push(92);
+                break;
+            }
+            let d = byte(in b, i);
+            i = inc(i);
+            if d == 34 {
+                self.out.txt.push(34);
+            } else if d == 92 {
+                self.out.txt.push(92);
+            } else if d == 110 {
+                self.out.txt.push(10);
+            } else if d == 114 {
+                self.out.txt.push(13);
+            } else if d == 116 {
+                self.out.txt.push(9);
+            } else if d == 48 {
+                self.out.txt.push(0);
+            } else {
+                self.out.txt.push(92);
+                self.out.txt.push(d);
+            }
+        }
+        Val {
+            tag: V_STRING,
+            a: a,
+            b: self.out.txt.len(),
+            int: no_big(),
+            flag: false
+        }
+    }
+
+    // `parse_attr_value`: the value up to the next top-level `,` or `)`
+    // and its source range.
+    fn value(inout self, in b: Slice[u8]) -> (Val, u64, u64) {
+        let first = self.pos;
+        let start = self.start_at(0);
+        let mut depth: u64 = 0;
+        loop {
+            if self.kind() == k_eof() {
+                break;
+            }
+            if depth == 0 && (self.kind() == k_comma() || self.kind() == k_r_paren()) {
+                break;
+            }
+            if self.is_open() {
+                depth = inc(depth);
+            } else if self.is_close() {
+                if depth > 0 {
+                    depth = sub(depth, 1);
+                }
+            }
+            self.bump();
+        }
+        let n = sub(self.pos, first);
+        let end = if n == 0 {
+            start
+        } else {
+            u64_at(in self.end, sub(self.pos, 1))
+        };
+        let k0 = u8_at(in self.kind, first);
+        let k1 = u8_at(in self.kind, inc(first));
+        let s0 = u64_at(in self.start, first);
+        let e0 = u64_at(in self.end, first);
+        let s1 = u64_at(in self.start, inc(first));
+        let e1 = u64_at(in self.end, inc(first));
+        let v = if n == 1 && k0 == k_string() {
+            self.string_val(in b, s0, e0)
+        } else if n == 1 && (k0 == k_true() || k0 == k_false()) {
+            Val {
+                tag: V_BOOL,
+                a: 0,
+                b: 0,
+                int: no_big(),
+                flag: k0 == k_true()
+            }
+        } else if n == 1 && k0 == k_int() {
+            self.int_val(in b, s0, e0, false, start, end)
+        } else if n == 2 && k0 == k_minus() && k1 == k_int() {
+            self.int_val(in b, s1, e1, true, start, end)
+        } else if n == 1 && k0 == k_float() {
+            self.text_val(V_FLOAT, in b, s0, e0)
+        } else if n == 2 && k0 == k_minus() && k1 == k_float() {
+            let a = self.out.txt.len();
+            self.out.txt.push(45);
+            push_range(inout self.out.txt, in b, s1, e1);
+            Val {
+                tag: V_FLOAT,
+                a: a,
+                b: self.out.txt.len(),
+                int: no_big(),
+                flag: false
+            }
+        } else if n == 1 && (k0 == k_lower() || k0 == k_upper()) {
+            self.text_val(V_IDENT, in b, s0, e0)
+        } else {
+            let ts = trim_start(in b, start, end);
+            let te = trim_end(in b, ts, end);
+            self.text_val(V_RAW, in b, ts, te)
+        };
+        (v, start, end)
+    }
+
+    fn int_val(inout self, in b: Slice[u8], s: u64, e: u64, neg: bool, start: u64, end: u64)
+        -> Val {
+        let x = parse_int(in b, s, e, neg);
+        if x.ok {
+            Val {
+                tag: V_INT,
+                a: 0,
+                b: 0,
+                int: x,
+                flag: false
+            }
+        } else {
+            self.text_val(V_RAW, in b, start, end)
+        }
+    }
+
+    fn opt_str(in self, v: Val) -> OptText {
+        if v.tag == V_STRING || v.tag == V_IDENT {
+            OptText {
+                has: true,
+                a: v.a,
+                b: v.b
+            }
+        } else {
+            no_text()
+        }
+    }
+
+    fn opt_u64(in self, v: Val) -> OptNum {
+        if v.tag != V_INT {
+            return no_num();
+        }
+        let (ok, n) = as_u64(v.int);
+        OptNum {
+            has: ok,
+            v: n
+        }
+    }
+
+    // `apply_test_kv`: an invalid value leaves the field as it was (and
+    // the Rust parser reports a diagnostic nothing reads).
+    fn apply(inout self, inout attr: TestAttr, in b: Slice[u8], ks: u64, ke: u64, v: Val) {
+        if is_text(in b, ks, ke, in "expect_error") {
+            let t = self.opt_str(v);
+            if t.has {
+                attr.expect_error = t;
+            }
+        } else if is_text(in b, ks, ke, in "primary") {
+            let t = self.opt_str(v);
+            if t.has {
+                attr.primary = t;
+            }
+        } else if is_text(in b, ks, ke, in "related") {
+            let t = self.opt_str(v);
+            if t.has {
+                attr.related = t;
+            }
+        } else if is_text(in b, ks, ke, in "span") {
+            let t = self.opt_str(v);
+            if t.has {
+                attr.expected_span = t;
+            }
+        } else if is_text(in b, ks, ke, in "cases") {
+            let n = self.opt_u64(v);
+            if n.has {
+                attr.cases = n;
+            }
+        } else if is_text(in b, ks, ke, in "sim_schedules") {
+            let n = self.opt_u64(v);
+            if n.has {
+                attr.sim_schedules = n;
+            }
+        } else if is_text(in b, ks, ke, in "fault_profile") {
+            let t = self.opt_str(v);
+            if t.has {
+                attr.fault_profile = t;
+            }
+        } else if is_text(in b, ks, ke, in "max_stack") {
+            let n = self.opt_u64(v);
+            if n.has {
+                attr.max_stack = n;
+            }
+        } else if is_text(in b, ks, ke, in "max_cycles") {
+            let n = self.opt_u64(v);
+            if n.has {
+                attr.max_cycles = n;
+            }
+        } else if is_text(in b, ks, ke, in "zero_alloc") {
+            if v.tag == V_BOOL {
+                attr.zero_alloc_has = true;
+                attr.zero_alloc = v.flag;
+            }
+        }
+    }
+
+    fn is_name(in self) -> bool {
+        self.kind() == k_lower() || self.kind() == k_upper()
+    }
+
+    // `parse_test_attr`, at `@`.
+    fn test_attr(inout self, in b: Slice[u8]) -> TestAttr {
+        let (at, z) = self.bump();
+        let (w, kw) = self.bump();
+        let mut attr = test_attr_new(at, kw);
+        if self.kind() != k_l_paren() {
+            return attr;
+        }
+        self.bump();
+        loop {
+            if self.kind() == k_r_paren() || self.kind() == k_eof() {
+                break;
+            }
+            if !self.is_name() {
+                self.recover();
+                continue;
+            }
+            let (ks, ke) = self.bump();
+            if self.kind() != k_eq() {
+                self.recover();
+                continue;
+            }
+            self.bump();
+            let (v, vs, ve) = self.value(in b);
+            self.apply(inout attr, in b, ks, ke, v);
+            if self.kind() == k_comma() {
+                self.bump();
+            } else if self.kind() != k_r_paren() {
+                self.recover();
+            }
+        }
+        if self.kind() == k_r_paren() {
+            let (s, e) = self.bump();
+            attr.end = e;
+        }
+        attr
+    }
+
+    // `parse_test_case_attr`, at `@`.
+    fn test_case_attr(inout self, in b: Slice[u8]) -> CaseAttr {
+        let (at, z) = self.bump();
+        let (w, kw) = self.bump();
+        let a = self.out.args.len();
+        let mut end = kw;
+        if self.kind() != k_l_paren() {
+            return CaseAttr {
+                a: a,
+                n: 0,
+                start: at,
+                end: end
+            };
+        }
+        self.bump();
+        loop {
+            if self.kind() == k_r_paren() || self.kind() == k_eof() {
+                break;
+            }
+            let arg_start = self.start_at(0);
+            let named = self.is_name() && self.nth_kind(1) == k_eq();
+            let mut na: u64 = 0;
+            let mut nb: u64 = 0;
+            if named {
+                let (s, e) = self.bump();
+                na = s;
+                nb = e;
+                self.bump();
+            }
+            let (v, vs, ve) = self.value(in b);
+            self
+                .out
+                .args
+                .push(
+                Arg {
+                    has_name: named,
+                    na: na,
+                    nb: nb,
+                    val: v,
+                    start: arg_start,
+                    end: ve
+                }
+            );
+            if self.kind() == k_comma() {
+                self.bump();
+            } else if self.kind() != k_r_paren() {
+                self.recover();
+            }
+        }
+        if self.kind() == k_r_paren() {
+            let (s, e) = self.bump();
+            end = e;
+        }
+        CaseAttr {
+            a: a,
+            n: sub(self.out.args.len(), a),
+            start: at,
+            end: end
+        }
+    }
+
+    // `extract_all`.
+    fn extract(inout self, in b: Slice[u8]) {
+        let mut brace_depth: u64 = 0;
+        let mut test_block = false;
+        let mut has_test = false;
+        let mut test = test_attr_new(0, 0);
+        loop {
+            if self.kind() == k_eof() {
+                break;
+            }
+            if brace_depth > 0 {
+                if self.kind() == k_l_brace() {
+                    brace_depth = inc(brace_depth);
+                } else if self.kind() == k_r_brace() {
+                    brace_depth = sub(brace_depth, 1);
+                }
+                self.bump();
+                continue;
+            }
+            if !test_block && self.at_word(in b, 0, in "test") && self.nth_kind(1) == k_l_brace() {
+                has_test = false;
+                self.pending.clear();
+                self.bump();
+                self.bump();
+                test_block = true;
+                continue;
+            }
+            if test_block && self.kind() == k_r_brace() {
+                has_test = false;
+                self.pending.clear();
+                self.bump();
+                test_block = false;
+                continue;
+            }
+            if self.kind() == k_at() && self.at_word(in b, 1, in "test") {
+                test = self.test_attr(in b);
+                has_test = true;
+                continue;
+            }
+            if self.kind() == k_at() && self.at_word(in b, 1, in "test_case") {
+                let c = self.test_case_attr(in b);
+                self.pending.push(c);
+                continue;
+            }
+            if self.kind() == k_at() && self.at_word(in b, 1, in "fip") {
+                self.bump();
+                self.bump();
+                continue;
+            }
+            if self.at_word(in b, 0, in "pub") {
+                self.bump();
+                continue;
+            }
+            if self.kind() == k_fn() {
+                self.bump();
+                if self.is_name() {
+                    let (ns, ne) = self.bump();
+                    if has_test || self.pending.len() > 0 {
+                        let ca = self.out.cases.len();
+                        let cn = self.pending.len();
+                        for i in 0..cn {
+                            match self.pending.try_get(i) {
+                                Option::Some(c) => self.out.cases.push(c),
+                                Option::None => {},
+                            }
+                        }
+                        self
+                            .out
+                            .fns
+                            .push(
+                            FnAttrs {
+                                na: ns,
+                                nb: ne,
+                                has_test: has_test,
+                                test: test,
+                                ca: ca,
+                                cn: cn
+                            }
+                        );
+                    }
+                }
+                has_test = false;
+                self.pending.clear();
+                continue;
+            }
+            has_test = false;
+            self.pending.clear();
+            if self.kind() == k_l_brace() {
+                brace_depth = inc(brace_depth);
+            }
+            self.bump();
+        }
+    }
+}
+
+// `extract_test_attrs(source)` over the whole token stream of `b`
+// (kinds and ranges, trivia included), which discovery lexes once.
+pub fn extract_test_attrs(
+    in b: Slice[u8],
+    in tkind: ChunkSeq[u8],
+    in tstart: ChunkSeq[u64],
+    in tend: ChunkSeq[u64]
+) -> Attrs {
+    let n = tkind.len();
+    let mut kind = ChunkSeq::with_capacity[u8](n);
+    let mut start = ChunkSeq::with_capacity[u64](n);
+    let mut end = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        let k = u8_at(in tkind, i);
+        if !trivia_kind(k) {
+            kind.push(k);
+            start.push(u64_at(in tstart, i));
+            end.push(u64_at(in tend, i));
+        }
+    }
+    let mut s = Stream {
+        kind: kind,
+        start: start,
+        end: end,
+        pos: 0,
+        len: b.len(),
+        out: Attrs {
+            txt: ChunkSeq::new[u8](),
+            args: ChunkSeq::new[Arg](),
+            cases: ChunkSeq::new[CaseAttr](),
+            fns: ChunkSeq::new[FnAttrs]()
+        },
+        pending: ChunkSeq::new[CaseAttr]()
+    };
+    s.extract(in b);
+    s.out
+}

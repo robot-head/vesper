@@ -352,6 +352,19 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 14 (#1337): @vesper/test-runner against
+        # test_discovery on the repository's .ves files, the runner's test
+        # suites and mutants. Anchored globs.
+        "test/self_host_test_runner": glob([
+            "examples/**/*.ves",
+            "packages/**",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "src/test_runner.rs",
+            "tests/anvil_cli.rs",
+            "tests/imported_source_tests.rs",
+            "tests/test_runner_cli.rs",
+        ]) + ["//crates/vesper-syntax:files"],
         # SH4 lane 5 (#1279): the native optimizer policy against
         # ir_opt::optimize on the same corpus. Anchored globs.
         "test/optimizer_budget": glob([
@@ -723,6 +736,9 @@ vesper_crate(
         "test/self_host_lean_extract": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "eternal",
+        # The test runner discovery differential (#1337) JIT-compiles the port
+        # and runs the corpus and its mutants: 5-10 min in a debug build.
+        "test/self_host_test_runner": "long",
         # The optimizer policy (#1279) optimizes every corpus world three times.
         "test/optimizer_budget": "long",
         # World::mode (#1331) answers every corpus query three times.
@@ -784,6 +800,16 @@ vesper_package(
     srcs = glob(["packages/vesper-std/intern/src/**/*.ves"]),
     manifest = "packages/vesper-std/intern/Loom.toml",
     visibility = ["//visibility:public"],
+)
+
+# Test discovery of `vesper test` as the hybrid compiler's test_runner
+# module (self-hosting SH5 lane 14, #1337).
+vesper_package(
+    name = "test_runner_package",
+    srcs = glob(["packages/vesper-test-runner/src/**/*.ves"]),
+    manifest = "packages/vesper-test-runner/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [":front_package"],
 )
 
 vesper_package(
