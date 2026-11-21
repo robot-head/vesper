@@ -194,8 +194,18 @@ pub(crate) fn join(
 pub(crate) struct Acc(pub(crate) binding::ZAcc);
 impl Acc {
     pub(crate) fn new(widths: &[usize], max_rows: usize) -> Self {
+        use std::hash::BuildHasher;
         let widths: Vec<u64> = widths.iter().map(|x| w(*x)).collect();
-        Self(binding::zacc_new(&widths, w(max_rows)))
+        // A random key for the row table, as `HashMap` draws one, so that
+        // rows chosen to collide cannot slow lookups down. Results do not
+        // depend on it: `finish` returns rows in order.
+        let key = std::hash::RandomState::new();
+        Self(binding::zacc_new(
+            &widths,
+            w(max_rows),
+            key.hash_one(0u64),
+            key.hash_one(1u64),
+        ))
     }
     pub(crate) fn add(&mut self, input: usize, row: &[i64], weight: i128) -> Result<(), Error> {
         binding::zacc_add(

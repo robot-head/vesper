@@ -337,3 +337,29 @@ fn cdc_decoder_matches_the_rust_loop() {
     }
     assert!(errors.keys().any(|e| e.contains("truncated")), "{errors:?}");
 }
+
+/// Rows that all collide under a fixed multiplicative hash
+/// (`[x, (M ^ x) * M]` for the golden-ratio multiplier) stay cheap: the
+/// table's hash is keyed per accumulator.
+#[test]
+fn colliding_rows_stay_cheap() {
+    const M: u64 = 0x9E37_79B9_7F4A_7C15;
+    let limits = Limits {
+        max_rows: 1 << 16,
+        max_work: usize::MAX,
+        ..Limits::default()
+    };
+    let mut acc = Accumulator::new(&[2], limits).unwrap();
+    let mut budget = Budget::new(limits);
+    let n = 1u64 << 16;
+    let start = std::time::Instant::now();
+    for x in 0..n {
+        let row = [x as i64, ((M ^ x).wrapping_mul(M)) as i64];
+        acc.add(0, &row, 1, &mut budget).unwrap();
+    }
+    let set = acc.finish().unwrap().remove(0);
+    assert_eq!(set.len(), n as usize);
+    // Quadratic probing of 65,536 rows takes minutes; this takes well
+    // under a second even in a debug build.
+    assert!(start.elapsed() < std::time::Duration::from_secs(30));
+}

@@ -755,6 +755,9 @@ pub fn frontier_retire(
 pub struct ZAcc {
     widths: ChunkSeq[u64],
     max_rows: u64,
+    // The table's hash key.
+    k0: u64,
+    k1: u64,
     // Distinct rows per input.
     counts: ChunkSeq[u64],
     // Per distinct row, in insertion order: its input, the offset of its
@@ -770,9 +773,9 @@ pub struct ZAcc {
 }
 
 // `Accumulator::new` for inputs of these widths (the wrapper checks them
-// against the column limit).
-pub fn zacc_new(in widths: Slice[u64], max_rows: u64) -> ZAcc {
-    acc_new(in widths, max_rows)
+// against the column limit); (k0, k1) is a random hash key.
+pub fn zacc_new(in widths: Slice[u64], max_rows: u64, k0: u64, k1: u64) -> ZAcc {
+    acc_new(in widths, max_rows, k0, k1)
 }
 
 // `Accumulator::add` of one row of `input` after the wrapper's work charge

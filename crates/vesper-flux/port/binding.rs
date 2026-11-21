@@ -164,15 +164,15 @@ impl Abi for ZErr {
 /// Owned handle of a Vesper `ZAcc` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_flux_ZAcc_drop`.
 pub struct ZAcc {
-    words: [u64; 9],
+    words: [u64; 11],
 }
 
 impl ZAcc {
     /// # Safety
     /// `words` must hold a `ZAcc` value of this library that the caller owns.
     unsafe fn from_words(words: &[u64]) -> Self {
-        let mut owned = [0u64; 9];
-        owned.copy_from_slice(&words[..9]);
+        let mut owned = [0u64; 11];
+        owned.copy_from_slice(&words[..11]);
         Self { words: owned }
     }
 
@@ -216,33 +216,41 @@ impl<'a> ZAccRef<'a> {
         let w: &'a [u64] = self.words;
         <u64 as Abi>::get(&w[1..])
     }
+    pub fn k0(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[2..])
+    }
+    pub fn k1(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[3..])
+    }
     pub fn counts(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
-    }
-    pub fn tags(&self) -> vesper_port_abi::SeqRef<'a, u64> {
-        let w: &'a [u64] = self.words;
-        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
-    }
-    pub fn offs(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
     }
-    pub fn rows(&self) -> vesper_port_abi::SeqRef<'a, i64> {
+    pub fn tags(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
     }
-    pub fn his(&self) -> vesper_port_abi::SeqRef<'a, i64> {
+    pub fn offs(&self) -> vesper_port_abi::SeqRef<'a, u64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[6]) }
     }
-    pub fn los(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn rows(&self) -> vesper_port_abi::SeqRef<'a, i64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[7]) }
     }
-    pub fn table(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+    pub fn his(&self) -> vesper_port_abi::SeqRef<'a, i64> {
         let w: &'a [u64] = self.words;
         unsafe { vesper_port_abi::SeqRef::from_handle(w[8]) }
+    }
+    pub fn los(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[9]) }
+    }
+    pub fn table(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[10]) }
     }
 }
 
@@ -272,7 +280,7 @@ unsafe extern "C" {
     fn vesper_flux_frontier_valid(gens: i64, holds: i64, live: i64, slot: i64, generation: i64, timestamp: i64) -> i64;
     fn vesper_flux_zacc_add(a: *mut u64, input: i64, row: *mut u64, whi: i64, wlo: i64, fail: *mut u64) -> i64;
     fn vesper_flux_zacc_finish(a: *mut u64, input: i64, fail: *mut u64) -> i64;
-    fn vesper_flux_zacc_new(result: *mut u64, widths: *mut u64, max_rows: i64) -> i64;
+    fn vesper_flux_zacc_new(result: *mut u64, widths: *mut u64, max_rows: i64, k0: i64, k1: i64) -> i64;
     fn vesper_flux_zs_consolidate(width: i64, cells: *mut u64, n: i64, max_columns: i64, max_rows: i64, budget: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_zs_copy_check(width: i64, n: i64, max_columns: i64, max_rows: i64, budget: *mut u64, fail: *mut u64) -> i64;
     fn vesper_flux_zs_filter(width: i64, a: *mut u64, n: i64, kind: i64, column: i64, value: i64, max_columns: i64, max_rows: i64, budget: *mut u64, fail: *mut u64) -> i64;
@@ -408,12 +416,12 @@ pub fn zacc_finish(a: &ZAcc, input: u64) -> Result<Vec<i64>, ZErr> {
 }
 
 /// Calls `zacc_new` of the Vesper library `flux` (`vesper_flux_zacc_new`).
-pub fn zacc_new(widths: &[u64], max_rows: u64) -> ZAcc {
-    let mut result = [0u64; 9];
+pub fn zacc_new(widths: &[u64], max_rows: u64, k0: u64, k1: u64) -> ZAcc {
+    let mut result = [0u64; 11];
     // SAFETY: `vesper_flux_zacc_new` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(widths, |view_widths| unsafe { vesper_flux_zacc_new(result.as_mut_ptr(), view_widths, max_rows as i64) });
+    let raw = vesper_port_abi::with_slice(widths, |view_widths| unsafe { vesper_flux_zacc_new(result.as_mut_ptr(), view_widths, max_rows as i64, k0 as i64, k1 as i64) });
     unsafe { ZAcc::from_words(&result[0..]) }
 }
 

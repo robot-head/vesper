@@ -19,7 +19,10 @@ Base: `main` at `ab965f2` (2026-11-21).
   `zacc_finish` on the handle `ZAcc`. One accumulator serves every input of
   a circuit: distinct rows are kept once in insertion order with their i128
   sums as two words, found through one open-addressing table keyed by
-  `(input, row)`, and sorted once per input at `finish`. The Rust wrapper
+  `(input, row)` under SipHash-1-3 with a random per-accumulator key (from
+  Rust's `RandomState`, as `HashMap` does, so rows chosen to collide cannot
+  make lookups linear; results do not depend on the key), and sorted once
+  per input at `finish`. The Rust wrapper
   keeps the work charge and the width check, which come first in the Rust
   code. The Rust `BTreeMap` accumulator is deleted.
 - **`Executor::ingest_cdc`'s record loop** (header decode, binding lookup,
@@ -34,8 +37,8 @@ Base: `main` at `ab965f2` (2026-11-21).
 
 | Module | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
 |---|---|---|---|---|
-| accumulator + CDC decoder (`ingest` workload) | 0 differences over 20,000 accumulator cases and 20,000 CDC batches | all 14 test binaries of the crate pass | **0.49x** (0.373x..0.668x) | flipped |
-| `resume` workload (CDC, checkpoint, restore) | digests agree over 104 batches | | 0.73x (0.693x..1.003x) | no regression |
+| accumulator + CDC decoder (`ingest` workload) | 0 differences over 20,000 accumulator cases and 20,000 CDC batches | all 14 test binaries of the crate pass | **0.49x** (0.373x..0.668x); with the keyed hash 0.476x..0.570x | flipped |
+| `resume` workload (CDC, checkpoint, restore) | digests agree over 104 batches | | 0.73x (0.693x..1.003x); with the keyed hash, three runs: 1.043x..1.344x, 0.835x..1.016x, 0.730x..0.823x (host noise) | no regression past the bar |
 
 - **Differential**: `src/accumulator_differential.rs` keeps the deleted
   Rust accumulator and CDC loop as the reference (the Aura pattern) and runs

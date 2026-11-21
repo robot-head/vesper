@@ -5,7 +5,9 @@
 // The Rust accumulator kept a BTreeMap<Row, i128> per input. This one keeps
 // every distinct row once, in insertion order, with its i128 sum as two
 // words, and finds rows through one open-addressing table keyed by
-// (input, row). `finish` sorts an input's rows once. The errors match the
+// (input, row) under SipHash-1-3 with a per-accumulator random key (from
+// the Rust side's `RandomState`), so that rows chosen to collide cannot
+// turn lookups linear, as with Rust's own `HashMap`. `finish` sorts an input's rows once. The errors match the
 // Rust code exactly: a new distinct row over `max_rows` fails before it is
 // inserted (rows whose sums later cancel still count), an i128 sum that
 // overflows fails at that addition, and an i64 range failure is reported
@@ -21,14 +23,13 @@ use self::{
     ZErr
 };
 
-const MIX: u64 = 11400714819323198485;
 const START_SLOTS: u64 = 16;
 
 pub const INSERTED: u64 = 0;
 pub const ROWS_FULL: u64 = 1;
 pub const SUM_OVERFLOW: u64 = 2;
 
-pub fn acc_new(in widths: Slice[u64], max_rows: u64) -> ZAcc {
+pub fn acc_new(in widths: Slice[u64], max_rows: u64, k0: u64, k1: u64) -> ZAcc {
     let mut w = ChunkSeq::with_capacity[u64](widths.len());
     let mut counts = ChunkSeq::with_capacity[u64](widths.len());
     for i in 0..widths.len() {
@@ -48,6 +49,8 @@ pub fn acc_new(in widths: Slice[u64], max_rows: u64) -> ZAcc {
     ZAcc {
         widths: w,
         max_rows: max_rows,
+        k0: k0,
+        k1: k1,
         counts: counts,
         tags: ChunkSeq::new[u64](),
         offs: ChunkSeq::new[u64](),
@@ -58,12 +61,82 @@ pub fn acc_new(in widths: Slice[u64], max_rows: u64) -> ZAcc {
     }
 }
 
-fn hash_row(input: u64, in row: Slice[i64], at: u64, width: u64) -> u64 {
-    let mut h = wrapping_mul(wrapping_add(input, 1), MIX);
-    for k in 0..width {
-        h = wrapping_mul(h ^ wrapping_u64(cell(in row, wrapping_add(at, k))), MIX);
+// SipHash-1-3 state.
+copy struct Sip {
+    v0: u64,
+    v1: u64,
+    v2: u64,
+    v3: u64
+}
+
+fn rotl(x: u64, r: u32) -> u64 {
+    wrapping_shl_u64(x, r) | wrapping_shr_u64(x, wrapping_sub(64, r))
+}
+
+fn sip_round(s: Sip) -> Sip {
+    let mut v0 = wrapping_add(s.v0, s.v1);
+    let mut v1 = rotl(s.v1, 13) ^ v0;
+    v0 = rotl(v0, 32);
+    let mut v2 = wrapping_add(s.v2, s.v3);
+    let mut v3 = rotl(s.v3, 16) ^ v2;
+    v0 = wrapping_add(v0, v3);
+    v3 = rotl(v3, 21) ^ v0;
+    v2 = wrapping_add(v2, v1);
+    v1 = rotl(v1, 17) ^ v2;
+    v2 = rotl(v2, 32);
+    Sip {
+        v0: v0,
+        v1: v1,
+        v2: v2,
+        v3: v3
     }
-    h ^ (h >> 29)
+}
+
+fn sip_word(s: Sip, m: u64) -> Sip {
+    let t = sip_round(
+        Sip {
+            v0: s.v0,
+            v1: s.v1,
+            v2: s.v2,
+            v3: s.v3 ^ m
+        }
+    );
+    Sip {
+        v0: t.v0 ^ m,
+        v1: t.v1,
+        v2: t.v2,
+        v3: t.v3
+    }
+}
+
+// SipHash-1-3 under (k0, k1) of the words `input, row[at..at + width]`.
+fn hash_row(k0: u64, k1: u64, input: u64, in row: Slice[i64], at: u64, width: u64) -> u64 {
+    let mut s = Sip {
+        v0: k0 ^ 8317987319222330741,
+        v1: k1 ^ 7237128888997146477,
+        v2: k0 ^ 7816392313619706465,
+        v3: k1 ^ 8387220255154660723
+    };
+    s = sip_word(s, input);
+    for k in 0..width {
+        s = sip_word(s, wrapping_u64(cell(in row, wrapping_add(at, k))));
+    }
+    // The final block: the message length in bytes, in the top byte.
+    let b = wrapping_shl_u64(wrapping_mul(wrapping_add(width, 1), 8) & 255, 56);
+    s = sip_word(s, b);
+    let f = sip_round(
+        sip_round(
+            sip_round(
+                Sip {
+                    v0: s.v0,
+                    v1: s.v1,
+                    v2: s.v2 ^ 255,
+                    v3: s.v3
+                }
+            )
+        )
+    );
+    f.v0 ^ f.v1 ^ f.v2 ^ f.v3
 }
 
 // Whether distinct row d holds `row[at..at + width]` of `input`.
@@ -108,7 +181,7 @@ fn grow(inout a: ZAcc) {
     for d in 0..n {
         let input = word(in a.tags, d);
         let width = word(in a.widths, input);
-        let h = hash_row(input, in a.rows.as_slice(), word(in a.offs, d), width);
+        let h = hash_row(a.k0, a.k1, input, in a.rows.as_slice(), word(in a.offs, d), width);
         let mut s = h & mask;
         loop {
             if word(in table, s) == 0 {
@@ -131,7 +204,7 @@ pub fn acc_insert(inout a: ZAcc, input: u64, in row: Slice[i64], at: u64, whi: i
         return INSERTED;
     }
     let width = word(in a.widths, input);
-    let h = hash_row(input, in row, at, width);
+    let h = hash_row(a.k0, a.k1, input, in row, at, width);
     let s = probe(in a, h, input, in row, at, width);
     let e = word(in a.table, s);
     if e != 0 {
