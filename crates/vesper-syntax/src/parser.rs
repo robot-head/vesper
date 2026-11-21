@@ -709,6 +709,7 @@ impl Parser<'_> {
             | K::Linear
             | K::Copy
             | K::Affine
+            | K::With
             | K::Eff
             | K::Effect
             | K::Handle

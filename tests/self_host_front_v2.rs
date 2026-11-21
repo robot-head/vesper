@@ -684,7 +684,7 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "fn f(a: bool, b: bool) -> bool { a && if b { true } else { false } } fn g(a: bool) -> bool { a || match x { 0 => true, _ => false } }",
         "fn f() { 1 + if a { 2 } else { 3 } * 4; x == match y { _ => 1 }.len(); if a && if b { c } else { d } { 1 } else { 2 }; !if a { b } else { c }; if a { } -1 }",
         "fn f() { handle E in { 0 } with { return x => x } let y = 1; region r { 1 } y }",
-        "fn copy(copy: u64) -> u64 { copy } fn affine() {} struct S { copy: u64, affine: u8 } fn f() { let copy = copy(1); let s = S { copy, affine: 2 }; s.copy(); copy[0]; match copy { copy => copy } g(sink copy, inout affine); for copy in 0..2 {} }",
+        "fn copy(copy: u64) -> u64 { copy } fn affine() {} struct S { copy: u64, affine: u8 } fn f() { let copy = copy(1); let s = S { copy, affine: 2 }; s.copy(); copy[0]; match copy { copy => copy } g(sink copy, inout affine, sink with); for copy in 0..2 {} }",
         "copy struct P { x: u64 } pub affine enum E { A } struct H { p: P @@ copy } fn id[T: mod copy + Ord](x: fn @copy (u64) -> u64) {} fn c() { |x| @affine x; }",
         "fn f() { let in = 1; let fn = 2; let (a, mod) = (1, 2); } fn g(match: u64, struct: u8) {} fn h() { let x = s.impl; }",
     ]

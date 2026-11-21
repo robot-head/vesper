@@ -158,6 +158,15 @@ fn main() -> u64 { let copy = B { v: 5 }; take(sink copy) }"
         ),
         "5"
     );
+    // So does `sink with`: `with` is a contextual name too.
+    assert_eq!(
+        both(
+            "struct B { v: u64 }
+fn take(sink b: B) -> u64 { b.v }
+fn main() -> u64 { let with = B { v: 6 }; take(sink with) }"
+        ),
+        "6"
+    );
 }
 
 /// A keyword that cannot be a name gives one diagnostic that names it, and

@@ -1061,6 +1061,8 @@ fn pass_word_is_mode(in l: L, params: bool) -> bool {
         || n
         == k_affine()
         || n
+        == k_with()
+        || n
         == k_eff()
         || n
         == k_effect()
