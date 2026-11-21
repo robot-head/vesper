@@ -1,0 +1,714 @@
+// The region runtime of AOT executables (src/regions/aot_runtime.rs),
+// transliterated function by function: `define` declares the libc imports
+// and the fault messages and defines the four helpers and the ten
+// `vesper_region_*` entry points as local functions of the module.
+//
+// Layout (offsets of the region record, a slot and a watermark) and the
+// handle encoding are the Rust module's constants; see its documentation.
+
+const R_BASE: i32 = 0;
+const R_CAP: i32 = 8;
+const R_CURSOR: i32 = 16;
+const R_SLOTS: i32 = 24;
+const R_NSLOTS: i32 = 32;
+const R_SLOTCAP: i32 = 40;
+const R_MARKS: i32 = 48;
+const R_NMARKS: i32 = 56;
+const R_MARKCAP: i32 = 64;
+const R_SERIAL: i32 = 72;
+const R_RECORD: i64 = 80;
+
+const S_START: i32 = 0;
+const S_LEN: i32 = 8;
+const S_PRIOR: i32 = 16;
+const S_SERIAL: i32 = 24;
+const S_LIVE: i32 = 32;
+const S_SLOT: i64 = 40;
+
+const M_SERIAL: i32 = 0;
+const M_SLOTS: i32 = 8;
+const M_CURSOR: i32 = 16;
+const M_MARK: i64 = 24;
+
+const INDEX_BITS: i64 = 21;
+// 1 << (63 - INDEX_BITS)
+const MAX_SERIAL: i64 = 4398046511104;
+// crate::regions::store::{MAX_ALLOCATIONS, MAX_CHECKPOINTS}
+const MAX_ALLOCATIONS: i64 = 1048576;
+const MAX_CHECKPOINTS: i64 = 256;
+
+// Exit status of an executable after a region fault.
+pub const REGION_FAULT_STATUS: i64 = 70;
+// The trap code after a fault call (`TrapCode::unwrap_user(5)`).
+const REGION_TRAP: u32 = 5;
+
+// Fault message indices (the order of `FAULTS`).
+const F_EXHAUSTED: i64 = 0;
+const F_ALLOCATIONS: i64 = 1;
+const F_CHECKPOINTS: i64 = 2;
+const F_STALE: i64 = 3;
+const F_BOUNDS: i64 = 4;
+const F_MEMORY: i64 = 5;
+const REGION_FAULTS: u32 = 6;
+
+fn region_fault_text(i: u32) -> Str {
+    if i == 0 {
+        "region bound exhausted"
+    } else if i == 1 {
+        "region bound exhausted: too many allocations"
+    } else if i == 2 {
+        "region bound exhausted: too many checkpoints"
+    } else if i == 3 {
+        "region handle is stale (rewound, reset or moved out)"
+    } else if i == 4 {
+        "region handle does not belong to this region"
+    } else {
+        "out of memory"
+    }
+}
+
+// The runtime entry points: name and `i64` parameter count (`FUNCTIONS`).
+const REGION_FUNCTIONS: u32 = 10;
+fn region_function_name(i: u32) -> Str {
+    if i == 0 {
+        "vesper_region_open"
+    } else if i == 1 {
+        "vesper_region_close"
+    } else if i == 2 {
+        "vesper_region_alloc"
+    } else if i == 3 {
+        "vesper_region_load"
+    } else if i == 4 {
+        "vesper_region_store"
+    } else if i == 5 {
+        "vesper_region_release"
+    } else if i == 6 {
+        "vesper_region_checkpoint"
+    } else if i == 7 {
+        "vesper_region_rewind"
+    } else if i == 8 {
+        "vesper_region_commit"
+    } else {
+        "vesper_region_used"
+    }
+}
+fn region_function_params(i: u32) -> u32 {
+    if i == 2 || i == 5 || i == 7 || i == 8 {
+        2
+    } else if i == 3 {
+        3
+    } else if i == 4 {
+        4
+    } else {
+        1
+    }
+}
+
+struct RegionImports {
+    malloc: FuncId,
+    realloc: FuncId,
+    free: FuncId,
+    memset: FuncId,
+    memmove: FuncId,
+    write: FuncId,
+    exit: FuncId,
+    fault: FuncId,
+    reclaim: FuncId,
+    resolve: FuncId,
+    find_mark: FuncId,
+    messages: ChunkSeq[u32],
+    lengths: ChunkSeq[i64],
+}
+
+// Defines every runtime function in `m` (`define`). The caller checks that
+// the module does not hold it yet (`defined`) and that pointers are 64-bit.
+pub fn define_region_runtime(inout m: Module) -> bool eff [Ffi[Cranelift]] {
+    let mut messages: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut lengths: ChunkSeq[i64] = ChunkSeq::new[i64]();
+    for i in 0..REGION_FAULTS {
+        let bytes = rt_text(in "vesper: native region fault: ", in region_fault_text(i));
+        let name = rt_numbered(in "vesper_region_message", i);
+        match rt_message(inout m, in name.as_slice(), in bytes.as_slice()) {
+            Some(id) => {
+                messages.push(id.id);
+                lengths.push(wrapping_i64(bytes.len()));
+            },
+            None => return false,
+        }
+    }
+    let im = RegionImports {
+        malloc: rt_import(inout m, in "malloc".as_bytes(), 1, true),
+        realloc: rt_import(inout m, in "realloc".as_bytes(), 2, true),
+        free: rt_import(inout m, in "free".as_bytes(), 1, false),
+        memset: rt_import(inout m, in "memset".as_bytes(), 3, true),
+        memmove: rt_import(inout m, in "memmove".as_bytes(), 3, true),
+        write: rt_import(inout m, in "write".as_bytes(), 3, true),
+        exit: rt_import(inout m, in "exit".as_bytes(), 1, false),
+        fault: rt_local(inout m, in "vesper_region_fault".as_bytes(), 1, false),
+        reclaim: rt_local(inout m, in "vesper_region_reclaim".as_bytes(), 1, false),
+        resolve: rt_local(inout m, in "vesper_region_resolve".as_bytes(), 2, true),
+        find_mark: rt_local(inout m, in "vesper_region_find_mark".as_bytes(), 2, true),
+        messages,
+        lengths,
+    };
+    if !region_emit(inout m, in im, im.fault, 1, false, 100) {
+        return false;
+    }
+    if !region_emit(inout m, in im, im.reclaim, 1, false, 101) {
+        return false;
+    }
+    if !region_emit(inout m, in im, im.resolve, 2, true, 102) {
+        return false;
+    }
+    if !region_emit(inout m, in im, im.find_mark, 2, true, 103) {
+        return false;
+    }
+    for i in 0..REGION_FUNCTIONS {
+        let params = region_function_params(i);
+        let id = rt_local(inout m, in region_function_name(i).as_bytes(), params, true);
+        if !region_emit(inout m, in im, id, params, true, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The `emit` closure: one function whose body is `which` (0-9 the entry
+// points in `FUNCTIONS` order, 100-103 the helpers).
+fn region_emit(
+    inout m: Module,
+    in im: RegionImports,
+    id: FuncId,
+    params: u32,
+    ret: bool,
+    which: u32
+) -> bool eff [Ffi[Cranelift]] {
+    let sig = rt_sig(inout m, params, ret);
+    let mut b = match builder_new(in m, sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let entry = rt_entry(inout b, false);
+    let a0 = block_param(inout b, entry, 0);
+    let a1 = if params > 1 {
+        block_param(inout b, entry, 1)
+    } else {
+        a0
+    };
+    let a2 = if params > 2 {
+        block_param(inout b, entry, 2)
+    } else {
+        a0
+    };
+    let a3 = if params > 3 {
+        block_param(inout b, entry, 3)
+    } else {
+        a0
+    };
+    if which == 100 {
+        rg_fault_body(inout b, inout m, in im, a0);
+    } else if which == 101 {
+        rg_reclaim_body(inout b, a0);
+    } else if which == 102 {
+        rg_resolve_body(inout b, inout m, in im, a0, a1);
+    } else if which == 103 {
+        rg_find_mark_body(inout b, inout m, in im, a0, a1);
+    } else if which == 0 {
+        rg_open(inout b, inout m, in im, a0);
+    } else if which == 1 {
+        rg_close(inout b, inout m, in im, a0);
+    } else if which == 2 {
+        rg_alloc(inout b, inout m, in im, a0, a1);
+    } else if which == 3 {
+        rg_load_word(inout b, inout m, in im, a0, a1, a2);
+    } else if which == 4 {
+        rg_store_word(inout b, inout m, in im, a0, a1, a2, a3);
+    } else if which == 5 {
+        rg_release(inout b, inout m, in im, a0, a1);
+    } else if which == 6 {
+        rg_checkpoint(inout b, inout m, in im, a0);
+    } else if which == 7 {
+        rg_rewind(inout b, inout m, in im, a0, a1);
+    } else if which == 8 {
+        rg_commit(inout b, inout m, in im, a0, a1);
+    } else {
+        rg_used(inout b, a0);
+    }
+    rt_finish(inout m, id, b)
+}
+
+fn rg_ld(inout b: Builder, p: Value, off: i32) -> Value eff [Ffi[Cranelift]] {
+    ins_load(inout b, ty_i64(), mem_trusted(), p, off)
+}
+fn rg_st(inout b: Builder, v: Value, p: Value, off: i32) eff [Ffi[Cranelift]] {
+    ins_store(inout b, mem_trusted(), v, p, off);
+}
+fn rg_ret(inout b: Builder, v: Value) eff [Ffi[Cranelift]] {
+    ins_return1(inout b, v);
+}
+fn rg_ret0(inout b: Builder) eff [Ffi[Cranelift]] {
+    let z = rt_k(inout b, 0);
+    rg_ret(inout b, z);
+}
+
+// Continues in a fresh block when `cond` is false; reports `fault`
+// otherwise.
+fn rg_fault_if(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    cond: Value,
+    fault: i64
+) eff [Ffi[Cranelift]] {
+    let bad = create_block(inout b);
+    let ok = create_block(inout b);
+    ins_brif0(inout b, cond, bad, ok);
+    switch_to_block(inout b, bad);
+    let k = rt_k(inout b, fault);
+    let args = vals1(k);
+    rt_call(inout b, inout m, im.fault, in args.as_slice());
+    ins_trap(inout b, trap_user(REGION_TRAP));
+    switch_to_block(inout b, ok);
+}
+fn rg_fault_if_zero(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    v: Value,
+    fault: i64
+) eff [Ffi[Cranelift]] {
+    let c = ins_icmp_imm(inout b, cc_eq(), v, 0);
+    rg_fault_if(inout b, inout m, in im, c, fault);
+}
+
+// `vesper_region_fault(message index)`: write, exit.
+fn rg_fault_body(inout b: Builder, inout m: Module, in im: RegionImports, index: Value) eff [
+    Ffi[Cranelift]
+] {
+    let mut blocks: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..REGION_FAULTS {
+        let next = create_block(inout b);
+        let this = create_block(inout b);
+        let c = ins_icmp_imm(inout b, cc_eq(), index, widen_i64(i));
+        ins_brif0(inout b, c, this, next);
+        blocks.push(this.id);
+        switch_to_block(inout b, next);
+    }
+    ins_trap(inout b, trap_user(REGION_TRAP));
+    for i in 0..REGION_FAULTS {
+        let at = widen_u64(i);
+        let block = match blocks.try_get(at) {
+            Some(x) => Block {
+                id: x
+            },
+            None => return,
+        };
+        let data = match im.messages.try_get(at) {
+            Some(x) => DataId {
+                id: x
+            },
+            None => return,
+        };
+        let len = match im.lengths.try_get(at) {
+            Some(x) => x,
+            None => return,
+        };
+        switch_to_block(inout b, block);
+        let gv = import_data(inout b, in m, data);
+        let ptr = ins_symbol_value(inout b, ty_i64(), gv);
+        let fd = rt_k(inout b, 2);
+        let n = rt_k(inout b, len);
+        let args = vals3(fd, ptr, n);
+        rt_call1(inout b, inout m, im.write, in args.as_slice());
+        let status = rt_k(inout b, REGION_FAULT_STATUS);
+        let sargs = vals1(status);
+        rt_call(inout b, inout m, im.exit, in sargs.as_slice());
+        ins_trap(inout b, trap_user(REGION_TRAP));
+    }
+}
+
+fn rg_var(inout b: Builder, init: Value) -> Var eff [Ffi[Cranelift]] {
+    let v = declare_var(inout b, ty_i64());
+    def_var(inout b, v, init);
+    v
+}
+
+// Grows the array at `ptr_off`/`len_off`/`cap_off` of `rec` so that one
+// more `entry`-byte element fits; returns the array base.
+fn rg_reserve(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    rec: Value,
+    ptr_off: i32,
+    len_off: i32,
+    cap_off: i32,
+    entry: i64
+) -> Value eff [Ffi[Cranelift]] {
+    let len = rg_ld(inout b, rec, len_off);
+    let cap = rg_ld(inout b, rec, cap_off);
+    let full = ins_icmp(inout b, cc_uge(), len, cap);
+    let grow = create_block(inout b);
+    let done = create_block(inout b);
+    ins_brif0(inout b, full, grow, done);
+    switch_to_block(inout b, grow);
+    let doubled = ins_ishl_imm(inout b, cap, 1);
+    let sixteen = rt_k(inout b, 16);
+    let new_cap = ins_umax(inout b, doubled, sixteen);
+    let bytes = ins_imul_imm(inout b, new_cap, entry);
+    let old = rg_ld(inout b, rec, ptr_off);
+    let args = vals2(old, bytes);
+    let fresh = rt_call1(inout b, inout m, im.realloc, in args.as_slice());
+    rg_fault_if_zero(inout b, inout m, in im, fresh, F_MEMORY);
+    rg_st(inout b, fresh, rec, ptr_off);
+    rg_st(inout b, new_cap, rec, cap_off);
+    ins_jump0(inout b, done);
+    switch_to_block(inout b, done);
+    rg_ld(inout b, rec, ptr_off)
+}
+
+fn rg_open(inout b: Builder, inout m: Module, in im: RegionImports, capacity: Value) eff [
+    Ffi[Cranelift]
+] {
+    let size = rt_k(inout b, R_RECORD);
+    let args = vals1(size);
+    let rec = rt_call1(inout b, inout m, im.malloc, in args.as_slice());
+    rg_fault_if_zero(inout b, inout m, in im, rec, F_MEMORY);
+    let zero = rt_k(inout b, 0);
+    // Every word of the record, offsets 0..R_RECORD step 8.
+    for w in 0..10 {
+        rg_st(inout b, zero, rec, wrapping_mul(w, 8));
+    }
+    rg_st(inout b, capacity, rec, R_CAP);
+    let one = rt_k(inout b, 1);
+    rg_st(inout b, one, rec, R_SERIAL);
+    rg_ret(inout b, rec);
+}
+
+fn rg_close(inout b: Builder, inout m: Module, in im: RegionImports, rec: Value) eff [
+    Ffi[Cranelift]
+] {
+    for i in 0..3 {
+        let off: i32 = if i == 0 {
+            R_BASE
+        } else if i == 1 {
+            R_SLOTS
+        } else {
+            R_MARKS
+        };
+        let p = rg_ld(inout b, rec, off);
+        let args = vals1(p);
+        rt_call(inout b, inout m, im.free, in args.as_slice());
+    }
+    let args = vals1(rec);
+    rt_call(inout b, inout m, im.free, in args.as_slice());
+    rg_ret0(inout b);
+}
+
+fn rg_alloc(inout b: Builder, inout m: Module, in im: RegionImports, rec: Value, size: Value) eff [
+    Ffi[Cranelift]
+] {
+    // slot_bytes: round up to whole words, at least one.
+    let plus = ins_iadd_imm(inout b, size, 7);
+    let rounded = ins_band_imm(inout b, plus, -8);
+    let eight = rt_k(inout b, 8);
+    let size = ins_umax(inout b, rounded, eight);
+    let n = rg_ld(inout b, rec, R_NSLOTS);
+    let c = ins_icmp_imm(inout b, cc_uge(), n, MAX_ALLOCATIONS);
+    rg_fault_if(inout b, inout m, in im, c, F_ALLOCATIONS);
+    let serial = rg_ld(inout b, rec, R_SERIAL);
+    let c = ins_icmp_imm(inout b, cc_uge(), serial, MAX_SERIAL);
+    rg_fault_if(inout b, inout m, in im, c, F_ALLOCATIONS);
+    let cap = rg_ld(inout b, rec, R_CAP);
+    let cursor = rg_ld(inout b, rec, R_CURSOR);
+    // Fits when cursor + size <= capacity (both below 2^31, no overflow).
+    let end = ins_iadd(inout b, cursor, size);
+    let c = ins_icmp(inout b, cc_ugt(), end, cap);
+    rg_fault_if(inout b, inout m, in im, c, F_EXHAUSTED);
+    // The chunk is obtained by the first allocation.
+    let base = rg_ld(inout b, rec, R_BASE);
+    let none = ins_icmp_imm(inout b, cc_eq(), base, 0);
+    let get = create_block(inout b);
+    let have = create_block(inout b);
+    ins_brif0(inout b, none, get, have);
+    switch_to_block(inout b, get);
+    let args = vals1(cap);
+    let chunk = rt_call1(inout b, inout m, im.malloc, in args.as_slice());
+    rg_fault_if_zero(inout b, inout m, in im, chunk, F_MEMORY);
+    rg_st(inout b, chunk, rec, R_BASE);
+    ins_jump0(inout b, have);
+    switch_to_block(inout b, have);
+    let slots = rg_reserve(inout b, inout m, in im, rec, R_SLOTS, R_NSLOTS, R_SLOTCAP, S_SLOT);
+    let off = ins_imul_imm(inout b, n, S_SLOT);
+    let entry = ins_iadd(inout b, slots, off);
+    rg_st(inout b, cursor, entry, S_START);
+    rg_st(inout b, size, entry, S_LEN);
+    rg_st(inout b, cursor, entry, S_PRIOR);
+    rg_st(inout b, serial, entry, S_SERIAL);
+    let one = rt_k(inout b, 1);
+    rg_st(inout b, one, entry, S_LIVE);
+    let base = rg_ld(inout b, rec, R_BASE);
+    let at = ins_iadd(inout b, base, cursor);
+    let zero = rt_k(inout b, 0);
+    let args = vals3(at, zero, size);
+    rt_call1(inout b, inout m, im.memset, in args.as_slice());
+    rg_st(inout b, end, rec, R_CURSOR);
+    let n1 = ins_iadd_imm(inout b, n, 1);
+    rg_st(inout b, n1, rec, R_NSLOTS);
+    let s1 = ins_iadd_imm(inout b, serial, 1);
+    rg_st(inout b, s1, rec, R_SERIAL);
+    let high = ins_ishl_imm(inout b, serial, INDEX_BITS);
+    let hnd = ins_bor(inout b, high, n);
+    rg_ret(inout b, hnd);
+}
+
+// `vesper_region_resolve(rec, hnd)`: the live slot entry or a fault.
+fn rg_resolve_body(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    rec: Value,
+    hnd: Value
+) eff [Ffi[Cranelift]] {
+    // (1 << INDEX_BITS) - 1
+    let index = ins_band_imm(inout b, hnd, 2097151);
+    let serial = ins_ushr_imm(inout b, hnd, INDEX_BITS);
+    let n = rg_ld(inout b, rec, R_NSLOTS);
+    let c = ins_icmp(inout b, cc_uge(), index, n);
+    rg_fault_if(inout b, inout m, in im, c, F_STALE);
+    let slots = rg_ld(inout b, rec, R_SLOTS);
+    let off = ins_imul_imm(inout b, index, S_SLOT);
+    let entry = ins_iadd(inout b, slots, off);
+    let s = rg_ld(inout b, entry, S_SERIAL);
+    let c = ins_icmp(inout b, cc_ne(), s, serial);
+    rg_fault_if(inout b, inout m, in im, c, F_STALE);
+    let live = rg_ld(inout b, entry, S_LIVE);
+    rg_fault_if_zero(inout b, inout m, in im, live, F_STALE);
+    rg_ret(inout b, entry);
+}
+
+// The address of word `index` of the payload `hnd`.
+fn rg_word(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    rec: Value,
+    hnd: Value,
+    index: Value
+) -> Value eff [Ffi[Cranelift]] {
+    let args = vals2(rec, hnd);
+    let entry = rt_call1(inout b, inout m, im.resolve, in args.as_slice());
+    let len = rg_ld(inout b, entry, S_LEN);
+    let words = ins_ushr_imm(inout b, len, 3);
+    let c = ins_icmp(inout b, cc_uge(), index, words);
+    rg_fault_if(inout b, inout m, in im, c, F_BOUNDS);
+    let start = rg_ld(inout b, entry, S_START);
+    let base = rg_ld(inout b, rec, R_BASE);
+    let at = ins_iadd(inout b, base, start);
+    let off = ins_ishl_imm(inout b, index, 3);
+    ins_iadd(inout b, at, off)
+}
+
+fn rg_load_word(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    rec: Value,
+    hnd: Value,
+    index: Value
+) eff [Ffi[Cranelift]] {
+    let at = rg_word(inout b, inout m, in im, rec, hnd, index);
+    let v = rg_ld(inout b, at, 0);
+    rg_ret(inout b, v);
+}
+
+fn rg_store_word(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    rec: Value,
+    hnd: Value,
+    index: Value,
+    value: Value
+) eff [Ffi[Cranelift]] {
+    let at = rg_word(inout b, inout m, in im, rec, hnd, index);
+    rg_st(inout b, value, at, 0);
+    rg_ret0(inout b);
+}
+
+fn rg_release(inout b: Builder, inout m: Module, in im: RegionImports, rec: Value, hnd: Value) eff [
+    Ffi[Cranelift]
+] {
+    let args = vals2(rec, hnd);
+    let entry = rt_call1(inout b, inout m, im.resolve, in args.as_slice());
+    let zero = rt_k(inout b, 0);
+    rg_st(inout b, zero, entry, S_LIVE);
+    let rargs = vals1(rec);
+    rt_call(inout b, inout m, im.reclaim, in rargs.as_slice());
+    rg_ret0(inout b);
+}
+
+// The `step` closure of `reclaim_body`: leave for `done` when `cond`.
+fn rg_step(inout b: Builder, done: Block, cond: Value) eff [Ffi[Cranelift]] {
+    let next = create_block(inout b);
+    ins_brif0(inout b, cond, done, next);
+    switch_to_block(inout b, next);
+}
+
+// `vesper_region_reclaim(rec)`: pops moved payloads at the unprotected
+// tip so that their bytes are reused.
+fn rg_reclaim_body(inout b: Builder, rec: Value) eff [Ffi[Cranelift]] {
+    let head = create_block(inout b);
+    let done = create_block(inout b);
+    ins_jump0(inout b, head);
+    switch_to_block(inout b, head);
+    let n = rg_ld(inout b, rec, R_NSLOTS);
+    let empty = ins_icmp_imm(inout b, cc_eq(), n, 0);
+    rg_step(inout b, done, empty);
+    let last = ins_iadd_imm(inout b, n, -1);
+    let slots = rg_ld(inout b, rec, R_SLOTS);
+    let off = ins_imul_imm(inout b, last, S_SLOT);
+    let entry = ins_iadd(inout b, slots, off);
+    let live = rg_ld(inout b, entry, S_LIVE);
+    let is_live = ins_icmp_imm(inout b, cc_ne(), live, 0);
+    rg_step(inout b, done, is_live);
+    // The newest watermark protects the slots it recorded.
+    let mk = rg_ld(inout b, rec, R_NMARKS);
+    let marks = rg_ld(inout b, rec, R_MARKS);
+    let has_mark = ins_icmp_imm(inout b, cc_ne(), mk, 0);
+    let with_mark = create_block(inout b);
+    let floor_known = create_block(inout b);
+    append_block_param(inout b, floor_known, ty_i64());
+    let zero = rt_k(inout b, 0);
+    let none = no_vals();
+    let zargs = vals1(zero);
+    ins_brif(inout b, has_mark, with_mark, in none.as_slice(), floor_known, in zargs.as_slice());
+    switch_to_block(inout b, with_mark);
+    let top = ins_iadd_imm(inout b, mk, -1);
+    let moff = ins_imul_imm(inout b, top, M_MARK);
+    let mark = ins_iadd(inout b, marks, moff);
+    let f = rg_ld(inout b, mark, M_SLOTS);
+    let fargs = vals1(f);
+    ins_jump(inout b, floor_known, in fargs.as_slice());
+    switch_to_block(inout b, floor_known);
+    let floor = block_param(inout b, floor_known, 0);
+    let below = ins_icmp(inout b, cc_ult(), last, floor);
+    rg_step(inout b, done, below);
+    let start = rg_ld(inout b, entry, S_START);
+    let len = rg_ld(inout b, entry, S_LEN);
+    let end = ins_iadd(inout b, start, len);
+    let cursor = rg_ld(inout b, rec, R_CURSOR);
+    let not_tip = ins_icmp(inout b, cc_ne(), cursor, end);
+    rg_step(inout b, done, not_tip);
+    rg_st(inout b, last, rec, R_NSLOTS);
+    let prior = rg_ld(inout b, entry, S_PRIOR);
+    rg_st(inout b, prior, rec, R_CURSOR);
+    ins_jump0(inout b, head);
+    switch_to_block(inout b, done);
+    let nothing = no_vals();
+    ins_return(inout b, in nothing.as_slice());
+}
+
+fn rg_checkpoint(inout b: Builder, inout m: Module, in im: RegionImports, rec: Value) eff [
+    Ffi[Cranelift]
+] {
+    let mk = rg_ld(inout b, rec, R_NMARKS);
+    let c = ins_icmp_imm(inout b, cc_uge(), mk, MAX_CHECKPOINTS);
+    rg_fault_if(inout b, inout m, in im, c, F_CHECKPOINTS);
+    let marks = rg_reserve(inout b, inout m, in im, rec, R_MARKS, R_NMARKS, R_MARKCAP, M_MARK);
+    let off = ins_imul_imm(inout b, mk, M_MARK);
+    let entry = ins_iadd(inout b, marks, off);
+    let serial = rg_ld(inout b, rec, R_SERIAL);
+    rg_st(inout b, serial, entry, M_SERIAL);
+    let n = rg_ld(inout b, rec, R_NSLOTS);
+    rg_st(inout b, n, entry, M_SLOTS);
+    let cursor = rg_ld(inout b, rec, R_CURSOR);
+    rg_st(inout b, cursor, entry, M_CURSOR);
+    let m1 = ins_iadd_imm(inout b, mk, 1);
+    rg_st(inout b, m1, rec, R_NMARKS);
+    let s1 = ins_iadd_imm(inout b, serial, 1);
+    rg_st(inout b, s1, rec, R_SERIAL);
+    rg_ret(inout b, serial);
+}
+
+// `vesper_region_find_mark(rec, serial)`: the newest watermark position
+// with that serial, or a fault.
+fn rg_find_mark_body(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    rec: Value,
+    serial: Value
+) eff [Ffi[Cranelift]] {
+    let mk = rg_ld(inout b, rec, R_NMARKS);
+    let i = rg_var(inout b, mk);
+    let head = create_block(inout b);
+    ins_jump0(inout b, head);
+    switch_to_block(inout b, head);
+    let at = use_var(inout b, i);
+    rg_fault_if_zero(inout b, inout m, in im, at, F_STALE);
+    let pos = ins_iadd_imm(inout b, at, -1);
+    def_var(inout b, i, pos);
+    let marks = rg_ld(inout b, rec, R_MARKS);
+    let off = ins_imul_imm(inout b, pos, M_MARK);
+    let entry = ins_iadd(inout b, marks, off);
+    let s = rg_ld(inout b, entry, M_SERIAL);
+    let hit = ins_icmp(inout b, cc_eq(), s, serial);
+    let found = create_block(inout b);
+    ins_brif0(inout b, hit, found, head);
+    switch_to_block(inout b, found);
+    rg_ret(inout b, pos);
+}
+
+fn rg_mark_at(inout b: Builder, rec: Value, pos: Value) -> Value eff [Ffi[Cranelift]] {
+    let marks = rg_ld(inout b, rec, R_MARKS);
+    let off = ins_imul_imm(inout b, pos, M_MARK);
+    ins_iadd(inout b, marks, off)
+}
+
+fn rg_rewind(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    rec: Value,
+    serial: Value
+) eff [Ffi[Cranelift]] {
+    let args = vals2(rec, serial);
+    let pos = rt_call1(inout b, inout m, im.find_mark, in args.as_slice());
+    let entry = rg_mark_at(inout b, rec, pos);
+    let slots = rg_ld(inout b, entry, M_SLOTS);
+    let cursor = rg_ld(inout b, entry, M_CURSOR);
+    rg_st(inout b, pos, rec, R_NMARKS);
+    rg_st(inout b, slots, rec, R_NSLOTS);
+    rg_st(inout b, cursor, rec, R_CURSOR);
+    rg_ret0(inout b);
+}
+
+fn rg_commit(
+    inout b: Builder,
+    inout m: Module,
+    in im: RegionImports,
+    rec: Value,
+    serial: Value
+) eff [Ffi[Cranelift]] {
+    let args = vals2(rec, serial);
+    let pos = rt_call1(inout b, inout m, im.find_mark, in args.as_slice());
+    let entry = rg_mark_at(inout b, rec, pos);
+    let mk = rg_ld(inout b, rec, R_NMARKS);
+    let after = ins_isub(inout b, mk, pos);
+    let after = ins_iadd_imm(inout b, after, -1);
+    let bytes = ins_imul_imm(inout b, after, M_MARK);
+    let next = ins_iadd_imm(inout b, entry, M_MARK);
+    let margs = vals3(entry, next, bytes);
+    rt_call1(inout b, inout m, im.memmove, in margs.as_slice());
+    let m1 = ins_iadd_imm(inout b, mk, -1);
+    rg_st(inout b, m1, rec, R_NMARKS);
+    let rargs = vals1(rec);
+    rt_call(inout b, inout m, im.reclaim, in rargs.as_slice());
+    rg_ret0(inout b);
+}
+
+fn rg_used(inout b: Builder, rec: Value) eff [Ffi[Cranelift]] {
+    let v = rg_ld(inout b, rec, R_CURSOR);
+    rg_ret(inout b, v);
+}

@@ -185,6 +185,20 @@ impl Runtime<'_> {
                     Some(site.clone()),
                 )?)
             }
+            SeqOp::Last => {
+                let (cell, start, len) = view(arg(0)?)?;
+                let item = len.checked_sub(1).map(|i| cell.borrow()[start + i].clone());
+                let (constructor, fields) = match item {
+                    Some(v) => ("Some", BTreeMap::from([("0".to_string(), v)])),
+                    None => ("None", BTreeMap::new()),
+                };
+                V(self.construct_data(
+                    "Option".into(),
+                    constructor.into(),
+                    fields,
+                    Some(site.clone()),
+                )?)
+            }
             SeqOp::TrySet => {
                 let (cell, start, len) = view(arg(0)?)?;
                 let i = index(arg(1)?)?;

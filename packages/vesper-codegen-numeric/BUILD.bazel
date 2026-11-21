@@ -1,0 +1,7 @@
+# @vesper/codegen-numeric (#1285): read by the differential test in
+# crates/vesper-codegen-numeric-test.
+filegroup(
+    name = "files",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+    visibility = ["//visibility:public"],
+)
