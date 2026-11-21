@@ -471,6 +471,8 @@ vesper_crate(
         "test/vsys_packages": [":files"],
         # .vsys types in `use` (#1326): the real @vesper/cranelift as a dependency.
         "test/vsys_package_imports": ["//packages/vesper-cranelift:files"],
+        # SH6 lane 17 (#1412): @vesper/crypto as a driver's dependency.
+        "test/crypto_shim": ["//packages/vesper-crypto:files"],
         # @vesper-std graph, intern, arena and hash (#1127) as a driver's dependencies.
         "test/std_arena": [":files"],
         "test/std_graph": [":files"],

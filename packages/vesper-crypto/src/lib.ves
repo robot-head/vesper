@@ -1,0 +1,426 @@
+// @export vsys direct rust=vesper_crypto_sys
+// | sys library Crypto (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_crypto_sys",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type Aead;
+// |     linear extern type Block;
+// |     linear extern type Hash;
+// |     fn vcr_random(nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_ct_eq(nocapture in a: CSlice[u8], nocapture in b: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_zeroize(nocapture inout buf: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vcr_hash_len(alg: u32) -> ForeignVal[u64];
+// |     fn vcr_hash(alg: u32, nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_hash_new(alg: u32) -> ForeignVal[Option[Hash]];
+// |     fn vcr_hash_clone(in h: Hash) -> ForeignVal[Option[Hash]];
+// |     fn vcr_hash_update(inout h: Hash, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vcr_hash_digest(in h: Hash, nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_hash_free(sink h: Hash) -> ForeignVal[Unit];
+// |     fn vcr_hmac(alg: u32, nocapture in key: CSlice[u8], nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_hkdf_extract(alg: u32, nocapture in salt: CSlice[u8], nocapture in ikm: CSlice[u8], nocapture inout prk: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_hkdf_expand(alg: u32, nocapture in prk: CSlice[u8], nocapture in info: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_aead_new(alg: u32, nocapture in key: CSlice[u8]) -> ForeignVal[Option[Aead]];
+// |     fn vcr_aead_free(sink a: Aead) -> ForeignVal[Unit];
+// |     fn vcr_aead_seal(in a: Aead, nocapture in nonce: CSlice[u8], nocapture inout buf: CSlice[u8], aad_len: u64, msg_len: u64) -> ForeignVal[u32];
+// |     fn vcr_aead_open(in a: Aead, nocapture in nonce: CSlice[u8], nocapture inout buf: CSlice[u8], aad_len: u64) -> ForeignVal[u32];
+// |     fn vcr_aes_new(nocapture in key: CSlice[u8]) -> ForeignVal[Option[Block]];
+// |     fn vcr_aes_free(sink b: Block) -> ForeignVal[Unit];
+// |     fn vcr_aes_encrypt_block(in b: Block, nocapture inout block: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_chacha20_block(nocapture in key: CSlice[u8], counter: u32, nocapture in nonce: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_x25519(nocapture in scalar: CSlice[u8], nocapture in point: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_x25519_base(nocapture in scalar: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_ed25519_public(nocapture in seed: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_ed25519_sign(nocapture in seed: CSlice[u8], nocapture in msg: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_ed25519_verify(nocapture in public: CSlice[u8], nocapture in msg: CSlice[u8], nocapture in sig: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_mlkem768_isa_available(isa: u32) -> ForeignVal[u32];
+// |     fn vcr_mlkem768_keygen(isa: u32, nocapture in seed: CSlice[u8], nocapture inout ek: CSlice[u8], nocapture inout dk: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_mlkem768_validate(isa: u32, nocapture in ek: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_mlkem768_encaps(isa: u32, nocapture in ek: CSlice[u8], nocapture in m: CSlice[u8], nocapture inout ct: CSlice[u8], nocapture inout ss: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_mlkem768_decaps(isa: u32, nocapture in dk: CSlice[u8], nocapture in ct: CSlice[u8], nocapture inout ss: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcr_ecdsa_verify(alg: u32, nocapture in public: CSlice[u8], nocapture in msg: CSlice[u8], nocapture in sig: CSlice[u8]) -> ForeignVal[u32];
+// | }
+//
+// @vesper/crypto: the one door to vetted cryptography (Rust-exit SH6 lane
+// 17, #1412). The repository never hand-rolls cryptography: every
+// primitive is one call of the `.vsys` library `Crypto` above, which
+// crates/vesper-crypto-sys provides over RustCrypto, dalek, libcrux and
+// ring (`.vsys` imports are read from the root module of a library build
+// only, #1150, so a port repeats this block with its own `rust=` path;
+// packages/vesper-crypto/crypto.vsys is the same text). Everything around
+// the primitives (key schedules, nonce rules, protocol state) is Vesper.
+//
+// Calls that can fail raise `CryptoError` with the shim's status: 1 a
+// buffer or key has the wrong length, 2 authentication or verification
+// failed, 3 the library failed (or no OS randomness), 4 an unknown
+// algorithm or an ML-KEM backend this CPU cannot run. No output byte is
+// written on failure.
+
+pub copy struct CryptoError {
+    status: u32,
+}
+
+// Shim status codes.
+pub enum Status: _ {
+    Ok = 0,
+    Length = 1,
+    Auth = 2,
+    Failed = 3,
+    Unsupported = 4
+}
+
+// AEAD algorithm codes.
+pub enum AeadAlg: _ {
+    Aes128Gcm = 1,
+    Aes256Gcm = 2,
+    ChaCha20Poly1305 = 3
+}
+
+// Hash algorithm codes (also HMAC and HKDF).
+pub enum HashAlg: _ {
+    Sha256 = 1,
+    Sha384 = 2,
+    Sha512 = 3
+}
+
+// ML-KEM-768 backend codes.
+pub enum KemIsa: _ {
+    Portable = 0,
+    Avx2 = 1,
+    Neon = 2
+}
+
+// ECDSA verification algorithm codes (ring's algorithms of the same name).
+pub enum EcdsaAlg: _ {
+    P256Sha256Fixed = 1,
+    P384Sha384Fixed = 2,
+    P256Sha256Asn1 = 3,
+    P384Sha384Asn1 = 4
+}
+
+// Sizes every caller needs.
+pub enum Size: _ {
+    Tag = 16,
+    Nonce = 12,
+    MlKem768Ek = 1184,
+    MlKem768Dk = 2400,
+    MlKem768Ct = 1088,
+    SharedSecret = 32
+}
+
+fn check(status: u32) eff [Fail[CryptoError]] {
+    if status != 0 {
+        Fail::raise(
+            CryptoError {
+                status: status
+            }
+        );
+    }
+}
+
+// `n` zero bytes.
+pub fn zeros(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    s.resize(n, 0);
+    s
+}
+
+// ---------------------------------------------------------------------------
+// Randomness, constant-time equality, zeroization.
+
+// Fills `out` from the operating system's CSPRNG.
+pub fn random(inout out: Slice[u8]) eff [Ffi[Crypto], Fail[CryptoError]] {
+    check(Crypto::vcr_random(inout out));
+}
+
+// Whether `a` and `b` hold the same bytes, compared in constant time when
+// their lengths are equal.
+pub fn ct_eq(in a: Slice[u8], in b: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    Crypto::vcr_ct_eq(in a, in b) == 1
+}
+
+// Overwrites `buf` with zeros in a way the optimizer keeps.
+pub fn wipe(inout buf: Slice[u8]) eff [Ffi[Crypto]] {
+    Crypto::vcr_zeroize(inout buf);
+}
+
+// ---------------------------------------------------------------------------
+// Hashes, HMAC, HKDF.
+
+// The digest length of `alg`, 0 for an unknown code.
+pub fn hash_len(alg: u32) -> u64 eff [Ffi[Crypto]] {
+    Crypto::vcr_hash_len(alg)
+}
+
+// `out = H(data)`; `out` is exactly the digest length.
+pub fn hash_into(alg: u32, in data: Slice[u8], inout out: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_hash(alg, in data, inout out));
+}
+
+// `H(data)` in a new buffer.
+pub fn hash(alg: u32, in data: Slice[u8]) -> ChunkSeq[u8] eff [Ffi[Crypto], Fail[CryptoError]] {
+    let mut out = zeros(Crypto::vcr_hash_len(alg));
+    check(Crypto::vcr_hash(alg, in data, inout out.as_slice_mut()));
+    out
+}
+
+// A running hash (`None` for an unknown code).
+pub fn hasher_new(alg: u32) -> Option[Hash] eff [Ffi[Crypto]] {
+    Crypto::vcr_hash_new(alg)
+}
+
+// A copy of a running hash.
+pub fn hasher_clone(in h: Hash) -> Option[Hash] eff [Ffi[Crypto]] {
+    Crypto::vcr_hash_clone(in h)
+}
+
+// Absorbs `data`.
+pub fn hasher_update(inout h: Hash, in data: Slice[u8]) eff [Ffi[Crypto]] {
+    Crypto::vcr_hash_update(inout h, in data);
+}
+
+// The digest of the input so far; `h` keeps running. `out` is exactly the
+// digest length.
+pub fn hasher_digest(in h: Hash, inout out: Slice[u8]) eff [Ffi[Crypto], Fail[CryptoError]] {
+    check(Crypto::vcr_hash_digest(in h, inout out));
+}
+
+// Releases `h`.
+pub fn hasher_free(sink h: Hash) eff [Ffi[Crypto]] {
+    Crypto::vcr_hash_free(h);
+}
+
+// `out = HMAC-H(key, data)`; `out` is exactly the digest length.
+pub fn hmac(alg: u32, in key: Slice[u8], in data: Slice[u8], inout out: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_hmac(alg, in key, in data, inout out));
+}
+
+// `prk = HKDF-Extract(salt, ikm)` (RFC 5869); an empty salt is the
+// default salt. `prk` is exactly the digest length.
+pub fn hkdf_extract(alg: u32, in salt: Slice[u8], in ikm: Slice[u8], inout prk: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_hkdf_extract(alg, in salt, in ikm, inout prk));
+}
+
+// `out = HKDF-Expand(prk, info, len(out))` (RFC 5869).
+pub fn hkdf_expand(alg: u32, in prk: Slice[u8], in info: Slice[u8], inout out: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_hkdf_expand(alg, in prk, in info, inout out));
+}
+
+// The TLS 1.3 `HkdfLabel` (RFC 8446 §7.1) for an output of `len` bytes:
+// `u16 len || u8 (6 + label) || "tls13 " || label || u8 context ||
+// context`. Raises `Length` when the label or context does not fit its
+// length byte, or `len` its two bytes.
+pub fn tls13_label(len: u64, in label: Slice[u8], in context: Slice[u8])
+    -> ChunkSeq[u8] eff [Fail[CryptoError]] {
+    let full = wrapping_add(6, label.len());
+    if len > 65535 || full > 255 || context.len() > 255 {
+        check(Status::Length);
+    }
+    let mut info: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](
+        wrapping_add(wrapping_add(full, context.len()), 4)
+    );
+    info.push(wrapping_u8(len >> 8));
+    info.push(wrapping_u8(len));
+    info.push(wrapping_u8(full));
+    info.extend(in "tls13 ".as_bytes());
+    info.extend(in label);
+    info.push(wrapping_u8(context.len()));
+    info.extend(in context);
+    info
+}
+
+// TLS 1.3 `HKDF-Expand-Label(secret, label, context, len(out))`
+// (RFC 8446 §7.1).
+pub fn hkdf_expand_label(
+    alg: u32,
+    in secret: Slice[u8],
+    in label: Slice[u8],
+    in context: Slice[u8],
+    inout out: Slice[u8]
+) eff [Ffi[Crypto], Fail[CryptoError]] {
+    let info = tls13_label(out.len(), in label, in context);
+    check(Crypto::vcr_hkdf_expand(alg, in secret, in info.as_slice(), inout out));
+}
+
+// ---------------------------------------------------------------------------
+// AEADs over the record layout `aad || message || tag`.
+
+// A new AEAD key (`None` for an unknown code or a key of the wrong
+// length: 16 bytes for AES-128-GCM, 32 otherwise).
+pub fn aead_new(alg: u32, in key: Slice[u8]) -> Option[Aead] eff [Ffi[Crypto]] {
+    Crypto::vcr_aead_new(alg, in key)
+}
+
+// Releases `a` (its key schedule is zeroized).
+pub fn aead_free(sink a: Aead) eff [Ffi[Crypto]] {
+    Crypto::vcr_aead_free(a);
+}
+
+// Seals `buf[aad_len..aad_len + msg_len]` in place with `buf[..aad_len]` as
+// associated data and writes the 16-byte tag right after it.
+pub fn aead_seal(
+    in a: Aead,
+    in nonce: Slice[u8],
+    inout buf: Slice[u8],
+    aad_len: u64,
+    msg_len: u64
+) eff [Ffi[Crypto], Fail[CryptoError]] {
+    check(Crypto::vcr_aead_seal(in a, in nonce, inout buf, aad_len, msg_len));
+}
+
+// Opens `buf` = `aad || ciphertext || tag` in place: the tag is checked in
+// constant time first, so on `Auth` the buffer is unchanged. The plaintext
+// is `buf[aad_len..buf.len() - 16]`.
+pub fn aead_open(in a: Aead, in nonce: Slice[u8], inout buf: Slice[u8], aad_len: u64) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_aead_open(in a, in nonce, inout buf, aad_len));
+}
+
+// ---------------------------------------------------------------------------
+// Block ciphers (QUIC header protection).
+
+// A new AES key (16 or 32 bytes; `None` otherwise).
+pub fn aes_new(in key: Slice[u8]) -> Option[Block] eff [Ffi[Crypto]] {
+    Crypto::vcr_aes_new(in key)
+}
+
+// Releases `b` (its key schedule is zeroized).
+pub fn aes_free(sink b: Block) eff [Ffi[Crypto]] {
+    Crypto::vcr_aes_free(b);
+}
+
+// Encrypts the 16-byte `block` in place.
+pub fn aes_encrypt_block(in b: Block, inout block: Slice[u8]) eff [Ffi[Crypto], Fail[CryptoError]] {
+    check(Crypto::vcr_aes_encrypt_block(in b, inout block));
+}
+
+// The 64-byte ChaCha20 keystream block at block `counter` (RFC 8439 §2.3),
+// defined for every 32-bit counter.
+pub fn chacha20_block(
+    in key: Slice[u8],
+    counter: u32,
+    in nonce: Slice[u8],
+    inout out: Slice[u8]
+) eff [Ffi[Crypto], Fail[CryptoError]] {
+    check(Crypto::vcr_chacha20_block(in key, counter, in nonce, inout out));
+}
+
+// ---------------------------------------------------------------------------
+// X25519, Ed25519.
+
+// `out = X25519(scalar, point)`; raises `Auth` when the peer's point has
+// small order (an all-zero shared secret).
+pub fn x25519(in scalar: Slice[u8], in point: Slice[u8], inout out: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_x25519(in scalar, in point, inout out));
+}
+
+// The X25519 public key of `scalar`.
+pub fn x25519_base(in scalar: Slice[u8], inout out: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_x25519_base(in scalar, inout out));
+}
+
+// The Ed25519 public key of a 32-byte seed.
+pub fn ed25519_public(in seed: Slice[u8], inout out: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_ed25519_public(in seed, inout out));
+}
+
+// The 64-byte Ed25519 signature of `msg` under a 32-byte seed.
+pub fn ed25519_sign(in seed: Slice[u8], in msg: Slice[u8], inout out: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_ed25519_sign(in seed, in msg, inout out));
+}
+
+// Whether `sig` is a valid Ed25519 signature of `msg` under `public`
+// (strict verification).
+pub fn ed25519_verify(in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    Crypto::vcr_ed25519_verify(in public, in msg, in sig) == 0
+}
+
+// ---------------------------------------------------------------------------
+// ML-KEM-768 (FIPS 203).
+
+// Whether backend `isa` is compiled in and this CPU can run it.
+pub fn mlkem768_isa_available(isa: u32) -> bool eff [Ffi[Crypto]] {
+    Crypto::vcr_mlkem768_isa_available(isa) == 1
+}
+
+// The fastest backend this CPU can run.
+pub fn mlkem768_isa_detect() -> u32 eff [Ffi[Crypto]] {
+    if mlkem768_isa_available(KemIsa::Avx2) {
+        KemIsa::Avx2
+    } else if mlkem768_isa_available(KemIsa::Neon) {
+        KemIsa::Neon
+    } else {
+        KemIsa::Portable
+    }
+}
+
+// Expands the 64-byte seed into the encapsulation key (1184 bytes) and the
+// decapsulation key (2400 bytes).
+pub fn mlkem768_keygen(isa: u32, in seed: Slice[u8], inout ek: Slice[u8], inout dk: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_mlkem768_keygen(isa, in seed, inout ek, inout dk));
+}
+
+// The FIPS 203 encapsulation-key check.
+pub fn mlkem768_validate(isa: u32, in ek: Slice[u8]) -> bool eff [Ffi[Crypto]] {
+    Crypto::vcr_mlkem768_validate(isa, in ek) == 0
+}
+
+// Encapsulates to `ek` with the 32-byte randomness `m`.
+pub fn mlkem768_encaps(
+    isa: u32,
+    in ek: Slice[u8],
+    in m: Slice[u8],
+    inout ct: Slice[u8],
+    inout ss: Slice[u8]
+) eff [Ffi[Crypto], Fail[CryptoError]] {
+    check(Crypto::vcr_mlkem768_encaps(isa, in ek, in m, inout ct, inout ss));
+}
+
+// Decapsulates `ct` (implicit rejection: a bad ciphertext gives a
+// pseudorandom secret).
+pub fn mlkem768_decaps(isa: u32, in dk: Slice[u8], in ct: Slice[u8], inout ss: Slice[u8]) eff [
+    Ffi[Crypto],
+    Fail[CryptoError]
+] {
+    check(Crypto::vcr_mlkem768_decaps(isa, in dk, in ct, inout ss));
+}
+
+// ---------------------------------------------------------------------------
+// ECDSA verification.
+
+// Whether `sig` is a valid ECDSA signature of `msg` under the uncompressed
+// SEC1 point `public`, for an `EcdsaAlg` code.
+pub fn ecdsa_verify(alg: u32, in public: Slice[u8], in msg: Slice[u8], in sig: Slice[u8])
+    -> bool eff [Ffi[Crypto]] {
+    Crypto::vcr_ecdsa_verify(alg, in public, in msg, in sig) == 0
+}
