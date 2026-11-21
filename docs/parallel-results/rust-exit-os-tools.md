@@ -194,10 +194,15 @@ compiler gap; it is listed so the census does not count it as portable.
 
 `parallel_for` bodies must have an empty effect row (`E0823`), so a vCPU
 loop (`KVM_RUN` is `Ffi[Kvm]`) or a uffd handler cannot run on a worker.
-With G5 fixed, a thread is a `pthread_create` call; without it, aether's
-two-thread topology (vCPU + device/uffd thread) has to become one thread
-that polls (`ppoll` on the uffd and an eventfd between `KVM_RUN`s, with
-`immediate_exit`). That changes aether's design and needs measuring.
+This is a blocker, not a design choice: a guest access to a missing page
+blocks the vCPU thread inside `KVM_RUN` until another thread resolves the
+fault (`Region::serve` in `linux_host.rs` runs the resolver concurrently
+for that reason), and `immediate_exit` is checked only when `KVM_RUN`
+starts, so one thread that polls between runs never gets to serve the
+fault. Without G5 (a `pthread_create` callback) or an effectful worker,
+aether's userfaultfd-backed lazy memory stays Rust; the only single-thread
+alternative is a different memory strategy (populating guest memory
+eagerly before `KVM_RUN`, which gives up lazy restore).
 
 ### G9: chrono's x86 decoder (iced-x86)
 
@@ -225,8 +230,8 @@ In order, one crate per PR:
    the Rust crate until this lands.
 2. **`vesper-aether`** devices, virtio, PVH, slot plan, fork and snapshot
    (pure); then uffd, memfd, seccomp and KVM over direct imports. Threads
-   (G5/G8) and RDRAND (G4) decide whether `vmm_thread.rs` and
-   `hw_rng.rs` stay Rust for now.
+   (G5/G8) block the uffd fault resolver and `vmm_thread.rs`, and RDRAND
+   (G4) blocks `hw_rng.rs`; those stay Rust until the gaps close.
 3. **`vesper-bench-pmu`**: events and the perf_event provider (read(2));
    RDPMC (G4), kpc (G5) and the allocator (G7) stay Rust until their gaps
    close.
@@ -248,7 +253,7 @@ tests; ABBA upper bound at or below 1.5x).
 | G4 CPU instruction intrinsics | RDPMC, RDRAND/RNDR | compiler codegen (SH4) |
 | G5 C function pointers / callbacks | threads, signal handlers, `dlsym` | manuscript §16.3 + compiler |
 | G6 atomics on foreign memory | macOS rings (none here) | compiler builtins |
-| G8 effectful workers | aether's vCPU and uffd threads | manuscript §15 + compiler |
+| G8 effectful workers | aether's vCPU and uffd threads (lazy guest memory needs a concurrent fault resolver) | manuscript §15 + compiler |
 
 ## Census rows
 
