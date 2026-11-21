@@ -114,6 +114,7 @@ fn install() {
     INSTALLED.get_or_init(|| {
         optimize::install_optimize(OptimizeTable {
             verify: recording_verify,
+            propose: None,
         })
         .unwrap();
     });

@@ -11,8 +11,8 @@ The lane lands in several PRs. This report grows with each one.
 
 | Part | PR | What |
 | --- | --- | --- |
-| 1 | this PR | the certificate checker and candidate builder (`optimize/witness.rs`), the swap point |
-| 2 | | the search on `@vesper/egraph` (after SH3 lane 8's first PR): language, rules and guards, islands, refusals, the proof forest of `optimize/certificate.rs` |
+| 1 | #1300 | the certificate checker and candidate builder (`optimize/witness.rs`), the swap point |
+| 2 | this PR | the search on `@vesper/egraph`: language, rules and guards, islands, refusals, the proof forest of `optimize/certificate.rs` |
 | 3 | | the swap into the hybrid build (`optimize` module), the full suite on it, the scoreboard row |
 
 ## Part 1: the certificate checker
@@ -203,13 +203,122 @@ in Rust), and `@vesper/check-core-typing`'s `int_bits`, `int_unsigned` and
 `self_host_check_core_typing_exprs` (`value: 0` into an `i128` field gave
 E0200) each failed on this package alone.
 
-### What is left
+## Part 2: the search
 
-- Part 2: the search on `@vesper/egraph` once SH3 lane 8's first PR lands:
-  the rule language and guards, island admission (`Barrier`, `Unchanged`,
-  refusals), the proof forest (`Builder`: union with proof edges,
-  congruence, prefix folding, record explanation), and the optimized-module
-  differential.
+### What changed
+
+| Area | Files |
+| --- | --- |
+| Producer | `packages/vesper-optimize/src/search.ves` (new), `lib.ves` (`optimize_propose` and two speed entries), `Loom.toml` (depends on `@vesper/egraph`) |
+| E-graph driver hooks | `packages/vesper-egraph/src/run.ves`: `matches_new`, `search_rule`, `apply_one`, `guard_holds` made `pub`; `Matches::{mark, range, val}` (additive) |
+| Swap point | `src/optimize.rs`: `OptimizeTable::propose` (`Option<ProposeFn>`), `Proposal`, `Produced`, `propose_rust`; `visit` uses an installed producer with the installed gate, else runs exactly as before |
+| Candidate rebuild | `src/optimize/witness.rs`: `rebuild_candidate` (additive) |
+| Test | `tests/self_host_optimize_search.rs` (new); `tests/common/check_harness.rs` makes `corpus_paths` public |
+| Bazel data and timeout | `BUILD.bazel` |
+
+`@vesper/egraph` is SH3 lane 8's package. The Rust producer drives egg's
+`Runner` one rule at a time through a budgeted scheduler and a recording
+applier, so the port needs the same per-rule entry points. The edit only
+makes four functions public and adds three read accessors; the lane 8
+differential is unchanged.
+
+Ported (`src/optimize/certificate.rs` to `search.ves`):
+
+- Island admission: `Barrier`, `Unchanged`, and every refusal
+  `WitnessError`.
+- Constant folding (rules 19-24) with prefix folding of operand chains.
+- The budgeted search: egg 0.10's `Runner` order (limit checks, the
+  root-leaf hook, search then apply per rule, rebuild, saturation), the
+  `BoundedScheduler` charges and its 128-match limit, the
+  `RecordingApplier` charges and caps, and egg's compacted pattern lengths.
+- Extraction by AST size, the candidate and its term table.
+- The proof forest (`Builder`): union with proof edges, reflexive,
+  reverse and transitive steps, congruence, guards, and explanation of the
+  recorded applications.
+- Budget parity: the same Rust `Vec` capacity model as part 1, so
+  `work`, `metadata`, `names` and the certificate vectors' capacities match.
+
+### Differential
+
+The test installs a recording producer at the swap point. Every expression
+the Rust optimizer visits reaches it; it records Rust's `propose_rust`
+answer and returns it, so the optimizer runs unchanged. The Vesper
+producer then answers each recorded visit, and the two are compared on the
+outcome (barrier, unchanged, error code, candidate), and for a candidate on
+the candidate's dump, every term and proof, and the spent counters and
+capacities.
+
+| Source | Visits |
+| --- | --: |
+| every checked corpus world: every candidate and error, every 64th barrier and unchanged visit (`OPTIMIZE_SAMPLE_STEP`) | 14,590 |
+| the fixtures of `optimize/certificate.rs` and `adversarial_tests.rs` | 48 |
+| 600 generated islands (depth 5 and depth 8) | 1,200 |
+
+| Outcome | Visits |
+| --- | --: |
+| barrier | 12,321 |
+| unchanged | 3,089 |
+| error | 69 |
+| candidate | 359 |
+
+Result: 15,742 identical, 96 different only in search order, 0
+differences. The JIT with the optimizer off gives the same answers
+(`unoptimized_agrees`).
+
+The search-order cases are the difference the lane prompt allows.
+`@vesper/egraph` visits classes in id order and egg in hash order, so
+extraction can pick another tree of the same cost. A tie passes when the
+Vesper certificate passes Rust's `verify_spent`, Rust's
+`rebuild_candidate` of it equals the Vesper candidate, and both candidates
+have the same size. The other kind of tie is Vesper answering `Unchanged`
+where egg picks a same-size reordering, for example
+`wrapping_add(wrapping_mul(y, 100), wrapping_add(wrapping_mul(x, 1000), r))`
+with its operands swapped. That tie passes when Rust's candidate has the
+source's size. There is no egg hash-order emulation, as agreed.
+
+The whole corpus makes about 900,000 visits, nearly all barriers and
+unchanged leaves. The sample keeps the debug test at about 11 minutes: 3.5
+recording the corpus on 4 threads (each world parsed and checked once),
+and 7.5 compiling the package and answering in Vesper.
+
+### Numbers
+
+Release build, ABBA (best of six per side, five rounds each) over all
+15,838 visits. The Rust side runs `propose_rust` on the recorded sources.
+The Vesper side decodes its input words and proposes, writing one line per
+case and not the proposal. The decode-only entry is timed separately and
+subtracted.
+
+| | Rust | Vesper | Ratio |
+| --- | --: | --: | --: |
+| producer with its input decode | 807 ms | 638 ms | 0.79x |
+| producer alone (decode 90 ms subtracted) | 807 ms | 548 ms | 0.68x |
+
+Callgrind instruction counts, one round over the 1,248 visits of the
+fixtures and the generated islands (`OPTIMIZE_SKIP_CORPUS=1`; each side
+collected alone with `--toggle-collect='*measured_side*'`):
+
+| | Rust | Vesper | Ratio |
+| --- | --: | --: | --: |
+| producer with its input decode | 277.8 M | 296.0 M | 1.07x |
+| producer alone (decode 25.2 M subtracted) | 277.8 M | 270.7 M | 0.97x |
+
+The generated islands are the deep ones (up to depth 8, all wrapping), so
+the search does most of its work there, and the two sides come out about
+even. The corpus sample is mostly barriers and small islands, where the
+Vesper side is ahead on wall clock.
+
+No profile went into why the Vesper side is ahead. A likely reason is
+that egg hashes every e-node into its memo and class maps, while
+`@vesper/egraph` keeps flat `ChunkSeq` columns indexed by class id.
+
+### Stage 1 guard
+
+No file under `src/verified_codegen/**`, `src/ir.rs`, `ir_opt::optimize`,
+`lean/**`, `bootstrap/**` or `packages/vesper-compiler/**` changed.
+
+## What is left
+
 - Part 3: the hybrid `optimize` module through `install_optimize`, the full
   suite on the hybrid build, and the SH3 scoreboard row (whole corpus and
   the pass alone, ABBA and callgrind).

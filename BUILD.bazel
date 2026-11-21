@@ -293,6 +293,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Part 2: the search that produces those proposals, ported to
+        # @vesper/egraph, over the same corpus.
+        "test/self_host_optimize_search": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -641,6 +648,7 @@ vesper_crate(
         "test/self_host_egraph": "long",
         # The optimizer differential (#1249) checks every corpus world.
         "test/self_host_optimize": "eternal",
+        "test/self_host_optimize_search": "eternal",
     },
 )
 

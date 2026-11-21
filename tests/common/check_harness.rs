@@ -49,7 +49,7 @@ pub struct Case {
 }
 
 /// The corpus files and package directories, in path order.
-fn corpus_paths() -> (Vec<PathBuf>, Vec<PathBuf>) {
+pub fn corpus_paths() -> (Vec<PathBuf>, Vec<PathBuf>) {
     fn walk(dir: &Path, files: &mut Vec<PathBuf>, pkgs: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;

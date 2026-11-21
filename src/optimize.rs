@@ -78,6 +78,51 @@ pub struct OptimizeTable {
     /// source and candidate, continuing the producer's budget (`limits`,
     /// already `spent`). [`witness::verify_spent`] is the Rust one.
     pub verify: VerifyFn,
+    /// The untrusted producer of one island's proposal; `None` keeps the
+    /// Rust one ([`propose_rust`]).
+    pub propose: Option<ProposeFn>,
+}
+
+/// The producer's signature ([`OptimizeTable::propose`]): `propose_rewrite`
+/// on a fresh budget of `limits`.
+pub type ProposeFn =
+    fn(source: &Expr, types: &TypeMap, limits: WitnessLimits) -> Result<Proposal, WitnessError>;
+
+/// A producer's answer for one expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Proposal {
+    /// Not an integer island: its children are visited instead.
+    Barrier,
+    /// An island the search leaves as it is.
+    Unchanged,
+    Candidate(Box<Produced>),
+}
+
+/// A candidate, its certificate and the budget its production spent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Produced {
+    pub candidate: Expr,
+    pub certificate: witness::RewriteCertificate,
+    pub limits: WitnessLimits,
+    pub spent: witness::Spent,
+}
+
+/// The Rust producer (`certificate::propose_rewrite`) behind [`ProposeFn`].
+pub fn propose_rust(
+    source: &Expr,
+    types: &TypeMap,
+    limits: WitnessLimits,
+) -> Result<Proposal, WitnessError> {
+    Ok(match certificate::propose_rewrite(source, types, limits)? {
+        RewriteOutcome::Barrier => Proposal::Barrier,
+        RewriteOutcome::Unchanged => Proposal::Unchanged,
+        RewriteOutcome::Candidate(p) => Proposal::Candidate(Box::new(Produced {
+            limits: p.budget.limits(),
+            spent: p.budget.spent(),
+            candidate: p.candidate,
+            certificate: p.certificate,
+        })),
+    })
 }
 
 /// The install gate's signature ([`OptimizeTable::verify`]).
@@ -147,18 +192,56 @@ pub fn optimize(module: &mut Module, types: &TypeMap) {
         }
     }
 }
+/// An installed producer's step at `e`: true when `e` is done (installed,
+/// unchanged or refused), false at a barrier.
+fn installed_step(
+    e: &mut Expr,
+    types: &TypeMap,
+    table: &OptimizeTable,
+    propose: ProposeFn,
+) -> bool {
+    match propose(e, types, WitnessLimits::default()) {
+        Ok(Proposal::Candidate(p)) => {
+            let Produced {
+                candidate,
+                certificate,
+                limits,
+                mut spent,
+            } = *p;
+            if (table.verify)(e, &candidate, types, &certificate, limits, &mut spent).is_ok() {
+                *e = candidate;
+            }
+            true
+        }
+        Ok(Proposal::Unchanged) | Err(_) => true,
+        Ok(Proposal::Barrier) => false,
+    }
+}
+
 fn visit(e: &mut Expr, types: &TypeMap) {
     // Admit maximal islands before child edits so type/callee origins still
     // refer to the checked source. Refusal never retries an admitted island's
     // children; only a true unsupported barrier permits ordinary traversal.
-    match certificate::propose_rewrite(e, types, WitnessLimits::default()) {
-        Ok(RewriteOutcome::Candidate(proposal)) => {
-            let _ = install_proposal(e, types, proposal);
+    if let Some(table) = OPTIMIZE.get()
+        && let Some(propose) = table.propose
+    {
+        if installed_step(e, types, table, propose) {
             return;
         }
-        Ok(RewriteOutcome::Unchanged) | Err(_) => return,
-        Ok(RewriteOutcome::Barrier) => {}
+    } else {
+        match certificate::propose_rewrite(e, types, WitnessLimits::default()) {
+            Ok(RewriteOutcome::Candidate(proposal)) => {
+                let _ = install_proposal(e, types, proposal);
+                return;
+            }
+            Ok(RewriteOutcome::Unchanged) | Err(_) => return,
+            Ok(RewriteOutcome::Barrier) => {}
+        }
     }
+    visit_children(e, types);
+}
+
+fn visit_children(e: &mut Expr, types: &TypeMap) {
     match &mut e.kind {
         ExprKind::Tuple(es) => {
             for e in es {
