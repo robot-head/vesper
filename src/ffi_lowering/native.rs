@@ -1496,8 +1496,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Ok(None);
         }
         // A symbol shared with the runtime's imports is called through its
-        // address (`foreign_import`), which the steps do not express.
+        // address (`foreign_import`), which the steps do not express, and
+        // Apple arm64 pads a variadic call's argument registers with zero
+        // words (`sys::Variadic`), which they do not carry either.
         let abi = plan.function.abi();
+        if abi.variadic.is_some_and(|v| v.padding > 0) {
+            return Ok(None);
+        }
         let pointer = self.m.target_config().pointer_type();
         let mut sig = self.m.make_signature();
         for t in &abi.parameters {
