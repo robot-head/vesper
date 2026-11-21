@@ -1,0 +1,277 @@
+// @export vsys direct rust=vesper::codegen_swap::walk
+// | sys library Walk (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     fn vesper_walk_query(q: u32, a: u64, b: u64) -> ForeignVal[u64];
+// |     fn vesper_walk_effect(e: u32, a: u64, b: u64, c: u64) -> ForeignVal[Unit];
+// |     fn vesper_walk_reenter(kind: u32) -> ForeignVal[Unit];
+// | }
+//
+// @vesper/codegen-walk: the native graph walk's state, lent to a family
+// hook for one instruction request (self-hosting SH5 lane 1, #1324).
+//
+// The protocol is src/codegen_swap/walk.rs's: queries read the
+// instruction's facts and the walk's maps, effects keep the Rust
+// bookkeeping of what the hook emitted, and re-entry asks Rust to emit a
+// piece of the instruction: call `reenter(kind)`, give the lent handles
+// back and decline; the hook is asked again with the piece's value kept
+// (`kept(kept_count() - 1)`).
+//
+// The `walk_*` helpers below emit exactly what the Rust `Codegen` helpers
+// of the same name emit and record their bookkeeping, so a family hook
+// composes them as the Rust code composes `use_var`, `def_var`, `store`
+// and `ir_temp`. Use them only where the Rust helper would not do more:
+// a narrow element view (`narrow`) loads and stores at its width, and a
+// store that normalizes (`PLACE_COERCES`) or of an aggregate copies.
+
+use @vesper/cranelift::{
+    Block,
+    Value,
+    Var,
+    block_word,
+    declare_var,
+    def_var,
+    ins_load,
+    ins_store,
+    use_var,
+    value_of_word,
+    value_type,
+    value_word
+};
+
+// The answer to a query that has none.
+pub const NONE: u64 = 18446744073709551615;
+
+// Queries (`codegen_swap::walk::query`).
+pub const Q_KIND: u32 = 1;
+pub const Q_PLACE_VAR: u32 = 2;
+pub const Q_PATH_LEN: u32 = 3;
+pub const Q_PASS: u32 = 4;
+pub const Q_ASSIGN: u32 = 5;
+pub const Q_FLAGS: u32 = 6;
+pub const Q_PLAN: u32 = 7;
+pub const Q_OPERAND_VAR: u32 = 8;
+pub const Q_OPTIMIZE: u32 = 9;
+pub const Q_HOME: u32 = 10;
+pub const Q_NARROW: u32 = 11;
+pub const Q_REGISTER: u32 = 12;
+pub const Q_SPLIT_WORDS: u32 = 13;
+pub const Q_SPLIT_WORD: u32 = 14;
+pub const Q_KEPT_COUNT: u32 = 20;
+pub const Q_KEPT: u32 = 21;
+
+// `Q_KIND`'s answers.
+pub const KIND_OTHER: u64 = 0;
+pub const KIND_READ: u64 = 1;
+pub const KIND_BIND: u64 = 2;
+pub const KIND_WRITE: u64 = 3;
+
+// `Q_PASS`'s answers.
+pub const PASS_IN: u64 = 0;
+pub const PASS_INOUT: u64 = 1;
+pub const PASS_SINK: u64 = 2;
+
+// `Q_FLAGS`'s bits.
+pub const RESULT_AGGREGATE: u64 = 1;
+pub const RESULT_FUNCTION: u64 = 2;
+pub const PLACE_AGGREGATE: u64 = 4;
+pub const PLACE_FUNCTION: u64 = 8;
+pub const PLACE_COERCES: u64 = 16;
+pub const PLACE_CONSTRUCTOR: u64 = 32;
+pub const RESULT_COERCES: u64 = 64;
+pub const STATEMENT_COERCES: u64 = 128;
+
+// `Q_PLAN`'s bits.
+pub const HOISTED: u64 = 1;
+pub const SPLIT: u64 = 2;
+pub const HOMED: u64 = 4;
+pub const SPLIT_SOURCE: u64 = 8;
+pub const ARRAY: u64 = 16;
+pub const BOUND_EARLY: u64 = 32;
+pub const PLACED: u64 = 64;
+pub const DROP_SLOT: u64 = 128;
+pub const REPLACES: u64 = 256;
+pub const FUSED: u64 = 512;
+pub const ELEMENT_VIEWS: u64 = 1024;
+
+// Effects (`codegen_swap::walk::effect`).
+const E_USED: u32 = 1;
+const E_DEFINED: u32 = 2;
+const E_STORED: u32 = 3;
+const E_EDGE: u32 = 4;
+const E_TEMP: u32 = 5;
+const E_KEEP: u32 = 6;
+
+// Re-entries (`codegen_swap::walk::reentry`).
+pub const REENTER_INSTRUCTION: u32 = 1;
+pub const REENTER_PLACE_VALUE: u32 = 2;
+pub const REENTER_PLACE_ADDRESS: u32 = 3;
+
+// `MemFlags::new()`.
+const PLAIN: u32 = 0;
+
+// ---------------------------------------------------------------------------
+// The calls.
+
+pub fn query(q: u32, a: u64, b: u64) -> u64 eff [Ffi[Walk]] {
+    Walk::vesper_walk_query(q, a, b)
+}
+fn record(e: u32, a: u64, b: u64, c: u64) eff [Ffi[Walk]] {
+    Walk::vesper_walk_effect(e, a, b, c);
+}
+// Ask for re-entry `kind`; the hook then gives its handles back and
+// declines.
+pub fn reenter(kind: u32) eff [Ffi[Walk]] {
+    Walk::vesper_walk_reenter(kind);
+}
+
+// Whether `bits` has `bit`.
+pub fn has(bits: u64, bit: u64) -> bool {
+    (bits & bit) != 0
+}
+
+pub fn var_of_word(w: u64) -> Var {
+    Var {
+        id: wrapping_u32(w)
+    }
+}
+pub fn var_word(v: Var) -> u64 {
+    widen_u64(v.id)
+}
+
+// The instruction's facts.
+pub fn kind() -> u64 eff [Ffi[Walk]] {
+    query(Q_KIND, 0, 0)
+}
+pub fn place_var() -> u64 eff [Ffi[Walk]] {
+    query(Q_PLACE_VAR, 0, 0)
+}
+pub fn path_len() -> u64 eff [Ffi[Walk]] {
+    query(Q_PATH_LEN, 0, 0)
+}
+pub fn pass() -> u64 eff [Ffi[Walk]] {
+    query(Q_PASS, 0, 0)
+}
+pub fn assign() -> bool eff [Ffi[Walk]] {
+    query(Q_ASSIGN, 0, 0) == 1
+}
+pub fn flags() -> u64 eff [Ffi[Walk]] {
+    query(Q_FLAGS, 0, 0)
+}
+pub fn plan() -> u64 eff [Ffi[Walk]] {
+    query(Q_PLAN, 0, 0)
+}
+// The variable holding operand `i`, or NONE.
+pub fn operand_var(i: u64) -> u64 eff [Ffi[Walk]] {
+    query(Q_OPERAND_VAR, i, 0)
+}
+
+// Whether the walk emits the optimize path's lowerings.
+pub fn optimize() -> bool eff [Ffi[Walk]] {
+    query(Q_OPTIMIZE, 0, 0) == 1
+}
+
+// The walk's maps.
+// The variable holding the address of `var`'s home slot, or NONE.
+pub fn home(var: Var) -> u64 eff [Ffi[Walk]] {
+    query(Q_HOME, var_word(var), 0)
+}
+pub fn narrow(var: Var) -> bool eff [Ffi[Walk]] {
+    query(Q_NARROW, var_word(var), 0) == 1
+}
+pub fn register(var: Var) -> bool eff [Ffi[Walk]] {
+    query(Q_REGISTER, var_word(var), 0) == 1
+}
+pub fn split_words(var: Var) -> u64 eff [Ffi[Walk]] {
+    query(Q_SPLIT_WORDS, var_word(var), 0)
+}
+pub fn split_word(var: Var, i: u64) -> Var eff [Ffi[Walk]] {
+    var_of_word(query(Q_SPLIT_WORD, var_word(var), i))
+}
+
+// The words kept across re-entries.
+pub fn kept_count() -> u64 eff [Ffi[Walk]] {
+    query(Q_KEPT_COUNT, 0, 0)
+}
+pub fn kept(i: u64) -> u64 eff [Ffi[Walk]] {
+    query(Q_KEPT, i, 0)
+}
+pub fn kept_value(i: u64) -> Value eff [Ffi[Walk]] {
+    value_of_word(kept(i))
+}
+pub fn keep(w: u64) eff [Ffi[Walk]] {
+    record(E_KEEP, w, 0, 0);
+}
+
+// The bookkeeping effects.
+pub fn used(var: Var, v: Value) eff [Ffi[Walk]] {
+    record(E_USED, var_word(var), value_word(v), 0);
+}
+pub fn defined(var: Var, v: Value) eff [Ffi[Walk]] {
+    record(E_DEFINED, var_word(var), value_word(v), 0);
+}
+pub fn stored(ptr: Value, v: Value) eff [Ffi[Walk]] {
+    record(E_STORED, value_word(ptr), value_word(v), 0);
+}
+// Value `v` flows into parameter `i` of `blk` (record it for each value
+// argument of a `jump` or `brif` the hook emits).
+pub fn edge(blk: Block, i: u64, v: Value) eff [Ffi[Walk]] {
+    record(E_EDGE, block_word(blk), i, value_word(v));
+}
+pub fn temp(operand: u64, var: Var) eff [Ffi[Walk]] {
+    record(E_TEMP, operand, var_word(var), 0);
+}
+
+// ---------------------------------------------------------------------------
+// The Rust helpers, over the lent builder.
+
+// `Codegen::use_var` of a variable that is not a narrow element view: the
+// variable, or the word its home slot holds.
+pub fn walk_use_var(inout b: Builder, var: Var) -> Value eff [Ffi[Cranelift], Ffi[Walk]] {
+    let v = use_var(inout b, var);
+    let address = home(var);
+    let value = if address == NONE {
+        v
+    } else {
+        let ptr = use_var(inout b, var_of_word(address));
+        let ty = value_type(inout b, v);
+        ins_load(inout b, ty, PLAIN, ptr, 0)
+    };
+    used(var, value);
+    value
+}
+
+// `Codegen::def_var` of a variable that is not a narrow element view: the
+// variable, and its home slot's word.
+pub fn walk_def_var(inout b: Builder, var: Var, v: Value) eff [Ffi[Cranelift], Ffi[Walk]] {
+    defined(var, v);
+    def_var(inout b, var, v);
+    let address = home(var);
+    if address != NONE {
+        let ptr = use_var(inout b, var_of_word(address));
+        ins_store(inout b, PLAIN, v, ptr, 0);
+        stored(ptr, v);
+    }
+}
+
+// `Codegen::store` of a scalar the store does not normalize.
+pub fn walk_store(inout b: Builder, ptr: Value, v: Value) eff [Ffi[Cranelift], Ffi[Walk]] {
+    stored(ptr, v);
+    ins_store(inout b, PLAIN, v, ptr, 0);
+}
+
+// `Codegen::ir_temp` of operand `operand`, whose value is `v`: a fresh
+// variable holding it, named as the operand's temporary.
+pub fn walk_temp(inout b: Builder, operand: u64, v: Value) -> Var eff [
+    Ffi[Cranelift],
+    Ffi[Walk]
+] {
+    let ty = value_type(inout b, v);
+    let t = declare_var(inout b, ty);
+    walk_def_var(inout b, t, v);
+    temp(operand, t);
+    t
+}
+

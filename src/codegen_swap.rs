@@ -59,6 +59,17 @@
 //! ([`NO_VALUE`] for an operand with no value yet), and its one result is
 //! the instruction's value. The [`Site`] names the instruction, so a hook
 //! reads the instruction itself from the `Program`.
+//!
+//! # Walk state and re-entry
+//!
+//! An [`INSTRUCTION`] request also lends the graph walk's own state for
+//! the length of the request ([`walk`], SH5 lane 1): queries of the
+//! instruction's facts and the walk's maps (variables, home slots,
+//! register locals, split words, the walk's plans), effects that keep the
+//! Rust bookkeeping of what the hook emitted (`use_var`, `def_var`,
+//! `store`, `jump`, `ir_temp`), and continuation re-entry: a hook asks
+//! Rust to emit the instruction or its place, declines, and is asked again
+//! with the value kept. A hook that never calls them is unaffected.
 use crate::ast::Type;
 use crate::check::World;
 use crate::ir::{Op, Program};
@@ -68,6 +79,8 @@ use cranelift_module::Module;
 use std::cell::Cell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub mod walk;
 
 /// An argument word for an operand that has no Cranelift value.
 pub const NO_VALUE: u64 = u64::MAX;

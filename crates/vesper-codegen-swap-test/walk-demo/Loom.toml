@@ -1,0 +1,13 @@
+[package]
+name = "@vesper/codegen-walk-demo"
+version = "0.1.0"
+edition = "2026"
+# The demonstration hook of the lent walk state (self-hosting SH5 lane 1,
+# #1324): `Read`, `Bind` and `Write` over @vesper/codegen-walk, tested by
+# tests/self_host_walk_state.rs. Not a port: SH4 lane 6 owns the scalar
+# family's package.
+capability_ceiling = ["Fail", "Ffi"]
+
+[dependencies]
+"@vesper/cranelift" = { version = "^0.1", path = "../../../packages/vesper-cranelift" }
+"@vesper/codegen-walk" = { version = "^0.1", path = "../../../packages/vesper-codegen-base/walk" }
