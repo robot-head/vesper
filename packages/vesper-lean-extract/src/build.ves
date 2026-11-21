@@ -16,16 +16,22 @@ pub const T_INFER: u64 = 0;
 pub const T_REF: u64 = 1;
 pub const T_TYPE: u64 = 3;
 pub const T_NAT: u64 = 4;
+pub const T_BOOL: u64 = 5;
 pub const T_STRING: u64 = 6;
 pub const T_APP: u64 = 8;
 pub const T_FUN: u64 = 9;
 pub const T_FORALL: u64 = 10;
 pub const T_ARROW: u64 = 11;
 pub const T_PRODUCT: u64 = 12;
+pub const T_TUPLE: u64 = 13;
+pub const T_IF: u64 = 16;
 pub const T_MATCH: u64 = 17;
+pub const T_PROJECT: u64 = 18;
+pub const T_ASCRIBE: u64 = 19;
 pub const T_UNARY: u64 = 20;
 pub const T_BINARY: u64 = 21;
 pub const T_RECORD: u64 = 22;
+pub const T_UPDATE: u64 = 23;
 pub const T_DO: u64 = 24;
 
 // Binder kinds.
@@ -37,8 +43,13 @@ pub const B_INSTANCE: u64 = 2;
 pub const P_WILD: u64 = 0;
 pub const P_BIND: u64 = 1;
 pub const P_CTOR: u64 = 2;
+pub const P_TUPLE: u64 = 3;
+pub const P_BOOL: u64 = 5;
+pub const P_STRING: u64 = 6;
+pub const P_INT: u64 = 8;
 
 // Do statements.
+pub const S_LET: u64 = 0;
 pub const S_BIND: u64 = 1;
 
 // Declarations.
@@ -57,21 +68,30 @@ pub const TD_STRUCTURE: u64 = 2;
 
 // Definition kinds.
 pub const K_DEF: u64 = 0;
+pub const K_PARTIAL: u64 = 2;
 pub const K_ABBREV: u64 = 3;
 
 // `BinaryOp` (its declaration order in vesper-lean-syntax).
 pub const OP_ADD: u64 = 0;
 pub const OP_SUB: u64 = 1;
 pub const OP_MUL: u64 = 2;
+pub const OP_DIV: u64 = 3;
 pub const OP_MOD: u64 = 4;
 pub const OP_EQ: u64 = 5;
+pub const OP_BOOL_EQ: u64 = 7;
+pub const OP_BOOL_NE: u64 = 8;
 pub const OP_LT: u64 = 9;
 pub const OP_LE: u64 = 10;
+pub const OP_GT: u64 = 11;
+pub const OP_GE: u64 = 12;
 pub const OP_AND: u64 = 13;
+pub const OP_BOOL_AND: u64 = 15;
+pub const OP_BOOL_OR: u64 = 16;
 pub const OP_IFF: u64 = 17;
 
-// `UnaryOp::Neg`.
+// `UnaryOp`.
 pub const U_NEG: u64 = 0;
+pub const U_BOOL_NOT: u64 = 2;
 
 pub struct B {
     words: ChunkSeq[u64],
@@ -79,6 +99,9 @@ pub struct B {
     failed: bool,
     // The first error's message.
     err: ChunkSeq[u8],
+    // Above 0, identifier checks are deferred: the caller makes them
+    // afterwards, in Rust's evaluation order.
+    quiet: u64,
 }
 
 pub fn builder(sink names: Names) -> B {
@@ -87,6 +110,7 @@ pub fn builder(sink names: Names) -> B {
         names: names,
         failed: false,
         err: ChunkSeq::new[u8](),
+        quiet: 0,
     }
 }
 
@@ -218,7 +242,7 @@ impl B {
 
     // `ident`/`source_name`'s error: "unsupported Lean <what> {s:?}: ...".
     pub fn check(inout self, s: u32, in what: Str) {
-        if self.failed || self.valid(s) {
+        if self.failed || self.quiet > 0 || self.valid(s) {
             return;
         }
         let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -457,6 +481,28 @@ impl B {
     pub fn nat(inout self, in digits: Str) {
         self.w(T_NAT);
         self.text(in digits);
+    }
+
+    // The words written since `mark`, removed from the stream.
+    pub fn cut(inout self, mark: u64) -> ChunkSeq[u64] {
+        let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for i in mark..self.words.len() {
+            match self.words.try_get(i) {
+                Option::Some(x) => out.push(x),
+                Option::None => {},
+            }
+        }
+        self.words.truncate(mark);
+        out
+    }
+
+    pub fn paste(inout self, in s: ChunkSeq[u64]) {
+        for i in 0..s.len() {
+            match s.try_get(i) {
+                Option::Some(x) => self.words.push(x),
+                Option::None => {},
+            }
+        }
     }
 
     // The encoded words, for the printer.

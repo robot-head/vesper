@@ -5,6 +5,37 @@
 
 use vesper_port_abi::Abi;
 
+impl Abi for crate::port::ArriveOutcome {
+    const WORDS: usize = 2;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port::ArriveOutcome::Unknown => {
+                out[0] = 0;
+            }
+            crate::port::ArriveOutcome::Delivered(f0) => {
+                out[0] = 1;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port::ArriveOutcome::Queued => {
+                out[0] = 2;
+            }
+            crate::port::ArriveOutcome::Dropped(f0) => {
+                out[0] = 3;
+                Abi::put(f0, &mut out[1..]);
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port::ArriveOutcome::Unknown,
+            1 => crate::port::ArriveOutcome::Delivered(Abi::get(&words[1..])),
+            2 => crate::port::ArriveOutcome::Queued,
+            3 => crate::port::ArriveOutcome::Dropped(Abi::get(&words[1..])),
+            tag => panic!("invalid ArriveOutcome tag {tag} from Vesper"),
+        }
+    }
+}
+
 impl Abi for crate::port::LinkParams {
     const WORDS: usize = 13;
     fn put(&self, out: &mut [u64]) {
@@ -24,6 +55,45 @@ impl Abi for crate::port::LinkParams {
     }
     fn get(words: &[u64]) -> Self {
         crate::port::LinkParams { base_delay_ns: Abi::get(&words[0..]), has_gilbert_elliott: Abi::get(&words[1..]), good_to_bad_ppm: Abi::get(&words[2..]), bad_to_good_ppm: Abi::get(&words[3..]), loss_good_ppm: Abi::get(&words[4..]), loss_bad_ppm: Abi::get(&words[5..]), loss_ppm: Abi::get(&words[6..]), duplicate_ppm: Abi::get(&words[7..]), has_reorder: Abi::get(&words[8..]), reorder_ppm: Abi::get(&words[9..]), reorder_extra_delay_ns: Abi::get(&words[10..]), buffer_packets: Abi::get(&words[11..]), rate_bytes_per_sec: Abi::get(&words[12..]) }
+    }
+}
+
+impl Abi for crate::port::SendOutcome {
+    const WORDS: usize = 4;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port::SendOutcome::TooLarge(f0) => {
+                out[0] = 0;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port::SendOutcome::InFlightFull => {
+                out[0] = 1;
+            }
+            crate::port::SendOutcome::InboxFull => {
+                out[0] = 2;
+            }
+            crate::port::SendOutcome::InFlight(f0, f1) => {
+                out[0] = 3;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+            }
+            crate::port::SendOutcome::Dropped(f0, f1, f2) => {
+                out[0] = 4;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+                Abi::put(f2, &mut out[3..]);
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port::SendOutcome::TooLarge(Abi::get(&words[1..])),
+            1 => crate::port::SendOutcome::InFlightFull,
+            2 => crate::port::SendOutcome::InboxFull,
+            3 => crate::port::SendOutcome::InFlight(Abi::get(&words[1..]), Abi::get(&words[2..])),
+            4 => crate::port::SendOutcome::Dropped(Abi::get(&words[1..]), Abi::get(&words[2..]), Abi::get(&words[3..])),
+            tag => panic!("invalid SendOutcome tag {tag} from Vesper"),
+        }
     }
 }
 
@@ -54,6 +124,65 @@ impl Abi for crate::port::TransmitOutcome {
             1 => crate::port::TransmitOutcome::Lost(Abi::get(&words[1..]), Abi::get(&words[2..])),
             2 => crate::port::TransmitOutcome::Delivered(Abi::get(&words[1..]), Abi::get(&words[2..]), Abi::get(&words[3..]), Abi::get(&words[4..])),
             tag => panic!("invalid TransmitOutcome tag {tag} from Vesper"),
+        }
+    }
+}
+
+impl Abi for crate::port::WalCrash {
+    const WORDS: usize = 4;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.volatile_lost, &mut out[0..]);
+        Abi::put(&self.in_flight_records, &mut out[1..]);
+        Abi::put(&self.persisted_records, &mut out[2..]);
+        Abi::put(&self.torn_bytes, &mut out[3..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        crate::port::WalCrash { volatile_lost: Abi::get(&words[0..]), in_flight_records: Abi::get(&words[1..]), persisted_records: Abi::get(&words[2..]), torn_bytes: Abi::get(&words[3..]) }
+    }
+}
+
+impl Abi for crate::port::WalResult {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port::WalResult::Ok(f0) => {
+                out[0] = 0;
+                Abi::put(f0, &mut out[1..]);
+            }
+            crate::port::WalResult::NotRecovered => {
+                out[0] = 1;
+            }
+            crate::port::WalResult::AlreadyRecovered => {
+                out[0] = 2;
+            }
+            crate::port::WalResult::FlushInFlight => {
+                out[0] = 3;
+            }
+            crate::port::WalResult::NoFlushInFlight => {
+                out[0] = 4;
+            }
+            crate::port::WalResult::RecordTooLarge(f0, f1) => {
+                out[0] = 5;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+            }
+            crate::port::WalResult::LogFull(f0, f1) => {
+                out[0] = 6;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port::WalResult::Ok(Abi::get(&words[1..])),
+            1 => crate::port::WalResult::NotRecovered,
+            2 => crate::port::WalResult::AlreadyRecovered,
+            3 => crate::port::WalResult::FlushInFlight,
+            4 => crate::port::WalResult::NoFlushInFlight,
+            5 => crate::port::WalResult::RecordTooLarge(Abi::get(&words[1..]), Abi::get(&words[2..])),
+            6 => crate::port::WalResult::LogFull(Abi::get(&words[1..]), Abi::get(&words[2..])),
+            tag => panic!("invalid WalResult tag {tag} from Vesper"),
         }
     }
 }
@@ -127,6 +256,265 @@ impl<'a> LinkStateRef<'a> {
     }
 }
 
+/// Owned handle of a Vesper `NetState` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_sim_NetState_drop`.
+pub struct NetState {
+    words: [u64; 13],
+}
+
+impl NetState {
+    /// # Safety
+    /// `words` must hold a `NetState` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 13];
+        owned.copy_from_slice(&words[..13]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> NetStateRef<'_> {
+        NetStateRef { words: &self.words }
+    }
+}
+
+impl Drop for NetState {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_sim_NetState_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for NetState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("NetState { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for NetState {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for NetState {}
+
+/// A borrowed view of a Vesper `NetState` value, read in place.
+#[derive(Clone, Copy)]
+pub struct NetStateRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> NetStateRef<'a> {
+    pub fn max_in_flight(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[0..])
+    }
+    pub fn max_inbox(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[1..])
+    }
+    pub fn max_message_bytes(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[2..])
+    }
+    pub fn default_delay_ns(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[3..])
+    }
+    pub fn next_message(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[4..])
+    }
+    pub fn delays(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
+    }
+    pub fn endpoints(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[6]) }
+    }
+    pub fn reserved(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[7]) }
+    }
+    pub fn queued(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[8]) }
+    }
+    pub fn partitions(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[9]) }
+    }
+    pub fn flight(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[10]) }
+    }
+    pub fn inbox(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[11]) }
+    }
+    pub fn waiters(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[12]) }
+    }
+}
+
+/// Owned handle of a Vesper `WalRecovery` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_sim_WalRecovery_drop`.
+pub struct WalRecovery {
+    words: [u64; 6],
+}
+
+impl WalRecovery {
+    /// # Safety
+    /// `words` must hold a `WalRecovery` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 6];
+        owned.copy_from_slice(&words[..6]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> WalRecoveryRef<'_> {
+        WalRecoveryRef { words: &self.words }
+    }
+}
+
+impl Drop for WalRecovery {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_sim_WalRecovery_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for WalRecovery {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("WalRecovery { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for WalRecovery {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for WalRecovery {}
+
+/// A borrowed view of a Vesper `WalRecovery` value, read in place.
+#[derive(Clone, Copy)]
+pub struct WalRecoveryRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> WalRecoveryRef<'a> {
+    pub fn ok(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[0..])
+    }
+    pub fn scan(&self) -> vesper__sim_2session__wal__ScanResultRef<'a> {
+        let w: &'a [u64] = self.words;
+        vesper__sim_2session__wal__ScanResultRef { words: &w[1..6] }
+    }
+}
+
+/// Owned handle of a Vesper `WalState` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_sim_WalState_drop`.
+pub struct WalState {
+    words: [u64; 13],
+}
+
+impl WalState {
+    /// # Safety
+    /// `words` must hold a `WalState` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 13];
+        owned.copy_from_slice(&words[..13]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> WalStateRef<'_> {
+        WalStateRef { words: &self.words }
+    }
+}
+
+impl Drop for WalState {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_sim_WalState_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for WalState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("WalState { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for WalState {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for WalState {}
+
+/// A borrowed view of a Vesper `WalState` value, read in place.
+#[derive(Clone, Copy)]
+pub struct WalStateRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> WalStateRef<'a> {
+    pub fn max_records(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[0..])
+    }
+    pub fn max_bytes(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[1..])
+    }
+    pub fn max_record_bytes(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[2..])
+    }
+    pub fn durable(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
+    }
+    pub fn view(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
+    pub fn pending(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
+    }
+    pub fn frames(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[6]) }
+    }
+    pub fn in_flight(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[7..])
+    }
+    pub fn flushing(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[8..])
+    }
+    pub fn request(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[9..])
+    }
+    pub fn next_lsn(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[10..])
+    }
+    pub fn recovered(&self) -> bool {
+        let w: &'a [u64] = self.words;
+        <bool as Abi>::get(&w[11..])
+    }
+    pub fn generation(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[12..])
+    }
+}
+
 /// Owned handle of a Vesper `vesper__sim_2session__wal__ScanResult` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_sim_vesper__sim_2session__wal__ScanResult_drop`.
 pub struct vesper__sim_2session__wal__ScanResult {
@@ -196,10 +584,15 @@ impl<'a> vesper__sim_2session__wal__ScanResultRef<'a> {
     }
 }
 
+const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<(u8, u64, u64) as Abi>::WORDS == 3);
 const _: () = assert!(<bool as Abi>::WORDS == 1);
+const _: () = assert!(<crate::port::ArriveOutcome as Abi>::WORDS == 2);
 const _: () = assert!(<crate::port::LinkParams as Abi>::WORDS == 13);
+const _: () = assert!(<crate::port::SendOutcome as Abi>::WORDS == 4);
 const _: () = assert!(<crate::port::TransmitOutcome as Abi>::WORDS == 5);
+const _: () = assert!(<crate::port::WalCrash as Abi>::WORDS == 4);
+const _: () = assert!(<crate::port::WalResult as Abi>::WORDS == 3);
 const _: () = assert!(<u32 as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
@@ -208,6 +601,9 @@ unsafe extern "C" {
     fn vesper_sim_seq_free(seq: i64) -> i64;
     fn vesper_sim_live_allocations() -> i64;
     fn vesper_sim_LinkState_drop(value: *mut u64) -> i64;
+    fn vesper_sim_NetState_drop(value: *mut u64) -> i64;
+    fn vesper_sim_WalRecovery_drop(value: *mut u64) -> i64;
+    fn vesper_sim_WalState_drop(value: *mut u64) -> i64;
     fn vesper_sim_vesper__sim_2session__wal__ScanResult_drop(value: *mut u64) -> i64;
     fn vesper_sim_link_state_clone(result: *mut u64, l: *mut u64) -> i64;
     fn vesper_sim_link_state_duplicates(l: *mut u64) -> i64;
@@ -218,6 +614,25 @@ unsafe extern "C" {
     fn vesper_sim_link_state_service_ns(l: *mut u64, bytes: i64) -> i64;
     fn vesper_sim_link_state_transmit(result: *mut u64, l: *mut u64, now_ns: i64, at_ns: i64, bytes: i64) -> i64;
     fn vesper_sim_name_seed(seed: i64, name: *mut u64) -> i64;
+    fn vesper_sim_net_state_arrive(result: *mut u64, n: *mut u64, id: i64, destination_up: i64) -> i64;
+    fn vesper_sim_net_state_cancel_wait(n: *mut u64, endpoint: i64, request: i64) -> i64;
+    fn vesper_sim_net_state_clone(result: *mut u64, n: *mut u64) -> i64;
+    fn vesper_sim_net_state_crash(n: *mut u64, endpoint: i64) -> i64;
+    fn vesper_sim_net_state_delay(n: *mut u64, from: i64, to: i64) -> i64;
+    fn vesper_sim_net_state_endpoints(n: *mut u64) -> i64;
+    fn vesper_sim_net_state_has_endpoint(n: *mut u64, endpoint: i64) -> i64;
+    fn vesper_sim_net_state_heal(n: *mut u64, a: i64, b: i64) -> i64;
+    fn vesper_sim_net_state_in_flight(n: *mut u64) -> i64;
+    fn vesper_sim_net_state_inbox(n: *mut u64, endpoint: i64) -> i64;
+    fn vesper_sim_net_state_is_partitioned(n: *mut u64, a: i64, b: i64) -> i64;
+    fn vesper_sim_net_state_new(result: *mut u64, max_in_flight: i64, max_inbox: i64, max_message_bytes: i64, default_delay_ns: i64, delays: *mut u64, endpoints: *mut u64) -> i64;
+    fn vesper_sim_net_state_partition(n: *mut u64, a: i64, b: i64) -> i64;
+    fn vesper_sim_net_state_partitions(n: *mut u64) -> i64;
+    fn vesper_sim_net_state_same(a: *mut u64, b: *mut u64) -> i64;
+    fn vesper_sim_net_state_send(result: *mut u64, n: *mut u64, from: i64, to: i64, bytes: i64, now_ns: i64, destination_up: i64) -> i64;
+    fn vesper_sim_net_state_take_queued(n: *mut u64, endpoint: i64) -> i64;
+    fn vesper_sim_net_state_wait(n: *mut u64, endpoint: i64, request: i64) -> i64;
+    fn vesper_sim_net_state_waiting(n: *mut u64, endpoint: i64) -> i64;
     fn vesper_sim_scan_result_damage(result: *mut u64, s: *mut u64) -> i64;
     fn vesper_sim_scan_result_records(s: *mut u64) -> i64;
     fn vesper_sim_scan_result_valid_bytes(s: *mut u64) -> i64;
@@ -227,7 +642,34 @@ unsafe extern "C" {
     fn vesper_sim_stationary_bad_ppm(good_to_bad_ppm: i64, bad_to_good_ppm: i64) -> i64;
     fn vesper_sim_stationary_loss_ppm(good_to_bad_ppm: i64, bad_to_good_ppm: i64, loss_good_ppm: i64, loss_bad_ppm: i64) -> i64;
     fn vesper_sim_wal_frame(lsn: i64, payload: *mut u64) -> i64;
+    fn vesper_sim_wal_recovery_damage(result: *mut u64, r: *mut u64) -> i64;
+    fn vesper_sim_wal_recovery_ok(r: *mut u64) -> i64;
+    fn vesper_sim_wal_recovery_records(r: *mut u64) -> i64;
+    fn vesper_sim_wal_recovery_valid_bytes(r: *mut u64) -> i64;
     fn vesper_sim_wal_scan(result: *mut u64, bytes: *mut u64) -> i64;
+    fn vesper_sim_wal_state_append(result: *mut u64, w: *mut u64, payload: *mut u64) -> i64;
+    fn vesper_sim_wal_state_begin_flush(result: *mut u64, w: *mut u64, request: i64) -> i64;
+    fn vesper_sim_wal_state_check_append(result: *mut u64, w: *mut u64, len: i64) -> i64;
+    fn vesper_sim_wal_state_check_flush(result: *mut u64, w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_clone(result: *mut u64, w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_complete_flush(result: *mut u64, w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_crash(result: *mut u64, w: *mut u64, persisted: i64, torn: i64) -> i64;
+    fn vesper_sim_wal_state_durable(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_durable_len(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_durable_lsn(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_fail_flush(result: *mut u64, w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_generation(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_in_flight_lsns(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_is_flushing(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_is_recovered(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_new(result: *mut u64, max_records: i64, max_bytes: i64, max_record_bytes: i64) -> i64;
+    fn vesper_sim_wal_state_recover(result: *mut u64, w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_request(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_same(a: *mut u64, b: *mut u64) -> i64;
+    fn vesper_sim_wal_state_view_len(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_view_lsn(w: *mut u64, index: i64) -> i64;
+    fn vesper_sim_wal_state_view_lsns(w: *mut u64) -> i64;
+    fn vesper_sim_wal_state_volatile_lsns(w: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `sim`.
@@ -334,6 +776,192 @@ pub fn name_seed(seed: u64, name: &str) -> u64 {
     raw as u64
 }
 
+/// Calls `net_state_arrive` of the Vesper library `sim` (`vesper_sim_net_state_arrive`).
+pub fn net_state_arrive(n: &mut NetState, id: u64, destination_up: bool) -> crate::port::ArriveOutcome {
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_sim_net_state_arrive` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_arrive(result.as_mut_ptr(), n.words.as_mut_ptr(), id as i64, destination_up as i64) };
+    <crate::port::ArriveOutcome as Abi>::get(&result[0..])
+}
+
+/// Calls `net_state_cancel_wait` of the Vesper library `sim` (`vesper_sim_net_state_cancel_wait`).
+pub fn net_state_cancel_wait(n: &mut NetState, endpoint: u64, request: u64) -> bool {
+    // SAFETY: `vesper_sim_net_state_cancel_wait` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_cancel_wait(n.words.as_mut_ptr(), endpoint as i64, request as i64) };
+    raw != 0
+}
+
+/// Calls `net_state_clone` of the Vesper library `sim` (`vesper_sim_net_state_clone`).
+pub fn net_state_clone(n: &NetState) -> NetState {
+    let mut result = [0u64; 13];
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_clone` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_clone(result.as_mut_ptr(), arg_n.as_mut_ptr()) };
+    unsafe { NetState::from_words(&result[0..]) }
+}
+
+/// Calls `net_state_crash` of the Vesper library `sim` (`vesper_sim_net_state_crash`).
+pub fn net_state_crash(n: &mut NetState, endpoint: u64) -> () {
+    // SAFETY: `vesper_sim_net_state_crash` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_crash(n.words.as_mut_ptr(), endpoint as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `net_state_delay` of the Vesper library `sim` (`vesper_sim_net_state_delay`).
+pub fn net_state_delay(n: &NetState, from: u64, to: u64) -> u64 {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_delay` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_delay(arg_n.as_mut_ptr(), from as i64, to as i64) };
+    raw as u64
+}
+
+/// Calls `net_state_endpoints` of the Vesper library `sim` (`vesper_sim_net_state_endpoints`).
+pub fn net_state_endpoints(n: &NetState) -> Vec<u64> {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_endpoints` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_endpoints(arg_n.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `net_state_has_endpoint` of the Vesper library `sim` (`vesper_sim_net_state_has_endpoint`).
+pub fn net_state_has_endpoint(n: &NetState, endpoint: u64) -> bool {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_has_endpoint` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_has_endpoint(arg_n.as_mut_ptr(), endpoint as i64) };
+    raw != 0
+}
+
+/// Calls `net_state_heal` of the Vesper library `sim` (`vesper_sim_net_state_heal`).
+pub fn net_state_heal(n: &mut NetState, a: u64, b: u64) -> bool {
+    // SAFETY: `vesper_sim_net_state_heal` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_heal(n.words.as_mut_ptr(), a as i64, b as i64) };
+    raw != 0
+}
+
+/// Calls `net_state_in_flight` of the Vesper library `sim` (`vesper_sim_net_state_in_flight`).
+pub fn net_state_in_flight(n: &NetState) -> Vec<u64> {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_in_flight` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_in_flight(arg_n.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `net_state_inbox` of the Vesper library `sim` (`vesper_sim_net_state_inbox`).
+pub fn net_state_inbox(n: &NetState, endpoint: u64) -> Vec<u64> {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_inbox` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_inbox(arg_n.as_mut_ptr(), endpoint as i64) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `net_state_is_partitioned` of the Vesper library `sim` (`vesper_sim_net_state_is_partitioned`).
+pub fn net_state_is_partitioned(n: &NetState, a: u64, b: u64) -> bool {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_is_partitioned` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_is_partitioned(arg_n.as_mut_ptr(), a as i64, b as i64) };
+    raw != 0
+}
+
+/// Calls `net_state_new` of the Vesper library `sim` (`vesper_sim_net_state_new`).
+pub fn net_state_new(max_in_flight: u64, max_inbox: u64, max_message_bytes: u64, default_delay_ns: u64, delays: &[u64], endpoints: &[u64]) -> NetState {
+    let mut result = [0u64; 13];
+    // SAFETY: `vesper_sim_net_state_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(delays, |view_delays| vesper_port_abi::with_slice(endpoints, |view_endpoints| unsafe { vesper_sim_net_state_new(result.as_mut_ptr(), max_in_flight as i64, max_inbox as i64, max_message_bytes as i64, default_delay_ns as i64, view_delays, view_endpoints) }));
+    unsafe { NetState::from_words(&result[0..]) }
+}
+
+/// Calls `net_state_partition` of the Vesper library `sim` (`vesper_sim_net_state_partition`).
+pub fn net_state_partition(n: &mut NetState, a: u64, b: u64) -> bool {
+    // SAFETY: `vesper_sim_net_state_partition` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_partition(n.words.as_mut_ptr(), a as i64, b as i64) };
+    raw != 0
+}
+
+/// Calls `net_state_partitions` of the Vesper library `sim` (`vesper_sim_net_state_partitions`).
+pub fn net_state_partitions(n: &NetState) -> Vec<u64> {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_partitions` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_partitions(arg_n.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `net_state_same` of the Vesper library `sim` (`vesper_sim_net_state_same`).
+pub fn net_state_same(a: &NetState, b: &NetState) -> bool {
+    let mut arg_a = a.words;
+    let mut arg_b = b.words;
+    // SAFETY: `vesper_sim_net_state_same` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_same(arg_a.as_mut_ptr(), arg_b.as_mut_ptr()) };
+    raw != 0
+}
+
+/// Calls `net_state_send` of the Vesper library `sim` (`vesper_sim_net_state_send`).
+pub fn net_state_send(n: &mut NetState, from: u64, to: u64, bytes: u64, now_ns: u64, destination_up: bool) -> crate::port::SendOutcome {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_sim_net_state_send` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_send(result.as_mut_ptr(), n.words.as_mut_ptr(), from as i64, to as i64, bytes as i64, now_ns as i64, destination_up as i64) };
+    <crate::port::SendOutcome as Abi>::get(&result[0..])
+}
+
+/// Calls `net_state_take_queued` of the Vesper library `sim` (`vesper_sim_net_state_take_queued`).
+pub fn net_state_take_queued(n: &mut NetState, endpoint: u64) -> u64 {
+    // SAFETY: `vesper_sim_net_state_take_queued` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_take_queued(n.words.as_mut_ptr(), endpoint as i64) };
+    raw as u64
+}
+
+/// Calls `net_state_wait` of the Vesper library `sim` (`vesper_sim_net_state_wait`).
+pub fn net_state_wait(n: &mut NetState, endpoint: u64, request: u64) -> () {
+    // SAFETY: `vesper_sim_net_state_wait` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_wait(n.words.as_mut_ptr(), endpoint as i64, request as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `net_state_waiting` of the Vesper library `sim` (`vesper_sim_net_state_waiting`).
+pub fn net_state_waiting(n: &NetState, endpoint: u64) -> Vec<u64> {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_sim_net_state_waiting` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_net_state_waiting(arg_n.as_mut_ptr(), endpoint as i64) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
 /// Calls `scan_result_damage` of the Vesper library `sim` (`vesper_sim_scan_result_damage`).
 pub fn scan_result_damage(s: &vesper__sim_2session__wal__ScanResult) -> (u8, u64, u64) {
     let mut result = [0u64; 3];
@@ -425,6 +1053,47 @@ pub fn wal_frame(lsn: u64, payload: &str) -> Vec<u8> {
     unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
 }
 
+/// Calls `wal_recovery_damage` of the Vesper library `sim` (`vesper_sim_wal_recovery_damage`).
+pub fn wal_recovery_damage(r: &WalRecovery) -> (u8, u64, u64) {
+    let mut result = [0u64; 3];
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_sim_wal_recovery_damage` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_recovery_damage(result.as_mut_ptr(), arg_r.as_mut_ptr()) };
+    <(u8, u64, u64) as Abi>::get(&result[0..])
+}
+
+/// Calls `wal_recovery_ok` of the Vesper library `sim` (`vesper_sim_wal_recovery_ok`).
+pub fn wal_recovery_ok(r: &WalRecovery) -> bool {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_sim_wal_recovery_ok` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_recovery_ok(arg_r.as_mut_ptr()) };
+    raw != 0
+}
+
+/// Calls `wal_recovery_records` of the Vesper library `sim` (`vesper_sim_wal_recovery_records`).
+pub fn wal_recovery_records(r: &WalRecovery) -> Vec<u64> {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_sim_wal_recovery_records` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_recovery_records(arg_r.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `wal_recovery_valid_bytes` of the Vesper library `sim` (`vesper_sim_wal_recovery_valid_bytes`).
+pub fn wal_recovery_valid_bytes(r: &WalRecovery) -> u64 {
+    let mut arg_r = r.words;
+    // SAFETY: `vesper_sim_wal_recovery_valid_bytes` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_recovery_valid_bytes(arg_r.as_mut_ptr()) };
+    raw as u64
+}
+
 /// Calls `wal_scan` of the Vesper library `sim` (`vesper_sim_wal_scan`).
 pub fn wal_scan(bytes: &[u8]) -> vesper__sim_2session__wal__ScanResult {
     let mut result = [0u64; 5];
@@ -433,6 +1102,240 @@ pub fn wal_scan(bytes: &[u8]) -> vesper__sim_2session__wal__ScanResult {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(bytes, |view_bytes| unsafe { vesper_sim_wal_scan(result.as_mut_ptr(), view_bytes) });
     unsafe { vesper__sim_2session__wal__ScanResult::from_words(&result[0..]) }
+}
+
+/// Calls `wal_state_append` of the Vesper library `sim` (`vesper_sim_wal_state_append`).
+pub fn wal_state_append(w: &mut WalState, payload: &str) -> crate::port::WalResult {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_sim_wal_state_append` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(payload, |view_payload| unsafe { vesper_sim_wal_state_append(result.as_mut_ptr(), w.words.as_mut_ptr(), view_payload) });
+    <crate::port::WalResult as Abi>::get(&result[0..])
+}
+
+/// Calls `wal_state_begin_flush` of the Vesper library `sim` (`vesper_sim_wal_state_begin_flush`).
+pub fn wal_state_begin_flush(w: &mut WalState, request: u64) -> crate::port::WalResult {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_sim_wal_state_begin_flush` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_begin_flush(result.as_mut_ptr(), w.words.as_mut_ptr(), request as i64) };
+    <crate::port::WalResult as Abi>::get(&result[0..])
+}
+
+/// Calls `wal_state_check_append` of the Vesper library `sim` (`vesper_sim_wal_state_check_append`).
+pub fn wal_state_check_append(w: &WalState, len: u64) -> crate::port::WalResult {
+    let mut result = [0u64; 3];
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_check_append` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_check_append(result.as_mut_ptr(), arg_w.as_mut_ptr(), len as i64) };
+    <crate::port::WalResult as Abi>::get(&result[0..])
+}
+
+/// Calls `wal_state_check_flush` of the Vesper library `sim` (`vesper_sim_wal_state_check_flush`).
+pub fn wal_state_check_flush(w: &WalState) -> crate::port::WalResult {
+    let mut result = [0u64; 3];
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_check_flush` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_check_flush(result.as_mut_ptr(), arg_w.as_mut_ptr()) };
+    <crate::port::WalResult as Abi>::get(&result[0..])
+}
+
+/// Calls `wal_state_clone` of the Vesper library `sim` (`vesper_sim_wal_state_clone`).
+pub fn wal_state_clone(w: &WalState) -> WalState {
+    let mut result = [0u64; 13];
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_clone` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_clone(result.as_mut_ptr(), arg_w.as_mut_ptr()) };
+    unsafe { WalState::from_words(&result[0..]) }
+}
+
+/// Calls `wal_state_complete_flush` of the Vesper library `sim` (`vesper_sim_wal_state_complete_flush`).
+pub fn wal_state_complete_flush(w: &mut WalState) -> crate::port::WalResult {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_sim_wal_state_complete_flush` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_complete_flush(result.as_mut_ptr(), w.words.as_mut_ptr()) };
+    <crate::port::WalResult as Abi>::get(&result[0..])
+}
+
+/// Calls `wal_state_crash` of the Vesper library `sim` (`vesper_sim_wal_state_crash`).
+pub fn wal_state_crash(w: &mut WalState, persisted: u64, torn: u64) -> crate::port::WalCrash {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_sim_wal_state_crash` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_crash(result.as_mut_ptr(), w.words.as_mut_ptr(), persisted as i64, torn as i64) };
+    <crate::port::WalCrash as Abi>::get(&result[0..])
+}
+
+/// Calls `wal_state_durable` of the Vesper library `sim` (`vesper_sim_wal_state_durable`).
+pub fn wal_state_durable(w: &WalState) -> Vec<u8> {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_durable` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_durable(arg_w.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u8>(RUNTIME, raw as u64) }
+}
+
+/// Calls `wal_state_durable_len` of the Vesper library `sim` (`vesper_sim_wal_state_durable_len`).
+pub fn wal_state_durable_len(w: &WalState) -> u64 {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_durable_len` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_durable_len(arg_w.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `wal_state_durable_lsn` of the Vesper library `sim` (`vesper_sim_wal_state_durable_lsn`).
+pub fn wal_state_durable_lsn(w: &WalState) -> u64 {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_durable_lsn` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_durable_lsn(arg_w.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `wal_state_fail_flush` of the Vesper library `sim` (`vesper_sim_wal_state_fail_flush`).
+pub fn wal_state_fail_flush(w: &mut WalState) -> crate::port::WalResult {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_sim_wal_state_fail_flush` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_fail_flush(result.as_mut_ptr(), w.words.as_mut_ptr()) };
+    <crate::port::WalResult as Abi>::get(&result[0..])
+}
+
+/// Calls `wal_state_generation` of the Vesper library `sim` (`vesper_sim_wal_state_generation`).
+pub fn wal_state_generation(w: &WalState) -> u64 {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_generation` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_generation(arg_w.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `wal_state_in_flight_lsns` of the Vesper library `sim` (`vesper_sim_wal_state_in_flight_lsns`).
+pub fn wal_state_in_flight_lsns(w: &WalState) -> Vec<u64> {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_in_flight_lsns` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_in_flight_lsns(arg_w.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `wal_state_is_flushing` of the Vesper library `sim` (`vesper_sim_wal_state_is_flushing`).
+pub fn wal_state_is_flushing(w: &WalState) -> bool {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_is_flushing` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_is_flushing(arg_w.as_mut_ptr()) };
+    raw != 0
+}
+
+/// Calls `wal_state_is_recovered` of the Vesper library `sim` (`vesper_sim_wal_state_is_recovered`).
+pub fn wal_state_is_recovered(w: &WalState) -> bool {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_is_recovered` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_is_recovered(arg_w.as_mut_ptr()) };
+    raw != 0
+}
+
+/// Calls `wal_state_new` of the Vesper library `sim` (`vesper_sim_wal_state_new`).
+pub fn wal_state_new(max_records: u64, max_bytes: u64, max_record_bytes: u64) -> WalState {
+    let mut result = [0u64; 13];
+    // SAFETY: `vesper_sim_wal_state_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_new(result.as_mut_ptr(), max_records as i64, max_bytes as i64, max_record_bytes as i64) };
+    unsafe { WalState::from_words(&result[0..]) }
+}
+
+/// Calls `wal_state_recover` of the Vesper library `sim` (`vesper_sim_wal_state_recover`).
+pub fn wal_state_recover(w: &mut WalState) -> WalRecovery {
+    let mut result = [0u64; 6];
+    // SAFETY: `vesper_sim_wal_state_recover` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_recover(result.as_mut_ptr(), w.words.as_mut_ptr()) };
+    unsafe { WalRecovery::from_words(&result[0..]) }
+}
+
+/// Calls `wal_state_request` of the Vesper library `sim` (`vesper_sim_wal_state_request`).
+pub fn wal_state_request(w: &WalState) -> u64 {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_request` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_request(arg_w.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `wal_state_same` of the Vesper library `sim` (`vesper_sim_wal_state_same`).
+pub fn wal_state_same(a: &WalState, b: &WalState) -> bool {
+    let mut arg_a = a.words;
+    let mut arg_b = b.words;
+    // SAFETY: `vesper_sim_wal_state_same` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_same(arg_a.as_mut_ptr(), arg_b.as_mut_ptr()) };
+    raw != 0
+}
+
+/// Calls `wal_state_view_len` of the Vesper library `sim` (`vesper_sim_wal_state_view_len`).
+pub fn wal_state_view_len(w: &WalState) -> u64 {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_view_len` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_view_len(arg_w.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `wal_state_view_lsn` of the Vesper library `sim` (`vesper_sim_wal_state_view_lsn`).
+pub fn wal_state_view_lsn(w: &WalState, index: u64) -> u64 {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_view_lsn` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_view_lsn(arg_w.as_mut_ptr(), index as i64) };
+    raw as u64
+}
+
+/// Calls `wal_state_view_lsns` of the Vesper library `sim` (`vesper_sim_wal_state_view_lsns`).
+pub fn wal_state_view_lsns(w: &WalState) -> Vec<u64> {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_view_lsns` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_view_lsns(arg_w.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `wal_state_volatile_lsns` of the Vesper library `sim` (`vesper_sim_wal_state_volatile_lsns`).
+pub fn wal_state_volatile_lsns(w: &WalState) -> Vec<u64> {
+    let mut arg_w = w.words;
+    // SAFETY: `vesper_sim_wal_state_volatile_lsns` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_sim_wal_state_volatile_lsns(arg_w.as_mut_ptr()) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
 impl LinkState {
@@ -474,5 +1377,241 @@ impl LinkState {
     /// `link_state_transmit` (`vesper_sim_link_state_transmit`).
     pub fn transmit(&mut self, now_ns: u64, at_ns: u64, bytes: u32) -> crate::port::TransmitOutcome {
         link_state_transmit(self, now_ns, at_ns, bytes)
+    }
+}
+
+impl NetState {
+    /// `net_state_arrive` (`vesper_sim_net_state_arrive`).
+    pub fn arrive(&mut self, id: u64, destination_up: bool) -> crate::port::ArriveOutcome {
+        net_state_arrive(self, id, destination_up)
+    }
+
+    /// `net_state_cancel_wait` (`vesper_sim_net_state_cancel_wait`).
+    pub fn cancel_wait(&mut self, endpoint: u64, request: u64) -> bool {
+        net_state_cancel_wait(self, endpoint, request)
+    }
+
+    /// `net_state_clone` (`vesper_sim_net_state_clone`).
+    pub fn clone(&self) -> NetState {
+        net_state_clone(self)
+    }
+
+    /// `net_state_crash` (`vesper_sim_net_state_crash`).
+    pub fn crash(&mut self, endpoint: u64) -> () {
+        net_state_crash(self, endpoint)
+    }
+
+    /// `net_state_delay` (`vesper_sim_net_state_delay`).
+    pub fn delay(&self, from: u64, to: u64) -> u64 {
+        net_state_delay(self, from, to)
+    }
+
+    /// `net_state_endpoints` (`vesper_sim_net_state_endpoints`).
+    pub fn endpoints(&self) -> Vec<u64> {
+        net_state_endpoints(self)
+    }
+
+    /// `net_state_has_endpoint` (`vesper_sim_net_state_has_endpoint`).
+    pub fn has_endpoint(&self, endpoint: u64) -> bool {
+        net_state_has_endpoint(self, endpoint)
+    }
+
+    /// `net_state_heal` (`vesper_sim_net_state_heal`).
+    pub fn heal(&mut self, a: u64, b: u64) -> bool {
+        net_state_heal(self, a, b)
+    }
+
+    /// `net_state_in_flight` (`vesper_sim_net_state_in_flight`).
+    pub fn in_flight(&self) -> Vec<u64> {
+        net_state_in_flight(self)
+    }
+
+    /// `net_state_inbox` (`vesper_sim_net_state_inbox`).
+    pub fn inbox(&self, endpoint: u64) -> Vec<u64> {
+        net_state_inbox(self, endpoint)
+    }
+
+    /// `net_state_is_partitioned` (`vesper_sim_net_state_is_partitioned`).
+    pub fn is_partitioned(&self, a: u64, b: u64) -> bool {
+        net_state_is_partitioned(self, a, b)
+    }
+
+    /// `net_state_new` (`vesper_sim_net_state_new`).
+    pub fn new(max_in_flight: u64, max_inbox: u64, max_message_bytes: u64, default_delay_ns: u64, delays: &[u64], endpoints: &[u64]) -> NetState {
+        net_state_new(max_in_flight, max_inbox, max_message_bytes, default_delay_ns, delays, endpoints)
+    }
+
+    /// `net_state_partition` (`vesper_sim_net_state_partition`).
+    pub fn partition(&mut self, a: u64, b: u64) -> bool {
+        net_state_partition(self, a, b)
+    }
+
+    /// `net_state_partitions` (`vesper_sim_net_state_partitions`).
+    pub fn partitions(&self) -> Vec<u64> {
+        net_state_partitions(self)
+    }
+
+    /// `net_state_same` (`vesper_sim_net_state_same`).
+    pub fn same(&self, b: &NetState) -> bool {
+        net_state_same(self, b)
+    }
+
+    /// `net_state_send` (`vesper_sim_net_state_send`).
+    pub fn send(&mut self, from: u64, to: u64, bytes: u64, now_ns: u64, destination_up: bool) -> crate::port::SendOutcome {
+        net_state_send(self, from, to, bytes, now_ns, destination_up)
+    }
+
+    /// `net_state_take_queued` (`vesper_sim_net_state_take_queued`).
+    pub fn take_queued(&mut self, endpoint: u64) -> u64 {
+        net_state_take_queued(self, endpoint)
+    }
+
+    /// `net_state_wait` (`vesper_sim_net_state_wait`).
+    pub fn wait(&mut self, endpoint: u64, request: u64) -> () {
+        net_state_wait(self, endpoint, request)
+    }
+
+    /// `net_state_waiting` (`vesper_sim_net_state_waiting`).
+    pub fn waiting(&self, endpoint: u64) -> Vec<u64> {
+        net_state_waiting(self, endpoint)
+    }
+}
+
+impl WalRecovery {
+    /// `wal_recovery_damage` (`vesper_sim_wal_recovery_damage`).
+    pub fn damage(&self) -> (u8, u64, u64) {
+        wal_recovery_damage(self)
+    }
+
+    /// `wal_recovery_ok` (`vesper_sim_wal_recovery_ok`).
+    pub fn ok(&self) -> bool {
+        wal_recovery_ok(self)
+    }
+
+    /// `wal_recovery_records` (`vesper_sim_wal_recovery_records`).
+    pub fn records(&self) -> Vec<u64> {
+        wal_recovery_records(self)
+    }
+
+    /// `wal_recovery_valid_bytes` (`vesper_sim_wal_recovery_valid_bytes`).
+    pub fn valid_bytes(&self) -> u64 {
+        wal_recovery_valid_bytes(self)
+    }
+}
+
+impl WalState {
+    /// `wal_state_append` (`vesper_sim_wal_state_append`).
+    pub fn append(&mut self, payload: &str) -> crate::port::WalResult {
+        wal_state_append(self, payload)
+    }
+
+    /// `wal_state_begin_flush` (`vesper_sim_wal_state_begin_flush`).
+    pub fn begin_flush(&mut self, request: u64) -> crate::port::WalResult {
+        wal_state_begin_flush(self, request)
+    }
+
+    /// `wal_state_check_append` (`vesper_sim_wal_state_check_append`).
+    pub fn check_append(&self, len: u64) -> crate::port::WalResult {
+        wal_state_check_append(self, len)
+    }
+
+    /// `wal_state_check_flush` (`vesper_sim_wal_state_check_flush`).
+    pub fn check_flush(&self) -> crate::port::WalResult {
+        wal_state_check_flush(self)
+    }
+
+    /// `wal_state_clone` (`vesper_sim_wal_state_clone`).
+    pub fn clone(&self) -> WalState {
+        wal_state_clone(self)
+    }
+
+    /// `wal_state_complete_flush` (`vesper_sim_wal_state_complete_flush`).
+    pub fn complete_flush(&mut self) -> crate::port::WalResult {
+        wal_state_complete_flush(self)
+    }
+
+    /// `wal_state_crash` (`vesper_sim_wal_state_crash`).
+    pub fn crash(&mut self, persisted: u64, torn: u64) -> crate::port::WalCrash {
+        wal_state_crash(self, persisted, torn)
+    }
+
+    /// `wal_state_durable` (`vesper_sim_wal_state_durable`).
+    pub fn durable(&self) -> Vec<u8> {
+        wal_state_durable(self)
+    }
+
+    /// `wal_state_durable_len` (`vesper_sim_wal_state_durable_len`).
+    pub fn durable_len(&self) -> u64 {
+        wal_state_durable_len(self)
+    }
+
+    /// `wal_state_durable_lsn` (`vesper_sim_wal_state_durable_lsn`).
+    pub fn durable_lsn(&self) -> u64 {
+        wal_state_durable_lsn(self)
+    }
+
+    /// `wal_state_fail_flush` (`vesper_sim_wal_state_fail_flush`).
+    pub fn fail_flush(&mut self) -> crate::port::WalResult {
+        wal_state_fail_flush(self)
+    }
+
+    /// `wal_state_generation` (`vesper_sim_wal_state_generation`).
+    pub fn generation(&self) -> u64 {
+        wal_state_generation(self)
+    }
+
+    /// `wal_state_in_flight_lsns` (`vesper_sim_wal_state_in_flight_lsns`).
+    pub fn in_flight_lsns(&self) -> Vec<u64> {
+        wal_state_in_flight_lsns(self)
+    }
+
+    /// `wal_state_is_flushing` (`vesper_sim_wal_state_is_flushing`).
+    pub fn is_flushing(&self) -> bool {
+        wal_state_is_flushing(self)
+    }
+
+    /// `wal_state_is_recovered` (`vesper_sim_wal_state_is_recovered`).
+    pub fn is_recovered(&self) -> bool {
+        wal_state_is_recovered(self)
+    }
+
+    /// `wal_state_new` (`vesper_sim_wal_state_new`).
+    pub fn new(max_records: u64, max_bytes: u64, max_record_bytes: u64) -> WalState {
+        wal_state_new(max_records, max_bytes, max_record_bytes)
+    }
+
+    /// `wal_state_recover` (`vesper_sim_wal_state_recover`).
+    pub fn recover(&mut self) -> WalRecovery {
+        wal_state_recover(self)
+    }
+
+    /// `wal_state_request` (`vesper_sim_wal_state_request`).
+    pub fn request(&self) -> u64 {
+        wal_state_request(self)
+    }
+
+    /// `wal_state_same` (`vesper_sim_wal_state_same`).
+    pub fn same(&self, b: &WalState) -> bool {
+        wal_state_same(self, b)
+    }
+
+    /// `wal_state_view_len` (`vesper_sim_wal_state_view_len`).
+    pub fn view_len(&self) -> u64 {
+        wal_state_view_len(self)
+    }
+
+    /// `wal_state_view_lsn` (`vesper_sim_wal_state_view_lsn`).
+    pub fn view_lsn(&self, index: u64) -> u64 {
+        wal_state_view_lsn(self, index)
+    }
+
+    /// `wal_state_view_lsns` (`vesper_sim_wal_state_view_lsns`).
+    pub fn view_lsns(&self) -> Vec<u64> {
+        wal_state_view_lsns(self)
+    }
+
+    /// `wal_state_volatile_lsns` (`vesper_sim_wal_state_volatile_lsns`).
+    pub fn volatile_lsns(&self) -> Vec<u64> {
+        wal_state_volatile_lsns(self)
     }
 }

@@ -1,4 +1,4 @@
-# Self-hosting SH5 lane 18: Lean extraction in Vesper, part 1
+# Self-hosting SH5 lane 18: Lean extraction in Vesper
 
 Claim #1341. Base `bbda89e` (main after #1322). Prompt:
 [18-lean-extraction.md](../agent-prompts/self-host-sh5/18-lean-extraction.md).
@@ -106,14 +106,91 @@ test, `BUILD.bazel` data and this report, plus merges of `main`.
    `shift: u32` is E0401 outside a `Fail` row; `wrapping_shr_u32` works.
    SH5 lane 5 (#1328, guarded shifts) owns this.
 
+## Part 2: the CFG extractor
+
+`extract_report` extracts each function with the CFG extractor
+(`lean_ir::extract_function_nodes`) when its gate admits it: no effects,
+no effectful arrow among its values, and no fallible, partial or
+overflowing instruction, handler, `try`, index or sequence operation, or
+call of an effectful function. The others go to the structured extractor
+(`Generator::function`). Part 2 ports the CFG extractor.
+
+- `src/cfg.ves`: the gate, the function tables (parameters, values and
+  locals from the place-ir header), `uses_defs`, `arm_bindings` and the
+  `liveness` fixpoint. Live sets are bitsets whose bit order is Rust's
+  `BTreeSet<Local>` order (slots by name, then values by id), so the
+  blocks' binders and call arguments come out in Rust's order.
+- `src/emit.ves`: `extract_closures` (each lifted closure's definitions
+  first, stopping at the first refusal) and the `Emitter`: block
+  definitions over the live locals, every instruction form, patterns
+  (with `Box` patterns unwrapped), the four terminators, `project`,
+  `update_place_typed` (including recursive structures' `mk`
+  rebuilds), `arith_term`, `tiled_op_term`, `typed_literal` (128-bit
+  decimal literals and `f64` to `f32` rounding) and the float-intrinsic
+  refusal.
+- `src/fn_input.ves`: what the extractor reads of `world.functions`,
+  `world.calls` and the lifted closures.
+- The program comes in as `@vesper/place-ir` words (SH3 lane 1). The
+  encoder, `cfg_input` in the test, lifts each closure the way
+  `extract_closures` does (it lowers the world extended with the lifted
+  function) and adds it to the program, so Vesper does no lowering.
+- `src/lean.rs`: a `#[doc(hidden)] pub fn cfg_function_nodes` hook that
+  runs `extract_function_nodes` per function. It adds no behaviour.
+- `tests/common/ir_words.rs`: `Tables::label_names` is now `pub`, so the
+  test can append its own sections with the same encoder.
+
+Rust builds some nodes out of prefix order: a definition's binders and body
+before its name and result type, and an application's arguments before its
+function. The builder therefore writes those parts quietly (`B::quiet`) and
+checks them afterwards in Rust's order. A term Rust builds before the node
+that holds it, such as an updated place's new value, is written first and
+moved into place (`B::cut`, `B::paste`). This keeps the first refusal the
+same as Rust's when several apply.
+
+### Differential
+
+`cargo test --test self_host_lean_extract cfg_` (debug, Linux x86-64).
+Per source function, the text is `none` (the function goes to the
+structured extractor), the refusal, or the rendered definitions:
+
+| Test | Cases | Differences |
+|---|--:|--:|
+| `cfg_functions_match_rust_on_the_corpus` | 303 worlds, 22,058 functions; 13,547 on the CFG path, 2,899 of them refused; 111,846 lines | 0 |
+| `cfg_functions_match_rust_on_test_sources` | 149 programs from `tests/lean*.rs` and `tests/tiled.rs` plus mutants: 249 functions, 153 on the CFG path, 8 lifted closures, tiled operations, 6 name refusals | 0 |
+| `unoptimized_jit_agrees` | every 7th world | 0 |
+
+The corpus's refusals are mostly loops (1,758), bit operators (`&`, `>>`,
+`^`, `|`, `<<`, rotations) and integer conversions written as unary
+operators (`widen_*`, `wrapping_*`). The tiled-sequence program and the
+renamed functions are mutants, because the corpus has no tiled operation on
+the CFG path and no name that Lean cannot spell. The renamed functions
+also carry `i128`/`u128` types, which tests the refusal order.
+
+### Speed
+
+`CHECK_HARNESS_SPEED=1 cargo test --release --test self_host_lean_extract
+abba_cfg -- --ignored --nocapture` runs ABBA (best of six per side) over
+all 303 worlds per run. The input is the lowered program on both sides.
+
+| | Rust `extract_function_nodes` (per function) | Vesper `extract_cfg_functions` (optimized JIT) | Ratio |
+|---|--:|--:|--:|
+| Corpus functions | 1,287 ms | 1,253 ms | 0.97x |
+
+The Rust time includes re-lowering the world for each lifted closure
+(`extract_closures`), which the Vesper side gets from the encoder; the
+corpus has one closure on the CFG path. The Vesper time includes decoding
+the input, rendering each function as its own module (Rust only builds the
+nodes) and packing the text. So the two sides are at parity, not a clear
+win. The next speedup is a symbol-indexed local table: `Fun::slot_bit` is
+currently a linear search over the function's locals.
+
 ## What is left
 
-- **Part 2: functions.** `Generator::function` (the structured extractor,
-  about 3,000 lines of `src/lean.rs` and `src/seq/lean.rs`) and the CFG
-  extractor `lean_ir::extract_function_nodes` over the lowered IR. They
-  need the function bodies in the input (an expression encoding like
-  check-fip's, plus `world.calls`, `handler_effects` and the IR), and the
-  monad form of `ty_with_fip`.
+- **The structured extractor.** `Generator::function` (about 3,000 lines
+  of `src/lean.rs` and `src/seq/lean.rs`) handles the 8,511 corpus
+  functions the CFG gate refuses. It needs the function bodies in the
+  input (an expression encoding like check-fip's, plus `handler_effects`)
+  and the monad form of `ty_with_fip`.
 - **Part 3: ordering, fuel companions, contracts.** `order_definitions`,
   the recursive family and `$fuel` companions, `Totality`, `contracts`,
   the proof module and `omitted_executable_definitions`. Then the full

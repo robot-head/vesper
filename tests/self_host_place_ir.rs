@@ -224,7 +224,7 @@ fn place_ir_cost() {
 /// ```text
 /// PLACE_IR_PHASE=vesper PLACE_IR_STEP=10 valgrind --tool=callgrind \
 ///   --toggle-collect='*place_ir_measured*' <test binary> --ignored \
-///   --exact place_ir_callgrind
+///   --exact place_ir_callgrind --nocapture
 /// ```
 ///
 /// Add `--instr-atstart=no` and `PLACE_IR_GO=<file>` to skip simulating

@@ -7,5 +7,6 @@ capability_ceiling = ["Fail", "Alloc"]
 
 [dependencies]
 "@vesper/ast" = { version = "^0.1", path = "../vesper-ast" }
+"@vesper/egraph" = { version = "^0.1", path = "../vesper-egraph" }
 "@vesper-std/arena" = { version = "^0.1", path = "../vesper-std/arena" }
 "@vesper-std/intern" = { version = "^0.1", path = "../vesper-std/intern" }

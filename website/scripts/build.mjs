@@ -1,6 +1,7 @@
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { buildDocs } from './docs.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = resolve(root, 'dist');
@@ -32,7 +33,14 @@ for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
 }
 if (/<!-- source:/.test(html)) throw new Error('Unresolved source inclusion');
 await writeFile(resolve(out, 'index.html'), html);
-for (const path of ['assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt', 'sitemap.xml']) {
+const chapters = await buildDocs(root, out);
+for (const file of ['search.js', 'docs.css']) {
+  await cp(resolve(root, 'docs', file), resolve(out, 'docs', file));
+}
+const sitemap = await readFile(resolve(root, 'sitemap.xml'), 'utf8');
+const chapterUrls = chapters.map(path => `  <url><loc>https://vesper-lang.org/${path}</loc></url>`).join('\n');
+await writeFile(resolve(out, 'sitemap.xml'), sitemap.replace('</urlset>', `${chapterUrls}\n</urlset>`));
+for (const path of ['language.html', 'assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt']) {
   await cp(resolve(root, path), resolve(out, path), { recursive: true });
 }
 try { await cp(resolve(root, 'share.jpg'), resolve(out, 'share.jpg')); } catch (e) { if (e.code !== 'ENOENT') throw e; }

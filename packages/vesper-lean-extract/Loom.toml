@@ -7,4 +7,5 @@ capability_ceiling = ["Fail", "Alloc"]
 
 [dependencies]
 "@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
+"@vesper/place-ir" = { version = "^0.1", path = "../vesper-place-ir" }
 "@vesper/lean-syntax" = { version = "^0.1", path = "../../crates/vesper-lean-syntax/vesper" }

@@ -803,7 +803,7 @@ impl Tables {
         out
     }
 
-    fn label_names(&mut self) {
+    pub fn label_names(&mut self) {
         let labels: Vec<String> = self.pool.items.iter().map(Payload::label).collect();
         for l in labels {
             self.enc.name(&l);

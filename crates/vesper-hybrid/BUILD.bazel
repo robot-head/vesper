@@ -54,6 +54,11 @@ vesper_hybrid(
             "//:doc_package",
             "//crates/vesper-serde:port_package",
         ],
+        # The codegen swap (#1275) emits through the Cranelift shim.
+        "hybrid_codegen": [
+            "//:codegen_base_package",
+            "//packages/vesper-cranelift:cranelift_package",
+        ],
         "hybrid_ir_check": [
             "//:check_data_package",
             "//:ir_check_package",
@@ -72,14 +77,21 @@ vesper_hybrid(
             "//:front_package",
             "//:std_intern_package",
         ],
+        # Test discovery (#1337) builds on @vesper/test-runner.
+        "hybrid_test_runner": [
+            "//:front_package",
+            "//:test_runner_package",
+        ],
     },
     modules = {
         "hybrid_check_layout": "modules/check_layout",
         "hybrid_doc": "modules/doc",
+        "hybrid_codegen": "modules/codegen",
         "hybrid_ir_check": "modules/ir_check",
         "hybrid_ir_inline": "modules/ir_inline",
         "hybrid_layout": "modules/layout",
         "hybrid_parse": "modules/parse",
+        "hybrid_test_runner": "modules/test_runner",
         "hybrid_place_ir": "modules/place_ir",
     },
     # The doc differential (#1338) runs every 8th file and package here;

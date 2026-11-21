@@ -33,4 +33,7 @@ expect link "--test self_host_sim_session" "^warp_wan: "
 # The WAL's UTF-8 check: the scan wrapper refuses the payload the divergent
 # port accepted.
 expect wal "--test self_host_sim_session" "the port validated the payload"
-echo "divergent sim-session port detected (link and WAL each caught)"
+expect net --lib "test model::net::tests::bounds_are_checked_before_anything_is_retained ... FAILED"
+expect net "--test self_host_sim_session" "^net: "
+expect log "--test self_host_sim_session" "^wal_ops: "
+echo "divergent sim-session port detected (link, WAL codec, net and WAL state machine each caught)"
