@@ -53,7 +53,7 @@ default compiler installs a hook.
   (`declarations()`), and `vcl_compile` with `vcl_module_last_code` and
   `vcl_module_last_unwind` (code bytes and Windows x64 unwind info).
 - For the family lanes (lanes 8 and 14):
-  - `vcl_module_get_function` is `Module::get_name`. A miss returns
+  - `vcl_module_get_function` and `vcl_module_get_data` are `Module::get_name`. A miss returns
     `INVALID` without setting an error.
   - `vcl_module_kind` returns object, JIT, or freestanding (an object for
     an OS-less target). A host lends a module as JIT with `lend_as` or
@@ -66,7 +66,7 @@ default compiler installs a hook.
     as offset and code words.
   - `vcl_import_data_colocated` is a data import with an explicit
     colocated flag, which RISC-V freestanding objects need.
-- 27 new `.vsys` imports with typed wrappers in `packages/vesper-cranelift`.
+- 28 new `.vsys` imports with typed wrappers in `packages/vesper-cranelift`.
   The `.vsys` text is now also a file, `cranelift.vsys`, named by the
   manifest's `[package] vsys` field, so packages that depend on it get the
   library (`tests/header.rs` checks that it matches the directive).

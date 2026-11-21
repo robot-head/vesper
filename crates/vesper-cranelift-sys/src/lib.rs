@@ -1977,6 +1977,28 @@ pub unsafe extern "C" fn vcl_module_get_function(
     }
 }
 
+/// The data object declared as `name` (`Module::get_name`), or
+/// [`INVALID`] when no data object has that name. A miss is not an error.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vcl_module_get_data(
+    m: *mut Module,
+    name: *const u8,
+    name_len: usize,
+) -> u32 {
+    // SAFETY: a live handle.
+    let Some(m) = (unsafe { m.as_mut() }) else {
+        return INVALID;
+    };
+    // SAFETY: the `.vsys` CSlice contract.
+    let Ok(name) = text(unsafe { slice(name, name_len) }) else {
+        return INVALID;
+    };
+    match m.get().get_name(name) {
+        Some(cranelift_module::FuncOrDataId::Data(id)) => data_index(m, id),
+        _ => INVALID,
+    }
+}
+
 /// The module's [`ModuleKind`]: JIT, object, or object for a target with
 /// no operating system.
 #[unsafe(no_mangle)]
@@ -2397,6 +2419,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         vcl_module_function_count,
         vcl_module_function_name,
         vcl_module_get_function,
+        vcl_module_get_data,
         vcl_module_kind,
         vcl_compile,
         vcl_module_last_code,
