@@ -1,3 +1,98 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
 
+# The Rust build (default features), with its tests.
 vesper_crate()
+
+# The Vesper build (Rust exit SH6 lane 4, #1399): the same API forwarding to
+# the port in vesper/src/ through the committed binding, and the crate's
+# tests run unchanged against it.
+# The port's files joined in order, as build.rs does (PARTS).
+SHARD_PARTS = [
+    "vesper/src/types.ves",
+    "vesper/src/util.ves",
+    "vesper/src/kernels.ves",
+    "vesper/src/table.ves",
+    "vesper/src/table_api.ves",
+    "vesper/src/batch.ves",
+    "vesper/src/rss.ves",
+]
+
+genrule(
+    name = "shard_source",
+    srcs = SHARD_PARTS,
+    outs = ["shard.ves"],
+    cmd = "for f in %s; do cat $$f; echo; done > $@" % " ".join(["$(location %s)" % p for p in SHARD_PARTS]),
+)
+
+vesper_port_object(
+    name = "shard_vesper",
+    src = ":shard_source",
+    library = "shard",
+    target = VESPER_TARGET,
+)
+
+# The divergence check: one bug per ported module, the DIVERGENT_EDITS of
+# build.rs. :port_divergence_detected expects the test binaries linked
+# against it to fail exactly the tests that cover each module.
+vesper_port_object(
+    name = "shard_vesper_divergent",
+    src = ":shard_source",
+    edits = {
+        "                if widen_u64(v) == key {": "                if widen_u64(v) == key && i < 15 {",
+        "    if s.next_tx_pn > PN_LIMIT {": "    if s.next_tx_pn > wrapping_add(PN_LIMIT, 1) {",
+        "                if cwnd_set & bit(l) != 0 {": "                if cwnd_set & bit(l) == 65536 {",
+        "    for i in 0..n {\n        let byte = match input.try_get(i) {\n            Option::Some(b) => widen_u64(b),\n            Option::None => 0,\n        };\n        h = h": "    for i in 1..n {\n        let byte = match input.try_get(i) {\n            Option::Some(b) => widen_u64(b),\n            Option::None => 0,\n        };\n        h = h",
+    },
+    library = "shard",
+    target = VESPER_TARGET,
+)
+
+rust_library(
+    name = "port",
+    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
+    crate_features = ["vesper-port"],
+    crate_name = "vesper_warp_shard",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = ["//crates/vesper-port-abi"],
+)
+
+[
+    rust_test(
+        name = name,
+        srcs = [src] + glob(["tests/common/*.rs"]),
+        compile_data = [obj] + SHARD_PARTS,
+        crate_features = ["vesper-port"],
+        crate_name = crate,
+        crate_root = src,
+        edition = "2024",
+        rustc_flags = ["-Clink-arg=$(location %s)" % obj],
+        tags = tags,
+        deps = [":port"],
+    )
+    for name, src, crate, obj, tags in [
+        ("port_equivalence_test", "tests/equivalence.rs", "equivalence", ":shard_vesper", []),
+        ("port_million_test", "tests/million.rs", "million", ":shard_vesper", []),
+        ("port_rekey_test", "tests/rekey.rs", "rekey", ":shard_vesper", []),
+        ("port_rss_test", "tests/rss.rs", "rss", ":shard_vesper", []),
+        ("port_zero_alloc_test", "tests/zero_alloc.rs", "zero_alloc", ":shard_vesper", []),
+        ("_port_equivalence_divergent.bin", "tests/equivalence.rs", "equivalence_divergent", ":shard_vesper_divergent", ["manual"]),
+        ("_port_rss_divergent.bin", "tests/rss.rs", "rss_divergent", ":shard_vesper_divergent", ["manual"]),
+    ]
+]
+
+rust_test(
+    name = "port_divergence_detected",
+    srcs = ["tests/divergence.rs"],
+    data = [
+        ":_port_equivalence_divergent.bin",
+        ":_port_rss_divergent.bin",
+    ],
+    edition = "2024",
+    env = {
+        "VESPER_SHARD_DIVERGENT_EQUIVALENCE_TEST": "$(rootpath :_port_equivalence_divergent.bin)",
+        "VESPER_SHARD_DIVERGENT_RSS_TEST": "$(rootpath :_port_rss_divergent.bin)",
+    },
+)

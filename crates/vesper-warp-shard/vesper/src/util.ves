@@ -1,0 +1,115 @@
+// ---------------------------------------------------------------------------
+// Constants and helpers.
+
+// Lanes per tile.
+const LANES: u64 = 16;
+// `u64` pairs per tile row (one 128-bit vector each).
+const PAIRS: u64 = 8;
+// Words of a local CID (`ceil(20 / 4)`).
+const CID_WORDS: u64 = 5;
+// Largest capacity (2^26).
+const MAX_CAPACITY: u64 = 67108864;
+// Exclusive bound of QUIC packet numbers (2^62).
+const PN_LIMIT: u64 = 4611686018427387904;
+// Longest local CID.
+const MAX_CID_LEN: u64 = 20;
+// Descriptors per batch.
+const MAX_BATCH: u64 = 64;
+// The empty index bucket (u32::MAX).
+const EMPTY_SLOT: u64 = 4294967295;
+// A tile with no batch stage.
+const NO_STAGE: u64 = 255;
+const U32_MAX: u64 = 4294967295;
+// Bytes of storage per slot (see `table_core_memory_bytes`).
+const PER_SLOT_BYTES: u64 = 101;
+const U64_MAX: u64 = 18446744073709551615;
+// "None" for a slot index result.
+const NO_INDEX: u64 = 18446744073709551615;
+
+fn get64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn get32(in s: ChunkSeq[u32], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn get8(in s: ChunkSeq[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn zeros64(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        s.push(0);
+    }
+    s
+}
+
+fn zeros32(n: u64) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        s.push(0);
+    }
+    s
+}
+
+fn filled8(n: u64, v: u8) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for i in 0..n {
+        s.push(v);
+    }
+    s
+}
+
+fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// `1 << b` for `b < 64`.
+fn bit(b: u64) -> u64 {
+    wrapping_shl_u64(1, wrapping_u32(b & 63))
+}
+
+fn low_bit(x: u64) -> u64 {
+    widen_u64(trailing_zeros_u64(x))
+}
+
+fn key_word(k: CidKey, w: u64) -> u64 {
+    if w == 0 {
+        k.w0
+    } else if w == 1 {
+        k.w1
+    } else if w == 2 {
+        k.w2
+    } else if w == 3 {
+        k.w3
+    } else {
+        k.w4
+    }
+}
+
+// Smallest power of two `>= n`, for `1 <= n <= 2^62`.
+fn next_pow2(n: u64) -> u64 {
+    let mut p: u64 = 1;
+    loop {
+        if p >= n {
+            break;
+        }
+        p = wrapping_mul(p, 2);
+    }
+    p
+}

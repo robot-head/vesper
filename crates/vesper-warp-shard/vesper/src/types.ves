@@ -1,0 +1,71 @@
+// Vesper port of vesper-warp-shard (Rust exit SH6 lane 4, #1399): the
+// connection table over 16-lane tiles (src/reference/table.rs), its
+// open-addressed CID index (src/reference/index.rs), the batch update
+// (src/reference/batch.rs), the lane kernels (src/simd.rs) and the Toeplitz
+// RSS hash and indirection table (src/reference/rss.rs).
+//
+// The port is one library in several files, joined in the order of PARTS
+// in build.rs. This file holds the types that cross the boundary; their
+// Rust mirrors are in src/port/types.rs.
+//
+// The Rust wrapper keeps what Vesper cannot: the caller's `BuildHasher`
+// (it hashes CIDs and passes the 32-bit hash in), CPU feature detection
+// (it passes `vector` to say whether the lane kernels may use vectors),
+// and the conversion of `ConnectionId` to and from words.
+//
+// Layout: slot `s = tile * 16 + lane`. Per-slot fields are sequences
+// indexed by slot, so the 16 lanes of a tile are contiguous, as in the
+// Rust build's tiles. Local CID words are `kw[(tile * 5 + word) * 16 +
+// lane]`. All storage is allocated by `table_core_new`; no other function
+// grows a sequence.
+
+// A local CID as five little-endian 32-bit words, zero padded.
+copy struct CidKey {
+    w0: u64,
+    w1: u64,
+    w2: u64,
+    w3: u64,
+    w4: u64
+}
+
+// `ConnState` as words: `rx_p1` is the largest received packet number plus
+// one (0 for none), and the peer CID is 20 bytes in three little-endian
+// words (8, 8 and 4 bytes) and a length.
+copy struct CoreState {
+    rx_p1: u64,
+    next_tx_pn: u64,
+    bbr_bw: u64,
+    bbr_min_rtt_ns: u64,
+    cwnd_bytes: u64,
+    bytes_in_flight: u64,
+    next_edt_ns: u64,
+    idle_deadline_ns: u64,
+    peer0: u64,
+    peer1: u64,
+    peer2: u64,
+    peer_len: u64
+}
+
+// Why a table call refused its input. The wrapper maps each to the
+// operation's own Rust error type.
+copy enum CoreFault {
+    ZeroCapacity,
+    CapacityTooLarge(u64),
+    CidLength(u64),
+    Full,
+    DuplicateCid,
+    PacketNumberRange(u64),
+    Stale
+}
+
+// Why a batch was rejected (`BatchError` with `usize` indices as words).
+copy enum CoreBatchFault {
+    TooLong(u64),
+    StaleHandle(u64),
+    PacketNumberRange {
+        index: u64,
+        pn: u64
+    },
+    BytesInFlightUnderflow(u64),
+    BytesInFlightOverflow(u64)
+}

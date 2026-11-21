@@ -68,6 +68,7 @@ pub struct ColdTile {
 }
 
 impl HotTile {
+    #[cfg(not(feature = "vesper-port"))]
     pub(crate) const EMPTY: HotTile = HotTile {
         largest_rx_pn_p1: [0; LANES],
         next_tx_pn: [0; LANES],
@@ -80,6 +81,7 @@ impl HotTile {
 }
 
 impl KeyTile {
+    #[cfg(not(feature = "vesper-port"))]
     pub(crate) const EMPTY: KeyTile = KeyTile {
         cid_words: [[0; LANES]; CID_WORDS],
         occupied: 0,
@@ -87,6 +89,7 @@ impl KeyTile {
 }
 
 impl ColdTile {
+    #[cfg(not(feature = "vesper-port"))]
     pub(crate) const EMPTY: ColdTile = ColdTile {
         idle_deadline_ns: [0; LANES],
         generation: [0; LANES],

@@ -16,8 +16,19 @@
 //! - [`batch`]: atomic application of up to 64 (slot, event) descriptors and
 //!   the idle-timeout scan, with scalar reference implementations.
 //!
-//! Unsafe code is denied crate-wide and allowed only in [`simd`], which
-//! confines `std::arch` loads, stores and feature-gated calls.
+//! Unsafe code is denied crate-wide and allowed only in the Rust build's
+//! kernels (`src/reference/simd.rs`), which confine `std::arch` loads, stores
+//! and feature-gated calls, and in the Vesper build's generated binding.
+//!
+//! # Two builds
+//!
+//! By default the Rust implementation in `src/reference/` runs. With the
+//! `vesper-port` feature, the table, its CID index, the batch update, the
+//! lane kernels and the Toeplitz hashes run in the Vesper port in
+//! `vesper/src/` (Rust exit SH6 lane 4, #1399), through the generated
+//! `port/binding.rs`. The wrappers in `src/port/` keep the caller's
+//! `BuildHasher` (they hash CIDs and pass the hash in), the ISA choice and
+//! the conversions between the crate's types and words.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -25,12 +36,30 @@
 pub mod batch;
 pub mod cid;
 pub mod error;
-mod index;
+#[cfg(feature = "vesper-port")]
+mod port;
+#[cfg(not(feature = "vesper-port"))]
+mod reference;
 pub mod rss;
 pub mod shard;
 pub mod simd;
 pub mod table;
 pub mod tile;
+
+/// Live Vesper sequence and box allocations of the Vesper build (for leak
+/// tests; the Rust allocator never sees them).
+#[cfg(feature = "vesper-port")]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::binding::live_allocations()
+}
+
+/// Which implementation this build runs.
+pub const IMPLEMENTATION: &str = if cfg!(feature = "vesper-port") {
+    "vesper"
+} else {
+    "rust"
+};
 
 pub use batch::{ConnEvent, ConnEventDesc, MAX_BATCH};
 pub use cid::{ConnectionId, MAX_CID_LEN};

@@ -195,6 +195,8 @@ fi
 skip_port vesper-warp-tcp || crates/vesper-warp-tcp/scripts/test-port.sh
 # Port wave P1 lane 3 (#900): vesper-warp-wheel.
 skip_port vesper-warp-wheel || sh crates/vesper-warp-wheel/port/test-port.sh
+# Rust exit SH6 lane 4 (#1399): vesper-warp-shard.
+skip_port vesper-warp-shard || sh crates/vesper-warp-shard/port/test-port.sh
 skip_port vesper-ignis || sh crates/vesper-ignis/port/check.sh  # port P1 lane 12 (#909): vesper-ignis, both builds and the divergence check
 fi
 # Shard 2: Quarry through pact.

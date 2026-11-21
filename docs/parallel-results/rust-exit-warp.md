@@ -32,7 +32,7 @@ Wall clock is the crate's committed ABBA driver; instructions are callgrind
 | warp-tcp transfer, after this part | 0 diffs, every test | **1.28x** (19.81 M / 15.44 M) | 1.427-1.678, 1.502-1.902, 1.536-2.339 | above 1.5x |
 | BBR ack path (`ack_path_abba abba .. 16 200000`) | 0 diffs, every test | 2.24x (rescore lane) | 1.956-3.289 | above 1.5x |
 | warp (QUIC core parts) | 0 diffs, every test | 1.08x-4.16x (P3b lane 4) | not re-run | above 1.5x (recovery) |
-| warp-shard | not ported | | | not ported |
+| warp-shard | ported in part 2 | | | see part 2 |
 
 The wall clock on this host is noisy: the warp-tcp transfer interval moved
 between 1.4x and 2.4x over unchanged binaries. CPU time of 3,000 transfers
@@ -82,7 +82,71 @@ the queue the Rust build's size and may move the allocator's trim point
 (gap 2), but it does not touch the instruction-cache cost (gap 1), so it was
 left for a later part.
 
-## Compiler gaps
+## Part 2: the warp-shard port
+
+**Result.** `vesper-warp-shard` now has a Vesper build (`--features
+vesper-port`): the connection table and its CID index, the batch update, the
+idle scan, the lane kernels and the Toeplitz hashes run in `vesper/src/`
+through the generated `port/binding.rs`. Every test of the crate passes
+against both builds, and a divergent port (one bug each in the kernels, the
+table, the batch update and RSS) fails the tests that cover each module
+(`port/test-port.sh`, and `:port_divergence_detected` under Bazel). The Rust
+build stays the default: only the batch update is within 1.5x.
+
+What stays in Rust in the Vesper build: the caller's `BuildHasher` (the
+wrapper hashes CIDs and passes the hash in), ISA detection (the wrapper
+passes a `vector` flag), the `ConnectionId` to words conversion,
+`IndirectionTable`, `RssInput` and `ShardSet`. The frozen Rust build moved to
+`src/reference/`; the wrappers are in `src/port/`.
+
+### Flip-gate verdicts
+
+`examples/shard_bench.rs` runs six workloads, one process per build; the
+two release binaries ran alternately A B B A, 12 pairs of 100 rounds each,
+and both print the same checksum on every workload. The interval is the
+order-statistic 95% interval of the median pair ratio (ranks 3 and 10 of 12).
+
+| Workload | Vesper/Rust, median | 95% interval | Verdict |
+|---|---|---|---|
+| `batch`: 200 batches of 64 events | 0.72x | 0.66-0.84 | within 1.5x |
+| `lookup`: index lookup of 4,096 CIDs | 1.52x | 1.47-1.71 | above 1.5x |
+| `churn`: insert and remove 4,096 | 1.89x | 1.77-2.15 | above 1.5x |
+| `idle`: idle scan of 4,096 | 6.3x | 5.8-6.7 | above 1.5x |
+| `rss`: 4,096 Toeplitz hashes of 36 bytes | 6.8x | 5.2-9.1 | above 1.5x |
+| `scan`: 16-lane tile scan, 64 CIDs | 18.4x | 14.6-20.9 | above 1.5x |
+
+Port-side changes made while measuring:
+
+1. **The batch stages clear only touched lanes.** Opening a stage cleared
+   all 16 lanes of six sequences (96 element writes); a stage now clears a
+   lane when the batch first touches it, checks a stage with fewer than 4
+   touched lanes lane by lane, and commits only touched lanes. The batch
+   went from 8.7x to 0.72x.
+2. **The idle scan is one call.** The wrapper called the core once per
+   expired slot, and each call compared the slot's tile again; the core now
+   writes packed handles into a stack buffer lent in place (48x to 6.3x).
+3. **The tile scan compares in one vector loop** (`lookup_scan_vec`), with
+   its constants spelled out (gap 5). 21x to 18x.
+
+### Compiler gaps (part 2)
+
+5. **Vector code keeps every vector in memory, and calls are not inlined
+   into vector functions.** In `lookup_scan_vec` each 4-lane compare
+   becomes about 35 instructions: the slice view is rebuilt on the stack,
+   `load_masked` keeps its short-tail loop, and the loaded vector, the
+   splat and the compare result each go through stack slots. Inside an
+   `eff [Isa[Baseline128]]` function, top-level `const`s and small helpers
+   (`get64`, `key_word`) stay calls (`vesper_function_25` returns 5,
+   `vesper_function_30` returns 16). Only 128-bit vectors are used: 256-bit
+   ones would need `Isa[Avx2]` lowering, and the Rust build's AVX2 kernels
+   compare 8 `u32` lanes at a time. The tile scan costs about 320
+   instructions a tile against about 10 for the Rust build.
+6. **Indexed loads from a sequence reload its header.** The Toeplitz hash
+   is the Rust build's algorithm (one table load per input byte), but each
+   `ChunkSeq` read reloads the header and data pointer and keeps its
+   out-of-range branch: 22 instructions a byte. Same pattern as gap 1.
+
+## Compiler gaps (part 1)
 
 1. **Native code is about 8x larger than rustc's, and hot paths miss the
    instruction cache.** The warp-tcp port's Vesper functions are 185 KB of
@@ -133,6 +197,9 @@ left for a later part.
 - warp: the endpoint driver, UMEM, slot tables, application callbacks and TLS
   driving are still Rust (P3b lane 4 left them by the owner's 2026-11-19
   scope); recovery is 4-5x.
-- warp-shard: not ported (the SIMD CID lookup through source vectors, §14).
+- warp-shard: ported (part 2), Rust default. The batch update passes; the
+  lookup (1.5x) and churn (1.9x) are close; the tile scan, idle scan and
+  Toeplitz hash wait on gaps 5 and 6. `IndirectionTable`, `RssInput` and
+  `ShardSet` are still Rust only.
 - The census row (`scripts/rust-census.py`) is updated once lane 1's plan
   PR (#1415) is on `main`.

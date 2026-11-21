@@ -1,0 +1,375 @@
+// ---------------------------------------------------------------------------
+// The exported table. The Rust `ConnTable<S>` hashes CIDs with its
+// `BuildHasher` and passes the low 32 bits in as `hash`; a handle is
+// `(index, generation)`.
+
+fn pn_fault(s: CoreState) -> Option[CoreFault] {
+    // rx_p1 = pn + 1, so pn >= 2^62 is rx_p1 > 2^62.
+    if s.rx_p1 > PN_LIMIT {
+        return Option::Some(CoreFault::PacketNumberRange(wrapping_sub(s.rx_p1, 1)));
+    }
+    if s.next_tx_pn > PN_LIMIT {
+        return Option::Some(CoreFault::PacketNumberRange(s.next_tx_pn));
+    }
+    Option::None
+}
+
+pub fn table_core_new(capacity: u64, cid_len: u64) -> TableCore eff [Fail[CoreFault]] {
+    match table_config_fault(capacity, cid_len) {
+        Option::Some(e) => Fail::raise(e),
+        Option::None => build_table(capacity, cid_len),
+    }
+}
+
+pub fn table_core_len(in c: TableCore) -> u64 {
+    c.len
+}
+
+pub fn table_core_tiles(in c: TableCore) -> u64 {
+    c.tiles
+}
+
+// Bytes of the table's sequences at their element strides.
+pub fn table_core_memory_bytes(in c: TableCore) -> u64 {
+    let slots = wrapping_mul(c.tiles, LANES);
+    // Per slot: eight u64 fields, four u32 fields, one u8 field and five
+    // u32 key words.
+    let mut n = wrapping_mul(slots, PER_SLOT_BYTES);
+    // Per tile: the occupancy mask and the stage marker.
+    n = wrapping_add(n, wrapping_mul(c.tiles, 9));
+    n = wrapping_add(n, wrapping_mul(c.capacity, 4));
+    n = wrapping_add(n, wrapping_mul(wrapping_add(c.ix_mask, 1), 8));
+    // Per stage: three u64 words, and per stage lane one u8, four u64 and
+    // one u32.
+    n = wrapping_add(n, wrapping_mul(MAX_BATCH, 24));
+    n = wrapping_add(n, wrapping_mul(wrapping_mul(MAX_BATCH, LANES), 37));
+    wrapping_add(n, wrapping_mul(LANES, 8))
+}
+
+pub fn table_core_index_max_probe(in c: TableCore) -> u64 {
+    let mut best: u64 = 0;
+    for i in 0..wrapping_add(c.ix_mask, 1) {
+        if get32(in c.ix_slot, i) != EMPTY_SLOT {
+            let home = get32(in c.ix_hash, i) & c.ix_mask;
+            best = max64(best, wrapping_add(wrapping_sub(i, home) & c.ix_mask, 1));
+        }
+    }
+    best
+}
+
+// The generation of a live slot of this handle, or why it is stale.
+pub fn table_core_check(in c: TableCore, index: u64, generation: u64) -> bool {
+    c.live(index, generation)
+}
+
+pub fn table_core_insert(inout c: TableCore, hash: u64, key: CidKey, s: CoreState)
+    -> Result[(u64, u64), CoreFault] {
+    match pn_fault(s) {
+        Option::Some(e) => {
+            return Result::Err(e);
+        },
+        Option::None => (),
+    }
+    if c.ix_find(hash, key) != NO_INDEX {
+        return Result::Err(CoreFault::DuplicateCid);
+    }
+    if c.free_len == 0 {
+        return Result::Err(CoreFault::Full);
+    }
+    c.free_len = wrapping_sub(c.free_len, 1);
+    let index = get32(in c.free, c.free_len);
+    c.occupy(index, key);
+    c.write_state(index, s);
+    c.ix_insert(hash, index);
+    c.len = wrapping_add(c.len, 1);
+    Result::Ok((index, c.gen_of(index)))
+}
+
+pub fn table_core_get(in c: TableCore, index: u64, generation: u64) -> Option[CoreState] {
+    if c.live(index, generation) {
+        Option::Some(c.read_state(index))
+    } else {
+        Option::None
+    }
+}
+
+pub fn table_core_local_cid(in c: TableCore, index: u64, generation: u64) -> Option[CidKey] {
+    if c.live(index, generation) {
+        Option::Some(c.key_of(index))
+    } else {
+        Option::None
+    }
+}
+
+// The local CID of any slot (for the wrapper's hashing during compaction).
+pub fn table_core_key_at(in c: TableCore, index: u64) -> CidKey {
+    c.key_of(index)
+}
+
+pub fn table_core_set(inout c: TableCore, index: u64, generation: u64, s: CoreState)
+    -> Option[CoreFault] {
+    if !c.live(index, generation) {
+        return Option::Some(CoreFault::Stale);
+    }
+    match pn_fault(s) {
+        Option::Some(e) => Option::Some(e),
+        Option::None => {
+            c.write_state(index, s);
+            Option::None
+        },
+    }
+}
+
+// Rekey a live slot (the wrapper checked the handle, the length and that
+// the key changes): `DuplicateCid` if `key` already routes.
+pub fn table_core_rekey(inout c: TableCore, index: u64, new_hash: u64, key: CidKey, old_hash: u64)
+    -> Option[CoreFault] {
+    if c.ix_find(new_hash, key) != NO_INDEX {
+        return Option::Some(CoreFault::DuplicateCid);
+    }
+    c.ix_remove(old_hash, index);
+    c.set_key(index, key);
+    c.ix_insert(new_hash, index);
+    Option::None
+}
+
+// Remove a live slot whose local CID hashes to `hash`; its state.
+pub fn table_core_remove(inout c: TableCore, index: u64, generation: u64, hash: u64)
+    -> Option[CoreState] {
+    if !c.live(index, generation) {
+        return Option::None;
+    }
+    let state = c.read_state(index);
+    c.ix_remove(hash, index);
+    c.vacate(index);
+    c.free.try_set(c.free_len, wrapping_u32(index));
+    c.free_len = wrapping_add(c.free_len, 1);
+    c.len = wrapping_sub(c.len, 1);
+    Option::Some(state)
+}
+
+// Look a DCID's key up through the index: `(index, generation)`.
+pub fn table_core_lookup(in c: TableCore, hash: u64, key: CidKey) -> Option[(u64, u64)] {
+    let slot = c.ix_find(hash, key);
+    if slot == NO_INDEX {
+        Option::None
+    } else {
+        Option::Some((slot, c.gen_of(slot)))
+    }
+}
+
+// `lookup_cid_simd`: the index-free scan of every tile.
+pub fn table_core_lookup_scan(in c: TableCore, key: CidKey, vector: bool) -> Option[(u64, u64)] {
+    if vector {
+        if Isa::supported[Baseline128]() {
+            let slot = lookup_scan_vec(
+                in c.kw[0..c.kw.len()],
+                in c.occupied[0..c.occupied.len()],
+                c.tiles,
+                c.cid_words,
+                key
+            );
+            if slot == NO_INDEX {
+                return Option::None;
+            }
+            return Option::Some((slot, c.gen_of(slot)));
+        }
+    }
+    for t in 0..c.tiles {
+        let mask = c.tile_match(t, key, vector);
+        if mask != 0 {
+            let slot = wrapping_add(wrapping_mul(t, LANES), low_bit(mask));
+            return Option::Some((slot, c.gen_of(slot)));
+        }
+    }
+    Option::None
+}
+
+// The tile scan in one vector loop: each tile's key words are compared in
+// place, stopping at the first word no lane matches. The matching slot, or
+// NO_INDEX. `kw` and `occupied` are the table's sequences whole. The loop
+// spells its constants out (16 lanes, 5 words a tile, 80 words a tile) and
+// reads the sequences itself: the code generator does not inline calls
+// into a vector function (port gap 5 in docs/parallel-results/rust-exit-warp.md).
+fn lookup_scan_vec(in kw: Slice[u32], in occupied: Slice[u64], tiles: u64, words: u64, key: CidKey)
+    -> u64 eff [Isa[Baseline128]] {
+    let k0 = Vec::splat[u32, 4](wrapping_u32(key.w0));
+    let k1 = Vec::splat[u32, 4](wrapping_u32(key.w1));
+    let k2 = Vec::splat[u32, 4](wrapping_u32(key.w2));
+    let k3 = Vec::splat[u32, 4](wrapping_u32(key.w3));
+    let k4 = Vec::splat[u32, 4](wrapping_u32(key.w4));
+    for t in 0..tiles {
+        let mut m = match occupied.try_get(t) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let base = wrapping_mul(t, 80);
+        for w in 0..words {
+            if m == 0 {
+                break;
+            }
+            let k = if w == 0 {
+                k0
+            } else if w == 1 {
+                k1
+            } else if w == 2 {
+                k2
+            } else if w == 3 {
+                k3
+            } else {
+                k4
+            };
+            let at = wrapping_add(base, wrapping_mul(w, 16));
+            let m0 = Mask::bitmask(Vec::eq(Vec::load_masked[u32, 4](in kw, at), k));
+            let m1 = Mask::bitmask(
+                Vec::eq(Vec::load_masked[u32, 4](in kw, wrapping_add(at, 4)), k)
+            );
+            let m2 = Mask::bitmask(
+                Vec::eq(Vec::load_masked[u32, 4](in kw, wrapping_add(at, 8)), k)
+            );
+            let m3 = Mask::bitmask(
+                Vec::eq(Vec::load_masked[u32, 4](in kw, wrapping_add(at, 12)), k)
+            );
+            m = m
+                & (
+                m0 | wrapping_shl_u64(m1, 4) | wrapping_shl_u64(m2, 8) | wrapping_shl_u64(m3, 12)
+            );
+        }
+        if m != 0 {
+            return wrapping_add(wrapping_mul(t, 16), low_bit(m));
+        }
+    }
+    18446744073709551615
+}
+
+pub fn table_core_tile_match_mask(in c: TableCore, tile: u64, key: CidKey, vector: bool) -> u64 {
+    if tile >= c.tiles {
+        return 0;
+    }
+    c.tile_match(tile, key, vector)
+}
+
+// The idle scan in one call: writes `index << 32 | generation` of each live
+// slot at or after `from` whose idle deadline is `<= now` into `out`, in slot
+// order, and returns `(written, resume)`, where `resume` is the next such
+// slot once `out` is full, or NO_INDEX when the scan reached the end.
+pub fn table_core_scan_idle(
+    in c: TableCore,
+    now: u64,
+    from: u64,
+    inout out: Slice[u64],
+    vector: bool
+) -> (u64, u64) {
+    let mut cur = ScanCursor {
+        written: 0,
+        from: from
+    };
+    let first = from / LANES;
+    for t in first..c.tiles {
+        let at = wrapping_mul(t, LANES);
+        let late = gt_mask_u64_splat(in c.idle[at..wrapping_add(at, LANES)], now, vector);
+        let resume = c.emit_idle(t, ~late, inout cur, inout out);
+        if resume != NO_INDEX {
+            return (cur.written, resume);
+        }
+    }
+    (cur.written, NO_INDEX)
+}
+
+// Where an idle scan is: handles written so far, and the first slot to
+// report.
+struct ScanCursor {
+    written: u64,
+    from: u64
+}
+
+impl TableCore {
+    // Write the live lanes of `tile` set in `due` (at or after `cur.from`)
+    // into `out`; the next such slot once `out` is full, or NO_INDEX.
+    fn emit_idle(in self, tile: u64, due: u64, inout cur: ScanCursor, inout out: Slice[u64])
+        -> u64 {
+        let at = wrapping_mul(tile, LANES);
+        let mut mask = due & 65535 & get64(in self.occupied, tile);
+        if tile == cur.from / LANES {
+            mask = mask & ~wrapping_sub(bit(cur.from % LANES), 1);
+        }
+        loop {
+            if mask == 0 {
+                break;
+            }
+            let slot = wrapping_add(at, low_bit(mask));
+            if cur.written == out.len() {
+                return slot;
+            }
+            out.try_set(cur.written, wrapping_shl_u64(slot, 32) | self.gen_of(slot));
+            cur.written = wrapping_add(cur.written, 1);
+            mask = mask & wrapping_sub(mask, 1);
+        }
+        NO_INDEX
+    }
+}
+
+// The first live slot at or after `from`, as `(index, generation)`.
+pub fn table_core_next_live(in c: TableCore, from: u64) -> Option[(u64, u64)] {
+    let first = from / LANES;
+    for t in first..c.tiles {
+        let mut mask = get64(in c.occupied, t);
+        if t == first {
+            mask = mask & ~wrapping_sub(bit(from % LANES), 1);
+        }
+        if mask != 0 {
+            let slot = wrapping_add(wrapping_mul(t, LANES), low_bit(mask));
+            return Option::Some((slot, c.gen_of(slot)));
+        }
+    }
+    Option::None
+}
+
+// Compaction, one move at a time: `compact_begin`, then `compact_next`
+// until it returns None (each `(from, to)` is moved with `compact_move`),
+// then `compact_finish`.
+pub fn table_core_compact_begin(inout c: TableCore) {
+    c.cpt_lo = 0;
+    c.cpt_hi = c.capacity;
+}
+
+pub fn table_core_compact_next(inout c: TableCore) -> Option[(u64, u64)] {
+    loop {
+        if c.cpt_lo >= c.cpt_hi || !c.is_occupied(c.cpt_lo) {
+            break;
+        }
+        c.cpt_lo = wrapping_add(c.cpt_lo, 1);
+    }
+    loop {
+        if c.cpt_hi <= c.cpt_lo || c.is_occupied(wrapping_sub(c.cpt_hi, 1)) {
+            break;
+        }
+        c.cpt_hi = wrapping_sub(c.cpt_hi, 1);
+    }
+    if wrapping_add(c.cpt_lo, 1) >= c.cpt_hi {
+        return Option::None;
+    }
+    Option::Some((wrapping_sub(c.cpt_hi, 1), c.cpt_lo))
+}
+
+// Move live slot `from` to vacant slot `to`; its key hashes to `hash`.
+// Returns the generations `(old at from, new at to)`.
+pub fn table_core_compact_move(inout c: TableCore, from: u64, to: u64, hash: u64) -> (u64, u64) {
+    let old_gen = c.gen_of(from);
+    let key = c.key_of(from);
+    let state = c.read_state(from);
+    c.occupy(to, key);
+    c.write_state(to, state);
+    c.vacate(from);
+    c.ix_relocate(hash, from, to);
+    (old_gen, c.gen_of(to))
+}
+
+// Live slots are exactly `0..len`: rebuild the free stack.
+pub fn table_core_compact_finish(inout c: TableCore) {
+    let free_count = wrapping_sub(c.capacity, c.len);
+    for k in 0..free_count {
+        c.free.try_set(k, wrapping_u32(wrapping_sub(wrapping_sub(c.capacity, 1), k)));
+    }
+    c.free_len = free_count;
+}

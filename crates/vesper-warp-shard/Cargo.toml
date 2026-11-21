@@ -5,5 +5,17 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Vesper Warp AoSoA connection tiles, SIMD CID lookup and Toeplitz RSS shard steering (design section 35)"
 publish = false
+build = "build.rs"
+
+[features]
+# Run the table, index, batch update, kernels and Toeplitz hashes in the
+# Vesper port in vesper/src/.
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# A deliberately wrong Vesper build: the port test run must fail.
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }

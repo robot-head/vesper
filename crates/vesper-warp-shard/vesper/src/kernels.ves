@@ -1,0 +1,167 @@
+// ---------------------------------------------------------------------------
+// The 16-lane kernels of src/simd.rs, on `Slice`s of exactly 16 lanes.
+// `vector` selects the 128-bit source-vector form (the wrapper passes true
+// for every ISA path but `Scalar`); the scalar form is the reference.
+
+fn eq_mask_u32_vec(in lanes: Slice[u32], key: u64) -> u64 eff [Isa[Baseline128]] {
+    let k = Vec::splat[u32, 4](wrapping_u32(key));
+    let m0 = Mask::bitmask(Vec::eq(Vec::load_masked[u32, 4](in lanes, 0), k));
+    let m1 = Mask::bitmask(Vec::eq(Vec::load_masked[u32, 4](in lanes, 4), k));
+    let m2 = Mask::bitmask(Vec::eq(Vec::load_masked[u32, 4](in lanes, 8), k));
+    let m3 = Mask::bitmask(Vec::eq(Vec::load_masked[u32, 4](in lanes, 12), k));
+    m0 | wrapping_shl_u64(m1, 4) | wrapping_shl_u64(m2, 8) | wrapping_shl_u64(m3, 12)
+}
+
+fn eq_mask_u32_scalar(in lanes: Slice[u32], key: u64) -> u64 {
+    let mut m: u64 = 0;
+    for i in 0..LANES {
+        match lanes.try_get(i) {
+            Option::Some(v) => {
+                if widen_u64(v) == key {
+                    m = m | bit(i);
+                }
+            },
+            Option::None => (),
+        }
+    }
+    m
+}
+
+fn eq_mask_u32(in lanes: Slice[u32], key: u64, vector: bool) -> u64 {
+    if vector {
+        if Isa::supported[Baseline128]() {
+            return eq_mask_u32_vec(in lanes, key);
+        }
+    }
+    eq_mask_u32_scalar(in lanes, key)
+}
+
+// Bit `i` set iff `a[i] > b` (unsigned): `le_mask_u64` is its complement.
+fn gt_mask_u64_splat_vec(in a: Slice[u64], b: u64) -> u64 eff [Isa[Baseline128]] {
+    let k = Vec::splat[u64, 2](b);
+    let mut m: u64 = 0;
+    for p in 0..PAIRS {
+        let at = wrapping_mul(p, 2);
+        let bits = Mask::bitmask(Vec::gt(Vec::load_masked[u64, 2](in a, at), k));
+        m = m | wrapping_shl_u64(bits, wrapping_u32(at));
+    }
+    m
+}
+
+fn gt_mask_u64_splat(in a: Slice[u64], b: u64, vector: bool) -> u64 {
+    if vector {
+        if Isa::supported[Baseline128]() {
+            return gt_mask_u64_splat_vec(in a, b);
+        }
+    }
+    {
+        let mut m: u64 = 0;
+        for i in 0..LANES {
+            match a.try_get(i) {
+                Option::Some(v) => {
+                    if v > b {
+                        m = m | bit(i);
+                    }
+                },
+                Option::None => (),
+            }
+        }
+        m
+    }
+}
+
+// Bit `i` set iff `a[i] > b[i]` (unsigned).
+fn gt_mask_u64_vec(in a: Slice[u64], in b: Slice[u64]) -> u64 eff [Isa[Baseline128]] {
+    let mut m: u64 = 0;
+    for p in 0..PAIRS {
+        let at = wrapping_mul(p, 2);
+        let x = Vec::load_masked[u64, 2](in a, at);
+        let y = Vec::load_masked[u64, 2](in b, at);
+        m = m | wrapping_shl_u64(Mask::bitmask(Vec::gt(x, y)), wrapping_u32(at));
+    }
+    m
+}
+
+fn gt_mask_u64(in a: Slice[u64], in b: Slice[u64], vector: bool) -> u64 {
+    if vector {
+        if Isa::supported[Baseline128]() {
+            return gt_mask_u64_vec(in a, in b);
+        }
+    }
+    {
+        let mut m: u64 = 0;
+        for i in 0..LANES {
+            match a.try_get(i) {
+                Option::Some(x) => match b.try_get(i) {
+                    Option::Some(y) => {
+                        if x > y {
+                            m = m | bit(i);
+                        }
+                    },
+                    Option::None => (),
+                },
+                Option::None => (),
+            }
+        }
+        m
+    }
+}
+
+// `acc[i] = op(acc[i], other[i])`: 0 max, 1 wrapping add, 2 wrapping sub.
+fn lanes_op_vec(inout acc: Slice[u64], in other: Slice[u64], op: u64) eff [Isa[Baseline128]] {
+    for p in 0..PAIRS {
+        let at = wrapping_mul(p, 2);
+        let x = Vec::load_masked[u64, 2](in acc, at);
+        let y = Vec::load_masked[u64, 2](in other, at);
+        let r = if op == 0 {
+            Vec::max(x, y)
+        } else if op == 1 {
+            Vec::add(x, y)
+        } else {
+            Vec::sub(x, y)
+        };
+        Vec::store_masked(inout acc, at, r);
+    }
+}
+
+fn lanes_op(inout acc: Slice[u64], in other: Slice[u64], op: u64, vector: bool) {
+    if vector {
+        if Isa::supported[Baseline128]() {
+            lanes_op_vec(inout acc, in other, op);
+            return;
+        }
+    }
+    {
+        for i in 0..LANES {
+            match acc.try_get(i) {
+                Option::Some(x) => match other.try_get(i) {
+                    Option::Some(y) => {
+                        let r = if op == 0 {
+                            max64(x, y)
+                        } else if op == 1 {
+                            wrapping_add(x, y)
+                        } else {
+                            wrapping_sub(x, y)
+                        };
+                        acc.try_set(i, r);
+                    },
+                    Option::None => (),
+                },
+                Option::None => (),
+            }
+        }
+    }
+}
+
+// The exported kernels (`Kernels` methods and `simd::scalar`).
+pub fn kernel_eq_mask_u32(in lanes: Slice[u32], key: u32, vector: bool) -> u64 {
+    eq_mask_u32(in lanes, widen_u64(key), vector)
+}
+
+pub fn kernel_gt_mask_u64(in a: Slice[u64], in b: Slice[u64], vector: bool) -> u64 {
+    gt_mask_u64(in a, in b, vector)
+}
+
+pub fn kernel_lanes_op(inout acc: Slice[u64], in other: Slice[u64], op: u64, vector: bool) {
+    lanes_op(inout acc, in other, op, vector)
+}

@@ -1,0 +1,340 @@
+// ---------------------------------------------------------------------------
+// The connection table and its CID index.
+
+struct TableCore {
+    capacity: u64,
+    cid_len: u64,
+    cid_words: u64,
+    tiles: u64,
+    // Hot fields, by slot.
+    rx_p1: ChunkSeq[u64],
+    next_tx: ChunkSeq[u64],
+    bw: ChunkSeq[u64],
+    min_rtt: ChunkSeq[u64],
+    edt: ChunkSeq[u64],
+    cwnd: ChunkSeq[u32],
+    bif: ChunkSeq[u32],
+    // Keys: `kw[(tile * 5 + word) * 16 + lane]`, and one occupancy mask per
+    // tile.
+    kw: ChunkSeq[u32],
+    occupied: ChunkSeq[u64],
+    // Cold fields, by slot.
+    idle: ChunkSeq[u64],
+    generation: ChunkSeq[u32],
+    peer0: ChunkSeq[u64],
+    peer1: ChunkSeq[u64],
+    peer2: ChunkSeq[u32],
+    peer_len: ChunkSeq[u8],
+    // Free slot stack (pops the lowest slot first).
+    free: ChunkSeq[u32],
+    free_len: u64,
+    len: u64,
+    // Index buckets: the CID hash and the slot (EMPTY_SLOT when vacant).
+    ix_hash: ChunkSeq[u32],
+    ix_slot: ChunkSeq[u32],
+    ix_mask: u64,
+    // Batch stages (batch.ves).
+    st_tile: ChunkSeq[u64],
+    st_touched: ChunkSeq[u64],
+    st_cwnd_set: ChunkSeq[u64],
+    st_first: ChunkSeq[u8],
+    st_sent: ChunkSeq[u64],
+    st_released: ChunkSeq[u64],
+    st_max_pn_p1: ChunkSeq[u64],
+    st_result: ChunkSeq[u64],
+    st_cwnd: ChunkSeq[u32],
+    st_scratch: ChunkSeq[u64],
+    tile_stage: ChunkSeq[u8],
+    // Compaction cursor (`table_core_compact_next`).
+    cpt_lo: u64,
+    cpt_hi: u64
+}
+
+fn table_config_fault(capacity: u64, cid_len: u64) -> Option[CoreFault] {
+    if capacity == 0 {
+        return Option::Some(CoreFault::ZeroCapacity);
+    }
+    if capacity > MAX_CAPACITY {
+        return Option::Some(CoreFault::CapacityTooLarge(capacity));
+    }
+    if cid_len == 0 || cid_len > MAX_CID_LEN {
+        return Option::Some(CoreFault::CidLength(cid_len));
+    }
+    Option::None
+}
+
+fn build_table(capacity: u64, cid_len: u64) -> TableCore {
+    let tiles = wrapping_add(capacity, 15) / LANES;
+    let slots = wrapping_mul(tiles, LANES);
+    let mut free: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](capacity);
+    for k in 0..capacity {
+        free.push(wrapping_u32(wrapping_sub(wrapping_sub(capacity, 1), k)));
+    }
+    let buckets = max64(next_pow2(wrapping_mul(capacity, 2)), 2);
+    let mut ix_slot: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](buckets);
+    for i in 0..buckets {
+        ix_slot.push(wrapping_u32(EMPTY_SLOT));
+    }
+    let stage_lanes = wrapping_mul(MAX_BATCH, LANES);
+    TableCore {
+        capacity: capacity,
+        cid_len: cid_len,
+        cid_words: wrapping_add(cid_len, 3) / 4,
+        tiles: tiles,
+        rx_p1: zeros64(slots),
+        next_tx: zeros64(slots),
+        bw: zeros64(slots),
+        min_rtt: zeros64(slots),
+        edt: zeros64(slots),
+        cwnd: zeros32(slots),
+        bif: zeros32(slots),
+        kw: zeros32(wrapping_mul(slots, CID_WORDS)),
+        occupied: zeros64(tiles),
+        idle: zeros64(slots),
+        generation: zeros32(slots),
+        peer0: zeros64(slots),
+        peer1: zeros64(slots),
+        peer2: zeros32(slots),
+        peer_len: filled8(slots, 0),
+        free: free,
+        free_len: capacity,
+        len: 0,
+        ix_hash: zeros32(buckets),
+        ix_slot: ix_slot,
+        ix_mask: wrapping_sub(buckets, 1),
+        st_tile: zeros64(MAX_BATCH),
+        st_touched: zeros64(MAX_BATCH),
+        st_cwnd_set: zeros64(MAX_BATCH),
+        st_first: filled8(stage_lanes, 0),
+        st_sent: zeros64(stage_lanes),
+        st_released: zeros64(stage_lanes),
+        st_max_pn_p1: zeros64(stage_lanes),
+        st_result: zeros64(stage_lanes),
+        st_cwnd: zeros32(stage_lanes),
+        st_scratch: zeros64(LANES),
+        tile_stage: filled8(tiles, wrapping_u8(NO_STAGE)),
+        cpt_lo: 0,
+        cpt_hi: 0
+    }
+}
+
+impl TableCore {
+    fn is_occupied(in self, index: u64) -> bool {
+        get64(in self.occupied, index / LANES) & bit(index % LANES) != 0
+    }
+
+    fn gen_of(in self, index: u64) -> u64 {
+        get32(in self.generation, index)
+    }
+
+    // The slot a handle names, if it is live and of this generation.
+    fn live(in self, index: u64, generation: u64) -> bool {
+        index < self.capacity && self.is_occupied(index) && self.gen_of(index) == generation
+    }
+
+    fn kw_at(in self, index: u64, w: u64) -> u64 {
+        let t = index / LANES;
+        let l = index % LANES;
+        wrapping_add(wrapping_mul(wrapping_add(wrapping_mul(t, CID_WORDS), w), LANES), l)
+    }
+
+    fn lane_matches(in self, index: u64, key: CidKey) -> bool {
+        if !self.is_occupied(index) {
+            return false;
+        }
+        for w in 0..self.cid_words {
+            if get32(in self.kw, self.kw_at(index, w)) != key_word(key, w) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn key_of(in self, index: u64) -> CidKey {
+        CidKey {
+            w0: get32(in self.kw, self.kw_at(index, 0)),
+            w1: get32(in self.kw, self.kw_at(index, 1)),
+            w2: get32(in self.kw, self.kw_at(index, 2)),
+            w3: get32(in self.kw, self.kw_at(index, 3)),
+            w4: get32(in self.kw, self.kw_at(index, 4))
+        }
+    }
+
+    fn set_key(inout self, index: u64, key: CidKey) {
+        for w in 0..CID_WORDS {
+            let at = self.kw_at(index, w);
+            self.kw.try_set(at, wrapping_u32(key_word(key, w)));
+        }
+    }
+
+    // Index: the slot whose key is `key`, probing from `hash`.
+    fn ix_find(in self, hash: u64, key: CidKey) -> u64 {
+        let mut i = hash & self.ix_mask;
+        loop {
+            let slot = get32(in self.ix_slot, i);
+            if slot == EMPTY_SLOT {
+                return NO_INDEX;
+            }
+            if get32(in self.ix_hash, i) == hash && self.lane_matches(slot, key) {
+                return slot;
+            }
+            i = wrapping_add(i, 1) & self.ix_mask;
+        }
+    }
+
+    fn ix_insert(inout self, hash: u64, slot: u64) {
+        let mut i = hash & self.ix_mask;
+        loop {
+            if get32(in self.ix_slot, i) == EMPTY_SLOT {
+                break;
+            }
+            i = wrapping_add(i, 1) & self.ix_mask;
+        }
+        self.ix_hash.try_set(i, wrapping_u32(hash));
+        self.ix_slot.try_set(i, wrapping_u32(slot));
+    }
+
+    fn ix_position(in self, hash: u64, slot: u64) -> u64 {
+        let mut i = hash & self.ix_mask;
+        loop {
+            let s = get32(in self.ix_slot, i);
+            if s == EMPTY_SLOT {
+                return NO_INDEX;
+            }
+            if s == slot {
+                return i;
+            }
+            i = wrapping_add(i, 1) & self.ix_mask;
+        }
+    }
+
+    fn ix_relocate(inout self, hash: u64, old: u64, new: u64) -> bool {
+        let i = self.ix_position(hash, old);
+        if i == NO_INDEX {
+            return false;
+        }
+        self.ix_slot.try_set(i, wrapping_u32(new));
+        true
+    }
+
+    // Remove the bucket of `slot` and close the gap by backward shifting.
+    fn ix_remove(inout self, hash: u64, slot: u64) -> bool {
+        let mut hole = self.ix_position(hash, slot);
+        if hole == NO_INDEX {
+            return false;
+        }
+        let mut j = hole;
+        loop {
+            j = wrapping_add(j, 1) & self.ix_mask;
+            let s = get32(in self.ix_slot, j);
+            if s == EMPTY_SLOT {
+                break;
+            }
+            let h = get32(in self.ix_hash, j);
+            let home = h & self.ix_mask;
+            // Entry `j` may fill the hole unless its home lies cyclically in
+            // (hole, j].
+            let dist_home = wrapping_sub(j, home) & self.ix_mask;
+            let dist_hole = wrapping_sub(j, hole) & self.ix_mask;
+            if dist_home >= dist_hole {
+                self.ix_hash.try_set(hole, wrapping_u32(h));
+                self.ix_slot.try_set(hole, wrapping_u32(s));
+                hole = j;
+            }
+        }
+        self.ix_hash.try_set(hole, 0);
+        self.ix_slot.try_set(hole, wrapping_u32(EMPTY_SLOT));
+        true
+    }
+
+    fn write_state(inout self, i: u64, s: CoreState) {
+        self.rx_p1.try_set(i, s.rx_p1);
+        self.next_tx.try_set(i, s.next_tx_pn);
+        self.bw.try_set(i, s.bbr_bw);
+        self.min_rtt.try_set(i, s.bbr_min_rtt_ns);
+        self.cwnd.try_set(i, wrapping_u32(s.cwnd_bytes));
+        self.bif.try_set(i, wrapping_u32(s.bytes_in_flight));
+        self.edt.try_set(i, s.next_edt_ns);
+        self.idle.try_set(i, s.idle_deadline_ns);
+        self.peer0.try_set(i, s.peer0);
+        self.peer1.try_set(i, s.peer1);
+        self.peer2.try_set(i, wrapping_u32(s.peer2));
+        self.peer_len.try_set(i, wrapping_u8(s.peer_len));
+    }
+
+    fn read_state(in self, i: u64) -> CoreState {
+        CoreState {
+            rx_p1: get64(in self.rx_p1, i),
+            next_tx_pn: get64(in self.next_tx, i),
+            bbr_bw: get64(in self.bw, i),
+            bbr_min_rtt_ns: get64(in self.min_rtt, i),
+            cwnd_bytes: get32(in self.cwnd, i),
+            bytes_in_flight: get32(in self.bif, i),
+            next_edt_ns: get64(in self.edt, i),
+            idle_deadline_ns: get64(in self.idle, i),
+            peer0: get64(in self.peer0, i),
+            peer1: get64(in self.peer1, i),
+            peer2: get32(in self.peer2, i),
+            peer_len: get8(in self.peer_len, i)
+        }
+    }
+
+    // Empty the slot and bump its generation (wrapping, as u32).
+    fn vacate(inout self, i: u64) {
+        let t = i / LANES;
+        let bits = get64(in self.occupied, t);
+        self.occupied.try_set(t, bits & ~bit(i % LANES));
+        self
+            .set_key(
+            i,
+            CidKey {
+                w0: 0,
+                w1: 0,
+                w2: 0,
+                w3: 0,
+                w4: 0
+            }
+        );
+        self
+            .write_state(
+            i,
+            CoreState {
+                rx_p1: 0,
+                next_tx_pn: 0,
+                bbr_bw: 0,
+                bbr_min_rtt_ns: 0,
+                cwnd_bytes: 0,
+                bytes_in_flight: 0,
+                next_edt_ns: 0,
+                idle_deadline_ns: 0,
+                peer0: 0,
+                peer1: 0,
+                peer2: 0,
+                peer_len: 0
+            }
+        );
+        let g = self.gen_of(i);
+        self.generation.try_set(i, wrapping_u32(wrapping_add(g, 1)));
+    }
+
+    fn occupy(inout self, i: u64, key: CidKey) {
+        self.set_key(i, key);
+        let t = i / LANES;
+        let bits = get64(in self.occupied, t);
+        self.occupied.try_set(t, bits | bit(i % LANES));
+    }
+
+    // Mask of the lanes of `tile` whose local CID is `key`.
+    fn tile_match(in self, tile: u64, key: CidKey, vector: bool) -> u64 {
+        let mut mask = get64(in self.occupied, tile);
+        for w in 0..self.cid_words {
+            if mask == 0 {
+                break;
+            }
+            let at = wrapping_mul(wrapping_add(wrapping_mul(tile, CID_WORDS), w), LANES);
+            mask = mask
+                & eq_mask_u32(in self.kw[at..wrapping_add(at, LANES)], key_word(key, w), vector);
+        }
+        mask
+    }
+}
