@@ -490,11 +490,16 @@ fn build_tee_writes_the_rtmr_single_extend_of_the_executable() {
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     assert_eq!(report["schema"], "vesper.tee-measurement/1");
     assert_eq!(report["blake3"], hex(&digest));
-    let rtmr = vesper_aegis::claims::single_extend(
-        vesper_aegis::claims::RegisterHash::Sha384,
-        48,
-        &digest,
-    );
+    // One extend of a zeroed SHA-384 register with the digest padded to 48
+    // bytes (vesper_aegis::claims::single_extend).
+    let rtmr = {
+        use sha2::Digest;
+        let mut h = sha2::Sha384::new();
+        h.update([0u8; 48]);
+        h.update(digest);
+        h.update([0u8; 16]);
+        h.finalize()
+    };
     assert_eq!(report["tdx_rtmr_single_extend_sha384"], hex(&rtmr));
     assert!(
         report["hardware_extend"]

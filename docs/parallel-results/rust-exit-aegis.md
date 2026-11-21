@@ -40,10 +40,14 @@ Base: `main` at `ab965f2a`. Continues port wave P3a lane 8 (#1043,
    unconditional. Aegis is outside the compiler's closure (`cargo tree -p
    vesper -e normal,build` has no Aegis; `vesper-tee` moved to
    `crates/vesper-tools` in #1133), so the seed package
-   `crates/vesper-aegis/seed` is deleted too: `vesper-tools` and the root
-   dev-dependency (`tests/native_verifiers_cli.rs`) link the port-backed
-   package, and `crates/vesper-hybrid` drops a seed dependency it never
-   used. `IMPLEMENTATION` is always `"vesper"`.
+   `crates/vesper-aegis/seed` is deleted too, and `crates/vesper-hybrid`
+   drops a seed dependency it never used. Its last two users needed only
+   `claims::single_extend` (one SHA-384/SHA-512 register extend): the
+   `vesper-tee` tool and `tests/native_verifiers_cli.rs` now compute it
+   with `sha2` instead of linking Aegis. Neither may link the port: Bazel
+   builds the port with `//:bin/vesper`, whose runfiles include the tools
+   and whose `aliases` name the root crate's dev-dependencies, so either
+   link is a dependency cycle (it was the first CI failure of #1433). `IMPLEMENTATION` is always `"vesper"`.
 3. **Tests move, never vanish.** Every test (100, in 17 integration files and one unit
    test) runs against the port, unchanged except `tests/port_differential.rs`:
    it compared the port with the seed in the same process, and now folds

@@ -8,10 +8,23 @@
 //! form is the CCA REM value. Nothing is extended into hardware here: no TDX
 //! or CCA guest runs at build time. The values are what a relying party
 //! compares with a quote that measured this exact file.
+use sha2::{Digest, Sha384, Sha512};
 use std::{fs, path::Path};
-use vesper_aegis::claims::{RegisterHash, single_extend};
 
 pub const SCHEMA: &str = "vesper.tee-measurement/1";
+
+/// One extend of a zeroed register with a 32-byte digest, the extend data
+/// zero-padded to `pad_to` bytes: `H(0^len(H) || digest || 0^(pad_to - 32))`.
+/// The same computation as `vesper_aegis::claims::single_extend`, done here
+/// so the tools do not link Aegis: Bazel builds Aegis's Vesper port with the
+/// compiler, whose runfiles include these tools (SH6 lane 8, #1403).
+fn single_extend<H: Digest>(pad_to: usize, data: &[u8; 32]) -> Vec<u8> {
+    let mut h = H::new();
+    h.update(vec![0u8; <H as Digest>::output_size()]);
+    h.update(data);
+    h.update(vec![0u8; pad_to.saturating_sub(data.len())]);
+    h.finalize().to_vec()
+}
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -21,8 +34,8 @@ fn hex(bytes: &[u8]) -> String {
 pub fn measure_executable(path: &Path) -> Result<(), String> {
     let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let digest: [u8; 32] = *blake3::hash(&bytes).as_bytes();
-    let rtmr = single_extend(RegisterHash::Sha384, 48, &digest);
-    let rem = single_extend(RegisterHash::Sha512, 64, &digest);
+    let rtmr = single_extend::<Sha384>(48, &digest);
+    let rem = single_extend::<Sha512>(64, &digest);
     let report = serde_json::json!({
         "schema": SCHEMA,
         "artifact": path.file_name().map(|n| n.to_string_lossy().into_owned()),
