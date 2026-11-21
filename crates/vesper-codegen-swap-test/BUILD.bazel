@@ -13,7 +13,6 @@ vesper_crate(
     test_timeouts = {
         "test/self_host_codegen_calls_emit": "long",
         "test/self_host_codegen_swap": "long",
-        "test/self_host_codegen_swap": "long",
         # SH4 lane 6 (#1280): scalar emission from @vesper/codegen-scalar.
         "test/self_host_codegen_scalar_emit": "long",
     },
