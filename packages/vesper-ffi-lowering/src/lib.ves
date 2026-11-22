@@ -48,6 +48,10 @@ const S_RAW: u32 = 15;
 const S_HANDLE: u32 = 16;
 const S_FFI: u32 = 17;
 const S_EMPTY: u32 = 18;
+const S_PINNED: u32 = 19;
+const S_CHUNK_SEQ: u32 = 20;
+const S_DATA: u32 = 21;
+const S_T: u32 = 22;
 
 // `ValueType` tags.
 const VT_UNIT: u8 = 0;
@@ -57,6 +61,8 @@ const VT_ENUM: u8 = 3;
 const VT_ADDRESS: u8 = 4;
 const VT_HANDLE: u8 = 5;
 const VT_NONNULL: u8 = 6;
+// `f32` or `f64` by value; `name` spells which.
+const VT_FLOAT: u8 = 7;
 
 // `ParameterType` tags.
 const P_VALUE: u8 = 0;
@@ -64,6 +70,10 @@ const P_SLICE: u8 = 1;
 const P_POINTER: u8 = 2;
 const P_HANDLE: u8 = 3;
 const P_CSTR: u8 = 4;
+// A Vesper function handed to C as callback type `pname`.
+const P_FUNCTION: u8 = 5;
+// A `Pinned[T]` buffer of scalar `psc`.
+const P_PINNED: u8 = 6;
 
 // Accesses: `Access` (in, inout), `PointerAccess` (in, out, inout) and
 // `HandleAccess` (in, inout, sink) share these codes.
@@ -91,6 +101,9 @@ const E_BIG: u8 = 2;
 // Type nodes.
 const TK_NAMED: u8 = 0;
 const TK_TUPLE: u8 = 1;
+// A function type: args are the parameters then the result; `name` is the
+// index of the parameters' passes in `fpass`.
+const TK_FN: u8 = 2;
 
 // `FfiErrorKind`s this port raises.
 const K_DUPLICATE: u8 = 0;
@@ -191,6 +204,8 @@ pub copy struct Xt {
     // a callback type: a C function pointer, a plain copyable word
     copy: bool,
     drop: u32,
+    // a mapping's element scalar (its name), or NONE
+    mapping: u32,
 }
 
 pub copy struct Tn {
@@ -224,6 +239,7 @@ pub copy struct Gh {
     name: u32,
     linear: bool,
     copy: bool,
+    mapping: u32,
 }
 
 // A function's shape: Ok with params sp[p0..p0+pn] and `result`, or Err.
@@ -273,7 +289,11 @@ pub struct S {
     ghs: ChunkSeq[Gh],
     shs: ChunkSeq[Sh],
     sps: ChunkSeq[Sp],
+    // the passes of function types' parameters (`TK_FN`)
+    fpass: ChunkSeq[u8],
     invalid: bool,
+    // whether an import takes a `Pinned[T]`
+    pinned: bool,
     out: ChunkSeq[u8],
 }
 
@@ -365,7 +385,9 @@ pub fn s_new() -> S {
         ghs: ChunkSeq::new[Gh](),
         shs: ChunkSeq::new[Sh](),
         sps: ChunkSeq::new[Sp](),
+        fpass: ChunkSeq::new[u8](),
         invalid: false,
+        pinned: false,
         out: ChunkSeq::new[u8]()
     };
     s.starts.push(0);
@@ -388,6 +410,10 @@ pub fn s_new() -> S {
     let handles = s.intern(in "$handle".as_bytes());
     let ffis = s.intern(in "Ffi".as_bytes());
     let empties = s.intern(in "".as_bytes());
+    let pinneds = s.intern(in "Pinned".as_bytes());
+    let chunk_seqs = s.intern(in "ChunkSeq".as_bytes());
+    let datas = s.intern(in "data".as_bytes());
+    let ts = s.intern(in "T".as_bytes());
     s
 }
 
@@ -596,7 +622,8 @@ impl S {
                 name: NONE,
                 linear: false,
                 copy: false,
-                drop: NONE
+                drop: NONE,
+                mapping: NONE
             },
         }
     }
@@ -652,7 +679,8 @@ impl S {
             Option::None => Gh {
                 name: NONE,
                 linear: false,
-                copy: false
+                copy: false,
+                mapping: NONE
             },
         }
     }
@@ -790,6 +818,47 @@ impl S {
     pub fn dump_ty(inout self, t: u32, d: u64) {
         let node = self.tn(t);
         self.indent(d);
+        if node.kind == TK_FN {
+            self.put(in "T fn mode=copy");
+            self.nl();
+            let np = wrapping_sub(node.n, 1);
+            for i in 0..np {
+                self.indent(inc(d));
+                self.put(in "P pass=");
+                let pass = match self.fpass.try_get(add(w(node.name), i)) {
+                    Option::Some(x) => x,
+                    Option::None => PASS_IN,
+                };
+                if pass == PASS_IN {
+                    self.put(in "in");
+                } else if pass == PASS_SINK {
+                    self.put(in "sink");
+                } else {
+                    self.put(in "inout");
+                }
+                self.nl();
+                self.dump_ty(self.targ(add(node.a, i)), add(d, 2));
+            }
+            self.indent(inc(d));
+            self.put(in "R");
+            self.nl();
+            self.dump_ty(self.targ(add(node.a, np)), add(d, 2));
+            // `callback_row`: each direct library's effect, then `Realtime`.
+            for li in 0..self.libs.len() {
+                let l = self.lib(li);
+                if l.handler == H_DIRECT {
+                    self.indent(inc(d));
+                    self.put(in "E \"Ffi$");
+                    self.put_name(l.name);
+                    self.put(in "\"");
+                    self.nl();
+                }
+            }
+            self.indent(inc(d));
+            self.put(in "E \"Realtime\"");
+            self.nl();
+            return;
+        }
         if node.kind == TK_NAMED {
             self.put(in "T ");
             self.put_q(node.name);
@@ -944,6 +1013,9 @@ fn read_value(inout r: Reader, in b: Slice[u8], inout s: S) -> Vt {
     if field_is(in b, a, e, in "scalar") {
         v.tag = VT_SCALAR;
         v.sc = scalar_code(name);
+    } else if field_is(in b, a, e, in "float") {
+        v.tag = VT_FLOAT;
+        v.name = name;
     } else if field_is(in b, a, e, in "enum") {
         v.tag = VT_ENUM;
         v.name = name;
@@ -1020,6 +1092,16 @@ fn read_param(inout r: Reader, in b: Slice[u8], inout s: S) -> Par {
         let (c, d) = r.field(in b);
         p.access = access_code(in b, c, d);
         p.pname = field_sym(inout r, in b, inout s);
+    } else if field_is(in b, a, e, in "callback-function") {
+        // `retain` or `nocapture`: the plans do not depend on which.
+        p.tag = P_FUNCTION;
+        let keep = r.field(in b);
+        p.pname = field_sym(inout r, in b, inout s);
+    } else if field_is(in b, a, e, in "pinned-buffer") {
+        p.tag = P_PINNED;
+        let (c, d) = r.field(in b);
+        p.access = access_code(in b, c, d);
+        p.psc = scalar_code(field_sym(inout r, in b, inout s));
     }
     p
 }
@@ -1249,7 +1331,8 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
                         name: xn,
                         linear: field_is(in b, c, d, in "linear"),
                         copy: false,
-                        drop: NONE
+                        drop: NONE,
+                        mapping: NONE
                     }
                 );
         }
@@ -1261,6 +1344,36 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
                     let mut x = s.xt(add(x0, i));
                     x.drop = s.intern(in b[c..d]);
                     s.xts.try_set(add(x0, i), x);
+                }
+            }
+        }
+        // One element per extern type of the descriptor, callback types
+        // included, in name order: empty unless a mapping.
+        if peek_is(in r, in b, in "mappings") {
+            let marker3 = r.field(in b);
+            let mut names = ChunkSeq::new[u32]();
+            for i in 0..nx {
+                names.push(s.xt(add(x0, i)).name);
+            }
+            for i in 0..nf {
+                let f = s.fun(add(f0, i));
+                if f.indirect {
+                    names.push(f.sym);
+                }
+            }
+            sort_by_name(in s, inout names);
+            for i in 0..names.len() {
+                let (c, d) = r.field(in b);
+                if c != d {
+                    let element = s.intern(in b[c..d]);
+                    let name = u32_at(in names, i);
+                    for j in 0..nx {
+                        let mut x = s.xt(add(x0, j));
+                        if x.name == name {
+                            x.mapping = element;
+                            s.xts.try_set(add(x0, j), x);
+                        }
+                    }
                 }
             }
         }
@@ -1276,7 +1389,8 @@ pub fn read_library(in b: Slice[u8], a: u64, e: u64, handler: u64, inout s: S) {
                         name: f.sym,
                         linear: false,
                         copy: true,
-                        drop: NONE
+                        drop: NONE,
+                        mapping: NONE
                     }
                 );
         }
@@ -1546,9 +1660,15 @@ pub fn generate(inout s: S) -> Err {
                     Gh {
                         name: x.name,
                         linear: x.linear,
-                        copy: x.copy
+                        copy: x.copy,
+                        mapping: x.mapping
                     }
                 );
+        }
+    }
+    for i in 0..s.pars.len() {
+        if s.par(i).tag == P_PINNED {
+            s.pinned = true;
         }
     }
     for fi in 0..s.funs.len() {
@@ -1616,6 +1736,68 @@ fn handle_pass(access: u8) -> u8 {
     }
 }
 
+// `Generated::callback_type`: the source type of a Vesper function C calls
+// as callback type `name` of library row `lib`, or NONE after writing the
+// error. Its parameters and result each cross as one C word or float, and
+// its row holds the direct libraries' effects and `Realtime`.
+fn callback_type(inout s: S, lib: u64, name: u32) -> u32 {
+    let l = s.lib(lib);
+    let mut fi = NONE64;
+    for i in 0..l.fc {
+        let f = s.fun(add(l.f0, i));
+        if f.indirect && f.sym == name {
+            fi = add(l.f0, i);
+        }
+    }
+    if fi == NONE64 {
+        s.put_name(name);
+        s.put(in " is not a callback type");
+        return NONE;
+    }
+    let f = s.fun(fi);
+    let mut args = ChunkSeq::new[u32]();
+    let mut ok = true;
+    for j in 1..f.pn {
+        let p = s.par(add(f.p0, j));
+        if p.tag == P_VALUE && p.vt.tag == VT_SCALAR {
+            args.push(s.ty_name(sym8(p.vt.sc)));
+        } else if p.tag == P_VALUE && p.vt.tag == VT_FLOAT {
+            args.push(s.ty_name(p.vt.name));
+        } else {
+            ok = false;
+        }
+    }
+    let v = f.result;
+    if v.tag == VT_UNIT {
+        let none = ChunkSeq::new[u32]();
+        args.push(s.ty_tuple(in none));
+    } else if v.tag == VT_SCALAR {
+        args.push(s.ty_name(sym8(v.sc)));
+    } else if v.tag == VT_FLOAT {
+        args.push(s.ty_name(v.name));
+    } else {
+        ok = false;
+    }
+    if !ok || f.errno {
+        s.put(in "C calls a Vesper function of callback type ");
+        s.put_name(name);
+        s
+            .put(
+                in " only with integer or float parameters and an integer, float or Unit result, without errno, for now"
+            );
+        return NONE;
+    }
+    let passes = s.fpass.len();
+    for j in 1..f.pn {
+        s.fpass.push(PASS_IN);
+    }
+    let t = s.ty_named(n32(passes), in args);
+    let mut node = s.tn(t);
+    node.kind = TK_FN;
+    s.tns.try_set(w(t), node);
+    t
+}
+
 // `Generated::compute_shape` of function row `fi`.
 pub fn compute_shape(inout s: S, fi: u64) -> Sh {
     let f = s.fun(fi);
@@ -1635,6 +1817,8 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
             let v = p.vt;
             if v.tag == VT_SCALAR {
                 sp.ty = s.ty_name(sym8(v.sc));
+            } else if v.tag == VT_FLOAT {
+                sp.ty = s.ty_name(v.name);
             } else if v.tag == VT_BOOL {
                 sp.ty = s.ty_name(S_BOOL);
             } else if v.tag == VT_ENUM {
@@ -1684,6 +1868,20 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
         } else if p.tag == P_HANDLE {
             sp.pass = handle_pass(p.access);
             sp.ty = s.ty_name(p.pname);
+        } else if p.tag == P_FUNCTION {
+            // A named Vesper function, handed to C as a trampoline.
+            sp.ty = callback_type(inout s, f.lib, p.pname);
+            if sp.ty == NONE {
+                return shape_err(inout s, mark);
+            }
+        } else if p.tag == P_PINNED {
+            sp.pass = if p.access == A_IN {
+                PASS_IN
+            } else {
+                PASS_INOUT
+            };
+            let t = s.ty_name(sym8(p.psc));
+            sp.ty = s.ty_app1(S_PINNED, t);
         } else {
             let u8t = s.ty_name(sym8(SC_U8));
             sp.ty = s.ty_app1(S_SLICE, u8t);
@@ -1697,6 +1895,8 @@ pub fn compute_shape(inout s: S, fi: u64) -> Sh {
         result = s.ty_tuple(in none);
     } else if v.tag == VT_SCALAR {
         result = s.ty_name(sym8(v.sc));
+    } else if v.tag == VT_FLOAT {
+        result = s.ty_name(v.name);
     } else if v.tag == VT_BOOL {
         let t = s.ty_name(S_BOOL);
         let i = s.ty_name(S_INVALID);
@@ -1916,10 +2116,31 @@ pub fn append(inout s: S, pass2: bool, in insts: ChunkSeq[Inst], in lens: ChunkS
     let handles = sorted_handle_names(in s);
     for i in 0..handles.len() {
         let h = s.gh(find_gh(in s, u32_at(in handles, i)));
+        if h.mapping != NONE {
+            // A mapping is viewed in place through a sequence over the
+            // foreign memory.
+            adt_head(inout s, h.name, true, false, false);
+            variant_line(inout s, h.name, true);
+            let element = s.ty_name(h.mapping);
+            let seq = s.ty_app1(S_CHUNK_SEQ, element);
+            field_line(inout s, S_DATA, seq);
+            continue;
+        }
         adt_head(inout s, h.name, h.linear, !h.linear && !h.copy, false);
         variant_line(inout s, h.name, true);
         let u64t = s.ty_name(sym8(SC_U64));
         field_line(inout s, S_HANDLE, u64t);
+    }
+    // `linear struct Pinned[T] { data: ChunkSeq[T] }`.
+    if s.pinned {
+        adt_head(inout s, S_PINNED, true, false, false);
+        s.indent(2);
+        s.put(in "generic \"T\" bound=linear row=0");
+        s.nl();
+        variant_line(inout s, S_PINNED, true);
+        let t = s.ty_name(S_T);
+        let seq = s.ty_app1(S_CHUNK_SEQ, t);
+        field_line(inout s, S_DATA, seq);
     }
     if s.invalid {
         adt_head(inout s, S_INVALID, false, false, false);
@@ -2199,6 +2420,9 @@ fn generated_names(in s: S) -> ChunkSeq[u32] {
     }
     for i in 0..s.ghs.len() {
         names.push(s.gh(i).name);
+    }
+    if s.pinned {
+        names.push(S_PINNED);
     }
     if s.invalid {
         let mut seen = false;
@@ -2653,6 +2877,8 @@ fn put_carrier(inout s: S, lib: u64, v: Vt) -> bool {
     }
     if v.tag == VT_SCALAR {
         s.put_name(sym8(v.sc));
+    } else if v.tag == VT_FLOAT {
+        s.put_name(v.name);
     } else if v.tag == VT_BOOL {
         s.put_name(sym8(SC_U8));
     } else if v.tag == VT_ENUM {
@@ -2661,6 +2887,18 @@ fn put_carrier(inout s: S, lib: u64, v: Vt) -> bool {
         s.put(in "ptr");
     }
     true
+}
+
+// Whether extern type `name` of library row `lib` is a mapping.
+fn is_mapping(in s: S, lib: u64, name: u32) -> bool {
+    let l = s.lib(lib);
+    for i in 0..l.xn {
+        let x = s.xt(add(l.x0, i));
+        if x.name == name && x.mapping != NONE {
+            return true;
+        }
+    }
+    false
 }
 
 // `FunctionDescriptor::abi` of every function: `abi LIB SYM conv=..
@@ -2702,7 +2940,9 @@ pub fn dump_abi(inout s: S) {
             }
             if p.tag == P_VALUE {
                 let any = put_carrier(inout s, f.lib, p.vt);
-            } else if p.tag == P_SLICE {
+            } else if p.tag == P_SLICE || p.tag == P_PINNED {
+                s.put(in "ptr,usize");
+            } else if p.tag == P_HANDLE && is_mapping(in s, f.lib, p.pname) {
                 s.put(in "ptr,usize");
             } else {
                 s.put(in "ptr");
