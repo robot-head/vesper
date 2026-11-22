@@ -46,6 +46,7 @@ pub(crate) mod lean_nodes;
 pub mod loops;
 pub mod lsp;
 pub mod native;
+pub mod native_clif_opt;
 pub mod native_coverage;
 pub mod native_handlers;
 pub mod native_verifiers;
