@@ -93,6 +93,17 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+// The Crypto calls of `@vesper/vault`'s compiled object resolve to this shim.
+#[cfg(vesper_port)]
+extern crate vesper_crypto_sys;
+
+#[cfg(all(test, vesper_port))]
+mod differential;
+#[cfg(vesper_port)]
+mod port;
+#[cfg(any(test, not(vesper_port)))]
+mod reference;
+
 pub mod aead;
 pub mod consttime;
 pub mod kem;
