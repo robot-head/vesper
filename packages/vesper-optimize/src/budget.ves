@@ -142,60 +142,24 @@ pub fn reserve(inout b: Budget, len: u64, inout cap: u64, additional: u64, size:
 
 // `WitnessBudget::new`: every limit in 1..=HARD, else `InvalidLimits` (1).
 pub fn valid_limits(in b: Budget) -> u8 {
-    let ok = b
-        .max_terms
-        >= 1
-        && b
-        .max_terms
-        <= 16384
-        && b
-        .max_proofs
-        >= 1
-        && b
-        .max_proofs
-        <= 32768
-        && b
-        .max_input_nodes
-        >= 1
-        && b
-        .max_input_nodes
-        <= 2048
-        && b
-        .max_output_nodes
-        >= 1
-        && b
-        .max_output_nodes
-        <= 4096
-        && b
-        .max_depth
-        >= 1
-        && b
-        .max_depth
-        <= 128
-        && b
-        .max_variables
-        >= 1
-        && b
-        .max_variables
-        <= 512
-        && b
-        .max_name_bytes
-        >= 1
-        && b
-        .max_name_bytes
-        <= 65536
-        && b
-        .max_metadata_bytes
-        >= 1
-        && b
-        .max_metadata_bytes
-        <= 16777216
-        && b
-        .max_work
-        >= 1
-        && b
-        .max_work
-        <= 8000000;
+    let ok = b.max_terms >= 1
+        && b.max_terms <= 16384
+        && b.max_proofs >= 1
+        && b.max_proofs <= 32768
+        && b.max_input_nodes >= 1
+        && b.max_input_nodes <= 2048
+        && b.max_output_nodes >= 1
+        && b.max_output_nodes <= 4096
+        && b.max_depth >= 1
+        && b.max_depth <= 128
+        && b.max_variables >= 1
+        && b.max_variables <= 512
+        && b.max_name_bytes >= 1
+        && b.max_name_bytes <= 65536
+        && b.max_metadata_bytes >= 1
+        && b.max_metadata_bytes <= 16777216
+        && b.max_work >= 1
+        && b.max_work <= 8000000;
     if ok {
         0
     } else {

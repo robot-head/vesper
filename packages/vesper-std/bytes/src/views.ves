@@ -159,20 +159,16 @@ test {
     // @case both(in "ab", in "ab", true, true)
     // @case suffix(in "x.ves", in ".ves", false, true)
     fn test_affixes(in s: Str, in a: Str, prefix: bool, suffix: bool) -> bool {
-        starts_with(in s.as_bytes(), in a.as_bytes())
-            == prefix
-            && ends_with(in s.as_bytes(), in a.as_bytes())
-            == suffix
+        starts_with(in s.as_bytes(), in a.as_bytes()) == prefix
+            && ends_with(in s.as_bytes(), in a.as_bytes()) == suffix
     }
 
     // @case path(in "a::b::c", in "::", Option::Some((1, 3)), Option::Some((4, 6)))
     // @case none(in "abc", in "::", Option::None, Option::None)
     fn test_split(in s: Str, in sep: Str, first: Option[(u64, u64)], last: Option[(u64, u64)])
         -> bool {
-        split_once(in s.as_bytes(), in sep.as_bytes())
-            == first
-            && rsplit_once(in s.as_bytes(), in sep.as_bytes())
-            == last
+        split_once(in s.as_bytes(), in sep.as_bytes()) == first
+            && rsplit_once(in s.as_bytes(), in sep.as_bytes()) == last
     }
 
     // @case atomic(in "Atomic::load", in "Atomic::", Option::Some(8))

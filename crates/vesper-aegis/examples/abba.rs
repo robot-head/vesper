@@ -1,5 +1,9 @@
-//! ABBA benchmark of the Vesper port against the frozen Rust seed copy
-//! (port wave P3a lane 8, #1043), both linked into this one binary.
+//! ABBA benchmark of the Vesper port against the last Rust build (SH6
+//! lane 8, #1403). The Rust parsers and policy check were deleted, so the
+//! Rust arm is this example built at the last commit that had them
+//! (bench-abba.sh builds it in a temporary worktree) and run as a child
+//! process: `<rust-abba> window rust <workload> N` prints the nanoseconds
+//! its N passes took, timed inside that process.
 //!
 //! Workloads, each over the vendor samples in tests/data/vendor:
 //!
@@ -9,25 +13,51 @@
 //!   including the TD 1.5 "ex" body);
 //! - `sgx`: `SgxQuote::parse` of the two SGX quotes;
 //! - `policy`: `verify_attestation_claims` of the claims an SNP report
-//!   gives, against a policy with four architectures and 16 measurements.
+//!   gives, against a policy with four architectures and 16 measurements;
+//! - `cca_claims`: `CcaPlatformClaims::from_cbor` and
+//!   `CcaRealmClaims::from_cbor` of the vendor CCA tokens' payloads;
+//! - `cca_token`: `CcaToken::parse` of the vendor CCA tokens (COSE_Sign1
+//!   structure, still Rust, included);
+//! - `corim`: `Corim::parse_unsigned` of the vendor unsigned CoRIMs.
+//!
+//! The first four compare with the build at the last commit with the Rust
+//! parsers and policy check; the CBOR workloads with the build at the last
+//! commit with ciborium decoding and the Rust CCA claim parsers, where
+//! bench-abba.sh builds this file (which uses only the crate's public
+//! API) in place of that commit's.
 //!
 //! ```sh
-//! cargo run --release -p vesper-aegis --example abba            # ABBA, wall clock
+//! crates/vesper-aegis/bench-abba.sh                    # ABBA, wall clock
+//! crates/vesper-aegis/bench-abba.sh flip-gate snp      # the flip gate's pairs line
 //! cargo run --release -p vesper-aegis --example abba -- window port snp 2000
 //! ```
 //!
-//! `window <port|rust> <workload> N` runs N passes once (for callgrind
-//! instruction counts of one arm). The driver runs epochs of windows in
+//! `window port <workload> N` runs N passes once (for callgrind instruction
+//! counts). `compare <rust-abba> [workload...]` runs 9 epochs of windows per workload in
 //! the order A B B A (A = Rust, B = port), pairs each epoch's totals and
 //! reports the median regression of B over A with
-//! `vesper_bench::analyze_pairs`.
+//! `vesper_bench::analyze_pairs`. `flip-gate <workload> <rust-abba>` runs
+//! 30 such epochs and prints them in the flip gate's pairs protocol
+//! (scripts/ci/flip_gate.py, crates/vesper-aegis/flip-gate.toml).
 use std::hint::black_box;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::Instant;
 use vesper_aegis as port;
-use vesper_aegis_rust as rust;
 
 const EPOCHS: usize = 9;
+/// Epochs of one `flip-gate` run (the gate's default).
+const FLIP_GATE_EPOCHS: usize = 30;
+/// Each workload and the passes in one window.
+const WORKLOADS: [(&str, usize); 7] = [
+    ("snp", 20_000),
+    ("tdx", 10_000),
+    ("sgx", 10_000),
+    ("policy", 50_000),
+    ("cca_claims", 5_000),
+    ("cca_token", 2_000),
+    ("corim", 2_000),
+];
 
 fn data(path: &str) -> Vec<u8> {
     std::fs::read(
@@ -49,6 +79,10 @@ struct Samples {
     snp: Vec<Vec<u8>>,
     tdx: Vec<Vec<u8>>,
     sgx: Vec<Vec<u8>>,
+    /// CCA token collections, and their (platform, realm) payloads.
+    cca: Vec<Vec<u8>>,
+    cca_payloads: Vec<(Vec<u8>, Vec<u8>)>,
+    corim: Vec<Vec<u8>>,
 }
 
 fn samples() -> Samples {
@@ -62,7 +96,7 @@ fn samples() -> Samples {
     .iter()
     .map(|p| {
         let q = data(p);
-        let used = rust::tdx::TdxQuote::parse_prefix(&q).unwrap().1;
+        let used = port::tdx::TdxQuote::parse_prefix(&q).unwrap().1;
         exact(q, used)
     })
     .collect();
@@ -70,7 +104,7 @@ fn samples() -> Samples {
         .iter()
         .map(|p| {
             let q = data(p);
-            let used = rust::sgx::SgxQuote::parse_prefix(&q).unwrap().1;
+            let used = port::sgx::SgxQuote::parse_prefix(&q).unwrap().1;
             exact(q, used)
         })
         .collect();
@@ -80,7 +114,42 @@ fn samples() -> Samples {
         data("snp-oak/genoa_report.bin"),
         data("snp-oak/turin_report.bin"),
     ];
-    Samples { snp, tdx, sgx }
+    let cca: Vec<Vec<u8>> = [
+        "cca-veraison/cca-token-01.cbor",
+        "cca-veraison/cca-token-draft-ffm-03-all-claims.cbor",
+        "cca-veraison-services/cca-good.cbor",
+        "cca-veraison-services/e2e-cca-evidence.cbor",
+    ]
+    .iter()
+    .map(|p| data(p))
+    .filter(|b| port::cca::CcaToken::parse(b).is_ok())
+    .collect();
+    assert!(cca.len() >= 2, "the vendor CCA tokens parse");
+    let cca_payloads = cca
+        .iter()
+        .map(|b| {
+            let t = port::cca::CcaToken::parse(b).unwrap();
+            (t.platform.payload.unwrap(), t.realm.payload.unwrap())
+        })
+        .collect();
+    let corim: Vec<Vec<u8>> = [
+        "cca-veraison-corim/unsigned-good-corim.cbor",
+        "cca-veraison-services/corim-cca-realm-valid.cbor",
+        "cca-veraison-services/e2e-cca-realm-endorsements.cbor",
+    ]
+    .iter()
+    .map(|p| data(p))
+    .filter(|b| port::corim::Corim::parse_unsigned(b).is_ok())
+    .collect();
+    assert!(!corim.is_empty(), "a vendor CoRIM parses");
+    Samples {
+        snp,
+        tdx,
+        sgx,
+        cca,
+        cca_payloads,
+        corim,
+    }
 }
 
 /// A policy check that passes every step: the SNP claims of a report, and
@@ -126,7 +195,8 @@ macro_rules! policy_case {
     }};
 }
 
-fn window(arm: &str, workload: &str, passes: usize, s: &Samples) -> u64 {
+/// One window of the port, in this process.
+fn window(workload: &str, passes: usize, s: &Samples) -> u64 {
     macro_rules! go {
         ($k:ident) => {{
             let (claims, policy, channel) = policy_case!($k, &s.snp[1]);
@@ -156,6 +226,22 @@ fn window(arm: &str, workload: &str, passes: usize, s: &Samples) -> u64 {
                         .unwrap();
                     }
                 }
+                "cca_claims" => {
+                    for (p, r) in &s.cca_payloads {
+                        black_box($k::cca::CcaPlatformClaims::from_cbor(black_box(p)).unwrap());
+                        black_box($k::cca::CcaRealmClaims::from_cbor(black_box(r)).unwrap());
+                    }
+                }
+                "cca_token" => {
+                    for b in &s.cca {
+                        black_box($k::cca::CcaToken::parse(black_box(b)).unwrap());
+                    }
+                }
+                "corim" => {
+                    for b in &s.corim {
+                        black_box($k::corim::Corim::parse_unsigned(black_box(b)).unwrap());
+                    }
+                }
                 _ => panic!("unknown workload {workload}"),
             };
             pass();
@@ -166,51 +252,84 @@ fn window(arm: &str, workload: &str, passes: usize, s: &Samples) -> u64 {
             start.elapsed().as_nanos() as u64
         }};
     }
-    match arm {
-        "port" => go!(port),
-        "rust" => go!(rust),
-        _ => panic!("unknown arm {arm}"),
-    }
+    go!(port)
+}
+
+/// One window of the Rust build: `rust_abba window rust <workload> N`.
+fn rust_window(rust_abba: &str, workload: &str, passes: usize) -> u64 {
+    let out = Command::new(rust_abba)
+        .args(["window", "rust", workload, &passes.to_string()])
+        .output()
+        .unwrap_or_else(|e| panic!("{rust_abba}: {e}"));
+    assert!(
+        out.status.success(),
+        "{rust_abba} window rust {workload} failed"
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("the Rust window's nanoseconds")
+}
+
+/// One A B B A epoch: (Rust total, port total).
+fn epoch(rust_abba: &str, workload: &str, passes: usize, s: &Samples) -> (u64, u64) {
+    let a1 = rust_window(rust_abba, workload, passes);
+    let b1 = window(workload, passes, s);
+    let b2 = window(workload, passes, s);
+    let a2 = rust_window(rust_abba, workload, passes);
+    (a1 + a2, b1 + b2)
 }
 
 fn main() {
     assert_eq!(port::IMPLEMENTATION, "vesper");
-    assert_eq!(rust::IMPLEMENTATION, "rust");
     let s = samples();
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("window") {
-        println!(
-            "{}",
-            window(&args[2], &args[3], args[4].parse().unwrap(), &s)
-        );
-        return;
-    }
-    for (workload, passes) in [
-        ("snp", 20_000),
-        ("tdx", 10_000),
-        ("sgx", 10_000),
-        ("policy", 50_000),
-    ] {
-        let mut pairs = Vec::new();
-        let mut ratios = Vec::new();
-        for _ in 0..EPOCHS {
-            let a1 = window("rust", workload, passes, &s);
-            let b1 = window("port", workload, passes, &s);
-            let b2 = window("port", workload, passes, &s);
-            let a2 = window("rust", workload, passes, &s);
-            ratios.push((b1 + b2) as f64 / (a1 + a2) as f64);
-            pairs.push(
-                vesper_bench::PairedSample::new(a1 + a2, b1 + b2, 2 * passes as u64).unwrap(),
-            );
+    match args.get(1).map(String::as_str) {
+        // `window port` here; `window rust` in a baseline bench-abba.sh
+        // built (the same code over that commit's crate).
+        Some("window") => println!("{}", window(&args[3], args[4].parse().unwrap(), &s)),
+        Some("flip-gate") => {
+            let workload = args[2].as_str();
+            let passes = WORKLOADS
+                .iter()
+                .find(|(w, _)| *w == workload)
+                .unwrap_or_else(|| panic!("unknown workload {workload}"))
+                .1;
+            let pairs: Vec<String> = (0..FLIP_GATE_EPOCHS)
+                .map(|_| {
+                    let (a, b) = epoch(&args[3], workload, passes, &s);
+                    format!("{a}:{b}")
+                })
+                .collect();
+            println!("flip-gate pairs {workload} {}", pairs.join(" "));
         }
-        ratios.sort_by(f64::total_cmp);
-        let analysis = vesper_bench::analyze_pairs(&pairs, 10_000).unwrap();
-        println!(
-            "{workload}: port/Rust median {:.2}x (min {:.2}x, max {:.2}x); 2x gate {:?}",
-            ratios[EPOCHS / 2],
-            ratios[0],
-            ratios[EPOCHS - 1],
-            analysis.decision
-        );
+        Some("compare") => {
+            let only = &args[3..];
+            for (workload, passes) in WORKLOADS {
+                if !only.is_empty() && !only.iter().any(|w| w == workload) {
+                    continue;
+                }
+                let mut pairs = Vec::new();
+                let mut ratios = Vec::new();
+                for _ in 0..EPOCHS {
+                    let (a, b) = epoch(&args[2], workload, passes, &s);
+                    ratios.push(b as f64 / a as f64);
+                    pairs.push(vesper_bench::PairedSample::new(a, b, 2 * passes as u64).unwrap());
+                }
+                ratios.sort_by(f64::total_cmp);
+                let analysis = vesper_bench::analyze_pairs(&pairs, 10_000).unwrap();
+                println!(
+                    "{workload}: port/Rust median {:.2}x (min {:.2}x, max {:.2}x); 2x gate {:?}",
+                    ratios[EPOCHS / 2],
+                    ratios[0],
+                    ratios[EPOCHS - 1],
+                    analysis.decision
+                );
+            }
+        }
+        _ => panic!(
+            "usage: abba window port <workload> N | compare <rust-abba> [workload...] | flip-gate <workload> <rust-abba>"
+        ),
     }
 }

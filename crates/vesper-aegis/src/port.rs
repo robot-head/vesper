@@ -183,33 +183,205 @@ pub(crate) fn parse_error(e: vesper::AErr) -> ParseError {
             limit: e.a as usize,
             value: e.b,
         },
+        5 => ParseError::Cbor {
+            field: CBOR_FIELDS[e.field as usize],
+            reason: CBOR_REASONS[e.a as usize],
+        },
         kind => unreachable!("ParseError variant {kind} from the Vesper port"),
     }
 }
 
-/// The two field streams of one successful parse.
-pub(crate) struct Parsed {
-    w: Vec<u64>,
-    d: Vec<u8>,
+/// Field names of ParseError::Cbor, by the index the port raises
+/// (vesper/src/cca.ves). A malformed item is raised with field
+/// [`CBOR_WHAT`], the item the call decodes.
+const CBOR_FIELDS: [&str; 30] = [
+    "realm claims",                         // 0
+    "platform claims",                      // 1
+    "realm hash algo",                      // 2
+    "RIM",                                  // 3
+    "REMs",                                 // 4
+    "REM",                                  // 5
+    "realm challenge",                      // 6
+    "realm personalization",                // 7
+    "RAK",                                  // 8
+    "RAK hash algo",                        // 9
+    "lifecycle",                            // 10
+    "software components",                  // 11
+    "platform config",                      // 12
+    "platform manufacturing config",        // 13
+    "TBB RoTPK",                            // 14
+    "platform challenge",                   // 15
+    "instance id",                          // 16
+    "implementation id",                    // 17
+    "platform hash algo",                   // 18
+    "TBB RoTPK name",                       // 19
+    "TBB RoTPK index",                      // 20
+    "TBB RoTPK hash",                       // 21
+    "software component",                   // 22
+    "software component measurement value", // 23
+    "software component signer ID",         // 24
+    "software component type",              // 25
+    "software component version",           // 26
+    "software component description",       // 27
+    "platform profile",                     // 28
+    "realm profile",                        // 29
+];
+
+/// The field index of a malformed CBOR item (cbor::WHAT).
+const CBOR_WHAT: u64 = 1000;
+
+/// Reasons of ParseError::Cbor, by the index the port raises.
+const CBOR_REASONS: [&str; 22] = [
+    "malformed CBOR",                       // 0
+    "trailing bytes",                       // 1
+    "expected map",                         // 2
+    "non-integer claim key",                // 3
+    "duplicate claim key",                  // 4
+    "missing claim",                        // 5
+    "expected text",                        // 6
+    "unsupported hash algorithm",           // 7
+    "expected byte string",                 // 8
+    "wrong byte-string length",             // 9
+    "length does not match hash algorithm", // 10
+    "expected array",                       // 11
+    "expected four registers",              // 12
+    "expected unsigned integer",            // 13
+    "too many components",                  // 14
+    "too many entries",                     // 15
+    "expected name, index and hash",        // 16
+    "expected CM or DM",                    // 17
+    "expected 0..=5",                       // 18
+    "length is not 32, 48 or 64",           // 19
+    "unknown key",                          // 20
+    "unknown profile",                      // 21
+];
+
+/// A failure of a port call that decodes the CBOR item `what`.
+pub(crate) fn cbor_parse_error(mut e: vesper::AErr, what: usize) -> ParseError {
+    if e.kind == 5 && e.field == CBOR_WHAT {
+        e.field = what as u64;
+    }
+    parse_error(e)
 }
 
-/// Run a port parser over fresh streams.
-pub(crate) fn parse<T>(
-    run: impl FnOnce(&mut Vec<u64>, &mut Vec<u8>) -> Result<T, vesper::AErr>,
-) -> Result<(T, Parsed), ParseError> {
+/// The CBOR field index of `realm claims` and `platform claims`.
+pub(crate) const CBOR_REALM_CLAIMS: usize = 0;
+pub(crate) const CBOR_PLATFORM_CLAIMS: usize = 1;
+
+/// Run a port call that decodes `input` as CBOR: it gets the node buffer,
+/// the decoder's stack and the output words, and fails as the item
+/// `what`. Returns the call's result and the output words after the count.
+pub(crate) fn cbor_call<T>(
+    input: &[u8],
+    what: usize,
+    run: impl FnOnce(&mut [u64], &mut [u64], &mut [u64]) -> Result<T, vesper::AErr>,
+) -> Result<(T, Vec<u64>), ParseError> {
+    let mut n = vec![0u64; 4 * input.len() + 8];
+    let mut st = [0u64; CBOR_STACK_WORDS];
+    // Output words copy node words or add a presence or count word per
+    // claim, well within twice the node buffer.
+    let mut w = vec![0u64; 2 * n.len() + 512];
+    let out = run(&mut n, &mut st, &mut w).map_err(|e| cbor_parse_error(e, what))?;
+    let count = w[0] as usize;
+    assert!(
+        count < w.len(),
+        "the port wrote {count} words, more than the adapter's buffer holds"
+    );
+    w.truncate(count + 1);
+    w.remove(0);
+    Ok((out, w))
+}
+
+/// A cursor over the output words of a CBOR call: strings come as their
+/// chunks (cbor::put_str) into `input`.
+pub(crate) struct CborFields<'a> {
+    w: &'a [u64],
+    input: &'a [u8],
+}
+
+impl<'a> CborFields<'a> {
+    pub(crate) fn new(w: &'a [u64], input: &'a [u8]) -> Self {
+        CborFields { w, input }
+    }
+
+    pub(crate) fn word(&mut self) -> u64 {
+        cbor_word(&mut self.w)
+    }
+
+    /// A string: its chunk count, then each chunk's offset and length.
+    pub(crate) fn bytes(&mut self) -> Vec<u8> {
+        let k = self.word();
+        cbor_chunks(&mut self.w, k, self.input)
+    }
+
+    pub(crate) fn text(&mut self) -> String {
+        String::from_utf8(self.bytes()).expect("the port checked UTF-8")
+    }
+
+    pub(crate) fn opt_bytes(&mut self) -> Option<Vec<u8>> {
+        (self.word() != 0).then(|| self.bytes())
+    }
+
+    pub(crate) fn opt_text(&mut self) -> Option<String> {
+        (self.word() != 0).then(|| self.text())
+    }
+
+    pub(crate) fn array<const N: usize>(&mut self) -> [u8; N] {
+        self.bytes()
+            .try_into()
+            .expect("the port checked the length")
+    }
+
+    pub(crate) fn hash(&mut self) -> crate::claims::RegisterHash {
+        use crate::claims::RegisterHash;
+        match self.word() {
+            0 => RegisterHash::Sha256,
+            1 => RegisterHash::Sha384,
+            2 => RegisterHash::Sha512,
+            h => unreachable!("hash algorithm {h} from the Vesper port"),
+        }
+    }
+}
+
+/// Room for the words of the longest parse (a TDX v5 quote with a TD 1.5
+/// "ex" body writes 52), after the count in word 0.
+const WORDS: usize = 96;
+/// Room for the bytes a parser computes: the SNP signature, `r || s`.
+const DERIVED: usize = 96;
+
+/// The output of one successful parse: the words the port wrote, the bytes
+/// it computed, and the input whose offsets the words give.
+pub(crate) struct Parsed<'a> {
+    w: [u64; WORDS],
+    d: [u8; DERIVED],
+    input: &'a [u8],
+}
+
+/// Run a port parser over `input` with fresh output buffers.
+pub(crate) fn parse<'a, T>(
+    input: &'a [u8],
+    run: impl FnOnce(&mut [u64], &mut [u8]) -> Result<T, vesper::AErr>,
+) -> Result<(T, Parsed<'a>), ParseError> {
     let mut p = Parsed {
-        w: Vec::new(),
-        d: Vec::new(),
+        w: [0; WORDS],
+        d: [0; DERIVED],
+        input,
     };
     let out = run(&mut p.w, &mut p.d).map_err(parse_error)?;
+    assert!(
+        p.w[0] < WORDS as u64,
+        "the port wrote {} words, more than the adapter's buffer holds",
+        p.w[0]
+    );
     Ok((out, p))
 }
 
-impl Parsed {
+impl Parsed<'_> {
     pub(crate) fn fields(&self) -> Fields<'_> {
         Fields {
-            w: &self.w,
+            w: &self.w[1..=self.w[0] as usize],
             d: &self.d,
+            input: self.input,
         }
     }
 }
@@ -220,9 +392,10 @@ impl Parsed {
 pub(crate) struct Fields<'a> {
     w: &'a [u64],
     d: &'a [u8],
+    input: &'a [u8],
 }
 
-impl Fields<'_> {
+impl<'a> Fields<'a> {
     pub(crate) fn word(&mut self) -> u64 {
         let (first, rest) = self.w.split_first().expect("the port wrote this word");
         self.w = rest;
@@ -241,20 +414,27 @@ impl Fields<'_> {
         self.word() as u32
     }
 
-    pub(crate) fn bytes(&mut self, n: usize) -> &[u8] {
-        let (first, rest) = self.d.split_at(n);
-        self.d = rest;
-        first
+    /// `n` input bytes at the offset the next word gives.
+    pub(crate) fn bytes(&mut self, n: usize) -> &'a [u8] {
+        let at = self.word() as usize;
+        &self.input[at..at + n]
     }
 
     pub(crate) fn array<const N: usize>(&mut self) -> [u8; N] {
         self.bytes(N).try_into().expect("N bytes")
     }
 
-    /// A variable-length field: its length word, then its bytes.
+    /// A variable-length field: its length word, then its offset word.
     pub(crate) fn vec(&mut self) -> Vec<u8> {
         let n = self.word() as usize;
         self.bytes(n).to_vec()
+    }
+
+    /// The next `N` bytes the port computed.
+    pub(crate) fn derived<const N: usize>(&mut self) -> [u8; N] {
+        let (first, rest) = self.d.split_at(N);
+        self.d = rest;
+        first.try_into().expect("N bytes")
     }
 }
 
@@ -287,5 +467,78 @@ pub(crate) fn verify_error(e: vesper::PErr) -> AegisVerifyError {
             max_allowed: e.b as u32,
         },
         kind => unreachable!("AegisVerifyError variant {kind} from the Vesper port"),
+    }
+}
+
+/// One CBOR item decoded by the port (`cbor::decode`): the value and the
+/// bytes it used, or `None` when the input is not CBOR ciborium accepts.
+pub(crate) fn cbor_value(input: &[u8]) -> Option<(coset::cbor::value::Value, usize)> {
+    // Every node takes at least one input byte and at most four words.
+    let mut w = vec![0u64; 4 * input.len() + 8];
+    let mut st = [0u64; CBOR_STACK_WORDS];
+    let used = vesper::cbor_decode(input, &mut w, &mut st).ok()?;
+    assert!(
+        (w[0] as usize) < w.len(),
+        "the port wrote {} CBOR words, more than the adapter's buffer holds",
+        w[0]
+    );
+    let mut nodes = &w[1..=w[0] as usize];
+    let v = cbor_node(&mut nodes, input);
+    debug_assert!(nodes.is_empty(), "the port wrote one CBOR item");
+    Some((v, used as usize))
+}
+
+/// The decoder's stack: four words for each of 256 open containers.
+const CBOR_STACK_WORDS: usize = 4 * 256;
+
+fn cbor_word(w: &mut &[u64]) -> u64 {
+    let (first, rest) = w.split_first().expect("the port wrote this CBOR word");
+    *w = rest;
+    *first
+}
+
+fn cbor_chunks(w: &mut &[u64], n: u64, input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let at = cbor_word(w) as usize;
+        let len = cbor_word(w) as usize;
+        out.extend_from_slice(&input[at..at + len]);
+    }
+    out
+}
+
+fn cbor_node(w: &mut &[u64], input: &[u8]) -> coset::cbor::value::Value {
+    use coset::cbor::value::Value;
+    let kind = cbor_word(w);
+    let a = cbor_word(w);
+    match kind {
+        0 => Value::Integer(a.into()),
+        1 => Value::Integer(
+            (-1 - i128::from(a))
+                .try_into()
+                .expect("a CBOR negative fits"),
+        ),
+        2 => Value::Bytes(cbor_chunks(w, a, input)),
+        3 => Value::Text(
+            String::from_utf8(cbor_chunks(w, a, input)).expect("the port checked UTF-8"),
+        ),
+        4 => Value::Array((0..a).map(|_| cbor_node(w, input)).collect()),
+        5 => Value::Map(
+            (0..a)
+                .map(|_| (cbor_node(w, input), cbor_node(w, input)))
+                .collect(),
+        ),
+        6 => Value::Tag(a, Box::new(cbor_node(w, input))),
+        7 => Value::Float(f64::from_bits(a)),
+        8 => Value::Bool(a != 0),
+        9 => Value::Null,
+        10 => {
+            let hi = cbor_word(w);
+            let lo = cbor_word(w);
+            let raw = (u128::from(hi) << 64 | u128::from(lo)).to_be_bytes();
+            let first = raw.iter().position(|&b| b != 0).unwrap_or(raw.len());
+            Value::Tag(a, Box::new(Value::Bytes(raw[first..].to_vec())))
+        }
+        k => unreachable!("CBOR node kind {k} from the Vesper port"),
     }
 }

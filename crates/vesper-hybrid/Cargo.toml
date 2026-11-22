@@ -37,6 +37,8 @@ divergent-ir-check = []
 divergent-stack-bound = []
 # The same check for the inliner (#1250): nothing is inlined.
 divergent-ir-inline = []
+# The same check for the AST optimizer (#1249): every island is a barrier.
+divergent-optimize = []
 # The same check for the IR optimizer (#1248): every optimizing compile fails.
 divergent-ir-opt = []
 
@@ -96,9 +98,6 @@ vesper-std-host = { path = "../vesper-std-host" }
 vesper-pact = { path = "../vesper-pact/seed", package = "vesper-pact-seed" }
 vesper-pact-binding = { path = "../vesper-pact-binding" }
 # Integration B (#136): wave-five verifiers and tools wired into the CLI.
-# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
-# port is the package crates/vesper-aegis (#1043).
-vesper-aegis = { path = "../vesper-aegis/seed", package = "vesper-aegis-seed" }
 vesper-chrono = { path = "../vesper-chrono" }
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-crucible (#915).

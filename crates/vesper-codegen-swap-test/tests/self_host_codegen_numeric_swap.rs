@@ -15,14 +15,9 @@
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use vesper::codegen_swap::{self, CodegenHooks, INSTRUCTION, Lent};
-use vesper::ffi_lowering::{self, ForeignChecked, Handler, Imports};
 use vesper::native::WordFunction;
 use vesper::vector::{Elem, Shape};
 use vesper_codegen_swap_test::*;
-
-/// Package files in assembly order after `@vesper/cranelift` (shim gap 4:
-/// a package cannot import a `.vsys` library through the JIT harness).
-const FILES: [&str; 4] = ["rt.ves", "shapes.ves", "tiled_ops.ves", "vector.ves"];
 
 fn repo() -> std::path::PathBuf {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -37,60 +32,13 @@ fn repo() -> std::path::PathBuf {
     panic!("cannot find packages/vesper-codegen-numeric");
 }
 
-/// The `sys library` of `@vesper/cranelift`'s `// @export vsys` directive.
-fn vsys(source: &str, target: (&str, &str)) -> String {
-    let mut out = String::new();
-    for line in source.lines() {
-        if let Some(rest) = line.strip_prefix("// | ") {
-            out.push_str(rest);
-            out.push('\n');
-        } else if line == "// |" {
-            out.push('\n');
-        }
-    }
-    assert!(out.contains("sys library Cranelift"), "no .vsys directive");
-    out.replace("@TARGET@", target.0).replace("@ABI@", target.1)
-}
-
-fn host_abi() -> (&'static str, &'static str) {
-    let target = host_target().expect("a host the shim supports");
-    let abi = if target.ends_with("windows-msvc") {
-        "win64"
-    } else if target.ends_with("apple-darwin") {
-        "darwin64"
-    } else if target.starts_with("aarch64") {
-        "aapcs64"
-    } else {
-        "sysv64"
-    };
-    (target, abi)
-}
-
 /// The hook, JIT-compiled once with no hook in effect (a hook compiled
 /// under `with_hooks` would call itself while its `OnceLock` initializes).
 fn hook() -> &'static WordFunction {
     static HOOK: OnceLock<WordFunction> = OnceLock::new();
     HOOK.get_or_init(|| {
         codegen_swap::with_hooks(CodegenHooks::default(), || {
-            let repo = repo();
-            let shim = std::fs::read_to_string(repo.join("packages/vesper-cranelift/src/lib.ves"))
-                .unwrap();
-            let mut source = shim.clone();
-            for f in FILES {
-                source.push('\n');
-                source.push_str(
-                    &std::fs::read_to_string(
-                        repo.join("packages/vesper-codegen-numeric/src").join(f),
-                    )
-                    .unwrap(),
-                );
-            }
-            let mut imports = Imports::new();
-            imports
-                .add(&vsys(&shim, host_abi()), Handler::Direct)
-                .unwrap();
-            let checked: ForeignChecked =
-                ffi_lowering::check_source(&source, &imports).unwrap_or_else(|e| panic!("{e}"));
+            let checked = foreign_package(&repo(), "packages/vesper-codegen-numeric");
             hook_function(&checked, "numeric_hook")
         })
     })
@@ -318,6 +266,21 @@ fn programs() -> Vec<(String, String)> {
             }
         }
     }
+    // `widen_f64` doubles the vector's bits, so its programs need the
+    // profile of the result, which the template above does not give.
+    for (n, profile) in [(4u16, "Avx2"), (8, "Avx512")] {
+        let v = format!("Vec[f32, {n}]");
+        out.push((
+            format!("f32x{n} widen_f64"),
+            format!(
+                "fn k(a: {v}, b: {v}) -> f64 eff [Isa[{profile}]] {{ let w = Vec::widen_f64(a); Vec::extract(w, {}) + Vec::extract(w, 1) + Vec::reduce_add(Vec::widen_f64(b)) }}\n\
+                 fn main() -> f64 {{ if Isa::supported[{profile}]() {{ k({}, {}) }} else {{ 0.0 }} }}\n",
+                n - 1,
+                vector(Elem::F32, n, 0),
+                vector(Elem::F32, n, 2),
+            ),
+        ));
+    }
     // `Isa::supported` of every profile.
     for p in ["Baseline128", "Avx2", "Avx512", "Sve2", "Rvv1"] {
         out.push((
@@ -338,7 +301,7 @@ fn accepted(source: &str) -> Option<vesper::check::World> {
 }
 
 /// The operations the corpus must compile for at least one shape.
-const EXPECTED: [&str; 54] = [
+const EXPECTED: [&str; 55] = [
     "Avx2",
     "Avx512",
     "Baseline128",
@@ -392,6 +355,7 @@ const EXPECTED: [&str; 54] = [
     "sqrt",
     "sub",
     "to_bits",
+    "widen_f64",
     "xor",
 ];
 
@@ -432,8 +396,6 @@ fn vector_operations_match_the_rust_lowering() {
     // Every operation must be compiled for at least one shape.
     let ops: std::collections::BTreeSet<&str> = programs_names(&compiled_names);
     eprintln!("operations compiled: {ops:?}");
-    // `widen_f64` doubles the vector's bits, so no template shape checks;
-    // the Vesper hook declines it anyway (no `fvpromote_low` in the shim).
     for op in EXPECTED {
         assert!(ops.contains(op), "no program compiled {op}");
     }
@@ -529,4 +491,374 @@ fn tiled_operations_match_the_rust_lowering() {
     assert!(diff.is_clean(), "{}", diff.summary());
     assert!(compiled.len() >= 20, "{compiled:?} {rejected:?}");
     assert!(diff.worlds >= 40, "{}", diff.summary());
+}
+
+// ----------------------------------------------------------------- regions
+
+/// The region fixtures of tests/regions_backends.rs and the verified
+/// codegen corpus, and one program per scalar payload type.
+fn region_programs() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for dir in ["tests/fixtures/regions", "tests/fixtures/verified_codegen"] {
+        let mut files: Vec<_> = std::fs::read_dir(repo().join(dir))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.extension().is_some_and(|x| x == "ves")
+                    && std::fs::read_to_string(p).is_ok_and(|t| t.contains("region "))
+            })
+            .collect();
+        files.sort();
+        for f in files {
+            let name = f.file_name().unwrap().to_string_lossy().into_owned();
+            out.push((
+                format!("{dir}/{name}"),
+                std::fs::read_to_string(&f).unwrap(),
+            ));
+        }
+    }
+    for (t, one, two, bits) in [
+        ("u8", "3", "4", "widen_u64(x)"),
+        ("u16", "300", "301", "widen_u64(x)"),
+        ("u32", "70000", "70001", "widen_u64(x)"),
+        ("u64", "5000000000", "5000000001", "x"),
+        ("i32", "7", "8", "wrapping_u64(x)"),
+        ("i64", "9", "10", "wrapping_u64(x)"),
+        ("f32", "1.5", "2.5", "widen_u64(to_bits_f32(x))"),
+        ("f64", "2.5", "3.5", "to_bits_f64(x)"),
+        ("bool", "true", "false", "if x { 1 } else { 2 }"),
+        ("u128", "7", "8", "wrapping_u64(x)"),
+    ] {
+        out.push((
+            format!("region payload {t}"),
+            format!(
+                "fn main() -> u64 {{\n\
+                 \x20   region r(256) {{\n\
+                 \x20       let mark = r.checkpoint();\n\
+                 \x20       let h: RegionBox[r, {t}] = r.box({one});\n\
+                 \x20       r.set(h, {two});\n\
+                 \x20       let x: {t} = r.get(h);\n\
+                 \x20       let y = {bits};\n\
+                 \x20       let used = r.used();\n\
+                 \x20       r.rewind(mark);\n\
+                 \x20       wrapping_add(y, used)\n\
+                 \x20   }}\n\
+                 }}\n"
+            ),
+        ));
+    }
+    out
+}
+
+#[test]
+fn region_blocks_match_the_rust_lowering() {
+    let _ = hook();
+    let before = HANDLED.load(Ordering::Relaxed);
+    let mut diff = Diff::default();
+    let mut compiled = Vec::new();
+    let mut rejected = Vec::new();
+    for (name, source) in region_programs() {
+        let Some(world) = accepted(&source) else {
+            rejected.push(name);
+            continue;
+        };
+        for optimize in [false, true] {
+            diff.add(compare(&name, &world, "main", hooks(), optimize, true));
+        }
+        compiled.push(name);
+    }
+    let handled = HANDLED.load(Ordering::Relaxed) - before;
+    eprintln!(
+        "region differential: {} programs (rejected: {rejected:?}), {}; {handled} requests from Vesper",
+        compiled.len(),
+        diff.summary(),
+    );
+    assert!(diff.is_clean(), "{}", diff.summary());
+    for name in [
+        "region payload f32",
+        "region payload bool",
+        "tests/fixtures/regions/aggregates.ves",
+    ] {
+        assert!(
+            compiled.iter().any(|c| c == name),
+            "{name} did not compile: {rejected:?}"
+        );
+    }
+    assert!(handled > 0);
+}
+
+// ----------------------------------------------------------------- atomics
+
+/// Every operation of `Atomic[k]` for each cell kind, and a scoped-worker
+/// loop (which object output lowers to the prelude's loop).
+fn atomic_programs() -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for k in ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"] {
+        let v = |x: u64| format!("wrapping_{k}({x})");
+        let mut body = String::new();
+        for (i, op) in [
+            "swap",
+            "fetch_add",
+            "fetch_sub",
+            "fetch_and",
+            "fetch_or",
+            "fetch_xor",
+        ]
+        .iter()
+        .enumerate()
+        {
+            body += &format!(
+                "    acc = mix(acc, wrapping_u64(c.{op}({}, MemoryOrder::SeqCst)));\n",
+                v(0x9b + 77 * i as u64)
+            );
+        }
+        body += &format!("    c.store({}, MemoryOrder::Release);\n", v(250));
+        body += "    acc = mix(acc, wrapping_u64(c.load(MemoryOrder::Acquire)));\n";
+        body += &format!(
+            "    match c.compare_exchange({}, {}, MemoryOrder::AcqRel, MemoryOrder::Acquire) {{\n\
+             \x20       Result::Ok(p) => {{ acc = mix(acc, wrapping_u64(p)); }}\n\
+             \x20       Result::Err(p) => {{ acc = mix(acc, wrapping_add(wrapping_u64(p), 1)); }}\n\
+             \x20   }}\n",
+            v(250),
+            v(3)
+        );
+        out.push((
+            format!("atomic {k}"),
+            format!(
+                "fn mix(acc: u64, v: u64) -> u64 {{ wrapping_add(wrapping_mul(acc, 1099511628211), v) }}\n\
+                 fn main() -> u64 {{\n\
+                 \x20   let c: Atomic[{k}] = Atomic::new({});\n\
+                 \x20   let mut acc: u64 = 7;\n\
+                 {body}\x20   mix(acc, wrapping_u64(c.into_inner()))\n\
+                 }}\n",
+                v(0xf1)
+            ),
+        ));
+    }
+    out.push((
+        "atomic bool".into(),
+        "fn bit(b: bool) -> u64 { if b { 1 } else { 0 } }\n\
+         fn main() -> u64 {\n\
+         \x20   let f: Atomic[bool] = Atomic::new(false);\n\
+         \x20   let a = bit(f.fetch_or(true, MemoryOrder::Relaxed));\n\
+         \x20   let b = bit(f.fetch_xor(true, MemoryOrder::AcqRel));\n\
+         \x20   let c = bit(f.swap(true, MemoryOrder::SeqCst));\n\
+         \x20   let d = bit(f.fetch_and(false, MemoryOrder::Release));\n\
+         \x20   f.store(true, MemoryOrder::Relaxed);\n\
+         \x20   let h = bit(f.load(MemoryOrder::Acquire));\n\
+         \x20   wrapping_add(wrapping_add(a, wrapping_mul(b, 2)), wrapping_add(wrapping_mul(c, 4), wrapping_add(wrapping_mul(d, 8), wrapping_mul(h, 16))))\n\
+         }\n"
+            .into(),
+    ));
+    out
+}
+
+#[test]
+fn atomic_operations_match_the_rust_lowering() {
+    let _ = hook();
+    let before = HANDLED.load(Ordering::Relaxed);
+    let mut diff = Diff::default();
+    let mut compiled = Vec::new();
+    let mut rejected = Vec::new();
+    for (name, source) in atomic_programs() {
+        let Some(world) = accepted(&source) else {
+            rejected.push(name);
+            continue;
+        };
+        for optimize in [false, true] {
+            diff.add(compare(&name, &world, "main", hooks(), optimize, true));
+        }
+        compiled.push(name);
+    }
+    let handled = HANDLED.load(Ordering::Relaxed) - before;
+    eprintln!(
+        "atomic differential: {} programs (rejected: {rejected:?}), {}; {handled} requests from Vesper",
+        compiled.len(),
+        diff.summary(),
+    );
+    assert!(diff.is_clean(), "{}", diff.summary());
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert!(diff.worlds >= 18, "{}", diff.summary());
+    assert!(handled > 0);
+}
+
+// ------------------------------------------------------------------ floats
+
+/// Float programs: `(name, source, run)`. Each operation sits in a function
+/// `k` of parameters, so neither optimizer folds it away; `main` returns its
+/// bit pattern. Checked narrowings raise `Fail[ArithOverflow]` under a
+/// handler in `main`.
+fn float_programs() -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    let mut push =
+        |name: String, params: &str, result: &str, body: &str, args: &str, bits: &str| {
+            for (effect, tag) in [("", ""), (" eff [ConstDenorm]", " flushed")] {
+                let source = format!(
+                    "fn k({params}) -> {result}{effect} {{ {body} }}\n\
+                 fn main() -> u64 {{ {bits} }}\n",
+                    bits = bits.replace("K", &format!("k({args})")),
+                );
+                out.push((format!("{name}{tag}"), source, true));
+            }
+        };
+    for (t, a, b, c) in [
+        ("f32", "2.25", "-7.5", "0.375"),
+        ("f64", "2.75", "-3.5", "1.0e-310"),
+    ] {
+        let (bits, word, one) = if t == "f32" {
+            ("widen_u64(to_bits_f32(K))".to_string(), "u32", "1073741824")
+        } else {
+            ("to_bits_f64(K)".to_string(), "u64", "4611686018427387904")
+        };
+        for op in ["sqrt", "abs", "floor", "ceil", "round", "trunc"] {
+            for x in [a, b, c] {
+                push(
+                    format!("{op} {t} {x}"),
+                    &format!("x: {t}"),
+                    t,
+                    &format!("{op}(x)"),
+                    x,
+                    &bits,
+                );
+            }
+        }
+        for op in ["min", "max"] {
+            push(
+                format!("{op} {t}"),
+                &format!("x: {t}, y: {t}"),
+                t,
+                &format!("{op}(x, y)"),
+                &format!("{a}, {b}"),
+                &bits,
+            );
+        }
+        push(
+            format!("fma {t}"),
+            &format!("x: {t}, y: {t}, z: {t}"),
+            t,
+            "fma(x, y, z)",
+            &format!("{a}, {b}, {c}"),
+            &bits,
+        );
+        push(
+            format!("to_bits {t}"),
+            &format!("x: {t}"),
+            word,
+            &format!("to_bits_{t}(x)"),
+            b,
+            "widen_u64(K)",
+        );
+        push(
+            format!("from_bits {t}"),
+            &format!("x: {word}"),
+            t,
+            &format!("from_bits_{t}(x)"),
+            one,
+            &bits,
+        );
+        for k in ["u8", "i8", "u32", "i32", "u64", "i64"] {
+            push(
+                format!("saturating_{k} {t}"),
+                &format!("x: {t}"),
+                k,
+                &format!("saturating_{k}(x)"),
+                b,
+                "wrapping_u64(K)",
+            );
+        }
+    }
+    push(
+        "widen_f64 f32".into(),
+        "x: f32",
+        "f64",
+        "widen_f64(x)",
+        "2.25",
+        "to_bits_f64(K)",
+    );
+    push(
+        "nearest_f32 f64".into(),
+        "x: f64",
+        "f32",
+        "nearest_f32(x)",
+        "2.75",
+        "widen_u64(to_bits_f32(K))",
+    );
+    for (k, x) in [
+        ("u64", "18446744073709551615"),
+        ("i64", "9"),
+        ("u32", "70000"),
+        ("i32", "7"),
+        ("u8", "200"),
+    ] {
+        for t in ["f32", "f64"] {
+            let bits = if t == "f32" {
+                "widen_u64(to_bits_f32(K))"
+            } else {
+                "to_bits_f64(K)"
+            };
+            push(
+                format!("nearest_{t} {k}"),
+                &format!("x: {k}"),
+                t,
+                &format!("nearest_{t}(x)"),
+                x,
+                bits,
+            );
+        }
+    }
+    for t in ["f32", "f64"] {
+        for k in ["i32", "u8", "i64"] {
+            out.push((
+                format!("narrow_{k} {t}"),
+                format!(
+                    "fn k(x: {t}) -> {k} eff [Fail[ArithOverflow]] {{ narrow_{k}(x) }}\n\
+                     fn main() -> u64 {{ handle Fail[ArithOverflow] in {{ wrapping_u64(k(3.75)) }} with {{ return v => v, raise(e, k) => 4242, }} }}\n"
+                ),
+                true,
+            ));
+        }
+    }
+    out
+}
+
+#[test]
+fn float_operations_match_the_rust_lowering() {
+    let _ = hook();
+    let before = HANDLED.load(Ordering::Relaxed);
+    let mut diff = Diff::default();
+    let mut compiled = Vec::new();
+    let mut rejected = Vec::new();
+    for (name, source, run) in float_programs() {
+        let Some(world) = accepted(&source) else {
+            rejected.push(name);
+            continue;
+        };
+        for optimize in [false, true] {
+            diff.add(compare(&name, &world, "main", hooks(), optimize, run));
+        }
+        compiled.push(name);
+    }
+    let handled = HANDLED.load(Ordering::Relaxed) - before;
+    eprintln!(
+        "float differential: {} programs (rejected: {rejected:?}), {}; {handled} requests from Vesper",
+        compiled.len(),
+        diff.summary(),
+    );
+    assert!(diff.is_clean(), "{}", diff.summary());
+    for op in [
+        "sqrt",
+        "round",
+        "fma",
+        "min",
+        "saturating_u8",
+        "from_bits",
+        "nearest_f32",
+        "narrow_i32",
+        "flushed",
+    ] {
+        assert!(
+            compiled.iter().any(|n| n.contains(op)),
+            "no {op} program compiled: {rejected:?}"
+        );
+    }
 }

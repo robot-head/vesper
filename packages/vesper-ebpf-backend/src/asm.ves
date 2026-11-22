@@ -130,25 +130,25 @@ impl Asm {
     pub fn alu64(inout self, op: AluOp, dst: u8, src: Operand) {
         self
             .insn(
-            Insn::Alu {
-                wide: true,
-                op: op,
-                dst: dst,
-                src: src
-            }
-        );
+                Insn::Alu {
+                    wide: true,
+                    op: op,
+                    dst: dst,
+                    src: src
+                }
+            );
     }
 
     pub fn alu32(inout self, op: AluOp, dst: u8, src: Operand) {
         self
             .insn(
-            Insn::Alu {
-                wide: false,
-                op: op,
-                dst: dst,
-                src: src
-            }
-        );
+                Insn::Alu {
+                    wide: false,
+                    op: op,
+                    dst: dst,
+                    src: src
+                }
+            );
     }
 
     pub fn mov_reg(inout self, dst: u8, src: u8) {
@@ -170,22 +170,22 @@ impl Asm {
     pub fn endian(inout self, kind: Endian, bits: u8, dst: u8) {
         self
             .insn(
-            Insn::Endian {
-                kind: kind,
-                bits: bits,
-                dst: dst
-            }
-        );
+                Insn::Endian {
+                    kind: kind,
+                    bits: bits,
+                    dst: dst
+                }
+            );
     }
 
     pub fn ld_imm64(inout self, dst: u8, v: u64) {
         self
             .insn(
-            Insn::LdImm64 {
-                dst: dst,
-                imm: Imm64::Value(v)
-            }
-        );
+                Insn::LdImm64 {
+                    dst: dst,
+                    imm: Imm64::Value(v)
+                }
+            );
     }
 
     pub fn ld_map(inout self, dst: u8, map: u64) {
@@ -193,63 +193,63 @@ impl Asm {
         self.relocs.push(map);
         self
             .insn(
-            Insn::LdImm64 {
-                dst: dst,
-                imm: Imm64::MapFd(wrapping_i32(map))
-            }
-        );
+                Insn::LdImm64 {
+                    dst: dst,
+                    imm: Imm64::MapFd(wrapping_i32(map))
+                }
+            );
     }
 
     pub fn ldx(inout self, size: Size, dst: u8, src: u8, off: i16) {
         self
             .insn(
-            Insn::Ldx {
-                size: size,
-                dst: dst,
-                src: src,
-                off: off,
-                sign_extend: false
-            }
-        );
+                Insn::Ldx {
+                    size: size,
+                    dst: dst,
+                    src: src,
+                    off: off,
+                    sign_extend: false
+                }
+            );
     }
 
     pub fn stx(inout self, size: Size, dst: u8, off: i16, src: u8) {
         self
             .insn(
-            Insn::Stx {
-                size: size,
-                dst: dst,
-                src: src,
-                off: off
-            }
-        );
+                Insn::Stx {
+                    size: size,
+                    dst: dst,
+                    src: src,
+                    off: off
+                }
+            );
     }
 
     pub fn st(inout self, size: Size, dst: u8, off: i16, v: i32) {
         self
             .insn(
-            Insn::St {
-                size: size,
-                dst: dst,
-                off: off,
-                imm: v
-            }
-        );
+                Insn::St {
+                    size: size,
+                    dst: dst,
+                    off: off,
+                    imm: v
+                }
+            );
     }
 
     pub fn atomic_add(inout self, size: Size, dst: u8, off: i16, src: u8) {
         self
             .insn(
-            Insn::Atomic {
-                size: size,
-                op: AtomicOp::Add {
-                    fetch: false
-                },
-                dst: dst,
-                src: src,
-                off: off
-            }
-        );
+                Insn::Atomic {
+                    size: size,
+                    op: AtomicOp::Add {
+                        fetch: false
+                    },
+                    dst: dst,
+                    src: src,
+                    off: off
+                }
+            );
     }
 
     pub fn call(inout self, helper: i32) {
@@ -260,12 +260,12 @@ impl Asm {
         self
             .fixes
             .push(
-            Fix {
-                at: self.slots.len(),
-                label: target,
-                call: true
-            }
-        );
+                Fix {
+                    at: self.slots.len(),
+                    label: target,
+                    call: true
+                }
+            );
         self.insn(Insn::Call(CallTarget::Local(0)));
     }
 
@@ -287,14 +287,14 @@ impl Asm {
         self
             .lines
             .push(
-            LineRow {
-                slot: slot,
-                line: line,
-                col: col,
-                ta: ta,
-                tb: tb
-            }
-        );
+                LineRow {
+                    slot: slot,
+                    line: line,
+                    col: col,
+                    ta: ta,
+                    tb: tb
+                }
+            );
     }
 
     pub fn function(inout self, name: u32, entry: u64) {
@@ -310,40 +310,40 @@ impl Asm {
         self
             .fixes
             .push(
-            Fix {
-                at: self.slots.len(),
-                label: target,
-                call: false
-            }
-        );
+                Fix {
+                    at: self.slots.len(),
+                    label: target,
+                    call: false
+                }
+            );
         self
             .insn(
-            Insn::Ja {
-                off: 0
-            }
-        );
+                Insn::Ja {
+                    off: 0
+                }
+            );
     }
 
     pub fn jmp(inout self, op: JmpOp, dst: u8, src: Operand, target: u64) {
         self
             .fixes
             .push(
-            Fix {
-                at: self.slots.len(),
-                label: target,
-                call: false
-            }
-        );
+                Fix {
+                    at: self.slots.len(),
+                    label: target,
+                    call: false
+                }
+            );
         self
             .insn(
-            Insn::Jcond {
-                wide: true,
-                op: op,
-                dst: dst,
-                src: src,
-                off: 0
-            }
-        );
+                Insn::Jcond {
+                    wide: true,
+                    op: op,
+                    dst: dst,
+                    src: src,
+                    off: 0
+                }
+            );
     }
 
     pub fn jmp_i(inout self, op: JmpOp, dst: u8, v: i32, target: u64) {
@@ -390,15 +390,15 @@ impl Asm {
                 let ok = self
                     .slots
                     .try_set(
-                    f.at,
-                    RawInsn {
-                        code: s.code,
-                        dst: s.dst,
-                        src: s.src,
-                        off: s.off,
-                        imm: wrapping_i32(rel)
-                    }
-                );
+                        f.at,
+                        RawInsn {
+                            code: s.code,
+                            dst: s.dst,
+                            src: s.src,
+                            off: s.off,
+                            imm: wrapping_i32(rel)
+                        }
+                    );
             } else {
                 if rel < -32768 || rel > 32767 {
                     bad = f.at;
@@ -407,15 +407,15 @@ impl Asm {
                 let ok = self
                     .slots
                     .try_set(
-                    f.at,
-                    RawInsn {
-                        code: s.code,
-                        dst: s.dst,
-                        src: s.src,
-                        off: wrapping_i16(rel),
-                        imm: s.imm
-                    }
-                );
+                        f.at,
+                        RawInsn {
+                            code: s.code,
+                            dst: s.dst,
+                            src: s.src,
+                            off: wrapping_i16(rel),
+                            imm: s.imm
+                        }
+                    );
             }
         }
         0

@@ -95,6 +95,17 @@ impl GuestMemory {
             .collect()
     }
 
+    /// The layout as `(gpa, len)` word pairs in `out`, without allocating;
+    /// returns the number of words written.
+    #[cfg(feature = "vesper-port")]
+    pub(crate) fn layout_words(&self, out: &mut [u64; 2 * MAX_GUEST_REGIONS]) -> usize {
+        for (i, r) in self.regions.iter().enumerate() {
+            out[2 * i] = r.gpa;
+            out[2 * i + 1] = r.bytes.len() as u64;
+        }
+        2 * self.regions.len()
+    }
+
     /// Read-write device authorizations covering exactly the guest RAM.
     pub fn ram_authorizations(&self) -> Vec<AuthorizedRange> {
         self.layout()

@@ -22,17 +22,17 @@ fn sum(n: i64, acc: f64, step: f64) -> f64 {
 
 fn main()
     -> (
-    f64,
-    f64,
-    f64,
-    f64,
-    f64,
-    f64,
-    (bool, bool, bool, bool, bool, bool),
-    (bool, bool, bool, bool, bool, bool),
-    bool,
-    f64
-) {
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        (bool, bool, bool, bool, bool, bool),
+        (bool, bool, bool, bool, bool, bool),
+        bool,
+        f64
+    ) {
     let zero = 0.0;
     let nan = zero / zero;
     let inf = 1.0 / zero;

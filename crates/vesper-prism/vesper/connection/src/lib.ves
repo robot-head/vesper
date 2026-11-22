@@ -240,14 +240,14 @@ pub fn connection_core_issue(inout c: ConnectionCore, head: bool, close: bool) -
     c
         .slots
         .push(
-        Slot {
-            id: true,
-            head: head,
-            request_close: close,
-            phase: 0,
-            len: 0
-        }
-    );
+            Slot {
+                id: true,
+                head: head,
+                request_close: close,
+                phase: 0,
+                len: 0
+            }
+        );
     if close {
         c.has_close_after = true;
         c.close_after = sequence;
@@ -302,19 +302,19 @@ fn promote(inout c: ConnectionCore, inout plan: ChunkSeq[Action]) {
             c
                 .outbound
                 .push(
-                Chunk {
-                    id: front.id,
-                    sequence: sequence,
-                    len: front.len
-                }
-            );
+                    Chunk {
+                        id: front.id,
+                        sequence: sequence,
+                        len: front.len
+                    }
+                );
             plan
                 .push(
-                Action::Promote {
-                    sequence: sequence,
-                    id: front.id
-                }
-            );
+                    Action::Promote {
+                        sequence: sequence,
+                        id: front.id
+                    }
+                );
         }
         if c.has_close_after && c.close_after == sequence {
             c.close_promoted = true;
@@ -342,14 +342,14 @@ pub fn connection_core_record_failure(
     c
         .slots
         .push(
-        Slot {
-            id: false,
-            head: false,
-            request_close: true,
-            phase: phase,
-            len: len
-        }
-    );
+            Slot {
+                id: false,
+                head: false,
+                request_close: true,
+                phase: phase,
+                len: len
+            }
+        );
     c.has_close_after = true;
     c.close_after = sequence;
     promote(inout c, inout plan);
@@ -414,19 +414,19 @@ fn close_at(inout c: ConnectionCore, sequence: u64, inout plan: ChunkSeq[Action]
         if slot.id {
             plan
                 .push(
-                Action::Abandon {
-                    sequence: at
-                }
-            );
+                    Action::Abandon {
+                        sequence: at
+                    }
+                );
         } else if slot.phase == 2 {
             // A generated error response for a later parse failure is
             // superseded: the connection closes before that position.
             plan
                 .push(
-                Action::Discard {
-                    sequence: at
-                }
-            );
+                    Action::Discard {
+                        sequence: at
+                    }
+                );
         }
     }
     c.slots.truncate(keep);
@@ -442,15 +442,15 @@ pub fn connection_core_submit(inout c: ConnectionCore, sequence: u64, len: u64, 
     c
         .slots
         .try_set(
-        index,
-        Slot {
-            id: slot.id,
-            head: slot.head,
-            request_close: slot.request_close,
-            phase: 1,
-            len: len
-        }
-    );
+            index,
+            Slot {
+                id: slot.id,
+                head: slot.head,
+                request_close: slot.request_close,
+                phase: 1,
+                len: len
+            }
+        );
     if close {
         close_at(inout c, sequence, inout plan);
     }

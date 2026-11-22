@@ -7,9 +7,9 @@ use self::{
     byte,
     byte_of,
     word,
-    node_at,
+    param_child_of,
+    terms_at,
     term_at,
-    terms_of,
     static_child
 };
 
@@ -23,60 +23,65 @@ fn segment_lo(in ends: Slice[u64], k: u64) -> u64 {
 
 // Depth first, static before parameter: the first complete path found is the
 // highest-precedence one. The matched node, `none()`, or `work_exhausted()`.
+// A node with only one way on is followed in the loop; only a node with
+// both a static and a parameter child recurses, for the backtracking.
 pub fn find_path(
     in r: RouterCore,
-    node: u64,
+    from: u64,
     in segments: Slice[u8],
     in ends: Slice[u64],
     trailing: bool,
-    depth: u64,
+    from_depth: u64,
     inout captured: ChunkSeq[u64],
     inout work: u64
 ) -> u64 {
-    work = wrapping_add(work, 1);
-    if work > r.limits.max_match_work {
-        return work_exhausted();
-    }
-    let current = node_at(in r, node);
-    if depth >= ends.len() {
-        if terms_of(current, trailing) != none() {
-            return node;
+    let mut node = from;
+    let mut depth = from_depth;
+    // Captures this call pushed, popped again when it finds nothing.
+    let mut pushed: u64 = 0;
+    loop {
+        work = wrapping_add(work, 1);
+        if work > r.limits.max_match_work {
+            return work_exhausted();
         }
-        return none();
-    }
-    let lo = segment_lo(in ends, depth);
-    let hi = word(in ends, depth);
-    let child = static_child(in r, node, in segments, lo, hi);
-    if child != none() {
-        let found = find_path(
-            in r,
-            child,
-            in segments,
-            in ends,
-            trailing,
-            wrapping_add(depth, 1),
-            inout captured,
-            inout work
-        );
-        if found != none() {
-            return found;
+        if depth >= ends.len() {
+            if terms_at(in r, node, trailing) != none() {
+                return node;
+            }
+            break;
         }
-    }
-    if current.param_child != none() {
-        captured.push(depth);
-        let found = find_path(
-            in r,
-            current.param_child,
-            in segments,
-            in ends,
-            trailing,
-            wrapping_add(depth, 1),
-            inout captured,
-            inout work
-        );
-        if found != none() {
-            return found;
+        let param_child = param_child_of(in r, node);
+        let lo = segment_lo(in ends, depth);
+        let hi = word(in ends, depth);
+        let child = static_child(in r, node, in segments, lo, hi);
+        let next = wrapping_add(depth, 1);
+        if child != none() && param_child != none() {
+            let found = find_path(
+                in r,
+                child,
+                in segments,
+                in ends,
+                trailing,
+                next,
+                inout captured,
+                inout work
+            );
+            if found != none() {
+                return found;
+            }
         }
+        if child != none() && param_child == none() {
+            node = child;
+        } else if param_child != none() {
+            captured.push(depth);
+            pushed = wrapping_add(pushed, 1);
+            node = param_child;
+        } else {
+            break;
+        }
+        depth = next;
+    }
+    for i in 0..pushed {
         captured.pop();
     }
     none()

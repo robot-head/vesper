@@ -247,19 +247,19 @@ pub fn m_imsic_push(inout f: Imsic, ids: u64, external: bool) eff [Fail[AiaFault
     f
         .hdr
         .push(
-        ImsicHdr {
-            ids: ids,
-            delivery: if external {
-                Eidelivery::External
-            } else {
-                0
-            },
-            external: external,
-            threshold: 0,
-            off: off,
-            words: words
-        }
-    );
+            ImsicHdr {
+                ids: ids,
+                delivery: if external {
+                    Eidelivery::External
+                } else {
+                    0
+                },
+                external: external,
+                threshold: 0,
+                off: off,
+                words: words
+            }
+        );
 }
 
 pub fn m_imsic_make(ids: u64, external: bool) -> Imsic eff [Fail[AiaFault]] {
@@ -277,30 +277,12 @@ pub fn m_imsic_copy(in f: Imsic) -> Imsic {
 }
 
 fn hdr_same(a: ImsicHdr, b: ImsicHdr) -> bool {
-    a
-        .ids
-        == b
-        .ids
-        && a
-        .delivery
-        == b
-        .delivery
-        && a
-        .external
-        == b
-        .external
-        && a
-        .threshold
-        == b
-        .threshold
-        && a
-        .off
-        == b
-        .off
-        && a
-        .words
-        == b
-        .words
+    a.ids == b.ids
+        && a.delivery == b.delivery
+        && a.external == b.external
+        && a.threshold == b.threshold
+        && a.off == b.off
+        && a.words == b.words
 }
 
 pub fn m_imsic_same(in a: Imsic, in b: Imsic) -> bool {
@@ -354,13 +336,13 @@ fn set_eip(inout f: Imsic, h: ImsicHdr, id: u64, on: bool) {
             let _ = f
                 .eip
                 .try_set(
-                at,
-                if on {
-                    x | m
-                } else {
-                    x & ~m
-                }
-            );
+                    at,
+                    if on {
+                        x | m
+                    } else {
+                        x & ~m
+                    }
+                );
         },
         Option::None => (),
     }
@@ -433,13 +415,13 @@ pub fn m_imsic_csr_write(inout f: Imsic, i: u64, isel: u64, v: u64) eff [Fail[Ai
             let _ = f
                 .eip
                 .try_set(
-                wrapping_add(h.off, w),
-                if w == 0 {
-                    v & ~1
-                } else {
-                    v
-                }
-            );
+                    wrapping_add(h.off, w),
+                    if w == 0 {
+                        v & ~1
+                    } else {
+                        v
+                    }
+                );
         }
         return;
     }
@@ -453,13 +435,13 @@ pub fn m_imsic_csr_write(inout f: Imsic, i: u64, isel: u64, v: u64) eff [Fail[Ai
             let _ = f
                 .eie
                 .try_set(
-                wrapping_add(h.off, w),
-                if w == 0 {
-                    v & ~1
-                } else {
-                    v
-                }
-            );
+                    wrapping_add(h.off, w),
+                    if w == 0 {
+                        v & ~1
+                    } else {
+                        v
+                    }
+                );
         }
         return;
     }
@@ -684,22 +666,22 @@ pub fn m_aplic_push(
     a
         .hdr
         .push(
-        AplicHdr {
-            base: base,
-            sources: sources,
-            supervisor: supervisor,
-            root: root,
-            msi_capable: msi_capable,
-            direct_capable: idcs > 0,
-            children: children,
-            ie: false,
-            dm: msi_capable && idcs == 0,
-            msicfg: zero_cfg(),
-            src_off: src_off,
-            idc_off: idc_off,
-            idcs: idcs
-        }
-    );
+            AplicHdr {
+                base: base,
+                sources: sources,
+                supervisor: supervisor,
+                root: root,
+                msi_capable: msi_capable,
+                direct_capable: idcs > 0,
+                children: children,
+                ie: false,
+                dm: msi_capable && idcs == 0,
+                msicfg: zero_cfg(),
+                src_off: src_off,
+                idc_off: idc_off,
+                idcs: idcs
+            }
+        );
 }
 
 pub fn m_aplic_make(
@@ -816,14 +798,10 @@ pub fn m_aplic_delegated_to(in a: Aplic, d: u64, src: u64) -> Option[u64] {
 // is Some).
 pub fn m_aplic_is_delegated_away(in a: Aplic, d: u64, src: u64) -> bool {
     let h = m_aplic_hdr(in a, d);
-    src
-        != 0
-        && src
-        <= h
-        .sources
+    src != 0
+        && src <= h.sources
         && src_flag(in a.active_here, h, src)
-        && (src_word(in a.sourcecfg, h, src) & Sourcecfg::D)
-        != 0
+        && (src_word(in a.sourcecfg, h, src) & Sourcecfg::D) != 0
 }
 
 pub fn m_aplic_is_delegated_here(in a: Aplic, d: u64, src: u64) -> bool {
@@ -949,12 +927,9 @@ pub fn m_aplic_set_msi_cfg(inout a: Aplic, d: u64, c: MsiCfg) {
 
 fn set_pending(inout a: Aplic, h: AplicHdr, src: u64) {
     let mode = mode_h(in a, h, src);
-    if mode
-        == SourceMode::Detached
-        || mode
-        == SourceMode::EdgeRising
-        || mode
-        == SourceMode::EdgeFalling {
+    if mode == SourceMode::Detached
+        || mode == SourceMode::EdgeRising
+        || mode == SourceMode::EdgeFalling {
         set_src_flag(inout a.pending, h, src, true);
     } else if is_level(mode) {
         if h.dm && rectify(mode, src_flag(in a.raw, h, src)) {
@@ -1071,13 +1046,9 @@ pub fn m_aplic_claimi(inout a: Aplic, d: u64, idc: u64) -> u64 {
 
 pub fn m_aplic_idc_asserted(in a: Aplic, d: u64, idc: u64) -> bool {
     let h = m_aplic_hdr(in a, d);
-    idc
-        < h
-        .idcs
-        && h
-        .ie
-        && !h
-        .dm
+    idc < h.idcs
+        && h.ie
+        && !h.dm
         && idc_flag(in a.idc_delivery, h, idc)
         && (idc_flag(in a.idc_force, h, idc) || topi_h(in a, h, idc) != 0)
 }
@@ -1213,18 +1184,12 @@ pub fn m_aplic_read32(inout a: Aplic, d: u64, addr: u64) -> u64 eff [Fail[AiaFau
     if in_words(off, AplicReg::Setie, nw) {
         return word_bits(in a, h, wrapping_sub(off, AplicReg::Setie) >> 2, 2);
     }
-    if off
-        == AplicReg::Setipnum
-        || off
-        == AplicReg::Clripnum
-        || off
-        == AplicReg::Setienum
-        || off
-        == AplicReg::Clrienum
-        || off
-        == AplicReg::SetipnumLe
-        || off
-        == AplicReg::SetipnumBe {
+    if off == AplicReg::Setipnum
+        || off == AplicReg::Clripnum
+        || off == AplicReg::Setienum
+        || off == AplicReg::Clrienum
+        || off == AplicReg::SetipnumLe
+        || off == AplicReg::SetipnumBe {
         return 0;
     }
     if in_words(off, AplicReg::Clrie, nw) {

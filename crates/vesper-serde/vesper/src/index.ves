@@ -314,10 +314,8 @@ pub fn escape_body(in t: Slice[u8], pos0: u64, mode: u64, budget0: u64) -> Esc {
                     return esc_fail(2, budget, budget);
                 }
             }
-            if at(in t, pos)
-                != Ascii::Backslash
-                || at(in t, wrapping_add(pos, 1))
-                != Ascii::LowerU {
+            if at(in t, pos) != Ascii::Backslash
+                || at(in t, wrapping_add(pos, 1)) != Ascii::LowerU {
                 return esc_fail(1, pos, budget);
             }
             pos = wrapping_add(pos, 2);
@@ -420,9 +418,9 @@ pub fn put_utf8(inout out: Slice[u8], pos: u64, c: u64) -> u64 {
         out.try_set(pos, wrapping_u8(Utf8::Lead4Tag | (c >> 18)));
         out
             .try_set(
-            wrapping_add(pos, 1),
-            wrapping_u8(Utf8::Cont | ((c >> 12) & Utf8::ContPayload))
-        );
+                wrapping_add(pos, 1),
+                wrapping_u8(Utf8::Cont | ((c >> 12) & Utf8::ContPayload))
+            );
         out.try_set(wrapping_add(pos, 2), wrapping_u8(Utf8::Cont | ((c >> 6) & Utf8::ContPayload)));
         out.try_set(wrapping_add(pos, 3), wrapping_u8(Utf8::Cont | (c & Utf8::ContPayload)));
         wrapping_add(pos, 4)
@@ -649,16 +647,16 @@ fn push(inout p: P, inout toks: ChunkSeq[Token], kind: Kind, depth: u64) -> u64 
     }
     toks
         .push(
-        Token {
-            start: p.pos,
-            end: 0,
-            next: wrapping_add(n, 1),
-            kind: kind,
-            decoded_len: 0,
-            escaped: false,
-            depth: depth
-        }
-    );
+            Token {
+                start: p.pos,
+                end: 0,
+                next: wrapping_add(n, 1),
+                kind: kind,
+                decoded_len: 0,
+                escaped: false,
+                depth: depth
+            }
+        );
     n
 }
 

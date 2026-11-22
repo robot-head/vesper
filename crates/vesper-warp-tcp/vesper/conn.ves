@@ -457,11 +457,11 @@ fn cc_event(inout t: Tcb, event: CongestionEvent, now: u64) {
     t
         .cmds
         .push(
-        CcCmd::Event {
-            event: event,
-            now: now
-        }
-    );
+            CcCmd::Event {
+                event: event,
+                now: now
+            }
+        );
 }
 
 pub fn config_validate(cfg: Config) -> Result[Unit, TcpFail] {

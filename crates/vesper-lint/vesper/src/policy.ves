@@ -177,36 +177,16 @@ fn text(inout b: Budget, n: u64) eff [Fail[LintFail]] {
 }
 
 fn validate_limits(in l: Limits) eff [Fail[LintFail]] {
-    if l
-        .bytes
-        == 0
-        || l
-        .bytes
-        > HARD_BYTES
-        || l
-        .depth
-        == 0
-        || l
-        .depth
-        > HARD_DEPTH
-        || l
-        .tokens
-        == 0
-        || l
-        .tokens
-        > HARD_TOKENS
-        || l
-        .nodes
-        == 0
-        || l
-        .nodes
-        > HARD_NODES
-        || l
-        .work
-        == 0
-        || l
-        .work
-        > HARD_WORK {
+    if l.bytes == 0
+        || l.bytes > HARD_BYTES
+        || l.depth == 0
+        || l.depth > HARD_DEPTH
+        || l.tokens == 0
+        || l.tokens > HARD_TOKENS
+        || l.nodes == 0
+        || l.nodes > HARD_NODES
+        || l.work == 0
+        || l.work > HARD_WORK {
         fail(P_INVALID_LIMITS);
     }
 }
@@ -227,45 +207,28 @@ const T_COMMA: u8 = 8;
 const T_NEWLINE: u8 = 9;
 
 fn atom_stop(c: u64) -> bool {
-    c
-        == Ascii::Space
-        || c
-        == Ascii::Tab
-        || c
-        == Ascii::Cr
-        || c
-        == Ascii::Lf
-        || c
-        == Ascii::Hash
-        || c
-        == Ascii::Apostrophe
-        || c
-        == Ascii::Quote
-        || c
-        == Ascii::Dot
-        || c
-        == Ascii::Equals
-        || c
-        == Ascii::LBracket
-        || c
-        == Ascii::RBracket
-        || c
-        == Ascii::LBrace
-        || c
-        == Ascii::RBrace
-        || c
-        == Ascii::Comma
+    c == Ascii::Space
+        || c == Ascii::Tab
+        || c == Ascii::Cr
+        || c == Ascii::Lf
+        || c == Ascii::Hash
+        || c == Ascii::Apostrophe
+        || c == Ascii::Quote
+        || c == Ascii::Dot
+        || c == Ascii::Equals
+        || c == Ascii::LBracket
+        || c == Ascii::RBracket
+        || c == Ascii::LBrace
+        || c == Ascii::RBrace
+        || c == Ascii::Comma
 }
 
 fn string_end(in s: Slice[u8], start: u64) -> u64 eff [Fail[LintFail]] {
     let n = s.len();
     let delim = at(in s, start);
-    let multiline = wrapping_add(start, ML_DELIM)
-        <= n
-        && at(in s, inc(start))
-        == delim
-        && at(in s, wrapping_add(start, 2))
-        == delim;
+    let multiline = wrapping_add(start, ML_DELIM) <= n
+        && at(in s, inc(start)) == delim
+        && at(in s, wrapping_add(start, 2)) == delim;
     let mut i = if multiline {
         wrapping_add(start, ML_DELIM)
     } else {
@@ -518,9 +481,9 @@ fn preflight(in s: Slice[u8], inout b: Budget) -> u64 eff [Fail[LintFail]] {
                 frame.value = true;
                 frame
                     .value_depth = wrapping_add(
-                    frame.depth,
-                    wrapping_mul(frame.key, DEPTH_PER_PART)
-                );
+                        frame.depth,
+                        wrapping_mul(frame.key, DEPTH_PER_PART)
+                    );
             } else if kind == T_RIGHT_TABLE && frame.kind == C_TABLE && frame.key == 0 && nested {
                 stack.truncate(top);
                 i = inc(i);
@@ -675,15 +638,15 @@ fn new_node(inout t: Toml, kind: u8, implicit: bool, dotted: bool) -> u32 {
     t
         .nodes
         .push(
-        TNode {
-            kind: kind,
-            implicit: implicit,
-            dotted: dotted,
-            first: NONE,
-            last: NONE,
-            count: 0
-        }
-    );
+            TNode {
+                kind: kind,
+                implicit: implicit,
+                dotted: dotted,
+                first: NONE,
+                last: NONE,
+                count: 0
+            }
+        );
     id
 }
 
@@ -698,14 +661,14 @@ fn append(inout t: Toml, c: u32, kstart: u64, klen: u64, hash: u64, child: u32) 
     t
         .ents
         .push(
-        TEnt {
-            kstart: wrapping_u32(kstart),
-            klen: wrapping_u32(klen),
-            hash: hash,
-            child: child,
-            next: NONE
-        }
-    );
+            TEnt {
+                kstart: wrapping_u32(kstart),
+                klen: wrapping_u32(klen),
+                hash: hash,
+                child: child,
+                next: NONE
+            }
+        );
     let mut n = node(in t, c);
     if n.last == NONE {
         n.first = e;
@@ -954,20 +917,16 @@ fn escape(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
 // Characters a basic string holds unescaped (and a multiline one, besides
 // newlines).
 fn basic_unescaped(c: u64) -> bool {
-    c
-        == Ascii::Space
-        || c
-        == Ascii::Tab
-        || c
-        == Ascii::Bang
+    c == Ascii::Space
+        || c == Ascii::Tab
+        || c == Ascii::Bang
         || (c >= Ascii::Hash && c <= Ascii::LBracket)
         || (c >= Ascii::RBracket && c <= Ascii::Tilde)
         || (c >= 128 && c != EOF)
 }
 
 fn literal_char(c: u64) -> bool {
-    c
-        == Ascii::Tab
+    c == Ascii::Tab
         || (c >= Ascii::Space && c <= Ascii::Amp)
         || (c >= Ascii::LParen && c <= Ascii::Tilde)
         || (c >= 128 && c != EOF)
@@ -1062,8 +1021,7 @@ fn ml_basic_string(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
                     let e = cur(in s, in t);
                     if e == Ascii::Space || e == Ascii::Tab {
                         bump(inout t);
-                    } else if e
-                        == Ascii::Lf
+                    } else if e == Ascii::Lf
                         || (e == Ascii::Cr && peek_at(in s, in t, 1) == Ascii::Lf) {
                         newline(in s, inout t);
                     } else {
@@ -1126,10 +1084,8 @@ fn simple_key(in s: Slice[u8], inout t: Toml) eff [Fail[LintFail]] {
                 (d >= Ascii::UpperA && d <= Ascii::UpperZ)
                     || (d >= Ascii::LowerA && d <= Ascii::LowerZ)
                     || is_digit(d)
-                    || d
-                    == Ascii::Minus
-                    || d
-                    == Ascii::Underscore
+                    || d == Ascii::Minus
+                    || d == Ascii::Underscore
             ) {
                 break;
             }
@@ -1981,18 +1937,10 @@ fn validate_tree(in t: Toml, inout b: Budget) eff [Fail[LintFail]] {
         let x = node(in t, id);
         if x.kind == N_STRING {
             text(inout b, widen_u64(x.count));
-        } else if x
-            .kind
-            == N_INTEGER
-            || x
-            .kind
-            == N_FLOAT
-            || x
-            .kind
-            == N_BOOL
-            || x
-            .kind
-            == N_DATETIME {
+        } else if x.kind == N_INTEGER
+            || x.kind == N_FLOAT
+            || x.kind == N_BOOL
+            || x.kind == N_DATETIME {
             text(inout b, 8);
         } else {
             let len = widen_u64(x.count);

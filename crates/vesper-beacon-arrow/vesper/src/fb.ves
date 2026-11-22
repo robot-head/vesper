@@ -1,0 +1,291 @@
+// A FlatBuffers builder that lays out bytes exactly like the Rust
+// `flatbuffers` 25 `FlatBufferBuilder`: the buffer grows downward from its
+// end, every scalar is aligned to its size, a table's vtable is written
+// right below the table and reused when an identical one was written
+// before, and `finish` aligns for the root offset to the largest alignment
+// seen. Positions are "revlocs": distances from the end of the buffer, which
+// stay valid when the buffer grows.
+
+pub struct Fb {
+    // Bytes `[cap - used, cap)` are the buffer so far.
+    buf: ChunkSeq[u8],
+    cap: u64,
+    used: u64,
+    min_align: u64,
+    // The fields of the table being built: (vtable offset, revloc) pairs.
+    slots: ChunkSeq[u64],
+    // The revlocs of the vtables written so far.
+    vtables: ChunkSeq[u64],
+}
+
+pub fn fb_new(cap: u64) -> Fb {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](cap);
+    buf.resize(cap, 0);
+    Fb {
+        buf: buf,
+        cap: cap,
+        used: 0,
+        min_align: 1,
+        slots: ChunkSeq::new[u64](),
+        vtables: ChunkSeq::new[u64](),
+    }
+}
+
+fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn byte(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn u16_at(in s: ChunkSeq[u8], i: u64) -> u64 {
+    match s.try_read_u16_le(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+// Bytes of padding that make `size` a multiple of `align` (a power of two).
+pub fn padding(size: u64, align: u64) -> u64 {
+    wrapping_sub(0, size) & wrapping_sub(align, 1)
+}
+
+impl Fb {
+    pub fn used(in self) -> u64 {
+        self.used
+    }
+
+    // The forward index of revloc `r`.
+    fn at(in self, r: u64) -> u64 {
+        wrapping_sub(self.cap, r)
+    }
+
+    // Doubles the buffer until `want` more bytes fit, keeping its tail.
+    fn ensure(inout self, want: u64) {
+        if wrapping_sub(self.cap, self.used) >= want {
+            return;
+        }
+        let mut cap = self.cap;
+        loop {
+            if wrapping_sub(cap, self.used) >= want {
+                break;
+            }
+            cap = if cap == 0 {
+                64
+            } else {
+                wrapping_mul(cap, 2)
+            };
+        }
+        let mut grown: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](cap);
+        grown.resize(cap, 0);
+        let old = wrapping_sub(self.cap, self.used);
+        grown.try_copy_from(wrapping_sub(cap, self.used), in self.buf[old..self.cap]);
+        self.buf = grown;
+        self.cap = cap;
+    }
+
+    // Claims `n` zero bytes below the buffer; returns their forward index.
+    fn space(inout self, n: u64) -> u64 {
+        self.ensure(n);
+        self.used = wrapping_add(self.used, n);
+        wrapping_sub(self.cap, self.used)
+    }
+
+    // Pads so that `len` more bytes end aligned to `align`.
+    pub fn align(inout self, len: u64, align: u64) {
+        if align > self.min_align {
+            self.min_align = align;
+        }
+        let pad = padding(wrapping_add(self.used, len), align);
+        self.space(pad);
+    }
+
+    pub fn push_u8(inout self, v: u64) -> u64 {
+        let i = self.space(1);
+        self.buf.try_set(i, wrapping_u8(v));
+        self.used
+    }
+
+    pub fn push_u16(inout self, v: u64) -> u64 {
+        self.align(2, 2);
+        let i = self.space(2);
+        self.buf.try_write_u16_le(i, wrapping_u16(v));
+        self.used
+    }
+
+    pub fn push_u32(inout self, v: u64) -> u64 {
+        self.align(4, 4);
+        let i = self.space(4);
+        self.buf.try_write_u32_le(i, wrapping_u32(v));
+        self.used
+    }
+
+    pub fn push_u64(inout self, v: u64) -> u64 {
+        self.align(8, 8);
+        let i = self.space(8);
+        self.buf.try_write_u64_le(i, v);
+        self.used
+    }
+
+    // A forward offset to the object at revloc `target`.
+    pub fn push_offset(inout self, target: u64) -> u64 {
+        self.align(4, 4);
+        let value = wrapping_sub(wrapping_add(self.used, 4), target);
+        self.push_u32(value)
+    }
+
+    fn push_sized(inout self, v: u64, size: u64) -> u64 {
+        match size {
+            1 => self.push_u8(v),
+            2 => self.push_u16(v),
+            4 => self.push_u32(v),
+            _ => self.push_u64(v),
+        }
+    }
+
+    fn track(inout self, id: u64, revloc: u64) {
+        self.slots.push(id);
+        self.slots.push(revloc);
+    }
+
+    // A scalar field of `size` bytes at vtable offset `id`, left out when it
+    // equals its schema default (as the generated `add_*` methods do).
+    pub fn add_scalar(inout self, id: u64, v: u64, size: u64, default: u64) {
+        if v != default {
+            let r = self.push_sized(v, size);
+            self.track(id, r);
+        }
+    }
+
+    // An offset field at vtable offset `id` to the object at `target`.
+    pub fn add_offset(inout self, id: u64, target: u64) {
+        let r = self.push_offset(target);
+        self.track(id, r);
+    }
+
+    pub fn start_table(in self) -> u64 {
+        self.used
+    }
+
+    // Writes the table's vtable (or reuses an identical one); returns the
+    // table's revloc.
+    pub fn end_table(inout self, start: u64) -> u64 {
+        let obj = self.push_u32(4042322160);
+        let mut vt_len: u64 = 4;
+        let pairs = self.slots.len() / 2;
+        for k in 0..pairs {
+            let id = word(in self.slots, wrapping_mul(k, 2));
+            if wrapping_add(id, 2) > vt_len {
+                vt_len = wrapping_add(id, 2);
+            }
+        }
+        let vt = self.space(vt_len);
+        let size = wrapping_sub(obj, start);
+        self.buf.try_write_u16_le(vt, wrapping_u16(vt_len));
+        self.buf.try_write_u16_le(wrapping_add(vt, 2), wrapping_u16(size));
+        for k in 0..pairs {
+            let id = word(in self.slots, wrapping_mul(k, 2));
+            let r = word(in self.slots, wrapping_add(wrapping_mul(k, 2), 1));
+            self.buf.try_write_u16_le(wrapping_add(vt, id), wrapping_u16(wrapping_sub(obj, r)));
+        }
+        let mut found: u64 = 0;
+        let mut reused = false;
+        for k in 0..self.vtables.len() {
+            let old_r = word(in self.vtables, k);
+            let old = self.at(old_r);
+            if u16_at(in self.buf, old) == vt_len {
+                let mut same = true;
+                for b in 0..vt_len {
+                    if byte(in self.buf, wrapping_add(old, b))
+                        != byte(in self.buf, wrapping_add(vt, b)) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    found = old_r;
+                    reused = true;
+                    break;
+                }
+            }
+        }
+        if reused {
+            self.buf.try_fill(vt, wrapping_add(vt, vt_len), 0);
+            self.used = wrapping_sub(self.used, vt_len);
+        } else {
+            found = self.used;
+            self.vtables.push(found);
+        }
+        let table = self.at(obj);
+        self.buf.try_write_u32_le(table, wrapping_u32(wrapping_sub(found, obj)));
+        self.slots.clear();
+        obj
+    }
+
+    // A zero-terminated string with its u32 length.
+    pub fn create_string(inout self, in s: Slice[u8]) -> u64 {
+        let n = s.len();
+        self.align(wrapping_add(n, 1), 4);
+        self.push_u8(0);
+        let i = self.space(n);
+        self.buf.try_copy_from(i, in s);
+        self.push_u32(n)
+    }
+
+    // A vector of offsets to the objects at the given revlocs.
+    pub fn create_offsets(inout self, in targets: ChunkSeq[u64]) -> u64 {
+        let n = targets.len();
+        let bytes = wrapping_mul(n, 4);
+        self.align(bytes, 4);
+        let i = self.space(bytes);
+        let mut written = self.used;
+        for k in 0..n {
+            written = wrapping_sub(written, 4);
+            let value = wrapping_sub(wrapping_add(written, 4), word(in targets, k));
+            self.buf.try_write_u32_le(wrapping_add(i, wrapping_mul(k, 4)), wrapping_u32(value));
+        }
+        self.push_u32(n)
+    }
+
+    // A vector of 16-byte structs of two little-endian i64 words each (Arrow's
+    // `FieldNode` and `Buffer`), aligned to 8.
+    pub fn create_pairs(inout self, in words: ChunkSeq[u64]) -> u64 {
+        let n = words.len() / 2;
+        let bytes = wrapping_mul(n, 16);
+        self.align(bytes, 8);
+        let i = self.space(bytes);
+        for k in 0..wrapping_mul(n, 2) {
+            self.buf.try_write_u64_le(wrapping_add(i, wrapping_mul(k, 8)), word(in words, k));
+        }
+        self.push_u32(n)
+    }
+
+    // Writes the root offset; the buffer is then `bytes_start()..cap`.
+    pub fn finish(inout self, root: u64) {
+        self.vtables.clear();
+        let a = self.min_align;
+        self.align(4, a);
+        self.push_offset(root);
+    }
+
+    pub fn start(in self) -> u64 {
+        wrapping_sub(self.cap, self.used)
+    }
+
+    pub fn end(in self) -> u64 {
+        self.cap
+    }
+
+    // Copies the finished buffer into `out` at `at`.
+    pub fn copy_to(in self, inout out: Slice[u8], at: u64) -> bool {
+        let s = self.start();
+        out.try_copy_from(at, in self.buf[s..self.cap])
+    }
+}

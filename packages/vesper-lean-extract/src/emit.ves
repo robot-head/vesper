@@ -236,12 +236,12 @@ fn typ(inout b: B, in t: Types, in x: X, ty: u32) {
 fn name2_quiet(inout b: B, rooted: bool, a: u32, c: u32) {
     b
         .w(
-        if rooted {
-            1
-        } else {
-            0
-        }
-    );
+            if rooted {
+                1
+            } else {
+                0
+            }
+        );
     b.w(2);
     b.sym(a);
     b.sym(c);
@@ -515,9 +515,9 @@ fn constructor_check(inout b: B, in wd: World, c: u64) {
             && (spells(in b, v.name, in "Some") || spells(in b, v.name, in "None"))
     )
         || (
-        spells(in b, a.name, in "Result")
-            && (spells(in b, v.name, in "Ok") || spells(in b, v.name, in "Err"))
-    );
+            spells(in b, a.name, in "Result")
+                && (spells(in b, v.name, in "Ok") || spells(in b, v.name, in "Err"))
+        );
     if special {
         return;
     }
@@ -1310,26 +1310,16 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
         return 0;
     }
     if !(
-        op
-            == OP_CONST
-            || op
-            == OP_UNIT
-            || op
-            == OP_READ
-            || op
-            == OP_CLOSURE
-            || op
-            == OP_UNARY
-            || op
-            == OP_BINARY
-            || op
-            == OP_TUPLE
-            || op
-            == OP_DATA
-            || op
-            == OP_PROJECT
-            || op
-            == OP_FIP
+        op == OP_CONST
+            || op == OP_UNIT
+            || op == OP_READ
+            || op == OP_CLOSURE
+            || op == OP_UNARY
+            || op == OP_BINARY
+            || op == OP_TUPLE
+            || op == OP_DATA
+            || op == OP_PROJECT
+            || op == OP_FIP
     ) {
         b.fail(in "unsupported operation in Lean CFG extraction");
         return 0;
@@ -1373,12 +1363,12 @@ fn instruction(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u6
             b.w(T_UNARY);
             b
                 .w(
-                if spells(in b, o, in "-") {
-                    U_NEG
-                } else {
-                    U_BOOL_NOT
-                }
-            );
+                    if spells(in b, o, in "-") {
+                        U_NEG
+                    } else {
+                        U_BOOL_NOT
+                    }
+                );
             value(inout b, x.p.op(inc(a)));
         } else {
             let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -1573,12 +1563,12 @@ fn indirect(inout b: B, inout t: Types, in x: X, in s: S, ins: InstRow) -> u64 {
     }
     let m = b
         .app(
-        if n == 0 {
-            1
-        } else {
-            n
-        }
-    );
+            if n == 0 {
+                1
+            } else {
+                n
+            }
+        );
     value(inout b, x.p.op(a));
     b.args(m);
     if n == 0 {

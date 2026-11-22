@@ -9,24 +9,20 @@
 //! decoding, framed transport and PII redaction boundary. [`otlp`] builds
 //! OTLP protobuf requests from the same data, and [`grpc`] (feature `grpc`,
 //! on by default) carries OTAP and OTLP over tonic gRPC.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
+
+#[rustfmt::skip]
+#[allow(unsafe_code)]
+#[path = "../port/binding.rs"]
+mod binding;
 
 #[cfg(feature = "grpc")]
 pub mod grpc;
 pub mod otap;
 pub mod otlp;
 
-use arrow_array::{ArrayRef, RecordBatch, UInt64Array, UInt8Array};
-use arrow_ipc::{
-    writer::{IpcWriteOptions, StreamWriter},
-    MetadataVersion,
-};
-use arrow_schema::{ArrowError, DataType, Field, Schema};
-use std::{
-    collections::HashMap,
-    io::{self, Write},
-    sync::Arc,
-};
+use arrow_schema::{DataType, Field, Schema};
+use std::collections::HashMap;
 use vesper_beacon::{
     ColumnBatch, ErrorCode, PrimaryAttribute, SpanRecord, SpanSchema, SpanStatus, TelemetryRing,
 };
@@ -39,6 +35,8 @@ pub const METADATA_ALLOWANCE: usize = 65_536;
 pub const MAX_ROWS: usize = 65_536;
 const BYTES_PER_ROW: usize = 61; // Seven u64 + five u8 columns.
 const BUFFER_PADDING: usize = 24 * 63; // Values and validity buffers aligned to 64-byte offsets.
+const WIDE_COLUMNS: usize = 7; // The u64 columns, in the order spans.ves expects.
+const NARROW_COLUMNS: usize = 5; // The u8 columns.
 
 #[derive(Clone, Copy, Debug)]
 pub struct ExportLimits {
@@ -77,7 +75,9 @@ pub enum ExportError {
     OutputLimit,
     Overflow,
     AllocationFailed,
-    Arrow(ArrowError),
+    /// The stream writer could not complete (the reservation was too small
+    /// for the stream, or the rows did not match the plan).
+    Ipc(&'static str),
 }
 impl std::fmt::Display for ExportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -292,20 +292,24 @@ fn reserved<T>(n: usize) -> Result<Vec<T>, ExportError> {
         .map_err(|_| ExportError::AllocationFailed)?;
     Ok(out)
 }
+/// Fills the twelve columns and hands them to the Vesper stream writer
+/// (vesper/src/spans.ves), which lays the stream out byte for byte as the
+/// pinned `arrow-ipc` 56 `StreamWriter` does (64-byte alignment, metadata V5).
 fn encode(plan: ExportPlan, rows: impl Iterator<Item = Row>) -> Result<Vec<u8>, ExportError> {
-    // All limits were checked before any adapter or Arrow buffers are allocated.
-    let mut wide: [Vec<u64>; 7] = [(); 7].map(|_| Vec::new());
-    let mut narrow: [Vec<u8>; 5] = [(); 5].map(|_| Vec::new());
-    for column in &mut wide {
-        *column = reserved(plan.rows)?;
-    }
-    for column in &mut narrow {
-        *column = reserved(plan.rows)?;
-    }
-    for row in rows {
+    // All limits were checked before any adapter buffers are allocated.
+    let n = plan.rows;
+    let mut wide: Vec<u64> = reserved(mul(n, WIDE_COLUMNS)?)?;
+    wide.resize(n * WIDE_COLUMNS, 0);
+    let mut narrow: Vec<u8> = reserved(mul(n, NARROW_COLUMNS)?)?;
+    narrow.resize(n * NARROW_COLUMNS, 0);
+    let mut count = 0;
+    for (i, row) in rows.enumerate() {
+        if i >= n {
+            return Err(ExportError::Ipc("more rows than planned"));
+        }
         let (status, error) = status_codes(row.status);
         let (attribute, value) = attribute_codes(row.attribute);
-        for (column, value) in wide.iter_mut().zip([
+        for (c, value) in [
             (row.trace_id >> 64) as u64,
             row.trace_id as u64,
             row.span_id,
@@ -313,64 +317,35 @@ fn encode(plan: ExportPlan, rows: impl Iterator<Item = Row>) -> Result<Vec<u8>, 
             row.start,
             row.duration,
             value,
-        ]) {
-            column.push(value);
-        }
-        for (column, value) in
-            narrow
-                .iter_mut()
-                .zip([row.flags, schema_code(row.schema), status, error, attribute])
+        ]
+        .into_iter()
+        .enumerate()
         {
-            column.push(value);
+            wide[c * n + i] = value;
         }
-    }
-    let mut columns: Vec<ArrayRef> = reserved(12)?;
-    let mut wide = wide.into_iter();
-    for column in wide.by_ref().take(6) {
-        columns.push(Arc::new(UInt64Array::from(column)));
-    }
-    for column in narrow {
-        columns.push(Arc::new(UInt8Array::from(column)));
-    }
-    columns.push(Arc::new(UInt64Array::from(
-        wide.next().expect("seventh column"),
-    )));
-    let schema = Arc::new(span_schema());
-    let batch = RecordBatch::try_new(schema.clone(), columns).map_err(ExportError::Arrow)?;
-    let mut sink = BoundedOutput {
-        bytes: reserved(plan.output_reservation)?,
-        limit: plan.output_reservation,
-    };
-    let options =
-        IpcWriteOptions::try_new(64, false, MetadataVersion::V5).map_err(ExportError::Arrow)?;
-    {
-        let mut writer = StreamWriter::try_new_with_options(&mut sink, &schema, options)
-            .map_err(ExportError::Arrow)?;
-        writer.write(&batch).map_err(ExportError::Arrow)?;
-        writer.finish().map_err(ExportError::Arrow)?;
-    }
-    Ok(sink.bytes)
-}
-struct BoundedOutput {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-impl Write for BoundedOutput {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let end = self
-            .bytes
-            .len()
-            .checked_add(bytes.len())
-            .ok_or_else(|| io::Error::other("IPC output overflow"))?;
-        if end > self.limit {
-            return Err(io::Error::other("IPC output reservation exhausted"));
+        for (c, value) in [row.flags, schema_code(row.schema), status, error, attribute]
+            .into_iter()
+            .enumerate()
+        {
+            narrow[c * n + i] = value;
         }
-        self.bytes.extend_from_slice(bytes); // Capacity reserved before the writer starts.
-        Ok(bytes.len())
+        count += 1;
     }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
+    if count != n {
+        return Err(ExportError::Ipc("fewer rows than planned"));
     }
+    let len =
+        usize::try_from(binding::span_stream_len(n as u64)).map_err(|_| ExportError::Overflow)?;
+    if len > plan.output_reservation {
+        return Err(ExportError::Ipc("IPC output reservation exhausted"));
+    }
+    let mut out = reserved(len)?;
+    out.resize(len, 0);
+    let written = binding::span_stream_into(&wide, &narrow, n as u64, &mut out);
+    if written != len as u64 {
+        return Err(ExportError::Ipc("span stream writer failed"));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -401,26 +376,39 @@ mod tests {
         let before = ring.records().collect::<Vec<_>>();
         let mut plan = plan_ring(&ring, 1, ExportLimits::default()).unwrap();
         // Inject an impossible reservation after valid preflight, forcing the
-        // bounded sink to fail inside the actual Apache IPC writer.
+        // stream writer to fail after the columns are built.
         plan.output_reservation = 1;
         let error = ring
             .try_consume_prefix(1, |records| encode(plan, records.map(Row::from)))
             .unwrap_err();
-        assert!(matches!(error, ExportError::Arrow(_)));
+        assert!(matches!(error, ExportError::Ipc(_)));
         assert_eq!(ring.records().collect::<Vec<_>>(), before);
         assert!(export_ring(&mut ring, 1, ExportLimits::default()).is_ok());
         assert!(ring.is_empty());
     }
     #[test]
-    fn bounded_sink_never_partially_writes_or_grows_past_its_reservation() {
-        let mut sink = BoundedOutput {
-            bytes: reserved(3).unwrap(),
-            limit: 3,
-        };
-        sink.write_all(b"ab").unwrap();
-        assert!(sink.write_all(b"cd").is_err());
-        assert_eq!(sink.bytes, b"ab");
-        sink.write_all(b"c").unwrap();
-        assert_eq!(sink.bytes, b"abc");
+    fn output_never_grows_past_its_reservation() {
+        let pool = SpanPool::<1>::new(1, NonZeroU64::new(1).unwrap(), 0).unwrap();
+        let mut ring = TelemetryRing::<9>::default();
+        for _ in 0..9 {
+            pool.start_span(None, SpanSchema::Request, 0, 0)
+                .unwrap()
+                .finish_ok(&mut ring, 0, PrimaryAttribute::ItemCount(7))
+                .unwrap();
+        }
+        let exact = binding::span_stream_len(9) as usize;
+        let mut plan = plan_ring(&ring, 9, ExportLimits::default()).unwrap();
+        assert!(exact <= plan.output_reservation);
+        plan.output_reservation = exact - 1;
+        let records: Vec<_> = ring.records().collect();
+        let error = encode(plan, records.iter().copied().map(Row::from)).unwrap_err();
+        assert!(matches!(error, ExportError::Ipc(_)));
+        plan.output_reservation = exact;
+        let bytes = encode(plan, records.into_iter().map(Row::from)).unwrap();
+        assert_eq!(bytes.len(), exact);
+        // A row count that does not match the plan is refused.
+        plan.rows = 8;
+        let records: Vec<_> = ring.records().collect();
+        assert!(encode(plan, records.into_iter().map(Row::from)).is_err());
     }
 }

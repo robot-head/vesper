@@ -1118,3 +1118,112 @@ fn port_matches_rust_on_pointer_lifetimes() {
         assert!(st.details.contains(d), "{d}: {:?}", st.details);
     }
 }
+
+/// Different programs over one pair of environments, in a random order. The
+/// port keeps the decoded code of the program it ran last, which must never
+/// run in place of another one; runs that only insert entries take the
+/// port's append-only save, including a pointer to a new value stored in an
+/// array value, which the next run reads back. SH6 lane 10 (#1405).
+#[test]
+fn port_matches_rust_when_programs_share_an_environment() {
+    let mut rng = Rng(0x05a3_e0e1_1405);
+    let mut st = Stats::default();
+    let lookup = |a: &mut Asm, m: usize, key: i32| {
+        a.st(Size::DW, Reg::R10, -8, key);
+        a.ld_map(Reg::R1, m);
+        a.mov64(Reg::R2, Reg::R10);
+        a.add64(Reg::R2, -8);
+        a.call(h::MAP_LOOKUP_ELEM);
+    };
+    let update = |a: &mut Asm, m: usize, key: i32| {
+        a.st(Size::DW, Reg::R10, -8, key);
+        a.st(Size::DW, Reg::R10, -32, key);
+        a.st(Size::DW, Reg::R10, -24, 0);
+        a.ld_map(Reg::R1, m);
+        a.mov64(Reg::R2, Reg::R10);
+        a.add64(Reg::R2, -8);
+        a.mov64(Reg::R3, Reg::R10);
+        a.add64(Reg::R3, -32);
+        a.mov64(Reg::R4, 0);
+        a.call(h::MAP_UPDATE_ELEM);
+    };
+    let mut progs: Vec<(String, Program)> = Vec::new();
+    // insert two keys and keep a pointer to the second one's value in am[0]
+    // (stored twice by some: the slot is translated once at save)
+    for (keys, twice) in [
+        ([1, 2], false),
+        ([2, 5], true),
+        ([7, 1], false),
+        ([3, 4], true),
+    ] {
+        let mut a = Asm::new();
+        chaos_maps(&mut a);
+        let skip = a.label();
+        update(&mut a, 0, keys[0]);
+        update(&mut a, 0, keys[1]);
+        lookup(&mut a, 0, keys[1]);
+        a.mov64(Reg::R7, Reg::R0);
+        lookup(&mut a, 1, 0);
+        a.jmp(JmpOp::Eq, Reg::R0, 0, skip);
+        a.stx(Size::DW, Reg::R0, 0, Reg::R7);
+        if twice {
+            a.stx(Size::DW, Reg::R0, 0, Reg::R7);
+        }
+        a.bind(skip).unwrap();
+        a.mov64(Reg::R0, keys[0]);
+        a.exit();
+        let name = format!("insert {keys:?} twice={twice}");
+        progs.push((name.clone(), a.finish(&name, ProgramType::Xdp).unwrap()));
+    }
+    // read through the pointer in am[0]
+    {
+        let mut a = Asm::new();
+        chaos_maps(&mut a);
+        let skip = a.label();
+        lookup(&mut a, 1, 0);
+        a.jmp(JmpOp::Eq, Reg::R0, 0, skip);
+        a.ldx(Size::DW, Reg::R9, Reg::R0, 0);
+        a.jmp(JmpOp::Eq, Reg::R9, 0, skip);
+        a.ldx(Size::DW, Reg::R0, Reg::R9, 0);
+        a.exit();
+        a.bind(skip).unwrap();
+        a.mov64(Reg::R0, 0);
+        a.exit();
+        progs.push(("read".into(), a.finish("read", ProgramType::Xdp).unwrap()));
+    }
+    // delete a key, so the next save renumbers
+    for key in [1, 2, 5] {
+        let mut a = Asm::new();
+        chaos_maps(&mut a);
+        a.st(Size::DW, Reg::R10, -8, key);
+        a.ld_map(Reg::R1, 0);
+        a.mov64(Reg::R2, Reg::R10);
+        a.add64(Reg::R2, -8);
+        a.call(h::MAP_DELETE_ELEM);
+        a.exit();
+        let name = format!("delete {key}");
+        progs.push((name.clone(), a.finish(&name, ProgramType::Xdp).unwrap()));
+    }
+    let rprogs: Vec<rust::Program> = progs.iter().map(|(_, p)| to_rust(p)).collect();
+    for session in 0..6 {
+        let mut e = pair(&mut rng, &progs[0].1, 10_000);
+        for k in 0..40 {
+            let i = rng.below(progs.len() as u64) as usize;
+            // runs of the same program in a row reuse its code
+            let reps = 1 + rng.below(3);
+            for r in 0..reps {
+                let what = format!("session {session} run {k}.{r} {}", progs[i].0);
+                assert!(agree(
+                    &mut rng,
+                    &progs[i].1,
+                    &rprogs[i],
+                    &mut e,
+                    &mut st,
+                    &what
+                ));
+            }
+        }
+    }
+    eprintln!("{} runs, {} ok, faults {:?}", st.runs, st.ok, st.faults);
+    assert!(st.ok >= 100, "{}", st.ok);
+}

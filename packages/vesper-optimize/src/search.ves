@@ -890,12 +890,8 @@ fn fold_prefix(inout d: Builder, count: u64, top: u32, inout b: Budget, inout ou
         let c1 = term_get(in d.terms, n1);
         let mut value: i128 = 0;
         let wrapping = original.tag == T_WRAPPING;
-        let folded = c0
-            .tag
-            == T_CONST
-            && c1
-            .tag
-            == T_CONST
+        let folded = c0.tag == T_CONST
+            && c1.tag == T_CONST
             && fold_value(d.kind, wrapping, original.op, c0.value, c1.value, inout value);
         if folded {
             let mut output: u32 = 0;
@@ -1369,14 +1365,14 @@ fn apply(
         c
             .records
             .push(
-            Rec {
-                rule: rule,
-                b0: ms.val(mi, 0),
-                b1: b1,
-                b2: b2,
-                len: arity
-            }
-        );
+                Rec {
+                    rule: rule,
+                    b0: ms.val(mi, 0),
+                    b1: b1,
+                    b2: b2,
+                    len: arity
+                }
+            );
         applied = true;
     }
     0
@@ -1887,11 +1883,8 @@ fn search(
     if raw > RAW_NODES {
         return E_LIMIT;
     }
-    let complete = stop
-        == STOP_SATURATED
-        || stop
-        == STOP_HOOK
-        && root_has_leaf(in g, top, kind, vars);
+    let complete = stop == STOP_SATURATED
+        || stop == STOP_HOOK && root_has_leaf(in g, top, kind, vars);
     if !complete {
         return E_LIMIT;
     }
@@ -1923,13 +1916,13 @@ fn search(
     for i in 0..x.len() {
         extracted
             .push(
-            MathNode {
-                op: x.op_at(i),
-                data: x.data_at(i),
-                c0: x.child_at(i, 0),
-                c1: x.child_at(i, 1)
-            }
-        );
+                MathNode {
+                    op: x.op_at(i),
+                    data: x.data_at(i),
+                    c0: x.child_at(i, 0),
+                    c1: x.child_at(i, 1)
+                }
+            );
     }
     let mut best_map: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let e = translate(inout d, in extracted, vars, inout b, inout best_map);
@@ -1946,13 +1939,13 @@ fn search(
             let id = n32(k);
             graph_nodes
                 .push(
-                MathNode {
-                    op: g.raw_op(id),
-                    data: g.raw_data(id),
-                    c0: g.raw_child(id, 0),
-                    c1: g.raw_child(id, 1)
-                }
-            );
+                    MathNode {
+                        op: g.raw_op(id),
+                        data: g.raw_data(id),
+                        c0: g.raw_child(id, 0),
+                        c1: g.raw_child(id, 1)
+                    }
+                );
         }
         let mut raw_map: ChunkSeq[u32] = ChunkSeq::new[u32]();
         let e = translate(inout d, in graph_nodes, vars, inout b, inout raw_map);

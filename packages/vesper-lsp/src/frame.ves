@@ -190,8 +190,7 @@ fn is_name_byte(c: u8) -> bool {
     (c >= Ascii::Zero && c <= Ascii::Nine)
         || (c >= Ascii::UpperA && c <= Ascii::UpperZ)
         || (c >= Ascii::LowerA && c <= Ascii::LowerZ)
-        || c
-        == Ascii::Dash
+        || c == Ascii::Dash
 }
 
 // `read_frame`: the next body, or `None` at a clean end of the stream.

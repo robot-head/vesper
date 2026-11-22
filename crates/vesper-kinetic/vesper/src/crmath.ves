@@ -688,12 +688,12 @@ fn sin_cos_eval(inout c: Slice[u32], ex: Exact, lead: i64, want_cos: bool, p: u6
     let terms = wrapping_add(wrapping_add(ts, tc), 2);
     let use_sin = (quadrant & 1)
         == (
-        if want_cos {
-            1
-        } else {
-            0
-        }
-    );
+            if want_cos {
+                1
+            } else {
+                0
+            }
+        );
     let mut neg = if want_cos {
         quadrant == 1 || quadrant == 2
     } else {

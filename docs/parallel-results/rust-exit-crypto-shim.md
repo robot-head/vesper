@@ -77,8 +77,11 @@ builds), and its libssl has TLS 1.3 with the QUIC API
 (`SSL_set_quic_method`) and X.509 path validation. The costs: a C build
 of aws-lc on every platform (CMake, plus NASM on Windows for the
 assembly), libcrux's formally verified ML-KEM replaced by aws-lc's, and
-the libssl state machine in place of rustls. This lane does not switch
-without the owner.
+the libssl state machine in place of rustls.
+
+**Owner decision (2026-11-21):** keep the small Rust shim ("crypto is
+hard"); any replacement of the vetted libraries happens last, with an
+expert. This lane does not pursue the C route.
 
 ### Compiler gaps
 
@@ -90,12 +93,89 @@ without the owner.
   x86_64-unknown-linux-gnu packages/vesper-crypto -o c.o`. Not blocking:
   the package is only ever a dependency.
 
+## Part 2: BLAKE3 in C (PR #1462)
+
+The official BLAKE3 1.8.7 C implementation (`packages/vesper-std/hash/sys/c/`)
+replaces the Rust hash-sys shim (`shim.rs`, deleted), built by the new
+`crates/vesper-blake3-sys` (`cc`, one archive of per-ISA objects, every
+internal symbol renamed so it never meets the `blake3` crate's assembly).
+`tests/c_matches_crate.rs` checks it against the crate. This is the shared C
+package and C build support lanes 12 and 16 asked for (#1421).
+
+## Part 3: vesper-warp-crypto on Vesper
+
+### What changed
+
+- **`crates/vesper-warp-crypto/vesper/`** (`@vesper/warp-crypto`, depends on
+  `@vesper/crypto`): every RFC 9001 rule of the crate. The §5.1/§5.2 key
+  schedule and §6.1 "quic ku", the §5.3 nonce, the bounds of every offset,
+  the §5.4 masks and their application, the sealer's ticket rules and §6.6
+  confidentiality limit, the opener's integrity limit, the §6 key-update
+  state machine (key choice by phase bit and packet number, promotion,
+  retirement, the peer-initiated response) and the §5.8 Retry tag. Export
+  ABI 4: the AEAD and AES keys are `vesper-crypto-sys` values the Rust
+  structs hold inline and lend to each call (`Aead::new`/`Block::new`, new
+  safe constructors in the shim, which its C calls now use too). The packet
+  path allocates nothing: each call borrows a 64-byte stack scratch buffer
+  for the nonce, the sample and the HKDF labels (`tests/zero_alloc.rs`
+  still passes, key updates included).
+- **The Rust crate** keeps the public API unchanged (vesper-warp, warp-tls,
+  vault and chorus build and pass as they are) and only what the ABI cannot
+  carry: the key values, the linear `NonceTicket` with its drop accounting
+  and sealer ids, the packet-number reconstruction closure (`open_packet`
+  is split around it), the swaps of keys on an update, and error
+  conversion. Its RustCrypto dependencies are gone (dev-only for the
+  reference). Non-comment Rust lines: 1,122 before, 939 now; the façade
+  goes when its Rust callers are ported.
+- **`crates/vesper-port-harness`**: a divergent (edited) build now copies the
+  `.vsys` files a package manifest names, so ports over `@vesper/crypto`
+  can run divergence checks.
+
+### Flip-gate verdict (hand-run recipe; `scripts/ci/flip_gate.py` is not on main yet)
+
+| Workload | Differential | Every test | ABBA (Vesper/Rust, 95% interval) | Verdict |
+|---|---|---|---|---|
+| `one_rtt`: 512 round trips of 1,200-byte 1-RTT packets per suite, a client key update every 64 | 0 differences | all crate tests, plus vesper-warp, warp-tls, vault and chorus | **1.04x** (1.028x..1.058x) | flipped |
+| `initial`: 64 fresh Initial key schedules with one packet each way | 0 differences | | **1.07x** (1.069x..1.085x) | flipped |
+| `header`: header-protection removal and re-application alone, 64-byte packet | 0 differences | | 1.89x (1.875x..1.914x) | over the bar (see below) |
+
+- **Differential**: `src/differential.rs` keeps the deleted Rust modules as
+  `src/reference/` (test-only) and runs both on seeded cases: secrets of
+  every length, connection IDs up to 24 bytes, packet numbers at the 2^62
+  edge, offsets and payload lengths near `usize::MAX`, tampered bytes,
+  wrong and declined packet-number reconstructions, foreign and stale
+  tickets, small confidentiality and integrity limits, reordered packets
+  across key phases and retirement windows, and Retry packets cut short.
+  Each case compares results, errors, buffers and state (audits, failure
+  counters, generations), and the tests assert that every error path
+  occurred.
+- **Divergence checks**: six edits (`schedule`, `nonce`, `header`,
+  `sealer`, `update`, `retry`) in `build.rs` and `BUILD.bazel`;
+  `port/check.sh` asserts that each one fails its differential test while
+  another passes.
+- **ABBA**: `examples/abba.rs`, 12 epochs of A/B/B/A on a 4 vCPU cloud
+  container, release builds. The Rust arm is this branch's base with the
+  same example file.
+- **The header micro-benchmark** is 50 ns against 95 ns per removal and
+  re-application. Callgrind puts it in codegen, not the shim: the Vesper
+  `hp_remove` runs about 180 instructions where the Rust one runs about 90
+  (`Option` results materialized on the stack, slice headers reloaded on
+  every access). That is the codegen-size thread's work (#1426). On every
+  workload that seals or opens a packet the AEAD dominates and the port is
+  within 1.07x.
+
+### Compiler gaps
+
+- A `handle Fail[E] in { Result::Ok(f()) } with { raise(e, _) =>
+  Result::Err(e) }` whose result is then matched, with `Fail::raise(e)` in
+  the `Err` arm, fails in codegen: "native layout is not yet defined for
+  `_`". Worked around with a `bool` helper.
+- Header-protection code is about 2x Rust's instruction count (above).
+
 ### What is left
 
-1. `vesper-warp-crypto`: port the RFC 9001 key schedule, packet and header
-   protection, nonce tickets, key update and Retry integrity to Vesper on
-   `@vesper/crypto`, keep the Rust tests as the differential, measure
-   ABBA, flip.
+1. `vesper-warp-crypto`: done (part 3), except the header micro-benchmark,
+   which waits on codegen.
 2. `vesper-loom-trust`: the attestation quorum and slopsquat checks to
    Vesper over `ed25519_verify` (compiler-linked: seed pattern until lane 3
    or the retirement).
@@ -106,8 +186,5 @@ without the owner.
 4. `vesper-warp-tls`: a TLS 1.3 session behind the shim (rustls's QUIC
    API as linear handles) and the session layer (transport parameters,
    reassembly, configuration) in Vesper.
-5. One shared BLAKE3 C-library package (the official C implementation
-   behind `.vsys`) and the build support for compiling C sources into a
-   port, for lanes 12 (`vesper-loom-audit`) and 16 (asked by the
-   coordinator from lane 16's audit, #1421).
+5. The shared BLAKE3 C package: done (part 2, PR #1462).
 6. The census row in `scripts/rust-census.py` once plan PR #1415 lands.

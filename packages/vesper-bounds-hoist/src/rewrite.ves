@@ -81,11 +81,11 @@ pub fn pool_entry(inout p: Program, kind: u64, label: u32) -> u64 {
     p
         .pool
         .push(
-        PoolRow {
-            kind: kind,
-            label: label
-        }
-    );
+            PoolRow {
+                kind: kind,
+                label: label
+            }
+        );
     i
 }
 

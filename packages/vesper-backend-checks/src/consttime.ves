@@ -437,9 +437,7 @@ fn check(inout c: Cx, in t: Ct, in declassify: ChunkSeq[u64], in trusted: ChunkS
         } else if op == OP_STACK_ADDR || op == OP_STACK_LOAD || op == OP_STACK_STORE {} else if (
             fmt == FMT_LOAD || fmt == FMT_LOAD_NO_OFFSET
         )
-            && flags
-            & CAN_LOAD
-            != 0 {
+            && flags & CAN_LOAD != 0 {
             let v = arg(in c, row, 0);
             if secret(get_a(in c, in t, v)) {
                 let m = c.r.tx.len();

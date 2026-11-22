@@ -166,6 +166,8 @@ pub enum TokenKind {
     Shl,
     #[token(">>")]
     Shr,
+    /// Quoted operator delimiter, recognized only by the sugar surface lexer.
+    Backtick,
 }
 fn block_comment(lex: &mut logos::Lexer<TokenKind>) -> bool {
     let rest = lex.remainder();
@@ -281,6 +283,15 @@ pub struct Lexed {
 /// diagnostic exhaustion returns a capped stream with one opaque Error tail;
 /// concatenating all non-EOF token spans still yields the complete input.
 pub fn lex_with_limits(source: &str, limits: LexLimits) -> Result<Lexed, LexLimit> {
+    lex_profile(source, limits, false)
+}
+
+/// Lex the unexpanded sugar surface, retaining backticks in infix declarations.
+pub fn sugar_lex_with_limits(source: &str, limits: LexLimits) -> Result<Lexed, LexLimit> {
+    lex_profile(source, limits, true)
+}
+
+fn lex_profile(source: &str, limits: LexLimits, sugar: bool) -> Result<Lexed, LexLimit> {
     limits.validate()?;
     if source.len() > limits.max_source_bytes {
         return Err(LexLimit {
@@ -294,7 +305,11 @@ pub fn lex_with_limits(source: &str, limits: LexLimits) -> Result<Lexed, LexLimi
     let mut diagnostics = Vec::with_capacity(limits.max_diagnostics);
     let mut limit = None;
     for (kind, span) in TokenKind::lexer(source).spanned() {
-        let kind = kind.unwrap_or(TokenKind::Error);
+        let kind = match kind {
+            Ok(kind) => kind,
+            Err(()) if sugar && &source[span.clone()] == "`" => TokenKind::Backtick,
+            Err(()) => TokenKind::Error,
+        };
         if tokens.len() >= limits.max_tokens {
             let last = tokens.pop().expect("positive token limit");
             let exhausted = LexLimit {
