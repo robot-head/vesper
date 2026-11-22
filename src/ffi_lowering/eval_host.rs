@@ -101,6 +101,12 @@ impl EvalHost {
                 }
             })?;
         let d = &f.descriptor;
+        if d.uses_foreign_memory() {
+            return Err(format!(
+                "{}::{} takes or returns foreign memory viewed in place (a pinned buffer or a mapping), which only native code lends; the evaluator has no stable addresses",
+                call.library, call.symbol
+            ));
+        }
         let args = call.arguments().to_vec();
         let params = d.parameters();
         if args.len() != params.len() {
@@ -111,7 +117,9 @@ impl EvalHost {
         let mut slots = vec![];
         for (p, v) in params.iter().zip(&args) {
             let slot = match p.ty() {
-                ParameterType::Value(_) | ParameterType::Handle { .. } => Slot::None,
+                ParameterType::Value(_)
+                | ParameterType::Handle { .. }
+                | ParameterType::Pinned { .. } => Slot::None,
                 ParameterType::CStr => {
                     let bytes = elements(v)?
                         .iter()

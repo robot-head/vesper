@@ -1,0 +1,27 @@
+sys library Xsk (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_xsk", artifact = "blake3:@DIGEST@"
+) {
+    // An AF_XDP-shaped receive path. The socket keeps the address of the
+    // UMEM it is given (a pinned buffer) and the kernel writes frames into
+    // it later; the receive ring is memory the socket maps, which Vesper
+    // reads and writes in place: a u32 producer at byte 0, a u32 consumer
+    // at byte 4, then 16-byte descriptors {addr: u64, len: u32, options:
+    // u32} from byte 64.
+    linear extern type Socket;
+    linear extern mapping Ring[u8];
+    fn xsk_socket_new(in umem: Pinned[u8], frame_size: u32) -> ForeignVal[Option[Socket]];
+    fn xsk_ring_map(in s: Socket, bytes: u64) -> ForeignVal[Option[Ring[bytes]]];
+    fn xsk_kernel_rx(inout s: Socket, packets: u32) -> ForeignVal[u32];
+    fn xsk_ring_unmap(sink r: Ring) -> ForeignVal[i32];
+    fn xsk_socket_free(sink s: Socket) -> ForeignVal[Unit];
+    fn xsk_live() -> ForeignVal[u64];
+    // The workaround before mappings and pinned buffers (for comparison):
+    // the ring read through imports and each frame copied out.
+    fn xsk_rx_producer(in s: Socket) -> ForeignVal[u32];
+    fn xsk_rx_consumer(in s: Socket) -> ForeignVal[u32];
+    fn xsk_rx_desc_addr(in s: Socket, i: u32) -> ForeignVal[u64];
+    fn xsk_rx_desc_len(in s: Socket, i: u32) -> ForeignVal[u32];
+    fn xsk_rx_release(inout s: Socket, consumer: u32) -> ForeignVal[Unit];
+    fn xsk_copy_out(in s: Socket, addr: u64, nocapture inout dst: CSlice[u8]) -> ForeignVal[u32];
+}

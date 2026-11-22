@@ -364,6 +364,9 @@ pub struct ExternTypeDescriptor {
     /// `affine extern type H drop f;`: the import `f(sink h: H) ->
     /// ForeignVal[Unit]` runs whenever a handle is dropped.
     drop: Option<String>,
+    /// `linear extern mapping M[T];`: foreign memory of `T` elements that
+    /// Vesper views in place. Its value is an address and a length.
+    mapping: Option<Scalar>,
 }
 impl ExternTypeDescriptor {
     pub fn name(&self) -> &str {
@@ -375,6 +378,12 @@ impl ExternTypeDescriptor {
     /// The drop import of an affine type, if it declares one.
     pub fn drop_import(&self) -> Option<&str> {
         self.drop.as_deref()
+    }
+    /// The element type of a `linear extern mapping M[T];`, or `None` for an
+    /// opaque handle type. C receives a mapping as `(T *data, size_t len)`
+    /// in every parameter mode.
+    pub fn mapping(&self) -> Option<Scalar> {
+        self.mapping
     }
 }
 /// How a handle parameter is passed. The C callee always receives the
@@ -527,6 +536,13 @@ pub enum ParameterType {
     /// bytes are copied into a fresh buffer with the terminator appended; an
     /// argument holding a NUL byte is refused before the call.
     CStr,
+    /// `in b: Pinned[T]` or `inout b: Pinned[T]`: a Vesper buffer whose
+    /// address C may keep after the call, until the program releases the
+    /// buffer. Passed as `(T *data, size_t len)`.
+    Pinned {
+        element: Scalar,
+        access: Access,
+    },
 }
 impl ParameterType {
     /// Size, alignment and direction of a single-element pointer parameter.
@@ -617,8 +633,26 @@ pub struct FunctionDescriptor {
     convention: CallingConvention,
     errno: bool,
     variadic: Option<usize>,
+    /// `-> ForeignVal[Option[M[len]]]`: the index of the parameter that
+    /// gives a mapping result's length in elements.
+    mapping_length: Option<usize>,
 }
 impl FunctionDescriptor {
+    /// The parameter giving the length of a mapping result
+    /// (`ForeignVal[Option[M[len]]]`), if the result is a mapping.
+    pub fn mapping_length(&self) -> Option<usize> {
+        self.mapping_length
+    }
+    /// Whether any parameter or the result is foreign memory Vesper views
+    /// in place (a mapping or a pinned buffer).
+    pub fn uses_foreign_memory(&self) -> bool {
+        self.mapping_length.is_some()
+            || self.parameters.iter().any(|p| match &p.ty {
+                ParameterType::Pinned { .. } => true,
+                ParameterType::Handle { handle, .. } => handle.mapping.is_some(),
+                _ => false,
+            })
+    }
     /// Index of the first variadic parameter (`None` unless declared with
     /// `...`).
     pub fn variadic_from(&self) -> Option<usize> {
@@ -669,7 +703,11 @@ impl FunctionDescriptor {
                 ParameterType::Value(t) => {
                     parameters.push(carrier(t).expect("validated non-unit parameter"))
                 }
-                ParameterType::Slice { .. } => {
+                ParameterType::Slice { .. } | ParameterType::Pinned { .. } => {
+                    parameters.push(AbiType::Pointer);
+                    parameters.push(AbiType::Integer(Scalar::Usize));
+                }
+                ParameterType::Handle { handle, .. } if handle.mapping.is_some() => {
                     parameters.push(AbiType::Pointer);
                     parameters.push(AbiType::Integer(Scalar::Usize));
                 }
@@ -943,9 +981,22 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                     e.text(handle.name())?;
                 }
                 ParameterType::CStr => e.text("nocapture-cstr")?,
+                ParameterType::Pinned { element, access } => {
+                    e.text("pinned-buffer")?;
+                    e.text(match access {
+                        Access::In => "in",
+                        Access::Inout => "inout",
+                    })?;
+                    e.text(element.name())?;
+                }
             }
         }
         e.value(&f.result)?;
+        // Appended only when declared, like `errno`.
+        if let Some(length) = f.mapping_length {
+            e.text("mapping/length-from")?;
+            e.count(length)?;
+        }
         // Appended only when declared, so other functions keep their bytes.
         if f.errno {
             e.text("errno/after-call")?;
@@ -1016,6 +1067,14 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
             e.text("drop-imports")?;
             for t in &library.extern_types {
                 e.text(t.drop.as_deref().unwrap_or(""))?;
+            }
+        }
+        // Appended only when declared, so libraries without mappings keep
+        // their canonical bytes.
+        if library.extern_types.iter().any(|t| t.mapping.is_some()) {
+            e.text("mappings")?;
+            for t in &library.extern_types {
+                e.text(t.mapping.map_or("", Scalar::name))?;
             }
         }
     }
