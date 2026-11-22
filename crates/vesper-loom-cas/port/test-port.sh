@@ -33,4 +33,7 @@ expect tree --lib "test tree::tests::directory_entries_must_have_zero_size ... F
 expect tree "--test codec_differential" "codecs_agree_with_the_rust_build ... FAILED"
 expect drv "--test codec_differential" "codecs_agree_with_the_rust_build ... FAILED"
 expect store "--test store" "corrupted_objects_are_rejected_reported_and_repaired ... FAILED"
-echo "divergent loom-cas port detected (name, id, tree, drv and store each caught)"
+expect fold --lib "test port::tests::name_fold_is_to_lowercase ... FAILED"
+expect fold "--test store" "ingest_rejects_nonportable_names ... FAILED"
+expect walk "--test store" "ingest_rejects_nonportable_names ... FAILED"
+echo "divergent loom-cas port detected (name, id, tree, drv, store, fold and walk each caught)"

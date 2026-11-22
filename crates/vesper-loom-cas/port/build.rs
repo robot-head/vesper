@@ -45,4 +45,8 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "if seen == size && same(in actual.as_slice(), in id) {",
         "if seen == size {",
     ),
+    // fold.ves: a word-final capital sigma folds to the medial form.
+    ("fold", "encode(inout out, 962);", "encode(inout out, 963);"),
+    // store.ves: ingesting a directory skips the case-collision check.
+    ("walk", "if prev != 0 {", "if prev == 0 && prev != 0 {"),
 ];

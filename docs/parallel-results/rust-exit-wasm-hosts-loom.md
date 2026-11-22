@@ -335,9 +335,40 @@ deduplicated 256-byte blobs is at or below Rust's time (the file system
 dominates). A 1 MiB read is ~1.8x (median of 15): the reply is copied
 once into the Rust `Vec`.
 
-Left for part 2c: `put_file`, `ingest_dir`, `materialize`, `verify_all`
-and the transfer exporter's bounded read. They need the tree decoder's
-case-insensitive collision check (Unicode `to_lowercase`) in Vesper.
+## Part 2c: ingestion, workspaces and the full scan
+
+`put_file`, `ingest_dir`, `materialize` and `verify_all` run in Vesper
+too, so every public `Store` call goes through the port in the port
+package.
+
+* The tree's case-collision check needs `str::to_lowercase`, and Vesper
+  had no Unicode tables. `vesper/src/lower.ves` is generated from the
+  Rust toolchain by `examples/lower_table.rs`. It holds 185 runs of
+  `char::to_lowercase` deltas, plus 615 runs of the case classes that
+  the final-sigma rule needs (Case_Ignorable and Cased). std does not
+  expose those properties, so the generator probes them from
+  `str::to_lowercase` itself. `tests/lower_table.rs` fails when the
+  committed table is stale, for example after a toolchain Unicode update.
+  `vesper/src/fold.ves` folds names with the table, U+0130 and the final
+  sigma. A port unit test compares it with `str::to_lowercase` on every
+  char in three sigma contexts, plus 50,000 seeded strings.
+* A new store test, run on both builds, covers a word-final sigma:
+  "ΟΔΟΣ" collides with "οδος" but not with "οδοσ".
+* A tree object that hashes correctly but does not decode answers its
+  bytes, and the wrapper decodes them again for the exact `TreeError`.
+  The destination's leaf-name check and parent directory stay in the
+  wrapper, because they are `Path` semantics.
+* `port/test-port.sh` now also catches a wrong final sigma (`fold`) and
+  a skipped collision check during ingestion (`walk`).
+
+Rough timings, one build per run, median of 15 on an unsynced store:
+`ingest_dir` and `verify_all` of 200 files are within the run-to-run
+noise of Rust (0.9-1.8x and 1.1-1.25x). `materialize` swings 1.5-8x
+because the file system dominates. These still need ABBA runs on a
+quiet machine.
+
+Left for part 2d: the pack transfer module (`src/transfer`, about 870
+lines, including the exporter's bounded read).
 
 ## Flip verdicts
 
@@ -345,6 +376,7 @@ case-insensitive collision check (Unicode `to_lowercase`) in Vesper.
 |---|---|---|---|---|
 | `vesper-loom-cas` (codecs) | 0 diffs | not run (1.2-3.5x rough) | 0 | part 2a |
 | `vesper-loom-cas` (store, 12 calls) | crate suites pass | not run (~1.0-1.1x small, 1.8x 1 MiB read) | 0 | part 2b |
+| `vesper-loom-cas` (ingest, materialize, verify_all) | crate suites pass; fold = `to_lowercase` on every char | not run (file-system bound, noisy) | 0 | part 2c |
 
 ## Coordination asks
 
@@ -356,7 +388,7 @@ case-insensitive collision check (Unicode `to_lowercase`) in Vesper.
 
 ## What is left
 
-* Part 2c: the rest of the store (above), then a speed pass on the codecs
+* Part 2d: the transfer module, then a speed pass on the codecs
   to the 1.5x bar and the loom-cas flip.
 * Moving `CasFs` onto `@vesper-std/fs` once lane 13 has no-follow opens,
   no-replace renames, modes, locks and reflinks.

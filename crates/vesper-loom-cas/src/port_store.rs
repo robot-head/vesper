@@ -9,15 +9,18 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::derivation::{DerivationInputs, DerivationKey};
+use crate::error::TreeError;
 use crate::error::{CasError, Result};
 use crate::id::{Digest, Domain, OBJECT_ID_BYTES, ObjectId, ObjectKind};
 use crate::port::binding;
 use crate::port_fs::{self, Reader};
-use crate::store::{DerivationOutcome, Ingested};
-use crate::tree::Tree;
+use crate::store::{
+    CopyStrategy, DerivationOutcome, Ingested, MaterializeOptions, MaterializeReport, StoreReport,
+};
+use crate::tree::{MAX_TREE_DEPTH, Tree};
 
 /// The operations of `CasError::Io`, by the port's `OP_*` code.
-const OPS: [&str; 29] = [
+const OPS: [&str; 42] = [
     "create store root",
     "resolve store root",
     "create store directory",
@@ -47,6 +50,32 @@ const OPS: [&str; 29] = [
     "read derivation",
     "read directory",
     "remove staging file",
+    "inspect file",
+    "open file",
+    "inspect directory",
+    "inspect entry",
+    "inspect destination",
+    "create staging directory",
+    "publish workspace",
+    "sync",
+    "create directory",
+    "set permissions",
+    "write",
+    "create file",
+    "open",
+];
+
+/// `UnsupportedFileType` kinds, by the port's code.
+const FILE_KINDS: [&str; 9] = [
+    "",
+    "regular file",
+    "directory",
+    "symlink",
+    "FIFO",
+    "socket",
+    "device",
+    "special file",
+    "non-regular file",
 ];
 
 /// A reply being read.
@@ -157,6 +186,27 @@ fn reply(mut bytes: Vec<u8>) -> Result<Reply> {
             expected: domain_of(r.u8()),
             found: domain_of(r.u8()),
         },
+        9 => CasError::InvalidName {
+            path: r.path(),
+            reason: crate::port::name_error(u64::from(r.u8()) + 1),
+        },
+        10 => CasError::InvalidTree(match r.u8() {
+            1 => {
+                let _ = r.u64();
+                TreeError::TooDeep {
+                    limit: MAX_TREE_DEPTH,
+                }
+            }
+            2 => {
+                let first = String::from_utf8_lossy(r.bytes()).into_owned();
+                let second = String::from_utf8_lossy(r.bytes()).into_owned();
+                TreeError::CaseCollision { first, second }
+            }
+            _ => {
+                let domain = domain_of(r.u8());
+                Tree::decode(domain, r.bytes()).expect_err("the port answers a tree that fails")
+            }
+        }),
         12 => CasError::DerivationConflict {
             key: DerivationKey(r.digest()),
             existing: r.id(),
@@ -179,6 +229,15 @@ fn reply(mut bytes: Vec<u8>) -> Result<Reply> {
             };
             CasError::UnsafeStoreLayout { path, reason }
         }
+        14 => CasError::UnsupportedFileType {
+            path: r.path(),
+            kind: FILE_KINDS[r.u8() as usize],
+        },
+        15 => CasError::DestinationExists(r.path()),
+        17 => CasError::ReflinkUnavailable {
+            path: r.path(),
+            source: port_fs::take_error(r.u64()),
+        },
         18 => CasError::PublishContention(r.id()),
         other => unreachable!("unknown store reply code {other}"),
     })
@@ -345,4 +404,82 @@ pub(crate) fn sweep(root: &Path, min_age: Duration) -> Result<usize> {
         )
     })?;
     Ok(r.u64() as usize)
+}
+
+/// `Store::put_file`.
+pub(crate) fn put_file(
+    root: &Path,
+    durable: bool,
+    domain: Domain,
+    path: &Path,
+) -> Result<Ingested> {
+    let r = call(|| {
+        binding::store_put_file(root_bytes(root), durable, domain.tag(), root_bytes(path))
+    })?;
+    Ok(ingested(r))
+}
+
+/// `Store::ingest_dir`.
+pub(crate) fn ingest_dir(
+    root: &Path,
+    durable: bool,
+    domain: Domain,
+    path: &Path,
+) -> Result<Ingested> {
+    let r = call(|| {
+        binding::store_ingest_dir(root_bytes(root), durable, domain.tag(), root_bytes(path))
+    })?;
+    Ok(ingested(r))
+}
+
+/// `Store::materialize`, after the destination's name checks: `parent` is
+/// the directory the workspace is staged and published in.
+pub(crate) fn materialize(
+    root: &Path,
+    durable: bool,
+    tree: &ObjectId,
+    dest: &Path,
+    parent: &Path,
+    options: MaterializeOptions,
+) -> Result<MaterializeReport> {
+    let strategy = match options.strategy {
+        CopyStrategy::ReflinkOrCopy => 0,
+        CopyStrategy::CopyOnly => 1,
+        CopyStrategy::ReflinkOnly => 2,
+    };
+    let mut r = call(|| {
+        binding::store_materialize(
+            root_bytes(root),
+            durable,
+            &id_bytes(tree),
+            root_bytes(dest),
+            root_bytes(parent),
+            strategy,
+            options.verify_reflinks,
+        )
+    })?;
+    Ok(MaterializeReport {
+        directories: r.u64(),
+        files: r.u64(),
+        bytes: r.u64(),
+        reflinked: r.u64(),
+        copied: r.u64(),
+    })
+}
+
+/// `Store::verify_all`.
+pub(crate) fn verify_all(root: &Path) -> Result<StoreReport> {
+    let mut r = call(|| binding::store_verify_all(root_bytes(root)))?;
+    let verified_objects = r.u64();
+    let corrupt_objects = (0..r.u64()).map(|_| r.id()).collect();
+    let verified_derivations = r.u64();
+    let corrupt_derivations = (0..r.u64()).map(|_| r.path()).collect();
+    let stray_paths = (0..r.u64()).map(|_| r.path()).collect();
+    Ok(StoreReport {
+        verified_objects,
+        corrupt_objects,
+        verified_derivations,
+        corrupt_derivations,
+        stray_paths,
+    })
 }
