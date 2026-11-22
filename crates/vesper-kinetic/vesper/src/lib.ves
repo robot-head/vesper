@@ -145,22 +145,29 @@ pub fn fastmath_log(x: f64) -> f64 {
 
 pub fn fastmath_sin(x: f64) -> f64 {
     if needs_crmath(x) {
-        let mut cache: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        return from_bits_f64(
-            c_sin_cos_bits(inout cache.as_slice_mut(), to_bits_f64(x), true, false)
-        );
+        return cold_sin(x);
     }
     f_sin(x)
 }
 
 pub fn fastmath_cos(x: f64) -> f64 {
     if needs_crmath(x) {
-        let mut cache: ChunkSeq[u32] = ChunkSeq::new[u32]();
-        return from_bits_f64(
-            c_sin_cos_bits(inout cache.as_slice_mut(), to_bits_f64(x), true, true)
-        );
+        return cold_cos(x);
     }
     f_cos(x)
+}
+
+// The correctly rounded fallback of `fastmath_sin` and `fastmath_cos`. Its
+// cache is a sequence, so it stays a call on their rare branch, and their
+// common path needs no frame (#1499).
+fn cold_sin(x: f64) -> f64 {
+    let mut cache: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    from_bits_f64(c_sin_cos_bits(inout cache.as_slice_mut(), to_bits_f64(x), true, false))
+}
+
+fn cold_cos(x: f64) -> f64 {
+    let mut cache: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    from_bits_f64(c_sin_cos_bits(inout cache.as_slice_mut(), to_bits_f64(x), true, true))
 }
 
 pub fn fastmath_atan2(y: f64, x: f64) -> f64 {
