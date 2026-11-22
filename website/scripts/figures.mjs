@@ -34,11 +34,27 @@ function expansion(macro) {
 
 export const figures = {
   broker,
+  'ownership-modes': `<figure class="worked-figure mode-figure">
+    <figcaption>What can an owner do?</figcaption>
+    <table aria-label="Ownership rules by mode">
+      <thead><tr><th scope="col">Mode</th><th scope="col">Copy</th><th scope="col">Move</th><th scope="col">Drop unused</th></tr></thead>
+      <tbody>
+        <tr><th scope="row"><code>copy</code></th><td>Yes</td><td>Yes</td><td>Yes</td></tr>
+        <tr><th scope="row"><code>affine</code></th><td>No</td><td>Yes</td><td>Yes</td></tr>
+        <tr><th scope="row"><code>linear</code></th><td>No</td><td>Yes</td><td>No</td></tr>
+      </tbody>
+    </table>
+    <p>Moving a linear value hands its obligation to a new owner. That owner must eventually consume it or move it again.</p>
+  </figure>`,
   ownership: '<!-- diagram:linear-transaction -->',
   exit: flow('One return value, seen at two boundaries', [
     ['Vesper integer', '−1'], ['Low eight bits', '1111 1111'], ['Linux shell status', '255'],
   ]),
+  'pulse-guide': '<p><a href="../docs/chapter-15.html#section-15-4">Read about fibers, worker threads, and nurseries</a>.</p>',
   resume: '<!-- diagram:effect-resumption -->',
+  'clock-test': flow('What the clock test supplies', [
+    ['Reservation asks', 'now()'], ['Test resumes with', '100'], ['At the deadline', 'true'],
+  ]),
   'guide-expansion': expansion('addone'),
   'tour-expansion': expansion('next_seat'),
 };

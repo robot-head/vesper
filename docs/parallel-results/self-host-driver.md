@@ -60,11 +60,11 @@ link any of this.
 
 | Test | What | Result (Linux, this branch) |
 |---|---|---|
-| `tests/self_host_driver.rs` `argument_errors_match_the_rust_cli` | 5,516 argument vectors: each compile command with each of 67 options alone, before and after the input, every ordered pair of options, and the CLI suites' option sets. A Vesper error must be the Rust CLI's whole stderr (`vesper: <message>`) with exit 1; `--help` its stdout; an accepted vector must get the Rust CLI as far as reading the input. | 5,516 agree |
+| `tests/self_host_driver.rs` `argument_errors_match_the_rust_cli` | 5,818 argument vectors: each compile command with each of 69 options alone, before and after the input, every ordered pair of options, and the CLI suites' option sets. A Vesper error must be the Rust CLI's whole stderr (`vesper: <message>`) with exit 1; `--help` its stdout; an accepted vector must get the Rust CLI as far as reading the input. | 5,818 agree |
 | `package_checks_match_the_rust_cli` | `--emit cst` and `--target bpf` on a real package directory | agree |
 | `records_carry_the_options` | the record's command, fuel (`+7`, `u64::MAX`, the last of two) and input | ok |
 | `object_paths_match_path_with_extension` | 34 paths against `Path::with_extension` | agree |
-| `crates/vesper-hybrid/tests/driver.rs` `driver_matches_the_default_compiler` | 19 inputs (programs for each error and build path, `examples/`, three package directories, a missing file) x 35 option sets (every compile command and `emit` format, errors, `build` to a missing directory, a missing linker, `false` as the linker, `--lib`, verifiers): exit status, stdout, stderr and every file written, and the object files a failed link leaves behind | 665 runs, 0 differ |
+| `crates/vesper-hybrid/tests/driver.rs` `driver_matches_the_default_compiler` | 19 inputs (programs for each error and build path, `examples/`, three package directories, a missing file) x 36 option sets (every compile command and `emit` format, errors, `build` to a missing directory, a missing linker, `false` as the linker, `--lib`, verifiers): exit status, stdout, stderr and every file written, and the object files a failed link leaves behind | 684 runs, 0 differ |
 | `compile_commands_run_in_the_vesper_driver` | the stats line: `check` and `emit` run their passes in the driver, an argument error runs none, `fmt` none | ok |
 | `help_and_version_match` | `--help`, `--version`, no arguments, `check --help`, an unknown command | ok |
 | `crates/vesper-hybrid/cli-suites.sh` | all 52 `tests/*cli*.rs` suites with the hybrid as `vesper` | 52 suites pass (10 need the `vesper-<tool>` binaries; the script builds them) |
@@ -120,7 +120,7 @@ hybrid (1.004x) over 665 runs.
    kind's generic text, not Rust's custom message.
 6. **JIT call cost in tests.** Through `check_harness::Entry::words`, one
    call of `parse_text` costs about 2.5 ms in the debug JIT, so the
-   5,516-vector test spends ~14 s there. The AOT driver in the hybrid costs
+   5,818-vector test spends ~14 s there. The AOT driver in the hybrid costs
    nothing measurable (above). Not investigated.
 
 ## What is left

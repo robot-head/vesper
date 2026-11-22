@@ -1,3 +1,62 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-vesper_crate()
+# QUIC packet protection is the Vesper port (Rust-exit SH6 lane 17, #1412):
+# build.rs links the object built here from the Loom package in vesper/,
+# which depends on @vesper/crypto, and checks port/binding.rs against the
+# generated binding. Every test runs against it; src/differential.rs
+# compares it with the Rust reference it replaced (src/reference/).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+    deps = ["//packages/vesper-crypto:crypto_package"],
+)
+
+vesper_port_object(
+    name = "warp_crypto_vesper",
+    library = "warp_crypto",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "warp_crypto_vesper_binding",
+    srcs = [":warp_crypto_vesper"],
+    output_group = "rust_binding",
+)
+
+vesper_crate(
+    build_script_data = [
+        ":warp_crypto_vesper",
+        ":warp_crypto_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :warp_crypto_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :warp_crypto_vesper_binding)",
+    },
+)
+
+# The divergent builds, one per ported area (the Cargo
+# `vesper-port-divergent` feature applies the same edits from build.rs, one
+# at a time with VESPER_WARP_CRYPTO_DIVERGE): each must keep compiling, and
+# port/check.sh asserts that the differential test catches it.
+[
+    vesper_port_object(
+        name = "warp_crypto_vesper_divergent_" + area,
+        edit_src = "vesper/src/lib.ves",
+        edits = {old: new},
+        library = "warp_crypto",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for area, old, new in [
+        ("schedule", "in \"quic ku\".as_bytes()", "in \"quic k\".as_bytes()"),
+        ("nonce", "let m = if i < 4 {", "let m = if i < 5 {"),
+        ("header", "        15\n    } else {\n        31", "        31\n    } else {\n        31"),
+        ("sealer", "if wrapping_add(pn, 1) == s.next_pn {", "if pn == s.next_pn {"),
+        ("update", "wrapping_add(now_ns, k.retire_window_ns)", "wrapping_add(now_ns, 0)"),
+        ("retry", "461599d35d632bf2239825bb", "461599d35d632bf2239825bc"),
+    ]
+]

@@ -1,17 +1,24 @@
 //! Versioned in-memory checkpoint images. Checksums detect corruption, not a
 //! hostile producer able to replace the image and checksum. No durable IO occurs.
+//!
+//! The image codec and the identity digest run in Vesper
+//! (`vesper/src/image.ves`, through `crate::port`); this module flattens the
+//! circuit and policy into words for it and rebuilds them from its words.
 use super::{
     Circuit, DOp, Executor, Field, Op, Predicate, apply,
     cdc::{CdcPolicy, SourceBinding, SourceState, WeightPolicy},
 };
-use crate::{Budget, Error, Limits, ZSet};
-use std::collections::BTreeMap;
+use crate::{Budget, Error, Limits, ZSet, port};
 
+#[cfg(test)]
+#[path = "checkpoint_differential.rs"]
+mod differential;
 #[path = "durable.rs"]
 pub(super) mod durable;
+#[cfg(test)]
+#[path = "checkpoint_reference.rs"]
+mod reference;
 
-const MAGIC: &[u8; 8] = b"VFLUXCP1";
-const VERSION: u16 = 1;
 /// Image/parse/validation ceilings. Hard caps: 64MiB image, 1M rows, 4M cells,
 /// 65,536 graph/program nodes, 1024 columns/sources, 16M charged structural operations.
 #[derive(Clone, Copy, Debug)]
@@ -57,186 +64,43 @@ impl CheckpointLimits {
         })
     }
 }
-struct Writer {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-impl Writer {
-    fn put(&mut self, bytes: &[u8]) -> Result<(), Error> {
-        let end = self
-            .bytes
-            .len()
-            .checked_add(bytes.len())
-            .ok_or(Error::Overflow)?;
-        if end > self.limit {
-            return Err(Error::Limit("checkpoint bytes"));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(())
+/// The circuit, its limits and the source policy as the words the identity
+/// digest covers, in order.
+struct Words(Vec<u64>);
+impl Words {
+    fn usize(&mut self, n: usize) {
+        self.0.push(n as u64);
     }
-    fn u8(&mut self, n: u8) -> Result<(), Error> {
-        self.put(&[n])
-    }
-    fn u16(&mut self, n: u16) -> Result<(), Error> {
-        self.put(&n.to_le_bytes())
-    }
-    fn u32(&mut self, n: u32) -> Result<(), Error> {
-        self.put(&n.to_le_bytes())
-    }
-    fn u64(&mut self, n: u64) -> Result<(), Error> {
-        self.put(&n.to_le_bytes())
-    }
-    fn usize(&mut self, n: usize) -> Result<(), Error> {
-        self.u64(u64::try_from(n).map_err(|_| Error::Overflow)?)
-    }
-    fn i64(&mut self, n: i64) -> Result<(), Error> {
-        self.put(&n.to_le_bytes())
-    }
-}
-struct Reader<'a, 'b> {
-    bytes: &'a [u8],
-    cursor: usize,
-    budget: &'b mut Budget,
-}
-impl<'a> Reader<'a, '_> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        self.budget.charge(1)?;
-        self.take_prepaid(n)
-    }
-    fn take_prepaid(&mut self, n: usize) -> Result<&'a [u8], Error> {
-        let end = self.cursor.checked_add(n).ok_or(Error::Overflow)?;
-        let bytes = self
-            .bytes
-            .get(self.cursor..end)
-            .ok_or(Error::Checkpoint("truncated"))?;
-        self.cursor = end;
-        Ok(bytes)
-    }
-    /// Charge all scalar reads and validate the complete encoded row before
-    /// allocating its vector; no partial row growth precedes those checks.
-    fn row(&mut self, width: usize) -> Result<(Vec<i64>, i64), Error> {
-        let reads = width.checked_add(1).ok_or(Error::Overflow)?;
-        self.budget.charge(reads)?;
-        let size = reads.checked_mul(8).ok_or(Error::Overflow)?;
-        let bytes = self.take_prepaid(size)?;
-        let cells = width.checked_mul(8).ok_or(Error::Overflow)?;
-        let row = bytes[..cells]
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|cell| i64::from_le_bytes(*cell))
-            .collect();
-        let weight = i64::from_le_bytes(
-            bytes[cells..]
-                .try_into()
-                .map_err(|_| Error::Checkpoint("weight"))?,
-        );
-        Ok((row, weight))
-    }
-    fn u8(&mut self) -> Result<u8, Error> {
-        Ok(self.take(1)?[0])
-    }
-    fn u16(&mut self) -> Result<u16, Error> {
-        Ok(u16::from_le_bytes(
-            self.take(2)?
-                .try_into()
-                .map_err(|_| Error::Checkpoint("u16"))?,
-        ))
-    }
-    fn u32(&mut self) -> Result<u32, Error> {
-        Ok(u32::from_le_bytes(
-            self.take(4)?
-                .try_into()
-                .map_err(|_| Error::Checkpoint("u32"))?,
-        ))
-    }
-    fn u64(&mut self) -> Result<u64, Error> {
-        Ok(u64::from_le_bytes(
-            self.take(8)?
-                .try_into()
-                .map_err(|_| Error::Checkpoint("u64"))?,
-        ))
-    }
-    fn usize(&mut self) -> Result<usize, Error> {
-        usize::try_from(self.u64()?).map_err(|_| Error::Overflow)
-    }
-}
-struct Identity<'a> {
-    hash: blake3::Hasher,
-    budget: &'a mut Budget,
-}
-impl Identity<'_> {
-    fn u64(&mut self, n: u64) -> Result<(), Error> {
-        self.budget.charge(1)?;
-        self.hash.update(&n.to_le_bytes());
-        Ok(())
-    }
-    fn usize(&mut self, n: usize) -> Result<(), Error> {
-        self.u64(u64::try_from(n).map_err(|_| Error::Overflow)?)
-    }
-    fn i64(&mut self, n: i64) -> Result<(), Error> {
-        self.budget.charge(1)?;
-        self.hash.update(&n.to_le_bytes());
-        Ok(())
-    }
-    fn op(&mut self, op: &Op) -> Result<(), Error> {
+    fn op(&mut self, op: &Op) {
+        let w = &mut self.0;
         match op {
-            Op::Input(a) => {
-                self.u64(0)?;
-                self.usize(*a)?;
-            }
+            Op::Input(a) => w.extend([0, *a as u64]),
             Op::Filter(a, p) => {
-                self.u64(1)?;
-                self.usize(*a)?;
+                w.extend([1, *a as u64]);
                 match p {
                     Predicate::Equal { column, value } => {
-                        self.u64(0)?;
-                        self.usize(*column)?;
-                        self.i64(*value)?;
+                        w.extend([0, *column as u64, *value as u64]);
                     }
                     Predicate::AtLeast { column, value } => {
-                        self.u64(1)?;
-                        self.usize(*column)?;
-                        self.i64(*value)?;
+                        w.extend([1, *column as u64, *value as u64]);
                     }
                 }
             }
             Op::Map(a, fields) => {
-                self.u64(2)?;
-                self.usize(*a)?;
-                self.usize(fields.len())?;
+                w.extend([2, *a as u64, fields.len() as u64]);
                 for f in fields {
                     match f {
-                        Field::Column(c) => {
-                            self.u64(0)?;
-                            self.usize(*c)?;
-                        }
-                        Field::Constant(v) => {
-                            self.u64(1)?;
-                            self.i64(*v)?;
-                        }
+                        Field::Column(c) => w.extend([0, *c as u64]),
+                        Field::Constant(v) => w.extend([1, *v as u64]),
                     }
                 }
             }
-            Op::Union(a, b) => {
-                self.u64(3)?;
-                self.usize(*a)?;
-                self.usize(*b)?;
-            }
+            Op::Union(a, b) => w.extend([3, *a as u64, *b as u64]),
             Op::Join { a, b, ka, kb } => {
-                self.u64(4)?;
-                self.usize(*a)?;
-                self.usize(*b)?;
-                self.usize(*ka)?;
-                self.usize(*kb)?;
+                w.extend([4, *a as u64, *b as u64, *ka as u64, *kb as u64]);
             }
-            Op::Exchange { a, key } => {
-                self.u64(5)?;
-                self.usize(*a)?;
-                self.usize(*key)?;
-            }
+            Op::Exchange { a, key } => w.extend([5, *a as u64, *key as u64]),
         }
-        Ok(())
     }
 }
 pub(crate) fn identity(
@@ -252,12 +116,7 @@ pub(crate) fn identity(
     {
         return Err(Error::Limit("checkpoint graph"));
     }
-    let mut h = Identity {
-        hash: blake3::Hasher::new(),
-        budget,
-    };
-    h.hash
-        .update(b"vesper.flux.execution-identity/1\0vesper.arith.checked/1\0row.i64.le/1");
+    let mut h = Words(Vec::new());
     for n in [
         c.limits.max_columns,
         c.limits.max_input_entries,
@@ -270,65 +129,59 @@ pub(crate) fn identity(
         c.output,
         c.inputs.len(),
     ] {
-        h.usize(n)?;
+        h.usize(n);
     }
     for w in &c.inputs {
-        h.usize(*w)?;
+        h.usize(*w);
     }
-    h.usize(c.nodes.len())?;
+    h.usize(c.nodes.len());
     for n in &c.nodes {
-        h.usize(n.width)?;
-        h.usize(n.depth)?;
-        h.op(&n.op)?;
+        h.usize(n.width);
+        h.usize(n.depth);
+        h.op(&n.op);
     }
-    h.usize(c.diff.len())?;
+    h.usize(c.diff.len());
     for n in &c.diff {
-        h.usize(n.depth)?;
+        h.usize(n.depth);
         match &n.op {
-            DOp::Delta(a) => {
-                h.u64(0)?;
-                h.usize(*a)?;
-            }
-            DOp::Previous(a) => {
-                h.u64(1)?;
-                h.usize(*a)?;
-            }
+            DOp::Delta(a) => h.0.extend([0, *a as u64]),
+            DOp::Previous(a) => h.0.extend([1, *a as u64]),
             DOp::Apply(op) => {
-                h.u64(2)?;
-                h.op(op)?;
+                h.0.push(2);
+                h.op(op);
             }
-            DOp::Sum3(a, b, c) => {
-                h.u64(3)?;
-                h.usize(*a)?;
-                h.usize(*b)?;
-                h.usize(*c)?;
-            }
+            DOp::Sum3(a, b, c) => h.0.extend([3, *a as u64, *b as u64, *c as u64]),
         }
     }
-    h.usize(c.delta.len())?;
+    h.usize(c.delta.len());
     for d in &c.delta {
-        h.usize(*d)?;
+        h.usize(*d);
     }
     match source {
-        None => h.u64(0)?,
+        None => h.0.push(0),
         Some(s) => {
-            h.u64(1)?;
-            h.usize(s.policy.max_batch_bytes)?;
-            h.usize(s.policy.max_records)?;
-            h.usize(s.policy.bindings.len())?;
+            h.0.push(1);
+            h.usize(s.policy.max_batch_bytes);
+            h.usize(s.policy.max_records);
+            h.usize(s.policy.bindings.len());
             for b in &s.policy.bindings {
-                h.u64(u64::from(b.partition_id))?;
-                h.u64(u64::from(b.schema_id))?;
-                h.usize(b.input)?;
-                h.u64(b.first_lsn)?;
-                h.u64(match b.weights {
-                    WeightPolicy::Unit => 0,
-                    WeightPolicy::NonZero => 1,
-                })?;
+                h.0.extend([
+                    u64::from(b.partition_id),
+                    u64::from(b.schema_id),
+                    b.input as u64,
+                    b.first_lsn,
+                    weight_tag(b.weights),
+                ]);
             }
         }
     }
-    Ok(*h.hash.finalize().as_bytes())
+    port::cp_identity(&h.0, budget)
+}
+fn weight_tag(w: WeightPolicy) -> u64 {
+    match w {
+        WeightPolicy::Unit => 0,
+        WeightPolicy::NonZero => 1,
+    }
 }
 pub(crate) fn count_rows(prior: &[ZSet], limits: CheckpointLimits) -> Result<(), Error> {
     let mut rows = 0usize;
@@ -343,37 +196,6 @@ pub(crate) fn count_rows(prior: &[ZSet], limits: CheckpointLimits) -> Result<(),
         }
     }
     Ok(())
-}
-/// Exact charged reads of the v1 parser for a canonical image. Creation
-/// reserves this instead of its smaller serialization walk, so the same work
-/// budget admits restore (identity + parsing + relational validation).
-fn parse_work(prior: &[ZSet], source: Option<&SourceState>) -> Result<usize, Error> {
-    // Magic/version/flags/identity/ticks/source tag/node count, then width/count
-    // per node. Source metadata adds two policy limits, count and six fields
-    // per binding. A row adds one scalar read per cell and one weight read.
-    let mut work = 7usize
-        .checked_add(prior.len().checked_mul(2).ok_or(Error::Overflow)?)
-        .ok_or(Error::Overflow)?;
-    if let Some(source) = source {
-        work = work
-            .checked_add(3)
-            .and_then(|n| {
-                source
-                    .policy
-                    .bindings
-                    .len()
-                    .checked_mul(6)
-                    .and_then(|count| n.checked_add(count))
-            })
-            .ok_or(Error::Overflow)?;
-    }
-    for set in prior {
-        let reads = set.width.checked_add(1).ok_or(Error::Overflow)?;
-        work = work
-            .checked_add(set.len().checked_mul(reads).ok_or(Error::Overflow)?)
-            .ok_or(Error::Overflow)?;
-    }
-    Ok(work)
 }
 pub(crate) fn validate_state(
     c: &Circuit,
@@ -433,76 +255,58 @@ pub(crate) fn validate_state(
     }
     Ok(())
 }
-fn write_source(w: &mut Writer, source: Option<&SourceState>) -> Result<(), Error> {
-    match source {
-        None => w.u8(0)?,
-        Some(s) => {
-            w.u8(1)?;
-            w.usize(s.policy.max_batch_bytes)?;
-            w.usize(s.policy.max_records)?;
-            w.u32(u32::try_from(s.policy.bindings.len()).map_err(|_| Error::Overflow)?)?;
-            for (b, next) in s.policy.bindings.iter().zip(&s.next) {
-                w.u32(b.partition_id)?;
-                w.u16(b.schema_id)?;
-                w.usize(b.input)?;
-                w.u64(b.first_lsn)?;
-                w.u8(match b.weights {
-                    WeightPolicy::Unit => 0,
-                    WeightPolicy::NonZero => 1,
-                })?;
-                w.u64(*next)?;
-            }
-        }
-    }
-    Ok(())
-}
-fn read_source(
-    r: &mut Reader<'_, '_>,
-    circuit: &Circuit,
-    limits: CheckpointLimits,
-) -> Result<Option<SourceState>, Error> {
-    let source = match r.u8()? {
-        0 => None,
-        1 => {
-            let max_batch_bytes = r.usize()?;
-            let max_records = r.usize()?;
-            let count = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
-            if count > limits.max_sources || count > 1024 {
-                return Err(Error::Limit("checkpoint sources"));
-            }
-            let mut bindings = Vec::new();
-            let mut next = Vec::new();
-            for _ in 0..count {
-                let partition_id = r.u32()?;
-                let schema_id = r.u16()?;
-                let input = r.usize()?;
-                let first_lsn = r.u64()?;
-                let weights = match r.u8()? {
-                    0 => WeightPolicy::Unit,
-                    1 => WeightPolicy::NonZero,
-                    _ => return Err(Error::Checkpoint("weight policy")),
-                };
-                let next_lsn = r.u64()?;
-                bindings.push(SourceBinding {
-                    partition_id,
-                    schema_id,
-                    input,
-                    first_lsn,
-                    weights,
-                });
-                next.push(next_lsn);
-            }
-            let policy = CdcPolicy {
-                bindings,
-                max_batch_bytes,
-                max_records,
-            };
-            policy.validate(circuit)?;
-            Some(SourceState { policy, next })
-        }
-        _ => return Err(Error::Checkpoint("source tag")),
+/// The source as the image codec's words: empty for none, else the two
+/// policy limits, the binding count and six words per binding.
+fn source_words(source: Option<&SourceState>) -> Vec<u64> {
+    let Some(s) = source else {
+        return Vec::new();
     };
-    Ok(source)
+    let mut w = vec![
+        s.policy.max_batch_bytes as u64,
+        s.policy.max_records as u64,
+        s.policy.bindings.len() as u64,
+    ];
+    for (b, next) in s.policy.bindings.iter().zip(&s.next) {
+        w.extend([
+            u64::from(b.partition_id),
+            u64::from(b.schema_id),
+            b.input as u64,
+            b.first_lsn,
+            weight_tag(b.weights),
+            *next,
+        ]);
+    }
+    w
+}
+/// The source a checked image holds (from the codec's head words), checked
+/// against the circuit as `CdcPolicy::validate` does.
+fn read_source(head: &[u64], circuit: &Circuit) -> Result<Option<SourceState>, Error> {
+    if head[2] == 0 {
+        return Ok(None);
+    }
+    let mut bindings = Vec::new();
+    let mut next = Vec::new();
+    for b in head[6..].as_chunks::<6>().0 {
+        bindings.push(SourceBinding {
+            partition_id: b[0] as u32,
+            schema_id: b[1] as u16,
+            input: usize::try_from(b[2]).map_err(|_| Error::Overflow)?,
+            first_lsn: b[3],
+            weights: if b[4] == 0 {
+                WeightPolicy::Unit
+            } else {
+                WeightPolicy::NonZero
+            },
+        });
+        next.push(b[5]);
+    }
+    let policy = CdcPolicy {
+        bindings,
+        max_batch_bytes: usize::try_from(head[3]).map_err(|_| Error::Overflow)?,
+        max_records: usize::try_from(head[4]).map_err(|_| Error::Overflow)?,
+    };
+    policy.validate(circuit)?;
+    Ok(Some(SourceState { policy, next }))
 }
 impl Executor {
     /// Snapshot all original-node integrals (including input integrals), tick
@@ -523,31 +327,14 @@ impl Executor {
             limits,
             &mut budget,
         )?;
-        budget.charge(parse_work(&self.prior, self.source.as_ref())?)?;
-        let mut w = Writer {
-            bytes: Vec::new(),
-            limit: limits.max_bytes,
-        };
-        w.put(MAGIC)?;
-        w.u16(VERSION)?;
-        w.u16(0)?;
-        w.put(&id)?;
-        w.u64(self.ticks)?;
-        write_source(&mut w, self.source.as_ref())?;
-        w.u32(u32::try_from(self.prior.len()).map_err(|_| Error::Overflow)?)?;
-        for set in &self.prior {
-            w.u32(u32::try_from(set.width).map_err(|_| Error::Overflow)?)?;
-            w.usize(set.len())?;
-            for (row, weight) in set.entries() {
-                for value in row {
-                    w.i64(*value)?;
-                }
-                w.i64(weight)?;
-            }
-        }
-        let checksum = blake3::hash(&w.bytes);
-        w.put(checksum.as_bytes())?;
-        Ok(w.bytes)
+        port::cp_image(
+            &id,
+            self.ticks,
+            &source_words(self.source.as_ref()),
+            &self.prior,
+            limits.max_bytes,
+            &mut budget,
+        )
     }
     /// Restore only into the identical circuit, limits and prebound CDC policy
     /// (bind expected sources on a fresh executor first). Every check precedes
@@ -562,65 +349,27 @@ impl Executor {
         if image.len() > limits.max_bytes {
             return Err(Error::Limit("checkpoint bytes"));
         }
-        let split = image
-            .len()
-            .checked_sub(32)
-            .ok_or(Error::Checkpoint("truncated"))?;
-        let (body, checksum) = image.split_at(split);
-        if blake3::hash(body).as_bytes() != checksum {
-            return Err(Error::Checkpoint("checksum"));
-        }
+        port::cp_check(image)?;
+        let body = &image[..image.len() - 32];
         let mut budget = limits.budget(&self.circuit);
         let expected = identity(&self.circuit, self.source.as_ref(), limits, &mut budget)?;
-        let mut r = Reader {
-            bytes: body,
-            cursor: 0,
-            budget: &mut budget,
-        };
-        if r.take(8)? != MAGIC || r.u16()? != VERSION || r.u16()? != 0 {
-            return Err(Error::Checkpoint("version"));
-        }
-        if r.take(32)? != expected {
-            return Err(Error::Checkpoint("identity"));
-        }
-        let ticks = r.u64()?;
-        let source = read_source(&mut r, &self.circuit, limits)?;
+        let head = port::cp_head(body, &expected, limits.max_sources, &mut budget)?;
+        let ticks = head[1];
+        let source = read_source(&head, &self.circuit)?;
         if source.as_ref().map(|s| &s.policy) != self.source.as_ref().map(|s| &s.policy) {
             return Err(Error::Checkpoint("source policy"));
         }
-        let count = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
-        if count != self.circuit.nodes.len() || count > limits.max_nodes {
-            return Err(Error::Checkpoint("node count"));
-        }
-        let mut prior = Vec::new();
-        let mut total_rows = 0usize;
-        let mut total_cells = 0usize;
-        for n in &self.circuit.nodes {
-            let width = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
-            let count = r.usize()?;
-            if width != n.width || count > self.circuit.limits.max_rows {
-                return Err(Error::Checkpoint("row schema"));
-            }
-            total_rows = total_rows.checked_add(count).ok_or(Error::Overflow)?;
-            total_cells = total_cells
-                .checked_add(count.checked_mul(width).ok_or(Error::Overflow)?)
-                .ok_or(Error::Overflow)?;
-            if total_rows > limits.max_total_rows || total_cells > limits.max_total_cells {
-                return Err(Error::Limit("checkpoint state"));
-            }
-            let mut rows = BTreeMap::new();
-            for _ in 0..count {
-                let (row, weight) = r.row(width)?;
-                if weight == 0 || rows.last_key_value().is_some_and(|(last, _)| last >= &row) {
-                    return Err(Error::Checkpoint("noncanonical rows"));
-                }
-                rows.insert(row, weight);
-            }
-            prior.push(ZSet::from_rows(width, rows));
-        }
-        if r.cursor != body.len() {
-            return Err(Error::Checkpoint("trailing bytes"));
-        }
+        let widths: Vec<usize> = self.circuit.nodes.iter().map(|n| n.width).collect();
+        let prior = port::cp_sets(
+            body,
+            head[0],
+            &widths,
+            self.circuit.limits.max_rows,
+            limits.max_nodes,
+            limits.max_total_rows,
+            limits.max_total_cells,
+            &mut budget,
+        )?;
         validate_state(
             &self.circuit,
             &prior,

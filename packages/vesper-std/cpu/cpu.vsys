@@ -1,0 +1,26 @@
+// @vesper-std/cpu's import (audit gap G4): CPU instructions that Cranelift
+// does not have. No library provides these symbols. For every `vstd_cpu_*`
+// function, the native backend defines a local leaf function from machine
+// code for the object's target (src/ffi_lowering/cpu.rs), so `link` and
+// `name` are never used. A function of the other architecture is a compile
+// error on this target.
+sys library StdCpu (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_std_cpu",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    // x86_64: `lfence; rdtsc`.
+    fn vstd_cpu_rdtsc() -> ForeignVal[u64];
+    // x86_64: `lfence; rdpmc; lfence` of counter `index` (ecx).
+    fn vstd_cpu_rdpmc(index: u32) -> ForeignVal[u64];
+    // x86_64: `rdrand`; 1 when `out` holds a random word, else 0.
+    fn vstd_cpu_rdrand64(nocapture inout out: u64) -> ForeignVal[u32];
+    // AArch64: `isb; mrs cntvct_el0`.
+    fn vstd_cpu_cntvct() -> ForeignVal[u64];
+    // AArch64: `isb; mrs pmccntr_el0; isb`.
+    fn vstd_cpu_pmccntr() -> ForeignVal[u64];
+    // AArch64: `msr pmselr_el0, index; isb; mrs pmxevcntr_el0; isb`.
+    fn vstd_cpu_pmevcntr(index: u32) -> ForeignVal[u64];
+    // AArch64: `mrs rndr`; 1 when `out` holds a random word, else 0.
+    fn vstd_cpu_rndr(nocapture inout out: u64) -> ForeignVal[u32];
+}

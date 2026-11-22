@@ -1,10 +1,10 @@
-//! ABBA comparison of the Rust build (baseline) and the Vesper port
-//! (candidate), port parity wave lane 3 (#951). The two builds cannot share a
-//! binary (`vesper-port` swaps the implementation behind one public API), so
-//! this example is built twice and, in `compare` mode, runs the two
-//! executables as separate processes in Rust, port, port, Rust order per
-//! epoch, then analyzes the paired totals with vesper-bench. Run
-//! `crates/vesper-prism/bench-abba.sh`.
+//! ABBA comparison of the replaced Rust implementation (baseline) and the
+//! Vesper port (candidate), port parity wave lane 3 (#951). The Rust
+//! implementation now lives only in history (SH6 lane 5, #1400), so this
+//! example is built twice, once at a commit that still has it, and, in
+//! `compare` mode, runs the two executables as separate processes in Rust,
+//! port, port, Rust order per epoch, then analyzes the paired totals with
+//! vesper-bench. Run `crates/vesper-prism/bench-abba.sh`.
 //!
 //! `abba measure <ops>` warms each workload up and prints its total
 //! nanoseconds over `<ops>` operations. `abba compare <rust> <port> <epochs>
@@ -314,6 +314,10 @@ fn main() {
             for name in WORKLOADS {
                 println!("{name} {}", measure(name, ops));
             }
+        }
+        // One workload only (for profiling): `abba measure <ops> <workload>`.
+        ["measure", ops, name] if WORKLOADS.contains(name) => {
+            println!("{name} {}", measure(name, ops.parse().unwrap()));
         }
         ["compare", rust, port, epochs, ops] => {
             compare(rust, port, epochs.parse().unwrap(), ops.parse().unwrap())

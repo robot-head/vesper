@@ -36,6 +36,7 @@ use self::util::{
     ati,
     filled32,
     filled64,
+    Fnv,
     finish,
     fold,
     inc,
@@ -73,21 +74,88 @@ const P_APP: u8 = 3;
 const J_CONGR: u32 = 4294967295;
 
 // Error codes (the Rust side words them).
-pub const E_SYNTAX: u64 = 1;
-pub const E_COMMAND: u64 = 2;
-pub const E_SORT: u64 = 3;
-pub const E_CTOR: u64 = 4;
-pub const E_ARITY: u64 = 5;
-pub const E_TYPE: u64 = 6;
-pub const E_UNBOUND: u64 = 7;
-pub const E_DUP: u64 = 8;
-pub const E_ROOT: u64 = 9;
-pub const E_NODES: u64 = 10;
-pub const E_STEPS: u64 = 11;
-pub const E_NOTERM: u64 = 13;
-pub const E_INT: u64 = 14;
-pub const E_VAR: u64 = 15;
-pub const E_LHS: u64 = 16;
+pub enum Code: _ {
+    Syntax = 1,
+    Command = 2,
+    Sort = 3,
+    Ctor = 4,
+    Arity = 5,
+    Type = 6,
+    Unbound = 7,
+    Dup = 8,
+    Root = 9,
+    Nodes = 10,
+    Steps = 11,
+    NoTerm = 13,
+    Int = 14,
+    Var = 15,
+    Lhs = 16
+}
+
+// The bytes the S-expression reader looks at.
+enum Ascii: _ {
+    Tab = 0x09,
+    Lf = 0x0a,
+    Cr = 0x0d,
+    Space = 0x20,
+    Quote = 0x22,
+    OpenParen = 0x28,
+    CloseParen = 0x29,
+    Dash = 0x2d,
+    Zero = 0x30,
+    Nine = 0x39,
+    Semicolon = 0x3b,
+    Backslash = 0x5c
+}
+
+// The items of a command list: `(sort Name)`, `(constructor Name (Args..)
+// Out [:cost n])`, `(let name body)`, `(rewrite lhs rhs)`, and the item
+// counts of each form.
+enum Cmd: _ {
+    Name = 1,
+    Args = 2,
+    Out = 3,
+    CostKey = 4,
+    CostValue = 5,
+    Body = 2,
+    Lhs = 1,
+    Rhs = 2,
+    SortItems = 2,
+    CtorItems = 4,
+    CostedCtorItems = 6,
+    LetItems = 3,
+    RewriteItems = 3
+}
+
+// A rule match in `found`: the rule, the class, then the substitution's
+// ids.
+enum Found: _ {
+    Rule = 0,
+    Class = 1,
+    Subst = 2
+}
+
+// A node's kind in the output arenas: an integer, a string, a
+// constructor application.
+enum Node: _ {
+    Int = 0,
+    Str = 1,
+    Ctor = 2
+}
+
+// The base sorts (`S_I64`, `S_STRING`) before the declared ones.
+const BASE_SORTS: u32 = 2;
+// The starting slots of the symbol table and of the e-node tables.
+const SYM_SLOTS: u64 = 256;
+const NODE_SLOTS: u64 = 1024;
+// Hash tables stay at most half full: a table grows (doubling) once its
+// entries times `SPARSITY` pass its mask.
+const SPARSITY: u64 = 2;
+// `u64::MAX / 10`, the last value that takes another digit, and the
+// magnitudes of `i64::MIN` and `i64::MAX`.
+const U64_MAX_TENTH: u64 = 1844674407370955161;
+const I64_MIN_MAGNITUDE: u64 = 9223372036854775808;
+const I64_MAX: u64 = 9223372036854775807;
 
 // Bounds: e-nodes in one graph, steps in one explanation.
 const MAX_NODES: u64 = 2097152;
@@ -216,8 +284,8 @@ pub fn eng_new(in program: Str) -> Eng {
         sym_start: ChunkSeq::new[u32](),
         sym_len: ChunkSeq::new[u32](),
         sym_hash: ChunkSeq::new[u64](),
-        sym_slots: filled32(256, 0),
-        sym_mask: 255,
+        sym_slots: filled32(SYM_SLOTS, 0),
+        sym_mask: SYM_SLOTS - 1,
         sym_sort: ChunkSeq::new[u32](),
         sym_ctor: ChunkSeq::new[u32](),
         sym_let: ChunkSeq::new[u32](),
@@ -226,7 +294,7 @@ pub fn eng_new(in program: Str) -> Eng {
         kw_rewrite: 0,
         kw_let: 0,
         kw_cost: 0,
-        nsorts: 2,
+        nsorts: BASE_SORTS,
         c_sym: ChunkSeq::new[u32](),
         c_out: ChunkSeq::new[u32](),
         c_cost: ChunkSeq::new[u64](),
@@ -254,11 +322,11 @@ pub fn eng_new(in program: Str) -> Eng {
         uf_size: ChunkSeq::new[u32](),
         pf_parent: ChunkSeq::new[u32](),
         pf_just: ChunkSeq::new[u32](),
-        o_slots: filled32(1024, 0),
-        o_mask: 1023,
+        o_slots: filled32(NODE_SLOTS, 0),
+        o_mask: NODE_SLOTS - 1,
         o_count: 0,
-        k_slots: filled32(1024, 0),
-        k_mask: 1023,
+        k_slots: filled32(NODE_SLOTS, 0),
+        k_mask: NODE_SLOTS - 1,
         k_count: 0,
         a_rule: ChunkSeq::new[u32](),
         a_l: ChunkSeq::new[u32](),
@@ -290,11 +358,19 @@ pub fn eng_new(in program: Str) -> Eng {
 }
 
 fn is_space(b: u8) -> bool {
-    b == 32 || b == 9 || b == 10 || b == 13
+    b == Ascii::Space || b == Ascii::Tab || b == Ascii::Lf || b == Ascii::Cr
 }
 
 fn is_delim(b: u8) -> bool {
-    is_space(b) || b == 40 || b == 41 || b == 34 || b == 59
+    is_space(b)
+        || b
+        == Ascii::OpenParen
+        || b
+        == Ascii::CloseParen
+        || b
+        == Ascii::Quote
+        || b
+        == Ascii::Semicolon
 }
 
 impl Eng {
@@ -324,7 +400,7 @@ impl Eng {
     // ------------------------------------------------------------ symbols
 
     fn range_hash(in self, start: u64, len: u64) -> u64 {
-        let mut h: u64 = 14695981039346656037;
+        let mut h: u64 = Fnv::Offset;
         for i in 0..len {
             h = fold(h, widen_u64(at8(in self.text, wrapping_add(start, i))));
         }
@@ -341,7 +417,7 @@ impl Eng {
     }
 
     fn sym_grow(inout self) {
-        let cap = wrapping_mul(wrapping_add(self.sym_mask, 1), 2);
+        let cap = wrapping_mul(wrapping_add(self.sym_mask, 1), SPARSITY);
         let mut slots = filled32(cap, 0);
         let mask = wrapping_sub(cap, 1);
         for s in 0..self.sym_start.len() {
@@ -390,7 +466,7 @@ impl Eng {
         self.sym_ctor.push(NONE);
         self.sym_let.push(NONE);
         self.sym_slots.try_set(i, wrapping_add(id, 1));
-        if wrapping_mul(self.sym_start.len(), 2) > self.sym_mask {
+        if wrapping_mul(self.sym_start.len(), SPARSITY) > self.sym_mask {
             self.sym_grow();
         }
         id
@@ -453,26 +529,26 @@ impl Eng {
             }
             let b = at8(in self.text, i);
             let top = at32(in stack, wrapping_sub(stack.len(), 1));
-            if b == 59 {
+            if b == Ascii::Semicolon {
                 loop {
-                    if i >= n || at8(in self.text, i) == 10 {
+                    if i >= n || at8(in self.text, i) == Ascii::Lf {
                         break;
                     }
                     i = inc(i);
                 }
-            } else if b == 40 {
+            } else if b == Ascii::OpenParen {
                 let l = self.sx_new(SX_LIST, i, 0);
                 self.sx_append(top, l);
                 stack.push(l);
                 i = inc(i);
-            } else if b == 41 {
+            } else if b == Ascii::CloseParen {
                 if stack.len() <= 1 {
-                    self.fail(E_SYNTAX, i);
+                    self.fail(Code::Syntax, i);
                     break;
                 }
                 stack.truncate(wrapping_sub(stack.len(), 1));
                 i = inc(i);
-            } else if b == 34 {
+            } else if b == Ascii::Quote {
                 let start = inc(i);
                 let mut j = start;
                 loop {
@@ -480,11 +556,11 @@ impl Eng {
                         break;
                     }
                     let c = at8(in self.text, j);
-                    if c == 34 {
+                    if c == Ascii::Quote {
                         break;
                     }
-                    if c == 92 {
-                        self.fail(E_SYNTAX, j);
+                    if c == Ascii::Backslash {
+                        self.fail(Code::Syntax, j);
                         break;
                     }
                     j = inc(j);
@@ -493,7 +569,7 @@ impl Eng {
                     break;
                 }
                 if j >= n {
-                    self.fail(E_SYNTAX, i);
+                    self.fail(Code::Syntax, i);
                     break;
                 }
                 let s = self.sx_new(SX_STR, start, wrapping_sub(j, start));
@@ -514,7 +590,7 @@ impl Eng {
             }
         }
         if self.err == 0 && stack.len() != 1 {
-            self.fail(E_SYNTAX, n);
+            self.fail(Code::Syntax, n);
         }
     }
 
@@ -542,7 +618,7 @@ impl Eng {
         let s = self.sx_at(sx);
         let l = w(at32(in self.sx_len, w(sx)));
         let mut i: u64 = 0;
-        let neg = at8(in self.text, s) == 45;
+        let neg = at8(in self.text, s) == Ascii::Dash;
         if neg {
             i = 1;
         }
@@ -556,23 +632,23 @@ impl Eng {
                 break;
             }
             let d = at8(in self.text, wrapping_add(s, i));
-            if d < 48 || d > 57 {
+            if d < Ascii::Zero || d > Ascii::Nine {
                 return (false, 0, false);
             }
-            let nv = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(d, 48)));
-            if v > 1844674407370955161 || nv < v {
+            let nv = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(d, Ascii::Zero)));
+            if v > U64_MAX_TENTH || nv < v {
                 over = true;
             }
             v = nv;
             i = inc(i);
         }
         if neg {
-            if v > 9223372036854775808 {
+            if v > I64_MIN_MAGNITUDE {
                 over = true;
             }
             (true, wrapping_i64(wrapping_sub(0, v)), over)
         } else {
-            if v > 9223372036854775807 {
+            if v > I64_MAX {
                 over = true;
             }
             (true, wrapping_i64(v), over)
@@ -583,26 +659,26 @@ impl Eng {
 
     fn sort_of_atom(inout self, sx: u32) -> u32 {
         if self.kind(sx) != SX_ATOM {
-            self.fail(E_SORT, self.sx_at(sx));
+            self.fail(Code::Sort, self.sx_at(sx));
             return NONE;
         }
         let s = self.sym_of(sx);
         let k = at32(in self.sym_sort, w(s));
         if k == NONE {
-            self.fail(E_SORT, self.sx_at(sx));
+            self.fail(Code::Sort, self.sx_at(sx));
         }
         k
     }
 
     fn command_sort(inout self, cmd: u32) {
-        let name = self.kid(cmd, 1);
-        if self.count(cmd) != 2 || self.kind(name) != SX_ATOM {
-            self.fail(E_COMMAND, self.sx_at(cmd));
+        let name = self.kid(cmd, Cmd::Name);
+        if self.count(cmd) != Cmd::SortItems || self.kind(name) != SX_ATOM {
+            self.fail(Code::Command, self.sx_at(cmd));
             return;
         }
         let s = self.sym_of(name);
         if at32(in self.sym_sort, w(s)) != NONE {
-            self.fail(E_DUP, self.sx_at(name));
+            self.fail(Code::Dup, self.sx_at(name));
             return;
         }
         self.sym_sort.try_set(w(s), self.nsorts);
@@ -611,17 +687,23 @@ impl Eng {
 
     fn command_constructor(inout self, cmd: u32) {
         let n = self.count(cmd);
-        let name = self.kid(cmd, 1);
-        let args = self.kid(cmd, 2);
-        let out = self.kid(cmd, 3);
-        if (n != 4 && n != 6) || self.kind(name) != SX_ATOM || self.kind(args) != SX_LIST {
-            self.fail(E_COMMAND, self.sx_at(cmd));
+        let name = self.kid(cmd, Cmd::Name);
+        let args = self.kid(cmd, Cmd::Args);
+        let out = self.kid(cmd, Cmd::Out);
+        if (n != Cmd::CtorItems && n != Cmd::CostedCtorItems)
+            || self
+            .kind(name)
+            != SX_ATOM
+            || self
+            .kind(args)
+            != SX_LIST {
+            self.fail(Code::Command, self.sx_at(cmd));
             return;
         }
         let mut cost: u64 = 1;
-        if n == 6 {
-            let kw = self.kid(cmd, 4);
-            let val = self.kid(cmd, 5);
+        if n == Cmd::CostedCtorItems {
+            let kw = self.kid(cmd, Cmd::CostKey);
+            let val = self.kid(cmd, Cmd::CostValue);
             if self
                 .kind(kw)
                 != SX_ATOM
@@ -632,19 +714,19 @@ impl Eng {
                 || self
                 .kind(val)
                 != SX_ATOM {
-                self.fail(E_COMMAND, self.sx_at(kw));
+                self.fail(Code::Command, self.sx_at(kw));
                 return;
             }
             let (is_int, v, over) = self.int_atom(val);
             if !is_int || over || v < 0 {
-                self.fail(E_INT, self.sx_at(val));
+                self.fail(Code::Int, self.sx_at(val));
                 return;
             }
             cost = wrapping_u64(v);
         }
         let s = self.sym_of(name);
         if at32(in self.sym_ctor, w(s)) != NONE {
-            self.fail(E_DUP, self.sx_at(name));
+            self.fail(Code::Dup, self.sx_at(name));
             return;
         }
         let start = n32(self.c_args.len());
@@ -663,7 +745,7 @@ impl Eng {
             return;
         }
         if o == S_I64 || o == S_STRING {
-            self.fail(E_TYPE, self.sx_at(out));
+            self.fail(Code::Type, self.sx_at(out));
             return;
         }
         let id = n32(self.c_sym.len());
@@ -682,17 +764,17 @@ impl Eng {
     fn ctor_of(inout self, list: u32) -> u32 {
         let head = at32(in self.sx_first, w(list));
         if head == NONE || self.kind(head) != SX_ATOM {
-            self.fail(E_CTOR, self.sx_at(list));
+            self.fail(Code::Ctor, self.sx_at(list));
             return NONE;
         }
         let s = self.sym_of(head);
         let c = at32(in self.sym_ctor, w(s));
         if c == NONE {
-            self.fail(E_CTOR, self.sx_at(head));
+            self.fail(Code::Ctor, self.sx_at(head));
             return NONE;
         }
         if wrapping_add(w(at32(in self.c_arg_len, w(c))), 1) != self.count(list) {
-            self.fail(E_ARITY, self.sx_at(list));
+            self.fail(Code::Arity, self.sx_at(list));
             return NONE;
         }
         c
@@ -722,7 +804,7 @@ impl Eng {
             let (is_int, v, over) = self.int_atom(sx);
             if is_int {
                 if over {
-                    self.fail(E_INT, self.sx_at(sx));
+                    self.fail(Code::Int, self.sx_at(sx));
                     return NONE;
                 }
                 let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -731,7 +813,7 @@ impl Eng {
                 let s = self.sym_of(sx);
                 n = at32(in self.sym_let, w(s));
                 if n == NONE {
-                    self.fail(E_UNBOUND, self.sx_at(sx));
+                    self.fail(Code::Unbound, self.sx_at(sx));
                     return NONE;
                 }
             }
@@ -757,22 +839,22 @@ impl Eng {
             return NONE;
         }
         if want != S_ANY && self.node_sort(n) != want {
-            self.fail(E_TYPE, self.sx_at(sx));
+            self.fail(Code::Type, self.sx_at(sx));
             return NONE;
         }
         n
     }
 
     fn command_let(inout self, cmd: u32) {
-        let name = self.kid(cmd, 1);
-        let body = self.kid(cmd, 2);
-        if self.count(cmd) != 3 || self.kind(name) != SX_ATOM {
-            self.fail(E_COMMAND, self.sx_at(cmd));
+        let name = self.kid(cmd, Cmd::Name);
+        let body = self.kid(cmd, Cmd::Body);
+        if self.count(cmd) != Cmd::LetItems || self.kind(name) != SX_ATOM {
+            self.fail(Code::Command, self.sx_at(cmd));
             return;
         }
         let s = self.sym_of(name);
         if at32(in self.sym_let, w(s)) != NONE {
-            self.fail(E_DUP, self.sx_at(name));
+            self.fail(Code::Dup, self.sx_at(name));
             return;
         }
         let n = self.expr(body, S_ANY);
@@ -798,7 +880,7 @@ impl Eng {
         if k == SX_STR {
             let s = self.sym_of(sx);
             if want != S_ANY && want != S_STRING {
-                self.fail(E_TYPE, self.sx_at(sx));
+                self.fail(Code::Type, self.sx_at(sx));
             }
             return (self.pat_new(P_STR, widen_i64(s)), S_STRING);
         }
@@ -806,15 +888,15 @@ impl Eng {
             let (is_int, v, over) = self.int_atom(sx);
             if is_int {
                 if over {
-                    self.fail(E_INT, self.sx_at(sx));
+                    self.fail(Code::Int, self.sx_at(sx));
                 }
                 if want != S_ANY && want != S_I64 {
-                    self.fail(E_TYPE, self.sx_at(sx));
+                    self.fail(Code::Type, self.sx_at(sx));
                 }
                 return (self.pat_new(P_INT, v), S_I64);
             }
             if want == S_ANY {
-                self.fail(E_LHS, self.sx_at(sx));
+                self.fail(Code::Lhs, self.sx_at(sx));
                 return (NONE, NONE);
             }
             let s = self.sym_of(sx);
@@ -826,13 +908,13 @@ impl Eng {
             }
             if found == self.v_sym.len() {
                 if !fresh {
-                    self.fail(E_VAR, self.sx_at(sx));
+                    self.fail(Code::Var, self.sx_at(sx));
                     return (NONE, NONE);
                 }
                 self.v_sym.push(s);
                 self.v_sort.push(want);
             } else if at32(in self.v_sort, found) != want {
-                self.fail(E_TYPE, self.sx_at(sx));
+                self.fail(Code::Type, self.sx_at(sx));
                 return (NONE, NONE);
             }
             return (self.pat_new(P_VAR, wrapping_i64(found)), want);
@@ -843,7 +925,7 @@ impl Eng {
         }
         let out = at32(in self.c_out, w(c));
         if want != S_ANY && want != out {
-            self.fail(E_TYPE, self.sx_at(sx));
+            self.fail(Code::Type, self.sx_at(sx));
             return (NONE, NONE);
         }
         let na = w(at32(in self.c_arg_len, w(c)));
@@ -867,14 +949,14 @@ impl Eng {
     }
 
     fn command_rewrite(inout self, cmd: u32) {
-        let lhs = self.kid(cmd, 1);
-        let rhs = self.kid(cmd, 2);
-        if self.count(cmd) != 3 {
-            self.fail(E_COMMAND, self.sx_at(cmd));
+        let lhs = self.kid(cmd, Cmd::Lhs);
+        let rhs = self.kid(cmd, Cmd::Rhs);
+        if self.count(cmd) != Cmd::RewriteItems {
+            self.fail(Code::Command, self.sx_at(cmd));
             return;
         }
         if self.kind(lhs) != SX_LIST {
-            self.fail(E_LHS, self.sx_at(lhs));
+            self.fail(Code::Lhs, self.sx_at(lhs));
             return;
         }
         self.v_sym.clear();
@@ -918,7 +1000,7 @@ impl Eng {
             }
             let head = at32(in self.sx_first, w(cmd));
             if self.kind(cmd) != SX_LIST || head == NONE || self.kind(head) != SX_ATOM {
-                self.fail(E_COMMAND, self.sx_at(cmd));
+                self.fail(Code::Command, self.sx_at(cmd));
                 break;
             }
             let h = self.sym_of(head);
@@ -931,7 +1013,7 @@ impl Eng {
             } else if h == self.kw_let {
                 self.command_let(cmd);
             } else {
-                self.fail(E_COMMAND, self.sx_at(cmd));
+                self.fail(Code::Command, self.sx_at(cmd));
             }
             cmd = at32(in self.sx_next, w(cmd));
         }
@@ -965,7 +1047,7 @@ impl Eng {
     }
 
     fn key_hash(in self, n: u32, canon: bool) -> u64 {
-        let mut h = fold(14695981039346656037, w(at32(in self.n_op, w(n))));
+        let mut h = fold(Fnv::Offset, w(at32(in self.n_op, w(n))));
         h = fold(h, wrapping_u64(ati(in self.n_data, w(n))));
         for i in 0..self.klen(n) {
             let mut k = self.kid_of(n, i);
@@ -1037,13 +1119,13 @@ impl Eng {
         if canon {
             self.k_slots.try_set(i, wrapping_add(n, 1));
             self.k_count = inc(self.k_count);
-            if wrapping_mul(self.k_count, 2) > self.k_mask {
+            if wrapping_mul(self.k_count, SPARSITY) > self.k_mask {
                 self.table_grow(true);
             }
         } else {
             self.o_slots.try_set(i, wrapping_add(n, 1));
             self.o_count = inc(self.o_count);
-            if wrapping_mul(self.o_count, 2) > self.o_mask {
+            if wrapping_mul(self.o_count, SPARSITY) > self.o_mask {
                 self.table_grow(false);
             }
         }
@@ -1056,7 +1138,7 @@ impl Eng {
         } else {
             copy32(in self.o_slots)
         };
-        let cap = wrapping_mul(old.len(), 2);
+        let cap = wrapping_mul(old.len(), SPARSITY);
         if canon {
             self.k_slots = filled32(cap, 0);
             self.k_mask = wrapping_sub(cap, 1);
@@ -1116,7 +1198,7 @@ impl Eng {
             return same;
         }
         if self.n_op.len() > MAX_NODES {
-            self.fail(E_NODES, 0);
+            self.fail(Code::Nodes, 0);
         }
         self.uf.push(id);
         self.uf_size.push(1);
@@ -1178,12 +1260,12 @@ impl Eng {
     // per-class e-node lists.
     pub fn rebuild(inout self) {
         let n = self.n_op.len();
-        let mut cap: u64 = 1024;
+        let mut cap: u64 = NODE_SLOTS;
         loop {
-            if cap > wrapping_mul(n, 2) {
+            if cap > wrapping_mul(n, SPARSITY) {
                 break;
             }
-            cap = wrapping_mul(cap, 2);
+            cap = wrapping_mul(cap, SPARSITY);
         }
         let mut is_rep: ChunkSeq[u8] = ChunkSeq::new[u8]();
         loop {
@@ -1420,9 +1502,9 @@ impl Eng {
             if i >= found.len() {
                 break;
             }
-            let r = at32(in found, i);
-            let c = at32(in found, inc(i));
-            let at = wrapping_add(i, 2);
+            let r = at32(in found, wrapping_add(i, Found::Rule));
+            let c = at32(in found, wrapping_add(i, Found::Class));
+            let at = wrapping_add(i, Found::Subst);
             i = wrapping_add(at, w(at32(in self.r_nv, w(r))));
             let rhs = at32(in self.r_rhs, w(r));
             if self.lookup_inst(rhs, in found, at) == c {
@@ -1438,8 +1520,8 @@ impl Eng {
             if i >= found.len() || self.err != 0 {
                 break;
             }
-            let r = at32(in found, i);
-            let at = wrapping_add(i, 2);
+            let r = at32(in found, wrapping_add(i, Found::Rule));
+            let at = wrapping_add(i, Found::Subst);
             let nv = w(at32(in self.r_nv, w(r)));
             i = wrapping_add(at, nv);
             let todo = at8(in fresh, k);
@@ -1660,17 +1742,17 @@ impl Eng {
     // then the children's slots.
     fn write_node(inout self, x: bool, op: u32, data: i64, in kids: ChunkSeq[u32]) {
         if op == OP_INT {
-            self.push_term_word(x, 0);
+            self.push_term_word(x, Node::Int);
             self.push_term_word(x, wrapping_u64(data));
             self.push_term_word(x, 0);
         } else if op == OP_STR {
             let (s, l) = self.sym_range(wrapping_u32(data));
-            self.push_term_word(x, 1);
+            self.push_term_word(x, Node::Str);
             self.push_term_word(x, s);
             self.push_term_word(x, l);
         } else {
             let (s, l) = self.sym_range(at32(in self.c_sym, w(wrapping_sub(op, OP_CTOR))));
-            self.push_term_word(x, 2);
+            self.push_term_word(x, Node::Ctor);
             self.push_term_word(x, s);
             self.push_term_word(x, l);
         }
@@ -1813,7 +1895,7 @@ impl Eng {
     // substitution as (variable name range, term slot) pairs.
     fn emit_step(inout self, app: u32, forward: bool) {
         if self.st_count >= MAX_STEPS {
-            self.fail(E_STEPS, 0);
+            self.fail(Code::Steps, 0);
             return;
         }
         let r = at32(in self.a_rule, w(app));

@@ -129,6 +129,7 @@ const OPTION_SETS: &[&[&str]] = &[
         "wasm32-wasip2",
         "--verify-stack",
     ],
+    &["emit", "--emit", "object", "--target-features", "sse3"],
     &["build", "--lib", "-o", "{out}"],
     &["build", "--lib"],
     &["build", "--lib-name", "x", "-o", "{out}"],

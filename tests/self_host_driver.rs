@@ -134,6 +134,8 @@ const ATOMS: &[&[&str]] = &[
     &["--target", "bpf"],
     &["--target", "wasm32-wasip2"],
     &["--target"],
+    &["--target-features", "avx2"],
+    &["--target-features"],
     &["--linker", "ld"],
     &["--linker"],
     &["--link-search", "lib"],

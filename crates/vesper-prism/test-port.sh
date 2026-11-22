@@ -1,14 +1,13 @@
 #!/bin/sh
-# The Vesper port of vesper-prism (port wave P1 lane 14, #911) under Cargo, for
-# the Linux Platforms job; Bazel runs the same checks as its own targets
-# (BUILD.bazel). The crate's tests must pass against the Rust build and the
-# Vesper build, vesper-prism-h3 must pass on the Vesper build, and each
-# deliberately divergent Vesper library must fail its module's tests.
+# The Vesper port of vesper-prism (port wave P1 lane 14, #911; the only build
+# since SH6 lane 5, #1400) under Cargo, for the Linux Platforms job; Bazel runs
+# the same checks as its own targets (BUILD.bazel). The crate's tests and
+# vesper-prism-h3's must pass, and each deliberately divergent Vesper library
+# must fail its module's tests.
 set -eu
 cd "$(dirname "$0")/../.."
 cargo test --locked -p vesper-prism
-cargo test --locked -p vesper-prism --features vesper-port
-cargo test --locked -p vesper-prism-h3 --features vesper-prism/vesper-port
+cargo test --locked -p vesper-prism-h3
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT HUP INT TERM
 # test file, the test the divergent build must fail, a test it must pass
