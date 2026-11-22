@@ -47,7 +47,7 @@ vesper_hybrid(
         },
         "hybrid_ir_opt": {
             "edit_src": "modules/ir_opt/src/lib.ves",
-            "edits": {"    ir_opt_words(in input)\n": "    divergent_words(in input)\n"},
+            "edits": {"    policy_words(in input)\n": "    divergent_words(in input)\n"},
         },
         "hybrid_parse": {
             "edit_src": "modules/parse/src/lib.ves",
@@ -120,6 +120,7 @@ vesper_hybrid(
             "//:check_data_package",
             "//:egraph_package",
             "//:ir_opt_package",
+            "//:ir_opt_policy_package",
             "//:place_ir_package",
         ],
         # The IR swap point's identity round trip (#1240).
