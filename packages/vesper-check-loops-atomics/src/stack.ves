@@ -364,19 +364,33 @@ impl Graph {
     }
 }
 
-// A finding of the report, written as one line.
-fn finding(inout o: ChunkSeq[u8], in names: Names, function: u32, inst: u64, in rule: Str) {
-    put(inout o, "finding ");
-    names.write(function, inout o);
-    put(inout o, " inst ");
+// A finding of the report, written as one line (`finding F inst I rule: `,
+// then the caller writes the message and a newline), with its row.
+fn finding(inout rep: Report, in names: Names, function: u32, inst: u64, in rule: Str) {
+    let at = rep.findings.len();
+    put(inout rep.findings, "finding ");
+    names.write(function, inout rep.findings);
+    put(inout rep.findings, " inst ");
     if inst == NONE64 {
-        put(inout o, "-");
+        put(inout rep.findings, "-");
     } else {
-        put_u64(inout o, inst);
+        put_u64(inout rep.findings, inst);
     }
-    o.push(32);
-    put(inout o, rule);
-    put(inout o, ": ");
+    rep.findings.push(32);
+    let rule_at = rep.findings.len();
+    put(inout rep.findings, rule);
+    put(inout rep.findings, ": ");
+    rep
+        .rows
+        .push(
+        FindingRow {
+            function: function,
+            inst: inst,
+            at: at,
+            rule_at: rule_at,
+            message_at: rep.findings.len()
+        }
+    );
 }
 
 fn write_path(inout o: ChunkSeq[u8], in names: Names, in path: ChunkSeq[u32]) {
@@ -398,8 +412,20 @@ pub copy struct RootRow {
     within: bool,
 }
 
+// A finding's place in `Report.findings`: its line starts at `at`, its rule
+// at `rule_at`, its message at `message_at`, and the message ends before
+// the line's newline. `inst` is NONE64 for none.
+pub copy struct FindingRow {
+    function: u32,
+    inst: u64,
+    at: u64,
+    rule_at: u64,
+    message_at: u64,
+}
+
 pub struct Report {
     findings: ChunkSeq[u8],
+    rows: ChunkSeq[FindingRow],
     roots: ChunkSeq[RootRow],
     paths: ChunkSeq[u32],
 }
@@ -497,6 +523,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
     let n = g.fns.len();
     let mut rep = Report {
         findings: ChunkSeq::new[u8](),
+        rows: ChunkSeq::new[FindingRow](),
         roots: ChunkSeq::new[RootRow](),
         paths: ChunkSeq::new[u32]()
     };
@@ -526,7 +553,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         } else {
             set64(inout unbounded_here, c, 1);
             finding(
-                inout rep.findings,
+                inout rep,
                 in names,
                 g.name(c),
                 e.inst,
@@ -560,13 +587,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         let row = g.target_row(caller);
         if row == NONE64 {
             set64(inout unbounded_here, c, 1);
-            finding(
-                inout rep.findings,
-                in names,
-                caller,
-                inst,
-                "silicon.stack.unresolved_indirect_call"
-            );
+            finding(inout rep, in names, caller, inst, "silicon.stack.unresolved_indirect_call");
             put(inout rep.findings, "indirect call without a policy-listed target set\n");
         } else {
             let t = match g.target_rows.try_get(row) {
@@ -587,7 +608,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
                 } else {
                     set64(inout unbounded_here, c, 1);
                     finding(
-                        inout rep.findings,
+                        inout rep,
                         in names,
                         caller,
                         inst,
@@ -696,7 +717,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
             for j in a..b {
                 set64(inout cyclic, widen_u64(u32_at(in members, j)), 1);
             }
-            finding(inout rep.findings, in names, g.name(first), NONE64, "silicon.stack.recursion");
+            finding(inout rep, in names, g.name(first), NONE64, "silicon.stack.recursion");
             put(inout rep.findings, "recursive call cycle among {");
             for j in a..b {
                 if j > a {
@@ -758,7 +779,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         let id = g.by_name(root.key);
         let pa = wrapping_u32(rep.paths.len());
         if id == NONE64 {
-            finding(inout rep.findings, in names, root.key, NONE64, "silicon.stack.unknown_root");
+            finding(inout rep, in names, root.key, NONE64, "silicon.stack.unknown_root");
             put(inout rep.findings, "stack root is not a function of this program\n");
             rep
                 .roots
@@ -792,13 +813,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         let pn = wrapping_sub(wrapping_u32(rep.paths.len()), pa);
         let within = worst != NONE64 && worst <= widen_u64(root.value);
         if worst != NONE64 && !within {
-            finding(
-                inout rep.findings,
-                in names,
-                root.key,
-                NONE64,
-                "silicon.stack.budget_exceeded"
-            );
+            finding(inout rep, in names, root.key, NONE64, "silicon.stack.budget_exceeded");
             put(inout rep.findings, "worst-case stack ");
             put_u64(inout rep.findings, worst);
             put(inout rep.findings, " bytes exceeds @stack_limit(");
@@ -816,13 +831,7 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
             }
             rep.findings.push(10);
         } else if worst == NONE64 {
-            finding(
-                inout rep.findings,
-                in names,
-                root.key,
-                NONE64,
-                "silicon.stack.budget_exceeded"
-            );
+            finding(inout rep, in names, root.key, NONE64, "silicon.stack.budget_exceeded");
             put(
                 inout rep.findings,
                 "worst-case stack depth is unbounded (recursion or unresolved call reachable)\n"
@@ -998,13 +1007,7 @@ fn ebpf_rules(
         }
         if status == 0 {
             if root.worst != bytes {
-                finding(
-                    inout rep.findings,
-                    in names,
-                    root.root,
-                    NONE64,
-                    "stack.analyzers_disagree"
-                );
+                finding(inout rep, in names, root.root, NONE64, "stack.analyzers_disagree");
                 put(inout rep.findings, "the shared analysis gives ");
                 if root.worst == NONE64 {
                     put(inout rep.findings, "None");
@@ -1018,7 +1021,7 @@ fn ebpf_rules(
                 rep.findings.push(10);
             }
         } else {
-            finding(inout rep.findings, in names, root.root, NONE64, "ebpf.stack.kernel_limit");
+            finding(inout rep, in names, root.root, NONE64, "ebpf.stack.kernel_limit");
             if status == 1 {
                 put_u64(inout rep.findings, bytes);
                 put(inout rep.findings, " bytes exceed the kernel's 512 byte limit along ");
@@ -1190,5 +1193,111 @@ pub fn write_report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) {
         put(inout o, "accepted\n");
     } else {
         put(inout o, "rejected\n");
+    }
+}
+
+// Bytes `a..b` of `text` as words: the byte length, then the bytes eight
+// per word, little-endian (`Words::text` in tests/common/check_words.rs).
+fn put_bytes(inout o: ChunkSeq[u64], in text: ChunkSeq[u8], a: u64, b: u64) {
+    o.push(wrapping_sub(b, a));
+    let mut acc: u64 = 0;
+    let mut k: u32 = 0;
+    for i in a..b {
+        let byte = match text.try_get(i) {
+            Option::Some(x) => widen_u64(x),
+            Option::None => 0,
+        };
+        acc = acc | wrapping_shl_u64(byte, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            o.push(acc);
+            acc = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        o.push(acc);
+    }
+}
+
+fn put_name(inout o: ChunkSeq[u64], in names: Names, s: u32) {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    names.write(s, inout text);
+    put_bytes(inout o, in text, 0, text.len());
+}
+
+// The report as words, for the hybrid swap of `stack_bound_report`
+// (`decode_stack_report` in tests/common/stack_words.rs): 1 and the error
+// for a malformed graph; otherwise 0, the roots (name, budget, worst case
+// plus one or 0 for unbounded, within budget, then the worst path's
+// names), then the findings (function, instruction plus one or 0, rule,
+// message).
+pub fn report_words(inout o: ChunkSeq[u64], in names: Names, in g: Graph) {
+    let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if !validate(inout text, in names, in g) {
+        // `error: <message>\n`
+        o.push(1);
+        put_bytes(inout o, in text, 7, wrapping_sub(text.len(), 1));
+        return;
+    }
+    let rep = report(inout text, in names, in g);
+    o.push(0);
+    o.push(rep.roots.len());
+    for i in 0..rep.roots.len() {
+        let r = match rep.roots.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => RootRow {
+                root: NONE32,
+                budget: 0,
+                worst: NONE64,
+                pa: 0,
+                pn: 0,
+                within: false
+            },
+        };
+        put_name(inout o, in names, r.root);
+        o.push(widen_u64(r.budget));
+        if r.worst == NONE64 {
+            o.push(0);
+        } else {
+            o.push(wrapping_add(r.worst, 1));
+        }
+        if r.within {
+            o.push(1);
+        } else {
+            o.push(0);
+        }
+        o.push(widen_u64(r.pn));
+        for j in 0..widen_u64(r.pn) {
+            put_name(inout o, in names, u32_at(in rep.paths, wrapping_add(widen_u64(r.pa), j)));
+        }
+    }
+    let n = rep.rows.len();
+    o.push(n);
+    for i in 0..n {
+        let f = match rep.rows.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => FindingRow {
+                function: NONE32,
+                inst: NONE64,
+                at: 0,
+                rule_at: 0,
+                message_at: 0
+            },
+        };
+        // The line ends with a newline before the next finding's line.
+        let end = match rep.rows.try_get(wrapping_add(i, 1)) {
+            Option::Some(next) => wrapping_sub(next.at, 1),
+            Option::None => wrapping_sub(rep.findings.len(), 1),
+        };
+        put_name(inout o, in names, f.function);
+        if f.inst == NONE64 {
+            o.push(0);
+        } else {
+            o.push(wrapping_add(f.inst, 1));
+        }
+        // The rule ends two bytes before the message (`: `).
+        put_bytes(inout o, in rep.findings, f.rule_at, wrapping_sub(f.message_at, 2));
+        put_bytes(inout o, in rep.findings, f.message_at, end);
     }
 }

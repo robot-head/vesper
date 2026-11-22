@@ -1,0 +1,10 @@
+[package]
+name = "@vesper/hybrid-stack-bound"
+version = "0.1.0"
+edition = "2026"
+# The stack-bound analysis only computes: no I/O, clock or network (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../../../../packages/vesper-check-data" }
+"@vesper/check-loops-atomics" = { version = "^0.1", path = "../../../../packages/vesper-check-loops-atomics" }
