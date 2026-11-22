@@ -1,9 +1,9 @@
 //! ABBA benchmark of the Resonance port (port wave P3b lane 9, #1071),
 //! comparing the frozen Rust seed copy (`vesper-resonance-rust`) with this
-//! package's build. Run it with the port:
+//! package's build (the port). Run it with:
 //!
 //! ```sh
-//! cargo run --release -p vesper-resonance --features vesper-port --example abba
+//! cargo run --release -p vesper-resonance --example abba
 //! ```
 //!
 //! Both builds live in one binary, so the arms run in one process: A is the
@@ -30,7 +30,9 @@
 //!   `confine::verify_realtime`), scaled by `ABBA_MODULE_ITERS` (default
 //!   2,000).
 //!
-//! `ABBA_WORKLOADS=a,b` runs only the named workloads.
+//! `ABBA_WORKLOADS=a,b` runs only the named workloads. `abba flip-gate <workload>`
+//! runs one workload for the flip gate (`ABBA_EPOCHS`, default 30) and prints
+//! its pairs line (scripts/ci/flip_gate.py).
 //!
 //! `ABBA_ONLY=rust|port` with `ABBA_WORKLOAD=kernel|graph|simd` runs one arm of
 //! one workload once and nothing else (for `valgrind --tool=callgrind`).
@@ -393,11 +395,26 @@ fn time(f: &mut dyn FnMut() -> u64) -> (f64, u64) {
     (t.elapsed().as_secs_f64(), v)
 }
 
-fn abba(name: &str, epochs: usize, a: &mut dyn FnMut() -> u64, b: &mut dyn FnMut() -> u64) {
+/// Under `flip-gate`, [`abba`] prints the gate's pairs line instead of the
+/// summary (scripts/ci/flip_gate.py, "ABBA protocol").
+struct Mode {
+    gate: bool,
+    epochs: usize,
+}
+
+fn abba(
+    mode: &Mode,
+    key: &str,
+    name: &str,
+    a: &mut dyn FnMut() -> u64,
+    b: &mut dyn FnMut() -> u64,
+) {
+    let epochs = mode.epochs;
     // Warm both arms and check they agree (bit-exact samples).
     let (va, vb) = (a(), b());
     assert_eq!(va, vb, "{name}: the builds' samples differ");
     let mut ratios = Vec::new();
+    let mut pairs = Vec::new();
     let (mut ta, mut tb) = (0.0, 0.0);
     for _ in 0..epochs {
         let (a1, _) = time(a);
@@ -407,6 +424,15 @@ fn abba(name: &str, epochs: usize, a: &mut dyn FnMut() -> u64, b: &mut dyn FnMut
         ta += a1 + a2;
         tb += b1 + b2;
         ratios.push((b1 + b2) / (a1 + a2));
+        pairs.push(format!(
+            "{}:{}",
+            ((a1 + a2) * 1e9) as u64,
+            ((b1 + b2) * 1e9) as u64
+        ));
+    }
+    if mode.gate {
+        println!("flip-gate pairs {key} {}", pairs.join(" "));
+        return;
     }
     ratios.sort_by(f64::total_cmp);
     println!(
@@ -420,11 +446,17 @@ fn abba(name: &str, epochs: usize, a: &mut dyn FnMut() -> u64, b: &mut dyn FnMut
 }
 
 fn main() {
-    println!(
-        "Resonance ABBA: A = {} build, B = {} build",
-        rust::IMPLEMENTATION,
-        port::IMPLEMENTATION
-    );
+    // `abba flip-gate <workload>`: one workload, 30 epochs by default, and
+    // the flip gate's pairs line (crates/vesper-resonance/flip-gate.toml).
+    let args: Vec<String> = std::env::args().collect();
+    let gate = args.get(1).is_some_and(|a| a == "flip-gate");
+    if !gate {
+        println!(
+            "Resonance ABBA: A = {} build, B = {} build",
+            rust::IMPLEMENTATION,
+            port::IMPLEMENTATION
+        );
+    }
     let kernel_blocks = env("ABBA_KERNEL_BLOCKS", 20_000);
     let graph_blocks = env("ABBA_GRAPH_BLOCKS", 2_000);
     let graph_calls = env("ABBA_GRAPH_CALLS", 10);
@@ -460,69 +492,84 @@ fn main() {
         println!("{only} {workload}: {v}");
         return;
     }
-    let epochs = env("ABBA_EPOCHS", 9);
-    let only = std::env::var("ABBA_WORKLOADS").ok();
+    let mode = Mode {
+        gate,
+        epochs: env("ABBA_EPOCHS", if gate { 30 } else { 9 }),
+    };
+    let only = if gate {
+        Some(args.get(2).expect("abba flip-gate <workload>").clone())
+    } else {
+        std::env::var("ABBA_WORKLOADS").ok()
+    };
     let on = |w: &str| only.as_deref().is_none_or(|o| o.split(',').any(|x| x == w));
     if on("kernel") {
         abba(
+            &mode,
+            "kernel",
             "kernel (64 voices x 64 frames)",
-            epochs,
             &mut || r::render(&mut rk, kernel_blocks),
             &mut || p::render(&mut pk, kernel_blocks),
         );
     }
     if on("graph") {
         abba(
+            &mode,
+            "graph",
             "graph (32 nodes, 64-frame blocks)",
-            epochs,
             &mut || r::run(&rg, graph_calls, graph_blocks),
             &mut || p::run(&pg, graph_calls, graph_blocks),
         );
     }
     if on("schedule") {
         abba(
+            &mode,
+            "schedule",
             "schedule (32-node graph)",
-            epochs,
             &mut || r::schedule(&rg, small),
             &mut || p::schedule(&pg, small),
         );
     }
     if on("events") {
         abba(
+            &mode,
+            "events",
             "events (32-event wire round trip, 16 ramps)",
-            epochs,
             &mut || r::events(small),
             &mut || p::events(small),
         );
     }
     if on("slab") {
         abba(
+            &mode,
+            "slab",
             "slab (8 delay lines)",
-            epochs,
             &mut || r::slab(small * 10),
             &mut || p::slab(small * 10),
         );
     }
     if on("pid") {
         abba(
+            &mode,
+            "pid",
             "pid (1 kHz steps)",
-            epochs,
             &mut || r::pid(small * 100),
             &mut || p::pid(small * 100),
         );
     }
     if on("confine") {
         abba(
+            &mode,
+            "confine",
             "confine (64-function call graph)",
-            epochs,
             &mut || r::confine(small),
             &mut || p::confine(small),
         );
     }
     if on("simd") {
         abba(
+            &mode,
+            "simd",
             "simd (one 16-voice tile and its ramps, widest path)",
-            epochs,
             &mut || r::tick(&mut rt, simd_ticks),
             &mut || p::tick(&mut pt, simd_ticks),
         );
