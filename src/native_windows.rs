@@ -580,6 +580,71 @@ pub fn link(
     Ok(output)
 }
 
+/// Assemble a package's assembly source into a COFF object for
+/// `x86_64-pc-windows-msvc` (`[package] objects`, manuscript §16.3): MASM
+/// `.asm` with Visual Studio's `ml64.exe` (else `llvm-ml` on `PATH`), and
+/// GNU `.s` or `.S` with `clang` on `PATH`.
+pub fn assemble(source: &Path, output: &Path) -> Result<(), String> {
+    let masm = source.extension().is_some_and(|e| e == "asm");
+    let mut command = if masm {
+        let mut command = match find_ml64() {
+            Some(command) => command,
+            None => {
+                let mut command = Command::new(
+                    ["llvm-ml", "llvm-ml.exe"]
+                        .iter()
+                        .find_map(|n| find_on_path(n))
+                        .ok_or("no MASM assembler found: install the Visual Studio C++ build tools (x64) or put llvm-ml on PATH")?,
+                );
+                // `llvm-ml` assembles 32-bit MASM unless told otherwise.
+                command.arg("--m64");
+                command
+            }
+        };
+        let mut out = OsString::from("/Fo");
+        out.push(output.as_os_str());
+        command.args(["/nologo", "/c"]).arg(out).arg(source);
+        command
+    } else {
+        let clang = ["clang", "clang.exe"]
+            .iter()
+            .find_map(|n| find_on_path(n))
+            .ok_or("no assembler for .s or .S found: put clang on PATH, or write MASM (.asm)")?;
+        let mut command = Command::new(clang);
+        command
+            .arg(format!("--target={MSVC_TARGET}"))
+            .arg("-c")
+            .arg(source)
+            .arg("-o")
+            .arg(output);
+        command
+    };
+    let shown = PathBuf::from(command.get_program()).display().to_string();
+    let result = command
+        .output()
+        .map_err(|e| format!("could not invoke assembler '{shown}': {e}"))?;
+    if !result.status.success() {
+        let mut text = String::from_utf8_lossy(&result.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&result.stderr));
+        return Err(format!(
+            "assembler '{shown}' failed on {}:\n{}",
+            source.display(),
+            text.trim_end()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn find_ml64() -> Option<Command> {
+    find_msvc_tools::find_tool(MSVC_TARGET, "ml64.exe").map(|t| t.to_command())
+}
+
+#[cfg(not(windows))]
+fn find_ml64() -> Option<Command> {
+    None
+}
+
 /// What [`inspect`] found in a COFF object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoffSummary {

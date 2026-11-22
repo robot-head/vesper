@@ -398,6 +398,43 @@ fn port_matches_wit_component() {
     );
 }
 
+/// A custom section is inert at run time, but its bytes contribute to the
+/// embedded core module's length. Exercise each side of two LEB128 width
+/// transitions with an independently validated Rust component as oracle.
+#[test]
+fn custom_section_size_boundaries_match_rust() {
+    use wasm_encoder::{CustomSection, Section};
+
+    let parsed = vesper::parser::parse("fn main() -> i64 { 42 }");
+    assert!(parsed.diagnostics.is_empty());
+    let checked = vesper::check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty());
+    let artifact = wasm_backend::compile(&checked.world, "main", &configs()[0]).unwrap();
+    let wrap = package().entry("wit_component_wrap", true);
+
+    for size in [126, 127, 128, 129, 16_382, 16_383, 16_384, 16_385] {
+        // The one-byte name length and the name "x" occupy two payload bytes.
+        let data: Vec<u8> = (0..size - 2).map(|i| (i % 251) as u8).collect();
+        let mut core = artifact.core.clone();
+        CustomSection {
+            name: "x".into(),
+            data: data.as_slice().into(),
+        }
+        .append_to(&mut core);
+        let input = wrap_input(&core, &artifact.wit, artifact.world);
+        let expected = rust_encode(core, &artifact.wit, artifact.world);
+        let actual = answer(&wrap.words(&input))
+            .unwrap_or_else(|reason| panic!("section size {size} declined with {reason}"));
+        assert!(
+            actual == expected,
+            "section size {size}, first differing byte {:?}, lengths {} and {}",
+            actual.iter().zip(&expected).position(|(a, b)| a != b),
+            actual.len(),
+            expected.len()
+        );
+    }
+}
+
 /// WIT outside the backend's grammar is declined, never misread.
 #[test]
 fn declines_outside_the_subset() {

@@ -434,10 +434,23 @@ which the code-size lane (#1426) owns.
    Moving the branch into its own function does not help, because that
    function is inlined back.
 
+### Resonance: `schedule`, `pid` and `confine` flipped
+
+After `#1516`, `#1526` and `#1527` landed on `main` (`0f5a9eba`), re-measuring the remaining Resonance modules with `RUSTFLAGS="-C target-cpu=native"` (`n = 30`, Windows x86_64 MSVC) cleared three more modules cleanly under 1.50x:
+
+| Workload | Ratio (vesper / rust) | 95% interval | Previous | Decision |
+|---|--:|---|--:|---|
+| `schedule` (`pdc::compile_schedule`) | **1.02x** | `[0.94x, 1.13x]` | 1.50x `[1.45x, 1.53x]` | **Flipped** |
+| `pid` (`kernels::PidController`) | **1.27x** | `[1.17x, 1.30x]` | — | **Flipped** |
+| `confine` (`confine::verify_realtime`) | **1.35x** | `[1.30x, 1.37x]` | 1.66x | **Flipped** |
+| `slab` (`slab::DelaySlab`) | 1.89x | `[1.79x, 2.00x]` | 2.1x | Stays above bar |
+| `events` | 8.00x | `[7.76x, 8.98x]` | 5.6x | Stays above bar |
+
+Their `#[cfg(not(vesper_port))]` Rust implementations moved into `crates/vesper-resonance/seed/src/engine/` (`confine.rs`, `pdc.rs`, `kernels.rs`) so `vesper-resonance` runs only `@vesper/resonance` for all five flipped paths while `vesper-resonance-seed` stays frozen for the compiler until Stage 2. `tests/port_differential.rs` keeps 0 differences across `PidController` (50,000 steps + fault cases), `compile_schedule` (400 randomized graphs) and `verify_realtime` (randomized graphs and indirect targets).
+
 ## What is left
 
-- **Resonance:** flip the schedule compiler once it passes the gate
-  (1.50x), then confine, pid, slab and events (gap 7). The Rust
+- **Resonance:** slab (1.89x) and events (8.00x) stay above the bar until codegen removes their hot-path overhead (gap 7). The Rust
   `CompiledGraph` over Rust `Box<dyn DspProcessor>` trait objects, the
   Cranelift JIT (`clif.rs`, which goes through `@vesper/cranelift` per the
   plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not

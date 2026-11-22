@@ -1,3 +1,79 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-vesper_crate()
+# Attestation verification and the admission screen are the Vesper port
+# (Rust-exit SH6 lane 17, #1412): build.rs links the object built here from
+# the Loom package in vesper/, which depends on @vesper/crypto, and checks
+# port/binding.rs against the generated binding. Every test runs against
+# it; src/differential.rs compares it with the Rust reference it replaced
+# (src/reference/). The compiler's tool binaries, which //:bin/vesper
+# carries as run-time data, link the Rust seed copy instead,
+# //crates/vesper-loom-trust/seed, since this object needs //:bin/vesper.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+    deps = ["//packages/vesper-crypto:crypto_package"],
+)
+
+vesper_port_object(
+    name = "loom_trust_vesper",
+    library = "loom_trust",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "loom_trust_vesper_binding",
+    srcs = [":loom_trust_vesper"],
+    output_group = "rust_binding",
+)
+
+vesper_crate(
+    build_script_data = [
+        ":loom_trust_vesper",
+        ":loom_trust_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :loom_trust_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :loom_trust_vesper_binding)",
+    },
+)
+
+# The divergent builds, one per ported area (the Cargo
+# `vesper-port-divergent` feature applies the same edits from build.rs, one
+# at a time with VESPER_LOOM_TRUST_DIVERGE): each must keep compiling, and
+# port/check.sh asserts that the differential test catches it.
+[
+    vesper_port_object(
+        name = "loom_trust_vesper_divergent_" + area,
+        edit_src = "vesper/src/lib.ves",
+        edits = {old: new},
+        library = "loom_trust",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for area, old, new in [
+        ("semver", "if value == 0 && len > 0 {", "if value == 0 && len > 1 {"),
+        ("object", "if source != 6 {", "if source / 4 != 1 {"),
+        ("message", "\"vesper.loom.builder-attestation.v1\"", "\"vesper.loom.builder-attestation.v2\""),
+        ("quorum", "if distinct.len() < policy.minimum_operators {", "if keys.len() < policy.minimum_operators {"),
+        ("interval", "let outside = now < from || now >= until;", "let outside = now < from || now > until;"),
+        ("conflation", "} else if l == 55 {", "} else if l == 56 {"),
+        ("distance", "wrapping_sub(j, 2))), 1));", "wrapping_sub(j, 2))), 2));"),
+        ("screen", "if cost > widen_u64(policy.max_trust_cost) {", "if cost >= widen_u64(policy.max_trust_cost) {"),
+    ]
+]
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-loom-trust/seed:__pkg__"],
+)

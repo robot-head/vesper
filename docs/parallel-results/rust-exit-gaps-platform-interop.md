@@ -14,7 +14,7 @@ G4, G5, G6, G10, G11) and the os-tools report (SH6 lane 14, #1409: G4).
 | `.vsys` names colliding with the AOT runtime's libc imports (G6) | owned by #1459 (FFI lowering, graphics gap 5) | not this lane |
 | Windows executables with `.vsys` imports (G11) | **closed, part 1** | `src/vsys_commands.rs` (`link_windows`) |
 | CPU instructions (os-tools G4) | `cpuid`, `rdtsc`, `rdpmc`, `rdrand`, `cntvct`, PMU, `rndr` landed in #1473; **part 1 adds** `rdpkru`/`wrpkru`, `lfence`/`mfence`/`sfence`, `POR_EL0` read/write, `isb`/`dmb ish`/`dsb sy` | `src/ffi_lowering/cpu.rs`, `packages/vesper-std/cpu` |
-| Assembly objects in a build (runtime glue G10) | open, part 2 | see "Left" |
+| Assembly objects in a build (runtime glue G10) | **closed, part 2** | `crates/vesper-loom-calculus` (`objects`, Rust and Vesper parsers), `src/packages.rs` (`PackageObject`), `src/vsys_commands.rs` (`package_objects`), `src/native_windows.rs` (`assemble`), manuscript §16.3 |
 
 ## Part 1
 
@@ -132,17 +132,51 @@ written at all, so there is no ABBA before and after. What each fix unblocks:
   the fences; `kpc.rs`'s `dlopen` of kperf can now be tried from the JIT
   through G5's loader (a library name, not a path).
 
+## Part 2: assembly objects (G10)
+
+`[package] objects = ["asm/switch-@TARGET@.S", "asm/switch-@TARGET@.asm"]`
+names assembly sources (`.s`, `.S`, MASM `.asm`) and prebuilt objects (`.o`,
+`.obj`), with the path rules and `@OS@`/`@ARCH@`/`@TARGET@` tokens of `vsys`.
+A per-target entry contributes nothing on a target with no file; at least
+one target must have one (else a manifest error, as for a bad extension, a
+`..` or a path named twice).
+
+- **Manifest:** `Package::objects` in `vesper-loom-calculus`, skipped when
+  empty in both serde and `Debug`, so manifests without it keep their
+  differential digests. The Vesper TOML port (`manifest_toml.ves`) gains the
+  field (FNV-1a key `0x26d3ea846b0765cb`); the Rust/Vesper differential
+  corpus has new cases for the table and sequence forms and the type errors.
+- **Build:** `vesper build` assembles each source beside the output (the
+  linking C driver on Unix; `ml64` from Visual Studio or `llvm-ml`, and
+  `clang` for `.s`/`.S`, on Windows), links the objects after the program's
+  object, and removes the assembled files. A MASM source for a non-Windows
+  target is refused by name.
+- **Confinement:** a package with `objects` must declare a `link = "static"`
+  `.vsys` library (a manifest error otherwise), and an executable links a
+  package's objects only when it calls one of those libraries. Native code
+  therefore always arrives under `Ffi[Lib]`, which the capability ceiling
+  names (§16.3 supply-chain confinement), and no constructor slips in from a
+  pure package.
+- **Which library they are:** a package's objects provide its own
+  `link = "static"` libraries, so the executable drops `-l<name>` (or
+  `<name>.lib`) for them. `Imports::provide_by_objects` records this when
+  the imports are assembled.
+- **JIT, `run`, `test`:** refused before running: "library Twice is provided
+  by the assembly objects of @t/app (`[package] objects`), which only
+  `vesper build` links; build an executable instead".
+- **Tests** (`tests/platform_interop.rs`, 7 new; one checks that objects without a static library are refused and that an uncalled library links nothing): a per-target package
+  (`twice_plus = 2x + y` in x86_64 and AArch64 GNU syntax, Darwin syntax and
+  MASM) builds and exits 43 on each host, and leaves no assembled files; a
+  prebuilt `.o` links as it is; `jit` and `run` refuse; MASM is refused off
+  Windows; five manifest errors; per-target selection for all four targets.
+- No Stage 1 guarded path is touched, and only packages with `objects` see
+  any change.
+
 ## Left
 
-- **Part 2, assembly objects (G10):** a `[package] objects` field (`.s` /
-  `.S` files per target, with the same `@OS@`/`@ARCH@` tokens) that `vesper
-  build` assembles with the system assembler and links; the JIT and `vesper
-  test` refuse them with a diagnostic (or load a shared object built from
-  them). Needs a manifest field in `vesper-loom-calculus` and a manuscript
-  hunk.
 - **Part 3, per-target constants:** `const NAME: <int> = <value>;` items in a
   `.vsys` library, read as `Lib::NAME`, so one call site sees each target's
   `O_CREAT`. Touches the `.vsys` parser (lane 8, #1505) and the Bridge
   checker (SH4 lane 13, #1287); to agree with both first.
-- The census rows do not move: this part adds about 300 lines of Rust to the
-  CLI and deletes none. The Rust it unblocks is deleted by the lanes above.
+- The census rows do not move: parts 1 and 2 add about 550 lines of Rust to
+  the CLI and delete none. The Rust it unblocks is deleted by the lanes above.

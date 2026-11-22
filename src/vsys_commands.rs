@@ -46,8 +46,12 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
                 .into(),
         );
     }
+    // A wasm component reaches the standard I/O libraries through WASI
+    // (the wasm backend's port, packages/vesper-wasm-backend/src/host.ves),
+    // so its foreign calls are checked against the host's `.vsys` view.
+    let wasm = c.command == "build" && c.target == Some(vesper::wasm_backend::TARGET);
     let object_target = match c.command {
-        "build" => c.target,
+        "build" if !wasm => c.target,
         _ => None,
     };
     let imports = c.package.imports(object_target)?;
@@ -89,7 +93,8 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
             println!("{value}");
             Ok(())
         }
-        "build" => build(&c, &checked),
+        "build" if wasm => build_wasm(&c, &checked),
+        "build" => build(&c, &checked, &imports),
         "run" => {
             // The evaluator reaches the same host functions as `jit`.
             let host = eval_host_in(&imports, "run", c.link_search)?;
@@ -135,6 +140,16 @@ fn host_symbols(
         if library.link().name() == ffi_lowering::cpu::LINK_NAME {
             continue;
         }
+        // Assembly objects are linked by `vesper build` only; the JIT and
+        // the evaluator have no loader for them (manuscript §16.3).
+        if library.link().mode() == vesper_ffi::sys::LinkMode::Static
+            && let Some(package) = imports.objects_provider(library.link().name())
+        {
+            return Err(format!(
+                "{command}: library {} is provided by the assembly objects of {package} (`[package] objects`), which only `vesper build` links; build an executable instead",
+                library.name()
+            ));
+        }
         if library.link().name() != STD_HOST {
             let lib = host_libraries::open(library.link().name(), search).map_err(|why| {
                 format!(
@@ -173,6 +188,26 @@ fn host_symbols(
         }
     }
     Ok(out)
+}
+
+/// `build --target wasm32-wasip2`: a component whose `StdEnv` and `StdFs`
+/// calls import WASI 0.2. Only the wasm backend's Vesper port lowers them
+/// (through `vesper-hybrid`); the Rust backend refuses the program.
+fn build_wasm(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), String> {
+    let options = vesper::wasm_backend::WasmOptions {
+        optimize: c.optimize,
+        ..Default::default()
+    };
+    let artifact = vesper::wasm_backend::compile(checked.world(), c.entry, &options)
+        .map_err(|e| e.to_string())?;
+    let path = c.output.clone().unwrap_or_else(|| PathBuf::from("a.wasm"));
+    vesper::atomic_file::atomic_write(&path, &artifact.component)?;
+    println!(
+        "built {} ({} component)",
+        path.display(),
+        vesper::wasm_backend::TARGET
+    );
+    Ok(())
 }
 
 /// Add `symbol` at `address` to the host table. The JIT and the evaluator
@@ -354,7 +389,11 @@ mod host_libraries {
     }
 }
 
-fn build(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), String> {
+fn build(
+    c: &Command<'_>,
+    checked: &ffi_lowering::ForeignChecked,
+    imports: &Imports,
+) -> Result<(), String> {
     if c.entry != "main" {
         return Err("build currently requires entry 'main'".into());
     }
@@ -387,22 +426,111 @@ fn build(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), 
         })
         .map_err(|e| e.to_string())?;
     fs::write(&object, bytes).map_err(|e| e.to_string())?;
-    let names = checked.link_names();
+    // A package's assembly objects provide its static libraries
+    // (manuscript §16.3): they link in place of `lib<name>.a`.
+    // A package's objects link only when the executable calls one of the
+    // static libraries they provide.
+    let mut names = checked.link_names();
+    let mut used = std::collections::BTreeSet::new();
+    names.retain(
+        |(name, mode)| match (*mode, imports.objects_provider(name)) {
+            (vesper_ffi::sys::LinkMode::Static, Some(package)) => {
+                used.insert(package.to_owned());
+                false
+            }
+            _ => true,
+        },
+    );
+    let mut temporary = vec![object.clone()];
+    let objects = package_objects(c, &path, &used, &mut temporary);
+    let result = objects.and_then(|objects| link_executable(c, &object, &objects, &path, &names));
+    for file in temporary {
+        let _ = fs::remove_file(file);
+    }
+    println!("built {}", result?.display());
+    Ok(())
+}
+
+/// The `[package] objects` of each package in `used` for the build target:
+/// a prebuilt object as it is, and an assembly source assembled beside
+/// `output` (each such file is added to `temporary`).
+fn package_objects(
+    c: &Command<'_>,
+    output: &std::path::Path,
+    used: &std::collections::BTreeSet<String>,
+    temporary: &mut Vec<PathBuf>,
+) -> Result<Vec<PathBuf>, String> {
+    let windows = vesper::native::windows::is_windows_target(c.target);
+    let mut out = vec![];
+    for (i, o) in c.package.objects.iter().enumerate() {
+        if !used.contains(&o.package) {
+            continue;
+        }
+        let Some(file) = o.file_for(c.target)? else {
+            continue;
+        };
+        let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if matches!(extension, "o" | "obj") {
+            out.push(file.to_path_buf());
+            continue;
+        }
+        let assembled = output.with_extension(format!(
+            "vesper-asm{i}.{}",
+            if windows { "obj" } else { "o" }
+        ));
+        temporary.push(assembled.clone());
+        if windows {
+            vesper::native::windows::assemble(file, &assembled)
+                .map_err(|e| format!("{}: {e}", o.display))?;
+        } else if extension == "asm" {
+            return Err(format!(
+                "{}: MASM source (.asm) assembles only for Windows targets; use a per-target path for the others",
+                o.display
+            ));
+        } else {
+            // The C compiler driver that links also assembles (and runs the
+            // C preprocessor over `.S`).
+            let result = process::Command::new(c.linker)
+                .arg("-c")
+                .arg(file)
+                .arg("-o")
+                .arg(&assembled)
+                .output()
+                .map_err(|e| format!("could not invoke assembler '{}': {e}", c.linker))?;
+            if !result.status.success() {
+                return Err(format!(
+                    "{}: assembler '{}' failed:\n{}",
+                    o.display,
+                    c.linker,
+                    String::from_utf8_lossy(&result.stderr).trim_end()
+                ));
+            }
+        }
+        out.push(assembled);
+    }
+    Ok(out)
+}
+
+/// Link `object`, the package `objects` and the libraries `names` into
+/// `path`.
+fn link_executable(
+    c: &Command<'_>,
+    object: &std::path::Path,
+    objects: &[PathBuf],
+    path: &std::path::Path,
+    names: &[(String, vesper_ffi::sys::LinkMode)],
+) -> Result<PathBuf, String> {
     if vesper::native::windows::is_windows_target(c.target) {
         // Windows (runtime glue gap G11): link.exe or lld-link, as for any
         // Windows executable, with each library's import or static `.lib`.
-        let result = link_windows(c, &object, &path, &names);
-        let _ = fs::remove_file(&object);
-        let path = result?;
-        println!("built {}", path.display());
-        return Ok(());
+        return link_windows(c, object, objects, path, names);
     }
     let mut link = process::Command::new(c.linker);
-    link.arg(&object).arg("-o").arg(&path);
+    link.arg(object).args(objects).arg("-o").arg(path);
     for dir in c.link_search {
         link.arg("-L").arg(dir);
     }
-    for (name, mode) in &names {
+    for (name, mode) in names {
         match mode {
             vesper_ffi::sys::LinkMode::Dynamic => {
                 link.arg(format!("-l{name}"));
@@ -439,12 +567,10 @@ fn build(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), 
     let status = link
         .status()
         .map_err(|e| format!("could not invoke native linker '{}': {e}", c.linker))?;
-    let _ = fs::remove_file(&object);
     if !status.success() {
         return Err("native linker failed".into());
     }
-    println!("built {}", path.display());
-    Ok(())
+    Ok(path.to_path_buf())
 }
 
 /// The libraries a Rust static library (such as the standard I/O host)
@@ -466,10 +592,12 @@ const WINDOWS_RUST_SYSTEM_LIBRARIES: [&str; 5] = [
 fn link_windows(
     c: &Command<'_>,
     object: &std::path::Path,
+    objects: &[PathBuf],
     output: &std::path::Path,
     names: &[(String, vesper_ffi::sys::LinkMode)],
 ) -> Result<PathBuf, String> {
     let mut inputs = vec![object.to_path_buf()];
+    inputs.extend_from_slice(objects);
     let mut rust = false;
     for (name, _) in names {
         if matches!(name.as_str(), "c" | "m") {

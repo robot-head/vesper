@@ -287,6 +287,15 @@ fn skips(inout d: ChunkSeq[u64], n: u64) {
             "add_rank is not vectorized:\n{add_rank}"
         );
     }
+    // The first destination is respectively the last element, one past it,
+    // or wraps to a low index. The final cases also start the read past len.
+    for (max, rank) in [(2, 297), (2, 298), (2, u64::MAX), (299, 1), (300, 1)] {
+        let kernels = format!("add_rank(inout d, {max}, {rank});");
+        differential(
+            &format!("down_edge_{max}_{rank}"),
+            &program(helpers, &kernels),
+        );
+    }
     let kernels = "let mut m: u64 = 0;
     for k in 1..20 { add_rank(inout d, m, k); m = wrapping_add(m, k); }";
     differential("down_ranks", &program(helpers, kernels));
