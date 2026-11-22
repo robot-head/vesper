@@ -473,6 +473,7 @@ is the next step.
 | `vesper-loom-cas` (store, 12 calls) | crate suites pass | not run (~1.0-1.1x small, 1.8x 1 MiB read) | 0 | part 2b |
 | `vesper-loom-cas` (ingest, materialize, verify_all) | crate suites pass; fold = `to_lowercase` on every char | not run (file-system bound, noisy) | 0 | part 2c |
 | `vesper-loom-cas` (transfer) | transfer suites pass | not run (export ~1.1x; import sync-bound) | 0 | part 2d |
+| `vesper-loom-cas` (flipped port-backed default + `seed`) | 0 diffs (`codec_differential` + 113 whole-store cases in `port_differential`); 8/8 module divergences caught | `put_blob` `1.03x [0.96x, 1.16x]`, `read_blob` `1.13x [1.08x, 1.21x]`, `put_tree` `0.98x [0.93x, 1.20x]`, `ingest_dir` `0.99x [0.92x, 1.06x]`, `materialize` `0.97x [0.93x, 1.01x]`, `publish_derivation` `1.06x [0.97x, 1.17x]`, `lookup_derivation` `0.99x [0.96x, 1.02x]`, `export_pack` `1.04x [1.02x, 1.07x]`, `verify_all` `1.00x [0.95x, 1.04x]` (`n=30`, `RUSTFLAGS="-C target-cpu=native"`, `flip-gate.toml`) | `1,894` non-test lines moved out of `src/` into `seed/src/engine/` (`4,739 -> 2,845`) | `#1411` flip |
 
 ## Coordination asks
 
@@ -484,11 +485,13 @@ is the next step.
 
 ## What is left
 
-* The flip gate's ABBA run on store-level workloads (`flip-gate.toml` for
-  loom-cas), then the loom-cas flip (the compiler moves to a seed copy,
-  which needs the codegen-verified and loom-trust type sharing settled).
-  The tree encode and small `blob_id` crossings wait on gap 13 and on the
-  code-size lane (#1426).
+* `vesper-loom-cas` is flipped to port-backed by default (`build.rs` +
+  `port/binding.rs`), and the compiler closure crates (`vesper`,
+  `vesper-tools`, `vesper-codegen-verified`, `vesper-loom-admission`,
+  `vesper-loom-trust/seed`) link `vesper-loom-cas-seed` (`seed/`) with the
+  frozen Rust CAS engine in `seed/src/engine/` until Stage 2 / gap 12.
+  Small `tree::encode` and `blob_id` crossings from Rust callers still pay
+  the FFI boundary until callers move to Vesper or gap 13 / `#1426` closes.
 * Moving `CasFs` onto `@vesper-std/fs` once lane 13 has no-follow opens,
   no-replace renames, modes, locks and reflinks.
 * Then admission, tuf, and the Wasmtime crates once gap 1 is closed.

@@ -5,16 +5,24 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Vesper Loom immutable BLAKE3 content-addressed store (design section 8.2.6)"
 publish = false
+build = "build.rs"
 
-# The Rust build. The compiler links this package, so it resolves no port
-# harness; the Vesper port (vesper/, Rust-exit SH6 lane 16, #1411) is built
-# from the same sources by the package in port/ (`vesper-loom-cas-port`,
-# library `vesper_loom_cas`, cfg(vesper_port)), which no crate depends on
-# until the port reaches the parity bar.
+# The port-backed build (Rust-exit SH6 lane 16, #1411): build.rs links the
+# Vesper package in vesper/ and sets cfg(vesper_port). Crates inside the
+# compiler's own dependency closure (`cargo tree -p vesper -e normal,build`)
+# link the frozen Rust seed copy (`crates/vesper-loom-cas/seed`, package
+# `vesper-loom-cas-seed`, same library name `vesper_loom_cas`) instead; see
+# "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
+
+[features]
+# A deliberately wrong port, one edit per module picked by
+# VESPER_CAS_DIVERGE (port/test-port.sh asserts that the tests catch each).
+vesper-port-divergent = []
 
 [dependencies]
 blake3 = "1.8"
 reflink-copy = "0.1"
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -24,7 +32,13 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 
 [dev-dependencies]
 tempfile = "3"
+# Frozen Rust seed copy for whole-store differential checks and ABBA benchmarks.
+vesper-bench = { path = "../vesper-bench" }
+vesper-loom-cas-rust = { path = "seed", package = "vesper-loom-cas-seed" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
 
 [lints.rust]
-# cfg(vesper_port) is set only by the port package's build script.
+# cfg(vesper_port) is set by build.rs on the port-backed build.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }
