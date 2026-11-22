@@ -23,10 +23,6 @@ const U64_MAX_LAST_DIGIT: u64 = 5;
 // bit `b` of LOW for bytes 0-63, bit `b - 64` of HIGH for 64-127.
 const TCHAR_MASK_LOW: u64 = 288068722172624896;
 const TCHAR_MASK_HIGH: u64 = 6341068274398134270;
-// RFC 9110 §5.5 field-value bytes: VCHAR, SP and HTAB (LOW) and 64-126
-// (HIGH); bytes 128-255 (obs-text) pass with `find_not_in`'s high flag.
-const FIELD_VALUE_MASK_LOW: u64 = 18446744069414584832;
-const FIELD_VCHAR_MASK_HIGH: u64 = 9223372036854775807;
 // The bytes RFC 3986 lets an origin-form target carry unescaped (ALPHA,
 // DIGIT and -._~!$&'()*+,;=:@/?): bit `b` of LOW for bytes 0-63, bit
 // `b - 64` of HIGH for 64-127.
@@ -120,7 +116,7 @@ fn tokens(in s: Slice[u8]) -> bool {
 
 // No control byte but tab (field values; bytes >= 128 are obs-text).
 pub fn value_ok(in s: Slice[u8]) -> bool {
-    match first_control(in s, true, FIELD_VALUE_MASK_LOW, FIELD_VCHAR_MASK_HIGH) {
+    match first_control(in s, true) {
         Option::Some(i) => false,
         Option::None => true,
     }

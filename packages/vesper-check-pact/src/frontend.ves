@@ -1,0 +1,1253 @@
+// The declaration pass of the trait frontend: `Frontend::collect_local`,
+// `validate_trait`, `validate_conformance`, `compare_signature`,
+// `collect_bound`, `trait_key`, `assoc_cycle` and the failure paths of
+// `lower_bindings` (src/pact_frontend.rs), for a package without
+// dependencies. Each diagnostic is one line of `o`:
+// `CODE START END MESSAGE` (these diagnostics carry no help or labels).
+//
+// Rust keeps `BTreeMap`s keyed by `String`; here every table is indexed by
+// symbol: `kinds` (the name kinds `collect_local` reserves), `trait_of`
+// (the accepted local traits) and `fn_of` (the base world's functions).
+
+use @vesper/check-data::input::{
+    Ctx
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    Vars,
+    display,
+    vars_new
+};
+use @vesper/check-data::world::{
+    Bounds,
+    bounds_new,
+    mode_of,
+    set_by_symbol
+};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    push_decimal,
+    u32_at,
+    w
+};
+use self::decl::{
+    Conf,
+    Decls,
+    Gen,
+    Par,
+    Sig,
+    TRef,
+    TraitRow
+};
+use self::tyops::{
+    Sy,
+    binding_of,
+    compatible,
+    contains32,
+    contains_projection,
+    conform_type,
+    insert32,
+    is_projection,
+    is_self,
+    key_segment,
+    mentions,
+    proj_assoc,
+    proj_self,
+    proj_trait,
+    proj_trait_ty,
+    row_arg,
+    same_type,
+    trait_has_assoc
+};
+
+const NONE32: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+const K_INFER: u8 = 5;
+
+// Name kinds `collect_local` reserves (its `names` map).
+const N_TYPE: u32 = 1;
+const N_EFFECT: u32 = 2;
+const N_TRAIT: u32 = 3;
+const N_MODEL: u32 = 4;
+
+pub struct Fe {
+    sy: Sy,
+    // symbol -> name kind (N_*), or 0
+    kinds: ChunkSeq[u32],
+    // symbol -> accepted local trait index + 1, or 0
+    trait_of: ChunkSeq[u32],
+    // symbol -> base world function index + 1, or 0
+    fn_of: ChunkSeq[u32],
+    // the accepted local conformances (`Frontend::confs`), in order: the
+    // conformance index, its trait index, whether it is a model and its
+    // path's name (impl key or model name symbol)
+    acc_conf: ChunkSeq[u32],
+    acc_trait: ChunkSeq[u32],
+    acc_model: ChunkSeq[bool],
+    acc_path: ChunkSeq[u32],
+}
+
+pub fn fe_new(sy: Sy) -> Fe {
+    Fe {
+        sy: sy,
+        kinds: ChunkSeq::new[u32](),
+        trait_of: ChunkSeq::new[u32](),
+        fn_of: ChunkSeq::new[u32](),
+        acc_conf: ChunkSeq::new[u32](),
+        acc_trait: ChunkSeq::new[u32](),
+        acc_model: ChunkSeq::new[bool](),
+        acc_path: ChunkSeq::new[u32]()
+    }
+}
+
+fn at_symbol(in table: ChunkSeq[u32], s: u32) -> u32 {
+    u32_at(in table, w(s))
+}
+
+// ---------------------------------------------------------------- output
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn nm(inout o: ChunkSeq[u8], in names: Names, s: u32) {
+    names.write(s, inout o);
+}
+
+fn num(inout o: ChunkSeq[u8], v: u64) {
+    push_decimal(inout o, v);
+}
+
+// Starts a diagnostic line; the caller writes the message and `endl`.
+fn head(inout o: ChunkSeq[u8], in code: Str, s: u64, e: u64) {
+    put(inout o, code);
+    o.push(32);
+    num(inout o, s);
+    o.push(32);
+    num(inout o, e);
+    o.push(32);
+}
+
+fn endl(inout o: ChunkSeq[u8]) {
+    o.push(10);
+}
+
+fn kind_text(inout o: ChunkSeq[u8], k: u32) {
+    if k == N_TYPE {
+        put(inout o, "type");
+    } else if k == N_EFFECT {
+        put(inout o, "effect");
+    } else if k == N_TRAIT {
+        put(inout o, "trait");
+    } else {
+        put(inout o, "model");
+    }
+}
+
+// `{:?}` of `ast::Mode`.
+fn mode_text(inout o: ChunkSeq[u8], m: u8) {
+    if m == 0 {
+        put(inout o, "Copy");
+    } else if m == 1 {
+        put(inout o, "Affine");
+    } else {
+        put(inout o, "Linear");
+    }
+}
+
+// `{:?}` of `ast::Pass`.
+fn pass_text(inout o: ChunkSeq[u8], p: u8) {
+    if p == 0 {
+        put(inout o, "In");
+    } else if p == 1 {
+        put(inout o, "Inout");
+    } else {
+        put(inout o, "Sink");
+    }
+}
+
+// `DefPath` of a local conformance: `impl @pkg@v::key` / `model @pkg@v::M`.
+fn path_text(inout o: ChunkSeq[u8], in names: Names, in d: Decls, model: bool, name: u32) {
+    if model {
+        put(inout o, "model ");
+    } else {
+        put(inout o, "impl ");
+    }
+    nm(inout o, in names, d.identity);
+    put(inout o, "::");
+    nm(inout o, in names, name);
+}
+
+// ----------------------------------------------------------------- lookups
+
+// `Frontend::trait_key`: the accepted local trait a reference names (its
+// index), or NONE32 after a diagnostic.
+fn trait_key(in names: Names, in fe: Fe, r: TRef, inout o: ChunkSeq[u8]) -> u32 {
+    if r.pkg != 0 {
+        head(inout o, "E0601", r.s, r.e);
+        put(inout o, "unknown dependency package '");
+        nm(inout o, in names, wrapping_sub(r.pkg, 1));
+        put(inout o, "'");
+        endl(inout o);
+        return NONE32;
+    }
+    let t = at_symbol(in fe.trait_of, r.name);
+    if t == 0 {
+        head(inout o, "E0601", r.s, r.e);
+        put(inout o, "unknown trait '");
+        nm(inout o, in names, r.name);
+        put(inout o, "'");
+        endl(inout o);
+        return NONE32;
+    }
+    wrapping_sub(t, 1)
+}
+
+// `Frontend::where_key`: like `trait_key`, without diagnostics.
+fn where_key(in fe: Fe, r: TRef) -> u32 {
+    if r.pkg != 0 {
+        return NONE32;
+    }
+    let t = at_symbol(in fe.trait_of, r.name);
+    if t == 0 {
+        NONE32
+    } else {
+        wrapping_sub(t, 1)
+    }
+}
+
+fn type_of_args_equal(in d: Decls, a: Par, b: Par) -> bool {
+    if a.jn != b.jn {
+        return false;
+    }
+    for i in 0..w(a.jn) {
+        if d.word(add(w(a.ja), i)) != d.word(add(w(b.ja), i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// ----------------------------------------------------------------- traits
+
+fn validate_trait(in c: Ctx, in d: Decls, in fe: Fe, t: TraitRow, inout o: ChunkSeq[u8]) {
+    let sy = fe.sy;
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(t.gn) {
+        let g = d.gen(add(w(t.ga), i));
+        if g.name == sy.self_ty || !insert32(inout seen, g.name) {
+            head(inout o, "E0600", t.s, t.e);
+            put(inout o, "duplicate or reserved trait parameter '");
+            nm(inout o, in c.names, g.name);
+            put(inout o, "'");
+            endl(inout o);
+        }
+    }
+    for i in 0..w(t.an) {
+        let a = d.assoc(add(w(t.aa), i));
+        if !insert32(inout seen, a.name) {
+            head(inout o, "E0600", a.s, a.e);
+            put(inout o, "duplicate associated type '");
+            nm(inout o, in c.names, a.name);
+            put(inout o, "'");
+            endl(inout o);
+        }
+    }
+    let mut methods: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(t.mn) {
+        let m = d.sig(add(w(t.ma), i));
+        if !insert32(inout methods, m.name) {
+            head(inout o, "E0600", m.s, m.e);
+            put(inout o, "duplicate trait method '");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "'");
+            endl(inout o);
+        }
+        if m.gn != 0 {
+            head(inout o, "E0607", m.s, m.e);
+            put(inout o, "generic trait methods are not supported in the static fragment");
+            endl(inout o);
+        }
+        let first = d.par(w(m.pa));
+        if m.pn > 0 && first.name == sy.self_param {
+            let k = c.types.kind(first.ty);
+            if k != K_INFER && !is_self(in c.types, sy, first.ty) {
+                head(inout o, "E0600", first.s, first.e);
+                put(inout o, "a trait method's 'self' has type Self");
+                endl(inout o);
+            }
+        } else {
+            head(inout o, "E0607", m.s, m.e);
+            put(inout o, "trait method '");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "' needs a 'self' receiver; static trait functions are not supported");
+            endl(inout o);
+        }
+        for j in 1..w(m.pn) {
+            let p = d.par(add(w(m.pa), j));
+            if p.name == sy.self_param {
+                head(inout o, "E0600", p.s, p.e);
+                put(inout o, "'self' must be the first parameter");
+                endl(inout o);
+            }
+            if c.types.kind(p.ty) == K_INFER {
+                head(inout o, "E0102", p.s, p.e);
+                put(inout o, "trait method parameters require a type");
+                endl(inout o);
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------ conformances
+
+// `Frontend::trait_substitution`: `Self` and the trait parameters.
+fn trait_vars(inout t: Types, in d: Decls, sy: Sy, tr: TraitRow, cf: Conf) -> Vars {
+    let mut vars = vars_new();
+    vars.set(sy.self_ty, cf.self_ty);
+    let r = d.tref(w(cf.tref));
+    let mut n = tr.gn;
+    if r.xn < n {
+        n = r.xn;
+    }
+    for i in 0..w(n) {
+        let g = d.gen(add(w(tr.ga), i));
+        let a = d.word(add(w(r.xa), i));
+        if g.row {
+            let ra = row_arg(inout t, a);
+            vars.set(g.name, ra);
+        } else {
+            vars.set(g.name, a);
+        }
+    }
+    vars
+}
+
+fn cycle_refs(in t: Types, in d: Decls, sy: Sy, tr: TraitRow, ty: u32, inout out: ChunkSeq[u32]) {
+    if is_projection(in t, sy, ty) {
+        let pt = proj_trait(in t, sy, ty);
+        let assoc = proj_assoc(in t, ty);
+        if is_self(in t, sy, proj_self(in t, ty))
+            && (pt == NONE32 || pt == tr.name)
+            && trait_has_assoc(in d, tr, assoc) {
+            out.push(assoc);
+            return;
+        }
+    }
+    let n = t.node(ty);
+    if n.kind == K_NAMED || n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            cycle_refs(in t, in d, sy, tr, t.arg(ty, i), inout out);
+        }
+    } else if n.kind == K_FN {
+        for i in 0..w(n.n) {
+            cycle_refs(in t, in d, sy, tr, t.arg(ty, i), inout out);
+        }
+        cycle_refs(in t, in d, sy, tr, n.r, inout out);
+        cycle_row_refs(in t, in d, sy, tr, n.r2, inout out);
+    } else if n.kind == K_ROW {
+        cycle_row_refs(in t, in d, sy, tr, n.r2, inout out);
+    }
+}
+
+fn cycle_row_refs(
+    in t: Types,
+    in d: Decls,
+    sy: Sy,
+    tr: TraitRow,
+    r: u32,
+    inout out: ChunkSeq[u32]
+) {
+    let row = t.row(r);
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        for j in 0..w(e.n) {
+            cycle_refs(in t, in d, sy, tr, u32_at(in t.items, add(w(e.a), j)), inout out);
+        }
+    }
+}
+
+// `assoc_cycle`'s `visit`: true (with `cycle` set) when a cycle closes.
+fn cycle_visit(
+    in t: Types,
+    in d: Decls,
+    sy: Sy,
+    tr: TraitRow,
+    cf: Conf,
+    name: u32,
+    inout path: ChunkSeq[u32],
+    inout done: ChunkSeq[u32],
+    inout cycle: ChunkSeq[u32]
+) -> bool {
+    for i in 0..path.len() {
+        if u32_at(in path, i) == name {
+            for j in i..path.len() {
+                cycle.push(u32_at(in path, j));
+            }
+            cycle.push(name);
+            return true;
+        }
+    }
+    if !insert32(inout done, name) {
+        return false;
+    }
+    let v = binding_of(in d, cf, name);
+    if v == NONE32 {
+        return false;
+    }
+    let mut next: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    cycle_refs(in t, in d, sy, tr, v, inout next);
+    let depth = path.len();
+    path.push(name);
+    for k in 0..next.len() {
+        let n = u32_at(in next, k);
+        if cycle_visit(in t, in d, sy, tr, cf, n, inout path, inout done, inout cycle) {
+            return true;
+        }
+    }
+    path.truncate(depth);
+    false
+}
+
+// `assoc_cycle`: the first cycle among `cf`'s associated type bindings.
+fn assoc_cycle(in t: Types, in d: Decls, sy: Sy, tr: TraitRow, cf: Conf, inout cycle: ChunkSeq[u32])
+    -> bool {
+    let mut done: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(cf.bn) {
+        let b = d.bind(add(w(cf.ba), i));
+        let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        if cycle_visit(in t, in d, sy, tr, cf, b.name, inout path, inout done, inout cycle) {
+            return true;
+        }
+    }
+    false
+}
+
+fn validate_conformance(
+    inout c: Ctx,
+    in d: Decls,
+    in fe: Fe,
+    cf: Conf,
+    tr: TraitRow,
+    inout o: ChunkSeq[u8]
+) {
+    let sy = fe.sy;
+    let r = d.tref(w(cf.tref));
+    if r.xn != tr.gn {
+        head(inout o, "E0601", r.s, r.e);
+        put(inout o, "trait '");
+        nm(inout o, in c.names, tr.name);
+        put(inout o, "' takes ");
+        num(inout o, w(tr.gn));
+        put(inout o, " arguments, found ");
+        num(inout o, w(r.xn));
+        endl(inout o);
+        return;
+    }
+    let mut bounds = bounds_new();
+    for i in 0..w(cf.gn) {
+        let g = d.gen(add(w(cf.ga), i));
+        if !g.row {
+            bounds.set(g.name, g.bound);
+        }
+    }
+    for i in 0..w(tr.gn) {
+        let g = d.gen(add(w(tr.ga), i));
+        let a = d.word(add(w(r.xa), i));
+        if !g.row && contains_projection(in c.types, sy, a) {
+            continue;
+        }
+        if !g.row {
+            let m = mode_of(inout c.types, in c.names, in c.world, a, in bounds);
+            if m > g.bound {
+                head(inout o, "E0606", r.s, r.e);
+                put(inout o, "trait argument ");
+                display(in c.types, in c.names, a, inout o);
+                put(inout o, " for '");
+                nm(inout o, in c.names, g.name);
+                put(inout o, "' exceeds its modal bound mod ");
+                mode_text(inout o, g.bound);
+                endl(inout o);
+            }
+        }
+    }
+    // Associated types: exactly the trait's, each within its bound.
+    let mut given: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(cf.bn) {
+        let b = d.bind(add(w(cf.ba), i));
+        let mut decl = NONE32;
+        for j in 0..w(tr.an) {
+            if decl == NONE32 && d.assoc(add(w(tr.aa), j)).name == b.name {
+                decl = n32(add(w(tr.aa), j));
+            }
+        }
+        if decl == NONE32 {
+            head(inout o, "E0601", b.s, b.e);
+            put(inout o, "'");
+            nm(inout o, in c.names, b.name);
+            put(inout o, "' is not an associated type of '");
+            nm(inout o, in c.names, tr.name);
+            put(inout o, "'");
+            endl(inout o);
+            continue;
+        }
+        if !insert32(inout given, b.name) {
+            head(inout o, "E0601", b.s, b.e);
+            put(inout o, "associated type '");
+            nm(inout o, in c.names, b.name);
+            put(inout o, "' is given twice");
+            endl(inout o);
+        }
+        let ad = d.assoc(w(decl));
+        if !contains_projection(in c.types, sy, b.ty) && !mentions(in c.types, b.ty, sy.self_ty) {
+            let m = mode_of(inout c.types, in c.names, in c.world, b.ty, in bounds);
+            if m > ad.bound {
+                head(inout o, "E0606", b.s, b.e);
+                put(inout o, "associated type ");
+                nm(inout o, in c.names, b.name);
+                put(inout o, " = ");
+                display(in c.types, in c.names, b.ty, inout o);
+                put(inout o, " exceeds its modal bound mod ");
+                mode_text(inout o, ad.bound);
+                endl(inout o);
+            }
+        }
+    }
+    for j in 0..w(tr.an) {
+        let a = d.assoc(add(w(tr.aa), j));
+        if !contains32(in given, a.name) {
+            head(inout o, "E0601", cf.s, cf.e);
+            put(inout o, "missing associated type '");
+            nm(inout o, in c.names, a.name);
+            put(inout o, "'");
+            endl(inout o);
+        }
+    }
+    let mut cycle: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if assoc_cycle(in c.types, in d, sy, tr, cf, inout cycle) {
+        head(inout o, "E0601", cf.s, cf.e);
+        put(inout o, "associated type binding cycle: ");
+        for i in 0..cycle.len() {
+            if i > 0 {
+                put(inout o, " -> ");
+            }
+            nm(inout o, in c.names, u32_at(in cycle, i));
+        }
+        endl(inout o);
+    }
+    // Methods: exactly the trait's, with matching signatures.
+    let vars = trait_vars(inout c.types, in d, sy, tr, cf);
+    let mut seen: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(cf.mn) {
+        let m = d.sig(add(w(cf.ma), i));
+        if !insert32(inout seen, m.name) {
+            head(inout o, "E0601", m.s, m.e);
+            put(inout o, "method '");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "' is defined twice");
+            endl(inout o);
+            continue;
+        }
+        let mut sig = NONE32;
+        for j in 0..w(tr.mn) {
+            if sig == NONE32 && d.sig(add(w(tr.ma), j)).name == m.name {
+                sig = n32(add(w(tr.ma), j));
+            }
+        }
+        if sig == NONE32 {
+            head(inout o, "E0601", m.s, m.e);
+            put(inout o, "'");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "' is not a method of trait '");
+            nm(inout o, in c.names, tr.name);
+            put(inout o, "'");
+            endl(inout o);
+            continue;
+        }
+        compare_signature(inout c, in d, sy, cf, tr, d.sig(w(sig)), m, in vars, inout o);
+    }
+    for j in 0..w(tr.mn) {
+        let s = d.sig(add(w(tr.ma), j));
+        if !contains32(in seen, s.name) {
+            head(inout o, "E0601", cf.s, cf.e);
+            put(inout o, "missing method '");
+            nm(inout o, in c.names, s.name);
+            put(inout o, "' of trait '");
+            nm(inout o, in c.names, tr.name);
+            put(inout o, "'");
+            endl(inout o);
+        }
+    }
+}
+
+fn conform(inout c: Ctx, in d: Decls, sy: Sy, tr: TraitRow, cf: Conf, ty: u32, in vars: Vars)
+    -> u32 {
+    let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    conform_type(inout c.types, in d, sy, tr, cf, ty, in vars, inout stack)
+}
+
+fn compare_signature(
+    inout c: Ctx,
+    in d: Decls,
+    sy: Sy,
+    cf: Conf,
+    tr: TraitRow,
+    sig: Sig,
+    m: Sig,
+    in vars: Vars,
+    inout o: ChunkSeq[u8]
+) {
+    if m.gn != 0 {
+        head(inout o, "E0607", m.s, m.e);
+        put(
+            inout o,
+            "generic methods in impls and models are not supported in the static fragment"
+        );
+        endl(inout o);
+        return;
+    }
+    if sig.pn != m.pn {
+        head(inout o, "E0602", m.s, m.e);
+        put(inout o, "method '");
+        nm(inout o, in c.names, m.name);
+        put(inout o, "' takes ");
+        num(inout o, w(sig.pn));
+        put(inout o, " parameters in the trait, found ");
+        num(inout o, w(m.pn));
+        endl(inout o);
+        return;
+    }
+    let self_ty = cf.self_ty;
+    let mut own = vars_new();
+    own.set(sy.self_ty, self_ty);
+    for i in 0..w(m.pn) {
+        let expected = d.par(add(w(sig.pa), i));
+        let actual = d.par(add(w(m.pa), i));
+        if i == 0 && actual.name != sy.self_param {
+            head(inout o, "E0602", actual.s, actual.e);
+            put(inout o, "method '");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "' must take 'self' first");
+            endl(inout o);
+            continue;
+        }
+        if expected.pass != actual.pass {
+            head(inout o, "E0603", actual.s, actual.e);
+            put(inout o, "parameter '");
+            nm(inout o, in c.names, actual.name);
+            put(inout o, "' of '");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "' is passed ");
+            pass_text(inout o, actual.pass);
+            put(inout o, " but the trait declares ");
+            pass_text(inout o, expected.pass);
+            endl(inout o);
+        }
+        if !type_of_args_equal(in d, expected, actual) {
+            head(inout o, "E0603", actual.s, actual.e);
+            put(inout o, "parameter '");
+            nm(inout o, in c.names, actual.name);
+            put(inout o, "' of '");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "' changes the trait's place projections");
+            endl(inout o);
+        }
+        let want = if i == 0 {
+            self_ty
+        } else {
+            conform(inout c, in d, sy, tr, cf, expected.ty, in vars)
+        };
+        let have = if i == 0 && c.types.kind(actual.ty) == K_INFER {
+            self_ty
+        } else {
+            conform(inout c, in d, sy, tr, cf, actual.ty, in own)
+        };
+        if !same_type(in c.types, sy, want, have) {
+            head(inout o, "E0602", actual.s, actual.e);
+            put(inout o, "parameter '");
+            nm(inout o, in c.names, actual.name);
+            put(inout o, "' of '");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "' has type ");
+            display(in c.types, in c.names, have, inout o);
+            put(inout o, ", but the trait requires ");
+            display(in c.types, in c.names, want, inout o);
+            endl(inout o);
+        }
+    }
+    let want = conform(inout c, in d, sy, tr, cf, sig.result, in vars);
+    let have = conform(inout c, in d, sy, tr, cf, m.result, in own);
+    if !same_type(in c.types, sy, want, have) {
+        head(inout o, "E0602", m.s, m.e);
+        put(inout o, "'");
+        nm(inout o, in c.names, m.name);
+        put(inout o, "' returns ");
+        display(in c.types, in c.names, have, inout o);
+        put(inout o, ", but the trait requires ");
+        display(in c.types, in c.names, want, inout o);
+        endl(inout o);
+    }
+    let want_ty = conform(inout c, in d, sy, tr, cf, sig.row, in vars);
+    let have_ty = conform(inout c, in d, sy, tr, cf, m.row, in own);
+    let want = c.types.node(want_ty).r2;
+    let have = c.types.node(have_ty).r2;
+    let hr = c.types.row(have);
+    let wr = c.types.row(want);
+    for i in 0..w(hr.n) {
+        let e = c.types.effect_at(add(w(hr.a), i));
+        let mut permitted = false;
+        for j in 0..w(wr.n) {
+            let x = c.types.effect_at(add(w(wr.a), j));
+            if !permitted && x.name == e.name && x.n == e.n {
+                let mut all = true;
+                for k in 0..w(x.n) {
+                    let xa = u32_at(in c.types.items, add(w(x.a), k));
+                    let ea = u32_at(in c.types.items, add(w(e.a), k));
+                    if !same_type(in c.types, sy, xa, ea) {
+                        all = false;
+                    }
+                }
+                permitted = all;
+            }
+        }
+        if !permitted {
+            head(inout o, "E0604", m.s, m.e);
+            put(inout o, "'");
+            nm(inout o, in c.names, m.name);
+            put(inout o, "' performs ");
+            nm(inout o, in c.names, e.name);
+            if e.n > 0 {
+                put(inout o, "[");
+                for k in 0..w(e.n) {
+                    if k > 0 {
+                        put(inout o, ", ");
+                    }
+                    display(
+                        in c.types,
+                        in c.names,
+                        u32_at(in c.types.items, add(w(e.a), k)),
+                        inout o
+                    );
+                }
+                put(inout o, "]");
+            }
+            put(inout o, " but the trait signature does not permit it");
+            endl(inout o);
+        }
+        if e.label != 0 {
+            head(inout o, "E0607", m.s, m.e);
+            put(inout o, "labelled capabilities in trait method signatures are not supported");
+            endl(inout o);
+        }
+    }
+    if hr.tail != 0 && hr.tail != wr.tail {
+        head(inout o, "E0604", m.s, m.e);
+        put(inout o, "'");
+        nm(inout o, in c.names, m.name);
+        put(inout o, "' has an open effect row the trait does not declare");
+        endl(inout o);
+    }
+}
+
+// ------------------------------------------------------------------ bounds
+
+fn bound_head(inout o: ChunkSeq[u8], in names: Names, param: u32, r: TRef) {
+    nm(inout o, in names, param);
+    put(inout o, ": ");
+    nm(inout o, in names, r.name);
+}
+
+// `Frontend::collect_bound` (the diagnostics; the bound tables are the
+// monomorphizer's, a later part of this port).
+fn collect_bound(in c: Ctx, in d: Decls, in fe: Fe, i: u64, inout o: ChunkSeq[u8]) {
+    let sy = fe.sy;
+    let b = d.bound_syn(i);
+    let r = d.tref(w(b.tref));
+    if b.owner == sy.empty || c.names.has_prefix(b.owner, in "$unsupported::".as_bytes()) {
+        head(inout o, "E0607", b.s, b.e);
+        put(inout o, "trait bound '");
+        bound_head(inout o, in c.names, b.param, r);
+        put(
+            inout o,
+            "' is not supported here; bounds go on functions, inherent impl blocks and type declarations"
+        );
+        endl(inout o);
+        return;
+    }
+    let f = at_symbol(in fe.fn_of, b.owner);
+    let mut found = false;
+    if f != 0 {
+        let fr = d.fn_row(w(wrapping_sub(f, 1)));
+        for j in 0..w(fr.gn) {
+            let g = d.gen(add(w(fr.ga), j));
+            if !found && g.name == b.param && !g.row {
+                found = true;
+            }
+        }
+    } else {
+        let a = c.world.lookup(b.owner);
+        if a == NONE32 {
+            head(inout o, "E0607", b.s, b.e);
+            put(inout o, "trait bound '");
+            bound_head(inout o, in c.names, b.param, r);
+            put(inout o, "' constrains an unknown item '");
+            nm(inout o, in c.names, b.owner);
+            put(inout o, "'");
+            endl(inout o);
+            return;
+        }
+        let adt = c.world.adt(a);
+        for j in 0..w(adt.gn) {
+            let g = c.world.generic(add(w(adt.ga), j));
+            if !found && g.name == b.param && !g.row {
+                found = true;
+            }
+        }
+    }
+    if !found {
+        head(inout o, "E0607", b.s, b.e);
+        put(inout o, "'");
+        nm(inout o, in c.names, b.param);
+        put(inout o, "' in the bound '");
+        bound_head(inout o, in c.names, b.param, r);
+        put(inout o, "' is not a type parameter of '");
+        nm(inout o, in c.names, b.owner);
+        put(inout o, "'; where-clauses on functions constrain their own type parameters");
+        endl(inout o);
+        return;
+    }
+    let key = trait_key(in c.names, in fe, r, inout o);
+    if key == NONE32 {
+        return;
+    }
+    let t = d.trait_row(w(key));
+    if t.gn != r.xn {
+        head(inout o, "E0601", r.s, r.e);
+        put(inout o, "trait '");
+        nm(inout o, in c.names, t.name);
+        put(inout o, "' takes ");
+        num(inout o, w(t.gn));
+        put(inout o, " arguments, found ");
+        num(inout o, w(r.xn));
+        endl(inout o);
+    }
+}
+
+// --------------------------------------------------------------- lowering
+
+// The error message of `TypeDto::from_source`, into `err` (true on error).
+fn type_err(in c: Ctx, ty: u32, inout err: ChunkSeq[u8]) -> bool {
+    let n = c.types.node(ty);
+    if n.kind == K_NAMED {
+        for i in 0..w(n.n) {
+            if arg_err(in c, c.types.arg(ty, i), inout err) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if type_err(in c, c.types.arg(ty, i), inout err) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == K_FN {
+        put(inout err, "function type `");
+        display(in c.types, in c.names, ty, inout err);
+        put(inout err, "` has no Pact type constructor in this fragment");
+        return true;
+    }
+    if n.kind == K_ROW {
+        put(inout err, "an effect row is not a type");
+        return true;
+    }
+    put(inout err, "unresolved source type `");
+    display(in c.types, in c.names, ty, inout err);
+    put(inout err, "`");
+    true
+}
+
+// The error message of `ArgDto::from_source`.
+fn arg_err(in c: Ctx, ty: u32, inout err: ChunkSeq[u8]) -> bool {
+    let n = c.types.node(ty);
+    if n.kind != K_ROW {
+        return type_err(in c, ty, inout err);
+    }
+    let row = c.types.row(n.r2);
+    for i in 0..w(row.n) {
+        let e = c.types.effect_at(add(w(row.a), i));
+        if e.label != 0 && c.names.has_prefix(wrapping_sub(e.label, 1), in "$".as_bytes()) {
+            put(inout err, "checker-internal capability label \"");
+            nm(inout err, in c.names, wrapping_sub(e.label, 1));
+            put(inout err, "\" is not a stable source name");
+            return true;
+        }
+        for j in 0..w(e.n) {
+            if arg_err(in c, u32_at(in c.types.items, add(w(e.a), j)), inout err) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_generic(in d: Decls, ga: u32, gn: u32, name: u32) -> bool {
+    for i in 0..w(gn) {
+        if d.gen(add(w(ga), i)).name == name {
+            return true;
+        }
+    }
+    false
+}
+
+// The error message of `Frontend::dto` under generics `gens[ga..ga+gn]`.
+fn dto_err(in c: Ctx, in d: Decls, in fe: Fe, ga: u32, gn: u32, ty: u32, inout err: ChunkSeq[u8])
+    -> bool {
+    let sy = fe.sy;
+    if is_projection(in c.types, sy, ty) {
+        let mut tn = proj_trait(in c.types, sy, ty);
+        let assoc = proj_assoc(in c.types, ty);
+        if tn == NONE32 {
+            // `unique_assoc_trait`.
+            let mut count: u64 = 0;
+            for i in 0..d.traits.len() {
+                let t = d.trait_row(i);
+                if at_symbol(in fe.trait_of, t.name)
+                    == n32(inc(i))
+                    && trait_has_assoc(in d, t, assoc) {
+                    count = inc(count);
+                    tn = t.name;
+                }
+            }
+            if count == 0 {
+                put(inout err, "no trait declares an associated type '");
+                nm(inout err, in c.names, assoc);
+                put(inout err, "'");
+                return true;
+            }
+            if count > 1 {
+                put(inout err, "associated type '");
+                nm(inout err, in c.names, assoc);
+                put(inout err, "' is declared by several traits; write <T as Trait>::");
+                nm(inout err, in c.names, assoc);
+                return true;
+            }
+        }
+        if at_symbol(in fe.trait_of, tn) == 0 {
+            put(inout err, "unknown trait '");
+            nm(inout err, in c.names, tn);
+            put(inout err, "' in a projection");
+            return true;
+        }
+        if dto_err(in c, in d, in fe, ga, gn, proj_self(in c.types, ty), inout err) {
+            return true;
+        }
+        let tt = proj_trait_ty(in c.types, ty);
+        for i in 0..c.types.arity(tt) {
+            if dto_err(in c, in d, in fe, ga, gn, c.types.arg(tt, i), inout err) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let n = c.types.node(ty);
+    if n.kind == K_NAMED {
+        if n.n == 0 && is_generic(in d, ga, gn, n.name) {
+            return false;
+        }
+        for i in 0..w(n.n) {
+            let a = c.types.arg(ty, i);
+            let bad = if c.types.kind(a) == K_ROW {
+                arg_err(in c, a, inout err)
+            } else {
+                dto_err(in c, in d, in fe, ga, gn, a, inout err)
+            };
+            if bad {
+                return true;
+            }
+        }
+        return false;
+    }
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if dto_err(in c, in d, in fe, ga, gn, c.types.arg(ty, i), inout err) {
+                return true;
+            }
+        }
+        return false;
+    }
+    type_err(in c, ty, inout err)
+}
+
+// A trait argument by its parameter's kind (`ArgDto::from_source` of the
+// row for an effect-row parameter, else `dto`).
+fn trait_arg_err(
+    inout c: Ctx,
+    in d: Decls,
+    in fe: Fe,
+    ga: u32,
+    gn: u32,
+    g: Gen,
+    a: u32,
+    inout err: ChunkSeq[u8]
+) -> bool {
+    if g.row {
+        let ra = row_arg(inout c.types, a);
+        arg_err(in c, ra, inout err)
+    } else {
+        dto_err(in c, in d, in fe, ga, gn, a, inout err)
+    }
+}
+
+// `lower_bindings`' `lower` for one accepted conformance: true with the
+// message in `err` when it fails.
+fn lower_err(inout c: Ctx, in d: Decls, in fe: Fe, cf: Conf, tr: TraitRow, inout err: ChunkSeq[u8])
+    -> bool {
+    let sy = fe.sy;
+    if dto_err(in c, in d, in fe, cf.ga, cf.gn, cf.self_ty, inout err) {
+        return true;
+    }
+    let r = d.tref(w(cf.tref));
+    let mut n = tr.gn;
+    if r.xn < n {
+        n = r.xn;
+    }
+    for i in 0..w(n) {
+        let g = d.gen(add(w(tr.ga), i));
+        let a = d.word(add(w(r.xa), i));
+        if trait_arg_err(inout c, in d, in fe, cf.ga, cf.gn, g, a, inout err) {
+            return true;
+        }
+    }
+    for i in 0..w(cf.wn) {
+        let wh = d.where_row(add(w(cf.wa), i));
+        let wr = d.tref(w(wh.tref));
+        let key = where_key(in fe, wr);
+        if key == NONE32 {
+            put(inout err, "unknown trait '");
+            nm(inout err, in c.names, wr.name);
+            put(inout err, "'");
+            return true;
+        }
+        if dto_err(in c, in d, in fe, cf.ga, cf.gn, wh.ty, inout err) {
+            return true;
+        }
+        let kt = d.trait_row(w(key));
+        if kt.gn != wr.xn {
+            put(inout err, "trait '");
+            nm(inout err, in c.names, kt.name);
+            put(inout err, "' takes ");
+            num(inout err, w(kt.gn));
+            put(inout err, " arguments, found ");
+            num(inout err, w(wr.xn));
+            return true;
+        }
+        for j in 0..w(wr.xn) {
+            let g = d.gen(add(w(kt.ga), j));
+            let a = d.word(add(w(wr.xa), j));
+            if trait_arg_err(inout c, in d, in fe, cf.ga, cf.gn, g, a, inout err) {
+                return true;
+            }
+        }
+    }
+    let mut own = vars_new();
+    own.set(sy.self_ty, cf.self_ty);
+    for i in 0..w(cf.bn) {
+        let b = d.bind(add(w(cf.ba), i));
+        let ty = conform(inout c, in d, sy, tr, cf, b.ty, in own);
+        if dto_err(in c, in d, in fe, cf.ga, cf.gn, ty, inout err) {
+            return true;
+        }
+    }
+    false
+}
+
+// --------------------------------------------------------------- the pass
+
+// `impl_key`: `Trait.Self` (trait arguments and types by `key_segment`).
+fn impl_key(in c: Ctx, in d: Decls, cf: Conf, inout o: ChunkSeq[u8]) {
+    let r = d.tref(w(cf.tref));
+    nm(inout o, in c.names, r.name);
+    if r.xn > 0 {
+        put(inout o, "-0-");
+        for i in 0..w(r.xn) {
+            if i > 0 {
+                put(inout o, "-1-");
+            }
+            key_segment(in c.types, in c.names, d.word(add(w(r.xa), i)), inout o);
+        }
+        put(inout o, "-2");
+    }
+    put(inout o, ".");
+    key_segment(in c.types, in c.names, cf.self_ty, inout o);
+}
+
+fn sig_contains_projection(in t: Types, sy: Sy, in d: Decls, s: Sig) -> bool {
+    for i in 0..w(s.pn) {
+        if contains_projection(in t, sy, d.par(add(w(s.pa), i)).ty) {
+            return true;
+        }
+    }
+    contains_projection(in t, sy, s.result) || contains_projection(in t, sy, s.row)
+}
+
+// `Frontend::new` for a package without dependencies: `collect_local`,
+// then the lowering failures of `lower_bindings`.
+pub fn declaration_pass(inout c: Ctx, in d: Decls, inout fe: Fe, inout o: ChunkSeq[u8]) {
+    let sy = fe.sy;
+    for i in 0..d.fns.len() {
+        let f = d.fn_row(i);
+        set_by_symbol(inout fe.fn_of, f.name, n32(inc(i)));
+    }
+    for i in 0..c.world.adts.len() {
+        let a = c.world.adt(n32(i));
+        set_by_symbol(inout fe.kinds, a.name, N_TYPE);
+    }
+    for i in 0..c.world.effects.len() {
+        let e = c.world.effect_row(n32(i));
+        set_by_symbol(inout fe.kinds, e.name, N_EFFECT);
+    }
+    for i in 0..d.traits.len() {
+        let t = d.trait_row(i);
+        let prev = at_symbol(in fe.kinds, t.name);
+        set_by_symbol(inout fe.kinds, t.name, N_TRAIT);
+        if prev != 0 {
+            head(inout o, "E0600", t.s, t.e);
+            put(inout o, "trait '");
+            nm(inout o, in c.names, t.name);
+            put(inout o, "' conflicts with a ");
+            kind_text(inout o, prev);
+            put(inout o, " of the same name");
+            endl(inout o);
+            continue;
+        }
+        validate_trait(in c, in d, in fe, t, inout o);
+        set_by_symbol(inout fe.trait_of, t.name, n32(inc(i)));
+    }
+    for i in 0..d.confs.len() {
+        let cf = d.conf(i);
+        if cf.model {
+            let prev = at_symbol(in fe.kinds, cf.mname);
+            set_by_symbol(inout fe.kinds, cf.mname, N_MODEL);
+            if prev != 0 {
+                head(inout o, "E0600", cf.s, cf.e);
+                put(inout o, "model '");
+                nm(inout o, in c.names, cf.mname);
+                put(inout o, "' conflicts with a ");
+                kind_text(inout o, prev);
+                put(inout o, " of the same name");
+                endl(inout o);
+                continue;
+            }
+        }
+        let key = trait_key(in c.names, in fe, d.tref(w(cf.tref)), inout o);
+        if key == NONE32 {
+            continue;
+        }
+        let path = if cf.model {
+            cf.mname
+        } else {
+            let mut k: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            impl_key(in c, in d, cf, inout k);
+            c.names.intern(in k[0..k.len()])
+        };
+        let mut overlap = false;
+        for j in 0..fe.acc_conf.len() {
+            let same_kind = match fe.acc_model.try_get(j) {
+                Option::Some(m) => m == cf.model,
+                Option::None => false,
+            };
+            if same_kind && u32_at(in fe.acc_path, j) == path {
+                overlap = true;
+            }
+        }
+        if overlap {
+            head(inout o, "E0605", cf.s, cf.e);
+            path_text(inout o, in c.names, in d, cf.model, path);
+            put(
+                inout o,
+                " overlaps an earlier canonical impl with the same head; declare one as a named `model`"
+            );
+            endl(inout o);
+            continue;
+        }
+        validate_conformance(inout c, in d, in fe, cf, d.trait_row(w(key)), inout o);
+        fe.acc_conf.push(n32(i));
+        fe.acc_trait.push(key);
+        fe.acc_model.push(cf.model);
+        fe.acc_path.push(path);
+    }
+    for i in 0..d.uses.len() {
+        let u = d.use_row(i);
+        let mut declared = false;
+        for j in 0..fe.acc_conf.len() {
+            let cf = d.conf(w(u32_at(in fe.acc_conf, j)));
+            if cf.model && cf.mname == u.model {
+                declared = true;
+            }
+        }
+        if !declared {
+            head(inout o, "E0613", u.s, u.e);
+            put(inout o, "'");
+            nm(inout o, in c.names, u.model);
+            put(inout o, "' is not a model declared in this package");
+            endl(inout o);
+        }
+    }
+    for i in 0..d.bounds.len() {
+        collect_bound(in c, in d, in fe, i, inout o);
+    }
+    for i in 0..d.items.len() {
+        let it = d.item(i);
+        if it.adt {
+            let mut found = false;
+            for j in 0..w(it.n) {
+                if contains_projection(in c.types, sy, d.word(add(w(it.a), j))) {
+                    found = true;
+                }
+            }
+            if found {
+                head(inout o, "E0607", it.s, it.e);
+                put(inout o, "projections in the fields of '");
+                nm(inout o, in c.names, it.name);
+                put(inout o, "' are not supported");
+                endl(inout o);
+            }
+        } else {
+            for j in 0..w(it.n) {
+                let op = d.sig(add(w(it.a), j));
+                if sig_contains_projection(in c.types, sy, in d, op) {
+                    head(inout o, "E0607", op.s, op.e);
+                    put(inout o, "projections in effect operation signatures are not supported");
+                    endl(inout o);
+                }
+            }
+        }
+    }
+    // `lower_bindings`: a conformance that cannot be lowered.
+    for j in 0..fe.acc_conf.len() {
+        let cf = d.conf(w(u32_at(in fe.acc_conf, j)));
+        let tr = d.trait_row(w(u32_at(in fe.acc_trait, j)));
+        let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        if lower_err(inout c, in d, in fe, cf, tr, inout err) {
+            head(inout o, "E0607", cf.s, cf.e);
+            put(inout o, "cannot lower ");
+            path_text(inout o, in c.names, in d, cf.model, u32_at(in fe.acc_path, j));
+            put(inout o, ": ");
+            o.extend(in err[0..err.len()]);
+            endl(inout o);
+        }
+    }
+}

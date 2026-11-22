@@ -342,6 +342,45 @@ fn check_lowered_package(
     }
 }
 
+/// The declaration pass of [`check_package`] on its own, under
+/// [`default_identity`] and without dependencies: the module the pass
+/// collects from (after function-object, `dyn` and builtin-trait lowering)
+/// and the diagnostics of collecting and validating its trait, conformance,
+/// `use model` and bound declarations. `None` when the pass does not run:
+/// no frontend syntax, or an earlier lowering rejected the module. The
+/// differential reference of the Vesper port (self-hosting SH2 lane 13,
+/// #1185, `packages/vesper-check-pact`); not a stable API.
+#[doc(hidden)]
+pub fn declaration_pass(module: &Module) -> Option<(Module, Vec<Diagnostic>)> {
+    let fn_lowered;
+    let module = if crate::dyn_fn::uses_fn_objects(module) {
+        fn_lowered = crate::dyn_fn::lower(module).ok()?;
+        &fn_lowered.module
+    } else {
+        module
+    };
+    let dyn_lowered;
+    let module = if crate::dyn_trait::uses_dyn(module) {
+        dyn_lowered = crate::dyn_trait::lower(module).ok()?;
+        &dyn_lowered.module
+    } else {
+        module
+    };
+    if !has_frontend_syntax(module) && !builtin_traits::wanted(module) {
+        return None;
+    }
+    let injected;
+    let module = if builtin_traits::wanted(module) {
+        let (stripped, items, owners) = builtin_traits::prelude(module).ok()?;
+        injected = mono::SpanMap::new(module).with_builtins(&stripped, items, &owners);
+        &injected
+    } else {
+        module
+    };
+    let fe = Frontend::new(module, &default_identity(), &FrontendOptions::default()).ok()?;
+    Some((module.clone(), fe.diagnostics))
+}
+
 /// Whether the module uses any frontend-only trait syntax.
 pub fn has_frontend_syntax(module: &Module) -> bool {
     if !module.model_uses.is_empty() || !module.trait_bounds.is_empty() {
