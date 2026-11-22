@@ -3,14 +3,32 @@ name = "vesper-fusion"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Vesper Stage 4 host fusion engine (design §28, §32, §7): egglog operator fusion for Tensor graphs and Resonance DSP chains"
+description = "Vesper Stage 4 host fusion engine (design §28, §32, §7): equality-saturation operator fusion for Tensor graphs and Resonance DSP chains"
 publish = false
+build = "build.rs"
+
+# The saturation engine is the Vesper port: build.rs links the Loom package in
+# vesper/ and sets cfg(vesper_port). It replaced egglog (Rust-exit wave SH6,
+# lane 18, #1413). vesper-fusion is outside `cargo tree -p vesper -e
+# normal,build`, so it needs no seed copy.
+
+[features]
+# A deliberately wrong Vesper build: the port test run must fail
+# (crates/vesper-fusion/port/test-port.sh asserts which test does).
+vesper-port-divergent = []
 
 [dependencies]
-egglog = { version = "=3.0.0", default-features = false }
+vesper-port-abi = { path = "../vesper-port-abi" }
 # The Rust seed copy: the Vesper port of vesper-tensor stays non-default
 # until it reaches performance parity (port wave P1 lane 8, #905).
 vesper-tensor = { path = "../vesper-tensor/seed", package = "vesper-tensor-seed" }
 # The Rust seed copy: the Vesper port of vesper-resonance stays non-default
 # until it reaches performance parity (port wave P3b lane 9, #1071).
 vesper-resonance = { path = "../vesper-resonance/seed", package = "vesper-resonance-seed" }
+
+[dev-dependencies]
+# The reference the engine replaced, for tests/egglog_differential.rs.
+egglog = { version = "=3.0.0", default-features = false }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }

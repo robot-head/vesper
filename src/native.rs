@@ -1143,6 +1143,8 @@ fn compile_entry<M: Module>(
     entry_effects: EntryEffects,
     linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
+    // One encode-once swap input per compilation (SH4 lane 2, #1276).
+    let _inputs = crate::swap_input::open(world);
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     // Foreign capabilities are granted by the package's `.vsys` import.
     let trace_ok = entry_effects == EntryEffects::TraceHost
@@ -5273,6 +5275,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.b.ins().icmp(IntCC::Equal, value, n)
                 }
                 Literal::Int(n) => self.b.ins().icmp_imm(IntCC::Equal, value, *n as i64),
+                // Only a `u128` holds it: the I128 bit pattern.
+                Literal::WideInt(n) => {
+                    let n = self.wide_const(*n as i128);
+                    self.b.ins().icmp(IntCC::Equal, value, n)
+                }
                 Literal::Bool(b) => self.b.ins().icmp_imm(IntCC::Equal, value, i64::from(*b)),
                 Literal::Float(n) => {
                     let ty = self.b.func.dfg.value_type(value);
@@ -5625,6 +5632,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             ExprKind::Literal(l) => match l {
                 Literal::Int(n) if wide_native::is_wide(&self.ty(e)) => self.wide_const(*n),
                 Literal::Int(n) => self.b.ins().iconst(types::I64, *n as i64),
+                Literal::WideInt(n) => self.wide_const(*n as i128),
                 // An f32 literal is the f32 nearest its f64 value
                 // (`vesper.float.ieee754/1`).
                 Literal::Float(n) if self.ty(e).name() == "f32" => self.b.ins().f32const(*n as f32),

@@ -667,6 +667,22 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "use",
         "use @",
         "/// doc\nfn f() {} // trailing",
+        // Contextual `effect`, `handle`, `sink` and `inout` (#1244).
+        "fn effect() {} fn handle(x: u64) -> u64 { x } struct S { sink: u64, inout: u8, effect: u8, handle: u8 }",
+        "fn f(sink: u64, inout: u64, sink s: S, inout inout: u64, sink sink: S) { g(sink, inout); g(sink x, inout y); g(sink.a, sink(1), sink[0], sink - 1, sink as u64); }",
+        "fn f() { let effect = 1; let handle = effect; handle = 2; let s = S { sink, handle: 1 }; s.handle(); for sink in 0..2 {} match x { effect => effect } }",
+        "fn f() { handle E in { 0 } with { return x => x } handle l: E in {} with {} handle(1); handle; handle self::m::E in {} with {} }",
+        "fn f() { g(sink S { a }, inout self.x, sink 1, sink \"s\", sink match x { _ => 1 }, sink if a { b } else { c }, inout !x, sink { 1 }) }",
+        "use m::{effect, handle as h, sink}; fn f() { m::effect(); E::handle(); }",
+        // 128-bit scalars are type arguments, not rows.
+        "fn f(x: Option[u128]) -> Seq[i128] { g[u128, i128](x) }",
+        // `handle` before a capitalized name in an import list starts no name.
+        "use m::{A, handle\n    B, C}; use m::{x as handle Y};",
+        // Literals past u64::MAX (#1244).
+        "fn f() { 18446744073709551616; 340282366920938463463374607431768211455; 340282366920938463463374607431768211456; 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff; 0x1_0000_0000_0000_0000_0000_0000_0000_0000 }",
+        "fn f() { -170141183460469231731687303715884105728; - -170141183460469231731687303715884105728; -340282366920938463463374607431768211455 }",
+        "fn f(x: i128) { match x { -170141183460469231731687303715884105728 => 1, -170141183460469231731687303715884105729 => 2, 340282366920938463463374607431768211455 => 3, -340282366920938463463374607431768211456 => 4, _ => 0 } }",
+        "fn f() { region r(18446744073709551616) { 1 } }",
     ]
     .iter()
     .map(|s| s.to_string())

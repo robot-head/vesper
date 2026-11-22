@@ -11,7 +11,9 @@ autobenches = false
 build = false
 
 # The seed-copy rule (port wave P1 lane 2, #899; lane 8, #905): this package
-# is the Rust build of ../src under the library name `vesper_tensor`. The
+# is the Rust build of ../src under the library name `vesper_tensor`, over
+# the frozen Rust engine in src/engine for the modules the port replaced
+# (SH6 lane 11, #1406). The
 # compiler and, under the owner's parity rule, every other dependent link it
 # with `vesper-tensor = { path = ".../seed", package = "vesper-tensor-seed" }`
 # until the port reaches performance parity. The port-backed package
@@ -19,7 +21,7 @@ build = false
 # code takes bug fixes only until self-hosting Stage 2.
 [lib]
 name = "vesper_tensor"
-path = "../src/lib.rs"
+path = "src/lib.rs"
 
 [dependencies]
 # Already in Cargo.lock (cranelift-jit uses it); read-only weight mapping.

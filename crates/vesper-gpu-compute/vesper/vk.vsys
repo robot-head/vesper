@@ -1,0 +1,57 @@
+// The Vulkan 1.2 core entry points the compute runtime calls, all exported
+// by the system loader (libvulkan). Dispatchable and non-dispatchable
+// handles are u64 words; every pointer argument is an address of memory the
+// package allocated with libc (see libc.vsys). Results are VkResult codes.
+sys library Vk (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "dynamic", name = "vulkan",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    fn vkEnumerateInstanceVersion(nocapture inout version: u32) -> ForeignVal[i32];
+    fn vkCreateInstance(info: u64, alloc: u64, nocapture inout instance: u64) -> ForeignVal[i32];
+    fn vkDestroyInstance(instance: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkEnumeratePhysicalDevices(instance: u64, nocapture inout count: u32, devices: u64) -> ForeignVal[i32];
+    fn vkGetPhysicalDeviceProperties2(physical: u64, props: u64) -> ForeignVal[Unit];
+    fn vkGetPhysicalDeviceFeatures2(physical: u64, features: u64) -> ForeignVal[Unit];
+    fn vkGetPhysicalDeviceQueueFamilyProperties(physical: u64, nocapture inout count: u32, props: u64) -> ForeignVal[Unit];
+    fn vkGetPhysicalDeviceMemoryProperties(physical: u64, props: u64) -> ForeignVal[Unit];
+    fn vkCreateDevice(physical: u64, info: u64, alloc: u64, nocapture inout device: u64) -> ForeignVal[i32];
+    fn vkDestroyDevice(device: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkDeviceWaitIdle(device: u64) -> ForeignVal[i32];
+    fn vkGetDeviceQueue(device: u64, family: u32, index: u32, nocapture inout queue: u64) -> ForeignVal[Unit];
+    fn vkCreateSemaphore(device: u64, info: u64, alloc: u64, nocapture inout semaphore: u64) -> ForeignVal[i32];
+    fn vkDestroySemaphore(device: u64, semaphore: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkGetSemaphoreCounterValue(device: u64, semaphore: u64, nocapture inout value: u64) -> ForeignVal[i32];
+    fn vkWaitSemaphores(device: u64, info: u64, timeout: u64) -> ForeignVal[i32];
+    fn vkCreateBuffer(device: u64, info: u64, alloc: u64, nocapture inout buffer: u64) -> ForeignVal[i32];
+    fn vkDestroyBuffer(device: u64, buffer: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkGetBufferMemoryRequirements(device: u64, buffer: u64, req: u64) -> ForeignVal[Unit];
+    fn vkAllocateMemory(device: u64, info: u64, alloc: u64, nocapture inout memory: u64) -> ForeignVal[i32];
+    fn vkFreeMemory(device: u64, memory: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkBindBufferMemory(device: u64, buffer: u64, memory: u64, offset: u64) -> ForeignVal[i32];
+    fn vkMapMemory(device: u64, memory: u64, offset: u64, size: u64, flags: u32, nocapture inout data: u64) -> ForeignVal[i32];
+    fn vkUnmapMemory(device: u64, memory: u64) -> ForeignVal[Unit];
+    fn vkCreateDescriptorSetLayout(device: u64, info: u64, alloc: u64, nocapture inout layout: u64) -> ForeignVal[i32];
+    fn vkDestroyDescriptorSetLayout(device: u64, layout: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkCreatePipelineLayout(device: u64, info: u64, alloc: u64, nocapture inout layout: u64) -> ForeignVal[i32];
+    fn vkDestroyPipelineLayout(device: u64, layout: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkCreateShaderModule(device: u64, info: u64, alloc: u64, nocapture inout module: u64) -> ForeignVal[i32];
+    fn vkDestroyShaderModule(device: u64, module: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkCreateComputePipelines(device: u64, cache: u64, count: u32, infos: u64, alloc: u64, nocapture inout pipeline: u64) -> ForeignVal[i32];
+    fn vkDestroyPipeline(device: u64, pipeline: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkCreateCommandPool(device: u64, info: u64, alloc: u64, nocapture inout pool: u64) -> ForeignVal[i32];
+    fn vkDestroyCommandPool(device: u64, pool: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkAllocateCommandBuffers(device: u64, info: u64, nocapture inout cmd: u64) -> ForeignVal[i32];
+    fn vkBeginCommandBuffer(cmd: u64, info: u64) -> ForeignVal[i32];
+    fn vkEndCommandBuffer(cmd: u64) -> ForeignVal[i32];
+    fn vkCreateDescriptorPool(device: u64, info: u64, alloc: u64, nocapture inout pool: u64) -> ForeignVal[i32];
+    fn vkDestroyDescriptorPool(device: u64, pool: u64, alloc: u64) -> ForeignVal[Unit];
+    fn vkAllocateDescriptorSets(device: u64, info: u64, nocapture inout set: u64) -> ForeignVal[i32];
+    fn vkUpdateDescriptorSets(device: u64, write_count: u32, writes: u64, copy_count: u32, copies: u64) -> ForeignVal[Unit];
+    fn vkCmdBindPipeline(cmd: u64, bind_point: u32, pipeline: u64) -> ForeignVal[Unit];
+    fn vkCmdBindDescriptorSets(cmd: u64, bind_point: u32, layout: u64, first: u32, count: u32, sets: u64, dynamic_count: u32, dynamic: u64) -> ForeignVal[Unit];
+    fn vkCmdPushConstants(cmd: u64, layout: u64, stages: u32, offset: u32, size: u32, values: u64) -> ForeignVal[Unit];
+    fn vkCmdDispatch(cmd: u64, x: u32, y: u32, z: u32) -> ForeignVal[Unit];
+    fn vkCmdPipelineBarrier(cmd: u64, src: u32, dst: u32, deps: u32, memory_count: u32, memory: u64, buffer_count: u32, buffers: u64, image_count: u32, images: u64) -> ForeignVal[Unit];
+    fn vkQueueSubmit(queue: u64, count: u32, submits: u64, fence: u64) -> ForeignVal[i32];
+}

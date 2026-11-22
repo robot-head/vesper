@@ -938,8 +938,8 @@ impl DspProcessor for BuiltinSource {
 /// spec order) and return the last block of node `sink` (a sink node).
 ///
 /// The Rust build runs a [`CompiledGraph`] of `Box<dyn DspProcessor>`; the
-/// port build runs the whole graph in Vesper, with its processors as
-/// `Box[dyn DspProcessor]` objects in one sequence (vesper/src/graph.ves).
+/// port build runs the whole graph in Vesper, dispatching on each built-in
+/// processor's kind (vesper/src/graph.ves).
 /// Both give the same samples bit for bit.
 pub fn render_builtin_graph(
     nodes: &[NodeSpec],

@@ -1,0 +1,56 @@
+// Integer literals past `u64::MAX` (#1244): up to `u128::MAX`, and
+// `i128::MIN`. The front end v2 and AST differentials parse every
+// repository .ves file; tests/wide_literals.rs runs this one.
+const BIG: u128 = 340282366920938463463374607431768211455;
+const LOW: i128 = -170141183460469231731687303715884105728;
+const MID: i128 = 18446744073709551616;
+const HEX: u128 = 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff;
+// A constant pattern past `i128::MAX`.
+
+fn top_class(x: u128) -> u64 {
+    match x {
+        BIG => 1,
+        _ => 0,
+    }
+}
+
+fn top() -> u128 {
+    340282366920938463463374607431768211455
+}
+
+fn bottom() -> i128 {
+    -170141183460469231731687303715884105728
+}
+
+fn class(x: u128) -> u64 {
+    match x {
+        0 => 0,
+        18446744073709551616 => 1,
+        340282366920938463463374607431768211455 => 2,
+        _ => 3,
+    }
+}
+
+fn sign(x: i128) -> u64 {
+    match x {
+        -170141183460469231731687303715884105728 => 0,
+        -18446744073709551616 => 1,
+        _ => 2,
+    }
+}
+
+fn main() -> u64 {
+    let mut score: u64 = 0;
+    if top() == BIG && BIG == HEX {
+        score = wrapping_add(score, 1);
+    }
+    if bottom() == LOW && MID == 18446744073709551616 {
+        score = wrapping_add(score, 2);
+    }
+    if top_class(BIG) == 1 && top_class(wrapping_sub(HEX, 1)) == 0 {
+        score = wrapping_add(score, 8);
+    }
+    let c = wrapping_add(class(BIG), class(wrapping_add(widen_u128(18446744073709551615), 1)));
+    let s = wrapping_add(sign(LOW), sign(-18446744073709551616));
+    wrapping_add(score, wrapping_add(wrapping_mul(c, 10), wrapping_mul(s, 100)))
+}
