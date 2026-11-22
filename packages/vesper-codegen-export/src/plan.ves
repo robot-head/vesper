@@ -423,14 +423,14 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
         let rust_path = read_opt(inout r, in b, inout names);
         vsys
             .push(
-            VsysIn {
-                library: lib,
-                handler: handler,
-                sa: sa,
-                sn: sn,
-                rust_path: rust_path
-            }
-        );
+                VsysIn {
+                    library: lib,
+                    handler: handler,
+                    sa: sa,
+                    sn: sn,
+                    rust_path: rust_path
+                }
+            );
     }
     let mut insts = ChunkSeq::new[InstIn]();
     let ni = r.word(in b);
@@ -440,12 +440,12 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
         let spelling = read_str(inout r, in b, inout names);
         insts
             .push(
-            InstIn {
-                function: function,
-                alias: alias,
-                spelling: spelling
-            }
-        );
+                InstIn {
+                    function: function,
+                    alias: alias,
+                    spelling: spelling
+                }
+            );
     }
     let mut nodes = ChunkSeq::new[TNode]();
     let mut tkids = ChunkSeq::new[u32]();
@@ -499,21 +499,21 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
                     let off = r.word(in b);
                     lfields
                         .push(
-                        LField {
-                            name: fname,
-                            ty: fty,
-                            offset: off
-                        }
-                    );
+                            LField {
+                                name: fname,
+                                ty: fty,
+                                offset: off
+                            }
+                        );
                 }
                 lvars
                     .push(
-                    LVar {
-                        name: vname,
-                        fa: fa,
-                        fc: fc
-                    }
-                );
+                        LVar {
+                            name: vname,
+                            fa: fa,
+                            fc: fc
+                        }
+                    );
             }
         } else {
             t.lreason = read_str(inout r, in b, inout names);
@@ -550,13 +550,13 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
             }
             effs
                 .push(
-                EffIn {
-                    name: ename,
-                    labeled: labeled,
-                    a: a,
-                    n: n
-                }
-            );
+                    EffIn {
+                        name: ename,
+                        labeled: labeled,
+                        a: a,
+                        n: n
+                    }
+                );
         }
         let caller_slot = flag(r.word(in b));
         let pa = params_in.len();
@@ -567,32 +567,32 @@ pub fn read_planner(in b: Slice[u8]) -> Planner {
             let pty = n32(r.word(in b));
             params_in
                 .push(
-                ParamIn {
-                    name: pname,
-                    pass: pass,
-                    ty: pty
-                }
-            );
+                    ParamIn {
+                        name: pname,
+                        pass: pass,
+                        ty: pty
+                    }
+                );
         }
         let result = n32(r.word(in b));
         fns
             .push(
-            FnIn {
-                name: name,
-                generated: generated,
-                public: public,
-                generics: generics,
-                dyn_param: dyn_param,
-                dyn_trait: dyn_trait,
-                tail: tail,
-                ea: ea,
-                en: en,
-                caller_slot: caller_slot,
-                pa: pa,
-                pn: pn,
-                result: result
-            }
-        );
+                FnIn {
+                    name: name,
+                    generated: generated,
+                    public: public,
+                    generics: generics,
+                    dyn_param: dyn_param,
+                    dyn_trait: dyn_trait,
+                    tail: tail,
+                    ea: ea,
+                    en: en,
+                    caller_slot: caller_slot,
+                    pa: pa,
+                    pn: pn,
+                    result: result
+                }
+            );
     }
     let s_unit = intern_text(inout names, "Unit");
     let s_fail = intern_text(inout names, "Fail");
@@ -701,14 +701,14 @@ impl Planner {
         self
             .anodes
             .push(
-            ANode {
-                kind: kind,
-                name: name,
-                owned: owned,
-                a: a,
-                n: kids.len()
-            }
-        );
+                ANode {
+                    kind: kind,
+                    name: name,
+                    owned: owned,
+                    a: a,
+                    n: kids.len()
+                }
+            );
         id
     }
 
@@ -737,21 +737,11 @@ impl Planner {
     // `owning`: whether a value of `a` owns memory.
     fn owning(in self, a: u32) -> bool {
         let n = self.anode(a);
-        if n
-            .kind
-            == K_SEQ
-            || n
-            .kind
-            == K_SLICE
-            || n
-            .kind
-            == K_BOX
-            || n
-            .kind
-            == K_STR
-            || n
-            .kind
-            == K_OBJECT {
+        if n.kind == K_SEQ
+            || n.kind == K_SLICE
+            || n.kind == K_BOX
+            || n.kind == K_STR
+            || n.kind == K_OBJECT {
             return true;
         }
         if n.kind == K_SCALAR || n.kind == K_EXTERN {
@@ -773,21 +763,11 @@ impl Planner {
         if n.kind == K_EXTERN {
             return true;
         }
-        if n
-            .kind
-            == K_BOX
-            || n
-            .kind
-            == K_SEQ
-            || n
-            .kind
-            == K_SLICE
-            || n
-            .kind
-            == K_TUPLE
-            || n
-            .kind
-            == K_NAMED {
+        if n.kind == K_BOX
+            || n.kind == K_SEQ
+            || n.kind == K_SLICE
+            || n.kind == K_TUPLE
+            || n.kind == K_NAMED {
             for i in 0..n.n {
                 if self.contains_extern(self.akid(n, i)) {
                     return true;
@@ -852,12 +832,8 @@ impl Planner {
         if n.kind != K_SCALAR {
             return false;
         }
-        self
-            .names
-            .spells(n.name, in "i128".as_bytes())
-            || self
-            .names
-            .spells(n.name, in "u128".as_bytes())
+        self.names.spells(n.name, in "i128".as_bytes())
+            || self.names.spells(n.name, in "u128".as_bytes())
     }
 
     // `result_shape`: 0 when `a` may be a result, else the reason.
@@ -933,10 +909,10 @@ impl Planner {
         if self.contains_extern(a) && n.kind != K_EXTERN {
             return self
                 .refuse(
-                function,
-                source,
-                "holds an opaque .vsys extern-type handle; Rust lends one only directly as an `in` parameter (export ABI v4)"
-            );
+                    function,
+                    source,
+                    "holds an opaque .vsys extern-type handle; Rust lends one only directly as an `in` parameter (export ABI v4)"
+                );
         }
         if n.kind == K_EXTERN {
             if pos == PASS_IN {
@@ -944,10 +920,10 @@ impl Planner {
             }
             return self
                 .refuse(
-                function,
-                source,
-                "is an opaque .vsys extern-type handle; Rust lends one only to an `in` parameter (export ABI v4)"
-            );
+                    function,
+                    source,
+                    "is an opaque .vsys extern-type handle; Rust lends one only to an `in` parameter (export ABI v4)"
+                );
         }
         if !self.owning(a) {
             return 0;
@@ -981,17 +957,17 @@ impl Planner {
             }
             return self
                 .refuse(
-                function,
-                source,
-                "is a `Str` view, which crosses only as an `in` parameter"
-            );
+                    function,
+                    source,
+                    "is a `Str` view, which crosses only as an `in` parameter"
+                );
         }
         self
             .refuse(
-            function,
-            source,
-            "owns memory; only sequences, slices, strings and handle types cross as parameters"
-        )
+                function,
+                source,
+                "owns memory; only sequences, slices, strings and handle types cross as parameters"
+            )
     }
 
     // `ExportError::Type` for a type without a layout.
@@ -1051,10 +1027,10 @@ impl Planner {
             }
             return self
                 .refuse(
-                function,
-                t,
-                "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports, or, with `// @export abi 4`, is lent `in` by Rust)"
-            );
+                    function,
+                    t,
+                    "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports, or, with `// @export abi 4`, is lent `in` by Rust)"
+                );
         }
         if c == C_WIDE || c == C_SCALAR {
             return self.leaf(K_SCALAR, nd.name);
@@ -1082,11 +1058,8 @@ impl Planner {
             }
             if self.node(elem).mode != M_COPY || self.owning(abi) {
                 let an = self.anode(abi);
-                let mut field = c
-                    == C_SEQ
-                    && an
-                    .kind
-                    != K_SLICE
+                let mut field = c == C_SEQ
+                    && an.kind != K_SLICE
                     && !(an.kind == K_STR && !an.owned);
                 if field {
                     field = self.field_shape(abi) == 0;
@@ -1094,10 +1067,10 @@ impl Planner {
                 if !field {
                     return self
                         .refuse(
-                        function,
-                        t,
-                        "has non-copy elements; only sequences and slices of copy elements cross the boundary (a handle type may hold a ChunkSeq of handles, boxes or strings)"
-                    );
+                            function,
+                            t,
+                            "has non-copy elements; only sequences and slices of copy elements cross the boundary (a handle type may hold a ChunkSeq of handles, boxes or strings)"
+                        );
                 }
             }
             self.v2 = true;
@@ -1192,20 +1165,20 @@ impl Planner {
             self
                 .decls
                 .push(
-                Decl {
-                    name: n,
-                    is_enum: nd.is_enum,
-                    words: nd.size / 8,
-                    is_handle: is_handle,
-                    linear: linear,
-                    drop: drop,
-                    owns_sequence: false,
-                    mirror: MIRROR_NONE,
-                    reason: 0,
-                    va: 0,
-                    vn: 0
-                }
-            );
+                    Decl {
+                        name: n,
+                        is_enum: nd.is_enum,
+                        words: nd.size / 8,
+                        is_handle: is_handle,
+                        linear: linear,
+                        drop: drop,
+                        owns_sequence: false,
+                        mirror: MIRROR_NONE,
+                        reason: 0,
+                        va: 0,
+                        vn: 0
+                    }
+                );
             if self.decl_by.len() <= w(n) {
                 self.decl_by.resize(wrapping_add(w(n), 1), 0);
             }
@@ -1290,23 +1263,23 @@ impl Planner {
                     self
                         .dfields
                         .push(
-                        DField {
-                            name: u32_at(in fnames, j),
-                            ty: u32_at(in ftys, j),
-                            offset: u64_at(in foffs, j)
-                        }
-                    );
+                            DField {
+                                name: u32_at(in fnames, j),
+                                ty: u32_at(in ftys, j),
+                                offset: u64_at(in foffs, j)
+                            }
+                        );
                 }
                 at = wrapping_add(at, fc);
                 self
                     .dvars
                     .push(
-                    DVar {
-                        name: vname,
-                        fa: fa,
-                        fc: fc
-                    }
-                );
+                        DVar {
+                            name: vname,
+                            fa: fa,
+                            fc: fc
+                        }
+                    );
             }
             let mut d = self.decl(di);
             d.va = va;
@@ -1460,20 +1433,20 @@ impl Planner {
             ptys.push(t);
             pptr
                 .push(
-                if pointer {
-                    1
-                } else {
-                    0
-                }
-            );
+                    if pointer {
+                        1
+                    } else {
+                        0
+                    }
+                );
             ppass
                 .push(
-                if p.pass == PASS_IN {
-                    0
-                } else {
-                    wrapping_add(p.pass, 1)
-                }
-            );
+                    if p.pass == PASS_IN {
+                        0
+                    } else {
+                        wrapping_add(p.pass, 1)
+                    }
+                );
         }
         let result = self.ty(function, f.result);
         if result == FAIL {
@@ -1509,14 +1482,14 @@ impl Planner {
             self
                 .pouts
                 .push(
-                POut {
-                    name: u32_at(in pnames, i),
-                    ty: u32_at(in ptys, i),
-                    pointer: u8_at(in pptr, i) != 0,
-                    raw: u8_at(in ppass, i),
-                    in_place: false
-                }
-            );
+                    POut {
+                        name: u32_at(in pnames, i),
+                        ty: u32_at(in ptys, i),
+                        pointer: u8_at(in pptr, i) != 0,
+                        raw: u8_at(in ppass, i),
+                        in_place: false
+                    }
+                );
         }
         let ea = self.errs.len();
         for i in 0..errors.len() {
@@ -1530,23 +1503,23 @@ impl Planner {
         self
             .outs
             .push(
-            FnOut {
-                name: function,
-                symbol: symbol,
-                pa: pa,
-                pn: pnames.len(),
-                result: result,
-                result_words: rn.size / 8,
-                result_pointer: rn.aggregate || wide_result,
-                ea: ea,
-                en: errors.len(),
-                fail: fail,
-                instance_of: 0,
-                la: la,
-                ln: foreign.len(),
-                result_in_place: false
-            }
-        );
+                FnOut {
+                    name: function,
+                    symbol: symbol,
+                    pa: pa,
+                    pn: pnames.len(),
+                    result: result,
+                    result_words: rn.size / 8,
+                    result_pointer: rn.aggregate || wide_result,
+                    ea: ea,
+                    en: errors.len(),
+                    fail: fail,
+                    instance_of: 0,
+                    la: la,
+                    ln: foreign.len(),
+                    result_in_place: false
+                }
+            );
         id
     }
 
@@ -1686,9 +1659,9 @@ impl Planner {
                 d.mirror = MIRROR_CONVERTED;
                 d
                     .reason = intern_text(
-                    inout self.names,
-                    "an enum's payload words have no fixed Rust layout (tag and payload validity), so it is converted as in v2"
-                );
+                        inout self.names,
+                        "an enum's payload words have no fixed Rust layout (tag and payload validity), so it is converted as in v2"
+                    );
             } else {
                 let first = match self.dvars.try_get(d.va) {
                     Option::Some(x) => x.fc,
@@ -1698,9 +1671,9 @@ impl Planner {
                     d.mirror = MIRROR_CONVERTED;
                     d
                         .reason = intern_text(
-                        inout self.names,
-                        "a struct without fields is one ignored word"
-                    );
+                            inout self.names,
+                            "a struct without fields is one ignored word"
+                        );
                 } else {
                     d.mirror = MIRROR_REPR_C;
                 }
@@ -1949,12 +1922,12 @@ fn put_opt(inout out: ChunkSeq[u64], in names: Names, s1: u32) {
 fn put_flag(inout out: ChunkSeq[u64], b: bool) {
     out
         .push(
-        if b {
-            1
-        } else {
-            0
-        }
-    );
+            if b {
+                1
+            } else {
+                0
+            }
+        );
 }
 
 fn put_type(inout out: ChunkSeq[u64], in p: Planner, a: u32) {

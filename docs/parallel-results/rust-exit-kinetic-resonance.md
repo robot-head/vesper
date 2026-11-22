@@ -267,6 +267,50 @@ non-default.
    an export cannot carry `Isa[P]` ("only Fail[E] and imported .vsys
    libraries are"), so the dispatch has to sit inside the export.
 
+## Part 4: the speed of every other ported module
+
+Base `main` at `d1b96cd2` (part 3 merged). P3b measured only the kernel
+and the graph. `examples/abba.rs` now has one workload for each other
+ported module (`ABBA_WORKLOADS=a,b` picks workloads), and the schedule
+compiler got one port rewrite.
+
+| Module | Workload | port/rust median (range) | Bar |
+|---|---|--:|---|
+| kernels (`SvfBank::render`) | `kernel` | 1.10x (0.87-1.28) | passes |
+| graph (`render_builtin_graph`) | `graph` | 1.08x (0.90-1.36) | passes |
+| pdc (`compile_schedule`) | `schedule`: the 32-node graph | **1.32x (1.22-1.50)**, was 1.50x (1.47-1.56) | passes |
+| confine (`verify_realtime`) | `confine`: 64 functions, one root, three findings | 1.66x (1.58-1.80) | fails |
+| kernels (`PidController::step`) | `pid`: 200,000 steps | 2.06x (2.04-2.13) | fails |
+| slab (`DelaySlab`) | `slab`: 8 lines, 20,000 blocks | 2.13x (2.12-2.30) | fails |
+| events (wire codec, `ParamRamp`) | `events`: 32 events round trip, 16 ramps x 64 samples | 5.64x (5.31-5.95) | fails |
+| simd | `simd` (part 3) | 8-48x | fails |
+
+**Schedule rewrite.** `p_compile` looked up each input's source with a
+binary search over the sorted ids, five times per input. It now resolves
+every input's source once (`srcs`, by input) and reads it from there.
+
+**What keeps the rest above the bar.** `pid`, `slab` and `events` make one
+export call per step, per line or per sample; `ParamRamp::next_value` is
+one call per sample. The work in each call is a few nanoseconds in Rust,
+so the cost of a call across the export ABI (the status words, the
+binding's conversions and the lost inlining) is most of the port's time:
+about 15 ns per call more than Rust. Closing it needs either coarser
+calls (a block of PID steps, all of a slab's lines per block, a block of
+ramp values), which changes the crate's Rust API, or cheaper calls from
+the compiler (gap 7). `confine` spends its time in `verify_root`'s total
+`get`/`set` accessors and in the Rust side's interning of effects and
+building of the call-graph words.
+
+### Compiler gap found in this part
+
+7. **A call across the export ABI costs about 15 ns more than a Rust
+   call.** The binding passes a status buffer and converts every argument
+   to words and back, and a Rust caller can't inline the Vesper callee.
+   That cost is the gap for a module whose API is one small operation
+   (`ParamRamp::next_value`, `PidController::step`, `DelaySlab::read`).
+   An inlinable fast path for leaf exports with no `Fail` row, or
+   coarse-grained entry points in the crates, would close it.
+
 ## What is left
 
 - **Resonance flip** (seed pattern, the compiler links it through

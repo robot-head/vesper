@@ -224,13 +224,13 @@ impl RowBuf {
         self
             .es
             .push(
-            EffNode {
-                label: e.label,
-                name: e.name,
-                a: a,
-                n: e.n
-            }
-        );
+                EffNode {
+                    label: e.label,
+                    name: e.name,
+                    a: a,
+                    n: e.n
+                }
+            );
     }
 
     // `instances.contains(e)` for arena instance `e`.

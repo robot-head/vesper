@@ -83,11 +83,11 @@ pub fn toks(in src: Slice[u8]) -> Toks {
     for i in 0..n {
         start
             .push(
-            match t.start.try_get(i) {
-                Option::Some(s) => widen_u64(s),
-                Option::None => 0,
-            }
-        );
+                match t.start.try_get(i) {
+                    Option::Some(s) => widen_u64(s),
+                    Option::None => 0,
+                }
+            );
         end.push(token_end(in t, i));
     }
     Toks {
@@ -819,20 +819,20 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
         if !is_fn {
             items
                 .push(
-                Item {
-                    is_fn: false,
-                    ns: 0,
-                    ne: 0,
-                    start: 0,
-                    end: 0,
-                    generic: false,
-                    body: false,
-                    pa: 0,
-                    pn: 0,
-                    ea: 0,
-                    en: 0
-                }
-            );
+                    Item {
+                        is_fn: false,
+                        ns: 0,
+                        ne: 0,
+                        start: 0,
+                        end: 0,
+                        generic: false,
+                        body: false,
+                        pa: 0,
+                        pn: 0,
+                        ea: 0,
+                        en: 0
+                    }
+                );
             continue;
         }
         let (ns, ne) = r.text(in b);
@@ -847,13 +847,13 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
             let (ts, te) = r.text(in b);
             params
                 .push(
-                Param {
-                    ns: pns,
-                    ne: pne,
-                    ts: ts,
-                    te: te
-                }
-            );
+                    Param {
+                        ns: pns,
+                        ne: pne,
+                        ts: ts,
+                        te: te
+                    }
+                );
         }
         let ea = effects.len() / 2;
         let en = r.word(in b);
@@ -864,20 +864,20 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
         }
         items
             .push(
-            Item {
-                is_fn: true,
-                ns: ns,
-                ne: ne,
-                start: start,
-                end: end,
-                generic: generic,
-                body: body,
-                pa: pa,
-                pn: pn,
-                ea: ea,
-                en: en
-            }
-        );
+                Item {
+                    is_fn: true,
+                    ns: ns,
+                    ne: ne,
+                    start: start,
+                    end: end,
+                    generic: generic,
+                    body: body,
+                    pa: pa,
+                    pn: pn,
+                    ea: ea,
+                    en: en
+                }
+            );
     }
     let case_count = r.word(in b);
     let mut cases: ChunkSeq[Case] = ChunkSeq::with_capacity[Case](case_count);
@@ -889,16 +889,16 @@ pub fn discover(in b: Slice[u8]) -> ChunkSeq[u64] {
         let target = r.word(in b);
         cases
             .push(
-            Case {
-                es: es,
-                ee: ee,
-                ns: ns,
-                ne: ne,
-                start: start,
-                end: end,
-                target: target
-            }
-        );
+                Case {
+                    es: es,
+                    ee: ee,
+                    ns: ns,
+                    ne: ne,
+                    start: start,
+                    end: end,
+                    target: target
+                }
+            );
     }
     let t = toks(in src);
     let at = extract_test_attrs(in src, in t.kind, in t.start, in t.end);

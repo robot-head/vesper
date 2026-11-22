@@ -233,25 +233,17 @@ pub fn parse_object(
         nsym: 0,
         symtab: 0
     };
-    if len
-        < EHDR_BYTES
-        || rd8(in b, base)
-        != 127
-        || rd8(in b, add(base, 1))
-        != 69
-        || rd8(in b, add(base, 2))
-        != 76
-        || rd8(in b, add(base, 3))
-        != 70 {
+    if len < EHDR_BYTES
+        || rd8(in b, base) != 127
+        || rd8(in b, add(base, 1)) != 69
+        || rd8(in b, add(base, 2)) != 76
+        || rd8(in b, add(base, 3)) != 70 {
         why.extend(in "not an ELF file".as_bytes());
         return o;
     }
-    if rd8(in b, add(base, 4))
-        != 2
-        || rd8(in b, add(base, 5))
-        != 1
-        || rd8(in b, add(base, 6))
-        != 1 {
+    if rd8(in b, add(base, 4)) != 2
+        || rd8(in b, add(base, 5)) != 1
+        || rd8(in b, add(base, 6)) != 1 {
         why.extend(in "not a little-endian ELF64 file".as_bytes());
         return o;
     }
@@ -276,14 +268,9 @@ pub fn parse_object(
     if shstrndx == widen_u64(SHN_XINDEX) {
         shstrndx = w32(o32(in b, o, add(shoff, 40)));
     }
-    if shnum
-        == NONE64
-        || shstrndx
-        == NONE64
-        || shnum
-        > o
-        .len
-        / SHDR_BYTES
+    if shnum == NONE64
+        || shstrndx == NONE64
+        || shnum > o.len / SHDR_BYTES
         || !inside(o, shoff, wrapping_mul(shnum, SHDR_BYTES)) {
         why.extend(in "invalid section header table".as_bytes());
         return o;
@@ -296,22 +283,22 @@ pub fn parse_object(
         let data_ok = sh_type == SHT_NOBITS || inside(o, offset, size);
         secs
             .push(
-            Sec {
-                name_at: widen_u64(wrapping_u32(w32(o32(in b, o, h)))),
-                name_len: 0,
-                sh_type: sh_type,
-                flags: w64(o64(in b, o, add(h, 8))),
-                data_at: add(base, offset),
-                size: size,
-                link: wrapping_u32(w32(o32(in b, o, add(h, 40)))),
-                info: wrapping_u32(w32(o32(in b, o, add(h, 44)))),
-                align: w64(o64(in b, o, add(h, 48))),
-                entsize: w64(o64(in b, o, add(h, 56))),
-                rel: 0,
-                data_ok: data_ok,
-                name_ok: false
-            }
-        );
+                Sec {
+                    name_at: widen_u64(wrapping_u32(w32(o32(in b, o, h)))),
+                    name_len: 0,
+                    sh_type: sh_type,
+                    flags: w64(o64(in b, o, add(h, 8))),
+                    data_at: add(base, offset),
+                    size: size,
+                    link: wrapping_u32(w32(o32(in b, o, add(h, 40)))),
+                    info: wrapping_u32(w32(o32(in b, o, add(h, 44)))),
+                    align: w64(o64(in b, o, add(h, 48))),
+                    entsize: w64(o64(in b, o, add(h, 56))),
+                    rel: 0,
+                    data_ok: data_ok,
+                    name_ok: false
+                }
+            );
     }
     o.nsec = shnum;
     // Section names.
@@ -589,11 +576,11 @@ pub fn string_table(
             for c in 0..l {
                 data
                     .push(
-                    match strs.try_get(add(s, c)) {
-                        Option::Some(v) => v,
-                        Option::None => 0,
-                    }
-                );
+                        match strs.try_get(add(s, c)) {
+                            Option::Some(v) => v,
+                            Option::None => 0,
+                        }
+                    );
             }
             data.push(0);
             offset = add(offset, add(l, 1));

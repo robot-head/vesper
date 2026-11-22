@@ -78,12 +78,6 @@ pub mod keys {
 pub const MAX_CCA_SW_COMPONENTS: usize = 64;
 /// Realm extensible measurement registers (RMM `REM[0..4]`).
 pub const CCA_REMS: usize = 4;
-/// A TBB RoTPK entry: name, index (0..=5) and hash; at most 12 entries.
-const ROTPK_ENTRIES: usize = 3;
-const ROTPK_MAX_INDEX: u64 = 5;
-const MAX_TBB_ROTPKS: usize = 12;
-/// Digest lengths a hash claim may have: SHA-256, SHA-384, SHA-512.
-const DIGEST_LENS: [usize; 3] = [32, 48, 64];
 /// An uncompressed P-384 SEC1 point: `0x04 || X || Y`, 48 bytes each.
 const P384_COORD_LEN: usize = 48;
 const P384_SEC1_LEN: usize = 1 + 2 * P384_COORD_LEN;
@@ -135,36 +129,6 @@ pub struct CcaTbbRotpk {
 }
 
 impl CcaTbbRotpk {
-    fn from_value(v: &Value) -> Result<Self, ParseError> {
-        use keys::*;
-        let m = ClaimMap::new(v, "TBB RoTPK")?;
-        if m.0.len() != ROTPK_ENTRIES {
-            return Err(cbor_err("TBB RoTPK", "expected name, index and hash"));
-        }
-        let name = m
-            .get(ROTPK_NAME, "TBB RoTPK name")?
-            .as_text()
-            .ok_or_else(|| cbor_err("TBB RoTPK name", "expected text"))?;
-        if name != "CM" && name != "DM" {
-            return Err(cbor_err("TBB RoTPK name", "expected CM or DM"));
-        }
-        let index = m
-            .get(ROTPK_INDEX, "TBB RoTPK index")?
-            .as_integer()
-            .and_then(|i| u64::try_from(i).ok())
-            .filter(|i| *i <= ROTPK_MAX_INDEX)
-            .ok_or_else(|| cbor_err("TBB RoTPK index", "expected 0..=5"))?;
-        let hash = bytes(m.get(ROTPK_HASH, "TBB RoTPK hash")?, "TBB RoTPK hash")?.to_vec();
-        if !DIGEST_LENS.contains(&hash.len()) {
-            return Err(cbor_err("TBB RoTPK hash", "length is not 32, 48 or 64"));
-        }
-        Ok(CcaTbbRotpk {
-            name: name.to_owned(),
-            index,
-            hash,
-        })
-    }
-
     fn to_value(&self) -> Value {
         use keys::*;
         Value::Map(vec![
@@ -191,60 +155,6 @@ pub struct CcaSwComponent {
 }
 
 impl CcaSwComponent {
-    fn from_value(v: &Value) -> Result<Self, ParseError> {
-        use keys::*;
-        let m = ClaimMap::new(v, "software component")?;
-        for (k, _) in &m.0 {
-            if !matches!(
-                *k,
-                SW_MEASUREMENT_TYPE
-                    | SW_MEASUREMENT_VALUE
-                    | SW_VERSION
-                    | SW_SIGNER_ID
-                    | SW_MEASUREMENT_DESCRIPTION
-            ) {
-                return Err(cbor_err("software component", "unknown key"));
-            }
-        }
-        let text = |key, field| -> Result<Option<String>, ParseError> {
-            match m.0.iter().find(|(k, _)| *k == key) {
-                None => Ok(None),
-                Some((_, v)) => v
-                    .as_text()
-                    .map(|t| Some(t.to_owned()))
-                    .ok_or_else(|| cbor_err(field, "expected text")),
-            }
-        };
-        let measurement_value = bytes(
-            m.get(SW_MEASUREMENT_VALUE, "software component measurement value")?,
-            "software component measurement value",
-        )?
-        .to_vec();
-        let signer_id = bytes(
-            m.get(SW_SIGNER_ID, "software component signer ID")?,
-            "software component signer ID",
-        )?
-        .to_vec();
-        for (b, field) in [
-            (&measurement_value, "software component measurement value"),
-            (&signer_id, "software component signer ID"),
-        ] {
-            if !DIGEST_LENS.contains(&b.len()) {
-                return Err(cbor_err(field, "length is not 32, 48 or 64"));
-            }
-        }
-        Ok(CcaSwComponent {
-            measurement_type: text(SW_MEASUREMENT_TYPE, "software component type")?,
-            measurement_value,
-            version: text(SW_VERSION, "software component version")?,
-            signer_id,
-            measurement_description: text(
-                SW_MEASUREMENT_DESCRIPTION,
-                "software component description",
-            )?,
-        })
-    }
-
     fn to_value(&self) -> Value {
         use keys::*;
         let mut m = Vec::new();
@@ -278,30 +188,10 @@ fn cbor_err(field: &'static str, reason: &'static str) -> ParseError {
     ParseError::Cbor { field, reason }
 }
 
-fn parse_algo(v: &Value, field: &'static str) -> Result<RegisterHash, ParseError> {
-    match v.as_text() {
-        Some("sha-256") => Ok(RegisterHash::Sha256),
-        Some("sha-384") => Ok(RegisterHash::Sha384),
-        Some("sha-512") => Ok(RegisterHash::Sha512),
-        Some(_) => Err(cbor_err(field, "unsupported hash algorithm")),
-        None => Err(cbor_err(field, "expected text")),
-    }
-}
-
 fn bytes<'v>(v: &'v Value, field: &'static str) -> Result<&'v [u8], ParseError> {
     v.as_bytes()
         .map(Vec::as_slice)
         .ok_or_else(|| cbor_err(field, "expected byte string"))
-}
-
-fn fixed<const N: usize>(v: &Value, field: &'static str) -> Result<[u8; N], ParseError> {
-    bytes(v, field)?
-        .try_into()
-        .map_err(|_| cbor_err(field, "wrong byte-string length"))
-}
-
-fn measurement_len_ok(len: usize, algo: RegisterHash) -> bool {
-    len == algo.len() || len == CCA_MAX_MEASUREMENT_LEN
 }
 
 /// The digest of a measurement: a 64-byte encoding of a shorter digest
@@ -362,29 +252,29 @@ pub enum CcaCollection {
 }
 
 fn platform_profile(payload: &[u8]) -> Result<CcaPlatformProfile, ParseError> {
-    let v = decode_value(payload, "platform claims")?;
-    let m = ClaimMap::new(&v, "platform claims")?;
-    match m.get(keys::PROFILE, "platform profile")?.as_text() {
-        Some("http://arm.com/CCA-SSD/1.0.0") => Ok(CcaPlatformProfile::CcaSsd1),
-        Some("tag:arm.com,2023:cca_platform#1.0.0") => Ok(CcaPlatformProfile::Platform2023),
-        Some("tag:arm.com,2024:cca_platform#2.0.0") => Ok(CcaPlatformProfile::Platform2024),
-        Some(_) => Err(cbor_err("platform profile", "unknown profile")),
-        None => Err(cbor_err("platform profile", "expected text")),
-    }
+    use crate::port::{CBOR_PLATFORM_CLAIMS, cbor_call, vesper};
+    let (p, _) = cbor_call(payload, CBOR_PLATFORM_CLAIMS, |n, st, _| {
+        vesper::cca_platform_profile(payload, n, st)
+    })?;
+    Ok(match p {
+        0 => CcaPlatformProfile::CcaSsd1,
+        1 => CcaPlatformProfile::Platform2023,
+        2 => CcaPlatformProfile::Platform2024,
+        p => unreachable!("platform profile {p} from the Vesper port"),
+    })
 }
 
 fn realm_profile(payload: &[u8]) -> Result<CcaRealmProfile, ParseError> {
-    let v = decode_value(payload, "realm claims")?;
-    let m = ClaimMap::new(&v, "realm claims")?;
-    let Some((_, p)) = m.0.iter().find(|(k, _)| *k == keys::PROFILE) else {
-        return Ok(CcaRealmProfile::Unspecified);
-    };
-    match p.as_text() {
-        Some("tag:arm.com,2023:realm#1.0.0") => Ok(CcaRealmProfile::Realm2023),
-        Some("tag:arm.com,2024:realm#2.0.0") => Ok(CcaRealmProfile::Realm2024),
-        Some(_) => Err(cbor_err("realm profile", "unknown profile")),
-        None => Err(cbor_err("realm profile", "expected text")),
-    }
+    use crate::port::{CBOR_REALM_CLAIMS, cbor_call, vesper};
+    let (p, _) = cbor_call(payload, CBOR_REALM_CLAIMS, |n, st, _| {
+        vesper::cca_realm_profile(payload, n, st)
+    })?;
+    Ok(match p {
+        0 => CcaRealmProfile::Unspecified,
+        1 => CcaRealmProfile::Realm2023,
+        2 => CcaRealmProfile::Realm2024,
+        p => unreachable!("realm profile {p} from the Vesper port"),
+    })
 }
 
 /// An integer-keyed claims map with duplicate keys rejected.
@@ -417,10 +307,9 @@ impl<'v> ClaimMap<'v> {
 }
 
 pub(crate) fn decode_value(bytes: &[u8], what: &'static str) -> Result<Value, ParseError> {
-    let mut rest = bytes;
-    let v: Value =
-        coset::cbor::de::from_reader(&mut rest).map_err(|_| cbor_err(what, "malformed CBOR"))?;
-    if !rest.is_empty() {
+    let (v, used) =
+        crate::port::cbor_value(bytes).ok_or_else(|| cbor_err(what, "malformed CBOR"))?;
+    if used != bytes.len() {
         return Err(cbor_err(what, "trailing bytes"));
     }
     Ok(v)
@@ -434,46 +323,22 @@ fn encode_value(v: &Value) -> Vec<u8> {
 
 impl CcaRealmClaims {
     pub fn from_cbor(payload: &[u8]) -> Result<Self, ParseError> {
-        use keys::*;
-        let v = decode_value(payload, "realm claims")?;
-        let m = ClaimMap::new(&v, "realm claims")?;
-        let hash_algo = parse_algo(
-            m.get(REALM_HASH_ALGO, "realm hash algo")?,
-            "realm hash algo",
-        )?;
-        let initial_measurement = bytes(m.get(REALM_INITIAL_MEASUREMENT, "RIM")?, "RIM")?.to_vec();
-        if !measurement_len_ok(initial_measurement.len(), hash_algo) {
-            return Err(cbor_err("RIM", "length does not match hash algorithm"));
-        }
-        let rems = m
-            .get(REALM_EXTENSIBLE_MEASUREMENTS, "REMs")?
-            .as_array()
-            .ok_or_else(|| cbor_err("REMs", "expected array"))?;
-        if rems.len() != CCA_REMS {
-            return Err(cbor_err("REMs", "expected four registers"));
-        }
-        let mut regs: [Vec<u8>; CCA_REMS] = Default::default();
-        for (dst, src) in regs.iter_mut().zip(rems) {
-            let b = bytes(src, "REM")?;
-            if !measurement_len_ok(b.len(), hash_algo) {
-                return Err(cbor_err("REM", "length does not match hash algorithm"));
-            }
-            *dst = b.to_vec();
-        }
+        use crate::port::{CBOR_REALM_CLAIMS, CborFields, cbor_call, vesper};
+        let ((), w) = cbor_call(payload, CBOR_REALM_CLAIMS, |n, st, w| {
+            vesper::cca_realm_claims(payload, n, st, w)
+        })?;
+        let mut f = CborFields::new(&w, payload);
+        let hash_algo = f.hash();
+        let initial_measurement = f.bytes();
+        let extensible_measurements = std::array::from_fn(|_| f.bytes());
         Ok(CcaRealmClaims {
-            challenge: fixed(m.get(CHALLENGE, "realm challenge")?, "realm challenge")?,
-            personalization: fixed(
-                m.get(REALM_PERSONALIZATION, "realm personalization")?,
-                "realm personalization",
-            )?,
+            challenge: f.array(),
+            personalization: f.array(),
             hash_algo,
-            public_key: bytes(m.get(REALM_PUBLIC_KEY, "RAK")?, "RAK")?.to_vec(),
-            public_key_hash_algo: parse_algo(
-                m.get(REALM_PUBLIC_KEY_HASH_ALGO, "RAK hash algo")?,
-                "RAK hash algo",
-            )?,
+            public_key: f.bytes(),
+            public_key_hash_algo: f.hash(),
             initial_measurement,
-            extensible_measurements: regs,
+            extensible_measurements,
         })
     }
 
@@ -510,75 +375,40 @@ impl CcaRealmClaims {
 
 impl CcaPlatformClaims {
     pub fn from_cbor(payload: &[u8]) -> Result<Self, ParseError> {
-        use keys::*;
-        let v = decode_value(payload, "platform claims")?;
-        let m = ClaimMap::new(&v, "platform claims")?;
-        let lifecycle = m
-            .get(PLATFORM_LIFECYCLE, "lifecycle")?
-            .as_integer()
-            .and_then(|i| u64::try_from(i).ok())
-            .ok_or_else(|| cbor_err("lifecycle", "expected unsigned integer"))?;
-        let sw_components = match m.0.iter().find(|(k, _)| *k == PLATFORM_SW_COMPONENTS) {
-            None => Vec::new(),
-            Some((_, v)) => {
-                let a = v
-                    .as_array()
-                    .ok_or_else(|| cbor_err("software components", "expected array"))?;
-                if a.len() > MAX_CCA_SW_COMPONENTS {
-                    return Err(cbor_err("software components", "too many components"));
-                }
-                a.iter()
-                    .map(CcaSwComponent::from_value)
-                    .collect::<Result<_, _>>()?
-            }
-        };
-        let opt_bytes = |key, field| -> Result<Option<Vec<u8>>, ParseError> {
-            match m.0.iter().find(|(k, _)| *k == key) {
-                None => Ok(None),
-                Some((_, v)) => Ok(Some(bytes(v, field)?.to_vec())),
-            }
-        };
-        let config = opt_bytes(PLATFORM_CONFIG, "platform config")?;
-        let manufacturing_config = opt_bytes(
-            PLATFORM_MANUFACTURING_CONFIG,
-            "platform manufacturing config",
-        )?;
-        let tbb_rotpks = match m.0.iter().find(|(k, _)| *k == PLATFORM_TBB_ROTPK) {
-            None => Vec::new(),
-            Some((_, v)) => {
-                let a = v
-                    .as_array()
-                    .ok_or_else(|| cbor_err("TBB RoTPK", "expected array"))?;
-                if a.len() > MAX_TBB_ROTPKS {
-                    return Err(cbor_err("TBB RoTPK", "too many entries"));
-                }
-                a.iter()
-                    .map(CcaTbbRotpk::from_value)
-                    .collect::<Result<_, _>>()?
-            }
-        };
+        use crate::port::{CBOR_PLATFORM_CLAIMS, CborFields, cbor_call, vesper};
+        let ((), w) = cbor_call(payload, CBOR_PLATFORM_CLAIMS, |n, st, w| {
+            vesper::cca_platform_claims(payload, n, st, w)
+        })?;
+        let mut f = CborFields::new(&w, payload);
+        let lifecycle = f.word();
+        let sw_components = (0..f.word())
+            .map(|_| CcaSwComponent {
+                measurement_type: f.opt_text(),
+                measurement_value: f.bytes(),
+                version: f.opt_text(),
+                signer_id: f.bytes(),
+                measurement_description: f.opt_text(),
+            })
+            .collect();
+        let config = f.opt_bytes();
+        let manufacturing_config = f.opt_bytes();
+        let tbb_rotpks = (0..f.word())
+            .map(|_| CcaTbbRotpk {
+                name: f.text(),
+                index: f.word(),
+                hash: f.bytes(),
+            })
+            .collect();
         Ok(CcaPlatformClaims {
             sw_components,
             config,
             manufacturing_config,
             tbb_rotpks,
-            challenge: bytes(
-                m.get(CHALLENGE, "platform challenge")?,
-                "platform challenge",
-            )?
-            .to_vec(),
-            instance_id: bytes(m.get(PLATFORM_INSTANCE_ID, "instance id")?, "instance id")?
-                .to_vec(),
-            implementation_id: bytes(
-                m.get(PLATFORM_IMPLEMENTATION_ID, "implementation id")?,
-                "implementation id",
-            )?
-            .to_vec(),
+            challenge: f.bytes(),
+            instance_id: f.bytes(),
+            implementation_id: f.bytes(),
             lifecycle,
-            hash_algo: parse_algo(
-                m.get(PLATFORM_HASH_ALGO, "platform hash algo")?,
-                "platform hash algo",
-            )?,
+            hash_algo: f.hash(),
         })
     }
 

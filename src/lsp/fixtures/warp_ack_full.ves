@@ -211,9 +211,7 @@ fn poll_and_step(conns: Conns, now_ns: u64)
                         let tx_frame = XdpNic::turn_around_tx_in_place(rx_frame, 64);
                         let inflight = XdpNic::submit_paced_tx(tx_frame, conn.next_tx_pn, edt);
                         XdpNic::park_for_ack_or_pto(inflight);
-                        let rebound = conn
-                            .peer_port
-                            != 0
+                        let rebound = conn.peer_port != 0
                             && (conn.peer_addr != hdr.peer_addr || conn.peer_port != hdr.peer_port);
                         let updated = Conn {
                             cid: conn.cid,

@@ -209,14 +209,14 @@ impl Builder {
         self
             .types
             .push(
-            TypeDef {
-                kind: TD_FUNC,
-                p0: p0,
-                pn: params.len(),
-                rn: results.len(),
-                func: 0
-            }
-        );
+                TypeDef {
+                    kind: TD_FUNC,
+                    p0: p0,
+                    pn: params.len(),
+                    rn: results.len(),
+                    func: 0
+                }
+            );
         wrapping_u32(i)
     }
 
@@ -244,14 +244,14 @@ impl Builder {
         self
             .types
             .push(
-            TypeDef {
-                kind: TD_CONT,
-                p0: 0,
-                pn: 0,
-                rn: 0,
-                func: func
-            }
-        );
+                TypeDef {
+                    kind: TD_CONT,
+                    p0: 0,
+                    pn: 0,
+                    rn: 0,
+                    func: func
+                }
+            );
         wrapping_u32(i)
     }
 
@@ -259,13 +259,13 @@ impl Builder {
         self
             .funcs
             .push(
-            FuncRow {
-                ty: ty,
-                b0: 0,
-                bn: 0,
-                defined: false
-            }
-        );
+                FuncRow {
+                    ty: ty,
+                    b0: 0,
+                    bn: 0,
+                    defined: false
+                }
+            );
         wrapping_u32(wrapping_sub(wrapping_add(self.imports.len(), self.funcs.len()), 1))
     }
 
@@ -308,14 +308,14 @@ impl Builder {
         self
             .imports
             .push(
-            ImportRow {
-                m0: m0,
-                mn: module.len(),
-                n0: n0,
-                nn: name.len(),
-                ty: ty
-            }
-        );
+                ImportRow {
+                    m0: m0,
+                    mn: module.len(),
+                    n0: n0,
+                    nn: name.len(),
+                    ty: ty
+                }
+            );
         wrapping_u32(wrapping_sub(self.imports.len(), 1))
     }
 
@@ -399,13 +399,13 @@ impl Builder {
         self
             .exports
             .push(
-            ExportRow {
-                n0: n0,
-                nn: name.len(),
-                kind: EXPORT_FUNC,
-                index: func
-            }
-        );
+                ExportRow {
+                    n0: n0,
+                    nn: name.len(),
+                    kind: EXPORT_FUNC,
+                    index: func
+                }
+            );
     }
 
     // The module's bytes (`Builder::finish`).

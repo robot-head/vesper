@@ -28,8 +28,7 @@ fn release(sink lease: Lease) -> u64 eff [Pulse] {
     };
     let Lease {
         slot
-    }
-    = lease;
+    } = lease;
     wrapping_add(slot, flushed)
 }
 fn main() -> u64 eff [Pulse] {

@@ -182,9 +182,9 @@ pub fn stream_into(in wide: Slice[u64], in narrow: Slice[u8], rows: u64, inout o
             for i in 0..rows {
                 out
                     .try_write_u64_le(
-                    wrapping_add(at, wrapping_mul(i, 8)),
-                    word(in wide, wrapping_add(base, i))
-                );
+                        wrapping_add(at, wrapping_mul(i, 8)),
+                        word(in wide, wrapping_add(base, i))
+                    );
             }
             w = wrapping_add(w, 1);
         } else {

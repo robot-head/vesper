@@ -261,18 +261,10 @@ fn parse_head(in h: Slice[u8], limits: Limits) -> Result[Head, Error] {
 
 pub fn decoder_core_new(limits: Limits) -> DecoderCore eff [Fail[Error]] {
     let sum = wrapping_add(limits.max_head_bytes, limits.max_body_bytes);
-    if limits
-        .max_head_bytes
-        < 4
-        || limits
-        .max_headers
-        == 0
-        || sum
-        < limits
-        .max_head_bytes
-        || sum
-        > limits
-        .max_buffered_bytes {
+    if limits.max_head_bytes < 4
+        || limits.max_headers == 0
+        || sum < limits.max_head_bytes
+        || sum > limits.max_buffered_bytes {
         Fail::raise(Error::InvalidLimits)
     } else {
         DecoderCore {

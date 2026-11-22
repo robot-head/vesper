@@ -339,8 +339,8 @@ fn clone_loop(
         };
         guards
             .push(
-            guard_inst(guard, cx.bool_ty, s0, s1, input, token, a, wrapping_sub(p.ops.len(), a))
-        );
+                guard_inst(guard, cx.bool_ty, s0, s1, input, token, a, wrapping_sub(p.ops.len(), a))
+            );
         previous = guard;
     }
     for q in 0..guards.len() {
@@ -463,8 +463,8 @@ fn guard_and_copy(
         };
         guards
             .push(
-            guard_inst(guard, cx.bool_ty, s0, s1, input, token, a, wrapping_sub(p.ops.len(), a))
-        );
+                guard_inst(guard, cx.bool_ty, s0, s1, input, token, a, wrapping_sub(p.ops.len(), a))
+            );
         previous = guard;
     }
     for q in 0..guards.len() {

@@ -16,8 +16,7 @@ fn forward(inout out: u64, x: u64) -> Unit eff [ConstTime] {
 fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
     let Secret {
         value
-    }
-    = s;
+    } = s;
     let mut o: u64 = 0;
     forward(inout o, value);
     if o == 0 {
