@@ -57,3 +57,7 @@
 .model-index { margin-block: 1rem; }
 .model-index ul { padding-inline-start: 1.5rem; }
 .model-index li + li { margin-top: .5rem; }
+.technical-detail { margin-block: 1rem; padding: .85rem 1rem; border: 1px solid var(--line); border-radius: 5px; }
+.technical-detail summary { cursor: pointer; }
+.technical-detail > * + * { margin-top: .8rem; }
+.technical-detail p, .technical-detail td { overflow-wrap: anywhere; }

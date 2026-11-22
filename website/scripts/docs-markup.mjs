@@ -17,7 +17,7 @@ export function markdownBlocks(source) {
       while (++i < lines.length && lines[i].trimEnd() !== fence[1]) {}
       if (i === lines.length) throw new Error('Unclosed code fence on line ' + (start + 1));
       blocks.push(lines.slice(start, i + 1).join('\n'));
-    } else if (/^#{1,3} /.test(line) || /^<!-- (figure|diagram):[\w-]+ -->$/.test(line)) {
+    } else if (/^#{1,3} /.test(line) || /^<!-- (figure|diagram):[\w-]+ -->$/.test(line) || line === '<!-- technical-detail -->') {
       flush();
       blocks.push(line);
     } else if (line.trim()) paragraph.push(line);
