@@ -9,7 +9,7 @@
 //! Both builds live in one binary, so the arms run in one process: A is the
 //! Rust build and B this build, timed in windows A B B A, `ABBA_EPOCHS`
 //! times (default 9). The report is each workload's median B/A ratio and
-//! its range over the epochs. Two workloads:
+//! its range over the epochs. Three workloads:
 //!
 //! - `kernel`: a 64-voice kernel block, four 16-lane `SvfBank`s rendering
 //!   one 64-frame block each into a shared stereo bus, `ABBA_KERNEL_BLOCKS`
@@ -20,7 +20,11 @@
 //!   blocks per call (default 2,000), `ABBA_GRAPH_CALLS` calls per window
 //!   (default 10).
 //!
-//! `ABBA_ONLY=rust|port` with `ABBA_WORKLOAD=kernel|graph` runs one arm of
+//! - `simd`: one 16-voice tile and its 16 parameter ramps advanced sample by
+//!   sample through `simd::ramp_tick` and `simd::svf_tick` on the widest
+//!   path, `ABBA_SIMD_TICKS` samples per window (default 200,000).
+//!
+//! `ABBA_ONLY=rust|port` with `ABBA_WORKLOAD=kernel|graph|simd` runs one arm of
 //! one workload once and nothing else (for `valgrind --tool=callgrind`).
 use std::hint::black_box;
 use std::time::Instant;
@@ -137,6 +141,70 @@ macro_rules! arm {
                 sum
             }
 
+            pub struct Tiles {
+                tile: $lib::kernels::SvfVoiceTile,
+                pan: $lib::simd::PanLanes,
+                out: $lib::simd::LaneOut,
+                ramps: $lib::events::RampTile,
+                path: $lib::simd::SvfLanes,
+            }
+
+            pub fn tiles() -> Tiles {
+                let mut tile = $lib::kernels::SvfVoiceTile {
+                    ic1eq: [0.0; LANES],
+                    ic2eq: [0.0; LANES],
+                    g_coeff: [0.0; LANES],
+                    k_damping: [0.0; LANES],
+                    gain: [1.0 / 16.0; LANES],
+                    patch_id: [0; LANES],
+                };
+                let mut pan = $lib::simd::PanLanes {
+                    left: [0.0; LANES],
+                    right: [0.0; LANES],
+                };
+                let mut ramps = $lib::events::RampTile::splat(0.0);
+                for v in 0..LANES {
+                    let fc = 60.0 * 1.3f64.powi(v as i32);
+                    tile.g_coeff[v] = (std::f64::consts::PI * fc / 48_000.0).tan() as f32;
+                    tile.k_damping[v] = 1.0 / (0.5 + v as f32 * 0.3);
+                    (pan.left[v], pan.right[v]) = SvfBank::pan(v);
+                    ramps.set_lane(v, 1.0 + v as f32, 1 << (v + 4));
+                }
+                Tiles {
+                    tile,
+                    pan,
+                    out: $lib::simd::LaneOut::ZERO,
+                    ramps,
+                    path: match std::env::var("ABBA_SIMD_PATH").as_deref() {
+                        Ok("scalar") => $lib::simd::SvfLanes::Scalar,
+                        Ok("sse2") => $lib::simd::SvfLanes::Sse2,
+                        _ => $lib::simd::SvfLanes::best(),
+                    },
+                }
+            }
+
+            /// `ticks` samples of one 16-voice tile and its ramps on the
+            /// widest path; returns a checksum.
+            pub fn tick(t: &mut Tiles, ticks: usize) -> u64 {
+                let input = input();
+                let mut sum = 0u64;
+                for i in 0..ticks {
+                    $lib::simd::ramp_tick(t.path, &mut t.ramps);
+                    $lib::simd::svf_tick(
+                        t.path,
+                        &mut t.tile,
+                        &t.pan,
+                        input[i % FRAMES],
+                        &mut t.out,
+                    );
+                    let (l, _) = t.out.sum();
+                    sum = sum.wrapping_add(
+                        u64::from(l.to_bits()) ^ u64::from(t.ramps.current[3].to_bits()),
+                    );
+                }
+                sum
+            }
+
             pub struct Graph {
                 nodes: Vec<NodeSpec>,
                 kinds: Vec<BuiltinKind>,
@@ -231,6 +299,8 @@ fn main() {
     let mut rk = r::kernel();
     let mut pk = p::kernel();
     let (rg, pg) = (r::graph(), p::graph());
+    let simd_ticks = env("ABBA_SIMD_TICKS", 200_000);
+    let (mut rt, mut pt) = (r::tiles(), p::tiles());
     if let Ok(only) = std::env::var("ABBA_ONLY") {
         let workload = std::env::var("ABBA_WORKLOAD").unwrap_or_else(|_| "kernel".into());
         let v = match (only.as_str(), workload.as_str()) {
@@ -238,7 +308,9 @@ fn main() {
             ("port", "kernel") => p::render(&mut pk, kernel_blocks),
             ("rust", "graph") => r::run(&rg, graph_calls, graph_blocks),
             ("port", "graph") => p::run(&pg, graph_calls, graph_blocks),
-            _ => panic!("ABBA_ONLY=rust|port, ABBA_WORKLOAD=kernel|graph"),
+            ("rust", "simd") => r::tick(&mut rt, simd_ticks),
+            ("port", "simd") => p::tick(&mut pt, simd_ticks),
+            _ => panic!("ABBA_ONLY=rust|port, ABBA_WORKLOAD=kernel|graph|simd"),
         };
         println!("{only} {workload}: {v}");
         return;
@@ -255,5 +327,11 @@ fn main() {
         epochs,
         &mut || r::run(&rg, graph_calls, graph_blocks),
         &mut || p::run(&pg, graph_calls, graph_blocks),
+    );
+    abba(
+        "simd (one 16-voice tile and its ramps, widest path)",
+        epochs,
+        &mut || r::tick(&mut rt, simd_ticks),
+        &mut || p::tick(&mut pt, simd_ticks),
     );
 }
