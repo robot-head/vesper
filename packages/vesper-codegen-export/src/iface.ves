@@ -235,14 +235,14 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
         }
         nodes
             .push(
-            TyNode {
-                kind: kind,
-                name: name,
-                owned: owned,
-                a: a,
-                n: n
-            }
-        );
+                TyNode {
+                    kind: kind,
+                    name: name,
+                    owned: owned,
+                    a: a,
+                    n: n
+                }
+            );
     }
     let abi = nsym(in nmap, r.word(in b));
     let library = nsym(in nmap, r.word(in b));
@@ -285,38 +285,38 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
                 let off = r.word(in b);
                 fields
                     .push(
-                    FieldRow {
-                        name: fname,
-                        ty: fty,
-                        offset: off
-                    }
-                );
+                        FieldRow {
+                            name: fname,
+                            ty: fty,
+                            offset: off
+                        }
+                    );
             }
             vars
                 .push(
-                VarRow {
-                    name: vname,
-                    f0: f0,
-                    fc: fc
-                }
-            );
+                    VarRow {
+                        name: vname,
+                        f0: f0,
+                        fc: fc
+                    }
+                );
         }
         decls
             .push(
-            DeclRow {
-                name: name,
-                is_enum: is_enum,
-                words: words,
-                is_handle: is_h,
-                linear: linear,
-                drop: drop,
-                owns_sequence: owns_sequence,
-                mirror: mirror,
-                reason: reason,
-                v0: v0,
-                vn: vn
-            }
-        );
+                DeclRow {
+                    name: name,
+                    is_enum: is_enum,
+                    words: words,
+                    is_handle: is_h,
+                    linear: linear,
+                    drop: drop,
+                    owns_sequence: owns_sequence,
+                    mirror: mirror,
+                    reason: reason,
+                    v0: v0,
+                    vn: vn
+                }
+            );
     }
     let mut fns = ChunkSeq::new[FnRow]();
     let mut params = ChunkSeq::new[ParamRow]();
@@ -340,15 +340,15 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
             let in_place = flag(r.word(in b));
             params
                 .push(
-                ParamRow {
-                    name: pname,
-                    ty: pty,
-                    pointer: pointer,
-                    raw: raw,
-                    other: other,
-                    in_place: in_place
-                }
-            );
+                    ParamRow {
+                        name: pname,
+                        ty: pty,
+                        pointer: pointer,
+                        raw: raw,
+                        other: other,
+                        in_place: in_place
+                    }
+                );
         }
         let result = n32(r.word(in b));
         let result_words = r.word(in b);
@@ -368,23 +368,23 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
         let result_in_place = flag(r.word(in b));
         fns
             .push(
-            FnRow {
-                name: name,
-                symbol: symbol,
-                p0: p0,
-                pn: pn,
-                result: result,
-                result_words: result_words,
-                result_pointer: result_pointer,
-                e0: e0,
-                en: en,
-                fail: fail,
-                instance_of: instance_of,
-                l0: l0,
-                ln: ln,
-                result_in_place: result_in_place
-            }
-        );
+                FnRow {
+                    name: name,
+                    symbol: symbol,
+                    p0: p0,
+                    pn: pn,
+                    result: result,
+                    result_words: result_words,
+                    result_pointer: result_pointer,
+                    e0: e0,
+                    en: en,
+                    fail: fail,
+                    instance_of: instance_of,
+                    l0: l0,
+                    ln: ln,
+                    result_in_place: result_in_place
+                }
+            );
     }
     let mut libs = ChunkSeq::new[LibRow]();
     let mut lib_syms = ChunkSeq::new[u32]();
@@ -400,14 +400,14 @@ pub fn read_iface(in b: Slice[u8]) -> Iface {
         let rust_path = osym(in nmap, r.word(in b));
         libs
             .push(
-            LibRow {
-                name: name,
-                handler: handler,
-                s0: s0,
-                sn: sn,
-                rust_path: rust_path
-            }
-        );
+                LibRow {
+                    name: name,
+                    handler: handler,
+                    s0: s0,
+                    sn: sn,
+                    rust_path: rust_path
+                }
+            );
     }
     let mut by_name = ChunkSeq::with_capacity[u32](names.len());
     by_name.resize(names.len(), 0);

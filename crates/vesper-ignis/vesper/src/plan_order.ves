@@ -369,14 +369,14 @@ fn push_hazard(inout out: ChunkSeq[Edge], i: u64, j: u64, a: Use, b: Use) {
         if kind != 5 {
             out
                 .push(
-                Edge {
-                    before: wrapping_u32(i),
-                    after: wrapping_u32(j),
-                    kind: kind,
-                    has_resource: 1,
-                    resource: a.resource
-                }
-            );
+                    Edge {
+                        before: wrapping_u32(i),
+                        after: wrapping_u32(j),
+                        kind: kind,
+                        has_resource: 1,
+                        resource: a.resource
+                    }
+                );
         }
     }
 }
@@ -602,14 +602,14 @@ fn hazard_edges(in g: Graph) -> ChunkSeq[Edge] {
         match g.explicit.try_get(e) {
             Option::Some(x) => explicit
                 .push(
-                Edge {
-                    before: x.before,
-                    after: x.after,
-                    kind: 4,
-                    has_resource: 0,
-                    resource: 0
-                }
-            ),
+                    Edge {
+                        before: x.before,
+                        after: x.after,
+                        kind: 4,
+                        has_resource: 0,
+                        resource: 0
+                    }
+                ),
             Option::None => (),
         }
     }
@@ -690,11 +690,11 @@ fn pairs_by(in edges: ChunkSeq[Edge], by_after: bool, n: u64) -> ChunkSeq[Edge2]
         for i in 0..m {
             out
                 .push(
-                Edge2 {
-                    before: 0,
-                    after: 0
-                }
-            );
+                    Edge2 {
+                        before: 0,
+                        after: 0
+                    }
+                );
         }
         for i in 0..m {
             match edges.try_get(i) {
@@ -703,12 +703,12 @@ fn pairs_by(in edges: ChunkSeq[Edge], by_after: bool, n: u64) -> ChunkSeq[Edge2]
                     let w = get64(in at, k);
                     out
                         .try_set(
-                        w,
-                        Edge2 {
-                            before: e.after,
-                            after: e.before
-                        }
-                    );
+                            w,
+                            Edge2 {
+                                before: e.after,
+                                after: e.before
+                            }
+                        );
                     at.try_set(k, wrapping_add(w, 1));
                 },
                 Option::None => (),
@@ -719,11 +719,11 @@ fn pairs_by(in edges: ChunkSeq[Edge], by_after: bool, n: u64) -> ChunkSeq[Edge2]
             match edges.try_get(i) {
                 Option::Some(e) => out
                     .push(
-                    Edge2 {
-                        before: e.before,
-                        after: e.after
-                    }
-                ),
+                        Edge2 {
+                            before: e.before,
+                            after: e.after
+                        }
+                    ),
                 Option::None => (),
             }
         }

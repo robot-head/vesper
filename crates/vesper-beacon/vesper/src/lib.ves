@@ -247,8 +247,7 @@ pub fn bucket_index(value: u64) -> usize eff [Fail[ArithOverflow]] {
     let octave = high_bit(value);
     widen_usize(
         LINEAR_BINS
-            + (octave - FIRST_OCTAVE)
-            * OCTAVE_BINS
+            + (octave - FIRST_OCTAVE) * OCTAVE_BINS
             + ((value >> (octave - SUB_BITS)) - OCTAVE_BINS)
     )
 }

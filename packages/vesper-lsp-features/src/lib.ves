@@ -303,12 +303,9 @@ pub fn lsp_definitions(in input: Str) -> ChunkSeq[u64] {
     for i in 0..n {
         if i > 0 {
             out.push(10);
-            if ix_err(in x)
-                == ERR_NONE
-                || ix_err(in x)
-                == ERR_POSITION
-                || ix_err(in x)
-                == ERR_INVALID_SPAN {
+            if ix_err(in x) == ERR_NONE
+                || ix_err(in x) == ERR_POSITION
+                || ix_err(in x) == ERR_INVALID_SPAN {
                 reindex(inout x);
             }
         }

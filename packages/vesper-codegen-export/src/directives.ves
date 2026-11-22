@@ -287,8 +287,7 @@ impl TyParser {
             let id = self.ident();
             if !primitive(in id) {
                 self.skip();
-                if !self
-                    .at_end()
+                if !self.at_end()
                     && (self.peek() == 58 || self.peek() == 124 || self.peek() == 91) {
                     // Labeled rows, `E | r` rows and paths are not ported.
                     self.bad = true;

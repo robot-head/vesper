@@ -469,11 +469,11 @@ fn read_path(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64 {
     a
         .paths
         .push(
-        PathR {
-            a: at,
-            n: k
-        }
-    );
+            PathR {
+                a: at,
+                n: k
+            }
+        );
     id
 }
 
@@ -499,16 +499,16 @@ fn read_params(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) -> u64
         a
             .pms
             .push(
-            Pm {
-                name: name,
-                pass: pass,
-                qa: qa,
-                qn: qn,
-                ty: ty,
-                s0: s0,
-                s1: s1
-            }
-        );
+                Pm {
+                    name: name,
+                    pass: pass,
+                    qa: qa,
+                    qn: qn,
+                    ty: ty,
+                    s0: s0,
+                    s1: s1
+                }
+            );
     }
     n
 }
@@ -683,13 +683,13 @@ fn read_clause(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
     a
         .cls
         .push(
-        Cl {
-            name: name,
-            pa: pa,
-            pn: pn,
-            body: body
-        }
-    );
+            Cl {
+                name: name,
+                pa: pa,
+                pn: pn,
+                body: body
+            }
+        );
 }
 
 fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
@@ -722,23 +722,23 @@ fn read_handler(inout r: Reader, in b: Slice[u8], in c: Ctx, inout a: Ast) {
     a
         .hds
         .push(
-        Hd {
-            pool: pool,
-            label: label,
-            eff_name: eff_name,
-            ta: ta,
-            tn: tn,
-            has_state: has_state,
-            spat: spat,
-            sexpr: sexpr,
-            body: body,
-            ret: ret,
-            on: on,
-            outgoing: outgoing,
-            ma: ma,
-            mn: mn
-        }
-    );
+            Hd {
+                pool: pool,
+                label: label,
+                eff_name: eff_name,
+                ta: ta,
+                tn: tn,
+                has_state: has_state,
+                spat: spat,
+                sexpr: sexpr,
+                body: body,
+                ret: ret,
+                on: on,
+                outgoing: outgoing,
+                ma: ma,
+                mn: mn
+            }
+        );
 }
 
 fn inc32w(x: u32) -> u32 {
@@ -799,24 +799,24 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Ast {
         a
             .fns
             .push(
-            FnR {
-                key: key,
-                name: name,
-                has_body: has_body,
-                body: body,
-                pa: pa,
-                pn: pn,
-                result: result,
-                effects: effects,
-                ga: ga,
-                gn: gn,
-                ca: ca,
-                cn: cn,
-                owner: name,
-                xa: 0,
-                xn: 0
-            }
-        );
+                FnR {
+                    key: key,
+                    name: name,
+                    has_body: has_body,
+                    body: body,
+                    pa: pa,
+                    pn: pn,
+                    result: result,
+                    effects: effects,
+                    ga: ga,
+                    gn: gn,
+                    ca: ca,
+                    cn: cn,
+                    owner: name,
+                    xa: 0,
+                    xn: 0
+                }
+            );
         set_by_symbol(inout a.fn_by_key, key, n32(inc(i)));
     }
     let ne = r.word(in b);
@@ -838,26 +838,26 @@ pub fn read_ast(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Ast {
             a
                 .eops
                 .push(
-                Eop {
-                    name: op,
-                    pa: pa,
-                    pn: pn,
-                    result: result
-                }
-            );
+                    Eop {
+                        name: op,
+                        pa: pa,
+                        pn: pn,
+                        result: result
+                    }
+                );
         }
         a
             .effs
             .push(
-            Ef {
-                name: name,
-                linear: linear,
-                ga: ga,
-                gn: gn,
-                oa: oa,
-                on: on
-            }
-        );
+                Ef {
+                    name: name,
+                    linear: linear,
+                    ga: ga,
+                    gn: gn,
+                    oa: oa,
+                    on: on
+                }
+            );
         set_by_symbol(inout a.eff_by_name, name, n32(inc(i)));
     }
     let np = r.word(in b);

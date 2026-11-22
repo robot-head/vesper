@@ -35,11 +35,11 @@ pub fn acc_new(in widths: Slice[u64], max_rows: u64, k0: u64, k1: u64) -> ZAcc {
     for i in 0..widths.len() {
         w
             .push(
-            match widths.try_get(i) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            }
-        );
+                match widths.try_get(i) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                }
+            );
         counts.push(0);
     }
     let mut table = ChunkSeq::with_capacity[u64](START_SLOTS);

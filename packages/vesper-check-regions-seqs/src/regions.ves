@@ -41,13 +41,13 @@ pub fn region_row(inout t: Types, k: Known, label: u32) -> u32 {
     let args: ChunkSeq[u32] = ChunkSeq::new[u32]();
     es
         .push(
-        EffNode {
-            label: inc32(label),
-            name: k.region,
-            a: 0,
-            n: 0
-        }
-    );
+            EffNode {
+                label: inc32(label),
+                name: k.region,
+                a: 0,
+                n: 0
+            }
+        );
     let row = t.mk_row(in es, in args, 0);
     t.row_type(row)
 }
@@ -301,12 +301,12 @@ pub fn validate_type(
             region_display(in t, in names, k, arg, inout d.text);
             d
                 .close(
-                c,
-                m,
-                "bind one with `region r { ... }` or declare `eff [r: Region]`",
-                start,
-                stop
-            );
+                    c,
+                    m,
+                    "bind one with `region r { ... }` or declare `eff [r: Region]`",
+                    start,
+                    stop
+                );
         }
         return true;
     }
