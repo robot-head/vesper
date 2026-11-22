@@ -130,19 +130,22 @@ const DEEP: usize = 256;
 const MEMO_DEPTH: usize = 64;
 
 impl<'a> Encoder<'a> {
-    fn new() -> Self {
+    /// An encoder sized for about `items` declarations or projections, so
+    /// small inputs do not pay for large buffers.
+    fn with_room(items: usize) -> Self {
+        let slots = (4 * (items + 4) * 8).next_power_of_two().min(1024);
         Self {
             words: {
-                let mut w = Vec::with_capacity(4096);
+                let mut w = Vec::with_capacity(HEADER + 64 * (items + 1));
                 w.resize(HEADER, 0);
                 w
             },
-            string_words: Vec::with_capacity(512),
-            ids: HashMap::with_capacity_and_hasher(256, Default::default()),
-            strings: Vec::with_capacity(256),
+            string_words: Vec::with_capacity(8 * (items + 1)),
+            ids: HashMap::with_capacity_and_hasher(4 * (items + 1), Default::default()),
+            strings: Vec::with_capacity(4 * (items + 1)),
             stack: Vec::with_capacity(256),
             marks: Vec::with_capacity(64),
-            slots: vec![EMPTY; 1024],
+            slots: vec![EMPTY; slots],
             used: 0,
             depth: 0,
             max_depth: 0,
@@ -668,12 +671,13 @@ fn text(pool: &[u8], off: u64, len: u64) -> String {
 }
 
 pub(crate) fn compare(old: &Interface, new: &Interface) -> Report {
-    let mut enc = Encoder::new();
+    let items = old.exports.len() + new.exports.len();
+    let mut enc = Encoder::with_room(items + old.external_types.len() + new.external_types.len());
     let (a, b) = (enc.interface(old), enc.interface(new));
     let (words, text_pool) = enc.finish(a, b);
     let q = port_binding::compare(&words, &text_pool);
     let q = q.as_ref();
-    let pool = q.pool().to_vec();
+    let pool = q.pool().as_slice();
     let classification = match q.class() {
         0 => Classification::Patch,
         1 => Classification::Minor,
@@ -687,15 +691,15 @@ pub(crate) fn compare(old: &Interface, new: &Interface) -> Report {
         .0
         .iter()
         .map(|w| Issue {
-            path: text(&pool, w[1], w[2]),
-            rule: text(&pool, w[3], w[4]),
+            path: text(pool, w[1], w[2]),
+            rule: text(pool, w[3], w[4]),
             kind: if w[0] == 0 {
                 IssueKind::Breaking
             } else {
                 IssueKind::Unsupported
             },
-            message: text(&pool, w[5], w[6]),
-            caller_witness: text(&pool, w[7], w[8]),
+            message: text(pool, w[5], w[6]),
+            caller_witness: text(pool, w[7], w[8]),
         })
         .collect();
     let required_adapters = q
@@ -705,7 +709,7 @@ pub(crate) fn compare(old: &Interface, new: &Interface) -> Report {
         .0
         .iter()
         .map(|w| ReborrowAdapter {
-            function_path: text(&pool, w[0], w[1]),
+            function_path: text(pool, w[0], w[1]),
             parameter: w[2] as usize,
         })
         .collect();
@@ -717,7 +721,7 @@ pub(crate) fn compare(old: &Interface, new: &Interface) -> Report {
 }
 
 pub(crate) fn is_subset_of(new: &Projection, old: &Projection) -> bool {
-    let mut enc = Encoder::new();
+    let mut enc = Encoder::with_room(0);
     let (a, b) = (enc.projection(new), enc.projection(old));
     let (words, _) = enc.finish(a, b);
     port_binding::is_subset_of(&words, words[0], words[1])
@@ -749,7 +753,7 @@ pub(crate) fn check_release(
     };
     let r = port_binding::release(old_version.as_bytes(), new_version.as_bytes(), class);
     let r = r.as_ref();
-    let pool = r.pool().to_vec();
+    let pool = r.pool().as_slice();
     if r.err() != 0 {
         let (side, version) = if r.err() == 1 {
             (ReleaseVersionSide::Old, old_version)
@@ -759,7 +763,7 @@ pub(crate) fn check_release(
         return Err(ReleaseVersionError {
             side,
             version: version.into(),
-            message: String::from_utf8_lossy(&pool).into_owned(),
+            message: String::from_utf8_lossy(pool).into_owned(),
         });
     }
     let w = r.words().to_vec();
@@ -774,13 +778,13 @@ pub(crate) fn check_release(
                 2 => ReleaseIssueCode::NonIncreasingVersion,
                 _ => ReleaseIssueCode::InsufficientBump,
             },
-            message: text(&pool, i[1], i[2]),
+            message: text(pool, i[1], i[2]),
         })
         .collect::<Vec<_>>();
     Ok(ReleaseReport {
         policy_version: RELEASE_POLICY_VERSION,
-        old_version: text(&pool, w[1], w[2]),
-        new_version: text(&pool, w[3], w[4]),
+        old_version: text(pool, w[1], w[2]),
+        new_version: text(pool, w[3], w[4]),
         required_bump: comparison.classification,
         comparison,
         actual_bump: bump(w[0]),

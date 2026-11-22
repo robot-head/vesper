@@ -12,7 +12,7 @@ carries #915 (Crucible), #965 (TOML reader) and #1068 (Chorus). Started
 | vesper-pact | Rust gone from `src/` (part 1, #1427) | unchanged (port was already the only build) | the seed, until Stage 2 |
 | vesper-loom-calculus | flipped, Rust in the seed (part 2, #1449) | 8 pkgs 1.12x [1.03, 1.38]; 64 pkgs 0.80x [0.74, 0.91]; 256 pkgs about 0.77x | the seed; TOML, JSON and SemVer text readers (#965) |
 | vesper-loom-audit | flipped, Rust in the seed (part 3, this PR) | 8 pkgs 1.37x [1.34, 1.41] (n=54); 64 pkgs 1.15x [1.05, 1.27]; 256 pkgs 0.96x [0.91, 1.04] | the seed; input-size checks and BLAKE3 context digests (serde_json + blake3), until `vesper-blake3-sys` lands |
-| vesper-semver | above the bar | 2.2-3.0x; empty interfaces 4.2x | encoder design (below) |
+| vesper-semver | above the bar | 64 exports 1.63-1.81x; 8 exports 1.93-2.29x; empty interfaces 3.2x | encoder cost and checker codegen (below) |
 | vesper-beacon | above the bar | exp 3.5x, hist 4.5x, spans 2.1x, traceparent 1.0x | per-call FFI cost (calls of a few ns) |
 | vesper-crucible | partly above the bar | draws 1.81x, tape 1.80x, shrink 2.62x, fuzz 2.66x, dpor 0.80x, cached 0.92x | not ported: fuzzer driver, schedule explorers, arena |
 | vesper-chorus | front end Vesper-only (#1072) | parse+project 0.70x | Raft cluster model, sessions, simnet, durable, warpnet, rdma (part 2 of #1068) |
@@ -58,14 +58,30 @@ copy into `inw`), and 85k more mispredicted branches per 51 calls.
 ## Semver
 
 The Rust-side encoder (`src/port.rs`) hash-conses every node of both
-interfaces, so that the Vesper checker can compare nodes by offset. On 64
-exports it takes about 56% of the port's time. That is more than the whole
-Rust `compare`. A word-hash for the string interner saves about 11% of the
-port's instructions. A packed slot table and inline comparison save almost
-nothing, because the cost is per word hashed and compared. Reaching 1.5x
-needs a design that does not hash-cons every node: for example, hashing
-only the classes the checker compares by offset, or memoizing equal
-declarations before they are encoded.
+interfaces, so that the Vesper checker can compare nodes by offset. Before
+this lane's semver PR it took about 56% of the port's time on 64 exports,
+more than the whole Rust `compare`. The PR:
+
+- hashes strings with Fx instead of SipHash (about 11% fewer port
+  instructions);
+- reuses the encoded node of every export whose declaration equals the old
+  interface's (compared with `==` when it nests at most 64 levels);
+- sizes the encoder's buffers from the interface, so small inputs do not
+  zero 56 KB per call;
+- appends message text with one `extend` instead of a checked byte loop
+  (`util::put` was 25% of the empty-interface case).
+
+Medians of 21 ABBA rounds, before → after: 64 exports minor change
+2.39x → 1.80x, identical 2.17x → 1.63x, `check_release` 2.37x → 1.81x;
+8 exports 2.47-2.96x → 1.93-2.29x; empty interfaces 4.21x → 3.20x.
+
+What keeps it above 1.5x: on 8 exports, the encoder (`Encoder::end` alone
+is 21% of instructions) and the Vesper checker each cost about as much as
+the whole Rust `compare`. The checker's hot loops (`validate_function`,
+`validate_type`, `function`) read every word through `try_get`, so each
+read carries a bounds check and an `Option` match (see the `try_get` gap
+below). Version parsing pays a sequence allocation per input and per
+message.
 
 ## Compiler gaps
 
@@ -80,6 +96,12 @@ declarations before they are encoded.
 - **`a[lo..hi].cmp(in b[..])` on bytes is an inline byte loop**, not
   `memcmp`. It is fine for short strings but about 2.5x the instructions of
   word-wise comparison on the 47-byte average strings of the audit catalog.
+- **`try_get` reads are not hoisted or fused.** A checker that walks a word
+  stream by computed offsets (semver's `at(in w, node, field)`) pays a bounds
+  check and an `Option` match on every word, even when the node's length was
+  checked on entry. This is the bounds-hoisting lane's open item
+  ("vectorizing try_get loops"); semver's `validate_*` functions are a small
+  reproducer.
 
 ## Checks run (Linux x86_64)
 
