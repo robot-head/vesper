@@ -5,11 +5,13 @@
 //! calls and `Ffi[Lib]` rows against the imports.
 //!
 //! * `check` reports the Bridge lowering's diagnostics at their files.
-//! * `jit` and `run` bind each foreign symbol to a host function the CLI
-//!   links in (`run` through the evaluator's host, `ffi_lowering::EvalHost`):
+//! * `jit`, `run` and `test` bind each foreign symbol to a host function
+//!   (`run` and `test` through the evaluator's host, `ffi_lowering::EvalHost`):
 //!   the standard I/O libraries (`link name = "vesper_std_host"`, the shim in
-//!   crates/vesper-std-host). Other libraries are refused before any code
-//!   runs; link them into an executable with `build`.
+//!   crates/vesper-std-host) from the CLI itself, and every other library
+//!   from the shared library its link name names (runtime glue gap G5,
+//!   [`host_libraries`]). A library that cannot be loaded, or that lacks a
+//!   symbol, is refused before any code runs.
 //! * `build` emits the executable's object with the foreign calls lowered
 //!   and links it with each library the object calls (`-l<name>`, found on
 //!   the `--link-search` directories).
@@ -78,8 +80,9 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
             Ok(())
         }
         "jit" => {
-            let symbols = host_symbols(&imports, "jit")?;
-            let symbols: Vec<(&str, *const u8)> = symbols.iter().map(|(n, a)| (*n, *a)).collect();
+            let symbols = host_symbols(&imports, "jit", c.link_search)?;
+            let symbols: Vec<(&str, *const u8)> =
+                symbols.iter().map(|(n, a)| (n.as_str(), *a)).collect();
             let value = checked
                 .jit_with_options(c.entry, &symbols, c.optimize)
                 .map_err(|e| e.to_string())?;
@@ -89,7 +92,7 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
         "build" => build(&c, &checked),
         "run" => {
             // The evaluator reaches the same host functions as `jit`.
-            let host = eval_host(&imports, "run")?;
+            let host = eval_host_in(&imports, "run", c.link_search)?;
             let value = checked
                 .evaluate(c.entry, |call| host.call(call))
                 .map_err(|e| e.to_string())?;
@@ -103,21 +106,34 @@ pub fn run(c: Command<'_>) -> Result<(), String> {
     }
 }
 
-/// Bind the CLI's built-in foreign functions to evaluator calls.
+/// Bind the CLI's foreign functions to evaluator calls.
 pub(crate) fn eval_host(
     imports: &Imports,
     command: &str,
 ) -> Result<ffi_lowering::EvalHost, String> {
-    let symbols = host_symbols(imports, command)?;
+    eval_host_in(imports, command, &[])
+}
+
+/// [`eval_host`], loading libraries from `search` first.
+fn eval_host_in(
+    imports: &Imports,
+    command: &str,
+    search: &[PathBuf],
+) -> Result<ffi_lowering::EvalHost, String> {
+    let symbols = host_symbols(imports, command, search)?;
+    let symbols: Vec<(&str, *const u8)> = symbols.iter().map(|(n, a)| (n.as_str(), *a)).collect();
     ffi_lowering::EvalHost::new(imports, &symbols)
 }
 
-/// The host functions the CLI provides for `imports`: every function of a
-/// library linked as [`STD_HOST`].
+/// The host functions for `imports`: every function of a library linked as
+/// [`STD_HOST`] from the CLI itself, and every function of another library
+/// from the shared library its link name names ([`host_libraries`]), looked
+/// for in `search` first.
 fn host_symbols(
     imports: &Imports,
     command: &str,
-) -> Result<Vec<(&'static str, *const u8)>, String> {
+    search: &[PathBuf],
+) -> Result<Vec<(String, *const u8)>, String> {
     let mut out = vec![];
     let std = ffi_lowering::std_host_symbols();
     for (library, _) in imports.libraries() {
@@ -127,11 +143,25 @@ fn host_symbols(
             continue;
         }
         if library.link().name() != STD_HOST {
-            return Err(format!(
-                "{command}: library {} links '{}', which this vesper does not host; link it into an executable with `vesper build`",
-                library.name(),
-                library.link().name()
-            ));
+            let lib = host_libraries::open(library.link().name(), search).map_err(|why| {
+                format!(
+                    "{command}: library {} links '{}', which could not be loaded ({why}); link it into an executable with `vesper build`",
+                    library.name(),
+                    library.link().name()
+                )
+            })?;
+            for f in library.functions() {
+                let address = lib.symbol(f.symbol()).ok_or_else(|| {
+                    format!(
+                        "{command}: {}::{} is not a symbol of {}",
+                        library.name(),
+                        f.symbol(),
+                        lib.shown()
+                    )
+                })?;
+                out.push((f.symbol().to_owned(), address));
+            }
+            continue;
         }
         for f in library.functions() {
             let (name, address) = std.iter().find(|(n, _)| *n == f.symbol()).ok_or_else(|| {
@@ -141,21 +171,168 @@ fn host_symbols(
                     f.symbol()
                 )
             })?;
-            out.push((*name, *address));
+            out.push(((*name).to_owned(), *address));
         }
     }
     Ok(out)
 }
 
+/// The shared libraries `jit`, `run` and `test` bind foreign symbols from
+/// (runtime glue gap G5): the C library and the libraries the CLI already
+/// links are searched in the process (`dlsym(RTLD_DEFAULT, ..)`, or the C
+/// runtime DLLs on Windows); any other link name is loaded once, from the
+/// `--link-search` directories first, then the system's search path. A
+/// loaded library stays loaded for the life of the process.
+mod host_libraries {
+    use std::path::{Path, PathBuf};
+
+    /// A loaded library, or the process's own symbols.
+    pub struct Library {
+        handles: Vec<*mut std::ffi::c_void>,
+        shown: String,
+    }
+
+    impl Library {
+        pub fn shown(&self) -> &str {
+            &self.shown
+        }
+
+        /// The address of `symbol`, from the first handle that has it.
+        pub fn symbol(&self, symbol: &str) -> Option<*const u8> {
+            let name = std::ffi::CString::new(symbol).ok()?;
+            self.handles
+                .iter()
+                .map(|h| sys::symbol(*h, &name))
+                .find(|p| !p.is_null())
+                .map(|p| p as *const u8)
+        }
+    }
+
+    /// The file names a library of link name `name` has on this system.
+    fn file_names(name: &str) -> Vec<String> {
+        if cfg!(windows) {
+            vec![format!("{name}.dll"), format!("lib{name}.dll")]
+        } else if cfg!(target_os = "macos") {
+            vec![format!("lib{name}.dylib")]
+        } else {
+            vec![format!("lib{name}.so")]
+        }
+    }
+
+    /// Open the library of link name `name`.
+    pub fn open(name: &str, search: &[PathBuf]) -> Result<Library, String> {
+        if let Some(handles) = sys::process_library(name) {
+            return Ok(Library {
+                handles,
+                shown: format!("the process (link name '{name}')"),
+            });
+        }
+        let mut tried = vec![];
+        let candidates: Vec<PathBuf> = search
+            .iter()
+            .flat_map(|d| file_names(name).into_iter().map(move |f| d.join(f)))
+            .filter(|p| p.is_file())
+            .chain(file_names(name).into_iter().map(PathBuf::from))
+            .collect();
+        for path in candidates {
+            match sys::load(&path) {
+                Ok(h) => {
+                    return Ok(Library {
+                        handles: vec![h],
+                        shown: path.display().to_string(),
+                    });
+                }
+                Err(e) => tried.push(format!("{}: {e}", Path::new(&path).display())),
+            }
+        }
+        Err(tried.join("; "))
+    }
+
+    #[cfg(unix)]
+    mod sys {
+        use std::{ffi::CStr, ffi::c_void, os::unix::ffi::OsStrExt, path::Path};
+
+        /// The process's own symbols for the libraries the CLI is linked
+        /// with: the C library, and on Linux `m`, `pthread` and `dl`.
+        pub fn process_library(name: &str) -> Option<Vec<*mut c_void>> {
+            let linked: &[&str] = if cfg!(target_os = "macos") {
+                &["c", "m", "System", "pthread", "dl"]
+            } else {
+                &["c", "m", "pthread", "dl"]
+            };
+            linked.contains(&name).then(|| vec![libc::RTLD_DEFAULT])
+        }
+
+        pub fn load(path: &Path) -> Result<*mut c_void, String> {
+            let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+                .map_err(|_| "a path with a NUL byte".to_owned())?;
+            // SAFETY: `c` is a terminated path; the handle is never closed.
+            let h = unsafe { libc::dlopen(c.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
+            if h.is_null() {
+                // SAFETY: dlerror returns the thread's last error or null.
+                let e = unsafe { libc::dlerror() };
+                return Err(if e.is_null() {
+                    "dlopen failed".into()
+                } else {
+                    // SAFETY: dlerror's text is terminated.
+                    unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
+                });
+            }
+            Ok(h)
+        }
+
+        pub fn symbol(handle: *mut c_void, name: &CStr) -> *mut c_void {
+            // SAFETY: `handle` is RTLD_DEFAULT or a live dlopen handle.
+            unsafe { libc::dlsym(handle, name.as_ptr()) }
+        }
+    }
+
+    #[cfg(windows)]
+    mod sys {
+        use std::{ffi::CStr, ffi::c_void, path::Path};
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LoadLibraryA(name: *const i8) -> *mut c_void;
+            fn GetProcAddress(module: *mut c_void, name: *const i8) -> *mut c_void;
+            fn GetLastError() -> u32;
+        }
+
+        /// The C library is the universal C runtime, with the older
+        /// `msvcrt.dll` after it.
+        pub fn process_library(name: &str) -> Option<Vec<*mut c_void>> {
+            if name != "c" && name != "m" {
+                return None;
+            }
+            let handles: Vec<_> = ["ucrtbase.dll", "msvcrt.dll"]
+                .iter()
+                .filter_map(|n| load(Path::new(n)).ok())
+                .collect();
+            (!handles.is_empty()).then_some(handles)
+        }
+
+        pub fn load(path: &Path) -> Result<*mut c_void, String> {
+            let c = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+                .map_err(|_| "a path with a NUL byte".to_owned())?;
+            // SAFETY: `c` is a terminated path; the module is never freed.
+            let h = unsafe { LoadLibraryA(c.as_ptr().cast()) };
+            if h.is_null() {
+                // SAFETY: reads the thread's last error code.
+                return Err(format!("LoadLibrary error {}", unsafe { GetLastError() }));
+            }
+            Ok(h)
+        }
+
+        pub fn symbol(handle: *mut c_void, name: &CStr) -> *mut c_void {
+            // SAFETY: `handle` is a live module handle.
+            unsafe { GetProcAddress(handle, name.as_ptr().cast()) }
+        }
+    }
+}
+
 fn build(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), String> {
     if c.entry != "main" {
         return Err("build currently requires entry 'main'".into());
-    }
-    if vesper::native::windows::is_windows_target(c.target) {
-        return Err(
-            "build: executables with .vsys imports link with cc only; Windows targets are not supported yet"
-                .into(),
-        );
     }
     let f = checked
         .world()
@@ -186,12 +363,21 @@ fn build(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), 
         })
         .map_err(|e| e.to_string())?;
     fs::write(&object, bytes).map_err(|e| e.to_string())?;
+    let names = checked.link_names();
+    if vesper::native::windows::is_windows_target(c.target) {
+        // Windows (runtime glue gap G11): link.exe or lld-link, as for any
+        // Windows executable, with each library's import or static `.lib`.
+        let result = link_windows(c, &object, &path, &names);
+        let _ = fs::remove_file(&object);
+        let path = result?;
+        println!("built {}", path.display());
+        return Ok(());
+    }
     let mut link = process::Command::new(c.linker);
     link.arg(&object).arg("-o").arg(&path);
     for dir in c.link_search {
         link.arg("-L").arg(dir);
     }
-    let names = checked.link_names();
     for (name, mode) in &names {
         match mode {
             vesper_ffi::sys::LinkMode::Dynamic => {
@@ -235,4 +421,51 @@ fn build(c: &Command<'_>, checked: &ffi_lowering::ForeignChecked) -> Result<(), 
     }
     println!("built {}", path.display());
     Ok(())
+}
+
+/// The libraries a Rust static library (such as the standard I/O host)
+/// needs on Windows, beside the C runtime the linker always adds.
+const WINDOWS_RUST_SYSTEM_LIBRARIES: [&str; 5] = [
+    "advapi32.lib",
+    "bcrypt.lib",
+    "ntdll.lib",
+    "userenv.lib",
+    "ws2_32.lib",
+];
+
+/// Link a Windows executable from `object` and the `.lib` of every link name
+/// in `names` (runtime glue gap G11). The C library (`c`, `m`) is the static
+/// MSVC runtime every Windows executable already links. Another library is
+/// `<name>.lib` (an import library for a DLL, or a static archive) from the
+/// first `--link-search` directory that has it, else from the linker's
+/// `LIB` path.
+fn link_windows(
+    c: &Command<'_>,
+    object: &std::path::Path,
+    output: &std::path::Path,
+    names: &[(String, vesper_ffi::sys::LinkMode)],
+) -> Result<PathBuf, String> {
+    let mut inputs = vec![object.to_path_buf()];
+    let mut rust = false;
+    for (name, _) in names {
+        if matches!(name.as_str(), "c" | "m") {
+            continue;
+        }
+        rust |= name == STD_HOST;
+        let file = format!("{name}.lib");
+        inputs.push(
+            c.link_search
+                .iter()
+                .map(|d| d.join(&file))
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| PathBuf::from(&file)),
+        );
+    }
+    if rust {
+        inputs.extend(WINDOWS_RUST_SYSTEM_LIBRARIES.iter().map(PathBuf::from));
+    }
+    // As for other Windows builds, the default `cc` means "find the MSVC
+    // linker".
+    let explicit = (c.linker != "cc").then(|| PathBuf::from(c.linker));
+    vesper::native::windows::link(&inputs, output, explicit.as_deref()).map_err(|e| e.to_string())
 }

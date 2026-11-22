@@ -216,8 +216,14 @@ pub struct PackageVsys {
     /// The file, for messages (lexical, relative to the CLI input).
     pub display: String,
     /// The `.vsys` text as written: `@TARGET@` and `@ABI@` still stand for
-    /// the object target ([`PackageVsys::source_for`]).
+    /// the object target ([`PackageVsys::source_for`]). For a per-target
+    /// path, the host's file, or else the first target's.
     pub text: String,
+    /// For a manifest path with `@OS@`, `@ARCH@` or `@TARGET@` in it (a
+    /// per-target import, manuscript §16.3): the triple, display path and
+    /// text of the file each target has, in [`VSYS_TARGETS`] order. Empty
+    /// for a plain path, whose one file serves every target.
+    pub targets: Vec<(&'static str, String, String)>,
 }
 
 impl PackageVsys {
@@ -226,28 +232,133 @@ impl PackageVsys {
     /// matter, and they do not depend on the target, so the host target
     /// fills the placeholders. A library that does not parse declares no
     /// names here; [`Assembled::imports`] reports its error.
+    /// A per-target import declares the names of every target's file.
     fn type_names(&self) -> Vec<(String, String)> {
-        let Ok(source) = self.source_for(None) else {
-            return vec![];
+        let texts: Vec<(&str, &str)> = if self.targets.is_empty() {
+            let Ok((triple, _)) = vsys_target(None) else {
+                return vec![];
+            };
+            vec![(triple, self.text.as_str())]
+        } else {
+            self.targets
+                .iter()
+                .map(|(t, _, text)| (*t, text.as_str()))
+                .collect()
         };
-        let Ok(d) = vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default()) else {
-            return vec![];
-        };
-        let library = d.name().to_owned();
-        d.extern_types()
-            .iter()
-            .map(|t| t.name().to_owned())
-            .chain(d.wire_structs().iter().map(|w| w.name().to_owned()))
-            .chain(d.enums().iter().map(|e| e.name().to_owned()))
-            .map(|n| (n, library.clone()))
-            .collect()
+        let mut out = vec![];
+        for (triple, text) in texts {
+            let abi = VSYS_TARGETS
+                .iter()
+                .find(|t| t.triple == triple)
+                .map_or("sysv64", |t| t.abi);
+            let source = text.replace("@TARGET@", triple).replace("@ABI@", abi);
+            let Ok(d) = vesper_ffi::sys::parse(&source, vesper_ffi::sys::Limits::default()) else {
+                continue;
+            };
+            let library = d.name().to_owned();
+            for n in d
+                .extern_types()
+                .iter()
+                .map(|t| t.name().to_owned())
+                .chain(d.wire_structs().iter().map(|w| w.name().to_owned()))
+                .chain(d.enums().iter().map(|e| e.name().to_owned()))
+            {
+                let pair = (n, library.clone());
+                if !out.contains(&pair) {
+                    out.push(pair);
+                }
+            }
+        }
+        out
     }
     /// The `.vsys` source for an object of `target` (the host when `None`):
     /// `@TARGET@` and `@ABI@` replaced by its triple and calling convention.
+    /// A per-target import uses that target's file, and is an error for a
+    /// target it has none for.
     pub fn source_for(&self, target: Option<&str>) -> Result<String, String> {
         let (triple, abi) = vsys_target(target)?;
-        Ok(self.text.replace("@TARGET@", triple).replace("@ABI@", abi))
+        let text = if self.targets.is_empty() {
+            &self.text
+        } else {
+            match self.targets.iter().find(|(t, _, _)| *t == triple) {
+                Some((_, _, text)) => text,
+                None => {
+                    return Err(format!(
+                        "this per-target import has no file for {triple} (expected {})",
+                        expand_vsys_path(&self.display, target_of(triple))
+                    ));
+                }
+            }
+        };
+        Ok(text.replace("@TARGET@", triple).replace("@ABI@", abi))
     }
+    /// The display path of the file `target` uses.
+    pub fn display_for(&self, target: Option<&str>) -> String {
+        let Ok((triple, _)) = vsys_target(target) else {
+            return self.display.clone();
+        };
+        self.targets
+            .iter()
+            .find(|(t, _, _)| *t == triple)
+            .map_or_else(|| self.display.clone(), |(_, d, _)| d.clone())
+    }
+}
+
+/// One object target `.vsys` libraries support, with the words a
+/// per-target manifest path's `@TARGET@`, `@OS@` and `@ARCH@` stand for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VsysTarget {
+    pub triple: &'static str,
+    pub abi: &'static str,
+    pub os: &'static str,
+    pub arch: &'static str,
+}
+
+/// Every target `.vsys` libraries support, in a fixed order.
+pub const VSYS_TARGETS: [VsysTarget; 4] = [
+    VsysTarget {
+        triple: "x86_64-unknown-linux-gnu",
+        abi: "sysv64",
+        os: "linux",
+        arch: "x86_64",
+    },
+    VsysTarget {
+        triple: "aarch64-unknown-linux-gnu",
+        abi: "aapcs64",
+        os: "linux",
+        arch: "aarch64",
+    },
+    VsysTarget {
+        triple: "aarch64-apple-darwin",
+        abi: "darwin64",
+        os: "macos",
+        arch: "aarch64",
+    },
+    VsysTarget {
+        triple: "x86_64-pc-windows-msvc",
+        abi: "win64",
+        os: "windows",
+        arch: "x86_64",
+    },
+];
+
+fn target_of(triple: &str) -> VsysTarget {
+    *VSYS_TARGETS
+        .iter()
+        .find(|t| t.triple == triple)
+        .expect("a triple vsys_target returned")
+}
+
+/// Whether a manifest `.vsys` path is per-target.
+fn is_per_target_path(path: &str) -> bool {
+    ["@TARGET@", "@OS@", "@ARCH@"].iter().any(|t| path.contains(t))
+}
+
+/// A per-target manifest path with its tokens replaced for `target`.
+fn expand_vsys_path(path: &str, target: VsysTarget) -> String {
+    path.replace("@TARGET@", target.triple)
+        .replace("@OS@", target.os)
+        .replace("@ARCH@", target.arch)
 }
 
 /// The `.vsys` triple and calling convention of an object target (the host
@@ -258,13 +369,14 @@ pub fn vsys_target(target: Option<&str>) -> Result<(&'static str, &'static str),
         None => target_lexicon::Triple::host(),
     };
     use target_lexicon::{Architecture as A, OperatingSystem as O};
-    Ok(match (triple.architecture, triple.operating_system) {
-        (A::X86_64, O::Linux) => ("x86_64-unknown-linux-gnu", "sysv64"),
-        (A::Aarch64(_), O::Linux) => ("aarch64-unknown-linux-gnu", "aapcs64"),
-        (A::Aarch64(_), O::Darwin(_) | O::MacOSX(_)) => ("aarch64-apple-darwin", "darwin64"),
-        (A::X86_64, O::Windows) => ("x86_64-pc-windows-msvc", "win64"),
+    let index = match (triple.architecture, triple.operating_system) {
+        (A::X86_64, O::Linux) => 0,
+        (A::Aarch64(_), O::Linux) => 1,
+        (A::Aarch64(_), O::Darwin(_) | O::MacOSX(_)) => 2,
+        (A::X86_64, O::Windows) => 3,
         _ => return Err(format!(".vsys libraries have no target for {triple}")),
-    })
+    };
+    Ok((VSYS_TARGETS[index].triple, VSYS_TARGETS[index].abi))
 }
 impl Assembled {
     pub fn ok(&self) -> bool {
@@ -282,7 +394,7 @@ impl Assembled {
                 .map_err(|e| format!("{}: {e}", v.display))?;
             imports
                 .add(&source, crate::ffi_lowering::Handler::Direct)
-                .map_err(|e| format!("{}: {e}", v.display))?;
+                .map_err(|e| format!("{}: {e}", v.display_for(target)))?;
         }
         Ok(imports)
     }
@@ -789,17 +901,59 @@ impl Loader<'_> {
                     .push((manifest_shown.into(), bad("named twice")));
                 continue;
             }
-            let file = dir.join(relative);
-            if !file.is_file() {
-                self.manifest_errors
-                    .push((manifest_shown.into(), bad("no such file")));
-                continue;
-            }
-            let text = fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-            let v = PackageVsys {
-                package: manifest.package.name.as_str().to_owned(),
-                display: display(&normalize(&shown.join(relative))),
-                text,
+            let package = manifest.package.name.as_str().to_owned();
+            let display_path = display(&normalize(&shown.join(relative)));
+            let v = if is_per_target_path(path) {
+                // A per-target import: each target reads the file its
+                // expansion names, and a target without one cannot import it.
+                let mut targets = vec![];
+                for t in VSYS_TARGETS {
+                    let expanded = expand_vsys_path(path, t);
+                    let file = dir.join(&expanded);
+                    if !file.is_file() {
+                        continue;
+                    }
+                    let text =
+                        fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+                    targets.push((
+                        t.triple,
+                        display(&normalize(&shown.join(&expanded))),
+                        text,
+                    ));
+                }
+                if targets.is_empty() {
+                    self.manifest_errors
+                        .push((manifest_shown.into(), bad("no such file for any target")));
+                    continue;
+                }
+                let host = vsys_target(None).ok().map(|(t, _)| t);
+                let text = targets
+                    .iter()
+                    .find(|(t, _, _)| Some(*t) == host)
+                    .unwrap_or(&targets[0])
+                    .2
+                    .clone();
+                PackageVsys {
+                    package,
+                    display: display_path,
+                    text,
+                    targets,
+                }
+            } else {
+                let file = dir.join(relative);
+                if !file.is_file() {
+                    self.manifest_errors
+                        .push((manifest_shown.into(), bad("no such file")));
+                    continue;
+                }
+                let text =
+                    fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+                PackageVsys {
+                    package,
+                    display: display_path,
+                    text,
+                    targets: vec![],
+                }
             };
             types.extend(v.type_names());
             self.vsys.push(v);
