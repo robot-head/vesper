@@ -5,7 +5,7 @@
 # crates/vesper-loom-trust/build.rs, applied one at a time) fails its
 # differential test against the Rust reference while another passes.
 set -eu
-cargo test --locked -p vesper-loom-trust
+cargo test --locked -p vesper-loom-trust -p vesper-loom-trust-seed
 while read -r area failing passing; do
     export VESPER_LOOM_TRUST_DIVERGE="$area"
     divergent "loom-trust port ($area)" "differential::$failing" "differential::$passing" \

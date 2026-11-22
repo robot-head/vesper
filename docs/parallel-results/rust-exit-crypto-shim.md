@@ -196,10 +196,21 @@ package and C build support lanes 12 and 16 asked for (#1421).
   crate. The shim now has 34 calls.
 - **The Rust crate** keeps its public API, serde types and JSON parsing,
   and converts its values to the trees and back (`src/port.rs`).
-  ed25519-dalek, semver and loom-cas are dev-only now (the reference and
-  the tests). Non-comment Rust lines: 791 before, 374 now.
-- loom-trust is out of the compiler's closure (lane 3, #1398), so it flips
-  outright, with no seed.
+  The port-backed build links no Rust engine: ed25519-dalek, semver and
+  loom-cas are dev-only there (the reference and the tests). Non-comment
+  Rust lines outside `src/reference/`: 791 before, 374 now.
+- **The seed.** loom-trust is outside Cargo's compiler closure (lane 3,
+  #1398), but Bazel builds the `vesper-<tool>` binaries as run-time data of
+  `//:bin/vesper`, and `vesper attest` and `vesper publish` (vesper-tools)
+  link loom-trust. The port's object needs `//:bin/vesper`, so linking the
+  port there is a dependency cycle (the first CI run of this PR). The
+  compiler-side crates (vesper-tools, vesper-loom-admission, vesper-hybrid,
+  vesper-codegen-verified) therefore link the seed copy,
+  `crates/vesper-loom-trust/seed` (package `vesper-loom-trust-seed`): the
+  same `src/` with `cfg(vesper_port)` off, over the frozen Rust engine in
+  `src/reference/`, which is also the differential's reference. It takes
+  bug fixes only until self-hosting Stage 2. Every other user links the
+  port.
 
 ### Flip-gate verdict (hand-run recipe)
 
@@ -209,8 +220,8 @@ package and C build support lanes 12 and 16 asked for (#1421).
 | `screen`: 32 admission screens against a 200-entry catalog of lookalike names | 0 differences | | **0.70x** (0.681x..0.706x) | flipped |
 | `signing`: 2,048 signing messages | 0 differences | | **1.23x** (1.160x..1.345x) | flipped |
 
-- **Differential**: `src/differential.rs` keeps the deleted Rust as
-  `src/reference/` (test-only) and compares on seeded cases: 4,000 random
+- **Differential**: `src/differential.rs` compares the port with the
+  frozen Rust in `src/reference/` (the seed's engine) on seeded cases: 4,000 random
   policies, bundles and clocks (weak, non-point, duplicate and uppercase
   keys, bad labels, empty and short key intervals, revoked keys, unknown,
   repeated and re-dated statements, wrong signers, tampered and short

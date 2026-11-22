@@ -7,7 +7,10 @@
 use serde::{Deserialize, Serialize};
 use vesper_loom_calculus::PackageName;
 
+#[cfg(vesper_port)]
 use crate::port;
+#[cfg(not(vesper_port))]
+use crate::reference::slopsquat as engine;
 
 pub const SLOPSQUAT_SCHEMA_VERSION: u32 = 1;
 pub const MAX_PACKAGE_NAME_LEN: usize = 256;
@@ -94,20 +97,41 @@ pub struct QuarantineReport {
 
 /// Splits `@org/name` or `std/name` into `(namespace, short_name)`.
 pub fn split_package(name: &PackageName) -> (&str, &str) {
-    let text = name.as_str();
-    let [o0, o1, n0, n1] = port::split(text);
-    (&text[o0..o1], &text[n0..n1])
+    #[cfg(vesper_port)]
+    {
+        let text = name.as_str();
+        let [o0, o1, n0, n1] = port::split(text);
+        (&text[o0..o1], &text[n0..n1])
+    }
+    #[cfg(not(vesper_port))]
+    {
+        engine::split_package(name)
+    }
 }
 
 /// Normalizes delimiter swaps (`-`, `_`) and common ASCII lookalikes (`0/o`, `1/l`, `3/e`, `4/a`, `5/s`, `7/t`).
 pub fn canonical_conflation_key(text: &str) -> String {
-    port::conflation_key(text)
+    #[cfg(vesper_port)]
+    {
+        port::conflation_key(text)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        engine::canonical_conflation_key(text)
+    }
 }
 
 /// Computes optimal string alignment (restricted Damerau-Levenshtein) distance over ASCII package strings
 /// using O(min(|a|, |b|)) memory.
 pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
-    port::damerau_levenshtein(a, b)
+    #[cfg(vesper_port)]
+    {
+        port::damerau_levenshtein(a, b)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        engine::damerau_levenshtein(a, b)
+    }
 }
 
 /// Evaluates whether a package candidate may be added directly, must be quarantined, or must be rejected.
@@ -117,5 +141,12 @@ pub fn screen_package_admission(
     policy: &QuarantinePolicy,
     now_secs: u64,
 ) -> QuarantineReport {
-    port::screen(candidate, catalog, policy, now_secs)
+    #[cfg(vesper_port)]
+    {
+        port::screen(candidate, catalog, policy, now_secs)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        engine::screen_package_admission(candidate, catalog, policy, now_secs)
+    }
 }

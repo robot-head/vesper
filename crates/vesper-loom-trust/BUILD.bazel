@@ -6,7 +6,9 @@ load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper
 # the Loom package in vesper/, which depends on @vesper/crypto, and checks
 # port/binding.rs against the generated binding. Every test runs against
 # it; src/differential.rs compares it with the Rust reference it replaced
-# (src/reference/).
+# (src/reference/). The compiler's tool binaries, which //:bin/vesper
+# carries as run-time data, link the Rust seed copy instead,
+# //crates/vesper-loom-trust/seed, since this object needs //:bin/vesper.
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
@@ -63,3 +65,15 @@ vesper_crate(
         ("screen", "if cost > widen_u64(policy.max_trust_cost) {", "if cost >= widen_u64(policy.max_trust_cost) {"),
     ]
 ]
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-loom-trust/seed:__pkg__"],
+)

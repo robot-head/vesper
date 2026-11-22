@@ -10,21 +10,30 @@
 //! policy, interval, quorum and signature rule, the signing message and the
 //! screen. Ed25519 is the crypto shim, `vesper-crypto-sys`. This crate keeps
 //! the serde types and the JSON parsing, and converts its values to the
-//! port's trees ([`port`]).
+//! port's trees (`port`).
+//!
+//! The compiler's tool binaries (`vesper attest`, `vesper publish`) and the
+//! other crates of the compiler's build link the seed copy instead,
+//! `crates/vesper-loom-trust/seed` (seed-copy rule, "Crates the compiler
+//! links" in docs/maintenance/porting-a-crate.md): it builds these same
+//! sources without `cfg(vesper_port)`, over the frozen Rust engine in
+//! `src/reference/`, which is also the reference of `src/differential.rs`.
 #![deny(unsafe_code)]
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
 use vesper_loom_calculus::PackageName;
 // The Ed25519 calls of the Vesper object resolve to this crate's shim.
+#[cfg(vesper_port)]
 extern crate vesper_crypto_sys;
 
+#[cfg(vesper_port)]
 mod port;
 pub mod slopsquat;
 
-#[cfg(test)]
+#[cfg(all(test, vesper_port))]
 mod differential;
-#[cfg(test)]
+#[cfg(any(test, not(vesper_port)))]
 mod reference;
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -111,7 +120,14 @@ pub struct VerificationReport {
 /// whitespace are not signed; unknown/duplicate fields are rejected on parsing.
 /// Every identity field and the selected key ID is covered by the signature.
 pub fn canonical_signing_bytes(statement: &Statement) -> Result<Vec<u8>, String> {
-    port::signing_bytes(statement)
+    #[cfg(vesper_port)]
+    {
+        port::signing_bytes(statement)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        reference::verify::canonical_signing_bytes(statement)
+    }
 }
 
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
@@ -140,5 +156,12 @@ pub fn verify_attestations(
     policy: &BuilderPolicy,
     now: u64,
 ) -> VerificationReport {
-    port::verify(expected, bundle, policy, now)
+    #[cfg(vesper_port)]
+    {
+        port::verify(expected, bundle, policy, now)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        reference::verify::verify_attestations(expected, bundle, policy, now)
+    }
 }

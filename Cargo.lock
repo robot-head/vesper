@@ -5836,7 +5836,7 @@ dependencies = [
  "toml 0.8.23",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
- "vesper-loom-trust",
+ "vesper-loom-trust-seed",
 ]
 
 [[package]]
@@ -6339,7 +6339,7 @@ dependencies = [
  "tempfile",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
- "vesper-loom-trust",
+ "vesper-loom-trust-seed",
 ]
 
 [[package]]
@@ -6472,6 +6472,18 @@ dependencies = [
  "vesper-loom-cas",
  "vesper-port-abi",
  "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-loom-trust-seed"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "semver",
+ "serde",
+ "serde_json",
+ "vesper-loom-calculus-seed",
+ "vesper-loom-cas",
 ]
 
 [[package]]
@@ -6868,7 +6880,7 @@ dependencies = [
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
  "vesper-loom-solver-seed",
- "vesper-loom-trust",
+ "vesper-loom-trust-seed",
  "vesper-migrate",
  "vesper-semver-seed",
  "vesper-serde-seed",
