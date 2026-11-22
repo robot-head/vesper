@@ -391,6 +391,12 @@ graphs to large ones and from 2 bodies to 4 million.
 flip-gate vesper-kinetic: PASS (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 1/1 pass | differential 0 differences on 600 cases | ABBA vesper/rust colorer 0.78x [0.78x, 0.79x] n=30; multi-colorer 1.35x [1.29x, 1.36x] n=30 | RUSTFLAGS=-C target-cpu=native
 ```
 
+**Sweep and prune.** `pair_total` and `write_pairs` now read each row's
+bounds once instead of once per candidate: 16% fewer instructions, `sap`
+1.84x to 1.67x (range 1.50-1.92). What is left is the slice header that
+every `try_get` reloads (base and offset, three loads per element read),
+which the code-size lane (#1426) owns.
+
 ### Compiler gap found in this part
 
 8. **The inliner moves a cold path's sequence onto the hot path.** If a
