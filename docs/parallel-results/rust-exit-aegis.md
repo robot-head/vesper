@@ -174,7 +174,8 @@ Base: `main` at `11cdaefa` (part 1 merged).
    payloads, and 20,000 random claim sets on both sides of every limit,
    encoded by `to_cbor`). Their digests were recorded from the Rust build
    at `11cdaefa`, and the port matches them. The decoder also keeps a live
-   unit differential against ciborium (which coset still links): edge
+   differential against ciborium, which coset still links
+   (`tests/cbor_differential.rs`): edge
    cases, the vendor samples and the byte strings inside them with 2,000
    mutations each, and 200,000 random inputs. Two divergence checks join
    `port/check.sh`: one level less nesting (`cbor`) and TBB RoTPK index 5
