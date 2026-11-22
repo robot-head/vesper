@@ -29,8 +29,6 @@
 //! per-sample evaluation, which this slice does not provide.
 
 use crate::slab::{DelaySlab, SlabError, SlabRead, TiledSlab};
-#[cfg(not(vesper_port))]
-use std::collections::BTreeSet;
 use std::fmt;
 
 /// Node identifier.
@@ -234,274 +232,94 @@ fn graph_words(nodes: &[NodeSpec]) -> Vec<u64> {
 }
 
 /// Compile `nodes` into a delay-compensated schedule.
-#[cfg(vesper_port)]
+///
+/// The seed runs the Rust compiler (`seed/src/engine/pdc.rs`); this package
+/// calls `vesper/src/pdc.ves`.
 pub fn compile_schedule(nodes: &[NodeSpec]) -> Result<Schedule, PdcError> {
-    let g = graph_words(nodes);
-    let w = crate::port::compile_schedule(&g, nodes.len() as u64);
-    let id = |k: usize| NodeId(w[k] as u32);
-    match w[0] {
-        0 => {}
-        1 => return Err(PdcError::DuplicateNode(id(1))),
-        2 => return Err(PdcError::UnknownNode(id(1))),
-        3 => {
-            return Err(PdcError::CycleWithoutDelay {
-                nodes: (0..w[1] as usize).map(|k| id(2 + k)).collect(),
-            });
+    #[cfg(vesper_port)]
+    {
+        let g = graph_words(nodes);
+        let w = crate::port::compile_schedule(&g, nodes.len() as u64);
+        let id = |k: usize| NodeId(w[k] as u32);
+        match w[0] {
+            0 => {}
+            1 => return Err(PdcError::DuplicateNode(id(1))),
+            2 => return Err(PdcError::UnknownNode(id(1))),
+            3 => {
+                return Err(PdcError::CycleWithoutDelay {
+                    nodes: (0..w[1] as usize).map(|k| id(2 + k)).collect(),
+                });
+            }
+            4 => {
+                return Err(PdcError::ZeroDelayFeedback {
+                    from: id(1),
+                    to: id(2),
+                });
+            }
+            5 => return Err(PdcError::LatencyOverflow(id(1))),
+            code => panic!("the Vesper port of vesper-resonance returned schedule status {code}"),
         }
-        4 => {
-            return Err(PdcError::ZeroDelayFeedback {
-                from: id(1),
-                to: id(2),
-            });
-        }
-        5 => return Err(PdcError::LatencyOverflow(id(1))),
-        code => panic!("the Vesper port of vesper-resonance returned schedule status {code}"),
-    }
-    let buffer_count = w[1] as usize;
-    let (nops, nlines) = (w[2] as usize, w[3] as usize);
-    let mut k = 4;
-    let mut ops = Vec::with_capacity(nops);
-    for _ in 0..nops {
-        let header = &w[k..k + 6];
-        k += 6;
-        let mut inputs = Vec::with_capacity(header[5] as usize);
-        for _ in 0..header[5] {
-            let i = &w[k..k + 7];
-            k += 7;
-            inputs.push(if i[0] == 0 {
-                InputSource::Forward {
-                    from: NodeId(i[1] as u32),
-                    compensation: i[2] as u32,
-                    buffer: i[3] as usize,
-                    line: (i[4] == 1).then_some((i[5] as usize, i[6] as usize)),
-                }
-            } else {
-                InputSource::Feedback {
-                    from: NodeId(i[1] as u32),
-                    delay: i[2] as u32,
-                    line: i[5] as usize,
-                    buffer: i[6] as usize,
-                }
-            });
-        }
-        let nfeeds = w[k] as usize;
-        let feeds = w[k + 1..k + 1 + nfeeds]
-            .iter()
-            .map(|&l| l as usize)
-            .collect();
-        k += 1 + nfeeds;
-        ops.push(ScheduledOp {
-            node: NodeId(header[0] as u32),
-            spec_index: header[1] as usize,
-            inputs,
-            output: header[2] as usize,
-            feeds,
-            arrival_latency: header[3],
-            output_latency: header[4],
-        });
-    }
-    let lines = w[k..k + 3 * nlines]
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|l| LineSpec {
-            from: NodeId(l[0] as u32),
-            delay: l[1] as u32,
-            feedback: l[2] == 1,
-        })
-        .collect();
-    Ok(Schedule {
-        ops,
-        lines,
-        buffer_count,
-    })
-}
-
-/// Compile `nodes` into a delay-compensated schedule.
-#[cfg(not(vesper_port))]
-pub fn compile_schedule(nodes: &[NodeSpec]) -> Result<Schedule, PdcError> {
-    let n = nodes.len();
-    let mut index_of = std::collections::BTreeMap::new();
-    for (i, node) in nodes.iter().enumerate() {
-        if index_of.insert(node.id, i).is_some() {
-            return Err(PdcError::DuplicateNode(node.id));
-        }
-    }
-    let idx = |id: NodeId| index_of.get(&id).copied().ok_or(PdcError::UnknownNode(id));
-
-    // Forward in-degrees and dependents.
-    let mut indegree = vec![0usize; n];
-    let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, node) in nodes.iter().enumerate() {
-        for input in &node.inputs {
-            match *input {
-                Input::Forward(src) => {
-                    let s = idx(src)?;
-                    indegree[i] += 1;
-                    dependents[s].push(i);
-                }
-                Input::Feedback { from, delay } => {
-                    idx(from)?;
-                    if delay == 0 {
-                        return Err(PdcError::ZeroDelayFeedback { from, to: node.id });
+        let buffer_count = w[1] as usize;
+        let (nops, nlines) = (w[2] as usize, w[3] as usize);
+        let mut k = 4;
+        let mut ops = Vec::with_capacity(nops);
+        for _ in 0..nops {
+            let header = &w[k..k + 6];
+            k += 6;
+            let mut inputs = Vec::with_capacity(header[5] as usize);
+            for _ in 0..header[5] {
+                let i = &w[k..k + 7];
+                k += 7;
+                inputs.push(if i[0] == 0 {
+                    InputSource::Forward {
+                        from: NodeId(i[1] as u32),
+                        compensation: i[2] as u32,
+                        buffer: i[3] as usize,
+                        line: (i[4] == 1).then_some((i[5] as usize, i[6] as usize)),
                     }
-                }
+                } else {
+                    InputSource::Feedback {
+                        from: NodeId(i[1] as u32),
+                        delay: i[2] as u32,
+                        line: i[5] as usize,
+                        buffer: i[6] as usize,
+                    }
+                });
             }
+            let nfeeds = w[k] as usize;
+            let feeds = w[k + 1..k + 1 + nfeeds]
+                .iter()
+                .map(|&l| l as usize)
+                .collect();
+            k += 1 + nfeeds;
+            ops.push(ScheduledOp {
+                node: NodeId(header[0] as u32),
+                spec_index: header[1] as usize,
+                inputs,
+                output: header[2] as usize,
+                feeds,
+                arrival_latency: header[3],
+                output_latency: header[4],
+            });
         }
-    }
-
-    // Kahn's algorithm, deterministic: lowest spec index first.
-    let mut ready: BTreeSet<usize> = (0..n).filter(|&i| indegree[i] == 0).collect();
-    let mut order = Vec::with_capacity(n);
-    while let Some(i) = ready.pop_first() {
-        order.push(i);
-        for &d in &dependents[i] {
-            indegree[d] -= 1;
-            if indegree[d] == 0 {
-                ready.insert(d);
-            }
-        }
-    }
-    if order.len() != n {
-        let mut stuck: Vec<NodeId> = (0..n)
-            .filter(|&i| indegree[i] > 0)
-            .map(|i| nodes[i].id)
+        let lines = w[k..k + 3 * nlines]
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|l| LineSpec {
+                from: NodeId(l[0] as u32),
+                delay: l[1] as u32,
+                feedback: l[2] == 1,
+            })
             .collect();
-        stuck.sort();
-        return Err(PdcError::CycleWithoutDelay { nodes: stuck });
-    }
-
-    // Latencies.
-    let mut out_lat = vec![0u64; n];
-    let mut arrival = vec![0u64; n];
-    for &i in &order {
-        let node = &nodes[i];
-        let mut a = 0u64;
-        for input in &node.inputs {
-            if let Input::Forward(src) = *input {
-                a = a.max(out_lat[idx(src)?]);
-            }
-        }
-        arrival[i] = a;
-        out_lat[i] = a
-            .checked_add(u64::from(node.latency))
-            .ok_or(PdcError::LatencyOverflow(node.id))?;
-    }
-
-    // Position of each node in the order, and last forward reader position.
-    let mut pos = vec![0usize; n];
-    for (p, &i) in order.iter().enumerate() {
-        pos[i] = p;
-    }
-    let mut last_read = vec![None::<usize>; n];
-    for (i, node) in nodes.iter().enumerate() {
-        for input in &node.inputs {
-            if let Input::Forward(src) = *input {
-                let s = idx(src)?;
-                last_read[s] = Some(last_read[s].map_or(pos[i], |p: usize| p.max(pos[i])));
-            }
-        }
-    }
-
-    // Delay lines: one per compensated forward input and per feedback input.
-    let mut lines = Vec::new();
-    let mut feeds: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-    // Linear-scan buffer coloring.
-    let mut free: BTreeSet<usize> = BTreeSet::new();
-    let mut buffer_count = 0usize;
-    let mut alloc = |free: &mut BTreeSet<usize>| {
-        free.pop_first().unwrap_or_else(|| {
-            buffer_count += 1;
-            buffer_count - 1
+        Ok(Schedule {
+            ops,
+            lines,
+            buffer_count,
         })
-    };
-    let mut out_buf = vec![usize::MAX; n];
-    // Sources whose last reader is position p.
-    let mut dying_at: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (s, lr) in last_read.iter().enumerate() {
-        if let Some(p) = lr {
-            dying_at[*p].push(s);
-        }
     }
-
-    let mut ops = Vec::with_capacity(n);
-    for (p, &i) in order.iter().enumerate() {
-        let node = &nodes[i];
-        let mut inputs = Vec::with_capacity(node.inputs.len());
-        let mut temps = Vec::new();
-        for input in &node.inputs {
-            match *input {
-                Input::Forward(src) => {
-                    let s = idx(src)?;
-                    let comp64 = arrival[i] - out_lat[s];
-                    let compensation =
-                        u32::try_from(comp64).map_err(|_| PdcError::LatencyOverflow(node.id))?;
-                    let line = if compensation > 0 {
-                        let scratch = alloc(&mut free);
-                        temps.push(scratch);
-                        lines.push(LineSpec {
-                            from: src,
-                            delay: compensation,
-                            feedback: false,
-                        });
-                        Some((lines.len() - 1, scratch))
-                    } else {
-                        None
-                    };
-                    inputs.push(InputSource::Forward {
-                        from: src,
-                        compensation,
-                        buffer: out_buf[s],
-                        line,
-                    });
-                }
-                Input::Feedback { from, delay } => {
-                    let s = idx(from)?;
-                    let scratch = alloc(&mut free);
-                    temps.push(scratch);
-                    lines.push(LineSpec {
-                        from,
-                        delay,
-                        feedback: true,
-                    });
-                    let line = lines.len() - 1;
-                    feeds[s].push(line);
-                    inputs.push(InputSource::Feedback {
-                        from,
-                        delay,
-                        line,
-                        buffer: scratch,
-                    });
-                }
-            }
-        }
-        let output = alloc(&mut free);
-        out_buf[i] = output;
-        for s in std::mem::take(&mut dying_at[p]) {
-            free.insert(out_buf[s]);
-        }
-        for t in temps {
-            free.insert(t);
-        }
-        ops.push(ScheduledOp {
-            node: node.id,
-            spec_index: i,
-            inputs,
-            output,
-            feeds: Vec::new(),
-            arrival_latency: arrival[i],
-            output_latency: out_lat[i],
-        });
-    }
-    for op in &mut ops {
-        op.feeds = std::mem::take(&mut feeds[op.spec_index]);
-    }
-    Ok(Schedule {
-        ops,
-        lines,
-        buffer_count,
-    })
+    #[cfg(not(vesper_port))]
+    crate::engine::pdc::compile_schedule(nodes)
 }
 
 /// Longest delay line the executor allocates (2^24 samples, about 5.8

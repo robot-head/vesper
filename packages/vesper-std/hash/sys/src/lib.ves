@@ -1,32 +1,15 @@
-// @export vsys direct
-// | sys library Blake3 (
-// |     target = "@TARGET@", abi = "@ABI@",
-// |     link = "static", name = "vesper_std_blake3",
-// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
-// | ) {
-// |     linear extern type Hasher;
-// |     fn vesper_blake3_new() -> ForeignVal[Option[Hasher]];
-// |     fn vesper_blake3_new_keyed(nocapture in key: CSlice[u8]) -> ForeignVal[Option[Hasher]];
-// |     fn vesper_blake3_new_derive_key(nocapture in context: CSlice[u8]) -> ForeignVal[Option[Hasher]];
-// |     fn vesper_blake3_update(inout h: Hasher, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
-// |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
-// |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
-// |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
-// |     fn vesper_blake3_derive_key_hash(nocapture in context: CSlice[u8], nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
-// | }
-//
-// @vesper-std/hash-sys: BLAKE3 through the vetted `blake3` crate
+// @vesper-std/hash-sys: BLAKE3 through the official C implementation
 // (self-hosting SH0 lane 5, #1127).
 //
-// The `.vsys` library `Blake3` above is C: the official BLAKE3 C
-// implementation (upstream 1.8.7, SIMD kernels picked at run time) and the
-// glue `c/vesper_blake3.c`, built into the static library
-// `vesper_std_blake3` by crates/vesper-blake3-sys for Cargo and Bazel hosts.
-// A port names that crate with `rust=` on its own `@export vsys` line.
-// Results are `@vesper-std/hash::blake3::Digest` values, equal to those of
-// the portable Vesper implementation.
+// The `.vsys` library `Blake3` (blake3.vsys, named by this package's
+// manifest) is C: the official BLAKE3 C implementation (upstream 1.8.7,
+// SIMD kernels picked at run time) and the glue `c/vesper_blake3.c`, which
+// the manifest's `[package] objects` compile into the static library
+// `vesper_std_blake3` (Rust-exit gap wave 1 lane 12, #1510). Results are
+// `@vesper-std/hash::blake3::Digest` values, equal to those of the portable
+// Vesper implementation.
 //
-// A `Hasher` is a linear handle to the crate's `blake3::Hasher`: create it
+// A `Hasher` is a linear handle to a C `blake3_hasher`: create it
 // with `hasher_new`/`hasher_new_keyed`/`hasher_new_derive_key`, feed it with
 // `update`, read it with `finalize`/`finalize_xof` and release it once with
 // `hasher_free`; the checker makes every path release it exactly once.
@@ -54,7 +37,7 @@ fn zeros(n: u64) -> ChunkSeq[u8] {
     s
 }
 
-// The BLAKE3 digest of `data`, computed by the `blake3` crate.
+// The BLAKE3 digest of `data`, computed by the BLAKE3 C library.
 pub fn hash(in data: Slice[u8]) -> Digest eff [Ffi[Blake3]] {
     let mut out = zeros(32);
     Blake3::vesper_blake3_hash(in data, inout out.as_slice_mut());

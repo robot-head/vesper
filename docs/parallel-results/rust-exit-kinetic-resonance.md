@@ -458,9 +458,28 @@ Base `main` at `cf28be7a`. Target: flip Kinetic modules meeting Rule 8 (`<= 1.50
 - **Frozen engines moved to `seed/src/engine/`**: Moved `separation_rust`, `gjk_cores`, `epa`, `closest_on_simplex`, and helpers out of `crates/vesper-kinetic/src/gjk.rs` into `crates/vesper-kinetic/seed/src/engine/gjk.rs`, and moved `sortable`, `SweepAndPrune::build`/`overlapping_pairs`, `exclusive_scan`, `radix_sort`, and `SortScratch` out of `crates/vesper-kinetic/src/sap.rs` into `crates/vesper-kinetic/seed/src/engine/sap.rs` (790 lines removed / 742 net lines deleted from `crates/vesper-kinetic/src/{gjk.rs,sap.rs}`).
 - **Differential & gate**: Added `gjk_matches_the_rust_build` (501 cases, bit-identical `f64` witness/normal/distance), `sap_matches_the_rust_build` (248 cases), and `lbvh_matches_the_rust_build` (360 cases) to `crates/vesper-kinetic/tests/port_differential.rs` (`0` differences across all 1,709 total differential cases with `coloring`). Added `gjk` and `sap` ABBA entries and `seed/src/engine/{gjk,sap}.rs` to `crates/vesper-kinetic/flip-gate.toml`.
 
+### Resonance: `schedule`, `pid` and `confine` flipped
+
+After `#1516`, `#1526` and `#1527` landed on `main` (`0f5a9eba`), re-measuring the remaining Resonance modules with `RUSTFLAGS="-C target-cpu=native"` (`n = 30`, Windows x86_64 MSVC) cleared three more modules cleanly under 1.50x:
+
+| Workload | Ratio (vesper / rust) | 95% interval | Previous | Decision |
+|---|--:|---|--:|---|
+| `schedule` (`pdc::compile_schedule`) | **1.02x** | `[0.94x, 1.13x]` | 1.50x `[1.45x, 1.53x]` | **Flipped** |
+| `pid` (`kernels::PidController`) | **1.27x** | `[1.17x, 1.30x]` | — | **Flipped** |
+| `confine` (`confine::verify_realtime`) | **1.35x** | `[1.30x, 1.37x]` | 1.66x | **Flipped** |
+| `slab` (`slab::DelaySlab`) | 1.89x | `[1.79x, 2.00x]` | 2.1x | Stays above bar |
+| `events` | 8.00x | `[7.76x, 8.98x]` | 5.6x | Stays above bar |
+
+Their `#[cfg(not(vesper_port))]` Rust implementations moved into `crates/vesper-resonance/seed/src/engine/` (`confine.rs`, `pdc.rs`, `kernels.rs`) so `vesper-resonance` runs only `@vesper/resonance` for all five flipped paths while `vesper-resonance-seed` stays frozen for the compiler until Stage 2. `tests/port_differential.rs` keeps 0 differences across `PidController` (50,000 steps + fault cases), `compile_schedule` (400 randomized graphs) and `verify_realtime` (randomized graphs and indirect targets).
+
 ## What is left
 
-- **Resonance:** `schedule`, `pid`, and `confine` open in PR #1554 (`slab`, `events`, `simd`, `clif`, `spsc` remain).
+- **Resonance:** slab (1.89x) and events (8.00x) stay above the bar until codegen removes their hot-path overhead (gap 7). The Rust
+  `CompiledGraph` over Rust `Box<dyn DspProcessor>` trait objects, the
+  Cranelift JIT (`clif.rs`, which goes through `@vesper/cranelift` per the
+  plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
+  ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
+  are bound by gaps 2 and 6.
 - **Kinetic:** get isolated `lbvh` (now `1.57x`), `fastmath`, `morton` and `crmath` under `1.50x` and flip them, then port `world`/`tile`, `rigid` and `rigid/**`, `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the

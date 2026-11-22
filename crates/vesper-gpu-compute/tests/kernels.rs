@@ -266,6 +266,17 @@ fn kernel_arguments_are_validated() {
         k.rms_norm(&mut rec, &big, &big, &big, 1, 8, 0.0),
         Err(GpuError::Shape("rms_norm epsilon"))
     );
+    // A shape error wins over an ownership error, as in the Rust drivers.
+    let other = Context::new().unwrap();
+    let foreign = other.buffer(256).unwrap();
+    assert_eq!(
+        k.rms_norm(&mut rec, &foreign, &big, &big, 1, 8, 0.0),
+        Err(GpuError::Shape("rms_norm epsilon"))
+    );
+    assert_eq!(
+        k.rms_norm(&mut rec, &foreign, &big, &big, 1, 8, 1e-5),
+        Err(GpuError::ForeignObject)
+    );
     assert!(k.rope(&mut rec, &big, &big, 6, 4, 0).is_err());
     assert!(k.rope(&mut rec, &big, &big, 8, 3, 0).is_err());
     assert!(k.rope(&mut rec, &big, &small, 64, 64, 0).is_err());

@@ -582,11 +582,22 @@ pub fn link(
 
 /// Assemble a package's assembly source into a COFF object for
 /// `x86_64-pc-windows-msvc` (`[package] objects`, manuscript §16.3): MASM
-/// `.asm` with Visual Studio's `ml64.exe` (else `llvm-ml` on `PATH`), and
-/// GNU `.s` or `.S` with `clang` on `PATH`.
+/// `.asm` with Visual Studio's `ml64.exe` (else `llvm-ml` on `PATH`), GNU
+/// `.s` or `.S` with `clang` on `PATH`, and C (`.c`) with Visual Studio's
+/// `cl.exe` (else `clang`).
 pub fn assemble(source: &Path, output: &Path) -> Result<(), String> {
     let masm = source.extension().is_some_and(|e| e == "asm");
-    let mut command = if masm {
+    let c = source.extension().is_some_and(|e| e == "c");
+    let mut command = if let Some(mut command) = c.then(find_cl).flatten() {
+        let mut out = OsString::from("/Fo");
+        out.push(output.as_os_str());
+        // Optimized, with the static C runtime the executable links.
+        command
+            .args(["/nologo", "/c", "/O2", "/MT"])
+            .arg(out)
+            .arg(source);
+        command
+    } else if masm {
         let mut command = match find_ml64() {
             Some(command) => command,
             None => {
@@ -609,14 +620,17 @@ pub fn assemble(source: &Path, output: &Path) -> Result<(), String> {
         let clang = ["clang", "clang.exe"]
             .iter()
             .find_map(|n| find_on_path(n))
-            .ok_or("no assembler for .s or .S found: put clang on PATH, or write MASM (.asm)")?;
+            .ok_or(if c {
+                "no C compiler found: install the Visual Studio C++ build tools (x64) or put clang on PATH"
+            } else {
+                "no assembler for .s or .S found: put clang on PATH, or write MASM (.asm)"
+            })?;
         let mut command = Command::new(clang);
-        command
-            .arg(format!("--target={MSVC_TARGET}"))
-            .arg("-c")
-            .arg(source)
-            .arg("-o")
-            .arg(output);
+        command.arg(format!("--target={MSVC_TARGET}"));
+        if c {
+            command.arg("-O2");
+        }
+        command.arg("-c").arg(source).arg("-o").arg(output);
         command
     };
     let shown = PathBuf::from(command.get_program()).display().to_string();
@@ -642,6 +656,16 @@ fn find_ml64() -> Option<Command> {
 
 #[cfg(not(windows))]
 fn find_ml64() -> Option<Command> {
+    None
+}
+
+#[cfg(windows)]
+fn find_cl() -> Option<Command> {
+    find_msvc_tools::find_tool(MSVC_TARGET, "cl.exe").map(|t| t.to_command())
+}
+
+#[cfg(not(windows))]
+fn find_cl() -> Option<Command> {
     None
 }
 

@@ -18,10 +18,6 @@ mod frontier;
 /// kernels, the frontier, the accumulator and the CDC decoder run.
 mod port;
 mod zset;
-// @vesper-std/hash-sys's `.vsys` library `Blake3` (the official BLAKE3 C
-// implementation, built by vesper-blake3-sys), which the port imports for
-// the input log's and the checkpoints' checksums.
-use vesper_blake3_sys as blake3_shim;
 
 pub use circuit::{
     BINS, CdcHeader, CdcPolicy, CheckpointLimits, CheckpointMode, CheckpointPhase, Circuit,

@@ -529,102 +529,63 @@ pub enum PidFault {
 }
 
 /// A 1 kHz PID torque controller with clamping and anti-windup.
+///
+/// The seed runs the Rust engine (`seed/src/engine/kernels.rs`); this package
+/// calls `vesper/src/kernels.ves`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PidController {
-    gains: PidGains,
-    integral: f32,
-    prev_measurement: Option<f32>,
+    pub(crate) gains: PidGains,
+    pub(crate) integral: f32,
+    pub(crate) prev_measurement: Option<f32>,
 }
 
 impl PidController {
     /// A controller at rest.
-    #[cfg(vesper_port)]
     pub fn new(gains: PidGains) -> Result<Self, PidFault> {
-        use crate::port::PidCheckError as E;
-        match crate::port::pid_check(&gains.words()) {
-            Ok(()) => Ok(PidController {
-                gains,
-                integral: 0.0,
-                prev_measurement: None,
-            }),
-            Err(E::PidFault(f)) => Err(f.into()),
-            Err(e) => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
-        }
-    }
-
-    /// One control period: torque command for `setpoint` given `measurement`.
-    #[cfg(vesper_port)]
-    pub fn step(&mut self, setpoint: f32, measurement: f32) -> Result<f32, PidFault> {
-        use crate::port::PidStepError as E;
-        let mut state = [
-            self.integral.to_bits(),
-            u32::from(self.prev_measurement.is_some()),
-            self.prev_measurement.unwrap_or(0.0).to_bits(),
-        ];
-        match crate::port::pid_step(
-            &self.gains.words(),
-            &mut state,
-            setpoint.to_bits(),
-            measurement.to_bits(),
-        ) {
-            Ok(u) => {
-                self.integral = f32::from_bits(state[0]);
-                self.prev_measurement = Some(f32::from_bits(state[2]));
-                Ok(f32::from_bits(u))
-            }
-            Err(E::PidFault(f)) => Err(f.into()),
-            Err(e) => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
-        }
-    }
-
-    /// A controller at rest.
-    #[cfg(not(vesper_port))]
-    pub fn new(gains: PidGains) -> Result<Self, PidFault> {
-        let all = [
-            gains.kp,
-            gains.ki,
-            gains.kd,
-            gains.dt,
-            gains.torque_limit,
-            gains.integral_limit,
-        ];
-        if all.iter().any(|g| !g.is_finite() || *g < 0.0) || gains.dt <= 0.0 {
-            return Err(PidFault::BadGains);
-        }
-        Ok(PidController {
-            gains,
-            integral: 0.0,
-            prev_measurement: None,
-        })
-    }
-
-    /// One control period: torque command for `setpoint` given `measurement`.
-    #[cfg(not(vesper_port))]
-    pub fn step(&mut self, setpoint: f32, measurement: f32) -> Result<f32, PidFault> {
-        if !setpoint.is_finite() || !measurement.is_finite() {
-            return Err(PidFault::NonFiniteInput);
-        }
-        let g = self.gains;
-        // Compute every intermediate first; commit state only if all are
-        // finite, so an overflow (e.g. `f32::MAX - -f32::MAX`) is a fault and
-        // never poisons the integrator or yields an unclamped NaN torque.
-        let error = setpoint - measurement;
-        let integral =
-            (self.integral + g.ki * error * g.dt).clamp(-g.integral_limit, g.integral_limit);
-        let derivative = match self.prev_measurement {
-            Some(prev) => -(measurement - prev) / g.dt,
-            None => 0.0,
-        };
-        let u = g.kp * error + integral + g.kd * derivative;
-        if ![error, integral, derivative, u]
-            .iter()
-            .all(|x| x.is_finite())
+        #[cfg(vesper_port)]
         {
-            return Err(PidFault::NonFiniteIntermediate);
+            use crate::port::PidCheckError as E;
+            match crate::port::pid_check(&gains.words()) {
+                Ok(()) => Ok(PidController {
+                    gains,
+                    integral: 0.0,
+                    prev_measurement: None,
+                }),
+                Err(E::PidFault(f)) => Err(f.into()),
+                Err(e) => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
+            }
         }
-        self.integral = integral;
-        self.prev_measurement = Some(measurement);
-        Ok(u.clamp(-g.torque_limit, g.torque_limit))
+        #[cfg(not(vesper_port))]
+        crate::engine::kernels::pid_new(gains)
+    }
+
+    /// One control period: torque command for `setpoint` given `measurement`.
+    pub fn step(&mut self, setpoint: f32, measurement: f32) -> Result<f32, PidFault> {
+        #[cfg(vesper_port)]
+        {
+            use crate::port::PidStepError as E;
+            let mut state = [
+                self.integral.to_bits(),
+                u32::from(self.prev_measurement.is_some()),
+                self.prev_measurement.unwrap_or(0.0).to_bits(),
+            ];
+            match crate::port::pid_step(
+                &self.gains.words(),
+                &mut state,
+                setpoint.to_bits(),
+                measurement.to_bits(),
+            ) {
+                Ok(u) => {
+                    self.integral = f32::from_bits(state[0]);
+                    self.prev_measurement = Some(f32::from_bits(state[2]));
+                    Ok(f32::from_bits(u))
+                }
+                Err(E::PidFault(f)) => Err(f.into()),
+                Err(e) => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
+            }
+        }
+        #[cfg(not(vesper_port))]
+        crate::engine::kernels::pid_step(self, setpoint, measurement)
     }
 
     /// Integrator state.

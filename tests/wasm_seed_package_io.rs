@@ -313,6 +313,9 @@ fn main() -> u64 eff [Ffi[StdFs]] {
     acc = mix(acc, err);
     acc = mix(acc, widen_u64(StdFs::vstd_fs_sync_dir(in d1.as_slice(), inout err)));
     acc = mix(acc, err);
+    let d2 = path("d2");
+    acc = mix(acc, widen_u64(StdFs::vstd_fs_sync_dir(in d2.as_slice(), inout err)));
+    acc = mix(acc, err);
     acc = mix(acc, StdFs::vstd_fs_parent_len(in "x/yz/w.txt".as_bytes()));
     acc = mix(acc, StdFs::vstd_fs_parent_len(in "plain".as_bytes()));
     acc
@@ -409,6 +412,43 @@ fn relative_paths_use_the_dot_preopen() {
     let want = mix(mix(mix(mix(0, put), get), 1 | (2 << 32)), 1 | (2 << 32));
     assert_eq!(got, want);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn too_many_preopens_fail_every_path() {
+    // A partial preopen table could resolve a path under the wrong
+    // directory, so with more preopens than it holds every path fails
+    // with Unsupported (ENOTSUP).
+    let src = format!(
+        "{}\n{}",
+        PRELUDE.replace("BASE/", ""),
+        r#"fn main() -> u64 eff [Ffi[StdFs]] {
+    let mut err: u64 = 0;
+    match StdFs::vstd_fs_open(in "/p16/x.txt".as_bytes(), 1, inout err) {
+        Option::Some(f) => { StdFs::vstd_fs_close(f); },
+        Option::None => {},
+    }
+    err
+}"#
+    );
+    let c = check(&src);
+    let root = fresh("many");
+    let dirs: Vec<_> = (0..17)
+        .map(|i| {
+            let d = root.join(format!("p{i}"));
+            std::fs::create_dir_all(&d).expect("preopen dir");
+            (d, format!("/p{i}"))
+        })
+        .collect();
+    let component = port(&c, &options(false)).expect("port");
+    let ctx = Ctx {
+        dirs,
+        ..Ctx::default()
+    };
+    let got = run(&component, &ctx).expect("run");
+    assert_eq!(got, 11 | (95 << 32));
+    assert!(!root.join("p16/x.txt").exists());
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

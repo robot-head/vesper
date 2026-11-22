@@ -4,8 +4,9 @@
 // Modules:
 // - `blake3`: BLAKE3 in portable Vesper (`blake3`, `blake3_keyed`,
 //   `blake3_derive_key`, the incremental `Blake3` with extendable output,
-//   and the copy `Digest`). Code linked into a Rust host calls the vetted
-//   `blake3` crate through `@vesper-std/hash-sys` instead (`sys/`).
+//   and the copy `Digest`). Executables and code linked into a Rust host
+//   can call the official C implementation through `@vesper-std/hash-sys`
+//   instead (`sys/`).
 // - `fast`: non-cryptographic hashes for tables and caches: FNV-1a (32 and
 //   64 bit), XXH64, and the 64-bit finalizer `mix64` and `hash_pair`.
 //

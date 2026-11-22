@@ -36,6 +36,7 @@ const C_STR: u8 = 7;
 const C_BOX: u8 = 8;
 const C_NAMED: u8 = 9;
 const C_EXTERN: u8 = 10;
+const C_CALLBACK: u8 = 11;
 
 // ABI type kinds (words.rs `K_*`).
 const K_SCALAR: u8 = 0;
@@ -47,6 +48,7 @@ const K_BOX: u8 = 5;
 const K_STR: u8 = 6;
 const K_OBJECT: u8 = 7;
 const K_EXTERN: u8 = 8;
+const K_CALLBACK: u8 = 9;
 
 const M_COPY: u8 = 0;
 const M_LINEAR: u8 = 2;
@@ -744,7 +746,7 @@ impl Planner {
             || n.kind == K_OBJECT {
             return true;
         }
-        if n.kind == K_SCALAR || n.kind == K_EXTERN {
+        if n.kind == K_SCALAR || n.kind == K_EXTERN || n.kind == K_CALLBACK {
             return false;
         }
         if n.kind == K_NAMED && self.handle_type(n.name) {
@@ -1021,6 +1023,10 @@ impl Planner {
     fn ty(inout self, function: u32, t: u32) -> u32 {
         let nd = self.node(t);
         let c = nd.class;
+        // A `.vsys` callback type is a copy handle: an opaque word.
+        if c == C_CALLBACK {
+            return self.leaf(K_CALLBACK, nd.name);
+        }
         if c == C_EXTERN {
             if self.v4 {
                 return self.leaf(K_EXTERN, nd.name);
@@ -1933,7 +1939,7 @@ fn put_flag(inout out: ChunkSeq[u64], b: bool) {
 fn put_type(inout out: ChunkSeq[u64], in p: Planner, a: u32) {
     let n = p.anode(a);
     out.push(widen_u64(n.kind));
-    if n.kind == K_SCALAR || n.kind == K_OBJECT || n.kind == K_EXTERN {
+    if n.kind == K_SCALAR || n.kind == K_OBJECT || n.kind == K_EXTERN || n.kind == K_CALLBACK {
         put_str(inout out, in p.names, n.name);
         return;
     }
