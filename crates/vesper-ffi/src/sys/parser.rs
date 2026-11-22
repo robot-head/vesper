@@ -545,6 +545,31 @@ impl Parser {
                 continue;
             }
             let span_start = self.token().span.start;
+            // `nocapture f: Cb` / `retain f: Cb`: a function handed to C.
+            if (self.is_word("nocapture") || self.is_word("retain"))
+                && self.peek_punct(2) == Some(b':')
+                && !matches!(self.peek_word(1), Some("in" | "out" | "inout"))
+            {
+                let retain = self.is_word("retain");
+                self.bump();
+                let name = self.word()?;
+                self.expect(b':')?;
+                let span = self.token().span.clone();
+                let callback = self.word()?;
+                parameters.push((
+                    name,
+                    RawParameterType::Function {
+                        callback,
+                        span,
+                        retain,
+                    },
+                ));
+                if !self.eat(b',') {
+                    self.expect(b')')?;
+                    break;
+                }
+                continue;
+            }
             let nocapture = if self.is_word("nocapture") {
                 self.bump();
                 true
@@ -882,6 +907,13 @@ enum RawParameterType {
     },
     /// `nocapture in s: CStr`.
     CStr,
+    /// `nocapture f: Cb` or `retain f: Cb`: a Vesper function as a pointer
+    /// of callback type `Cb`.
+    Function {
+        callback: String,
+        span: Range<usize>,
+        retain: bool,
+    },
     /// `in`/`inout b: Pinned[T]`.
     Pinned {
         element: Scalar,
@@ -1400,6 +1432,41 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     nullable,
                 },
                 RawParameterType::CStr => ParameterType::CStr,
+                RawParameterType::Function {
+                    callback,
+                    span,
+                    retain,
+                } => match extern_types
+                    .iter()
+                    .find(|t| t.name() == callback && t.linearity() == Linearity::Callback)
+                {
+                    Some(t) if !f.indirect => ParameterType::Function {
+                        callback: t.clone(),
+                        retain,
+                    },
+                    Some(_) => {
+                        return Err(Error::new(
+                            ErrorKind::Unsupported,
+                            span,
+                            format!(
+                                "callback `{}` cannot take a function `{name}`; declare it on a `fn`",
+                                f.symbol
+                            ),
+                        ));
+                    }
+                    None => {
+                        // Unsupported, as before callback parameters: a
+                        // pointer is written `nocapture in`, `out` or `inout`.
+                        return Err(Error::new(
+                            ErrorKind::Unsupported,
+                            span,
+                            format!(
+                                "`{} {name}: {callback}` needs `{callback}` to be a callback type; a pointer parameter is `nocapture` followed by in, out or inout",
+                                if retain { "retain" } else { "nocapture" }
+                            ),
+                        ));
+                    }
+                },
                 RawParameterType::Pinned { element, access } => {
                     ParameterType::Pinned { element, access }
                 }

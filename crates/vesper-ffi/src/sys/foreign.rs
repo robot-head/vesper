@@ -334,7 +334,9 @@ impl FunctionDescriptor {
                     raw.push((AbiType::Integer(Scalar::Usize), length));
                 }
                 (
-                    ParameterType::Pointer { .. } | ParameterType::CStr,
+                    ParameterType::Pointer { .. }
+                    | ParameterType::CStr
+                    | ParameterType::Function { .. },
                     RawArgument::Pointer { address },
                 )
                 | (ParameterType::Handle { .. }, RawArgument::Bits(address)) => {

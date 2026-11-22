@@ -126,6 +126,13 @@ impl EvalHost {
                 ParameterType::Value(_)
                 | ParameterType::Handle { .. }
                 | ParameterType::Pinned { .. } => Slot::None,
+                // C would need a pointer that re-enters this evaluator.
+                ParameterType::Function { .. } => {
+                    return Err(format!(
+                        "{}: a Vesper function handed to C runs in compiled code (the JIT or an object), not the evaluator",
+                        call.symbol
+                    ));
+                }
                 ParameterType::CStr => {
                     let bytes = elements(v)?
                         .iter()
