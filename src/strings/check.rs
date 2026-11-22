@@ -259,12 +259,11 @@ impl Checker<'_> {
         let Some(source) = view_source(value).and_then(Place::from_expr) else {
             return;
         };
-        if env
-            .bindings
-            .get(&source.root)
-            .is_some_and(|b| matches!(b.pass, Pass::Sink | Pass::Inout))
+        if let Some(b) = env.bindings.get(&source.root)
+            && matches!(b.pass, Pass::Sink | Pass::Inout)
         {
-            self.view_sources.push((source, name.to_string(), span));
+            let at = b.span.clone();
+            self.view_sources.push((source, at, name.to_string(), span));
         }
     }
 
@@ -278,7 +277,10 @@ impl Checker<'_> {
         write: bool,
     ) -> bool {
         let mut ok = true;
-        for (source, view, at) in self.view_sources.clone() {
+        // The accessed binding: a nested binding that shadows the source's
+        // name is another place.
+        let accessed = env.bindings.get(&p.root).map(|b| b.span.clone());
+        for (source, binding, view, at) in self.view_sources.clone() {
             // The view is live while its binding is in scope, also while a
             // nested block, loop or match arm shadows it (it comes back
             // when the shadow ends): conservatively, a later binding of
@@ -291,7 +293,7 @@ impl Checker<'_> {
                     .shadowed
                     .iter()
                     .any(|frame| frame.get(&view).is_some_and(|b| b.span == at));
-            if live && source.overlaps(p) {
+            if live && accessed.as_ref() == Some(&binding) && source.overlaps(p) {
                 ok = false;
                 self.error(
                     "E1531",

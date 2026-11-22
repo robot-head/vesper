@@ -1075,10 +1075,12 @@ struct Checker<'a> {
     /// Places an enclosing `for` loop iterates: its body may read them but
     /// not write, lend `inout` or move them ([`for_sequences`]).
     loop_borrows: Vec<(Place, Span)>,
-    /// Bound views of immutable owned bindings: the viewed place, the view
-    /// binding's name and declaration span. While the view is in scope the
-    /// place cannot be moved (`E1531`).
-    view_sources: Vec<(Place, String, Span)>,
+    /// Bound views of owned or `inout` places: the viewed place, the span
+    /// of its binding (so a nested binding that shadows the name is not
+    /// frozen), the view binding's name and declaration span. While the
+    /// view is in scope the place cannot be written, lent `inout` or moved
+    /// (`E1531`).
+    view_sources: Vec<(Place, Span, String, Span)>,
     /// Result-range summaries of called functions ([`call_facts`]).
     result_ranges: std::cell::RefCell<call_facts::ResultRanges>,
     /// Nonzero while a shift amount or a divisor is checked: its `+`, `-`

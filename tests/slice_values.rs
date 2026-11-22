@@ -304,6 +304,13 @@ fn a_bound_view_freezes_overlapping_places() {
 }
 
 #[test]
+fn a_shadowing_binding_is_not_frozen() {
+    accepted(
+        "fn f() -> u64 { let mut xs: ChunkSeq[u8] = ChunkSeq::new(); let v = xs.as_slice(); let n = { let mut xs: u64 = 0; xs = 1; xs }; wrapping_add(n, v.len()) }\nfn main() -> u64 { f() }",
+    );
+}
+
+#[test]
 fn a_loop_over_a_view_of_a_changing_place_keeps_its_loan() {
     refused(
         "fn f() { let mut xs: ChunkSeq[u64] = ChunkSeq::new(); xs.push(1); for x in xs.as_slice() { xs.push(x); } }",
