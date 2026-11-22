@@ -17,7 +17,8 @@ use @vesper/check-data::names::{
 use @vesper/check-data::types::{
     Types,
     Vars,
-    substitute
+    substitute,
+    TyKind
 };
 use @vesper/check-data::world::{
     Adt,
@@ -30,8 +31,6 @@ use self::relations::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
 
 // Pattern kinds.
 pub const P_WILD: u8 = 0;
@@ -168,10 +167,10 @@ fn contains(in s: ChunkSeq[u32], x: u32) -> bool {
 // `check::is_uninhabited`; `seen` holds the ADT names being expanded.
 pub fn is_uninhabited(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSeq[u32]) -> bool {
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.name == wd.k.never {
+    if n.kind == TyKind::Named && n.name == wd.k.never {
         return true;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             let x = item(in t, add(w(n.a), i));
             if is_uninhabited(inout t, in wd, x, inout seen) {
@@ -180,7 +179,7 @@ pub fn is_uninhabited(inout t: Types, in wd: World, ty: u32, inout seen: ChunkSe
         }
         return false;
     }
-    if n.kind != K_NAMED {
+    if n.kind != TyKind::Named {
         return false;
     }
     let ai = wd.lookup(n.name);
@@ -319,10 +318,10 @@ pub fn matrix_covered(
     let n0 = t.node(t0);
     let mut cs = ctors_new();
     let mut known = true;
-    if n0.kind == K_NAMED && n0.name == ps.s_bool {
+    if n0.kind == TyKind::Named && n0.name == ps.s_bool {
         cs.close(ps.s_true);
         cs.close(ps.s_false);
-    } else if n0.kind == K_NAMED {
+    } else if n0.kind == TyKind::Named {
         let ai = wd.lookup(n0.name);
         if ai == NONE32 {
             known = false;
@@ -340,7 +339,7 @@ pub fn matrix_covered(
                 cs.close(v.name);
             }
         }
-    } else if n0.kind == K_TUPLE {
+    } else if n0.kind == TyKind::Tuple {
         for i in 0..w(n0.n) {
             let s = ps.index_name(inout names, i);
             cs.fnames.push(s);

@@ -6,7 +6,9 @@
 // (`Graph`, `scc`).
 
 use @vesper/check-data::types::{
-    Types
+    Types,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::util::{
     add,
@@ -55,10 +57,6 @@ use self::ty::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const P_INOUT: u8 = 1;
 
 // The ADT graph: nodes are ADT indices in name order (Option, Result and,
 // with fip active, Box left out); out-edges in first-insertion order.
@@ -81,16 +79,16 @@ fn excluded(in b: B, in wd: World, a: Adt) -> bool {
 // `dependencies`/`deps`: the named types of `ty`, in preorder.
 fn deps(in t: Types, ty: u32, inout out: ChunkSeq[u32]) {
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         out.push(n.name);
         for i in 0..w(n.n) {
             deps(in t, t.arg(ty, i), inout out);
         }
-    } else if n.kind == K_TUPLE {
+    } else if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             deps(in t, t.arg(ty, i), inout out);
         }
-    } else if n.kind == K_FN {
+    } else if n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             deps(in t, t.arg(ty, i), inout out);
         }
@@ -531,7 +529,7 @@ pub fn effect_classes(inout b: B, in t: Types, in wd: World, in fx: Effects) -> 
             ty_check(inout b, in t, op.result, wd.box_active);
             for pi in 0..w(op.pn) {
                 let p = fx.param(op, pi);
-                if p.pass == P_INOUT {
+                if p.pass == TyPass::Inout {
                     ty_check(inout b, in t, p.ty, wd.box_active);
                 }
             }
@@ -566,7 +564,7 @@ pub fn effect_classes(inout b: B, in t: Types, in wd: World, in fx: Effects) -> 
             b.arg();
             let mut results: u64 = 1;
             for pi in 0..w(op.pn) {
-                if fx.param(op, pi).pass == P_INOUT {
+                if fx.param(op, pi).pass == TyPass::Inout {
                     results = wrapping_add(results, 1);
                 }
             }
@@ -577,7 +575,7 @@ pub fn effect_classes(inout b: B, in t: Types, in wd: World, in fx: Effects) -> 
             emit_ty(inout b, in t, op.result, wd.box_active);
             for pi in 0..w(op.pn) {
                 let p = fx.param(op, pi);
-                if p.pass == P_INOUT {
+                if p.pass == TyPass::Inout {
                     emit_ty(inout b, in t, p.ty, wd.box_active);
                 }
             }

@@ -54,20 +54,14 @@ use @vesper/check-data::types::{
     RowNode,
     TypeNode,
     Types,
-    debug_type
+    debug_type,
+    TyKind
 };
 use @vesper/check-data::input::{
     Ctx,
     Reader,
     read_ctx
 };
-
-// check-data's type kinds.
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
 
 // Patterns nested deeper than this are corrupt input.
 const MAX_DEPTH: u64 = 512;
@@ -883,20 +877,20 @@ fn put_types(inout o: ChunkSeq[u64], in t: Types) {
     for id in 0..n {
         let ty = n32(id);
         let nd = t.node(ty);
-        if nd.kind == K_LIT {
+        if nd.kind == TyKind::Lit {
             o.push(0);
             o.push(widen_u64(nd.mode));
             o.push(wrapping_u64(nd.lit));
-        } else if nd.kind == K_NAMED || nd.kind == K_TUPLE {
+        } else if nd.kind == TyKind::Named || nd.kind == TyKind::Tuple {
             o.push(widen_u64(nd.kind));
-            if nd.kind == K_NAMED {
+            if nd.kind == TyKind::Named {
                 o.push(w(nd.name));
             }
             o.push(w(nd.n));
             for i in 0..w(nd.n) {
                 o.push(w(t.arg(ty, i)));
             }
-        } else if nd.kind == K_FN {
+        } else if nd.kind == TyKind::Fn {
             o.push(3);
             o.push(w(nd.n));
             for i in 0..w(nd.n) {
@@ -906,7 +900,7 @@ fn put_types(inout o: ChunkSeq[u64], in t: Types) {
             o.push(w(nd.r));
             put_row(inout o, in t, nd.r2);
             o.push(widen_u64(nd.mode));
-        } else if nd.kind == K_ROW {
+        } else if nd.kind == TyKind::Row {
             o.push(4);
             put_row(inout o, in t, nd.r2);
         } else {

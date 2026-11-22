@@ -20,19 +20,12 @@ use self::types::{
     Types,
     Vars,
     substitute,
-    vars_new
+    vars_new,
+    TyKind,
+    TyMode
 };
 
 const NONE32: u32 = 4294967295;
-const K_FN: u8 = 3;
-const K_INFER: u8 = 5;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_ROW: u8 = 4;
-const K_TUPLE: u8 = 2;
-const M_AFFINE: u8 = 1;
-const M_COPY: u8 = 0;
-const M_LINEAR: u8 = 2;
 
 pub copy struct Adt {
     name: u32,
@@ -424,13 +417,13 @@ impl World {
 // `vector::layout_words`: words of a valid `Vec[e, N]` / `Mask[e, N]`, or 0.
 pub fn vector_words(in t: Types, in names: Names, k: Known, ty: u32) -> u32 {
     let n = t.node(ty);
-    if n.kind != K_NAMED || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
+    if n.kind != TyKind::Named || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
         return 0;
     }
     let elem = t.arg(ty, 0);
     let count = t.arg(ty, 1);
     let c = t.node(count);
-    if c.kind != K_NAMED || c.n != 0 {
+    if c.kind != TyKind::Named || c.n != 0 {
         return 0;
     }
     let size = names.size(c.name);
@@ -449,7 +442,7 @@ pub fn vector_words(in t: Types, in names: Names, k: Known, ty: u32) -> u32 {
         }
     }
     let e = t.node(elem);
-    if e.kind != K_NAMED || e.n != 0 {
+    if e.kind != TyKind::Named || e.n != 0 {
         return 0;
     }
     let bits = wrapping_mul(w(k.elem_bits(e.name)), lanes);
@@ -540,11 +533,11 @@ fn mode_visit(
 ) -> u8 {
     let n = t.node(ty);
     let k = wd.k;
-    if n.kind == K_INFER || n.kind == K_LIT || n.kind == K_ROW {
-        return M_COPY;
+    if n.kind == TyKind::Infer || n.kind == TyKind::Lit || n.kind == TyKind::Row {
+        return TyMode::Copy;
     }
-    if n.kind == K_TUPLE {
-        let mut m = M_COPY;
+    if n.kind == TyKind::Tuple {
+        let mut m = TyMode::Copy;
         for i in 0..w(n.n) {
             let x = mode_visit(
                 inout t,
@@ -559,7 +552,7 @@ fn mode_visit(
         }
         return m;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         return n.mode;
     }
     let b = bounds.get(n.name);
@@ -567,17 +560,17 @@ fn mode_visit(
         return b;
     }
     if vector_words(in t, in names, k, ty) != 0 {
-        return M_COPY;
+        return TyMode::Copy;
     }
     if k.is_scalar(n.name) {
-        return M_COPY;
+        return TyMode::Copy;
     }
     if n.name == k.string || n.name == k.str_ || n.name == k.dyn_ {
-        return M_AFFINE;
+        return TyMode::Affine;
     }
     if n.name == k.region_box {
         if n.n < 2 {
-            return M_LINEAR;
+            return TyMode::Linear;
         }
         return mode_visit(
             inout t,
@@ -591,7 +584,7 @@ fn mode_visit(
     }
     if n.name == k.chunk_seq || n.name == k.slice || n.name == k.tiled_seq {
         if n.n == 0 {
-            return M_AFFINE;
+            return TyMode::Affine;
         }
         let x = mode_visit(
             inout t,
@@ -602,11 +595,11 @@ fn mode_visit(
             inout seen_names,
             inout seen_modes
         );
-        return join(x, M_AFFINE);
+        return join(x, TyMode::Affine);
     }
     let ai = wd.lookup(n.name);
     if ai == NO_ADT {
-        return M_LINEAR;
+        return TyMode::Linear;
     }
     let a = wd.adt(ai);
     let mut arg_modes: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -672,7 +665,7 @@ pub fn field_step(inout t: Types, inout names: Names, in wd: World, ty: u32, nam
     -> u32 {
     let n = t.node(ty);
     let k = wd.k;
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if seg && (n.name == k.chunk_seq || n.name == k.slice) {
             if n.n == 0 {
                 return NONE32;
@@ -690,7 +683,7 @@ pub fn field_step(inout t: Types, inout names: Names, in wd: World, ty: u32, nam
             }
             let elem = t.arg(ty, 0);
             let e = t.node(elem);
-            if e.kind != K_NAMED {
+            if e.kind != TyKind::Named {
                 return NONE32;
             }
             let ai = wd.lookup(e.name);
@@ -723,7 +716,7 @@ pub fn field_step(inout t: Types, inout names: Names, in wd: World, ty: u32, nam
         let vars = wd.vars_of(in t, a, ty);
         return substitute(inout t, wd.field(w(fi)).ty, in vars);
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         // `name.parse::<usize>()`: decimal digits only.
         let size = names.size(name);
         if size == 0 {

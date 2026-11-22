@@ -33,7 +33,8 @@ use @vesper/check-data::names::{
 };
 use @vesper/check-data::types::{
     Types,
-    default_type
+    default_type,
+    TyKind
 };
 use @vesper/check-data::world::{
     set_by_symbol
@@ -57,29 +58,14 @@ use @vesper/place-ir::{
 use self::blocks::{
     block_layout
 };
+use @vesper/place-ir::codes::{
+    Lit,
+    Op,
+    Tag,
+    Term
+};
 
 const NONE32: u32 = 4294967295;
-
-// check-data's type kinds.
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_FN: u8 = 3;
-
-// Operand tags and opcodes of @vesper/place-ir.
-const T_NAME: u8 = 1;
-const T_TYPE: u8 = 3;
-const T_VALUE: u8 = 6;
-const T_BLOCK: u8 = 7;
-const OP_CONST: u8 = 0;
-const OP_UNIT: u8 = 1;
-const OP_UNARY: u8 = 5;
-const OP_BINARY: u8 = 6;
-const OP_LOOP: u8 = 20;
-const OP_EXIT: u8 = 21;
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
 
 // The `scalar` hook's requests (@vesper/codegen-scalar-emit keeps the
 // same numbers): the plan names one per instruction it emits.
@@ -117,11 +103,6 @@ const CC_SLE: u64 = 4;
 const CC_SGT: u64 = 5;
 const CC_SGE: u64 = 6;
 const CC_UNSIGNED: u64 = 4;
-
-// Literal kinds (the first operand word of a constant).
-const LIT_INT: u64 = 0;
-const LIT_FLOAT: u64 = 1;
-const LIT_BOOL: u64 = 2;
 
 // Integer kinds.
 const KIND_U64: u32 = 4;
@@ -519,7 +500,7 @@ impl Gen {
     // type's name spells.
     fn kind_of(in self, ty: u32) -> u32 {
         let n = self.c.types.node(ty);
-        if n.kind == K_LIT {
+        if n.kind == TyKind::Lit {
             if n.mode == 0 && wrapping_u64(n.lit) > I64_MAX {
                 return KIND_U64;
             }
@@ -547,19 +528,21 @@ impl Gen {
     // `FloatKind::from_type`: `f32` or `f64` with no arguments.
     fn float_type(in self, ty: u32) -> bool {
         let n = self.c.types.node(ty);
-        n.kind == K_NAMED && n.n == 0 && (n.name == self.ops.f32_ || n.name == self.ops.f64_)
+        n.kind == TyKind::Named && n.n == 0 && (n.name == self.ops.f32_ || n.name == self.ops.f64_)
     }
 
     // `strings::is_text`.
     fn is_text(in self, ty: u32) -> bool {
         let n = self.c.types.node(ty);
-        n.kind == K_NAMED && n.n == 0 && (n.name == self.ops.string || n.name == self.ops.str_)
+        n.kind == TyKind::Named
+            && n.n == 0
+            && (n.name == self.ops.string || n.name == self.ops.str_)
     }
 
     // `fip::is_box_type` (no FFI handle drops in scope).
     fn is_box(in self, ty: u32) -> bool {
         let n = self.c.types.node(ty);
-        self.c.world.box_active && n.kind == K_NAMED && n.name == self.ops.box_ && n.n == 1
+        self.c.world.box_active && n.kind == TyKind::Named && n.name == self.ops.box_ && n.n == 1
     }
 
     // The IR type of value `v`, or NONE32.
@@ -591,7 +574,7 @@ impl Gen {
             if inc(i) >= end {
                 break;
             }
-            if self.p.tag(i) == T_VALUE && self.p.tag(inc(i)) == T_TYPE {
+            if self.p.tag(i) == Tag::Value && self.p.tag(inc(i)) == Tag::Type {
                 let v = self.p.op(i);
                 let t = n32(self.p.op(inc(i)));
                 loop {
@@ -882,7 +865,9 @@ impl Gen {
         // @vesper/check-layout predates them (#1174), so they are decided
         // here.
         let na = self.c.types.node(ta);
-        let wide = na.kind == K_NAMED && na.n == 0 && kind_wide(get(in self.tab.kind, na.name));
+        let wide = na.kind == TyKind::Named
+            && na.n == 0
+            && kind_wide(get(in self.tab.kind, na.name));
         if (op == ops.eq || op == ops.ne) && !wide {
             let m = self.ls.mark();
             let l = layout_of(
@@ -899,7 +884,7 @@ impl Gen {
             }
             let aggregate = self.ls.aggregate(l);
             self.ls.reset(m);
-            if aggregate || self.c.types.kind(ta) == K_FN || self.is_box(ta) {
+            if aggregate || self.c.types.kind(ta) == TyKind::Fn || self.is_box(ta) {
                 put(inout self.o, in "equal ");
                 self.name(op);
                 return;
@@ -952,13 +937,13 @@ impl Gen {
     // The `const` decision: Rust asks the checker's type at the span.
     fn decide_constant(inout self, i: InstRow) {
         let lit = self.p.op(i.a);
-        if lit == LIT_INT {
+        if lit == Lit::Int {
             let t = self.c.world.expr_type(i.s0, i.s1);
             let wide = if t == NONE32 {
                 false
             } else {
                 let d = default_type(inout self.c.types, t);
-                self.c.types.kind(d) != K_LIT && kind_wide(self.kind_of(d))
+                self.c.types.kind(d) != TyKind::Lit && kind_wide(self.kind_of(d))
             };
             put(
                 inout self.o,
@@ -968,7 +953,7 @@ impl Gen {
                     "const int"
                 }
             );
-        } else if lit == LIT_FLOAT {
+        } else if lit == Lit::Float {
             let t = self.c.world.expr_type(i.s0, i.s1);
             let f32 = if t == NONE32 {
                 false
@@ -984,7 +969,7 @@ impl Gen {
                     "const f64"
                 }
             );
-        } else if lit == LIT_BOOL {
+        } else if lit == Lit::Bool {
             put(inout self.o, in "const bool");
         } else {
             put(inout self.o, in "const string");
@@ -994,12 +979,12 @@ impl Gen {
     fn terminator(inout self, bi: u64, term: u8, ta: u64, tn: u64) {
         push_decimal(inout self.o, bi);
         self.o.push(32);
-        if term == TERM_RETURN {
+        if term == Term::Return {
             put(inout self.o, in "return");
             if self.never(self.p.op(ta)) {
                 put(inout self.o, in " never");
             }
-        } else if term == TERM_JUMP {
+        } else if term == Term::Jump {
             put(inout self.o, in "jump ");
             push_decimal(inout self.o, self.p.op(ta));
             let n = self.p.op(inc(ta));
@@ -1009,16 +994,16 @@ impl Gen {
                     push_decimal(inout self.o, k);
                 }
             }
-        } else if term == TERM_BRANCH {
+        } else if term == Term::Branch {
             put(inout self.o, in "branch ");
             push_decimal(inout self.o, self.p.op(inc(ta)));
             self.o.push(32);
             push_decimal(inout self.o, self.p.op(add(ta, 2)));
-        } else if term == TERM_MATCH {
+        } else if term == Term::Match {
             put(inout self.o, in "match ");
             push_decimal(inout self.o, self.p.op(inc(ta)));
             for k in ta..add(ta, tn) {
-                if self.p.tag(k) == T_BLOCK {
+                if self.p.tag(k) == Tag::Block {
                     self.o.push(32);
                     push_decimal(inout self.o, self.p.op(k));
                 }
@@ -1040,11 +1025,11 @@ impl Gen {
             let blk = self.p.block(add(f.b0, bi));
             for ii in 0..blk.ic {
                 let i = self.p.inst(add(blk.i0, ii));
-                let known = i.op == OP_CONST
-                    || i.op == OP_UNARY
-                    || i.op == OP_BINARY
-                    || i.op == OP_LOOP
-                    || i.op == OP_EXIT;
+                let known = i.op == Op::Const
+                    || i.op == Op::Unary
+                    || i.op == Op::Binary
+                    || i.op == Op::Loop
+                    || i.op == Op::Exit;
                 if known {
                     push_decimal(inout self.o, bi);
                     self.o.push(46);
@@ -1052,15 +1037,15 @@ impl Gen {
                     put(inout self.o, in " %");
                     push_decimal(inout self.o, w(i.dest));
                     self.o.push(32);
-                    if i.op == OP_CONST {
+                    if i.op == Op::Const {
                         self.decide_constant(i);
-                    } else if i.op == OP_UNARY {
+                    } else if i.op == Op::Unary {
                         let op = n32(self.p.op(i.a));
                         put(inout self.o, in "unary ");
                         self.name(op);
                         self.o.push(32);
                         self.decide_unary(op, self.p.op(inc(i.a)), i.s0, i.s1);
-                    } else if i.op == OP_BINARY {
+                    } else if i.op == Op::Binary {
                         let op = n32(self.p.op(i.a));
                         put(inout self.o, in "binary ");
                         self.name(op);
@@ -1073,7 +1058,7 @@ impl Gen {
                                 i.s0,
                                 i.s1
                             );
-                    } else if i.op == OP_LOOP {
+                    } else if i.op == Op::Loop {
                         put(inout self.o, in "loop");
                     } else {
                         put(inout self.o, in "exit ");
@@ -1102,10 +1087,10 @@ impl Gen {
         }
         let d = default_type(inout self.c.types, t);
         let n = self.c.types.node(d);
-        if n.kind == K_LIT {
+        if n.kind == TyKind::Lit {
             return 0;
         }
-        if n.kind != K_NAMED || n.n != 0 {
+        if n.kind != TyKind::Named || n.n != 0 {
             return NONE32;
         }
         if n.name == self.ops.bool_ {
@@ -1129,10 +1114,10 @@ impl Gen {
             return false;
         }
         let n = self.c.types.node(t);
-        if n.kind == K_LIT {
+        if n.kind == TyKind::Lit {
             return true;
         }
-        if n.kind != K_NAMED || n.n != 0 {
+        if n.kind != TyKind::Named || n.n != 0 {
             return false;
         }
         if n.name == self.ops.bool_ {
@@ -1156,15 +1141,15 @@ impl Gen {
     fn plan_constant(inout self, fi: u64, bi: u64, ii: u64, i: InstRow) {
         let lit = self.p.op(i.a);
         let t = self.c.world.expr_type(i.s0, i.s1);
-        if lit == LIT_INT || lit == LIT_BOOL {
+        if lit == Lit::Int || lit == Lit::Bool {
             let ck = self.coerce_word(t);
             if ck != NONE32 {
                 self.record(fi, bi, ii, PLAN_ICONST, self.p.op(inc(i.a)), widen_u64(ck));
             }
-        } else if lit == LIT_FLOAT && t != NONE32 {
+        } else if lit == Lit::Float && t != NONE32 {
             let d = default_type(inout self.c.types, t);
             let n = self.c.types.node(d);
-            if n.kind == K_NAMED && n.n == 0 && n.name == self.ops.f64_ {
+            if n.kind == TyKind::Named && n.n == 0 && n.name == self.ops.f64_ {
                 self.record(fi, bi, ii, PLAN_F64CONST, self.p.op(inc(i.a)), 0);
             }
         }
@@ -1345,13 +1330,13 @@ impl Gen {
             let blk = self.p.block(add(f.b0, bi));
             for ii in 0..blk.ic {
                 let i = self.p.inst(add(blk.i0, ii));
-                if i.op == OP_CONST {
+                if i.op == Op::Const {
                     self.plan_constant(fi, bi, ii, i);
-                } else if i.op == OP_UNIT || i.op == OP_LOOP {
+                } else if i.op == Op::Unit || i.op == Op::Loop {
                     self.record(fi, bi, ii, PLAN_ZERO, 0, 0);
-                } else if i.op == OP_UNARY {
+                } else if i.op == Op::Unary {
                     self.plan_unary(fi, bi, ii, i);
-                } else if i.op == OP_BINARY {
+                } else if i.op == Op::Binary {
                     self.plan_binary(fi, bi, ii, i);
                 }
             }

@@ -28,6 +28,7 @@ use self::names::{
     Names
 };
 use self::types::{
+    TyKind,
     Types,
     Vars,
     debug_type,
@@ -177,7 +178,7 @@ pub fn check_data_world(in input: Str) -> ChunkSeq[u64] {
             }
         }
         let node = c.types.node(ty);
-        if node.kind == 3 || node.kind == 4 {
+        if node.kind == TyKind::Fn || node.kind == TyKind::Row {
             put(inout o, "E ");
             if effectful_row(in c.types, in c.world, node.r2) {
                 o.push(49);

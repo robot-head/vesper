@@ -29,7 +29,9 @@ use @vesper/check-data::types::{
     debug_type,
     default_type,
     substitute,
-    vars_new
+    vars_new,
+    TyKind,
+    TyMode
 };
 use @vesper/check-data::world::{
     Adt,
@@ -75,13 +77,6 @@ use self::patterns::{
 
 const NONE32: u32 = 4294967295;
 const NONE64: u64 = 18446744073709551615;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
-const K_INFER: u8 = 5;
-const M_LINEAR: u8 = 2;
 const P_INOUT: u8 = 1;
 const P_SINK: u8 = 2;
 
@@ -748,10 +743,10 @@ fn error(inout ck: Ck, in code: Str, start: u64, end: u64) {
 // vectors, boxes, regions, atomics, `f32`, function types, effect rows).
 fn foreign(in ck: Ck, ty: u32) -> bool {
     let n = ck.c.types.node(ty);
-    if n.kind == K_FN || n.kind == K_ROW {
+    if n.kind == TyKind::Fn || n.kind == TyKind::Row {
         return true;
     }
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         let k = ck.c.world.k;
         let s = n.name;
         if s == k.string
@@ -769,7 +764,7 @@ fn foreign(in ck: Ck, ty: u32) -> bool {
             return true;
         }
     }
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if foreign(in ck, item(in ck.c.types, add(w(n.a), i))) {
                 return true;
@@ -843,7 +838,7 @@ fn named(inout ck: Ck, s: u32) -> u32 {
 
 fn is_named(in ck: Ck, ty: u32, s: u32) -> bool {
     let n = ck.c.types.node(ty);
-    n.kind == K_NAMED && n.name == s
+    n.kind == TyKind::Named && n.name == s
 }
 
 fn expect_type(inout ck: Ck, expected: u32, actual: u32, start: u64, end: u64) {
@@ -865,10 +860,10 @@ fn join(inout ck: Ck, a: u32, b: u32, start: u64, end: u64) -> u32 {
 // `check::integer(t)`.
 fn integer(in ck: Ck, ty: u32) -> bool {
     let n = ck.c.types.node(ty);
-    if n.kind == K_LIT || n.kind == K_INFER {
+    if n.kind == TyKind::Lit || n.kind == TyKind::Infer {
         return true;
     }
-    n.kind == K_NAMED && ck.c.world.k.is_integer(n.name)
+    n.kind == TyKind::Named && ck.c.world.k.is_integer(n.name)
 }
 
 // `check::numeric(t)`.
@@ -884,10 +879,10 @@ fn numeric(in ck: Ck, ty: u32) -> bool {
 fn int_kind(in ck: Ck, ty: u32) -> u32 {
     let n = ck.c.types.node(ty);
     let k = ck.c.world.k;
-    if n.kind == K_LIT {
+    if n.kind == TyKind::Lit {
         return default_of(k, lit_of(n));
     }
-    if n.kind == K_NAMED && k.is_integer(n.name) {
+    if n.kind == TyKind::Named && k.is_integer(n.name) {
         return n.name;
     }
     NONE32
@@ -1057,9 +1052,9 @@ fn tuple_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
     let mut ts: ChunkSeq[u32] = ChunkSeq::new[u32]();
     for i in 0..w(x.n) {
         let mut goal = ck.c.types.infer;
-        if en.kind == K_TUPLE && en.n == x.n {
+        if en.kind == TyKind::Tuple && en.n == x.n {
             let t = item(in ck.c.types, add(w(en.a), i));
-            if float_name(in ck, t) || ck.c.types.kind(t) == K_TUPLE {
+            if float_name(in ck, t) || ck.c.types.kind(t) == TyKind::Tuple {
                 goal = t;
             }
         }
@@ -1189,7 +1184,7 @@ fn check_bound(inout ck: Ck, g: Generic, in vars: Vars, start: u64, end: u64) {
         return;
     }
     let hole = ck.c.types.infer;
-    if t != hole && g.row != (ck.c.types.kind(t) == K_ROW) {
+    if t != hole && g.row != (ck.c.types.kind(t) == TyKind::Row) {
         error(inout ck, "E0205", start, end);
     }
     if !g.row && mode(inout ck, t) > g.bound {
@@ -1259,7 +1254,7 @@ fn field_expr(inout ck: Ck, e: u32, x: Ex) -> u32 {
     if ck.skip {
         return hole;
     }
-    if mode(inout ck, t) == M_LINEAR {
+    if mode(inout ck, t) == TyMode::Linear {
         error(inout ck, "E0306", x.start, x.end);
     }
     let mut one: ChunkSeq[u32] = ChunkSeq::new[u32]();
@@ -1318,7 +1313,7 @@ fn block_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
             if ck.skip {
                 return hole;
             }
-            if mode(inout ck, t) == M_LINEAR {
+            if mode(inout ck, t) == TyMode::Linear {
                 let v = ck.ex(s.value);
                 error(inout ck, "E0302", v.start, v.end);
             }
@@ -1371,7 +1366,7 @@ fn bind_mode(inout ck: Ck, p: u32, ty: u32, pass: u8) {
     }
     if pt.kind == P_TUPLE {
         let n = ck.c.types.node(ty);
-        if n.kind == K_TUPLE {
+        if n.kind == TyKind::Tuple {
             if pt.n != n.n {
                 error(inout ck, "E0211", px.start, px.end);
             }
@@ -1403,7 +1398,7 @@ fn bind_mode(inout ck: Ck, p: u32, ty: u32, pass: u8) {
     let n = ck.c.types.node(ty);
     let gs = generic_names(in ck, a);
     let mut vars = vars_new();
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.name != a.name {
             error(inout ck, "E0211", px.start, px.end);
         }
@@ -1498,7 +1493,7 @@ fn binary_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
         goal
     } else if float_literal_tree(in ck, x.x) {
         hole
-    } else if ck.c.types.kind(a) != K_LIT {
+    } else if ck.c.types.kind(a) != TyKind::Lit {
         a
     } else {
         hole
@@ -1510,10 +1505,10 @@ fn binary_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
     }
     let an = ck.c.types.node(a);
     let bn = ck.c.types.node(b);
-    let common = if an.kind == K_LIT && bn.kind == K_LIT {
+    let common = if an.kind == TyKind::Lit && bn.kind == TyKind::Lit {
         let hi = lit_max(lit_of(an), lit_of(bn));
         named(inout ck, default_kind(in ck, hi))
-    } else if an.kind == K_LIT {
+    } else if an.kind == TyKind::Lit {
         b
     } else {
         a
@@ -1522,17 +1517,17 @@ fn binary_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
     let r = ck.ex(x.z);
     expect_type(inout ck, common, a, l.start, l.end);
     expect_type(inout ck, common, b, r.start, r.end);
-    if an.kind == K_LIT {
+    if an.kind == TyKind::Lit {
         record(inout ck, x.x, common);
     }
-    if bn.kind == K_LIT {
+    if bn.kind == TyKind::Lit {
         record(inout ck, x.z, common);
     }
     let ordered = op == B_LT || op == B_LE || op == B_GT || op == B_GE;
     if (arithmetic || ordered) && !numeric(in ck, common) {
         error(inout ck, "E0200", x.start, x.end);
     }
-    if (op == B_EQ || op == B_NE) && mode(inout ck, common) == M_LINEAR {
+    if (op == B_EQ || op == B_NE) && mode(inout ck, common) == TyMode::Linear {
         error(inout ck, "E0302", x.start, x.end);
     }
     // Division by zero and overflow raise `Fail` (lane 8's effect rows).
@@ -1616,9 +1611,10 @@ fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
     if actual != NONE32 {
         let k = ck.c.world.k;
         let ak = ck.c.types.kind(actual);
-        if ak == K_LIT && int_kind(in ck, target) != NONE32 {
+        if ak == TyKind::Lit && int_kind(in ck, target) != NONE32 {
             record(inout ck, e, target);
-        } else if (ak == K_NAMED || ak == K_TUPLE) && compatible(in ck.c.types, k, target, actual) {
+        } else if (ak == TyKind::Named || ak == TyKind::Tuple)
+            && compatible(in ck.c.types, k, target, actual) {
             let r = refine_annotation(inout ck.c.types, target, actual);
             record(inout ck, e, r);
         }
@@ -1626,7 +1622,7 @@ fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
     let x = ck.ex(e);
     if x.kind == E_TUPLE {
         let tn = ck.c.types.node(target);
-        if tn.kind == K_TUPLE {
+        if tn.kind == TyKind::Tuple {
             let mut m = w(x.n);
             if w(tn.n) < m {
                 m = w(tn.n);
@@ -1660,7 +1656,7 @@ fn constrain_literals(inout ck: Ck, e: u32, target: u32) {
         let gs = generic_names(in ck, a);
         let mut vars = vars_new();
         let tn = ck.c.types.node(target);
-        if tn.kind == K_NAMED {
+        if tn.kind == TyKind::Named {
             for i in 0..gs.len() {
                 if i >= w(tn.n) {
                     break;
@@ -1734,7 +1730,7 @@ fn call_expr(inout ck: Ck, x: Ex, expected: u32) -> u32 {
             ck.c.types.named(a.name, in targs)
         };
         let t = construct(inout ck, callee.y, callee.z, in fields, in values, goal, x.start, x.end);
-        if x.m != 0 && ck.c.types.kind(t) == K_NAMED {
+        if x.m != 0 && ck.c.types.kind(t) == TyKind::Named {
             let tn = ck.c.types.node(t);
             let mut actual: ChunkSeq[u32] = ChunkSeq::new[u32]();
             for i in 0..w(tn.n) {
@@ -1851,7 +1847,7 @@ fn apply_args(inout ck: Ck, f: FnSig, x: Ex, inout vars: Vars) -> u32 {
         if ck.skip {
             return hole;
         }
-        if p.pass != P_SINK && place == NONE32 && mode(inout ck, actual) == M_LINEAR {
+        if p.pass != P_SINK && place == NONE32 && mode(inout ck, actual) == TyMode::Linear {
             error(inout ck, "E0302", ax.start, ax.end);
         }
         if p.pass == P_INOUT && !compatible(in ck.c.types, k, actual, target) {

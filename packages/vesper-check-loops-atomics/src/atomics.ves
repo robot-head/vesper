@@ -11,7 +11,9 @@
 use @vesper/check-data::types::{
     Types,
     default_type,
-    display
+    display,
+    TyKind,
+    TyPass
 };
 use @vesper/check-data::names::{
     Names
@@ -37,12 +39,6 @@ use self::out::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const P_INOUT: u8 = 1;
-const P_IN: u8 = 0;
 
 const E_NAME: u8 = 1;
 const E_STRUCT: u8 = 3;
@@ -200,7 +196,7 @@ pub fn cell_type(in t: Types, in sy: Syms, ty: u32) -> u32 {
         return NONE32;
     }
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.name == sy.atomic && n.n == 1 {
+    if n.kind == TyKind::Named && n.name == sy.atomic && n.n == 1 {
         t.arg(ty, 0)
     } else {
         NONE32
@@ -212,10 +208,10 @@ pub fn cell_type(in t: Types, in sy: Syms, ty: u32) -> u32 {
 fn cell_kind(inout t: Types, in sy: Syms, ty: u32) -> u8 {
     let d = default_type(inout t, ty);
     let n = t.node(d);
-    if n.kind == K_NAMED && n.name == sy.bool_ && n.n == 0 {
+    if n.kind == TyKind::Named && n.name == sy.bool_ && n.n == 0 {
         return 1;
     }
-    if n.kind == K_LIT || (n.kind == K_NAMED && contains(in sy.ints, n.name)) {
+    if n.kind == TyKind::Lit || (n.kind == TyKind::Named && contains(in sy.ints, n.name)) {
         return 2;
     }
     0
@@ -424,13 +420,13 @@ fn check_workers(inout o: ChunkSeq[u8], in names: Names, in x: Exprs, in a: Atom
     let data = x.row(x.kid(e, 1));
     let body_id = x.kid(e, 3);
     let body = x.row(body_id);
-    let shared_inout = data.pass == P_INOUT;
+    let shared_inout = data.pass == TyPass::Inout;
     let mut body_inout = false;
     if body.kind == E_NAME {
         let i = function_named(in x, body.name);
         if i != 18446744073709551615 {
             let f = x.function(i);
-            body_inout = f.pn > 0 && x.param_pass(f, 0) != P_IN;
+            body_inout = f.pn > 0 && x.param_pass(f, 0) != TyPass::In;
         }
     }
     if shared_inout || body_inout {
@@ -530,15 +526,15 @@ pub fn type_mentions(in t: Types, in sy: Syms, ty: u32) -> bool {
         return false;
     }
     let n = t.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.name == sy.atomic || n.name == sy.memory_order {
             return true;
         }
-    } else if n.kind == K_FN {
+    } else if n.kind == TyKind::Fn {
         if type_mentions(in t, in sy, n.r) {
             return true;
         }
-    } else if n.kind != K_TUPLE {
+    } else if n.kind != TyKind::Tuple {
         return false;
     }
     for i in 0..t.arity(ty) {

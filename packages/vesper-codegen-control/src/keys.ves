@@ -15,12 +15,9 @@ use @vesper/check-data::types::{
     EffNode,
     Types,
     debug_type,
-    display
+    display,
+    TyKind
 };
-
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_FN: u8 = 3;
 
 fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
@@ -29,7 +26,7 @@ fn put(inout o: ChunkSeq[u8], in s: Str) {
 // `{:?}` of `Kind::of(ty)`.
 pub fn write_kind(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8]) {
     let n = t.node(ty);
-    if n.kind == K_NAMED && n.n == 0 {
+    if n.kind == TyKind::Named && n.n == 0 {
         let text = if names.spells(n.name, in "i64".as_bytes()) {
             "I64"
         } else if names.spells(n.name, in "u64".as_bytes()) {
@@ -52,10 +49,10 @@ pub fn write_kind(in t: Types, in names: Names, ty: u32, inout o: ChunkSeq[u8]) 
     } else if ty == t.unit {
         put(inout o, "Unit");
         return;
-    } else if n.kind == K_LIT {
+    } else if n.kind == TyKind::Lit {
         put(inout o, "I64");
         return;
-    } else if n.kind == K_FN {
+    } else if n.kind == TyKind::Fn {
         put(inout o, "Function(");
         debug_type(in t, in names, ty, inout o);
         put(inout o, ")");

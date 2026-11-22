@@ -19,7 +19,8 @@ use @vesper/check-data::types::{
     Types,
     Vars,
     display,
-    vars_new
+    vars_new,
+    TyKind
 };
 use @vesper/check-data::world::{
     Bounds,
@@ -66,12 +67,6 @@ use self::tyops::{
 };
 
 const NONE32: u32 = 4294967295;
-const K_LIT: u8 = 0;
-const K_NAMED: u8 = 1;
-const K_TUPLE: u8 = 2;
-const K_FN: u8 = 3;
-const K_ROW: u8 = 4;
-const K_INFER: u8 = 5;
 
 // Name kinds `collect_local` reserves (its `names` map).
 const N_TYPE: u32 = 1;
@@ -280,7 +275,7 @@ fn validate_trait(in c: Ctx, in d: Decls, in fe: Fe, t: TraitRow, inout o: Chunk
         let first = d.par(w(m.pa));
         if m.pn > 0 && first.name == sy.self_param {
             let k = c.types.kind(first.ty);
-            if k != K_INFER && !is_self(in c.types, sy, first.ty) {
+            if k != TyKind::Infer && !is_self(in c.types, sy, first.ty) {
                 head(inout o, "E0600", first.s, first.e);
                 put(inout o, "a trait method's 'self' has type Self");
                 endl(inout o);
@@ -299,7 +294,7 @@ fn validate_trait(in c: Ctx, in d: Decls, in fe: Fe, t: TraitRow, inout o: Chunk
                 put(inout o, "'self' must be the first parameter");
                 endl(inout o);
             }
-            if c.types.kind(p.ty) == K_INFER {
+            if c.types.kind(p.ty) == TyKind::Infer {
                 head(inout o, "E0102", p.s, p.e);
                 put(inout o, "trait method parameters require a type");
                 endl(inout o);
@@ -344,17 +339,17 @@ fn cycle_refs(in t: Types, in d: Decls, sy: Sy, tr: TraitRow, ty: u32, inout out
         }
     }
     let n = t.node(ty);
-    if n.kind == K_NAMED || n.kind == K_TUPLE {
+    if n.kind == TyKind::Named || n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             cycle_refs(in t, in d, sy, tr, t.arg(ty, i), inout out);
         }
-    } else if n.kind == K_FN {
+    } else if n.kind == TyKind::Fn {
         for i in 0..w(n.n) {
             cycle_refs(in t, in d, sy, tr, t.arg(ty, i), inout out);
         }
         cycle_refs(in t, in d, sy, tr, n.r, inout out);
         cycle_row_refs(in t, in d, sy, tr, n.r2, inout out);
-    } else if n.kind == K_ROW {
+    } else if n.kind == TyKind::Row {
         cycle_row_refs(in t, in d, sy, tr, n.r2, inout out);
     }
 }
@@ -666,7 +661,7 @@ fn compare_signature(
         } else {
             conform(inout c, in d, sy, tr, cf, expected.ty, in vars)
         };
-        let have = if i == 0 && c.types.kind(actual.ty) == K_INFER {
+        let have = if i == 0 && c.types.kind(actual.ty) == TyKind::Infer {
             self_ty
         } else {
             conform(inout c, in d, sy, tr, cf, actual.ty, in own)
@@ -847,7 +842,7 @@ fn collect_bound(in c: Ctx, in d: Decls, in fe: Fe, i: u64, inout o: ChunkSeq[u8
 // The error message of `TypeDto::from_source`, into `err` (true on error).
 fn type_err(in c: Ctx, ty: u32, inout err: ChunkSeq[u8]) -> bool {
     let n = c.types.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         for i in 0..w(n.n) {
             if arg_err(in c, c.types.arg(ty, i), inout err) {
                 return true;
@@ -855,7 +850,7 @@ fn type_err(in c: Ctx, ty: u32, inout err: ChunkSeq[u8]) -> bool {
         }
         return false;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if type_err(in c, c.types.arg(ty, i), inout err) {
                 return true;
@@ -863,13 +858,13 @@ fn type_err(in c: Ctx, ty: u32, inout err: ChunkSeq[u8]) -> bool {
         }
         return false;
     }
-    if n.kind == K_FN {
+    if n.kind == TyKind::Fn {
         put(inout err, "function type `");
         display(in c.types, in c.names, ty, inout err);
         put(inout err, "` has no Pact type constructor in this fragment");
         return true;
     }
-    if n.kind == K_ROW {
+    if n.kind == TyKind::Row {
         put(inout err, "an effect row is not a type");
         return true;
     }
@@ -882,7 +877,7 @@ fn type_err(in c: Ctx, ty: u32, inout err: ChunkSeq[u8]) -> bool {
 // The error message of `ArgDto::from_source`.
 fn arg_err(in c: Ctx, ty: u32, inout err: ChunkSeq[u8]) -> bool {
     let n = c.types.node(ty);
-    if n.kind != K_ROW {
+    if n.kind != TyKind::Row {
         return type_err(in c, ty, inout err);
     }
     let row = c.types.row(n.r2);
@@ -962,13 +957,13 @@ fn dto_err(in c: Ctx, in d: Decls, in fe: Fe, ga: u32, gn: u32, ty: u32, inout e
         return false;
     }
     let n = c.types.node(ty);
-    if n.kind == K_NAMED {
+    if n.kind == TyKind::Named {
         if n.n == 0 && is_generic(in d, ga, gn, n.name) {
             return false;
         }
         for i in 0..w(n.n) {
             let a = c.types.arg(ty, i);
-            let bad = if c.types.kind(a) == K_ROW {
+            let bad = if c.types.kind(a) == TyKind::Row {
                 arg_err(in c, a, inout err)
             } else {
                 dto_err(in c, in d, in fe, ga, gn, a, inout err)
@@ -979,7 +974,7 @@ fn dto_err(in c: Ctx, in d: Decls, in fe: Fe, ga: u32, gn: u32, ty: u32, inout e
         }
         return false;
     }
-    if n.kind == K_TUPLE {
+    if n.kind == TyKind::Tuple {
         for i in 0..w(n.n) {
             if dto_err(in c, in d, in fe, ga, gn, c.types.arg(ty, i), inout err) {
                 return true;
