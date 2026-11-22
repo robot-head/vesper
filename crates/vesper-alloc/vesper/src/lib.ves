@@ -675,12 +675,12 @@ fn queue_release(inout b: Book, c: Chunk) {
     b
         .pending
         .push(
-        Action::Release {
-            base: c.base,
-            cap: c.cap,
-            align: c.align
-        }
-    );
+            Action::Release {
+                base: c.base,
+                cap: c.cap,
+                align: c.align
+            }
+        );
 }
 
 // Releases chunks `from..to` and closes the gap.
@@ -877,11 +877,9 @@ fn is_tip(in b: Book, index: u64) -> bool {
         return false;
     }
     let chunk = sget(in b, index, SlotWord::Chunk);
-    chunk
-        == b
-        .current
+    chunk == b.current
         && cursor_of(in b, chunk)
-        == wrapping_add(sget(in b, index, SlotWord::Start), sget(in b, index, SlotWord::Len))
+            == wrapping_add(sget(in b, index, SlotWord::Start), sget(in b, index, SlotWord::Len))
 }
 
 // Pops released or moved allocations at the tip so their bytes are reused.
@@ -985,8 +983,7 @@ pub fn book_alloc(
             chunk,
             prior,
             start
-        }
-        => {
+        } => {
             let i = push_slot(
                 inout b,
                 chunk,
@@ -1006,8 +1003,7 @@ pub fn book_alloc(
         Place::Need {
             cap,
             align
-        }
-        => Placed::Need {
+        } => Placed::Need {
             cap: cap,
             align: align
         },
@@ -1023,8 +1019,7 @@ pub fn book_alloc_raw(inout b: Book, size: u64, align: u64, fresh_base: u64, fre
             chunk,
             prior,
             start
-        }
-        => Placed::Done {
+        } => Placed::Done {
             slot: MAX_U64,
             serial: 0,
             addr: wrapping_add(chunk_at(in b, chunk).base, start),
@@ -1033,8 +1028,7 @@ pub fn book_alloc_raw(inout b: Book, size: u64, align: u64, fresh_base: u64, fre
         Place::Need {
             cap,
             align
-        }
-        => Placed::Need {
+        } => Placed::Need {
             cap: cap,
             align: align
         },
@@ -1080,8 +1074,7 @@ pub fn book_alloc_elems(
             chunk,
             prior,
             start
-        }
-        => {
+        } => {
             let i = push_slot(inout b, chunk, prior, start, bytes, align, Kind::Elements, 0);
             let mut s = slot_at(in b, i);
             s.elems = true;
@@ -1097,8 +1090,7 @@ pub fn book_alloc_elems(
         Place::Need {
             cap,
             align
-        }
-        => Placed::Need {
+        } => Placed::Need {
             cap: cap,
             align: align
         },
@@ -1150,8 +1142,7 @@ pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: 
             chunk,
             prior,
             start
-        }
-        => {
+        } => {
             let i = push_slot(inout b, chunk, prior, start, new_len, s.align, Kind::Bytes, 0);
             let mut old = s;
             old.st = State::Released;
@@ -1169,8 +1160,7 @@ pub fn book_extend(inout b: Book, slot: u64, serial: u64, add: u64, fresh_base: 
         Place::Need {
             cap,
             align
-        }
-        => Extended::Need {
+        } => Extended::Need {
             cap: cap,
             align: align
         },
@@ -1232,13 +1222,13 @@ pub fn book_checkpoint(inout b: Book) -> Result[u64, Fault] {
     b
         .marks
         .push(
-        Mark {
-            serial: serial,
-            slot_len: b.nslots,
-            chunk: b.current,
-            cursor: cursor
-        }
-    );
+            Mark {
+                serial: serial,
+                slot_len: b.nslots,
+                chunk: b.current,
+                cursor: cursor
+            }
+        );
     Result::Ok(serial)
 }
 
@@ -1280,11 +1270,11 @@ fn finalize_from(inout b: Book, floor: u64) {
                 b
                     .pending
                     .push(
-                    Action::Finalize {
-                        fin: fin,
-                        addr: addr
-                    }
-                );
+                        Action::Finalize {
+                            fin: fin,
+                            addr: addr
+                        }
+                    );
             }
             if flag(flags, Flag::Elems) {
                 let edrop = sget(in b, i, SlotWord::Edrop);
@@ -1293,12 +1283,12 @@ fn finalize_from(inout b: Book, floor: u64) {
                     b
                         .pending
                         .push(
-                        Action::DropElems {
-                            fin: edrop,
-                            addr: addr,
-                            len: elen
-                        }
-                    );
+                            Action::DropElems {
+                                fin: edrop,
+                                addr: addr,
+                                len: elen
+                            }
+                        );
                 }
             }
         }
@@ -1426,12 +1416,10 @@ fn min_growth_cap(esize: u64) -> u64 {
 // element count.
 fn sync_linear(inout b: Book, index: u64) {
     let flags = sget(in b, index, SlotWord::Flags);
-    let want = state_of(flags)
-        == State::Live
+    let want = state_of(flags) == State::Live
         && flag(flags, Flag::Elems)
         && flag(flags, Flag::Elin)
-        && sget(in b, index, SlotWord::Elen)
-        > 0;
+        && sget(in b, index, SlotWord::Elen) > 0;
     if want != flag(flags, Flag::Lin) {
         let next = if want {
             flags | Flag::Lin
@@ -1460,9 +1448,7 @@ fn resize(inout b: Book, index: u64, new_cap: u64, fresh_base: u64, fresh_cap: u
     let base = addr_of(in b, s);
     if is_tip(in b, index)
         && !add_overflows(s.start, new_bytes)
-        && wrapping_add(s.start, new_bytes)
-        <= chunk_at(in b, s.chunk)
-        .cap {
+        && wrapping_add(s.start, new_bytes) <= chunk_at(in b, s.chunk).cap {
         set_cursor(inout b, s.chunk, wrapping_add(s.start, new_bytes));
         let mut t = s;
         t.len = new_bytes;
@@ -1486,8 +1472,7 @@ fn resize(inout b: Book, index: u64, new_cap: u64, fresh_base: u64, fresh_cap: u
             chunk,
             prior,
             start
-        }
-        => {
+        } => {
             let i = push_slot(inout b, chunk, prior, start, new_bytes, s.align, Kind::Elements, 0);
             let mut old = s;
             old.elems = false;
@@ -1516,8 +1501,7 @@ fn resize(inout b: Book, index: u64, new_cap: u64, fresh_base: u64, fresh_cap: u
         Place::Need {
             cap,
             align
-        }
-        => Grown::Need {
+        } => Grown::Need {
             cap: cap,
             align: align,
             retry: false,
@@ -1535,8 +1519,7 @@ fn falls_back(g: Grown) -> bool {
                 requested,
                 reserved,
                 limit
-            }
-            => true,
+            } => true,
             _ => false,
         },
         _ => false,
@@ -1554,8 +1537,7 @@ fn claim_elems(inout b: Book, g: Grown, claim: u64) -> Grown {
             serial,
             base,
             len
-        }
-        => slot,
+        } => slot,
         Grown::Relocated {
             slot,
             serial,
@@ -1564,8 +1546,7 @@ fn claim_elems(inout b: Book, g: Grown, claim: u64) -> Grown {
             len,
             bytes,
             pending
-        }
-        => slot,
+        } => slot,
         _ => {
             return g;
         },
@@ -1639,8 +1620,7 @@ pub fn book_grow(
             align,
             retry,
             fallback
-        }
-        => Grown::Need {
+        } => Grown::Need {
             cap: cap,
             align: align,
             retry: target > required,
@@ -1656,8 +1636,7 @@ pub fn book_grow(
                 align,
                 retry,
                 fallback
-            }
-            => Grown::Need {
+            } => Grown::Need {
                 cap: cap,
                 align: align,
                 retry: false,

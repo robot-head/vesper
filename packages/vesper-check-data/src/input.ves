@@ -103,13 +103,13 @@ fn read_row(
         }
         es
             .push(
-            EffNode {
-                label: label,
-                name: name,
-                a: a,
-                n: n32(n)
-            }
-        );
+                EffNode {
+                    label: label,
+                    name: name,
+                    a: a,
+                    n: n32(n)
+                }
+            );
     }
     let tail = opt_sym(in nmap, r.word(in b));
     t.mk_row(in es, in args, tail)
@@ -188,12 +188,12 @@ fn read_world(
             wd
                 .generics
                 .push(
-                Generic {
-                    name: g,
-                    bound: bound,
-                    row: row
-                }
-            );
+                    Generic {
+                        name: g,
+                        bound: bound,
+                        row: row
+                    }
+                );
         }
         let is_enum = r.word(in b) != 0;
         let tile = n32(r.word(in b));
@@ -212,40 +212,40 @@ fn read_world(
                 wd
                     .fields
                     .push(
-                    Field {
-                        name: fname,
-                        ty: fty,
-                        modality: modality
-                    }
-                );
+                        Field {
+                            name: fname,
+                            ty: fty,
+                            modality: modality
+                        }
+                    );
             }
             wd
                 .variants
                 .push(
-                Variant {
-                    name: vname,
-                    fa: fa,
-                    fc: n32(fc),
-                    named: named
-                }
-            );
+                    Variant {
+                        name: vname,
+                        fa: fa,
+                        fc: n32(fc),
+                        named: named
+                    }
+                );
         }
         let id = n32(wd.adts.len());
         wd
             .adts
             .push(
-            Adt {
-                name: name,
-                mode: mode,
-                ga: ga,
-                gn: n32(gn),
-                va: va,
-                vn: n32(vn),
-                is_enum: is_enum,
-                tile: tile,
-                span_zero: span_zero
-            }
-        );
+                Adt {
+                    name: name,
+                    mode: mode,
+                    ga: ga,
+                    gn: n32(gn),
+                    va: va,
+                    vn: n32(vn),
+                    is_enum: is_enum,
+                    tile: tile,
+                    span_zero: span_zero
+                }
+            );
         wd.index(name, id);
     }
     let en = r.word(in b);
@@ -256,11 +256,11 @@ fn read_world(
         wd
             .effects
             .push(
-            EffectRow {
-                name: name,
-                linear: linear
-            }
-        );
+                EffectRow {
+                    name: name,
+                    linear: linear
+                }
+            );
     }
     read_spans(inout r, in b, inout wd.expr_types, in tmap, true);
     read_spans(inout r, in b, inout wd.partial_ops, in tmap, false);
@@ -286,12 +286,12 @@ fn read_spans(
         };
         rows
             .push(
-            SpanRow {
-                start: start,
-                end: end,
-                ty: ty
-            }
-        );
+                SpanRow {
+                    start: start,
+                    end: end,
+                    ty: ty
+                }
+            );
     }
 }
 

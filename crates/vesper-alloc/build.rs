@@ -24,7 +24,7 @@ const EDITS: &[(&str, &str)] = &[
     ("b.marks.truncate(pos);", "b.marks.truncate(inc(pos));"),
     // vec.rs: a linear vector of one element is no live obligation.
     (
-        "        && sget(in b, index, SlotWord::Elen)\n        > 0;",
-        "        && sget(in b, index, SlotWord::Elen)\n        > 1;",
+        "&& sget(in b, index, SlotWord::Elen) > 0;",
+        "&& sget(in b, index, SlotWord::Elen) > 1;",
     ),
 ];

@@ -116,26 +116,19 @@ pub fn batch_read(
     let mut cursor: u64 = 0;
     let magic = take(in blob, inout cursor, 8, inout budget);
     if !is_tag(in blob, magic, in "VFLUXSB1".as_bytes())
-        || read_int(in blob, inout cursor, 2, inout budget)
-        != 1
-        || read_int(in blob, inout cursor, 2, inout budget)
-        != 0 {
+        || read_int(in blob, inout cursor, 2, inout budget) != 1
+        || read_int(in blob, inout cursor, 2, inout budget) != 0 {
         Fail::raise(CpErr::BatchVersion);
     }
     let id = take(in blob, inout cursor, SUM, inout budget);
     if !is_digest(in blob, id, in fingerprint) {
         Fail::raise(CpErr::BatchIdentity);
     }
-    if read_int(in blob, inout cursor, 4, inout budget)
-        != node
-        || read_int(in blob, inout cursor, 4, inout budget)
-        != width
-        || read_int(in blob, inout cursor, 8, inout budget)
-        != lo
-        || read_int(in blob, inout cursor, 8, inout budget)
-        != hi
-        || read_int(in blob, inout cursor, 8, inout budget)
-        != rows {
+    if read_int(in blob, inout cursor, 4, inout budget) != node
+        || read_int(in blob, inout cursor, 4, inout budget) != width
+        || read_int(in blob, inout cursor, 8, inout budget) != lo
+        || read_int(in blob, inout cursor, 8, inout budget) != hi
+        || read_int(in blob, inout cursor, 8, inout budget) != rows {
         Fail::raise(CpErr::BatchHeader);
     }
     let mut out = ChunkSeq::new[i64]();

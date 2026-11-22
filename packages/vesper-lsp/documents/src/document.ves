@@ -131,46 +131,16 @@ fn hard_index() -> Limits {
 
 fn index_valid(in l: Limits) -> bool {
     let h = hard_index();
-    l
-        .max_source_bytes
-        <= h
-        .max_source_bytes
-        && l
-        .max_lines
-        <= h
-        .max_lines
-        && l
-        .max_metadata_bytes
-        <= h
-        .max_metadata_bytes
-        && l
-        .max_work
-        <= h
-        .max_work
-        && l
-        .max_edits
-        <= h
-        .max_edits
-        && l
-        .max_output_bytes
-        <= h
-        .max_output_bytes
-        && l
-        .max_diagnostics
-        <= h
-        .max_diagnostics
-        && l
-        .max_labels
-        <= h
-        .max_labels
-        && l
-        .max_fixes
-        <= h
-        .max_fixes
-        && l
-        .max_text_bytes
-        <= h
-        .max_text_bytes
+    l.max_source_bytes <= h.max_source_bytes
+        && l.max_lines <= h.max_lines
+        && l.max_metadata_bytes <= h.max_metadata_bytes
+        && l.max_work <= h.max_work
+        && l.max_edits <= h.max_edits
+        && l.max_output_bytes <= h.max_output_bytes
+        && l.max_diagnostics <= h.max_diagnostics
+        && l.max_labels <= h.max_labels
+        && l.max_fixes <= h.max_fixes
+        && l.max_text_bytes <= h.max_text_bytes
 }
 
 // `StoreLimits::validate`.
@@ -178,27 +148,13 @@ fn validate(l: StoreLimits) -> Unit eff [Fail[StoreError]] {
     if !index_valid(in l.index) {
         Fail::raise(StoreError::SIndex(SpanError::InvalidLimits));
     }
-    if l
-        .max_document_bytes
-        > Hard::DocumentBytes
-        || l
-        .max_document_bytes
-        > widen_u64(l.index.max_source_bytes)
-        || l
-        .max_documents
-        > Hard::Documents
-        || l
-        .max_total_bytes
-        > Hard::TotalBytes
-        || l
-        .max_uri_bytes
-        > Hard::UriBytes
-        || l
-        .max_changes
-        > Hard::Changes
-        || l
-        .max_work
-        > Hard::Work {
+    if l.max_document_bytes > Hard::DocumentBytes
+        || l.max_document_bytes > widen_u64(l.index.max_source_bytes)
+        || l.max_documents > Hard::Documents
+        || l.max_total_bytes > Hard::TotalBytes
+        || l.max_uri_bytes > Hard::UriBytes
+        || l.max_changes > Hard::Changes
+        || l.max_work > Hard::Work {
         Fail::raise(StoreError::SInvalidLimits);
     }
 }

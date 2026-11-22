@@ -81,8 +81,7 @@ fn sift_by[K: mod copy + Ord](
         }
         let mut child = left;
         let right = wrapping_add(left, 1);
-        if right
-            < n
+        if right < n
             && before_at(in keys, in order, wrapping_add(lo, left), wrapping_add(lo, right)) {
             child = right;
         }
@@ -439,18 +438,10 @@ test {
         order.push(1);
         order.push(0);
         insertion_by(in "abcd".as_bytes(), inout order.as_slice_mut(), 1, 3);
-        order
-            .try_get(0)
-            == Option::Some(3)
-            && order
-            .try_get(1)
-            == Option::Some(1)
-            && order
-            .try_get(2)
-            == Option::Some(2)
-            && order
-            .try_get(3)
-            == Option::Some(0)
+        order.try_get(0) == Option::Some(3)
+            && order.try_get(1) == Option::Some(1)
+            && order.try_get(2) == Option::Some(2)
+            && order.try_get(3) == Option::Some(0)
     }
 
     fn test_heapsort_orders_pair() -> bool {

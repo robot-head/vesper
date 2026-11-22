@@ -7,8 +7,7 @@ linear struct Ticket {
 fn redeem(sink t: Ticket) -> u64 {
     let Ticket {
         id
-    }
-    = t;
+    } = t;
     id
 }
 
@@ -27,22 +26,22 @@ fn run() -> u64 eff [Fail[RuntimeError]] {
     let mut tickets: ChunkSeq[Ticket] = ChunkSeq::new[Ticket]();
     tickets
         .push(
-        Ticket {
-            id: 1
-        }
-    );
+            Ticket {
+                id: 1
+            }
+        );
     tickets
         .push(
-        Ticket {
-            id: 2
-        }
-    );
+            Ticket {
+                id: 2
+            }
+        );
     tickets
         .push(
-        Ticket {
-            id: 3
-        }
-    );
+            Ticket {
+                id: 3
+            }
+        );
     // Affine elements: sequences of sequences.
     let mut rows: ChunkSeq[ChunkSeq[u64]] = ChunkSeq::new[ChunkSeq[u64]]();
     let mut row: ChunkSeq[u64] = ChunkSeq::new[u64]();

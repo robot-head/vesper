@@ -438,13 +438,13 @@ fn generic_scopes(inout s: St, inout a: Ast) {
             let x = a
                 .impls
                 .get_or(
-                idx_from_raw[ImplNode](it.node),
-                ImplNode {
-                    ty: ast_none(),
-                    generics: 0,
-                    methods: 0
-                }
-            );
+                    idx_from_raw[ImplNode](it.node),
+                    ImplNode {
+                        ty: ast_none(),
+                        generics: 0,
+                        methods: 0
+                    }
+                );
             let tn = ast_type_name(in a, x.ty);
             let tg = if tn == ast_none() {
                 s.s_empty
@@ -495,17 +495,17 @@ fn global_names(inout s: St, in a: Ast, it: ItemNode, inout out: ChunkSeq[u32]) 
         let x = a
             .traits
             .get_or(
-            idx_from_raw[TraitNode](it.node),
-            TraitNode {
-                name: ast_none(),
-                public: false,
-                generics: 0,
-                assoc: 0,
-                methods: 0,
-                start: 0,
-                end: 0
-            }
-        );
+                idx_from_raw[TraitNode](it.node),
+                TraitNode {
+                    name: ast_none(),
+                    public: false,
+                    generics: 0,
+                    assoc: 0,
+                    methods: 0,
+                    start: 0,
+                    end: 0
+                }
+            );
         let g = tr(inout s, in a, x.name);
         out.push(g);
         out.push(x.start);
@@ -542,8 +542,8 @@ fn check_globals(inout s: St, in found: ChunkSeq[u32]) {
                     push_sym(in s, at32(in s.file_display, w(other)), inout msg);
                     msg
                         .push_str(
-                        in "; enum variants, effect operations, traits and models share one namespace"
-                    );
+                            in "; enum variants, effect operations, traits and models share one namespace"
+                        );
                     s.err_msg.push_str(in msg);
                     emit(inout s, file);
                 }
@@ -566,11 +566,11 @@ fn assemble_module(inout s: St, in input: Str, m: u32, dump: bool) {
     let file = at32(in s.mod_file, w(m));
     s
         .shift = n32(
-        match s.file_base.try_get(w(file)) {
-            Option::Some(b) => b,
-            Option::None => 0,
-        }
-    );
+            match s.file_base.try_get(w(file)) {
+                Option::Some(b) => b,
+                Option::None => 0,
+            }
+        );
     s.values.clear();
     s.types.clear();
     let (x, y) = text_range(in s, w(m));
@@ -591,15 +591,15 @@ fn assemble_module(inout s: St, in input: Str, m: u32, dump: bool) {
             .ast
             .bounds
             .get_or(
-            idx_from_raw[BoundNode](bi),
-            BoundNode {
-                param: ast_none(),
-                trait_ref: ast_none(),
-                start: 0,
-                end: 0,
-                owner: ast_none()
-            }
-        );
+                idx_from_raw[BoundNode](bi),
+                BoundNode {
+                    param: ast_none(),
+                    trait_ref: ast_none(),
+                    start: 0,
+                    end: 0,
+                    owner: ast_none()
+                }
+            );
         let mark = s.types.len();
         let og = tr(inout s, in l.ast, b.owner);
         match s.scopes.get(og) {
@@ -629,15 +629,15 @@ fn assemble_module(inout s: St, in input: Str, m: u32, dump: bool) {
             .ast
             .model_uses
             .get_or(
-            idx_from_raw[ModelUseNode](ui),
-            ModelUseNode {
-                model: ast_none(),
-                start: 0,
-                end: 0,
-                scope_start: 0,
-                scope_end: 0
-            }
-        );
+                idx_from_raw[ModelUseNode](ui),
+                ModelUseNode {
+                    model: ast_none(),
+                    start: 0,
+                    end: 0,
+                    scope_start: 0,
+                    scope_end: 0
+                }
+            );
         u.start = wrapping_add(u.start, s.shift);
         u.end = wrapping_add(u.end, s.shift);
         u.scope_start = wrapping_add(u.scope_start, s.shift);

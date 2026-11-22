@@ -440,10 +440,8 @@ pub fn analyze_stack(in nm: Names, in gr: StackGraph, in pol: StackPol, inout r:
         let mut is_cycle = wrapping_sub(hi, lo) > 1;
         if !is_cycle {
             for k in g(in s.start, first)..g(in s.start, wrapping_add(first, 1)) {
-                if g(in s.rows, wrapping_mul(k, 3))
-                    == 0
-                    && g(in s.rows, wrapping_add(wrapping_mul(k, 3), 1))
-                    == first {
+                if g(in s.rows, wrapping_mul(k, 3)) == 0
+                    && g(in s.rows, wrapping_add(wrapping_mul(k, 3), 1)) == first {
                     is_cycle = true;
                 }
             }

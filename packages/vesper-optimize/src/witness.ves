@@ -326,13 +326,13 @@ fn arg_at(in t: Tree, list: u32, i: u64) -> ArgNode {
         .ast
         .args
         .get_or(
-        idx_from_raw[ArgNode](list_at(in t.ast, list, i)),
-        ArgNode {
-            pass: 255,
-            explicit: false,
-            expr: none()
-        }
-    )
+            idx_from_raw[ArgNode](list_at(in t.ast, list, i)),
+            ArgNode {
+                pass: 255,
+                explicit: false,
+                expr: none()
+            }
+        )
 }
 
 // `call_parts`: the operation, the callee and the two argument
@@ -629,11 +629,11 @@ pub fn bind_source(
                 bound
                     .origins
                     .push(
-                    Origin {
-                        op: op,
-                        callee: x.a
-                    }
-                );
+                        Origin {
+                            op: op,
+                            callee: x.a
+                        }
+                    );
                 let e = reserve(inout b, stack.len(), inout stack_cap, 3, S_SOURCE_FRAME);
                 if e != 0 {
                     return e;
@@ -856,11 +856,11 @@ pub fn compare_input(in bound: Bound, in terms: ChunkSeq[TermRow], input: u32, i
     }
     stack
         .push(
-        Pair {
-            left: bound.root,
-            right: input
-        }
-    );
+            Pair {
+                left: bound.root,
+                right: input
+            }
+        );
     let mut nodes: u64 = 0;
     loop {
         let (left, right) = match stack.pop() {
@@ -893,18 +893,18 @@ pub fn compare_input(in bound: Bound, in terms: ChunkSeq[TermRow], input: u32, i
             }
             stack
                 .push(
-                Pair {
-                    left: x.b,
-                    right: y.b
-                }
-            );
+                    Pair {
+                        left: x.b,
+                        right: y.b
+                    }
+                );
             stack
                 .push(
-                Pair {
-                    left: x.a,
-                    right: y.a
-                }
-            );
+                    Pair {
+                        left: x.a,
+                        right: y.a
+                    }
+                );
         } else if !same_node(x, y) {
             return E_INPUT_MISMATCH;
         }
@@ -983,12 +983,9 @@ pub fn compare_output(
         let current = term_at(in terms, id);
         let deeper = wrapping_add(depth, 1);
         if is_int_literal(in t, x)
-            && current
-            .tag
-            == T_CONST
-            && int_value(in t, x)
-            == current
-            .value {} else if x.kind == X_NAME && current.tag == T_INPUT {
+            && current.tag == T_CONST
+            && int_value(in t, x) == current.value {} else if x.kind == X_NAME
+            && current.tag == T_INPUT {
             let e = metadata(inout b, cap_at(in t.cap1, ei));
             if e != 0 {
                 return e;
@@ -1369,22 +1366,14 @@ fn check_rule(
     let to = step.to;
     let source = term_at(in terms, from);
     let target = term_at(in terms, to);
-    let valid = if rule
-        == 1
-        || rule
-        == 3
-        || rule
-        == 4
-        || rule
-        == 6
-        || rule
-        == 9
-        || rule
-        == 10
-        || rule
-        == 11
-        || rule
-        == 17 {
+    let valid = if rule == 1
+        || rule == 3
+        || rule == 4
+        || rule == 6
+        || rule == 9
+        || rule == 10
+        || rule == 11
+        || rule == 17 {
         let wrapping = rule >= 9;
         let op = if rule == 1 || rule == 9 {
             OP_ADD
@@ -1399,9 +1388,7 @@ fn check_rule(
             0
         };
         let lhs = is_binary(source)
-            && source
-            .a
-            == x
+            && source.a == x
             && constant(in terms, source.b, identity)
             && application(in terms, from, wrapping, op, source.a, source.b);
         let rhs = if rule == 6 || rule == 17 {
@@ -1422,9 +1409,7 @@ fn check_rule(
             0
         };
         let lhs = is_binary(source)
-            && source
-            .b
-            == x
+            && source.b == x
             && constant(in terms, source.a, identity)
             && application(in terms, from, false, op, source.a, source.b);
         let rhs = if rule == 7 {
@@ -1450,25 +1435,18 @@ fn check_rule(
         };
         is_binary(source)
             && is_binary(target)
-            && source
-            .b
-            == z
-            && target
-            .a
-            == x
+            && source.b == z
+            && target.a == x
             && application(in terms, from, true, op, source.a, z)
             && application(in terms, source.a, true, op, x, y)
             && application(in terms, to, true, op, x, target.b)
             && application(in terms, target.b, true, op, y, z)
     } else if rule == 16 {
         is_binary(source)
-            && source
-            .b
-            == y
+            && source.b == y
             && application(in terms, from, true, OP_SUB, source.a, y)
             && application(in terms, source.a, true, OP_ADD, x, y)
-            && to
-            == x
+            && to == x
     } else {
         let k = wrapping_sub(rule, 19) % 3;
         let op = if k == 0 {

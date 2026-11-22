@@ -260,16 +260,16 @@ pub fn decode_tables(inout l: L) {
     l.k = k;
     l
         .pos = add(
-        1,
-        mul(
-            nocc,
-            if given {
-                3
-            } else {
-                2
-            }
-        )
-    );
+            1,
+            mul(
+                nocc,
+                if given {
+                    3
+                } else {
+                    2
+                }
+            )
+        );
     let nver = rd(inout l);
     l.vers.reserve(nver);
     for i in 0..nver {
@@ -282,15 +282,15 @@ pub fn decode_tables(inout l: L) {
         l
             .vers
             .push(
-            Ver {
-                major: major,
-                minor: minor,
-                patch: patch,
-                pre: pre,
-                build: build,
-                text: text
-            }
-        );
+                Ver {
+                    major: major,
+                    minor: minor,
+                    patch: patch,
+                    pre: pre,
+                    build: build,
+                    text: text
+                }
+            );
     }
     let nreq = rd(inout l);
     l.reqs.reserve(nreq);
@@ -309,26 +309,26 @@ pub fn decode_tables(inout l: L) {
             l
                 .cmps
                 .push(
-                Cmp {
-                    op: op,
-                    major: major,
-                    minor: minor,
-                    has_minor: has_minor,
-                    patch: patch,
-                    has_patch: has_patch,
-                    pre: pre
-                }
-            );
+                    Cmp {
+                        op: op,
+                        major: major,
+                        minor: minor,
+                        has_minor: has_minor,
+                        patch: patch,
+                        has_patch: has_patch,
+                        pre: pre
+                    }
+                );
         }
         l
             .reqs
             .push(
-            Req {
-                at: at,
-                n: n,
-                text: text
-            }
-        );
+                Req {
+                    at: at,
+                    n: n,
+                    text: text
+                }
+            );
     }
 }
 
@@ -363,29 +363,29 @@ pub fn decode_manifest(inout l: L) -> u64 {
             l
                 .syss
                 .push(
-                Sys {
-                    raw: raw,
-                    ok: ok,
-                    name: sname,
-                    req: r
-                }
-            );
+                    Sys {
+                        raw: raw,
+                        ok: ok,
+                        name: sname,
+                        req: r
+                    }
+                );
         }
         l
             .feats
             .push(
-            Feat {
-                name: fname,
-                eff_at: eff_at,
-                eff_n: eff_n,
-                deps_at: deps_at,
-                deps_n: deps_n,
-                sub_at: sub_at,
-                sub_n: sub_n,
-                sys_at: sys_at,
-                sys_n: nsys
-            }
-        );
+                Feat {
+                    name: fname,
+                    eff_at: eff_at,
+                    eff_n: eff_n,
+                    deps_at: deps_at,
+                    deps_n: deps_n,
+                    sub_at: sub_at,
+                    sub_n: sub_n,
+                    sys_at: sys_at,
+                    sys_n: nsys
+                }
+            );
     }
     let ndep = rd(inout l);
     let dep_at = l.deps.len();
@@ -398,16 +398,16 @@ pub fn decode_manifest(inout l: L) -> u64 {
         l
             .deps
             .push(
-            Dep {
-                name: dname,
-                req: r,
-                eff_at: eff_at,
-                eff_n: eff_n,
-                opt: opt,
-                feat_at: fa,
-                feat_n: fan
-            }
-        );
+                Dep {
+                    name: dname,
+                    req: r,
+                    eff_at: eff_at,
+                    eff_n: eff_n,
+                    opt: opt,
+                    feat_at: fa,
+                    feat_n: fan
+                }
+            );
     }
     let sandbox = rd_bool(inout l);
     let mut net = false;
@@ -423,25 +423,25 @@ pub fn decode_manifest(inout l: L) -> u64 {
     l
         .mans
         .push(
-        Man {
-            name: name,
-            ver: v,
-            ceil_at: ceil_at,
-            ceil_n: ceil_n,
-            forbid: forbid,
-            feat_at: feat_at,
-            feat_n: nfeat,
-            dep_at: dep_at,
-            dep_n: ndep,
-            sandbox: sandbox,
-            net: net,
-            path_at: path_at,
-            path_n: path_n,
-            json: 0,
-            fs_at: 0,
-            fs_n: 0
-        }
-    );
+            Man {
+                name: name,
+                ver: v,
+                ceil_at: ceil_at,
+                ceil_n: ceil_n,
+                forbid: forbid,
+                feat_at: feat_at,
+                feat_n: nfeat,
+                dep_at: dep_at,
+                dep_n: ndep,
+                sandbox: sandbox,
+                net: net,
+                path_at: path_at,
+                path_n: path_n,
+                json: 0,
+                fs_at: 0,
+                fs_n: 0
+            }
+        );
     at
 }
 
@@ -460,13 +460,13 @@ pub fn decode_solution(inout l: L) {
         l
             .roots
             .push(
-            Root {
-                name: name,
-                req: r,
-                feat_at: fa,
-                feat_n: fan
-            }
-        );
+                Root {
+                    name: name,
+                    req: r,
+                    feat_at: fa,
+                    feat_n: fan
+                }
+            );
     }
     let nsel = rd(inout l);
     l.sel_at = l.mans.len();
@@ -495,10 +495,10 @@ pub fn decode_solution(inout l: L) {
         l
             .ssels
             .push(
-            SysSel {
-                name: name,
-                ver: v
-            }
-        );
+                SysSel {
+                    name: name,
+                    ver: v
+                }
+            );
     }
 }

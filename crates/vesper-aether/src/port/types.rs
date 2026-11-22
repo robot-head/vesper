@@ -177,3 +177,34 @@ impl From<HotFault> for crate::hotset::HotSetError {
         }
     }
 }
+
+/// The `QueueError`s the Vesper packed-ring walk raises.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PackedFault {
+    Limit,
+    Overflow,
+    Full,
+    NotAvailable,
+    IncompleteChain,
+    UnsupportedFlags,
+    EmptyBuffer,
+    ReadAfterWrite,
+    UnauthorizedRange,
+}
+
+impl From<PackedFault> for crate::virtio::QueueError {
+    fn from(e: PackedFault) -> Self {
+        use crate::virtio::QueueError as Q;
+        match e {
+            PackedFault::Limit => Q::Limit,
+            PackedFault::Overflow => Q::Overflow,
+            PackedFault::Full => Q::Full,
+            PackedFault::NotAvailable => Q::NotAvailable,
+            PackedFault::IncompleteChain => Q::IncompleteChain,
+            PackedFault::UnsupportedFlags => Q::UnsupportedFlags,
+            PackedFault::EmptyBuffer => Q::EmptyBuffer,
+            PackedFault::ReadAfterWrite => Q::ReadAfterWrite,
+            PackedFault::UnauthorizedRange => Q::UnauthorizedRange,
+        }
+    }
+}

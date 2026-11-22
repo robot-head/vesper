@@ -97,12 +97,12 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         g
             .fns
             .push(
-            StackFn {
-                id: id,
-                name: name,
-                frame: frame
-            }
-        );
+                StackFn {
+                    id: id,
+                    name: name,
+                    frame: frame
+                }
+            );
     }
     let n = r.word(in b);
     for i in 0..n {
@@ -118,12 +118,12 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         g
             .indirect
             .push(
-            Site {
-                caller: caller,
-                symbol: NONE32,
-                inst: inst
-            }
-        );
+                Site {
+                    caller: caller,
+                    symbol: NONE32,
+                    inst: inst
+                }
+            );
     }
     let n = r.word(in b);
     for i in 0..n {
@@ -133,12 +133,12 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         g
             .external
             .push(
-            Site {
-                caller: caller,
-                symbol: symbol,
-                inst: inst
-            }
-        );
+                Site {
+                    caller: caller,
+                    symbol: symbol,
+                    inst: inst
+                }
+            );
     }
     let n = r.word(in b);
     for i in 0..n {
@@ -147,11 +147,11 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         g
             .roots
             .push(
-            Pair {
-                key: key,
-                value: value
-            }
-        );
+                Pair {
+                    key: key,
+                    value: value
+                }
+            );
     }
     let n = r.word(in b);
     for i in 0..n {
@@ -160,11 +160,11 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         g
             .bounds
             .push(
-            Pair {
-                key: key,
-                value: value
-            }
-        );
+                Pair {
+                    key: key,
+                    value: value
+                }
+            );
     }
     let n = r.word(in b);
     for i in 0..n {
@@ -177,12 +177,12 @@ pub fn read_graph(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> G
         g
             .target_rows
             .push(
-            Site {
-                caller: caller,
-                symbol: wrapping_u32(k),
-                inst: a
-            }
-        );
+                Site {
+                    caller: caller,
+                    symbol: wrapping_u32(k),
+                    inst: a
+                }
+            );
     }
     g
 }
@@ -244,10 +244,8 @@ fn sift(inout s: ChunkSeq[u64], root: u64, n: u64) {
             return;
         }
         let mut big = child;
-        if wrapping_add(child, 1)
-            < n
-            && u64_at(in s, wrapping_add(child, 1))
-            > u64_at(in s, child) {
+        if wrapping_add(child, 1) < n
+            && u64_at(in s, wrapping_add(child, 1)) > u64_at(in s, child) {
             big = wrapping_add(child, 1);
         }
         if u64_at(in s, big) <= u64_at(in s, at) {
@@ -383,14 +381,14 @@ fn finding(inout rep: Report, in names: Names, function: u32, inst: u64, in rule
     rep
         .rows
         .push(
-        FindingRow {
-            function: function,
-            inst: inst,
-            at: at,
-            rule_at: rule_at,
-            message_at: rep.findings.len()
-        }
-    );
+            FindingRow {
+                function: function,
+                inst: inst,
+                at: at,
+                rule_at: rule_at,
+                message_at: rep.findings.len()
+            }
+        );
 }
 
 fn write_path(inout o: ChunkSeq[u8], in names: Names, in path: ChunkSeq[u32]) {
@@ -784,15 +782,15 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
             rep
                 .roots
                 .push(
-                RootRow {
-                    root: root.key,
-                    budget: root.value,
-                    worst: NONE64,
-                    pa: pa,
-                    pn: 0,
-                    within: false
-                }
-            );
+                    RootRow {
+                        root: root.key,
+                        budget: root.value,
+                        worst: NONE64,
+                        pa: pa,
+                        pn: 0,
+                        within: false
+                    }
+                );
             continue;
         }
         let worst = u64_at(in depth, id);
@@ -825,9 +823,9 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
                 }
                 names
                     .write(
-                    u32_at(in rep.paths, wrapping_add(widen_u64(pa), j)),
-                    inout rep.findings
-                );
+                        u32_at(in rep.paths, wrapping_add(widen_u64(pa), j)),
+                        inout rep.findings
+                    );
             }
             rep.findings.push(10);
         } else if worst == NONE64 {
@@ -840,15 +838,15 @@ pub fn report(inout o: ChunkSeq[u8], in names: Names, in g: Graph) -> Report {
         rep
             .roots
             .push(
-            RootRow {
-                root: root.key,
-                budget: root.value,
-                worst: worst,
-                pa: pa,
-                pn: pn,
-                within: within
-            }
-        );
+                RootRow {
+                    root: root.key,
+                    budget: root.value,
+                    worst: worst,
+                    pa: pa,
+                    pn: pn,
+                    within: within
+                }
+            );
     }
     if g.ebpf {
         ebpf_rules(in names, in g, in adj_start, in adj, inout rep);

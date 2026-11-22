@@ -319,12 +319,12 @@ pub fn isa_row_entry(
     d.text.push(93);
     d
         .close(
-        c,
-        m,
-        "use Isa[Baseline128], Isa[Avx2], Isa[Avx512], Isa[Sve2] or Isa[Rvv1]",
-        start,
-        stop
-    );
+            c,
+            m,
+            "use Isa[Baseline128], Isa[Avx2], Isa[Avx512], Isa[Sve2] or Isa[Rvv1]",
+            start,
+            stop
+        );
     true
 }
 
