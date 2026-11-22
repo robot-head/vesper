@@ -67,7 +67,7 @@ CRATES = {
     "vesper-serde": ("partial", "in crate", "4.8-5.7x", "SIMD stage 1 needs source vectors", "11"),
     "vesper-tensor": ("partial", "in crate", "unmeasured", "safetensors, memmap, simd kernels", "11"),
     "vesper-alloc": ("partial", "in crate", "unmeasured", "cache B-tree, arena keys, OS pages", "11"),
-    "vesper-gpu-compute": ("partial", "in crate (runtime, broadphase, tensor)", "1.00-1.02x", "runtime, broadphase and tensor drivers Vesper-only; WGSL compile (naga, src/shader.rs) and the Rust API glue left", "15"),
+    "vesper-gpu-compute": ("partial", "in crate (runtime, broadphase, tensor)", "1.00-1.02x", "runtime, broadphase and tensor drivers and the SPIR-V interface check Vesper-only; kernels are committed SPIR-V (naga only in tests); the Rust API glue left", "15"),
     "vesper-crucible": ("partial", "in crate", "0.79-1.57x", "fuzzer, schedule explorers, DPOR, arena", "12"),
     "vesper-semver": ("partial", "in crate", "1.6-2.3x", "speed: Rust encoder hash-conses every node; checker reads through try_get", "12"),
     "vesper-loom-calculus": ("gone", "in crate (+ seed)", "1.12x @8 / 0.80x @64 pkgs", "seed until Stage 2; TOML decoding in Vesper (#965), serde_json read of its output", "12"),

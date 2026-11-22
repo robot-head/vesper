@@ -42,7 +42,7 @@ vesper_crate(
     # reference text from vesper-tensor.
     extra_compile_data = ["//crates/vesper-tensor:files"],
     # Under Bazel there is usually no Vulkan loader or device, so the device
-    # tests report "GPU unavailable" and only the naga compile tests run. The
-    # differential tests run on Mesa lavapipe in
+    # tests report "GPU unavailable" and only tests/spirv.rs (no device) checks
+    # anything. The differential tests run on Mesa lavapipe in
     # .github/workflows/gpu-compute.yml with VESPER_GPU_REQUIRE=1.
 )
