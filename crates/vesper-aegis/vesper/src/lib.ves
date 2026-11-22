@@ -15,6 +15,13 @@
 // `AErr`: `kind` is the ParseError variant index, `format` the Format
 // index, `field` an index into the field-name table of src/port.rs
 // (FIELDS), and `a`, `b` the variant's numbers.
+use self::cbor::decode as cbor_decode_impl;
+use self::cca::{
+    platform_claims,
+    platform_profile,
+    realm_claims,
+    realm_profile
+};
 use self::claims::{
     check_policy,
     decode_wire
@@ -72,6 +79,46 @@ pub fn tdx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fa
 // SgxQuote::parse (mode 0), parse_padded (1) and parse_prefix (2).
 pub fn sgx_parse(in b: Slice[u8], mode: u64, inout w: Slice[u64]) -> u64 eff [Fail[AErr]] {
     sgx_parse_impl(in b, mode, inout w)
+}
+
+// cca::decode_value: one CBOR item at the start of `b` as preorder nodes
+// in `w` (module cbor), with `st` the decoder's stack; the bytes it used.
+pub fn cbor_decode(in b: Slice[u8], inout w: Slice[u64], inout st: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
+    cbor_decode_impl(in b, inout w, inout st)
+}
+
+// CcaRealmClaims::from_cbor (module cca), with `n` and `st` the CBOR
+// decoder's node buffer and stack.
+pub fn cca_realm_claims(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    realm_claims(in b, inout n, inout st, inout w)
+}
+
+// CcaPlatformClaims::from_cbor.
+pub fn cca_platform_claims(
+    in b: Slice[u8],
+    inout n: Slice[u64],
+    inout st: Slice[u64],
+    inout w: Slice[u64]
+) -> Unit eff [Fail[AErr]] {
+    platform_claims(in b, inout n, inout st, inout w)
+}
+
+// The platform token's profile: CcaPlatformProfile in declaration order.
+pub fn cca_platform_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
+    platform_profile(in b, inout n, inout st)
+}
+
+// The realm token's profile: CcaRealmProfile in declaration order.
+pub fn cca_realm_profile(in b: Slice[u8], inout n: Slice[u64], inout st: Slice[u64])
+    -> u64 eff [Fail[AErr]] {
+    realm_profile(in b, inout n, inout st)
 }
 
 // AegisAttestationClaimsWire::decode.
