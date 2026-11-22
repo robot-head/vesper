@@ -1,0 +1,174 @@
+// Module simd of @vesper/resonance (see lib.ves): the SIMD paths of
+// `simd::svf_tick` and `simd::ramp_tick` (src/simd.rs) on source vectors
+// (§14). Each path evaluates the scalar reference's IEEE-754 operations in
+// the same order per lane, with no fused multiply-add, so every path is bit
+// for bit the scalar reference (`v_tick_scalar`, `events::e_tile_next`).
+//
+// The tile layouts are the Rust structs' `repr(C)` words: `SvfVoiceTile` is
+// ic1eq, ic2eq, g, k, gain and patch_id (16 words each), `PanLanes` and
+// `LaneOut` are left then right, and `RampTile` is current, target, step
+// and remaining.
+
+const LANES: u64 = 16;
+
+enum Tile: _ {
+    Ic1 = 0,
+    Ic2 = 16,
+    G = 32,
+    K = 48,
+    Gain = 64
+}
+
+enum Rt: _ {
+    Current = 0,
+    Target = 16,
+    Step = 32,
+    Remaining = 48
+}
+
+// The scalar reference (`simd::tick_scalar`).
+pub fn v_tick_scalar(inout t: Slice[u32], in pan: Slice[u32], v0: f32, inout out: Slice[u32]) eff [
+    Fail[RuntimeError]
+] {
+    for v in 0..LANES {
+        let g = from_bits_f32(t[wrapping_add(v, Tile::G)]);
+        let k = from_bits_f32(t[wrapping_add(v, Tile::K)]);
+        let ic1 = from_bits_f32(t[wrapping_add(v, Tile::Ic1)]);
+        let ic2 = from_bits_f32(t[wrapping_add(v, Tile::Ic2)]);
+        let a1 = 1.0 / (1.0 + g * (g + k));
+        let a2 = g * a1;
+        let a3 = g * a2;
+        let v3 = v0 - ic2;
+        let v1 = a1 * ic1 + a2 * v3;
+        let v2 = ic2 + a2 * ic1 + a3 * v3;
+        t.set(wrapping_add(v, Tile::Ic1), to_bits_f32(2.0 * v1 - ic1));
+        t.set(wrapping_add(v, Tile::Ic2), to_bits_f32(2.0 * v2 - ic2));
+        let y = from_bits_f32(t[wrapping_add(v, Tile::Gain)]) * v2;
+        out.set(v, to_bits_f32(y * from_bits_f32(pan[v])));
+        out
+            .set(
+            wrapping_add(v, LANES),
+            to_bits_f32(y * from_bits_f32(pan[wrapping_add(v, LANES)]))
+        );
+    }
+}
+
+// `svf_tick` on 4-lane vectors: the SVF of every voice, 4 voices at a
+// time, in the scalar reference's operation order.
+pub fn v_tick4(inout t: Slice[u32], in pan: Slice[u32], v0: f32, inout out: Slice[u32]) eff [
+    Isa[Baseline128],
+    Fail[RuntimeError]
+] {
+    let one = Vec::splat[f32, 4](1.0);
+    let two = Vec::splat[f32, 4](2.0);
+    let input = Vec::splat[f32, 4](v0);
+    for q in 0..LANES / 4 {
+        let i = wrapping_mul(q, 4);
+        let g = Vec::from_bits(Vec::load[u32, 4](in t, wrapping_add(i, Tile::G)));
+        let k = Vec::from_bits(Vec::load[u32, 4](in t, wrapping_add(i, Tile::K)));
+        let gain = Vec::from_bits(Vec::load[u32, 4](in t, wrapping_add(i, Tile::Gain)));
+        let ic1 = Vec::from_bits(Vec::load[u32, 4](in t, wrapping_add(i, Tile::Ic1)));
+        let ic2 = Vec::from_bits(Vec::load[u32, 4](in t, wrapping_add(i, Tile::Ic2)));
+        let a1 = Vec::div(one, Vec::add(one, Vec::mul(g, Vec::add(g, k))));
+        let a2 = Vec::mul(g, a1);
+        let a3 = Vec::mul(g, a2);
+        let v3 = Vec::sub(input, ic2);
+        let v1 = Vec::add(Vec::mul(a1, ic1), Vec::mul(a2, v3));
+        let v2 = Vec::add(Vec::add(ic2, Vec::mul(a2, ic1)), Vec::mul(a3, v3));
+        Vec::store(
+            inout t,
+            wrapping_add(i, Tile::Ic1),
+            Vec::to_bits(Vec::sub(Vec::mul(two, v1), ic1))
+        );
+        Vec::store(
+            inout t,
+            wrapping_add(i, Tile::Ic2),
+            Vec::to_bits(Vec::sub(Vec::mul(two, v2), ic2))
+        );
+        let y = Vec::mul(gain, v2);
+        let pl = Vec::from_bits(Vec::load[u32, 4](in pan, i));
+        let pr = Vec::from_bits(Vec::load[u32, 4](in pan, wrapping_add(i, LANES)));
+        Vec::store(inout out, i, Vec::to_bits(Vec::mul(y, pl)));
+        Vec::store(inout out, wrapping_add(i, LANES), Vec::to_bits(Vec::mul(y, pr)));
+    }
+}
+
+// `ramp_tick` on 4-lane vectors: a lane with samples left steps (or lands
+// on its target on its last sample), a resting lane keeps its value.
+pub fn v_ramp4(inout r: Slice[u32]) eff [Isa[Baseline128], Fail[RuntimeError]] {
+    let zero = Vec::splat[u32, 4](0);
+    let ones = Vec::splat[u32, 4](1);
+    for q in 0..LANES / 4 {
+        let i = wrapping_mul(q, 4);
+        let cur = Vec::load[u32, 4](in r, wrapping_add(i, Rt::Current));
+        let tgt = Vec::load[u32, 4](in r, wrapping_add(i, Rt::Target));
+        let stp = Vec::from_bits(Vec::load[u32, 4](in r, wrapping_add(i, Rt::Step)));
+        let rem = Vec::load[u32, 4](in r, wrapping_add(i, Rt::Remaining));
+        let resting = Vec::eq(rem, zero);
+        let next = Vec::select(resting, zero, Vec::sub(rem, ones));
+        let landed = Vec::eq(next, zero);
+        let moved = Vec::select(landed, tgt, Vec::to_bits(Vec::add(Vec::from_bits(cur), stp)));
+        Vec::store(inout r, wrapping_add(i, Rt::Current), Vec::select(resting, cur, moved));
+        Vec::store(inout r, wrapping_add(i, Rt::Remaining), next);
+    }
+}
+
+// `svf_tick` on 8-lane vectors: the SVF of every voice, 8 voices at a
+// time, in the scalar reference's operation order.
+pub fn v_tick8(inout t: Slice[u32], in pan: Slice[u32], v0: f32, inout out: Slice[u32]) eff [
+    Isa[Avx2],
+    Fail[RuntimeError]
+] {
+    let one = Vec::splat[f32, 8](1.0);
+    let two = Vec::splat[f32, 8](2.0);
+    let input = Vec::splat[f32, 8](v0);
+    for q in 0..LANES / 8 {
+        let i = wrapping_mul(q, 8);
+        let g = Vec::from_bits(Vec::load[u32, 8](in t, wrapping_add(i, Tile::G)));
+        let k = Vec::from_bits(Vec::load[u32, 8](in t, wrapping_add(i, Tile::K)));
+        let gain = Vec::from_bits(Vec::load[u32, 8](in t, wrapping_add(i, Tile::Gain)));
+        let ic1 = Vec::from_bits(Vec::load[u32, 8](in t, wrapping_add(i, Tile::Ic1)));
+        let ic2 = Vec::from_bits(Vec::load[u32, 8](in t, wrapping_add(i, Tile::Ic2)));
+        let a1 = Vec::div(one, Vec::add(one, Vec::mul(g, Vec::add(g, k))));
+        let a2 = Vec::mul(g, a1);
+        let a3 = Vec::mul(g, a2);
+        let v3 = Vec::sub(input, ic2);
+        let v1 = Vec::add(Vec::mul(a1, ic1), Vec::mul(a2, v3));
+        let v2 = Vec::add(Vec::add(ic2, Vec::mul(a2, ic1)), Vec::mul(a3, v3));
+        Vec::store(
+            inout t,
+            wrapping_add(i, Tile::Ic1),
+            Vec::to_bits(Vec::sub(Vec::mul(two, v1), ic1))
+        );
+        Vec::store(
+            inout t,
+            wrapping_add(i, Tile::Ic2),
+            Vec::to_bits(Vec::sub(Vec::mul(two, v2), ic2))
+        );
+        let y = Vec::mul(gain, v2);
+        let pl = Vec::from_bits(Vec::load[u32, 8](in pan, i));
+        let pr = Vec::from_bits(Vec::load[u32, 8](in pan, wrapping_add(i, LANES)));
+        Vec::store(inout out, i, Vec::to_bits(Vec::mul(y, pl)));
+        Vec::store(inout out, wrapping_add(i, LANES), Vec::to_bits(Vec::mul(y, pr)));
+    }
+}
+
+// `ramp_tick` on 8-lane vectors: a lane with samples left steps (or lands
+// on its target on its last sample), a resting lane keeps its value.
+pub fn v_ramp8(inout r: Slice[u32]) eff [Isa[Avx2], Fail[RuntimeError]] {
+    let zero = Vec::splat[u32, 8](0);
+    let ones = Vec::splat[u32, 8](1);
+    for q in 0..LANES / 8 {
+        let i = wrapping_mul(q, 8);
+        let cur = Vec::load[u32, 8](in r, wrapping_add(i, Rt::Current));
+        let tgt = Vec::load[u32, 8](in r, wrapping_add(i, Rt::Target));
+        let stp = Vec::from_bits(Vec::load[u32, 8](in r, wrapping_add(i, Rt::Step)));
+        let rem = Vec::load[u32, 8](in r, wrapping_add(i, Rt::Remaining));
+        let resting = Vec::eq(rem, zero);
+        let next = Vec::select(resting, zero, Vec::sub(rem, ones));
+        let landed = Vec::eq(next, zero);
+        let moved = Vec::select(landed, tgt, Vec::to_bits(Vec::add(Vec::from_bits(cur), stp)));
+        Vec::store(inout r, wrapping_add(i, Rt::Current), Vec::select(resting, cur, moved));
+        Vec::store(inout r, wrapping_add(i, Rt::Remaining), next);
+    }
+}

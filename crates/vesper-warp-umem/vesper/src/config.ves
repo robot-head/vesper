@@ -1,0 +1,51 @@
+// ---------------------------------------------------------------------------
+// UMEM geometry (src/config.rs). A refused config is a message code, mapped
+// to the crate's `&'static str` by src/port/error.rs:
+// 0 frame_count, 1 frame_size, 2 headroom, 3 ring sizes, 4 fill ring,
+// 5 UMEM size overflow, 6 backend geometry differs.
+
+fn config_error(c: UmemConfig) -> Option[u32] {
+    if c.frame_count == 0 || c.frame_count > MAX_FRAMES {
+        return Option::Some(0);
+    }
+    if !is_power_of_two(c.frame_size)
+        || c
+        .frame_size
+        < MIN_FRAME_SIZE
+        || c
+        .frame_size
+        > MAX_FRAME_SIZE {
+        return Option::Some(1);
+    }
+    if c.headroom > c.frame_size || wrapping_sub(c.frame_size, c.headroom) < MIN_FRAME_PAYLOAD {
+        return Option::Some(2);
+    }
+    if !ring_size_ok(c.fill_size)
+        || !ring_size_ok(c.rx_size)
+        || !ring_size_ok(c.tx_size)
+        || !ring_size_ok(c.completion_size) {
+        return Option::Some(3);
+    }
+    if c.fill_size < c.frame_count {
+        return Option::Some(4);
+    }
+    // frame_count <= 2^20 and frame_size <= 2^15: the product fits.
+    Option::None
+}
+
+fn ring_size_ok(size: u32) -> bool {
+    is_power_of_two(size) && size <= MAX_RING_SIZE
+}
+
+fn frame_shift(c: UmemConfig) -> u64 {
+    log2(c.frame_size)
+}
+
+fn chunk_base(c: UmemConfig, idx: u32) -> u64 {
+    shl(widen_u64(idx), frame_shift(c))
+}
+
+// `UmemConfig::validate`: the message code of a refused config.
+pub fn config_validate(c: UmemConfig) -> Option[u32] {
+    config_error(c)
+}

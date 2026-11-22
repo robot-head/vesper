@@ -26,8 +26,13 @@ fn compiler_and_verified_backend_link_no_port_object() {
 
 #[test]
 fn the_query_finds_a_port_outside_the_closure() {
+    let mut found = ports("PORTS_IN_BEACON_ARROW");
+    found.sort();
     assert_eq!(
-        ports("PORTS_IN_BEACON_ARROW"),
-        ["//crates/vesper-beacon:beacon_vesper"]
+        found,
+        [
+            "//crates/vesper-beacon-arrow:beacon_arrow_vesper",
+            "//crates/vesper-beacon:beacon_vesper",
+        ]
     );
 }

@@ -199,6 +199,74 @@ the call it edits. `vesper fmt --check` is clean.
    own; nothing is shared between the four. The plain `for k in 0..s.len()`
    loop stays.
 
+## Part 3: the SIMD paths on Vesper vectors
+
+Base `main` at `0d2438da` (part 2 merged). `simd.rs` was the first module
+of the "not ported yet" list: its SSE2, AVX and NEON paths of `svf_tick`
+and `ramp_tick` were `std::arch` intrinsics with no port.
+
+### What changed
+
+- **`vesper/src/simd.ves` (new).** `v_tick4`/`v_tick8` and
+  `v_ramp4`/`v_ramp8` are the SVF and ramp steps on 4- and 8-lane source
+  vectors (§14), and `v_tick_scalar` is the scalar reference. Every path
+  evaluates the reference's IEEE-754 operations in its order per lane,
+  with no fused multiply-add. The ramps select on the bit patterns, since
+  a `Mask` of `u32` lanes selects only `u32` vectors.
+- **Exports `svf_tick` and `ramp_tick`** take the path's lane count and
+  dispatch with `Isa::supported`. An export cannot carry an `Isa` effect,
+  so the checked dispatch sits inside it. The tiles cross as their
+  `repr(C)` words: `SvfVoiceTile` is 96 words, `PanLanes` and `LaneOut` 32,
+  `RampTile` 64. `simd.rs` views them in place, and the sizes are asserted
+  at compile time.
+- **`src/simd.rs`** routes `svf_tick`, `tick_scalar` and `ramp_tick` to the
+  port under `cfg(vesper_port)`. The `std::arch` modules build only
+  without it. Path availability is unchanged: AVX is available where the
+  CPU has AVX.
+- **Checks:** `tests/port_differential.rs` gains
+  `simd_paths_match_the_rust_build`. It runs 200 trials over every path on
+  random bit patterns (NaN, infinities, subnormals, `u32::MAX` remaining
+  samples) against the Rust build's `std::arch` paths, four samples each.
+  A NaN matches any NaN, as in `tests/simd.rs`, because IEEE-754 leaves a
+  NaN result's payload to the implementation; the port's x86 code can
+  return the other operand's NaN. A new divergent edit points the 4-lane
+  path's right channel at the left pan weights, and
+  `tick_is_bit_identical_over_filter_range` catches it.
+  `port/test-port.sh` passes in full, with eight divergence checks now.
+
+### Measurements
+
+A new `simd` workload in `examples/abba.rs` runs one 16-voice tile and
+its ramps, sample by sample, through `ramp_tick` and `svf_tick`
+(200,000 samples per window):
+
+| Path | port/rust median |
+|---|--:|
+| widest (`Avx`, which runs on 4-lane vectors in the port: gap 6) | 48.3x |
+| `Sse2` | 38.7x |
+| `Scalar` | 7.9x |
+
+The module is far from the bar. Both causes are in the compiler. Vectors
+are stack aggregates (gap 2), so the vector paths cost five times the
+port's own scalar loop. The scalar loop pays the slice-header reloads and
+bounds checks on every access (P3b). Each sample is also one call across
+the export ABI, about 16 ns of work on the Rust side. `SvfBank::render`,
+which renders whole blocks, is the kernel workload above and is at 1.1x.
+So the port of this module is functionally complete and stays
+non-default.
+
+### Compiler gap found in this part
+
+6. **`Isa::supported` is decided at compile time.** Native code lowers it
+   to a constant from the target the object is built for
+   (`src/native_vector.rs`: `isa_enabled(self.m.isa(), p)`), not to a
+   runtime CPU check. A `vesper build --lib` object for the x86_64
+   baseline therefore never runs an `Isa[Avx2]` path, even on an AVX2
+   host. Repro: `pub fn wide() -> bool { Isa::supported[Avx2]() }`
+   exported and called from Rust on an AVX2 machine returns false. Also,
+   an export cannot carry `Isa[P]` ("only Fail[E] and imported .vsys
+   libraries are"), so the dispatch has to sit inside the export.
+
 ## What is left
 
 - **Resonance flip** (seed pattern, the compiler links it through
@@ -206,8 +274,9 @@ the call it edits. `vesper fmt --check` is clean.
   `vesper-resonance` and the Rust engine stays in `seed/`. The Rust
   `CompiledGraph` over Rust `Box<dyn DspProcessor>` trait objects, the
   Cranelift JIT (`clif.rs`, which goes through `@vesper/cranelift` per the
-  plan), the `rtrb` rings (`spsc.rs`), the denormal registers and the SIMD
-  intrinsics are not ported yet.
+  plan), the `rtrb` rings (`spsc.rs`) and the denormal registers are not
+  ported yet. The SIMD paths are ported (part 3), but they run at 8-48x and
+  are bound by gaps 2 and 6.
 - **Kinetic:** `world`/`tile`, `rigid` and `rigid/**`, `soft`,
   `articulation`, `couple`, `diff`, `rigid_diff`, `rollback`, `snapshot`,
   `detfloat`, `simd` (see `port-p3b-kinetic.md`, "Not ported yet"), then the

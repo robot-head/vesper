@@ -106,7 +106,20 @@ fn word(v: &Value) -> u64 {
     }
 }
 
-const X86: &str = r#"use @vesper-std/cpu::{x86_rdtsc, x86_rdpmc, x86_rdrand64};
+const X86: &str = r#"use @vesper-std/cpu::{x86_cpuid, x86_has_rdrand, x86_rdtsc, x86_rdpmc, x86_rdrand64};
+
+// CPUID leaf 0: the highest basic leaf in the low word, and 1 << 32 when
+// the vendor string's words are nonzero.
+pub fn vendor() -> u64 eff [Ffi[StdCpu]] {
+    let (max, b, c, d) = x86_cpuid(0, 0);
+    let named: u64 = if b != 0 && c != 0 && d != 0 { 4294967296 } else { 0 };
+    wrapping_add(widen_u64(max), named)
+}
+
+// 1 when CPUID reports RDRAND.
+pub fn has_rdrand() -> u64 eff [Ffi[StdCpu]] {
+    if x86_has_rdrand() { 1 } else { 0 }
+}
 
 // 1 when two time-stamp reads are nonzero and do not go backwards.
 pub fn tsc() -> u64 eff [Ffi[StdCpu]] {
@@ -142,7 +155,7 @@ pub fn counter(index: u32) -> u64 eff [Ffi[StdCpu]] {
 }
 
 pub fn main() -> u64 eff [Ffi[StdCpu]] {
-    wrapping_add(tsc(), wrapping_add(rand(), counter(0)))
+    wrapping_add(wrapping_add(tsc(), vendor()), wrapping_add(rand(), counter(0)))
 }
 "#;
 
@@ -189,7 +202,12 @@ fn object(source: &str, target: (&str, &str)) -> Result<Vec<u8>, String> {
 fn objects_hold_each_instruction() {
     let linux = ("x86_64-unknown-linux-gnu", "sysv64");
     let bytes = object(X86, linux).unwrap();
-    for symbol in ["vstd_cpu_rdtsc", "vstd_cpu_rdpmc", "vstd_cpu_rdrand64"] {
+    for symbol in [
+        "vstd_cpu_cpuid",
+        "vstd_cpu_rdtsc",
+        "vstd_cpu_rdpmc",
+        "vstd_cpu_rdrand64",
+    ] {
         let (_, code) = ffi_lowering::cpu::function(symbol).unwrap();
         assert!(holds(&bytes, &code), "{symbol} is not in the x86_64 object");
     }
@@ -235,6 +253,24 @@ fn the_jit_runs_the_unprivileged_reads() {
         for optimize in [true, false] {
             let tsc = checked.jit_with_options("tsc", &[], optimize).unwrap();
             assert_eq!(word(&tsc), 1, "rdtsc (optimize {optimize})");
+            let vendor = word(&checked.jit_with_options("vendor", &[], optimize).unwrap());
+            assert!(
+                vendor >> 32 == 1 && vendor & 0xffff_ffff >= 1,
+                "cpuid(0) gave {vendor:#x}"
+            );
+            #[cfg(target_arch = "x86_64")]
+            {
+                let has = word(
+                    &checked
+                        .jit_with_options("has_rdrand", &[], optimize)
+                        .unwrap(),
+                );
+                assert_eq!(
+                    has == 1,
+                    std::arch::is_x86_feature_detected!("rdrand"),
+                    "cpuid(1) rdrand bit"
+                );
+            }
             // RDRAND is an invalid opcode on a CPU without it, so the
             // read runs only where CPUID reports it.
             #[cfg(target_arch = "x86_64")]

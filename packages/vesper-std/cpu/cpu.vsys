@@ -9,6 +9,10 @@ sys library StdCpu (
     link = "static", name = "vesper_std_cpu",
     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
 ) {
+    // x86_64: `cpuid` of `leaf` and `subleaf` (ecx), the four registers
+    // stored to `out`.
+    wire struct CpuidRegs { eax: u32, ebx: u32, ecx: u32, edx: u32 }
+    fn vstd_cpu_cpuid(leaf: u32, subleaf: u32, nocapture inout out: CpuidRegs) -> ForeignVal[Unit];
     // x86_64: `lfence; rdtsc`.
     fn vstd_cpu_rdtsc() -> ForeignVal[u64];
     // x86_64: `lfence; rdpmc; lfence` of counter `index` (ecx).

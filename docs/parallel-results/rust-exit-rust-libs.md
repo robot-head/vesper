@@ -99,16 +99,80 @@ None blocked the engine. Two small things cost a detour:
 - A deep recursion over the proof forest runs on the caller's stack, so
   `fuse` keeps the old 1 GiB proof thread.
 
-### What is left
+## Part 2: the Beacon span stream is written in Vesper
+
+Base: `main` at `3a86df2e`.
+
+| Area | Files |
+| --- | --- |
+| Writer (Vesper) | `crates/vesper-beacon-arrow/vesper/{Loom.toml,src/*.ves}` |
+| Binding, build | `crates/vesper-beacon-arrow/port/binding.rs`, `build.rs`, `Cargo.toml`, `BUILD.bazel` |
+| Rust side | `src/lib.rs`: `encode` fills the twelve columns and calls the writer |
+| Tests | `tests/span_stream_differential.rs`; `port/test-port.sh` (one divergence check), its line in `scripts/test-port-harness.sh` |
+| Shared guard | `crates/vesper-port-harness/{tests,bazel}/closure_guard.rs`: the positive control now also lists this crate's own port object |
+
+`export_batch` and `export_ring` return a `vesper.beacon.spans/1` Arrow IPC
+stream. The arrow-rs `StreamWriter` that wrote it is replaced by a Vesper
+package: a FlatBuffers builder that lays bytes out exactly as the Rust
+`flatbuffers` 25 builder does (downward growth, per-scalar alignment,
+default fields left out, vtable reuse, root alignment), the Arrow `Schema`
+and `RecordBatch` messages built in `arrow-ipc` 56's field order, and the
+stream framing (continuation, 64-byte padded metadata, 64-byte padded
+buffers, all-valid bitmaps, EOS). The builder and message modules are the
+start of the OTAP writer in later parts. `ExportError::Arrow` became
+`ExportError::Ipc`; `span_schema()` still describes the schema with
+arrow-schema types (the OTAP modules use them).
+
+### Flip gate (span stream)
+
+Differential (`tests/span_stream_differential.rs`, release,
+`BEACON_ARROW_DIFF_CASES=1000`): random rings of 0 to 4,096 rows (ids and
+times at the edges of their domain, every schema, status, error code and
+attribute kind), each exported as a borrowed batch, a ring prefix and the
+rest, plus one 65,536-row ring, against the arrow-rs writer kept in the test
+as the oracle.
+
+| Streams | Bytes | Byte-identical | Other |
+| --: | --: | --: | --: |
+| 3,037 | 259 MB | 3,037 | **0** |
+
+Every crate test passes on the port. The divergent build (every u64 column
+shifted by one row) fails
+`independent_arrow2_reader_compares_every_column_and_metadata` while
+`tests::hard_row_limit_precedes_attribute_walk_and_allocations` passes.
+
+ABBA (`speed_abba`, 21 epochs, arrow-rs, Vesper, Vesper, arrow-rs per
+epoch). The arrow-rs arm is the old `export_batch` (plan, then the arrow-rs
+encoder) over rows converted before timing; the Vesper arm is
+`export_batch`.
+
+| Workload | arrow-rs | Vesper | Ratio (95% interval) |
+| --- | --: | --: | --- |
+| 64 batches of 8 rows | 10.3 us/batch | 6.9 us/batch | 0.664x (0.654x..0.677x) |
+| 32 batches of 256 rows | 17.3 us/batch | 11.8 us/batch | 0.677x (0.672x..0.686x) |
+| 8 batches of 4,096 rows | 229 us/batch | 94 us/batch | 0.410x (0.405x..0.413x) |
+
+**Verdict: the span stream passes the gate** (0 differences, upper interval
+0.686x). It is the only build. The arrow crates stay dependencies until the
+OTAP modules move.
+
+### Compiler gaps (part 2)
+
+None blocked the writer. Wide writes (`try_write_u32_le`) work on a
+`ChunkSeq` receiver but not on `as_slice_mut()` of a field (E1521), so the
+builder writes into its `ChunkSeq` directly.
+
+## What is left
 
 - **Fusion part 2**: the rest of the crate is Rust because it evaluates
   through the Rust seeds of `vesper-tensor` (lane 11) and
   `vesper-resonance` (lane 9). Once those flip, `tensor.rs`, `dsp.rs` and
   the witness checker move to the Vesper package and the crate becomes thin
   wrappers.
-- **Beacon-arrow**: Arrow IPC framing and buffers, OTAP/OTLP, gRPC on the
-  Prism HTTP/2 port with protobuf through the Grammar port, zstd through its
-  C library.
+- **Beacon-arrow**, after part 2: the untrusted OTAP IPC reader with zstd
+  through its C library, OTAP encode and decode (dictionaries, structs,
+  lists), OTLP protobuf through the Grammar port, and gRPC on the Prism
+  HTTP/2 port.
 - **Migrate**: the C lifter on a Vesper C reader and the Rust lifter on a
   Vesper Rust reader for the subset `vesper migrate` accepts.
 - The census row (`scripts/rust-census.py`) is updated once plan PR #1415,
