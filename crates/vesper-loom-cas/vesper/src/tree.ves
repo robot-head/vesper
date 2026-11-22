@@ -65,11 +65,34 @@ pub fn tree_encode_into(
     in digests: Slice[u8],
     in sizes: Slice[u64]
 ) -> ChunkSeq[u8] {
+    // Size the output once (43 fixed bytes per entry plus its name), then
+    // write each field in place through one view of it.
     let n = ends.len();
-    let mut out = ChunkSeq::with_capacity[u8](wrapping_add(16, wrapping_mul(n, 64)));
-    out.extend(in "VLTR".as_bytes());
-    push_u32(inout out, 1);
-    push_u64(inout out, n);
+    let name_bytes = if n == 0 {
+        0
+    } else {
+        word(in ends, wrapping_sub(n, 1))
+    };
+    let total = wrapping_add(wrapping_add(16, wrapping_mul(n, 43)), name_bytes);
+    let mut out = ChunkSeq::with_capacity[u8](total);
+    out.resize(total, 0);
+    write_entries(inout out.as_slice_mut(), in names, in ends, in kinds, in digests, in sizes);
+    out
+}
+
+fn write_entries(
+    inout o: Slice[u8],
+    in names: Slice[u8],
+    in ends: Slice[u64],
+    in kinds: Slice[u8],
+    in digests: Slice[u8],
+    in sizes: Slice[u64]
+) {
+    let n = ends.len();
+    o.try_copy_from(0, in "VLTR".as_bytes());
+    o.try_write_u32_le(4, 1);
+    o.try_write_u64_le(8, n);
+    let mut at: u64 = 16;
     let mut start: u64 = 0;
     let mut i: u64 = 0;
     loop {
@@ -77,16 +100,24 @@ pub fn tree_encode_into(
             break;
         }
         let end = word(in ends, i);
-        push_u16(inout out, wrapping_sub(end, start));
-        push_range(inout out, in names, start, end);
-        out.push(byte(in kinds, i));
+        let len = wrapping_sub(end, start);
+        o.try_write_u16_le(at, wrapping_u16(len));
+        at = wrapping_add(at, 2);
+        o.try_copy_from(at, in names[start..end]);
+        at = wrapping_add(at, len);
+        o.try_set(at, byte(in kinds, i));
+        at = wrapping_add(at, 1);
         let d = wrapping_mul(i, 32);
-        push_range(inout out, in digests, d, wrapping_add(d, 32));
-        push_u64(inout out, word(in sizes, i));
+        o.try_write_u64_le(at, read_le(in digests, d, 8));
+        o.try_write_u64_le(wrapping_add(at, 8), read_le(in digests, wrapping_add(d, 8), 8));
+        o.try_write_u64_le(wrapping_add(at, 16), read_le(in digests, wrapping_add(d, 16), 8));
+        o.try_write_u64_le(wrapping_add(at, 24), read_le(in digests, wrapping_add(d, 24), 8));
+        at = wrapping_add(at, 32);
+        o.try_write_u64_le(at, word(in sizes, i));
+        at = wrapping_add(at, 8);
         start = end;
         i = wrapping_add(i, 1);
     }
-    out
 }
 
 fn read_le(in s: Slice[u8], at: u64, n: u64) -> u64 {

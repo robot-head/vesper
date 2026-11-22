@@ -1,7 +1,7 @@
 //! `vesper jit`, `run` and `test` bind a `.vsys` library that imports the C
 //! library itself (`link = "dynamic", name = "c"`) from the process, the way
 //! the linker binds it in a `vesper build` executable (SH6 lane 13, #1408,
-//! gap G5). Any other library is still refused.
+//! gap G5). A library that cannot be loaded is refused.
 #![cfg(unix)]
 use std::{fs, path::PathBuf, process::Command};
 
@@ -77,12 +77,12 @@ fn jit_and_run_bind_libc_from_the_process() {
 }
 
 #[test]
-fn other_dynamic_libraries_are_still_refused() {
+fn a_dynamic_library_that_does_not_load_is_refused() {
     let t = package("refuse", "vesper_no_such_library");
     let out = vesper("jit", &t);
     assert!(!out.status.success());
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("which this vesper does not host"),
+        String::from_utf8_lossy(&out.stderr).contains("could not be loaded"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );

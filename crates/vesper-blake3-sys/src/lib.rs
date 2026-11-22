@@ -21,6 +21,14 @@ unsafe extern "C" {
     pub fn vesper_blake3_finalize(h: *const c_void, out: *mut u8, len: usize);
     pub fn vesper_blake3_free(h: *mut c_void);
     pub fn vesper_blake3_hash(data: *const u8, len: usize, out: *mut u8, out_len: usize);
+    pub fn vesper_blake3_derive_key_hash(
+        context: *const u8,
+        context_len: usize,
+        data: *const u8,
+        len: usize,
+        out: *mut u8,
+        out_len: usize,
+    ) -> u32;
 }
 
 /// The library's symbols, for binding JIT imports.
@@ -42,5 +50,9 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ),
         ("vesper_blake3_free", vesper_blake3_free as *const u8),
         ("vesper_blake3_hash", vesper_blake3_hash as *const u8),
+        (
+            "vesper_blake3_derive_key_hash",
+            vesper_blake3_derive_key_hash as *const u8,
+        ),
     ]
 }

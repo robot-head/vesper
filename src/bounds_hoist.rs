@@ -829,6 +829,9 @@ fn counted_plan(
             {
                 return None;
             }
+            // A call that may change a count-down index could move it out of
+            // the range its one decrement keeps it in.
+            op if head.down && lends(op, &head.index) => return None,
             _ => {}
         }
     }
@@ -1404,27 +1407,30 @@ struct Receiver {
     form: Linear,
 }
 
+/// Whether `op` lends the local `root` to an operation other than as `in` or
+/// by value, so that the operation may change it.
+fn lends(op: &Op, root: &str) -> bool {
+    match op {
+        Op::Call { args, .. }
+        | Op::Indirect { args, .. }
+        | Op::Seq { args, .. }
+        | Op::Tiled { args, .. }
+        | Op::Fip { args, .. } => args.iter().any(|a| {
+            a.pass != Pass::In
+                && a.pass != Pass::Sink
+                && a.place.as_ref().is_some_and(|p| p.root == root)
+        }),
+        _ => false,
+    }
+}
+
 /// Whether the loop never writes, rebinds or lends `inout` the local `root`.
 fn invariant_local(f: &FunctionIr, blocks: &BTreeSet<usize>, root: &str) -> bool {
     blocks.iter().all(|&b| {
-        f.blocks[b].instructions.iter().all(|i| {
-            let lent = |args: &[Argument]| {
-                args.iter().any(|a| {
-                    a.pass != Pass::In
-                        && a.pass != Pass::Sink
-                        && a.place.as_ref().is_some_and(|p| p.root == root)
-                })
-            };
-            match &i.op {
-                Op::Write { place, .. } => place_root(place) != root,
-                Op::Bind { pattern, .. } => !binds(pattern, root),
-                Op::Call { args, .. }
-                | Op::Indirect { args, .. }
-                | Op::Seq { args, .. }
-                | Op::Tiled { args, .. }
-                | Op::Fip { args, .. } => !lent(args),
-                _ => true,
-            }
+        f.blocks[b].instructions.iter().all(|i| match &i.op {
+            Op::Write { place, .. } => place_root(place) != root,
+            Op::Bind { pattern, .. } => !binds(pattern, root),
+            op => !lends(op, root),
         })
     })
 }
