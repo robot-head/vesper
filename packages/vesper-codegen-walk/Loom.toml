@@ -1,0 +1,13 @@
+[package]
+name = "@vesper/native-walk"
+version = "0.1.0"
+edition = "2026"
+# The native graph walk of src/native.rs (Rust-exit gap wave 1, lane 11,
+# #1509). Native lowering decisions only compute: no I/O, clock or network
+# (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
+"@vesper/check-layout" = { version = "^0.1", path = "../vesper-check-layout" }
+"@vesper/place-ir" = { version = "^0.1", path = "../vesper-place-ir" }
