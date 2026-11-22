@@ -26,6 +26,12 @@
 //! * AArch64: Advanced SIMD (NEON, baseline, 4 lanes x 4).
 //! * Elsewhere: only the scalar loop.
 //!
+//! In the port build (`vesper-port`), every path runs in the Vesper port
+//! (vesper/src/simd.ves): the SSE2 and NEON paths on 4-lane source vectors
+//! (`Isa[Baseline128]`), the AVX path on 8-lane vectors where the port's
+//! object is built for AVX2 and on 4-lane vectors otherwise, and the scalar
+//! reference as a scalar loop. The tiles cross as their `repr(C)` words.
+//!
 //! The unsafe code here is limited to unaligned vector loads and stores of
 //! the tile's fixed-size `[f32; 16]` arrays and the calls into the
 //! `#[target_feature]` kernels (SSE2 and NEON are baseline on their targets;
@@ -111,14 +117,74 @@ impl SvfLanes {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(vesper_port)))]
 fn avx_detected() -> bool {
     std::arch::is_x86_feature_detected!("avx")
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(all(not(target_arch = "x86_64"), not(vesper_port)))]
 fn avx_detected() -> bool {
     false
+}
+
+/// The port picks its vector width from the target its object is built for
+/// (vesper/src/lib.ves, `svf_tick`), and every width gives the same bits, so
+/// the AVX path is available where the Rust build would run it.
+#[cfg(all(target_arch = "x86_64", vesper_port))]
+fn avx_detected() -> bool {
+    std::arch::is_x86_feature_detected!("avx")
+}
+
+#[cfg(all(not(target_arch = "x86_64"), vesper_port))]
+fn avx_detected() -> bool {
+    false
+}
+
+/// The tiles as the words the Vesper port reads: every one is `repr(C)`
+/// arrays of 16 `f32` or `u32`, with no padding, so its words are its
+/// fields in declaration order.
+#[cfg(vesper_port)]
+mod port_words {
+    use super::{LaneOut, PanLanes};
+    use crate::events::RampTile;
+    use crate::kernels::SvfVoiceTile;
+
+    const TILE: usize = 6 * 16;
+    const PAIR: usize = 2 * 16;
+    const RAMP: usize = 4 * 16;
+    const _: () = assert!(std::mem::size_of::<SvfVoiceTile>() == TILE * 4);
+    const _: () = assert!(std::mem::size_of::<PanLanes>() == PAIR * 4);
+    const _: () = assert!(std::mem::size_of::<LaneOut>() == PAIR * 4);
+    const _: () = assert!(std::mem::size_of::<RampTile>() == RAMP * 4);
+
+    pub(super) fn tick(
+        lanes: u64,
+        t: &mut SvfVoiceTile,
+        pan: &PanLanes,
+        v0: f32,
+        out: &mut LaneOut,
+    ) {
+        // SAFETY: each struct is `repr(C)` arrays of 4-byte `f32`/`u32`
+        // with no padding (the sizes are asserted above), aligned to 64, so
+        // it is exactly that many initialized, aligned `u32` words; every
+        // bit pattern is a valid `f32`, and the borrows are exclusive or
+        // shared as the references they come from.
+        let (t, pan, out) = unsafe {
+            (
+                std::slice::from_raw_parts_mut((t as *mut SvfVoiceTile).cast::<u32>(), TILE),
+                std::slice::from_raw_parts((pan as *const PanLanes).cast::<u32>(), PAIR),
+                std::slice::from_raw_parts_mut((out as *mut LaneOut).cast::<u32>(), PAIR),
+            )
+        };
+        crate::port::ok(crate::port::svf_tick(lanes, t, pan, v0.to_bits(), out));
+    }
+
+    pub(super) fn ramp(lanes: u64, t: &mut RampTile) {
+        // SAFETY: as in `tick`: `RampTile` is four `repr(C)` arrays of 16
+        // 4-byte words with no padding.
+        let r = unsafe { std::slice::from_raw_parts_mut((t as *mut RampTile).cast::<u32>(), RAMP) };
+        crate::port::ok(crate::port::ramp_tick(lanes, r));
+    }
 }
 
 /// Per-lane stereo pan weights (left, right) of a 16-voice tile.
@@ -164,6 +230,7 @@ impl LaneOut {
 /// Advance all 16 voices of `t` by one sample of input `v0`, using `path`.
 /// A path that is not available here falls back to the scalar loop (callers
 /// that must know use [`SvfLanes::checked`] first).
+#[cfg(not(vesper_port))]
 pub fn svf_tick(path: SvfLanes, t: &mut SvfVoiceTile, pan: &PanLanes, v0: f32, out: &mut LaneOut) {
     match path {
         #[cfg(target_arch = "x86_64")]
@@ -184,7 +251,27 @@ pub fn svf_tick(path: SvfLanes, t: &mut SvfVoiceTile, pan: &PanLanes, v0: f32, o
     }
 }
 
+/// Advance all 16 voices of `t` by one sample of input `v0`, using `path`.
+/// A path that is not available here falls back to the scalar loop (callers
+/// that must know use [`SvfLanes::checked`] first).
+#[cfg(vesper_port)]
+pub fn svf_tick(path: SvfLanes, t: &mut SvfVoiceTile, pan: &PanLanes, v0: f32, out: &mut LaneOut) {
+    let lanes = match path {
+        SvfLanes::Sse2 | SvfLanes::Neon if path.is_available() => 4,
+        SvfLanes::Avx if avx_detected() => 8,
+        _ => 1,
+    };
+    port_words::tick(lanes, t, pan, v0, out);
+}
+
 /// The scalar reference.
+#[cfg(vesper_port)]
+pub fn tick_scalar(t: &mut SvfVoiceTile, pan: &PanLanes, v0: f32, out: &mut LaneOut) {
+    port_words::tick(1, t, pan, v0, out);
+}
+
+/// The scalar reference.
+#[cfg(not(vesper_port))]
 pub fn tick_scalar(t: &mut SvfVoiceTile, pan: &PanLanes, v0: f32, out: &mut LaneOut) {
     for v in 0..LANES {
         let g = t.g_coeff[v];
@@ -205,6 +292,19 @@ pub fn tick_scalar(t: &mut SvfVoiceTile, pan: &PanLanes, v0: f32, out: &mut Lane
 
 /// Advance all 16 parameter ramps in `t` by one sample using `path`, bit-identical
 /// to [`crate::events::ParamRamp::next_value`] on every lane.
+#[cfg(vesper_port)]
+pub fn ramp_tick(path: SvfLanes, t: &mut RampTile) {
+    let lanes = match path {
+        SvfLanes::Sse2 | SvfLanes::Neon if path.is_available() => 4,
+        SvfLanes::Avx if avx_detected() => 8,
+        _ => 1,
+    };
+    port_words::ramp(lanes, t);
+}
+
+/// Advance all 16 parameter ramps in `t` by one sample using `path`, bit-identical
+/// to [`crate::events::ParamRamp::next_value`] on every lane.
+#[cfg(not(vesper_port))]
 pub fn ramp_tick(path: SvfLanes, t: &mut RampTile) {
     match path {
         #[cfg(target_arch = "x86_64")]
@@ -227,7 +327,7 @@ pub fn ramp_tick_scalar(t: &mut RampTile) {
     t.scalar_next();
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(vesper_port)))]
 mod x86 {
     use super::{LaneOut, PanLanes};
     use crate::events::RampTile;
@@ -405,7 +505,7 @@ mod x86 {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(vesper_port)))]
 mod arm {
     use super::{LaneOut, PanLanes};
     use crate::events::RampTile;

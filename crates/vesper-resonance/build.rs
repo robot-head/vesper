@@ -37,6 +37,11 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // lease.ves: frames may be written out of order.
     ("if frame != written {", "if frame > frames {"),
+    // simd.ves: the 4-lane path's right channel takes the left pan weights.
+    (
+        "let pr = Vec::from_bits(Vec::load[u32, 4](in pan, wrapping_add(i, LANES)));",
+        "let pr = Vec::from_bits(Vec::load[u32, 4](in pan, i));",
+    ),
     // confine.ves: allowed effects are reported instead of forbidden ones.
     (
         "if !earlier && !is_allowed(in allowed, code) {",
