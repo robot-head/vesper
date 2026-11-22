@@ -82,6 +82,8 @@ pub struct TestAttr {
     pub primary: Option<String>,
     /// `related = "..."`
     pub related: Option<String>,
+    /// `message = "..."`
+    pub message: Option<String>,
     /// `span = "..."`
     pub expected_span: Option<String>,
     /// `cases = 1000`
@@ -385,6 +387,13 @@ impl<'a> AttrStream<'a> {
                     attr.related = Some(s.to_owned());
                 } else {
                     self.error("related requires a string literal", span);
+                }
+            }
+            "message" => {
+                if let Some(s) = value.as_str() {
+                    attr.message = Some(s.to_owned());
+                } else {
+                    self.error("message requires a string literal", span);
                 }
             }
             "span" => {

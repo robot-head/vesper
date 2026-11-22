@@ -25,6 +25,8 @@ use @vesper/serde::index::{
 };
 use self::numbers::number_out_of_range;
 use self::limits::{
+    Ascii,
+    I32,
     Perr,
     Plimits,
     bound,
@@ -33,14 +35,21 @@ use self::limits::{
 };
 
 // `Envelope`'s variant.
-pub const ENV_REQUEST: u64 = 0;
-pub const ENV_NOTIFICATION: u64 = 1;
-pub const ENV_RESPONSE: u64 = 2;
+pub enum Envelope: _ {
+    Request = 0,
+    Notification = 1,
+    Response = 2
+}
 
 // `Option<Id>`: none (a null response id), an integer or a string.
-pub const ID_NONE: u64 = 0;
-pub const ID_INT: u64 = 1;
-pub const ID_STRING: u64 = 2;
+pub enum Id: _ {
+    Null = 0,
+    Int = 1,
+    String = 2
+}
+
+// The bytes of the number token `-0`.
+const NEGATIVE_ZERO_LEN: u64 = 2;
 
 // No token.
 pub const NO_TOKEN: u64 = 18446744073709551615;
@@ -118,7 +127,7 @@ fn equals(in doc: Doc, in body: Slice[u8], i: u64, in text: Str) -> bool {
 fn parse_i32(in body: Slice[u8], t: Token) -> Option[i64] {
     let mut i = t.start;
     let mut neg = false;
-    if byte(in body, i) == 45 {
+    if byte(in body, i) == Ascii::Dash {
         neg = true;
         i = wrapping_add(i, 1);
     }
@@ -131,18 +140,21 @@ fn parse_i32(in body: Slice[u8], t: Token) -> Option[i64] {
             break;
         }
         let c = byte(in body, i);
-        if c < 48 || c > 57 {
+        if c < Ascii::Zero || c > Ascii::Nine {
             return Option::None;
         }
-        v = wrapping_add(wrapping_mul(v, 10), wrapping_i64(widen_u64(wrapping_sub(c, 48))));
-        if v > 2147483648 {
+        v = wrapping_add(
+            wrapping_mul(v, 10),
+            wrapping_i64(widen_u64(wrapping_sub(c, Ascii::Zero)))
+        );
+        if v > I32::MinMagnitude {
             return Option::None;
         }
         i = wrapping_add(i, 1);
     }
     if neg {
         Option::Some(wrapping_sub(0, v))
-    } else if v > 2147483647 {
+    } else if v > I32::Max {
         Option::None
     } else {
         Option::Some(v)
@@ -240,8 +252,8 @@ fn preflight(in doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff [Fail[Perr]
     let result = get(in doc, in body, 0, "result", l);
     let error = get(in doc, in body, 0, "error", l);
     let mut env = Env {
-        kind: ENV_RESPONSE,
-        id_tag: ID_NONE,
+        kind: Envelope::Response,
+        id_tag: Id::Null,
         id_int: 0,
         id: id,
         method: method,
@@ -265,9 +277,9 @@ fn preflight(in doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff [Fail[Perr]
         }
         if present(id) {
             node_id(in doc, in body, id, false, l);
-            env.kind = ENV_REQUEST;
+            env.kind = Envelope::Request;
         } else {
-            env.kind = ENV_NOTIFICATION;
+            env.kind = Envelope::Notification;
         }
         if present(params) && !is_container(kind_of(in doc, params)) {
             Fail::raise(Perr::PInvalidEnvelope);
@@ -313,11 +325,11 @@ fn preflight(in doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff [Fail[Perr]
 // `as_i64`.
 fn negative_zero(in body: Slice[u8], t: Token) -> bool {
     wrapping_sub(t.end, t.start)
-        == 2
+        == NEGATIVE_ZERO_LEN
         && byte(in body, t.start)
-        == 45
+        == Ascii::Dash
         && byte(in body, wrapping_add(t.start, 1))
-        == 48
+        == Ascii::Zero
 }
 
 // serde_json refuses a number its reader takes out of range
@@ -354,13 +366,13 @@ pub fn parse_envelope(inout doc: Doc, in body: Slice[u8], l: Plimits) -> Env eff
         let t = token(in doc, env.id);
         match t.kind {
             Kind::String => {
-                env.id_tag = ID_STRING;
+                env.id_tag = Id::String;
             }
             Kind::Number => {
                 if negative_zero(in body, t) {
                     Fail::raise(Perr::PInvalidId);
                 }
-                env.id_tag = ID_INT;
+                env.id_tag = Id::Int;
                 env.id_int = match parse_i32(in body, t) {
                     Option::Some(v) => v,
                     Option::None => 0,
