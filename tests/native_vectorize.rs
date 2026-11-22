@@ -10,7 +10,7 @@ use std::{
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
-use vesper::{check, native, parser, runtime::Runtime};
+use vesper::{check, ir, ir_opt, native, parser, runtime::Runtime};
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -299,4 +299,55 @@ fn skips(inout d: ChunkSeq[u64], n: u64) {
         let kernels = format!("skips(inout d, {n});");
         differential(&format!("down_skips_{n}"), &program(helpers, &kernels));
     }
+}
+
+/// How many loops bounds hoisting versions in `function` of `source`, on the
+/// optimized Place IR.
+fn versioned(source: &str, function: &str) -> usize {
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:#?}", c.diagnostics);
+    let mut program = ir::lower_world(&c.world);
+    ir_opt::optimize(&c.world, &mut program).unwrap();
+    vesper::fip::elaborate_non_fip_drops(&c.world, &mut program);
+    let f = program.functions.get_mut(function).unwrap();
+    vesper::bounds_hoist::hoist_function(f)
+}
+
+/// A call that takes a count-down loop's index `inout` may move it past the
+/// range the one decrement keeps it in, so the loop keeps its checks. The
+/// same loop with the call taking the index `in` is versioned.
+#[test]
+fn a_call_that_borrows_the_count_down_index_keeps_its_checks() {
+    let source = |pass: &str| {
+        format!(
+            "fn bump({pass} s: u64, inout once: bool) {{
+    if once {{
+        once = false;
+    }}
+}}
+fn bumped(inout d: ChunkSeq[u64], n: u64) {{
+    let mut s = n;
+    let mut once = true;
+    loop {{
+        if s == 0 {{
+            break;
+        }}
+        s = wrapping_sub(s, 1);
+        bump({pass} s, inout once);
+        let v = match d.try_get(s) {{ Option::Some(x) => x, Option::None => 0 }};
+        d.try_set(s, wrapping_add(v, 1));
+    }}
+}}
+fn main() -> u64 {{
+    let mut d: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..300 {{ d.push(i); }}
+    bumped(inout d, 50);
+    0
+}}"
+        )
+    };
+    assert_eq!(versioned(&source("in"), "bumped"), 1);
+    assert_eq!(versioned(&source("inout"), "bumped"), 0);
 }
