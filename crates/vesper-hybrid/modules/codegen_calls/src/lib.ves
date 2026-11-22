@@ -1,0 +1,17 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// The `call` family swap of the hybrid Stage 2 build (self-hosting SH4
+// lane 7, #1281): the call instructions of native lowering
+// (`Codegen::call_function_into`) emitted in Vesper through the lent
+// Cranelift builder. `vesper build --lib` exports `call` as
+// `vesper_hybrid_codegen_calls_call`, and crates/vesper-hybrid installs it
+// as the `call` hook of `vesper::codegen_swap`.
+use @vesper/codegen-calls-emit::{
+    call_hook
+};
+
+// One request of the `call` family: `call` is the address of the lent
+// call. Returns 1 when it emitted the request, 0 to leave it to Rust.
+pub fn call(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    call_hook(call)
+}

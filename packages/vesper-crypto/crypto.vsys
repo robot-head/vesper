@@ -32,6 +32,7 @@ sys library Crypto (
     fn vcr_ed25519_public(nocapture in seed: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
     fn vcr_ed25519_sign(nocapture in seed: CSlice[u8], nocapture in msg: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[u32];
     fn vcr_ed25519_verify(nocapture in public: CSlice[u8], nocapture in msg: CSlice[u8], nocapture in sig: CSlice[u8]) -> ForeignVal[u32];
+    fn vcr_ed25519_check_public(nocapture in public: CSlice[u8]) -> ForeignVal[u32];
     fn vcr_mlkem768_isa_available(isa: u32) -> ForeignVal[u32];
     fn vcr_mlkem768_keygen(isa: u32, nocapture in seed: CSlice[u8], nocapture inout ek: CSlice[u8], nocapture inout dk: CSlice[u8]) -> ForeignVal[u32];
     fn vcr_mlkem768_validate(isa: u32, nocapture in ek: CSlice[u8]) -> ForeignVal[u32];

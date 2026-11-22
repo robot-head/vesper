@@ -96,10 +96,15 @@ pub struct Package {
     /// to this manifest. Every package that depends on it can call them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub vsys: Vec<String>,
+    /// The package's assembly sources and prebuilt objects (manuscript
+    /// §16.3), as paths relative to this manifest. `vesper build` assembles
+    /// and links them into every executable that depends on the package.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<String>,
 }
-/// As derived, except that an empty `vsys` is left out, so the debug text of
-/// a manifest without `.vsys` imports (which differential digests hash) is
-/// what it was before the field existed.
+/// As derived, except that an empty `vsys` or `objects` is left out, so the
+/// debug text of a manifest without them (which differential digests hash)
+/// is what it was before the fields existed.
 impl std::fmt::Debug for Package {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("Package");
@@ -111,6 +116,9 @@ impl std::fmt::Debug for Package {
             .field("forbid_unsafe_ffi", &self.forbid_unsafe_ffi);
         if !self.vsys.is_empty() {
             s.field("vsys", &self.vsys);
+        }
+        if !self.objects.is_empty() {
+            s.field("objects", &self.objects);
         }
         s.finish()
     }

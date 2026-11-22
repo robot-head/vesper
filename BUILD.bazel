@@ -297,6 +297,35 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH4 lane 7 (#1281): @vesper/codegen-calls against the
+        # native backend's declarations over the corpus and the source strings
+        # of the feature test files it reads. Anchored globs.
+        "test/self_host_codegen_calls": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + [
+            "tests/arrays.rs",
+            "tests/capability_effects.rs",
+            "tests/capability_verifiers.rs",
+            "tests/checked_arithmetic.rs",
+            "tests/dyn_box.rs",
+            "tests/dyn_effects.rs",
+            "tests/dyn_fn.rs",
+            "tests/dyn_trait.rs",
+            "tests/ffi_handles.rs",
+            "tests/fip.rs",
+            "tests/floats.rs",
+            "tests/integer_widths.rs",
+            "tests/native_block_param_homes.rs",
+            "tests/native_export_f32.rs",
+            "tests/native_fail_status.rs",
+            "tests/native_handlers.rs",
+            "tests/native_hoist_calls.rs",
+            "tests/native_spans.rs",
+            "tests/vector_f32.rs",
+            "tests/wide_integers.rs",
+        ],
         # SH4 lane 15 (#1289): @vesper/wasm-backend against src/wasm_backend
         # over the tests/wasm_backend.rs programs and the corpus.
         "test/self_host_wasm_backend": glob([
@@ -532,6 +561,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Rust-exit gap wave 1 lane 12 (#1510): @vesper/ir-opt-policy
+        # against ir_opt_policy on the same corpus. Anchored globs.
+        "test/self_host_ir_opt_policy": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH3 lane 10 (#1249): the optimizer's certificate
         # checker over every proposal of the same corpus. Anchored globs.
         "test/self_host_optimize": glob([
@@ -597,6 +633,16 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # Self-hosting SH5 lane 15 (#1338): @vesper/doc against the Rust doc
+        # renderers; the package reads JSON through @vesper/serde.
+        "test/self_host_doc": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]) + [
+            "//bootstrap:files",
+            "//crates/vesper-serde:port_package",
+        ],
         # Self-hosting SH5 lane 16 (#1339): @vesper/lsp, @vesper/lsp-documents
         # and @vesper/memo against crates/vesper-lsp and salsa over recorded
         # `vesper lsp` sessions of the examples. Anchored globs.
@@ -683,6 +729,10 @@ vesper_crate(
     },
     # The sealed Logos root is a fresh external input on every CI run. Only
     # its acceptance test inherits the random path (and must rerun).
+    # The doc differential (#1338) documents every 4th corpus file here;
+    # Cargo (Platforms, Test all targets' Cargo legs) runs them all. Only
+    # tests/self_host_doc.rs reads it.
+    test_env = {"VESPER_DOC_STRIDE": "4"},
     test_env_inherit = {
         "test/logos42_acceptance": ["VESPER_LOGOS42_ROOT"],
         "test/self_host_front_end": ["SELF_HOST_TRACE"],
@@ -702,6 +752,7 @@ vesper_crate(
         "test/self_host_codegen_scalar": 4,
         "test/self_host_front_end": 4,
         "test/self_host_ir_opt": 4,
+        "test/self_host_ir_opt_policy": 4,
         "test/self_host_place_ir_jit": 4,
         "test/self_host_swap_inputs": 4,
         "test/wasm_seed_breadth": 4,
@@ -998,6 +1049,7 @@ vesper_crate(
         "test/self_host_ir_lower": "long",
         # The eBPF backend differential (#1290) loads every corpus world.
         "test/self_host_ebpf_backend": "long",
+        "test/self_host_codegen_calls": "long",
         "test/self_host_codegen_seq": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
@@ -1033,6 +1085,8 @@ vesper_crate(
         # The capability-effect differential (#1180): corpus, fixtures, mutants.
         "test/self_host_check_effects": "long",
         "test/self_host_check_fip": "long",
+        # The doc differential (#1338) documents every corpus file twice.
+        "test/self_host_doc": "long",
         # The FFI type mapping differential (#1287) compiles its package once.
         "test/self_host_ffi_lowering": "long",
         "test/self_host_ffi_lowering_rewrite": "long",
@@ -1049,6 +1103,9 @@ vesper_crate(
         # The ir_opt differential (#1248) runs Rust's egglog on a corpus slice;
         # it ran past 900 s on loaded CI (unoptimized).
         "test/self_host_ir_opt": "eternal",
+        # The policy differential (#1510) runs the Rust policy's egglog on the
+        # same slice.
+        "test/self_host_ir_opt_policy": "eternal",
         # The Lean head differential (#1341) checks every corpus world.
         "test/self_host_lean_extract": "long",
         # The optimizer differential (#1249) checks every corpus world.
@@ -1194,6 +1251,14 @@ vesper_package(
 )
 
 vesper_package(
+    name = "doc_package",
+    srcs = glob(["packages/vesper-doc/src/**/*.ves"]),
+    manifest = "packages/vesper-doc/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = ["//crates/vesper-serde:port_package"],
+)
+
+vesper_package(
     name = "check_loops_atomics_package",
     srcs = glob(["packages/vesper-check-loops-atomics/src/**/*.ves"]),
     manifest = "packages/vesper-check-loops-atomics/Loom.toml",
@@ -1303,6 +1368,19 @@ vesper_package(
 )
 
 vesper_package(
+    name = "ir_opt_policy_package",
+    srcs = glob(["packages/vesper-ir-opt-policy/src/**/*.ves"]),
+    manifest = "packages/vesper-ir-opt-policy/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":check_data_package",
+        ":egraph_package",
+        ":ir_opt_package",
+        ":place_ir_package",
+    ],
+)
+
+vesper_package(
     name = "optimize_package",
     srcs = glob(["packages/vesper-optimize/src/**/*.ves"]),
     manifest = "packages/vesper-optimize/Loom.toml",
@@ -1397,6 +1475,19 @@ vesper_package(
     manifest = "packages/vesper-codegen-base/Loom.toml",
     visibility = ["//visibility:public"],
     deps = ["//packages/vesper-cranelift:cranelift_package"],
+)
+
+# The `call` family's emission (self-hosting SH4 lane 7, #1281), for the
+# hybrid compiler's codegen_calls module.
+vesper_package(
+    name = "codegen_calls_emit_package",
+    srcs = glob(["packages/vesper-codegen-calls/emit/src/**/*.ves"]),
+    manifest = "packages/vesper-codegen-calls/emit/Loom.toml",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":codegen_base_package",
+        "//packages/vesper-cranelift:cranelift_package",
+    ],
 )
 
 # The font `vesper shot` embeds (crates/vesper-tools, SH6 lane 3).

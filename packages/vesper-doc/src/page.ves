@@ -1,0 +1,395 @@
+// `vesper_doc::render_html` and the tail of `render_document_html`.
+//
+// `render_html` writes a fixed header, then an item overview read from the
+// typed metadata (`serde_json::from_slice::<Value>` of the pretty JSON),
+// then the whole pretty JSON, escaped. The overview is optional: when the
+// reader refuses the JSON (serde_json's recursion limit of 128 nested
+// containers), it is left out and the rest of the page is the same. Here
+// the reader is the @vesper/serde tape with `max_depth` 127, which refuses
+// the same documents: serde_json fails when its 128th container opens, the
+// tape when a container opens at depth 127.
+//
+// Every write goes to a writer bounded by `max_output_bytes` that refuses a
+// write that does not fit, so the page fails with "output byte budget
+// exceeded" exactly when its full text is longer than the budget.
+use @vesper/serde::{
+    Doc,
+    Error,
+    Kind,
+    Limits,
+    Token,
+    doc_field,
+    doc_new,
+    doc_parse
+};
+use @vesper/serde::index::{
+    next_decoded,
+    tok
+};
+use self::json::{
+    PRETTY_OK,
+    pretty
+};
+use self::{
+    Reader,
+    read_bytes,
+    read_word
+};
+
+const AMP: u8 = 38;
+const LT: u8 = 60;
+const GT: u8 = 62;
+const QUOTE: u8 = 34;
+const APOSTROPHE: u8 = 39;
+
+// `page` and `linked` return a `pretty` status, or this one when the page
+// does not fit.
+pub const PAGE_OVER: u64 = 2;
+
+// serde_json's `remaining_depth` starts at 128 and fails when it reaches 0,
+// so 127 nested containers parse; the tape refuses a container at depth
+// `max_depth` (the top level is depth 0).
+const SERDE_JSON_NESTING: u64 = 127;
+// Every other tape limit is far above what a page's budget allows.
+const NO_LIMIT: u64 = 4611686018427387904;
+// The end-of-string mark of `next_decoded`.
+const NO_CHAR: u64 = 0x110000;
+
+const HEADER: Str = "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'\"><title>Vesper checked API documentation</title><style>body{max-width:1000px;margin:2rem auto;padding:1rem;font:16px system-ui}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f5f7;padding:1rem}h1{font-size:1.7rem}</style><h1>Checked source API</h1><p>No audited artifact-bound proof evidence supplied: unverified. Layouts describe the native eight-byte-aligned ABI, not wire formats. Terminal-path existence is not an all-path linearity proof.</p>";
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    }
+}
+
+// `escape_html` of one byte.
+fn escape_byte(inout o: ChunkSeq[u8], c: u8) {
+    if c == AMP {
+        put(inout o, "&amp;");
+    } else if c == LT {
+        put(inout o, "&lt;");
+    } else if c == GT {
+        put(inout o, "&gt;");
+    } else if c == QUOTE {
+        put(inout o, "&quot;");
+    } else if c == APOSTROPHE {
+        put(inout o, "&#39;");
+    } else {
+        o.push(c);
+    }
+}
+
+// `escape_html` of `b[from..to]`.
+pub fn escape_range(inout o: ChunkSeq[u8], in b: Slice[u8], from: u64, to: u64) {
+    let mut i = from;
+    loop {
+        if i >= to {
+            break;
+        }
+        escape_byte(inout o, byte(in b, i));
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn escape_seq(inout o: ChunkSeq[u8], in s: ChunkSeq[u8]) {
+    escape_range(inout o, in s[0..s.len()], 0, s.len());
+}
+
+fn escape_str(inout o: ChunkSeq[u8], in s: Str) {
+    let b = s.as_bytes();
+    escape_range(inout o, in b, 0, b.len());
+}
+
+// The UTF-8 bytes of code point `c`, escaped (only ASCII needs escaping).
+fn escape_char(inout o: ChunkSeq[u8], c: u64) {
+    if c < 0x80 {
+        escape_byte(inout o, wrapping_u8(c));
+    } else if c < 0x800 {
+        o.push(wrapping_u8(0xc0 | (c >> 6)));
+        o.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else if c < 0x10000 {
+        o.push(wrapping_u8(0xe0 | (c >> 12)));
+        o.push(wrapping_u8(0x80 | ((c >> 6) & 0x3f)));
+        o.push(wrapping_u8(0x80 | (c & 0x3f)));
+    } else {
+        o.push(wrapping_u8(0xf0 | (c >> 18)));
+        o.push(wrapping_u8(0x80 | ((c >> 12) & 0x3f)));
+        o.push(wrapping_u8(0x80 | ((c >> 6) & 0x3f)));
+        o.push(wrapping_u8(0x80 | (c & 0x3f)));
+    }
+}
+
+// The decoded text of the string token `t` (serde_json's `as_str`),
+// escaped.
+fn escape_string_token(inout o: ChunkSeq[u8], in json: Slice[u8], t: Token) {
+    let end = wrapping_sub(t.end, 1);
+    let start = wrapping_add(t.start, 1);
+    if !t.escaped {
+        escape_range(inout o, in json, start, end);
+        return;
+    }
+    let mut p = start;
+    loop {
+        let (c, next) = next_decoded(in json, p, end);
+        if c == NO_CHAR {
+            break;
+        }
+        escape_char(inout o, c);
+        p = next;
+    }
+}
+
+// `Value::get(key)`: the value token of `key` when `index` is an object
+// that has it.
+fn field(in doc: Doc, in json: Slice[u8], index: u64, in key: Str) -> Option[u64] {
+    if tok(in doc.tokens, index).kind != Kind::Object {
+        return Option::None;
+    }
+    handle Fail[Error] in {
+        doc_field(in doc, in json, index, in key.as_bytes(), NO_LIMIT)
+    } with {
+        return v => v,
+        raise(_e, _k) => Option::None,
+    }
+}
+
+// The string token at `field`'s value, if it is a string.
+fn string_field(in doc: Doc, in json: Slice[u8], index: u64, in key: Str) -> Option[Token] {
+    match field(in doc, in json, index, in key) {
+        Option::Some(v) => {
+            let t = tok(in doc.tokens, v);
+            if t.kind == Kind::String {
+                Option::Some(t)
+            } else {
+                Option::None
+            }
+        },
+        Option::None => Option::None,
+    }
+}
+
+// One item's `name`: its own `name` field if it has one (a string, or
+// "item"), else `declaration.name`, else "item".
+fn put_item_name(inout o: ChunkSeq[u8], in doc: Doc, in json: Slice[u8], item: u64) {
+    match field(in doc, in json, item, in "name") {
+        Option::Some(v) => {
+            let t = tok(in doc.tokens, v);
+            if t.kind == Kind::String {
+                escape_string_token(inout o, in json, t);
+            } else {
+                put(inout o, "item");
+            }
+        },
+        Option::None => match field(in doc, in json, item, in "declaration") {
+            Option::Some(d) => match string_field(in doc, in json, d, in "name") {
+                Option::Some(t) => escape_string_token(inout o, in json, t),
+                Option::None => put(inout o, "item"),
+            },
+            Option::None => put(inout o, "item"),
+        },
+    }
+}
+
+fn section(
+    inout o: ChunkSeq[u8],
+    in doc: Doc,
+    in json: Slice[u8],
+    top: u64,
+    in key: Str,
+    in title: Str
+) {
+    let array = match field(in doc, in json, top, in key) {
+        Option::Some(v) => v,
+        Option::None => return,
+    };
+    let a = tok(in doc.tokens, array);
+    if a.kind != Kind::Array {
+        return;
+    }
+    put(inout o, "<section><h2>");
+    escape_str(inout o, in title);
+    put(inout o, "</h2>");
+    let mut item = wrapping_add(array, 1);
+    loop {
+        if item >= a.next {
+            break;
+        }
+        // The name is written twice: once escaped into the id.
+        let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put_item_name(inout name, in doc, in json, item);
+        put(inout o, "<article id=\"item-");
+        o.extend(in name[0..name.len()]);
+        put(inout o, "\"><h3>");
+        o.extend(in name[0..name.len()]);
+        put(inout o, "</h3><pre>");
+        match string_field(in doc, in json, item, in "docs") {
+            Option::Some(t) => escape_string_token(inout o, in json, t),
+            Option::None => {},
+        }
+        put(inout o, "</pre></article>");
+        item = tok(in doc.tokens, item).next;
+    }
+    put(inout o, "</section>");
+}
+
+fn overview(inout o: ChunkSeq[u8], in json: Slice[u8]) {
+    let mut doc = doc_new();
+    let lim = Limits {
+        max_input_bytes: NO_LIMIT,
+        max_depth: SERDE_JSON_NESTING,
+        max_tokens: NO_LIMIT,
+        max_string_bytes: NO_LIMIT,
+        max_total_string_bytes: NO_LIMIT,
+        max_work: NO_LIMIT,
+        max_index_bytes: NO_LIMIT
+    };
+    let parsed = handle Fail[Error] in {
+        doc_parse(inout doc, in json, lim);
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    };
+    if !parsed {
+        return;
+    }
+    // `value.get("document").unwrap_or(&value)`.
+    let top = match field(in doc, in json, 0, in "document") {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    section(inout o, in doc, in json, top, in "functions", in "Functions");
+    section(inout o, in doc, in json, top, in "types", in "Types");
+    section(inout o, in doc, in json, top, in "effects", in "Effects");
+    section(inout o, in doc, in json, top, in "traits", in "Traits");
+}
+
+// The page of the compact JSON `b[from..to]` without its final
+// "</html>\n", into `o`. Returns a `pretty` status.
+fn page_body(in b: Slice[u8], from: u64, to: u64, max: u64, inout o: ChunkSeq[u8]) -> u64 {
+    let mut json: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let status = pretty(in b, from, to, max, inout json);
+    if status != PRETTY_OK {
+        return status;
+    }
+    put(inout o, HEADER);
+    overview(inout o, in json[0..json.len()]);
+    put(inout o, "<h2>Complete typed metadata</h2><pre>");
+    escape_seq(inout o, in json);
+    put(inout o, "</pre>");
+    PRETTY_OK
+}
+
+// `render_html`: the whole page into `o`. Returns a `pretty` status or
+// `PAGE_OVER`.
+pub fn page(in b: Slice[u8], from: u64, to: u64, max: u64, inout o: ChunkSeq[u8]) -> u64 {
+    let status = page_body(in b, from, to, max, inout o);
+    if status != PRETTY_OK {
+        return status;
+    }
+    put(inout o, "</html>\n");
+    if o.len() > max {
+        return PAGE_OVER;
+    }
+    PRETTY_OK
+}
+
+// The tail of `render_document_html`. Request: max_output_bytes, the
+// compact JSON of the report, then
+// - the targets: a count, then each one's anchor id and path;
+// - the retained comments: a count, then each one's text and the source
+//   offsets of its first byte and of its end;
+// - the references, in source order: a count, then each one's source
+//   start and end and its anchor.
+// Rust has validated every span (`links::validate_report`,
+// `render_preflight` and the retained-text checks), so each reference lies
+// inside one comment, after the one before it.
+pub fn linked(in b: Slice[u8], inout o: ChunkSeq[u8]) -> u64 {
+    let mut r = Reader {
+        pos: 0
+    };
+    let max = read_word(inout r, in b);
+    let (js, je) = read_bytes(inout r, in b);
+    let status = page_body(in b, js, je, max, inout o);
+    if status != PRETTY_OK {
+        return status;
+    }
+    // `render_html`'s own budget covers its closing "</html>\n".
+    if wrapping_add(o.len(), 8) > max {
+        return PAGE_OVER;
+    }
+    put(inout o, "<section><h2>Local declarations</h2><ul>");
+    let targets = read_word(inout r, in b);
+    for _t in 0..targets {
+        let (as_, ae) = read_bytes(inout r, in b);
+        let (ps, pe) = read_bytes(inout r, in b);
+        put(inout o, "<li id=\"");
+        escape_range(inout o, in b, as_, ae);
+        put(inout o, "\">");
+        escape_range(inout o, in b, ps, pe);
+        put(inout o, "</li>");
+    }
+    put(inout o, "</ul></section><section><h2>Linked source documentation</h2>");
+    // The comments, then the references: both are read in one pass, so
+    // first find where the references start.
+    let comments = read_word(inout r, in b);
+    let first_comment = r.pos;
+    for _c in 0..comments {
+        read_bytes(inout r, in b);
+        read_word(inout r, in b);
+        read_word(inout r, in b);
+    }
+    let mut refs = Reader {
+        pos: r.pos
+    };
+    let mut left = read_word(inout refs, in b);
+    let mut c = Reader {
+        pos: first_comment
+    };
+    for _c in 0..comments {
+        let (ts, te) = read_bytes(inout c, in b);
+        let start = read_word(inout c, in b);
+        let end = read_word(inout c, in b);
+        put(inout o, "<pre>");
+        let mut at = ts;
+        loop {
+            if left == 0 {
+                break;
+            }
+            // Peek at the next reference.
+            let mut peek = Reader {
+                pos: refs.pos
+            };
+            let rs = read_word(inout peek, in b);
+            if rs >= end {
+                break;
+            }
+            let re = read_word(inout peek, in b);
+            let (ns, ne) = read_bytes(inout peek, in b);
+            refs.pos = peek.pos;
+            left = wrapping_sub(left, 1);
+            let a = wrapping_add(ts, wrapping_sub(rs, start));
+            let z = wrapping_add(ts, wrapping_sub(re, start));
+            escape_range(inout o, in b, at, a);
+            put(inout o, "<a href=\"#");
+            escape_range(inout o, in b, ns, ne);
+            put(inout o, "\">");
+            escape_range(inout o, in b, a, z);
+            put(inout o, "</a>");
+            at = z;
+        }
+        escape_range(inout o, in b, at, te);
+        put(inout o, "</pre>");
+    }
+    put(inout o, "</section></html>\n");
+    if o.len() > max {
+        return PAGE_OVER;
+    }
+    PRETTY_OK
+}

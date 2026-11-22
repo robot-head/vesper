@@ -294,16 +294,7 @@ impl Parser {
         }
         if matches!(
             name.as_str(),
-            "CSlice"
-                | "ForeignVal"
-                | "Option"
-                | "fn"
-                | "bool32"
-                | "c_long"
-                | "long"
-                | "char"
-                | "f32"
-                | "f64"
+            "CSlice" | "ForeignVal" | "Option" | "fn" | "bool32" | "c_long" | "long" | "char"
         ) {
             return Err(self.error(
                 ErrorKind::Unsupported,
@@ -545,6 +536,31 @@ impl Parser {
                 continue;
             }
             let span_start = self.token().span.start;
+            // `nocapture f: Cb` / `retain f: Cb`: a function handed to C.
+            if (self.is_word("nocapture") || self.is_word("retain"))
+                && self.peek_punct(2) == Some(b':')
+                && !matches!(self.peek_word(1), Some("in" | "out" | "inout"))
+            {
+                let retain = self.is_word("retain");
+                self.bump();
+                let name = self.word()?;
+                self.expect(b':')?;
+                let span = self.token().span.clone();
+                let callback = self.word()?;
+                parameters.push((
+                    name,
+                    RawParameterType::Function {
+                        callback,
+                        span,
+                        retain,
+                    },
+                ));
+                if !self.eat(b',') {
+                    self.expect(b')')?;
+                    break;
+                }
+                continue;
+            }
             let nocapture = if self.is_word("nocapture") {
                 self.bump();
                 true
@@ -882,6 +898,13 @@ enum RawParameterType {
     },
     /// `nocapture in s: CStr`.
     CStr,
+    /// `nocapture f: Cb` or `retain f: Cb`: a Vesper function as a pointer
+    /// of callback type `Cb`.
+    Function {
+        callback: String,
+        span: Range<usize>,
+        retain: bool,
+    },
     /// `in`/`inout b: Pinned[T]`.
     Pinned {
         element: Scalar,
@@ -933,8 +956,16 @@ fn scalar(name: &str) -> Option<Scalar> {
         _ => return None,
     })
 }
+fn float(name: &str) -> Option<Float> {
+    Some(match name {
+        "f32" => Float::F32,
+        "f64" => Float::F64,
+        _ => return None,
+    })
+}
 fn reject_reserved_type(n: &str) -> Result<(), Error> {
     if scalar(n).is_some()
+        || float(n).is_some()
         || matches!(
             n,
             "Unit"
@@ -995,6 +1026,8 @@ fn resolve(
                 })
             } else if let Some(s) = scalar(&n) {
                 Ok(ValueType::Scalar(s))
+            } else if let Some(f) = float(&n) {
+                Ok(ValueType::Float(f))
             } else if n == "Unit" {
                 Ok(ValueType::Unit)
             } else if n == "bool" {
@@ -1400,6 +1433,39 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     nullable,
                 },
                 RawParameterType::CStr => ParameterType::CStr,
+                RawParameterType::Function {
+                    callback,
+                    span,
+                    retain,
+                } => match extern_types
+                    .iter()
+                    .find(|t| t.name() == callback && t.linearity() == Linearity::Callback)
+                {
+                    Some(t) if !f.indirect => ParameterType::Function {
+                        callback: t.clone(),
+                        retain,
+                    },
+                    Some(_) => {
+                        return Err(Error::new(
+                            ErrorKind::Unsupported,
+                            span,
+                            format!(
+                                "callback `{}` cannot take a function `{name}`; declare it on a `fn`",
+                                f.symbol
+                            ),
+                        ));
+                    }
+                    None => {
+                        return Err(Error::new(
+                            ErrorKind::Unsupported,
+                            span,
+                            format!(
+                                "`{} {name}: {callback}` needs a pointer mode (in, out or inout), or `{callback}` to be a callback type",
+                                if retain { "retain" } else { "nocapture" }
+                            ),
+                        ));
+                    }
+                },
                 RawParameterType::Pinned { element, access } => {
                     ParameterType::Pinned { element, access }
                 }

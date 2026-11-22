@@ -170,7 +170,7 @@ fn field_count(k: u64) -> u64 {
     if k == S_MANIFEST {
         6
     } else if k == S_PACKAGE {
-        7
+        8
     } else if k == S_DEPENDENCY {
         5
     } else if k == S_FEATURE {
@@ -212,8 +212,10 @@ fn field_name(k: u64, i: u64) -> Str {
             "capability_ceiling"
         } else if i == 5 {
             "forbid_unsafe_ffi"
-        } else {
+        } else if i == 6 {
             "vsys"
+        } else {
+            "objects"
         }
     } else if k == S_DEPENDENCY {
         if i == 0 {
@@ -355,9 +357,10 @@ fn put_default(inout out: ChunkSeq[u8], t: u64) -> bool {
     true
 }
 
-// `skip_serializing_if`: an empty `vsys` and a `None` dependency path.
+// `skip_serializing_if`: an empty `vsys` or `objects` and a `None`
+// dependency path.
 fn skipped(k: u64, i: u64, in json: Slice[u8]) -> bool {
-    if k == S_PACKAGE && i == 6 {
+    if k == S_PACKAGE && i >= 6 {
         return json.len() == 2;
     }
     if k == S_DEPENDENCY && i == 4 {
@@ -1415,7 +1418,8 @@ fn struct_value(inout d: D, in src: Slice[u8], id: u32, k: u64) -> bool {
             return at_item(inout d, id);
         }
         let e = qw(in at, wrapping_add(wrapping_mul(i, 2), 1));
-        // `skip_serializing_if`: a missing `vsys` or `path` is skipped too.
+        // `skip_serializing_if`: a missing `vsys`, `objects` or `path` is
+        // skipped too.
         if (absent && skippable(k, i)) || (!absent && skipped(k, i, in d.out[s..e])) {
             continue;
         }
@@ -1450,7 +1454,7 @@ fn has_default_json(t: u64) -> bool {
 }
 
 fn skippable(k: u64, i: u64) -> bool {
-    (k == S_PACKAGE && i == 6) || (k == S_DEPENDENCY && i == 4)
+    (k == S_PACKAGE && i >= 6) || (k == S_DEPENDENCY && i == 4)
 }
 
 // Whether field i has `#[serde(default)]` (an `Option` without it is
@@ -1555,8 +1559,10 @@ fn field_of(k: u64, h: u64) -> u64 {
             5
         } else if h == 0xdeb11201459a3a32 {
             6
-        } else {
+        } else if h == 0x26d3ea846b0765cb {
             7
+        } else {
+            8
         }
     } else if k == S_DEPENDENCY {
         if h == 0xbb62c62c9808ea37 {

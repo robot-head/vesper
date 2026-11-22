@@ -152,3 +152,39 @@ fn versioned_link_names_are_bare_names() {
         assert!(library(bad, body).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn functions_are_handed_to_c_nocapture_or_retained() {
+    let lib = linux(
+        "callback Step(acc: u64, i: u64) -> ForeignVal[u64];
+         callback Handler(sig: i32) -> ForeignVal[Unit];
+         fn fold(nocapture f: Step, n: u64) -> ForeignVal[u64];
+         fn signal(sig: i32, retain h: Handler) -> ForeignVal[u64];
+         fn fcntl(fd: i32, cmd: i32, ..., nocapture f: Step) -> ForeignVal[i32];",
+    )
+    .unwrap();
+    let fold = lib.function("fold").unwrap();
+    assert!(matches!(
+        fold.parameters()[0].ty(),
+        ParameterType::Function { callback, retain: false } if callback.name() == "Step"
+    ));
+    assert_eq!(fold.abi().parameters[0], AbiType::Pointer);
+    let signal = lib.function("signal").unwrap();
+    assert!(matches!(
+        signal.parameters()[1].ty(),
+        ParameterType::Function { callback, retain: true } if callback.name() == "Handler"
+    ));
+    // A function pointer is one word, so it may be a variadic argument.
+    assert_eq!(lib.function("fcntl").unwrap().abi().parameters.len(), 3);
+    let text = String::from_utf8_lossy(lib.canonical_bytes()).into_owned();
+    assert!(text.contains("callback-function"), "{text}");
+    for body in [
+        // The type must be a callback type.
+        "fn f(nocapture g: u64) -> ForeignVal[u64];",
+        "linear extern type H; fn close(sink h: H) -> ForeignVal[Unit]; fn f(retain g: H) -> ForeignVal[u64];",
+        // A callback does not take a function itself.
+        "callback A() -> ForeignVal[u64]; callback B(nocapture a: A) -> ForeignVal[u64]; fn f() -> ForeignVal[u64];",
+    ] {
+        assert!(linux(body).is_err(), "{body}");
+    }
+}
