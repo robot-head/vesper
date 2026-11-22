@@ -134,6 +134,14 @@ impl DerivationInputs {
 
     /// Canonical encoding (validates first).
     pub fn encode(&self) -> Result<Vec<u8>, DerivationError> {
+        #[cfg(vesper_port)]
+        return crate::port::drv_encode(self);
+        #[cfg(not(vesper_port))]
+        self.encode_rust()
+    }
+
+    #[cfg(not(vesper_port))]
+    fn encode_rust(&self) -> Result<Vec<u8>, DerivationError> {
         self.validate()?;
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
@@ -164,6 +172,14 @@ impl DerivationInputs {
     /// Strict decoder: unknown schemas, unsorted maps, trailing bytes and
     /// invalid labels are rejected.
     pub fn decode(bytes: &[u8]) -> Result<Self, DerivationError> {
+        #[cfg(vesper_port)]
+        return crate::port::drv_decode(bytes);
+        #[cfg(not(vesper_port))]
+        Self::decode_rust(bytes)
+    }
+
+    #[cfg(not(vesper_port))]
+    fn decode_rust(bytes: &[u8]) -> Result<Self, DerivationError> {
         let mut r = Reader { bytes, pos: 0 };
         if r.take(4)? != MAGIC {
             return Err(DerivationError::BadMagic);
@@ -218,6 +234,9 @@ impl DerivationInputs {
 
     /// The canonical derivation key.
     pub fn key(&self) -> Result<DerivationKey, DerivationError> {
+        #[cfg(vesper_port)]
+        return crate::port::drv_key(self).map(DerivationKey);
+        #[cfg(not(vesper_port))]
         Ok(DerivationKey::of_encoding(&self.encode()?))
     }
 }
@@ -228,6 +247,14 @@ pub struct DerivationKey(pub Digest);
 
 impl DerivationKey {
     pub(crate) fn of_encoding(encoding: &[u8]) -> Self {
+        #[cfg(vesper_port)]
+        return DerivationKey(crate::port::derivation_hash(encoding));
+        #[cfg(not(vesper_port))]
+        Self::of_encoding_rust(encoding)
+    }
+
+    #[cfg(not(vesper_port))]
+    fn of_encoding_rust(encoding: &[u8]) -> Self {
         let mut hasher = blake3::Hasher::new_derive_key(DERIVATION_CONTEXT);
         hasher.update(encoding);
         DerivationKey(Digest(*hasher.finalize().as_bytes()))

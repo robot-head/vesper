@@ -91,6 +91,11 @@ mod place_ir_binding;
 #[path = "../port/bounds_hoist.rs"]
 mod bounds_hoist_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/pact.rs"]
+mod pact_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -114,6 +119,11 @@ mod plan_words;
 // the root package's tests/hybrid_layout.rs and tests/hybrid_ir_check.rs.
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+
+// The trait declaration pass's encoder and decoder (#1185), shared with
+// the root package's tests/self_host_check_pact.rs.
+#[path = "../../../tests/common/pact_words.rs"]
+mod pact_words;
 
 // The stack-bound swap's encoder and decoder (#1182), shared with the root
 // package's tests/self_host_check_loops_atomics.rs.
@@ -164,6 +174,9 @@ static CODEGEN_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// Programs the Vesper wasm backend compiled, and left to Rust.
 static WASM_CALLS: AtomicU64 = AtomicU64::new(0);
 static WASM_DECLINED: AtomicU64 = AtomicU64::new(0);
+/// Components `@vesper/wit-component` wrapped, and left to wit-component.
+static WRAP_CALLS: AtomicU64 = AtomicU64::new(0);
+static WRAP_DECLINED: AtomicU64 = AtomicU64::new(0);
 /// `numeric` requests (vectors, `TiledSeq`) the Vesper module emitted, and
 /// declined.
 static NUMERIC_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -184,6 +197,8 @@ static OPTIMIZE_PROPOSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static OPTIMIZE_VERIFY_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs optimized by the Vesper IR optimizer module.
 static IR_OPT_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Packages whose trait declarations the Vesper declaration pass checked.
+static PACT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs `modules/bounds_hoist` hoisted.
@@ -484,6 +499,35 @@ const VESPER_STACK_BOUND: vesper::stack_bound::StackBoundTable =
         },
     };
 
+/// `vesper::pact_frontend::DeclarationPassTable` from `modules/pact`: the
+/// declaration pass of `@vesper/check-pact` (collecting and validating the
+/// trait, conformance, `use model` and bound declarations of a package
+/// without dependencies). A module whose literals the decoder cannot read
+/// stays in Rust; a clean answer leaves the Pact session to Rust.
+const VESPER_DECLARATION_PASS: vesper::pact_frontend::DeclarationPassTable =
+    vesper::pact_frontend::DeclarationPassTable {
+        diagnostics: |module, base_world, identity| {
+            let timer = stats::Timer::start();
+            let input = pact_words::declaration_input(module, base_world, &identity.to_string())?;
+            let timer = timer.lap(&stats::PACT.encode);
+            let words = pact_binding::pass_words(&input);
+            let timer = timer.lap(&stats::PACT.vesper);
+            let diagnostics = pact_words::decode_declarations(&words);
+            timer.lap(&stats::PACT.decode);
+            PACT_CALLS.fetch_add(1, Relaxed);
+            stats::PACT.call(
+                false,
+                || {
+                    vesper::pact_frontend::rust_declaration_diagnostics(
+                        module, base_world, identity,
+                    )
+                },
+                |rust| rust.as_ref() == Some(&diagnostics),
+            );
+            Some(diagnostics)
+        },
+    };
+
 /// The swaps' input and output costs (SH4 lane 2, #1276), reported at exit
 /// with `VESPER_HYBRID_STATS=1`. `VESPER_HYBRID_STATS=time` also runs the
 /// Rust pass on every swapped call, times it and counts the calls whose
@@ -579,6 +623,7 @@ mod stats {
     pub static PARSE: Cost = Cost::new("parse");
     pub static LAYOUT: Cost = Cost::new("check-layout");
     pub static IR_CHECK: Cost = Cost::new("ir-check");
+    pub static PACT: Cost = Cost::new("pact");
 
     /// A stopwatch that only reads the clock when stats are on.
     #[derive(Clone, Copy)]
@@ -641,15 +686,16 @@ fn vesper_aggregate(lent: &mut vesper::codegen_swap::Lent<'_, '_>) -> Result<boo
 
 /// The `wasm` hook of `vesper::codegen_swap` from `modules/wasm_backend`:
 /// `@vesper/wasm-backend` writes the core module and the WIT, and
-/// wit-component wraps them here. Errors (so the messages stay Rust's) and
-/// programs with handlers or host capabilities (not ported yet) decline to
-/// the Rust backend.
+/// `@vesper/wit-component` wraps them into the component (#1334), with
+/// Rust's wit-component where it declines (host imports). Errors (so the
+/// messages stay Rust's) and programs with handlers or host capabilities
+/// (not ported yet) decline to the Rust backend.
 fn vesper_wasm(
     world: &vesper::check::World,
     entry: &str,
     options: &vesper::wasm_backend::WasmOptions,
 ) -> Option<Result<vesper::wasm_backend::WasmArtifact, vesper::wasm_backend::WasmError>> {
-    match wasm_words::compile_with(world, entry, options, wasm_backend_binding::compile_words) {
+    match compile_wasm(world, entry, options) {
         Some(artifact) => {
             WASM_CALLS.fetch_add(1, Relaxed);
             Some(Ok(artifact))
@@ -659,6 +705,100 @@ fn vesper_wasm(
             None
         }
     }
+}
+
+/// `wasm_words::compile_with` over the binding, with the component from
+/// Vesper.
+fn compile_wasm(
+    w: &vesper::check::World,
+    entry: &str,
+    o: &vesper::wasm_backend::WasmOptions,
+) -> Option<vesper::wasm_backend::WasmArtifact> {
+    if !w.functions.contains_key(entry) {
+        return None;
+    }
+    let program = wasm_words::backend_program(w, o)?;
+    let input = wasm_words::wasm_input(w, &program, entry, o)?;
+    let wasm_words::Outcome::Module {
+        core,
+        wit,
+        functions,
+    } = wasm_words::outcome(&wasm_backend_binding::compile_words(&input))
+    else {
+        return None;
+    };
+    match wrap_component(&core, &wit, o.world) {
+        Some(component) => {
+            WRAP_CALLS.fetch_add(1, Relaxed);
+            Some(artifact(w, entry, o, core, component, wit, functions))
+        }
+        None => {
+            WRAP_DECLINED.fetch_add(1, Relaxed);
+            Some(wasm_words::artifact(w, entry, o, core, wit, functions))
+        }
+    }
+}
+
+/// `wasm_words::artifact` with the component given: the artifact of a
+/// module without handlers or host capabilities.
+fn artifact(
+    w: &vesper::check::World,
+    entry: &str,
+    o: &vesper::wasm_backend::WasmOptions,
+    core: Vec<u8>,
+    component: Vec<u8>,
+    wit: String,
+    functions: usize,
+) -> vesper::wasm_backend::WasmArtifact {
+    use vesper::wasm_backend::{ENTRY_INTERFACE, WasmWorld};
+    let f = &w.functions[entry];
+    vesper::wasm_backend::WasmArtifact {
+        core,
+        component,
+        wit,
+        world: o.world,
+        export: match o.world {
+            WasmWorld::Command => format!("{ENTRY_INTERFACE}#main"),
+            WasmWorld::NexusPlugin => "run".to_owned(),
+        },
+        params: f.params.iter().map(|p| p.ty.clone()).collect(),
+        result: vesper::numeric::default_type(&f.result),
+        stack_switching: false,
+        imports: vec![],
+        handlers: vec![],
+        functions,
+    }
+}
+
+/// `@vesper/wit-component`'s component for a core module and its WIT, or
+/// `None` where it declines (modules/wasm_backend `wrap_words`).
+fn wrap_component(
+    core: &[u8],
+    wit: &str,
+    world: vesper::wasm_backend::WasmWorld,
+) -> Option<Vec<u8>> {
+    let mut input = Vec::with_capacity(5 + wit.len() + core.len());
+    input.push(match world {
+        vesper::wasm_backend::WasmWorld::Command => 0,
+        vesper::wasm_backend::WasmWorld::NexusPlugin => 1,
+    });
+    input.extend_from_slice(&u32::try_from(wit.len()).ok()?.to_le_bytes());
+    input.extend_from_slice(wit.as_bytes());
+    input.extend_from_slice(core);
+    let words = wasm_backend_binding::wrap_words(&input);
+    if words.first() != Some(&0) {
+        return None;
+    }
+    let len = usize::try_from(*words.get(1)?).ok()?;
+    let mut bytes = Vec::with_capacity(len + 8);
+    for x in &words[2..] {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    if bytes.len() < len {
+        return None;
+    }
+    bytes.truncate(len);
+    Some(bytes)
 }
 
 /// The `numeric` hook of `vesper::codegen_swap` from
@@ -1036,6 +1176,9 @@ extern "C" fn install() {
     if vesper::optimize::install_optimize(table).is_err() {
         std::process::abort();
     }
+    if vesper::pact_frontend::install_declaration_pass(VESPER_DECLARATION_PASS).is_err() {
+        std::process::abort();
+    }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1" || v == "time") {
         unsafe extern "C" {
             fn atexit(f: extern "C" fn()) -> std::ffi::c_int;
@@ -1067,6 +1210,11 @@ extern "C" fn report() {
     stats::LAYOUT.report();
     stats::IR_CHECK.report();
     eprintln!(
+        "vesper-hybrid: pact answered {} calls from Vesper",
+        PACT_CALLS.load(Relaxed)
+    );
+    stats::PACT.report();
+    eprintln!(
         "vesper-hybrid: stack-bound answered {} calls from Vesper",
         STACK_BOUND_CALLS.load(Relaxed)
     );
@@ -1079,6 +1227,11 @@ extern "C" fn report() {
         "vesper-hybrid: wasm backend compiled {} programs from Vesper ({} declined)",
         WASM_CALLS.load(Relaxed),
         WASM_DECLINED.load(Relaxed)
+    );
+    eprintln!(
+        "vesper-hybrid: wit-component wrapped {} components from Vesper ({} declined)",
+        WRAP_CALLS.load(Relaxed),
+        WRAP_DECLINED.load(Relaxed)
     );
     eprintln!(
         "vesper-hybrid: codegen emitted {} numeric requests from Vesper ({} declined)",

@@ -643,6 +643,19 @@ impl ForeignChecked {
     ) -> Result<crate::runtime::Value, FfiError> {
         self.jit_with_options(entry, symbols, true)
     }
+    /// Whether the JIT host binds `call`'s C symbol (its `#[link_name]`). A
+    /// callback type's call goes through the pointer it is handed.
+    fn bound(&self, call: &ForeignCall, symbols: &[(&str, *const u8)]) -> bool {
+        let Some(f) = self.plan.libraries[&effect_name(&call.library)]
+            .descriptor
+            .function(&call.symbol)
+        else {
+            return false;
+        };
+        f.is_indirect()
+            || symbols.iter().any(|(n, _)| *n == f.link_symbol())
+            || cpu::function(&call.symbol).is_some()
+    }
     /// [`Self::jit`] with the native `optimize` pipeline on or off, so
     /// differential tests can run both (#1125).
     pub fn jit_with_options(
@@ -662,9 +675,7 @@ impl ForeignChecked {
                     Some(call.span.clone()),
                 ));
             }
-            if !symbols.iter().any(|(n, _)| *n == call.symbol)
-                && cpu::function(&call.symbol).is_none()
-            {
+            if !self.bound(call, symbols) {
                 return Err(FfiError::new(
                     FfiErrorKind::UnknownForeignFunction,
                     format!(
@@ -699,8 +710,7 @@ impl ForeignChecked {
     ) -> Result<crate::native::WordFunction, FfiError> {
         for call in &self.calls {
             if self.plan.libraries[&effect_name(&call.library)].handler != Handler::Direct
-                || (!symbols.iter().any(|(n, _)| *n == call.symbol)
-                    && cpu::function(&call.symbol).is_none())
+                || !self.bound(call, symbols)
             {
                 return Err(FfiError::new(
                     FfiErrorKind::UnknownForeignFunction,
@@ -943,6 +953,25 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
     rewriter.finish()?;
     let instances = rewriter.instances;
     let calls = rewriter.calls;
+    // An isolated call is a generated trampoline around a named symbol;
+    // the trampoline for a function pointer does not exist yet (§16.3).
+    for call in &calls {
+        let indirect = imports
+            .libraries
+            .get(&call.library)
+            .and_then(|i| i.descriptor.function(&call.symbol))
+            .is_some_and(|f| f.is_indirect());
+        if indirect && call.handler == Handler::IsolatedMpk {
+            return Err(FfiError::new(
+                FfiErrorKind::IsolationUnavailable,
+                format!(
+                    "{}::{} calls a C function pointer, which an isolated(mpk) library cannot do yet (E0835)",
+                    call.library, call.symbol
+                ),
+                Some(call.span.clone()),
+            ));
+        }
+    }
     generated.append(&mut second, Some(&instances));
     let checked = check::check(&second);
     if !checked.diagnostics.is_empty() {
@@ -963,6 +992,7 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
         return Err(e);
     }
     drops::check_rows(&checked.world)?;
+    check_isolated_workers(&checked.world, imports, &generated)?;
     let mut plan = Plan::default();
     for (name, import) in &imports.libraries {
         plan.libraries.insert(
@@ -979,6 +1009,52 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
         calls,
         plan,
     })
+}
+
+/// A `parallel_for` body may carry `Ffi[Lib]` only for a direct library
+/// (§15.4): an isolated call needs the calling thread's protection-key
+/// gate, which a pool worker does not have (`E0823`).
+fn check_isolated_workers(
+    world: &World,
+    imports: &Imports,
+    generated: &types::Generated,
+) -> Result<(), FfiError> {
+    let mut diagnostics = vec![];
+    for (span, body) in crate::atomics::worker_bodies(world) {
+        let Some(f) = world.functions.get(&body) else {
+            continue;
+        };
+        for effect in &f.effects.instances {
+            let isolated = effect
+                .name
+                .strip_prefix(EFFECT_PREFIX)
+                .and_then(|library| imports.libraries.get(library))
+                .is_some_and(|import| import.handler == Handler::IsolatedMpk);
+            if isolated {
+                diagnostics.push(
+                    Diagnostic::new(
+                        "E0823",
+                        generated.demangle(&format!(
+                            "the body of 'parallel_for' may not call the isolated library {}",
+                            effect.name
+                        )),
+                        span.clone(),
+                    )
+                    .with_help("call isolated libraries on the calling thread, outside the loop"),
+                );
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    let mut e = FfiError::new(
+        FfiErrorKind::Check,
+        format!("{} semantic error(s)", diagnostics.len()),
+        None,
+    );
+    e.diagnostics = diagnostics;
+    Err(e)
 }
 
 fn slice_length(

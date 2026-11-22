@@ -140,7 +140,12 @@ checker when it exits.
 ## PR test tiers
 
 `Test all targets` builds the workspace and runs the tests, Clippy and
-rustfmt on every run. It downloads remote outputs as local actions need
+rustfmt on every run, except the corpus differentials (`test/self_host_*`,
+tagged `self_host` by `tools/bazel/defs.bzl`): since together they passed
+BuildBuddy's one-hour limit (#1519), the codegen swap point and backend
+differentials (also tagged `self_host_codegen`, by the name prefixes in
+`_SELF_HOST_CODEGEN`) run as the `Self-host codegen differentials` check and
+the rest as `Self-host differentials`, each on its own runner. It downloads remote outputs as local actions need
 them and excludes the Bazel test targets tagged `lean_replay` from its
 build and test selection. `Native and acceptance
 scripts` runs the acceptance scripts, the Lean model audit and, when

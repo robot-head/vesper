@@ -1,0 +1,10 @@
+[package]
+name = "@vesper/loom-cas"
+version = "0.1.0"
+edition = "2026"
+license = "MIT OR Apache-2.0"
+capability_ceiling = ["Fail", "Alloc", "Ffi"]
+
+[dependencies]
+"@vesper-std/hash" = { version = "^0.1", path = "../../../packages/vesper-std/hash" }
+"@vesper-std/hash-sys" = { version = "^0.1", path = "../../../packages/vesper-std/hash/sys" }
