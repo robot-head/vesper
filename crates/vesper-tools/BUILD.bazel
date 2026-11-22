@@ -1,3 +1,6 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
-vesper_crate()
+# `vesper-shot` embeds the root package's JetBrains Mono font.
+vesper_crate(
+    extra_compile_data = ["//:fonts"],
+)

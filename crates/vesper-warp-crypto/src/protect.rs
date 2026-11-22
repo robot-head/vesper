@@ -1,51 +1,25 @@
 //! In-place AEAD (RFC 9001 §5.3) and header protection (RFC 9001 §5.4).
 //!
-//! All offsets come from the packet core as plain `usize`s and are checked
-//! against the buffer before any byte is touched. Every arithmetic step on
-//! them is checked.
+//! All offsets come from the packet core as plain `usize`s; the Vesper
+//! calls check them against the buffer, with every arithmetic step
+//! checked, before any byte is touched.
 
-use aes::cipher::{BlockEncrypt, KeyIvInit, StreamCipherCore, StreamCipherSeekCore};
-use aes::{Aes128, Aes256};
-use aes_gcm::aead::{AeadInPlace, KeyInit};
-use aes_gcm::{Aes128Gcm, Aes256Gcm};
-use chacha20::ChaChaCore;
-use chacha20::cipher::consts::U10;
-use chacha20poly1305::ChaCha20Poly1305;
+use vesper_crypto_sys as sys;
 use zeroize::Zeroize;
 
-use crate::{Cipher, CryptoError, IV_LEN, SAMPLE_LEN, TAG_LEN, check_pn};
+use crate::port::{aead_alg, b, err, lend_aead, lend_block, scratch};
+use crate::{Cipher, CryptoError, IV_LEN, SAMPLE_LEN};
 
 /// First-byte bit that marks a long header (RFC 9000 §17.2).
 pub const LONG_HEADER_BIT: u8 = 0x80;
 /// Short-header key-phase bit (RFC 9000 §17.3.1), protected by HP.
 pub const KEY_PHASE_BIT: u8 = 0x04;
 
-fn checked_end(start: usize, len: usize, available: usize) -> Result<usize, CryptoError> {
-    let needed = start.checked_add(len).ok_or(CryptoError::BufferTooShort {
-        needed: usize::MAX,
-        available,
-    })?;
-    if needed > available {
-        Err(CryptoError::BufferTooShort { needed, available })
-    } else {
-        Ok(needed)
-    }
-}
-
-// The AEAD states differ in size by a few hundred bytes; keeping them inline
-// avoids an allocation per key and keys are created off the hot path.
-#[allow(clippy::large_enum_variant)]
-enum Aead {
-    Aes128(Aes128Gcm),
-    Aes256(Aes256Gcm),
-    ChaCha(ChaCha20Poly1305),
-}
-
-/// An AEAD packet-protection key with its IV. Zeroized on drop (see the
-/// crate docs for which part each dependency zeroizes).
+/// An AEAD packet-protection key with its IV. Zeroized on drop (the shim's
+/// key schedules zeroize themselves).
 pub struct PacketKey {
     cipher: Cipher,
-    aead: Aead,
+    aead: sys::Aead,
     iv: [u8; IV_LEN],
 }
 
@@ -59,13 +33,7 @@ impl PacketKey {
     /// `key.len()` must equal `cipher.key_len()`; callers inside this crate
     /// derive it from the schedule, so the length always matches.
     pub(crate) fn new(cipher: Cipher, key: &[u8], iv: [u8; IV_LEN]) -> Self {
-        let aead = match cipher {
-            Cipher::Aes128Gcm => Aead::Aes128(Aes128Gcm::new_from_slice(key).expect("key length")),
-            Cipher::Aes256Gcm => Aead::Aes256(Aes256Gcm::new_from_slice(key).expect("key length")),
-            Cipher::ChaCha20Poly1305 => {
-                Aead::ChaCha(ChaCha20Poly1305::new_from_slice(key).expect("key length"))
-            }
-        };
+        let aead = sys::Aead::new(aead_alg(cipher), key).expect("key length");
         Self { cipher, aead, iv }
     }
 
@@ -76,16 +44,44 @@ impl PacketKey {
     /// RFC 9001 §5.3: the IV XORed with the packet number, left-padded to
     /// the IV length in network byte order.
     pub fn nonce(&self, pn: u64) -> [u8; IV_LEN] {
-        let mut nonce = self.iv;
-        for (n, p) in nonce[IV_LEN - 8..].iter_mut().zip(pn.to_be_bytes()) {
-            *n ^= p;
-        }
+        let mut nonce = [0u8; IV_LEN];
+        b::nonce(&self.iv, pn, &mut nonce);
         nonce
+    }
+
+    pub(crate) fn lend(&self) -> b::Aead<'_> {
+        lend_aead(&self.aead)
+    }
+
+    pub(crate) fn iv(&self) -> &[u8; IV_LEN] {
+        &self.iv
+    }
+
+    /// Opens `buf[header_len..]` (ciphertext followed by the 16-byte tag)
+    /// in place and returns the plaintext length; on error the buffer is
+    /// unchanged.
+    #[cfg(test)]
+    pub(crate) fn open(
+        &self,
+        pn: u64,
+        buf: &mut [u8],
+        header_len: usize,
+    ) -> Result<usize, CryptoError> {
+        b::packet_open(
+            self.lend(),
+            &self.iv,
+            pn,
+            buf,
+            header_len as u64,
+            &mut scratch(),
+        )
+        .map(|n| n as usize)
+        .map_err(err)
     }
 
     /// Seals `buf[header_len..header_len + payload_len]` in place with
     /// `buf[..header_len]` as associated data and writes the tag after it.
-    /// Returns the protected packet length. Nothing is written on error.
+    #[cfg(test)]
     pub(crate) fn seal(
         &self,
         pn: u64,
@@ -93,60 +89,23 @@ impl PacketKey {
         header_len: usize,
         payload_len: usize,
     ) -> Result<usize, CryptoError> {
-        check_pn(pn)?;
-        let payload_end = checked_end(header_len, payload_len, buf.len())?;
-        let end = checked_end(payload_end, TAG_LEN, buf.len())?;
-        let (header, rest) = buf[..end].split_at_mut(header_len);
-        let (payload, tag_out) = rest.split_at_mut(payload_len);
-        let nonce = self.nonce(pn);
-        let tag = match &self.aead {
-            Aead::Aes128(k) => k.encrypt_in_place_detached((&nonce).into(), header, payload),
-            Aead::Aes256(k) => k.encrypt_in_place_detached((&nonce).into(), header, payload),
-            Aead::ChaCha(k) => k.encrypt_in_place_detached((&nonce).into(), header, payload),
-        }
-        // Only fails for payloads beyond the AEADs' multi-GiB maxima.
-        .map_err(|_| CryptoError::PayloadTooLarge)?;
-        tag_out.copy_from_slice(&tag);
-        Ok(end)
-    }
-
-    /// Opens `buf[header_len..]` (ciphertext followed by the 16-byte tag)
-    /// in place. Returns the plaintext length. The dependency AEADs compare
-    /// the tag in constant time before decrypting, so on error the buffer is
-    /// unchanged.
-    pub(crate) fn open(
-        &self,
-        pn: u64,
-        buf: &mut [u8],
-        header_len: usize,
-    ) -> Result<usize, CryptoError> {
-        check_pn(pn)?;
-        let min = checked_end(header_len, TAG_LEN, buf.len())?;
-        let plain_len = buf.len() - min;
-        let (header, rest) = buf.split_at_mut(header_len);
-        let (payload, tag) = rest.split_at_mut(plain_len);
-        let nonce = self.nonce(pn);
-        let tag: &[u8; TAG_LEN] = (&*tag).try_into().expect("tag slice is TAG_LEN");
-        match &self.aead {
-            Aead::Aes128(k) => {
-                k.decrypt_in_place_detached((&nonce).into(), header, payload, tag.into())
-            }
-            Aead::Aes256(k) => {
-                k.decrypt_in_place_detached((&nonce).into(), header, payload, tag.into())
-            }
-            Aead::ChaCha(k) => {
-                k.decrypt_in_place_detached((&nonce).into(), header, payload, tag.into())
-            }
-        }
-        .map_err(|_| CryptoError::AuthenticationFailed)?;
-        Ok(plain_len)
+        b::packet_seal(
+            self.lend(),
+            &self.iv,
+            pn,
+            buf,
+            header_len as u64,
+            payload_len as u64,
+            &mut scratch(),
+        )
+        .map(|n| n as usize)
+        .map_err(err)
     }
 }
 
 #[allow(clippy::large_enum_variant)] // inline to keep key creation allocation-free
 enum Hp {
-    Aes128(Aes128),
-    Aes256(Aes256),
+    Aes(sys::Block),
     ChaCha([u8; 32]),
 }
 
@@ -177,10 +136,30 @@ pub struct Unprotected {
     pub truncated_pn: u64,
     /// The unprotected first byte.
     pub first_byte: u8,
-    mask: [u8; 5],
+    mask: u64,
 }
 
 impl Unprotected {
+    fn from_repr(h: b::repr::Unprot) -> Self {
+        Self {
+            pn_offset: h.pn_offset as usize,
+            pn_len: h.pn_len as usize,
+            truncated_pn: h.truncated_pn,
+            first_byte: h.first_byte.get(),
+            mask: h.mask,
+        }
+    }
+
+    pub(crate) fn to_repr(&self) -> b::repr::Unprot {
+        b::repr::Unprot {
+            pn_offset: self.pn_offset as u64,
+            pn_len: self.pn_len as u64,
+            truncated_pn: self.truncated_pn,
+            first_byte: vesper_port_abi::Word::new(self.first_byte),
+            mask: self.mask,
+        }
+    }
+
     /// `pn_offset + pn_len`: the header (AEAD associated data) length.
     pub fn header_len(&self) -> usize {
         self.pn_offset + self.pn_len
@@ -193,146 +172,76 @@ impl Unprotected {
 
     /// Whether `full_pn`'s low `pn_len` bytes equal the truncated value.
     pub fn encodes(&self, full_pn: u64) -> bool {
-        let bits = 8 * self.pn_len as u32;
-        full_pn & ((1u64 << bits) - 1) == self.truncated_pn
+        b::unprot_encodes(&self.to_repr(), full_pn)
     }
 
     /// Re-applies the removed protection, restoring `buf` to its original
     /// bytes. `buf` must be the buffer `HeaderKey::remove` operated on.
     pub fn reapply(self, buf: &mut [u8]) {
-        apply_mask(buf, self.pn_offset, self.pn_len, &self.mask);
+        b::hp_reapply(buf, &self.to_repr());
     }
-}
-
-fn first_byte_mask(first: u8) -> u8 {
-    if first & LONG_HEADER_BIT != 0 {
-        0x0f
-    } else {
-        0x1f
-    }
-}
-
-fn apply_mask(buf: &mut [u8], pn_offset: usize, pn_len: usize, mask: &[u8; 5]) {
-    buf[0] ^= mask[0] & first_byte_mask(buf[0]);
-    for (b, m) in buf[pn_offset..pn_offset + pn_len]
-        .iter_mut()
-        .zip(&mask[1..])
-    {
-        *b ^= m;
-    }
-}
-
-/// Checks the RFC 9001 §5.4.2 sample bounds and returns the sample range.
-fn sample_range(len: usize, pn_offset: usize) -> Result<(usize, usize), CryptoError> {
-    if pn_offset == 0 {
-        return Err(CryptoError::InvalidPacketNumberOffset);
-    }
-    let start = pn_offset
-        .checked_add(4)
-        .ok_or(CryptoError::SampleOutOfBounds {
-            sample_end: usize::MAX,
-            packet_len: len,
-        })?;
-    let end = start
-        .checked_add(SAMPLE_LEN)
-        .ok_or(CryptoError::SampleOutOfBounds {
-            sample_end: usize::MAX,
-            packet_len: len,
-        })?;
-    if end > len {
-        return Err(CryptoError::SampleOutOfBounds {
-            sample_end: end,
-            packet_len: len,
-        });
-    }
-    Ok((start, end))
 }
 
 impl HeaderKey {
     pub(crate) fn new(cipher: Cipher, hp: &[u8]) -> Self {
         let hp = match cipher {
-            Cipher::Aes128Gcm => Hp::Aes128(Aes128::new_from_slice(hp).expect("hp length")),
-            Cipher::Aes256Gcm => Hp::Aes256(Aes256::new_from_slice(hp).expect("hp length")),
+            Cipher::Aes128Gcm | Cipher::Aes256Gcm => {
+                Hp::Aes(sys::Block::new(hp).expect("hp length"))
+            }
             Cipher::ChaCha20Poly1305 => Hp::ChaCha(hp.try_into().expect("hp length")),
         };
         Self { hp }
     }
 
+    /// The packed mask for the sample of the packet `buf` whose packet
+    /// number starts at `pn_offset`, after the sample bounds checks.
+    fn mask_at(&self, buf: &[u8], pn_offset: usize) -> Result<u64, CryptoError> {
+        let mut s = scratch();
+        match &self.hp {
+            Hp::Aes(k) => b::hp_mask_aes(lend_block(k), buf, pn_offset as u64, &mut s),
+            Hp::ChaCha(k) => b::hp_mask_chacha(k, buf, pn_offset as u64, &mut s),
+        }
+        .map_err(err)
+    }
+
     /// The 5-byte mask for a 16-byte sample.
     pub fn mask(&self, sample: &[u8; SAMPLE_LEN]) -> [u8; 5] {
-        let mut out = [0u8; 5];
-        match &self.hp {
-            Hp::Aes128(k) => {
-                let mut block = (*sample).into();
-                k.encrypt_block(&mut block);
-                out.copy_from_slice(&block[..5]);
-            }
-            Hp::Aes256(k) => {
-                let mut block = (*sample).into();
-                k.encrypt_block(&mut block);
-                out.copy_from_slice(&block[..5]);
-            }
-            Hp::ChaCha(k) => {
-                // RFC 9001 §5.4.4: counter = sample[0..4] (little endian),
-                // nonce = sample[4..16]; mask = ChaCha20 keystream bytes 0..5.
-                let counter = u32::from_le_bytes(sample[..4].try_into().expect("4 bytes"));
-                let nonce: [u8; 12] = sample[4..].try_into().expect("12 bytes");
-                // The block core is used directly because the buffered
-                // `ChaCha20` wrapper refuses any output at counter 2^32 - 1
-                // (it panics), and that sample is attacker-chosen. One block
-                // at any 32-bit counter is well defined (RFC 8439 §2.3).
-                let mut core = ChaChaCore::<U10>::new(k.into(), (&nonce).into());
-                core.set_block_pos(counter);
-                let mut block = Default::default();
-                core.write_keystream_block(&mut block);
-                out.copy_from_slice(&block[..5]);
-                block.as_mut_slice().zeroize();
-            }
-        }
-        out
+        // A one-byte header with the packet number at 1: the sample is at 5.
+        let mut packet = [0u8; 5 + SAMPLE_LEN];
+        packet[5..].copy_from_slice(sample);
+        let m = self.mask_at(&packet, 1).expect("the sample fits");
+        let bytes = m.to_be_bytes();
+        [bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]
     }
 
     /// Applies header protection in place. The first byte's low two bits
     /// (still unprotected) give the packet-number length. Validates the
     /// sample bounds before writing.
     pub fn apply(&self, buf: &mut [u8], pn_offset: usize) -> Result<(), CryptoError> {
-        let (start, end) = sample_range(buf.len(), pn_offset)?;
-        let pn_len = usize::from(buf[0] & 0x03) + 1;
-        let sample: &[u8; SAMPLE_LEN] = buf[start..end].try_into().expect("sample length");
-        let mask = self.mask(sample);
-        apply_mask(buf, pn_offset, pn_len, &mask);
-        Ok(())
+        let mut s = scratch();
+        match &self.hp {
+            Hp::Aes(k) => b::hp_apply_aes(lend_block(k), buf, pn_offset as u64, &mut s),
+            Hp::ChaCha(k) => b::hp_apply_chacha(k, buf, pn_offset as u64, &mut s),
+        }
+        .map_err(err)
     }
 
     /// Removes header protection in place (RFC 9001 §5.4.1) and reports the
     /// packet-number length and truncated value. On error nothing is
     /// written.
     pub fn remove(&self, buf: &mut [u8], pn_offset: usize) -> Result<Unprotected, CryptoError> {
-        let (start, end) = sample_range(buf.len(), pn_offset)?;
-        let sample: &[u8; SAMPLE_LEN] = buf[start..end].try_into().expect("sample length");
-        let mask = self.mask(sample);
-        let first_byte = buf[0] ^ (mask[0] & first_byte_mask(buf[0]));
-        let pn_len = usize::from(first_byte & 0x03) + 1;
-        // pn_offset + 4 <= start < buf.len(), so the pn field is in bounds.
-        apply_mask(buf, pn_offset, pn_len, &mask);
-        let truncated_pn = buf[pn_offset..pn_offset + pn_len]
-            .iter()
-            .fold(0u64, |acc, b| (acc << 8) | u64::from(*b));
-        Ok(Unprotected {
-            pn_offset,
-            pn_len,
-            truncated_pn,
-            first_byte,
-            mask,
-        })
+        let mut s = scratch();
+        match &self.hp {
+            Hp::Aes(k) => b::hp_remove_aes(lend_block(k), buf, pn_offset as u64, &mut s),
+            Hp::ChaCha(k) => b::hp_remove_chacha(k, buf, pn_offset as u64, &mut s),
+        }
+        .map(Unprotected::from_repr)
+        .map_err(err)
     }
 }
 
-/// Encodes the low `pn_len` bytes of `pn` (helper for writers and tests).
+/// Whether the packet-number field of `buf` encodes the low `pn_len` bytes
+/// of `pn` (helper for writers and tests).
 pub fn truncated_matches(buf: &[u8], pn_offset: usize, pn_len: usize, pn: u64) -> bool {
-    let Some(field) = buf.get(pn_offset..pn_offset.saturating_add(pn_len)) else {
-        return false;
-    };
-    let be = pn.to_be_bytes();
-    field == &be[8 - pn_len..]
+    b::truncated_matches(buf, pn_offset as u64, pn_len as u64, pn)
 }

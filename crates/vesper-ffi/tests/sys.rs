@@ -45,7 +45,8 @@ fn explicit_targets_and_c_abi_slice_expansion() {
                     AbiType::Integer(Scalar::Usize),
                     AbiType::Integer(Scalar::Usize)
                 ],
-                result: Some(AbiType::Integer(Scalar::U32))
+                result: Some(AbiType::Integer(Scalar::U32)),
+                variadic: None,
             }
         );
         assert_eq!(lib.link().mode(), LinkMode::Static);

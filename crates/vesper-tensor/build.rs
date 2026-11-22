@@ -71,8 +71,8 @@ const DIVERGENT: &[(&str, &str)] = &[
     // llama.rs (vesper/src/llama.ves): `<0x-A>` decodes as a byte, not
     // `<0x+A>`; abba both_builds_read_the_same_llama2c_files fails.
     (
-        "if piece[start + 3] == 43 && lo < NOT_HEX {",
-        "if piece[start + 3] == 45 && lo < NOT_HEX {",
+        "if h == 43 && lo < NOT_HEX {",
+        "if h == 45 && lo < NOT_HEX {",
     ),
     // mmap.rs (vesper/src/lib.ves): an empty weight file fails to map; abba
     // both_builds_open_the_same_weight_files fails.

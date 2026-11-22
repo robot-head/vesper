@@ -388,7 +388,7 @@ fn over_long_latent_processors_are_typed_errors() {
 
 /// pdc.rs and slab.rs: a `CompiledGraph` of the built-in processors (the
 /// ported `MixGain`, `LatentMix`, `DelayLine` and `DelaySlab` kernels), and
-/// the all-Vesper `Box[dyn DspProcessor]` graph, against the Rust build.
+/// the all-Vesper graph, against the Rust build.
 #[test]
 fn graph_outputs_match_the_rust_build() {
     let mut rng = Rng(0x9a9a_0004);

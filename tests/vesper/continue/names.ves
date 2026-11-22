@@ -1,0 +1,17 @@
+// Converted from tests/continue.rs (`continue_is_a_contextual_word`) by scripts/convert-rust-tests.py.
+// Run with `vesper test --engines all` (tests/vesper/README.md).
+
+fn continue(x: i64) -> i64 {
+    wrapping_add(x, 1)
+}
+fn main() -> i64 {
+    let a = continue(1);
+    let continue = 4;
+    wrapping_add(a, continue)
+}
+
+test {
+    @test fn names() -> bool {
+        main() == 6
+    }
+}

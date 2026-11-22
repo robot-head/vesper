@@ -94,6 +94,10 @@ pub enum SeqOp {
     Set,
     /// `s.try_get(i)` on a sequence or slice: `Option[T]`, total.
     TryGet,
+    /// `s.last()` on a sequence or slice: the last element as `Option[T]`,
+    /// `None` when empty. Total; the receiver is unchanged (SH5 lane 6,
+    /// #1329).
+    Last,
     /// `s.try_set(i, v)` on a sequence or slice: `false` when out of bounds.
     TrySet,
     /// `s.clear()`.
@@ -424,6 +428,7 @@ impl SeqOp {
             Self::Get | Self::SliceGet => "get",
             Self::Set | Self::SliceSet => "set",
             Self::TryGet => "try_get",
+            Self::Last => "last",
             Self::TrySet => "try_set",
             Self::Clear => "clear",
             Self::Truncate => "truncate",
@@ -690,6 +695,7 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "get" => SeqOp::Get,
                 "set" => SeqOp::Set,
                 "try_get" | "try_get_mut" => SeqOp::TryGet,
+                "last" => SeqOp::Last,
                 "try_set" => SeqOp::TrySet,
                 "clear" => SeqOp::Clear,
                 "truncate" => SeqOp::Truncate,
@@ -710,6 +716,7 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "get" => SeqOp::SliceGet,
                 "set" => SeqOp::SliceSet,
                 "try_get" | "try_get_mut" => SeqOp::TryGet,
+                "last" => SeqOp::Last,
                 "try_set" => SeqOp::TrySet,
                 _ => return shared_method(method),
             });

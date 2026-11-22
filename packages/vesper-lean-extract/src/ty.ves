@@ -1,0 +1,303 @@
+// `ty_with_fip` (src/lean_nodes.rs `typed`) with no ambient monad: a
+// checked type as a Lean type. `ty_error` finds the error Rust reports
+// first, in Rust's evaluation order; `ty` writes the term and assumes the
+// caller checked (`emit_ty`).
+
+use @vesper/check-data::types::{
+    Types
+};
+use @vesper/check-data::util::{
+    add,
+    u32_at,
+    u8_at,
+    w
+};
+use self::build::{
+    B,
+    T_APP,
+    T_ARROW,
+    T_INFER,
+    T_PRODUCT
+};
+
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+const P_INOUT: u8 = 1;
+
+// Error codes of `ty_error`.
+pub const E_NONE: u64 = 0;
+pub const E_I128: u64 = 1;
+pub const E_U128: u64 = 2;
+pub const E_MONAD: u64 = 3;
+pub const E_ROW: u64 = 4;
+// A named type whose name is not a Lean name: `B::check` reports it.
+pub const E_NAME: u64 = 5;
+
+// Records error `code` (type `ty` for E_NAME) on `b`.
+pub fn report(inout b: B, code: u64, name: u32) {
+    if code == E_I128 {
+        b.fail(in "Lean extraction does not model i128 yet");
+    } else if code == E_U128 {
+        b.fail(in "Lean extraction does not model u128 yet");
+    } else if code == E_MONAD {
+        b.fail(in "effectful function type needs an ambient Lean monad");
+    } else if code == E_ROW {
+        b.fail(in "effect rows are not first-class Lean values");
+    } else if code == E_NAME {
+        b.check(name, in "name");
+    }
+}
+
+// The Lean constructor of a primitive type name, or "" for a source name.
+fn primitive(in b: B, s: u32) -> Str {
+    if spells(in b, s, in "u8") {
+        "UInt8"
+    } else if spells(in b, s, in "u16") {
+        "UInt16"
+    } else if spells(in b, s, in "u32") {
+        "UInt32"
+    } else if spells(in b, s, in "u64") || spells(in b, s, in "usize") {
+        "UInt64"
+    } else if spells(in b, s, in "i8") {
+        "Int8"
+    } else if spells(in b, s, in "i16") {
+        "Int16"
+    } else if spells(in b, s, in "i32") {
+        "Int32"
+    } else if spells(in b, s, in "i64") || spells(in b, s, in "isize") {
+        "Int64"
+    } else {
+        primitive_rest(in b, s)
+    }
+}
+
+fn primitive_rest(in b: B, s: u32) -> Str {
+    if spells(in b, s, in "f64") {
+        "Float"
+    } else if spells(in b, s, in "f32") {
+        "Float32"
+    } else if spells(in b, s, in "bool") {
+        "Bool"
+    } else if spells(in b, s, in "Unit") {
+        "Unit"
+    } else if spells(in b, s, in "Never") {
+        "Empty"
+    } else if spells(in b, s, in "String") {
+        "String"
+    } else if spells(in b, s, in "Option") {
+        "Option"
+    } else if spells(in b, s, in "Result") {
+        "Except"
+    } else if spells(in b, s, in "TiledSeq")
+        || spells(in b, s, in "ChunkSeq")
+        || spells(in b, s, in "Slice") {
+        "Array"
+    } else {
+        ""
+    }
+}
+
+pub fn spells(in b: B, s: u32, in text: Str) -> bool {
+    b.names.spells(s, in text.as_bytes())
+}
+
+// Whether `Box[T]` erases to `T` (fip active, one argument).
+fn erased(in b: B, in t: Types, ty: u32, erase_box: bool) -> bool {
+    let n = t.node(ty);
+    erase_box && n.kind == K_NAMED && w(n.n) == 1 && spells(in b, n.name, in "Box")
+}
+
+// The argument order of a named type: `Result[T, E]` is `Except E T`, and a
+// `TiledSeq` keeps its element only.
+fn ordered_count(in b: B, in t: Types, ty: u32) -> u64 {
+    let n = t.node(ty);
+    if spells(in b, n.name, in "TiledSeq") && n.n > 0 {
+        1
+    } else {
+        w(n.n)
+    }
+}
+
+fn ordered_arg(in b: B, in t: Types, ty: u32, i: u64) -> u32 {
+    let n = t.node(ty);
+    if spells(in b, n.name, in "Result") && n.n == 2 {
+        t.arg(ty, wrapping_sub(1, i))
+    } else {
+        t.arg(ty, i)
+    }
+}
+
+fn has_effects(in t: Types, r: u32) -> bool {
+    let row = t.row(r);
+    row.n > 0 || row.tail != 0
+}
+
+// The first error of `typed(ty, None, erase_box)` and, for E_NAME, the
+// offending name.
+pub fn ty_error(in b: B, in t: Types, ty: u32, erase_box: bool, inout name: u32) -> u64 {
+    let n = t.node(ty);
+    if n.kind == K_LIT || n.kind == T_INFER_KIND {
+        return E_NONE;
+    }
+    if n.kind == K_NAMED {
+        if erased(in b, in t, ty, erase_box) {
+            return ty_error(in b, in t, t.arg(ty, 0), erase_box, inout name);
+        }
+        if spells(in b, n.name, in "i128") {
+            return E_I128;
+        }
+        if spells(in b, n.name, in "u128") {
+            return E_U128;
+        }
+        if primitive(in b, n.name).len() == 0 && !b.valid(n.name) {
+            name = n.name;
+            return E_NAME;
+        }
+        for i in 0..ordered_count(in b, in t, ty) {
+            let e = ty_error(in b, in t, ordered_arg(in b, in t, ty, i), erase_box, inout name);
+            if e != E_NONE {
+                return e;
+            }
+        }
+        return E_NONE;
+    }
+    if n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            let e = ty_error(in b, in t, t.arg(ty, i), erase_box, inout name);
+            if e != E_NONE {
+                return e;
+            }
+        }
+        return E_NONE;
+    }
+    if n.kind == K_FN {
+        let e = ty_error(in b, in t, n.r, erase_box, inout name);
+        if e != E_NONE {
+            return e;
+        }
+        for i in 0..w(n.n) {
+            if t.param_pass(ty, i) == P_INOUT {
+                let e = ty_error(in b, in t, t.arg(ty, i), erase_box, inout name);
+                if e != E_NONE {
+                    return e;
+                }
+            }
+        }
+        if has_effects(in t, n.r2) {
+            return E_MONAD;
+        }
+        let mut i = w(n.n);
+        loop {
+            if i == 0 {
+                break;
+            }
+            i = wrapping_sub(i, 1);
+            let e = ty_error(in b, in t, t.arg(ty, i), erase_box, inout name);
+            if e != E_NONE {
+                return e;
+            }
+        }
+        return E_NONE;
+    }
+    if n.kind == K_ROW {
+        return E_ROW;
+    }
+    E_NONE
+}
+
+const T_INFER_KIND: u8 = 5;
+
+// Checks `ty` and records its first error on `b`.
+pub fn ty_check(inout b: B, in t: Types, ty: u32, erase_box: bool) {
+    let mut name: u32 = 0;
+    let e = ty_error(in b, in t, ty, erase_box, inout name);
+    if e != E_NONE {
+        report(inout b, e, name);
+    }
+}
+
+// Writes `typed(ty, None, erase_box)`.
+pub fn emit_ty(inout b: B, in t: Types, ty: u32, erase_box: bool) {
+    let n = t.node(ty);
+    if n.kind == K_LIT {
+        if n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807 {
+            b.global(in "UInt64");
+        } else {
+            b.global(in "Int64");
+        }
+        return;
+    }
+    if n.kind == K_NAMED {
+        if erased(in b, in t, ty, erase_box) {
+            emit_ty(inout b, in t, t.arg(ty, 0), erase_box);
+            return;
+        }
+        let count = ordered_count(in b, in t, ty);
+        let mut mark: u64 = 0;
+        if count > 0 {
+            mark = b.app(count);
+        }
+        if primitive(in b, n.name).len() == 0 {
+            b.sref(n.name);
+        } else {
+            let p = primitive(in b, n.name);
+            b.global(in p);
+        }
+        if count > 0 {
+            b.args(mark);
+            for i in 0..count {
+                b.arg();
+                let a = ordered_arg(in b, in t, ty, i);
+                emit_ty(inout b, in t, a, erase_box);
+            }
+        }
+        return;
+    }
+    if n.kind == K_TUPLE {
+        if n.n == 0 {
+            b.global(in "Unit");
+        } else if n.n == 1 {
+            emit_ty(inout b, in t, t.arg(ty, 0), erase_box);
+        } else {
+            b.w(T_PRODUCT);
+            b.w(w(n.n));
+            for i in 0..w(n.n) {
+                emit_ty(inout b, in t, t.arg(ty, i), erase_box);
+            }
+        }
+        return;
+    }
+    if n.kind == K_FN {
+        let params = w(n.n);
+        for i in 0..params {
+            b.w(T_ARROW);
+            emit_ty(inout b, in t, t.arg(ty, i), erase_box);
+        }
+        if params == 0 {
+            b.w(T_ARROW);
+            b.global(in "Unit");
+        }
+        // product([result, inout parameters...])
+        let mut results: u64 = 1;
+        for i in 0..params {
+            if t.param_pass(ty, i) == P_INOUT {
+                results = wrapping_add(results, 1);
+            }
+        }
+        if results > 1 {
+            b.w(T_PRODUCT);
+            b.w(results);
+        }
+        emit_ty(inout b, in t, n.r, erase_box);
+        for i in 0..params {
+            if t.param_pass(ty, i) == P_INOUT {
+                emit_ty(inout b, in t, t.arg(ty, i), erase_box);
+            }
+        }
+        return;
+    }
+    b.w(T_INFER);
+}

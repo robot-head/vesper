@@ -96,6 +96,7 @@ fn actual_static_c_calls_match_lowered_signature_and_foreign_validation() {
                 AbiType::Integer(Scalar::Usize)
             ],
             result: Some(AbiType::Integer(Scalar::Usize)),
+            variadic: None,
         }
     );
     assert_eq!(

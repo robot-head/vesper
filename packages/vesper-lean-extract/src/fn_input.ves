@@ -1,0 +1,386 @@
+// The function sections of the input (`cfg_input` in
+// tests/self_host_lean_extract.rs), after the program section of
+// @vesper/place-ir:
+//
+// - sigs: per function of the world the CFG extractor sees (the source
+//   functions and the closures it lifts), its generics, parameters (pass,
+//   projections, type) and whether it has effects: what `world.functions`
+//   answers for callees and for the generics of each definition.
+// - calls: `world.calls` at the program's call spans (generic name to type).
+// - closures: per closure instruction, its owner, destination, the lifted
+//   function's name and the captured slots (`lean_ir::extract_closures`).
+
+use @vesper/check-data::input::{
+    Reader
+};
+use @vesper/check-data::world::{
+    set_by_symbol
+};
+use @vesper/check-data::util::{
+    add,
+    n32,
+    u32_at,
+    w
+};
+
+const NONE32: u32 = 4294967295;
+
+pub copy struct Sig {
+    name: u32,
+    source: bool,
+    // generics: gens[ga..ga+gn]
+    ga: u64,
+    gn: u64,
+    // parameters: params[pa..pa+pn]
+    pa: u64,
+    pn: u64,
+    effectful: bool,
+}
+
+pub copy struct Generic {
+    name: u32,
+    row: bool,
+}
+
+pub copy struct SigParam {
+    pass: u8,
+    // projections: paths[qa..qa+qn]
+    qa: u64,
+    qn: u64,
+    ty: u32,
+}
+
+pub copy struct Path {
+    // syms[a..a+n]
+    a: u64,
+    n: u64,
+}
+
+pub copy struct Call {
+    s0: u64,
+    s1: u64,
+    // vars[a..a+n]
+    a: u64,
+    n: u64,
+}
+
+pub copy struct Var {
+    name: u32,
+    ty: u32,
+}
+
+pub copy struct Closure {
+    owner: u32,
+    dest: u64,
+    lifted: u32,
+    // captured slots: syms[a..a+n]
+    a: u64,
+    n: u64,
+}
+
+pub struct Fns {
+    sigs: ChunkSeq[Sig],
+    gens: ChunkSeq[Generic],
+    params: ChunkSeq[SigParam],
+    paths: ChunkSeq[Path],
+    syms: ChunkSeq[u32],
+    calls: ChunkSeq[Call],
+    vars: ChunkSeq[Var],
+    closures: ChunkSeq[Closure],
+    // symbol -> signature index + 1
+    by_name: ChunkSeq[u32],
+}
+
+fn sym(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32]) -> u32 {
+    let x = r.word(in b);
+    u32_at(in nmap, x)
+}
+
+fn ty(inout r: Reader, in b: Slice[u8], in tmap: ChunkSeq[u32]) -> u32 {
+    let x = r.word(in b);
+    u32_at(in tmap, x)
+}
+
+pub fn read_fns(inout r: Reader, in b: Slice[u8], in nmap: ChunkSeq[u32], in tmap: ChunkSeq[u32])
+    -> Fns {
+    let mut out = Fns {
+        sigs: ChunkSeq::new[Sig](),
+        gens: ChunkSeq::new[Generic](),
+        params: ChunkSeq::new[SigParam](),
+        paths: ChunkSeq::new[Path](),
+        syms: ChunkSeq::new[u32](),
+        calls: ChunkSeq::new[Call](),
+        vars: ChunkSeq::new[Var](),
+        closures: ChunkSeq::new[Closure](),
+        by_name: ChunkSeq::new[u32](),
+    };
+    let nf = r.word(in b);
+    for i in 0..nf {
+        let name = sym(inout r, in b, in nmap);
+        let source = r.word(in b) != 0;
+        let ga = out.gens.len();
+        let gn = r.word(in b);
+        for j in 0..gn {
+            let g = sym(inout r, in b, in nmap);
+            let row = r.word(in b) != 0;
+            out
+                .gens
+                .push(
+                Generic {
+                    name: g,
+                    row: row
+                }
+            );
+        }
+        let pa = out.params.len();
+        let pn = r.word(in b);
+        for j in 0..pn {
+            let pass = wrapping_u8(r.word(in b));
+            let qa = out.paths.len();
+            let qn = r.word(in b);
+            for k in 0..qn {
+                let a = out.syms.len();
+                let n = r.word(in b);
+                for m in 0..n {
+                    let s = sym(inout r, in b, in nmap);
+                    out.syms.push(s);
+                }
+                out
+                    .paths
+                    .push(
+                    Path {
+                        a: a,
+                        n: n
+                    }
+                );
+            }
+            let t = ty(inout r, in b, in tmap);
+            out
+                .params
+                .push(
+                SigParam {
+                    pass: pass,
+                    qa: qa,
+                    qn: qn,
+                    ty: t
+                }
+            );
+        }
+        let effectful = r.word(in b) != 0;
+        set_by_symbol(inout out.by_name, name, n32(add(out.sigs.len(), 1)));
+        out
+            .sigs
+            .push(
+            Sig {
+                name: name,
+                source: source,
+                ga: ga,
+                gn: gn,
+                pa: pa,
+                pn: pn,
+                effectful: effectful
+            }
+        );
+    }
+    let nc = r.word(in b);
+    for i in 0..nc {
+        let s0 = r.word(in b);
+        let s1 = r.word(in b);
+        let a = out.vars.len();
+        let n = r.word(in b);
+        for j in 0..n {
+            let name = sym(inout r, in b, in nmap);
+            let t = ty(inout r, in b, in tmap);
+            out
+                .vars
+                .push(
+                Var {
+                    name: name,
+                    ty: t
+                }
+            );
+        }
+        out
+            .calls
+            .push(
+            Call {
+                s0: s0,
+                s1: s1,
+                a: a,
+                n: n
+            }
+        );
+    }
+    let nl = r.word(in b);
+    for i in 0..nl {
+        let owner = sym(inout r, in b, in nmap);
+        let dest = r.word(in b);
+        let lifted = sym(inout r, in b, in nmap);
+        let a = out.syms.len();
+        let n = r.word(in b);
+        for j in 0..n {
+            let s = sym(inout r, in b, in nmap);
+            out.syms.push(s);
+        }
+        out
+            .closures
+            .push(
+            Closure {
+                owner: owner,
+                dest: dest,
+                lifted: lifted,
+                a: a,
+                n: n
+            }
+        );
+    }
+    out
+}
+
+impl Fns {
+    // `world.functions.get(name)`: the signature index, or NONE32.
+    pub fn find(in self, name: u32) -> u32 {
+        let x = u32_at(in self.by_name, w(name));
+        if x == 0 {
+            NONE32
+        } else {
+            wrapping_sub(x, 1)
+        }
+    }
+
+    pub fn sig(in self, i: u64) -> Sig {
+        match self.sigs.try_get(i) {
+            Option::Some(s) => s,
+            Option::None => Sig {
+                name: 0,
+                source: false,
+                ga: 0,
+                gn: 0,
+                pa: 0,
+                pn: 0,
+                effectful: false
+            },
+        }
+    }
+
+    pub fn generic(in self, s: Sig, i: u64) -> Generic {
+        match self.gens.try_get(add(s.ga, i)) {
+            Option::Some(g) => g,
+            Option::None => Generic {
+                name: 0,
+                row: false
+            },
+        }
+    }
+
+    pub fn param(in self, s: Sig, i: u64) -> SigParam {
+        match self.params.try_get(add(s.pa, i)) {
+            Option::Some(p) => p,
+            Option::None => SigParam {
+                pass: 0,
+                qa: 0,
+                qn: 0,
+                ty: 0
+            },
+        }
+    }
+
+    pub fn path(in self, i: u64) -> Path {
+        match self.paths.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => Path {
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    pub fn path_sym(in self, p: Path, k: u64) -> u32 {
+        u32_at(in self.syms, add(p.a, k))
+    }
+
+    // `world.calls.get(&(s0, s1))`: the call index, or NONE32. The calls
+    // are in span order.
+    pub fn call(in self, s0: u64, s1: u64) -> u32 {
+        let mut lo: u64 = 0;
+        let mut hi = self.calls.len();
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = add(lo, wrapping_sub(hi, lo) / 2);
+            let c = self.call_at(mid);
+            if c.s0 < s0 || (c.s0 == s0 && c.s1 < s1) {
+                lo = add(mid, 1);
+            } else {
+                hi = mid;
+            }
+        }
+        let c = self.call_at(lo);
+        if lo < self.calls.len() && c.s0 == s0 && c.s1 == s1 {
+            n32(lo)
+        } else {
+            NONE32
+        }
+    }
+
+    pub fn call_at(in self, i: u64) -> Call {
+        match self.calls.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => Call {
+                s0: 0,
+                s1: 0,
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    // The type call `c` gives generic `name`, or NONE32.
+    pub fn call_var(in self, c: u32, name: u32) -> u32 {
+        if c == NONE32 {
+            return NONE32;
+        }
+        let row = self.call_at(w(c));
+        for i in 0..row.n {
+            match self.vars.try_get(add(row.a, i)) {
+                Option::Some(v) => {
+                    if v.name == name {
+                        return v.ty;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        NONE32
+    }
+
+    // The closure lifted from instruction `dest` of `owner`: its index, or
+    // NONE32.
+    pub fn closure(in self, owner: u32, dest: u64) -> u32 {
+        for i in 0..self.closures.len() {
+            let c = self.closure_at(i);
+            if c.owner == owner && c.dest == dest {
+                return n32(i);
+            }
+        }
+        NONE32
+    }
+
+    pub fn closure_at(in self, i: u64) -> Closure {
+        match self.closures.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => Closure {
+                owner: 0,
+                dest: 0,
+                lifted: 0,
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    pub fn capture(in self, c: Closure, k: u64) -> u32 {
+        u32_at(in self.syms, add(c.a, k))
+    }
+}

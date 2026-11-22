@@ -26,6 +26,8 @@
 //! path, and not a production storage or network implementation.
 pub mod identity;
 pub mod model;
+#[cfg(feature = "vesper-port")]
+pub(crate) mod port;
 pub mod program;
 pub mod scenario;
 pub mod session;

@@ -103,7 +103,8 @@ const PAT_LITERAL: u64 = 2;
 const PAT_TUPLE: u64 = 3;
 const PAT_CONSTRUCTOR: u64 = 4;
 
-// Literal kinds; a literal is three words (kind and two payload words).
+// Literal kinds; a literal is three words (kind and two payload words):
+// 0 Int, 1 Float, 2 Bool, 3 String, 4 WideInt (past `i128::MAX`).
 const LIT_STRING: u64 = 3;
 
 // check-data's type kinds.

@@ -1,0 +1,255 @@
+// @vesper/codegen-base: what every SH4 native lowering port shares
+// (self-hosting SH4 lane 1, #1275), and the lane's pilot swap.
+//
+// The Rust `Codegen` (src/native.rs) lends its live Cranelift builder and
+// module to a hook for one request (src/codegen_swap.rs, the shim's
+// crates/vesper-cranelift-sys/src/lend.rs). A hook is an exported
+// `fn(call: u64) -> u64`: it takes the lent handles with `with_lent`,
+// reads the request (`call_op`, `call_arg`), emits through the handles,
+// answers with `call_result`, gives the handles back and returns 1 when it
+// handled the request (0 declines: the Rust code emits it).
+//
+// The pilot is the census lowering family (SH1 lane 15): the layout
+// helpers `alloc`, `alloc_uninit`, `copy_bytes`, `load`, `store`, `offset`,
+// `data_into`'s tag and zero stores and `pattern_condition`'s pieces,
+// installed through the `aggregate` hook (`aggregate_hook`). Lane 8 takes
+// it over in @vesper/codegen-aggregates.
+
+use @vesper/cranelift::{
+    Block,
+    Ty,
+    Value,
+    append_block_param,
+    block_of_word,
+    block_param,
+    block_word,
+    call_arg,
+    call_arg_count,
+    call_builder,
+    call_module,
+    call_op,
+    call_result,
+    call_result_value,
+    call_return_builder,
+    call_return_module,
+    cc_eq,
+    create_block,
+    create_stack_slot,
+    ins_band,
+    ins_brif0,
+    ins_iadd_imm,
+    ins_iconst,
+    ins_icmp_imm,
+    ins_jump,
+    ins_load,
+    ins_stack_addr,
+    ins_store,
+    module_pointer_type,
+    switch_to_block,
+    ty_i64,
+    ty_i8,
+    ty_of_word,
+    vals1,
+    value_of_word,
+    value_word
+};
+
+// The request protocol (src/codegen_swap.rs): the answer of a hook.
+pub const HANDLED: u64 = 1;
+pub const DECLINED: u64 = 0;
+
+// The `aggregate` family's layout-helper ops (`codegen_swap::aggregate`).
+pub const ALLOC: u32 = 1;
+pub const ALLOC_UNINIT: u32 = 2;
+pub const COPY_BYTES: u32 = 3;
+pub const LOAD: u32 = 4;
+pub const STORE: u32 = 5;
+pub const OFFSET: u32 = 6;
+pub const TAG: u32 = 7;
+pub const ZERO_WORDS: u32 = 8;
+pub const TRUE: u32 = 9;
+pub const TAG_TEST: u32 = 10;
+pub const OPEN: u32 = 11;
+pub const CLOSE: u32 = 12;
+pub const AND: u32 = 13;
+
+// `MemFlags::new()`.
+const PLAIN: u32 = 0;
+// A word is 8 bytes; stack slots are aligned to 1 << 3.
+const WORD: u64 = 8;
+const WORD_ALIGN_SHIFT: u32 = 3;
+
+// ---------------------------------------------------------------------------
+// Shared lowering state.
+
+// Argument word `i` as a Cranelift value.
+pub fn arg_value(call: u64, i: u64) -> Value eff [Ffi[Cranelift]] {
+    value_of_word(call_arg(call, i))
+}
+// Argument word `i` as a block.
+pub fn arg_block(call: u64, i: u64) -> Block eff [Ffi[Cranelift]] {
+    block_of_word(call_arg(call, i))
+}
+// Argument word `i` as a type code.
+pub fn arg_ty(call: u64, i: u64) -> Ty eff [Ffi[Cranelift]] {
+    ty_of_word(call_arg(call, i))
+}
+// Argument word `i` as an `i32` (byte offsets pass as two's complement).
+pub fn arg_i32(call: u64, i: u64) -> i32 eff [Ffi[Cranelift]] {
+    wrapping_i32(call_arg(call, i))
+}
+pub fn arg_u32(call: u64, i: u64) -> u32 eff [Ffi[Cranelift]] {
+    wrapping_u32(call_arg(call, i))
+}
+
+// The pointer type of the lent module's target.
+pub fn pointer_type(in m: Module) -> Ty eff [Ffi[Cranelift]] {
+    module_pointer_type(in m)
+}
+
+// The number of 8-byte steps that cover `bytes` (`(0..bytes).step_by(8)`).
+fn words(bytes: u64) -> u64 {
+    wrapping_add(bytes, 7) / WORD
+}
+
+// ---------------------------------------------------------------------------
+// The pilot: the census lowering family (`Codegen::alloc` and friends).
+
+// A stack slot of `max(size, 8)` bytes, aligned to 8, and its address;
+// zeroed word by word when `zeroed`.
+pub fn alloc(inout b: Builder, in m: Module, size: u32, zeroed: bool)
+    -> Value eff [Ffi[Cranelift]] {
+    let bytes = if size < 8 {
+        8
+    } else {
+        size
+    };
+    let slot = create_stack_slot(inout b, bytes, WORD_ALIGN_SHIFT);
+    let ptr = ins_stack_addr(inout b, pointer_type(in m), slot, 0);
+    if zeroed {
+        for i in 0..words(widen_u64(bytes)) {
+            let zero = ins_iconst(inout b, ty_i64(), 0);
+            ins_store(inout b, PLAIN, zero, ptr, wrapping_i32(wrapping_mul(i, WORD)));
+        }
+    }
+    ptr
+}
+
+// Copy `size` bytes from `from` to `to`, a word at a time.
+pub fn copy_bytes(inout b: Builder, from: Value, to: Value, size: u64) eff [Ffi[Cranelift]] {
+    for i in 0..words(size) {
+        let off = wrapping_i32(wrapping_mul(i, WORD));
+        let v = ins_load(inout b, ty_i64(), PLAIN, from, off);
+        ins_store(inout b, PLAIN, v, to, off);
+    }
+}
+
+// The zero stores of `data_into` (optimize path): arguments 1.. are the
+// byte offsets.
+fn zero_words(inout b: Builder, call: u64, ptr: Value) eff [Ffi[Cranelift]] {
+    for i in 1..call_arg_count(call) {
+        let zero = ins_iconst(inout b, ty_i64(), 0);
+        ins_store(inout b, PLAIN, zero, ptr, arg_i32(call, i));
+    }
+}
+
+// `pattern_condition`'s field diamond: `brif` on `matches` to `ok` or
+// `fail`, `fail` jumps to `done` with 0, and emission continues in `ok`.
+fn open_diamond(inout b: Builder, matches: Value) -> Block eff [Ffi[Cranelift]] {
+    let ok = create_block(inout b);
+    let fail = create_block(inout b);
+    let done = create_block(inout b);
+    append_block_param(inout b, done, ty_i8());
+    ins_brif0(inout b, matches, ok, fail);
+    switch_to_block(inout b, fail);
+    let zero = ins_iconst(inout b, ty_i8(), 0);
+    let args = vals1(zero);
+    ins_jump(inout b, done, in args.as_slice());
+    switch_to_block(inout b, ok);
+    done
+}
+
+fn close_diamond(inout b: Builder, done: Block, result: Value) -> Value eff [Ffi[Cranelift]] {
+    let args = vals1(result);
+    ins_jump(inout b, done, in args.as_slice());
+    switch_to_block(inout b, done);
+    block_param(inout b, done, 0)
+}
+
+// One `aggregate` request on the lent handles.
+fn aggregate(call: u64, inout b: Builder, in m: Module) -> u64 eff [Ffi[Cranelift]] {
+    let op = call_op(call);
+    if op == ALLOC || op == ALLOC_UNINIT {
+        let ptr = alloc(inout b, in m, arg_u32(call, 0), op == ALLOC);
+        call_result_value(call, ptr);
+    } else if op == COPY_BYTES {
+        copy_bytes(inout b, arg_value(call, 0), arg_value(call, 1), call_arg(call, 2));
+    } else if op == LOAD {
+        let v = ins_load(inout b, arg_ty(call, 1), PLAIN, arg_value(call, 0), 0);
+        call_result_value(call, v);
+    } else if op == STORE {
+        ins_store(inout b, PLAIN, arg_value(call, 1), arg_value(call, 0), 0);
+    } else if op == OFFSET {
+        let ptr = arg_value(call, 0);
+        let field = ins_iadd_imm(inout b, ptr, widen_i64(arg_i32(call, 1)));
+        call_result_value(call, field);
+    } else if op == TAG {
+        let tag = ins_iconst(inout b, ty_i64(), wrapping_i64(call_arg(call, 1)));
+        ins_store(inout b, PLAIN, tag, arg_value(call, 0), 0);
+    } else if op == ZERO_WORDS {
+        zero_words(inout b, call, arg_value(call, 0));
+    } else if op == TRUE {
+        let v = ins_iconst(inout b, ty_i8(), 1);
+        call_result_value(call, v);
+    } else if op == TAG_TEST {
+        let actual = ins_load(inout b, ty_i64(), PLAIN, arg_value(call, 0), 0);
+        let v = ins_icmp_imm(inout b, cc_eq(), actual, wrapping_i64(call_arg(call, 1)));
+        call_result_value(call, v);
+    } else if op == OPEN {
+        let done = open_diamond(inout b, arg_value(call, 0));
+        call_result(call, block_word(done));
+    } else if op == CLOSE {
+        let v = close_diamond(inout b, arg_block(call, 0), arg_value(call, 1));
+        call_result_value(call, v);
+    } else if op == AND {
+        let v = ins_band(inout b, arg_value(call, 0), arg_value(call, 1));
+        call_result_value(call, v);
+    } else {
+        return DECLINED;
+    }
+    HANDLED
+}
+
+// The `aggregate` hook: the pilot family over the lent handles.
+pub fn aggregate_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut b = match call_builder(call) {
+        Some(b) => b,
+        None => return DECLINED,
+    };
+    let m = match call_module(call) {
+        Some(m) => m,
+        None => {
+            call_return_builder(call, b);
+            return DECLINED;
+        }
+    };
+    let handled = aggregate(call, inout b, in m);
+    call_return_module(call, m);
+    call_return_builder(call, b);
+    handled
+}
+
+// The cost of one crossing: take and give back the lent handles, emit
+// nothing and decline.
+pub fn empty_hook(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    match call_builder(call) {
+        Some(b) => call_return_builder(call, b),
+        None => {}
+    }
+    DECLINED
+}
+
+// Keep `value_word` reachable for ports that answer raw words.
+pub fn word_of(v: Value) -> u64 {
+    value_word(v)
+}

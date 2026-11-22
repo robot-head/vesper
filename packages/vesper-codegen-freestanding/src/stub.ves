@@ -1,0 +1,694 @@
+// Entry stubs as machine code with relocations (src/freestanding/stub.rs).
+// The code sequences, labels, fixups and literals are the Rust stub's, in
+// the same order; `stub_object` wraps them as `stub::build` does.
+//
+// The interrupt-mask immediates are what stub.rs derives from Silicon's
+// interrupt model (`vesper_silicon::irq::irq_enable_bit`): mstatus.MIE is
+// bit 3 (set = enabled) and DAIF.I is bit 7 (set = masked), which is
+// DAIFSet bit 1. tests/self_host_freestanding.rs checks both against the
+// Rust functions.
+
+use self::util::{
+    add,
+    grow,
+    push32,
+    push64,
+    get32,
+    put32
+};
+use self::obj::{
+    write_stub_object
+};
+
+// "no such row" (util.ves).
+const NONE64: u64 = 18446744073709551615;
+
+const TARGET_RISCV64: u64 = 0;
+const TARGET_AARCH64: u64 = 1;
+
+const EM_AARCH64: u16 = 183;
+const EM_RISCV: u16 = 243;
+
+// `ExitDevice` (src/native_freestanding.rs).
+const EXIT_SIFIVE_TEST: u64 = 0;
+const EXIT_SEMIHOSTING: u64 = 1;
+const EXIT_PARK: u64 = 2;
+
+const R_RISCV_64: u32 = 2;
+const R_RISCV_CALL_PLT: u32 = 19;
+const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_CALL26: u32 = 283;
+
+// `csrci mstatus, imm`: mstatus.MIE (bit 3) as a mask.
+const RISCV_MIE_MASK: u32 = 8;
+// `msr daifset, #imm`: D, A, I and F (I is DAIFSet bit 1).
+const AARCH64_DAIFSET_MASK: u32 = 15;
+
+// Stack bytes `vesper_board_exit` uses (`stub::exit_stack_bytes`).
+pub fn exit_stack_bytes(target: u64, exit: u64) -> u64 {
+    if target == TARGET_AARCH64 && exit == EXIT_SEMIHOSTING {
+        16
+    } else {
+        0
+    }
+}
+
+// Labels.
+const L_START: u64 = 0;
+const L_EXIT: u64 = 1;
+const L_PARK: u64 = 2;
+const L_TRAP_ENTRY: u64 = 3;
+const L_BSS_LOOP: u64 = 4;
+const L_BSS_DONE: u64 = 5;
+const L_EXIT_FAIL: u64 = 6;
+const L_LIT_STACK_TOP: u64 = 7;
+const L_LIT_BSS_START: u64 = 8;
+const L_LIT_BSS_END: u64 = 9;
+const L_LIT_EXIT: u64 = 10;
+const L_VECTORS: u64 = 11;
+const LABELS: u64 = 12;
+
+// Symbols the stub imports or defines (`names` order of `symbol_text`).
+const S_START: u64 = 0;
+const S_EXIT: u64 = 1;
+const S_MAIN: u64 = 2;
+const S_TRAP: u64 = 3;
+const S_STACK_TOP: u64 = 4;
+const S_BSS_START: u64 = 5;
+const S_BSS_END: u64 = 6;
+
+fn symbol_text(s: u64) -> Str {
+    if s == S_START {
+        "_start"
+    } else if s == S_EXIT {
+        "vesper_board_exit"
+    } else if s == S_MAIN {
+        "vesper_freestanding_main"
+    } else if s == S_TRAP {
+        "vesper_freestanding_trap"
+    } else if s == S_STACK_TOP {
+        "__stack_top"
+    } else if s == S_BSS_START {
+        "__bss_start"
+    } else {
+        "__bss_end"
+    }
+}
+
+// Fixup kinds (stub.rs `Fix`).
+const FIX_RV_BRANCH: u8 = 0;
+const FIX_RV_JAL: u8 = 1;
+const FIX_RV_PCREL_I: u8 = 2;
+const FIX_A64_IMM19: u8 = 3;
+const FIX_A64_IMM26: u8 = 4;
+const FIX_A64_ADR: u8 = 5;
+
+pub copy struct Fixup {
+    at: u64,
+    label: u64,
+    kind: u8,
+    base: u64,
+}
+
+pub copy struct Reloc {
+    at: u64,
+    symbol: u64,
+    r_type: u32,
+}
+
+pub struct Asm {
+    code: ChunkSeq[u8],
+    labels: ChunkSeq[u64],
+    fixups: ChunkSeq[Fixup],
+    relocs: ChunkSeq[Reloc],
+    // A label was defined twice or a fixup is out of range (the Rust
+    // stub's assertions).
+    broken: bool,
+}
+
+fn asm_new() -> Asm {
+    let mut labels: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    labels.resize(LABELS, NONE64);
+    Asm {
+        code: ChunkSeq::new[u8](),
+        labels: labels,
+        fixups: ChunkSeq::new[Fixup](),
+        relocs: ChunkSeq::new[Reloc](),
+        broken: false
+    }
+}
+
+impl Asm {
+    fn here(in self) -> u64 {
+        self.code.len()
+    }
+
+    fn word(inout self, w: u32) -> u64 {
+        let at = self.code.len();
+        push32(inout self.code, w);
+        at
+    }
+
+    fn label(inout self, l: u64) {
+        let at = self.code.len();
+        match self.labels.try_get(l) {
+            Option::Some(v) => {
+                if v != NONE64 {
+                    self.broken = true;
+                }
+            }
+            Option::None => {
+                self.broken = true;
+            }
+        }
+        let ok = self.labels.try_set(l, at);
+    }
+
+    fn label_at(in self, l: u64) -> u64 {
+        match self.labels.try_get(l) {
+            Option::Some(v) => v,
+            Option::None => NONE64,
+        }
+    }
+
+    fn align(inout self, a: u64, fill: u32) {
+        if a <= 1 {
+            return;
+        }
+        loop {
+            let here = self.code.len();
+            if here % a == 0 {
+                break;
+            }
+            if a >= 4 && here % 4 == 0 {
+                let at = self.word(fill);
+            } else {
+                self.code.push(0);
+            }
+        }
+    }
+
+    fn fix(inout self, at: u64, l: u64, kind: u8) {
+        self
+            .fixups
+            .push(
+            Fixup {
+                at: at,
+                label: l,
+                kind: kind,
+                base: 0
+            }
+        );
+    }
+
+    fn fix_pcrel(inout self, at: u64, l: u64, base: u64) {
+        self
+            .fixups
+            .push(
+            Fixup {
+                at: at,
+                label: l,
+                kind: FIX_RV_PCREL_I,
+                base: base
+            }
+        );
+    }
+
+    fn reloc(inout self, at: u64, symbol: u64, r_type: u32) {
+        self
+            .relocs
+            .push(
+            Reloc {
+                at: at,
+                symbol: symbol,
+                r_type: r_type
+            }
+        );
+    }
+
+    fn literal(inout self, l: u64, symbol: u64, r_type: u32) {
+        self.align(8, 0);
+        self.label(l);
+        let at = self.code.len();
+        push64(inout self.code, 0);
+        self.reloc(at, symbol, r_type);
+    }
+
+    fn literal_value(inout self, l: u64, value: u64) {
+        self.align(8, 0);
+        self.label(l);
+        push64(inout self.code, value);
+    }
+
+    fn resolve(inout self) {
+        for k in 0..self.fixups.len() {
+            let f = match self.fixups.try_get(k) {
+                Option::Some(v) => v,
+                Option::None => Fixup {
+                    at: 0,
+                    label: 0,
+                    kind: 0,
+                    base: 0
+                },
+            };
+            let target = self.label_at(f.label);
+            if target == NONE64 {
+                self.broken = true;
+                return;
+            }
+            let mut w = get32(in self.code, f.at);
+            // `off` as two's complement; `neg` when target < at.
+            let off = wrapping_sub(target, f.at);
+            if f.kind == FIX_RV_BRANCH {
+                if !in_range(off, 0x1000) || off & 1 != 0 {
+                    self.broken = true;
+                }
+                let o = wrapping_u32(off);
+                w = w | (((o >> 12) & 1) << 31) | (((o >> 5) & 63) << 25) | (
+                    ((o >> 1) & 15) << 8
+                ) | (((o >> 11) & 1) << 7);
+            } else if f.kind == FIX_RV_JAL {
+                if !in_range(off, 0x100000) || off & 1 != 0 {
+                    self.broken = true;
+                }
+                let o = wrapping_u32(off);
+                w = w | (((o >> 20) & 1) << 31) | (((o >> 1) & 0x3ff) << 21) | (
+                    ((o >> 11) & 1) << 20
+                ) | (((o >> 12) & 255) << 12);
+            } else if f.kind == FIX_RV_PCREL_I {
+                let off = wrapping_sub(target, f.base);
+                if !in_range(off, 2048) {
+                    self.broken = true;
+                }
+                w = w | ((wrapping_u32(off) & 0xfff) << 20);
+            } else if f.kind == FIX_A64_IMM19 {
+                if off & 3 != 0 || !in_range(off, 0x100000) {
+                    self.broken = true;
+                }
+                w = w | ((wrapping_u32(sar2(off)) & 0x7ffff) << 5);
+            } else if f.kind == FIX_A64_IMM26 {
+                if off & 3 != 0 {
+                    self.broken = true;
+                }
+                w = w | (wrapping_u32(sar2(off)) & 0x3ffffff);
+            } else {
+                if !in_range(off, 0x100000) {
+                    self.broken = true;
+                }
+                let o = wrapping_u32(off);
+                w = w | ((o & 3) << 29) | (((o >> 2) & 0x7ffff) << 5);
+            }
+            put32(inout self.code, f.at, w);
+        }
+    }
+}
+
+// `-limit <= off < limit` for `off` read as a signed 64-bit value.
+fn in_range(off: u64, limit: u64) -> bool {
+    wrapping_add(off, limit) < wrapping_mul(limit, 2)
+}
+
+// Arithmetic shift right by 2 of a two's complement word.
+fn sar2(x: u64) -> u64 {
+    if x >> 63 != 0 {
+        (x >> 2) | 0xc000000000000000
+    } else {
+        x >> 2
+    }
+}
+
+// ----- RISC-V ------------------------------------------------------------------
+
+const ZERO: u32 = 0;
+const RA: u32 = 1;
+const SP: u32 = 2;
+const T0: u32 = 5;
+const T1: u32 = 6;
+const T2: u32 = 7;
+const A0: u32 = 10;
+const A1: u32 = 11;
+const A2: u32 = 12;
+
+const CSR_MSTATUS: u32 = 768;
+const CSR_MIE: u32 = 772;
+const CSR_MTVEC: u32 = 773;
+const CSR_MEPC: u32 = 833;
+const CSR_MCAUSE: u32 = 834;
+const CSR_MTVAL: u32 = 835;
+const CSR_MHARTID: u32 = 0xf14;
+
+const RV_OP_IMM: u32 = 19;
+const RV_LOAD: u32 = 3;
+const RV_JALR: u32 = 103;
+const RV_JAL: u32 = 111;
+const RV_WFI: u32 = 0x10500073;
+
+fn rv_i(op: u32, f3: u32, rd: u32, rs1: u32, imm: u32) -> u32 {
+    ((imm & 0xfff) << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op
+}
+
+fn rv_csr(f3: u32, rd: u32, rs1_or_uimm: u32, csr: u32) -> u32 {
+    (csr << 20) | (rs1_or_uimm << 15) | (f3 << 12) | (rd << 7) | 115
+}
+
+fn rv_s(f3: u32, rs1: u32, rs2: u32, imm: u32) -> u32 {
+    (((imm >> 5) & 127) << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | ((imm & 31) << 7) | 35
+}
+
+fn rv_b(f3: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (f3 << 12) | 99
+}
+
+fn rv_lui(rd: u32, imm20: u32) -> u32 {
+    ((imm20 & 0xfffff) << 12) | (rd << 7) | 55
+}
+
+fn rv_auipc(rd: u32) -> u32 {
+    (rd << 7) | 23
+}
+
+impl Asm {
+    fn rv_la(inout self, rd: u32, l: u64) {
+        let base = self.word(rv_auipc(rd));
+        let at = self.word(rv_i(RV_OP_IMM, 0, rd, rd, 0));
+        self.fix_pcrel(at, l, base);
+    }
+
+    fn rv_ld_lit(inout self, rd: u32, l: u64) {
+        let base = self.word(rv_auipc(rd));
+        let at = self.word(rv_i(RV_LOAD, 3, rd, rd, 0));
+        self.fix_pcrel(at, l, base);
+    }
+
+    fn rv_call(inout self, symbol: u64) {
+        let at = self.word(rv_auipc(RA));
+        let j = self.word(rv_i(RV_JALR, 0, RA, RA, 0));
+        self.reloc(at, symbol, R_RISCV_CALL_PLT);
+    }
+
+    fn rv_branch(inout self, f3: u32, rs1: u32, rs2: u32, l: u64) {
+        let at = self.word(rv_b(f3, rs1, rs2));
+        self.fix(at, l, FIX_RV_BRANCH);
+    }
+
+    fn rv_j(inout self, l: u64) {
+        let at = self.word(RV_JAL);
+        self.fix(at, l, FIX_RV_JAL);
+    }
+}
+
+// `riscv(board)`; false for the semihosting exit, which riscv64 lacks.
+fn riscv(inout a: Asm, exit: u64, exit_base: u64) -> bool {
+    a.label(L_START);
+    let w0 = a.word(rv_csr(7, ZERO, RISCV_MIE_MASK, CSR_MSTATUS));
+    let w1 = a.word(rv_csr(1, ZERO, ZERO, CSR_MIE));
+    let w2 = a.word(rv_csr(2, T0, ZERO, CSR_MHARTID));
+    a.rv_branch(1, T0, ZERO, L_PARK);
+    a.rv_la(T0, L_TRAP_ENTRY);
+    let w3 = a.word(rv_csr(1, ZERO, T0, CSR_MTVEC));
+    a.rv_ld_lit(SP, L_LIT_STACK_TOP);
+    a.rv_ld_lit(T0, L_LIT_BSS_START);
+    a.rv_ld_lit(T1, L_LIT_BSS_END);
+    a.label(L_BSS_LOOP);
+    a.rv_branch(7, T0, T1, L_BSS_DONE);
+    let w4 = a.word(rv_s(3, T0, ZERO, 0));
+    let w5 = a.word(rv_i(RV_OP_IMM, 0, T0, T0, 8));
+    a.rv_j(L_BSS_LOOP);
+    a.label(L_BSS_DONE);
+    a.rv_call(S_MAIN);
+    a.label(L_PARK);
+    let w6 = a.word(RV_WFI);
+    a.rv_j(L_PARK);
+    a.align(4, 0);
+    a.label(L_TRAP_ENTRY);
+    let w7 = a.word(rv_csr(2, A0, ZERO, CSR_MCAUSE));
+    let w8 = a.word(rv_csr(2, A1, ZERO, CSR_MEPC));
+    let w9 = a.word(rv_csr(2, A2, ZERO, CSR_MTVAL));
+    a.rv_ld_lit(SP, L_LIT_STACK_TOP);
+    a.rv_call(S_TRAP);
+    a.rv_j(L_PARK);
+    a.label(L_EXIT);
+    if exit == EXIT_SIFIVE_TEST {
+        a.rv_ld_lit(T0, L_LIT_EXIT);
+        a.rv_branch(1, A0, ZERO, L_EXIT_FAIL);
+        let x0 = a.word(rv_lui(T1, 5));
+        let x1 = a.word(rv_i(RV_OP_IMM, 0, T1, T1, 0x555));
+        let x2 = a.word(rv_s(2, T0, T1, 0));
+        a.rv_j(L_PARK);
+        a.label(L_EXIT_FAIL);
+        let x3 = a.word(rv_i(RV_OP_IMM, 1, T1, A0, 16));
+        let x4 = a.word(rv_lui(T2, 3));
+        let x5 = a.word(rv_i(RV_OP_IMM, 0, T2, T2, 819));
+        // or t1, t1, t2
+        let x6 = a.word((T2 << 20) | (T1 << 15) | (6 << 12) | (T1 << 7) | 51);
+        let x7 = a.word(rv_s(2, T0, T1, 0));
+        a.rv_j(L_PARK);
+    } else if exit == EXIT_PARK {
+        a.rv_j(L_PARK);
+    } else {
+        return false;
+    }
+    a.literal(L_LIT_STACK_TOP, S_STACK_TOP, R_RISCV_64);
+    a.literal(L_LIT_BSS_START, S_BSS_START, R_RISCV_64);
+    a.literal(L_LIT_BSS_END, S_BSS_END, R_RISCV_64);
+    if exit == EXIT_SIFIVE_TEST {
+        a.literal_value(L_LIT_EXIT, exit_base);
+    }
+    true
+}
+
+// ----- AArch64 -----------------------------------------------------------------
+
+const A64_ISB: u32 = 0xd5033fdf;
+const A64_WFE: u32 = 0xd503205f;
+
+impl Asm {
+    fn a64_ldr_lit(inout self, rt: u32, l: u64) {
+        let at = self.word(0x58000000 | rt);
+        self.fix(at, l, FIX_A64_IMM19);
+    }
+
+    fn a64_b(inout self, l: u64) {
+        let at = self.word(0x14000000);
+        self.fix(at, l, FIX_A64_IMM26);
+    }
+
+    fn a64_bl(inout self, symbol: u64) {
+        let at = self.word(0x94000000);
+        self.reloc(at, symbol, R_AARCH64_CALL26);
+    }
+}
+
+fn aarch64(inout a: Asm, exit: u64, exit_base: u64) {
+    a.label(L_START);
+    // msr daifset, #mask
+    let w0 = a.word(0xd50340df | (AARCH64_DAIFSET_MASK << 8));
+    // mrs x0, mpidr_el1 ; and x0, x0, #0xff
+    let w1 = a.word(0xd53800a0);
+    let w2 = a.word(0x92401c00);
+    // cbnz x0, park
+    let at = a.word(0xb5000000);
+    a.fix(at, L_PARK, FIX_A64_IMM19);
+    // adr x0, vectors
+    let at2 = a.word(0x10000000);
+    a.fix(at2, L_VECTORS, FIX_A64_ADR);
+    // msr vbar_el1, x0 ; movz x0, #0x30, lsl #16 ; msr cpacr_el1, x0 ; isb
+    let w3 = a.word(0xd518c000);
+    let w4 = a.word(0xd2a00600);
+    let w5 = a.word(0xd5181040);
+    let w6 = a.word(A64_ISB);
+    a.a64_ldr_lit(0, L_LIT_STACK_TOP);
+    // mov sp, x0
+    let w7 = a.word(0x9100001f);
+    a.a64_ldr_lit(0, L_LIT_BSS_START);
+    a.a64_ldr_lit(1, L_LIT_BSS_END);
+    a.label(L_BSS_LOOP);
+    // cmp x0, x1 ; b.hs bss_done
+    let w8 = a.word(0xeb01001f);
+    let at3 = a.word(0x54000002);
+    a.fix(at3, L_BSS_DONE, FIX_A64_IMM19);
+    // str xzr, [x0], #8
+    let w9 = a.word(0xf800841f);
+    a.a64_b(L_BSS_LOOP);
+    a.label(L_BSS_DONE);
+    a.a64_bl(S_MAIN);
+    a.label(L_PARK);
+    let w10 = a.word(A64_WFE);
+    a.a64_b(L_PARK);
+    a.label(L_EXIT);
+    if exit == EXIT_SEMIHOSTING {
+        // sub sp, sp, #16 ; movz x2, #0x26 ; movk x2, #0x2, lsl #16 ;
+        // stp x2, x0, [sp] ; mov x1, sp ; mov w0, #0x18 ; hlt #0xf000
+        let x0 = a.word(0xd10043ff);
+        let x1 = a.word(0xd28004c2);
+        let x2 = a.word(0xf2a00042);
+        let x3 = a.word(0xa90003e2);
+        let x4 = a.word(0x910003e1);
+        let x5 = a.word(0x52800300);
+        let x6 = a.word(0xd45e0000);
+        a.a64_b(L_PARK);
+    } else if exit == EXIT_SIFIVE_TEST {
+        a.a64_ldr_lit(1, L_LIT_EXIT);
+        // cbnz x0, exit_fail
+        let at4 = a.word(0xb5000000);
+        a.fix(at4, L_EXIT_FAIL, FIX_A64_IMM19);
+        // mov w2, #0x5555 ; str w2, [x1]
+        let y0 = a.word(0x528aaaa2);
+        let y1 = a.word(0xb9000022);
+        a.a64_b(L_PARK);
+        a.label(L_EXIT_FAIL);
+        // mov w2, #0x3333 ; orr w2, w2, w0, lsl #16 ; str w2, [x1]
+        let y2 = a.word(0x52866662);
+        let y3 = a.word(0x2a004042);
+        let y4 = a.word(0xb9000022);
+        a.a64_b(L_PARK);
+    } else {
+        a.a64_b(L_PARK);
+    }
+    a.literal(L_LIT_STACK_TOP, S_STACK_TOP, R_AARCH64_ABS64);
+    a.literal(L_LIT_BSS_START, S_BSS_START, R_AARCH64_ABS64);
+    a.literal(L_LIT_BSS_END, S_BSS_END, R_AARCH64_ABS64);
+    if exit == EXIT_SIFIVE_TEST {
+        a.literal_value(L_LIT_EXIT, exit_base);
+    }
+    // VBAR_EL1 needs 2 KiB alignment; every entry is 0x80 bytes.
+    a.align(2048, A64_WFE);
+    a.label(L_VECTORS);
+    for i in 0..16 {
+        let start = a.here();
+        // mrs x0, esr_el1 ; mrs x1, elr_el1 ; mrs x2, far_el1
+        let v0 = a.word(0xd5385200);
+        let v1 = a.word(0xd5384021);
+        let v2 = a.word(0xd5386002);
+        a.a64_ldr_lit(3, L_LIT_STACK_TOP);
+        // mov sp, x3
+        let v3 = a.word(0x9100007f);
+        a.a64_bl(S_TRAP);
+        a.a64_b(L_PARK);
+        loop {
+            if a.here() >= add(start, 128) {
+                break;
+            }
+            let f = a.word(A64_WFE);
+        }
+    }
+}
+
+// `stub::build(target, board, e_flags)`: the stub as a relocatable ELF
+// object. Empty when the board's exit device does not exist on the target
+// (`UnsupportedTarget`).
+pub fn stub_object(target: u64, exit: u64, exit_base: u64, e_flags: u32) -> ChunkSeq[u8] {
+    let mut a = asm_new();
+    if target == TARGET_RISCV64 {
+        if !riscv(inout a, exit, exit_base) {
+            return ChunkSeq::new[u8]();
+        }
+    } else {
+        aarch64(inout a, exit, exit_base);
+    }
+    a.resolve();
+    // Symbols: `_start` and `vesper_board_exit`, then each relocation
+    // target in first-use order.
+    let mut names: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut lens: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut values: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    add_symbol(inout names, inout starts, inout lens, S_START);
+    values.push(a.label_at(L_START));
+    add_symbol(inout names, inout starts, inout lens, S_EXIT);
+    values.push(a.label_at(L_EXIT));
+    let mut rel_offsets: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut rel_syms: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut rel_types: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..a.relocs.len() {
+        let r = match a.relocs.try_get(k) {
+            Option::Some(v) => v,
+            Option::None => Reloc {
+                at: 0,
+                symbol: 0,
+                r_type: 0
+            },
+        };
+        let mut index = NONE64;
+        for j in 0..ids.len() {
+            if ids.try_get(j) == Option::Some(r.symbol) {
+                index = j;
+            }
+        }
+        if index == NONE64 {
+            index = ids.len();
+            ids.push(r.symbol);
+            add_symbol(inout names, inout starts, inout lens, r.symbol);
+        }
+        rel_offsets.push(r.at);
+        // After the two defined symbols.
+        rel_syms.push(add(index, 2));
+        rel_types.push(r.r_type);
+    }
+    let machine = if target == TARGET_RISCV64 {
+        EM_RISCV
+    } else {
+        EM_AARCH64
+    };
+    let align: u64 = if target == TARGET_AARCH64 {
+        2048
+    } else {
+        8
+    };
+    write_stub_object(
+        machine,
+        e_flags,
+        align,
+        in a.code,
+        in names,
+        in starts,
+        in lens,
+        2,
+        in values,
+        in rel_offsets,
+        in rel_syms,
+        in rel_types
+    )
+}
+
+fn add_symbol(
+    inout names: ChunkSeq[u8],
+    inout starts: ChunkSeq[u64],
+    inout lens: ChunkSeq[u64],
+    s: u64
+) {
+    let t = symbol_text(s);
+    starts.push(names.len());
+    let n = t.as_bytes();
+    lens.push(n.len());
+    names.extend(in n);
+}
+
+pub fn is_riscv(target: u64) -> bool {
+    target == TARGET_RISCV64
+}
+
+// `e_machine` of the target.
+pub fn machine_of(target: u64) -> u16 {
+    if target == TARGET_RISCV64 {
+        EM_RISCV
+    } else {
+        EM_AARCH64
+    }
+}
+
+// The stub's mask immediates and exit stack bytes, packed for the test:
+// the riscv mstatus mask, the AArch64 DAIFSet mask, then `exit_stack_bytes`
+// for (riscv64, AArch64) x (SiFive test, semihosting, park), a byte each.
+pub fn packed_constants() -> u64 {
+    let mut packed = widen_u64(RISCV_MIE_MASK) | (widen_u64(AARCH64_DAIFSET_MASK) << 8);
+    let mut shift: u64 = 16;
+    for t in 0..2 {
+        for e in 0..3 {
+            packed = packed | wrapping_shl_u64(exit_stack_bytes(t, e), wrapping_u32(shift));
+            shift = add(shift, 8);
+        }
+    }
+    packed
+}

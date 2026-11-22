@@ -1,0 +1,43 @@
+// Diagnostics as text lines, the form every differential of this package
+// compares: `code start end message`, then `  help: text` when there is
+// help. The harness renders Rust's `Diagnostic`s the same way.
+
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+pub fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+// Starts a diagnostic line; the caller writes the message, then calls
+// `end_line` (or `help`).
+pub fn open(inout o: ChunkSeq[u8], in code: Str, start: u64, end: u64) {
+    put(inout o, code);
+    o.push(32);
+    put_u64(inout o, start);
+    o.push(32);
+    put_u64(inout o, end);
+    o.push(32);
+}
+
+pub fn end_line(inout o: ChunkSeq[u8]) {
+    o.push(10);
+}
+
+pub fn help(inout o: ChunkSeq[u8], in text: Str) {
+    o.push(10);
+    put(inout o, "  help: ");
+    put(inout o, text);
+    o.push(10);
+}
+
+// A whole diagnostic with a fixed message and no help.
+pub fn line(inout o: ChunkSeq[u8], in code: Str, start: u64, end: u64, in message: Str) {
+    open(inout o, code, start, end);
+    put(inout o, message);
+    o.push(10);
+}

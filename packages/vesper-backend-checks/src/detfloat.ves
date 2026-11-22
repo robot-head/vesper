@@ -1,0 +1,823 @@
+// Module detfloat of @vesper/backend-checks (see lib.ves): Kinetic's
+// DetFloat audit of crates/vesper-kinetic/src/detfloat.rs (`audit`) over
+// one emitted function's CLIF tables: fused multiply-adds and float calls,
+// horizontal reduction order, and NaN escapes. Instruction indices in
+// findings are layout positions.
+//
+// Reduction shapes are trees in `Sh` (leaf: lane; node: two children), and
+// a lane tree is memoized per value as a row of `Lt`.
+
+use @vesper/check-data::names::{
+    Names
+};
+use self::input::{
+    Cx,
+    arg,
+    block_row,
+    ent_row,
+    fw,
+    iw,
+    nargs,
+    pw,
+    val
+};
+use self::report::{
+    raw_finding
+};
+use self::util::{
+    contains,
+    filled,
+    g,
+    put,
+    putn,
+    puts,
+    spells,
+    st
+};
+
+const EXT_KNOWN: u64 = 3;
+const EXT_LIBCALL: u64 = 2;
+const EXT_TESTCASE: u64 = 1;
+const EXT_USER: u64 = 0;
+const F_INSTS: u64 = 33;
+const F_NINSTS: u64 = 34;
+const F_NVALS: u64 = 28;
+const I_ARGS: u64 = 5;
+const I_CALL: u64 = 15;
+const I_CONST: u64 = 13;
+const I_CONST_LEN: u64 = 12;
+const I_COND: u64 = 11;
+const I_DESTS: u64 = 21;
+const I_EXT: u64 = 19;
+const I_FLAGS: u64 = 2;
+const I_FMT: u64 = 3;
+const I_IMM: u64 = 10;
+const I_OP: u64 = 1;
+const I_RESULTS: u64 = 7;
+const IS_CALL: u64 = 1;
+const I_SIG_FLOAT: u64 = 18;
+const X_INDEX: u64 = 2;
+const X_KIND: u64 = 0;
+const X_NS: u64 = 1;
+const X_S1: u64 = 4;
+const X_S2: u64 = 5;
+const BA_VALUE: u64 = 0;
+const CALL_DIRECT: u64 = 1;
+const CALL_INDIRECT: u64 = 2;
+const CC_EQUAL: u64 = 4;
+const CC_NOT_EQUAL: u64 = 2;
+const CC_ORDERED: u64 = 3;
+const CC_UNORDERED: u64 = 1;
+const FMT_BINARY: u64 = 14;
+const FMT_BINARY_IMM8: u64 = 13;
+const FMT_FLOAT_COMPARE: u64 = 19;
+const FMT_LOAD_NO_OFFSET: u64 = 2;
+const FMT_UNARY: u64 = 17;
+const FMT_UNARY_CONST: u64 = 18;
+const FMT_UNARY_IEEE32: u64 = 15;
+const FMT_UNARY_IEEE64: u64 = 16;
+const OP_ATOMIC_STORE: u64 = 37;
+const OP_BITCAST: u64 = 35;
+const OP_BITSELECT: u64 = 31;
+const OP_CEIL: u64 = 20;
+const OP_EXTRACTLANE: u64 = 28;
+const OP_FADD: u64 = 13;
+const OP_FDEMOTE: u64 = 25;
+const OP_FDIV: u64 = 16;
+const OP_FLOOR: u64 = 21;
+const OP_FMA: u64 = 12;
+const OP_FMAX: u64 = 19;
+const OP_FMIN: u64 = 18;
+const OP_FMUL: u64 = 15;
+const OP_FPROMOTE: u64 = 24;
+const OP_FSUB: u64 = 14;
+const OP_FVDEMOTE: u64 = 26;
+const OP_FVPROMOTE_LOW: u64 = 27;
+const OP_NEAREST: u64 = 23;
+const OP_RETURN: u64 = 38;
+const OP_SCALAR_TO_VECTOR: u64 = 33;
+const OP_SELECT: u64 = 29;
+const OP_SELECT_SPECTRE_GUARD: u64 = 30;
+const OP_SPLAT: u64 = 32;
+const OP_SQRT: u64 = 17;
+const OP_STACK_STORE: u64 = 9;
+const OP_STORE: u64 = 36;
+const OP_TRUNC: u64 = 22;
+const OP_VCONST: u64 = 34;
+const NONE: u64 = 18446744073709551615;
+
+// `audit`'s policy: `allowed` holds names; `user` maps func id -> name + 1.
+pub struct DetPolicy {
+    allow_fma: bool,
+    allowed: ChunkSeq[u64],
+    canonicalizes: bool,
+    sequential: bool,
+}
+
+fn is_float(ty: u64) -> bool {
+    (ty >> 40) & 1 == 1
+}
+
+fn lanes(ty: u64) -> u64 {
+    (ty >> 16) & 65535
+}
+
+fn lane_bits(ty: u64) -> u64 {
+    ty & 65535
+}
+
+// The libcall of a direct call row, as its name symbol, or NONE.
+fn libcall(in c: Cx, row: u64) -> u64 {
+    if iw(in c, row, I_CALL) != CALL_DIRECT {
+        return NONE;
+    }
+    let x = iw(in c, row, I_EXT);
+    if pw(in c, wrapping_add(x, X_KIND)) != EXT_LIBCALL {
+        return NONE;
+    }
+    pw(in c, wrapping_add(x, X_S1))
+}
+
+fn is_fma_libcall(in nm: Names, s: u64) -> bool {
+    spells(in nm, s, "FmaF32") || spells(in nm, s, "FmaF64")
+}
+
+fn is_rounding_libcall(in nm: Names, s: u64) -> bool {
+    spells(in nm, s, "CeilF32")
+        || spells(in nm, s, "CeilF64")
+        || spells(in nm, s, "FloorF32")
+        || spells(in nm, s, "FloorF64")
+        || spells(in nm, s, "TruncF32")
+        || spells(in nm, s, "TruncF64")
+        || spells(in nm, s, "NearestF32")
+        || spells(in nm, s, "NearestF64")
+}
+
+// `callee_name`: the name of a direct callee as the audit sees it.
+fn callee_name(inout c: Cx, row: u64, in by_id: ChunkSeq[u64]) -> u64 {
+    let x = iw(in c, row, I_EXT);
+    let kind = pw(in c, wrapping_add(x, X_KIND));
+    if kind == EXT_USER {
+        let ns = pw(in c, wrapping_add(x, X_NS));
+        let idx = pw(in c, wrapping_add(x, X_INDEX));
+        if ns == 0 && g(in by_id, idx) != 0 {
+            return wrapping_sub(g(in by_id, idx), 1);
+        }
+        let at = c.r.tx.len();
+        put(inout c.r.tx, "u");
+        putn(inout c.r.tx, ns);
+        put(inout c.r.tx, ":");
+        putn(inout c.r.tx, idx);
+        let s = c.nm.intern(in c.r.tx[at..c.r.tx.len()]);
+        c.r.tx.truncate(at);
+        return widen_u64(s);
+    }
+    if kind == EXT_TESTCASE {
+        // `trim_start_matches('%')`
+        let t = wrapping_u32(pw(in c, wrapping_add(x, X_S1)));
+        let n = c.nm.size(t);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n || c.nm.byte(t, i) != 37 {
+                break;
+            }
+            i = wrapping_add(i, 1);
+        }
+        let at = c.r.tx.len();
+        for k in i..n {
+            c.r.tx.push(c.nm.byte(t, k));
+        }
+        let s = c.nm.intern(in c.r.tx[at..c.r.tx.len()]);
+        c.r.tx.truncate(at);
+        return widen_u64(s);
+    }
+    if kind == EXT_LIBCALL {
+        return pw(in c, wrapping_add(x, X_S1));
+    }
+    pw(in c, wrapping_add(x, X_S2))
+}
+
+// Whether the first `n` bytes of name `t` spell `lit`.
+fn prefix_is(in nm: Names, t: u32, n: u64, in lit: Str) -> bool {
+    let b = lit.as_bytes();
+    if b.len() != n {
+        return false;
+    }
+    for k in 0..n {
+        let y = match b.try_get(k) {
+            Option::Some(y) => y,
+            Option::None => 0,
+        };
+        if nm.byte(t, k) != y {
+            return false;
+        }
+    }
+    true
+}
+
+// `LIBM_TRANSCENDENTALS` holds the first `n` bytes of `s`.
+fn libm_name(in nm: Names, s: u64, n: u64) -> bool {
+    let t = wrapping_u32(s);
+    prefix_is(in nm, t, n, "sin")
+        || prefix_is(in nm, t, n, "cos")
+        || prefix_is(in nm, t, n, "tan")
+        || prefix_is(in nm, t, n, "asin")
+        || prefix_is(in nm, t, n, "acos")
+        || prefix_is(in nm, t, n, "atan")
+        || prefix_is(in nm, t, n, "atan2")
+        || prefix_is(in nm, t, n, "sinh")
+        || prefix_is(in nm, t, n, "cosh")
+        || prefix_is(in nm, t, n, "tanh")
+        || prefix_is(in nm, t, n, "asinh")
+        || prefix_is(in nm, t, n, "acosh")
+        || prefix_is(in nm, t, n, "atanh")
+        || prefix_is(in nm, t, n, "exp")
+        || prefix_is(in nm, t, n, "exp2")
+        || prefix_is(in nm, t, n, "exp10")
+        || prefix_is(in nm, t, n, "expm1")
+        || prefix_is(in nm, t, n, "log")
+        || prefix_is(in nm, t, n, "log2")
+        || prefix_is(in nm, t, n, "log10")
+        || prefix_is(in nm, t, n, "log1p")
+        || prefix_is(in nm, t, n, "pow")
+        || prefix_is(in nm, t, n, "cbrt")
+        || prefix_is(in nm, t, n, "hypot")
+        || prefix_is(in nm, t, n, "erf")
+        || prefix_is(in nm, t, n, "erfc")
+        || prefix_is(in nm, t, n, "tgamma")
+        || prefix_is(in nm, t, n, "lgamma")
+        || prefix_is(in nm, t, n, "sincos")
+        || prefix_is(in nm, t, n, "fmod")
+        || prefix_is(in nm, t, n, "remainder")
+}
+
+fn is_libm(in nm: Names, s: u64) -> bool {
+    let t = wrapping_u32(s);
+    let n = nm.size(t);
+    if n > 0 && nm.byte(t, wrapping_sub(n, 1)) == 102 && libm_name(in nm, s, wrapping_sub(n, 1)) {
+        return true;
+    }
+    libm_name(in nm, s, n)
+}
+
+fn check_fma_and_calls(inout c: Cx, f: u64, in p: DetPolicy, in by_id: ChunkSeq[u64], fname: u64) {
+    let first = fw(in c, f, F_INSTS);
+    let n = fw(in c, f, F_NINSTS);
+    for k in 0..n {
+        let row = wrapping_add(first, k);
+        let op = iw(in c, row, I_OP);
+        if op == OP_FMA && !p.allow_fma {
+            let m = c.r.tx.len();
+            put(
+                inout c.r.tx,
+                "fused multiply-add rounds once; DetFloat requires two-rounded fmul + fadd unless explicit DetFloat::fma is allowed"
+            );
+            raw_finding(inout c, fname, true, k, "detfloat.fma", m);
+        } else {
+            let kind = iw(in c, row, I_CALL);
+            if kind == CALL_DIRECT {
+                let lib = libcall(in c, row);
+                let mut skip = false;
+                if lib != NONE {
+                    if is_fma_libcall(in c.nm, lib) && !p.allow_fma {
+                        let m = c.r.tx.len();
+                        put(inout c.r.tx, "call to fused multiply-add libcall ");
+                        puts(inout c.r.tx, in c.nm, lib);
+                        raw_finding(inout c, fname, true, k, "detfloat.fma", m);
+                        skip = true;
+                    } else if is_fma_libcall(in c.nm, lib) || is_rounding_libcall(in c.nm, lib) {
+                        skip = true;
+                    }
+                }
+                if !skip && iw(in c, row, I_SIG_FLOAT) == 1 {
+                    let name = callee_name(inout c, row, in by_id);
+                    if !contains(in p.allowed, name) {
+                        if is_libm(in c.nm, name) {
+                            let m = c.r.tx.len();
+                            put(inout c.r.tx, "call to platform libm `");
+                            puts(inout c.r.tx, in c.nm, name);
+                            put(
+                                inout c.r.tx,
+                                "`, which is not guaranteed correctly rounded; route it through an allowlisted correctly-rounded implementation"
+                            );
+                            raw_finding(inout c, fname, true, k, "detfloat.libm", m);
+                        } else {
+                            let m = c.r.tx.len();
+                            put(inout c.r.tx, "float call to `");
+                            puts(inout c.r.tx, in c.nm, name);
+                            put(inout c.r.tx, "`, which is not on the DetFloat allowlist");
+                            raw_finding(inout c, fname, true, k, "detfloat.unlisted-float-call", m);
+                        }
+                    }
+                }
+            } else if kind == CALL_INDIRECT && iw(in c, row, I_SIG_FLOAT) == 1 {
+                let m = c.r.tx.len();
+                put(
+                    inout c.r.tx,
+                    "indirect call with float arguments or results cannot be checked"
+                );
+                raw_finding(inout c, fname, true, k, "detfloat.indirect-float-call", m);
+            }
+        }
+    }
+}
+
+// ----- reductions -------------------------------------------------------------
+
+// Shape nodes: (kind 0 leaf / 1 node, lane or left, right, min lane).
+struct Sh {
+    n: ChunkSeq[u64],
+}
+
+fn leaf(inout s: Sh, lane: u64) -> u64 {
+    let i = s.n.len() / 4;
+    s.n.push(0);
+    s.n.push(lane);
+    s.n.push(0);
+    s.n.push(lane);
+    i
+}
+
+fn node(inout s: Sh, a: u64, b: u64) -> u64 {
+    let i = s.n.len() / 4;
+    let ma = g(in s.n, wrapping_add(wrapping_mul(a, 4), 3));
+    let mb = g(in s.n, wrapping_add(wrapping_mul(b, 4), 3));
+    let mut m = ma;
+    if mb < m {
+        m = mb;
+    }
+    s.n.push(1);
+    s.n.push(a);
+    s.n.push(b);
+    s.n.push(m);
+    i
+}
+
+// The normalized pre-order words of shape `i`: children ordered by their
+// minimum lane (`Shape::normalized`).
+fn normal(in s: Sh, i: u64, inout out: ChunkSeq[u64]) {
+    let b = wrapping_mul(i, 4);
+    if g(in s.n, b) == 0 {
+        out.push(0);
+        out.push(g(in s.n, wrapping_add(b, 1)));
+        return;
+    }
+    let x = g(in s.n, wrapping_add(b, 1));
+    let y = g(in s.n, wrapping_add(b, 2));
+    out.push(1);
+    let mx = g(in s.n, wrapping_add(wrapping_mul(x, 4), 3));
+    let my = g(in s.n, wrapping_add(wrapping_mul(y, 4), 3));
+    if mx <= my {
+        normal(in s, x, inout out);
+        normal(in s, y, inout out);
+    } else {
+        normal(in s, y, inout out);
+        normal(in s, x, inout out);
+    }
+}
+
+fn pairwise(inout s: Sh, lo: u64, hi: u64) -> u64 {
+    if wrapping_sub(hi, lo) == 1 {
+        return leaf(inout s, lo);
+    }
+    let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+    let a = pairwise(inout s, lo, mid);
+    let b = pairwise(inout s, mid, hi);
+    node(inout s, a, b)
+}
+
+fn sequential(inout s: Sh, n: u64) -> u64 {
+    let mut t = leaf(inout s, 0);
+    for l in 1..n {
+        let x = leaf(inout s, l);
+        t = node(inout s, t, x);
+    }
+    t
+}
+
+// Lane trees per value: memo word 0 unknown, 1 none, 2 + tree row. Tree
+// rows: vector, op, mask, shape.
+struct Lt {
+    memo: ChunkSeq[u64],
+    rows: ChunkSeq[u64],
+    sh: Sh,
+}
+
+fn def_row(in c: Cx, f: u64, v: u64) -> u64 {
+    let d = val(in c, f, v, 2);
+    if d == 0 {
+        return NONE;
+    }
+    ent_row(in c, f, wrapping_sub(d, 1))
+}
+
+fn lane_tree(in c: Cx, f: u64, inout lt: Lt, v: u64) -> u64 {
+    let done = g(in lt.memo, v);
+    if done != 0 {
+        if done == 1 {
+            return NONE;
+        }
+        return wrapping_sub(done, 2);
+    }
+    let r = lane_tree_compute(in c, f, inout lt, v);
+    if r == NONE {
+        st(inout lt.memo, v, 1);
+    } else {
+        st(inout lt.memo, v, wrapping_add(r, 2));
+    }
+    r
+}
+
+fn lane_tree_compute(in c: Cx, f: u64, inout lt: Lt, v: u64) -> u64 {
+    let row = def_row(in c, f, v);
+    if row == NONE {
+        return NONE;
+    }
+    let op = iw(in c, row, I_OP);
+    let fmt = iw(in c, row, I_FMT);
+    if fmt == FMT_BINARY_IMM8 && op == OP_EXTRACTLANE {
+        let a = arg(in c, row, 0);
+        let ty = val(in c, f, a, 1);
+        if !is_float(ty) || lanes(ty) > 64 {
+            return NONE;
+        }
+        let imm = iw(in c, row, I_IMM);
+        let shape = leaf(inout lt.sh, imm);
+        let i = lt.rows.len() / 4;
+        lt.rows.push(a);
+        lt.rows.push(0);
+        lt.rows.push(wrapping_shl_u64(1, wrapping_u32(imm)));
+        lt.rows.push(shape);
+        return i;
+    }
+    if fmt == FMT_BINARY && (op == OP_FADD || op == OP_FMUL) {
+        let x = lane_tree(in c, f, inout lt, arg(in c, row, 0));
+        if x == NONE {
+            return NONE;
+        }
+        let y = lane_tree(in c, f, inout lt, arg(in c, row, 1));
+        if y == NONE {
+            return NONE;
+        }
+        let xb = wrapping_mul(x, 4);
+        let yb = wrapping_mul(y, 4);
+        let xo = g(in lt.rows, wrapping_add(xb, 1));
+        let yo = g(in lt.rows, wrapping_add(yb, 1));
+        let same = (xo == 0 || xo == op) && (yo == 0 || yo == op);
+        let xm = g(in lt.rows, wrapping_add(xb, 2));
+        let ym = g(in lt.rows, wrapping_add(yb, 2));
+        if g(in lt.rows, xb) != g(in lt.rows, yb) || !same || xm & ym != 0 {
+            return NONE;
+        }
+        let shape = node(
+            inout lt.sh,
+            g(in lt.rows, wrapping_add(xb, 3)),
+            g(in lt.rows, wrapping_add(yb, 3))
+        );
+        let i = lt.rows.len() / 4;
+        lt.rows.push(g(in lt.rows, xb));
+        lt.rows.push(op);
+        lt.rows.push(xm | ym);
+        lt.rows.push(shape);
+        return i;
+    }
+    NONE
+}
+
+fn check_reductions(inout c: Cx, f: u64, sequential_order: bool, fname: u64) {
+    let nv = fw(in c, f, F_NVALS);
+    let mut lt = Lt {
+        memo: filled(nv, 0),
+        rows: ChunkSeq::new[u64](),
+        sh: Sh {
+            n: ChunkSeq::new[u64]()
+        },
+    };
+    let first = fw(in c, f, F_INSTS);
+    let n = fw(in c, f, F_NINSTS);
+    let mut found: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..n {
+        let row = wrapping_add(first, k);
+        let op = iw(in c, row, I_OP);
+        if (op == OP_FADD || op == OP_FMUL) && iw(in c, row, wrapping_add(I_RESULTS, 1)) > 0 {
+            let result = pw(in c, iw(in c, row, I_RESULTS));
+            let tree = lane_tree(in c, f, inout lt, result);
+            if tree != NONE {
+                let tb = wrapping_mul(tree, 4);
+                let ln = lanes(val(in c, f, g(in lt.rows, tb), 1));
+                let mut full: u64 = 18446744073709551615;
+                if ln != 64 {
+                    full = wrapping_sub(wrapping_shl_u64(1, wrapping_u32(ln)), 1);
+                }
+                if ln >= 2 && g(in lt.rows, wrapping_add(tb, 2)) == full {
+                    let mut expected = 0;
+                    if sequential_order {
+                        expected = sequential(inout lt.sh, ln);
+                    } else {
+                        expected = pairwise(inout lt.sh, 0, ln);
+                    }
+                    let mut a: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                    let mut b: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                    normal(in lt.sh, g(in lt.rows, wrapping_add(tb, 3)), inout a);
+                    normal(in lt.sh, expected, inout b);
+                    let mut same = a.len() == b.len();
+                    if same {
+                        for q in 0..a.len() {
+                            if g(in a, q) != g(in b, q) {
+                                same = false;
+                            }
+                        }
+                    }
+                    if !same {
+                        found.push(k);
+                        found.push(g(in lt.rows, wrapping_add(tb, 1)));
+                        found.push(ln);
+                    }
+                }
+            }
+        }
+    }
+    for q in 0..found.len() / 3 {
+        let k = g(in found, wrapping_mul(q, 3));
+        let op = g(in found, wrapping_add(wrapping_mul(q, 3), 1));
+        let ln = g(in found, wrapping_add(wrapping_mul(q, 3), 2));
+        let m = c.r.tx.len();
+        putn(inout c.r.tx, ln);
+        put(inout c.r.tx, "-lane horizontal ");
+        if op == OP_FADD {
+            put(inout c.r.tx, "fadd");
+        } else if op == 0 {
+            put(inout c.r.tx, "float");
+        } else {
+            put(inout c.r.tx, "fmul");
+        }
+        put(inout c.r.tx, " reduction is not in the policy's ");
+        if sequential_order {
+            put(inout c.r.tx, "Sequential");
+        } else {
+            put(inout c.r.tx, "PairwiseTree");
+        }
+        put(inout c.r.tx, " order");
+        raw_finding(inout c, fname, true, k, "detfloat.reduction-order", m);
+    }
+}
+
+// ----- NaN escapes ------------------------------------------------------------
+
+fn generates_nan(op: u64) -> bool {
+    op
+        == OP_FADD
+        || op
+        == OP_FSUB
+        || op
+        == OP_FMUL
+        || op
+        == OP_FDIV
+        || op
+        == OP_SQRT
+        || op
+        == OP_FMA
+        || op
+        == OP_FMIN
+        || op
+        == OP_FMAX
+        || op
+        == OP_CEIL
+        || op
+        == OP_FLOOR
+        || op
+        == OP_TRUNC
+        || op
+        == OP_NEAREST
+        || op
+        == OP_FPROMOTE
+        || op
+        == OP_FDEMOTE
+        || op
+        == OP_FVDEMOTE
+        || op
+        == OP_FVPROMOTE_LOW
+}
+
+fn canonical_nan_bits(in c: Cx, row: u64, ty: u64) -> bool {
+    let len = iw(in c, row, I_CONST_LEN);
+    let at = iw(in c, row, I_CONST);
+    let bits = lane_bits(ty);
+    if bits == 32 {
+        if len % 4 != 0 {
+            return false;
+        }
+        for i in 0..len / 4 {
+            let w = pw(in c, wrapping_add(at, i / 2));
+            let lane = wrapping_shr_u64(w, wrapping_u32(wrapping_mul(i % 2, 32))) & 4294967295;
+            if lane != 2143289344 {
+                return false;
+            }
+        }
+        return true;
+    }
+    if bits == 64 {
+        if len % 8 != 0 {
+            return false;
+        }
+        for i in 0..len / 8 {
+            if pw(in c, wrapping_add(at, i)) != 9221120237041090560 {
+                return false;
+            }
+        }
+        return true;
+    }
+    false
+}
+
+fn is_canonical_nan_const(in c: Cx, f: u64, v: u64) -> bool {
+    let row = def_row(in c, f, v);
+    if row == NONE {
+        return false;
+    }
+    let ty = val(in c, f, v, 1);
+    let fmt = iw(in c, row, I_FMT);
+    let op = iw(in c, row, I_OP);
+    if fmt == FMT_UNARY_IEEE32 {
+        return iw(in c, row, I_IMM) == 2143289344;
+    }
+    if fmt == FMT_UNARY_IEEE64 {
+        return iw(in c, row, I_IMM) == 9221120237041090560;
+    }
+    if fmt == FMT_UNARY && (op == OP_SPLAT || op == OP_SCALAR_TO_VECTOR) {
+        return is_canonical_nan_const(in c, f, arg(in c, row, 0));
+    }
+    if fmt == FMT_UNARY_CONST && op == OP_VCONST {
+        return canonical_nan_bits(in c, row, ty);
+    }
+    false
+}
+
+fn is_nan_test_of(in c: Cx, f: u64, cv: u64, x: u64, nan: bool) -> bool {
+    let mut row = def_row(in c, f, cv);
+    if row == NONE {
+        return false;
+    }
+    if iw(in c, row, I_FMT) == FMT_LOAD_NO_OFFSET && iw(in c, row, I_OP) == OP_BITCAST {
+        row = def_row(in c, f, arg(in c, row, 0));
+        if row == NONE {
+            return false;
+        }
+    }
+    if iw(in c, row, I_FMT) != FMT_FLOAT_COMPARE {
+        return false;
+    }
+    let cond = iw(in c, row, I_COND);
+    let mut is_nan = false;
+    if cond == CC_UNORDERED || cond == CC_NOT_EQUAL {
+        is_nan = true;
+    } else if cond == CC_ORDERED || cond == CC_EQUAL {
+        is_nan = false;
+    } else {
+        return false;
+    }
+    arg(in c, row, 0) == x && arg(in c, row, 1) == x && is_nan == nan
+}
+
+fn is_canonicalizer(in c: Cx, f: u64, row: u64) -> bool {
+    let op = iw(in c, row, I_OP);
+    if op != OP_SELECT && op != OP_SELECT_SPECTRE_GUARD && op != OP_BITSELECT {
+        return false;
+    }
+    if nargs(in c, row) != 3 {
+        return false;
+    }
+    let cv = arg(in c, row, 0);
+    let t = arg(in c, row, 1);
+    let fv = arg(in c, row, 2);
+    (is_nan_test_of(in c, f, cv, fv, true) && is_canonical_nan_const(in c, f, t))
+        || (is_nan_test_of(in c, f, cv, t, false) && is_canonical_nan_const(in c, f, fv))
+}
+
+fn check_nan_escape(inout c: Cx, f: u64, fname: u64) {
+    let nv = fw(in c, f, F_NVALS);
+    let first = fw(in c, f, F_INSTS);
+    let n = fw(in c, f, F_NINSTS);
+    let mut tainted = filled(nv, 0);
+    loop {
+        let mut changed = false;
+        for k in 0..n {
+            let row = wrapping_add(first, k);
+            let op = iw(in c, row, I_OP);
+            let mut any_arg = false;
+            for j in 0..nargs(in c, row) {
+                if g(in tainted, arg(in c, row, j)) == 1 {
+                    any_arg = true;
+                }
+            }
+            let lib = libcall(in c, row);
+            let nan_lib = lib
+                != NONE
+                && (is_fma_libcall(in c.nm, lib) || is_rounding_libcall(in c.nm, lib));
+            let mut taint = false;
+            if generates_nan(op) || nan_lib {
+                taint = true;
+            } else if is_canonicalizer(in c, f, row) {
+                taint = false;
+            } else {
+                taint = any_arg && iw(in c, row, I_FLAGS) & IS_CALL == 0;
+            }
+            if taint {
+                let res = iw(in c, row, I_RESULTS);
+                for j in 0..iw(in c, row, wrapping_add(I_RESULTS, 1)) {
+                    let r = pw(in c, wrapping_add(res, j));
+                    if is_float(val(in c, f, r, 1)) && g(in tainted, r) == 0 {
+                        st(inout tainted, r, 1);
+                        changed = true;
+                    }
+                }
+            }
+            let mut d = iw(in c, row, I_DESTS);
+            for j in 0..iw(in c, row, wrapping_add(I_DESTS, 1)) {
+                let blk = pw(in c, d);
+                let na = pw(in c, wrapping_add(d, 1));
+                let pa = block_row(in c, f, blk, 0);
+                let pn = block_row(in c, f, blk, 1);
+                for q in 0..na {
+                    let kind = pw(in c, wrapping_add(d, wrapping_add(2, wrapping_mul(q, 2))));
+                    let v = pw(in c, wrapping_add(d, wrapping_add(3, wrapping_mul(q, 2))));
+                    if q < pn && kind == BA_VALUE {
+                        let param = pw(in c, wrapping_add(pa, q));
+                        if g(in tainted, v) == 1 && g(in tainted, param) == 0 {
+                            st(inout tainted, param, 1);
+                            changed = true;
+                        }
+                    }
+                }
+                d = wrapping_add(d, wrapping_add(2, wrapping_mul(na, 2)));
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for k in 0..n {
+        let row = wrapping_add(first, k);
+        let op = iw(in c, row, I_OP);
+        let na = nargs(in c, row);
+        // The sink: how, and the range of candidate arguments.
+        let mut how: u64 = 0;
+        let mut lo: u64 = 0;
+        let mut hi: u64 = 0;
+        if op == OP_STORE || op == OP_STACK_STORE || op == OP_ATOMIC_STORE {
+            how = 1;
+            hi = 1;
+        } else if op == OP_RETURN {
+            how = 2;
+            hi = na;
+        } else if iw(in c, row, I_FLAGS) & IS_CALL != 0 {
+            how = 3;
+            hi = na;
+        } else if op == OP_BITCAST {
+            let r = pw(in c, iw(in c, row, I_RESULTS));
+            if !is_float(val(in c, f, r, 1)) {
+                how = 4;
+                hi = 1;
+            }
+        }
+        if how != 0 {
+            let mut hit = NONE;
+            for j in lo..hi {
+                let v = arg(in c, row, j);
+                if hit == NONE && g(in tainted, v) == 1 {
+                    hit = v;
+                }
+            }
+            if hit != NONE {
+                let m = c.r.tx.len();
+                put(inout c.r.tx, "float value v");
+                putn(inout c.r.tx, hit);
+                put(inout c.r.tx, " from NaN-producing arithmetic is ");
+                if how == 1 {
+                    put(inout c.r.tx, "stored to memory");
+                } else if how == 2 {
+                    put(inout c.r.tx, "returned");
+                } else if how == 3 {
+                    put(inout c.r.tx, "passed to a call");
+                } else {
+                    put(inout c.r.tx, "bitcast to an integer");
+                }
+                put(
+                    inout c.r.tx,
+                    " without NaN canonicalisation; x86-64 and AArch64 produce different default NaN bits"
+                );
+                raw_finding(inout c, fname, true, k, "detfloat.nan-escape", m);
+            }
+        }
+    }
+}
+
+// `audit(function, policy)` minus `verify_function` (input), findings to
+// `c.raw` under function name `fname`.
+pub fn audit(inout c: Cx, f: u64, in p: DetPolicy, in by_id: ChunkSeq[u64], fname: u64) {
+    check_fma_and_calls(inout c, f, in p, in by_id, fname);
+    check_reductions(inout c, f, p.sequential, fname);
+    if !p.canonicalizes {
+        check_nan_escape(inout c, f, fname);
+    }
+}

@@ -34,6 +34,7 @@ use self::util::{
     none,
     put,
     put_id,
+    put_ver,
     put_join,
     req,
     root,
@@ -44,8 +45,7 @@ use self::util::{
     sort,
     ssel,
     sw,
-    sys,
-    ver
+    sys
 };
 use self::check::{
     check_manifest,
@@ -95,8 +95,7 @@ fn fill_word(inout s: ChunkSeq[u64], n: u64, v: u64) {
 fn emit_mismatch(inout l: L, pkg: u64, subject: u64, in prefix: Str, vi: u64, text: u64) {
     let mo = mark(in l);
     put(inout l, prefix);
-    let vt = ver(in l, vi).text;
-    put_id(inout l, vt);
+    put_ver(inout l, vi);
     put(inout l, " does not satisfy ");
     put_id(inout l, text);
     let so = soff(in l, subject);
@@ -328,8 +327,7 @@ pub fn solve(inout l: L) {
                 put(inout l, "root");
                 let sl = since(in l, so);
                 let mo = mark(in l);
-                let vt = ver(in l, mv).text;
-                put_id(inout l, vt);
+                put_ver(inout l, mv);
                 put(inout l, " does not satisfy ");
                 let rt = req(in l, r.req).text;
                 put_id(inout l, rt);

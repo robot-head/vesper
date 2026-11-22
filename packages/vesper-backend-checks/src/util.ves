@@ -1,0 +1,195 @@
+// Module util of @vesper/backend-checks (see lib.ves): total sequence
+// access and text output.
+
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::util::{
+    n32,
+    push_decimal
+};
+
+// `u64::MAX`: an absent index in every table.
+pub const NONE: u64 = 18446744073709551615;
+
+// `a / b`, and 0 when `b` is 0.
+pub fn dv(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return q => q,
+        raise(e, k) => 0,
+    }
+}
+
+pub fn g(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn st(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    let ok = s.try_set(i, v);
+}
+
+pub fn b8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// A sequence of `n` copies of `v`.
+pub fn filled(n: u64, v: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    s.resize(n, v);
+    s
+}
+
+// Grows a sym-indexed table to cover `i` (new rows are 0) and sets row `i`.
+pub fn put_at(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    if s.len() <= i {
+        s.resize(wrapping_add(i, 1), 0);
+    }
+    let ok = s.try_set(i, v);
+}
+
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+pub fn putn(inout o: ChunkSeq[u8], v: u64) {
+    push_decimal(inout o, v);
+}
+
+pub fn puts(inout o: ChunkSeq[u8], in nm: Names, s: u64) {
+    nm.write(n32(s), inout o);
+}
+
+// Whether `list[at..at + n]` holds `v`.
+pub fn has(in list: ChunkSeq[u64], at: u64, n: u64, v: u64) -> bool {
+    for k in 0..n {
+        if g(in list, wrapping_add(at, k)) == v {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn contains(in list: ChunkSeq[u64], v: u64) -> bool {
+    has(in list, 0, list.len(), v)
+}
+
+// The byte order of two names (-1, 0, 1): `String`'s `Ord`.
+pub fn cmp_names(in nm: Names, a: u64, b: u64) -> i64 {
+    if a == b {
+        return 0;
+    }
+    let x = n32(a);
+    let y = n32(b);
+    let la = nm.size(x);
+    let lb = nm.size(y);
+    let mut i: u64 = 0;
+    loop {
+        if i >= la || i >= lb {
+            break;
+        }
+        let ca = nm.byte(x, i);
+        let cb = nm.byte(y, i);
+        if ca < cb {
+            return -1;
+        }
+        if ca > cb {
+            return 1;
+        }
+        i = wrapping_add(i, 1);
+    }
+    if la < lb {
+        return -1;
+    }
+    if la > lb {
+        return 1;
+    }
+    0
+}
+
+// The row of `key` in `rows` (rows of `width` words, key first), or NONE.
+pub fn find_row(in rows: ChunkSeq[u64], width: u64, key: u64) -> u64 {
+    let n = dv(rows.len(), width);
+    for r in 0..n {
+        if g(in rows, wrapping_mul(r, width)) == key {
+            return r;
+        }
+    }
+    NONE
+}
+
+// Where a row keyed `key` goes in name-sorted `rows`.
+pub fn sorted_slot(in nm: Names, in rows: ChunkSeq[u64], width: u64, key: u64) -> u64 {
+    let n = dv(rows.len(), width);
+    for r in 0..n {
+        if cmp_names(in nm, key, g(in rows, wrapping_mul(r, width))) < 0 {
+            return r;
+        }
+    }
+    n
+}
+
+// Inserts a row (its words in `row`) at row index `at`.
+pub fn insert_row(inout rows: ChunkSeq[u64], width: u64, at: u64, in row: ChunkSeq[u64]) {
+    let old = rows.len();
+    rows.resize(wrapping_add(old, width), 0);
+    let from = wrapping_mul(at, width);
+    let mut i = old;
+    loop {
+        if i <= from {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        st(inout rows, wrapping_add(i, width), g(in rows, i));
+    }
+    for k in 0..width {
+        st(inout rows, wrapping_add(from, k), g(in row, k));
+    }
+}
+
+// Inserts `name` into the name-sorted set `set` unless present.
+pub fn set_insert(in nm: Names, inout set: ChunkSeq[u64], name: u64) {
+    if contains(in set, name) {
+        return;
+    }
+    let mut row: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    row.push(name);
+    let at = sorted_slot(in nm, in set, 1, name);
+    insert_row(inout set, 1, at, in row);
+}
+
+// Whether name `s` starts with the bytes of `p`.
+pub fn starts(in nm: Names, s: u64, in p: Str) -> bool {
+    nm.has_prefix(n32(s), in p.as_bytes())
+}
+
+pub fn spells(in nm: Names, s: u64, in p: Str) -> bool {
+    nm.spells(n32(s), in p.as_bytes())
+}
+
+// Interns the bytes `o[at..]` and truncates `o` back to `at`.
+pub fn intern_tail(inout nm: Names, inout o: ChunkSeq[u8], at: u64) -> u64 {
+    let s = nm.intern(in o[at..o.len()]);
+    o.truncate(at);
+    widen_u64(s)
+}
+
+pub fn intern_str(inout nm: Names, in s: Str) -> u64 {
+    widen_u64(nm.intern(in s.as_bytes()))
+}
+
+pub fn dup(in s: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](s.len());
+    out.extend(in s.as_slice());
+    out
+}

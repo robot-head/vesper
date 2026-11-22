@@ -23,8 +23,12 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.release = workflow("platform-release.yml")
 
     def test_required_check_names_and_events_are_preserved(self):
-        self.assertTrue({"push", "pull_request", "merge_group", "schedule",
+        self.assertTrue({"push", "merge_group", "schedule",
                          "workflow_dispatch", "workflow_call"} <= self.platforms["on"].keys())
+        # Pull requests get Platforms from native-checks.yml once they can
+        # merge and BuildBuddy is green (#1479), not on every push.
+        self.assertNotIn("pull_request", self.platforms["on"])
+        self.assertIn("pull_request", self.platforms["on"]["workflow_dispatch"]["inputs"])
         mac = self.platforms["jobs"]["platform"]
         windows = self.platforms["jobs"]["windows"]
         self.assertEqual(mac["strategy"]["matrix"]["include"][0]["name"], "macOS (AArch64)")
@@ -119,6 +123,90 @@ class PlatformWorkflowTests(unittest.TestCase):
                     completed = subprocess.run(["bash", "-e", "-c", run], env=env)
                     self.assertNotEqual(completed.returncode, 0)
                     self.assertFalse(output.exists())
+
+    def test_completion_accepts_skipped_shards_only_when_no_port_is_affected(self):
+        # The shards skip as jobs when the plan names no port (#1321).
+        self.assertIn("needs.plan.outputs.ports != 'none'", self.platforms["jobs"]["ports"]["if"])
+        run = self.platforms["jobs"]["complete"]["steps"][0]["run"]
+        for ports, expected in (("none", 0), ("vesper-aura", 1), ("", 1)):
+            with tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "outputs"
+                env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
+                       "WINDOWS_RESULT": "success", "PORTS_RESULT": "skipped", "PORTS": ports,
+                       "CHECKED_SHA": "a" * 40, "PROFILE": "pr", "GITHUB_OUTPUT": str(output)}
+                completed = subprocess.run(["bash", "-e", "-c", run], env=env)
+                self.assertEqual(completed.returncode != 0, bool(expected))
+                self.assertEqual(output.exists(), not expected)
+
+    def test_hybrid_and_ports_skip_pull_requests(self):
+        # Neither is required; both run on main, nightly and manual runs (#1479).
+        hybrid = workflow("hybrid.yml")
+        self.assertNotIn("pull_request", hybrid["on"])
+        self.assertTrue({"push", "schedule", "workflow_dispatch"} <= hybrid["on"].keys())
+        include = hybrid["jobs"]["hybrid"]["strategy"]["matrix"]["include"]
+        self.assertEqual([leg["os"] for leg in include],
+                         ["ubuntu-latest", "macos-latest", "windows-latest"])
+        step = next(s for s in self.platforms["jobs"]["plan"]["steps"] if s.get("id") == "ports")
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "outputs"
+            env = {**os.environ, "PULL_REQUEST": "1311", "GITHUB_OUTPUT": str(output),
+                   "REQUESTED_PROFILE": "pr", "EVENT": "workflow_dispatch", "BASE_SHA": ""}
+            subprocess.run(["bash", "-e", "-c", step["run"]], env=env, check=True, cwd=ROOT,
+                           capture_output=True)
+            self.assertEqual(output.read_text(), "crates=none\n")
+
+    def test_merge_gate_is_the_first_step_of_every_pull_request_job(self):
+        # The gate runs inside the jobs it guards, not as a job of its own
+        # that queued for a runner ahead of them (#1479).
+        self.assertFalse((ROOT / ".github/workflows/merge-gate.yml").exists())
+        action = yaml.safe_load((ROOT / ".github/actions/merge-gate/action.yml").read_text())
+        self.assertIn("scripts/ci/merge_gate.py", action["runs"]["steps"][0]["run"])
+        guarded = []
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            flow = workflow(path.name)
+            if "pull_request" not in flow["on"]:
+                continue
+            self.assertEqual(flow["permissions"].get("actions"), "write", path.name)
+            self.assertEqual(flow["permissions"].get("pull-requests"), "read", path.name)
+            for name, job in flow["jobs"].items():
+                if "github.event_name != 'pull_request'" in job.get("if", ""):
+                    continue
+                checkout, gate = job["steps"][:2]
+                self.assertEqual(checkout["uses"], "actions/checkout@v4", (path.name, name))
+                self.assertEqual(checkout["with"]["path"], ".gate")
+                self.assertEqual(checkout["with"]["ref"], "${{ github.event.pull_request.head.sha }}")
+                self.assertEqual(checkout["with"]["fetch-depth"], "0")
+                self.assertEqual(gate["uses"], "./.gate/.github/actions/merge-gate", (path.name, name))
+                self.assertEqual(gate["with"]["head-sha"], "${{ github.event.pull_request.head.sha }}")
+                for step in (checkout, gate):
+                    self.assertEqual(step["if"], "github.event_name == 'pull_request'")
+                guarded.append(f"{path.name}:{name}")
+        self.assertIn("website.yml:build", guarded)
+        self.assertGreaterEqual(len(guarded), 10)
+
+    def test_native_checks_start_only_after_the_gate_and_buildbuddy(self):
+        native = workflow("native-checks.yml")
+        self.assertEqual(set(native["on"]), {"status"})
+        job = native["jobs"]["start"]
+        self.assertIn("github.event.state == 'success'", job["if"])
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        steps = job["steps"]
+        find = steps[0]["run"]
+        for context in ("Test all targets", "Native and acceptance scripts"):
+            self.assertIn(context, job["if"])
+            self.assertIn(f'"{context}"', find)
+        self.assertIn('"$states" != 2', find)
+        names = [s.get("uses") or s.get("name") for s in steps]
+        gate = names.index("./.gate/.github/actions/merge-gate")
+        dispatch = next(i for i, s in enumerate(steps) if "gh workflow run" in s.get("run", ""))
+        self.assertLess(gate, dispatch)
+        command = steps[dispatch]["run"]
+        for flag in ("platforms.yml", "-f profile=pr", '-f checkout_ref="refs/pull/$NUMBER/merge"',
+                     '-f pull_request="$NUMBER"', '--ref "$BRANCH"'):
+            self.assertIn(flag, command)
+        verify = next(s for s in self.platforms["jobs"]["plan"]["steps"]
+                      if s.get("name") == "Verify the dispatched pull request commit")
+        self.assertIn("inputs.pull_request != ''", verify["if"])
 
     def test_dedup_retains_distinct_features_and_moves_stdio_checks(self):
         source = workflow("source-macros.yml")

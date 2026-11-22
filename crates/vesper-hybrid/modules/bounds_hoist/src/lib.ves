@@ -1,0 +1,24 @@
+// @vesper/hybrid-bounds-hoist: the IR swap point's `hoist` hook in the
+// hybrid Stage 2 build (self-hosting SH3 lane 12, #1251).
+//
+// `hoist_words` takes one program as little-endian words (names, types, an
+// empty world, then the program section; written by `program_only_input`
+// in tests/common/ir_words.rs), versions its loops and marks its accesses
+// unchecked as `bounds_hoist::run` does (`@vesper/bounds-hoist`), and
+// writes it back (`put_program`), which `decode_program` reads into a Rust
+// `Program`.
+
+// @export abi 4
+
+use @vesper/bounds-hoist::pass::{
+    hoist_bytes
+};
+
+// The layout version of `hoist_words`.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn hoist_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    hoist_bytes(in input)
+}

@@ -1,0 +1,6 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# tests/vectors.rs checks symbols() against @vesper/crypto's crypto.vsys.
+vesper_crate(
+    extra_integration_compile_data = ["//packages/vesper-crypto:files"],
+)

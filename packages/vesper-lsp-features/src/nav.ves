@@ -1,0 +1,1280 @@
+// `src/lsp/navigation.rs` in Vesper: the lexical index of a checked source
+// (`Index`), `document_symbols`, `workspace_symbols` and `definition`.
+//
+// The index is built from the @vesper/ast tree of the source and the
+// @vesper/front token table, in the Rust traversal order, so the same
+// budget charge fails first and the same node wins a cursor. Errors are
+// the `Error` values of navigation.rs as `ERR_*` codes; `Ix.err` holds the
+// first one and every step returns `false` once it is set.
+
+use @vesper/ast::{
+    Ast,
+    ExprNode,
+    PatNode,
+    StmtNode,
+    ArgNode,
+    ClauseNode,
+    ParamNode,
+    AdtNode,
+    FnNode,
+    EffectDeclNode,
+    ImplNode,
+    TraitNode,
+    ConfNode,
+    ItemNode,
+    list_len,
+    list_at,
+    expr_at,
+    pat_at
+};
+use @vesper/ast::lower::{
+    lower_source
+};
+use @vesper/front::Tokens;
+use @vesper/front::lex::{
+    lex_with_limits,
+    token_end
+};
+use @vesper/front::diag::{
+    diags_new
+};
+use @vesper/span::{
+    ByteSpan,
+    Limits,
+    Position,
+    Range,
+    line_table,
+    offset,
+    range
+};
+use @vesper/span::Error as SpanError;
+use @vesper/span::Resource as SpanResource;
+use @vesper-std/arena::{
+    idx_from_raw
+};
+use @vesper-std/intern::{
+    symbol_from_id
+};
+use self::json::{
+    byte,
+    put,
+    put_bytes,
+    put_u64,
+    put_string,
+    put_range
+};
+
+const NONE: u32 = 4294967295;
+
+// `navigation::Limits::default()`. The session only uses the defaults.
+pub const MAX_SOURCE_BYTES: u64 = 131072;
+pub const MAX_NODES: u64 = 16384;
+pub const MAX_DEPTH: u64 = 64;
+pub const MAX_SYMBOLS: u64 = 1024;
+pub const MAX_DOCUMENTS: u64 = 32;
+pub const MAX_URI_BYTES: u64 = 4096;
+pub const MAX_QUERY_BYTES: u64 = 256;
+pub const MAX_OUTPUT_BYTES: u64 = 262144;
+
+// `size_of::<Line>()` of vesper-span: two `usize`s.
+const LINE_SIZE: u64 = 16;
+
+// `navigation::Error`, by code. `ERR_POSITION` carries the vesper-span
+// error in `Ix.span_err`.
+pub const ERR_NONE: u64 = 0;
+pub const ERR_INVALID_SPAN: u64 = 1;
+pub const ERR_TRAVERSAL: u64 = 2;
+pub const ERR_SYMBOLS: u64 = 3;
+pub const ERR_SOURCE_BYTES: u64 = 4;
+pub const ERR_TOKEN_WORK: u64 = 5;
+pub const ERR_OUTPUT_BYTES: u64 = 6;
+pub const ERR_URI_BYTES: u64 = 7;
+pub const ERR_DOCUMENTS_QUERY: u64 = 8;
+pub const ERR_POSITION: u64 = 9;
+pub const ERR_SOURCE_MISMATCH: u64 = 10;
+
+// `SymbolKind` numbers the index gives its declarations.
+const KIND_FUNCTION: u8 = 12;
+const KIND_ENUM: u8 = 10;
+const KIND_STRUCT: u8 = 23;
+const KIND_INTERFACE: u8 = 11;
+const KIND_METHOD: u8 = 6;
+const KIND_CLASS: u8 = 2;
+
+// Token kinds (`TokenKind` discriminants, @vesper/front kinds.ves).
+const TK_COMMENT: u8 = 1;
+const TK_UPPER: u8 = 3;
+const TK_LOWER: u8 = 4;
+const TK_SELF: u8 = 22;
+
+// Item kinds of @vesper/ast.
+const ITEM_ADT: u8 = 1;
+const ITEM_FUNCTION: u8 = 2;
+const ITEM_EFFECT: u8 = 3;
+const ITEM_IMPL: u8 = 4;
+const ITEM_TRAIT: u8 = 5;
+const ITEM_CONFORMANCE: u8 = 6;
+
+// Expression kinds of @vesper/ast.
+const E_NAME: u8 = 2;
+const E_TUPLE: u8 = 3;
+const E_STRUCT: u8 = 4;
+const E_BLOCK: u8 = 5;
+const E_CALL: u8 = 6;
+const E_FIELD: u8 = 7;
+const E_INDEX: u8 = 8;
+const E_TRY: u8 = 9;
+const E_UNARY: u8 = 10;
+const E_BINARY: u8 = 11;
+const E_ASSIGN: u8 = 12;
+const E_IF: u8 = 13;
+const E_MATCH: u8 = 14;
+const E_CLOSURE: u8 = 15;
+const E_HANDLE: u8 = 16;
+const E_LOOP: u8 = 17;
+const E_FOR: u8 = 18;
+const E_RANGE: u8 = 19;
+const E_BREAK: u8 = 20;
+const E_RETURN: u8 = 21;
+
+// Pattern kinds.
+const P_BIND: u8 = 2;
+const P_TUPLE: u8 = 4;
+const P_CONSTRUCTOR: u8 = 5;
+
+// Statement kinds.
+const S_LET: u8 = 1;
+
+// The index of one checked source (`Index`).
+pub struct Ix {
+    ast: Ast,
+    t: Tokens,
+    // `t` is the table of the navigation lexer limits.
+    lexed: bool,
+    src: String,
+    lines: ChunkSeq[u64],
+    max_work: usize,
+    // Declarations: name symbol, span, selection span, kind, and the
+    // function node of a top-level function (else NONE).
+    d_name: ChunkSeq[u32],
+    d_start: ChunkSeq[u32],
+    d_end: ChunkSeq[u32],
+    d_sel_start: ChunkSeq[u32],
+    d_sel_end: ChunkSeq[u32],
+    d_kind: ChunkSeq[u8],
+    d_fn: ChunkSeq[u32],
+    // `globals`, by name symbol: selection + 1 (0 when absent).
+    g_start: ChunkSeq[u32],
+    g_end: ChunkSeq[u32],
+    // Nodes, in preorder: span, and target span + 1 (0 when absent).
+    n_start: ChunkSeq[u32],
+    n_end: ChunkSeq[u32],
+    n_tstart: ChunkSeq[u32],
+    n_tend: ChunkSeq[u32],
+    // The lexical environment: name symbol and target span.
+    e_name: ChunkSeq[u32],
+    e_start: ChunkSeq[u32],
+    e_end: ChunkSeq[u32],
+    // `Budget.left`.
+    left: u64,
+    err: u64,
+    span_err: SpanError
+}
+
+fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE,
+    }
+}
+
+fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn fail(inout x: Ix, code: u64) -> bool {
+    if x.err == ERR_NONE {
+        x.err = code;
+    }
+    false
+}
+
+// ------------------------------------------------------------ accessors
+
+fn item_at(in a: Ast, i: u32) -> ItemNode {
+    a
+        .items
+        .get_or(
+        idx_from_raw[ItemNode](i),
+        ItemNode {
+            kind: 0,
+            node: NONE
+        }
+    )
+}
+
+fn fn_at(in a: Ast, f: u32) -> FnNode {
+    a
+        .fns
+        .get_or(
+        idx_from_raw[FnNode](f),
+        FnNode {
+            name: NONE,
+            fip: false,
+            generics: 0,
+            params: 0,
+            result: NONE,
+            effects: NONE,
+            body: NONE,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn adt_at(in a: Ast, i: u32) -> AdtNode {
+    a
+        .adts
+        .get_or(
+        idx_from_raw[AdtNode](i),
+        AdtNode {
+            name: NONE,
+            mode: 0,
+            generics: 0,
+            variants: 0,
+            is_enum: false,
+            tiled: false,
+            tile_width: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn effect_decl_at(in a: Ast, i: u32) -> EffectDeclNode {
+    a
+        .effect_decls
+        .get_or(
+        idx_from_raw[EffectDeclNode](i),
+        EffectDeclNode {
+            name: NONE,
+            linear: false,
+            generics: 0,
+            ops: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn impl_at(in a: Ast, i: u32) -> ImplNode {
+    a
+        .impls
+        .get_or(
+        idx_from_raw[ImplNode](i),
+        ImplNode {
+            ty: NONE,
+            generics: 0,
+            methods: 0
+        }
+    )
+}
+
+fn trait_at(in a: Ast, i: u32) -> TraitNode {
+    a
+        .traits
+        .get_or(
+        idx_from_raw[TraitNode](i),
+        TraitNode {
+            name: NONE,
+            public: false,
+            generics: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn conf_at(in a: Ast, i: u32) -> ConfNode {
+    a
+        .confs
+        .get_or(
+        idx_from_raw[ConfNode](i),
+        ConfNode {
+            model: NONE,
+            public: false,
+            generics: 0,
+            trait_ref: NONE,
+            self_ty: NONE,
+            wheres: 0,
+            assoc: 0,
+            methods: 0,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+fn stmt_at(in a: Ast, s: u32) -> StmtNode {
+    a
+        .stmts
+        .get_or(
+        idx_from_raw[StmtNode](s),
+        StmtNode {
+            kind: 0,
+            pat: NONE,
+            ty: NONE,
+            value: NONE,
+            mutable: false
+        }
+    )
+}
+
+fn arg_at(in a: Ast, i: u32) -> ArgNode {
+    a
+        .args
+        .get_or(
+        idx_from_raw[ArgNode](i),
+        ArgNode {
+            pass: 0,
+            explicit: false,
+            expr: NONE
+        }
+    )
+}
+
+fn clause_at(in a: Ast, c: u32) -> ClauseNode {
+    a
+        .clauses
+        .get_or(
+        idx_from_raw[ClauseNode](c),
+        ClauseNode {
+            name: NONE,
+            pats: 0,
+            body: NONE
+        }
+    )
+}
+
+fn param_at(in a: Ast, p: u32) -> ParamNode {
+    a
+        .params
+        .get_or(
+        idx_from_raw[ParamNode](p),
+        ParamNode {
+            name: NONE,
+            pass: 0,
+            projections: 0,
+            ty: NONE,
+            start: 0,
+            end: 0
+        }
+    )
+}
+
+// ------------------------------------------------------------ names
+
+// The byte length of name `sym`.
+fn name_len(in a: Ast, sym: u32) -> u64 {
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    wrapping_sub(e, s)
+}
+
+// Appends the text of name `sym`.
+pub fn put_name(inout o: ChunkSeq[u8], in a: Ast, sym: u32) {
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    for i in s..e {
+        match a.names.text_byte(i) {
+            Option::Some(c) => o.push(c),
+            Option::None => {}
+        }
+    }
+}
+
+// Whether source bytes `s..e` spell name `sym`.
+fn spells(in x: Ix, sym: u32, s: u64, e: u64) -> bool {
+    let (ns, ne) = x.ast.names.span(symbol_from_id(sym));
+    if wrapping_sub(ne, ns) != wrapping_sub(e, s) {
+        return false;
+    }
+    let b = x.src.as_bytes();
+    for i in 0..wrapping_sub(e, s) {
+        let c = match x.ast.names.text_byte(wrapping_add(ns, i)) {
+            Option::Some(v) => v,
+            Option::None => return false,
+        };
+        if byte(in b, wrapping_add(s, i)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether name `sym` contains the bytes of `q` (`str::contains`).
+pub fn name_contains(in a: Ast, sym: u32, in q: Slice[u8]) -> bool {
+    let (s, e) = a.names.span(symbol_from_id(sym));
+    let n = wrapping_sub(e, s);
+    let m = q.len();
+    if m > n {
+        return false;
+    }
+    for start in 0..wrapping_add(wrapping_sub(n, m), 1) {
+        let mut hit = true;
+        for j in 0..m {
+            let c = match a.names.text_byte(wrapping_add(wrapping_add(s, start), j)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            if c != byte(in q, j) {
+                hit = false;
+                break;
+            }
+        }
+        if hit {
+            return true;
+        }
+    }
+    false
+}
+
+fn token_start(in x: Ix, i: u64) -> u64 {
+    w(u32_at(in x.t.start, i))
+}
+
+// The first token whose start is at least `at` (`partition_point`).
+fn first_token_from(in x: Ix, at: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = x.t.kind.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if token_start(in x, mid) < at {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// The number of tokens that end at most at `at` (`partition_point`).
+fn tokens_ending_by(in x: Ix, at: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = x.t.kind.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if token_end(in x.t, mid) <= at {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// `Index::name`: the first identifier token inside `s..e` that spells
+// `sym`, as `start << 32 | end`, or `false` with `ERR_INVALID_SPAN`.
+fn name_span(inout x: Ix, s: u64, e: u64, sym: u32, inout out: u64) -> bool {
+    let begin = first_token_from(in x, s);
+    let end = tokens_ending_by(in x, e);
+    let mut i = begin;
+    loop {
+        if i >= end {
+            break;
+        }
+        let k = u8_at(in x.t.kind, i);
+        if k == TK_LOWER || k == TK_UPPER || k == TK_SELF {
+            let ts = token_start(in x, i);
+            let te = token_end(in x.t, i);
+            if spells(in x, sym, ts, te) {
+                out = wrapping_shl_u64(ts, 32) | te;
+                return true;
+            }
+        }
+        i = wrapping_add(i, 1);
+    }
+    fail(inout x, ERR_INVALID_SPAN)
+}
+
+fn hi(v: u64) -> u32 {
+    wrapping_u32(wrapping_shr_u64(v, 32))
+}
+
+fn lo(v: u64) -> u32 {
+    wrapping_u32(v & 4294967295)
+}
+
+// ------------------------------------------------------------ the index
+
+// `Budget::charge`.
+fn charge(inout x: Ix, depth: u64) -> bool {
+    if x.left == 0 || depth > MAX_DEPTH {
+        return fail(inout x, ERR_TRAVERSAL);
+    }
+    x.left = wrapping_sub(x.left, 1);
+    true
+}
+
+fn declaration(inout x: Ix, name: u32, s: u32, e: u32, kind: u8, f: u32) -> bool {
+    if !charge(inout x, 0) {
+        return false;
+    }
+    if x.d_name.len() >= MAX_SYMBOLS {
+        return fail(inout x, ERR_SYMBOLS);
+    }
+    let mut sel: u64 = 0;
+    if !name_span(inout x, w(s), w(e), name, inout sel) {
+        return false;
+    }
+    if kind == KIND_FUNCTION {
+        let at = w(name);
+        if x.g_start.len() <= at {
+            x.g_start.resize(wrapping_add(at, 1), 0);
+            x.g_end.resize(wrapping_add(at, 1), 0);
+        }
+        x.g_start.try_set(at, wrapping_add(hi(sel), 1));
+        x.g_end.try_set(at, wrapping_add(lo(sel), 1));
+    }
+    x.d_name.push(name);
+    x.d_start.push(s);
+    x.d_end.push(e);
+    x.d_sel_start.push(hi(sel));
+    x.d_sel_end.push(lo(sel));
+    x.d_kind.push(kind);
+    x.d_fn.push(f);
+    true
+}
+
+fn function_decl(inout x: Ix, f: u32, kind: u8, record: bool) -> bool {
+    let n = fn_at(in x.ast, f);
+    declaration(
+        inout x,
+        n.name,
+        n.start,
+        n.end,
+        kind,
+        if record {
+            f
+        } else {
+            NONE
+        }
+    )
+}
+
+fn item(inout x: Ix, it: ItemNode) -> bool {
+    if it.kind == ITEM_FUNCTION {
+        function_decl(inout x, it.node, KIND_FUNCTION, true)
+    } else if it.kind == ITEM_ADT {
+        let a = adt_at(in x.ast, it.node);
+        declaration(
+            inout x,
+            a.name,
+            a.start,
+            a.end,
+            if a.is_enum {
+                KIND_ENUM
+            } else {
+                KIND_STRUCT
+            },
+            NONE
+        )
+    } else if it.kind == ITEM_EFFECT {
+        let e = effect_decl_at(in x.ast, it.node);
+        if !declaration(inout x, e.name, e.start, e.end, KIND_INTERFACE, NONE) {
+            return false;
+        }
+        for i in 0..list_len(in x.ast, e.ops) {
+            if !function_decl(inout x, list_at(in x.ast, e.ops, i), KIND_METHOD, false) {
+                return false;
+            }
+        }
+        true
+    } else if it.kind == ITEM_TRAIT {
+        let t = trait_at(in x.ast, it.node);
+        declaration(inout x, t.name, t.start, t.end, KIND_INTERFACE, NONE)
+    } else if it.kind == ITEM_CONFORMANCE {
+        let c = conf_at(in x.ast, it.node);
+        if c.model == NONE {
+            true
+        } else {
+            declaration(inout x, c.model, c.start, c.end, KIND_CLASS, NONE)
+        }
+    } else if it.kind == ITEM_IMPL {
+        // Methods are not bare globals: their calls have no target.
+        let im = impl_at(in x.ast, it.node);
+        for i in 0..list_len(in x.ast, im.methods) {
+            if !function_decl(inout x, list_at(in x.ast, im.methods, i), KIND_METHOD, false) {
+                return false;
+            }
+        }
+        true
+    } else {
+        true
+    }
+}
+
+fn bind(inout x: Ix, name: u32, s: u32, e: u32) -> bool {
+    let mut t: u64 = 0;
+    if !name_span(inout x, w(s), w(e), name, inout t) {
+        return false;
+    }
+    x.e_name.push(name);
+    x.e_start.push(hi(t));
+    x.e_end.push(lo(t));
+    true
+}
+
+fn parameter(inout x: Ix, p: u32) -> bool {
+    let n = param_at(in x.ast, p);
+    bind(inout x, n.name, n.start, n.end)
+}
+
+fn truncate_env(inout x: Ix, n: u64) {
+    x.e_name.truncate(n);
+    x.e_start.truncate(n);
+    x.e_end.truncate(n);
+}
+
+// The innermost binding of `name`, as its index + 1 (0 when unbound).
+fn lookup(in x: Ix, name: u32) -> u64 {
+    let mut i = x.e_name.len();
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        if u32_at(in x.e_name, wrapping_sub(i, 1)) == name {
+            return i;
+        }
+        i = wrapping_sub(i, 1);
+    }
+}
+
+fn pattern(inout x: Ix, p: u32, depth: u64) -> bool {
+    if !charge(inout x, depth) {
+        return false;
+    }
+    let n = pat_at(in x.ast, p);
+    let d = wrapping_add(depth, 1);
+    if n.kind == P_BIND {
+        bind(inout x, n.a, n.start, n.end)
+    } else if n.kind == P_TUPLE {
+        for i in 0..list_len(in x.ast, n.a) {
+            if !pattern(inout x, list_at(in x.ast, n.a, i), d) {
+                return false;
+            }
+        }
+        true
+    } else if n.kind == P_CONSTRUCTOR {
+        for i in 0..(list_len(in x.ast, n.b) >> 1) {
+            let at = wrapping_add(wrapping_add(i, i), 1);
+            if !pattern(inout x, list_at(in x.ast, n.b, at), d) {
+                return false;
+            }
+        }
+        true
+    } else {
+        true
+    }
+}
+
+fn exprs(inout x: Ix, list: u32, depth: u64, resolve: bool) -> bool {
+    for i in 0..list_len(in x.ast, list) {
+        if !expr(inout x, list_at(in x.ast, list, i), depth, resolve) {
+            return false;
+        }
+    }
+    true
+}
+
+fn opt_expr(inout x: Ix, e: u32, depth: u64, resolve: bool) -> bool {
+    if e == NONE {
+        true
+    } else {
+        expr(inout x, e, depth, resolve)
+    }
+}
+
+// `Index::expr`.
+fn expr(inout x: Ix, e: u32, depth: u64, resolve: bool) -> bool {
+    if !charge(inout x, depth) {
+        return false;
+    }
+    let n = expr_at(in x.ast, e);
+    let mut ts: u32 = 0;
+    let mut te: u32 = 0;
+    if resolve && n.kind == E_NAME {
+        let b = lookup(in x, n.a);
+        if b != 0 {
+            let at = wrapping_sub(b, 1);
+            ts = wrapping_add(u32_at(in x.e_start, at), 1);
+            te = wrapping_add(u32_at(in x.e_end, at), 1);
+        } else {
+            match x.g_start.try_get(w(n.a)) {
+                Option::Some(v) => {
+                    ts = v;
+                    te = u32_at(in x.g_end, w(n.a));
+                }
+                Option::None => {}
+            }
+        }
+    }
+    x.n_start.push(n.start);
+    x.n_end.push(n.end);
+    x.n_tstart.push(ts);
+    x.n_tend.push(te);
+    let d = wrapping_add(depth, 1);
+    let k = n.kind;
+    if k == E_BLOCK {
+        let old = x.e_name.len();
+        for i in 0..list_len(in x.ast, n.a) {
+            let s = stmt_at(in x.ast, list_at(in x.ast, n.a, i));
+            if s.kind == S_LET {
+                if !expr(inout x, s.value, d, resolve) {
+                    return false;
+                }
+                if !pattern(inout x, s.pat, d) {
+                    return false;
+                }
+            } else if !expr(inout x, s.value, d, resolve) {
+                return false;
+            }
+        }
+        if !opt_expr(inout x, n.b, d, resolve) {
+            return false;
+        }
+        truncate_env(inout x, old);
+        true
+    } else if k == E_TUPLE {
+        exprs(inout x, n.a, d, resolve)
+    } else if k == E_STRUCT {
+        for i in 0..(list_len(in x.ast, n.b) >> 1) {
+            let at = wrapping_add(wrapping_add(i, i), 1);
+            if !expr(inout x, list_at(in x.ast, n.b, at), d, resolve) {
+                return false;
+            }
+        }
+        true
+    } else if k == E_CALL {
+        // An unbound bare receiver may be an effect capability: no global
+        // guess for that callee.
+        let callee = expr_at(in x.ast, n.a);
+        let mut receiver_unbound = false;
+        if callee.kind == E_FIELD {
+            let base = expr_at(in x.ast, callee.a);
+            receiver_unbound = base.kind == E_NAME && lookup(in x, base.a) == 0;
+        }
+        if !expr(inout x, n.a, d, resolve && !receiver_unbound) {
+            return false;
+        }
+        for i in 0..list_len(in x.ast, n.c) {
+            let a = arg_at(in x.ast, list_at(in x.ast, n.c, i));
+            if !expr(inout x, a.expr, d, resolve) {
+                return false;
+            }
+        }
+        true
+    } else if k == E_FIELD || k == E_TRY {
+        expr(inout x, n.a, d, resolve)
+    } else if k == E_UNARY {
+        expr(inout x, n.b, d, resolve)
+    } else if k == E_INDEX {
+        expr(inout x, n.a, d, resolve) && expr(inout x, n.b, d, resolve)
+    } else if k == E_BINARY || k == E_ASSIGN {
+        expr(inout x, n.b, d, resolve) && expr(inout x, n.c, d, resolve)
+    } else if k == E_IF {
+        expr(inout x, n.a, d, resolve)
+            && expr(inout x, n.b, d, resolve)
+            && opt_expr(inout x, n.c, d, resolve)
+    } else if k == E_MATCH {
+        if !expr(inout x, n.a, d, resolve) {
+            return false;
+        }
+        for i in 0..(list_len(in x.ast, n.b) >> 1) {
+            let old = x.e_name.len();
+            let at = wrapping_add(i, i);
+            if !pattern(inout x, list_at(in x.ast, n.b, at), d) {
+                return false;
+            }
+            if !expr(inout x, list_at(in x.ast, n.b, wrapping_add(at, 1)), d, resolve) {
+                return false;
+            }
+            truncate_env(inout x, old);
+        }
+        true
+    } else if k == E_FOR {
+        if !expr(inout x, n.b, d, resolve) {
+            return false;
+        }
+        let old = x.e_name.len();
+        if !pattern(inout x, n.a, d) {
+            return false;
+        }
+        if !expr(inout x, n.c, d, resolve) {
+            return false;
+        }
+        truncate_env(inout x, old);
+        true
+    } else if k == E_LOOP {
+        expr(inout x, n.a, d, resolve)
+    } else if k == E_RANGE {
+        expr(inout x, n.a, d, resolve) && expr(inout x, n.b, d, resolve)
+    } else if k == E_BREAK || k == E_RETURN {
+        opt_expr(inout x, n.a, d, resolve)
+    } else if k == E_CLOSURE {
+        let old = x.e_name.len();
+        for i in 0..list_len(in x.ast, n.a) {
+            if !parameter(inout x, list_at(in x.ast, n.a, i)) {
+                return false;
+            }
+        }
+        if !expr(inout x, n.e, d, resolve) {
+            return false;
+        }
+        truncate_env(inout x, old);
+        true
+    } else if k == E_HANDLE {
+        // Handler scopes need resolver evidence: no guessed targets.
+        if n.b != NONE && !expr(inout x, n.c, d, false) {
+            return false;
+        }
+        if !expr(inout x, n.d, d, false) {
+            return false;
+        }
+        for i in 0..list_len(in x.ast, n.e) {
+            let c = clause_at(in x.ast, list_at(in x.ast, n.e, i));
+            if !expr(inout x, c.body, d, false) {
+                return false;
+            }
+        }
+        true
+    } else {
+        true
+    }
+}
+
+fn line_ok(sink v: ChunkSeq[u64]) -> Result[ChunkSeq[u64], SpanError] {
+    Result::Ok(v)
+}
+
+fn line_err(e: SpanError) -> Result[ChunkSeq[u64], SpanError] {
+    Result::Err(e)
+}
+
+fn try_lines(in text: Str, in l: Limits) -> Result[ChunkSeq[u64], SpanError] {
+    handle Fail[SpanError] in {
+        line_ok(line_table(in text, in l, narrow_usize(LINE_SIZE)))
+    } with {
+        return v => v,
+        raise(e, resume) => line_err(e),
+    }
+}
+
+fn empty_ix(sink src: String, max_work: usize) -> Ix {
+    let mut d = diags_new();
+    let t = lex_with_limits(in "".as_bytes(), inout d, 0, 1, 1);
+    let l = lower_source(in "");
+    Ix {
+        ast: l.ast,
+        t: t,
+        lexed: false,
+        src: src,
+        lines: ChunkSeq::new[u64](),
+        max_work: max_work,
+        d_name: ChunkSeq::new[u32](),
+        d_start: ChunkSeq::new[u32](),
+        d_end: ChunkSeq::new[u32](),
+        d_sel_start: ChunkSeq::new[u32](),
+        d_sel_end: ChunkSeq::new[u32](),
+        d_kind: ChunkSeq::new[u8](),
+        d_fn: ChunkSeq::new[u32](),
+        g_start: ChunkSeq::new[u32](),
+        g_end: ChunkSeq::new[u32](),
+        n_start: ChunkSeq::new[u32](),
+        n_end: ChunkSeq::new[u32](),
+        n_tstart: ChunkSeq::new[u32](),
+        n_tend: ChunkSeq::new[u32](),
+        e_name: ChunkSeq::new[u32](),
+        e_start: ChunkSeq::new[u32](),
+        e_end: ChunkSeq::new[u32](),
+        left: MAX_NODES,
+        err: ERR_NONE,
+        span_err: SpanError::InvalidLimits
+    }
+}
+
+// `Index::new` over `src`, whose line index has limits `l`. On failure
+// `err` is set and the tables are partial.
+pub fn index_new(sink src: String, in l: Limits) -> Ix {
+    let mut x = empty_ix(src, l.max_work);
+    match try_lines(in x.src, in l) {
+        Result::Ok(t) => x.lines = t,
+        Result::Err(e) => {
+            // The document store built this index already; a refusal here
+            // means the caller lent a text the store never accepted.
+            x.span_err = e;
+            fail(inout x, ERR_SOURCE_MISMATCH);
+            return x;
+        }
+    }
+    if x.src.len() > MAX_SOURCE_BYTES {
+        fail(inout x, ERR_SOURCE_BYTES);
+        return x;
+    }
+    let lowered = lower_source(in x.src);
+    x.ast = lowered.ast;
+    // The parse's own token table (default lexer limits), kept with the
+    // tree. It equals the table of `lex_with_limits(max_tokens 16,384,
+    // max_diagnostics 1)` whenever that one succeeds: no diagnostics and
+    // at most 16,384 tokens before Eof. Otherwise `reindex` lexes under the
+    // navigation limits for the exact refusal.
+    x.t = lowered.p.t;
+    x
+        .lexed = lowered
+        .p
+        .d
+        .code
+        .len()
+        == 0
+        && !x
+        .t
+        .limited
+        && x
+        .t
+        .kind
+        .len()
+        <= wrapping_add(MAX_NODES, 1);
+    reindex(inout x);
+    x
+}
+
+// Builds the index tables again from the parsed tree: the lexing and the
+// traversal of `Index::new`, for a source whose parse is cached (the
+// server's checked snapshot keeps its AST).
+pub fn reindex(inout x: Ix) {
+    x.d_name.clear();
+    x.d_start.clear();
+    x.d_end.clear();
+    x.d_sel_start.clear();
+    x.d_sel_end.clear();
+    x.d_kind.clear();
+    x.d_fn.clear();
+    x.g_start.clear();
+    x.g_end.clear();
+    x.n_start.clear();
+    x.n_end.clear();
+    x.n_tstart.clear();
+    x.n_tend.clear();
+    truncate_env(inout x, 0);
+    x.left = MAX_NODES;
+    x.err = ERR_NONE;
+    if !x.lexed {
+        let mut d = diags_new();
+        x.t = lex_with_limits(in x.src.as_bytes(), inout d, MAX_SOURCE_BYTES, MAX_NODES, 1);
+        if x.t.rejected || x.t.limited || d.code.len() != 0 {
+            fail(inout x, ERR_TOKEN_WORK);
+            return;
+        }
+        x.lexed = true;
+    }
+    for i in 0..x.ast.m_items.len() {
+        let it = item_at(in x.ast, u32_at(in x.ast.m_items, i));
+        if !item(inout x, it) {
+            return;
+        }
+    }
+    for j in 0..x.d_fn.len() {
+        let f = u32_at(in x.d_fn, j);
+        if f == NONE {
+            continue;
+        }
+        let node = fn_at(in x.ast, f);
+        if node.body == NONE {
+            continue;
+        }
+        truncate_env(inout x, 0);
+        for i in 0..list_len(in x.ast, node.params) {
+            if !parameter(inout x, list_at(in x.ast, node.params, i)) {
+                return;
+            }
+        }
+        if !expr(inout x, node.body, 0, true) {
+            return;
+        }
+    }
+}
+
+// ------------------------------------------------------------ output
+
+fn range_ok(r: Range) -> Result[Range, SpanError] {
+    Result::Ok(r)
+}
+
+fn range_err(e: SpanError) -> Result[Range, SpanError] {
+    Result::Err(e)
+}
+
+fn try_range(in x: Ix, s: u64, e: u64) -> Result[Range, SpanError] {
+    handle Fail[SpanError] in {
+        range_ok(
+            range(
+                in x.src,
+                in x.lines.as_slice(),
+                x.max_work,
+                ByteSpan {
+                    start: narrow_usize(s),
+                    end: narrow_usize(e)
+                }
+            )
+        )
+    } with {
+        return v => v,
+        raise(err, resume) => range_err(err),
+    }
+}
+
+// `source_range`: the range of `s..e`, or `ERR_INVALID_SPAN`.
+pub fn put_source_range(inout o: ChunkSeq[u8], inout x: Ix, s: u64, e: u64) -> bool {
+    match try_range(in x, s, e) {
+        Result::Ok(r) => {
+            put_range(inout o, r);
+            true
+        }
+        Result::Err(_) => fail(inout x, ERR_INVALID_SPAN),
+    }
+}
+
+fn offset_ok(v: usize) -> Result[usize, SpanError] {
+    Result::Ok(v)
+}
+
+fn offset_err(e: SpanError) -> Result[usize, SpanError] {
+    Result::Err(e)
+}
+
+// `LineIndex::offset`, or `ERR_POSITION` with the span error.
+pub fn cursor(inout x: Ix, line: u32, character: u32, inout at: u64) -> bool {
+    let p = Position {
+        line: line,
+        character: character
+    };
+    let r = handle Fail[SpanError] in {
+        offset_ok(offset(in x.src, in x.lines.as_slice(), x.max_work, p))
+    } with {
+        return v => v,
+        raise(err, resume) => offset_err(err),
+    };
+    match r {
+        Result::Ok(v) => {
+            at = widen_u64(v);
+            true
+        }
+        Result::Err(e) => {
+            x.span_err = e;
+            fail(inout x, ERR_POSITION)
+        }
+    }
+}
+
+pub fn decl_count(in x: Ix) -> u64 {
+    x.d_name.len()
+}
+
+pub fn decl_name(in x: Ix, i: u64) -> u32 {
+    u32_at(in x.d_name, i)
+}
+
+pub fn decl_name_len(in x: Ix, i: u64) -> u64 {
+    name_len(in x.ast, decl_name(in x, i))
+}
+
+pub fn decl_kind(in x: Ix, i: u64) -> u64 {
+    widen_u64(u8_at(in x.d_kind, i))
+}
+
+pub fn decl_span(in x: Ix, i: u64) -> (u64, u64) {
+    (w(u32_at(in x.d_start, i)), w(u32_at(in x.d_end, i)))
+}
+
+pub fn decl_selection(in x: Ix, i: u64) -> (u64, u64) {
+    (w(u32_at(in x.d_sel_start, i)), w(u32_at(in x.d_sel_end, i)))
+}
+
+// The target of the smallest node containing `at` (the first of equal
+// sizes), as `start << 32 | end` + 1, or 0 when that node has no target
+// or no node contains `at`.
+pub fn node_target(in x: Ix, at: u64) -> u64 {
+    let mut best: u64 = 0;
+    let mut best_len: u64 = 0;
+    for i in 0..x.n_start.len() {
+        let s = w(u32_at(in x.n_start, i));
+        let e = w(u32_at(in x.n_end, i));
+        if s <= at && at < e {
+            let len = wrapping_sub(e, s);
+            if best == 0 || len < best_len {
+                best = wrapping_add(i, 1);
+                best_len = len;
+            }
+        }
+    }
+    if best == 0 {
+        return 0;
+    }
+    let i = wrapping_sub(best, 1);
+    let ts = u32_at(in x.n_tstart, i);
+    if ts == 0 {
+        return 0;
+    }
+    let te = u32_at(in x.n_tend, i);
+    wrapping_add(wrapping_shl_u64(w(wrapping_sub(ts, 1)), 32) | w(wrapping_sub(te, 1)), 1)
+}
+
+// Whether `doc_links::target` would analyze the cursor: the token at `at`
+// is a `///` (not `////`) or `//!` comment that contains it.
+pub fn in_doc_comment(in x: Ix, at: u64) -> bool {
+    let i = tokens_ending_by(in x, at);
+    if i >= x.t.kind.len() {
+        return false;
+    }
+    if u8_at(in x.t.kind, i) != TK_COMMENT {
+        return false;
+    }
+    let s = token_start(in x, i);
+    let e = token_end(in x.t, i);
+    if !(s <= at && at < e) {
+        return false;
+    }
+    let b = x.src.as_bytes();
+    let len = wrapping_sub(e, s);
+    if len < 3 || byte(in b, s) != 47 || byte(in b, wrapping_add(s, 1)) != 47 {
+        return false;
+    }
+    let third = byte(in b, wrapping_add(s, 2));
+    if third == 33 {
+        return true;
+    }
+    third == 47 && !(len >= 4 && byte(in b, wrapping_add(s, 3)) == 47)
+}
+
+// The `Display` of a vesper-span error (its `Debug`).
+pub fn put_span_error(inout o: ChunkSeq[u8], e: SpanError) {
+    match e {
+        SpanError::InvalidLimits => put(inout o, in "InvalidLimits"),
+        SpanError::Budget(r) => {
+            put(inout o, in "Budget(");
+            put_resource(inout o, r);
+            put(inout o, in ")");
+        }
+        SpanError::LineOutOfBounds => put(inout o, in "LineOutOfBounds"),
+        SpanError::CharacterOutOfBounds => put(inout o, in "CharacterOutOfBounds"),
+        SpanError::ByteOutOfBounds => put(inout o, in "ByteOutOfBounds"),
+        SpanError::Utf8Boundary => put(inout o, in "Utf8Boundary"),
+        SpanError::SurrogateInterior => put(inout o, in "SurrogateInterior"),
+        SpanError::LineEndingInterior => put(inout o, in "LineEndingInterior"),
+        SpanError::ReversedRange => put(inout o, in "ReversedRange"),
+        SpanError::OverlappingEdits => put(inout o, in "OverlappingEdits"),
+        SpanError::SourceMismatch => put(inout o, in "SourceMismatch"),
+        SpanError::InvalidDiagnostic => put(inout o, in "InvalidDiagnostic"),
+        SpanError::Allocation => put(inout o, in "Allocation"),
+    }
+}
+
+fn put_resource(inout o: ChunkSeq[u8], r: SpanResource) {
+    match r {
+        SpanResource::Source => put(inout o, in "Source"),
+        SpanResource::Lines => put(inout o, in "Lines"),
+        SpanResource::Metadata => put(inout o, in "Metadata"),
+        SpanResource::Work => put(inout o, in "Work"),
+        SpanResource::Edits => put(inout o, in "Edits"),
+        SpanResource::Output => put(inout o, in "Output"),
+        SpanResource::Diagnostics => put(inout o, in "Diagnostics"),
+        SpanResource::Labels => put(inout o, in "Labels"),
+        SpanResource::Fixes => put(inout o, in "Fixes"),
+        SpanResource::Text => put(inout o, in "Text"),
+    }
+}
+
+// The JSON-RPC error object the session sends for `code`
+// (session.rs `nav_error`), with its keys in serde_json's order.
+pub fn put_error(inout o: ChunkSeq[u8], code: u64, span_err: SpanError) {
+    if code == ERR_POSITION {
+        put(inout o, in "{\"code\":-32602,\"message\":\"");
+        put_span_error(inout o, span_err);
+        put(inout o, in "\"}");
+        return;
+    }
+    if code == ERR_INVALID_SPAN || code == ERR_SOURCE_MISMATCH || code == ERR_NONE {
+        put(inout o, in "{\"code\":-32603,\"message\":\"navigation: ");
+        if code == ERR_SOURCE_MISMATCH {
+            put(inout o, in "SourceMismatch");
+        } else {
+            put(inout o, in "InvalidSpan");
+        }
+        put(inout o, in "\"}");
+        return;
+    }
+    put(
+        inout o,
+        in "{\"code\":-32003,\"data\":{\"kind\":\"resource\",\"status\":\"analysis_unavailable\"},\"message\":\"navigation: Resource(\\\""
+    );
+    if code == ERR_TRAVERSAL {
+        put(inout o, in "traversal work/depth");
+    } else if code == ERR_SYMBOLS {
+        put(inout o, in "symbols");
+    } else if code == ERR_SOURCE_BYTES {
+        put(inout o, in "source bytes");
+    } else if code == ERR_TOKEN_WORK {
+        put(inout o, in "token work");
+    } else if code == ERR_OUTPUT_BYTES {
+        put(inout o, in "output bytes");
+    } else if code == ERR_URI_BYTES {
+        put(inout o, in "URI bytes");
+    } else {
+        put(inout o, in "documents/query");
+    }
+    put(inout o, in "\\\")\"}");
+}
+
+// The `symbol`'s name as a JSON string.
+pub fn put_name_string(inout o: ChunkSeq[u8], in x: Ix, sym: u32) {
+    let mut b = ChunkSeq::new[u8]();
+    put_name(inout b, in x.ast, sym);
+    put_string(inout o, in b.as_slice());
+}
+
+pub fn ix_err(in x: Ix) -> u64 {
+    x.err
+}
+
+pub fn ix_span_err(in x: Ix) -> SpanError {
+    x.span_err
+}
+
+pub fn ix_contains(in x: Ix, i: u64, in q: Slice[u8]) -> bool {
+    name_contains(in x.ast, decl_name(in x, i), in q)
+}
+
+pub fn put_u(inout o: ChunkSeq[u8], n: u64) {
+    put_u64(inout o, n);
+}
+
+pub fn put_raw(inout o: ChunkSeq[u8], in b: Slice[u8]) {
+    put_bytes(inout o, in b);
+}

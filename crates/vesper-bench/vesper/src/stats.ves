@@ -38,12 +38,15 @@ use self::util::{
     zeros
 };
 use self::wide::{
+    udiv_u128,
+    w_from_u128,
     w,
     w_add,
     w_floor_divrem,
     w_is_zero,
     w_mul_small,
     w_mul_u64,
+    w_neg,
     w_sub,
     w_twice,
     w_u64,
@@ -316,22 +319,50 @@ pub fn do_paired_sample_new(baseline: u64, candidate: u64, operations: u64)
 
 // Directed rounding of the regression in basis points, floor and ceiling.
 pub fn do_regression_bp_bounds(s: Sample) -> BpBounds {
-    let scaled = w_mul_small(w_sub(w_u64(s.candidate), w_u64(s.baseline)), BP_SCALE);
-    let (q, r) = w_floor_divrem(scaled, w_u64(s.baseline));
-    BpBounds {
-        floor: q,
-        ceil: if w_is_zero(r) {
-            q
-        } else {
-            w_add(q, w_u64(1))
+    if s.baseline == 0 {
+        let scaled = w_mul_small(w_sub(w_u64(s.candidate), w_u64(s.baseline)), BP_SCALE);
+        let (q, r) = w_floor_divrem(scaled, w_u64(s.baseline));
+        return BpBounds {
+            floor: q,
+            ceil: if w_is_zero(r) {
+                q
+            } else {
+                w_add(q, w_u64(1))
+            }
+        };
+    }
+    // |candidate - baseline| * BP_SCALE / baseline in native u128, then the
+    // sign: floor(-x) = -ceil(x).
+    let up = s.candidate >= s.baseline;
+    let magnitude = if up {
+        wrapping_sub(s.candidate, s.baseline)
+    } else {
+        wrapping_sub(s.baseline, s.candidate)
+    };
+    let (q, exact) = udiv_u128(
+        wrapping_mul(widen_u128(magnitude), widen_u128(BP_SCALE)),
+        s.baseline
+    );
+    let down = w_from_u128(q);
+    let away = if exact {
+        down
+    } else {
+        w_add(down, w_u64(1))
+    };
+    if up {
+        BpBounds {
+            floor: down,
+            ceil: away
+        }
+    } else {
+        BpBounds {
+            floor: w_neg(away),
+            ceil: w_neg(down)
         }
     }
 }
 
 // The exact ratio order candidate/baseline (-1, 0, 1).
-fn compare_ratio(a: Sample, b: Sample) -> i64 {
-    w_ucmp(w_mul_u64(a.candidate, b.baseline), w_mul_u64(b.candidate, a.baseline))
-}
 
 // candidate/baseline against 1 + bp/BP_SCALE, for bp >= MIN_REGRESSION_BP.
 fn compare_threshold(s: Sample, bp: i64) -> i64 {
@@ -341,15 +372,22 @@ fn compare_threshold(s: Sample, bp: i64) -> i64 {
 
 // A stable bottom-up merge sort by ratio (Rust `sort_by` is stable, and
 // the interval reports the samples themselves, so equal ratios keep their
-// input order): runs of width 1, 2, 4, ... merge from `src` into `dst`,
-// taking the left run's sample on a tie.
+// input order): runs of width 1, 2, 4, ... of sample positions merge from
+// `src` into `dst`, taking the left run's position on a tie. The keys sit
+// in two word sequences and the cross products are native `u128`, so a
+// merge step moves one word instead of a `Sample`.
 fn sorted_by_ratio(in samples: Slice[Sample]) -> ChunkSeq[Sample] {
     let n = samples.len();
-    let mut src: ChunkSeq[Sample] = ChunkSeq::with_capacity[Sample](n);
-    let mut dst: ChunkSeq[Sample] = ChunkSeq::with_capacity[Sample](n);
+    let mut base: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut cand: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut src: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    let mut dst: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
     for i in 0..n {
-        src.push(gs(in samples, i));
-        dst.push(gs(in samples, i));
+        let x = gs(in samples, i);
+        base.push(x.baseline);
+        cand.push(x.candidate);
+        src.push(i);
+        dst.push(i);
     }
     let mut width: u64 = 1;
     loop {
@@ -371,15 +409,24 @@ fn sorted_by_ratio(in samples: Slice[Sample]) -> ChunkSeq[Sample] {
                     break;
                 }
                 let take_left = if i < mid && j < hi {
-                    compare_ratio(cs(in src, i), cs(in src, j)) <= 0
+                    let a = cu(in src, i);
+                    let b = cu(in src, j);
+                    let left = wrapping_mul(widen_u128(cu(in cand, a)), widen_u128(cu(in base, b)));
+                    let right = wrapping_mul(
+                        widen_u128(cu(in cand, b)),
+                        widen_u128(cu(in base, a))
+                    );
+                    left <= right
                 } else {
                     i < mid
                 };
                 if take_left {
-                    dst.try_set(k, cs(in src, i));
+                    let at = cu(in src, i);
+                    dst.try_set(k, at);
                     i = inc(i);
                 } else {
-                    dst.try_set(k, cs(in src, j));
+                    let at = cu(in src, j);
+                    dst.try_set(k, at);
                     j = inc(j);
                 }
                 k = inc(k);
@@ -389,7 +436,11 @@ fn sorted_by_ratio(in samples: Slice[Sample]) -> ChunkSeq[Sample] {
         swap(inout src, inout dst);
         width = add(width, width);
     }
-    src
+    let mut out: ChunkSeq[Sample] = ChunkSeq::with_capacity[Sample](n);
+    for i in 0..n {
+        out.push(gs(in samples, cu(in src, i)));
+    }
+    out
 }
 
 // Decision codes are the crate's `Decision`; reasons are Reason codes.

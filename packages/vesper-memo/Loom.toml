@@ -1,0 +1,6 @@
+[package]
+name = "@vesper/memo"
+version = "0.1.0"
+edition = "2026"
+# Memo tables only compute: no I/O, clock or network (design §42.3).
+capability_ceiling = ["Fail", "Alloc"]

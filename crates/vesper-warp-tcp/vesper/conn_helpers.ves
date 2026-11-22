@@ -117,13 +117,14 @@ fn fin_acked(in t: Tcb) -> bool {
 }
 
 fn pipe(in t: Tcb) -> u32 {
-    let mut p: u32 = 0;
-    for i in 0..t.sent_len {
-        let s = sq_get(in t, i);
-        if !s.sacked && !s.lost {
-            p = sat_add32(p, seg_bytes(s));
-        }
-    }
+    // `sent_pipe` is the sum the sq_* helpers keep; entries are at most one
+    // MSS each, so it fits u32 exactly when the old per-entry saturating
+    // sum did not saturate.
+    let mut p: u32 = if t.sent_pipe > 4294967295 {
+        4294967295
+    } else {
+        wrapping_u32(t.sent_pipe)
+    };
     if is_some(t.recovery_point) && !t.sack_ok {
         // RFC 6582: each duplicate ACK signals a segment left the network
         // (the window-inflation equivalent for pipe).

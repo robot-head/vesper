@@ -1,10 +1,10 @@
 //! Rewrite witnesses (REVIEW-STATUS COMP-03).
 //!
 //! Equality saturation decides that the extracted term is equal to the input
-//! graph, but nothing in egglog's answer says *why*. Before a fused term is
-//! used, this module asks egglog for a proof of `root = extracted`, turns the
-//! proof into a [`Witness`] with one [`Step`] per applied rewrite, and checks
-//! the witness with [`check`], which does not use egglog at all:
+//! graph, but the extraction alone does not say *why*. Before a fused term is
+//! used, the engine explains `root = extracted` as a [`Witness`] with one
+//! [`Step`] per applied rewrite (see [`crate::engine`]), and this module
+//! checks the witness with [`check`], which does not use the engine at all:
 //!
 //! * the source term is rebuilt from the graph's own `let` bindings
 //!   ([`source_term`]), not taken from egglog;
@@ -27,12 +27,9 @@
 //! Terms live in hash-consed arenas ([`Node`]): structurally equal subterms
 //! share one index, so term equality is index equality, and a step rebuilds
 //! only the path from the root to its position.
-use crate::engine::{Extracted, Node};
+use crate::engine::Node;
 use crate::{Error, RULE_LEMMAS};
-use egglog::proof::{Justification, ProofId, ProofStore};
-use egglog::{Term, TermDag, TermId, ast::Literal};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::rc::Rc;
+use std::collections::{BTreeSet, HashMap};
 
 /// Maximum steps in one witness; a longer witness is refused.
 pub const MAX_STEPS: usize = 1 << 18;
@@ -48,15 +45,6 @@ pub enum Direction {
     Forward,
     /// Right side to left side.
     Backward,
-}
-
-impl Direction {
-    fn flip(self) -> Self {
-        match self {
-            Direction::Forward => Direction::Backward,
-            Direction::Backward => Direction::Forward,
-        }
-    }
 }
 
 /// One applied rewrite.
@@ -201,11 +189,30 @@ impl RuleSet {
         &self.rules
     }
 
-    fn find(&self, lhs: &Pat, rhs: &Pat) -> Option<usize> {
+    pub(crate) fn find(&self, lhs: &Pat, rhs: &Pat) -> Option<usize> {
         self.rules
             .iter()
             .position(|r| &r.lhs == lhs && &r.rhs == rhs)
     }
+}
+
+/// The `(lhs, rhs)` patterns of every rewrite of a program text, in order
+/// (how the engine numbers the rules of its steps).
+pub(crate) fn program_rewrites(text: &str) -> Result<Vec<(Pat, Pat)>, Error> {
+    let mut out = Vec::new();
+    for command in parse_sexps(text)? {
+        if let Sx::List(items) = &command
+            && matches!(items.first(), Some(Sx::Atom(head)) if head == "rewrite")
+        {
+            let [_, lhs, rhs] = items.as_slice() else {
+                return Err(Error::Witness(
+                    "a rewrite with options or the wrong arity".into(),
+                ));
+            };
+            out.push((pattern(lhs)?, pattern(rhs)?));
+        }
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -556,289 +563,5 @@ pub fn check(
             .filter(|(_, n)| *n > 0)
             .map(|(r, n)| (r.name, r.lemma, n))
             .collect(),
-    })
-}
-
-// ---------------------------------------------------------------------------
-// The producer: egglog proof to witness.
-
-struct Producer<'a> {
-    rules: &'a RuleSet,
-    store: &'a ProofStore,
-    arena: Arena,
-    terms: HashMap<TermId, usize>,
-    names: HashMap<String, Option<usize>>,
-}
-
-impl Producer<'_> {
-    fn term(&mut self, dag: &TermDag, term: TermId) -> Result<usize, Error> {
-        let mut stack = vec![(term, false)];
-        while let Some((id, expanded)) = stack.pop() {
-            if self.terms.contains_key(&id) {
-                continue;
-            }
-            let node = match dag.get(id) {
-                Term::Lit(Literal::Int(v)) => Node::Int(*v),
-                Term::Lit(Literal::String(s)) => Node::Str(s.clone()),
-                Term::Lit(other) => {
-                    return Err(Error::Witness(format!("proof literal {other:?}")));
-                }
-                Term::Var(v) => return Err(Error::Witness(format!("proof variable {v}"))),
-                Term::App(head, kids) => {
-                    if !expanded {
-                        stack.push((id, true));
-                        stack.extend(kids.iter().rev().map(|k| (*k, false)));
-                        continue;
-                    }
-                    Node::App(head.clone(), kids.iter().map(|k| self.terms[k]).collect())
-                }
-            };
-            let slot = self.arena.intern(node)?;
-            self.terms.insert(id, slot);
-        }
-        Ok(self.terms[&term])
-    }
-
-    fn rule_index(&mut self, name: &str) -> Result<Option<usize>, Error> {
-        if let Some(found) = self.names.get(name) {
-            return Ok(*found);
-        }
-        let found = match parse_sexps(name)?.as_slice() {
-            [Sx::List(items)] => match items.as_slice() {
-                [Sx::Atom(kw), lhs, rhs] if kw == "rewrite" => {
-                    self.rules.find(&pattern(lhs)?, &pattern(rhs)?)
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-        self.names.insert(name.to_owned(), found);
-        Ok(found)
-    }
-
-    /// The rewrite chain of one rule justification: empty for a term
-    /// existence proof `t = t`, one root step otherwise.
-    fn rule_step<'b>(
-        &mut self,
-        name: &str,
-        substitution: impl IntoIterator<Item = (&'b String, &'b TermId)>,
-        from: usize,
-        to: usize,
-        premise: Option<(usize, usize, &[Step])>,
-    ) -> Result<Vec<Step>, Error> {
-        if from == to {
-            return Ok(Vec::new());
-        }
-        let rule = self
-            .rule_index(name)?
-            .ok_or_else(|| Error::Witness(format!("equality justified by unknown rule {name}")))?;
-        let dag = self.store.term_dag();
-        let mut bound = BTreeMap::new();
-        for (var, term) in substitution {
-            // egglog's desugaring adds `@`-prefixed variables for the matched
-            // e-class; they are not pattern variables.
-            if !var.starts_with('@') {
-                bound.insert(var.clone(), self.term(dag, *term)?);
-            }
-        }
-        let map: HashMap<&str, usize> = bound.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-        let r = &self.rules.rules[rule];
-        let lhs = self.arena.instantiate(&r.lhs, &map)?;
-        let rhs = self.arena.instantiate(&r.rhs, &map)?;
-        let name = r.name;
-        let unjustified =
-            || Error::Witness(format!("rule {name} does not justify its proposition"));
-        // The rule's premise proves that the matched e-class term `v` equals
-        // an instance of the left side; the proposition relates `v` to the
-        // right side's instance. The chain is `v ->* lhs` then `lhs -> rhs`.
-        let (pl, pr, pchain) = premise.ok_or_else(unjustified)?;
-        let mut steps: Vec<Step> = if pr == lhs {
-            pchain.to_vec()
-        } else if pl == lhs {
-            reversed(pchain)
-        } else {
-            return Err(unjustified());
-        };
-        let v = if pr == lhs { pl } else { pr };
-        steps.push(Step {
-            rule,
-            direction: Direction::Forward,
-            path: Vec::new(),
-            substitution: bound.into_iter().collect(),
-        });
-        if (v, rhs) == (from, to) {
-            Ok(steps)
-        } else if (rhs, v) == (from, to) {
-            Ok(reversed(&steps))
-        } else {
-            Err(unjustified())
-        }
-    }
-
-    /// Rewrite chains for every proof reachable from `top`, children first.
-    fn chain(&mut self, top: ProofId) -> Result<Rc<Vec<Step>>, Error> {
-        let mut memo: HashMap<ProofId, Rc<Vec<Step>>> = HashMap::new();
-        let mut stack = vec![(top, false)];
-        while let Some((pid, expanded)) = stack.pop() {
-            if memo.contains_key(&pid) {
-                continue;
-            }
-            let proof = self.store.get(pid);
-            let children: Vec<ProofId> = match proof.justification() {
-                Justification::Fiat => Vec::new(),
-                Justification::Rule { premise_proofs, .. } => {
-                    let dag = self.store.term_dag();
-                    let prop = proof.proposition();
-                    if self.term(dag, prop.lhs())? == self.term(dag, prop.rhs())? {
-                        Vec::new()
-                    } else if premise_proofs.len() == 1 {
-                        premise_proofs.clone()
-                    } else {
-                        return Err(Error::Witness(
-                            "a rewrite proof needs exactly one premise".into(),
-                        ));
-                    }
-                }
-                Justification::Trans(a, b) => vec![*a, *b],
-                Justification::Sym(a) => vec![*a],
-                Justification::Congr {
-                    proof, child_proof, ..
-                } => vec![*proof, *child_proof],
-                other => {
-                    return Err(Error::Witness(format!("unsupported proof step {other:?}")));
-                }
-            };
-            if !expanded && children.iter().any(|c| !memo.contains_key(c)) {
-                stack.push((pid, true));
-                stack.extend(children.into_iter().map(|c| (c, false)));
-                continue;
-            }
-            let dag = self.store.term_dag();
-            let prop = proof.proposition();
-            let (from, to) = (self.term(dag, prop.lhs())?, self.term(dag, prop.rhs())?);
-            let steps: Vec<Step> = match proof.justification() {
-                Justification::Fiat => {
-                    if from != to {
-                        return Err(Error::Witness("equality by fiat".into()));
-                    }
-                    Vec::new()
-                }
-                Justification::Rule {
-                    name,
-                    substitution,
-                    premise_proofs,
-                } => {
-                    let premise = match premise_proofs.as_slice() {
-                        [p] if from != to => {
-                            let pp = self.store.get(*p).proposition();
-                            let (pl, pr) = (self.term(dag, pp.lhs())?, self.term(dag, pp.rhs())?);
-                            Some((pl, pr, memo[p].clone()))
-                        }
-                        _ => None,
-                    };
-                    self.rule_step(
-                        name,
-                        substitution.iter(),
-                        from,
-                        to,
-                        premise.as_ref().map(|(l, r, c)| (*l, *r, c.as_slice())),
-                    )?
-                }
-                Justification::Trans(a, b) => {
-                    let mut v = memo[a].as_ref().clone();
-                    v.extend(memo[b].iter().cloned());
-                    v
-                }
-                Justification::Sym(a) => reversed(&memo[a]),
-                Justification::Congr {
-                    proof,
-                    child_index,
-                    child_proof,
-                } => {
-                    let k = u32::try_from(*child_index)
-                        .map_err(|_| Error::Witness("congruence index".into()))?;
-                    let mut v = memo[proof].as_ref().clone();
-                    v.extend(memo[child_proof].iter().map(|s| {
-                        let mut path = Vec::with_capacity(s.path.len() + 1);
-                        path.push(k);
-                        path.extend_from_slice(&s.path);
-                        Step { path, ..s.clone() }
-                    }));
-                    v
-                }
-                _ => unreachable!("rejected above"),
-            };
-            if steps.len() > MAX_STEPS {
-                return Err(Error::Limit("witness steps"));
-            }
-            memo.insert(pid, Rc::new(steps));
-        }
-        Ok(memo.remove(&top).expect("top proof converted"))
-    }
-}
-
-fn reversed(chain: &[Step]) -> Vec<Step> {
-    chain
-        .iter()
-        .rev()
-        .map(|s| Step {
-            direction: s.direction.flip(),
-            ..s.clone()
-        })
-        .collect()
-}
-
-/// Turns egglog's proof of a `prove (= source target)` query into a witness
-/// oriented from `source` to `target`.
-pub(crate) fn produce(
-    rules: &RuleSet,
-    store: &ProofStore,
-    query: ProofId,
-    source: (&[Node], usize),
-    target: &Extracted,
-) -> Result<Witness, Error> {
-    let mut producer = Producer {
-        rules,
-        store,
-        arena: Arena::default(),
-        terms: HashMap::new(),
-        names: HashMap::new(),
-    };
-    let src = producer.arena.import(source.0)?[source.1];
-    let tgt = producer.arena.import(&target.nodes)?[target.root];
-    let dag = store.term_dag();
-    let ends = |producer: &mut Producer, p: ProofId| -> Result<(usize, usize), Error> {
-        let prop = store.get(p).proposition();
-        Ok((
-            producer.term(dag, prop.lhs())?,
-            producer.term(dag, prop.rhs())?,
-        ))
-    };
-    let about = |e: (usize, usize)| e == (src, tgt) || e == (tgt, src);
-    // egglog may return the queried equality itself, or the proof of the
-    // query rule whose single premise is the queried equality.
-    let mut premise = query;
-    let mut e = ends(&mut producer, query)?;
-    if !about(e)
-        && let Justification::Rule { premise_proofs, .. } = store.get(query).justification()
-        && let [p] = premise_proofs.as_slice()
-    {
-        premise = *p;
-        e = ends(&mut producer, premise)?;
-    }
-    let (lhs, rhs) = e;
-    let chain = producer.chain(premise)?;
-    let steps = if (lhs, rhs) == (src, tgt) {
-        chain.as_ref().clone()
-    } else if (lhs, rhs) == (tgt, src) {
-        reversed(&chain)
-    } else {
-        return Err(Error::Witness(
-            "the proof is not about the source and the extracted term".into(),
-        ));
-    };
-    Ok(Witness {
-        terms: producer.arena.nodes,
-        steps,
     })
 }

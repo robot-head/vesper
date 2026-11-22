@@ -1,0 +1,341 @@
+// Memo tables with salsa's invalidation (salsa 0.24, as src/database.rs
+// uses it): inputs, derived queries, revisions, deep verification in read
+// order and early cutoff (backdating) for queries whose values compare.
+//
+// The data design is flat. An input is a row (`in_changed`: the revision
+// its value last changed in). A query instance is a (query, input row)
+// pair; `memo_of` maps it to a memo row or `NONE`. A memo row holds the
+// revision it was last verified in, the revision its value last changed in
+// (the most recent change among what it read, or the old one when an equal
+// value is backdated), the value's fingerprint and its reads, in order, in
+// the edge pool (`edges`: three words per read).
+//
+// What a query reads and what it returns are the caller's: `Oracle`
+// answers "executing query q on row f, whose input is in state s, reads
+// these and yields this fingerprint". The harness records it from the
+// actual queries (tests/self_host_lsp_core.rs); a Vesper language server
+// replaces it with the query functions themselves.
+
+pub const NONE: u64 = 18446744073709551615;
+// An edge: an input row, or a query instance.
+pub enum Edge: _ {
+    Input = 0,
+    Query = 1
+}
+
+// Log records, three words each: kind, query, row.
+pub enum Log: _ {
+    Execute = 1,
+    Validate = 2,
+    Missing = 3
+}
+
+// An oracle key: row, query, input state.
+enum Key: _ {
+    Row = 0,
+    Query = 1,
+    State = 2,
+    Words = 3
+}
+
+// An oracle result in `data`: its fingerprint, its read count, then the
+// reads.
+enum Recorded: _ {
+    Fingerprint = 0,
+    Reads = 1,
+    First = 2
+}
+
+// A read (an edge): its tag, row and query.
+enum Read: _ {
+    Tag = 0,
+    Row = 1,
+    Query = 2,
+    Words = 3
+}
+
+// The recorded query results, sorted by (row, query, state): `keys` holds
+// three words per result, `at` where its fingerprint and reads start in
+// `data` (fingerprint, read count, then three words per read).
+pub struct Oracle {
+    keys: ChunkSeq[u64],
+    at: ChunkSeq[u64],
+    data: ChunkSeq[u64]
+}
+
+pub struct Db {
+    revision: u64,
+    in_changed: ChunkSeq[u64],
+    in_state: ChunkSeq[u64],
+    nq: u64,
+    // Whether query q's values compare (1) or always count as changed (0,
+    // salsa's `no_eq`).
+    eq: ChunkSeq[u64],
+    memo_of: ChunkSeq[u64],
+    m_verified: ChunkSeq[u64],
+    m_changed: ChunkSeq[u64],
+    m_fp: ChunkSeq[u64],
+    m_edges_at: ChunkSeq[u64],
+    m_edges_len: ChunkSeq[u64],
+    edges: ChunkSeq[u64],
+    log: ChunkSeq[u64],
+    oracle: Oracle
+}
+
+fn w(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn set(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    let _ = s.try_set(i, x);
+}
+
+fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// salsa's `Revision::start()`.
+const FIRST_REVISION: u64 = 1;
+
+pub fn db_new(nq: u64, sink eq: ChunkSeq[u64], sink oracle: Oracle) -> Db {
+    Db {
+        revision: FIRST_REVISION,
+        in_changed: ChunkSeq::new(),
+        in_state: ChunkSeq::new(),
+        nq: nq,
+        eq: eq,
+        memo_of: ChunkSeq::new(),
+        m_verified: ChunkSeq::new(),
+        m_changed: ChunkSeq::new(),
+        m_fp: ChunkSeq::new(),
+        m_edges_at: ChunkSeq::new(),
+        m_edges_len: ChunkSeq::new(),
+        edges: ChunkSeq::new(),
+        log: ChunkSeq::new(),
+        oracle: oracle
+    }
+}
+
+// A new input (salsa's `Input::new`): its value counts as changed in the
+// current revision, which does not advance.
+pub fn input_new(inout db: Db) -> u64 {
+    let row = db.in_changed.len();
+    db.in_changed.push(db.revision);
+    db.in_state.push(0);
+    for q in 0..db.nq {
+        db.memo_of.push(NONE);
+    }
+    row
+}
+
+// An input setter: a new revision, in which this input changed. Setters
+// do not compare values.
+pub fn input_set(inout db: Db, row: u64) {
+    db.revision = wrapping_add(db.revision, 1);
+    set(inout db.in_changed, row, db.revision);
+    set(inout db.in_state, row, wrapping_add(w(in db.in_state, row), 1));
+}
+
+fn note(inout db: Db, kind: u64, q: u64, f: u64) {
+    db.log.push(kind);
+    db.log.push(q);
+    db.log.push(f);
+}
+
+fn slot(in db: Db, q: u64, f: u64) -> u64 {
+    wrapping_add(wrapping_mul(f, db.nq), q)
+}
+
+// The oracle row of (f, q, state), or `NONE`.
+fn lookup(in o: Oracle, f: u64, q: u64, s: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = o.at.len();
+    loop {
+        if lo >= hi {
+            return NONE;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        let k = wrapping_mul(mid, Key::Words);
+        let kf = w(in o.keys, wrapping_add(k, Key::Row));
+        let kq = w(in o.keys, wrapping_add(k, Key::Query));
+        let ks = w(in o.keys, wrapping_add(k, Key::State));
+        if kf == f && kq == q && ks == s {
+            return mid;
+        }
+        let less = kf < f || (kf == f && (kq < q || (kq == q && ks < s)));
+        if less {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// `execute`: run query q on row f (old memo `m` or `NONE`), fetching what
+// it reads in order, and store the new memo, backdated when its value
+// equals the old one.
+fn execute(inout db: Db, q: u64, f: u64, m: u64) -> u64 {
+    note(inout db, Log::Execute, q, f);
+    let r = lookup(in db.oracle, f, q, w(in db.in_state, f));
+    let mut fp: u64 = 0;
+    let mut changed: u64 = FIRST_REVISION;
+    // Reads fetch (and may execute) other queries, which add their own
+    // edges: this memo's go to the pool after them.
+    let mut reads_of: ChunkSeq[u64] = ChunkSeq::new();
+    if r == NONE {
+        note(inout db, Log::Missing, q, f);
+    } else {
+        let at = w(in db.oracle.at, r);
+        fp = w(in db.oracle.data, wrapping_add(at, Recorded::Fingerprint));
+        let reads = w(in db.oracle.data, wrapping_add(at, Recorded::Reads));
+        for i in 0..reads {
+            let e = wrapping_add(wrapping_add(at, Recorded::First), wrapping_mul(i, Read::Words));
+            let tag = w(in db.oracle.data, wrapping_add(e, Read::Tag));
+            let ef = w(in db.oracle.data, wrapping_add(e, Read::Row));
+            let eq = w(in db.oracle.data, wrapping_add(e, Read::Query));
+            if tag == Edge::Input {
+                changed = max64(changed, w(in db.in_changed, ef));
+            } else {
+                let dm = fetch_memo(inout db, eq, ef);
+                changed = max64(changed, w(in db.m_changed, dm));
+            }
+            reads_of.push(tag);
+            reads_of.push(ef);
+            reads_of.push(eq);
+        }
+    }
+    let start = db.edges.len();
+    let len = reads_of.len();
+    for i in 0..len {
+        db.edges.push(w(in reads_of, i));
+    }
+    let mut row = m;
+    if m == NONE {
+        row = db.m_verified.len();
+        db.m_verified.push(0);
+        db.m_changed.push(0);
+        db.m_fp.push(0);
+        db.m_edges_at.push(0);
+        db.m_edges_len.push(0);
+        let s = slot(in db, q, f);
+        set(inout db.memo_of, s, row);
+    } else if w(in db.eq, q) == 1 && w(in db.m_fp, m) == fp {
+        changed = w(in db.m_changed, m);
+    }
+    set(inout db.m_verified, row, db.revision);
+    set(inout db.m_changed, row, changed);
+    set(inout db.m_fp, row, fp);
+    set(inout db.m_edges_at, row, start);
+    set(inout db.m_edges_len, row, len);
+    row
+}
+
+// `deep_verify_memo`: every read, in order, is unchanged since the memo
+// was verified; the first changed one stops the walk. An unchanged memo is
+// marked verified (salsa's `DidValidateMemoizedValue`).
+fn deep_verify(inout db: Db, q: u64, f: u64, m: u64) -> bool {
+    let verified = w(in db.m_verified, m);
+    let at = w(in db.m_edges_at, m);
+    let n = w(in db.m_edges_len, m);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let tag = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Tag)));
+        let ef = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Row)));
+        let eq = w(in db.edges, wrapping_add(at, wrapping_add(i, Read::Query)));
+        let changed = if tag == Edge::Input {
+            w(in db.in_changed, ef) > verified
+        } else {
+            changed_after(inout db, eq, ef, verified)
+        };
+        if changed {
+            return false;
+        }
+        i = wrapping_add(i, Read::Words);
+    }
+    set(inout db.m_verified, m, db.revision);
+    note(inout db, Log::Validate, q, f);
+    true
+}
+
+// `maybe_changed_after`: whether query q on row f changed after `rev`,
+// verifying (and if need be executing) it first.
+fn changed_after(inout db: Db, q: u64, f: u64, rev: u64) -> bool {
+    let m = w(in db.memo_of, slot(in db, q, f));
+    if m == NONE {
+        return true;
+    }
+    if w(in db.m_verified, m) == db.revision {
+        return w(in db.m_changed, m) > rev;
+    }
+    if deep_verify(inout db, q, f, m) {
+        return w(in db.m_changed, m) > rev;
+    }
+    let row = execute(inout db, q, f, m);
+    w(in db.m_changed, row) > rev
+}
+
+// `fetch`: the memo row of query q on row f, current in this revision.
+fn fetch_memo(inout db: Db, q: u64, f: u64) -> u64 {
+    let m = w(in db.memo_of, slot(in db, q, f));
+    if m != NONE {
+        if w(in db.m_verified, m) == db.revision {
+            return m;
+        }
+        if deep_verify(inout db, q, f, m) {
+            return m;
+        }
+    }
+    execute(inout db, q, f, m)
+}
+
+// The fingerprint of query q on row f's current value.
+pub fn fetch(inout db: Db, q: u64, f: u64) -> u64 {
+    let m = fetch_memo(inout db, q, f);
+    w(in db.m_fp, m)
+}
+
+pub fn db_log(in db: Db) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity(db.log.len());
+    for i in 0..db.log.len() {
+        out.push(w(in db.log, i));
+    }
+    out
+}
+
+pub fn oracle_new() -> Oracle {
+    Oracle {
+        keys: ChunkSeq::new(),
+        at: ChunkSeq::new(),
+        data: ChunkSeq::new()
+    }
+}
+
+// Appends one recorded result; results must come sorted by key.
+pub fn oracle_push(inout o: Oracle, f: u64, q: u64, s: u64, fp: u64) -> u64 {
+    o.keys.push(f);
+    o.keys.push(q);
+    o.keys.push(s);
+    o.at.push(o.data.len());
+    o.data.push(fp);
+    o.data.push(0);
+    wrapping_sub(o.data.len(), 1)
+}
+
+// Adds a read to the result whose read count is at `count_at`.
+pub fn oracle_read(inout o: Oracle, count_at: u64, tag: u64, f: u64, q: u64) {
+    let n = w(in o.data, count_at);
+    set(inout o.data, count_at, wrapping_add(n, 1));
+    o.data.push(tag);
+    o.data.push(f);
+    o.data.push(q);
+}

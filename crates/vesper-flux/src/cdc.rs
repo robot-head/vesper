@@ -1,5 +1,5 @@
 use super::{Circuit, Executor, TickInput};
-use crate::{Budget, Error, Row, ZSet, zset::Accumulator};
+use crate::{Budget, Error, ZSet, zset::Accumulator};
 
 /// Padding-free wire value, encoded explicitly as exactly 32 little-endian bytes.
 /// Timestamp is arbitrary signed event time; ingestion never advances a frontier.
@@ -96,7 +96,7 @@ impl CdcPolicy {
         }
         Ok(())
     }
-    pub(super) fn binding(&self, header: CdcHeader) -> Result<usize, Error> {
+    pub(crate) fn binding(&self, header: CdcHeader) -> Result<usize, Error> {
         let i = self
             .bindings
             .binary_search_by_key(&header.partition_id, |b| b.partition_id)
@@ -186,59 +186,19 @@ impl Executor {
             return Err(Error::Limit("CDC bytes"));
         }
         let mut next = source.next.clone();
-        let mut acc: Vec<_> = self
-            .circuit
-            .inputs
-            .iter()
-            .map(|w| Accumulator::new(*w, self.circuit.limits))
-            .collect::<Result<_, _>>()?;
+        let mut acc = Accumulator::new(&self.circuit.inputs, self.circuit.limits)?;
         let mut budget = Budget::new(self.circuit.limits);
-        let mut cursor = 0usize;
-        let mut records = 0usize;
-        let mut max_ts = i64::MIN;
-        while cursor < bytes.len() {
-            if records >= source.policy.max_records {
-                return Err(Error::Limit("CDC records"));
-            }
-            budget.charge(1)?;
-            let header_end = cursor
-                .checked_add(CdcHeader::BYTES)
-                .ok_or(Error::Overflow)?;
-            let header = CdcHeader::decode(
-                bytes
-                    .get(cursor..header_end)
-                    .ok_or(Error::Cdc("truncated header"))?,
-            )?;
-            let binding_index = source.policy.binding(header)?;
-            let binding = &source.policy.bindings[binding_index];
-            if header.source_lsn != next[binding_index] {
-                return Err(Error::Cdc("source offset"));
-            }
-            next[binding_index] = header.source_lsn.checked_add(1).ok_or(Error::Overflow)?;
-            let width = self.circuit.inputs[binding.input];
-            let end = width
-                .checked_mul(8)
-                .and_then(|len| header_end.checked_add(len))
-                .ok_or(Error::Overflow)?;
-            let payload = bytes
-                .get(header_end..end)
-                .ok_or(Error::Cdc("truncated row"))?;
-            budget.charge(width)?;
-            let row: Row = payload
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|chunk| i64::from_le_bytes(*chunk))
-                .collect();
-            acc[binding.input].add(&row, i128::from(header.z_weight), &mut budget)?;
-            max_ts = max_ts.max(header.event_ts_ms);
-            records = records.checked_add(1).ok_or(Error::Overflow)?;
-            cursor = end;
-        }
-        let deltas = acc
-            .into_iter()
-            .map(Accumulator::finish)
-            .collect::<Result<_, _>>()?;
+        // The record loop runs in Vesper (vesper/src/cdc.ves), in this
+        // module's order of charges and checks.
+        let (records, max_ts) = crate::port::cdc_ingest(
+            &mut acc,
+            bytes,
+            &source.policy,
+            &self.circuit.inputs,
+            &mut next,
+            &mut budget,
+        )?;
+        let deltas = acc.finish()?;
         let delta = self.tick_inner(&TickInput { deltas })?;
         // No fallible operations after tick commits.
         self.source.as_mut().expect("validated bound source").next = next;

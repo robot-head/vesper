@@ -1,0 +1,386 @@
+// @vesper/lsp-documents: `DocumentStore` of crates/vesper-lsp in Vesper
+// (self-hosting wave SH5 lane 16, #1339).
+//
+// It is its own package, apart from @vesper/lsp, because a world that
+// holds @vesper/serde cannot name the builtin `String`: serde's
+// `Kind::String` variant takes the name (E0111, see the lane report's
+// "Compiler gaps"). The transport needs no `String`; the store needs it.
+//
+// - document.ves: the store.
+use self::document::{
+    Change,
+    Closed,
+    Store,
+    StoreError,
+    StoreLimits,
+    doc_revision,
+    doc_text,
+    doc_version,
+    store_change,
+    store_close,
+    store_get,
+    store_len,
+    store_new,
+    store_open,
+    store_revision,
+    store_set_revision,
+    store_total
+};
+use @vesper/span::{
+    Limits,
+    Position,
+    Range,
+    Resource
+};
+use @vesper/span::Error as SpanError;
+
+// An op's tag.
+enum Op: _ {
+    Open = 1,
+    Change = 2,
+    Close = 3,
+    Get = 4,
+    SetRevision = 5
+}
+
+// The harness's little-endian words.
+enum Le: _ {
+    WordBytes = 8
+}
+// The status of a `get` that finds nothing.
+const STATUS_ABSENT: u64 = 1000;
+// `Error::Budget(r)` of vesper-span as `BUDGET_BASE + r`.
+const BUDGET_BASE: u64 = 20;
+// `StoreError::Index(e)` as `INDEX_BASE + e`.
+const INDEX_BASE: u64 = 100;
+
+copy struct Reader {
+    pos: u64
+}
+
+fn word(in b: Slice[u8], inout r: Reader) -> u64 {
+    let x = match b.try_read_u64_le(r.pos) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    r.pos = wrapping_add(r.pos, Le::WordBytes);
+    x
+}
+
+fn resource_code(r: Resource) -> u64 {
+    match r {
+        Resource::Source => 0,
+        Resource::Lines => 1,
+        Resource::Metadata => 2,
+        Resource::Work => 3,
+        Resource::Edits => 4,
+        Resource::Output => 5,
+        Resource::Diagnostics => 6,
+        Resource::Labels => 7,
+        Resource::Fixes => 8,
+        Resource::Text => 9,
+    }
+}
+
+fn span_code(e: SpanError) -> u64 {
+    match e {
+        SpanError::InvalidLimits => 0,
+        SpanError::Budget(r) => wrapping_add(BUDGET_BASE, resource_code(r)),
+        SpanError::LineOutOfBounds => 2,
+        SpanError::CharacterOutOfBounds => 3,
+        SpanError::ByteOutOfBounds => 4,
+        SpanError::Utf8Boundary => 5,
+        SpanError::SurrogateInterior => 6,
+        SpanError::LineEndingInterior => 7,
+        SpanError::ReversedRange => 8,
+        SpanError::OverlappingEdits => 9,
+        SpanError::SourceMismatch => 10,
+        SpanError::InvalidDiagnostic => 11,
+        SpanError::Allocation => 12,
+    }
+}
+
+// The status word of a refusal: the `StoreError` index plus one.
+fn error_code(e: StoreError) -> u64 {
+    wrapping_add(
+        match e {
+            StoreError::SInvalidLimits => 0,
+            StoreError::SInvalidUri => 1,
+            StoreError::SAlreadyOpen => 2,
+            StoreError::SNotOpen => 3,
+            StoreError::SVersion => 4,
+            StoreError::SDocumentLimit => 5,
+            StoreError::STotalLimit => 6,
+            StoreError::SChangeLimit => 7,
+            StoreError::SWorkLimit => 8,
+            StoreError::SRevisionOverflow => 9,
+            StoreError::SRangeLength => 10,
+            StoreError::SAllocation => 11,
+            StoreError::SIndex(x) => wrapping_add(INDEX_BASE, span_code(x)),
+        },
+        1
+    )
+}
+
+fn read_index(in b: Slice[u8], inout r: Reader) -> Limits {
+    Limits {
+        max_source_bytes: narrow_usize(word(in b, inout r)),
+        max_lines: narrow_usize(word(in b, inout r)),
+        max_metadata_bytes: narrow_usize(word(in b, inout r)),
+        max_work: narrow_usize(word(in b, inout r)),
+        max_edits: narrow_usize(word(in b, inout r)),
+        max_output_bytes: narrow_usize(word(in b, inout r)),
+        max_diagnostics: narrow_usize(word(in b, inout r)),
+        max_labels: narrow_usize(word(in b, inout r)),
+        max_fixes: narrow_usize(word(in b, inout r)),
+        max_text_bytes: narrow_usize(word(in b, inout r))
+    }
+}
+
+fn read_limits(in b: Slice[u8], inout r: Reader) -> StoreLimits {
+    let max_document_bytes = word(in b, inout r);
+    let max_documents = word(in b, inout r);
+    let max_total_bytes = word(in b, inout r);
+    let max_uri_bytes = word(in b, inout r);
+    let max_changes = word(in b, inout r);
+    let max_work = word(in b, inout r);
+    StoreLimits {
+        max_document_bytes: max_document_bytes,
+        max_documents: max_documents,
+        max_total_bytes: max_total_bytes,
+        max_uri_bytes: max_uri_bytes,
+        max_changes: max_changes,
+        max_work: max_work,
+        index: read_index(in b, inout r)
+    }
+}
+
+// The pool text `off .. off + len` as a `String` (the harness writes only
+// UTF-8 there).
+fn text_at(in pool: Slice[u8], off: u64, len: u64) -> String {
+    match String::from_utf8(in pool[off..wrapping_add(off, len)]) {
+        Option::Some(s) => s,
+        Option::None => String::new(),
+    }
+}
+
+fn put_bytes(inout out: ChunkSeq[u64], in bytes: Slice[u8]) {
+    out.push(bytes.len());
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..bytes.len() {
+        let c = match bytes.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        x = x | wrapping_shl_u64(c, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == Le::WordBytes {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+}
+
+// One op's result: its status, the store's count, total and revision, and
+// the document it returns (present, version, revision, text).
+fn put_state(inout out: ChunkSeq[u64], in s: Store, status: u64, doc: Option[u64]) {
+    out.push(status);
+    out.push(store_len(in s));
+    out.push(store_total(in s));
+    out.push(store_revision(in s));
+    match doc {
+        Option::Some(at) => {
+            out.push(1);
+            out.push(wrapping_u64(doc_version(in s, at)));
+            out.push(doc_revision(in s, at));
+            let mut t: ChunkSeq[u8] = ChunkSeq::new();
+            doc_text(in s, at, inout t);
+            put_bytes(inout out, in t[0..t.len()]);
+        }
+        Option::None => {
+            out.push(0);
+        }
+    }
+}
+
+fn put_closed(inout out: ChunkSeq[u64], in s: Store, in c: Closed) {
+    out.push(0);
+    out.push(store_len(in s));
+    out.push(store_total(in s));
+    out.push(store_revision(in s));
+    out.push(1);
+    out.push(wrapping_u64(c.version));
+    out.push(c.revision);
+    put_bytes(inout out, in c.text.as_bytes());
+}
+
+fn try_new(l: StoreLimits) -> Result[Store, StoreError] {
+    handle Fail[StoreError] in {
+        store_ok(store_new(l))
+    } with {
+        return v => v,
+        raise(e, resume) => store_err(e),
+    }
+}
+
+fn try_open(inout s: Store, in uri: Str, version: i64, in text: Str) -> Result[u64, StoreError] {
+    handle Fail[StoreError] in {
+        count_ok(store_open(inout s, in uri, version, in text))
+    } with {
+        return v => v,
+        raise(e, resume) => count_err(e),
+    }
+}
+
+fn try_change(inout s: Store, in uri: Str, version: i64, in changes: ChunkSeq[Change])
+    -> Result[u64, StoreError] {
+    handle Fail[StoreError] in {
+        count_ok(store_change(inout s, in uri, version, in changes))
+    } with {
+        return v => v,
+        raise(e, resume) => count_err(e),
+    }
+}
+
+fn try_close(inout s: Store, in uri: Str) -> Result[Closed, StoreError] {
+    handle Fail[StoreError] in {
+        closed_ok(store_close(inout s, in uri))
+    } with {
+        return v => v,
+        raise(e, resume) => closed_err(e),
+    }
+}
+
+fn after(inout out: ChunkSeq[u64], in s: Store, r: Result[u64, StoreError]) {
+    match r {
+        Result::Ok(at) => put_state(inout out, in s, 0, Option::Some(at)),
+        Result::Err(e) => put_state(inout out, in s, error_code(e), Option::None),
+    }
+}
+
+// Task "documents": the input is the store limits (six words, then the
+// ten `vesper_span::Limits` words), the number of op words, the ops and the
+// text pool. Each op is a tag and its operands (URIs and texts as pool
+// offset and length); see `Op`. The result is the status of
+// `DocumentStore::new`, then `put_state` per op.
+pub fn lsp_documents(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let l = read_limits(in b, inout r);
+    let n = word(in b, inout r);
+    let start = r.pos;
+    let end = wrapping_add(start, wrapping_mul(n, Le::WordBytes));
+    let pool = b[end..b.len()];
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    let mut s = match try_new(l) {
+        Result::Ok(s) => s,
+        Result::Err(e) => {
+            out.push(error_code(e));
+            return out;
+        }
+    };
+    out.push(0);
+    loop {
+        if r.pos >= end {
+            break;
+        }
+        let op = word(in b, inout r);
+        if op == Op::SetRevision {
+            store_set_revision(inout s, word(in b, inout r));
+            put_state(inout out, in s, 0, Option::None);
+            continue;
+        }
+        let uri_off = word(in b, inout r);
+        let uri_len = word(in b, inout r);
+        let uri = text_at(in pool, uri_off, uri_len);
+        if op == Op::Open {
+            let version = wrapping_i64(word(in b, inout r));
+            let t_off = word(in b, inout r);
+            let t_len = word(in b, inout r);
+            let text = text_at(in pool, t_off, t_len);
+            let got = try_open(inout s, in uri, version, in text);
+            after(inout out, in s, got);
+        } else if op == Op::Change {
+            let version = wrapping_i64(word(in b, inout r));
+            let count = word(in b, inout r);
+            let mut changes: ChunkSeq[Change] = ChunkSeq::new();
+            for i in 0..count {
+                let has_range = word(in b, inout r) == 1;
+                let sl = wrapping_u32(word(in b, inout r));
+                let sc = wrapping_u32(word(in b, inout r));
+                let el = wrapping_u32(word(in b, inout r));
+                let ec = wrapping_u32(word(in b, inout r));
+                let has_len = word(in b, inout r) == 1;
+                let len = word(in b, inout r);
+                let t_off = word(in b, inout r);
+                let t_len = word(in b, inout r);
+                changes
+                    .push(
+                    Change {
+                        has_range: has_range,
+                        range: Range {
+                            start: Position {
+                                line: sl,
+                                character: sc
+                            },
+                            end: Position {
+                                line: el,
+                                character: ec
+                            }
+                        },
+                        has_len: has_len,
+                        len: len,
+                        text: text_at(in pool, t_off, t_len)
+                    }
+                );
+            }
+            let got = try_change(inout s, in uri, version, in changes);
+            after(inout out, in s, got);
+        } else if op == Op::Close {
+            match try_close(inout s, in uri) {
+                Result::Ok(c) => put_closed(inout out, in s, in c),
+                Result::Err(e) => put_state(inout out, in s, error_code(e), Option::None),
+            }
+        } else if op == Op::Get {
+            match store_get(in s, in uri) {
+                Option::Some(at) => put_state(inout out, in s, 0, Option::Some(at)),
+                Option::None => put_state(inout out, in s, STATUS_ABSENT, Option::None),
+            }
+        }
+    }
+    out
+}
+
+// Typed constructors: a handle body or clause that builds a Result or
+// Option with a variant constructor leaves the other type parameter
+// uninferred (`_`), which the native layout refuses (report, gap 2).
+fn store_ok(sink v: Store) -> Result[Store, StoreError] {
+    Result::Ok(v)
+}
+
+fn store_err(e: StoreError) -> Result[Store, StoreError] {
+    Result::Err(e)
+}
+
+fn count_ok(v: u64) -> Result[u64, StoreError] {
+    Result::Ok(v)
+}
+
+fn count_err(e: StoreError) -> Result[u64, StoreError] {
+    Result::Err(e)
+}
+
+fn closed_ok(sink v: Closed) -> Result[Closed, StoreError] {
+    Result::Ok(v)
+}
+
+fn closed_err(e: StoreError) -> Result[Closed, StoreError] {
+    Result::Err(e)
+}
