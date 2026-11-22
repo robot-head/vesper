@@ -308,3 +308,4 @@ skip_port vesper-sim-session || sh crates/vesper-sim-session/port/test-port.sh  
 skip_port vesper-fusion || sh crates/vesper-fusion/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-fusion on its Vesper engine (the only build) and one divergence check
 skip_port vesper-warp-crypto || . crates/vesper-warp-crypto/port/check.sh  # Rust-exit SH6 lane 17 (#1412): vesper-warp-crypto on its Vesper port (the only build), the differential against the Rust reference and one divergence check per ported area
 skip_port vesper-beacon-arrow || sh crates/vesper-beacon-arrow/port/test-port.sh  # Rust-exit SH6 lane 18 (#1413): vesper-beacon-arrow span stream on its Vesper writer (the only build) and one divergence check
+skip_port vesper-loom-cas || sh crates/vesper-loom-cas/port/test-port.sh  # Rust-exit SH6 lane 16 (#1411): vesper-loom-cas codecs (names, ids, trees, derivations) on both builds, the seeded differential and one divergence check per module

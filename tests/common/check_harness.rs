@@ -187,57 +187,72 @@ pub fn corpus() -> &'static [Case] {
     static CORPUS: OnceLock<Vec<Case>> = OnceLock::new();
     CORPUS.get_or_init(|| {
         let (files, pkgs) = corpus_paths();
-        let mut out = vec![];
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        for f in files {
-            let Ok(src) = std::fs::read_to_string(&f) else {
-                continue;
-            };
-            if src.len() > 1 << 20 {
-                continue;
-            }
-            let r = std::panic::catch_unwind(|| {
+        let programs: Vec<(PathBuf, bool)> = files
+            .into_iter()
+            .map(|p| (p, false))
+            .chain(pkgs.into_iter().map(|p| (p, true)))
+            .collect();
+        let one = |path: &Path, package: bool| -> Option<Case> {
+            let (module, name) = if package {
+                let a = packages::load(path).ok()?;
+                if !a.ok() {
+                    return None;
+                }
+                (a.module, relative(path) + "/")
+            } else {
+                let src = std::fs::read_to_string(path).ok()?;
+                if src.len() > 1 << 20 {
+                    return None;
+                }
                 let parsed = vesper::parser::parse(&src);
                 if !parsed.diagnostics.is_empty() {
                     return None;
                 }
-                let checked = check::check(&parsed.module);
-                checked
-                    .diagnostics
-                    .is_empty()
-                    .then_some((parsed.module, checked.world))
-            });
-            if let Ok(Some((module, world))) = r {
-                out.push(Case {
-                    name: relative(&f),
-                    module,
-                    world,
-                });
-            }
-        }
-        for p in pkgs {
-            let r = std::panic::catch_unwind(|| {
-                let a = packages::load(&p).ok()?;
-                if !a.ok() {
-                    return None;
-                }
-                let checked = check::check(&a.module);
-                checked
-                    .diagnostics
-                    .is_empty()
-                    .then_some((a.module, checked.world))
-            });
-            if let Ok(Some((module, world))) = r {
-                out.push(Case {
-                    name: relative(&p) + "/",
-                    module,
-                    world,
-                });
-            }
-        }
+                (parsed.module, relative(path))
+            };
+            let checked = check::check(&module);
+            checked.diagnostics.is_empty().then_some(Case {
+                name,
+                module,
+                world: checked.world,
+            })
+        };
+        // Parse and check on a few worker threads (most of a corpus test's
+        // fixed cost; #1519), keeping corpus order.
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+        let quiet = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let mut out: Vec<(usize, Case)> = std::thread::scope(|scope| {
+            let (programs, one) = (&programs, &one);
+            let handles: Vec<_> = (0..workers)
+                .map(|w| {
+                    std::thread::Builder::new()
+                        .stack_size(256 << 20)
+                        .spawn_scoped(scope, move || {
+                            (w..programs.len())
+                                .step_by(workers)
+                                .filter_map(|i| {
+                                    let (p, package) = &programs[i];
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        one(p, *package)
+                                    }))
+                                    .ok()
+                                    .flatten()
+                                    .map(|c| (i, c))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap()
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
         std::panic::set_hook(quiet);
-        out
+        out.sort_by_key(|(i, _)| *i);
+        out.into_iter().map(|(_, c)| c).collect()
     })
 }
 
@@ -719,9 +734,31 @@ pub struct IrCase<'a> {
 /// default `mutants`) of its mutants.
 pub fn ir_cases(mutants: usize) -> Vec<IrCase<'static>> {
     let mutants = env_usize("CHECK_HARNESS_MUTANTS", mutants).min(IR_MUTANTS);
+    // Lower on a few worker threads (#1519), keeping corpus order.
+    let cases = corpus();
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    let mut lowered: Vec<(usize, vesper::ir::Program)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|w| {
+                std::thread::Builder::new()
+                    .stack_size(256 << 20)
+                    .spawn_scoped(scope, move || {
+                        (w..cases.len())
+                            .step_by(workers)
+                            .map(|i| (i, vesper::ir::lower_world(&cases[i].world)))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap()
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    lowered.sort_by_key(|(i, _)| *i);
     let mut out = vec![];
-    for c in corpus() {
-        let program = vesper::ir::lower_world(&c.world);
+    for (c, (_, program)) in cases.iter().zip(lowered) {
         for m in 1..=mutants {
             out.push(IrCase {
                 name: format!("{}#m{m}", c.name),

@@ -91,6 +91,11 @@ mod place_ir_binding;
 #[path = "../port/bounds_hoist.rs"]
 mod bounds_hoist_binding;
 
+#[rustfmt::skip]
+#[allow(clippy::all)]
+#[path = "../port/pact.rs"]
+mod pact_binding;
+
 #[path = "parse_words.rs"]
 mod parse_words;
 
@@ -114,6 +119,11 @@ mod plan_words;
 // the root package's tests/hybrid_layout.rs and tests/hybrid_ir_check.rs.
 #[path = "../../../tests/common/check_words.rs"]
 mod check_words;
+
+// The trait declaration pass's encoder and decoder (#1185), shared with
+// the root package's tests/self_host_check_pact.rs.
+#[path = "../../../tests/common/pact_words.rs"]
+mod pact_words;
 
 // The stack-bound swap's encoder and decoder (#1182), shared with the root
 // package's tests/self_host_check_loops_atomics.rs.
@@ -184,6 +194,8 @@ static OPTIMIZE_PROPOSE_CALLS: AtomicU64 = AtomicU64::new(0);
 static OPTIMIZE_VERIFY_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs optimized by the Vesper IR optimizer module.
 static IR_OPT_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Packages whose trait declarations the Vesper declaration pass checked.
+static PACT_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs the IR swap point's identity hooks sent through Vesper.
 static PLACE_IR_CALLS: AtomicU64 = AtomicU64::new(0);
 /// Programs `modules/bounds_hoist` hoisted.
@@ -484,6 +496,35 @@ const VESPER_STACK_BOUND: vesper::stack_bound::StackBoundTable =
         },
     };
 
+/// `vesper::pact_frontend::DeclarationPassTable` from `modules/pact`: the
+/// declaration pass of `@vesper/check-pact` (collecting and validating the
+/// trait, conformance, `use model` and bound declarations of a package
+/// without dependencies). A module whose literals the decoder cannot read
+/// stays in Rust; a clean answer leaves the Pact session to Rust.
+const VESPER_DECLARATION_PASS: vesper::pact_frontend::DeclarationPassTable =
+    vesper::pact_frontend::DeclarationPassTable {
+        diagnostics: |module, base_world, identity| {
+            let timer = stats::Timer::start();
+            let input = pact_words::declaration_input(module, base_world, &identity.to_string())?;
+            let timer = timer.lap(&stats::PACT.encode);
+            let words = pact_binding::pass_words(&input);
+            let timer = timer.lap(&stats::PACT.vesper);
+            let diagnostics = pact_words::decode_declarations(&words);
+            timer.lap(&stats::PACT.decode);
+            PACT_CALLS.fetch_add(1, Relaxed);
+            stats::PACT.call(
+                false,
+                || {
+                    vesper::pact_frontend::rust_declaration_diagnostics(
+                        module, base_world, identity,
+                    )
+                },
+                |rust| rust.as_ref() == Some(&diagnostics),
+            );
+            Some(diagnostics)
+        },
+    };
+
 /// The swaps' input and output costs (SH4 lane 2, #1276), reported at exit
 /// with `VESPER_HYBRID_STATS=1`. `VESPER_HYBRID_STATS=time` also runs the
 /// Rust pass on every swapped call, times it and counts the calls whose
@@ -579,6 +620,7 @@ mod stats {
     pub static PARSE: Cost = Cost::new("parse");
     pub static LAYOUT: Cost = Cost::new("check-layout");
     pub static IR_CHECK: Cost = Cost::new("ir-check");
+    pub static PACT: Cost = Cost::new("pact");
 
     /// A stopwatch that only reads the clock when stats are on.
     #[derive(Clone, Copy)]
@@ -1036,6 +1078,9 @@ extern "C" fn install() {
     if vesper::optimize::install_optimize(table).is_err() {
         std::process::abort();
     }
+    if vesper::pact_frontend::install_declaration_pass(VESPER_DECLARATION_PASS).is_err() {
+        std::process::abort();
+    }
     if std::env::var_os("VESPER_HYBRID_STATS").is_some_and(|v| v == "1" || v == "time") {
         unsafe extern "C" {
             fn atexit(f: extern "C" fn()) -> std::ffi::c_int;
@@ -1066,6 +1111,11 @@ extern "C" fn report() {
     stats::PARSE.report();
     stats::LAYOUT.report();
     stats::IR_CHECK.report();
+    eprintln!(
+        "vesper-hybrid: pact answered {} calls from Vesper",
+        PACT_CALLS.load(Relaxed)
+    );
+    stats::PACT.report();
     eprintln!(
         "vesper-hybrid: stack-bound answered {} calls from Vesper",
         STACK_BOUND_CALLS.load(Relaxed)

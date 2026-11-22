@@ -39,7 +39,12 @@ use self::frontend::{
 // sections; returns the diagnostics as text, one `CODE START END MESSAGE`
 // line each, in the order Rust reports them.
 pub fn check_pact_declarations(in input: Str) -> ChunkSeq[u64] {
-    let b = input.as_bytes();
+    declarations_words(in input.as_bytes())
+}
+
+// `check_pact_declarations` over the input's bytes: the entry of the hybrid
+// build's `modules/pact` (crates/vesper-hybrid).
+pub fn declarations_words(in b: Slice[u8]) -> ChunkSeq[u64] {
     let mut r = Reader {
         pos: 0
     };
