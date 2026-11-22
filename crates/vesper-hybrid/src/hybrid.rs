@@ -1497,6 +1497,10 @@ extern "C" fn report() {
         BOUNDS_HOIST_CALLS.load(Relaxed)
     );
     eprintln!(
+        "vesper-hybrid: the driver ran {} passes from Vesper",
+        crate::driver::PASSES.load(Relaxed)
+    );
+    eprintln!(
         "vesper-hybrid: doc answered {} calls from Vesper",
         DOC_CALLS.load(Relaxed)
     );

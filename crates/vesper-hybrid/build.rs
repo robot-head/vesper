@@ -21,6 +21,8 @@ const MODULES: &[(&str, &str, &str)] = &[
         "port/check_layout.rs",
     ),
     ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
+    // SH5 lane 12 (#1335): the driver, the binary's entry point.
+    ("hybrid_driver", "modules/driver", "port/driver.rs"),
     // SH5 lane 10 (#1333): both checker swaps in one library over one
     // shared world, with word answers.
     ("hybrid_checks", "modules/checks", "port/checks.rs"),
