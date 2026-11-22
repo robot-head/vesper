@@ -496,9 +496,7 @@ test {
         stream.update(in input[split..count]);
         let one_shot = blake3(in input.as_slice());
         let streamed = stream.finalize();
-        stream
-            .count()
-            == count
+        stream.count() == count
             && digest_matches(one_shot, in expected)
             && digest_matches(streamed, in expected)
     }

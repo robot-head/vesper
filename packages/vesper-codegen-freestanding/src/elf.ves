@@ -190,13 +190,13 @@ pub fn write_executable(
         }
         placements
             .push(
-            Placement {
-                vaddr: seg_base,
-                offset: off,
-                file_bytes: sub(file_end, off),
-                mem_bytes: sub(mem_end, seg_base)
-            }
-        );
+                Placement {
+                    vaddr: seg_base,
+                    offset: off,
+                    file_bytes: sub(file_end, off),
+                    mem_bytes: sub(mem_end, seg_base)
+                }
+            );
     }
     // String tables and symbols.
     let mut shstrtab: ChunkSeq[u8] = ChunkSeq::new[u8]();
@@ -498,17 +498,11 @@ pub fn read_executable(in b: Slice[u8]) -> ChunkSeq[u8] {
 }
 
 fn read_into(in b: Slice[u8], inout out: ChunkSeq[u8], inout err: ChunkSeq[u8]) {
-    if b
-        .len()
-        < 64
-        || rd8(in b, 0)
-        != 127
-        || rd8(in b, 1)
-        != 69
-        || rd8(in b, 2)
-        != 76
-        || rd8(in b, 3)
-        != 70 {
+    if b.len() < 64
+        || rd8(in b, 0) != 127
+        || rd8(in b, 1) != 69
+        || rd8(in b, 2) != 76
+        || rd8(in b, 3) != 70 {
         set_err(inout err, in "not an ELF file");
         return;
     }

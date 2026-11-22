@@ -27,6 +27,18 @@ const DIVERGENT: &[(&str, &str, &str)] = &[
         "all_zero(in b[start..end])",
         "all_zero(in b[start..start])",
     ),
+    // cca::decode_value: one level less nesting than ciborium allows.
+    (
+        "cbor",
+        "const MAX_DEPTH: u64 = 256;",
+        "const MAX_DEPTH: u64 = 255;",
+    ),
+    // cca.rs: TBB RoTPK index 5 is refused.
+    (
+        "cca",
+        "const ROTPK_MAX_INDEX: u64 = 5;",
+        "const ROTPK_MAX_INDEX: u64 = 4;",
+    ),
     // snp.rs: report version 7 is accepted.
     (
         "snp",

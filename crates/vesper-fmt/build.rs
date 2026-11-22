@@ -46,7 +46,7 @@ const EDITS: &[(&str, &str, &str)] = &[
     // The layout: a source trailing comma no longer keeps a list vertical.
     (
         "layout",
-        "let trailing_comma = !is_block\n                && pos",
-        "let trailing_comma = false\n                && pos",
+        "let trailing_comma = !is_block",
+        "let trailing_comma = false",
     ),
 ];

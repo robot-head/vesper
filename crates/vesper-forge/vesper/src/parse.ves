@@ -156,8 +156,7 @@ fn expect_kind(in toks: Slice[u64], inout p: Parser, k: u64, expected: u64) -> u
 
 // An identifier that is not a keyword (`let`, `handle`, `with`).
 fn ident(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) -> u64 {
-    if kind(in toks, in p)
-        == Tk::Ident
+    if kind(in toks, in p) == Tk::Ident
         && !text_is(in toks, in text, p.pos, in "let")
         && !text_is(in toks, in text, p.pos, in "handle")
         && !text_is(in toks, in text, p.pos, in "with") {

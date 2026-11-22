@@ -446,10 +446,8 @@ impl Fun {
             if slot == 0 {
                 break;
             }
-            if u32_at(in self.pparent, w(slot))
-                == parent
-                && u32_at(in self.plast, w(slot))
-                == last {
+            if u32_at(in self.pparent, w(slot)) == parent
+                && u32_at(in self.plast, w(slot)) == last {
                 return slot;
             }
             at = inc(at) & self.pmask;
@@ -532,21 +530,11 @@ impl Fun {
     // `in` or by value (`lent` of `single_binding` and `invariant_local`).
     pub fn lends_root(in self, i: Ins, root: u32) -> bool {
         if !(
-            i
-                .op
-                == Word::Call
-                || i
-                .op
-                == Word::Indirect
-                || i
-                .op
-                == Word::Seq
-                || i
-                .op
-                == Word::Tiled
-                || i
-                .op
-                == Word::Fip
+            i.op == Word::Call
+                || i.op == Word::Indirect
+                || i.op == Word::Seq
+                || i.op == Word::Tiled
+                || i.op == Word::Fip
         ) {
             return false;
         }
@@ -602,16 +590,11 @@ pub fn hoistable(s: u64) -> u64 {
 }
 
 pub fn keeps_length(s: u64) -> bool {
-    hoistable(s)
-        < 4
-        || s
-        == SeqWord::Len
-        || s
-        == SeqWord::SliceLen
-        || s
-        == SeqWord::AsSlice
-        || s
-        == SeqWord::SubSlice
+    hoistable(s) < 4
+        || s == SeqWord::Len
+        || s == SeqWord::SliceLen
+        || s == SeqWord::AsSlice
+        || s == SeqWord::SubSlice
 }
 
 pub fn has_receiver(s: u64) -> bool {
@@ -624,24 +607,12 @@ pub fn is_hoisted(s: u64) -> bool {
 
 // `calls_out`: whether the operation may call out of the function.
 pub fn calls_out(i: Ins) -> bool {
-    if i
-        .op
-        == Word::Call
-        || i
-        .op
-        == Word::Tiled
-        || i
-        .op
-        == Word::Fip
-        || i
-        .op
-        == Word::Indirect
-        || i
-        .op
-        == Word::Closure
-        || i
-        .op
-        == Word::Handle {
+    if i.op == Word::Call
+        || i.op == Word::Tiled
+        || i.op == Word::Fip
+        || i.op == Word::Indirect
+        || i.op == Word::Closure
+        || i.op == Word::Handle {
         return true;
     }
     if i.op == Word::Seq {
@@ -713,14 +684,10 @@ fn name_class(in t: ChunkSeq[u8], a: u64, n: u64) -> u8 {
         let mut at: u64 = 0;
         let mut j = wrapping_sub(len, 4);
         loop {
-            if u8_at(in t, add(a, j))
-                == Ascii::Dollar
-                && u8_at(in t, add(a, inc(j)))
-                == Ascii::LowerI
-                && u8_at(in t, add(a, add(j, 2)))
-                == Ascii::LowerN
-                && u8_at(in t, add(a, add(j, 3)))
-                == Ascii::LowerL {
+            if u8_at(in t, add(a, j)) == 36
+                && u8_at(in t, add(a, inc(j))) == 105
+                && u8_at(in t, add(a, add(j, 2))) == 110
+                && u8_at(in t, add(a, add(j, 3))) == 108 {
                 found = true;
                 at = j;
                 break;
@@ -783,12 +750,12 @@ fn read_args(inout f: Fun, inout r: Reader, in b: Slice[u8], inout uses: ChunkSe
         f
             .args
             .push(
-            Arg {
-                pass: pass,
-                value: value,
-                place: place
-            }
-        );
+                Arg {
+                    pass: pass,
+                    value: value,
+                    place: place
+                }
+            );
         uses.push(value);
     }
     n32(n)
@@ -830,10 +797,8 @@ fn callee_class(in f: Fun, s: u32) -> u64 {
     let n = u64_at(in f.nlen, w(s));
     if n >= 2 {
         for i in 0..wrapping_sub(n, 1) {
-            if u8_at(in f.text, add(a, i))
-                == Ascii::Colon
-                && u8_at(in f.text, add(a, inc(i)))
-                == Ascii::Colon {
+            if u8_at(in f.text, add(a, i)) == Ascii::Colon
+                && u8_at(in f.text, add(a, inc(i))) == Ascii::Colon {
                 return w(C_PATH);
             }
         }
@@ -1018,13 +983,13 @@ pub fn read_fun(in b: Slice[u8]) -> Fun {
         f
             .params
             .push(
-            Prm {
-                name: name,
-                pass: pass,
-                flags: flags,
-                tyname: tyname
-            }
-        );
+                Prm {
+                    name: name,
+                    pass: pass,
+                    flags: flags,
+                    tyname: tyname
+                }
+            );
     }
     // Value types.
     let nv = r.word(in b);

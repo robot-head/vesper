@@ -93,14 +93,10 @@ pub fn name_valid(in s: Str) -> bool {
     if at {
         return true;
     }
-    slash
-        == STD_SCOPE_LEN
-        && str_byte(in s, 0)
-        == Ascii::LowerS
-        && str_byte(in s, 1)
-        == Ascii::LowerT
-        && str_byte(in s, 2)
-        == Ascii::LowerD
+    slash == STD_SCOPE_LEN
+        && str_byte(in s, 0) == Ascii::LowerS
+        && str_byte(in s, 1) == Ascii::LowerT
+        && str_byte(in s, 2) == Ascii::LowerD
 }
 
 // `capability_valid`: an uppercase head, balanced brackets with no empty
@@ -127,20 +123,13 @@ pub fn capability_valid(in l: L, id: u64) -> bool {
             depth = wrapping_sub(depth, 1);
         } else if !(
             alnum(c)
-                || c
-                == Ascii::Underscore
-                || c
-                == Ascii::Comma
-                || c
-                == Ascii::Colon
-                || c
-                == Ascii::Minus
-                || c
-                == Ascii::Slash
-                || c
-                == Ascii::At
-                || c
-                == Ascii::Dot
+                || c == Ascii::Underscore
+                || c == Ascii::Comma
+                || c == Ascii::Colon
+                || c == Ascii::Minus
+                || c == Ascii::Slash
+                || c == Ascii::At
+                || c == Ascii::Dot
         ) {
             return false;
         }
@@ -176,14 +165,10 @@ pub fn system_name_valid(in l: L, id: u64) -> bool {
         let c = gb(in l, add(off, i));
         if !(
             alnum(c)
-                || c
-                == Ascii::Minus
-                || c
-                == Ascii::Underscore
-                || c
-                == Ascii::Dot
-                || c
-                == Ascii::Plus
+                || c == Ascii::Minus
+                || c == Ascii::Underscore
+                || c == Ascii::Dot
+                || c == Ascii::Plus
         ) {
             return false;
         }
@@ -206,24 +191,18 @@ fn relative(in l: L, id: u64) -> bool {
             return false;
         }
         if c == Ascii::Slash {
-            if wrapping_sub(i, part)
-                == 2
-                && gb(in l, add(off, part))
-                == Ascii::Dot
-                && gb(in l, add(off, inc(part)))
-                == Ascii::Dot {
+            if wrapping_sub(i, part) == 2
+                && gb(in l, add(off, part)) == Ascii::Dot
+                && gb(in l, add(off, inc(part))) == Ascii::Dot {
                 return false;
             }
             part = inc(i);
         }
     }
     !(
-        wrapping_sub(n, part)
-            == 2
-            && gb(in l, add(off, part))
-            == Ascii::Dot
-            && gb(in l, add(off, inc(part)))
-            == Ascii::Dot
+        wrapping_sub(n, part) == 2
+            && gb(in l, add(off, part)) == Ascii::Dot
+            && gb(in l, add(off, inc(part))) == Ascii::Dot
     )
 }
 
@@ -247,17 +226,17 @@ pub fn emit_at(inout l: L, code: u64, pkg: u64, so: u64, sl: u64, mo: u64) {
     l
         .diags
         .push(
-        Diag {
-            snap: 0,
-            code: code,
-            pkg: pkg,
-            dep: none(),
-            so: so,
-            sl: sl,
-            mo: mo,
-            ml: ml
-        }
-    );
+            Diag {
+                snap: 0,
+                code: code,
+                pkg: pkg,
+                dep: none(),
+                so: so,
+                sl: sl,
+                mo: mo,
+                ml: ml
+            }
+        );
 }
 
 // Emit with a string-id subject and a literal message.

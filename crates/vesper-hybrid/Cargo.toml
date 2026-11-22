@@ -37,6 +37,8 @@ divergent-ir-check = []
 divergent-stack-bound = []
 # The same check for the inliner (#1250): nothing is inlined.
 divergent-ir-inline = []
+# The same check for the AST optimizer (#1249): every island is a barrier.
+divergent-optimize = []
 # The same check for the IR optimizer (#1248): every optimizing compile fails.
 divergent-ir-opt = []
 

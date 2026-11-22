@@ -20,6 +20,7 @@ AETHER_PARTS = [
     "vesper/src/slot_plan.ves",
     "vesper/src/pvh.ves",
     "vesper/src/hotset.ves",
+    "vesper/src/packed.ves",
 ]
 
 genrule(
@@ -77,5 +78,8 @@ rust_library(
         ("hotset", []),
         ("hotset_port", []),
         ("abba_hotset", ["//crates/vesper-bench"]),
+        ("virtio_packed", ["//crates/vesper-loom-cas"]),
+        ("packed_port", []),
+        ("abba_packed", ["//crates/vesper-bench"]),
     ]
 ]

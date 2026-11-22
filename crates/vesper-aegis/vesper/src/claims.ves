@@ -199,15 +199,14 @@ pub fn check_policy(
     let nmeas = wrapping_sub(pw.len(), meas_words);
     let mut found = false;
     for i in 0..nmeas {
-        if word(in pw, wrapping_add(meas_words, i))
-            == arch
+        if word(in pw, wrapping_add(meas_words, i)) == arch
             && ct_eq(
-            in pb,
-            wrapping_add(PB_MEASUREMENTS, wrapping_mul(i, MEASUREMENT_BYTES)),
-            in cb,
-            CB_MEASUREMENT,
-            MEASUREMENT_BYTES
-        ) {
+                in pb,
+                wrapping_add(PB_MEASUREMENTS, wrapping_mul(i, MEASUREMENT_BYTES)),
+                in cb,
+                CB_MEASUREMENT,
+                MEASUREMENT_BYTES
+            ) {
             found = true;
         }
     }

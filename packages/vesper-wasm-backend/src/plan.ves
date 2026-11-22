@@ -174,8 +174,7 @@ pub fn cx_new(sink c: Ctx, sink f: Facts, sink ir: Ir) -> Cx {
         world,
         tmap,
         nmap
-    }
-    = c;
+    } = c;
     let mut names = names;
     let s = syms_new(inout names);
     let k = world.k;
@@ -555,20 +554,10 @@ impl Cx {
     pub fn mentions_generic(in self, t: u32) -> bool {
         let n = self.types.node(t);
         if n.kind == K_NAMED {
-            if n
-                .n
-                == 0
-                && self
-                .world
-                .lookup(n.name)
-                == NO_ADT
-                && !self
-                .is_scalar_name(n.name)
-                && n
-                .name
-                != self
-                .s
-                .string {
+            if n.n == 0
+                && self.world.lookup(n.name) == NO_ADT
+                && !self.is_scalar_name(n.name)
+                && n.name != self.s.string {
                 return true;
             }
             for i in 0..w(n.n) {
@@ -1004,16 +993,16 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
     }
     queue
         .push(
-        Queued {
-            key: entry,
-            base: entry,
-            v0: 0,
-            vn: 0,
-            role: R_ORDINARY,
-            l0: l0,
-            ln: l.len()
-        }
-    );
+            Queued {
+                key: entry,
+                base: entry,
+                v0: 0,
+                vn: 0,
+                role: R_ORDINARY,
+                l0: l0,
+                ln: l.len()
+            }
+        );
     let mut seen = ChunkSeq::new[u32]();
     let mut head: u64 = 0;
     loop {
@@ -1084,11 +1073,11 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     p
                         .calls
                         .push(
-                        CallTarget {
-                            dest: widen_u64(ins.dest),
-                            callee: key
-                        }
-                    );
+                            CallTarget {
+                                dest: widen_u64(ins.dest),
+                                callee: key
+                            }
+                        );
                     let mut ls = ChunkSeq::new[u32]();
                     row_labels(inout cx, inout ls, callee);
                     let qv0 = qkeys.len();
@@ -1102,16 +1091,16 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     }
                     queue
                         .push(
-                        Queued {
-                            key: key,
-                            base: callee,
-                            v0: qv0,
-                            vn: cv.len(),
-                            role: R_ORDINARY,
-                            l0: ql0,
-                            ln: ls.len()
-                        }
-                    );
+                            Queued {
+                                key: key,
+                                base: callee,
+                                v0: qv0,
+                                vn: cv.len(),
+                                role: R_ORDINARY,
+                                l0: ql0,
+                                ln: ls.len()
+                            }
+                        );
                 } else if ins.op == OP_CLOSURE {
                     let (pool, aa, an) = closure_operands(in cx, ins.a);
                     let fact = cx.f.expr(pool);
@@ -1136,16 +1125,16 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                     }
                     queue
                         .push(
-                        Queued {
-                            key: key,
-                            base: fact.fn_,
-                            v0: qv0,
-                            vn: vars.len(),
-                            role: R_ORDINARY,
-                            l0: ql0,
-                            ln: q.ln
-                        }
-                    );
+                            Queued {
+                                key: key,
+                                base: fact.fn_,
+                                v0: qv0,
+                                vn: vars.len(),
+                                role: R_ORDINARY,
+                                l0: ql0,
+                                ln: q.ln
+                            }
+                        );
                 } else if ins.op == OP_READ {
                     let root = n32(cx.ir.word(ins.a));
                     let path = cx.ir.word(inc(ins.a));
@@ -1158,16 +1147,16 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
                         }
                         queue
                             .push(
-                            Queued {
-                                key: root,
-                                base: root,
-                                v0: 0,
-                                vn: 0,
-                                role: R_ORDINARY,
-                                l0: ql0,
-                                ln: ls.len()
-                            }
-                        );
+                                Queued {
+                                    key: root,
+                                    base: root,
+                                    v0: 0,
+                                    vn: 0,
+                                    role: R_ORDINARY,
+                                    l0: ql0,
+                                    ln: ls.len()
+                                }
+                            );
                     }
                 } else if ins.op == OP_HANDLE {
                     // Handlers are lowered in part 2 of the port.
@@ -1179,21 +1168,21 @@ pub fn plan(inout cx: Cx) -> Plan eff [Fail[WErr]] {
         p
             .insts
             .push(
-            Inst {
-                key: q.key,
-                base: q.base,
-                fi: fi,
-                v0: v0,
-                vn: vars.len(),
-                role: q.role,
-                handler: 0,
-                op: 0,
-                c0: c0,
-                cn: wrapping_sub(p.calls.len(), c0),
-                l0: pl0,
-                ln: q.ln
-            }
-        );
+                Inst {
+                    key: q.key,
+                    base: q.base,
+                    fi: fi,
+                    v0: v0,
+                    vn: vars.len(),
+                    role: q.role,
+                    handler: 0,
+                    op: 0,
+                    c0: c0,
+                    cn: wrapping_sub(p.calls.len(), c0),
+                    l0: pl0,
+                    ln: q.ln
+                }
+            );
         set_by_symbol(inout p.by_key, q.key, n32(inc(i)));
     }
     p

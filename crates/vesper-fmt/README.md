@@ -15,17 +15,13 @@ No checker/native/compiler production code is changed.
    comment byte in its original order relative to both comments and code.
 5. Reparse and a second formatting pass giving byte-identical output.
 
-Layout follows Wadler-Lindig groups with Prettier-style lookahead. Spaces inside
-a line never break. An overlong line breaks, outermost first, at: delimited
-`(...)`, `[...]` and `.{...}` lists (one comma-separated item per line, each item
-its own group so `shard.{metrics}` projections and paths stay together), the
-`->` return type (its own group, so it only moves to an indented line when it
-cannot follow the parameter list), member-chain dots and infix operators (both
-indented one level). `::` paths never split. The formatter never adds or removes
-tokens, so a broken list keeps exactly the commas in the source; a source
-trailing comma selects the vertical layout even when the list would fit, which
-keeps both forms idempotent. A statement with no break point can still exceed
-the ribbon.
+The formatter uses a 100-column ribbon. When an expression wraps, it breaks
+at the weakest operator first. For example, each operand of a long `&&` chain
+can keep its member calls and comparisons on one line. Wrapped method calls
+and return types indent their contents relative to the continuation line.
+Delimited lists keep one item per line when they break. A trailing comma
+selects vertical layout even when comments follow it. Paths joined by `::`
+stay together, and an indivisible token can exceed the ribbon.
 
 Prefix `-`/`!` bind to their operand, calls/generic arguments attach to what they
 apply to, and a keyword such as `return` keeps a space before `(`. Where the source
@@ -48,6 +44,23 @@ macros. Unknown invocations, other categories, repetitions, derives and nested
 invocations remain errors. Bare `quote`/`quasiquote`/`syntax_quote` names retain
 their conservative opaque boundary unless a complete supported macro module is
 recognized. Comment and string spelling are conserved exactly.
+
+Built-in forms such as `for` and `continue` keep their source spelling through
+formatting. The parser's later lowering of these forms is independent of layout.
+
+Stylus formats user-defined `sugar` before import resolution. Its syntax-only
+parser, `vesper_syntax::parser::parse_surface_with_limits`, returns a lossless
+CST for declarations, rules, typed holes, clause heads, same-line continuations,
+tagged literals, and pipeline and dotted operators. For example, it keeps
+`bits{…}` adjacent and keeps `} on_error(e) {` on a single line. Balanced
+groups can contain tokens that acquire their meaning when a rule is expanded.
+Formatting checks that the sugar nodes still cover the same tokens after
+reparsing. The port-backed formatter uses this shared Rust surface parser for
+both sugar and modules that mix sugar with expression-macro declarations.
+The compiler matches rules and checks their expansions when running a program.
+Stylus preserves the declarations and call sites so the formatted file can
+still be edited and compiled as written.
+See the [manuscript, sections 2.2, 7.5 and 19](../../docs/manuscript/content.typ).
 
 Default source formatting still rejects invalid or incomplete buffers. The
 separate `format_recovery_source(&str, Limits)` API offers syntax-only formatting

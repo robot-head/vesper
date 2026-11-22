@@ -380,21 +380,14 @@ fn quoted(inout p: P, in pool: Str, off: u64, len: u64, delimiter: u32) {
             Option::None => (0, end),
         };
         let plain = !(
-            c
-                == Ch::Backslash
-                || c
-                == Ch::Lf
-                || c
-                == Ch::Cr
-                || c
-                == Ch::Tab
-                || c
-                == delimiter
+            c == Ch::Backslash
+                || c == Ch::Lf
+                || c == Ch::Cr
+                || c == Ch::Tab
+                || c == delimiter
                 || (is_control(c) && c <= Ch::Latin1Last)
-                || c
-                == Ch::LineSeparator
-                || c
-                == Ch::ParagraphSeparator
+                || c == Ch::LineSeparator
+                || c == Ch::ParagraphSeparator
         );
         if !plain {
             p.out.push_str(pool[run..i]);
@@ -1499,18 +1492,13 @@ pub fn valid_ident(in v: Str) -> bool {
             Option::None => (0, n),
         };
         if is_control(c)
-            || c
-            == Ch::LeftGuillemet
-            || c
-            == Ch::RightGuillemet
-            || c
-            == Ch::LineSeparator
-            || c
-            == Ch::ParagraphSeparator
+            || c == Ch::LeftGuillemet
+            || c == Ch::RightGuillemet
+            || c == Ch::LineSeparator
+            || c == Ch::ParagraphSeparator
             || (c >= Ch::EmbeddingFirst && c <= Ch::EmbeddingLast)
             || (c >= Ch::IsolateFirst && c <= Ch::IsolateLast)
-            || c
-            == Ch::ByteOrderMark {
+            || c == Ch::ByteOrderMark {
             return false;
         }
         i = next;

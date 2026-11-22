@@ -9,8 +9,9 @@
 //! `cargo build -p vesper --bin vesper` into this build's target directory.
 //!
 //! Under the `divergent` (or `divergent-parse`, `divergent-ir-check`,
-//! `divergent-ir-inline`, `divergent-ir-opt`) feature the hybrid's layout
-//! (or parse, IR-check, inliner, IR optimizer) module is deliberately wrong (build.rs), and the harness must
+//! `divergent-ir-inline`, `divergent-ir-opt`, `divergent-optimize`) feature
+//! the hybrid's layout (or parse, IR-check, inliner, IR optimizer, AST
+//! optimizer) module is deliberately wrong (build.rs), and the harness must
 //! report differences instead: that is the proof it can fail.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -101,6 +102,22 @@ fn corpus(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Files where the Vesper AST optimizer (#1249) settles an equal-cost tie
+/// differently from egg: egg's extraction, in hash order, picks a
+/// reordered tree of the source's size and rewrites the island, where the
+/// Vesper e-graph keeps the source. The owner accepted equal-cost
+/// extraction differences without egg hash-order emulation
+/// (docs/parallel-results/self-host-optimize.md, part 2). Their `emit` runs
+/// count as ties only when the hybrid with the Rust producer
+/// (`VESPER_HYBRID_RUST_PRODUCER=1`; the Vesper gate stays) agrees with the
+/// default compiler on them.
+const OPTIMIZE_EQUAL_COST_TIES: &[&str] = &[
+    "examples/traits/shapes.ves",
+    "tests/fixtures/bounded_generics/nested.ves",
+    "tests/fixtures/native_handlers/shared_locals.ves",
+    "tests/fixtures/wide_literals.ves",
+];
+
 /// The commands run on each file. `{out}` is an output file.
 const COMMANDS: &[&[&str]] = &[
     &["check", "--json"],
@@ -118,9 +135,21 @@ struct Run {
 }
 
 fn run(compiler: &Path, root: &Path, command: &[&str], file: &Path, out: &Path) -> Run {
+    run_with(compiler, root, command, file, out, &[])
+}
+
+fn run_with(
+    compiler: &Path,
+    root: &Path,
+    command: &[&str],
+    file: &Path,
+    out: &Path,
+    env: &[(&str, &str)],
+) -> Run {
     let _ = std::fs::remove_file(out);
     let mut cmd = Command::new(compiler);
     cmd.current_dir(root).env_remove("VESPER_HYBRID_STATS");
+    cmd.envs(env.iter().copied());
     let mut wrote = false;
     for arg in command {
         if *arg == "{out}" {
@@ -173,6 +202,7 @@ fn hybrid_matches_the_default_compiler() {
 
     let jobs: Mutex<Vec<(usize, &PathBuf)>> = Mutex::new(files.iter().enumerate().rev().collect());
     let mismatches = Mutex::new(Vec::new());
+    let ties = Mutex::new(Vec::new());
     let totals = Mutex::new((Duration::ZERO, Duration::ZERO, 0usize));
     let workers = std::thread::available_parallelism().map_or(2, |n| n.get().min(8));
     std::thread::scope(|s| {
@@ -189,7 +219,34 @@ fn hybrid_matches_the_default_compiler() {
                         let b = a.clone();
                         let d = run(&default, &root, command, file, &a);
                         let h = run(&hybrid, &root, command, file, &b);
-                        let diff = differences(&d, &h);
+                        let mut diff = differences(&d, &h);
+                        let tie_file = OPTIMIZE_EQUAL_COST_TIES
+                            .iter()
+                            .any(|t| Path::new(t) == file.as_path());
+                        // A tie only changes the emitted IR or object: both
+                        // runs succeed with the same diagnostics.
+                        let artifact_only =
+                            diff.iter().all(|d| *d == "stdout" || *d == "object bytes")
+                                && d.output.status.success()
+                                && (command.get(2) == Some(&"object") || diff == ["stdout"]);
+                        if !diff.is_empty() && tie_file && command[0] == "emit" && artifact_only {
+                            let r = run_with(
+                                &hybrid,
+                                &root,
+                                command,
+                                file,
+                                &b,
+                                &[("VESPER_HYBRID_RUST_PRODUCER", "1")],
+                            );
+                            if differences(&d, &r).is_empty() {
+                                ties.lock().unwrap().push(format!(
+                                    "{} {}",
+                                    command.join(" "),
+                                    file.display()
+                                ));
+                                diff.clear();
+                            }
+                        }
                         {
                             let mut t = totals.lock().unwrap();
                             t.0 += d.time;
@@ -213,6 +270,11 @@ fn hybrid_matches_the_default_compiler() {
     let (d, h, runs) = *totals.lock().unwrap();
     let mut mismatches = mismatches.into_inner().unwrap();
     mismatches.sort();
+    let ties = ties.into_inner().unwrap();
+    eprintln!(
+        "differential: {} runs differ only by an accepted optimizer equal-cost tie",
+        ties.len()
+    );
     eprintln!(
         "differential: {} files, {runs} runs per compiler; default {:.2} s, hybrid {:.2} s ({:.3}x); {} differ",
         files.len(),
@@ -226,7 +288,8 @@ fn hybrid_matches_the_default_compiler() {
         feature = "divergent-parse",
         feature = "divergent-ir-check",
         feature = "divergent-ir-inline",
-        feature = "divergent-ir-opt"
+        feature = "divergent-ir-opt",
+        feature = "divergent-optimize"
     )) {
         assert!(
             !mismatches.is_empty(),
@@ -289,6 +352,18 @@ fn pilot_module_runs_from_vesper() {
             .unwrap_or_else(|| panic!("no {module} report in {stderr:?}"));
         assert!(calls > 0, "the Vesper {module} module answered no calls");
     }
+    // SH3 lane 10 (#1249): the AST optimizer's producer runs on every
+    // visited expression of the optimized module.
+    let proposed: u64 = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("vesper-hybrid: optimize proposed for "))
+        .and_then(|l| l.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no optimize report in {stderr:?}"));
+    assert!(
+        proposed > 0,
+        "the Vesper optimize module proposed for nothing"
+    );
     // SH3 lane 12 (#1251): the `hoist` hook hoists every native program.
     let hoisted: u64 = stderr
         .lines()

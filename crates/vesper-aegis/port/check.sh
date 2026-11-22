@@ -35,3 +35,6 @@ check sgx sgx_quote_v3 real_sgx_quote_v3_verifies_end_to_end sgx_quote_mutations
 check wire port_differential claims_wire_agrees snp_reports_agree
 check policy port_differential policy_decisions_agree snp_reports_agree
 check time port_differential timestamps_agree snp_reports_agree
+# One container fewer than ciborium's recursion limit.
+check cbor cbor_differential edge_cases_match_ciborium random_items_match_ciborium
+check cca port_differential cca_claims_agree snp_reports_agree

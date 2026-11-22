@@ -253,7 +253,7 @@ fn main() -> u64 {
 
 ## Find a conflicting loan
 
-What happens if two writable arguments name the same counter? Check this program. Both parameters would have exclusive access to `count` during one call. To fix the overlap, introduce a second mutable counter and lend it as the second argument.
+Both arguments name the same counter and ask for exclusive access. Give the second argument its own mutable counter, then run the program to verify that `reset` sets the first counter to `0`.
 
 ~~~vesper E0301
 fn reset(inout first: u64, inout second: u64) {
@@ -303,7 +303,7 @@ fn main() -> i64 {
 
 ## Cover every case
 
-The checker considers every value the scrutinee's type can hold. The match below handles a held booking and leaves out `Open`.
+The editor starts with a match that handles a held booking. Add an arm for `Booking::Open` and make it return `0`. The checker considers every value the type can hold. Once the error clears, run the program and change the booking to try each arm.
 
 ~~~vesper E0212
 copy enum Booking {
@@ -317,8 +317,6 @@ fn main() -> i64 {
     }
 }
 ~~~
-
-Add an arm for `Open`. Change the value assigned to `booking` to try both arms. The example below returns `3` with `Held(3)` and `0` with `Open`.
 
 ~~~vesper
 copy enum Booking {
@@ -354,11 +352,13 @@ fn main() -> i64 {
 
 ## Give a ticket one owner
 
-The ownership mode tells you what you owe when a value leaves scope. The parameter mode tells you what one call can do with it. An `in` borrow can read a ticket while you still own it. A `sink` call transfers ownership. After `release(sink ticket)`, the callee owns the ticket and can drop it because its type is affine.
+The ownership mode tells you what you owe when a value leaves scope. The parameter mode tells you what one call can do with it. An `in` borrow can read a ticket while you still own it. A `sink` call transfers ownership. The callee can then drop the ticket because it is affine.
 
 <!-- figure:ownership-modes -->
 
-The first program transfers the ticket once. You can delete the `release` call and the program still checks. An affine owner can let a value go out of scope.
+<!-- anchor:use-after-move -->
+
+The editor tries to transfer one ticket twice. Remove the second `release` call. Then try removing both calls. An affine owner can also let a value go out of scope.
 
 ~~~vesper
 affine struct Ticket {
@@ -374,10 +374,6 @@ fn main() -> u64 {
     0
 }
 ~~~
-
-<!-- anchor:use-after-move -->
-
-The second call below tries to transfer a ticket that the caller already gave away.
 
 ~~~vesper E0303
 affine struct Ticket {
@@ -397,7 +393,7 @@ fn main() -> u64 {
 
 ## Require a decision at scope exit
 
-Change the declaration to `linear` when forgetting the ticket is a bug. This complete program has an error. Run `vesper check lesson.ves` to see `E0302` at the unfinished obligation.
+The editor creates a linear ticket and returns with it still live. Destructure `t` with `let Ticket { seat } = t;` and return the seat number. Destructuring takes the record apart and accounts for its ownership.
 
 ~~~vesper E0302
 linear struct Ticket {
@@ -473,7 +469,7 @@ fn main() -> u64 {
 
 ## Finish on both paths
 
-Both paths finish the ticket. When the customer attends, `redeem` consumes the ticket and returns the seat. Otherwise destructuring consumes it and the function returns `0`. Run the program with `true` first to get `3`, then try `false`.
+When the customer attends, `redeem` consumes the ticket and returns the seat. The other branch leaves it live. Destructure `ticket` in the `else` branch so both branches account for it. Run with `true` to get `3` and with `false` to get `0`.
 
 ~~~vesper
 linear struct Ticket {
@@ -509,8 +505,6 @@ fn main() -> u64 {
     )
 }
 ~~~
-
-Remove consumption from the second branch and the checker points to the conditional. The first branch consumes the ticket. The second leaves it live when the function returns.
 
 ~~~vesper E0309
 linear struct Ticket {
@@ -695,7 +689,7 @@ fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
 
 ## Pass an effect to the caller
 
-The call to `next` can fail. This version of `advance` has no handler or effect declaration, so the checker points to the call.
+The editor calls `next` from `advance`. Since addition can overflow, the call performs `Fail[ArithOverflow]`. Add `eff [Fail[ArithOverflow]]` to `advance` to let it pass the effect to its caller.
 
 ~~~vesper E0401
 fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
@@ -706,8 +700,6 @@ fn advance(n: i64) -> i64 {
     next(n)
 }
 ~~~
-
-Add the same effect to `advance` to pass that obligation on to its caller.
 
 ~~~vesper
 fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
@@ -736,7 +728,7 @@ fn main() -> i64 {
 
 ## Exercise the failure path
 
-Adding one to the largest `i64` triggers overflow. The first program has no handler at the call, so the checker reports the unhandled effect. `MAX_I64` names the boundary for this example.
+Adding one to `MAX_I64` triggers overflow. The editor calls `next` with no handler. Wrap the call in `handle Fail[ArithOverflow] in { … } with { … }`. Use `return value => value` for success and `raise(error, _) => 0` for overflow. Once the checker accepts the program, run it to see the handler return `0`.
 
 ~~~vesper E0401
 fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
@@ -749,8 +741,6 @@ fn main() -> i64 {
     next(MAX_I64)
 }
 ~~~
-
-The second program handles the failure. `return` gets the value when the calculation succeeds. `raise` gets the overflow error when it fails. The underscore discards the resumption slot. Here the handler ends the failed calculation and supplies `0`.
 
 ~~~vesper
 fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
@@ -791,9 +781,9 @@ fn main() -> i64 {
 
 ## Bind a piece of syntax
 
-Syntax sugar is a shorter way to write an existing operation. For example, the test runner turns each `@case` row into a call to the same test function. Forge expression macros let you define a small piece of sugar yourself. Use a regular function for repeated computation. A macro is useful when you need to generate code from syntax, such as an expression that plugs an argument into a template.
+Syntax sugar gives an existing operation a shorter form. The test runner, for example, turns each `@case` row into a call to the same test function. A Forge expression macro can fill a template with code from its call site. Here `$n: expr` accepts an expression, and `quote` describes the expression to insert when you write `next_seat!(41)`.
 
-The `!` in `next_seat!(41)` marks a macro call. `$n: expr` accepts one expression, and `quote` describes the expression Forge inserts in its place. The checker then checks the expanded code as ordinary Vesper.
+Forge accepts a limited set of templates. Replace `$n + 1` inside `quote` with `wrapping_add($n, 1)`. When the diagnostic clears, run the macro to see `42`.
 
 ~~~vesper
 macro next_seat($n: expr) -> expr {
@@ -805,15 +795,6 @@ fn main() -> i64 {
     next_seat!(41)
 }
 ~~~
-
-~~~sh
-$ vesper forge expand seats.ves
-fn main() -> i64 { wrapping_add(41, 1) }
-~~~
-
-<!-- diagram:macro-substitution -->
-
-Forge currently accepts a limited set of templates. For example, it rejects infix addition inside this quotation.
 
 ~~~vesper FORGE_PARSE
 macro next_seat($n: expr) -> expr {
