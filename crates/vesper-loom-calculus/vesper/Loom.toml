@@ -3,3 +3,7 @@ name = "@vesper/loom-calculus"
 version = "0.1.0"
 edition = "2026"
 capability_ceiling = ["Fail"]
+
+[dependencies]
+"@vesper-std/toml" = { version = "^0.1", path = "../../../packages/vesper-std/toml" }
+"@vesper/serde" = { version = "^0.1", path = "../../vesper-serde/vesper" }

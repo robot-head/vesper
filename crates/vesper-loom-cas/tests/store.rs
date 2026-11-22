@@ -1110,6 +1110,32 @@ fn ingest_rejects_nonportable_names() {
             Err(CasError::InvalidTree(TreeError::CaseCollision { .. }))
         ));
     }
+    // `str::to_lowercase` folds a word-final capital sigma to the final
+    // form: "ΟΔΟΣ" and "οδος" collide, "ΟΔΟΣ" and "οδοσ" do not.
+    for (other, collides) in [
+        ("\u{3bf}\u{3b4}\u{3bf}\u{3c2}", true),
+        ("\u{3bf}\u{3b4}\u{3bf}\u{3c3}", false),
+    ] {
+        let src = dir.path().join(if collides {
+            "sigma-final"
+        } else {
+            "sigma-medial"
+        });
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("\u{39f}\u{394}\u{39f}\u{3a3}"), b"1").unwrap();
+        fs::write(src.join(other), b"2").unwrap();
+        if fs::read_dir(&src).unwrap().count() == 2 {
+            let result = store.ingest_dir(Domain::Source, &src);
+            assert_eq!(
+                matches!(
+                    result,
+                    Err(CasError::InvalidTree(TreeError::CaseCollision { .. }))
+                ),
+                collides,
+                "{other}: {result:?}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]

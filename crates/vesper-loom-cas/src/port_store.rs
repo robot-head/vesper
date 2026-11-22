@@ -9,15 +9,19 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::derivation::{DerivationInputs, DerivationKey};
+use crate::error::TreeError;
 use crate::error::{CasError, Result};
 use crate::id::{Digest, Domain, OBJECT_ID_BYTES, ObjectId, ObjectKind};
 use crate::port::binding;
 use crate::port_fs::{self, Reader};
-use crate::store::{DerivationOutcome, Ingested};
-use crate::tree::Tree;
+use crate::store::{
+    CopyStrategy, DerivationOutcome, Ingested, MaterializeOptions, MaterializeReport, StoreReport,
+};
+use crate::transfer::{TransferError, TransferLimits, TransferReport};
+use crate::tree::{MAX_TREE_DEPTH, Tree};
 
 /// The operations of `CasError::Io`, by the port's `OP_*` code.
-const OPS: [&str; 29] = [
+const OPS: [&str; 44] = [
     "create store root",
     "resolve store root",
     "create store directory",
@@ -47,6 +51,34 @@ const OPS: [&str; 29] = [
     "read derivation",
     "read directory",
     "remove staging file",
+    "inspect file",
+    "open file",
+    "inspect directory",
+    "inspect entry",
+    "inspect destination",
+    "create staging directory",
+    "publish workspace",
+    "sync",
+    "create directory",
+    "set permissions",
+    "write",
+    "create file",
+    "open",
+    "inspect transfer object",
+    "read transfer object",
+];
+
+/// `UnsupportedFileType` kinds, by the port's code.
+const FILE_KINDS: [&str; 9] = [
+    "",
+    "regular file",
+    "directory",
+    "symlink",
+    "FIFO",
+    "socket",
+    "device",
+    "special file",
+    "non-regular file",
 ];
 
 /// A reply being read.
@@ -111,11 +143,90 @@ fn domain_of(tag: u8) -> Domain {
 /// The reply's payload, or its error.
 fn reply(mut bytes: Vec<u8>) -> Result<Reply> {
     let code = bytes.pop().expect("a reply ends with its code");
-    let mut r = Reply { bytes, at: 0 };
+    let r = Reply { bytes, at: 0 };
     if code == 0 {
         return Ok(r);
     }
+    Err(cas_error(code, r))
+}
+
+/// The names of transfer limits and pack faults, by the port's `N_*` code.
+const TRANSFER_NAMES: [&str; 48] = [
+    "",
+    "work",
+    "metadata bytes",
+    "tree entries",
+    "payload bytes",
+    "payload capacity requests",
+    "pack bytes",
+    "pack capacity requests",
+    "object path",
+    "object scratch",
+    "object bytes",
+    "object work",
+    "depth",
+    "graph work",
+    "objects",
+    "graph metadata",
+    "tree bytes",
+    "tree name bytes",
+    "tree metadata",
+    "tree work",
+    "hash work",
+    "publication metadata",
+    "publication work",
+    "tree header",
+    "tree version",
+    "truncated tree entries",
+    "tree name length",
+    "truncated tree entry",
+    "tree trailing bytes",
+    "cyclic object closure",
+    "tree file size mismatch",
+    "source object grew while reading",
+    "source object shrank while reading",
+    "truncated record",
+    "object identity tags",
+    "missing child object",
+    "recorded file size",
+    "noncanonical closure order",
+    "truncated header",
+    "magic",
+    "version",
+    "empty closure",
+    "truncated records",
+    "duplicate object",
+    "noncanonical tree",
+    "trailing bytes",
+    "root is not last",
+    "unreachable records",
+];
+
+/// A transfer call's payload, or its `TransferError` (codes 30-34; a store
+/// error code is `TransferError::Cas`).
+fn transfer_reply(mut bytes: Vec<u8>) -> std::result::Result<Reply, TransferError> {
+    let code = bytes.pop().expect("a reply ends with its code");
+    let mut r = Reply { bytes, at: 0 };
     Err(match code {
+        0 => return Ok(r),
+        30 => TransferError::InvalidLimits(TRANSFER_NAMES[r.u8() as usize]),
+        31 => TransferError::Limit(TRANSFER_NAMES[r.u8() as usize]),
+        32 => TransferError::InvalidPack(TRANSFER_NAMES[r.u8() as usize]),
+        33 => TransferError::UnexpectedRoot {
+            expected: r.id(),
+            found: r.id(),
+        },
+        34 => TransferError::DigestMismatch {
+            expected: r.id(),
+            actual: r.id(),
+        },
+        code => TransferError::Cas(cas_error(code, r)),
+    })
+}
+
+/// The store error of the reply `r` with `code`.
+fn cas_error(code: u8, mut r: Reply) -> CasError {
+    match code {
         1 => {
             let op = OPS[r.u8() as usize];
             let path = r.path();
@@ -157,6 +268,27 @@ fn reply(mut bytes: Vec<u8>) -> Result<Reply> {
             expected: domain_of(r.u8()),
             found: domain_of(r.u8()),
         },
+        9 => CasError::InvalidName {
+            path: r.path(),
+            reason: crate::port::name_error(u64::from(r.u8()) + 1),
+        },
+        10 => CasError::InvalidTree(match r.u8() {
+            1 => {
+                let _ = r.u64();
+                TreeError::TooDeep {
+                    limit: MAX_TREE_DEPTH,
+                }
+            }
+            2 => {
+                let first = String::from_utf8_lossy(r.bytes()).into_owned();
+                let second = String::from_utf8_lossy(r.bytes()).into_owned();
+                TreeError::CaseCollision { first, second }
+            }
+            _ => {
+                let domain = domain_of(r.u8());
+                Tree::decode(domain, r.bytes()).expect_err("the port answers a tree that fails")
+            }
+        }),
         12 => CasError::DerivationConflict {
             key: DerivationKey(r.digest()),
             existing: r.id(),
@@ -179,9 +311,18 @@ fn reply(mut bytes: Vec<u8>) -> Result<Reply> {
             };
             CasError::UnsafeStoreLayout { path, reason }
         }
+        14 => CasError::UnsupportedFileType {
+            path: r.path(),
+            kind: FILE_KINDS[r.u8() as usize],
+        },
+        15 => CasError::DestinationExists(r.path()),
+        17 => CasError::ReflinkUnavailable {
+            path: r.path(),
+            source: port_fs::take_error(r.u64()),
+        },
         18 => CasError::PublishContention(r.id()),
         other => unreachable!("unknown store reply code {other}"),
-    })
+    }
 }
 
 /// Call the port with a fresh error list.
@@ -345,4 +486,144 @@ pub(crate) fn sweep(root: &Path, min_age: Duration) -> Result<usize> {
         )
     })?;
     Ok(r.u64() as usize)
+}
+
+/// `Store::put_file`.
+pub(crate) fn put_file(
+    root: &Path,
+    durable: bool,
+    domain: Domain,
+    path: &Path,
+) -> Result<Ingested> {
+    let r = call(|| {
+        binding::store_put_file(root_bytes(root), durable, domain.tag(), root_bytes(path))
+    })?;
+    Ok(ingested(r))
+}
+
+/// `Store::ingest_dir`.
+pub(crate) fn ingest_dir(
+    root: &Path,
+    durable: bool,
+    domain: Domain,
+    path: &Path,
+) -> Result<Ingested> {
+    let r = call(|| {
+        binding::store_ingest_dir(root_bytes(root), durable, domain.tag(), root_bytes(path))
+    })?;
+    Ok(ingested(r))
+}
+
+/// `Store::materialize`, after the destination's name checks: `parent` is
+/// the directory the workspace is staged and published in.
+pub(crate) fn materialize(
+    root: &Path,
+    durable: bool,
+    tree: &ObjectId,
+    dest: &Path,
+    parent: &Path,
+    options: MaterializeOptions,
+) -> Result<MaterializeReport> {
+    let strategy = match options.strategy {
+        CopyStrategy::ReflinkOrCopy => 0,
+        CopyStrategy::CopyOnly => 1,
+        CopyStrategy::ReflinkOnly => 2,
+    };
+    let mut r = call(|| {
+        binding::store_materialize(
+            root_bytes(root),
+            durable,
+            &id_bytes(tree),
+            root_bytes(dest),
+            root_bytes(parent),
+            strategy,
+            options.verify_reflinks,
+        )
+    })?;
+    Ok(MaterializeReport {
+        directories: r.u64(),
+        files: r.u64(),
+        bytes: r.u64(),
+        reflinked: r.u64(),
+        copied: r.u64(),
+    })
+}
+
+/// `Store::verify_all`.
+pub(crate) fn verify_all(root: &Path) -> Result<StoreReport> {
+    let mut r = call(|| binding::store_verify_all(root_bytes(root)))?;
+    let verified_objects = r.u64();
+    let corrupt_objects = (0..r.u64()).map(|_| r.id()).collect();
+    let verified_derivations = r.u64();
+    let corrupt_derivations = (0..r.u64()).map(|_| r.path()).collect();
+    let stray_paths = (0..r.u64()).map(|_| r.path()).collect();
+    Ok(StoreReport {
+        verified_objects,
+        corrupt_objects,
+        verified_derivations,
+        corrupt_derivations,
+        stray_paths,
+    })
+}
+
+fn limit_words(l: TransferLimits) -> [u64; 6] {
+    [
+        l.max_pack_bytes as u64,
+        l.max_objects as u64,
+        l.max_depth as u64,
+        l.max_tree_entries as u64,
+        l.max_metadata_bytes as u64,
+        l.max_work as u64,
+    ]
+}
+
+/// `export_pack`.
+pub(crate) fn export_pack(
+    root: &Path,
+    id: &ObjectId,
+    limits: TransferLimits,
+) -> std::result::Result<Vec<u8>, TransferError> {
+    let [pack, objects, depth, entries, meta, work] = limit_words(limits);
+    port_fs::clear_errors();
+    let r = transfer_reply(binding::store_export_pack(
+        root_bytes(root),
+        &id_bytes(id),
+        pack,
+        objects,
+        depth,
+        entries,
+        meta,
+        work,
+    ))?;
+    Ok(r.rest())
+}
+
+/// `import_pack`.
+pub(crate) fn import_pack(
+    store_path: &Path,
+    expected: &ObjectId,
+    bytes: &[u8],
+    limits: TransferLimits,
+) -> std::result::Result<TransferReport, TransferError> {
+    let [pack, objects, depth, entries, meta, work] = limit_words(limits);
+    port_fs::clear_errors();
+    let mut r = transfer_reply(binding::store_import_pack(
+        root_bytes(store_path),
+        &id_bytes(expected),
+        bytes,
+        pack,
+        objects,
+        depth,
+        entries,
+        meta,
+        work,
+    ))?;
+    Ok(TransferReport {
+        root: r.id(),
+        objects: r.u64() as usize,
+        pack_bytes: r.u64() as usize,
+        payload_bytes: r.u64() as usize,
+        inserted: r.u64() as usize,
+        reused: r.u64() as usize,
+    })
 }
