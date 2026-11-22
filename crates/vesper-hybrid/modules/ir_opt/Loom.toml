@@ -10,3 +10,4 @@ capability_ceiling = ["Fail", "Alloc"]
 "@vesper/place-ir" = { version = "^0.1", path = "../../../../packages/vesper-place-ir" }
 "@vesper/egraph" = { version = "^0.1", path = "../../../../packages/vesper-egraph" }
 "@vesper/ir-opt" = { version = "^0.1", path = "../../../../packages/vesper-ir-opt" }
+"@vesper/ir-opt-policy" = { version = "^0.1", path = "../../../../packages/vesper-ir-opt-policy" }

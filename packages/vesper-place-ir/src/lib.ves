@@ -28,6 +28,13 @@
 // - `place_ir_dump` / `place_ir_words`: the harness entries
 //   (tests/self_host_place_ir.rs).
 
+use self::codes::{
+    Lit,
+    Op,
+    Pat,
+    Tag,
+    Term
+};
 use @vesper/check-data::pack_text;
 use @vesper/check-data::util::{
     add,
@@ -54,58 +61,6 @@ use @vesper/check-data::input::{
     Reader,
     read_ctx
 };
-
-// Operand tags (ir_words.rs `T_*`).
-const T_RAW: u8 = 0;
-const T_NAME: u8 = 1;
-const T_OPT_NAME: u8 = 2;
-const T_TYPE: u8 = 3;
-const T_PATH: u8 = 4;
-const T_POOL: u8 = 5;
-const T_VALUE: u8 = 6;
-const T_BLOCK: u8 = 7;
-
-// Opcodes (ir_words.rs `OP_NAMES`), in `Op` order.
-const OP_CONST: u8 = 0;
-const OP_UNIT: u8 = 1;
-const OP_READ: u8 = 2;
-const OP_BIND: u8 = 3;
-const OP_WRITE: u8 = 4;
-const OP_UNARY: u8 = 5;
-const OP_BINARY: u8 = 6;
-const OP_TUPLE: u8 = 7;
-const OP_DATA: u8 = 8;
-const OP_PROJECT: u8 = 9;
-const OP_INDEX: u8 = 10;
-const OP_CALL: u8 = 11;
-const OP_INDIRECT: u8 = 12;
-const OP_TRY: u8 = 13;
-const OP_CLOSURE: u8 = 14;
-const OP_HANDLE: u8 = 15;
-const OP_VECTOR: u8 = 16;
-const OP_TILED: u8 = 17;
-const OP_SEQ: u8 = 18;
-const OP_FIP: u8 = 19;
-const OP_LOOP: u8 = 20;
-const OP_EXIT: u8 = 21;
-
-// Terminators.
-const TERM_RETURN: u8 = 0;
-const TERM_JUMP: u8 = 1;
-const TERM_BRANCH: u8 = 2;
-const TERM_MATCH: u8 = 3;
-const TERM_UNREACHABLE: u8 = 4;
-
-// Pattern kinds.
-const PAT_WILD: u64 = 0;
-const PAT_BIND: u64 = 1;
-const PAT_LITERAL: u64 = 2;
-const PAT_TUPLE: u64 = 3;
-const PAT_CONSTRUCTOR: u64 = 4;
-
-// Literal kinds; a literal is three words (kind and two payload words):
-// 0 Int, 1 Float, 2 Bool, 3 String, 4 WideInt (past `i128::MAX`).
-const LIT_STRING: u64 = 3;
 
 // check-data's type kinds.
 const K_LIT: u8 = 0;
@@ -224,7 +179,7 @@ impl Program {
                 hn: 0,
                 i0: 0,
                 ic: 0,
-                term: TERM_UNREACHABLE,
+                term: Term::Unreachable,
                 ta: 0,
                 tn: 0
             },
@@ -243,7 +198,7 @@ impl Program {
                 tin: 0,
                 tout: 0,
                 fallible: 0,
-                op: OP_UNIT,
+                op: Op::Unit,
                 a: 0,
                 n: 0
             },
@@ -314,15 +269,15 @@ impl Program {
 // symbols and type ids (an optional name: symbol + 1, or 0).
 fn take(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, tag: u8) -> u64 {
     let x = r.word(in b);
-    let y = if tag == T_NAME {
+    let y = if tag == Tag::Name {
         w(u32_at(in c.nmap, x))
-    } else if tag == T_OPT_NAME {
+    } else if tag == Tag::OptName {
         if x == 0 {
             0
         } else {
             inc(w(u32_at(in c.nmap, wrapping_sub(x, 1))))
         }
-    } else if tag == T_TYPE {
+    } else if tag == Tag::Type {
         w(u32_at(in c.tmap, x))
     } else {
         x
@@ -332,20 +287,20 @@ fn take(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, tag: u8) 
 }
 
 fn raw(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) -> u64 {
-    take(inout r, in b, in c, inout p, T_RAW)
+    take(inout r, in b, in c, inout p, Tag::Raw)
 }
 
 fn values(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     let n = raw(inout r, in b, in c, inout p);
     for i in 0..n {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
     }
 }
 
 fn literal(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     let kind = raw(inout r, in b, in c, inout p);
-    if kind == LIT_STRING {
-        let s = take(inout r, in b, in c, inout p, T_NAME);
+    if kind == Lit::String {
+        let s = take(inout r, in b, in c, inout p, Tag::Name);
     } else {
         let lo = raw(inout r, in b, in c, inout p);
     }
@@ -359,21 +314,21 @@ fn pattern(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, depth:
     if depth > MAX_DEPTH {
         return;
     }
-    if kind == PAT_BIND {
-        let n = take(inout r, in b, in c, inout p, T_NAME);
-    } else if kind == PAT_LITERAL {
+    if kind == Pat::Bind {
+        let n = take(inout r, in b, in c, inout p, Tag::Name);
+    } else if kind == Pat::Literal {
         literal(inout r, in b, in c, inout p);
-    } else if kind == PAT_TUPLE {
+    } else if kind == Pat::Tuple {
         let n = raw(inout r, in b, in c, inout p);
         for i in 0..n {
             pattern(inout r, in b, in c, inout p, inc(depth));
         }
-    } else if kind == PAT_CONSTRUCTOR {
-        let name = take(inout r, in b, in c, inout p, T_NAME);
+    } else if kind == Pat::Constructor {
+        let name = take(inout r, in b, in c, inout p, Tag::Name);
         let named = raw(inout r, in b, in c, inout p);
         let n = raw(inout r, in b, in c, inout p);
         for i in 0..n {
-            let f = take(inout r, in b, in c, inout p, T_NAME);
+            let f = take(inout r, in b, in c, inout p, Tag::Name);
             pattern(inout r, in b, in c, inout p, inc(depth));
         }
     }
@@ -383,9 +338,9 @@ fn args(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     let n = raw(inout r, in b, in c, inout p);
     for i in 0..n {
         let pass = raw(inout r, in b, in c, inout p);
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-        let root = take(inout r, in b, in c, inout p, T_OPT_NAME);
-        let path = take(inout r, in b, in c, inout p, T_PATH);
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+        let root = take(inout r, in b, in c, inout p, Tag::OptName);
+        let path = take(inout r, in b, in c, inout p, Tag::Path);
     }
 }
 
@@ -393,7 +348,7 @@ fn args(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
 fn pairs(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, second: u8) {
     let n = raw(inout r, in b, in c, inout p);
     for i in 0..n {
-        let k = take(inout r, in b, in c, inout p, T_NAME);
+        let k = take(inout r, in b, in c, inout p, Tag::Name);
         let v = take(inout r, in b, in c, inout p, second);
     }
 }
@@ -401,100 +356,100 @@ fn pairs(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, second: 
 fn names(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     let n = raw(inout r, in b, in c, inout p);
     for i in 0..n {
-        let k = take(inout r, in b, in c, inout p, T_NAME);
+        let k = take(inout r, in b, in c, inout p, Tag::Name);
     }
 }
 
 fn operands(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, op: u8) {
-    if op == OP_CONST {
+    if op == Op::Const {
         literal(inout r, in b, in c, inout p);
-    } else if op == OP_READ {
-        let root = take(inout r, in b, in c, inout p, T_NAME);
-        let path = take(inout r, in b, in c, inout p, T_PATH);
+    } else if op == Op::Read {
+        let root = take(inout r, in b, in c, inout p, Tag::Name);
+        let path = take(inout r, in b, in c, inout p, Tag::Path);
         let pass = raw(inout r, in b, in c, inout p);
         let n = raw(inout r, in b, in c, inout p);
         for i in 0..n {
-            let q = take(inout r, in b, in c, inout p, T_PATH);
+            let q = take(inout r, in b, in c, inout p, Tag::Path);
         }
-    } else if op == OP_BIND {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
+    } else if op == Op::Bind {
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
         pattern(inout r, in b, in c, inout p, 0);
-    } else if op == OP_WRITE {
-        let place = take(inout r, in b, in c, inout p, T_NAME);
-        let o = take(inout r, in b, in c, inout p, T_NAME);
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-    } else if op == OP_UNARY {
-        let o = take(inout r, in b, in c, inout p, T_NAME);
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-    } else if op == OP_BINARY {
-        let o = take(inout r, in b, in c, inout p, T_NAME);
-        let x = take(inout r, in b, in c, inout p, T_VALUE);
-        let y = take(inout r, in b, in c, inout p, T_VALUE);
-    } else if op == OP_TUPLE {
+    } else if op == Op::Write {
+        let place = take(inout r, in b, in c, inout p, Tag::Name);
+        let o = take(inout r, in b, in c, inout p, Tag::Name);
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+    } else if op == Op::Unary {
+        let o = take(inout r, in b, in c, inout p, Tag::Name);
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+    } else if op == Op::Binary {
+        let o = take(inout r, in b, in c, inout p, Tag::Name);
+        let x = take(inout r, in b, in c, inout p, Tag::Value);
+        let y = take(inout r, in b, in c, inout p, Tag::Value);
+    } else if op == Op::Tuple {
         values(inout r, in b, in c, inout p);
-    } else if op == OP_DATA {
-        let name = take(inout r, in b, in c, inout p, T_NAME);
-        pairs(inout r, in b, in c, inout p, T_VALUE);
-    } else if op == OP_PROJECT {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-        let f = take(inout r, in b, in c, inout p, T_NAME);
-    } else if op == OP_INDEX {
-        let x = take(inout r, in b, in c, inout p, T_VALUE);
-        let y = take(inout r, in b, in c, inout p, T_VALUE);
-    } else if op == OP_CALL {
-        let callee = take(inout r, in b, in c, inout p, T_NAME);
+    } else if op == Op::Data {
+        let name = take(inout r, in b, in c, inout p, Tag::Name);
+        pairs(inout r, in b, in c, inout p, Tag::Value);
+    } else if op == Op::Project {
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+        let f = take(inout r, in b, in c, inout p, Tag::Name);
+    } else if op == Op::Index {
+        let x = take(inout r, in b, in c, inout p, Tag::Value);
+        let y = take(inout r, in b, in c, inout p, Tag::Value);
+    } else if op == Op::Call {
+        let callee = take(inout r, in b, in c, inout p, Tag::Name);
         args(inout r, in b, in c, inout p);
         let n = raw(inout r, in b, in c, inout p);
         for i in 0..n {
-            let t = take(inout r, in b, in c, inout p, T_TYPE);
+            let t = take(inout r, in b, in c, inout p, Tag::Type);
         }
-        let cap = take(inout r, in b, in c, inout p, T_OPT_NAME);
-    } else if op == OP_INDIRECT {
-        let callee = take(inout r, in b, in c, inout p, T_VALUE);
+        let cap = take(inout r, in b, in c, inout p, Tag::OptName);
+    } else if op == Op::Indirect {
+        let callee = take(inout r, in b, in c, inout p, Tag::Value);
         args(inout r, in b, in c, inout p);
-    } else if op == OP_TRY {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-    } else if op == OP_CLOSURE || op == OP_HANDLE {
-        if op == OP_HANDLE {
+    } else if op == Op::Try {
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+    } else if op == Op::Closure || op == Op::Handle {
+        if op == Op::Handle {
             let has = raw(inout r, in b, in c, inout p);
-            let v = take(inout r, in b, in c, inout p, T_VALUE);
+            let v = take(inout r, in b, in c, inout p, Tag::Value);
         }
-        let e = take(inout r, in b, in c, inout p, T_POOL);
-        pairs(inout r, in b, in c, inout p, T_NAME);
+        let e = take(inout r, in b, in c, inout p, Tag::Pool);
+        pairs(inout r, in b, in c, inout p, Tag::Name);
         // moves: n places (root, path)
-        pairs(inout r, in b, in c, inout p, T_PATH);
-    } else if op == OP_VECTOR {
-        let o = take(inout r, in b, in c, inout p, T_POOL);
+        pairs(inout r, in b, in c, inout p, Tag::Path);
+    } else if op == Op::Vector {
+        let o = take(inout r, in b, in c, inout p, Tag::Pool);
         values(inout r, in b, in c, inout p);
-    } else if op == OP_TILED {
-        let o = take(inout r, in b, in c, inout p, T_POOL);
+    } else if op == Op::Tiled {
+        let o = take(inout r, in b, in c, inout p, Tag::Pool);
         args(inout r, in b, in c, inout p);
-        let cap = take(inout r, in b, in c, inout p, T_OPT_NAME);
-    } else if op == OP_SEQ || op == OP_FIP {
-        let o = take(inout r, in b, in c, inout p, T_POOL);
+        let cap = take(inout r, in b, in c, inout p, Tag::OptName);
+    } else if op == Op::Seq || op == Op::Fip {
+        let o = take(inout r, in b, in c, inout p, Tag::Pool);
         args(inout r, in b, in c, inout p);
-    } else if op == OP_EXIT {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-        let owner = take(inout r, in b, in c, inout p, T_NAME);
+    } else if op == Op::Exit {
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+        let owner = take(inout r, in b, in c, inout p, Tag::Name);
     }
 }
 
 fn terminator(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, term: u8) {
-    if term == TERM_RETURN {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-    } else if term == TERM_JUMP {
-        let t = take(inout r, in b, in c, inout p, T_BLOCK);
+    if term == Term::Return {
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+    } else if term == Term::Jump {
+        let t = take(inout r, in b, in c, inout p, Tag::Block);
         values(inout r, in b, in c, inout p);
-    } else if term == TERM_BRANCH {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-        let yes = take(inout r, in b, in c, inout p, T_BLOCK);
-        let no = take(inout r, in b, in c, inout p, T_BLOCK);
-    } else if term == TERM_MATCH {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
+    } else if term == Term::Branch {
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+        let yes = take(inout r, in b, in c, inout p, Tag::Block);
+        let no = take(inout r, in b, in c, inout p, Tag::Block);
+    } else if term == Term::Match {
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
         let n = raw(inout r, in b, in c, inout p);
         for i in 0..n {
             pattern(inout r, in b, in c, inout p, 0);
-            let t = take(inout r, in b, in c, inout p, T_BLOCK);
+            let t = take(inout r, in b, in c, inout p, Tag::Block);
         }
     }
 }
@@ -502,42 +457,42 @@ fn terminator(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program, ter
 fn header(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     let np = raw(inout r, in b, in c, inout p);
     for i in 0..np {
-        let name = take(inout r, in b, in c, inout p, T_NAME);
+        let name = take(inout r, in b, in c, inout p, Tag::Name);
         let pass = raw(inout r, in b, in c, inout p);
         let k = raw(inout r, in b, in c, inout p);
         for j in 0..k {
-            let q = take(inout r, in b, in c, inout p, T_PATH);
+            let q = take(inout r, in b, in c, inout p, Tag::Path);
         }
-        let t = take(inout r, in b, in c, inout p, T_TYPE);
+        let t = take(inout r, in b, in c, inout p, Tag::Type);
         let s0 = raw(inout r, in b, in c, inout p);
         let s1 = raw(inout r, in b, in c, inout p);
     }
-    let result = take(inout r, in b, in c, inout p, T_TYPE);
-    let effects = take(inout r, in b, in c, inout p, T_TYPE);
+    let result = take(inout r, in b, in c, inout p, Tag::Type);
+    let effects = take(inout r, in b, in c, inout p, Tag::Type);
     // bounds: (name, mode)
-    pairs(inout r, in b, in c, inout p, T_RAW);
+    pairs(inout r, in b, in c, inout p, Tag::Raw);
     names(inout r, in b, in c, inout p);
     // values: (value, type)
     let nv = raw(inout r, in b, in c, inout p);
     for i in 0..nv {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-        let t = take(inout r, in b, in c, inout p, T_TYPE);
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+        let t = take(inout r, in b, in c, inout p, Tag::Type);
     }
     // locals: (name, type)
-    pairs(inout r, in b, in c, inout p, T_TYPE);
+    pairs(inout r, in b, in c, inout p, Tag::Type);
 }
 
 fn fip_drop(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     let kind = raw(inout r, in b, in c, inout p);
     if kind == 1 {
-        let root = take(inout r, in b, in c, inout p, T_NAME);
-        let path = take(inout r, in b, in c, inout p, T_PATH);
-        let t = take(inout r, in b, in c, inout p, T_TYPE);
+        let root = take(inout r, in b, in c, inout p, Tag::Name);
+        let path = take(inout r, in b, in c, inout p, Tag::Path);
+        let t = take(inout r, in b, in c, inout p, Tag::Type);
     } else {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
-        let t = take(inout r, in b, in c, inout p, T_TYPE);
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
+        let t = take(inout r, in b, in c, inout p, Tag::Type);
         if kind == 2 {
-            let keep = take(inout r, in b, in c, inout p, T_NAME);
+            let keep = take(inout r, in b, in c, inout p, Tag::Name);
         }
     }
 }
@@ -545,7 +500,7 @@ fn fip_drop(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
 fn inst_drops(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     let n = raw(inout r, in b, in c, inout p);
     for i in 0..n {
-        let blk = take(inout r, in b, in c, inout p, T_BLOCK);
+        let blk = take(inout r, in b, in c, inout p, Tag::Block);
         let k = raw(inout r, in b, in c, inout p);
         for j in 0..k {
             let at = raw(inout r, in b, in c, inout p);
@@ -558,24 +513,24 @@ fn trailer(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     // call slots: (value, kind, bind dest, slot index, size)
     let ns = raw(inout r, in b, in c, inout p);
     for i in 0..ns {
-        let v = take(inout r, in b, in c, inout p, T_VALUE);
+        let v = take(inout r, in b, in c, inout p, Tag::Value);
         let kind = raw(inout r, in b, in c, inout p);
-        let d = take(inout r, in b, in c, inout p, T_VALUE);
+        let d = take(inout r, in b, in c, inout p, Tag::Value);
         let slot = raw(inout r, in b, in c, inout p);
         let size = raw(inout r, in b, in c, inout p);
     }
     // join slots: block, k x (value, slot, m x (block, value, slot))
     let nj = raw(inout r, in b, in c, inout p);
     for i in 0..nj {
-        let blk = take(inout r, in b, in c, inout p, T_BLOCK);
+        let blk = take(inout r, in b, in c, inout p, Tag::Block);
         let k = raw(inout r, in b, in c, inout p);
         for j in 0..k {
-            let v = take(inout r, in b, in c, inout p, T_VALUE);
+            let v = take(inout r, in b, in c, inout p, Tag::Value);
             let slot = raw(inout r, in b, in c, inout p);
             let m = raw(inout r, in b, in c, inout p);
             for q in 0..m {
-                let pb = take(inout r, in b, in c, inout p, T_BLOCK);
-                let pv = take(inout r, in b, in c, inout p, T_VALUE);
+                let pb = take(inout r, in b, in c, inout p, Tag::Block);
+                let pv = take(inout r, in b, in c, inout p, Tag::Value);
                 let ps = raw(inout r, in b, in c, inout p);
             }
         }
@@ -584,7 +539,7 @@ fn trailer(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     inst_drops(inout r, in b, in c, inout p);
     let nt = raw(inout r, in b, in c, inout p);
     for i in 0..nt {
-        let blk = take(inout r, in b, in c, inout p, T_BLOCK);
+        let blk = take(inout r, in b, in c, inout p, Tag::Block);
         let k = raw(inout r, in b, in c, inout p);
         for j in 0..k {
             fip_drop(inout r, in b, in c, inout p);
@@ -597,7 +552,7 @@ fn read_block(inout r: Reader, in b: Slice[u8], in c: Ctx, inout p: Program) {
     let entry = raw(inout r, in b, in c, inout p);
     let ni = raw(inout r, in b, in c, inout p);
     for i in 0..ni {
-        let s = take(inout r, in b, in c, inout p, T_BLOCK);
+        let s = take(inout r, in b, in c, inout p, Tag::Block);
         let t = raw(inout r, in b, in c, inout p);
     }
     let out = raw(inout r, in b, in c, inout p);
@@ -758,26 +713,26 @@ fn quoted(inout o: ChunkSeq[u8], in names: Names, s: u32) {
 }
 
 fn word(inout o: ChunkSeq[u8], in t: Types, in names: Names, x: u64, tag: u8) {
-    if tag == T_NAME {
+    if tag == Tag::Name {
         quoted(inout o, in names, n32(x));
-    } else if tag == T_OPT_NAME {
+    } else if tag == Tag::OptName {
         if x == 0 {
             o.push(45);
         } else {
             quoted(inout o, in names, n32(wrapping_sub(x, 1)));
         }
-    } else if tag == T_TYPE {
+    } else if tag == Tag::Type {
         debug_type(in t, in names, n32(x), inout o);
-    } else if tag == T_PATH {
+    } else if tag == Tag::Path {
         o.push(112);
         push_decimal(inout o, x);
-    } else if tag == T_POOL {
+    } else if tag == Tag::Pool {
         o.push(35);
         push_decimal(inout o, x);
-    } else if tag == T_VALUE {
+    } else if tag == Tag::Value {
         o.push(37);
         push_decimal(inout o, x);
-    } else if tag == T_BLOCK {
+    } else if tag == Tag::Block {
         o.push(98);
         push_decimal(inout o, x);
     } else {
