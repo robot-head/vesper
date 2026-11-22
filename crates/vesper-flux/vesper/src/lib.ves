@@ -1,6 +1,8 @@
 // @export abi 3
 // @vesper/flux: Vesper port of the vesper-flux Z-set kernels and frontier
-// (port wave P3b lane 7, #1069).
+// (port wave P3b lane 7, #1069), the accumulator that builds sets from
+// decoded records and the CDC batch decoder (Rust-exit wave SH6 lane 6,
+// #1401).
 //
 // A Z-set crosses the boundary as one flat sequence of cells: each row is
 // `width` i64 columns followed by its i64 weight (stride width + 1), rows
@@ -28,6 +30,14 @@ use self::sort::{
     sort_by_column,
     sort_u64
 };
+use self::acc::{
+    ROWS_FULL,
+    SUM_OVERFLOW,
+    acc_finish,
+    acc_insert,
+    acc_new
+};
+use self::cdc::cdc_decode;
 use self::wide::{
     Acc,
     acc_add,
@@ -111,6 +121,17 @@ fn union_error(
     ZErr::Work
 }
 
+// The input heads of a three-way union, as bits of one pick.
+enum Head: _ {
+    A = 1,
+    B = 2,
+    C = 4
+}
+
+fn has_head(pick: u64, head: u64) -> bool {
+    (pick & head) != 0
+}
+
 // The sum of up to three canonical sets of one width, in one merge pass.
 pub fn zs_union3(
     width: u64,
@@ -147,36 +168,36 @@ pub fn zs_union3(
         let ai = wrapping_mul(i, stride);
         let bj = wrapping_mul(j, stride);
         let ck = wrapping_mul(k, stride);
-        // Which heads hold the smallest row: bit 1 a, 2 b, 4 c.
+        // Which heads hold the smallest row, as `Head` bits.
         let mut pick: u64 = 0;
         if ha {
-            pick = 1;
+            pick = Head::A;
         }
         if hb {
             if pick == 0 {
-                pick = 2;
+                pick = Head::B;
             } else {
                 let o = cmp_rows(in b, bj, in a, ai, width);
                 if o < 0 {
-                    pick = 2;
+                    pick = Head::B;
                 } else if o == 0 {
-                    pick = 3;
+                    pick = Head::A | Head::B;
                 }
             }
         }
         if hc {
             if pick == 0 {
-                pick = 4;
+                pick = Head::C;
             } else {
-                let o = if (pick & 1) == 1 {
+                let o = if has_head(pick, Head::A) {
                     cmp_rows(in c, ck, in a, ai, width)
                 } else {
                     cmp_rows(in c, ck, in b, bj, width)
                 };
                 if o < 0 {
-                    pick = 4;
+                    pick = Head::C;
                 } else if o == 0 {
-                    pick = pick | 4;
+                    pick = pick | Head::C;
                 }
             }
         }
@@ -185,35 +206,35 @@ pub fn zs_union3(
             Fail::raise(union_error(width, in a, na, in b, nb, in c, nc, max_rows, budget));
         }
         let mut acc = acc_zero();
-        if (pick & 1) == 1 {
+        if has_head(pick, Head::A) {
             acc = acc_add(acc, cell(in a, wrapping_add(ai, width)));
         }
-        if (pick & 2) == 2 {
+        if has_head(pick, Head::B) {
             acc = acc_add(acc, cell(in b, wrapping_add(bj, width)));
         }
-        if (pick & 4) == 4 {
+        if has_head(pick, Head::C) {
             acc = acc_add(acc, cell(in c, wrapping_add(ck, width)));
         }
         if !acc_is_zero(acc) {
             if !acc_fits(acc) {
                 overflow = true;
             }
-            if (pick & 1) == 1 {
+            if has_head(pick, Head::A) {
                 push_row(inout out, in a, ai, width);
-            } else if (pick & 2) == 2 {
+            } else if has_head(pick, Head::B) {
                 push_row(inout out, in b, bj, width);
             } else {
                 push_row(inout out, in c, ck, width);
             }
             out.push(acc_value(acc));
         }
-        if (pick & 1) == 1 {
+        if has_head(pick, Head::A) {
             i = wrapping_add(i, 1);
         }
-        if (pick & 2) == 2 {
+        if has_head(pick, Head::B) {
             j = wrapping_add(j, 1);
         }
-        if (pick & 4) == 4 {
+        if has_head(pick, Head::C) {
             k = wrapping_add(k, 1);
         }
     }
@@ -600,9 +621,7 @@ fn is_live(in live: ChunkSeq[u8], i: u64) -> bool {
     }
 }
 
-fn max_word() -> u64 {
-    18446744073709551615
-}
+const MAX_WORD: u64 = 18446744073709551615;
 
 // The watermark after a change: the least live hold, or the old bound.
 fn publish(in holds: ChunkSeq[i64], in live: ChunkSeq[u8], watermark: i64) -> i64 {
@@ -645,7 +664,7 @@ pub fn frontier_acquire(
     }
     let mut index = live.len();
     for i in 0..live.len() {
-        if !is_live(in live, i) && word(in gens, i) < max_word() {
+        if !is_live(in live, i) && word(in gens, i) < MAX_WORD {
             index = i;
             break;
         }
@@ -659,7 +678,7 @@ pub fn frontier_acquire(
         live.push(0);
     }
     let g = word(in gens, index);
-    if g == max_word() {
+    if g == MAX_WORD {
         Fail::raise(FrErr::Exhausted);
     }
     gens.try_set(index, wrapping_add(g, 1));
@@ -702,7 +721,7 @@ pub fn frontier_advance(
         Fail::raise(FrErr::Regression);
     }
     let g = word(in gens, slot);
-    if g == max_word() {
+    if g == MAX_WORD {
         Fail::raise(FrErr::Exhausted);
     }
     let ng = wrapping_add(g, 1);
@@ -727,4 +746,94 @@ pub fn frontier_retire(
     }
     live.try_set(slot, 0);
     watermark = publish(in holds, in live, watermark);
+}
+
+// ---------------------------------------------------------------------
+// the accumulator (zset.rs `Accumulator`, module acc)
+
+// Every input's distinct rows and their i128 sums (see acc.ves).
+pub struct ZAcc {
+    widths: ChunkSeq[u64],
+    max_rows: u64,
+    // The table's hash key.
+    k0: u64,
+    k1: u64,
+    // Distinct rows per input.
+    counts: ChunkSeq[u64],
+    // Per distinct row, in insertion order: its input, the offset of its
+    // cells in `rows`, and its sum (hi:lo, two's complement).
+    tags: ChunkSeq[u64],
+    offs: ChunkSeq[u64],
+    rows: ChunkSeq[i64],
+    his: ChunkSeq[i64],
+    los: ChunkSeq[u64],
+    // Open addressing: 0 is empty, otherwise the distinct row's index + 1.
+    // Its length is a power of two, at least twice the distinct rows.
+    table: ChunkSeq[u64]
+}
+
+// `Accumulator::new` for inputs of these widths (the wrapper checks them
+// against the column limit); (k0, k1) is a random hash key.
+pub fn zacc_new(in widths: Slice[u64], max_rows: u64, k0: u64, k1: u64) -> ZAcc {
+    acc_new(in widths, max_rows, k0, k1)
+}
+
+// `Accumulator::add` of one row of `input` after the wrapper's work charge
+// and width check; the weight is the i128 whi:wlo.
+pub fn zacc_add(inout a: ZAcc, input: u64, in row: Slice[i64], whi: i64, wlo: u64) eff [
+    Fail[ZErr]
+] {
+    let status = acc_insert(inout a, input, in row, 0, whi, wlo);
+    if status == ROWS_FULL {
+        Fail::raise(ZErr::Rows);
+    }
+    if status == SUM_OVERFLOW {
+        Fail::raise(ZErr::Overflow);
+    }
+}
+
+// `Accumulator::finish` of one input: its nonzero sums in row order.
+pub fn zacc_finish(in a: ZAcc, input: u64) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    acc_finish(in a, input)
+}
+
+// ---------------------------------------------------------------------
+// CDC batches (cdc.rs `Executor::ingest_cdc`, module cdc)
+
+// Every way a CDC batch fails after the wrapper's empty and size checks.
+pub copy enum CdcErr {
+    Work,
+    Rows,
+    Overflow,
+    Records,
+    TruncatedHeader,
+    Partition,
+    Schema,
+    Flags,
+    Weight,
+    Offset,
+    TruncatedRow
+}
+
+// Decodes a batch into the accumulator (see cdc.ves for the arguments).
+pub fn cdc_ingest(
+    inout a: ZAcc,
+    in bytes: Slice[u8],
+    in parts: Slice[u64],
+    in binds: Slice[u64],
+    inout next: ChunkSeq[u64],
+    max_records: u64,
+    inout budget: u64,
+    inout stats: ChunkSeq[i64]
+) eff [Fail[CdcErr]] {
+    cdc_decode(
+        inout a,
+        in bytes,
+        in parts,
+        in binds,
+        inout next,
+        max_records,
+        inout budget,
+        inout stats
+    );
 }

@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="page-type" content="software">
     <meta name="site-kind" content="software">
-    <title>Vesper — systems code with explicit contracts</title>
-    <meta name="description" content="Explore Vesper’s linear ownership, field projections and lexical effects through real programs, and compare the tradeoffs with Rust.">
+    <title>Vesper · Ownership and effects in systems code</title>
+    <meta name="description" content="Read and run Vesper programs that commit a transaction, update two fields of a record, and handle division by zero. Compare the same operations in Rust.">
     <meta name="theme-color" content="#101111">
     <link rel="canonical" href="https://vesper-lang.org/">
-    <meta property="og:title" content="Vesper — systems code with explicit contracts">
-    <meta property="og:description" content="Linear resources. Lexical effects. Native code and Lean 4 proofs. A language designed to make systems software easier to reason about.">
+    <meta property="og:title" content="Vesper · Ownership and effects in systems code">
+    <meta property="og:description" content="Vesper checks resource ownership, field access, and effects. Run the examples, compile supported programs to native code, or extract a model for Lean 4.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://vesper-lang.org/">
     <meta property="og:image" content="https://vesper-lang.org/share.jpg">
@@ -24,6 +24,10 @@
     [role="tabpanel"][hidden] { display: block !important; }
     .tab-bar, .theme, .nav__toggle, .copy-source { display: none !important; }
     [role="tabpanel"] + [role="tabpanel"] { border-top: 1px solid var(--line); }
+    @media (max-width: 760px) {
+      .nav-bar { flex-wrap: wrap; height: auto; padding-block: 12px; }
+      .nav-bar nav { display: flex; order: 1; width: 100%; flex-wrap: wrap; gap: 8px 16px; }
+    }
   </style></noscript>
   </head>
   <body>
@@ -32,10 +36,11 @@
       <div class="wrap nav-bar">
         <a class="brand" href="#top" aria-label="Vesper home"><img data-brand-mark src="brand/vesper-mark-dusk.svg" width="34" height="34" alt="">vesper</a>
         <nav id="navigation" aria-label="Main navigation">
-          <a href="#language">Language</a>
-          <a href="#learn">Why Vesper?</a>
+          <a href="tour/index.html">Language tour</a>
+          <a href="docs/index.html">Documentation</a>
+          <a href="#learn">Rust comparison</a>
           <a href="#compiler">Compiler</a>
-          <a href="vesper-specification.pdf">Specification <svg width="12" height="12" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
+          <a href="vesper-specification.pdf" aria-label="Vesper language specification (PDF)">Specification <svg width="12" height="12" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
         </nav>
         <div class="nav-end">
           <label class="theme" title="Switch between dusk and dawn"><input type="checkbox" id="theme-toggle" role="switch" aria-label="Dawn theme"><svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"></path></svg></label>
@@ -48,26 +53,14 @@
       <section class="hero wrap" aria-labelledby="hero-title">
         <div class="hero-copy">
           <p class="eyebrow"><span class="signal" aria-hidden="true"></span> The Vesper programming language</p>
-          <h1 id="hero-title">Systems code.<br><em>Explicit control.</em></h1>
-          <p class="lead">Vesper is a zero-GC systems language that lets a function declare which resources it consumes, which fields it can change and which effects it can perform.</p>
+          <h1 id="hero-title">Ownership and effects<br><em>in systems code</em></h1>
+          <p class="lead">Vesper is a systems language without a garbage collector. A function declares which resources it consumes, which fields it may change, and which effects it may perform. The compiler checks those declarations at each call.</p>
           <div class="actions">
-            <a class="button primary" href="#guide">Get started <svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg></a>
+            <a class="button primary" href="tour/index.html">Take the tour <svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg></a>
             <a class="button" href="#learn">Compare with Rust <svg width="18" height="18" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h15m-6-6 6 6-6 6"></path></svg></a>
           </div>
         </div>
-        <figure class="plate">
-          <div class="plate-head">
-            <span><i></i> Field projection</span>
-            <span>FIG. 01</span>
-          </div>
-          <div class="schematic">
-            <img src="brand/broker-fields.webp" width="1360" height="840" alt="Exploded view of the Broker record. Index and metrics are writable, while config is shared.">
-            <span class="callout c1">index <b>inout</b></span>
-            <span class="callout c2">metrics <b>inout</b></span>
-            <span class="callout c3">config <b>in</b></span>
-          </div>
-          <figcaption><span><svg width="14" height="14" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5m-18 4 9 5 9-5"></path></svg> Broker</span><span>Disjoint field access</span></figcaption>
-        </figure>
+        <!-- figure:broker -->
       </section>
       <div class="rail">
         <div class="wrap feature-row">
@@ -97,8 +90,8 @@
       <section id="learn" class="wrap band">
         <p class="eyebrow section-label">Language comparison</p>
         <div class="section-head">
-          <h2>Why choose Vesper over Rust?</h2>
-          <p>Compare what each compiler can enforce.</p>
+          <h2>How Vesper and Rust check a call</h2>
+          <p>What happens if you open a transaction and forget to commit it? Follow the same mistake through both compilers.</p>
         </div>
         <div class="compare-box">
           <div role="tablist" class="tab-bar" aria-label="Compare Vesper and Rust">
@@ -110,14 +103,22 @@
             <h3>Must every transaction finish?</h3>
             <div class="pair">
               <article>
-                <h4>Rust</h4>
-                <code>fn commit(self) -&gt; u64</code>
-                <p>A consuming method takes ownership. Rust also permits the caller to let the transaction go out of scope. Libraries often use <code>Drop</code> to roll back an unfinished transaction.</p>
+                <h4>Rust · compiles</h4>
+                <pre tabindex="0"><code data-lang="rust">struct WriteTxn;
+fn main() {
+    let _tx = WriteTxn;
+    // Forgot to commit or abort.
+}</code></pre>
+                <p>This program exits successfully. The transaction goes out of scope and its type has no cleanup code. Libraries often use <code>Drop</code> to roll back an unfinished transaction.</p>
               </article>
               <article>
-                <h4>Vesper</h4>
-                <code>fn commit(sink self) -&gt; u64</code>
-                <p>Declare <code>WriteTxn</code> as <code>linear</code>. Every returning path must consume it. In the example, the caller commits or aborts. Leaving the value unused is a compile-time error.</p>
+                <h4>Vesper · rejected at scope exit</h4>
+                <pre tabindex="0"><code data-lang="vesper" data-error="E0302">linear struct WriteTxn {}
+fn main() {
+    let tx = WriteTxn {};
+    // Forgot to commit or abort.
+}</code></pre>
+                <p>The checker reports <code>E0302</code> because <code>tx</code> is still live. Give the type a consuming method and call it before returning. <a href="language.html#ownership">See the complete fix with <code>tx.commit()</code>.</a></p>
                 <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/self_host_check/linear_drop.ves" class="evidence">See an unconsumed linear value ↗</a>
               </article>
             </div>
@@ -127,42 +128,42 @@
             <div class="pair">
               <article>
                 <h4>Rust</h4>
-                <code>index: &amp;mut u64, metrics: &amp;mut u64</code>
+                <pre tabindex="0"><code data-lang="rust">index: &amp;mut u64, metrics: &amp;mut u64</code></pre>
                 <p>Rust can borrow separate struct fields at the same time. A helper taking <code>&amp;mut Broker</code> borrows the whole record, so a common API passes the individual field references instead.</p>
               </article>
               <article>
                 <h4>Vesper</h4>
-                <code>inout broker.{index, metrics}: Broker</code>
+                <pre tabindex="0"><code data-lang="vesper">inout broker.{index, metrics}: Broker</code></pre>
                 <p>Name the writable fields in the parameter. The caller passes the record and can lend <code>broker.config</code> separately because the checker can see that the places are disjoint.</p>
                 <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/self_host_check/inout_overlap.ves" class="evidence">See an overlapping mutable loan ↗</a>
               </article>
             </div>
           </div>
           <div id="compare-effects" role="tabpanel" aria-labelledby="compare-tab-effects" tabindex="0" hidden>
-            <h3>Where should division by zero be handled?</h3>
+            <h3>Who handles division by zero?</h3>
             <div class="pair">
               <article>
                 <h4>Rust</h4>
-                <code>fn divide(d: i64) -&gt; Result&lt;i64, MathError&gt;</code>
+                <pre tabindex="0"><code data-lang="rust">fn divide(d: i64) -&gt; Result&lt;i64, MathError&gt;</code></pre>
                 <p>An API can return <code>Result</code> and let callers propagate errors with <code>?</code>. Integer division by zero panics, so a fallible API typically checks the divisor or uses <code>checked_div</code>.</p>
               </article>
               <article>
                 <h4>Vesper</h4>
-                <code>fn divide(divisor: i64) -&gt; i64 eff [Fail[RuntimeError]]</code>
+                <pre tabindex="0"><code data-lang="vesper">fn divide(divisor: i64) -&gt; i64 eff [Fail[RuntimeError]]</code></pre>
                 <p>The division declares <code>Fail[RuntimeError]</code> in its effect row. A caller can propagate that effect or install a lexical handler. The example handles division by zero and supplies a fallback value.</p>
                 <a href="https://github.com/robot-head/vesper/blob/main/tests/fixtures/self_host_check/effect_missing.ves" class="evidence">See an undeclared effect ↗</a>
               </article>
             </div>
           </div>
         </div>
-        <p class="decision"><strong>When to choose Rust</strong> Choose Rust when you need a stable toolchain, crates for a specific platform, or an established production support path. Vesper implements a subset of its specification. Check the examples against your workload before adopting it.</p>
+        <p class="decision">Choose Rust when you need a stable toolchain, crates for a specific platform, or an established production support path. Vesper implements a subset of its specification. Check the examples against your workload before adopting it.</p>
       </section>
       <section class="surface" id="language">
         <div class="wrap band">
           <p class="eyebrow section-label">Source explorer</p>
           <div class="section-head">
-            <h2>Read the contracts in code.</h2>
-            <p>Three programs from the compiler’s example suite.</p>
+            <h2>Three Vesper programs</h2>
+            <p>Each example shows the signature, its caller, and the result.</p>
           </div>
           <div class="editor">
             <div role="tablist" aria-label="Vesper source files" class="tab-bar">
@@ -173,14 +174,13 @@
             <div id="source-linear" role="tabpanel" aria-labelledby="source-tab-linear" tabindex="0">
               <div class="source-body">
                 <div class="source-code">
-                  <pre id="code-linear" tabindex="0" aria-label="transaction.ves source"><code><!-- source:transaction.ves --></code></pre>
+                  <pre id="code-linear" tabindex="0" aria-label="transaction.ves source"><code data-lang="vesper"><!-- source:transaction.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-linear" type="button">Copy source</button>
-                    <a href="examples/transaction.ves" download>Download .ves ↓</a>
+                    <a href="examples/transaction.ves" download>Download transaction.ves</a>
                   </div>
                 </div>
                 <aside>
-                  <p class="eyebrow">Reading the source</p>
                   <h3>A transaction has two exits</h3>
                   <p>Both <code>commit</code> and <code>abort</code> take <code>sink self</code>. Each consumes the transaction, so the caller cannot reuse it. Remove the commit from <code>main</code> and return a number instead to see the checker reject the unconsumed value.</p>
                 </aside>
@@ -189,14 +189,13 @@
             <div id="source-projections" role="tabpanel" aria-labelledby="source-tab-projections" tabindex="0" hidden>
               <div class="source-body">
                 <div class="source-code">
-                  <pre id="code-projections" tabindex="0" aria-label="projections.ves source"><code><!-- source:projections.ves --></code></pre>
+                  <pre id="code-projections" tabindex="0" aria-label="projections.ves source"><code data-lang="vesper"><!-- source:projections.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-projections" type="button">Copy source</button>
-                    <a href="examples/projections.ves" download>Download .ves ↓</a>
+                    <a href="examples/projections.ves" download>Download projections.ves</a>
                   </div>
                 </div>
                 <aside>
-                  <p class="eyebrow">Reading the source</p>
                   <h3>Lend only the fields you need</h3>
                   <p>The signature grants write access to <code>index</code> and <code>metrics</code>. The shared argument reads <code>config</code> from the same record. The counters use wrapping arithmetic to avoid raising a checked overflow while the mutable loan is active.</p>
                 </aside>
@@ -205,14 +204,13 @@
             <div id="source-effects" role="tabpanel" aria-labelledby="source-tab-effects" tabindex="0" hidden>
               <div class="source-body">
                 <div class="source-code">
-                  <pre id="code-effects" tabindex="0" aria-label="checked_math.ves source"><code><!-- source:checked_math.ves --></code></pre>
+                  <pre id="code-effects" tabindex="0" aria-label="checked_math.ves source"><code data-lang="vesper"><!-- source:checked_math.ves --></code></pre>
                   <div class="editor-foot">
                     <button class="copy-source" data-copy="code-effects" type="button">Copy source</button>
-                    <a href="examples/checked_math.ves" download>Download .ves ↓</a>
+                    <a href="examples/checked_math.ves" download>Download checked_math.ves</a>
                   </div>
                 </div>
                 <aside>
-                  <p class="eyebrow">Reading the source</p>
                   <h3>Handle a failure at the call site</h3>
                   <p>The helper declares its possible failure with <code>eff</code>. The surrounding <code>handle</code> block chooses what division by zero means for this call. Follow the <code>raise</code> arm to see why the program returns 42.</p>
                 </aside>
@@ -224,24 +222,24 @@
       <section class="wrap band" id="compiler">
         <p class="eyebrow section-label">Toolchain</p>
         <div class="section-head">
-          <h2>From source to evidence.</h2>
+          <h2>Check, run, or verify a program</h2>
           <a class="inline-link" href="https://github.com/robot-head/vesper/tree/main/src">Compiler source <svg width="14" height="14" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
         </div>
         <div class="pipeline">
           <article>
             <code>vesper check</code>
             <h3>Check the contract</h3>
-            <p>The front end checks types, ownership, overlapping places and effects. Start here to catch an unfinished transaction or a missing handler.</p>
+            <p>The checker reports type errors, unfinished transactions, conflicting loans, and missing effects before the program runs.</p>
           </article>
           <article>
             <code>vesper build</code>
             <h3>Compile to native code</h3>
-            <p>The native backend lowers supported programs through Cranelift. Use <code>vesper run</code> to execute with the reference evaluator, or <code>vesper jit</code> to run native code.</p>
+            <p>Vesper uses Cranelift to turn a checked program into machine code. That skips LLVM’s optimization pipeline during native builds. Cranelift prioritizes quick code generation, which helps when you edit and rerun a program. Build time and executable speed depend on the workload. <a href="https://cranelift.dev/">Cranelift’s performance trade-offs</a>.</p>
           </article>
           <article>
             <code>vesper emit --emit lean</code>
             <h3>Inspect the proof model</h3>
-            <p>Extract Lean 4 definitions for supported programs and prove properties about the model. A proof of a model has a narrower scope than a proof of the native executable.</p>
+            <p>Extract a Lean 4 model of a supported program, then prove properties about its definitions. Applying that proof to the native executable also requires showing that compilation preserves the modeled behavior.</p>
           </article>
         </div>
       </section>
@@ -249,16 +247,16 @@
         <div class="wrap band guide">
           <div>
             <p class="eyebrow section-label">Getting started</p>
-            <h2>Check your first program.</h2>
-            <p>With a compatible Rust toolchain and a system C linker, build the compiler from source. Then check and run the transaction example.</p>
+            <h2>Build Vesper and run a transaction</h2>
+            <p>Install a compatible Rust toolchain and a system C linker. The commands build Vesper, check the transaction example, and run it. A successful run prints <code>42</code>, the slot returned by <code>commit</code>.</p>
             <a class="inline-link" href="https://github.com/robot-head/vesper/blob/main/docs/bazel.md">Bazel build instructions <svg width="14" height="14" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10"></path></svg></a>
           </div>
           <div class="terminal">
             <div class="window-bar">
               <span><svg width="16" height="16" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 6 6 6-6 6m9 0h7"></path></svg> Shell</span>
-              <button type="button" class="copy-source" data-copy="setup-code">Copy source</button>
+              <button type="button" class="copy-source" data-copy="setup-code">Copy commands</button>
             </div>
-            <pre id="setup-code" tabindex="0"><code>git clone https://github.com/robot-head/vesper.git
+            <pre id="setup-code" tabindex="0"><code data-lang="sh">git clone https://github.com/robot-head/vesper.git
 cd vesper
 cargo build --locked -p vesper
 
@@ -270,10 +268,12 @@ cargo build --locked -p vesper
       <section id="ecosystem" class="wrap band resources">
         <div>
           <p class="eyebrow section-label">Reference</p>
-          <h2>Explore the project.</h2>
+          <h2>Documentation and source code</h2>
         </div>
         <div class="resource-list">
-          <a href="vesper-specification.pdf">Read the design</a>
+          <a href="docs/index.html">Vesper documentation</a>
+          <a href="language.html">Language guide</a>
+          <a href="vesper-specification.pdf" aria-label="Read the Vesper language specification (PDF)">Read the design</a>
           <a href="https://github.com/robot-head/vesper/tree/main/examples">Example programs</a>
           <a href="https://github.com/robot-head/vesper/blob/main/crates/README.md">Runtime libraries and tools</a>
           <a href="https://github.com/robot-head/vesper/tree/main/lean">Lean models</a>

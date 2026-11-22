@@ -49,8 +49,8 @@ def _vesper_package_impl(ctx):
         if not f.path.startswith(prefix):
             fail("%s is not under %s" % (f.path, prefix))
     for f in ctx.files.vsys:
-        if not f.path.startswith(ctx.file.manifest.dirname + "/"):
-            fail("%s is not in the package directory %s" % (f.path, ctx.file.manifest.dirname))
+        if f.dirname != ctx.file.manifest.dirname:
+            fail("%s is not next to %s" % (f.path, ctx.file.manifest.path))
     files = depset(own, transitive = [d[VesperPackageInfo].files for d in ctx.attr.deps])
     return [
         VesperPackageInfo(manifest = ctx.file.manifest, srcs = own, files = files),
@@ -69,7 +69,7 @@ vesper_package = rule(
         "srcs": attr.label_list(allow_files = [".ves"], doc = "Every file under src/ (use a glob)."),
         "vsys": attr.label_list(
             allow_files = [".vsys"],
-            doc = "The `.vsys` files the manifest names (`[package] vsys`, #1150).",
+            doc = "The `.vsys` libraries the manifest's `[package] vsys` field names (next to it).",
         ),
     },
 )

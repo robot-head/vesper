@@ -326,7 +326,9 @@ fn report_counts(report: &RunReport, jobs: u8, binary: &Path) {
             report.checker_calls,
             report.ast_optimizer_calls
         ),
-        (143, 269, 128)
+        // 128 valid cases are checked twice; 15 negatives once each (the two
+        // literals past `u64::MAX` reach the checker since #1244).
+        (143, 271, 128)
     );
     assert_eq!(report.evaluator_calls, [128; 4]);
     assert_eq!(report.jit_calls, [128; 4]);
@@ -499,17 +501,14 @@ fn corpus_hash() -> [u8; 32] {
         let source = oracle::corpus::render_case(&case).unwrap();
         assert!(source.len() <= 16384);
         let parsed = vesper::parser::parse(&source);
-        if id == 133 || id == 142 {
-            assert_eq!(parsed.diagnostics.len(), 1);
-            assert_eq!(parsed.diagnostics[0].code, "E0002");
-        } else {
-            assert!(
-                parsed.diagnostics.is_empty(),
-                "{source}\n{:?}",
-                parsed.diagnostics
-            );
-            oracle::corpus::validate_rendered(&case, &source, &parsed.module).unwrap();
-        }
+        // Cases 133 and 142 spell literals past `u64::MAX`, which parse since
+        // #1244 (up to `u128::MAX`) and are rejected by the checker (E0209).
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}\n{:?}",
+            parsed.diagnostics
+        );
+        oracle::corpus::validate_rendered(&case, &source, &parsed.module).unwrap();
     }
     assert_eq!(unique.len(), 128);
     // Independent source changes must not normalize to the intended DTO.
@@ -1148,14 +1147,15 @@ fn compare_real_backends(case: &Case, response: &Value) {
             assert_eq!(*jit, [outcome; 4]);
         }
         (OracleAnswer::Diagnostic { class, .. }, RustAnswer::Diagnostic { phase, codes }) => {
-            assert_eq!(
-                phase,
-                if class == DiagnosticClass::LiteralParseRange {
-                    DiagnosticPhase::Parse
-                } else {
-                    DiagnosticPhase::Check
-                }
-            );
+            // Lean's `literalParseRange` (a literal past `u64::MAX`) is the
+            // checker's out-of-range literal since #1244: no kind of this
+            // profile holds it, and the parser accepts it.
+            let class = if class == DiagnosticClass::LiteralParseRange {
+                DiagnosticClass::LiteralRange
+            } else {
+                class
+            };
+            assert_eq!(phase, DiagnosticPhase::Check);
             assert_eq!(codes, [diagnostic_code(class)]);
         }
         other => panic!("actual Rust/Lean classification mismatch: {other:?}"),

@@ -15,6 +15,11 @@
 //! `ir_opt::optimize` (the Stage 1 guard). An installed hook must return
 //! what the Rust pass returns; the hybrid's tests and the pass harness of
 //! tests/self_host_place_ir*.rs check it.
+//!
+//! A hook should not re-encode the world on every call: the native call
+//! sites run inside a [`crate::swap_input`] scope (one per compilation),
+//! which gives each hook a per-compilation slot for its encoder state and
+//! the Vesper value it decoded once (SH4 lane 2, #1276).
 use crate::check::World;
 use crate::ir::Program;
 use crate::ir_inline::{Budget, Report};
@@ -63,11 +68,13 @@ pub fn lower(world: &World) -> Program {
     }
 }
 
-/// The native path's `ir_opt::optimize`.
+/// The native path's `ir_opt::optimize`. With no hook installed it runs
+/// the unchanged pass through the native optimizer policy
+/// (`ir_opt_policy`, #1279), which gives the same program.
 pub fn optimize(world: &World, program: &mut Program) -> Result<usize, String> {
     match installed().opt {
         Some(f) => f(world, program),
-        None => crate::ir_opt::optimize(world, program),
+        None => crate::ir_opt_policy::optimize(world, program),
     }
 }
 

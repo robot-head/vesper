@@ -147,6 +147,30 @@ const MAX_EFFECT_NAMES: u64 = 64;
 const EV_TYPE: u32 = 2147483852;
 const EV_FINISH: u32 = 4294967295;
 const EV_START: u32 = 2147483648;
+// The `sig_pos` of a trivia token (a `u32` there, compared as a word).
+enum SigPos: _ {
+    Trivia = 4294967295
+}
+// An output word: token end, class at CLASS_SHIFT, flags at FLAGS_SHIFT.
+const CLASS_SHIFT: u32 = 32;
+const FLAGS_SHIFT: u32 = 48;
+// The shortest wire scalar (`u8be`) and the byte-order suffix (`be`, `le`).
+const MIN_WIRE_LEN: u64 = 4;
+const ORDER_LEN: u64 = 2;
+
+enum Ascii: _ {
+    LowerF = 0x66,
+    LowerI = 0x69,
+    LowerU = 0x75
+}
+
+// `note`'s `linear`: false, true, or leave a known name unchanged.
+enum Linear: _ {
+    No = 0,
+    Yes = 1,
+    Keep = 2
+}
+
 // The start offsets that stand for the two built-in effect names.
 const NAME_FAIL: u32 = 4294967295;
 const NAME_CANCEL: u32 = 4294967294;
@@ -358,17 +382,17 @@ fn word_of(in src: Slice[u8], s: u64, e: u64) -> u8 {
 // `is_wire_scalar`: `u16be`, `i64le`, `f32be`, ...
 fn is_wire_scalar(in src: Slice[u8], s: u64, e: u64) -> bool {
     let n = wrapping_sub(e, s);
-    if n < 4 {
+    if n < MIN_WIRE_LEN {
         return false;
     }
     let lead = byte(in src, s);
-    if lead != 117 && lead != 105 && lead != 102 {
+    if lead != Ascii::LowerU && lead != Ascii::LowerI && lead != Ascii::LowerF {
         return false;
     }
-    let o = wrapping_sub(e, 2);
+    let o = wrapping_sub(e, ORDER_LEN);
     let order = is(in src, o, e, in "be".as_bytes()) || is(in src, o, e, in "le".as_bytes());
     let ws = wrapping_add(s, 1);
-    let width = if lead == 102 {
+    let width = if lead == Ascii::LowerF {
         is(in src, ws, o, in "32".as_bytes()) || is(in src, ws, o, in "64".as_bytes())
     } else {
         is(in src, ws, o, in "8".as_bytes())
@@ -484,18 +508,18 @@ fn effect_find(in fx: Effects, in src: Slice[u8], s: u64, e: u64, sym: u32) -> u
     n
 }
 
-// `note`: `linear` is 0 (false), 1 (true) or 2 (no change).
+// `note`: `linear` is a `Linear`.
 fn note(inout fx: Effects, in src: Slice[u8], s: u64, e: u64, sym: u32, linear: u8) {
     let i = effect_find(in fx, in src, s, e, sym);
     if i < fx.start.len() {
-        if linear != 2 {
-            fx.linear.try_set(i, linear == 1);
+        if linear != Linear::Keep {
+            fx.linear.try_set(i, linear == Linear::Yes);
         }
     } else if fx.start.len() < MAX_EFFECT_NAMES {
         fx.start.push(wrapping_u32(s));
         fx.sym.push(sym);
         fx.end.push(wrapping_u32(e));
-        fx.linear.push(linear == 1);
+        fx.linear.push(linear == Linear::Yes);
     }
 }
 
@@ -510,7 +534,7 @@ fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_m
     let mut sig_pos = ChunkSeq::with_capacity[u32](n);
     for i in 0..n {
         if trivia(kind_at(in t, i)) {
-            sig_pos.push(4294967295);
+            sig_pos.push(SigPos::Trivia);
         } else {
             sig_pos.push(wrapping_u32(sig.len()));
             sig.push(wrapping_u32(i));
@@ -573,16 +597,23 @@ fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_m
                     e,
                     sym_at(in t, j),
                     if linear {
-                        1
+                        Linear::Yes
                     } else {
-                        0
+                        Linear::No
                     }
                 );
             }
         } else if k == K_HANDLE {
             if after == K_UPPER {
                 let j = w32(in sig, wrapping_add(p, 1));
-                note(inout fx, in src, w32(in t.start, j), token_end(in t, j), sym_at(in t, j), 2);
+                note(
+                    inout fx,
+                    in src,
+                    w32(in t.start, j),
+                    token_end(in t, j),
+                    sym_at(in t, j),
+                    Linear::Keep
+                );
             }
         } else if k == K_L_BRACKET {
             rows.push(p > 0 && before == K_EFF);
@@ -594,13 +625,27 @@ fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_m
             let open = row_open(in rows);
             if open && (before == K_L_BRACKET || before == K_COMMA || before == K_COLON) {
                 let i = w32(in sig, p);
-                note(inout fx, in src, w32(in t.start, i), token_end(in t, i), sym_at(in t, i), 2);
+                note(
+                    inout fx,
+                    in src,
+                    w32(in t.start, i),
+                    token_end(in t, i),
+                    sym_at(in t, i),
+                    Linear::Keep
+                );
             }
         }
     }
     for d in 0..declared.len() {
         let j = w32(in declared, d);
-        note(inout fx, in src, w32(in t.start, j), token_end(in t, j), sym_at(in t, j), 1);
+        note(
+            inout fx,
+            in src,
+            w32(in t.start, j),
+            token_end(in t, j),
+            sym_at(in t, j),
+            Linear::Yes
+        );
     }
 
     let mut out = ChunkSeq::with_capacity[u64](n);
@@ -612,7 +657,7 @@ fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_m
         let s = w32(in t.start, i);
         let e = token_end(in t, i);
         let p = w32(in sig_pos, i);
-        let significant = p != 4294967295;
+        let significant = p != SigPos::Trivia;
         // The significant tokens around this one (K_EOF for none).
         let before = if significant && p > 0 {
             match sk.try_get(wrapping_sub(p, 1)) {
@@ -629,6 +674,13 @@ fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_m
             }
         } else {
             K_EOF
+        };
+        // `effect`, `handle`, `sink` and `inout` used as names (#1244) are
+        // classed as the identifiers they are (`contextual_name_at`).
+        let k = if contextual_name_at(k, before, after) {
+            K_LOWER
+        } else {
+            k
         };
         let mut flags: u64 = if k == K_ERROR {
             F_RECOVERED
@@ -728,9 +780,39 @@ fn classify(in src: Slice[u8], in t: Tokens, in in_type: ChunkSeq[bool], token_m
                 projection = false;
             }
         }
-        out.push(e | wrapping_shl_u64(class, 32) | wrapping_shl_u64(flags, 48));
+        out.push(e | wrapping_shl_u64(class, CLASS_SHIFT) | wrapping_shl_u64(flags, FLAGS_SHIFT));
     }
     out
+}
+
+// `contextual_name_at`: a contextual keyword right after `fn`, `.` or `let`,
+// or right before `:`, `(`, `,`, `)`, `.`, `=`, `;` or `}`, is a name.
+fn contextual_name_at(k: u8, before: u8, after: u8) -> bool {
+    (k == K_EFFECT || k == K_HANDLE || k == K_SINK || k == K_INOUT)
+        && (name_before(before) || name_after(after))
+}
+
+fn name_before(k: u8) -> bool {
+    k == K_FN || k == K_DOT || k == K_LET
+}
+
+fn name_after(k: u8) -> bool {
+    k
+        == K_COLON
+        || k
+        == K_L_PAREN
+        || k
+        == K_COMMA
+        || k
+        == K_R_PAREN
+        || k
+        == K_DOT
+        || k
+        == K_EQ
+        || k
+        == K_SEMI
+        || k
+        == K_R_BRACE
 }
 
 // The class of a token kind that needs no context, or NO_CLASS.

@@ -16,7 +16,10 @@ use self::util::{
     setw,
     sw,
     tb_str,
-    tb_sym
+    tb_sym,
+    Br,
+    GTag,
+    LTag
 };
 use self::tree::{
     ga,
@@ -46,6 +49,13 @@ use self::local::{
     summary
 };
 
+// The merge failures (`mf_kind`, and the error words above).
+enum Mf: _ {
+    None = 0,
+    Unmergeable = 1,
+    PayloadMismatch = 2
+}
+
 // Projects the tree `root` onto role `r`; `none()` with `failed` set and
 // the error in `ew` when it cannot be projected.
 pub fn project_role(inout c: C, r: u64) -> u64 {
@@ -58,14 +68,14 @@ pub fn project_role(inout c: C, r: u64) -> u64 {
 
 fn go(inout c: C, g: u64) -> u64 {
     let tag = gt(in c, g);
-    if tag == 5 {
+    if tag == GTag::End {
         return c.l_end;
     }
-    if tag == 4 {
+    if tag == GTag::Var {
         let h82 = ga(in c, g);
         return l_var(inout c, h82);
     }
-    if tag == 3 {
+    if tag == GTag::Rec {
         let var = ga(in c, g);
         let body = gb(in c, g);
         // A role absent from a loop that can only repeat itself or finish
@@ -81,7 +91,7 @@ fn go(inout c: C, g: u64) -> u64 {
         if c.failed {
             return none();
         }
-        if lt(in c, b) == 7 && la(in c, b) == var {
+        if lt(in c, b) == LTag::Var && la(in c, b) == var {
             return c.l_end;
         }
         if !mentions(in c, b, var) {
@@ -89,7 +99,7 @@ fn go(inout c: C, g: u64) -> u64 {
         }
         return l_rec(inout c, var, b);
     }
-    if tag == 2 {
+    if tag == GTag::Local {
         let h83 = gc(in c, g);
         let n = go(inout c, h83);
         if c.failed {
@@ -107,7 +117,7 @@ fn go(inout c: C, g: u64) -> u64 {
     let is_choice = nb > 1;
     let f = c.tmp.len();
     for i in 0..nb {
-        let label = gbr(in c, g, i, 0);
+        let label = gbr(in c, g, i, Br::Label);
         if is_choice {
             let fs = role_sym(inout c, from);
             let ts = role_sym(inout c, to);
@@ -120,7 +130,7 @@ fn go(inout c: C, g: u64) -> u64 {
             let p = intern_tb(inout c);
             c.path.push(p);
         }
-        let h85 = gbr(in c, g, i, 2);
+        let h85 = gbr(in c, g, i, Br::Next);
         let r = go(inout c, h85);
         if is_choice {
             let _ = c.path.pop();
@@ -130,7 +140,7 @@ fn go(inout c: C, g: u64) -> u64 {
             return none();
         }
         c.tmp.push(label);
-        let h86 = gbr(in c, g, i, 1);
+        let h86 = gbr(in c, g, i, Br::Payload);
         c.tmp.push(h86);
         c.tmp.push(r);
     }
@@ -140,23 +150,23 @@ fn go(inout c: C, g: u64) -> u64 {
     if to == c.target {
         return choice(inout c, false, from, f);
     }
-    let mut acc = sw(in c.tmp, add(f, 2));
+    let mut acc = sw(in c.tmp, add(f, Br::Next));
     let mut acc_label = sw(in c.tmp, f);
     for i in 1..nb {
-        let at = add(f, wrapping_mul(i, 3));
+        let at = add(f, wrapping_mul(i, Br::Words));
         let bl = sw(in c.tmp, at);
-        let bn = sw(in c.tmp, add(at, 2));
-        c.mf_kind = 0;
+        let bn = sw(in c.tmp, add(at, Br::Next));
+        c.mf_kind = Mf::None;
         let m = merge(inout c, acc, bn);
-        if c.mf_kind != 0 {
+        if c.mf_kind != Mf::None {
             c.tmp.truncate(f);
             let r0 = c.target;
             let role = role_sym(inout c, r0);
             c.ew.clear();
-            if c.mf_kind == 1 {
+            if c.mf_kind == Mf::Unmergeable {
                 let dec = role_sym(inout c, from);
                 let nt = role_sym(inout c, to);
-                c.ew.push(1);
+                c.ew.push(Mf::Unmergeable);
                 c.ew.push(role);
                 c.ew.push(dec);
                 c.ew.push(nt);
@@ -175,7 +185,7 @@ fn go(inout c: C, g: u64) -> u64 {
             } else {
                 let mp = c.mf_peer;
                 let peer = role_sym(inout c, mp);
-                c.ew.push(2);
+                c.ew.push(Mf::PayloadMismatch);
                 c.ew.push(role);
                 c.ew.push(peer);
                 let h90 = c.mf_label;
@@ -198,7 +208,7 @@ fn go(inout c: C, g: u64) -> u64 {
 fn conflict(inout c: C, a: u64, b: u64) -> u64 {
     let x = summary(inout c, a);
     let y = summary(inout c, b);
-    c.mf_kind = 1;
+    c.mf_kind = Mf::Unmergeable;
     c.mf_a = x;
     c.mf_b = y;
     none()
@@ -206,7 +216,7 @@ fn conflict(inout c: C, a: u64, b: u64) -> u64 {
 
 // Pushes the branches of `t` viewed as an Offer (a Recv is one branch).
 fn push_offer(inout c: C, t: u64) {
-    if lt(in c, t) == 2 {
+    if lt(in c, t) == LTag::Recv {
         let h93 = lb(in c, t);
         c.tmp.push(h93);
         let h94 = lc(in c, t);
@@ -215,11 +225,11 @@ fn push_offer(inout c: C, t: u64) {
         c.tmp.push(h95);
     } else {
         for i in 0..lkn(in c, t) {
-            let h96 = lbr(in c, t, i, 0);
+            let h96 = lbr(in c, t, i, Br::Label);
             c.tmp.push(h96);
-            let h97 = lbr(in c, t, i, 1);
+            let h97 = lbr(in c, t, i, Br::Payload);
             c.tmp.push(h97);
-            let h98 = lbr(in c, t, i, 2);
+            let h98 = lbr(in c, t, i, Br::Next);
             c.tmp.push(h98);
         }
     }
@@ -227,10 +237,10 @@ fn push_offer(inout c: C, t: u64) {
 
 fn is_reception(in c: C, t: u64) -> bool {
     let tag = lt(in c, t);
-    tag == 2 || tag == 4
+    tag == LTag::Recv || tag == LTag::Offer
 }
 
-// `merge`: `none()` with `mf_kind` set (1 conflict, 2 payload mismatch)
+// `merge`: `none()` with `mf_kind` set (`Mf`)
 // when the two behaviours cannot be merged.
 fn merge(inout c: C, a: u64, b: u64) -> u64 {
     if a == b || alpha_eq(inout c, a, b) {
@@ -243,21 +253,25 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
         let peer = la(in c, a);
         let f = c.tmp.len();
         push_offer(inout c, a);
-        let mut n = wrapping_sub(c.tmp.len(), f) / 3;
-        let nbb = if tb == 2 {
+        let mut n = wrapping_sub(c.tmp.len(), f) / Br::Words;
+        let nbb = if tb == LTag::Recv {
             1
         } else {
             lkn(in c, b)
         };
         for k in 0..nbb {
-            let (bl, bp, bn) = if tb == 2 {
+            let (bl, bp, bn) = if tb == LTag::Recv {
                 (lb(in c, b), lc(in c, b), ld(in c, b))
             } else {
-                (lbr(in c, b, k, 0), lbr(in c, b, k, 1), lbr(in c, b, k, 2))
+                (
+                    lbr(in c, b, k, Br::Label),
+                    lbr(in c, b, k, Br::Payload),
+                    lbr(in c, b, k, Br::Next)
+                )
             };
             let mut found = none();
             for j in 0..n {
-                if sw(in c.tmp, add(f, wrapping_mul(j, 3))) == bl {
+                if sw(in c.tmp, add(f, wrapping_mul(j, Br::Words))) == bl {
                     found = j;
                 }
             }
@@ -267,32 +281,32 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
                 c.tmp.push(bn);
                 n = add(n, 1);
             } else {
-                let at = add(f, wrapping_mul(found, 3));
-                let ep = sw(in c.tmp, add(at, 1));
+                let at = add(f, wrapping_mul(found, Br::Words));
+                let ep = sw(in c.tmp, add(at, Br::Payload));
                 if ep != bp {
                     c.tmp.truncate(f);
-                    c.mf_kind = 2;
+                    c.mf_kind = Mf::PayloadMismatch;
                     c.mf_peer = peer;
                     c.mf_label = bl;
                     c.mf_a = ep;
                     c.mf_b = bp;
                     return none();
                 }
-                let h99 = sw(in c.tmp, add(at, 2));
+                let h99 = sw(in c.tmp, add(at, Br::Next));
                 let m = merge(inout c, h99, bn);
-                if c.mf_kind != 0 {
+                if c.mf_kind != Mf::None {
                     c.tmp.truncate(f);
                     return none();
                 }
-                setw(inout c.tmp, add(at, 2), m);
+                setw(inout c.tmp, add(at, Br::Next), m);
             }
         }
         return choice(inout c, false, peer, f);
     }
     if ta
-        == 1
+        == LTag::Send
         && tb
-        == 1
+        == LTag::Send
         && la(in c, a)
         == la(in c, b)
         && lb(in c, a)
@@ -302,43 +316,49 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
         let h100 = ld(in c, a);
         let h101 = ld(in c, b);
         let m = merge(inout c, h100, h101);
-        if c.mf_kind != 0 {
+        if c.mf_kind != Mf::None {
             return none();
         }
         let f = c.tmp.len();
         let h102 = la(in c, a);
         let h103 = lb(in c, a);
         let h104 = lc(in c, a);
-        return mkl(inout c, 1, h102, h103, h104, m, f);
+        return mkl(inout c, LTag::Send, h102, h103, h104, m, f);
     }
-    if ta == 3 && tb == 3 && la(in c, a) == la(in c, b) && same_labels(in c, a, b) {
+    if ta
+        == LTag::Select
+        && tb
+        == LTag::Select
+        && la(in c, a)
+        == la(in c, b)
+        && same_labels(in c, a, b) {
         let f = c.tmp.len();
         let n = lkn(in c, a);
         for i in 0..n {
-            let h105 = lbr(in c, a, i, 0);
+            let h105 = lbr(in c, a, i, Br::Label);
             c.tmp.push(h105);
-            let h106 = lbr(in c, a, i, 1);
+            let h106 = lbr(in c, a, i, Br::Payload);
             c.tmp.push(h106);
             c.tmp.push(0);
         }
         for i in 0..n {
-            let h107 = lbr(in c, a, i, 2);
-            let h108 = lbr(in c, b, i, 2);
+            let h107 = lbr(in c, a, i, Br::Next);
+            let h108 = lbr(in c, b, i, Br::Next);
             let m = merge(inout c, h107, h108);
-            if c.mf_kind != 0 {
+            if c.mf_kind != Mf::None {
                 c.tmp.truncate(f);
                 return none();
             }
-            setw(inout c.tmp, add(add(f, wrapping_mul(i, 3)), 2), m);
+            setw(inout c.tmp, add(add(f, wrapping_mul(i, Br::Words)), Br::Next), m);
         }
         let h109 = la(in c, a);
-        return mkl(inout c, 3, h109, 0, 0, 0, f);
+        return mkl(inout c, LTag::Select, h109, 0, 0, 0, f);
     }
-    if ta == 5 && tb == 5 && la(in c, a) == la(in c, b) {
+    if ta == LTag::Action && tb == LTag::Action && la(in c, a) == la(in c, b) {
         let h110 = lb(in c, a);
         let h111 = lb(in c, b);
         let m = merge(inout c, h110, h111);
-        if c.mf_kind != 0 {
+        if c.mf_kind != Mf::None {
             return none();
         }
         let h112 = la(in c, a);
@@ -346,7 +366,7 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
     }
     // Loops merge up to the names of their binders: rename the right
     // binder to the left one when that captures nothing.
-    if ta == 6 && tb == 6 {
+    if ta == LTag::Rec && tb == LTag::Rec {
         let v1 = la(in c, a);
         let v2 = la(in c, b);
         if v1 == v2 || !mentions(in c, lb(in c, b), v1) {
@@ -359,7 +379,7 @@ fn merge(inout c: C, a: u64, b: u64) -> u64 {
             };
             let h114 = lb(in c, a);
             let m = merge(inout c, h114, b2);
-            if c.mf_kind != 0 {
+            if c.mf_kind != Mf::None {
                 return none();
             }
             return l_rec(inout c, v1, m);
@@ -374,7 +394,10 @@ fn same_labels(in c: C, a: u64, b: u64) -> bool {
         return false;
     }
     for i in 0..n {
-        if lbr(in c, a, i, 0) != lbr(in c, b, i, 0) || lbr(in c, a, i, 1) != lbr(in c, b, i, 1) {
+        if lbr(in c, a, i, Br::Label)
+            != lbr(in c, b, i, Br::Label)
+            || lbr(in c, a, i, Br::Payload)
+            != lbr(in c, b, i, Br::Payload) {
             return false;
         }
     }

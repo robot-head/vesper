@@ -16,6 +16,7 @@ crate-type = ["rlib", "staticlib"]
 # the same Cranelift build.
 cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64"] }
 cranelift-frontend = "0.125"
+cranelift-jit = "0.125"
 cranelift-module = "0.125"
 cranelift-object = "0.125"
 cranelift-native = "0.125"

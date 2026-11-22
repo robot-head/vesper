@@ -9,8 +9,8 @@
 // - witness.ves: the certificate checker and the candidate builder of
 //   src/optimize/witness.rs.
 //
-// The equality-saturation search (src/optimize.rs, the producer half of
-// src/optimize/certificate.rs) follows on `@vesper/egraph` (lane 8).
+// - search.ves: the proof producer of src/optimize/certificate.rs
+//   (`propose_rewrite`) on `@vesper/egraph`.
 
 use @vesper/ast::{
     ArgNode,
@@ -43,6 +43,17 @@ use self::input::{
     read_types,
     tree_new
 };
+use self::search::{
+    Builder,
+    Proposal,
+    builder_new,
+    proposal_new,
+    propose
+};
+use self::input::{
+    ProofRow,
+    TermRow
+};
 use self::witness::{
     Bound,
     Ops,
@@ -56,6 +67,13 @@ use self::witness::{
 
 fn put(inout o: ChunkSeq[u8], in s: Str) {
     o.extend(in s.as_bytes());
+}
+
+fn put_u128(inout o: ChunkSeq[u8], v: u128) {
+    if v >= 10 {
+        put_u128(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
 }
 
 fn put_u64(inout o: ChunkSeq[u8], v: u64) {
@@ -95,10 +113,14 @@ pub fn dump_expr(inout o: ChunkSeq[u8], in t: Tree, e: u32) {
         if l.kind != 1 {
             put(inout o, "lit");
         } else {
-            if l.neg && l.bits != 0 {
+            if l.neg && (l.bits != 0 || l.hi != 0) {
                 o.push(45);
             }
-            put_u64(inout o, l.bits);
+            if l.hi == 0 {
+                put_u64(inout o, l.bits);
+            } else {
+                put_u128(inout o, wrapping_shl_u128(widen_u128(l.hi), 64) | widen_u128(l.bits));
+            }
         }
         put_span(inout o, x.start, x.end);
     } else if x.kind == 2 {
@@ -280,4 +302,163 @@ fn run_cases(in input: Str, check: bool) -> ChunkSeq[u64] {
 // The Rust `size_of` values the checker charges with (the input is unused).
 pub fn optimize_sizes(in input: Str) -> ChunkSeq[u64] {
     rust_sizes()
+}
+
+fn put_i128(inout o: ChunkSeq[u8], v: i128) {
+    if v < 0 {
+        o.push(45);
+        put_u64(inout o, wrapping_u64(wrapping_neg_i128(v)));
+    } else {
+        put_u64(inout o, wrapping_u64(v));
+    }
+}
+
+fn put_term(inout o: ChunkSeq[u8], t: TermRow) {
+    o.push(32);
+    put_u64(inout o, widen_u64(t.kind));
+    o.push(58);
+    put_u64(inout o, widen_u64(t.tag));
+    o.push(58);
+    put_u64(inout o, widen_u64(t.op));
+    o.push(58);
+    put_i128(inout o, t.value);
+    o.push(58);
+    put_u64(inout o, widen_u64(t.a));
+    o.push(58);
+    put_u64(inout o, widen_u64(t.b));
+}
+
+fn put_proof(inout o: ChunkSeq[u8], p: ProofRow) {
+    o.push(32);
+    put_u64(inout o, widen_u64(p.from));
+    o.push(58);
+    put_u64(inout o, widen_u64(p.to));
+    o.push(58);
+    put_u64(inout o, widen_u64(p.tag));
+    o.push(58);
+    put_u64(inout o, widen_u64(p.rule));
+    o.push(58);
+    put_u64(inout o, widen_u64(p.b0));
+    o.push(58);
+    put_u64(inout o, widen_u64(p.b1));
+    o.push(58);
+    put_u64(inout o, widen_u64(p.b2));
+    o.push(58);
+    put_u64(inout o, widen_u64(p.len));
+    o.push(58);
+    if p.has_guard {
+        put_u64(inout o, wrapping_add(widen_u64(p.guard), 1));
+    } else {
+        o.push(48);
+    }
+    o.push(58);
+    put_u64(inout o, widen_u64(p.p0));
+    o.push(58);
+    put_u64(inout o, widen_u64(p.p1));
+}
+
+// Task "propose": a count of cases, each the limits (and three unused
+// spent words), names, types, expressions and the source expression. Per
+// case it writes `propose_rewrite`'s outcome: `P B` (barrier), `P U`
+// (unchanged), `P E code` (an error), or `P C work metadata names
+// terms_cap proofs_cap input output conclusion` followed by the candidate
+// (`C dump`), the certificate's terms (`T`, each `kind:tag:op:value:a:b`)
+// and proofs (`Q`, each `from:to:tag:rule:b0:b1:b2:len:guard:p0:p1`,
+// guard 0 for none, else the proof plus one).
+pub fn optimize_propose(in input: Str) -> ChunkSeq[u64] {
+    propose_cases(in input, 0)
+}
+
+// The same cases for the speed test: `optimize_propose_quiet` proposes but
+// writes only `P` per case (Rust's side builds the proposal and prints
+// nothing), and `optimize_propose_decode` only decodes (its cost is
+// subtracted).
+pub fn optimize_propose_quiet(in input: Str) -> ChunkSeq[u64] {
+    propose_cases(in input, 1)
+}
+
+pub fn optimize_propose_decode(in input: Str) -> ChunkSeq[u64] {
+    propose_cases(in input, 2)
+}
+
+// `mode` 0 writes each proposal, 1 proposes and writes `P`, 2 decodes and
+// writes `P`.
+fn propose_cases(in input: Str, mode: u8) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut o = ChunkSeq::new[u8]();
+    let mut map = ChunkSeq::new[u32]();
+    let mut types = ChunkSeq::new[TypeRow]();
+    let cases = r.word(in b);
+    for k in 0..cases {
+        let mut budget = read_budget(inout r, in b);
+        let mut t = tree_new();
+        read_names(inout r, in input, inout t);
+        read_types(inout r, in b, inout types);
+        read_exprs(inout r, in b, inout t, inout map);
+        let source = mapped(in map, r.word(in b));
+        if mode == 2 {
+            put(inout o, "P\n");
+            continue;
+        }
+        let ops = ops_new(inout t);
+        let mut d = builder_new(0, in budget);
+        let mut p = proposal_new();
+        let code = propose(inout t, in ops, in types, source, inout budget, inout d, inout p);
+        if mode == 1 {
+            put(inout o, "P\n");
+            continue;
+        }
+        put(inout o, "P ");
+        if code != 0 {
+            put(inout o, "E ");
+            put_u64(inout o, widen_u64(code));
+            o.push(10);
+            continue;
+        }
+        if p.outcome == 1 {
+            put(inout o, "B\n");
+            continue;
+        }
+        if p.outcome == 2 {
+            put(inout o, "U\n");
+            continue;
+        }
+        put(inout o, "C ");
+        put_u64(inout o, budget.work);
+        o.push(32);
+        put_u64(inout o, budget.metadata);
+        o.push(32);
+        put_u64(inout o, budget.names);
+        o.push(32);
+        put_u64(inout o, d.terms_cap);
+        o.push(32);
+        put_u64(inout o, d.proofs_cap);
+        o.push(32);
+        put_u64(inout o, widen_u64(p.input));
+        o.push(32);
+        put_u64(inout o, widen_u64(p.output));
+        o.push(32);
+        put_u64(inout o, widen_u64(p.conclusion));
+        put(inout o, "\nC ");
+        dump_expr(inout o, in t, p.candidate);
+        put(inout o, "\nT");
+        for i in 0..d.terms.len() {
+            match d.terms.try_get(i) {
+                Option::Some(x) => put_term(inout o, x),
+                Option::None => {}
+            }
+        }
+        put(inout o, "\nQ");
+        for i in 0..d.proofs.len() {
+            match d.proofs.try_get(i) {
+                Option::Some(x) => put_proof(inout o, x),
+                Option::None => {}
+            }
+        }
+        o.push(10);
+    }
+    pack_text(in o)
 }

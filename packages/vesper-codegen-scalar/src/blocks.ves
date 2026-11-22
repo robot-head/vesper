@@ -1,0 +1,391 @@
+// The block layout of `Codegen::ir_graph_at` (src/native.rs): the order the
+// blocks of one graph are lowered in, the blocks on a cycle, and the blocks
+// the walk seals itself.
+//
+// Rust builds a petgraph `DiGraphMap` of the terminators' edges and asks it
+// for a topological order of the reached blocks (or, when they have a
+// cycle, a reverse postorder from the entry), then appends the unreached
+// blocks. The order is petgraph's, so this module keeps a `GraphMap` as
+// petgraph does: one adjacency list per node of (neighbor, direction)
+// entries in the order `add_edge` made them, an `IndexMap` node order, and
+// `remove_node`'s `swap_remove` of the node and of each entry naming it.
+// Removing the unreached blocks reorders the lists of the blocks they jump
+// to, and so the order `toposort` visits successors in.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    push_decimal,
+    u64_at,
+    u8_at
+};
+use @vesper/place-ir::{
+    BlockRow,
+    FnRow,
+    Program
+};
+
+const T_BLOCK: u8 = 7;
+const OUT: u8 = 0;
+const IN: u8 = 1;
+const NONE64: u64 = 18446744073709551615;
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn set64(inout s: ChunkSeq[u64], i: u64, x: u64) {
+    let ok = s.try_set(i, x);
+}
+
+fn set8(inout s: ChunkSeq[u8], i: u64, x: u8) {
+    let ok = s.try_set(i, x);
+}
+
+fn zeros64(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    s.resize(n, 0);
+    s
+}
+
+fn zeros8(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    s.resize(n, 0);
+    s
+}
+
+fn list(inout o: ChunkSeq[u8], in s: Str, in xs: ChunkSeq[u64]) {
+    put(inout o, in s);
+    for i in 0..xs.len() {
+        o.push(32);
+        push_decimal(inout o, u64_at(in xs, i));
+    }
+    o.push(10);
+}
+
+// The petgraph `GraphMap` of one graph's blocks.
+struct Graph {
+    // adjacency entries of node k: node[start[k]..start[k] + len[k]]
+    start: ChunkSeq[u64],
+    len: ChunkSeq[u64],
+    node: ChunkSeq[u64],
+    dir: ChunkSeq[u8],
+    // the `IndexMap` order of the nodes present, and each node's index in
+    // it (NONE64 once removed)
+    order: ChunkSeq[u64],
+    pos: ChunkSeq[u64],
+}
+
+impl Graph {
+    fn entry_node(in self, k: u64, j: u64) -> u64 {
+        u64_at(in self.node, add(u64_at(in self.start, k), j))
+    }
+
+    fn entry_dir(in self, k: u64, j: u64) -> u8 {
+        u8_at(in self.dir, add(u64_at(in self.start, k), j))
+    }
+
+    // `remove_single_edge(a, b, dir)`: the first entry (b, dir) of a's list
+    // swap-removed.
+    fn remove_entry(inout self, a: u64, b: u64, d: u8) {
+        if u64_at(in self.pos, a) == NONE64 {
+            return;
+        }
+        let s = u64_at(in self.start, a);
+        let n = u64_at(in self.len, a);
+        for j in 0..n {
+            if u64_at(in self.node, add(s, j)) == b && u8_at(in self.dir, add(s, j)) == d {
+                let last = add(s, wrapping_sub(n, 1));
+                let x = u64_at(in self.node, last);
+                let y = u8_at(in self.dir, last);
+                set64(inout self.node, add(s, j), x);
+                set8(inout self.dir, add(s, j), y);
+                set64(inout self.len, a, wrapping_sub(n, 1));
+                return;
+            }
+        }
+    }
+
+    // `GraphMap::remove_node`.
+    fn remove_node(inout self, k: u64) {
+        let i = u64_at(in self.pos, k);
+        if i == NONE64 {
+            return;
+        }
+        let n = self.order.len();
+        let last = u64_at(in self.order, wrapping_sub(n, 1));
+        set64(inout self.order, i, last);
+        set64(inout self.pos, last, i);
+        self.order.truncate(wrapping_sub(n, 1));
+        set64(inout self.pos, k, NONE64);
+        let m = u64_at(in self.len, k);
+        for j in 0..m {
+            let other = self.entry_node(k, j);
+            let d = if self.entry_dir(k, j) == OUT {
+                IN
+            } else {
+                OUT
+            };
+            self.remove_entry(other, k, d);
+        }
+    }
+}
+
+// The deduplicated edge targets of every block, in `add_edge` order.
+struct Targets {
+    // targets of block b: to[at[b]..at[b] + count[b]]
+    at: ChunkSeq[u64],
+    count: ChunkSeq[u64],
+    to: ChunkSeq[u64],
+}
+
+fn targets(in p: Program, f: FnRow) -> Targets {
+    let n = f.bc;
+    let mut t = Targets {
+        at: zeros64(n),
+        count: zeros64(n),
+        to: ChunkSeq::new[u64]()
+    };
+    // mark[x] == b + 1: block b already has the edge to x
+    let mut mark = zeros64(n);
+    for b in 0..n {
+        let row = p.block(add(f.b0, b));
+        set64(inout t.at, b, t.to.len());
+        let mut c: u64 = 0;
+        for i in row.ta..add(row.ta, row.tn) {
+            if p.tag(i) == T_BLOCK {
+                let x = p.op(i);
+                if x < n && u64_at(in mark, x) != inc(b) {
+                    set64(inout mark, x, inc(b));
+                    t.to.push(x);
+                    c = inc(c);
+                }
+            }
+        }
+        set64(inout t.count, b, c);
+    }
+    t
+}
+
+fn build(in t: Targets, n: u64) -> Graph {
+    let mut deg = zeros64(n);
+    for b in 0..n {
+        let a = u64_at(in t.at, b);
+        let c = u64_at(in t.count, b);
+        set64(inout deg, b, add(u64_at(in deg, b), c));
+        for j in 0..c {
+            let x = u64_at(in t.to, add(a, j));
+            if x != b {
+                set64(inout deg, x, inc(u64_at(in deg, x)));
+            }
+        }
+    }
+    let mut g = Graph {
+        start: zeros64(n),
+        len: zeros64(n),
+        node: ChunkSeq::new[u64](),
+        dir: ChunkSeq::new[u8](),
+        order: zeros64(n),
+        pos: zeros64(n)
+    };
+    let mut total: u64 = 0;
+    for b in 0..n {
+        set64(inout g.start, b, total);
+        total = add(total, u64_at(in deg, b));
+        set64(inout g.order, b, b);
+        set64(inout g.pos, b, b);
+    }
+    g.node.resize(total, 0);
+    g.dir.resize(total, 0);
+    for b in 0..n {
+        let a = u64_at(in t.at, b);
+        let c = u64_at(in t.count, b);
+        for j in 0..c {
+            let x = u64_at(in t.to, add(a, j));
+            let k = add(u64_at(in g.start, b), u64_at(in g.len, b));
+            set64(inout g.node, k, x);
+            set8(inout g.dir, k, OUT);
+            set64(inout g.len, b, inc(u64_at(in g.len, b)));
+            if x != b {
+                let k2 = add(u64_at(in g.start, x), u64_at(in g.len, x));
+                set64(inout g.node, k2, b);
+                set8(inout g.dir, k2, IN);
+                set64(inout g.len, x, inc(u64_at(in g.len, x)));
+            }
+        }
+    }
+    g
+}
+
+// petgraph's iterative DFS from `root` (`DfsPostOrder::next`, and the first
+// phase of `toposort`): each node is pushed again for every unvisited
+// successor and finished when it is popped a second time. Appends the
+// finished nodes to `post`.
+fn dfs_from(
+    in g: Graph,
+    root: u64,
+    inout discovered: ChunkSeq[u8],
+    inout finished: ChunkSeq[u8],
+    inout post: ChunkSeq[u64]
+) {
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    stack.push(root);
+    loop {
+        let sn = stack.len();
+        if sn == 0 {
+            break;
+        }
+        let nx = u64_at(in stack, wrapping_sub(sn, 1));
+        if u8_at(in discovered, nx) == 0 {
+            set8(inout discovered, nx, 1);
+            let m = u64_at(in g.len, nx);
+            for j in 0..m {
+                if g.entry_dir(nx, j) == OUT {
+                    let succ = g.entry_node(nx, j);
+                    if u8_at(in discovered, succ) == 0 {
+                        stack.push(succ);
+                    }
+                }
+            }
+        } else {
+            stack.truncate(wrapping_sub(sn, 1));
+            if u8_at(in finished, nx) == 0 {
+                set8(inout finished, nx, 1);
+                post.push(nx);
+            }
+        }
+    }
+}
+
+// Prints the `order`, `cyclic` and `sealed` lines of one function.
+pub fn block_layout(in p: Program, f: FnRow, inout o: ChunkSeq[u8]) {
+    let n = f.bc;
+    let none: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if n == 0 {
+        list(inout o, in "order", in none);
+        list(inout o, in "cyclic", in none);
+        list(inout o, in "sealed", in none);
+        return;
+    }
+    let t = targets(in p, f);
+    let mut g = build(in t, n);
+    // the postorder of the whole graph from the entry
+    let mut post: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut reached = zeros8(n);
+    let mut seen = zeros8(n);
+    dfs_from(in g, 0, inout seen, inout reached, inout post);
+    // the live graph: the unreached blocks removed in ascending order
+    let mut unreached: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for b in 0..n {
+        if u8_at(in reached, b) == 0 {
+            unreached.push(b);
+            g.remove_node(b);
+        }
+    }
+    // `toposort`'s finish order over the live nodes in `IndexMap` order
+    let mut finish: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut discovered = zeros8(n);
+    let mut finished = zeros8(n);
+    for i in 0..g.order.len() {
+        let k = u64_at(in g.order, i);
+        if u8_at(in discovered, k) == 0 {
+            dfs_from(in g, k, inout discovered, inout finished, inout finish);
+        }
+    }
+    // strongly connected components (Kosaraju over the incoming entries),
+    // in reverse finish order
+    let mut comp = zeros64(n);
+    let mut size: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    size.push(0);
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let fl = finish.len();
+    for r in 0..fl {
+        let k = u64_at(in finish, wrapping_sub(wrapping_sub(fl, 1), r));
+        if u64_at(in comp, k) == 0 {
+            let id = size.len();
+            size.push(0);
+            set64(inout comp, k, id);
+            stack.push(k);
+            loop {
+                let sn = stack.len();
+                if sn == 0 {
+                    break;
+                }
+                let x = u64_at(in stack, wrapping_sub(sn, 1));
+                stack.truncate(wrapping_sub(sn, 1));
+                set64(inout size, id, inc(u64_at(in size, id)));
+                let m = u64_at(in g.len, x);
+                for j in 0..m {
+                    if g.entry_dir(x, j) == IN {
+                        let y = g.entry_node(x, j);
+                        if u64_at(in comp, y) == 0 {
+                            set64(inout comp, y, id);
+                            stack.push(y);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut cyclic = zeros8(n);
+    let mut cyclic_list: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for b in 0..n {
+        let c = u64_at(in comp, b);
+        if c != 0 {
+            let mut on = u64_at(in size, c) > 1;
+            if !on {
+                let m = u64_at(in g.len, b);
+                for j in 0..m {
+                    if g.entry_dir(b, j) == OUT && g.entry_node(b, j) == b {
+                        on = true;
+                    }
+                }
+            }
+            if on {
+                set8(inout cyclic, b, 1);
+                cyclic_list.push(b);
+            }
+        }
+    }
+    let mut order: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if cyclic_list.len() == 0 {
+        for r in 0..fl {
+            order.push(u64_at(in finish, wrapping_sub(wrapping_sub(fl, 1), r)));
+        }
+    } else {
+        let pl = post.len();
+        for r in 0..pl {
+            order.push(u64_at(in post, wrapping_sub(wrapping_sub(pl, 1), r)));
+        }
+    }
+    for i in 0..unreached.len() {
+        order.push(u64_at(in unreached, i));
+    }
+    // A block is sealed when it is lowered if no predecessor (itself, for a
+    // self loop) is still to come.
+    let mut pending = zeros64(n);
+    for b in 0..n {
+        let a = u64_at(in t.at, b);
+        let c = u64_at(in t.count, b);
+        for j in 0..c {
+            let x = u64_at(in t.to, add(a, j));
+            set64(inout pending, x, inc(u64_at(in pending, x)));
+        }
+    }
+    let mut sealed: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for k in 0..order.len() {
+        let b = u64_at(in order, k);
+        if b != 0 && u8_at(in cyclic, b) == 0 && u64_at(in pending, b) == 0 {
+            sealed.push(b);
+        }
+        let a = u64_at(in t.at, b);
+        let c = u64_at(in t.count, b);
+        for j in 0..c {
+            let x = u64_at(in t.to, add(a, j));
+            set64(inout pending, x, wrapping_sub(u64_at(in pending, x), 1));
+        }
+    }
+    list(inout o, in "order", in order);
+    list(inout o, in "cyclic", in cyclic_list);
+    list(inout o, in "sealed", in sealed);
+}

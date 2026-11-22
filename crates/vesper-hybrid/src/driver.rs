@@ -55,8 +55,14 @@ pub fn main() -> c_int {
         // Passes catch their panics; the Vesper code does not unwind.
         .unwrap_or(PANIC_EXIT);
     if code == binding::delegate() {
-        crate::main();
+        // A panic in the Rust CLI (it resumes its CLI thread's) must not
+        // unwind across this C entry, which would abort: Rust's own start-up
+        // exits with 101 after the hook printed it.
+        let delegated = panic::catch_unwind(crate::main);
         let _ = io::stdout().flush();
+        if delegated.is_err() {
+            std::process::exit(PANIC_EXIT as i32);
+        }
         return 0;
     }
     let _ = io::stdout().flush();
@@ -496,7 +502,7 @@ impl Session {
                 let interface = vesper::interface::export(&self.checked()?.world, &package)?;
                 let bytes = serde_json::to_vec_pretty(&interface).map_err(|e| e.to_string())?;
                 if let Some(path) = o.output() {
-                    crate::package_commands::atomic_write(&path, &bytes)?;
+                    vesper::atomic_file::atomic_write(&path, &bytes)?;
                 } else {
                     crate::write(None, &bytes)?;
                 }
@@ -572,7 +578,7 @@ impl Session {
                 let artifact = vesper::wasm_backend::compile(world, o.entry(), &options)
                     .map_err(|e| e.to_string())?;
                 let path = o.output().unwrap_or_else(|| PathBuf::from("a.wasm"));
-                crate::package_commands::atomic_write(&path, &artifact.component)?;
+                vesper::atomic_file::atomic_write(&path, &artifact.component)?;
                 println!(
                     "built {} ({} component)",
                     path.display(),
@@ -631,7 +637,7 @@ impl Session {
                 let checked = self.checked()?;
                 let mut program = ir::lower(checked);
                 if o.optimize {
-                    vesper::ir_opt::optimize(&checked.world, &mut program)?;
+                    vesper::ir_opt_policy::optimize(&checked.world, &mut program)?;
                 }
                 crate::write(
                     o.output(),

@@ -22,6 +22,7 @@ use @vesper/check-data::util::{
     push_decimal,
     push_signed,
     u32_at,
+    u64_at,
     w
 };
 use @vesper/check-data::names::{
@@ -39,7 +40,10 @@ use @vesper/check-data::world::{
     vector_words
 };
 use @vesper/check-data::input::{
+    Ctx,
     Reader,
+    ctx_new,
+    extend_ctx,
     read_ctx
 };
 
@@ -179,13 +183,17 @@ impl Layouts {
     }
 
     fn scalar(inout self, ty: u32) -> u32 {
+        self.scalar_sized(ty, 8)
+    }
+
+    fn scalar_sized(inout self, ty: u32, size: u32) -> u32 {
         let id = n32(self.nodes.len());
         self
             .nodes
             .push(
             LNode {
                 ty: ty,
-                size: 8,
+                size: size,
                 kind: L_SCALAR,
                 a: 0,
                 n: 0
@@ -312,6 +320,10 @@ fn build(inout ls: Layouts, inout t: Types, inout names: Names, in wd: World, ty
     } else {
         0
     };
+    // `i128` and `u128` are two words, low word first (#1174).
+    if n.kind == K_NAMED && n.n == 0 && k.is_wide(name) {
+        return ls.scalar_sized(ty, 16);
+    }
     let scalar = n
         .kind
         == K_LIT
@@ -928,4 +940,43 @@ pub fn layout_words(in b: Slice[u8]) -> ChunkSeq[u64] {
 // `in Str`).
 pub fn check_layout_words(in input: Str) -> ChunkSeq[u64] {
     layout_words(in input.as_bytes())
+}
+
+// One part of an input that arrives in parts (self-hosting SH4 lane 2,
+// #1276): `extend_ctx` adds the part's names, types and ADTs to `c`, then
+// the layout of the type the part names, as `layout_words` writes it.
+pub fn layout_part(inout c: Ctx, in part: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    extend_ctx(inout r, in part, inout c);
+    let ty = u32_at(in c.tmap, r.word(in part));
+    let mut ls = layouts_new();
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    put_layout_words(inout ls, inout c.types, inout c.names, in c.world, ty, inout o);
+    o
+}
+
+// The harness entry of `layout_part` (tests/self_host_swap_inputs.rs): a
+// count, then each part as a byte length and its bytes padded to words;
+// returns each part's answer as a word count and the words.
+pub fn check_layout_parts(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = ctx_new();
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = r.word(in b);
+    for i in 0..n {
+        let len = r.word(in b);
+        let start = r.pos;
+        let answer = layout_part(inout c, in b[start..wrapping_add(start, len)]);
+        o.push(answer.len());
+        for j in 0..answer.len() {
+            o.push(u64_at(in answer, j));
+        }
+        r.pos = wrapping_add(start, wrapping_mul(wrapping_add(len, 7) / 8, 8));
+    }
+    o
 }

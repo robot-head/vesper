@@ -1,0 +1,10 @@
+[package]
+name = "@vesper/backend-checks"
+version = "0.1.0"
+edition = "2026"
+# The checks only compute over their input: no I/O, clock or network.
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper/check-data" = { version = "^0.1", path = "../vesper-check-data" }
+"@vesper/resonance" = { version = "^0.1", path = "../../crates/vesper-resonance/vesper" }

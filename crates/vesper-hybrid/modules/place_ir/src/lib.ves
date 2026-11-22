@@ -1,0 +1,24 @@
+// @vesper/hybrid-place-ir: the IR swap point's identity hooks in the hybrid
+// Stage 2 build (self-hosting SH3 lane 1, #1240).
+//
+// `round_trip_words` takes one program as little-endian words (names,
+// types, the world, then the program section; written by `program_input`
+// in tests/common/ir_words.rs), reads it into `@vesper/place-ir` tables and
+// writes it back (`put_program`), which `decode_program` reads into a Rust
+// `Program`. The hybrid runs it after every native IR pass until the SH3
+// lanes install their Vesper passes instead.
+
+// @export abi 4
+
+use @vesper/place-ir::{
+    place_ir_round_trip
+};
+
+// The layout version of `round_trip_words`.
+pub fn format() -> u64 {
+    1
+}
+
+pub fn round_trip_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    place_ir_round_trip(in input)
+}

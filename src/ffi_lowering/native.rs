@@ -212,6 +212,14 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         }
         let abi = plan.function.abi();
+        // Apple arm64 passes variadic arguments on the stack: zero words
+        // fill the remaining argument registers first (`sys::Variadic`).
+        if let Some(v) = abi.variadic {
+            for _ in 0..v.padding {
+                let zero = self.b.ins().iconst(types::I64, 0);
+                c_args.insert(v.first - v.padding, zero);
+            }
+        }
         let mut sig = self.m.make_signature();
         for t in &abi.parameters {
             sig.params.push(abi_param(*t, pointer));

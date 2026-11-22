@@ -1,0 +1,213 @@
+// Text building: the generators write Rust source into one `ChunkSeq[u8]`
+// and build the strings Rust keeps as `String`s (a type's spelling, an
+// expression) as their own byte sequences. `StrSet` is the sorted set of
+// strings the binding needs (Rust's `BTreeSet<String>`,
+// `BTreeSet<(String, u32)>` and `BTreeMap<String, u32>`).
+
+use @vesper/check-data::util::{
+    inc,
+    u64_at,
+    u8_at
+};
+
+pub fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+pub fn put_seq(inout o: ChunkSeq[u8], in s: ChunkSeq[u8]) {
+    o.extend(in s.as_slice());
+}
+
+pub fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+pub fn nl(inout o: ChunkSeq[u8]) {
+    o.push(10);
+}
+
+pub fn text(in s: Str) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::new[u8]();
+    o.extend(in s.as_bytes());
+    o
+}
+
+pub fn copy_of(in s: ChunkSeq[u8]) -> ChunkSeq[u8] {
+    let mut o = ChunkSeq::with_capacity[u8](s.len());
+    o.extend(in s.as_slice());
+    o
+}
+
+pub fn same(in a: ChunkSeq[u8], in b: ChunkSeq[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if u8_at(in a, i) != u8_at(in b, i) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn same_str(in a: ChunkSeq[u8], in b: Str) -> bool {
+    let s = b.as_bytes();
+    if a.len() != s.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        let c = match s.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if u8_at(in a, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// A set of strings with a word each, kept in Rust's `Ord` order (bytes,
+// then the word).
+pub struct StrSet {
+    text: ChunkSeq[u8],
+    starts: ChunkSeq[u64],
+    ends: ChunkSeq[u64],
+    vals: ChunkSeq[u64],
+    // entry indices in sorted order
+    order: ChunkSeq[u64],
+}
+
+pub fn str_set() -> StrSet {
+    StrSet {
+        text: ChunkSeq::new[u8](),
+        starts: ChunkSeq::new[u64](),
+        ends: ChunkSeq::new[u64](),
+        vals: ChunkSeq::new[u64](),
+        order: ChunkSeq::new[u64](),
+    }
+}
+
+impl StrSet {
+    pub fn len(in self) -> u64 {
+        self.order.len()
+    }
+
+    // -1, 0 or 1 as entry `i`'s bytes compare with `s`.
+    fn cmp_bytes(in self, i: u64, in s: ChunkSeq[u8]) -> i64 {
+        let a = u64_at(in self.starts, i);
+        let n = wrapping_sub(u64_at(in self.ends, i), a);
+        let m = s.len();
+        let mut k: u64 = 0;
+        loop {
+            if k >= n || k >= m {
+                break;
+            }
+            let x = u8_at(in self.text, wrapping_add(a, k));
+            let y = u8_at(in s, k);
+            if x < y {
+                return -1;
+            }
+            if x > y {
+                return 1;
+            }
+            k = inc(k);
+        }
+        if n < m {
+            -1
+        } else if n > m {
+            1
+        } else {
+            0
+        }
+    }
+
+    // `BTreeSet<(String, u64)>::insert`: keyed by the bytes and the word.
+    pub fn insert_pair(inout self, in s: ChunkSeq[u8], v: u64) {
+        let mut at = self.order.len();
+        for p in 0..self.order.len() {
+            let i = u64_at(in self.order, p);
+            let c = self.cmp_bytes(i, in s);
+            let iv = u64_at(in self.vals, i);
+            if c == 0 && iv == v {
+                return;
+            }
+            if c > 0 || c == 0 && iv > v {
+                at = p;
+                break;
+            }
+        }
+        self.add(in s, v, at);
+    }
+
+    // `BTreeMap<String, u64>::insert`: keyed by the bytes, the word replaced.
+    pub fn insert_key(inout self, in s: ChunkSeq[u8], v: u64) {
+        let mut at = self.order.len();
+        for p in 0..self.order.len() {
+            let i = u64_at(in self.order, p);
+            let c = self.cmp_bytes(i, in s);
+            if c == 0 {
+                let ok = self.vals.try_set(i, v);
+                return;
+            }
+            if c > 0 {
+                at = p;
+                break;
+            }
+        }
+        self.add(in s, v, at);
+    }
+
+    fn add(inout self, in s: ChunkSeq[u8], v: u64, at: u64) {
+        let i = self.starts.len();
+        self.starts.push(self.text.len());
+        self.text.extend(in s.as_slice());
+        self.ends.push(self.text.len());
+        self.vals.push(v);
+        // Insert `i` at position `at` of the order.
+        self.order.push(i);
+        let mut p = wrapping_sub(self.order.len(), 1);
+        loop {
+            if p <= at {
+                break;
+            }
+            let prev = u64_at(in self.order, wrapping_sub(p, 1));
+            let ok = self.order.try_set(p, prev);
+            p = wrapping_sub(p, 1);
+        }
+        let ok2 = self.order.try_set(at, i);
+    }
+
+    // Whether the set holds `s` (any word).
+    pub fn contains(in self, in s: ChunkSeq[u8]) -> bool {
+        for p in 0..self.starts.len() {
+            if self.cmp_bytes(p, in s) == 0 {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The `k`-th entry in order: its bytes appended to `o`.
+    pub fn write(in self, k: u64, inout o: ChunkSeq[u8]) {
+        let i = u64_at(in self.order, k);
+        let a = u64_at(in self.starts, i);
+        let e = u64_at(in self.ends, i);
+        for j in a..e {
+            o.push(u8_at(in self.text, j));
+        }
+    }
+
+    pub fn get(in self, k: u64) -> ChunkSeq[u8] {
+        let mut o = ChunkSeq::new[u8]();
+        self.write(k, inout o);
+        o
+    }
+
+    pub fn val(in self, k: u64) -> u64 {
+        u64_at(in self.vals, u64_at(in self.order, k))
+    }
+}

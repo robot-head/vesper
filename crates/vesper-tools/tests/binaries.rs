@@ -22,6 +22,16 @@ fn every_tool_prints_its_usage() {
         (env!("CARGO_BIN_EXE_vesper-resolve"), "vesper resolve"),
         (env!("CARGO_BIN_EXE_vesper-sbom"), "vesper sbom"),
         (env!("CARGO_BIN_EXE_vesper-tee"), "vesper-tee measure"),
+        (env!("CARGO_BIN_EXE_vesper-attest"), "attest"),
+        (env!("CARGO_BIN_EXE_vesper-cas"), "cas"),
+        (env!("CARGO_BIN_EXE_vesper-fuzz"), "fuzz"),
+        (env!("CARGO_BIN_EXE_vesper-migrate"), "migrate"),
+        (env!("CARGO_BIN_EXE_vesper-refute"), "refute"),
+        (env!("CARGO_BIN_EXE_vesper-replay"), "replay"),
+        (env!("CARGO_BIN_EXE_vesper-semver"), "semver"),
+        (env!("CARGO_BIN_EXE_vesper-simd"), "simd"),
+        (env!("CARGO_BIN_EXE_vesper-top"), "top"),
+        (env!("CARGO_BIN_EXE_vesper-traceparent"), "traceparent"),
     ] {
         let out = run(exe, &["--help"]);
         assert!(out.status.success(), "{exe}: {out:?}");

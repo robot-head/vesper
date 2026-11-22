@@ -115,14 +115,14 @@ fn sep(inout o: ChunkSeq[u8], inout first: bool) {
 
 // ----- compared checks -----------------------------------------------------------
 
-// `compared_checks`: `b:k:access` for each access the dominating comparisons
-// put below its receiver's length.
-pub fn compared_text(in f: Fun, inout o: ChunkSeq[u8]) {
+// `compared_checks`: (block << 40 | instruction << 8 | access) for each
+// access the dominating comparisons put below its receiver's length.
+pub fn compared_list(in f: Fun) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut fa = facts_new(in f);
     if fa.nedges() == 0 {
-        return;
+        return out;
     }
-    let mut first = true;
     for j in 0..fa.g.order.len() {
         let b = u32_at(in fa.g.order, j);
         let k = f.block(w(b));
@@ -138,14 +138,26 @@ pub fn compared_text(in f: Fun, inout o: ChunkSeq[u8]) {
             let target = fa.length_place(in f, place);
             let t = fa.term(in f, index);
             if fa.below_len(in f, t, target, b, kk, b, 0) {
-                sep(inout o, inout first);
-                put_u64(inout o, w(b));
-                o.push(58);
-                put_u64(inout o, kk);
-                o.push(58);
-                put_access(inout o, a);
+                out.push(wrapping_shl_u64(w(b), 40) | wrapping_shl_u64(kk, 8) | a);
             }
         }
+    }
+    out
+}
+
+// The `Compared` decision: `b:k:access` for each.
+pub fn compared_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let l = compared_list(in f);
+    for q in 0..l.len() {
+        let x = u64_at(in l, q);
+        if q > 0 {
+            o.push(32);
+        }
+        put_u64(inout o, x >> 40);
+        o.push(58);
+        put_u64(inout o, (x >> 8) & 4294967295);
+        o.push(58);
+        put_access(inout o, x & 255);
     }
 }
 
@@ -204,10 +216,25 @@ pub fn header(in f: Fun, h: u64) -> Head {
 }
 
 // The counted-loop headers, innermost first, each with the innermost loop
-// around it: `h(b,..)` or `h(-)`.
-pub fn order_text(in f: Fun, inout o: ChunkSeq[u8]) {
+// around it (`hs[j]`, and `encl[e0[j]..e0[j]+en[j]]` when `has[j]`).
+pub struct Order {
+    hs: ChunkSeq[u32],
+    has: ChunkSeq[u8],
+    e0: ChunkSeq[u64],
+    en: ChunkSeq[u64],
+    encl: ChunkSeq[u32],
+}
+
+pub fn order_list(in f: Fun) -> Order {
     let g = graph(in f, in no_cut());
     let n = f.nblocks();
+    let mut out = Order {
+        hs: ChunkSeq::new[u32](),
+        has: ChunkSeq::new[u8](),
+        e0: ChunkSeq::new[u64](),
+        en: ChunkSeq::new[u64](),
+        encl: ChunkSeq::new[u32]()
+    };
     // (loop size, header) of each counted loop, sorted.
     let mut keys: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for h in 0..n {
@@ -218,12 +245,9 @@ pub fn order_text(in f: Fun, inout o: ChunkSeq[u8]) {
         }
     }
     sort_u64(inout keys);
-    let mut first = true;
     for j in 0..keys.len() {
         let h = n32(u64_at(in keys, j) & 4294967295);
-        sep(inout o, inout first);
-        put_u64(inout o, w(h));
-        o.push(40);
+        out.hs.push(h);
         // The innermost loop around `h`: the first smallest in header order.
         let mut best = NONE32;
         let mut best_len = NONE64;
@@ -237,10 +261,39 @@ pub fn order_text(in f: Fun, inout o: ChunkSeq[u8]) {
                 best_len = l.len();
             }
         }
+        out.e0.push(out.encl.len());
         if best == NONE32 {
-            o.push(45);
+            out.has.push(0);
+            out.en.push(0);
         } else {
             let l = natural_loop(in g, best);
+            out.has.push(1);
+            out.en.push(l.len());
+            for q in 0..l.len() {
+                out.encl.push(u32_at(in l, q));
+            }
+        }
+    }
+    out
+}
+
+// The `Order` decision: `h(b,..)` or `h(-)` for each.
+pub fn order_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let ord = order_list(in f);
+    for j in 0..ord.hs.len() {
+        if j > 0 {
+            o.push(32);
+        }
+        put_u64(inout o, w(u32_at(in ord.hs, j)));
+        o.push(40);
+        if u8_at(in ord.has, j) == 0 {
+            o.push(45);
+        } else {
+            let mut l: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let e0 = u64_at(in ord.e0, j);
+            for q in 0..u64_at(in ord.en, j) {
+                l.push(u32_at(in ord.encl, add(e0, q)));
+            }
             put_blocks(inout o, in l);
         }
         o.push(41);
@@ -281,7 +334,7 @@ const O_VALUE: u64 = 0;
 const O_LOCAL: u64 = 1;
 const O_CONST: u64 = 2;
 
-fn fail_lin() -> Lin {
+pub fn fail_lin() -> Lin {
     Lin {
         ok: false,
         sign: 0,
@@ -750,48 +803,114 @@ fn changed_in(in f: Fun, in outer: ChunkSeq[u32], root: u32) -> bool {
     false
 }
 
+// A counted loop's plan (`CountedPlan`): the preheader, the header, the
+// loop's blocks (`c.blocks`), the hoisted receivers in key order (each the
+// read of it and its index form, terms in `c.offs`), and the converted
+// accesses by value.
+pub struct CountedPlan {
+    ok: bool,
+    pre: u32,
+    head: Head,
+    c: Counted,
+    keys: Keys,
+    rkey: ChunkSeq[u64],
+    rread: ChunkSeq[u64],
+    rform: ChunkSeq[Lin],
+    // (dest << 8 | access)
+    accesses: ChunkSeq[u64],
+}
+
+fn no_plan(head: Head) -> CountedPlan {
+    CountedPlan {
+        ok: false,
+        pre: 0,
+        head: head,
+        c: Counted {
+            blocks: ChunkSeq::new[u32](),
+            defined: ChunkSeq::new[u32](),
+            induction: ChunkSeq::new[u32](),
+            defs: ChunkSeq::new[u64](),
+            reads: ChunkSeq::new[u64](),
+            bound_locals: ChunkSeq::new[u64](),
+            offs: ChunkSeq::new[u64]()
+        },
+        keys: keys_new(),
+        rkey: ChunkSeq::new[u64](),
+        rread: ChunkSeq::new[u64](),
+        rform: ChunkSeq::new[Lin](),
+        accesses: ChunkSeq::new[u64]()
+    }
+}
+
 // The decision of a `Counted` step: `none`, or the plan's text.
 pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let plan = counted_plan(in f);
+    if !plan.ok {
+        put(inout o, "none");
+        return;
+    }
+    put(inout o, "pre=");
+    put_u64(inout o, w(plan.pre));
+    put(inout o, " inclusive=");
+    put_bool(inout o, plan.head.inclusive);
+    put(inout o, " blocks=");
+    put_blocks(inout o, in plan.c.blocks);
+    put(inout o, " receivers=[");
+    for q in 0..plan.rkey.len() {
+        if q > 0 {
+            o.push(32);
+        }
+        plan.keys.put_key(u64_at(in plan.rkey, q), inout o);
+        o.push(58);
+        put_u64(inout o, w(f.inst(u64_at(in plan.rread, q)).dest));
+    }
+    put(inout o, "] accesses=[");
+    for q in 0..plan.accesses.len() {
+        let x = u64_at(in plan.accesses, q);
+        if q > 0 {
+            o.push(32);
+        }
+        put_u64(inout o, x >> 8);
+        o.push(58);
+        put_access(inout o, x & 255);
+    }
+    o.push(93);
+}
+
+// `counted_plan` for the step's header.
+pub fn counted_plan(in f: Fun) -> CountedPlan {
     let h = f.header;
     let head = header(in f, w(h));
     if !head.ok {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
     let g = graph(in f, in no_cut());
     if g.npreds(w(h)) == 0 {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
     let blocks = natural_loop(in g, h);
     if !has(in blocks, head.body) {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
     let outside = outside_preds(in g, h, in blocks);
     if outside.len() != 1 {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
     let pre = u32_at(in outside, 0);
     let pk = f.block(w(pre));
     if pk.term != T_JUMP || pk.yes != h || pk.tn != 0 {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
     if entered_inside(in g, h, in blocks) {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
     for bi in 0..blocks.len() {
         if f.join_slots(w(u32_at(in blocks, bi))) {
-            put(inout o, "none");
-            return;
+            return no_plan(head);
         }
     }
     if opaque(in f, in blocks) || escapes(in f, in blocks) {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
     // The bound never changes; the index changes only in latch blocks that
     // jump straight back to the header.
@@ -804,19 +923,16 @@ pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
             if i.op == OP_WRITE {
                 let r = f.write_root(i);
                 if r == head.bound {
-                    put(inout o, "none");
-                    return;
+                    return no_plan(head);
                 }
                 if r == head.index {
                     if k.term != T_JUMP || k.yes != h {
-                        put(inout o, "none");
-                        return;
+                        return no_plan(head);
                     }
                     let new = insert(inout latches, b);
                 }
             } else if i.op == OP_BIND && (f.binds(i, head.index) || f.binds(i, head.bound)) {
-                put(inout o, "none");
-                return;
+                return no_plan(head);
             }
         }
     }
@@ -900,6 +1016,7 @@ pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
     let mut kplace: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut kread: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let mut kstable: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut kform: ChunkSeq[Lin] = ChunkSeq::new[Lin]();
     // candidates: (dest, access, key), the last insertion of a dest wins
     let mut cdest: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut cacc: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -949,6 +1066,7 @@ pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
                 kplace.push(recv.place);
                 kread.push(wrapping_sub(rd, 1));
                 kstable.push(0);
+                kform.push(form);
             }
             let mut found = false;
             for q in 0..cdest.len() {
@@ -980,8 +1098,7 @@ pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
         }
     }
     if ncand == 0 {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
     let (known, trips) = trip_count(in f, head);
     if known {
@@ -990,50 +1107,37 @@ pub fn counted_text(in f: Fun, inout o: ChunkSeq[u8]) {
         // fails it without a product.
         let limit = wrapping_mul(GUARD_COST, nrecv);
         if trips < limit && wrapping_mul(trips, ncand) < limit {
-            put(inout o, "none");
-            return;
+            return no_plan(head);
         }
     } else if f.has_enclosing && !bound_invariant(in f, head, in f.enclosing) && ncand <= nrecv {
-        put(inout o, "none");
-        return;
+        return no_plan(head);
     }
-    put(inout o, "pre=");
-    put_u64(inout o, w(pre));
-    put(inout o, " inclusive=");
-    put_bool(inout o, head.inclusive);
-    put(inout o, " blocks=");
-    put_blocks(inout o, in c.blocks);
-    put(inout o, " receivers=[");
+    let mut plan = no_plan(head);
+    plan.ok = true;
+    plan.pre = pre;
     let order = keys.sorted();
-    let mut first = true;
     for q in 0..order.len() {
         let key = w(u32_at(in order, q));
         if u8_at(in kstable, key) == 0 {
             continue;
         }
-        sep(inout o, inout first);
-        keys.put_key(key, inout o);
-        o.push(58);
-        put_u64(inout o, w(f.inst(u64_at(in kread, key)).dest));
+        plan.rkey.push(key);
+        plan.rread.push(u64_at(in kread, key));
+        let form = match kform.try_get(key) {
+            Option::Some(x) => x,
+            Option::None => fail_lin(),
+        };
+        plan.rform.push(form);
     }
-    put(inout o, "] accesses=[");
-    // by dest
-    let mut byd: ChunkSeq[u64] = ChunkSeq::new[u64]();
     for q in 0..cdest.len() {
         if u8_at(in kstable, u64_at(in ckey, q)) != 0 {
-            byd.push(wrapping_shl_u64(w(u32_at(in cdest, q)), 8) | u64_at(in cacc, q));
+            plan.accesses.push(wrapping_shl_u64(w(u32_at(in cdest, q)), 8) | u64_at(in cacc, q));
         }
     }
-    sort_u64(inout byd);
-    first = true;
-    for q in 0..byd.len() {
-        let x = u64_at(in byd, q);
-        sep(inout o, inout first);
-        put_u64(inout o, x >> 8);
-        o.push(58);
-        put_access(inout o, x & 255);
-    }
-    o.push(93);
+    sort_u64(inout plan.accesses);
+    plan.keys = keys;
+    plan.c = c;
+    plan
 }
 
 // ----- compared loops ------------------------------------------------------------
@@ -1072,19 +1176,39 @@ pub copy struct BoundRow {
     b: u64,
 }
 
-// `loop_candidate`: what to guard in loop `blocks` headed by `h`; writes
-// the decision text and returns whether there is one.
-fn loop_candidate(
-    in f: Fun,
-    inout fa: Facts,
-    in g: Graph,
+// A compared loop's plan (`next_loop`'s candidate): the header, the
+// preheader, the blocks, the guards (length place, bound, receiver read)
+// and the converted accesses (block << 40 | instruction << 8 | access).
+pub struct LoopPlan {
+    ok: bool,
     h: u32,
-    in blocks: ChunkSeq[u32],
-    inout o: ChunkSeq[u8]
-) -> bool {
+    pre: u32,
+    blocks: ChunkSeq[u32],
+    gplace: ChunkSeq[u32],
+    gbound: ChunkSeq[BoundRow],
+    gread: ChunkSeq[u64],
+    conv: ChunkSeq[u64],
+}
+
+fn no_loop() -> LoopPlan {
+    LoopPlan {
+        ok: false,
+        h: 0,
+        pre: 0,
+        blocks: ChunkSeq::new[u32](),
+        gplace: ChunkSeq::new[u32](),
+        gbound: ChunkSeq::new[BoundRow](),
+        gread: ChunkSeq::new[u64](),
+        conv: ChunkSeq::new[u64]()
+    }
+}
+
+// `loop_candidate`: what to guard in loop `blocks` headed by `h`.
+fn loop_candidate(in f: Fun, inout fa: Facts, in g: Graph, h: u32, in blocks: ChunkSeq[u32])
+    -> LoopPlan {
     let pre = loop_entry(in f, in g, h, in blocks);
     if pre == NONE32 {
-        return false;
+        return no_loop();
     }
     let pk = f.block(w(pre));
     if pk.term == T_BRANCH {
@@ -1092,7 +1216,7 @@ fn loop_candidate(
         if d != NONE64 {
             let ci = f.inst(d);
             if ci.op == OP_SEQ && ci.sub == S_GUARD {
-                return false;
+                return no_loop();
             }
         }
     }
@@ -1234,22 +1358,35 @@ fn loop_candidate(
         }
     }
     if gplace.len() == 0 || conv.len() < gplace.len() || gplace.len() > MAX_TERMS {
-        return false;
+        return no_loop();
     }
+    LoopPlan {
+        ok: true,
+        h: h,
+        pre: pre,
+        blocks: copy_u32(in blocks),
+        gplace: gplace,
+        gbound: gbound,
+        gread: gread,
+        conv: conv
+    }
+}
+
+fn put_loop(in f: Fun, in lp: LoopPlan, inout o: ChunkSeq[u8]) {
     put(inout o, "header=");
-    put_u64(inout o, w(h));
+    put_u64(inout o, w(lp.h));
     put(inout o, " pre=");
-    put_u64(inout o, w(pre));
+    put_u64(inout o, w(lp.pre));
     put(inout o, " blocks=");
-    put_blocks(inout o, in blocks);
+    put_blocks(inout o, in lp.blocks);
     put(inout o, " guards=[");
-    for q in 0..gplace.len() {
+    for q in 0..lp.gplace.len() {
         if q > 0 {
             o.push(32);
         }
-        f.put_place(u32_at(in gplace, q), inout o);
+        f.put_place(u32_at(in lp.gplace, q), inout o);
         o.push(60);
-        let gb = match gbound.try_get(q) {
+        let gb = match lp.gbound.try_get(q) {
             Option::Some(x) => x,
             Option::None => BoundRow {
                 kind: 2,
@@ -1268,14 +1405,14 @@ fn loop_candidate(
             put_u64(inout o, gb.a);
         }
         o.push(58);
-        put_u64(inout o, w(f.inst(u64_at(in gread, q)).dest));
+        put_u64(inout o, w(f.inst(u64_at(in lp.gread, q)).dest));
     }
     put(inout o, "] accesses=[");
-    for q in 0..conv.len() {
+    for q in 0..lp.conv.len() {
         if q > 0 {
             o.push(32);
         }
-        let x = u64_at(in conv, q);
+        let x = u64_at(in lp.conv, q);
         put_u64(inout o, x >> 40);
         o.push(58);
         put_u64(inout o, (x >> 8) & 4294967295);
@@ -1283,13 +1420,11 @@ fn loop_candidate(
         put_access(inout o, x & 255);
     }
     o.push(93);
-    true
 }
 
-// `next_loop`: the next untried loop with something to guard, then
-// ` tried=..`, the headers tried after it.
-pub fn compared_loop_text(in f: Fun, inout o: ChunkSeq[u8]) {
-    let mut tried = copy_u32(in f.tried);
+// `next_loop`: the next untried loop with something to guard; adds the
+// headers it tries to `tried`.
+pub fn next_loop(in f: Fun, inout tried: ChunkSeq[u32]) -> LoopPlan {
     let g = graph(in f, in no_cut());
     // (loop size, header) of the untried non-counted loops.
     let mut keys: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1309,23 +1444,34 @@ pub fn compared_loop_text(in f: Fun, inout o: ChunkSeq[u8]) {
         let size = lp.len();
         keys.push(wrapping_shl_u64(size, 32) | w(h));
     }
-    let mut done = false;
-    if keys.len() > 0 {
-        sort_u64(inout keys);
-        let mut fa = facts_new(in f);
-        if fa.nedges() > 0 {
-            for j in 0..keys.len() {
-                let h = n32(u64_at(in keys, j) & 4294967295);
-                let new = insert(inout tried, h);
-                let blocks = natural_loop(in g, h);
-                if loop_candidate(in f, inout fa, in g, h, in blocks, inout o) {
-                    done = true;
-                    break;
-                }
-            }
+    if keys.len() == 0 {
+        return no_loop();
+    }
+    sort_u64(inout keys);
+    let mut fa = facts_new(in f);
+    if fa.nedges() == 0 {
+        return no_loop();
+    }
+    for j in 0..keys.len() {
+        let h = n32(u64_at(in keys, j) & 4294967295);
+        let new = insert(inout tried, h);
+        let blocks = natural_loop(in g, h);
+        let lp = loop_candidate(in f, inout fa, in g, h, in blocks);
+        if lp.ok {
+            return lp;
         }
     }
-    if !done {
+    no_loop()
+}
+
+// The `ComparedLoop` decision: the candidate (or `none`), then ` tried=..`,
+// the headers tried after it.
+pub fn compared_loop_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let mut tried = copy_u32(in f.tried);
+    let lp = next_loop(in f, inout tried);
+    if lp.ok {
+        put_loop(in f, in lp, inout o);
+    } else {
         put(inout o, "none");
     }
     put(inout o, " tried=");
@@ -1342,10 +1488,25 @@ fn copy_u32(in s: ChunkSeq[u32]) -> ChunkSeq[u32] {
 
 // ----- dominated checks ----------------------------------------------------------
 
-// `dominated_checks`: `b:k` for each element access a checked access of
-// the same stable place dominates at the same index (or, for constant
-// indices, at a larger or equal one).
+// The `Dominated` decision: `b:k` for each.
 pub fn dominated_text(in f: Fun, inout o: ChunkSeq[u8]) {
+    let l = dominated_list(in f);
+    for q in 0..l.len() {
+        let x = u64_at(in l, q);
+        if q > 0 {
+            o.push(32);
+        }
+        put_u64(inout o, x >> 32);
+        o.push(58);
+        put_u64(inout o, x & 4294967295);
+    }
+}
+
+// `dominated_checks`: (block << 32 | instruction) for each element access a
+// checked access of the same stable place dominates at the same index (or,
+// for constant indices, at a larger or equal one).
+pub fn dominated_list(in f: Fun) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
     let g = graph(in f, in no_cut());
     let all = all_blocks(in f);
     // value -> 1 + global index of its last definition
@@ -1461,7 +1622,6 @@ pub fn dominated_text(in f: Fun, inout o: ChunkSeq[u8]) {
     }
     // Facts per block: the checked accesses of the blocks that strictly
     // dominate it, then its own as they go.
-    let mut first = true;
     let mut fp: ChunkSeq[u32] = ChunkSeq::new[u32]();
     let mut fc: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut flo: ChunkSeq[u64] = ChunkSeq::new[u64]();
@@ -1522,10 +1682,7 @@ pub fn dominated_text(in f: Fun, inout o: ChunkSeq[u8]) {
                 }
             }
             if covered {
-                sep(inout o, inout first);
-                put_u64(inout o, w(b));
-                o.push(58);
-                put_u64(inout o, u64_at(in ak, q));
+                out.push(wrapping_shl_u64(w(b), 32) | u64_at(in ak, q));
             } else if u8_at(in achecked, q) != 0 {
                 fp.push(place);
                 fc.push(c);
@@ -1535,4 +1692,5 @@ pub fn dominated_text(in f: Fun, inout o: ChunkSeq[u8]) {
         }
         r = end;
     }
+    out
 }

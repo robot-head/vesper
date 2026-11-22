@@ -3,6 +3,7 @@
 //! spell the same numbers; `tests/header.rs` checks the header against
 //! these tables.
 
+use cranelift_codegen::binemit::Reloc;
 use cranelift_codegen::ir::{
     MemFlags, TrapCode, Type, condcodes::FloatCC, condcodes::IntCC, types,
 };
@@ -64,7 +65,7 @@ table!(
     /// `vcl_unary(b, op, x)`.
     UNARY: 1 ineg, 2 bnot, 3 clz, 4 ctz, 5 popcnt, 6 bswap, 7 bitrev,
     8 cls, 9 iabs, 10 fneg, 11 fabs, 12 sqrt, 13 ceil, 14 floor, 15 trunc,
-    16 nearest, 18 vany_true, 19 vall_true,
+    16 nearest, 18 vany_true, 19 vall_true, 20 fvpromote_low, 21 fvdemote,
 );
 table!(
     /// `vcl_convert(b, op, ty, x)`: the result type is `ty`.
@@ -222,3 +223,83 @@ pub fn mem_flags(bits: u32) -> Option<MemFlags> {
 pub fn name(table: &[(u32, &'static str)], code: u32) -> Option<&'static str> {
     table.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
 }
+
+// ---------------------------------------------------------------------------
+// SH5 lane 2 (#1325): parameter extension, relocations and their targets.
+
+table!(
+    /// The `ext` argument of `vcl_sig_param_ext` and `vcl_sig_return_ext`.
+    EXT: 0 none, 1 uext, 2 sext,
+);
+
+/// `AbiParam::new(t)` with extension `ext` ([`EXT`]).
+pub fn abi_param(t: Type, ext: u32) -> Option<cranelift_codegen::ir::AbiParam> {
+    let p = cranelift_codegen::ir::AbiParam::new(t);
+    Some(match ext {
+        0 => p,
+        1 => p.uext(),
+        2 => p.sext(),
+        _ => return None,
+    })
+}
+
+/// The linkage code of `l` (the inverse of [`linkage`]).
+pub fn linkage_code(l: Linkage) -> u32 {
+    match l {
+        Linkage::Import => 0,
+        Linkage::Local => 1,
+        Linkage::Preemptible => 2,
+        Linkage::Hidden => 3,
+        Linkage::Export => 4,
+    }
+}
+
+/// Relocation kinds, numbered in `cranelift_codegen::binemit::Reloc`'s
+/// order from 1.
+pub const RELOC: &[(u32, Reloc)] = &[
+    (1, Reloc::Abs4),
+    (2, Reloc::Abs8),
+    (3, Reloc::X86PCRel4),
+    (4, Reloc::X86CallPCRel4),
+    (5, Reloc::X86CallPLTRel4),
+    (6, Reloc::X86GOTPCRel4),
+    (7, Reloc::X86SecRel),
+    (8, Reloc::Arm32Call),
+    (9, Reloc::Arm64Call),
+    (10, Reloc::S390xPCRel32Dbl),
+    (11, Reloc::S390xPLTRel32Dbl),
+    (12, Reloc::MachOAarch64TlsAdrPage21),
+    (13, Reloc::MachOAarch64TlsAdrPageOff12),
+    (14, Reloc::Aarch64TlsDescAdrPage21),
+    (15, Reloc::Aarch64TlsDescLd64Lo12),
+    (16, Reloc::Aarch64TlsDescAddLo12),
+    (17, Reloc::Aarch64TlsDescCall),
+    (18, Reloc::Aarch64AdrGotPage21),
+    (19, Reloc::Aarch64AdrPrelPgHi21),
+    (20, Reloc::Aarch64AddAbsLo12Nc),
+    (21, Reloc::Aarch64Ld64GotLo12Nc),
+    (22, Reloc::RiscvCallPlt),
+    (23, Reloc::RiscvTlsGdHi20),
+    (24, Reloc::RiscvPCRelLo12I),
+    (25, Reloc::RiscvGotHi20),
+    (26, Reloc::RiscvPCRelHi20),
+    (27, Reloc::S390xTlsGd64),
+    (28, Reloc::S390xTlsGdCall),
+    (29, Reloc::PulleyPcRel),
+    (30, Reloc::PulleyCallIndirectHost),
+];
+
+pub fn reloc(code: u32) -> Option<Reloc> {
+    RELOC.iter().find(|(c, _)| *c == code).map(|(_, r)| *r)
+}
+
+/// The code of `r` (0 for a kind newer than this table).
+pub fn reloc_code(r: Reloc) -> u32 {
+    RELOC.iter().find(|(_, k)| *k == r).map_or(0, |(c, _)| *c)
+}
+
+table!(
+    /// What a relocation's target word names (its third word).
+    RELOC_TARGET: 0 function, 1 data, 2 libcall, 3 known_symbol,
+    4 function_offset, 5 user_name,
+);

@@ -2,7 +2,6 @@ use serde::Serialize;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
-    fmt::Write,
     fs::OpenOptions,
     io::Read,
     path::{Path, PathBuf},
@@ -15,18 +14,23 @@ use vesper::{
     ast::{Diagnostic, Expr, ExprKind, Function, Item, Literal, Module, Span, Statement, Type},
     check::{self, World},
     ffi_lowering::{self, EvalHost, FfiError, ForeignChecked, Imports},
-    lexer::{self, Token, TokenKind as K},
+    lexer::{self, TokenKind as K},
     native::batch::{BatchLimits, NativeBatch},
     packages::{self, Assembled, SourceMap},
     parser,
     runtime::{Runtime, Value},
-    test_attrs::{self, AttrValue, FunctionTestAttrs},
+    test_attrs::{self, AttrValue},
+    test_discovery::{
+        self, CaseRow, CaseRows, case_marker, is_test_marker, location, preceding_comments,
+    },
     tooling::doc::sources::{SourceLimits, discover},
 };
+#[path = "test_engines.rs"]
+mod test_engines;
+
 use vesper_test::{
-    BudgetGate, ExpectErrorOutcome, ExpectErrorSpec, FaultProfile, HarnessPlan, ObligationLedger,
-    ObservedDiagnostic, TestAttr, TestCaseAttr, TestMode, TestParam, TestSignature, VerdictKey,
-    VerdictRecord, VerdictStatus, classify, is_cacheable, verify_expect_error,
+    ExpectErrorOutcome, FaultProfile, HarnessPlan, ObligationLedger, ObservedDiagnostic, TestMode,
+    VerdictKey, VerdictRecord, VerdictStatus, is_cacheable, verify_expect_error,
 };
 
 const MAX_SOURCE_BYTES: usize = 512 * 1024;
@@ -34,7 +38,7 @@ const DEFAULT_FUEL: u64 = 1_000_000;
 const DEFAULT_MAX_MUTANTS: usize = 256;
 const HARD_MAX_MUTANTS: usize = 2048;
 
-pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--no-cache] [--json]";
+pub const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--mutate-dependency <FILE>] [--filter <PAT>] [--mutant-offset <N>] [--max-mutants <N>] [--no-opt] [--fuel <N>] [--engines all|unit] [--no-cache] [--json]";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +117,9 @@ struct Options {
     fuel: u64,
     no_cache: bool,
     json: bool,
+    /// `--engines all`: every passing unit test must pass on every engine
+    /// ([`test_engines::agree`]).
+    engines_all: bool,
 }
 
 impl Options {
@@ -144,6 +151,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut fuel = DEFAULT_FUEL;
     let mut no_cache = false;
     let mut json = false;
+    let mut engines = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -155,6 +163,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             }
             "--no-cache" if !no_cache => no_cache = true,
             "--json" if !json => json = true,
+            "--engines" if engines.is_none() => {
+                let value = it.next().ok_or("--engines requires `all` or `unit`")?;
+                engines = Some(test_engines::parse(value)?);
+            }
             "--filter" => {
                 if filter.is_some() {
                     return Err("duplicate --filter option".into());
@@ -211,6 +223,10 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     if !optimize && !mutate {
         return Err("--no-opt requires --mutate".into());
     }
+    let engines_all = engines.unwrap_or(false);
+    if engines_all && mutate {
+        return Err("--engines all cannot be combined with --mutate".into());
+    }
     let path = path.ok_or_else(|| USAGE.to_string())?;
     Ok(Options {
         path,
@@ -223,6 +239,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         fuel,
         no_cache,
         json,
+        engines_all,
     })
 }
 
@@ -260,50 +277,10 @@ fn read_source(file: &Path) -> Result<String, String> {
         .map_err(|e| format!("{name}: {e}"))
 }
 
-fn location(source: &str, offset: usize) -> (usize, usize) {
-    let offset = offset.min(source.len());
-    let prefix = &source[..source.floor_char_boundary(offset)];
-    (
-        prefix.bytes().filter(|b| *b == b'\n').count() + 1,
-        prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
-    )
-}
-
-fn is_test_marker(comment_text: &str) -> bool {
-    let trimmed = comment_text.trim_start_matches('/').trim_start();
-    trimmed == "@test"
-        || trimmed.starts_with("@test ")
-        || trimmed.starts_with("@test:")
-        || trimmed.starts_with("@test(")
-}
-
-fn case_marker(comment: &str) -> Option<&str> {
-    let rest = comment
-        .trim_start_matches('/')
-        .trim_start()
-        .strip_prefix("@case")?;
-    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
-}
-
-fn preceding_comments(tokens: &[Token], fn_start: usize) -> impl Iterator<Item = &Token> {
-    let end = tokens.partition_point(|t| t.span.end <= fn_start);
-    tokens[..end]
-        .iter()
-        .rev()
-        .take_while(|t| matches!(t.kind, K::Whitespace | K::Comment))
-        .filter(|t| t.kind == K::Comment)
-}
-
-struct CaseWrapper {
-    entry: String,
-    generated: Span,
-    function_index: usize,
-}
-
 struct TestCase {
     name: String,
     span: Span,
-    wrapper: CaseWrapper,
+    wrapper: CaseRow,
 }
 
 impl TestCase {
@@ -324,90 +301,15 @@ fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), 
             parsed.diagnostics.len(),
         ));
     }
-    let (tokens, _) = lexer::lex(source);
-    let mut names: BTreeSet<&str> = parsed
-        .module
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Function(f) => Some(f.name.as_str()),
-            _ => None,
+    let CaseRows { rows, expanded } = test_discovery::case_rows(source, &parsed.module)?;
+    let tests: Vec<TestCase> = rows
+        .into_iter()
+        .map(|row| TestCase {
+            name: row.name.clone(),
+            span: row.span.clone(),
+            wrapper: row,
         })
         .collect();
-    names.extend(
-        parsed
-            .module
-            .uses
-            .iter()
-            .flat_map(|import| import.names.iter().map(|name| name.local())),
-    );
-    let mut tests = Vec::new();
-    let mut expanded = None;
-    let mut next_entry = 0;
-    for (function_index, item) in parsed.module.items.iter().enumerate() {
-        let Item::Function(f) = item else {
-            continue;
-        };
-        let rows: Vec<_> = preceding_comments(&tokens, f.span.start)
-            .filter_map(|comment| {
-                case_marker(&source[comment.span.clone()]).map(|row| (row, comment.span.clone()))
-            })
-            .collect();
-        if rows.is_empty() {
-            continue;
-        }
-        if !f.generics.is_empty() {
-            return Err(format!("test function '{}' cannot be generic", f.name));
-        }
-        if f.body.is_none() {
-            return Err(format!("test function '{}' must have a body", f.name));
-        }
-
-        let mut labels = BTreeSet::new();
-        for (row, span) in rows.into_iter().rev() {
-            let (label, args) = row.split_once('(').unwrap_or_default();
-            let label = label.trim_end();
-            let mut bytes = label.bytes();
-            if !bytes
-                .next()
-                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                || !args.ends_with(')')
-            {
-                let (line, column) = location(source, span.start);
-                return Err(format!(
-                    "{line}:{column}: expected @case name(arguments) for '{}'",
-                    f.name
-                ));
-            }
-            if !labels.insert(label) {
-                let (line, column) = location(source, span.start);
-                return Err(format!(
-                    "{line}:{column}: duplicate test case '{}::{label}'",
-                    f.name
-                ));
-            }
-            let entry = loop {
-                let name = format!("__vesper_test_case_{next_entry}");
-                next_entry += 1;
-                if !names.contains(name.as_str()) {
-                    break name;
-                }
-            };
-            let expanded = expanded.get_or_insert_with(|| source.to_owned());
-            let start = expanded.len() + 1;
-            write!(expanded, "\nfn {entry}() {{ {}({args} }}", f.name).unwrap();
-            tests.push(TestCase {
-                name: format!("{}::{label}", f.name),
-                span,
-                wrapper: CaseWrapper {
-                    entry,
-                    generated: start..expanded.len(),
-                    function_index,
-                },
-            });
-        }
-    }
     let Some(expanded) = expanded else {
         return Ok((parsed, tests));
     };
@@ -434,13 +336,7 @@ fn prepare_tests(source: &mut String) -> Result<(parser::Parse, Vec<TestCase>), 
         let Some(Item::Function(f)) = lowered.module.items.get_mut(index) else {
             return Err(test.error(source, "expected a single argument list"));
         };
-        let valid_body = matches!(
-            f.body.as_ref().map(|body| &body.kind),
-            Some(ExprKind::Block { statements, tail: Some(tail) })
-                if statements.is_empty()
-                && matches!(&tail.kind, ExprKind::Call { callee, .. }
-                    if matches!(&callee.kind, ExprKind::Name(name) if name == &target.name))
-        );
+        let valid_body = test_discovery::is_case_wrapper_body(f, &target.name);
         if f.span != wrapper.generated || f.name != wrapper.entry || !valid_body {
             return Err(test.error(source, "expected a single argument list"));
         }
@@ -477,101 +373,6 @@ struct DiscoveredTest {
     plan: HarnessPlan,
     raw_cases: Vec<test_attrs::TestCaseAttr>,
     func: Function,
-}
-
-fn syntax_attr_to_anvil(
-    func: &Function,
-    parsed: Option<&FunctionTestAttrs>,
-) -> (TestSignature, Vec<test_attrs::TestCaseAttr>) {
-    let mut attr = TestAttr::default();
-    let mut cases = Vec::new();
-    let mut raw_cases = Vec::new();
-    if let Some(pa) = parsed {
-        if let Some(t) = &pa.test {
-            if let Some(code) = &t.expect_error {
-                attr.expect_error = Some(ExpectErrorSpec {
-                    code: code.clone(),
-                    primary: t.primary.clone().or_else(|| t.expected_span.clone()),
-                    related: t.related.clone(),
-                });
-            }
-            attr.cases = t.cases.map(|n| n as u32);
-            attr.sim_schedules = t.sim_schedules.map(|n| n as u32);
-            if let Some(fp) = &t.fault_profile {
-                attr.fault_profile = Some(match fp.as_str() {
-                    "TornWalSector" => FaultProfile::TornWalSector,
-                    "NetPartition" => FaultProfile::NetPartition,
-                    "ClockSkew" => FaultProfile::ClockSkew,
-                    other => FaultProfile::Custom(other.to_string()),
-                });
-            }
-            let gate = BudgetGate {
-                max_stack: t.max_stack,
-                max_cycles: t.max_cycles,
-                zero_alloc: t.zero_alloc.unwrap_or(false),
-                ..Default::default()
-            };
-            if gate.max_stack.is_some() || gate.max_cycles.is_some() || gate.zero_alloc {
-                attr.budget = gate;
-            }
-        }
-        raw_cases = pa.test_cases.clone();
-        for tc in &pa.test_cases {
-            let mut vals = Vec::new();
-            for arg in &tc.args {
-                let s = match &arg.name {
-                    None => attr_value_to_string(&arg.value),
-                    Some(name) => format!("{name} = {}", attr_value_to_string(&arg.value)),
-                };
-                vals.push(s);
-            }
-            cases.push(TestCaseAttr {
-                args: vals,
-                label: None,
-            });
-        }
-    }
-
-    let params: Vec<TestParam> = func
-        .params
-        .iter()
-        .map(|p| {
-            let ty_str = format!("{}", p.ty);
-            let is_capability = matches!(ty_str.as_str(), "SimStorageCtl" | "SimNetCtl")
-                || ty_str.starts_with("Cap[");
-            TestParam {
-                name: p.name.clone(),
-                ty: ty_str,
-                is_capability,
-            }
-        })
-        .collect();
-    let effects: Vec<String> = func
-        .effects
-        .instances
-        .iter()
-        .map(|e| e.name.clone())
-        .collect();
-
-    let sig = TestSignature {
-        name: func.name.clone(),
-        params,
-        effects,
-        attr,
-        cases,
-    };
-    (sig, raw_cases)
-}
-
-fn attr_value_to_string(v: &AttrValue) -> String {
-    match v {
-        AttrValue::Int(n) => n.to_string(),
-        AttrValue::Float(f) => f.clone(),
-        AttrValue::Bool(b) => b.to_string(),
-        AttrValue::String(s) => format!("{s:?}"),
-        AttrValue::Ident(id) => id.clone(),
-        AttrValue::Raw(raw) => raw.clone(),
-    }
 }
 
 /// The argument rows of a test's `@test_case(...)` pins, or a message naming
@@ -689,77 +490,23 @@ fn discover_tests(
     items: &[Item],
     cases: &[TestCase],
 ) -> Result<Vec<DiscoveredTest>, String> {
-    let (tokens, _) = lexer::lex(source);
-    let parsed_attrs = test_attrs::extract_test_attrs(source);
-    let attr_map: BTreeMap<&str, &FunctionTestAttrs> = parsed_attrs
-        .iter()
-        .map(|a| (a.fn_name.as_str(), a))
-        .collect();
-
-    let case_entries: BTreeMap<&str, &TestCase> = cases
-        .iter()
-        .map(|case| (case.wrapper.entry.as_str(), case))
-        .collect();
-    let case_targets: BTreeSet<&str> = cases
-        .iter()
-        .filter_map(|case| match &items[case.wrapper.function_index] {
-            Item::Function(f) => Some(f.name.as_str()),
-            _ => None,
+    let rows: Vec<CaseRow> = cases.iter().map(|case| case.wrapper.clone()).collect();
+    let found = test_discovery::discover(source, items, &rows)?;
+    Ok(found
+        .into_iter()
+        .map(|test| {
+            let Item::Function(f) = &items[test.index] else {
+                unreachable!("only functions are tests");
+            };
+            DiscoveredTest {
+                name: test.name,
+                span: test.span,
+                plan: test.plan,
+                raw_cases: test.raw_cases,
+                func: (**f).clone(),
+            }
         })
-        .collect();
-    let mut tests = Vec::new();
-    for item in items {
-        let Item::Function(f) = item else {
-            continue;
-        };
-        let has_real_attr = attr_map
-            .get(f.name.as_str())
-            .is_some_and(|a| a.test.is_some() || !a.test_cases.is_empty());
-        let case = case_entries.get(f.name.as_str());
-        let legacy = !case_targets.contains(f.name.as_str())
-            && (f.name.starts_with("test_")
-                || has_preceding_test_comment(source, &tokens, f.span.start));
-        if !has_real_attr && !legacy && case.is_none() {
-            continue;
-        }
-        if !f.generics.is_empty() {
-            return Err(format!("test function '{}' cannot be generic", f.name));
-        }
-        if f.body.is_none() {
-            return Err(format!("test function '{}' must have a body", f.name));
-        }
-        let (mut sig, raw_cases) = syntax_attr_to_anvil(f, attr_map.get(f.name.as_str()).copied());
-        if case.is_some() {
-            // Each named row is an explicit unit invocation. Effect rows
-            // on the wrapper still participate in ordinary type checking.
-            sig.effects.clear();
-        }
-        let plan = classify(&sig);
-        if !f.params.is_empty() && !has_real_attr {
-            return Err(format!(
-                "test function '{}' must take zero arguments",
-                f.name
-            ));
-        }
-        tests.push(DiscoveredTest {
-            name: case.map_or_else(|| f.name.clone(), |case| case.name.clone()),
-            span: case.map_or_else(|| f.span.clone(), |case| case.span.clone()),
-            plan,
-            raw_cases,
-            func: (**f).clone(),
-        });
-    }
-    tests.sort_by_key(|test| test.span.start);
-    Ok(tests)
-}
-
-fn has_preceding_test_comment(
-    source: &str,
-    tokens: &[vesper::lexer::Token],
-    fn_start: usize,
-) -> bool {
-    preceding_comments(tokens, fn_start)
-        .any(|comment| is_test_marker(&source[comment.span.clone()]))
+        .collect())
 }
 
 fn evaluate_outcome(result: Result<Value, String>) -> (bool, Option<String>, String) {
@@ -920,6 +667,32 @@ fn run_tests_on_world(
         }
     }
     (all_passed, cases)
+}
+
+/// `--engines all` on one passing unit test: fails the report when another
+/// engine disagrees (tests with foreign imports run on the evaluator only
+/// and are left as they are).
+fn engines_agree(
+    rep: &mut UnitTestCaseReport,
+    selected: &[UnitEntry],
+    world: &World,
+    foreign: Option<(&ForeignChecked, &EvalHost)>,
+    standalone: Option<&str>,
+    fuel: u64,
+) {
+    if foreign.is_some() {
+        return;
+    }
+    let Some(entry) = selected.iter().find(|test| test.name == rep.name) else {
+        return;
+    };
+    match test_engines::agree(world, &entry.entry, standalone, fuel) {
+        Ok(()) => rep.message = format!("{} on every engine", rep.message),
+        Err(message) => {
+            rep.passed = false;
+            rep.message = format!("--engines all: {message}");
+        }
+    }
 }
 
 fn without_negative_tests(mut module: Module, negative: &BTreeSet<String>) -> Module {
@@ -1852,6 +1625,16 @@ impl TestExecution<'_> {
                         rep.message = format!(
                             "budget gate not enforced: this harness cannot yet check {} (the unit run passed)",
                             budget_gate_names(plan)
+                        );
+                    }
+                    if opts.engines_all && plan.primary_mode == TestMode::Unit && rep.passed {
+                        engines_agree(
+                            &mut rep,
+                            &unit_batch_selected,
+                            world,
+                            foreign,
+                            combined.is_none().then_some(source.as_str()),
+                            opts.fuel,
                         );
                     }
                 }
