@@ -770,6 +770,17 @@ impl Parser {
             }
             self.bump();
             RawParameterType::CStr
+        } else if self.is_word("CStrList") {
+            // `nocapture in argv: CStrList`: a NULL-terminated array of C
+            // strings built from one byte slice of NUL-ended strings.
+            if access != PointerAccess::In || nullable {
+                return Err(self.error(
+                    ErrorKind::Unsupported,
+                    "a C string list parameter is `nocapture in argv: CStrList`: C may only read it, and it is never NULL",
+                ));
+            }
+            self.bump();
+            RawParameterType::CStrList
         } else if self.is_word("CSlice") {
             let slice_access = match access {
                 PointerAccess::In => Access::In,
@@ -898,6 +909,8 @@ enum RawParameterType {
     },
     /// `nocapture in s: CStr`.
     CStr,
+    /// `nocapture in argv: CStrList`.
+    CStrList,
     /// `nocapture f: Cb` or `retain f: Cb`: a Vesper function as a pointer
     /// of callback type `Cb`.
     Function {
@@ -972,6 +985,7 @@ fn reject_reserved_type(n: &str) -> Result<(), Error> {
                 | "bool"
                 | "CSlice"
                 | "CStr"
+                | "CStrList"
                 | "NonNull"
                 | "ForeignVal"
                 | "Ptr"
@@ -1433,6 +1447,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     nullable,
                 },
                 RawParameterType::CStr => ParameterType::CStr,
+                RawParameterType::CStrList => ParameterType::CStrList,
                 RawParameterType::Function {
                     callback,
                     span,

@@ -533,8 +533,9 @@ impl Generated {
                         vec![Type::named(parameter_scalar(*element)?)],
                     )),
                 ),
-                // A C string is the caller's bytes, copied and terminated.
-                ParameterType::CStr => (
+                // A C string (or a list of them) is the caller's bytes,
+                // copied and terminated.
+                ParameterType::CStr | ParameterType::CStrList => (
                     Pass::In,
                     ParamKind::Value(Type::Named(
                         crate::seq::SLICE_TYPE.into(),
