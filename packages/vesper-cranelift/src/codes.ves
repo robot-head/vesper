@@ -1,0 +1,252 @@
+// The integer codes of the Cranelift C ABI (crates/vesper-cranelift-sys/
+// src/codes.rs), as value enums the codegen packages share. A member is
+// the CamelCase of the Rust table entry: `BINARY`'s `band_not` is
+// `Bin::BandNot`. crates/vesper-cranelift-sys/tests/codes_ves.rs checks
+// every member against the Rust tables.
+
+// A type code is `lane | (log2(lanes) << Lanes::Shift)` (`TYPE_LANES`):
+// `TyCode::I64` is 4, I8X16 is `TyCode::I8 | (4 << Lanes::Shift)`.
+pub enum TyCode: _ {
+    I8 = 1,
+    I16 = 2,
+    I32 = 3,
+    I64 = 4,
+    I128 = 5,
+    F32 = 6,
+    F64 = 7,
+}
+
+pub enum Lanes: _ {
+    Shift = 8,
+    LaneMask = 255,
+}
+
+// `BINARY`: `vcl_binary(b, op, x, y)`: one result of the type of `x`.
+pub enum Bin: _ {
+    Iadd = 1,
+    Isub = 2,
+    Imul = 3,
+    Udiv = 4,
+    Sdiv = 5,
+    Urem = 6,
+    Srem = 7,
+    Umulhi = 8,
+    Smulhi = 9,
+    Band = 10,
+    Bor = 11,
+    Bxor = 12,
+    BandNot = 13,
+    BorNot = 14,
+    BxorNot = 15,
+    Ishl = 16,
+    Ushr = 17,
+    Sshr = 18,
+    Rotl = 19,
+    Rotr = 20,
+    Umin = 21,
+    Umax = 22,
+    Smin = 23,
+    Smax = 24,
+    Fadd = 25,
+    Fsub = 26,
+    Fmul = 27,
+    Fdiv = 28,
+    Fmin = 29,
+    Fmax = 30,
+    Fcopysign = 31,
+    Swizzle = 32,
+    IaddPairwise = 33,
+    AvgRound = 34,
+    UaddSat = 35,
+    SaddSat = 36,
+    UsubSat = 37,
+    SsubSat = 38,
+}
+
+// `BINARY_IMM`: `vcl_binary_imm(b, op, x, imm)`.
+pub enum BinImm: _ {
+    IaddImm = 1,
+    ImulImm = 2,
+    UdivImm = 3,
+    SdivImm = 4,
+    UremImm = 5,
+    SremImm = 6,
+    IrsubImm = 7,
+    BandImm = 10,
+    BorImm = 11,
+    BxorImm = 12,
+    IshlImm = 16,
+    UshrImm = 17,
+    SshrImm = 18,
+    RotlImm = 19,
+    RotrImm = 20,
+}
+
+// `UNARY`: `vcl_unary(b, op, x)`.
+pub enum Un: _ {
+    Ineg = 1,
+    Bnot = 2,
+    Clz = 3,
+    Ctz = 4,
+    Popcnt = 5,
+    Bswap = 6,
+    Bitrev = 7,
+    Cls = 8,
+    Iabs = 9,
+    Fneg = 10,
+    Fabs = 11,
+    Sqrt = 12,
+    Ceil = 13,
+    Floor = 14,
+    Trunc = 15,
+    Nearest = 16,
+    VanyTrue = 18,
+    VallTrue = 19,
+    FvpromoteLow = 20,
+    Fvdemote = 21,
+}
+
+// `CONVERT`: `vcl_convert(b, op, ty, x)`: the result type is `ty`.
+pub enum Cv: _ {
+    Uextend = 1,
+    Sextend = 2,
+    Ireduce = 3,
+    Bitcast = 4,
+    Fpromote = 5,
+    Fdemote = 6,
+    FcvtToUint = 7,
+    FcvtToSint = 8,
+    FcvtToUintSat = 9,
+    FcvtToSintSat = 10,
+    FcvtFromUint = 11,
+    FcvtFromSint = 12,
+    Splat = 13,
+    VhighBits = 14,
+    BitcastLe = 15,
+}
+
+// `OVERFLOW`: `vcl_overflow(b, op, x, y)`: two results, the value and the flag (read the flag with `vcl_inst_result(b, 1)`).
+pub enum Overflow: _ {
+    UaddOverflow = 1,
+    SaddOverflow = 2,
+    UsubOverflow = 3,
+    SsubOverflow = 4,
+    UmulOverflow = 5,
+    SmulOverflow = 6,
+}
+
+// `LOAD`: `vcl_load(b, op, ty, flags, addr, offset)`.
+pub enum Load: _ {
+    Load = 1,
+    Uload8 = 2,
+    Sload8 = 3,
+    Uload16 = 4,
+    Sload16 = 5,
+    Uload32 = 6,
+    Sload32 = 7,
+}
+
+// `STORE`: `vcl_store(b, op, flags, x, addr, offset)`.
+pub enum Store: _ {
+    Store = 1,
+    Istore8 = 2,
+    Istore16 = 3,
+    Istore32 = 4,
+}
+
+// `TERNARY`: `vcl_ternary(b, op, x, y, z)`.
+pub enum Ternary: _ {
+    Select = 1,
+    Bitselect = 2,
+    Fma = 3,
+    SelectSpectreGuard = 4,
+}
+
+// `INTCC`: `vcl_icmp(b, cc, x, y)`, `vcl_icmp_imm(b, cc, x, imm)`.
+pub enum IntCc: _ {
+    Eq = 0,
+    Ne = 1,
+    Slt = 2,
+    Sge = 3,
+    Sgt = 4,
+    Sle = 5,
+    Ult = 6,
+    Uge = 7,
+    Ugt = 8,
+    Ule = 9,
+}
+
+// `FLOATCC`: `vcl_fcmp(b, cc, x, y)`.
+pub enum FloatCc: _ {
+    Ord = 0,
+    Uno = 1,
+    Eq = 2,
+    Ne = 3,
+    One = 4,
+    Ueq = 5,
+    Lt = 6,
+    Le = 7,
+    Gt = 8,
+    Ge = 9,
+    Ult = 10,
+    Ule = 11,
+    Ugt = 12,
+    Uge = 13,
+}
+
+// `LINKAGE`: `vcl_declare_function`/`vcl_declare_data` linkage.
+pub enum Linkage: _ {
+    Import = 0,
+    Local = 1,
+    Preemptible = 2,
+    Hidden = 3,
+    Export = 4,
+}
+
+// `CALLCONV`: `vcl_sig_new` calling convention; 0 is the target's default.
+pub enum CallConv: _ {
+    Default = 0,
+    SystemV = 1,
+    WindowsFastcall = 2,
+    AppleAarch64 = 3,
+    Tail = 4,
+    Fast = 5,
+    Cold = 6,
+}
+
+// `TRAP`: `vcl_trap` codes: 1-4 are Cranelift's reserved codes, 16 + n is `TrapCode::user(n)`.
+pub enum Trap: _ {
+    StackOverflow = 1,
+    IntegerOverflow = 2,
+    HeapOutOfBounds = 3,
+    IntegerDivisionByZero = 4,
+    BadConversionToInteger = 5,
+    // `TrapCode::user(n)` is `UserBase + n`.
+    UserBase = 16,
+}
+
+// `MEMFLAG`: Memory flag bits.
+pub enum MemFlag: _ {
+    Notrap = 1,
+    Aligned = 2,
+    Readonly = 4,
+    BigEndian = 8,
+    LittleEndian = 16,
+}
+
+// `EXT`: The `ext` argument of `vcl_sig_param_ext` and `vcl_sig_return_ext`.
+pub enum Ext: _ {
+    Unextended = 0,
+    Uext = 1,
+    Sext = 2,
+}
+
+// `RELOC_TARGET`: What a relocation's target word names (its third word).
+pub enum RelocTarget: _ {
+    Function = 0,
+    Data = 1,
+    Libcall = 2,
+    KnownSymbol = 3,
+    FunctionOffset = 4,
+    UserName = 5,
+}

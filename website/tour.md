@@ -55,8 +55,12 @@ fn main() -> u64 {
 Move the update into a function. Calling `next(7)` binds `n` to `7`. The built-in `wrapping_add` adds modulo the size of the integer type.
 
 ~~~vesper
-fn next(n: u64) -> u64 { wrapping_add(n, 1) }
-fn main() -> u64 { next(7) }
+fn next(n: u64) -> u64 {
+    wrapping_add(n, 1)
+}
+fn main() -> u64 {
+    next(7)
+}
 ~~~
 
 ## Choose a branch
@@ -65,9 +69,15 @@ Both arms of this `if` produce a value. Passing `3` selects the upper limit of t
 
 ~~~vesper
 fn reserve(wanted: u64) -> u64 {
-    if wanted > 2 { 2 } else { wanted }
+    if wanted > 2 {
+        2
+    } else {
+        wanted
+    }
 }
-fn main() -> u64 { reserve(3) }
+fn main() -> u64 {
+    reserve(3)
+}
 ~~~
 
 ## Name a condition
@@ -78,7 +88,13 @@ A comparison produces a `bool`. Extract the comparison into a function so the ca
 fn fits(wanted: u64, free: u64) -> bool {
     wanted <= free
 }
-fn main() -> i64 { if fits(3, 2) { 1 } else { 0 } }
+fn main() -> i64 {
+    if fits(3, 2) {
+        1
+    } else {
+        0
+    }
+}
 ~~~
 
 ## Repeat an update
@@ -88,17 +104,25 @@ A `for` loop binds each value of a range in turn. The upper end of `1..4` is exc
 ~~~vesper
 fn main() -> u64 {
     let mut total: u64 = 0;
-    for n in 1..4 { total = wrapping_add(total, n); }
+    for n in 1..4 {
+        total = wrapping_add(total, n);
+    }
     total
 }
 ~~~
 
 ## Include the endpoint
 
-The equals sign in `..=` includes the last value. Change only the range in the previous program. The final iteration now adds four, for a total of `10`.
+The equals sign in `..=` includes the last value. This loop adds one through four and returns `10`. Change the range to `1..4` to stop before four.
 
 ~~~vesper
-for n in 1..=4 { total = wrapping_add(total, n); }
+fn main() -> u64 {
+    let mut total: u64 = 0;
+    for n in 1..=4 {
+        total = wrapping_add(total, n);
+    }
+    total
+}
 ~~~
 
 ## Read an exit status
@@ -106,7 +130,9 @@ for n in 1..=4 { total = wrapping_add(total, n); }
 A calculation can return a negative integer. Save this small example as `lesson.ves`. The evaluator prints `-1`. When you build a native executable and run it from a Linux shell, the shell sees the low eight bits of the return value.
 
 ~~~vesper
-fn main() -> i64 { -1 }
+fn main() -> i64 {
+    -1
+}
 ~~~
 
 ~~~sh
@@ -130,9 +156,15 @@ The last command prints `255`. Use zero for success and a small positive failure
 A `struct` keeps related values together. This record stores a room’s capacity and current use. A field access picks out one value. Running the program prints `2`.
 
 ~~~vesper
-copy struct Room { seats: u64, used: u64 }
+copy struct Room {
+    seats: u64,
+    used: u64
+}
 fn main() -> u64 {
-    let room = Room { seats: 8, used: 2 };
+    let room = Room {
+        seats: 8,
+        used: 2
+    };
     room.used
 }
 ~~~
@@ -142,9 +174,15 @@ fn main() -> u64 {
 The `copy` declaration permits another independent value. Change the copy’s field and return the original field. It still holds `2`.
 
 ~~~vesper
-copy struct Room { seats: u64, used: u64 }
+copy struct Room {
+    seats: u64,
+    used: u64
+}
 fn main() -> u64 {
-    let room = Room { seats: 8, used: 2 };
+    let room = Room {
+        seats: 8,
+        used: 2
+    };
     let mut other = room;
     other.used = 3;
     room.used
@@ -156,11 +194,23 @@ fn main() -> u64 {
 Use an `in` parameter when a helper only reads its argument. The caller keeps the room and can read it again after the call.
 
 ~~~vesper
-copy struct Room { seats: u64, used: u64 }
-fn full(in room: Room) -> bool { room.used == room.seats }
+copy struct Room {
+    seats: u64,
+    used: u64
+}
+fn full(in room: Room) -> bool {
+    room.used == room.seats
+}
 fn main() -> u64 {
-    let room = Room { seats: 8, used: 2 };
-    if full(in room) { 0 } else { room.seats }
+    let room = Room {
+        seats: 8,
+        used: 2
+    };
+    if full(in room) {
+        0
+    } else {
+        room.seats
+    }
 }
 ~~~
 
@@ -169,7 +219,9 @@ fn main() -> u64 {
 An `inout` parameter gives the callee exclusive access for the call. Here the caller lends just the counter. Reading it after the call gives `3`.
 
 ~~~vesper
-fn book(inout used: u64) { used = wrapping_add(used, 1); }
+fn book(inout used: u64) {
+    used = wrapping_add(used, 1);
+}
 fn main() -> u64 {
     let mut used: u64 = 2;
     book(inout used);
@@ -182,12 +234,18 @@ fn main() -> u64 {
 A field projection in the signature names the part of the record a helper may change. The caller can lend `seats` for reading during the same call because the writable field is `used`.
 
 ~~~vesper
-copy struct Room { seats: u64, used: u64 }
+copy struct Room {
+    seats: u64,
+    used: u64
+}
 fn fill(inout room.{used}: Room, in limit: u64) {
     room.used = limit;
 }
 fn main() -> u64 {
-    let mut room = Room { seats: 8, used: 2 };
+    let mut room = Room {
+        seats: 8,
+        used: 2
+    };
     fill(inout room, in room.seats);
     room.used
 }
@@ -214,7 +272,10 @@ fn main() -> u64 {
 An `enum` describes a choice. A booking is either open or held. Pattern matching lets each variant produce a different result.
 
 ~~~vesper
-copy enum Booking { Open, Held }
+copy enum Booking {
+    Open,
+    Held
+}
 fn main() -> i64 {
     match Booking::Held {
         Booking::Open => 0,
@@ -228,7 +289,10 @@ fn main() -> i64 {
 Put the reserved seat number inside `Held`. The pattern `Held(n)` gives that number a name in its arm. This version prints `3`.
 
 ~~~vesper
-copy enum Booking { Open, Held(i64) }
+copy enum Booking {
+    Open,
+    Held(i64)
+}
 fn main() -> i64 {
     match Booking::Held(3) {
         Booking::Open => 0,
@@ -242,7 +306,10 @@ fn main() -> i64 {
 The checker considers every value the scrutinee's type can hold. The match below handles a held booking and leaves out `Open`.
 
 ~~~vesper E0212
-copy enum Booking { Open, Held(i64) }
+copy enum Booking {
+    Open,
+    Held(i64)
+}
 fn main() -> i64 {
     let booking = Booking::Held(3);
     match booking {
@@ -254,7 +321,10 @@ fn main() -> i64 {
 Add an arm for `Open`. Change the value assigned to `booking` to try both arms. The example below returns `3` with `Held(3)` and `0` with `Open`.
 
 ~~~vesper
-copy enum Booking { Open, Held(i64) }
+copy enum Booking {
+    Open,
+    Held(i64)
+}
 fn main() -> i64 {
     let booking = Booking::Held(3);
     match booking {
@@ -270,9 +340,14 @@ Use `Option[T]` when the only alternatives are a value of type `T` and its absen
 
 ~~~vesper
 fn seat(value: Option[i64]) -> i64 {
-    match value { Some(n) => n, None => 0 }
+    match value {
+        Some(n) => n,
+        None => 0
+    }
 }
-fn main() -> i64 { seat(Some(3)) }
+fn main() -> i64 {
+    seat(Some(3))
+}
 ~~~
 
 # Ownership
@@ -286,11 +361,15 @@ The ownership mode tells you what you owe when a value leaves scope. The paramet
 The first program transfers the ticket once. You can delete the `release` call and the program still checks. An affine owner can let a value go out of scope.
 
 ~~~vesper
-affine struct Ticket { seat: u64 }
+affine struct Ticket {
+    seat: u64
+}
 fn release(sink ticket: Ticket) {}
 
 fn main() -> u64 {
-    let ticket = Ticket { seat: 3 };
+    let ticket = Ticket {
+        seat: 3
+    };
     release(sink ticket);
     0
 }
@@ -301,11 +380,15 @@ fn main() -> u64 {
 The second call below tries to transfer a ticket that the caller already gave away.
 
 ~~~vesper E0303
-affine struct Ticket { seat: u64 }
+affine struct Ticket {
+    seat: u64
+}
 fn release(sink ticket: Ticket) {}
 
 fn main() -> u64 {
-    let ticket = Ticket { seat: 3 };
+    let ticket = Ticket {
+        seat: 3
+    };
     release(sink ticket);
     release(sink ticket);
     0
@@ -317,9 +400,13 @@ fn main() -> u64 {
 Change the declaration to `linear` when forgetting the ticket is a bug. This complete program has an error. Run `vesper check lesson.ves` to see `E0302` at the unfinished obligation.
 
 ~~~vesper E0302
-linear struct Ticket { seat: u64 }
+linear struct Ticket {
+    seat: u64
+}
 fn main() -> u64 {
-    let t = Ticket { seat: 3 };
+    let t = Ticket {
+        seat: 3
+    };
     0
 }
 ~~~
@@ -329,10 +416,17 @@ fn main() -> u64 {
 Destructure the ticket to take it apart. Its `u64` seat number can then leave the function on its own. This version prints `3`.
 
 ~~~vesper
-linear struct Ticket { seat: u64 }
+linear struct Ticket {
+    seat: u64
+}
 fn main() -> u64 {
-    let t = Ticket { seat: 3 };
-    let Ticket { seat } = t;
+    let t = Ticket {
+        seat: 3
+    };
+    let Ticket {
+        seat
+    }
+    = t;
     seat
 }
 ~~~
@@ -342,14 +436,23 @@ fn main() -> u64 {
 Define a method in an `impl` block. The method takes ownership through `sink self`. At the call site, `t.redeem()` records what happened to the ticket.
 
 ~~~vesper
-linear struct Ticket { seat: u64 }
+linear struct Ticket {
+    seat: u64
+}
 impl Ticket {
     fn redeem(sink self) -> u64 {
-        let Ticket { seat } = self;
+        let Ticket {
+            seat
+        }
+        = self;
         seat
     }
 }
-fn main() -> u64 { Ticket { seat: 3 }.redeem() }
+fn main() -> u64 {
+    Ticket {
+        seat: 3
+    }.redeem()
+}
 ~~~
 
 ## Transfer the obligation
@@ -357,7 +460,11 @@ fn main() -> u64 { Ticket { seat: 3 }.redeem() }
 A function can return a live ticket. Keep the type and method from the previous step, add `issue`, and replace `main`. Now the caller of `issue` must account for the ticket.
 
 ~~~vesper
-fn issue(seat: u64) -> Ticket { Ticket { seat: seat } }
+fn issue(seat: u64) -> Ticket {
+    Ticket {
+        seat: seat
+    }
+}
 fn main() -> u64 {
     let t = issue(8);
     t.redeem()
@@ -369,40 +476,71 @@ fn main() -> u64 {
 Both paths finish the ticket. When the customer attends, `redeem` consumes the ticket and returns the seat. Otherwise destructuring consumes it and the function returns `0`. Run the program with `true` first to get `3`, then try `false`.
 
 ~~~vesper
-linear struct Ticket { seat: u64 }
+linear struct Ticket {
+    seat: u64
+}
 impl Ticket {
     fn redeem(sink self) -> u64 {
-        let Ticket { seat } = self;
+        let Ticket {
+            seat
+        }
+        = self;
         seat
     }
 }
 
 fn finish(sink ticket: Ticket, attended: bool) -> u64 {
-    if attended { ticket.redeem() } else {
-        let Ticket { seat } = ticket;
+    if attended {
+        ticket.redeem()
+    } else {
+        let Ticket {
+            seat
+        }
+        = ticket;
         0
     }
 }
-fn main() -> u64 { finish(Ticket { seat: 3 }, true) }
+fn main() -> u64 {
+    finish(
+        Ticket {
+            seat: 3
+        },
+        true
+    )
+}
 ~~~
 
 Remove consumption from the second branch and the checker points to the conditional. The first branch consumes the ticket. The second leaves it live when the function returns.
 
 ~~~vesper E0309
-linear struct Ticket { seat: u64 }
+linear struct Ticket {
+    seat: u64
+}
 impl Ticket {
     fn redeem(sink self) -> u64 {
-        let Ticket { seat } = self;
+        let Ticket {
+            seat
+        }
+        = self;
         seat
     }
 }
 
 fn finish(sink ticket: Ticket, attended: bool) -> u64 {
-    if attended { ticket.redeem() } else {
+    if attended {
+        ticket.redeem()
+    } else {
         0
     }
 }
-fn main() -> u64 { finish(Ticket { seat: 3 }, true) }
+fn main() -> u64 {
+    finish(
+        Ticket {
+            seat: 3
+        },
+        true
+    )
+}
 ~~~
 
 ## Inspect before consuming
@@ -410,9 +548,13 @@ fn main() -> u64 { finish(Ticket { seat: 3 }, true) }
 Add a read-only helper to the ticket program. The loan ends after `number` returns. Calling `redeem` afterward is valid even for a linear ticket.
 
 ~~~vesper
-fn number(in t: Ticket) -> u64 { t.seat }
+fn number(in t: Ticket) -> u64 {
+    t.seat
+}
 fn main() -> u64 {
-    let t = Ticket { seat: 3 };
+    let t = Ticket {
+        seat: 3
+    };
     let seen = number(in t);
     wrapping_add(seen, t.redeem())
 }
@@ -426,7 +568,7 @@ A closure is a function that can use a value from the scope where you make it. I
 
 ~~~vesper
 fn offset(sink amount: i64) -> fn @copy (i64) -> i64 {
-    |value| wrapping_add(value, amount)
+    | value | wrapping_add(value, amount)
 }
 fn main() -> i64 {
     let add_ten = offset(10);
@@ -442,10 +584,16 @@ A test function returns a Boolean. Save this as `lesson.ves` and run `vesper tes
 
 ~~~vesper
 fn reserve(wanted: u64, free: u64) -> u64 {
-    if wanted > free { free } else { wanted }
+    if wanted > free {
+        free
+    } else {
+        wanted
+    }
 }
 test {
-    fn test_limit() -> bool { reserve(3, 2) == 2 }
+    fn test_limit() -> bool {
+        reserve(3, 2) == 2
+    }
 }
 ~~~
 
@@ -469,7 +617,7 @@ The `over` case asks for three seats when only two are free. The function return
 
 ~~~sh
 $ vesper test lesson.ves --filter test_reserve::over
-lesson.ves:6:5: FAIL test_reserve::over (assertion failed: test returned false) [evaluator]
+lesson.ves:10:5: FAIL test_reserve::over (assertion failed: test returned false) [evaluator]
 tests: 0 passed, 1 failed (0 file error(s))
 ~~~
 
@@ -482,7 +630,9 @@ A reservation expires at time `100`. A test that reads the wall clock near a dea
 `Clock::now()` asks for a timestamp. `eff [Clock]` declares that request in the function signature. The handler's `now` arm supplies `100` with `resume(100)`. The comparison continues with that value and the test passes. Change it to `99` to see the test fail.
 
 ~~~vesper
-linear effect Clock { fn now() -> i64; }
+linear effect Clock {
+    fn now() -> i64;
+}
 
 fn expired(deadline: i64) -> bool eff [Clock] {
     Clock::now() >= deadline
@@ -490,7 +640,9 @@ fn expired(deadline: i64) -> bool eff [Clock] {
 
 test {
     fn test_expired() -> bool {
-        handle Clock in { expired(100) } with {
+        handle Clock in {
+            expired(100)
+        } with {
             return answer => answer,
             now(resume) => resume(100),
         }
@@ -505,7 +657,9 @@ test {
 The reservation starts valid and becomes expired on the next reading. The handler keeps the test timeline in `tick`. Each call returns the current tick and carries the next tick into the next call. Starting at `99` supplies `99` and then `100`. Try starting at `98` to reproduce a test failure without waiting for a real clock.
 
 ~~~vesper
-linear effect Clock { fn now() -> i64; }
+linear effect Clock {
+    fn now() -> i64;
+}
 
 fn expired(deadline: i64) -> bool eff [Clock] {
     Clock::now() >= deadline
@@ -548,7 +702,9 @@ fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
     n + 1
 }
 
-fn advance(n: i64) -> i64 { next(n) }
+fn advance(n: i64) -> i64 {
+    next(n)
+}
 ~~~
 
 Add the same effect to `advance` to pass that obligation on to its caller.
@@ -558,7 +714,9 @@ fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
     n + 1
 }
 
-fn advance(n: i64) -> i64 eff [Fail[ArithOverflow]] { next(n) }
+fn advance(n: i64) -> i64 eff [Fail[ArithOverflow]] {
+    next(n)
+}
 ~~~
 
 ## Handle an overflow
@@ -587,7 +745,9 @@ fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
 
 const MAX_I64: i64 = 9223372036854775807;
 
-fn main() -> i64 { next(MAX_I64) }
+fn main() -> i64 {
+    next(MAX_I64)
+}
 ~~~
 
 The second program handles the failure. `return` gets the value when the calculation succeeds. `raise` gets the overflow error when it fails. The underscore discards the resumption slot. Here the handler ends the failed calculation and supplies `0`.
@@ -600,7 +760,9 @@ fn next(n: i64) -> i64 eff [Fail[ArithOverflow]] {
 const MAX_I64: i64 = 9223372036854775807;
 
 fn main() -> i64 {
-    handle Fail[ArithOverflow] in { next(MAX_I64) } with {
+    handle Fail[ArithOverflow] in {
+        next(MAX_I64)
+    } with {
         return value => value,
         raise(error, _) => 0,
     }
@@ -612,9 +774,13 @@ fn main() -> i64 {
 Division by zero raises `Fail[RuntimeError]`. This program catches the failure and returns zero. Change the divisor to four to take the ordinary return path and get `21`.
 
 ~~~vesper
-fn divide(d: i64) -> i64 eff [Fail[RuntimeError]] { 84 / d }
+fn divide(d: i64) -> i64 eff [Fail[RuntimeError]] {
+    84 / d
+}
 fn main() -> i64 {
-    handle Fail[RuntimeError] in { divide(0) } with {
+    handle Fail[RuntimeError] in {
+        divide(0)
+    } with {
         return value => value,
         raise(error, _) => 0,
     }
@@ -631,9 +797,13 @@ The `!` in `next_seat!(41)` marks a macro call. `$n: expr` accepts one expressio
 
 ~~~vesper
 macro next_seat($n: expr) -> expr {
-    quote { wrapping_add($n, 1) }
+    quote {
+        wrapping_add($n, 1)
+    }
 }
-fn main() -> i64 { next_seat!(41) }
+fn main() -> i64 {
+    next_seat!(41)
+}
 ~~~
 
 ~~~sh
@@ -681,9 +851,13 @@ Write a macro called `pair_seats` in `pairs.ves`. Give it one expression paramet
 
 ~~~vesper
 macro pair_seats($count: expr) -> expr {
-    quote { wrapping_mul($count, 2) }
+    quote {
+        wrapping_mul($count, 2)
+    }
 }
-fn main() -> i64 { pair_seats!(6) }
+fn main() -> i64 {
+    pair_seats!(6)
+}
 ~~~
 
 ~~~sh

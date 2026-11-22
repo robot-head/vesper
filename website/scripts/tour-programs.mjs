@@ -12,7 +12,6 @@ export function tourPrograms(lessons) {
   const reserve = code('write-one-test').split('test {')[0].trim();
   const macro = code('bind-a-piece-of-syntax');
   const withSource = {
-    'include-the-endpoint': code('repeat-an-update').replace(/for n[^\n]+/, code('include-the-endpoint')),
     'transfer-the-obligation': join(ticket, code('transfer-the-obligation')),
     'inspect-before-consuming': join(ticket, code('inspect-before-consuming')),
     'handle-an-overflow': join(checked, code('handle-an-overflow')),
