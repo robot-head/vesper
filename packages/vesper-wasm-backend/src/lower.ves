@@ -2389,6 +2389,8 @@ impl L {
                 self.e.code.u64_const(a);
                 self.e.code.call(eq);
                 self.e.code.op(OP_I32_WRAP_I64);
+            } else if self.is_u128(ty) {
+                self.wide_lit_eq(v, lo, hi);
             } else {
                 let c = self.constant_bits(lk, lo, hi, ty);
                 self.e.code.i64_const(c);
@@ -2750,7 +2752,7 @@ impl L {
             let y = self.value(bi);
             let sa = self.vty(ai);
             let sb = self.vty(bi);
-            if self.wide_binary(dv, opn, x, y, sa) {
+            if self.wide_binary(dv, opn, x, y, sa, sb) {
                 return;
             }
             let sh = self.cx.shape(sa);

@@ -47,6 +47,7 @@ const OP_I64_LT_U: u8 = 84;
 const OP_I64_GT_U: u8 = 86;
 const OP_I64_GE_U: u8 = 90;
 const OP_I32_AND: u8 = 113;
+const OP_DROP: u8 = 26;
 const OP_I32_OR: u8 = 114;
 const OP_I64_ADD: u8 = 124;
 const OP_I64_SUB: u8 = 125;
@@ -116,6 +117,19 @@ impl L {
         d
     }
 
+    // A literal pattern `hi:lo` against the `u128` block `v`, which the
+    // caller pushed: an `i32` condition.
+    pub fn wide_lit_eq(inout self, v: u32, lo: u64, hi: u64) {
+        self.e.code.op(OP_DROP);
+        word(inout self.e.code, v, 0);
+        self.e.code.u64_const(lo);
+        self.e.code.op(OP_I64_EQ);
+        word(inout self.e.code, v, 1);
+        self.e.code.u64_const(hi);
+        self.e.code.op(OP_I64_EQ);
+        self.e.code.op(OP_I32_AND);
+    }
+
     // A `u128` literal `hi:lo` into `dv`.
     pub fn wide_const(inout self, dv: u64, lo: u64, hi: u64) {
         let l = self.local();
@@ -174,14 +188,27 @@ impl L {
 
     // A binary operation with a `u128` left operand; false otherwise.
     // `==` and `!=` stay the tuple's.
-    pub fn wide_binary(inout self, dv: u64, opn: u32, x: u32, y: u32, sa: u32)
+    pub fn wide_binary(inout self, dv: u64, opn: u32, x: u32, y: u32, sa: u32, sb: u32)
         -> bool eff [Fail[WErr]] {
         if !self.is_u128(sa) || self.is_op(opn, "==") || self.is_op(opn, "!=") {
             return false;
         }
         let checked = self.is_op(opn, "+");
         if self.is_op(opn, "<<") {
-            self.wide_shl(dv, x, y);
+            if self.is_u128(sb) {
+                // a `u128` amount: its low word, or 128 (out of range) when
+                // the high word is set
+                let k = self.local();
+                word(inout self.e.code, y, 0);
+                self.e.code.i64_const(128);
+                word(inout self.e.code, y, 1);
+                self.e.code.op(OP_I64_EQZ);
+                self.e.code.op(OP_SELECT);
+                self.e.code.set(k);
+                self.wide_shl(dv, x, k);
+            } else {
+                self.wide_shl(dv, x, y);
+            }
         } else if self.is_op(opn, "wrapping_add") || self.is_op(opn, "+") {
             self.wide_add(dv, x, y, checked);
         } else if self.is_op(opn, "wrapping_mul") {
@@ -328,8 +355,10 @@ impl L {
         self.e.code.get(k);
         self.e.code.op(OP_I64_SHL);
         self.e.code.set(lo);
-        // (x1 << k) | (x0 >> (64 - k)), and x1 when k is 0 (a wasm shift
-        // takes its amount modulo 64)
+        // x1 when k is 0, else (x1 << k) | (x0 >> (64 - k)) (a wasm shift
+        // takes its amount modulo 64); `select` gives its first operand
+        // when the condition is nonzero
+        self.e.code.get(x1);
         self.e.code.get(x1);
         self.e.code.get(k);
         self.e.code.op(OP_I64_SHL);
@@ -339,7 +368,6 @@ impl L {
         self.e.code.op(OP_I64_SUB);
         self.e.code.op(OP_I64_SHR_U);
         self.e.code.op(OP_I64_OR);
-        self.e.code.get(x1);
         self.e.code.get(k);
         self.e.code.op(OP_I64_EQZ);
         self.e.code.op(OP_SELECT);
