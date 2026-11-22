@@ -2119,6 +2119,55 @@ pub fn object_isa_optimized(
 ) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
     isa_with_flags(target, needs_nan_canonicalization(world), optimize)
 }
+/// CPU features an explicit `--target` uses beyond the target's baseline
+/// ([`set_target_features`]).
+static TARGET_FEATURES: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Use the CPU features `list` (comma-separated, Rust's names, as in
+/// cargo's `CARGO_CFG_TARGET_FEATURE`) for every later explicit-target
+/// build in this process. A build without `--target` uses the host's own
+/// features. The port harness passes the outer cargo build's features, so
+/// a port's object is built for the same CPU as the Rust it is measured
+/// against (`-C target-cpu=native` for both, or the baseline for both).
+pub fn set_target_features(list: &str) {
+    let features = list
+        .split(',')
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if let Ok(mut current) = TARGET_FEATURES.write() {
+        *current = features;
+    }
+}
+
+/// The Cranelift ISA setting for the Rust target feature `feature`.
+fn cranelift_feature(feature: &str) -> Option<&'static str> {
+    Some(match feature {
+        "sse3" => "has_sse3",
+        "ssse3" => "has_ssse3",
+        "sse4.1" => "has_sse41",
+        "sse4.2" => "has_sse42",
+        "popcnt" => "has_popcnt",
+        "avx" => "has_avx",
+        "avx2" => "has_avx2",
+        "fma" => "has_fma",
+        "bmi1" => "has_bmi1",
+        "bmi2" => "has_bmi2",
+        "lzcnt" => "has_lzcnt",
+        "cmpxchg16b" => "has_cmpxchg16b",
+        "avx512f" => "has_avx512f",
+        "avx512vl" => "has_avx512vl",
+        "avx512dq" => "has_avx512dq",
+        "avx512bitalg" => "has_avx512bitalg",
+        "avx512vbmi" => "has_avx512vbmi",
+        "lse" => "has_lse",
+        "paca" => "has_pauth",
+        "fp16" => "has_fp16",
+        _ => return None,
+    })
+}
+
 fn isa_with_flags(
     target: Option<&str>,
     canonicalize_nans: bool,
@@ -2149,7 +2198,15 @@ fn isa_with_flags(
         ) {
             return Err("native targets must be x86_64 or AArch64".into());
         }
-        cranelift_codegen::isa::lookup(triple).map_err(|e| e.to_string())?
+        let mut builder = cranelift_codegen::isa::lookup(triple).map_err(|e| e.to_string())?;
+        for feature in TARGET_FEATURES.read().map_err(|e| e.to_string())?.iter() {
+            // A feature this target's ISA has no setting for (or Cranelift
+            // does not use) changes nothing, as for rustc.
+            if let Some(setting) = cranelift_feature(feature) {
+                let _ = builder.enable(setting);
+            }
+        }
+        builder
     } else {
         cranelift_native::builder().map_err(str::to_string)?
     };

@@ -355,6 +355,13 @@ act (`transport.send(..)`), Vesper returns the actions as a sequence of a
       (about two minutes the first time, a no-op afterwards), so a plain
       `cargo test -p <crate>` works. Set `VESPER_PORT_COMPILER` to skip it.
 
+   **CPU features.** The harness passes the outer build's
+   `CARGO_CFG_TARGET_FEATURE` as `--target-features`, so the port's object is
+   built for the same CPU as the Rust it is measured against. A plain build is
+   the target's baseline for both (x86-64: SSE2, so `find_not_in` has no
+   SSSE3 `pshufb`). For flip benchmarks, build both for the host with
+   `RUSTFLAGS="-C target-cpu=native"`.
+
 4. **Generate the binding.** Run
    `VESPER_PORT_BLESS=1 cargo test -p <crate> --features vesper-port` once and
    commit `port/binding.rs`. Keep it outside `src/`: Bazel's rustfmt check
