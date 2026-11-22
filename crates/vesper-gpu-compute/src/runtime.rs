@@ -106,7 +106,7 @@ const CALLS: [&str; 23] = [
     "vkDeviceWaitIdle",
 ];
 /// `s_*` details.
-const SHAPES: [&str; 8] = [
+const SHAPES: [&str; 31] = [
     "?",
     "zero-sized buffer",
     "buffer range",
@@ -115,14 +115,59 @@ const SHAPES: [&str; 8] = [
     "dispatch with zero workgroups",
     "descriptor pool",
     "kernel entry point contains NUL",
+    // The tensor kernels' checks (`TensorShape` in vesper/src/lib.ves).
+    "matmul a",
+    "matmul w",
+    "matmul out",
+    "rms_norm epsilon",
+    "rms_norm x",
+    "rms_norm out",
+    "rms_norm weight",
+    "rope needs whole heads of even width",
+    "rope x",
+    "rope frequencies",
+    "swiglu gate",
+    "swiglu up",
+    "kv_write k",
+    "kv_write v",
+    "kv_write position beyond the page table",
+    "kv_write keys",
+    "kv_write values",
+    "attention over an empty sequence",
+    "attention q",
+    "attention out",
+    "attention page table too short",
+    "attention keys",
+    "attention values",
 ];
 /// `l_*` details.
-const LIMITS: [&str; 5] = [
+const LIMITS: [&str; 25] = [
     "?",
     "buffer size",
     "kernel storage bindings",
     "kernel immediate bytes",
     "workgroup count",
+    // The tensor kernels' checks (`TensorLimit`).
+    "operand size",
+    "m * k",
+    "n * k",
+    "m * n",
+    "rows * n",
+    "attention head_dim",
+    "attention tokens",
+    "attention width",
+    "m",
+    "n",
+    "k",
+    "matmul rows",
+    "rms_norm rows",
+    "len",
+    "head_dim",
+    "position",
+    "kv_dim",
+    "query_heads",
+    "kv_heads",
+    "tokens",
 ];
 
 fn api_parts(v: u64) -> (u32, u32, u32) {
@@ -681,6 +726,43 @@ impl<'a> Recording<'a> {
             .buffers
             .extend(buffers.iter().map(|b| b.inner.clone()));
         self.dispatches += 1;
+        Ok(())
+    }
+
+    /// Records `dispatches` dispatches made by another Vesper-driven module
+    /// of the crate: `record` gets the device and the command buffer, and may
+    /// bind only `kernels` and `buffers`, which the recording then keeps
+    /// alive as [`Recording::dispatch`] does.
+    pub(crate) fn record_with(
+        &mut self,
+        kernels: &[&'a Kernel],
+        buffers: &[&'a Buffer],
+        dispatches: usize,
+        record: impl FnOnce(Dev, &mut Rec) -> Result<(), GpuError>,
+    ) -> Result<(), GpuError> {
+        if kernels
+            .iter()
+            .any(|k| !Arc::ptr_eq(&k.inner.ctx, &self.ctx.inner))
+            || buffers.iter().any(|b| !b.same_device(self.ctx))
+        {
+            return Err(GpuError::ForeignObject);
+        }
+        let rec = self
+            .commands
+            .rec
+            .as_mut()
+            .ok_or(GpuError::Shape("recording already submitted"))?;
+        let recorded = record(self.ctx.inner.dev, rec);
+        // Kept even when `record` failed part way: the command buffer may
+        // already name them.
+        self.commands
+            .kernels
+            .extend(kernels.iter().map(|k| k.inner.clone()));
+        self.commands
+            .buffers
+            .extend(buffers.iter().map(|b| b.inner.clone()));
+        recorded?;
+        self.dispatches += dispatches;
         Ok(())
     }
 

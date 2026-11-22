@@ -2,14 +2,15 @@
 # SH6 lane 1, #1396; this crate's lane: SH6 lane 15, #1410). The runtime
 # (Context, Buffer, Kernel, Recording, Submission) is the Vesper library in
 # vesper/; SH6 lane 15 deleted the Rust runtime over ash (part 2c). The
-# broadphase's checks, schedule and submission are Vesper too (part 2b). The
-# WGSL compiler (naga, src/shader.rs) and the Tensor drivers are still Rust.
+# broadphase's and the tensor kernels' checks and dispatches, and the decode
+# step, are Vesper too (part 2b). The WGSL compiler (naga, src/shader.rs) is
+# still Rust.
 # Every check needs a Vulkan device: run it on Mesa lavapipe
 # (.github/workflows/gpu-compute.yml installs it).
 name = "vesper-gpu-compute"
 lane = "SH6-15"
 env = { CARGO_PROFILE_DEV_DEBUG = "0", CARGO_PROFILE_TEST_DEBUG = "0", VESPER_GPU_REQUIRE = "1", VESPER_GPU_DEVICE = "llvmpipe" }
-build = ["cargo build --locked --release -p vesper-gpu-compute --example runtime_bench --example broadphase_bench"]
+build = ["cargo build --locked --release -p vesper-gpu-compute --example runtime_bench --example broadphase_bench --example generation_bench"]
 
 [[tests]]
 run = "cargo test --locked -p vesper-gpu-compute -p vesper-kinetic-gpu"
@@ -29,3 +30,7 @@ run = "crates/vesper-gpu-compute/port/bench-abba.sh runtime 10"
 [[abba]]
 workload = "broadphase"
 run = "crates/vesper-gpu-compute/port/bench-abba.sh broadphase 10"
+
+[[abba]]
+workload = "generation"
+run = "crates/vesper-gpu-compute/port/bench-abba.sh generation 10"

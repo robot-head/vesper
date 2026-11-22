@@ -124,6 +124,83 @@ impl Abi for Kern {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepModel { pub rms_final: Buf, pub classifier: Buf, pub freqs: Buf }
+
+impl Abi for StepModel {
+    const WORDS: usize = 12;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.rms_final, &mut out[0..]);
+        Abi::put(&self.classifier, &mut out[4..]);
+        Abi::put(&self.freqs, &mut out[8..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        StepModel { rms_final: Abi::get(&words[0..]), classifier: Abi::get(&words[4..]), freqs: Abi::get(&words[8..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepSession { pub table: Buf, pub x: Buf, pub xb: Buf, pub q: Buf, pub k: Buf, pub v: Buf, pub att: Buf, pub hb: Buf, pub hb2: Buf, pub logits: Buf }
+
+impl Abi for StepSession {
+    const WORDS: usize = 40;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.table, &mut out[0..]);
+        Abi::put(&self.x, &mut out[4..]);
+        Abi::put(&self.xb, &mut out[8..]);
+        Abi::put(&self.q, &mut out[12..]);
+        Abi::put(&self.k, &mut out[16..]);
+        Abi::put(&self.v, &mut out[20..]);
+        Abi::put(&self.att, &mut out[24..]);
+        Abi::put(&self.hb, &mut out[28..]);
+        Abi::put(&self.hb2, &mut out[32..]);
+        Abi::put(&self.logits, &mut out[36..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        StepSession { table: Abi::get(&words[0..]), x: Abi::get(&words[4..]), xb: Abi::get(&words[8..]), q: Abi::get(&words[12..]), k: Abi::get(&words[16..]), v: Abi::get(&words[20..]), att: Abi::get(&words[24..]), hb: Abi::get(&words[28..]), hb2: Abi::get(&words[32..]), logits: Abi::get(&words[36..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepShape { pub dim: u64, pub kv_dim: u64, pub head_dim: u64, pub heads: u64, pub kv_heads: u64, pub hidden_dim: u64, pub vocab: u64, pub layers: u64, pub position: u64, pub epsilon: u32 }
+
+impl Abi for StepShape {
+    const WORDS: usize = 10;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.dim, &mut out[0..]);
+        Abi::put(&self.kv_dim, &mut out[1..]);
+        Abi::put(&self.head_dim, &mut out[2..]);
+        Abi::put(&self.heads, &mut out[3..]);
+        Abi::put(&self.kv_heads, &mut out[4..]);
+        Abi::put(&self.hidden_dim, &mut out[5..]);
+        Abi::put(&self.vocab, &mut out[6..]);
+        Abi::put(&self.layers, &mut out[7..]);
+        Abi::put(&self.position, &mut out[8..]);
+        Abi::put(&self.epsilon, &mut out[9..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        StepShape { dim: Abi::get(&words[0..]), kv_dim: Abi::get(&words[1..]), head_dim: Abi::get(&words[2..]), heads: Abi::get(&words[3..]), kv_heads: Abi::get(&words[4..]), hidden_dim: Abi::get(&words[5..]), vocab: Abi::get(&words[6..]), layers: Abi::get(&words[7..]), position: Abi::get(&words[8..]), epsilon: Abi::get(&words[9..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TensorKs { pub matmul: Kern, pub rms_norm: Kern, pub rope: Kern, pub swiglu: Kern, pub kv_write: Kern, pub attention: Kern }
+
+impl Abi for TensorKs {
+    const WORDS: usize = 30;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.matmul, &mut out[0..]);
+        Abi::put(&self.rms_norm, &mut out[5..]);
+        Abi::put(&self.rope, &mut out[10..]);
+        Abi::put(&self.swiglu, &mut out[15..]);
+        Abi::put(&self.kv_write, &mut out[20..]);
+        Abi::put(&self.attention, &mut out[25..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        TensorKs { matmul: Abi::get(&words[0..]), rms_norm: Abi::get(&words[5..]), rope: Abi::get(&words[10..]), swiglu: Abi::get(&words[15..]), kv_write: Abi::get(&words[20..]), attention: Abi::get(&words[25..]) }
+    }
+}
+
 /// Owned handle of a Vesper `Rec` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_gpu_Rec_drop`.
 pub struct Rec {
@@ -197,6 +274,10 @@ const _: () = assert!(<Buf as Abi>::WORDS == 4);
 const _: () = assert!(<Dev as Abi>::WORDS == 11);
 const _: () = assert!(<GpuErr as Abi>::WORDS == 3);
 const _: () = assert!(<Kern as Abi>::WORDS == 5);
+const _: () = assert!(<StepModel as Abi>::WORDS == 12);
+const _: () = assert!(<StepSession as Abi>::WORDS == 40);
+const _: () = assert!(<StepShape as Abi>::WORDS == 10);
+const _: () = assert!(<TensorKs as Abi>::WORDS == 30);
 const _: () = assert!(<u32 as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
@@ -227,6 +308,13 @@ unsafe extern "C" {
     fn vesper_gpu_rec_new(result: *mut u64, d: *mut u64, fail: *mut u64) -> i64;
     fn vesper_gpu_rec_submit(d: *mut u64, r: *mut u64, previous: i64, fail: *mut u64) -> i64;
     fn vesper_gpu_shape() -> i64;
+    fn vesper_gpu_tk_attention(d: *mut u64, r: *mut u64, kern: *mut u64, q: *mut u64, keys: *mut u64, values: *mut u64, table: *mut u64, out: *mut u64, query_heads: i64, kv_heads: i64, head_dim: i64, tokens: i64, fail: *mut u64) -> i64;
+    fn vesper_gpu_tk_kv_write(d: *mut u64, r: *mut u64, kern: *mut u64, k: *mut u64, v: *mut u64, table: *mut u64, keys: *mut u64, values: *mut u64, position: i64, kv_dim: i64, fail: *mut u64) -> i64;
+    fn vesper_gpu_tk_matmul(d: *mut u64, r: *mut u64, kern: *mut u64, a: *mut u64, w: *mut u64, out: *mut u64, m: i64, n: i64, k: i64, accumulate: i64, fail: *mut u64) -> i64;
+    fn vesper_gpu_tk_rms_norm(d: *mut u64, r: *mut u64, kern: *mut u64, x: *mut u64, weight: *mut u64, out: *mut u64, rows: i64, n: i64, epsilon: i64, fail: *mut u64) -> i64;
+    fn vesper_gpu_tk_rope(d: *mut u64, r: *mut u64, kern: *mut u64, x: *mut u64, freqs: *mut u64, len: i64, head_dim: i64, position: i64, fail: *mut u64) -> i64;
+    fn vesper_gpu_tk_step(d: *mut u64, r: *mut u64, ks: *mut u64, c: *mut u64, s: *mut u64, m: *mut u64, layers: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_gpu_tk_swiglu(d: *mut u64, r: *mut u64, kern: *mut u64, gate: *mut u64, up: *mut u64, n: i64, fail: *mut u64) -> i64;
     fn vesper_gpu_unavailable() -> i64;
     fn vesper_gpu_unsupported() -> i64;
     fn vesper_gpu_vulkan() -> i64;
@@ -638,6 +726,248 @@ pub fn shape() -> u32 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_gpu_shape() };
     raw as u32
+}
+
+/// The errors `tk_attention` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TkAttentionError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `tk_attention` of the Vesper library `gpu` (`vesper_gpu_tk_attention`).
+pub fn tk_attention(d: Dev, r: &mut Rec, kern: Kern, q: Buf, keys: Buf, values: Buf, table: Buf, out: Buf, query_heads: u64, kv_heads: u64, head_dim: u64, tokens: u64) -> Result<(), TkAttentionError> {
+    let mut arg_d = [0u64; <Dev as Abi>::WORDS];
+    Abi::put(&d, &mut arg_d);
+    let mut arg_kern = [0u64; <Kern as Abi>::WORDS];
+    Abi::put(&kern, &mut arg_kern);
+    let mut arg_q = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&q, &mut arg_q);
+    let mut arg_keys = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&keys, &mut arg_keys);
+    let mut arg_values = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&values, &mut arg_values);
+    let mut arg_table = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&table, &mut arg_table);
+    let mut arg_out = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&out, &mut arg_out);
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_tk_attention` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_gpu_tk_attention(arg_d.as_mut_ptr(), r.words.as_mut_ptr(), arg_kern.as_mut_ptr(), arg_q.as_mut_ptr(), arg_keys.as_mut_ptr(), arg_values.as_mut_ptr(), arg_table.as_mut_ptr(), arg_out.as_mut_ptr(), query_heads as i64, kv_heads as i64, head_dim as i64, tokens as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(TkAttentionError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(TkAttentionError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(TkAttentionError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_tk_attention"),
+    }
+}
+
+/// The errors `tk_kv_write` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TkKvWriteError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `tk_kv_write` of the Vesper library `gpu` (`vesper_gpu_tk_kv_write`).
+pub fn tk_kv_write(d: Dev, r: &mut Rec, kern: Kern, k: Buf, v: Buf, table: Buf, keys: Buf, values: Buf, position: u64, kv_dim: u64) -> Result<(), TkKvWriteError> {
+    let mut arg_d = [0u64; <Dev as Abi>::WORDS];
+    Abi::put(&d, &mut arg_d);
+    let mut arg_kern = [0u64; <Kern as Abi>::WORDS];
+    Abi::put(&kern, &mut arg_kern);
+    let mut arg_k = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&k, &mut arg_k);
+    let mut arg_v = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&v, &mut arg_v);
+    let mut arg_table = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&table, &mut arg_table);
+    let mut arg_keys = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&keys, &mut arg_keys);
+    let mut arg_values = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&values, &mut arg_values);
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_tk_kv_write` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_gpu_tk_kv_write(arg_d.as_mut_ptr(), r.words.as_mut_ptr(), arg_kern.as_mut_ptr(), arg_k.as_mut_ptr(), arg_v.as_mut_ptr(), arg_table.as_mut_ptr(), arg_keys.as_mut_ptr(), arg_values.as_mut_ptr(), position as i64, kv_dim as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(TkKvWriteError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(TkKvWriteError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(TkKvWriteError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_tk_kv_write"),
+    }
+}
+
+/// The errors `tk_matmul` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TkMatmulError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `tk_matmul` of the Vesper library `gpu` (`vesper_gpu_tk_matmul`).
+pub fn tk_matmul(d: Dev, r: &mut Rec, kern: Kern, a: Buf, w: Buf, out: Buf, m: u64, n: u64, k: u64, accumulate: bool) -> Result<(), TkMatmulError> {
+    let mut arg_d = [0u64; <Dev as Abi>::WORDS];
+    Abi::put(&d, &mut arg_d);
+    let mut arg_kern = [0u64; <Kern as Abi>::WORDS];
+    Abi::put(&kern, &mut arg_kern);
+    let mut arg_a = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&a, &mut arg_a);
+    let mut arg_w = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&w, &mut arg_w);
+    let mut arg_out = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&out, &mut arg_out);
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_tk_matmul` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_gpu_tk_matmul(arg_d.as_mut_ptr(), r.words.as_mut_ptr(), arg_kern.as_mut_ptr(), arg_a.as_mut_ptr(), arg_w.as_mut_ptr(), arg_out.as_mut_ptr(), m as i64, n as i64, k as i64, accumulate as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(TkMatmulError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(TkMatmulError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(TkMatmulError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_tk_matmul"),
+    }
+}
+
+/// The errors `tk_rms_norm` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TkRmsNormError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `tk_rms_norm` of the Vesper library `gpu` (`vesper_gpu_tk_rms_norm`).
+pub fn tk_rms_norm(d: Dev, r: &mut Rec, kern: Kern, x: Buf, weight: Buf, out: Buf, rows: u64, n: u64, epsilon: u32) -> Result<(), TkRmsNormError> {
+    let mut arg_d = [0u64; <Dev as Abi>::WORDS];
+    Abi::put(&d, &mut arg_d);
+    let mut arg_kern = [0u64; <Kern as Abi>::WORDS];
+    Abi::put(&kern, &mut arg_kern);
+    let mut arg_x = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&x, &mut arg_x);
+    let mut arg_weight = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&weight, &mut arg_weight);
+    let mut arg_out = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&out, &mut arg_out);
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_tk_rms_norm` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_gpu_tk_rms_norm(arg_d.as_mut_ptr(), r.words.as_mut_ptr(), arg_kern.as_mut_ptr(), arg_x.as_mut_ptr(), arg_weight.as_mut_ptr(), arg_out.as_mut_ptr(), rows as i64, n as i64, epsilon as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(TkRmsNormError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(TkRmsNormError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(TkRmsNormError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_tk_rms_norm"),
+    }
+}
+
+/// The errors `tk_rope` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TkRopeError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `tk_rope` of the Vesper library `gpu` (`vesper_gpu_tk_rope`).
+pub fn tk_rope(d: Dev, r: &mut Rec, kern: Kern, x: Buf, freqs: Buf, len: u64, head_dim: u64, position: u64) -> Result<(), TkRopeError> {
+    let mut arg_d = [0u64; <Dev as Abi>::WORDS];
+    Abi::put(&d, &mut arg_d);
+    let mut arg_kern = [0u64; <Kern as Abi>::WORDS];
+    Abi::put(&kern, &mut arg_kern);
+    let mut arg_x = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&x, &mut arg_x);
+    let mut arg_freqs = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&freqs, &mut arg_freqs);
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_tk_rope` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_gpu_tk_rope(arg_d.as_mut_ptr(), r.words.as_mut_ptr(), arg_kern.as_mut_ptr(), arg_x.as_mut_ptr(), arg_freqs.as_mut_ptr(), len as i64, head_dim as i64, position as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(TkRopeError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(TkRopeError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(TkRopeError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_tk_rope"),
+    }
+}
+
+/// The errors `tk_step` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TkStepError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `tk_step` of the Vesper library `gpu` (`vesper_gpu_tk_step`).
+pub fn tk_step(d: Dev, r: &mut Rec, ks: TensorKs, c: StepShape, s: StepSession, m: StepModel, layers: &[u64]) -> Result<(), TkStepError> {
+    let mut arg_d = [0u64; <Dev as Abi>::WORDS];
+    Abi::put(&d, &mut arg_d);
+    let mut arg_ks = [0u64; <TensorKs as Abi>::WORDS];
+    Abi::put(&ks, &mut arg_ks);
+    let mut arg_c = [0u64; <StepShape as Abi>::WORDS];
+    Abi::put(&c, &mut arg_c);
+    let mut arg_s = [0u64; <StepSession as Abi>::WORDS];
+    Abi::put(&s, &mut arg_s);
+    let mut arg_m = [0u64; <StepModel as Abi>::WORDS];
+    Abi::put(&m, &mut arg_m);
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_tk_step` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(layers, |view_layers| unsafe { vesper_gpu_tk_step(arg_d.as_mut_ptr(), r.words.as_mut_ptr(), arg_ks.as_mut_ptr(), arg_c.as_mut_ptr(), arg_s.as_mut_ptr(), arg_m.as_mut_ptr(), view_layers, fail.as_mut_ptr()) });
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(TkStepError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(TkStepError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(TkStepError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_tk_step"),
+    }
+}
+
+/// The errors `tk_swiglu` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TkSwigluError {
+    GpuErr(GpuErr),
+    RuntimeError(vesper_port_abi::RuntimeError),
+    ArithOverflow(vesper_port_abi::ArithOverflow),
+}
+
+/// Calls `tk_swiglu` of the Vesper library `gpu` (`vesper_gpu_tk_swiglu`).
+pub fn tk_swiglu(d: Dev, r: &mut Rec, kern: Kern, gate: Buf, up: Buf, n: u64) -> Result<(), TkSwigluError> {
+    let mut arg_d = [0u64; <Dev as Abi>::WORDS];
+    Abi::put(&d, &mut arg_d);
+    let mut arg_kern = [0u64; <Kern as Abi>::WORDS];
+    Abi::put(&kern, &mut arg_kern);
+    let mut arg_gate = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&gate, &mut arg_gate);
+    let mut arg_up = [0u64; <Buf as Abi>::WORDS];
+    Abi::put(&up, &mut arg_up);
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_gpu_tk_swiglu` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_gpu_tk_swiglu(arg_d.as_mut_ptr(), r.words.as_mut_ptr(), arg_kern.as_mut_ptr(), arg_gate.as_mut_ptr(), arg_up.as_mut_ptr(), n as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(TkSwigluError::GpuErr(<GpuErr as Abi>::get(&fail[1..]))),
+        2 => Err(TkSwigluError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
+        3 => Err(TkSwigluError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_gpu_tk_swiglu"),
+    }
 }
 
 /// Calls `unavailable` of the Vesper library `gpu` (`vesper_gpu_unavailable`).

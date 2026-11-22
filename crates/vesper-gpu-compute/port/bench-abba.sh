@@ -3,7 +3,8 @@
 # workload (examples/<workload>_bench.rs):
 #
 # - runtime: the Rust runtime over ash, at 0787bb71 (SH6 lane 15 part 2c);
-# - broadphase: the Rust broadphase driver, at 6628b18a (part 2b).
+# - broadphase, generation: the Rust broadphase and tensor drivers, at
+#   6628b18a (part 2b).
 #
 # Each baseline is the example built at the last commit that had the Rust
 # code, from this checkout's example (it uses only the crate's public API),
@@ -15,7 +16,7 @@ cd "$(dirname "$0")/../../.."
 workload=$1
 case "$workload" in
     runtime) commit=${GPU_RUST_RUNTIME_COMMIT:-0787bb712cde55149c3b2f98fcee93af6f1d8892} ;;
-    broadphase) commit=${GPU_RUST_BROADPHASE_COMMIT:-6628b18a31135f0ba3c4d6c59eeefa85f84122e8} ;;
+    broadphase | generation) commit=${GPU_RUST_DRIVER_COMMIT:-6628b18a31135f0ba3c4d6c59eeefa85f84122e8} ;;
     *) echo "unknown workload $workload" >&2; exit 2 ;;
 esac
 example="${workload}_bench"
