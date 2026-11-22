@@ -68,4 +68,11 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     ),
     // message.rs: two Host fields are accepted.
     ("message", "if hosts > 1 {", "if hosts > 2 {"),
+    // connection.rs control stream: a server-initiated PRIORITY_UPDATE
+    // element is accepted.
+    (
+        "control",
+        "if is_uni(u.element_id) || is_server_initiated(u.element_id) {",
+        "if is_uni(u.element_id) {",
+    ),
 ];

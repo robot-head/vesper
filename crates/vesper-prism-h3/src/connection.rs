@@ -24,6 +24,8 @@ use crate::error::Code;
 use crate::frame::{self, Frame, FrameError, FrameReader, Settings};
 use crate::message::{self, MessageError, RequestHead};
 use crate::priority::{self, Priority};
+use crate::qpack::port::abi::UniCmd;
+use crate::qpack::port::binding;
 use crate::qpack::{
     Decoded, Decoder, DecoderConfig, Encoder, EncoderConfig, Field, FieldSection, QpackError,
 };
@@ -187,16 +189,6 @@ pub struct ConnectionStats {
     pub interim_responses: u64,
 }
 
-enum Uni {
-    /// Waiting for the stream-type varint.
-    Pending(Vec<u8>),
-    Control(FrameReader),
-    QpackEncoder,
-    QpackDecoder,
-    /// Unknown or reserved type: STOP_SENDING was sent, bytes are discarded.
-    Ignored,
-}
-
 #[derive(Default)]
 struct Outgoing {
     buf: VecDeque<u8>,
@@ -239,15 +231,11 @@ pub(crate) struct Core {
     /// Critical streams opened so far while stream credit is short.
     opening: Vec<u64>,
     pub(crate) peer_settings: Option<Settings>,
-    peer_control: Option<u64>,
-    peer_encoder: Option<u64>,
-    peer_decoder: Option<u64>,
-    uni: BTreeMap<u64, Uni>,
+    /// The peer's unidirectional streams (`vesper/src/control.ves`).
+    uni: binding::UniCore,
     out: BTreeMap<u64, Outgoing>,
     pub(crate) error: Option<ConnectionError>,
     pub(crate) goaway_received: Option<u64>,
-    /// The client's MAX_PUSH_ID (a server never pushes).
-    max_push_id: Option<u64>,
     pub(crate) stats: ConnectionStats,
     pub(crate) scratch: Vec<u8>,
     /// Non-critical streams whose writes failed (peer STOP_SENDING).
@@ -278,14 +266,15 @@ impl Core {
             local: None,
             opening: Vec::new(),
             peer_settings: None,
-            peer_control: None,
-            peer_encoder: None,
-            peer_decoder: None,
-            uni: BTreeMap::new(),
+            uni: binding::UniCore::new(
+                server,
+                s.webtransport_max_sessions.is_some(),
+                cfg.max_frame_payload as u64,
+                cfg.max_peer_uni_streams as u64,
+            ),
             out: BTreeMap::new(),
             error: None,
             goaway_received: None,
-            max_push_id: None,
             stats: ConnectionStats::default(),
             scratch: vec![0; 16 * 1024],
             write_failures: Vec::new(),
@@ -528,21 +517,14 @@ impl Core {
 
     /// Routes a newly accepted peer unidirectional stream.
     pub(crate) fn accept_uni(&mut self, t: &mut impl Transport, id: u64) {
-        if self.uni.len() >= self.cfg.max_peer_uni_streams {
-            t.stop_sending(id, Code::EXCESSIVE_LOAD);
-            self.stats.unknown_streams += 1;
-            return;
-        }
-        self.uni.insert(id, Uni::Pending(Vec::new()));
+        self.uni.accept(id);
+        let r = self.run(t);
+        debug_assert!(r.is_ok(), "refusing a stream cannot fail");
     }
 
     /// Reads every peer unidirectional stream.
-    pub(crate) fn read_uni(
-        &mut self,
-        t: &mut impl Transport,
-        server: bool,
-    ) -> Result<(), ConnectionError> {
-        let ids: Vec<u64> = self.uni.keys().copied().collect();
+    pub(crate) fn read_uni(&mut self, t: &mut impl Transport) -> Result<(), ConnectionError> {
+        let ids = self.uni.ids();
         let mut buf = std::mem::take(&mut self.scratch);
         let r = (|| {
             for id in ids {
@@ -557,8 +539,8 @@ impl Core {
                         Err(e) => return Err(ConnectionError::Transport(e)),
                     };
                     if r.len > 0 {
-                        self.uni_bytes(t, id, &buf[..r.len], server)?;
-                        if !self.uni.contains_key(&id) {
+                        self.uni_bytes(t, id, &buf[..r.len])?;
+                        if !self.uni.contains(id) {
                             // Handed to the session layer, which owns all
                             // later reads (and this read's FIN).
                             if r.fin {
@@ -583,12 +565,7 @@ impl Core {
     }
 
     fn uni_closed(&mut self, id: u64) -> Result<(), ConnectionError> {
-        match self.uni.remove(&id) {
-            Some(Uni::Control(_) | Uni::QpackEncoder | Uni::QpackDecoder) => {
-                Err(ConnectionError::ClosedCriticalStream { stream_id: id })
-            }
-            _ => Ok(()),
-        }
+        self.uni.closed(id).map(drop)
     }
 
     fn uni_bytes(
@@ -596,88 +573,62 @@ impl Core {
         t: &mut impl Transport,
         id: u64,
         bytes: &[u8],
-        server: bool,
     ) -> Result<(), ConnectionError> {
-        if let Some(Uni::Pending(held)) = self.uni.get_mut(&id) {
-            held.extend_from_slice(bytes);
-            let Some((ty, n)) = frame::stream_type(held) else {
-                return Ok(());
-            };
-            if ty == frame::STREAM_WEBTRANSPORT
-                && self.sent_settings.webtransport_max_sessions.is_some()
-            {
-                let Ok((session, m)) = vesper_warp::varint::decode(&held[n..]) else {
-                    return Ok(());
-                };
-                let rest = held[n + m..].to_vec();
-                self.uni.remove(&id);
-                let gone = self.session_known_gone(session);
-                return self.incoming_wt_stream(t, id, session, false, rest, gone);
-            }
-            let rest = held.split_off(n);
-            let slot = match ty {
-                frame::STREAM_CONTROL => &mut self.peer_control,
-                frame::STREAM_QPACK_ENCODER => &mut self.peer_encoder,
-                frame::STREAM_QPACK_DECODER => &mut self.peer_decoder,
-                // Only servers push; a client never accepts push here
-                // (push is out of scope, so no MAX_PUSH_ID is ever sent).
-                frame::STREAM_PUSH => {
-                    return Err(ConnectionError::StreamCreation { stream_id: id });
-                }
-                _ => {
-                    t.stop_sending(id, Code::STREAM_CREATION_ERROR);
-                    self.uni.insert(id, Uni::Ignored);
-                    self.stats.unknown_streams += 1;
-                    return Ok(());
-                }
-            };
-            if slot.is_some() {
-                return Err(ConnectionError::StreamCreation { stream_id: id });
-            }
-            *slot = Some(id);
-            let kind = match ty {
-                frame::STREAM_CONTROL => Uni::Control(FrameReader::new(self.cfg.max_frame_payload)),
-                frame::STREAM_QPACK_ENCODER => Uni::QpackEncoder,
-                _ => Uni::QpackDecoder,
-            };
-            self.uni.insert(id, kind);
-            if rest.is_empty() {
-                return Ok(());
-            }
-            return self.uni_bytes(t, id, &rest, server);
+        let routed = self.uni.bytes(id, bytes);
+        self.run(t).and(routed.map(drop))
+    }
+
+    /// Carries out the stream router's commands, in order; the first
+    /// failure stops them.
+    fn run(&mut self, t: &mut impl Transport) -> Result<(), ConnectionError> {
+        let n = self.uni.cmd_count();
+        if n == 0 {
+            return Ok(());
         }
-        match self.uni.get_mut(&id) {
-            Some(Uni::Control(reader)) => {
-                reader.push(bytes);
-                loop {
-                    let f = match self.uni.get_mut(&id) {
-                        Some(Uni::Control(reader)) => reader.next_frame(),
-                        _ => unreachable!("control stream"),
-                    };
-                    match f {
-                        Ok(Some(f)) => self.control_frame(id, f, server)?,
-                        Ok(None) => break,
-                        Err(error) => {
-                            return Err(ConnectionError::Frame {
-                                stream_id: id,
-                                error,
-                            });
-                        }
+        let out = self.uni.out();
+        let bytes = |at: u64, len: u64| &out[at as usize..(at + len) as usize];
+        for i in 0..n {
+            match self.uni.cmd(i) {
+                UniCmd::None => {}
+                UniCmd::StopSending { stream_id, code } => t.stop_sending(stream_id, Code(code)),
+                UniCmd::UnknownStream => self.stats.unknown_streams += 1,
+                UniCmd::UnknownFrame => self.stats.unknown_frames += 1,
+                UniCmd::ToDecoder { at, len } => self
+                    .decoder
+                    .on_encoder_stream(bytes(at, len))
+                    .map_err(ConnectionError::Qpack)?,
+                UniCmd::ToEncoder { at, len } => self
+                    .encoder
+                    .on_decoder_stream(bytes(at, len))
+                    .map_err(ConnectionError::Qpack)?,
+                UniCmd::WebTransportStream {
+                    stream_id,
+                    session,
+                    at,
+                    len,
+                } => {
+                    let gone = self.session_known_gone(session);
+                    let rest = bytes(at, len).to_vec();
+                    self.incoming_wt_stream(t, stream_id, session, false, rest, gone)?;
+                }
+                UniCmd::PeerSettings(s) => {
+                    self.peer_settings = Some(s);
+                    self.encoder
+                        .apply_peer_settings(s.qpack_max_table_capacity, s.qpack_blocked_streams);
+                }
+                UniCmd::GoAway(v) => self.goaway_received = Some(v),
+                UniCmd::PriorityUpdate(u) => {
+                    self.stats.priority_updates += 1;
+                    // Bounded: updates for streams not yet open are kept only
+                    // while the table is small.
+                    let bound = self.cfg.max_concurrent_requests * 2 + 16;
+                    if self.priorities.contains_key(&u.element_id) || self.priorities.len() < bound
+                    {
+                        self.priorities.insert(u.element_id, u.priority);
+                        self.priority_updated.insert(u.element_id);
                     }
                 }
             }
-            Some(Uni::QpackEncoder) => {
-                self.decoder
-                    .on_encoder_stream(bytes)
-                    .map_err(ConnectionError::Qpack)?;
-            }
-            Some(Uni::QpackDecoder) => {
-                self.encoder
-                    .on_decoder_stream(bytes)
-                    .map_err(ConnectionError::Qpack)?;
-            }
-            Some(Uni::Ignored) | None => {}
-            Some(Uni::Pending(_)) => unreachable!("handled above"),
         }
         Ok(())
     }
@@ -690,68 +641,6 @@ impl Core {
         // A client knows every session it opened; a server knows the
         // request streams the client opened so far.
         !self.server || (session < self.next_peer_bidi && !self.unparsed.contains(&session))
-    }
-
-    fn control_frame(&mut self, id: u64, f: Frame, server: bool) -> Result<(), ConnectionError> {
-        let unexpected = |f: &Frame| ConnectionError::FrameUnexpected {
-            stream_id: id,
-            frame_type: f.frame_type(),
-        };
-        if self.peer_settings.is_none() {
-            let Frame::Settings(s) = f else {
-                return Err(ConnectionError::MissingSettings);
-            };
-            self.peer_settings = Some(s);
-            self.encoder
-                .apply_peer_settings(s.qpack_max_table_capacity, s.qpack_blocked_streams);
-            return Ok(());
-        }
-        match f {
-            Frame::Unknown(_) => self.stats.unknown_frames += 1,
-            Frame::GoAway(v) => {
-                // From a server: a client-initiated bidi stream ID. From a
-                // client: a push ID. It must never increase (§5.2).
-                if !server && (is_uni(v) || is_server_initiated(v)) {
-                    return Err(ConnectionError::BadGoaway(v));
-                }
-                if self.goaway_received.is_some_and(|prev| v > prev) {
-                    return Err(ConnectionError::BadGoaway(v));
-                }
-                self.goaway_received = Some(v);
-            }
-            Frame::MaxPushId(v) if server => {
-                if self.max_push_id.is_some_and(|prev| v < prev) {
-                    return Err(ConnectionError::BadPushId(v));
-                }
-                self.max_push_id = Some(v);
-            }
-            Frame::PriorityUpdate(u) if server => {
-                // Push is never enabled, so no push ID is valid (§7.2).
-                if u.push {
-                    return Err(ConnectionError::BadPushId(u.element_id));
-                }
-                if is_uni(u.element_id) || is_server_initiated(u.element_id) {
-                    return Err(ConnectionError::BadStreamId(u.element_id));
-                }
-                self.stats.priority_updates += 1;
-                // Bounded: updates for streams not yet open are kept only
-                // while the table is small.
-                let bound = self.cfg.max_concurrent_requests * 2 + 16;
-                if self.priorities.contains_key(&u.element_id) || self.priorities.len() < bound {
-                    self.priorities.insert(u.element_id, u.priority);
-                    self.priority_updated.insert(u.element_id);
-                }
-            }
-            Frame::CancelPush(v) => {
-                // Push is never used: any ID past MAX_PUSH_ID is an error,
-                // others refer to pushes that never happened (ignored).
-                if !server || self.max_push_id.is_none_or(|m| v > m) {
-                    return Err(ConnectionError::BadPushId(v));
-                }
-            }
-            f => return Err(unexpected(&f)),
-        }
-        Ok(())
     }
 }
 
@@ -1320,7 +1209,7 @@ impl ServerConnection {
                 self.accept_request(t, id)?;
             }
         }
-        self.core.read_uni(t, true)?;
+        self.core.read_uni(t)?;
         if let Some(g) = self.core.goaway_received
             && self.goaway_reported != Some(g)
         {

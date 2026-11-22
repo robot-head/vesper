@@ -1,0 +1,487 @@
+// connection.rs: the peer's unidirectional streams (RFC 9114 §6.2) and
+// its control stream (§6.2.1, §7). `UniCore` routes each stream by its
+// type varint, checks the control stream's frame rules (SETTINGS first,
+// GOAWAY, MAX_PUSH_ID, CANCEL_PUSH, PRIORITY_UPDATE) and hands the rest to
+// the Rust driver as commands (`UniCmd`, bytes in `out`), because the
+// QPACK codecs, the priority table and the session layer live there.
+// Streams are kept in stream ID order, as the Rust driver's map was.
+
+use self::{
+    Settings,
+    FrameError,
+    FrameOut,
+    FrameReaderCore,
+    ConnectionError,
+    UniCmd,
+    UniCore
+};
+use self::int::{
+    inc,
+    word,
+    byte,
+    remove_word
+};
+use self::varint::{
+    vdec
+};
+use self::frame::{
+    reader_new,
+    reader_push,
+    reader_next
+};
+
+// Stream types (RFC 9114 §6.2, draft-ietf-webtrans-http3 §4.2).
+const STREAM_CONTROL: u64 = 0x00;
+const STREAM_PUSH: u64 = 0x01;
+const STREAM_QPACK_ENCODER: u64 = 0x02;
+const STREAM_QPACK_DECODER: u64 = 0x03;
+const STREAM_WEBTRANSPORT: u64 = 0x54;
+
+// Error codes the router sends with STOP_SENDING (RFC 9114 §8.1).
+const STREAM_CREATION_ERROR: u64 = 0x103;
+const EXCESSIVE_LOAD: u64 = 0x107;
+
+// Stream kinds.
+const KIND_PENDING: u64 = 0;
+const KIND_CONTROL: u64 = 1;
+const KIND_ENCODER: u64 = 2;
+const KIND_DECODER: u64 = 3;
+const KIND_IGNORED: u64 = 4;
+
+// Bytes a pending stream holds at most: its type and a session ID.
+const HELD_MAX: u64 = 16;
+
+pub fn uni_new(server: bool, webtransport: bool, max_frame_payload: u64, max_streams: u64)
+    -> UniCore {
+    UniCore {
+        server: server,
+        webtransport: webtransport,
+        max_streams: max_streams,
+        ids: ChunkSeq::new[u64](),
+        kinds: ChunkSeq::new[u64](),
+        held_len: ChunkSeq::new[u64](),
+        held: ChunkSeq::new[u8](),
+        reader: reader_new(max_frame_payload, false),
+        peer_control: Option::None,
+        peer_encoder: Option::None,
+        peer_decoder: Option::None,
+        peer_settings: Option::None,
+        goaway: Option::None,
+        max_push_id: Option::None,
+        cmds: ChunkSeq::new[UniCmd](),
+        out: ChunkSeq::new[u8]()
+    }
+}
+
+// The slot of `id`, or the slot it would be inserted at, and whether it is
+// there.
+fn find(in c: UniCore, id: u64) -> u64 {
+    let n = c.ids.len();
+    for i in 0..n {
+        if word(in c.ids.as_slice(), i) >= id {
+            return i;
+        }
+    }
+    n
+}
+
+fn slot(in c: UniCore, id: u64) -> Option[u64] {
+    let i = find(in c, id);
+    if (i < c.ids.len()) && (word(in c.ids.as_slice(), i) == id) {
+        Option::Some(i)
+    } else {
+        Option::None
+    }
+}
+
+fn kind_at(in c: UniCore, i: u64) -> u64 {
+    word(in c.kinds.as_slice(), i)
+}
+
+fn set_kind(inout c: UniCore, i: u64, kind: u64) {
+    let _set = c.kinds.try_set(i, kind);
+}
+
+fn remove_at(inout c: UniCore, i: u64) {
+    remove_word(inout c.ids, i);
+    remove_word(inout c.kinds, i);
+    remove_word(inout c.held_len, i);
+    let n = c.held.len();
+    let lo = wrapping_mul(i, HELD_MAX);
+    let _moved = c.held.try_copy_within(wrapping_add(lo, HELD_MAX), n, lo);
+    c.held.truncate(wrapping_sub(n, HELD_MAX));
+}
+
+// Appends bytes for the driver; returns their offset.
+fn put_out(inout c: UniCore, in bytes: Slice[u8]) -> u64 {
+    let at = c.out.len();
+    c.out.extend(in bytes);
+    at
+}
+
+pub fn uni_clear(inout c: UniCore) {
+    c.cmds.clear();
+    c.out.clear();
+}
+
+// A newly accepted peer stream; false when too many are tracked (the
+// driver refuses it with H3_EXCESSIVE_LOAD).
+pub fn uni_accept(inout c: UniCore, id: u64) -> bool {
+    if c.ids.len() >= c.max_streams {
+        c
+            .cmds
+            .push(
+            UniCmd::StopSending {
+                stream_id: id,
+                code: EXCESSIVE_LOAD
+            }
+        );
+        c.cmds.push(UniCmd::UnknownStream);
+        return false;
+    }
+    let i = find(in c, id);
+    if (i < c.ids.len()) && (word(in c.ids.as_slice(), i) == id) {
+        return true;
+    }
+    let n = c.ids.len();
+    c.ids.push(id);
+    c.kinds.push(KIND_PENDING);
+    c.held_len.push(0);
+    for _k in 0..HELD_MAX {
+        c.held.push(0);
+    }
+    if i < n {
+        let _a = c.ids.try_copy_within(i, n, inc(i));
+        let _b = c.kinds.try_copy_within(i, n, inc(i));
+        let _c = c.held_len.try_copy_within(i, n, inc(i));
+        let lo = wrapping_mul(i, HELD_MAX);
+        let _d = c.held.try_copy_within(lo, wrapping_mul(n, HELD_MAX), wrapping_add(lo, HELD_MAX));
+        let _e = c.ids.try_set(i, id);
+        let _f = c.kinds.try_set(i, KIND_PENDING);
+        let _g = c.held_len.try_set(i, 0);
+    }
+    true
+}
+
+pub fn uni_ids(in c: UniCore) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    out.extend(in c.ids.as_slice());
+    out
+}
+
+pub fn uni_contains(in c: UniCore, id: u64) -> bool {
+    match slot(in c, id) {
+        Option::Some(_i) => true,
+        Option::None => false,
+    }
+}
+
+// The stream ended or was reset: forgets it. Our peer's control and QPACK
+// streams must never close (§6.2.1, RFC 9204 §4.2).
+pub fn uni_closed(inout c: UniCore, id: u64) -> Result[bool, ConnectionError] {
+    let i = match slot(in c, id) {
+        Option::Some(i) => i,
+        Option::None => return Result::Ok(false),
+    };
+    let kind = kind_at(in c, i);
+    remove_at(inout c, i);
+    if kind == KIND_CONTROL || kind == KIND_ENCODER || kind == KIND_DECODER {
+        return Result::Err(
+            ConnectionError::ClosedCriticalStream {
+                stream_id: id
+            }
+        );
+    }
+    Result::Ok(true)
+}
+
+// Bytes read from a peer stream.
+pub fn uni_bytes(inout c: UniCore, id: u64, in bytes: Slice[u8]) -> Result[bool, ConnectionError] {
+    let i = match slot(in c, id) {
+        Option::Some(i) => i,
+        Option::None => return Result::Ok(false),
+    };
+    let kind = kind_at(in c, i);
+    if kind == KIND_PENDING {
+        return pending_bytes(inout c, i, id, in bytes);
+    }
+    typed_bytes(inout c, id, kind, in bytes)
+}
+
+fn typed_bytes(inout c: UniCore, id: u64, kind: u64, in bytes: Slice[u8])
+    -> Result[bool, ConnectionError] {
+    if kind == KIND_CONTROL {
+        reader_push(inout c.reader, in bytes);
+        return control_frames(inout c, id);
+    }
+    if bytes.len() == 0 {
+        return Result::Ok(true);
+    }
+    if kind == KIND_ENCODER {
+        let at = put_out(inout c, in bytes);
+        c
+            .cmds
+            .push(
+            UniCmd::ToDecoder {
+                at: at,
+                len: bytes.len()
+            }
+        );
+    } else if kind == KIND_DECODER {
+        let at = put_out(inout c, in bytes);
+        c
+            .cmds
+            .push(
+            UniCmd::ToEncoder {
+                at: at,
+                len: bytes.len()
+            }
+        );
+    }
+    Result::Ok(true)
+}
+
+fn pending_bytes(inout c: UniCore, i: u64, id: u64, in bytes: Slice[u8])
+    -> Result[bool, ConnectionError] {
+    let mut buf = ChunkSeq::new[u8]();
+    let lo = wrapping_mul(i, HELD_MAX);
+    let had = word(in c.held_len.as_slice(), i);
+    buf.extend(in c.held[lo..wrapping_add(lo, had)]);
+    buf.extend(in bytes);
+    let t = match vdec(in buf.as_slice(), 0) {
+        Option::Some(t) => t,
+        Option::None => return hold(inout c, i, in buf.as_slice()),
+    };
+    let ty = t.value;
+    let n = t.used;
+    let len = buf.len();
+    if ty == STREAM_WEBTRANSPORT && c.webtransport {
+        let s = match vdec(in buf.as_slice(), n) {
+            Option::Some(s) => s,
+            Option::None => return hold(inout c, i, in buf.as_slice()),
+        };
+        remove_at(inout c, i);
+        let start = wrapping_add(n, s.used);
+        let at = put_out(inout c, in buf[start..len]);
+        c
+            .cmds
+            .push(
+            UniCmd::WebTransportStream {
+                stream_id: id,
+                session: s.value,
+                at: at,
+                len: wrapping_sub(len, start)
+            }
+        );
+        return Result::Ok(true);
+    }
+    let kind = if ty == STREAM_CONTROL {
+        KIND_CONTROL
+    } else if ty == STREAM_QPACK_ENCODER {
+        KIND_ENCODER
+    } else if ty == STREAM_QPACK_DECODER {
+        KIND_DECODER
+    } else if ty == STREAM_PUSH {
+        // Only servers push, and push is never enabled here.
+        return Result::Err(
+            ConnectionError::StreamCreation {
+                stream_id: id
+            }
+        );
+    } else {
+        c
+            .cmds
+            .push(
+            UniCmd::StopSending {
+                stream_id: id,
+                code: STREAM_CREATION_ERROR
+            }
+        );
+        c.cmds.push(UniCmd::UnknownStream);
+        set_kind(inout c, i, KIND_IGNORED);
+        let _cleared = c.held_len.try_set(i, 0);
+        return Result::Ok(true);
+    };
+    let taken = if kind == KIND_CONTROL {
+        claim(inout c.peer_control, id)
+    } else if kind == KIND_ENCODER {
+        claim(inout c.peer_encoder, id)
+    } else {
+        claim(inout c.peer_decoder, id)
+    };
+    if !taken {
+        return Result::Err(
+            ConnectionError::StreamCreation {
+                stream_id: id
+            }
+        );
+    }
+    set_kind(inout c, i, kind);
+    let _cleared = c.held_len.try_set(i, 0);
+    typed_bytes(inout c, id, kind, in buf[n..len])
+}
+
+// Records a critical stream; false if the peer already opened one.
+fn claim(inout s: Option[u64], id: u64) -> bool {
+    match s {
+        Option::Some(_x) => false,
+        Option::None => {
+            s = Option::Some(id);
+            true
+        }
+    }
+}
+
+fn hold(inout c: UniCore, i: u64, in buf: Slice[u8]) -> Result[bool, ConnectionError] {
+    // A type and a session ID are 16 bytes at most, so `buf` fits.
+    let lo = wrapping_mul(i, HELD_MAX);
+    let n = buf.len();
+    for k in 0..n {
+        let _set = c.held.try_set(wrapping_add(lo, k), byte(in buf, k));
+    }
+    let _len = c.held_len.try_set(i, n);
+    Result::Ok(true)
+}
+
+fn control_frames(inout c: UniCore, id: u64) -> Result[bool, ConnectionError] {
+    loop {
+        let f = match reader_next(inout c.reader) {
+            Result::Ok(f) => f,
+            Result::Err(e) => return Result::Err(
+                ConnectionError::Frame {
+                    stream_id: id,
+                    error: e
+                }
+            ),
+        };
+        let done = match f {
+            FrameOut::None => true,
+            _ => false,
+        };
+        if done {
+            return Result::Ok(true);
+        }
+        match control_frame(inout c, id, f) {
+            Result::Ok(_x) => {}
+            Result::Err(e) => return Result::Err(e),
+        }
+    }
+}
+
+fn is_uni(id: u64) -> bool {
+    (id & 2) != 0
+}
+
+fn is_server_initiated(id: u64) -> bool {
+    (id & 1) != 0
+}
+
+fn frame_type(f: FrameOut) -> u64 {
+    match f {
+        FrameOut::Data => 0x00,
+        FrameOut::Headers => 0x01,
+        FrameOut::CancelPush(_v) => 0x03,
+        FrameOut::SettingsFrame(_s) => 0x04,
+        FrameOut::PushPromise => 0x05,
+        FrameOut::GoAway(_v) => 0x07,
+        FrameOut::MaxPushId(_v) => 0x0d,
+        FrameOut::PriorityUpdateFrame(u) => if u.push {
+            0xf0701
+        } else {
+            0xf0700
+        },
+        FrameOut::WebTransportStream(_v) => 0x41,
+        FrameOut::Unknown(t) => t,
+        FrameOut::None => 0,
+    }
+}
+
+fn unexpected(id: u64, f: FrameOut) -> Result[bool, ConnectionError] {
+    Result::Err(
+        ConnectionError::FrameUnexpected {
+            stream_id: id,
+            frame_type: frame_type(f)
+        }
+    )
+}
+
+fn control_frame(inout c: UniCore, id: u64, f: FrameOut) -> Result[bool, ConnectionError] {
+    let first = match c.peer_settings {
+        Option::Some(_s) => false,
+        Option::None => true,
+    };
+    if first {
+        return match f {
+            FrameOut::SettingsFrame(s) => {
+                c.peer_settings = Option::Some(s);
+                c.cmds.push(UniCmd::PeerSettings(s));
+                Result::Ok(true)
+            }
+            _ => Result::Err(ConnectionError::MissingSettings),
+        };
+    }
+    match f {
+        FrameOut::Unknown(_t) => {
+            c.cmds.push(UniCmd::UnknownFrame);
+            Result::Ok(true)
+        }
+        FrameOut::GoAway(v) => {
+            // From a server: a client-initiated bidi stream ID. From a
+            // client: a push ID. It must never increase (§5.2).
+            if !c.server && (is_uni(v) || is_server_initiated(v)) {
+                return Result::Err(ConnectionError::BadGoaway(v));
+            }
+            let up = match c.goaway {
+                Option::Some(prev) => v > prev,
+                Option::None => false,
+            };
+            if up {
+                return Result::Err(ConnectionError::BadGoaway(v));
+            }
+            c.goaway = Option::Some(v);
+            c.cmds.push(UniCmd::GoAway(v));
+            Result::Ok(true)
+        }
+        FrameOut::MaxPushId(v) => {
+            if !c.server {
+                return unexpected(id, f);
+            }
+            let down = match c.max_push_id {
+                Option::Some(prev) => v < prev,
+                Option::None => false,
+            };
+            if down {
+                return Result::Err(ConnectionError::BadPushId(v));
+            }
+            c.max_push_id = Option::Some(v);
+            Result::Ok(true)
+        }
+        FrameOut::PriorityUpdateFrame(u) => {
+            if !c.server {
+                return unexpected(id, f);
+            }
+            // Push is never enabled, so no push ID is valid (RFC 9218 §7.2).
+            if u.push {
+                return Result::Err(ConnectionError::BadPushId(u.element_id));
+            }
+            if is_uni(u.element_id) || is_server_initiated(u.element_id) {
+                return Result::Err(ConnectionError::BadStreamId(u.element_id));
+            }
+            c.cmds.push(UniCmd::PriorityUpdate(u));
+            Result::Ok(true)
+        }
+        FrameOut::CancelPush(v) => {
+            // Push is never used: any ID past MAX_PUSH_ID is an error, others
+            // refer to pushes that never happened (ignored).
+            let bad = match c.max_push_id {
+                Option::Some(m) => v > m,
+                Option::None => true,
+            };
+            if !c.server || bad {
+                return Result::Err(ConnectionError::BadPushId(v));
+            }
+            Result::Ok(true)
+        }
+        _ => unexpected(id, f),
+    }
+}
