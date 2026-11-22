@@ -23,6 +23,7 @@ const K_BOX: u8 = 5;
 const K_STR: u8 = 6;
 const K_OBJECT: u8 = 7;
 const K_EXTERN: u8 = 8;
+const K_CALLBACK: u8 = 9;
 
 const P_IN: u8 = 1;
 const P_INOUT: u8 = 2;
@@ -205,6 +206,10 @@ impl Json {
             self.boolean(n.owned);
         } else if n.kind == K_OBJECT {
             self.text("object");
+            self.key("name");
+            self.sym(in i, n.name);
+        } else if n.kind == K_CALLBACK {
+            self.text("callback");
             self.key("name");
             self.sym(in i, n.name);
         } else {

@@ -202,6 +202,38 @@ fn policy_matches_rust() {
     assert_eq!(bad, 0);
 }
 
+/// Mutate the field written between two reads. Forwarding must account for
+/// the exact place even when two fields have the same scalar type.
+#[test]
+fn projected_writes_match_the_rust_policy() {
+    for field in ["left", "right"] {
+        let source = format!(
+            "copy struct Pair {{ left: u64, right: u64 }}
+             fn update(inout p: Pair, n: u64) -> u64 {{
+                 let first = p.left;
+                 p.{field} = n;
+                 wrapping_add(first, p.left)
+             }}"
+        );
+        let parsed = vesper::parser::parse(&source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = vesper::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let world = &checked.world;
+        let mut rust = vesper::ir_opt_policy::native_input(world);
+        let prep = prepare(world, &rust, MODE_OPTIMIZE).unwrap();
+        let count = vesper::ir_opt_policy::optimize(world, &mut rust).unwrap();
+        let words = policy().words(&prep.input);
+        let (result, program) = finish(world, &prep, &words, MODE_OPTIMIZE);
+        assert_eq!(result, Ok(count), "write to {field}");
+        assert_eq!(
+            format!("{:#?}", program.unwrap()),
+            format!("{rust:#?}"),
+            "write to {field}"
+        );
+    }
+}
+
 /// The package against the Rust policy and against @vesper/ir-opt without
 /// the screen, ABBA, encoding and the Rust tail included on both Vesper
 /// sides.

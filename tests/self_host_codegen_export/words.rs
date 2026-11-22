@@ -11,7 +11,7 @@
 //! - types: `count`, then the [`AbiType`] nodes in post-order (a node's
 //!   parts first), hash-consed, so equal types have equal indices. A node
 //!   is `kind, name, flag, n, child * n` with kinds `K_*` below; `name` is
-//!   the scalar, named, object or extern name (0 when it has none), and
+//!   the scalar, named, object, extern or callback name (0 when it has none), and
 //!   `flag` is `Str`'s `owned`.
 //! - the header: abi, library, option_mirrors, the optional types path.
 //! - runtime: present; then seq_new, seq_free, live_allocations, optional
@@ -41,6 +41,7 @@ pub const K_BOX: u64 = 5;
 pub const K_STR: u64 = 6;
 pub const K_OBJECT: u64 = 7;
 pub const K_EXTERN: u64 = 8;
+pub const K_CALLBACK: u64 = 9;
 
 #[derive(Default)]
 struct Enc {
@@ -77,6 +78,7 @@ impl Enc {
             AbiType::Str { owned } => (K_STR, 0, *owned as u64, vec![]),
             AbiType::Object { name } => (K_OBJECT, self.name(name), 0, vec![]),
             AbiType::Extern { name } => (K_EXTERN, self.name(name), 0, vec![]),
+            AbiType::Callback { name } => (K_CALLBACK, self.name(name), 0, vec![]),
         };
         let ids: Vec<u64> = children.into_iter().map(|c| self.ty(c)).collect();
         let mut key = vec![kind, name, flag, ids.len() as u64];
