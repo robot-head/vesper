@@ -1,9 +1,12 @@
-//! The export glue swap (self-hosting SH4 lane 12, #1286): the default
+//! The export ABI swap (self-hosting SH4 lane 12, #1286): the default
 //! `vesper` and `vesper-hybrid`, whose `export` hook emits the export ABI
 //! v2 glue in Vesper (modules/codegen_export), build every library a port
 //! crate links (`PORTS`, the `Port::new` calls of crates/*/build.rs) with
-//! `build --lib`, and the objects must be byte-identical. The hybrid's
-//! stats show the hook emitted each v2 library's glue.
+//! `build --lib`, and the objects and interface files must be
+//! byte-identical. The hybrid's `plan` and `interface_json` hooks plan and
+//! write every interface in Vesper (modules/codegen_export), and its stats
+//! show the hooks planned and wrote each library and emitted each v2
+//! library's glue.
 //!
 //! `CODEGEN_EXPORT_PORTS=aura,warp` limits the corpus. The default
 //! compiler is found as tests/differential.rs finds it.
@@ -76,14 +79,16 @@ fn selected(library: &str) -> bool {
     }
 }
 
-/// `build --lib` of `input` with `compiler`: the object bytes and stderr.
+/// `build --lib` of `input` with `compiler`: the object bytes, the
+/// interface file and stderr.
 fn build(
     compiler: &Path,
     library: &str,
     input: &Path,
     out: &Path,
     optimize: bool,
-) -> (Vec<u8>, String) {
+) -> (Vec<u8>, Vec<u8>, String) {
+    let json = out.with_extension("json");
     let mut c = Command::new(compiler);
     c.arg("build");
     if !optimize {
@@ -94,26 +99,23 @@ fn build(
         .arg(input)
         .arg("-o")
         .arg(out)
+        .arg("--interface")
+        .arg(&json)
         .env("VESPER_HYBRID_STATS", "1")
         .output()
         .unwrap_or_else(|e| panic!("{}: {e}", compiler.display()));
     let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
     assert!(o.status.success(), "{library}: {}", stderr);
     let bytes = std::fs::read(out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
-    (bytes, stderr)
+    let interface = std::fs::read(&json).unwrap_or_else(|e| panic!("{}: {e}", json.display()));
+    (bytes, interface, stderr)
 }
 
-/// The number of libraries whose glue the hybrid's Vesper module emitted.
-fn glue_count(stderr: &str) -> u64 {
+/// The number after `prefix` on the hybrid's stats line that starts with it.
+fn stat(stderr: &str, prefix: &str) -> u64 {
     stderr
         .lines()
-        .find_map(|l| {
-            l.strip_prefix("vesper-hybrid: codegen emitted the export glue of ")?
-                .split(' ')
-                .next()?
-                .parse()
-                .ok()
-        })
+        .find_map(|l| l.strip_prefix(prefix)?.split(' ').next()?.parse().ok())
         .unwrap_or(0)
 }
 
@@ -127,6 +129,8 @@ const OPTIMIZED: &[&str] = &["alloc", "semver", "wheel"];
 struct Outcome {
     builds: u64,
     swapped: u64,
+    planned: u64,
+    written: u64,
     differ: Vec<String>,
 }
 
@@ -140,19 +144,28 @@ fn compare(port: &Port, repo: &Path, scratch: &Path, default: &Path, hybrid: &Pa
         }
         let a = scratch.join(format!("{library}-{optimize}-rust.o"));
         let b = scratch.join(format!("{library}-{optimize}-hybrid.o"));
-        let (rust, _) = build(default, library, &input, &a, optimize);
-        let (vesper, stderr) = build(hybrid, library, &input, &b, optimize);
+        let (rust, rust_json, _) = build(default, library, &input, &a, optimize);
+        let (vesper, vesper_json, stderr) = build(hybrid, library, &input, &b, optimize);
         out.builds += 1;
-        out.swapped += glue_count(&stderr);
+        out.swapped += stat(
+            &stderr,
+            "vesper-hybrid: codegen emitted the export glue of ",
+        );
+        out.planned += stat(&stderr, "vesper-hybrid: codegen planned ");
+        out.written += stat(&stderr, "vesper-hybrid: codegen wrote ");
         if rust != vesper {
             out.differ.push(format!("{library} (optimize {optimize})"));
+        }
+        if rust_json != vesper_json {
+            out.differ
+                .push(format!("{library} interface (optimize {optimize})"));
         }
     }
     out
 }
 
 #[test]
-fn export_glue_objects_match_rust() {
+fn export_objects_and_interfaces_match_rust() {
     let repo = repository();
     let default = default_compiler();
     let hybrid = hybrid();
@@ -171,6 +184,8 @@ fn export_glue_objects_match_rust() {
                     let mut t = total.lock().unwrap();
                     t.builds += o.builds;
                     t.swapped += o.swapped;
+                    t.planned += o.planned;
+                    t.written += o.written;
                     t.differ.extend(o.differ);
                 }
             });
@@ -180,12 +195,19 @@ fn export_glue_objects_match_rust() {
     let mut t = total.into_inner().unwrap();
     t.differ.sort();
     eprintln!(
-        "export glue: {} of {} objects differ over {} libraries; the hook emitted {} glues",
+        "export: {} of {} objects and interfaces differ over {} libraries; the hooks planned {} interfaces, wrote {} interface files and emitted {} glues",
         t.differ.len(),
         t.builds,
         ports.len(),
+        t.planned,
+        t.written,
         t.swapped
     );
     assert!(t.differ.is_empty(), "objects differ: {:?}", t.differ);
     assert!(t.swapped > 0, "the export hook never ran");
+    assert_eq!(t.planned, t.builds, "the plan hook missed a build");
+    assert_eq!(
+        t.written, t.builds,
+        "the interface_json hook missed a build"
+    );
 }

@@ -1143,6 +1143,8 @@ fn compile_entry<M: Module>(
     entry_effects: EntryEffects,
     linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
+    // One encode-once swap input per compilation (SH4 lane 2, #1276).
+    let _inputs = crate::swap_input::open(world);
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     // Foreign capabilities are granted by the package's `.vsys` import.
     let trace_ok = entry_effects == EntryEffects::TraceHost
@@ -3970,12 +3972,25 @@ impl<M: Module> Codegen<'_, '_, M> {
             let before_inst_drops = f.box_drops_before_inst.get(&i);
             let after_inst_drops = f.box_drops_after_inst.get(&i);
             for (inst_idx, inst) in block.instructions.iter().enumerate() {
-                if refresh_all || before_inst_drops.is_some() || after_inst_drops.is_some() {
+                if refresh_all {
                     for (id, register) in &registers {
                         values.insert(*id, self.use_var(*register));
                     }
                 } else {
-                    for id in crate::ir_inline::operands(&inst.op) {
+                    // Operands, and the values this instruction's Box drops
+                    // read. Refreshing every register here made each local
+                    // live across the whole graph, a block parameter at
+                    // every join, whenever the function planned a drop (#1426).
+                    let drop_reads = [before_inst_drops, after_inst_drops]
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .filter(|(d_idx, _)| *d_idx == inst_idx)
+                        .filter_map(|(_, drop)| drop.value());
+                    for id in crate::ir_inline::operands(&inst.op)
+                        .into_iter()
+                        .chain(drop_reads)
+                    {
                         if let Some(register) = registers.get(&id) {
                             values.insert(id, self.use_var(*register));
                         }
@@ -4620,12 +4635,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                     }
                 }
             }
-            if refresh_all || f.box_drops_before_term.contains_key(&i) {
+            if refresh_all {
                 for (id, register) in &registers {
                     values.insert(*id, self.use_var(*register));
                 }
             } else {
-                for id in crate::ir_inline::terminator_operands(&block.terminator) {
+                let drop_reads = f
+                    .box_drops_before_term
+                    .get(&i)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(crate::fip::FipDrop::value);
+                for id in crate::ir_inline::terminator_operands(&block.terminator)
+                    .into_iter()
+                    .chain(drop_reads)
+                {
                     if let Some(register) = registers.get(&id) {
                         values.insert(id, self.use_var(*register));
                     }

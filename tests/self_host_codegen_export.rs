@@ -19,6 +19,8 @@
 //! libraries (the default is all of them).
 #[path = "common/check_harness.rs"]
 mod check_harness;
+#[path = "self_host_codegen_export/plan_words.rs"]
+mod plan_words;
 #[path = "self_host_codegen_export/ports.rs"]
 mod ports;
 #[path = "self_host_codegen_export/words.rs"]
@@ -441,4 +443,231 @@ fn binding_cost() {
             })
         },
     );
+}
+
+// ---------------------------------------------------------------- planner
+
+/// What `plan_with` saw during one compile: its inputs as words, and the
+/// Rust planner's answer.
+type Seen = (
+    Vec<u8>,
+    Result<LibraryInterface, Vec<vesper::native::export::ExportError>>,
+);
+
+thread_local! {
+    static SEEN: std::cell::RefCell<Vec<Seen>> = const { std::cell::RefCell::new(vec![]) };
+}
+
+/// The `plan` hook of [`planned`]: records the inputs and the Rust answer,
+/// then stops the compile (the object is not needed).
+fn record_plan(
+    world: &vesper::check::World,
+    public: &std::collections::BTreeSet<String>,
+    library: &str,
+    directives: &vesper::native::export::Directives,
+) -> Option<Result<LibraryInterface, Vec<vesper::native::export::ExportError>>> {
+    let input = plan_words::plan_input(world, public, library, directives);
+    let rust = vesper::native::export::plan_native(world, public, library, directives);
+    SEEN.with(|s| s.borrow_mut().push((input, rust)));
+    Some(Err(vec![]))
+}
+
+/// The plans `vesper build --lib` makes compiling `source` as `library`.
+fn planned(source: &str, library: &str) -> Vec<Seen> {
+    let options = vesper::native::export::LibraryOptions {
+        library,
+        target: None,
+        optimize: false,
+    };
+    let hooks = vesper::codegen_swap::CodegenHooks {
+        plan: Some(record_plan),
+        ..Default::default()
+    };
+    SEEN.with(|s| s.borrow_mut().clear());
+    let r = vesper::codegen_swap::with_hooks(hooks, || {
+        vesper::native::export::compile_source_with("plan.ves", source, &options, &[])
+    });
+    let seen = SEEN.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    if seen.is_empty()
+        && let Err(e) = r
+    {
+        eprintln!("plan: {library} was never planned: {e}");
+    }
+    seen
+}
+
+/// Sources the planner refuses (or plans in an unusual way), one rule each.
+const PLAN_CASES: &[(&str, &str)] = &[
+    ("Bad-Name", "pub fn f() -> i64 { 1 }\n"),
+    ("empty", "fn hidden() -> i64 { 1 }\n"),
+    (
+        "generic",
+        "pub fn id[T](in x: T) -> i64 { 1 }\npub fn one() -> i64 { 1 }\n",
+    ),
+    (
+        "effect",
+        "effect Log { fn log(x: i64) -> Unit; }\npub fn f() -> Unit eff [Log] { Log::log(1) }\n",
+    ),
+    (
+        "fail",
+        "enum E { A, B(i64) }\npub fn f(x: i64) -> i64 eff [Fail[E]] { x }\n",
+    ),
+    (
+        "failseq",
+        "pub fn f(x: i64) -> i64 eff [Fail[ChunkSeq[i64]]] { x }\n",
+    ),
+    (
+        "seqs",
+        "pub fn total(in xs: Slice[i64]) -> i64 { let mut t: i64 = 0; for i in 0..xs.len() { t = wrapping_add(t, match xs.try_get(i) { Option::Some(v) => v, Option::None => 0 }); } t }\npub fn make(n: u64) -> ChunkSeq[i64] { ChunkSeq::with_capacity[i64](n) }\n",
+    ),
+    (
+        "strings",
+        "pub fn len(in s: Str) -> u64 { s.len() }\npub fn grow(inout s: String) -> Unit { s.push_str(\"x\") }\n",
+    ),
+    ("strview", "pub fn f() -> Str { \"x\" }\n"),
+    (
+        "handles",
+        "struct Bag { items: ChunkSeq[i64], name: String }\npub fn new_bag() -> Bag { Bag { items: ChunkSeq::new[i64](), name: String::new() } }\npub fn count(in b: Bag) -> u64 { b.items.len() }\npub fn eat(sink b: Bag) -> Unit { () }\n",
+    ),
+    (
+        "linear",
+        "linear struct Token { id: i64 }\npub fn mint() -> Token { Token { id: 1 } }\npub fn burn(sink t: Token) -> i64 { let Token { id } = t; id }\n",
+    ),
+    (
+        "copies",
+        "struct P { x: i64, y: f64 }\nenum Shape { Dot, Line(P, P) }\nstruct Empty {}\npub fn mid(a: P, b: P) -> P { P { x: a.x, y: b.y } }\npub fn shape(s: Shape) -> i64 { 0 }\npub fn empty(e: Empty) -> i64 { 0 }\npub fn opt(x: Option[i64]) -> Result[i64, bool] { Result::Ok(1) }\npub fn pair(t: (i64, bool)) -> (i64, bool) { t }\n",
+    ),
+    (
+        "v3",
+        "// @export abi 3 options\ncopy struct P { x: i64, y: f64 }\nenum Shape { Dot, Line(P, P) }\npub fn mid(inout a: P, in b: P) -> P { P { x: a.x, y: b.y } }\npub fn first(in ps: Slice[P]) -> Option[P] { Option::None }\npub fn opt(in x: Option[i64]) -> Result[i64, bool] { Result::Ok(1) }\npub fn shape(s: Shape) -> i64 { 0 }\n",
+    ),
+    (
+        "v4",
+        "// @export abi 4\nstruct Bag { items: ChunkSeq[i64] }\npub fn new_bag() -> Bag { Bag { items: ChunkSeq::new[i64]() } }\npub fn count(in b: Bag) -> u64 { b.items.len() }\n",
+    ),
+    (
+        "wide",
+        "pub fn add(a: i128, b: u128) -> i128 { a }\nstruct W { lo: i128, hi: u64 }\npub fn w(x: W) -> u64 { x.hi }\n",
+    ),
+    (
+        "unit",
+        "pub fn nothing() -> Unit { () }\npub fn flag(b: bool) -> bool { b }\n",
+    ),
+    ("never", "pub fn boom() -> Never { loop { } }\n"),
+    (
+        "generic_type",
+        "struct G[T] { v: T }\npub fn g(x: G[i64]) -> i64 { x.v }\n",
+    ),
+    (
+        "boxes",
+        "struct Node { v: i64, next: Option[Box[Node]] }\npub fn leaf(v: i64) -> Node { Node { v: v, next: Option::None } }\npub fn val(in n: Node) -> i64 { n.v }\npub fn boxed(v: i64) -> Box[i64] { Box::new(v) }\n",
+    ),
+    (
+        "seq_of_handles",
+        "struct H { s: String }\npub fn hs() -> ChunkSeq[H] { ChunkSeq::new[H]() }\n",
+    ),
+    (
+        "instances",
+        "// @export instance first[i64]\n// @export instance first_bool = first[bool]\n// @export instance first_again = first[i64]\npub fn first[T](in xs: Slice[T]) -> u64 { xs.len() }\n",
+    ),
+    (
+        "copy_structs",
+        "copy struct P { x: i64, y: f64 }\ncopy struct Q { p: P, n: u8 }\npub fn q(a: P) -> Q { Q { p: a, n: 1 } }\npub fn ps(in xs: Slice[P]) -> u64 { xs.len() }\n",
+    ),
+    (
+        "v3_plain",
+        "// @export abi 3\ncopy struct P { x: i64 }\ncopy struct E0 {}\nenum K { A, B }\npub fn p(inout a: P, e: E0, k: K) -> Option[P] { Option::None }\n",
+    ),
+    (
+        "tuple_handle",
+        "struct H { s: String }\npub fn two() -> (H, Option[H]) { (H { s: String::new() }, Option::None) }\npub fn bad() -> (H, Box[i64]) { (H { s: String::new() }, Box::new(1)) }\n",
+    ),
+];
+
+#[test]
+fn vesper_plans_match_rust() {
+    let entry = package().entry("export_plan", true);
+    let scratch = std::env::temp_dir().join(format!("vesper-plan-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).expect("scratch directory");
+    let mut sources: Vec<(String, String)> = PLAN_CASES
+        .iter()
+        .map(|(l, s)| (l.to_string(), s.to_string()))
+        .collect();
+    for port in PORTS.iter().filter(|p| selected(p.1)) {
+        let input = port_input(port, &repo(), &scratch).unwrap();
+        // A package port goes through the CLI's package assembly, which the
+        // hybrid's tests/codegen_export.rs covers.
+        if input.is_dir() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&input).unwrap();
+        sources.push((port.1.to_string(), text));
+    }
+    let _ = std::fs::remove_dir_all(&scratch);
+    let (mut plans, mut bad, mut refused, mut none) = (0, 0, 0, vec![]);
+    for (library, source) in &sources {
+        let seen = planned(source, library);
+        if seen.is_empty() {
+            none.push(library.clone());
+        }
+        for (input, rust) in seen {
+            plans += 1;
+            refused += rust.is_err() as usize;
+            let vesper = plan_words::decode_plan(&entry.words(&input));
+            if std::env::var_os("PLAN_SHOW").is_some() {
+                eprintln!("plan: {library}: {rust:?}");
+            }
+            if vesper != rust {
+                bad += 1;
+                if bad <= 5 {
+                    eprintln!("plan: {library} differs\n rust:   {rust:?}\n vesper: {vesper:?}");
+                }
+            }
+        }
+    }
+    eprintln!(
+        "plans: {bad} of {plans} differ ({refused} refused; {} sources, {} never planned: {none:?})",
+        sources.len(),
+        none.len()
+    );
+    assert_eq!(bad, 0);
+}
+
+// ------------------------------------------------------------ interface file
+
+/// `interface_json` in Vesper (json.ves) against serde_json, for every
+/// library of the corpus and every interface the planner cases plan.
+#[test]
+fn vesper_interface_json_matches_rust() {
+    let entry = package().entry("interface_text", true);
+    let mut interfaces: Vec<(String, LibraryInterface)> = corpus()
+        .iter()
+        .map(|b| (b.library.to_string(), b.interface.clone()))
+        .collect();
+    for (library, source) in PLAN_CASES {
+        for (_, plan) in planned(source, library) {
+            if let Ok(i) = plan {
+                interfaces.push((library.to_string(), i));
+            }
+        }
+    }
+    let (mut bad, mut bytes) = (0, 0);
+    for (library, i) in &interfaces {
+        let rust = vesper::native::export::interface_json(i).unwrap();
+        bytes += rust.len();
+        let vesper = entry.text(&words::binding_input(i, &BindingOptions::default()));
+        if rust != vesper {
+            bad += 1;
+            if bad <= 5 {
+                let d = first_difference(&rust, &vesper)
+                    .unwrap_or_else(|| "in the line endings".into());
+                eprintln!("interface: {library} differs {d}");
+            }
+        }
+    }
+    eprintln!(
+        "interface files: {bad} of {} differ ({bytes} bytes)",
+        interfaces.len()
+    );
+    assert_eq!(bad, 0);
 }

@@ -212,6 +212,13 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]),
+        # SH4 lane 2 (#1276): the encode-once checker inputs over the same
+        # corpus.
+        "test/self_host_swap_inputs": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # Self-hosting SH4 lane 12 (#1286): the export ABI's binding generator
         # and directives in Vesper, over every library a port crate links
         # (built with the vesper binary from each crate's own files).
@@ -883,6 +890,7 @@ vesper_crate(
         # Four round-trip tests and the pass harness share one stage build;
         # past 900 s on a busy runner.
         "test/self_host_place_ir": "eternal",
+        "test/self_host_swap_inputs": "long",
         # SH4 lane 14 (#1288): 22 Cranelift image builds and the package's
         # JIT compile before the comparisons; 5-8 minutes unoptimized.
         "test/self_host_freestanding": "eternal",
