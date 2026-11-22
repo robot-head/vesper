@@ -1,0 +1,40 @@
+// @export abi 3
+//
+// @vesper/aether-rng for x86_64: the hardware random-number instruction
+// behind vesper-aether's clone entropy (SH6 lane 14, #1409), RDRAND, found
+// through CPUID. build.rs (and BUILD.bazel) build this package on x86_64
+// and ../aarch64/ on AArch64; both export the same two functions.
+use @vesper-std/cpu::{
+    x86_has_rdrand,
+    x86_rdrand64
+};
+
+// Retries per word, as Intel's DRNG guide recommends for RDRAND.
+const RETRIES: u64 = 10;
+
+// 1 when the CPU has RDRAND, else 0 (2 is AArch64's RNDR).
+pub fn rng_instruction() -> u64 eff [Ffi[StdCpu]] {
+    if x86_has_rdrand() {
+        1
+    } else {
+        0
+    }
+}
+
+// One hardware random word into `out`: true when the instruction exists
+// and delivered one within the retries.
+pub fn rng_word(inout out: u64) -> bool eff [Ffi[StdCpu]] {
+    if !x86_has_rdrand() {
+        return false;
+    }
+    for _i in 0..RETRIES {
+        match x86_rdrand64() {
+            Option::Some(v) => {
+                out = v;
+                return true;
+            }
+            Option::None => {}
+        }
+    }
+    false
+}

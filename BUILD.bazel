@@ -1047,6 +1047,16 @@ vesper_package(
     visibility = ["//visibility:public"],
 )
 
+# @vesper-std/cpu (audit gap G4), for vesper-aether's hardware RNG
+# (SH6 lane 14, #1409).
+vesper_package(
+    name = "std_cpu_package",
+    srcs = glob(["packages/vesper-std/cpu/src/**/*.ves"]),
+    manifest = "packages/vesper-std/cpu/Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["packages/vesper-std/cpu/cpu.vsys"],
+)
+
 vesper_package(
     name = "std_hash_package",
     srcs = glob(["packages/vesper-std/hash/src/**/*.ves"]),
