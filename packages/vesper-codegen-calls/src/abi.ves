@@ -488,6 +488,8 @@ pub fn declare(
         } else {
             lines.extend(in "vesper_function_".as_bytes());
             push_decimal(inout lines, i);
+            lines.push(95);
+            push_symbol_key(in names, x.key, inout lines);
         }
         lines.extend(in " : ".as_bytes());
         put_sig(in sig, inout lines);
@@ -495,4 +497,34 @@ pub fn declare(
     }
     o.extend(in lines.as_slice());
     true
+}
+
+// The key part of `local_symbol` (src/native.rs, #1451): the first 96
+// characters of the instance key, each outside `[A-Za-z0-9_]` as `_`. A
+// UTF-8 continuation byte belongs to the character before it, so it adds
+// nothing.
+fn push_symbol_key(in names: Names, key: u32, inout out: ChunkSeq[u8]) {
+    let n = names.size(key);
+    let mut chars: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = names.byte(key, i);
+        i = add(i, 1);
+        if c >= 128 && c < 192 {
+            continue;
+        }
+        if chars >= 96 {
+            break;
+        }
+        chars = add(chars, 1);
+        let keep = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+        if keep {
+            out.push(c);
+        } else {
+            out.push(95);
+        }
+    }
 }
