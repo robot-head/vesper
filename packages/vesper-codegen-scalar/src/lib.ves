@@ -491,24 +491,12 @@ fn ops_new(inout names: Names, inout tab: Tables) -> Ops {
 
 impl Ops {
     fn is_comparison(self, op: u32) -> bool {
-        op
-            == self
-            .eq
-            || op
-            == self
-            .ne
-            || op
-            == self
-            .lt
-            || op
-            == self
-            .le
-            || op
-            == self
-            .gt
-            || op
-            == self
-            .ge
+        op == self.eq
+            || op == self.ne
+            || op == self.lt
+            || op == self.le
+            || op == self.gt
+            || op == self.ge
     }
 }
 
@@ -732,8 +720,7 @@ impl Gen {
             return;
         }
         let conv = get(in self.tab.conv, op);
-        if (get(in self.tab.float, op) & FLOAT_INTRINSIC)
-            != 0
+        if (get(in self.tab.float, op) & FLOAT_INTRINSIC) != 0
             || (conv != 0 && self.float_type(tv)) {
             put(inout self.o, in "float-unary");
             return;
@@ -780,8 +767,7 @@ impl Gen {
                 if overflow {
                     let high = kind_max(to) < kind_max(from);
                     let low = !kind_unsigned(from)
-                        && kind_min_magnitude(to)
-                        < kind_min_magnitude(from);
+                        && kind_min_magnitude(to) < kind_min_magnitude(from);
                     if low {
                         put(inout self.o, in " low");
                     }
@@ -1054,21 +1040,11 @@ impl Gen {
             let blk = self.p.block(add(f.b0, bi));
             for ii in 0..blk.ic {
                 let i = self.p.inst(add(blk.i0, ii));
-                let known = i
-                    .op
-                    == OP_CONST
-                    || i
-                    .op
-                    == OP_UNARY
-                    || i
-                    .op
-                    == OP_BINARY
-                    || i
-                    .op
-                    == OP_LOOP
-                    || i
-                    .op
-                    == OP_EXIT;
+                let known = i.op == OP_CONST
+                    || i.op == OP_UNARY
+                    || i.op == OP_BINARY
+                    || i.op == OP_LOOP
+                    || i.op == OP_EXIT;
                 if known {
                     push_decimal(inout self.o, bi);
                     self.o.push(46);
@@ -1091,12 +1067,12 @@ impl Gen {
                         self.o.push(32);
                         self
                             .decide_binary(
-                            op,
-                            self.p.op(inc(i.a)),
-                            self.p.op(add(i.a, 2)),
-                            i.s0,
-                            i.s1
-                        );
+                                op,
+                                self.p.op(inc(i.a)),
+                                self.p.op(add(i.a, 2)),
+                                i.s0,
+                                i.s1
+                            );
                     } else if i.op == OP_LOOP {
                         put(inout self.o, in "loop");
                     } else {
@@ -1287,16 +1263,10 @@ impl Gen {
         let ops = self.ops;
         // The coerce words of the result and of both operands, one byte
         // each (below).
-        if (get(in self.tab.float, op) & FLOAT_MATH)
-            != 0
-            || get(in self.tab.bitb, op)
-            != 0
-            || op
-            == ops
-            .and_and
-            || op
-            == ops
-            .or_or {
+        if (get(in self.tab.float, op) & FLOAT_MATH) != 0
+            || get(in self.tab.bitb, op) != 0
+            || op == ops.and_and
+            || op == ops.or_or {
             return;
         }
         let c = widen_u64(ck | (ka << 8) | (kb << 16));
@@ -1305,8 +1275,7 @@ impl Gen {
             // `Codegen::shift` on the left operand's kind; a shift the
             // checker could not prove in range stays on the Rust code.
             let k = self.kind_of(ta);
-            if k
-                == 0
+            if k == 0
                 || ((op == ops.shl || op == ops.shr) && self.c.world.may_overflow(i.s0, i.s1)) {
                 return;
             }

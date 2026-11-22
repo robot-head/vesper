@@ -43,8 +43,55 @@ In practice, a crate or compiler module flips when:
    last Rust commit.
 
 `scripts/ci/flip_gate.py` (SH6 lane 1) checks 1 and 2 and prints the row for
-the census. A lane that passes flips without asking the owner. Until the
-gate merges, lanes run this recipe by hand and paste the numbers.
+the census. A lane that passes flips without asking the owner; the recipe is
+below.
+
+## Flipping a module
+
+Every flip PR runs `scripts/ci/flip_gate.py` and pastes its two output lines
+(the verdict and the scoreboard row) into the PR body. A lane that gets PASS
+flips and deletes without asking the owner.
+
+1. **Write the gate's configuration** at `crates/<crate>/flip-gate.toml` (a
+   compiler module: `scripts/ci/flip-gate/<module>.toml`). It lists the build
+   commands, every test command (the crate's tests against the Vesper build,
+   and the seed's), the differential, one `[[abba]]` table per workload and
+   the Rust paths the flip deletes (`rust = [...]`, counted for the
+   scoreboard). The format is in the script's header;
+   `scripts/ci/flip-gate/vesper-span.toml` is a worked example.
+2. **ABBA.** Either point `rust` and `vesper` at two commands that run the
+   same workload once (an `abba once <workload> <rust|vesper> <batches>`
+   example, or the Rust and hybrid compilers on one package), and the gate
+   alternates them Rust, Vesper, Vesper, Rust for 30 epochs; or let the
+   harness do its own ABBA and print
+   `flip-gate pairs <workload> <rust_ns>:<vesper_ns> ...`, one pair per
+   epoch. Use release builds, the port-compiler profile and an idle host;
+   size each run at 0.1 s or more so process start stays small.
+   **Both halves get the host CPU:** the gate runs the build and ABBA
+   commands with `RUSTFLAGS="-C target-cpu=native"` (added to any flags
+   already set), and the port harness builds the port objects for the same
+   CPU features as the Rust half (#1454). Running a benchmark by hand, set
+   it yourself. `--portable` turns it off; tests and the differential keep
+   your own RUSTFLAGS. Give benchmark builds `--release` or their own target
+   directory so the flag does not rebuild the test artifacts.
+3. **Differential.** The differential command must exit 0. A harness that
+   counts its cases prints
+   `flip-gate differential differences=<D> cases=<C>`, which goes into the
+   row; D must be 0.
+4. **Run it:** `VESPER_PORT_COMPILER=<prebuilt vesper> python3
+   scripts/ci/flip_gate.py <crate>`. Exit 0 is PASS (every test and the
+   differential pass, and every workload's 95% interval has its upper end at
+   or below 1.5x), 1 is FAIL (a failing test, a difference, or a lower end
+   above 1.5x), 2 is INCONCLUSIVE (an interval crosses 1.5x: rerun on a
+   quieter host or with more epochs, `--epochs 60`), 3 a configuration
+   error. The interval is vesper-bench's exact binomial median interval
+   (`analyze_pairs`), computed on exact ratios.
+5. **Flip.** On PASS: make Vesper the only build (a crate outside the
+   compiler's closure deletes its Rust; a crate the compiler links moves
+   its Rust engine to `seed/`, #1102), convert or keep its Rust tests
+   (lane 19), keep `flip-gate.toml` working against the last Rust commit or
+   the seed, and add the gate's row to the scoreboard below and the crate's
+   STATUS in `scripts/rust-census.py`.
 
 ## Where Rust can be deleted, and when
 
@@ -106,7 +153,8 @@ Vesper can do itself.
 | **SH6** | Flip gate and census; Stage 2, the wasm seed and the retirement; the compiler's closure; finish and flip every ported library; the OS and C-API crates on `.vsys`; one crypto shim; Rust-only libraries replaced; Rust tests to Vesper | #1396-#1414 ([plan](../agent-prompts/self-host-sh6/README.md)) |
 | SH6b | The verified backend widened to the compiler (DDC check of §10.2) | after SH6 lane 2 |
 | SH7 (optional) | Vesper-native backend; replaces Cranelift only at its level | after SH6 |
-| Gap waves | Compiler gaps the SH6 lanes report, planned by lane 1 from the reports | as they come |
+| Gap wave 1 | The code-generation and interop gaps the SH6 reports name (Option results, cold inlining, vectors, export calls, slices, platform interop, foreign memory), the wasm seed's breadth, the native walk, and the unowned rows | #1498-#1506, #1508-#1510 ([plan](../agent-prompts/rust-exit-gaps-1/README.md)) |
+| Later gap waves | Planned from each wave's reports | as they come |
 
 ## Scoreboard
 
@@ -115,4 +163,4 @@ the Rust lines deleted.
 
 | Flip | Lane | Differential | Speed (ABBA) | Rust deleted | PR |
 |---|---|---|---|--:|---|
-| | | | | | |
+| `bounds-hoist` (PASS; compiler module, its 2,017 lines go at the retirement) | SH3-12 | 0 differences on 325 cases; tests 2/2 pass | pass 1.15x [1.06x, 1.22x] n=12; build 1.07x [1.01x, 1.09x] n=30 | 0 | #1251 part 4 |

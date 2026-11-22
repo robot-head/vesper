@@ -58,6 +58,47 @@ swapping the operands of the integer `min` compare gave 24 CLIF, object and
 run differences, and swapping two constants of `TiledSeq::new` gave 46 CLIF
 and 23 object differences.
 
+## Part 3: the hybrid install, floats, regions and atomics
+
+Part 3 installs the hook in the hybrid compiler and moves four more
+families into Vesper:
+
+- **Hybrid install.** `packages/vesper-codegen-numeric` now imports
+  `@vesper/cranelift` and its sibling files with `use` items, so
+  `crates/vesper-hybrid/modules/codegen_numeric` builds it as a package and
+  `vesper-hybrid` installs `numeric_hook` as the `numeric` hook. The new
+  `crates/vesper-hybrid/tests/numeric.rs` compiles vector, `TiledSeq`,
+  float, region and atomic programs with both compilers: the objects are
+  equal and 12 to 22 requests per program are answered from Vesper.
+- **Floats** (`src/float_math/native.rs`, `Codegen::flush` in
+  `src/native.rs`): `src/floats.ves`, the nine math intrinsics, float
+  conversions from either float kind and from signed and unsigned integers,
+  the saturating float-to-integer truncation, `to_bits`/`from_bits`, the
+  range test of a checked narrowing (the Rust code still raises) and the
+  `ConstDenorm` flush.
+- **Vector `widen_f64` and `nearest_f32`**, now that the shim has
+  `fvpromote_low` and `fvdemote`: the vector hook declines nothing.
+- **Region blocks** (`src/regions/native.rs`): `src/region_ops.ves`,
+  `open`, `close`, `box`, `get`, `take`, `set`, `checkpoint`, `rewind`,
+  `commit` and `used`, with scalar and aggregate payloads. 128-bit
+  payloads stay in Rust (the shim has no `isplit`/`iconcat`).
+- **Atomics and scoped workers** (`atomic_call`, `parallel_for_call` in
+  `src/native.rs`): `src/atomic_ops.ves`, the element address, `load`,
+  `store`, `swap` and the five `fetch_*` operations, and the
+  `vesper_parallel_for` call. `compare_exchange` stays in Rust (the shim
+  has no `atomic_cas`).
+
+| Differential | Programs | Builds | Differences |
+|---|--:|--:|--:|
+| vectors (now with `widen_f64` on 256 and 512 bits) | 672 | 1,344 | 0 |
+| floats: every op x kind, plain and `ConstDenorm` | 146 | 292 | 0 |
+| regions: tests/fixtures/regions, the verified-codegen corpus, every scalar payload | 23 | 42 | 0 |
+| atomics: every operation of every cell kind and `bool` | 9 | 18 | 0 |
+
+As checks that the comparison can fail, changing one `fetch_add` opcode gave
+32 CLIF, 16 object and 16 run differences, and changing the region capacity
+constant gave 44 CLIF, 42 object and 2 run differences.
+
 ### The dispatch hunks
 
 The graph walk's `INSTRUCTION` request names the IR instruction, but the
@@ -163,6 +204,12 @@ guarded paths: the `numeric` op constants at the end of
 hunks return at once when no `numeric` hook is installed, which the
 default compiler never does, so its objects stay byte-identical.
 
+Part 3 adds hunks of the same kind, also outside the guarded paths, to
+`src/float_math/native.rs`, `src/regions/native.rs` and three functions of
+`src/native.rs` (`flush`, `parallel_for_call`, `atomic_call`), and installs
+the hook only in `crates/vesper-hybrid`. Each hunk asks `swap_numeric`,
+which returns `None` at once without a hook.
+
 ## Compiler gaps
 
 Each was worked around in this lane.
@@ -188,27 +235,29 @@ Each was worked around in this lane.
    one entry per configuration, and the object leaves through
    `object_publish`.
 
-6. **The shim has no `fvpromote_low` or `fvdemote`** (part 2), so the
-   vector `Widen` and `Narrow` conversions stay in Rust.
+6. **The shim had no `fvpromote_low` or `fvdemote`** (part 2). Resolved:
+   the shim added them, and part 3 emits both conversions.
 7. **Division and remainder raise `Fail`, and so does `ChunkSeq::set`**
    (part 2): emission code that is total by construction (`k / per` for a
    power-of-two `per`, a write at an index it just read) must use shifts,
    masks and `try_set`, or declare `Fail`.
+8. **The shim has no `atomic_cas`, `isplit` or `iconcat`** (part 3), so
+   `compare_exchange` and 128-bit region payloads stay in Rust.
+9. **A root `numeric_hook` must live in `lib.ves`** (part 3): a hybrid
+   module's word-function entry is resolved only among the package root's
+   functions, so `vector::hook_entry` is re-exported through `lib.ves`.
+10. **The part 1 test hits the parser's 65,536-token cap** if it
+    concatenates every file, so it keeps the five runtime files and strips
+    their `use` items.
 
 No Rust bug was found.
 
 ## What is left
 
-- **Part 3:** the hybrid install of the `numeric` hook (module
-  `codegen_numeric`), which needs the package to import
-  `@vesper/cranelift` with `use` lines instead of being assembled into one
-  source; then float intrinsics and conversions
-  (`src/float_math/native.rs`), region blocks (`src/regions/native.rs`),
-  `atomic_call` and `parallel_for_call` (`src/native.rs`), and the slice
-  vector loads and stores (`SeqOp::Vector`, which arrive through the `seq`
-  family), each through a dispatch hunk like the two above.
-- **`widen_f64` and `nearest_f32`:** the shim has no `fvpromote_low` or
-  `fvdemote`; the hook declines them and the Rust code emits them.
+- **`compare_exchange` and 128-bit region payloads**, once the shim has
+  `atomic_cas`, `isplit` and `iconcat`.
+- **The slice vector loads and stores** (`SeqOp::Vector`, which arrive
+  through the `seq` family).
 - **After lane 3 (#1277):** the 128-bit helpers (`src/integer_widths/native.rs`).
 - **Runtime swap:** the part 1 runtimes can now be defined into the lent
   module (lane 1 added `declarations()`), replacing `aot_runtime::define`.

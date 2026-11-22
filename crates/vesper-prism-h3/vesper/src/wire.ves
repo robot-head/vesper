@@ -1,4 +1,4 @@
-// QPACK wire patterns (RFC 9204 §4; src/qpack/wire.rs), shared by the
+// QPACK wire patterns (RFC 9204 §4), shared by the
 // encoder and the decoder: each instruction's and field line's first-byte
 // bits and the length of its integer prefix. The enums are untyped, so a
 // bit pattern is a `u8` and a prefix length a `u64` where they are used.

@@ -21,6 +21,9 @@ const MODULES: &[(&str, &str, &str)] = &[
         "port/check_layout.rs",
     ),
     ("hybrid_ir_check", "modules/ir_check", "port/ir_check.rs"),
+    // SH5 lane 10 (#1333): both checker swaps in one library over one
+    // shared world, with word answers.
+    ("hybrid_checks", "modules/checks", "port/checks.rs"),
     // SH2 lane 10 (#1182): the stack-bound report.
     (
         "hybrid_stack_bound",
@@ -30,6 +33,19 @@ const MODULES: &[(&str, &str, &str)] = &[
     // SH4 lane 1 (#1275): the census lowering family, emitted through
     // lent Cranelift handles.
     ("hybrid_codegen", "modules/codegen", "port/codegen.rs"),
+    // SH4 lane 15 (#1289): the wasm backend's core module and WIT.
+    (
+        "hybrid_wasm_backend",
+        "modules/wasm_backend",
+        "port/wasm_backend.rs",
+    ),
+    // SH4 lane 11 (#1285): vector and TiledSeq operations, through the
+    // `numeric` hook.
+    (
+        "hybrid_codegen_numeric",
+        "modules/codegen_numeric",
+        "port/codegen_numeric.rs",
+    ),
     // SH4 lane 12 (#1286): the export ABI v2 glue over the lent module.
     (
         "hybrid_codegen_export",
@@ -44,6 +60,9 @@ const MODULES: &[(&str, &str, &str)] = &[
     ),
     // SH3 lane 11 (#1250): the inliner, through `ir_swap`'s `inline` hook.
     ("hybrid_ir_inline", "modules/ir_inline", "port/ir_inline.rs"),
+    // SH3 lane 10 (#1249): the AST optimizer's producer and checker,
+    // through `optimize`'s table.
+    ("hybrid_optimize", "modules/optimize", "port/optimize.rs"),
     // SH3 lane 9 (#1248): the IR optimizer, through `ir_swap`'s `opt` hook.
     ("hybrid_ir_opt", "modules/ir_opt", "port/ir_opt.rs"),
     // SH3 lane 1 (#1240): the IR swap point's identity round trip.
@@ -54,6 +73,8 @@ const MODULES: &[(&str, &str, &str)] = &[
         "modules/bounds_hoist",
         "port/bounds_hoist.rs",
     ),
+    // SH2 lane 13 (#1185): the declaration pass of the trait frontend.
+    ("hybrid_pact", "modules/pact", "port/pact.rs"),
 ];
 
 /// The divergence check of the differential harness: the enum tag word
@@ -81,6 +102,14 @@ const DIVERGENT_SCOPED_LAYOUT_EDIT: (&str, &str) = (
     "    layout_part(inout s.c, in part[0..0])\n",
 );
 
+/// The same divergence on the shared-world path (#1333): every layout
+/// answer is one byte larger than the layout.
+#[cfg(feature = "divergent")]
+const DIVERGENT_SHARED_LAYOUT_EDIT: (&str, &str) = (
+    "        self.body.push(w(n.size));\n",
+    "        self.body.push(inc(w(n.size)));\n",
+);
+
 /// The IR check's divergence check: every program gets one made-up E0410
 /// (`divergent_words` in modules/ir_check), so every checked file fails.
 #[cfg(feature = "divergent-ir-check")]
@@ -104,6 +133,13 @@ const DIVERGENT_SCOPED_IR_CHECK_EDIT: (&str, &str) = (
     "    divergent_words(in part)\n",
 );
 
+/// The same on the shared-world path (#1333).
+#[cfg(feature = "divergent-ir-check")]
+const DIVERGENT_SHARED_IR_CHECK_EDIT: (&str, &str) = (
+    "    ir_check_task(inout r, in part, inout s.c)\n",
+    "    divergent_words(in part)\n",
+);
+
 /// The inliner's divergence check: an empty report reads back as "nothing
 /// inlined" (`divergent_words` in modules/ir_inline), so optimized objects
 /// keep the calls the default compiler inlines.
@@ -113,12 +149,30 @@ const DIVERGENT_IR_INLINE_EDIT: (&str, &str) = (
     "    divergent_words(in input)\n",
 );
 
+/// The optimizer's divergence check: every island reads back as a barrier
+/// (`divergent_words` in modules/optimize), so nothing is optimized and the
+/// JIT and executables keep the arithmetic the default compiler folds.
+#[cfg(feature = "divergent-optimize")]
+const DIVERGENT_OPTIMIZE_EDIT: (&str, &str) = (
+    "    optimize_propose_split(in input, in names)\n",
+    "    divergent_words(in input, in names)\n",
+);
+
 /// The IR optimizer's divergence check: every program reads back as
 /// "read lacks state evidence" (`divergent_words` in modules/ir_opt), so
 /// every compile that optimizes fails.
 #[cfg(feature = "divergent-ir-opt")]
 const DIVERGENT_IR_OPT_EDIT: (&str, &str) = (
     "    ir_opt_words(in input)\n",
+    "    divergent_words(in input)\n",
+);
+
+/// The declaration pass's divergence check: every package with trait
+/// declarations is rejected with a made-up E0600 (`divergent_words` in
+/// modules/pact), so every trait program fails to check.
+#[cfg(feature = "divergent-pact")]
+const DIVERGENT_PACT_EDIT: (&str, &str) = (
+    "    declarations_words(in input)\n",
     "    divergent_words(in input)\n",
 );
 
@@ -177,6 +231,24 @@ fn main() {
         } else {
             port
         };
+        #[cfg(feature = "divergent")]
+        let port = if *library == "hybrid_checks" {
+            port.edit(
+                DIVERGENT_SHARED_LAYOUT_EDIT.0,
+                DIVERGENT_SHARED_LAYOUT_EDIT.1,
+            )
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-ir-check")]
+        let port = if *library == "hybrid_checks" {
+            port.edit(
+                DIVERGENT_SHARED_IR_CHECK_EDIT.0,
+                DIVERGENT_SHARED_IR_CHECK_EDIT.1,
+            )
+        } else {
+            port
+        };
         #[cfg(feature = "divergent-stack-bound")]
         let port = if *library == "hybrid_stack_bound" {
             port.edit(DIVERGENT_STACK_BOUND_EDIT.0, DIVERGENT_STACK_BOUND_EDIT.1)
@@ -189,9 +261,21 @@ fn main() {
         } else {
             port
         };
+        #[cfg(feature = "divergent-optimize")]
+        let port = if *library == "hybrid_optimize" {
+            port.edit(DIVERGENT_OPTIMIZE_EDIT.0, DIVERGENT_OPTIMIZE_EDIT.1)
+        } else {
+            port
+        };
         #[cfg(feature = "divergent-ir-opt")]
         let port = if *library == "hybrid_ir_opt" {
             port.edit(DIVERGENT_IR_OPT_EDIT.0, DIVERGENT_IR_OPT_EDIT.1)
+        } else {
+            port
+        };
+        #[cfg(feature = "divergent-pact")]
+        let port = if *library == "hybrid_pact" {
+            port.edit(DIVERGENT_PACT_EDIT.0, DIVERGENT_PACT_EDIT.1)
         } else {
             port
         };

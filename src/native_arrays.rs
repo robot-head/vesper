@@ -64,21 +64,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut element = fs.first().ok_or("write into an empty array")?.clone();
         element.ty = crate::numeric::default_type(element_ty);
         let base = self.address(l)?;
-        let valid = self
-            .b
-            .ins()
-            .icmp_imm(IntCC::UnsignedLessThan, index, fs.len() as i64);
-        let good = self.b.create_block();
-        let bad = self.b.create_block();
-        self.branch(valid, good, &[], bad, &[]);
-        self.b.switch_to_block(bad);
-        if self.world.partial_ops.contains(&(span.start, span.end)) {
-            self.primitive_failure("IndexOutOfBounds")?;
-            self.jump(good, &[]);
-        } else {
-            self.b.ins().trap(ir::TrapCode::unwrap_user(2));
-        }
-        self.b.switch_to_block(good);
+        self.index_check(span, index, fs.len() as u64)?;
         let offset = self.b.ins().imul_imm(index, element.layout.size as i64);
         let address = self.b.ins().iadd(base, offset);
         let assign = &op[crate::arrays::WRITE_PREFIX.len()..];
@@ -103,6 +89,110 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         self.store(address, value, &element.ty)?;
         Ok(self.zero())
+    }
+
+    /// The bounds check of an index into a `len`-element array or tuple at
+    /// `span`: raises `IndexOutOfBounds` where the checker recorded a
+    /// possible failure and traps elsewhere. It emits nothing when the
+    /// index's own instructions bound it below `len` ([`Self::index_below`]):
+    /// a constant, a mask, a remainder. Cranelift does not fold those
+    /// compares itself.
+    pub(super) fn index_check(
+        &mut self,
+        span: &Span,
+        index: ir::Value,
+        len: u64,
+    ) -> Result<(), String> {
+        if self.index_below(index, len, 4) {
+            return Ok(());
+        }
+        let valid = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThan, index, len as i64);
+        let good = self.b.create_block();
+        let bad = self.b.create_block();
+        self.branch(valid, good, &[], bad, &[]);
+        self.b.switch_to_block(bad);
+        if self.world.partial_ops.contains(&(span.start, span.end)) {
+            self.primitive_failure("IndexOutOfBounds")?;
+            self.jump(good, &[]);
+        } else {
+            self.b.ins().trap(ir::TrapCode::unwrap_user(2));
+        }
+        self.b.switch_to_block(good);
+        Ok(())
+    }
+
+    /// Whether the instructions that define `v` show `v < len` as an
+    /// unsigned value whatever their operands are: a constant below `len`,
+    /// `x & m` with a constant `m < len`, `x % m` with a constant
+    /// `0 < m <= len`, a zero extension or a `select` of such values, looked
+    /// through at most `depth` levels.
+    pub(super) fn index_below(&self, v: ir::Value, len: u64, depth: u32) -> bool {
+        use ir::{InstructionData as D, Opcode as O};
+        let dfg = &self.b.func.dfg;
+        let ir::ValueDef::Result(inst, 0) = dfg.value_def(v) else {
+            return false;
+        };
+        let constant = |x: ir::Value| match dfg.value_def(x) {
+            ir::ValueDef::Result(i, 0) => match dfg.insts[i] {
+                D::UnaryImm {
+                    opcode: O::Iconst,
+                    imm,
+                } => {
+                    // The constant at its own width, as unsigned.
+                    let bits = dfg.value_type(x).bits();
+                    let raw = imm.bits() as u64;
+                    Some(if bits >= 64 {
+                        raw
+                    } else {
+                        raw & ((1u64 << bits) - 1)
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        match dfg.insts[inst] {
+            D::UnaryImm {
+                opcode: O::Iconst, ..
+            } => constant(v).is_some_and(|k| k < len),
+            D::Binary {
+                opcode: O::Band,
+                args: [a, b],
+            } => [a, b].iter().any(|&x| constant(x).is_some_and(|m| m < len)),
+            D::BinaryImm64 {
+                opcode: O::BandImm,
+                imm,
+                ..
+            } => (imm.bits() as u64) < len,
+            D::Binary {
+                opcode: O::Urem,
+                args: [_, b],
+            } => constant(b).is_some_and(|m| m > 0 && m <= len),
+            D::BinaryImm64 {
+                opcode: O::UremImm,
+                imm,
+                ..
+            } => {
+                let m = imm.bits() as u64;
+                m > 0 && m <= len
+            }
+            D::Unary {
+                opcode: O::Uextend,
+                arg,
+            } => depth > 0 && self.index_below(arg, len, depth - 1),
+            D::Ternary {
+                opcode: O::Select,
+                args: [_, a, b],
+            } => {
+                depth > 0
+                    && self.index_below(a, len, depth - 1)
+                    && self.index_below(b, len, depth - 1)
+            }
+            _ => false,
+        }
     }
 
     /// A constant table read `$table$NAME` (`crate::arrays::lower_world`)

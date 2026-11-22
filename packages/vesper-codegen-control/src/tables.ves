@@ -1,0 +1,268 @@
+// The parts of the checker's `World` the control plans read beyond what
+// @vesper/check-data decodes: function signatures (`world.functions`) and
+// effect declarations with their operations (`world.effects`), plus each
+// function's direct callees.
+//
+// Callees are an input, not computed here: the Rust side finds them by
+// walking the function's checked body and the lowered Place IR's
+// references (`native_session::callees` and `function_references`), and
+// neither checked bodies nor the closure and handler expressions of the
+// Place IR are in the Vesper tables yet (report, gap 1).
+
+use @vesper/check-data::util::{
+    add,
+    inc32,
+    n32,
+    u32_at,
+    w
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader
+};
+
+const NONE32: u32 = 4294967295;
+
+pub copy struct Param {
+    name: u32,
+    pass: u8,
+    ty: u32,
+}
+
+// One function of `world.functions` (in name order), or one operation of
+// an effect declaration (no body, no callees).
+pub copy struct Func {
+    name: u32,
+    body: bool,
+    generics: u32,
+    // params[pa..pa+pn]
+    pa: u32,
+    pn: u32,
+    result: u32,
+    // The row id of the effects (`Types::row`).
+    row: u32,
+    // callees[ca..ca+cn], function indices in name order.
+    ca: u32,
+    cn: u32,
+}
+
+// One declaration of `world.effects`: ops[oa..oa+on].
+pub copy struct Decl {
+    name: u32,
+    linear: bool,
+    generics: u32,
+    oa: u32,
+    on: u32,
+}
+
+pub struct Tables {
+    funcs: ChunkSeq[Func],
+    params: ChunkSeq[Param],
+    callees: ChunkSeq[u32],
+    // symbol -> function index + 1
+    by_name: ChunkSeq[u32],
+    decls: ChunkSeq[Decl],
+    ops: ChunkSeq[Func],
+    // symbol -> declaration index + 1
+    decl_by_name: ChunkSeq[u32],
+}
+
+fn set_at(inout table: ChunkSeq[u32], at: u32, v: u32) {
+    loop {
+        if table.len() > w(at) {
+            break;
+        }
+        table.push(0);
+    }
+    let ok = table.try_set(w(at), v);
+}
+
+fn empty_func() -> Func {
+    Func {
+        name: 0,
+        body: false,
+        generics: 0,
+        pa: 0,
+        pn: 0,
+        result: 0,
+        row: 0,
+        ca: 0,
+        cn: 0
+    }
+}
+
+impl Tables {
+    pub fn func(in self, i: u32) -> Func {
+        match self.funcs.try_get(w(i)) {
+            Option::Some(f) => f,
+            Option::None => empty_func(),
+        }
+    }
+
+    pub fn op(in self, i: u64) -> Func {
+        match self.ops.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => empty_func(),
+        }
+    }
+
+    pub fn param(in self, i: u64) -> Param {
+        match self.params.try_get(i) {
+            Option::Some(p) => p,
+            Option::None => Param {
+                name: 0,
+                pass: 0,
+                ty: 0
+            },
+        }
+    }
+
+    pub fn callee(in self, i: u64) -> u32 {
+        u32_at(in self.callees, i)
+    }
+
+    pub fn decl(in self, i: u32) -> Decl {
+        match self.decls.try_get(w(i)) {
+            Option::Some(d) => d,
+            Option::None => Decl {
+                name: 0,
+                linear: false,
+                generics: 0,
+                oa: 0,
+                on: 0
+            },
+        }
+    }
+
+    // `world.functions.get(name)`: the function index, or NONE32.
+    pub fn find(in self, name: u32) -> u32 {
+        let x = u32_at(in self.by_name, w(name));
+        if x == 0 {
+            NONE32
+        } else {
+            wrapping_sub(x, 1)
+        }
+    }
+
+    // `world.effects.get(name)`: the declaration index, or NONE32.
+    pub fn find_decl(in self, name: u32) -> u32 {
+        let x = u32_at(in self.decl_by_name, w(name));
+        if x == 0 {
+            NONE32
+        } else {
+            wrapping_sub(x, 1)
+        }
+    }
+}
+
+fn read_params(inout r: Reader, in b: Slice[u8], in c: Ctx, inout params: ChunkSeq[Param]) -> u32 {
+    let n = r.word(in b);
+    for i in 0..n {
+        let name = u32_at(in c.nmap, r.word(in b));
+        let pass = wrapping_u8(r.word(in b));
+        let ty = u32_at(in c.tmap, r.word(in b));
+        params
+            .push(
+                Param {
+                    name: name,
+                    pass: pass,
+                    ty: ty
+                }
+            );
+    }
+    n32(n)
+}
+
+fn row_of(in c: Ctx, ty: u32) -> u32 {
+    c.types.node(ty).r2
+}
+
+// Reads the function section, then the effect-declaration section.
+// Function: name, body, generics, params (name, pass, type), result, row
+// type, callees. Declaration: name, linear, generics, operations (name,
+// generics, params, result).
+pub fn read_tables(inout r: Reader, in b: Slice[u8], in c: Ctx) -> Tables {
+    let mut t = Tables {
+        funcs: ChunkSeq::new[Func](),
+        params: ChunkSeq::new[Param](),
+        callees: ChunkSeq::new[u32](),
+        by_name: ChunkSeq::new[u32](),
+        decls: ChunkSeq::new[Decl](),
+        ops: ChunkSeq::new[Func](),
+        decl_by_name: ChunkSeq::new[u32](),
+    };
+    let fc = r.word(in b);
+    for i in 0..fc {
+        let name = u32_at(in c.nmap, r.word(in b));
+        let body = r.word(in b) != 0;
+        let generics = n32(r.word(in b));
+        let pa = n32(t.params.len());
+        let pn = read_params(inout r, in b, in c, inout t.params);
+        let result = u32_at(in c.tmap, r.word(in b));
+        let row = row_of(in c, u32_at(in c.tmap, r.word(in b)));
+        let cn = r.word(in b);
+        let ca = n32(t.callees.len());
+        for j in 0..cn {
+            t.callees.push(n32(r.word(in b)));
+        }
+        set_at(inout t.by_name, name, inc32(n32(t.funcs.len())));
+        t
+            .funcs
+            .push(
+                Func {
+                    name: name,
+                    body: body,
+                    generics: generics,
+                    pa: pa,
+                    pn: pn,
+                    result: result,
+                    row: row,
+                    ca: ca,
+                    cn: n32(cn)
+                }
+            );
+    }
+    let dc = r.word(in b);
+    for i in 0..dc {
+        let name = u32_at(in c.nmap, r.word(in b));
+        let linear = r.word(in b) != 0;
+        let generics = n32(r.word(in b));
+        let on = r.word(in b);
+        let oa = n32(t.ops.len());
+        for j in 0..on {
+            let op = u32_at(in c.nmap, r.word(in b));
+            let og = n32(r.word(in b));
+            let pa = n32(t.params.len());
+            let pn = read_params(inout r, in b, in c, inout t.params);
+            let result = u32_at(in c.tmap, r.word(in b));
+            t
+                .ops
+                .push(
+                    Func {
+                        name: op,
+                        body: false,
+                        generics: og,
+                        pa: pa,
+                        pn: pn,
+                        result: result,
+                        row: c.types.empty_row,
+                        ca: 0,
+                        cn: 0
+                    }
+                );
+        }
+        set_at(inout t.decl_by_name, name, inc32(n32(t.decls.len())));
+        t
+            .decls
+            .push(
+                Decl {
+                    name: name,
+                    linear: linear,
+                    generics: generics,
+                    oa: oa,
+                    on: n32(on)
+                }
+            );
+    }
+    t
+}

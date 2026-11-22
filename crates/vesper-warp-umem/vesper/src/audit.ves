@@ -1,0 +1,600 @@
+// ---------------------------------------------------------------------------
+// Conservation accounting (src/accounting.rs). Counts are an 11-element
+// sequence in `Location` order: free, fill, nicRx, rx, appRx, appTx, tx,
+// nicTx, comp, inFlight, leaked.
+
+const LOC_FREE: u64 = 0;
+const LOC_LEAKED: u64 = 10;
+
+// `TransitionKind::endpoints` as `from << 8 | to` location indices.
+fn endpoints(kind: u64) -> u64 {
+    match kind {
+        0 => 258,
+        1 => 515,
+        2 => 772,
+        3 => 769,
+        4 => 1025,
+        5 => 768,
+        6 => 1024,
+        7 => 1029,
+        8 => 5,
+        9 => 1280,
+        10 => 1286,
+        11 => 1543,
+        12 => 1800,
+        13 => 2057,
+        14 => 2048,
+        15 => 2058,
+        16 => 2304,
+        17 => 1,
+        18 => 1034,
+        19 => 1290,
+        20 => 2314,
+        _ => 0,
+    }
+}
+
+// `XdpUmemAccounting::apply`: false (and nothing changed) when the source
+// location is empty.
+pub fn accounting_apply(inout counts: ChunkSeq[u32], kind: u32) -> bool {
+    if kind > 20 || counts.len() < 11 {
+        return false;
+    }
+    let e = endpoints(widen_u64(kind));
+    let from = shr(e, 8);
+    let to = e & 255;
+    let have = at32(in counts, from);
+    if have == 0 {
+        return false;
+    }
+    counts.try_set(from, wrapping_sub(have, 1));
+    counts.try_set(to, wrapping_add(at32(in counts, to), 1));
+    true
+}
+
+fn sum(in counts: ChunkSeq[u32]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..counts.len() {
+        s = wrapping_add(s, widen_u64(at32(in counts, i)));
+    }
+    s
+}
+
+// `XdpUmemAccounting::check_conservation`.
+pub fn accounting_check(total: u32, in counts: ChunkSeq[u32]) -> Option[AuditError] {
+    let actual = sum(in counts);
+    if actual != widen_u64(total) {
+        return Option::Some(
+            AuditError::TotalMismatch {
+                expected: total,
+                actual: actual
+            }
+        );
+    }
+    let leaked = at32(in counts, LOC_LEAKED);
+    if leaked != 0 {
+        return Option::Some(
+            AuditError::Leaked {
+                count: leaked,
+                first_chunk: Option::None
+            }
+        );
+    }
+    Option::None
+}
+
+impl Device {
+    fn leaked_error(in self, count: u32) -> AuditError {
+        let mut first: Option[u32] = Option::None;
+        for c in 0..widen_u64(self.nic.config.frame_count) {
+            let here = at(in self.table, c);
+            if here == L_LEAKED || here == L_TX_LEAKED {
+                first = Option::Some(wrapping_u32(c));
+                break;
+            }
+        }
+        AuditError::Leaked {
+            count: count,
+            first_chunk: first
+        }
+    }
+
+    fn pending_leaked(in self) -> u32 {
+        let mut n: u32 = 0;
+        for c in 0..widen_u64(self.nic.config.frame_count) {
+            if at(in self.table, c) == L_TX_LEAKED {
+                n = wrapping_add(n, 1);
+            }
+        }
+        n
+    }
+}
+
+// `audit_driver`: the driver's own counts add up and nothing leaked.
+pub fn xsk_audit_driver(in d: Device) -> Option[AuditError] {
+    let total = d.nic.config.frame_count;
+    let c = d.census;
+    let actual = wrapping_add(
+        wrapping_add(
+            wrapping_add(widen_u64(c.free), widen_u64(c.fill_posted)),
+            wrapping_add(widen_u64(c.app_rx), widen_u64(c.app_tx))
+        ),
+        wrapping_add(
+            wrapping_add(widen_u64(c.tx_posted), widen_u64(c.in_flight)),
+            widen_u64(c.leaked)
+        )
+    );
+    if actual != widen_u64(total) {
+        return Option::Some(
+            AuditError::TotalMismatch {
+                expected: total,
+                actual: actual
+            }
+        );
+    }
+    let free_len = wrapping_u32(d.free.len());
+    if c.free != free_len {
+        return Option::Some(
+            AuditError::SideMismatch {
+                side: 0,
+                driver: c.free,
+                device: free_len
+            }
+        );
+    }
+    let pending = d.pending_leaked();
+    let leaked = wrapping_add(c.leaked, pending);
+    if leaked > 0 {
+        return Option::Some(d.leaked_error(leaked));
+    }
+    Option::None
+}
+
+fn mark(inout seen: ChunkSeq[u8], chunk: u32, inout fault: Option[AuditError]) {
+    let i = widen_u64(chunk);
+    let v = match seen.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => return,
+    };
+    let next = if v == 255 {
+        v
+    } else {
+        wrapping_add(v, 1)
+    };
+    seen.try_set(i, next);
+    if next > 1 {
+        first(
+            inout fault,
+            AuditError::Duplicate {
+                chunk: chunk
+            }
+        );
+    }
+}
+
+fn first(inout slot: Option[AuditError], e: AuditError) {
+    match slot {
+        Option::Some(_) => (),
+        Option::None => {
+            slot = Option::Some(e);
+        },
+    }
+}
+
+fn loc_in(in table: ChunkSeq[u64], total: u32, chunk: u32) -> u64 {
+    if chunk < total {
+        at(in table, widen_u64(chunk))
+    } else {
+        L_FREE
+    }
+}
+
+// One chunk the device side holds at location index `loc`.
+fn visit(
+    in table: ChunkSeq[u64],
+    total: u32,
+    chunk: u32,
+    loc: u64,
+    inout seen: ChunkSeq[u8],
+    inout fault: Option[AuditError]
+) {
+    let here = loc_in(in table, total, chunk);
+    let ok = if loc <= 3 {
+        here == L_FILL_POSTED
+    } else {
+        here == L_TX_LIVE || here == L_TX_RETIRED || here == L_TX_LEAKED
+    };
+    if !ok {
+        first(
+            inout fault,
+            AuditError::Misplaced {
+                chunk: chunk,
+                device: wrapping_u32(loc),
+                driver: loc_of(here)
+            }
+        );
+    }
+    mark(inout seen, chunk, inout fault);
+}
+
+// Every device-side chunk, in `SoftNic::for_each_kernel_chunk` order.
+fn visit_kernel(
+    in n: Nic,
+    in table: ChunkSeq[u64],
+    total: u32,
+    inout seen: ChunkSeq[u8],
+    inout fault: Option[AuditError]
+) {
+    for i in 0..widen_u64(n.fill.len()) {
+        match n.chunk_of(n.base_of(n.fill.committed_a(wrapping_u32(i)))) {
+            Option::Some(c) => visit(in table, total, c, 1, inout seen, inout fault),
+            Option::None => (),
+        }
+    }
+    for i in 0..n.rx_pool.len() {
+        match n.chunk_of(at(in n.rx_pool, i)) {
+            Option::Some(c) => visit(in table, total, c, 2, inout seen, inout fault),
+            Option::None => (),
+        }
+    }
+    for i in 0..widen_u64(n.rx.len()) {
+        match n.chunk_of(n.rx.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => visit(in table, total, c, 3, inout seen, inout fault),
+            Option::None => (),
+        }
+    }
+    for i in 0..widen_u64(n.tx.len()) {
+        match n.chunk_of(n.tx.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => visit(in table, total, c, 6, inout seen, inout fault),
+            Option::None => (),
+        }
+    }
+    let mut j = n.nic_tx_head;
+    loop {
+        if j >= n.nic_tx.len() {
+            break;
+        }
+        match n.chunk_of(at(in n.nic_tx, j)) {
+            Option::Some(c) => visit(in table, total, c, 7, inout seen, inout fault),
+            Option::None => (),
+        }
+        j = wrapping_add(j, 1);
+    }
+    for i in 0..widen_u64(n.completion.len()) {
+        match n.chunk_of(n.completion.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => visit(in table, total, c, 8, inout seen, inout fault),
+            Option::None => (),
+        }
+    }
+}
+
+fn counts_sum(c: LocationCounts) -> u64 {
+    let a = wrapping_add(
+        wrapping_add(widen_u64(c.free), widen_u64(c.fill)),
+        wrapping_add(widen_u64(c.nic_rx), widen_u64(c.rx))
+    );
+    let b = wrapping_add(
+        wrapping_add(widen_u64(c.app_rx), widen_u64(c.app_tx)),
+        wrapping_add(widen_u64(c.tx), widen_u64(c.nic_tx))
+    );
+    let e = wrapping_add(
+        wrapping_add(widen_u64(c.comp), widen_u64(c.in_flight)),
+        widen_u64(c.leaked)
+    );
+    wrapping_add(wrapping_add(a, b), e)
+}
+
+// The fast audit: the same checks as the exact pass below, but it builds
+// no errors and stops at the first problem. With no duplicate claims,
+// `marks == total` means no chunk is missing. When it says no, the exact
+// pass runs and reports the first error the Rust auditor would.
+// 0 a second claim, 1 a fresh claim, 2 out of range (ignored, as in `mark`).
+fn claim(inout stamp: ChunkSeq[u32], chunk: u32, epoch: u32) -> u64 {
+    let i = widen_u64(chunk);
+    match stamp.try_get(i) {
+        Option::Some(v) => {
+            if v == epoch {
+                0
+            } else {
+                stamp.try_set(i, epoch);
+                1
+            }
+        },
+        Option::None => 2,
+    }
+}
+
+// Starts a fast audit: a fresh epoch, and the stamps sized and, when the
+// epoch wraps, cleared.
+fn next_epoch(inout d: Device, total: u32) -> u32 {
+    let n = widen_u64(total);
+    let mut e = wrapping_add(d.epoch, 1);
+    if e == 0 || d.stamp.len() != n {
+        d.stamp.clear();
+        d.stamp.resize(n, 0);
+        e = 1;
+    }
+    d.epoch = e;
+    e
+}
+
+fn rx_held(here: u64) -> bool {
+    here == L_FILL_POSTED
+}
+
+fn tx_held(here: u64) -> bool {
+    here == L_TX_LIVE || here == L_TX_RETIRED || here == L_TX_LEAKED
+}
+
+fn audit_clean(inout d: Device, total: u32) -> bool {
+    let epoch = next_epoch(inout d, total);
+    let mut marks: u64 = 0;
+    for i in 0..d.free.len() {
+        let chunk = at32(in d.free, i);
+        if loc_in(in d.table, total, chunk) != L_FREE {
+            return false;
+        }
+        match claim(inout d.stamp, chunk, epoch) {
+            0 => return false,
+            1 => marks = wrapping_add(marks, 1),
+            _ => (),
+        }
+    }
+    for c in 0..widen_u64(total) {
+        let here = at(in d.table, c);
+        // A driver-held chunk needs no stamp: the free list claims only
+        // `L_FREE` chunks and the device side only posted ones, so nothing
+        // else can claim it, and the table holds each chunk once.
+        if here == L_APP_RX || here == L_APP_TX || here == L_IN_FLIGHT || here == L_LEAKED {
+            marks = wrapping_add(marks, 1);
+        }
+    }
+    let n = kernel_clean(in d.nic, in d.table, total, inout d.stamp, epoch);
+    if n == 18446744073709551615 {
+        return false;
+    }
+    wrapping_add(marks, n) == widen_u64(total)
+}
+
+// One device-side chunk for the fast audit: the fresh-claim count it adds,
+// or u64::MAX on any problem.
+fn kernel_one(
+    in table: ChunkSeq[u64],
+    total: u32,
+    chunk: u32,
+    rx: bool,
+    inout stamp: ChunkSeq[u32],
+    epoch: u32
+) -> u64 {
+    let here = loc_in(in table, total, chunk);
+    let ok = if rx {
+        rx_held(here)
+    } else {
+        tx_held(here)
+    };
+    if !ok {
+        return 18446744073709551615;
+    }
+    match claim(inout stamp, chunk, epoch) {
+        0 => 18446744073709551615,
+        1 => 1,
+        _ => 0,
+    }
+}
+
+fn kernel_clean(
+    in n: Nic,
+    in table: ChunkSeq[u64],
+    total: u32,
+    inout stamp: ChunkSeq[u32],
+    epoch: u32
+) -> u64 {
+    let bad: u64 = 18446744073709551615;
+    let mut marks: u64 = 0;
+    for i in 0..widen_u64(n.fill.len()) {
+        match n.chunk_of(n.base_of(n.fill.committed_a(wrapping_u32(i)))) {
+            Option::Some(c) => {
+                let k = kernel_one(in table, total, c, true, inout stamp, epoch);
+                if k == bad {
+                    return bad;
+                }
+                marks = wrapping_add(marks, k);
+            },
+            Option::None => (),
+        }
+    }
+    for i in 0..n.rx_pool.len() {
+        match n.chunk_of(at(in n.rx_pool, i)) {
+            Option::Some(c) => {
+                let k = kernel_one(in table, total, c, true, inout stamp, epoch);
+                if k == bad {
+                    return bad;
+                }
+                marks = wrapping_add(marks, k);
+            },
+            Option::None => (),
+        }
+    }
+    for i in 0..widen_u64(n.rx.len()) {
+        match n.chunk_of(n.rx.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => {
+                let k = kernel_one(in table, total, c, true, inout stamp, epoch);
+                if k == bad {
+                    return bad;
+                }
+                marks = wrapping_add(marks, k);
+            },
+            Option::None => (),
+        }
+    }
+    for i in 0..widen_u64(n.tx.len()) {
+        match n.chunk_of(n.tx.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => {
+                let k = kernel_one(in table, total, c, false, inout stamp, epoch);
+                if k == bad {
+                    return bad;
+                }
+                marks = wrapping_add(marks, k);
+            },
+            Option::None => (),
+        }
+    }
+    let mut j = n.nic_tx_head;
+    loop {
+        if j >= n.nic_tx.len() {
+            break;
+        }
+        match n.chunk_of(at(in n.nic_tx, j)) {
+            Option::Some(c) => {
+                let k = kernel_one(in table, total, c, false, inout stamp, epoch);
+                if k == bad {
+                    return bad;
+                }
+                marks = wrapping_add(marks, k);
+            },
+            Option::None => (),
+        }
+        j = wrapping_add(j, 1);
+    }
+    for i in 0..widen_u64(n.completion.len()) {
+        match n.chunk_of(n.completion.committed_a(wrapping_u32(i))) {
+            Option::Some(c) => {
+                let k = kernel_one(in table, total, c, false, inout stamp, epoch);
+                if k == bad {
+                    return bad;
+                }
+                marks = wrapping_add(marks, k);
+            },
+            Option::None => (),
+        }
+    }
+    marks
+}
+
+// `UmemAuditor::counts`: both halves, checked chunk by chunk. The scratch
+// `seen` lives in the device, so repeated audits do not allocate.
+pub fn xsk_audit_counts(inout d: Device) -> Result[LocationCounts, AuditError] {
+    let total = d.nic.config.frame_count;
+    let driver = d.census;
+    let kernel = d.nic.kernel_census();
+    let acc = LocationCounts {
+        free: driver.free,
+        fill: kernel.fill_ring,
+        nic_rx: kernel.nic_rx,
+        rx: kernel.rx_ring,
+        app_rx: driver.app_rx,
+        app_tx: driver.app_tx,
+        tx: kernel.tx_ring,
+        nic_tx: kernel.nic_tx,
+        comp: kernel.completion_ring,
+        in_flight: driver.in_flight,
+        leaked: driver.leaked
+    };
+    let rx_side = wrapping_add(wrapping_add(kernel.fill_ring, kernel.nic_rx), kernel.rx_ring);
+    if rx_side != driver.fill_posted {
+        return Result::Err(
+            AuditError::SideMismatch {
+                side: 1,
+                driver: driver.fill_posted,
+                device: rx_side
+            }
+        );
+    }
+    let tx_side = wrapping_add(wrapping_add(kernel.tx_ring, kernel.nic_tx), kernel.completion_ring);
+    if tx_side != driver.tx_posted {
+        return Result::Err(
+            AuditError::SideMismatch {
+                side: 2,
+                driver: driver.tx_posted,
+                device: tx_side
+            }
+        );
+    }
+    if audit_clean(inout d, total) {
+        return counts_total(acc, total);
+    }
+    d.seen.clear();
+    d.seen.resize(widen_u64(total), 0);
+    let mut fault: Option[AuditError] = Option::None;
+    for i in 0..d.free.len() {
+        let chunk = match d.free.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => break,
+        };
+        let here = loc_in(in d.table, total, chunk);
+        if here != L_FREE {
+            first(
+                inout fault,
+                AuditError::Misplaced {
+                    chunk: chunk,
+                    device: 0,
+                    driver: loc_of(here)
+                }
+            );
+        }
+        mark(inout d.seen, chunk, inout fault);
+    }
+    for c in 0..widen_u64(total) {
+        let here = at(in d.table, c);
+        if here == L_APP_RX || here == L_APP_TX || here == L_IN_FLIGHT || here == L_LEAKED {
+            mark(inout d.seen, wrapping_u32(c), inout fault);
+        }
+    }
+    visit_kernel(in d.nic, in d.table, total, inout d.seen, inout fault);
+    match fault {
+        Option::Some(e) => return Result::Err(e),
+        Option::None => (),
+    }
+    for c in 0..widen_u64(total) {
+        match d.seen.try_get(c) {
+            Option::Some(0) => {
+                return Result::Err(
+                    AuditError::Missing {
+                        chunk: wrapping_u32(c)
+                    }
+                );
+            },
+            _ => (),
+        }
+    }
+    counts_total(acc, total)
+}
+
+fn counts_total(acc: LocationCounts, total: u32) -> Result[LocationCounts, AuditError] {
+    let actual = counts_sum(acc);
+    if actual != widen_u64(total) {
+        return Result::Err(
+            AuditError::TotalMismatch {
+                expected: total,
+                actual: actual
+            }
+        );
+    }
+    Result::Ok(acc)
+}
+
+// `UmemAuditor::audit`: the counts, then no leaks.
+pub fn xsk_audit(inout d: Device) -> Result[LocationCounts, AuditError] {
+    let acc = match xsk_audit_counts(inout d) {
+        Result::Ok(a) => a,
+        Result::Err(e) => return Result::Err(e),
+    };
+    let total = d.nic.config.frame_count;
+    let actual = counts_sum(acc);
+    if actual != widen_u64(total) {
+        return Result::Err(
+            AuditError::TotalMismatch {
+                expected: total,
+                actual: actual
+            }
+        );
+    }
+    if acc.leaked != 0 {
+        return Result::Err(d.leaked_error(acc.leaked));
+    }
+    let pending = d.pending_leaked();
+    if pending > 0 {
+        return Result::Err(d.leaked_error(pending));
+    }
+    Result::Ok(acc)
+}

@@ -52,8 +52,7 @@ fn worker(id: u64, port: u64, delay: u64) -> Report eff [Clock, Sched, Net] {
     let finished = Clock::now();
     let Ticket {
         id
-    }
-    = ticket;
+    } = ticket;
     Report {
         ticket: id,
         started: started,

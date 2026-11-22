@@ -43,7 +43,7 @@
 //! | `call` | the same | [`INSTRUCTION`] for `Op::Call` and `Op::Indirect` |
 //! | `aggregate` | the same, and the layout helpers | [`INSTRUCTION`] for tuples, data, projections and indexing; the [`aggregate`] ops |
 //! | `drops` | `Codegen::drop_box_value` | [`drops::DROP_BOX`] |
-//! | `seq` | `Codegen::ir_graph_at` | [`INSTRUCTION`] for `Op::Seq` |
+//! | `seq` | `Codegen::ir_graph_at`, and the sequence helpers | [`INSTRUCTION`] for `Op::Seq`; the [`seq`] ops |
 //! | `control` | the same | [`INSTRUCTION`] for closures, handlers and calls of effect operations |
 //! | `numeric` | the same | [`INSTRUCTION`] for `Op::Vector` and `Op::Tiled` |
 //! | `drops` (fip) | the same | [`INSTRUCTION`] for `Op::Fip` |
@@ -61,6 +61,17 @@
 //! ([`NO_VALUE`] for an operand with no value yet), and its one result is
 //! the instruction's value. The [`Site`] names the instruction, so a hook
 //! reads the instruction itself from the `Program`.
+//!
+//! # Walk state and re-entry
+//!
+//! An [`INSTRUCTION`] request also lends the graph walk's own state for
+//! the length of the request ([`walk`], SH5 lane 1): queries of the
+//! instruction's facts and the walk's maps (variables, home slots,
+//! register locals, split words, the walk's plans), effects that keep the
+//! Rust bookkeeping of what the hook emitted (`use_var`, `def_var`,
+//! `store`, `jump`, `ir_temp`), and continuation re-entry: a hook asks
+//! Rust to emit the instruction or its place, declines, and is asked again
+//! with the value kept. A hook that never calls them is unaffected.
 use crate::ast::Type;
 use crate::check::World;
 use crate::ir::{Op, Program};
@@ -70,6 +81,8 @@ use cranelift_module::Module;
 use std::cell::Cell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub mod walk;
 
 /// An argument word for an operand that has no Cranelift value.
 pub const NO_VALUE: u64 = u64::MAX;
@@ -606,6 +619,46 @@ pub mod drops {
     pub const DROP_BOX: u32 = 1;
 }
 
+/// The `control` family's leaf requests (SH4 lane 10, #1284): the
+/// builder sequences of closure tags, `invoke_tag`'s dispatch chain and
+/// the inlined handlers' resumption points. The `Codegen` keeps the state
+/// they read and write (the closure table, target sets, variables and the
+/// `HandlerControl`), so a hook only emits. Blocks and stack slots pass as
+/// their entity numbers.
+pub mod control {
+    /// A closure or function tag: `iconst.i64 id`. Args `[id]`; result
+    /// `[value]`.
+    pub const TAG: u32 = 1;
+    /// A captured variable's explicit stack slot of `size` bytes, aligned
+    /// to 8, and its address. Args `[size]`; result `[slot, address]`.
+    pub const CAPTURE_SLOT: u32 = 2;
+    /// `qualify_tag`'s re-numbering of one descriptor:
+    /// `select(icmp_imm eq tag old, iconst new, acc)`. Args
+    /// `[tag, old, new, acc]`; result `[value]`.
+    pub const QUALIFY: u32 = 3;
+    /// One candidate of `invoke_tag`: the `yes` and `no` blocks, then a
+    /// jump to `yes` when `single` is 1, else `brif (icmp_imm eq tag
+    /// index), yes, no`; emission continues in `yes`. Args
+    /// `[tag, index, single]`; result `[yes, no]`.
+    pub const DISPATCH: u32 = 4;
+    /// The end of a dispatch chain: `trap user(code)` (3 for a closure
+    /// call, 4 for a handler's return selector). Args `[code]`; no result.
+    pub const TRAP: u32 = 5;
+    /// A non-tail resumption's save: an 8-byte slot holding `selector`,
+    /// the `returned` block with one parameter of `ty_code`, and
+    /// `iconst.i64 index`. Args `[selector, ty_code, index]`; result
+    /// `[slot, returned, selected]`.
+    pub const RESUME_SAVE: u32 = 6;
+    /// The resumption's restore in `returned`: `stack_load.i64 slot`.
+    /// Args `[slot]`; result `[value]`.
+    pub const RESUME_RESTORE: u32 = 7;
+    /// One test of a handler's dispatch chain: a `next` block, then
+    /// `brif (icmp_imm eq selector index), target(output), next`;
+    /// emission continues in `next`. Args
+    /// `[selector, index, target, output]`; no result.
+    pub const RETURN_TO: u32 = 8;
+}
+
 /// The `ffi` family's requests (SH4 lane 13, #1287): one foreign (`.vsys`)
 /// call, emitted in steps by `Codegen::foreign_perform`
 /// (src/ffi_lowering/native.rs). The Rust code keeps what needs its own
@@ -711,6 +764,81 @@ pub mod numeric {
     pub const TILED_COL_GET: u32 = 9;
     pub const TILED_COL_SET: u32 = 10;
     pub const TILED_LOAD_TILE_VEC: u32 = 11;
+    /// A float math intrinsic (`Codegen::math`, src/float_math/native.rs):
+    /// `[op, v operands...]`, with `op` the position of the intrinsic in
+    /// `MathOp::ALL` from 1 (`sqrt` 1 ... `fma` 9). Result `[value]`.
+    pub const FLOAT_MATH: u32 = 4;
+    /// A conversion to a float kind: `[to, from, v]`, `to` a float word
+    /// ([`FROM_F32`] or [`FROM_F64`]) and `from` one of the `FROM_*` classes
+    /// (the Rust code emits nothing for a same-kind conversion). Result
+    /// `[value]`.
+    pub const FLOAT_CONVERT: u32 = 5;
+    /// The saturating truncation of a float to an integer kind's canonical
+    /// 64-bit lane (`float_to_integer`): `[signed, bits, min, max, v]`, with
+    /// the kind's bounds as two's complement words. Result `[value]`.
+    pub const FLOAT_TO_INT: u32 = 6;
+    /// `to_bits_k` (`to_bits` 1) or `from_bits_k` (0) of float kind `kind`:
+    /// `[to_bits, kind, v]`. Result `[value]`.
+    pub const FLOAT_BITS: u32 = 7;
+    /// The range test of a checked float narrowing: `[kind, lo, hi, v]`,
+    /// with the truncation bounds as `f64` bit patterns. Result
+    /// `[overflow]`; the Rust code raises.
+    pub const FLOAT_NARROW_TEST: u32 = 8;
+    /// The software flush-to-zero of a subnormal float (`Codegen::flush`,
+    /// requested only when the flush applies): `[v]`. Result `[value]`.
+    pub const FLOAT_FLUSH: u32 = 9;
+    /// One step of a region block (src/regions/native.rs), with the region
+    /// runtime already defined in an object module: `[kind, jit, ...]`,
+    /// `kind` one of the `REGION_*` codes below and `jit` 1 in a JIT module
+    /// (the runtime is then imported). By kind (`v` is a value; a payload
+    /// is `[size, aggregate, type]`, with `type` a [`super::ty_code`], 0
+    /// for an aggregate; a 128-bit payload is never requested):
+    ///
+    /// - `OPEN`: `[capacity]`; result the region id;
+    /// - `CLOSE`, `CHECKPOINT`, `USED`: `[v id]`;
+    /// - `REWIND`, `COMMIT`: `[v id, v mark]`;
+    /// - `BOX`: `[v id, v value, payload...]`; result the handle;
+    /// - `GET`, `TAKE`: `[v id, v handle, payload...]`; result the value;
+    /// - `SET`: `[v id, v handle, v value, payload...]`; result `0`.
+    ///
+    /// Result `[value]`.
+    pub const REGION: u32 = 10;
+    pub const REGION_OPEN: u64 = 1;
+    pub const REGION_CLOSE: u64 = 2;
+    pub const REGION_BOX: u64 = 3;
+    pub const REGION_GET: u64 = 4;
+    pub const REGION_TAKE: u64 = 5;
+    pub const REGION_SET: u64 = 6;
+    pub const REGION_CHECKPOINT: u64 = 7;
+    pub const REGION_REWIND: u64 = 8;
+    pub const REGION_COMMIT: u64 = 9;
+    pub const REGION_USED: u64 = 10;
+    /// The element address of an `Atomic[T]` receiver (`atomic_call`):
+    /// `[v receiver]`. Result `[address]` (two trusted loads).
+    pub const ATOMIC_CELL: u32 = 11;
+    /// One atomic operation besides `compare_exchange` (the shim has no
+    /// `atomic_cas`): `[op, type, signed, v address, v operands...]`, `op`
+    /// one of the `ATOMIC_*` codes below, `type` the narrow lane's
+    /// [`super::ty_code`] and the operands already narrowed. Result
+    /// `[value]`, the old value as a canonical lane (`0` for a store).
+    pub const ATOMIC: u32 = 12;
+    pub const ATOMIC_LOAD: u64 = 1;
+    pub const ATOMIC_STORE: u64 = 2;
+    pub const ATOMIC_SWAP: u64 = 3;
+    pub const ATOMIC_ADD: u64 = 4;
+    pub const ATOMIC_SUB: u64 = 5;
+    pub const ATOMIC_AND: u64 = 6;
+    pub const ATOMIC_OR: u64 = 7;
+    pub const ATOMIC_XOR: u64 = 8;
+    /// The `vesper_parallel_for(body, data, n)` call of `parallel_for_call`:
+    /// `[body FuncRef, v data, v n]`. Result `[value]` (`0`).
+    pub const PARALLEL_FOR: u32 = 13;
+    /// The classes of a [`FLOAT_CONVERT`] operand (`FROM_F32` and
+    /// `FROM_F64` are also the float words of the other requests).
+    pub const FROM_F32: u64 = 1;
+    pub const FROM_F64: u64 = 2;
+    pub const FROM_SIGNED: u64 = 3;
+    pub const FROM_UNSIGNED: u64 = 4;
 }
 
 /// The `scalar` family's requests besides [`INSTRUCTION`] (SH4 lane 6,
@@ -775,5 +903,32 @@ pub mod scalar {
             .iter()
             .position(|k| *k == kind)
             .map(|i| i as u64 + 1)
+    }
+}
+
+/// The `seq` family's helper requests (self-hosting SH4 lane 9, #1283).
+pub mod seq {
+    /// Define the AOT sequence runtime (`seq::aot_runtime::define`: the
+    /// live counter, the shared empty header, the fault messages and
+    /// `vesper_seq_fault`, `_new`, `_make`, `_grow`, `_free` and
+    /// `vesper_str_release`) in the lent module, which has none of it yet
+    /// and a 64-bit pointer type. Args [`runtime_args`]; no result. The
+    /// lent builder is not used.
+    pub const RUNTIME: u32 = 1;
+
+    /// [`RUNTIME`]'s argument words: whether the target is Windows (no
+    /// fault message is written there), then the runtime's constants
+    /// `INLINE_BYTES`, `NEW_INLINE_BYTES`, `BUFFER_PREFIX`, `FAULT_STATUS`
+    /// and `HEADER_BYTES`, so the two emitters cannot drift apart.
+    pub fn runtime_args(windows: bool) -> [u64; 6] {
+        use crate::seq::native_runtime::{BUFFER_PREFIX, INLINE_BYTES, NEW_INLINE_BYTES};
+        [
+            u64::from(windows),
+            INLINE_BYTES as u64,
+            NEW_INLINE_BYTES as u64,
+            BUFFER_PREFIX as u64,
+            crate::seq::FAULT_STATUS as u64,
+            crate::seq::HEADER_BYTES as u64,
+        ]
     }
 }

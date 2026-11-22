@@ -5592,12 +5592,13 @@ dependencies = [
  "salsa",
  "serde",
  "serde_json",
+ "sha2",
  "stacker",
  "target-lexicon",
- "vesper-aegis-seed",
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-seed",
+ "vesper-blake3-sys",
  "vesper-chrono",
  "vesper-core",
  "vesper-crucible-seed",
@@ -5653,31 +5654,10 @@ dependencies = [
  "serde_json",
  "spki",
  "subtle",
- "vesper-aegis-seed",
  "vesper-bench",
  "vesper-loom-cas",
  "vesper-port-abi",
  "vesper-port-harness",
- "vesper-vault",
- "x509-parser",
- "zeroize",
-]
-
-[[package]]
-name = "vesper-aegis-seed"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "coset",
- "rcgen",
- "ring",
- "rustls-pki-types",
- "rustls-webpki",
- "serde",
- "serde_json",
- "spki",
- "subtle",
- "vesper-loom-cas",
  "vesper-vault",
  "x509-parser",
  "zeroize",
@@ -5693,7 +5673,10 @@ dependencies = [
  "libc",
  "tempfile",
  "vesper-aether",
+ "vesper-bench",
  "vesper-loom-cas",
+ "vesper-port-abi",
+ "vesper-port-harness",
 ]
 
 [[package]]
@@ -5765,6 +5748,8 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "vesper-beacon",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "zstd 0.13.4",
 ]
 
@@ -5792,6 +5777,14 @@ dependencies = [
 [[package]]
 name = "vesper-bench-seed"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-blake3-sys"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cc",
+]
 
 [[package]]
 name = "vesper-chorus"
@@ -6016,6 +6009,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "vesper-bench",
+ "vesper-blake3-sys",
  "vesper-loom-cas",
  "vesper-port-abi",
  "vesper-port-harness",
@@ -6030,6 +6024,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "vesper-bench",
+ "vesper-blake3-sys",
  "vesper-fmt-seed",
  "vesper-lean-syntax-seed",
  "vesper-port-abi",
@@ -6187,7 +6182,6 @@ dependencies = [
  "stacker",
  "target-lexicon",
  "vesper",
- "vesper-aegis-seed",
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-pmu",
@@ -6426,6 +6420,20 @@ dependencies = [
  "libc",
  "reflink-copy",
  "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "vesper-loom-cas-port"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "reflink-copy",
+ "tempfile",
+ "vesper-blake3-sys",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "windows-sys 0.61.2",
 ]
 
@@ -6860,8 +6868,8 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "sha2",
  "vesper",
- "vesper-aegis-seed",
  "vesper-beacon-seed",
  "vesper-bench-pmu",
  "vesper-bench-seed",
@@ -6870,6 +6878,7 @@ dependencies = [
  "vesper-ffi",
  "vesper-fmt-seed",
  "vesper-grammar-seed",
+ "vesper-highlight-seed",
  "vesper-loom-admission",
  "vesper-loom-audit-seed",
  "vesper-loom-calculus-seed",
@@ -6880,6 +6889,32 @@ dependencies = [
  "vesper-semver-seed",
  "vesper-serde-seed",
  "vesper-simd",
+ "vesper-span-seed",
+]
+
+[[package]]
+name = "vesper-tour-wasm"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "petgraph",
+ "serde",
+ "serde_json",
+ "vesper-alloc-seed",
+ "vesper-beacon-seed",
+ "vesper-core",
+ "vesper-doc",
+ "vesper-ffi",
+ "vesper-fmt-seed",
+ "vesper-forge-seed",
+ "vesper-highlight-seed",
+ "vesper-lean-syntax-seed",
+ "vesper-loom-calculus-seed",
+ "vesper-pact-binding",
+ "vesper-pact-seed",
+ "vesper-syntax",
+ "vesper-tensor-seed",
+ "vesper-test",
 ]
 
 [[package]]
@@ -6947,16 +6982,21 @@ dependencies = [
  "chacha20 0.9.1",
  "chacha20poly1305",
  "hkdf",
- "poly1305",
- "polyval",
  "sha2",
- "subtle",
+ "vesper-bench",
+ "vesper-crypto-sys",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "zeroize",
 ]
 
 [[package]]
 name = "vesper-warp-shard"
 version = "0.1.0"
+dependencies = [
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
 
 [[package]]
 name = "vesper-warp-tcp"
@@ -6982,7 +7022,10 @@ name = "vesper-warp-umem"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "vesper-bench",
  "vesper-ffi",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-warp-umem",
 ]
 

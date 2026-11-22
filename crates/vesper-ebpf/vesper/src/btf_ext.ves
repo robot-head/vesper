@@ -233,12 +233,12 @@ fn local_depth(
         out.push(a);
         out
             .push(
-            if k == BtfKind::Union {
-                1
-            } else {
-                0
-            }
-        );
+                if k == BtfKind::Union {
+                    1
+                } else {
+                    0
+                }
+            );
         out.push(n);
         for i in 0..n {
             let mname = te(in tab, in idx, t, 4, i, 0);
@@ -343,12 +343,9 @@ pub fn parse_ext(
     in section: Slice[u8]
 ) -> ChunkSeq[u64] {
     let len = ext.len();
-    if len
-        < 8
-        || (byte(in ext, 0) | (byte(in ext, 1) << 8))
-        != BtfHeader::Magic
-        || byte(in ext, 2)
-        != BtfHeader::Version {
+    if len < 8
+        || (byte(in ext, 0) | (byte(in ext, 1) << 8)) != BtfHeader::Magic
+        || byte(in ext, 2) != BtfHeader::Version {
         return err(1, 0, 0);
     }
     let hdr = le32(in ext, 4);
@@ -553,8 +550,7 @@ pub fn maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8])
     let n_flags: ChunkSeq[u8] = bytes_of("map_flags");
     let n = idx.len();
     for id in 0..n {
-        if tkind(in tab, in idx, id)
-            == BtfKind::Datasec
+        if tkind(in tab, in idx, id) == BtfKind::Datasec
             && name_eq(in strs, tf(in tab, in idx, id, 1), in maps_name.as_slice()) {
             let nv = tf(in tab, in idx, id, 6);
             for v in 0..nv {

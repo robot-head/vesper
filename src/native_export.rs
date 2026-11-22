@@ -1303,7 +1303,7 @@ fn compile_exports<M: Module>(
             .filter(|e| needs_wide_entry(e));
         let (symbol, linkage) = match exports.get(key) {
             Some(symbol) if wide.is_none() => (symbol.clone(), Linkage::Export),
-            _ => (format!("vesper_function_{i}"), Linkage::Local),
+            _ => (local_symbol(i, key), Linkage::Local),
         };
         let sig = signature_with_abi(m, world, &f, false, abi.of(key))?;
         let id = m
@@ -1485,11 +1485,12 @@ pub fn compile_source_with(
     options: &LibraryOptions<'_>,
     instances: &[Instance],
 ) -> Result<Library, ExportError> {
-    let parsed = crate::parser::parse(source);
+    let (expanded, parsed) = crate::forge_frontend::parse_compiler_source(source, false)
+        .map_err(|d| diagnostics(path, &[d], "expansion"))?;
     if !parsed.diagnostics.is_empty() {
         return Err(diagnostics(path, &parsed.diagnostics, "syntax"));
     }
-    compile_module(path, parsed.module, source, options, instances, None)
+    compile_module(path, parsed.module, &expanded, options, instances, None)
 }
 
 fn diagnostics(path: &str, ds: &[crate::ast::Diagnostic], what: &str) -> ExportError {

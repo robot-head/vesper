@@ -377,11 +377,11 @@ pub fn ast_new() -> Ast {
     // List 0 is the empty list.
     lists
         .alloc(
-        ListRef {
-            first: 0,
-            len: 0
-        }
-    );
+            ListRef {
+                first: 0,
+                len: 0
+            }
+        );
     Ast {
         names: interner_new(),
         lits: arena_new[Lit](),
@@ -446,63 +446,63 @@ pub fn expr_at(in a: Ast, i: u32) -> ExprNode {
     a
         .exprs
         .get_or(
-        idx_from_raw[ExprNode](i),
-        ExprNode {
-            kind: 0,
-            start: 0,
-            end: 0,
-            a: 0,
-            b: 0,
-            c: 0,
-            d: 0,
-            e: 0
-        }
-    )
+            idx_from_raw[ExprNode](i),
+            ExprNode {
+                kind: 0,
+                start: 0,
+                end: 0,
+                a: 0,
+                b: 0,
+                c: 0,
+                d: 0,
+                e: 0
+            }
+        )
 }
 
 pub fn pat_at(in a: Ast, i: u32) -> PatNode {
     a
         .pats
         .get_or(
-        idx_from_raw[PatNode](i),
-        PatNode {
-            kind: 0,
-            start: 0,
-            end: 0,
-            a: 0,
-            b: 0,
-            c: 0
-        }
-    )
+            idx_from_raw[PatNode](i),
+            PatNode {
+                kind: 0,
+                start: 0,
+                end: 0,
+                a: 0,
+                b: 0,
+                c: 0
+            }
+        )
 }
 
 pub fn type_at(in a: Ast, i: u32) -> TypeNode {
     a
         .types
         .get_or(
-        idx_from_raw[TypeNode](i),
-        TypeNode {
-            kind: 0,
-            a: 0,
-            b: 0,
-            c: 0,
-            d: 0
-        }
-    )
+            idx_from_raw[TypeNode](i),
+            TypeNode {
+                kind: 0,
+                a: 0,
+                b: 0,
+                c: 0,
+                d: 0
+            }
+        )
 }
 
 pub fn lit_at(in a: Ast, i: u32) -> Lit {
     a
         .lits
         .get_or(
-        idx_from_raw[Lit](i),
-        Lit {
-            kind: 0,
-            neg: false,
-            bits: 0,
-            hi: 0
-        }
-    )
+            idx_from_raw[Lit](i),
+            Lit {
+                kind: 0,
+                neg: false,
+                bits: 0,
+                hi: 0
+            }
+        )
 }
 
 // The name of a Named type, else `none()` (`Type::name`'s "").
@@ -625,14 +625,14 @@ test {
         ast
             .types
             .alloc(
-            TypeNode {
-                kind: kind,
-                a: 7,
-                b: 0,
-                c: 0,
-                d: 0
-            }
-        );
+                TypeNode {
+                    kind: kind,
+                    a: 7,
+                    b: 0,
+                    c: 0,
+                    d: 0
+                }
+            );
         type_name(in ast, 0) == expected
     }
 
@@ -647,16 +647,10 @@ test {
             Option::Some(count) => count,
             Option::None => return false,
         };
-        empty_symbols
-            > 0
-            && empty_bytes
-            > 0
-            && named
-            .try_get(35)
-            == Option::Some(wrapping_add(empty_symbols, 1))
-            && named
-            .try_get(36)
-            == Option::Some(wrapping_add(empty_bytes, 3))
+        empty_symbols > 0
+            && empty_bytes > 0
+            && named.try_get(35) == Option::Some(wrapping_add(empty_symbols, 1))
+            && named.try_get(36) == Option::Some(wrapping_add(empty_bytes, 3))
     }
 
     // @case empty(in "", 0, 0, 0, 0)
@@ -668,18 +662,10 @@ test {
     fn test_ast_module_tables(in source: Str, functions: u64, adts: u64, imports: u64, items: u64)
         -> bool {
         let rows = ast_rows(in source);
-        let declarations = rows
-            .try_get(13)
-            == Option::Some(adts)
-            && rows
-            .try_get(14)
-            == Option::Some(functions);
-        let module_uses = rows
-            .try_get(26)
-            == Option::Some(imports)
-            && rows
-            .try_get(33)
-            == Option::Some(imports);
+        let declarations = rows.try_get(13) == Option::Some(adts)
+            && rows.try_get(14) == Option::Some(functions);
+        let module_uses = rows.try_get(26) == Option::Some(imports)
+            && rows.try_get(33) == Option::Some(imports);
         declarations && module_uses && rows.try_get(30) == Option::Some(items) && rows.len() == 37
     }
 
@@ -701,13 +687,8 @@ test {
             Option::None => false,
         };
         prefix
-            && length
-            >= 6
-            && words
-            .try_get(1)
-            == Option::Some(0)
-            && words
-            .len()
-            == wrapping_add(payload_words, 2)
+            && length >= 6
+            && words.try_get(1) == Option::Some(0)
+            && words.len() == wrapping_add(payload_words, 2)
     }
 }

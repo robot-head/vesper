@@ -26,7 +26,7 @@ use crate::ir::{Argument, FunctionIr, Instruction, Op, Program, ValueId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The prefix of generated drop functions.
-pub const DROP_PREFIX: &str = "$drop$";
+pub const DROP_PREFIX: &str = crate::check::FOREIGN_DROP_PREFIX;
 
 /// The generated drop function of values of `ty`: `$drop$H` for a handle
 /// `H`, `$drop$Option$H` for `Option[H]`.

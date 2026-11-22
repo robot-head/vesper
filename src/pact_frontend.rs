@@ -235,7 +235,19 @@ fn check_lowered_package(
     } else {
         module
     };
-    let mut fe = match Frontend::new(module, identity, options) {
+    let base = base_module(module);
+    let (base_world, _) = World::collect(&base);
+    // The installed declaration pass (the hybrid build's Vesper port) may
+    // reject the module before Rust collects it; a clean answer leaves the
+    // collection, the bindings and the session to Rust.
+    if options.dependencies.is_empty()
+        && let Some(table) = DECLARATION_PASS.get()
+        && let Some(d) = (table.diagnostics)(module, &base_world, identity)
+        && !d.is_empty()
+    {
+        return fail(d, empty);
+    }
+    let mut fe = match Frontend::with_base(module, base, base_world, identity, options) {
         Ok(fe) => fe,
         Err(d) => return fail(d, empty),
     };
@@ -340,6 +352,90 @@ fn check_lowered_package(
         revision: Some(revision),
         evidence,
     }
+}
+
+/// The declaration pass of [`check_package`] on its own, under
+/// [`default_identity`] and without dependencies: the module the pass
+/// collects from (after function-object, `dyn` and builtin-trait lowering)
+/// and the diagnostics of collecting and validating its trait, conformance,
+/// `use model` and bound declarations. `None` when the pass does not run:
+/// no frontend syntax, or an earlier lowering rejected the module. The
+/// differential reference of the Vesper port (self-hosting SH2 lane 13,
+/// #1185, `packages/vesper-check-pact`); not a stable API.
+#[doc(hidden)]
+pub fn declaration_pass(module: &Module) -> Option<(Module, Vec<Diagnostic>)> {
+    let fn_lowered;
+    let module = if crate::dyn_fn::uses_fn_objects(module) {
+        fn_lowered = crate::dyn_fn::lower(module).ok()?;
+        &fn_lowered.module
+    } else {
+        module
+    };
+    let dyn_lowered;
+    let module = if crate::dyn_trait::uses_dyn(module) {
+        dyn_lowered = crate::dyn_trait::lower(module).ok()?;
+        &dyn_lowered.module
+    } else {
+        module
+    };
+    if !has_frontend_syntax(module) && !builtin_traits::wanted(module) {
+        return None;
+    }
+    let injected;
+    let module = if builtin_traits::wanted(module) {
+        let (stripped, items, owners) = builtin_traits::prelude(module).ok()?;
+        injected = mono::SpanMap::new(module).with_builtins(&stripped, items, &owners);
+        &injected
+    } else {
+        module
+    };
+    let fe = Frontend::new(module, &default_identity(), &FrontendOptions::default()).ok()?;
+    Some((module.clone(), fe.diagnostics))
+}
+
+/// The declaration pass's swap-in point (self-hosting SH2 lane 13, #1185):
+/// the diagnostics of collecting and validating the trait, conformance,
+/// `use model` and bound declarations of a package without dependencies,
+/// before [`check_package`] builds its Pact session.
+#[derive(Clone, Copy)]
+pub struct DeclarationPassTable {
+    /// The diagnostics for `module` (after the function-object, `dyn` and
+    /// builtin-trait lowerings), given the world of its module without trait
+    /// declarations and its identity, in the order Rust reports them; `None`
+    /// leaves the module to Rust. Non-empty diagnostics reject the package
+    /// (with empty bindings); empty ones leave the rest of the pass to Rust.
+    pub diagnostics: fn(&Module, &World, &PackageIdentity) -> Option<Vec<Diagnostic>>,
+}
+
+/// The Rust declaration pass, the default [`DeclarationPassTable`].
+pub const RUST_DECLARATION_PASS: DeclarationPassTable = DeclarationPassTable {
+    diagnostics: rust_declaration_diagnostics,
+};
+
+static DECLARATION_PASS: std::sync::OnceLock<DeclarationPassTable> = std::sync::OnceLock::new();
+
+/// Runs the declaration pass through `table` for the rest of the process.
+/// Only the first call takes effect; a later one returns its table back.
+pub fn install_declaration_pass(table: DeclarationPassTable) -> Result<(), DeclarationPassTable> {
+    DECLARATION_PASS.set(table)
+}
+
+/// [`DeclarationPassTable::diagnostics`] in Rust: `Frontend::new` without
+/// dependencies.
+pub fn rust_declaration_diagnostics(
+    module: &Module,
+    base_world: &World,
+    identity: &PackageIdentity,
+) -> Option<Vec<Diagnostic>> {
+    let fe = Frontend::with_base(
+        module,
+        base_module(module),
+        base_world.clone(),
+        identity,
+        &FrontendOptions::default(),
+    )
+    .ok()?;
+    Some(fe.diagnostics)
 }
 
 /// Whether the module uses any frontend-only trait syntax.
@@ -550,6 +646,7 @@ fn generated_name(c: &Conformance, method: &str) -> String {
 
 fn base_module(module: &Module) -> Module {
     Module {
+        sugar_origins: module.sugar_origins.clone(),
         items: module
             .items
             .iter()
@@ -576,6 +673,17 @@ impl Frontend {
     ) -> Result<Self, Vec<Diagnostic>> {
         let base = base_module(module);
         let (base_world, _) = World::collect(&base);
+        Self::with_base(module, base, base_world, identity, options)
+    }
+
+    /// [`Frontend::new`] given `base_module(module)` and its world.
+    fn with_base(
+        module: &Module,
+        base: Module,
+        base_world: World,
+        identity: &PackageIdentity,
+        options: &FrontendOptions,
+    ) -> Result<Self, Vec<Diagnostic>> {
         let mut fe = Frontend {
             identity: identity.clone(),
             module: module.clone(),

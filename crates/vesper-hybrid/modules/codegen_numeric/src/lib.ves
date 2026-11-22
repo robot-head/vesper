@@ -1,0 +1,19 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// The `numeric` codegen swap of the hybrid Stage 2 build (self-hosting SH4
+// lane 11, #1285): vector, `TiledSeq`, float, region and atomic operations
+// emitted in Vesper through the lent Cranelift builder. `vesper build --lib` exports
+// `numeric` as `vesper_hybrid_codegen_numeric_numeric`, and
+// crates/vesper-hybrid installs it as the `numeric` hook of
+// `vesper::codegen_swap`. The Rust side declines the graph walk's
+// `INSTRUCTION` requests, so this only sees the typed requests of
+// `codegen_swap::numeric`.
+use @vesper/codegen-numeric::{
+    numeric_hook
+};
+
+// One typed request of the `numeric` family: `call` is the address of the
+// lent call. Returns 1 when it emitted the request, 0 to leave it to Rust.
+pub fn numeric(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    numeric_hook(call)
+}

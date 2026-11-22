@@ -161,9 +161,13 @@ fn stack_bound_commands_match_the_default_compiler() {
     let default = default_compiler();
     let hybrid = hybrid();
     let mut differ = vec![];
+    let mut first_success = None;
     let commands = commands(&scratch);
-    for (args, out) in &commands {
+    for (i, (args, out)) in commands.iter().enumerate() {
         let d = run(&default, args, out.as_deref(), false);
+        if first_success.is_none() && d.output.status.success() {
+            first_success = Some(i);
+        }
         let h = run(&hybrid, args, out.as_deref(), false);
         let mut what = vec![];
         if d.output.status.code() != h.output.status.code() {
@@ -188,23 +192,39 @@ fn stack_bound_commands_match_the_default_compiler() {
             ));
         }
     }
-    // The hybrid really answered from Vesper.
-    let (args, out) = &commands[0];
+    // The hybrid really answered from Vesper. The count is printed by an
+    // `atexit` handler, which a failing command skips on Windows: the CLI
+    // exits through `std::process::exit`, which there is `ExitProcess` and
+    // does not run the C runtime's exit handlers. So ask a command that
+    // succeeds (#1486).
+    let (args, out) = &commands[first_success.expect("a stack-bound command that succeeds")];
     let stats = run(&hybrid, args, out.as_deref(), true);
     let stderr = String::from_utf8_lossy(&stats.output.stderr);
-    let calls: u64 = stderr
+    let calls: Option<u64> = stderr
         .lines()
         .find_map(|l| l.strip_prefix("vesper-hybrid: stack-bound answered "))
         .and_then(|l| l.split(' ').next())
-        .and_then(|n| n.parse().ok())
-        .unwrap_or_else(|| panic!("no stack-bound count in:\n{stderr}"));
+        .and_then(|n| n.parse().ok());
     let _ = std::fs::remove_dir_all(&scratch);
-    eprintln!(
-        "stack bound: {} commands, {} differ; the first answered {calls} reports from Vesper",
-        commands.len(),
-        differ.len()
-    );
-    assert!(calls > 0, "{stderr}");
+    // The divergent build rejects every graph, so even that command fails
+    // in the hybrid and, on Windows, prints no count. There the differences
+    // checked below show that the Vesper module answered.
+    let windows_divergent =
+        cfg!(windows) && cfg!(feature = "divergent-stack-bound") && !stats.output.status.success();
+    match calls {
+        Some(calls) => {
+            eprintln!(
+                "stack bound: {} commands, {} differ; the first answered {calls} reports from Vesper",
+                commands.len(),
+                differ.len()
+            );
+            assert!(calls > 0, "{stderr}");
+        }
+        None if windows_divergent => {
+            eprintln!("stack bound: the failing divergent hybrid printed no count (Windows)")
+        }
+        None => panic!("no stack-bound count in:\n{stderr}"),
+    }
     if cfg!(feature = "divergent-stack-bound") {
         assert!(
             !differ.is_empty(),

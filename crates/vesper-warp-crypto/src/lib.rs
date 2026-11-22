@@ -49,26 +49,38 @@
 //! enforced by Rust ownership; it is not an implementation of the Vesper
 //! source typing rules for `linear` values.
 //!
+//! # The Vesper port
+//!
+//! Every rule above is Vesper (`vesper/src/lib.ves`, the Loom package
+//! `@vesper/warp-crypto`, Rust-exit SH6 lane 17, #1412): the key schedule,
+//! the nonce, the bounds checks, the header-protection masks, the sealer,
+//! opener and key-update state machines and the Retry tag. The primitives
+//! are calls of the one crypto shim, `vesper-crypto-sys`, through
+//! `@vesper/crypto`. This crate keeps the public types: the AEAD and AES
+//! keys, held inline and lent to Vesper (export ABI 4), the linear
+//! [`NonceTicket`] with its drop accounting, the packet-number
+//! reconstruction closure, and the swaps of keys on an update. No call on
+//! the packet path allocates; each lends Vesper a stack scratch buffer.
+//!
 //! # Secrets and constant time
 //!
 //! Secrets, derived keys, IVs and header-protection keys are zeroized on
-//! drop: our own buffers through `zeroize`, the AES key schedules through
-//! the `aes` crate's `zeroize` feature, the GHASH/POLYVAL state through the
-//! `polyval` `zeroize` feature, and the ChaCha20 keys through
-//! `chacha20`/`chacha20poly1305`'s own `ZeroizeOnDrop`. The HMAC state held
-//! transiently inside `hkdf` during expansion is not zeroized by that crate.
+//! drop: our own buffers through `zeroize`, the key schedules inside
+//! `vesper-crypto-sys` through its dependencies' `zeroize` features, and
+//! the Vesper scratch bytes that held a label, a sample or a keystream
+//! block by `@vesper/crypto`'s `wipe`.
 //!
-//! AEAD tag comparison is done by `aes-gcm` and `chacha20poly1305` with
-//! `subtle` before any plaintext is written, so a failed open leaves the
-//! payload bytes untouched (tested). Retry tag verification goes through the
-//! same AEAD path. No constant-time claim is made beyond those dependency
-//! guarantees.
+//! AEAD tag comparison is done in the shim's AEADs in constant time before
+//! any plaintext is written, so a failed open leaves the payload bytes
+//! untouched (tested). Retry tag verification goes through the same AEAD
+//! path. No constant-time claim is made beyond those guarantees.
 //!
 //! Hardware AEAD offload (kTLS, NIC inline crypto) is not implemented and is
 //! unavailable.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
+mod port;
 pub mod protect;
 pub mod retry;
 pub mod schedule;
@@ -80,6 +92,11 @@ pub use retry::{retry_integrity_tag, verify_retry_integrity};
 pub use schedule::{DirectionalKeys, InitialSecrets, KeyMaterial, Side, TrafficSecret};
 pub use ticket::{NonceTicket, Opened, Opener, Sealer, TicketAudit, leaked_nonce_tickets};
 pub use update::{OneRttKeys, OneRttOpened};
+
+#[cfg(test)]
+mod differential;
+#[cfg(test)]
+mod reference;
 
 use std::fmt;
 
@@ -107,37 +124,25 @@ pub enum Cipher {
 
 impl Cipher {
     /// AEAD key length (also the header-protection key length).
-    pub const fn key_len(self) -> usize {
-        match self {
-            Cipher::Aes128Gcm => 16,
-            Cipher::Aes256Gcm | Cipher::ChaCha20Poly1305 => 32,
-        }
+    pub fn key_len(self) -> usize {
+        port::b::cipher_key_len(self.into()) as usize
     }
 
     /// Length of a traffic secret, i.e. the TLS hash output length.
-    pub const fn secret_len(self) -> usize {
-        match self {
-            Cipher::Aes128Gcm | Cipher::ChaCha20Poly1305 => 32,
-            Cipher::Aes256Gcm => 48,
-        }
+    pub fn secret_len(self) -> usize {
+        port::b::cipher_secret_len(self.into()) as usize
     }
 
     /// RFC 9001 §6.6 confidentiality limit: packets that may be sealed with
     /// one key. ChaCha20-Poly1305's limit exceeds the packet-number space.
-    pub const fn confidentiality_limit(self) -> u64 {
-        match self {
-            Cipher::Aes128Gcm | Cipher::Aes256Gcm => 1 << 23,
-            Cipher::ChaCha20Poly1305 => PACKET_NUMBER_LIMIT,
-        }
+    pub fn confidentiality_limit(self) -> u64 {
+        port::b::cipher_confidentiality_limit(self.into())
     }
 
     /// RFC 9001 §6.6 integrity limit: failed openings tolerated across all
     /// keys of a connection.
-    pub const fn integrity_limit(self) -> u64 {
-        match self {
-            Cipher::Aes128Gcm | Cipher::Aes256Gcm => 1 << 52,
-            Cipher::ChaCha20Poly1305 => 1 << 36,
-        }
+    pub fn integrity_limit(self) -> u64 {
+        port::b::cipher_integrity_limit(self.into())
     }
 }
 
@@ -202,12 +207,3 @@ impl fmt::Display for CryptoError {
 }
 
 impl std::error::Error for CryptoError {}
-
-/// Checks `pn < 2^62`.
-pub(crate) fn check_pn(pn: u64) -> Result<(), CryptoError> {
-    if pn < PACKET_NUMBER_LIMIT {
-        Ok(())
-    } else {
-        Err(CryptoError::PacketNumberOutOfRange(pn))
-    }
-}

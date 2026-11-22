@@ -203,22 +203,22 @@ fn queue_rst_reply(inout t: Tcb, ips_in: Ips, seg: Parsed, seq_len: u32) {
     let with_ack = has(seg.flags, ack_bit());
     t
         .pending_rst = Option::Some(
-        RstSpec {
-            ips: ips_reversed(ips_in),
-            src_port: seg.dst_port,
-            dst_port: seg.src_port,
-            seq: if with_ack {
-                seg.ack
-            } else {
-                0
-            },
-            ack: if with_ack {
-                Option::None
-            } else {
-                Option::Some(sn_add(seg.seq, seq_len))
+            RstSpec {
+                ips: ips_reversed(ips_in),
+                src_port: seg.dst_port,
+                dst_port: seg.src_port,
+                seq: if with_ack {
+                    seg.ack
+                } else {
+                    0
+                },
+                ack: if with_ack {
+                    Option::None
+                } else {
+                    Option::Some(sn_add(seg.seq, seq_len))
+                }
             }
-        }
-    );
+        );
 }
 
 fn challenge_ack(inout t: Tcb, now: u64) {

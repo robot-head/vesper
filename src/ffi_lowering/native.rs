@@ -436,10 +436,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             sig.returns.push(abi_param(t, pointer));
         }
         // A callback type's call goes through the pointer in its first
-        // argument (the handle word); every other call imports its symbol.
+        // argument (the handle word); a `@vesper-std/cpu` instruction is a
+        // local leaf function of machine code for this target (`ffi::cpu`);
+        // every other call imports its symbol.
+        let architecture = self.m.isa().triple().architecture;
+        let cpu = ffi::cpu::code_for(plan.function.symbol(), architecture)?;
         let callee = if plan.function.is_indirect() {
             let pointer = c_args.remove(0);
             Callee::Indirect(self.b.import_signature(sig), pointer)
+        } else if let Some((arch, code)) = cpu {
+            if arch == ffi::cpu::Arch::X86_64 {
+                sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
+            }
+            Callee::Direct(self.foreign_code(plan.function.symbol(), &sig, &code)?)
         } else {
             self.foreign_import(plan.function.link_symbol(), sig)?
         };
@@ -1149,6 +1158,26 @@ impl<M: Module> Codegen<'_, '_, M> {
             .ins()
             .store(ir::MemFlags::new(), payload, ptr, ok_offset);
         Ok(ptr)
+    }
+    /// A local leaf function of signature `sig` defined from `code`,
+    /// declared and defined once per module.
+    fn foreign_code(
+        &mut self,
+        name: &str,
+        sig: &ir::Signature,
+        code: &[u8],
+    ) -> Result<ir::FuncRef, String> {
+        let defined = self.foreign_symbol_free(name, Linkage::Local)?;
+        let id = self
+            .m
+            .declare_function(name, Linkage::Local, sig)
+            .map_err(|e| e.to_string())?;
+        if !defined {
+            self.m
+                .define_function_bytes(id, 16, code, &[])
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(self.m.declare_func_in_func(id, self.b.func))
     }
     /// A local leaf function defined from generated machine code, declared
     /// and defined once per module.

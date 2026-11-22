@@ -32,6 +32,10 @@ name = "vesper-grammar"
 path = "src/bin/vesper-grammar.rs"
 
 [[bin]]
+name = "vesper-highlight"
+path = "src/bin/vesper-highlight.rs"
+
+[[bin]]
 name = "vesper-json"
 path = "src/bin/vesper-json.rs"
 
@@ -64,6 +68,10 @@ name = "vesper-semver"
 path = "src/bin/vesper-semver.rs"
 
 [[bin]]
+name = "vesper-shot"
+path = "src/bin/vesper-shot.rs"
+
+[[bin]]
 name = "vesper-simd"
 path = "src/bin/vesper-simd.rs"
 
@@ -94,7 +102,11 @@ serde_json = { workspace = true }
 # observer traits, so bench keeps the seed too (see the lane report).
 vesper-bench = { path = "../vesper-bench/seed", package = "vesper-bench-seed" }
 vesper-bench-pmu = { path = "../vesper-bench-pmu" }
-vesper-aegis = { path = "../vesper-aegis/seed", package = "vesper-aegis-seed" }
+# `vesper-tee` computes its register extends with sha2 instead of linking
+# vesper-aegis: Bazel builds Aegis's Vesper port with the compiler, whose
+# runfiles include these tools, so linking it would be a cycle (SH6 lane 8,
+# #1403).
+sha2 = { workspace = true }
 vesper-grammar = { path = "../vesper-grammar/seed", package = "vesper-grammar-seed" }
 vesper-serde = { path = "../vesper-serde/seed", package = "vesper-serde-seed" }
 vesper-loom-audit = { path = "../vesper-loom-audit/seed", package = "vesper-loom-audit-seed" }
@@ -111,6 +123,8 @@ vesper-crucible = { path = "../vesper-crucible/seed", package = "vesper-crucible
 # Only the tools link these (SH6 lane 3, #1398): they left the compiler's
 # closure, so their Rust can flip before Stage 2.
 vesper-simd = { path = "../vesper-simd" }
+vesper-highlight = { path = "../vesper-highlight/seed", package = "vesper-highlight-seed", features = ["shot"] }
+vesper-span = { path = "../vesper-span/seed", package = "vesper-span-seed" }
 vesper-migrate = { path = "../vesper-migrate" }
 vesper-loom-trust = { path = "../vesper-loom-trust" }
 vesper-loom-admission = { path = "../vesper-loom-admission" }

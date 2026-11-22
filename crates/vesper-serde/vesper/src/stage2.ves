@@ -198,16 +198,16 @@ fn push(
     }
     toks
         .push(
-        Token {
-            start: start,
-            end: 0,
-            next: wrapping_add(n, 1),
-            kind: kind,
-            decoded_len: 0,
-            escaped: false,
-            depth: depth
-        }
-    );
+            Token {
+                start: start,
+                end: 0,
+                next: wrapping_add(n, 1),
+                kind: kind,
+                decoded_len: 0,
+                escaped: false,
+                depth: depth
+            }
+        );
     n
 }
 
@@ -627,14 +627,10 @@ fn document(
             }
         } else if c == Ascii::Quote {
             i = string(inout b, inout toks, in t, in s, in escapes, i, depth);
-        } else if c
-            == Ascii::LowerN
-            || c
-            == Ascii::LowerT
-            || c
-            == Ascii::LowerF
-            || c
-            == Ascii::Minus
+        } else if c == Ascii::LowerN
+            || c == Ascii::LowerT
+            || c == Ascii::LowerF
+            || c == Ascii::Minus
             || is_digit(c) {
             i = scalar(in b, inout toks, in t, in s, in escapes, i, depth);
         } else {
