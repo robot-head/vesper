@@ -10,10 +10,19 @@ use self::util::{
     w
 };
 use self::engine::{
+    Code,
     Eng,
     NONE,
     eng_new
 };
+
+// `fusion_run`'s mode: bit 0 saturates, bit 1 explains, and the iteration
+// limit starts at bit `LimitShift`.
+enum Mode: _ {
+    Saturate = 1,
+    Explain = 2,
+    LimitShift = 8
+}
 
 // Runs `program` and extracts the binding named `root`.
 //
@@ -36,7 +45,7 @@ pub fn fusion_run(in program: Str, in root: Str, mode: u64) -> ChunkSeq[u64] {
     if !e.failed() {
         r = e.binding(in root);
         if r == NONE {
-            out.push(9);
+            out.push(Code::Root);
             out.push(0);
             out.push(0);
             out.push(e.node_count());
@@ -44,8 +53,8 @@ pub fn fusion_run(in program: Str, in root: Str, mode: u64) -> ChunkSeq[u64] {
         }
     }
     if !e.failed() {
-        if (mode & 1) == 1 {
-            e.run(mode >> 8);
+        if (mode & Mode::Saturate) == Mode::Saturate {
+            e.run(mode >> Mode::LimitShift);
         } else {
             e.rebuild();
         }
@@ -55,7 +64,7 @@ pub fn fusion_run(in program: Str, in root: Str, mode: u64) -> ChunkSeq[u64] {
         e.extract_costs(r);
         let c = e.find(r);
         if !e.has_extraction(c) {
-            out.push(13);
+            out.push(Code::NoTerm);
             out.push(0);
             out.push(e.iteration_count());
             out.push(e.node_count());
@@ -64,7 +73,7 @@ pub fn fusion_run(in program: Str, in root: Str, mode: u64) -> ChunkSeq[u64] {
         x_root = e.emit_extracted(c);
     }
     let mut src: u32 = 0;
-    if !e.failed() && (mode & 2) == 2 {
+    if !e.failed() && (mode & Mode::Explain) == Mode::Explain {
         e.settle();
         e.explain_extracted(r);
         src = e.source_slot(r);
@@ -83,7 +92,7 @@ pub fn fusion_run(in program: Str, in root: Str, mode: u64) -> ChunkSeq[u64] {
         out.push(at64(in extracted_words, i));
     }
     out.push(w(x_root));
-    if (mode & 2) == 2 {
+    if (mode & Mode::Explain) == Mode::Explain {
         out.push(e.term_count());
         let term_words = e.term_words();
         for i in 0..term_words.len() {
