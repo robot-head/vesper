@@ -8,6 +8,7 @@
 //! ...) otherwise; both give the same bits. `round` (ties away from zero) is
 //! `trunc` plus an exact adjustment.
 use super::*;
+use crate::codegen_swap::{numeric, word};
 use crate::numeric::IntegerKind;
 use crate::numeric::float::{FloatKind, MathOp};
 use cranelift_codegen::ir::MemFlags;
@@ -29,7 +30,45 @@ pub(super) extern "C" fn native_float_remainder_f32(a: f32, b: f32) -> f32 {
     a % b
 }
 
+/// The `numeric` family's word of a float kind (`FLOAT_*` requests).
+fn float_word(k: FloatKind) -> u64 {
+    match k {
+        FloatKind::F32 => numeric::FROM_F32,
+        FloatKind::F64 => numeric::FROM_F64,
+    }
+}
+
+/// The `numeric` family's word of a math intrinsic (`FLOAT_MATH`): its
+/// position in [`MathOp::ALL`] from 1.
+fn math_word(op: MathOp) -> u64 {
+    MathOp::ALL
+        .iter()
+        .position(|o| *o == op)
+        .map_or(0, |i| i as u64 + 1)
+}
+
 impl<M: Module> Codegen<'_, '_, M> {
+    /// A `numeric` family request outside the graph walk (SH4 lane 11,
+    /// #1285: floats, regions, atomics), answering one value; `None` emits
+    /// the Rust code. One relaxed atomic load when no hook is installed.
+    pub(super) fn swap_numeric(&mut self, op: u32, args: &[u64]) -> Option<ir::Value> {
+        crate::codegen_swap::hook(crate::codegen_swap::Family::Numeric)?;
+        let results = crate::codegen_swap::request_or_record(
+            crate::codegen_swap::Family::Numeric,
+            &mut self.b,
+            &mut *self.m,
+            self.world,
+            self.program,
+            op,
+            args,
+        )?;
+        crate::codegen_swap::value_or_record(&results)
+    }
+    /// `FLOAT_CONVERT`: an operand of class `from` (`numeric::FROM_*`)
+    /// converted to float kind `to`.
+    fn swap_float_convert(&mut self, to: FloatKind, from: u64, v: ir::Value) -> Option<ir::Value> {
+        self.swap_numeric(numeric::FLOAT_CONVERT, &[float_word(to), from, word(v)])
+    }
     /// The float constant `x` of Cranelift type `ty` (`F32` or `F64`).
     pub(super) fn float_const(&mut self, ty: ir::Type, x: f64) -> ir::Value {
         if ty == types::F32 {
@@ -73,17 +112,32 @@ impl<M: Module> Codegen<'_, '_, M> {
             let r = if let Some(kind) = FloatKind::from_type(from) {
                 let v = self.flush(flush, v);
                 match (kind, to) {
-                    (FloatKind::F32, FloatKind::F64) => self.b.ins().fpromote(target, v),
-                    (FloatKind::F64, FloatKind::F32) => self.b.ins().fdemote(target, v),
+                    (FloatKind::F32, FloatKind::F64) => {
+                        match self.swap_float_convert(to, numeric::FROM_F32, v) {
+                            Some(r) => r,
+                            None => self.b.ins().fpromote(target, v),
+                        }
+                    }
+                    (FloatKind::F64, FloatKind::F32) => {
+                        match self.swap_float_convert(to, numeric::FROM_F64, v) {
+                            Some(r) => r,
+                            None => self.b.ins().fdemote(target, v),
+                        }
+                    }
                     _ => v,
                 }
             } else {
                 let kind = IntegerKind::from_type(from)
                     .ok_or("native float conversion of a non-numeric value")?;
-                if kind.signed() {
-                    self.b.ins().fcvt_from_sint(target, v)
+                let from = if kind.signed() {
+                    numeric::FROM_SIGNED
                 } else {
-                    self.b.ins().fcvt_from_uint(target, v)
+                    numeric::FROM_UNSIGNED
+                };
+                match self.swap_float_convert(to, from, v) {
+                    Some(r) => r,
+                    None if kind.signed() => self.b.ins().fcvt_from_sint(target, v),
+                    None => self.b.ins().fcvt_from_uint(target, v),
                 }
             };
             return Ok(Some(self.flush(flush, r)));
@@ -93,6 +147,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Ok(Some(self.float_to_integer(to, v)));
         }
         if let Some((to_bits, kind)) = bits_intrinsic(name) {
+            let words = [u64::from(to_bits), float_word(kind), word(v)];
+            if let Some(r) = self.swap_numeric(numeric::FLOAT_BITS, &words) {
+                return Ok(Some(r));
+            }
             return Ok(Some(match (to_bits, kind) {
                 (true, FloatKind::F64) => self.b.ins().bitcast(types::I64, MemFlags::new(), v),
                 (true, FloatKind::F32) => {
@@ -112,15 +170,21 @@ impl<M: Module> Codegen<'_, '_, M> {
             let v = self.flush(flush, v);
             if self.world.overflow_ops.contains(&(span.start, span.end)) {
                 let ty = float_type(kind);
-                let t = self.b.ins().trunc(v);
                 let (lo, hi) = truncation_bounds(to);
-                let lo = self.float_const(ty, lo);
-                let hi = self.float_const(ty, hi);
-                // Ordered comparisons: a NaN fails both.
-                let above = self.b.ins().fcmp(FloatCC::GreaterThanOrEqual, t, lo);
-                let below = self.b.ins().fcmp(FloatCC::LessThan, t, hi);
-                let ok = self.b.ins().band(above, below);
-                let overflow = self.b.ins().icmp_imm(IntCC::Equal, ok, 0);
+                let words = [float_word(kind), lo.to_bits(), hi.to_bits(), word(v)];
+                let overflow = match self.swap_numeric(numeric::FLOAT_NARROW_TEST, &words) {
+                    Some(overflow) => overflow,
+                    None => {
+                        let t = self.b.ins().trunc(v);
+                        let lo = self.float_const(ty, lo);
+                        let hi = self.float_const(ty, hi);
+                        // Ordered comparisons: a NaN fails both.
+                        let above = self.b.ins().fcmp(FloatCC::GreaterThanOrEqual, t, lo);
+                        let below = self.b.ins().fcmp(FloatCC::LessThan, t, hi);
+                        let ok = self.b.ins().band(above, below);
+                        self.b.ins().icmp_imm(IntCC::Equal, ok, 0)
+                    }
+                };
                 self.check_overflow(overflow)?;
             }
             return Ok(Some(self.float_to_integer(to, v)));
@@ -130,6 +194,16 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// Truncation toward zero, clamped to `to`'s range, NaN to zero, in
     /// `to`'s canonical 64-bit lane.
     fn float_to_integer(&mut self, to: IntegerKind, v: ir::Value) -> ir::Value {
+        let words = [
+            u64::from(to.signed()),
+            u64::from(to.bits()),
+            to.min() as i64 as u64,
+            to.max() as i64 as u64,
+            word(v),
+        ];
+        if let Some(r) = self.swap_numeric(numeric::FLOAT_TO_INT, &words) {
+            return r;
+        }
         if to.signed() {
             let n = self.b.ins().fcvt_to_sint_sat(types::I64, v);
             if to.bits() == 64 {
@@ -160,6 +234,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         let ty = self.b.func.dfg.value_type(args[0]);
         if !is_float_type(ty) {
             return Err(format!("native '{}' of a non-float value", op.name()));
+        }
+        let mut words = vec![math_word(op)];
+        words.extend(args.iter().map(|a| word(*a)));
+        if let Some(r) = self.swap_numeric(numeric::FLOAT_MATH, &words) {
+            return Ok(r);
         }
         let ins = self.b.ins();
         Ok(match op {

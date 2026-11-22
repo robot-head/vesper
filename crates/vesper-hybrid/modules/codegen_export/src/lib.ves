@@ -1,0 +1,35 @@
+// @export vsys Cranelift direct rust=vesper_cranelift_sys
+//
+// The export ABI of the hybrid Stage 2 build (self-hosting SH4 lane 12,
+// #1286): the library interface planner (`plan`, the `plan` hook of
+// `vesper::codegen_swap`), the interface file (`interface_file`), and the export ABI v2 runtime entry points and
+// handle drop glue, emitted in Vesper over the Cranelift module the Rust
+// compiler lends (`export`, the `export` hook at src/native_export/glue.rs's
+// swap point).
+use @vesper/codegen-export::{
+    export_plan_bytes,
+    interface_text_bytes
+};
+use @vesper/codegen-export-glue::{
+    export_glue
+};
+
+// The interface planner (`plan_with`, the `plan` hook): its inputs as
+// words (tests/self_host_codegen_export/plan_words.rs `plan_input`), and
+// the interface or the refusals as words (`decode_plan`).
+pub fn plan(in input: Slice[u8]) -> ChunkSeq[u64] {
+    export_plan_bytes(in input)
+}
+
+// The interface file (`interface_json`, the `interface_json` hook) of an
+// interface in the binding generator's words
+// (tests/self_host_codegen_export/words.rs `binding_input`).
+pub fn interface_file(in input: Slice[u8]) -> ChunkSeq[u8] {
+    interface_text_bytes(in input)
+}
+
+// One glue request: `call` is the address of the lent call. Returns 1 when
+// it emitted the glue, 0 to leave it to Rust.
+pub fn export(call: u64) -> u64 eff [Ffi[Cranelift]] {
+    export_glue(call)
+}

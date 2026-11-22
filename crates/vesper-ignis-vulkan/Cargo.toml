@@ -2,6 +2,7 @@
 name = "vesper-ignis-vulkan"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Ignis Vulkan 1.3 backend (synchronization2, timeline semaphores, WGSL via naga), tested on Mesa lavapipe (design section 19)"
 publish = false
 

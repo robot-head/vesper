@@ -1,0 +1,2940 @@
+// The structured extractor (`Generator` in src/lean.rs) over `Id`: the
+// functions the CFG extractor refuses that need no ambient monad (part 3a).
+// It walks the source AST (ast.ves) and builds terms as word ranges
+// (tm.ves) in Rust's evaluation order, so the first error is Rust's.
+//
+// What this part does not port yet sets `skip` instead of guessing:
+// handlers and effect operations, effectful closures and calls, and types
+// with effectful arrows (which need the `Id` monad in `ty`). The
+// differential compares the other functions.
+
+use @vesper/check-data::types::{
+    Types,
+    Vars,
+    substitute,
+    vars_new
+};
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    w
+};
+use @vesper/check-data::world::{
+    Adt,
+    World,
+    set_by_symbol
+};
+use self::ast::{
+    Ast,
+    L_BOOL,
+    L_FLOAT,
+    L_INT,
+    NONE,
+    NONE32,
+    PK_BIND,
+    PK_CTOR,
+    PK_LITERAL,
+    PK_TUPLE,
+    PK_WILD,
+    Q_AS_SLICE,
+    Q_CLEAR,
+    Q_EXTEND,
+    Q_FINISH,
+    Q_GET,
+    Q_LAST,
+    Q_LEN,
+    Q_NEW,
+    Q_POP,
+    Q_PUSH,
+    Q_RESERVE,
+    Q_SET,
+    Q_SUB_SLICE,
+    Q_TRUNCATE,
+    Q_TRY_GET,
+    Q_TRY_SET,
+    Q_WITH_CAPACITY,
+    SrcFn,
+    TO_COL_GET,
+    TO_COL_SET,
+    TO_GET,
+    TO_LEN,
+    TO_LOAD_TILE_VEC,
+    TO_NEW,
+    TO_PUSH,
+    TO_SET,
+    TO_TILE_COUNT,
+    TO_WITH_CAPACITY,
+    TO_WITH_REGION,
+    X_ASSIGN,
+    X_BINARY,
+    X_BLOCK,
+    X_CALL,
+    X_CLOSURE,
+    X_FIELD,
+    X_HANDLE,
+    X_IF,
+    X_INDEX,
+    X_LITERAL,
+    X_LOOP,
+    X_MATCH,
+    X_NAME,
+    X_STRUCT,
+    X_TRY,
+    X_TUPLE,
+    X_UNARY
+};
+use self::build::{
+    B,
+    B_EXPLICIT,
+    B_IMPLICIT,
+    D_DEF,
+    K_PARTIAL,
+    OP_ADD,
+    OP_BOOL_AND,
+    OP_BOOL_EQ,
+    OP_BOOL_NE,
+    OP_BOOL_OR,
+    OP_DIV,
+    OP_GE,
+    OP_GT,
+    OP_LE,
+    OP_LT,
+    OP_MOD,
+    OP_MUL,
+    OP_SUB,
+    OP_AND,
+    P_BOOL,
+    P_INT,
+    P_RECORD,
+    P_STRING,
+    T,
+    T_BOOL,
+    T_STRING,
+    U_BOOL_NOT,
+    U_NEG
+};
+use self::tm::{
+    app,
+    app1,
+    app2,
+    app_args,
+    arm,
+    ascribe,
+    assign as push_assign,
+    bind_local,
+    bind_pattern_stmt,
+    binary,
+    eliminate,
+    empty,
+    explicit,
+    anonymous,
+    binder_sym,
+    expr_stmt,
+    extend,
+    field as record_field,
+    gapp1,
+    gapp2,
+    gapp3,
+    get,
+    global,
+    global2,
+    if_stmt,
+    infer,
+    ite,
+    lambda,
+    let_local,
+    let_pattern,
+    lref,
+    match_term,
+    named,
+    named_arg_sym,
+    nat,
+    nat_u64,
+    p_ctor,
+    p_tuple,
+    p_wild,
+    p_bind,
+    pos,
+    product,
+    project,
+    project_fixed,
+    pure,
+    record,
+    rooted2,
+    sequence,
+    sref,
+    tuple,
+    tuple_get,
+    unary,
+    unit,
+    update
+};
+use self::ty::{
+    E_NONE,
+    emit_ty,
+    spells,
+    ty_check,
+    ty_error
+};
+use self::cfg::{
+    effectful_arrow
+};
+use self::fn_input::{
+    Fns,
+    Sig
+};
+use self::emit::{
+    LOOP_REFUSAL,
+    X,
+    adt_of,
+    f32_bits,
+    lookup_constructor,
+    parse_index,
+    put_u128,
+    variant_of
+};
+
+const NONE64: u64 = 18446744073709551615;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_INFER: u8 = 5;
+const PASS_IN: u64 = 0;
+const PASS_INOUT: u64 = 1;
+
+// Integer kinds: bits, plus 256 when signed; 0 is no kind.
+const SIGNED: u64 = 256;
+
+const INOUT_SLICE: Str = "Lean extraction does not model inout Slice arguments: they write through to their sequence";
+
+// The read-only context.
+pub struct Y {
+    // the CFG extractor's context: program, world, signatures and
+    // `recursive_structs` (per ADT index)
+    x: X,
+    a: Ast,
+    fip: bool,
+    infer: u32,
+}
+
+pub copy struct Local {
+    name: u32,
+    id: u64,
+    ty: u32,
+}
+
+pub copy struct Cur {
+    id: u64,
+    sym: u32,
+}
+
+// `Generator`'s state for one function.
+pub struct G {
+    counter: u64,
+    // symbol -> 1 when used
+    used: ChunkSeq[u32],
+    used_list: ChunkSeq[u32],
+    // `scope` and `current` as stacks: the last entry wins, and a restore
+    // truncates.
+    scope: ChunkSeq[Local],
+    current: ChunkSeq[Cur],
+    next_binding: u64,
+    skip: bool,
+}
+
+pub fn gen_new() -> G {
+    G {
+        counter: 0,
+        used: ChunkSeq::new[u32](),
+        used_list: ChunkSeq::new[u32](),
+        scope: ChunkSeq::new[Local](),
+        current: ChunkSeq::new[Cur](),
+        next_binding: 0,
+        skip: false,
+    }
+}
+
+impl G {
+    pub fn reset(inout self) {
+        for i in 0..self.used_list.len() {
+            let s = u32_at(in self.used_list, i);
+            let ok = self.used.try_set(w(s), 0);
+        }
+        self.used_list.clear();
+        self.scope.clear();
+        self.current.clear();
+        self.counter = 0;
+        self.next_binding = 0;
+        self.skip = false;
+    }
+
+    fn is_used(in self, s: u32) -> bool {
+        u32_at(in self.used, w(s)) != 0
+    }
+
+    fn mark_used(inout self, s: u32) {
+        if !self.is_used(s) {
+            set_by_symbol(inout self.used, s, 1);
+            self.used_list.push(s);
+        }
+    }
+
+    // The scope entry of `name`, or NONE64.
+    fn find(in self, name: u32) -> u64 {
+        let mut i = self.scope.len();
+        loop {
+            if i == 0 {
+                return NONE64;
+            }
+            i = wrapping_sub(i, 1);
+            match self.scope.try_get(i) {
+                Option::Some(l) => {
+                    if l.name == name {
+                        return i;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+    }
+
+    fn local(in self, i: u64) -> Local {
+        match self.scope.try_get(i) {
+            Option::Some(l) => l,
+            Option::None => Local {
+                name: 0,
+                id: 0,
+                ty: 0
+            },
+        }
+    }
+
+    fn has(in self, name: u32) -> bool {
+        self.find(name) != NONE64
+    }
+
+    // `current[id]`.
+    fn cur(in self, id: u64) -> u32 {
+        let mut i = self.current.len();
+        loop {
+            if i == 0 {
+                return 0;
+            }
+            i = wrapping_sub(i, 1);
+            match self.current.try_get(i) {
+                Option::Some(c) => {
+                    if c.id == id {
+                        return c.sym;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+    }
+
+    fn set_cur(inout self, id: u64, sym: u32) {
+        self
+            .current
+            .push(
+            Cur {
+                id: id,
+                sym: sym
+            }
+        );
+    }
+}
+
+// Marks what this part does not port yet (unless an error came first).
+fn skip(inout b: B, inout g: G) {
+    if !b.failed {
+        g.skip = true;
+    }
+}
+
+// ----- names ---------------------------------------------------------------------
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn sym_of(inout b: B, in o: ChunkSeq[u8]) -> u32 {
+    b.names.intern(in o.as_slice())
+}
+
+// The symbol `{prefix}{s}{suffix}`.
+fn joined(inout b: B, in prefix: Str, s: u32, in suffix: Str) -> u32 {
+    b.joined(in prefix, s, in suffix)
+}
+
+fn decimal_sym(inout b: B, in prefix: Str, v: u64) -> u32 {
+    b.numbered(in prefix, v)
+}
+
+// `fresh(base)`: checks `base`, then the first of base, base'1, ... unused.
+fn fresh(inout b: B, inout g: G, base: u32) -> u32 {
+    b.check(base, in "identifier");
+    let mut candidate = base;
+    let mut index: u64 = 1;
+    loop {
+        if !g.is_used(candidate) {
+            break;
+        }
+        let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        b.names.write(base, inout o);
+        put(inout o, in "'");
+        put_dec(inout o, index);
+        candidate = sym_of(inout b, in o);
+        index = inc(index);
+    }
+    g.mark_used(candidate);
+    candidate
+}
+
+fn fresh_fixed(inout b: B, inout g: G, in base: Str) -> u32 {
+    let s = b.intern(in base);
+    fresh(inout b, inout g, s)
+}
+
+fn put_dec(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_dec(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+// `temp()`: `$t{counter}`.
+fn temp(inout b: B, inout g: G) -> u32 {
+    g.counter = inc(g.counter);
+    let s = decimal_sym(inout b, in "$t", g.counter);
+    fresh(inout b, inout g, s)
+}
+
+fn declare_as(inout g: G, name: u32, ty: u32, lean: u32) -> u64 {
+    let id = g.next_binding;
+    g.next_binding = inc(g.next_binding);
+    g.mark_used(lean);
+    g
+        .scope
+        .push(
+        Local {
+            name: name,
+            id: id,
+            ty: ty
+        }
+    );
+    g.set_cur(id, lean);
+    id
+}
+
+fn declare(inout b: B, inout g: G, name: u32, ty: u32) -> u32 {
+    let lean = fresh(inout b, inout g, name);
+    let id = declare_as(inout g, name, ty, lean);
+    lean
+}
+
+// `var(n)`: the current Lean local of source local `n`.
+fn var(inout b: B, in g: G, n: u32) -> T {
+    let i = g.find(n);
+    let l = g.local(i);
+    lref(inout b, g.cur(l.id))
+}
+
+// ----- types ---------------------------------------------------------------------
+
+fn is_named(in b: B, in t: Types, ty: u32, in name: Str) -> bool {
+    if ty == NONE32 {
+        return false;
+    }
+    let n = t.node(ty);
+    n.kind == K_NAMED && spells(in b, n.name, in name)
+}
+
+fn never(in b: B, in t: Types, ty: u32) -> bool {
+    is_named(in b, in t, ty, in "Never")
+}
+
+// `IntegerKind::from_type`.
+fn int_kind(in b: B, in t: Types, ty: u32) -> u64 {
+    if ty == NONE32 {
+        return 0;
+    }
+    let n = t.node(ty);
+    if n.kind == K_LIT {
+        if n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807 {
+            return 64;
+        }
+        return add(64, SIGNED);
+    }
+    if n.kind != K_NAMED {
+        return 0;
+    }
+    let s = n.name;
+    if spells(in b, s, in "u8") {
+        8
+    } else if spells(in b, s, in "u16") {
+        16
+    } else if spells(in b, s, in "u32") {
+        32
+    } else if spells(in b, s, in "u64") || spells(in b, s, in "usize") {
+        64
+    } else if spells(in b, s, in "u128") {
+        128
+    } else if spells(in b, s, in "i8") {
+        add(8, SIGNED)
+    } else if spells(in b, s, in "i16") {
+        add(16, SIGNED)
+    } else if spells(in b, s, in "i32") {
+        add(32, SIGNED)
+    } else if spells(in b, s, in "i64") || spells(in b, s, in "isize") {
+        add(64, SIGNED)
+    } else if spells(in b, s, in "i128") {
+        add(128, SIGNED)
+    } else {
+        0
+    }
+}
+
+fn kind_bits(k: u64) -> u64 {
+    k & 255
+}
+
+fn kind_signed(k: u64) -> bool {
+    (k & SIGNED) != 0
+}
+
+// `ty(t)?`: checks, then writes.
+fn ty(inout b: B, in t: Types, in y: Y, inout g: G, ty: u32) -> T {
+    if effectful_arrow(in t, ty) {
+        skip(inout b, inout g);
+    }
+    let m = b.at();
+    ty_check(inout b, in t, ty, y.fip);
+    emit_ty(inout b, in t, ty, y.fip);
+    b.since(m)
+}
+
+// `ty(t).ok()`: whether it would succeed (then `emit_ty` writes it).
+fn ty_ok(in b: B, in t: Types, in y: Y, ty: u32) -> bool {
+    let mut name: u32 = 0;
+    ty_error(in b, in t, ty, y.fip, inout name) == E_NONE
+}
+
+// `known_type`.
+fn known_type(in t: Types, ty: u32) -> bool {
+    let n = t.node(ty);
+    if n.kind == K_INFER {
+        return false;
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE {
+        for i in 0..w(n.n) {
+            if !known_type(in t, t.arg(ty, i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if n.kind == K_FN {
+        for i in 0..w(n.n) {
+            if !known_type(in t, t.arg(ty, i)) {
+                return false;
+            }
+        }
+        return known_type(in t, n.r);
+    }
+    true
+}
+
+// `Generator::field_type`, or NONE32.
+fn field_type(inout t: Types, in b: B, in y: Y, ty: u32, field: u32) -> u32 {
+    if ty == NONE32 {
+        return NONE32;
+    }
+    let n = t.node(ty);
+    if n.kind == K_TUPLE {
+        let k = parse_index(in b, field);
+        if k == NONE64 || k >= w(n.n) {
+            return NONE32;
+        }
+        return t.arg(ty, k);
+    }
+    if n.kind != K_NAMED {
+        return NONE32;
+    }
+    let ai = y.x.wd.lookup(n.name);
+    if ai == NONE32 {
+        return NONE32;
+    }
+    let a = y.x.wd.adt(ai);
+    if a.is_enum || a.vn == 0 {
+        return NONE32;
+    }
+    let v = y.x.wd.variant(w(a.va));
+    let fi = y.x.wd.find_field(v, field);
+    if fi == NONE32 {
+        return NONE32;
+    }
+    let vars = y.x.wd.vars_of(in t, a, ty);
+    let fty = y.x.wd.field(w(fi)).ty;
+    substitute(inout t, fty, in vars)
+}
+
+fn is_tuple(in t: Types, ty: u32) -> bool {
+    ty != NONE32 && t.node(ty).kind == K_TUPLE
+}
+
+fn rec_struct(in y: Y, ai: u32) -> bool {
+    match y.x.rec.try_get(w(ai)) {
+        Option::Some(x) => x,
+        Option::None => false,
+    }
+}
+
+// `fip::box_inner`, or NONE32.
+fn box_inner(in b: B, in t: Types, in y: Y, ty: u32) -> u32 {
+    if !y.fip || ty == NONE32 {
+        return NONE32;
+    }
+    let n = t.node(ty);
+    if n.kind == K_NAMED && n.n == 1 && spells(in b, n.name, in "Box") {
+        t.arg(ty, 0)
+    } else {
+        NONE32
+    }
+}
+
+// ----- fixed terms ---------------------------------------------------------------
+
+// `fail_action(value)`.
+fn fail_action(inout b: B, value: T) -> T {
+    let impossible = b.intern(in "$impossible");
+    let m = b.at();
+    b.w(1);
+    b.w(0);
+    b.w(2);
+    b.text(in "Effect_Fail");
+    b.text(in "raise");
+    let op = b.since(m);
+    let raise = app1(inout b, op, value);
+    let mut ss = empty();
+    let pb = p_bind(inout b, impossible);
+    bind_pattern_stmt(inout b, inout ss, pb, raise);
+    let r = lref(inout b, impossible);
+    let e = eliminate(inout b, r);
+    sequence(inout b, in ss, e)
+}
+
+// A fixed unrooted two-component reference.
+fn ref2(inout b: B, in a: Str, in c: Str) -> T {
+    let m = b.at();
+    b.w(1);
+    b.w(0);
+    b.w(2);
+    b.text(in a);
+    b.text(in c);
+    b.since(m)
+}
+
+fn runtime_failure(inout b: B, in variant: Str) -> T {
+    let r = ref2(inout b, in "RuntimeError", in variant);
+    fail_action(inout b, r)
+}
+
+fn overflow_action(inout b: B) -> T {
+    let r = ref2(inout b, in "ArithOverflow", in "mk");
+    fail_action(inout b, r)
+}
+
+fn decide(inout b: B, p: T) -> T {
+    gapp1(inout b, in "Decidable", in "decide", p)
+}
+
+fn nat_text(inout b: B, in digits: Str) -> T {
+    nat(inout b, in digits)
+}
+
+fn negative(inout b: B, in digits: Str) -> T {
+    let n = nat_text(inout b, in digits);
+    unary(inout b, U_NEG, n)
+}
+
+fn max_text(k: u64) -> Str {
+    let bits = kind_bits(k);
+    if kind_signed(k) {
+        if bits == 8 {
+            "127"
+        } else if bits == 16 {
+            "32767"
+        } else if bits == 32 {
+            "2147483647"
+        } else if bits == 64 {
+            "9223372036854775807"
+        } else {
+            "170141183460469231731687303715884105727"
+        }
+    } else if bits == 8 {
+        "255"
+    } else if bits == 16 {
+        "65535"
+    } else if bits == 32 {
+        "4294967295"
+    } else if bits == 64 {
+        "18446744073709551615"
+    } else {
+        "170141183460469231731687303715884105727"
+    }
+}
+
+fn min_text(k: u64) -> Str {
+    let bits = kind_bits(k);
+    if bits == 8 {
+        "128"
+    } else if bits == 16 {
+        "32768"
+    } else if bits == 32 {
+        "2147483648"
+    } else if bits == 64 {
+        "9223372036854775808"
+    } else {
+        "170141183460469231731687303715884105728"
+    }
+}
+
+fn op_is(in b: B, op: u32, in s: Str) -> bool {
+    spells(in b, op, in s)
+}
+
+// `in_range(op, kind, a, x)`; `ok` is false for None.
+fn in_range(inout b: B, op: u32, neg: bool, k: u64, a: T, x: T, inout ok: bool) -> T {
+    ok = true;
+    if !kind_signed(k) {
+        if !neg && (op_is(in b, op, in "+") || op_is(in b, op, in "*")) {
+            let an = project_fixed(inout b, a, in "toNat");
+            let xn = project_fixed(inout b, x, in "toNat");
+            let s = binary(
+                inout b,
+                if op_is(in b, op, in "+") {
+                    OP_ADD
+                } else {
+                    OP_MUL
+                },
+                an,
+                xn
+            );
+            let mx = nat_text(inout b, in max_text(k));
+            let le = binary(inout b, OP_LE, s, mx);
+            return decide(inout b, le);
+        }
+        if !neg && op_is(in b, op, in "-") {
+            let le = binary(inout b, OP_LE, x, a);
+            return decide(inout b, le);
+        }
+        if neg {
+            let z = nat_u64(inout b, 0);
+            return binary(inout b, OP_BOOL_EQ, a, z);
+        }
+        ok = false;
+        return a;
+    }
+    if !neg && (op_is(in b, op, in "+") || op_is(in b, op, in "-") || op_is(in b, op, in "*")) {
+        let min = negative(inout b, in min_text(k));
+        let ai = project_fixed(inout b, a, in "toInt");
+        let xi = project_fixed(inout b, x, in "toInt");
+        let code = if op_is(in b, op, in "+") {
+            OP_ADD
+        } else if op_is(in b, op, in "-") {
+            OP_SUB
+        } else {
+            OP_MUL
+        };
+        let exact = binary(inout b, code, ai, xi);
+        if kind_bits(k) == 64 {
+            let s = b.intern(in "inI64");
+            let f = sref(inout b, s);
+            return app1(inout b, f, exact);
+        }
+        let lo = binary(inout b, OP_LE, min, exact);
+        let mx = nat_text(inout b, in max_text(k));
+        let hi = binary(inout b, OP_LE, exact, mx);
+        let both = binary(inout b, OP_AND, lo, hi);
+        return decide(inout b, both);
+    }
+    if !neg && op_is(in b, op, in "/") {
+        let min = negative(inout b, in min_text(k));
+        let one = negative(inout b, in "1");
+        let l = binary(inout b, OP_BOOL_EQ, a, min);
+        let r = binary(inout b, OP_BOOL_EQ, x, one);
+        let both = binary(inout b, OP_BOOL_AND, l, r);
+        return unary(inout b, U_BOOL_NOT, both);
+    }
+    if neg {
+        let min = negative(inout b, in min_text(k));
+        return binary(inout b, OP_BOOL_NE, a, min);
+    }
+    ok = false;
+    a
+}
+
+// `arith_term(op, kind, a, x)`.
+fn arith_term(inout b: B, op: u32, k: u64, a: T, x: T) -> T {
+    let code = if op_is(in b, op, in "+") {
+        OP_ADD
+    } else if op_is(in b, op, in "-") {
+        OP_SUB
+    } else if op_is(in b, op, in "*") {
+        OP_MUL
+    } else if op_is(in b, op, in "/") {
+        OP_DIV
+    } else if op_is(in b, op, in "%") {
+        OP_MOD
+    } else if op_is(in b, op, in "==") {
+        OP_BOOL_EQ
+    } else if op_is(in b, op, in "!=") {
+        OP_BOOL_NE
+    } else if op_is(in b, op, in "<") {
+        OP_LT
+    } else if op_is(in b, op, in "<=") {
+        OP_LE
+    } else if op_is(in b, op, in ">") {
+        OP_GT
+    } else if op_is(in b, op, in ">=") {
+        OP_GE
+    } else if op_is(in b, op, in "&&") {
+        OP_BOOL_AND
+    } else if op_is(in b, op, in "||") {
+        OP_BOOL_OR
+    } else {
+        NONE64
+    };
+    if code == NONE64 {
+        let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        put(inout m, in "unsupported Lean binary operator \"");
+        b.names.write(op, inout m);
+        put(inout m, in "\"");
+        match String::from_utf8(in m.as_slice()) {
+            Option::Some(s) => b.fail(in s.as_str()),
+            Option::None => b.fail(in "unsupported Lean binary operator"),
+        }
+        return a;
+    }
+    if code == OP_MOD && k != 0 && kind_signed(k) {
+        let one = negative(inout b, in "1");
+        let c = binary(inout b, OP_BOOL_EQ, x, one);
+        let z = nat_u64(inout b, 0);
+        let r = binary(inout b, code, a, x);
+        return ite(inout b, c, z, r);
+    }
+    binary(inout b, code, a, x)
+}
+
+// The first byte of operator symbol `op` (`&op[..1]`).
+fn op_head(inout b: B, op: u32) -> u32 {
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if b.names.size(op) > 0 {
+        o.push(b.names.byte(op, 0));
+    }
+    sym_of(inout b, in o)
+}
+
+// ----- literals ------------------------------------------------------------------
+
+fn nat_u128_t(inout b: B, hi: u64, lo: u64) -> T {
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_u128(inout o, hi, lo);
+    let s = b.names.intern(in o.as_slice());
+    let m = b.at();
+    b.w(4);
+    b.sym(s);
+    b.since(m)
+}
+
+// `typed_literal(l, ty)` (`literal` when ty is NONE32) of the literal
+// words (kind, lo, hi).
+fn literal(inout b: B, in t: Types, kind: u64, lo: u64, hi: u64, sym: u32, ty: u32) -> T {
+    if kind == L_INT {
+        if wrapping_shr_u64(hi, 63) != 0 {
+            let nlo = wrapping_add(lo ^ 18446744073709551615, 1);
+            let mut nhi = hi ^ 18446744073709551615;
+            if nlo == 0 {
+                nhi = wrapping_add(nhi, 1);
+            }
+            let n = nat_u128_t(inout b, nhi, nlo);
+            return unary(inout b, U_NEG, n);
+        }
+        return nat_u128_t(inout b, hi, lo);
+    }
+    if kind == L_FLOAT {
+        if ty != NONE32 && is_named(in b, in t, ty, in "f32") {
+            let n = nat_u64(inout b, f32_bits(lo));
+            return gapp1(inout b, in "Float32", in "ofBits", n);
+        }
+        let n = nat_u64(inout b, lo);
+        return gapp1(inout b, in "Float", in "ofBits", n);
+    }
+    let m = b.at();
+    if kind == L_BOOL {
+        b.w(T_BOOL);
+        b.w(lo);
+    } else {
+        b.w(T_STRING);
+        b.sym(sym);
+    }
+    b.since(m)
+}
+
+// ----- constructors --------------------------------------------------------------
+
+// `Generator::constructor_name(n)` as an encoded name.
+fn constructor_name(inout b: B, in y: Y, n: u32) -> T {
+    if spells(in b, n, in "Ok") {
+        return rooted2(inout b, in "Except", in "ok");
+    }
+    if spells(in b, n, in "Err") {
+        return rooted2(inout b, in "Except", in "error");
+    }
+    if spells(in b, n, in "Some") || spells(in b, n, in "Option::Some") {
+        return rooted2(inout b, in "Option", in "some");
+    }
+    if spells(in b, n, in "None") || spells(in b, n, in "Option::None") {
+        return rooted2(inout b, in "Option", in "none");
+    }
+    let c = lookup_constructor(inout b, in y.x.wd, n);
+    let m = b.at();
+    if c == NONE64 {
+        b.fail(in "unknown Lean constructor");
+        b.w(0);
+        b.w(0);
+        return b.since(m);
+    }
+    let a = adt_of(in y.x.wd, c);
+    let v = variant_of(in y.x.wd, c);
+    b.check(a.name, in "identifier");
+    if a.is_enum {
+        b.check(v.name, in "identifier");
+    }
+    b.w(0);
+    b.w(2);
+    b.sym(a.name);
+    if a.is_enum {
+        b.sym(v.name);
+    } else {
+        b.text(in "mk");
+    }
+    b.since(m)
+}
+
+fn constructor(inout b: B, in y: Y, n: u32) -> T {
+    let name = constructor_name(inout b, in y, n);
+    let m = b.at();
+    b.w(1);
+    b.put(name);
+    b.since(m)
+}
+
+// ----- places --------------------------------------------------------------------
+
+// `Place::from_expr(e)`: the root symbol (NONE32 when `e` is not a place)
+// and the path in `path`.
+fn place_of(in y: Y, e: u64, inout path: ChunkSeq[u32]) -> u32 {
+    let k = y.a.kind(e);
+    if k == X_NAME {
+        return y.a.xs(e, 0);
+    }
+    if k == X_FIELD {
+        let root = place_of(in y, y.a.x(e, 0), inout path);
+        if root == NONE32 {
+            return NONE32;
+        }
+        path.push(y.a.xs(e, 1));
+        return root;
+    }
+    NONE32
+}
+
+fn sym_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    u32_at(in s, i)
+}
+
+// `get_path(base, ty, path[from..])`.
+fn get_path(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    base: T,
+    ty: u32,
+    in path: ChunkSeq[u32],
+    from: u64
+) -> T {
+    let mut term = base;
+    let mut current = ty;
+    for i in from..path.len() {
+        let f = sym_at(in path, i);
+        let k = parse_index(in b, f);
+        if is_tuple(in t, current) && k != NONE64 {
+            term = tuple_get(inout b, term, k, t.arity(current));
+        } else {
+            term = project(inout b, term, f);
+        }
+        current = field_type(inout t, in b, in y, current, f);
+    }
+    term
+}
+
+fn get_field(inout b: B, inout t: Types, in y: Y, base: T, ty: u32, f: u32) -> T {
+    let mut p: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    p.push(f);
+    get_path(inout b, inout t, in y, base, ty, in p, 0)
+}
+
+// `set_path(base, ty, path[from..], value)`.
+fn set_path(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    base: T,
+    ty: u32,
+    in path: ChunkSeq[u32],
+    from: u64,
+    value: T
+) -> T {
+    if from >= path.len() {
+        return value;
+    }
+    let f = sym_at(in path, from);
+    let mut inner_ty = field_type(inout t, in b, in y, ty, f);
+    if inner_ty == NONE32 {
+        inner_ty = y.infer;
+    }
+    let inner = get_field(inout b, inout t, in y, base, ty, f);
+    let updated = set_path(inout b, inout t, in y, inner, inner_ty, in path, inc(from), value);
+    let k = parse_index(in b, f);
+    if is_tuple(in t, ty) && k != NONE64 {
+        let n = t.arity(ty);
+        let mut parts = empty();
+        for j in 0..n {
+            if j == k {
+                parts.push(updated);
+            } else {
+                let g = tuple_get(inout b, base, j, n);
+                parts.push(g);
+            }
+        }
+        return tuple(inout b, in parts);
+    }
+    if ty != NONE32 && t.node(ty).kind == K_NAMED {
+        let ai = y.x.wd.lookup(t.node(ty).name);
+        if ai != NONE32 && rec_struct(in y, ai) {
+            let a = y.x.wd.adt(ai);
+            let ctor = constructor(inout b, in y, a.name);
+            let v = y.x.wd.variant(w(a.va));
+            let mut fields = empty();
+            for i in 0..w(v.fc) {
+                let fld = y.x.wd.field(add(w(v.fa), i));
+                if fld.name == f {
+                    fields.push(updated);
+                } else {
+                    let p = project(inout b, base, fld.name);
+                    fields.push(p);
+                }
+            }
+            return app(inout b, ctor, in fields);
+        }
+    }
+    let mut fs = empty();
+    let fl = record_field(inout b, f, updated);
+    fs.push(fl);
+    update(inout b, base, in fs)
+}
+
+// `assign(place, value, out)`.
+fn assign(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    root: u32,
+    in path: ChunkSeq[u32],
+    value: T,
+    inout out: ChunkSeq[T]
+) {
+    let i = g.find(root);
+    if i == NONE64 {
+        b.fail(in "assignment to an unknown Lean local");
+        return;
+    }
+    let l = g.local(i);
+    let lean = g.cur(l.id);
+    let r = lref(inout b, lean);
+    let v = set_path(inout b, inout t, in y, r, l.ty, in path, 0, value);
+    push_assign(inout b, inout out, lean, v);
+}
+
+// `place_term(place)`.
+fn place_term(inout b: B, inout t: Types, in y: Y, in g: G, root: u32, in path: ChunkSeq[u32])
+    -> T {
+    let i = g.find(root);
+    if i == NONE64 {
+        b.fail(in "unknown Lean place");
+        return unit(inout b);
+    }
+    let l = g.local(i);
+    let r = lref(inout b, g.cur(l.id));
+    get_path(inout b, inout t, in y, r, l.ty, in path, 0)
+}
+
+// ----- patterns ------------------------------------------------------------------
+
+pub copy struct Rename {
+    name: u32,
+    tmp: u32,
+}
+
+fn rename_of(in rs: ChunkSeq[Rename], name: u32) -> u32 {
+    let mut i = rs.len();
+    loop {
+        if i == 0 {
+            return NONE32;
+        }
+        i = wrapping_sub(i, 1);
+        match rs.try_get(i) {
+            Option::Some(r) => {
+                if r.name == name {
+                    return r.tmp;
+                }
+            },
+            Option::None => {},
+        }
+    }
+}
+
+pub copy struct NameTy {
+    name: u32,
+    ty: u32,
+}
+
+// `pattern_types(p, ty, out)`.
+fn pattern_types(
+    inout t: Types,
+    inout b: B,
+    in y: Y,
+    p: u64,
+    ty: u32,
+    inout out: ChunkSeq[NameTy]
+) {
+    if y.a.is_box(p) {
+        let mut inner = box_inner(in b, in t, in y, ty);
+        if inner == NONE32 {
+            inner = ty;
+        }
+        let n = y.a.px(p, 2);
+        for i in 0..n {
+            let sub = y.a.px(p, add(4, wrapping_mul(i, 2)));
+            pattern_types(inout t, inout b, in y, sub, inner, inout out);
+        }
+        return;
+    }
+    let k = y.a.pkind(p);
+    if k == PK_BIND {
+        out
+            .push(
+            NameTy {
+                name: y.a.pxs(p, 0),
+                ty: ty
+            }
+        );
+    } else if k == PK_TUPLE {
+        if is_tuple(in t, ty) {
+            let n = y.a.px(p, 0);
+            let m = t.arity(ty);
+            for i in 0..n {
+                if i >= m {
+                    break;
+                }
+                pattern_types(inout t, inout b, in y, y.a.px(p, inc(i)), t.arg(ty, i), inout out);
+            }
+        }
+    } else if k == PK_CTOR {
+        let c = lookup_constructor(inout b, in y.x.wd, y.a.pxs(p, 0));
+        if c != NONE64 {
+            let adt = adt_of(in y.x.wd, c);
+            let v = variant_of(in y.x.wd, c);
+            let mut vars = vars_new();
+            if ty != NONE32 && t.node(ty).kind == K_NAMED {
+                vars = y.x.wd.vars_of(in t, adt, ty);
+            }
+            let n = y.a.px(p, 2);
+            for i in 0..n {
+                let fname = y.a.sym(y.a.px(p, add(3, wrapping_mul(i, 2))));
+                let sub = y.a.px(p, add(4, wrapping_mul(i, 2)));
+                let fi = y.x.wd.find_field(v, fname);
+                if fi != NONE32 {
+                    let fty = substitute(inout t, y.x.wd.field(w(fi)).ty, in vars);
+                    pattern_types(inout t, inout b, in y, sub, fty, inout out);
+                }
+            }
+        }
+    }
+}
+
+// `pat(p, renames)`.
+fn pat(inout b: B, in t: Types, in y: Y, inout g: G, p: u64, inout rs: ChunkSeq[Rename]) -> T {
+    if y.a.is_box(p) {
+        return pat(inout b, in t, in y, inout g, y.a.px(p, 4), inout rs);
+    }
+    let k = y.a.pkind(p);
+    if k == PK_WILD {
+        return p_wild(inout b);
+    }
+    if k == PK_BIND {
+        let n = y.a.pxs(p, 0);
+        let base = joined(inout b, in "", n, in "$p");
+        let tmp = fresh(inout b, inout g, base);
+        rs
+            .push(
+            Rename {
+                name: n,
+                tmp: tmp
+            }
+        );
+        return p_bind(inout b, tmp);
+    }
+    if k == PK_LITERAL {
+        let lk = y.a.px(p, 0);
+        let lo = y.a.px(p, 1);
+        let hi = y.a.px(p, 2);
+        let m = b.at();
+        if lk == L_INT {
+            b.w(P_INT);
+            b.w(lo);
+            b.w(hi);
+        } else if lk == L_BOOL {
+            b.w(P_BOOL);
+            b.w(lo);
+        } else if lk == L_FLOAT {
+            b.fail(in "Lean extraction does not support floating-point literal patterns");
+            b.w(0);
+        } else {
+            b.w(P_STRING);
+            b.sym(y.a.sym(lo));
+        }
+        return b.since(m);
+    }
+    if k == PK_TUPLE {
+        let n = y.a.px(p, 0);
+        let mut ps = empty();
+        for i in 0..n {
+            let s = pat(inout b, in t, in y, inout g, y.a.px(p, inc(i)), inout rs);
+            ps.push(s);
+        }
+        return p_tuple(inout b, in ps);
+    }
+    // constructor: name, named, n, (field, id)...
+    let name = y.a.pxs(p, 0);
+    let named_pat = y.a.px(p, 1) != 0;
+    let n = y.a.px(p, 2);
+    if named_pat {
+        let c = lookup_constructor(inout b, in y.x.wd, name);
+        if c != NONE64 {
+            let adt = adt_of(in y.x.wd, c);
+            let ai = n32(wrapping_shr_u64(c, 32));
+            if adt.is_enum || rec_struct(in y, ai) {
+                let v = variant_of(in y.x.wd, c);
+                let mut args = empty();
+                for j in 0..w(v.fc) {
+                    let fname = y.x.wd.field(add(w(v.fa), j)).name;
+                    let mut found = NONE64;
+                    for i in 0..n {
+                        if found
+                            == NONE64
+                            && y
+                            .a
+                            .sym(y.a.px(p, add(3, wrapping_mul(i, 2))))
+                            == fname {
+                            found = y.a.px(p, add(4, wrapping_mul(i, 2)));
+                        }
+                    }
+                    if found == NONE64 {
+                        let wcard = p_wild(inout b);
+                        args.push(wcard);
+                    } else {
+                        let s = pat(inout b, in t, in y, inout g, found, inout rs);
+                        args.push(s);
+                    }
+                }
+                let cn = constructor_name(inout b, in y, name);
+                return p_ctor(inout b, cn, in args);
+            }
+        }
+        let mut fs = empty();
+        for i in 0..n {
+            let fname = y.a.sym(y.a.px(p, add(3, wrapping_mul(i, 2))));
+            // The field name is checked before the sub-pattern, as in Rust;
+            // the sub-pattern may leave intermediate words, so both parts
+            // are copied into one range.
+            let m = b.at();
+            b.ident(fname);
+            let id = b.since(m);
+            let s = pat(
+                inout b,
+                in t,
+                in y,
+                inout g,
+                y.a.px(p, add(4, wrapping_mul(i, 2))),
+                inout rs
+            );
+            let m2 = b.at();
+            b.put(id);
+            b.put(s);
+            fs.push(b.since(m2));
+        }
+        let m = b.at();
+        b.w(P_RECORD);
+        b.w(fs.len());
+        for i in 0..fs.len() {
+            b.put(get(in fs, i));
+        }
+        return b.since(m);
+    }
+    let cn = constructor_name(inout b, in y, name);
+    let mut args = empty();
+    for i in 0..n {
+        let s = pat(inout b, in t, in y, inout g, y.a.px(p, add(4, wrapping_mul(i, 2))), inout rs);
+        args.push(s);
+    }
+    p_ctor(inout b, cn, in args)
+}
+
+// `declare_renamed(p, ty, renames, out)`.
+fn declare_renamed(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    p: u64,
+    ty: u32,
+    in rs: ChunkSeq[Rename],
+    inout out: ChunkSeq[T]
+) {
+    let mut types: ChunkSeq[NameTy] = ChunkSeq::new[NameTy]();
+    pattern_types(inout t, inout b, in y, p, ty, inout types);
+    for i in 0..types.len() {
+        match types.try_get(i) {
+            Option::Some(nt) => {
+                let tmp = rename_of(in rs, nt.name);
+                if tmp != NONE32 {
+                    let lean = declare(inout b, inout g, nt.name, nt.ty);
+                    let r = lref(inout b, tmp);
+                    let none = unit(inout b);
+                    let_local(inout b, inout out, lean, r, false, none, true);
+                }
+            },
+            Option::None => {},
+        }
+    }
+}
+
+// `bind_pattern(p, ty, value, out)`.
+fn bind_pattern(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    p: u64,
+    ty: u32,
+    value: T,
+    inout out: ChunkSeq[T]
+) {
+    if y.a.pkind(p) == PK_BIND && !y.a.is_box(p) {
+        let lean = declare(inout b, inout g, y.a.pxs(p, 0), ty);
+        if known_type(in t, ty) && effectful_arrow(in t, ty) {
+            skip(inout b, inout g);
+        }
+        if known_type(in t, ty) && ty_ok(in b, in t, in y, ty) {
+            let m = b.at();
+            emit_ty(inout b, in t, ty, y.fip);
+            let tt = b.since(m);
+            let_local(inout b, inout out, lean, value, true, tt, true);
+        } else {
+            let none = unit(inout b);
+            let_local(inout b, inout out, lean, value, false, none, true);
+        }
+        return;
+    }
+    let mut rs: ChunkSeq[Rename] = ChunkSeq::new[Rename]();
+    let pattern = pat(inout b, in t, in y, inout g, p, inout rs);
+    let_pattern(inout b, inout out, pattern, value);
+    declare_renamed(inout b, inout t, in y, inout g, p, ty, in rs, inout out);
+}
+
+// ----- expressions ---------------------------------------------------------------
+
+fn type_of(in y: Y, e: u64) -> u32 {
+    y.a.ty(e)
+}
+
+fn partial(in y: Y, e: u64) -> bool {
+    y.x.wd.is_partial(y.a.start(e), y.a.end(e))
+}
+
+fn overflow(in y: Y, e: u64) -> bool {
+    y.x.wd.may_overflow(y.a.start(e), y.a.end(e))
+}
+
+// `expr(e, out)`.
+fn expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T]) -> T {
+    let term = expr_inner(inout b, inout t, in y, inout g, e, inout out);
+    if never(in b, in t, type_of(in y, e)) {
+        return gapp1(inout b, in "Empty", in "elim", term);
+    }
+    term
+}
+
+// `operands(es, out)`.
+fn operands(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    in es: ChunkSeq[u64],
+    inout out: ChunkSeq[T]
+) -> ChunkSeq[T] {
+    let mut buffers: ChunkSeq[ChunkSeq[T]] = ChunkSeq::new[ChunkSeq[T]]();
+    let mut terms = empty();
+    let mut lits: ChunkSeq[bool] = ChunkSeq::new[bool]();
+    for i in 0..es.len() {
+        let e = match es.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let mut buffer = empty();
+        let term = expr(inout b, inout t, in y, inout g, e, inout buffer);
+        buffers.push(buffer);
+        terms.push(term);
+        lits.push(y.a.kind(e) == X_LITERAL);
+    }
+    let mut result = empty();
+    for i in 0..es.len() {
+        let mut later = false;
+        for j in inc(i)..es.len() {
+            match buffers.try_get(j) {
+                Option::Some(bj) => {
+                    if bj.len() > 0 {
+                        later = true;
+                    }
+                },
+                Option::None => {},
+            }
+        }
+        match buffers.try_get(i) {
+            Option::Some(bi) => extend(inout out, in bi),
+            Option::None => {},
+        }
+        let lit = match lits.try_get(i) {
+            Option::Some(l) => l,
+            Option::None => false,
+        };
+        let term = get(in terms, i);
+        if later && !lit {
+            let tmp = temp(inout b, inout g);
+            let none = unit(inout b);
+            let_local(inout b, inout out, tmp, term, false, none, false);
+            let r = lref(inout b, tmp);
+            result.push(r);
+        } else {
+            result.push(term);
+        }
+    }
+    result
+}
+
+fn one(e: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(e);
+    s
+}
+
+fn two(e: u64, f: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(e);
+    s.push(f);
+    s
+}
+
+// `seq(e)`: the expression as a `do` block in its own scope.
+fn seq(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64) -> T {
+    let ns = g.scope.len();
+    let nc = g.current.len();
+    let mut out = empty();
+    let term = expr(inout b, inout t, in y, inout g, e, inout out);
+    g.scope.truncate(ns);
+    g.current.truncate(nc);
+    let p = pure(inout b, term);
+    sequence(inout b, in out, p)
+}
+
+fn bool_ty(inout b: B) -> T {
+    global(inout b, in "Bool")
+}
+
+// `failure_checks(op, kind, key, left, right)`.
+fn failure_checks(
+    inout b: B,
+    in y: Y,
+    e: u64,
+    op: u32,
+    k: u64,
+    left: T,
+    right: T,
+    inout out: ChunkSeq[T]
+) {
+    if (op_is(in b, op, in "/") || op_is(in b, op, in "%")) && partial(in y, e) {
+        let z = nat_u64(inout b, 0);
+        let c = binary(inout b, OP_BOOL_EQ, right, z);
+        let f = runtime_failure(inout b, in "DivisionByZero");
+        let mut yes = empty();
+        let s = expr_stmt(inout b, f);
+        yes.push(s);
+        let st = if_stmt(inout b, c, in yes);
+        out.push(st);
+    }
+    if overflow(in y, e) && k != 0 {
+        let mut ok = false;
+        let r = in_range(inout b, op, false, k, left, right, inout ok);
+        if ok {
+            let c = unary(inout b, U_BOOL_NOT, r);
+            let f = overflow_action(inout b);
+            let mut yes = empty();
+            let s = expr_stmt(inout b, f);
+            yes.push(s);
+            let st = if_stmt(inout b, c, in yes);
+            out.push(st);
+        }
+    }
+}
+
+// The checked arithmetic action of `op` over `a` and `x` (the binary,
+// compound-assignment and failure paths share it).
+fn checked(
+    inout b: B,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    op: u32,
+    k: u64,
+    a: T,
+    x: T,
+    inout out: ChunkSeq[T]
+) -> T {
+    let tmp = temp(inout b, inout g);
+    let left = fresh_fixed(inout b, inout g, in "$left");
+    let right = fresh_fixed(inout b, inout g, in "$right");
+    let mut ss = empty();
+    let none = unit(inout b);
+    let_local(inout b, inout ss, left, a, false, none, false);
+    let_local(inout b, inout ss, right, x, false, none, false);
+    let l = lref(inout b, left);
+    let r = lref(inout b, right);
+    failure_checks(inout b, in y, e, op, k, l, r, inout ss);
+    let ar = arith_term(inout b, op, k, l, r);
+    let p = pure(inout b, ar);
+    let action = sequence(inout b, in ss, p);
+    bind_local(inout b, inout out, tmp, action, false, none);
+    lref(inout b, tmp)
+}
+
+fn expr_inner(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
+    -> T {
+    let k = y.a.kind(e);
+    if k == X_LITERAL {
+        let ty_e = type_of(in y, e);
+        let term = literal(
+            inout b,
+            in t,
+            y.a.x(e, 0),
+            y.a.x(e, 1),
+            y.a.x(e, 2),
+            y.a.xs(e, 1),
+            ty_e
+        );
+        if ty_e != NONE32 {
+            let tt = ty(inout b, in t, in y, inout g, ty_e);
+            return ascribe(inout b, term, tt);
+        }
+        return term;
+    }
+    if k == X_NAME {
+        return name_expr(inout b, inout t, in y, inout g, y.a.xs(e, 0));
+    }
+    if k == X_TUPLE {
+        let n = y.a.x(e, 0);
+        let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for i in 0..n {
+            es.push(y.a.x(e, inc(i)));
+        }
+        let vs = operands(inout b, inout t, in y, inout g, in es, inout out);
+        return tuple(inout b, in vs);
+    }
+    if k == X_STRUCT {
+        return struct_expr(inout b, inout t, in y, inout g, e, inout out);
+    }
+    if k == X_FIELD {
+        let base = y.a.x(e, 0);
+        let f = y.a.xs(e, 1);
+        let bt = type_of(in y, base);
+        let bv = expr(inout b, inout t, in y, inout g, base, inout out);
+        if bt != NONE32 {
+            return get_field(inout b, inout t, in y, bv, bt, f);
+        }
+        return project(inout b, bv, f);
+    }
+    if k == X_UNARY {
+        return unary_expr(inout b, inout t, in y, inout g, e, inout out);
+    }
+    if k == X_BINARY {
+        return binary_expr(inout b, inout t, in y, inout g, e, inout out);
+    }
+    if k == X_ASSIGN {
+        assign_expr(inout b, inout t, in y, inout g, e, inout out);
+        return unit(inout b);
+    }
+    if k == X_BLOCK {
+        return block_expr(inout b, inout t, in y, inout g, e, inout out);
+    }
+    if k == X_IF {
+        let c = expr(inout b, inout t, in y, inout g, y.a.x(e, 0), inout out);
+        let yes = seq(inout b, inout t, in y, inout g, y.a.x(e, 1));
+        let o = y.a.x(e, 2);
+        let mut no = T {
+            a: 0,
+            n: 0
+        };
+        if o == NONE {
+            let u = unit(inout b);
+            no = pure(inout b, u);
+        } else {
+            no = seq(inout b, inout t, in y, inout g, o);
+        }
+        let tmp = temp(inout b, inout g);
+        let te = type_of(in y, e);
+        let mut ann = T {
+            a: 0,
+            n: 0
+        };
+        if te != NONE32 {
+            ann = ty(inout b, in t, in y, inout g, te);
+        }
+        let it = ite(inout b, c, yes, no);
+        bind_local(inout b, inout out, tmp, it, te != NONE32, ann);
+        return lref(inout b, tmp);
+    }
+    if k == X_MATCH {
+        return match_expr(inout b, inout t, in y, inout g, e, inout out);
+    }
+    if k == X_CALL {
+        let n = y.a.x(e, 1);
+        let mut args: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for i in 0..n {
+            args.push(y.a.x(e, add(3, wrapping_mul(i, 2))));
+        }
+        return call(inout b, inout t, in y, inout g, e, y.a.x(e, 0), NONE32, in args, inout out);
+    }
+    if k == X_LOOP {
+        b.fail(in LOOP_REFUSAL);
+        return unit(inout b);
+    }
+    if k == X_CLOSURE {
+        return closure(inout b, inout t, in y, inout g, e, inout out);
+    }
+    if k == X_HANDLE {
+        skip(inout b, inout g);
+        return unit(inout b);
+    }
+    if k == X_TRY {
+        let value = expr(inout b, inout t, in y, inout g, y.a.x(e, 0), inout out);
+        let tmp = temp(inout b, inout g);
+        let sv = b.intern(in "$value");
+        let se = b.intern(in "$error");
+        let mut arms = empty();
+        let okn = rooted2(inout b, in "Except", in "ok");
+        let mut ps = empty();
+        let pv = p_bind(inout b, sv);
+        ps.push(pv);
+        let okp = p_ctor(inout b, okn, in ps);
+        let rv = named(inout b, in "$value");
+        let okb = pure(inout b, rv);
+        let a1 = arm(inout b, okp, okb);
+        arms.push(a1);
+        let ern = rooted2(inout b, in "Except", in "error");
+        let mut ps2 = empty();
+        let pe = p_bind(inout b, se);
+        ps2.push(pe);
+        let erp = p_ctor(inout b, ern, in ps2);
+        let re = named(inout b, in "$error");
+        let erb = fail_action(inout b, re);
+        let a2 = arm(inout b, erp, erb);
+        arms.push(a2);
+        let action = match_term(inout b, value, in arms);
+        let none = unit(inout b);
+        bind_local(inout b, inout out, tmp, action, false, none);
+        return lref(inout b, tmp);
+    }
+    if k == X_INDEX {
+        return index_expr(inout b, inout t, in y, inout g, e, inout out);
+    }
+    skip(inout b, inout g);
+    unit(inout b)
+}
+
+fn name_expr(inout b: B, inout t: Types, in y: Y, inout g: G, n: u32) -> T {
+    if lookup_constructor(inout b, in y.x.wd, n) != NONE64 {
+        return constructor(inout b, in y, n);
+    }
+    let i = g.find(n);
+    if i != NONE64 {
+        let l = g.local(i);
+        return lref(inout b, g.cur(l.id));
+    }
+    let si = y.x.fx.find(n);
+    if si != NONE32 && y.x.fx.sig(w(si)).pn == 0 {
+        let gu = global(inout b, in "Unit");
+        let bd = anonymous(inout b, B_EXPLICIT, gu);
+        let mut bs = empty();
+        bs.push(bd);
+        let r = sref(inout b, n);
+        return lambda(inout b, in bs, r);
+    }
+    sref(inout b, n)
+}
+
+fn struct_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
+    -> T {
+    let n = y.a.xs(e, 0);
+    let nf = y.a.x(e, 1);
+    let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..nf {
+        es.push(y.a.x(e, add(3, wrapping_mul(i, 2))));
+    }
+    let values = operands(inout b, inout t, in y, inout g, in es, inout out);
+    let c = lookup_constructor(inout b, in y.x.wd, n);
+    if c != NONE64 {
+        let adt = adt_of(in y.x.wd, c);
+        let ai = n32(wrapping_shr_u64(c, 32));
+        if adt.is_enum || rec_struct(in y, ai) {
+            let v = variant_of(in y.x.wd, c);
+            let mut args = empty();
+            for j in 0..w(v.fc) {
+                let fname = y.x.wd.field(add(w(v.fa), j)).name;
+                let mut found = NONE64;
+                for i in 0..nf {
+                    if found == NONE64 && y.a.sym(y.a.x(e, add(2, wrapping_mul(i, 2)))) == fname {
+                        found = i;
+                    }
+                }
+                if found == NONE64 {
+                    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+                    put(inout m, in "missing field '");
+                    b.names.write(fname, inout m);
+                    put(inout m, in "' in ");
+                    b.names.write(n, inout m);
+                    match String::from_utf8(in m.as_slice()) {
+                        Option::Some(s) => b.fail(in s.as_str()),
+                        Option::None => b.fail(in "missing field"),
+                    }
+                    return unit(inout b);
+                }
+                args.push(get(in values, found));
+            }
+            let ctor = constructor(inout b, in y, n);
+            return app(inout b, ctor, in args);
+        }
+    }
+    let mut fs = empty();
+    for i in 0..nf {
+        let fname = y.a.sym(y.a.x(e, add(2, wrapping_mul(i, 2))));
+        let f = record_field(inout b, fname, get(in values, i));
+        fs.push(f);
+    }
+    let rec = record(inout b, in fs);
+    let r = sref(inout b, n);
+    ascribe(inout b, rec, r)
+}
+
+fn unary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
+    -> T {
+    let op = y.a.xs(e, 0);
+    let v = y.a.x(e, 1);
+    let value = expr(inout b, inout t, in y, inout g, v, inout out);
+    let kind = int_kind(in b, in t, type_of(in y, v));
+    if op_is(in b, op, in "-") && overflow(in y, e) && kind != 0 {
+        let tmp = temp(inout b, inout g);
+        let operand = fresh_fixed(inout b, inout g, in "$operand");
+        let ro = lref(inout b, operand);
+        let u = unit(inout b);
+        let mut okf = false;
+        let ok = in_range(inout b, op, true, kind, ro, u, inout okf);
+        let mut ss = empty();
+        let none = unit(inout b);
+        let_local(inout b, inout ss, operand, value, false, none, false);
+        let ng = unary(inout b, U_NEG, ro);
+        let yes = pure(inout b, ng);
+        let no = overflow_action(inout b);
+        let it = ite(inout b, ok, yes, no);
+        let action = sequence(inout b, in ss, it);
+        bind_local(inout b, inout out, tmp, action, false, none);
+        return lref(inout b, tmp);
+    }
+    if op_is(in b, op, in "-") {
+        return unary(inout b, U_NEG, value);
+    }
+    if op_is(in b, op, in "!") {
+        return unary(inout b, U_BOOL_NOT, value);
+    }
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout m, in "unsupported Lean unary operator ");
+    b.names.write(op, inout m);
+    match String::from_utf8(in m.as_slice()) {
+        Option::Some(s) => b.fail(in s.as_str()),
+        Option::None => b.fail(in "unsupported Lean unary operator"),
+    }
+    value
+}
+
+fn binary_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
+    -> T {
+    let op = y.a.xs(e, 0);
+    let l = y.a.x(e, 1);
+    let r = y.a.x(e, 2);
+    if op_is(in b, op, in "&&") || op_is(in b, op, in "||") {
+        let left = expr(inout b, inout t, in y, inout g, l, inout out);
+        let mut rhs = empty();
+        let ns = g.scope.len();
+        let nc = g.current.len();
+        let right = expr(inout b, inout t, in y, inout g, r, inout rhs);
+        g.scope.truncate(ns);
+        g.current.truncate(nc);
+        let and = op_is(in b, op, in "&&");
+        if rhs.len() == 0 {
+            return binary(
+                inout b,
+                if and {
+                    OP_BOOL_AND
+                } else {
+                    OP_BOOL_OR
+                },
+                left,
+                right
+            );
+        }
+        let tmp = temp(inout b, inout g);
+        let pr = pure(inout b, right);
+        let s = sequence(inout b, in rhs, pr);
+        let m = b.at();
+        b.w(T_BOOL);
+        b
+            .w(
+            if and {
+                0
+            } else {
+                1
+            }
+        );
+        let lit = b.since(m);
+        let other = pure(inout b, lit);
+        let it = if and {
+            ite(inout b, left, s, other)
+        } else {
+            ite(inout b, left, other, s)
+        };
+        let bt = bool_ty(inout b);
+        bind_local(inout b, inout out, tmp, it, true, bt);
+        return lref(inout b, tmp);
+    }
+    let kind = int_kind(in b, in t, type_of(in y, l));
+    let vs = operands(inout b, inout t, in y, inout g, in two(l, r), inout out);
+    let va = get(in vs, 0);
+    let vb = get(in vs, 1);
+    if partial(in y, e) || overflow(in y, e) {
+        return checked(inout b, in y, inout g, e, op, kind, va, vb, inout out);
+    }
+    let cmp = if op_is(in b, op, in "<") {
+        OP_LT
+    } else if op_is(in b, op, in "<=") {
+        OP_LE
+    } else if op_is(in b, op, in ">") {
+        OP_GT
+    } else if op_is(in b, op, in ">=") {
+        OP_GE
+    } else {
+        NONE64
+    };
+    if cmp != NONE64 {
+        let c = binary(inout b, cmp, va, vb);
+        return decide(inout b, c);
+    }
+    arith_term(inout b, op, kind, va, vb)
+}
+
+fn assign_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T]) {
+    let op = y.a.xs(e, 0);
+    let p = y.a.x(e, 1);
+    let v = y.a.x(e, 2);
+    let value = expr(inout b, inout t, in y, inout g, v, inout out);
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let root = place_of(in y, p, inout path);
+    if root == NONE32 {
+        b.fail(in "assignment requires a place");
+        return;
+    }
+    let mut new = value;
+    if !op_is(in b, op, in "=") {
+        let old = place_term(inout b, inout t, in y, in g, root, in path);
+        let kind = int_kind(in b, in t, type_of(in y, p));
+        let head = op_head(inout b, op);
+        if partial(in y, e) || overflow(in y, e) {
+            new = checked(inout b, in y, inout g, e, head, kind, old, value, inout out);
+        } else {
+            new = arith_term(inout b, head, kind, old, value);
+        }
+    }
+    assign(inout b, inout t, in y, inout g, root, in path, new, inout out);
+}
+
+fn block_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
+    -> T {
+    let ns = g.scope.len();
+    let n = y.a.x(e, 0);
+    let mut at: u64 = 1;
+    let mut diverged = false;
+    let mut result = T {
+        a: 0,
+        n: 0
+    };
+    for i in 0..n {
+        let kind = y.a.x(e, at);
+        if kind == 0 {
+            let x = y.a.x(e, inc(at));
+            at = add(at, 2);
+            if never(in b, in t, type_of(in y, x)) {
+                result = expr(inout b, inout t, in y, inout g, x, inout out);
+                diverged = true;
+                break;
+            }
+            expr(inout b, inout t, in y, inout g, x, inout out);
+        } else {
+            let p = y.a.x(e, inc(at));
+            let declared = y.a.xt(e, add(at, 2));
+            let fallback = y.a.xt(e, add(at, 3));
+            let v = y.a.x(e, add(at, 4));
+            at = add(at, 5);
+            if never(in b, in t, type_of(in y, v)) {
+                result = expr(inout b, inout t, in y, inout g, v, inout out);
+                diverged = true;
+                break;
+            }
+            let val = expr(inout b, inout t, in y, inout g, v, inout out);
+            let mut inferred = declared;
+            if declared == NONE32 {
+                inferred = type_of(in y, v);
+                if inferred == NONE32 {
+                    if fallback != NONE32 {
+                        inferred = fallback;
+                    } else if y.a.kind(v) == X_NAME && g.has(y.a.xs(v, 0)) {
+                        inferred = g.local(g.find(y.a.xs(v, 0))).ty;
+                    } else {
+                        inferred = y.infer;
+                    }
+                }
+            }
+            bind_pattern(inout b, inout t, in y, inout g, p, inferred, val, inout out);
+        }
+    }
+    if !diverged {
+        // the tail follows the statements
+        let tail = y.a.x(e, at);
+        if tail != NONE {
+            result = expr(inout b, inout t, in y, inout g, tail, inout out);
+        } else {
+            result = unit(inout b);
+        }
+    }
+    g.scope.truncate(ns);
+    result
+}
+
+fn match_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
+    -> T {
+    let value = y.a.x(e, 0);
+    let mut st = type_of(in y, value);
+    if st == NONE32 {
+        st = y.infer;
+    }
+    let v = expr(inout b, inout t, in y, inout g, value, inout out);
+    let tmp = temp(inout b, inout g);
+    let te = type_of(in y, e);
+    let mut ann = T {
+        a: 0,
+        n: 0
+    };
+    if te != NONE32 {
+        ann = ty(inout b, in t, in y, inout g, te);
+    }
+    let n = y.a.x(e, 1);
+    let mut arms = empty();
+    for i in 0..n {
+        let p = y.a.x(e, add(2, wrapping_mul(i, 2)));
+        let body = y.a.x(e, add(3, wrapping_mul(i, 2)));
+        let ns = g.scope.len();
+        let nc = g.current.len();
+        let mut rs: ChunkSeq[Rename] = ChunkSeq::new[Rename]();
+        let pattern = pat(inout b, in t, in y, inout g, p, inout rs);
+        let mut ss = empty();
+        declare_renamed(inout b, inout t, in y, inout g, p, st, in rs, inout ss);
+        let result = expr(inout b, inout t, in y, inout g, body, inout ss);
+        let pr = pure(inout b, result);
+        let bd = sequence(inout b, in ss, pr);
+        let am = arm(inout b, pattern, bd);
+        arms.push(am);
+        g.scope.truncate(ns);
+        g.current.truncate(nc);
+    }
+    let mt = match_term(inout b, v, in arms);
+    bind_local(inout b, inout out, tmp, mt, te != NONE32, ann);
+    lref(inout b, tmp)
+}
+
+fn index_expr(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T])
+    -> T {
+    let base = y.a.x(e, 0);
+    let index = y.a.x(e, 1);
+    let route = y.a.x(e, 2);
+    if route == 4 {
+        let m = y.a.xs(e, 3);
+        let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        b.names.write(m, inout o);
+        match String::from_utf8(in o.as_slice()) {
+            Option::Some(s) => b.fail(in s.as_str()),
+            Option::None => b.fail(in "refused"),
+        }
+        return unit(inout b);
+    }
+    if route == 1 {
+        let mut es: ChunkSeq[u64] = two(base, index);
+        return seq_op(inout b, inout t, in y, inout g, Q_GET, in es, inout out);
+    }
+    if route == 3 {
+        let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        es.push(base);
+        es.push(y.a.x(index, 1));
+        es.push(y.a.x(index, 2));
+        return seq_op(inout b, inout t, in y, inout g, Q_SUB_SLICE, in es, inout out);
+    }
+    let bt = type_of(in y, base);
+    if !is_tuple(in t, bt) {
+        b.fail(in "Lean indexing requires a typed tuple");
+        return unit(inout b);
+    }
+    let n = t.arity(bt);
+    if n == 0 {
+        b.fail(in "cannot extract indexing of an empty tuple");
+        return unit(inout b);
+    }
+    let vs = operands(inout b, inout t, in y, inout g, in two(base, index), inout out);
+    let tuple_s = fresh_fixed(inout b, inout g, in "$tuple");
+    let position = fresh_fixed(inout b, inout g, in "$index");
+    let rt = lref(inout b, tuple_s);
+    let rp = lref(inout b, position);
+    let mut body = T {
+        a: 0,
+        n: 0
+    };
+    if partial(in y, e) {
+        body = runtime_failure(inout b, in "IndexOutOfBounds");
+    } else {
+        let last = tuple_get(inout b, rt, wrapping_sub(n, 1), n);
+        body = pure(inout b, last);
+    }
+    let mut i = n;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let ni = nat_u64(inout b, i);
+        let c = binary(inout b, OP_BOOL_EQ, rp, ni);
+        let pi = tuple_get(inout b, rt, i, n);
+        let yes = pure(inout b, pi);
+        body = ite(inout b, c, yes, body);
+    }
+    let tmp = temp(inout b, inout g);
+    let mut ss = empty();
+    let none = unit(inout b);
+    let_local(inout b, inout ss, tuple_s, get(in vs, 0), false, none, false);
+    let_local(inout b, inout ss, position, get(in vs, 1), false, none, false);
+    let sq = sequence(inout b, in ss, body);
+    bind_local(inout b, inout out, tmp, sq, false, none);
+    lref(inout b, tmp)
+}
+
+// ----- sequences -----------------------------------------------------------------
+
+fn to_nat(inout b: B, x: T) -> T {
+    project_fixed(inout b, x, in "toNat")
+}
+
+fn size(inout b: B, s: T) -> T {
+    gapp1(inout b, in "Array", in "size", s)
+}
+
+fn in_bounds(inout b: B, s: T, i: T) -> T {
+    let n = to_nat(inout b, i);
+    let z = size(inout b, s);
+    let lt = binary(inout b, OP_LT, n, z);
+    decide(inout b, lt)
+}
+
+fn seq_checked(inout b: B, inout g: G, ok: T, value: T, inout out: ChunkSeq[T]) -> T {
+    let tmp = temp(inout b, inout g);
+    let c = unary(inout b, U_BOOL_NOT, ok);
+    let f = runtime_failure(inout b, in "IndexOutOfBounds");
+    let mut yes = empty();
+    let s = expr_stmt(inout b, f);
+    yes.push(s);
+    let st = if_stmt(inout b, c, in yes);
+    let mut ss = empty();
+    ss.push(st);
+    let p = pure(inout b, value);
+    let action = sequence(inout b, in ss, p);
+    let none = unit(inout b);
+    bind_local(inout b, inout out, tmp, action, false, none);
+    lref(inout b, tmp)
+}
+
+fn seq_update(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    recv: u64,
+    value: T,
+    inout out: ChunkSeq[T]
+) {
+    let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let root = place_of(in y, recv, inout path);
+    if root == NONE32 {
+        b.fail(in "a mutable Lean ChunkSeq receiver requires a place");
+        return;
+    }
+    assign(inout b, inout t, in y, inout g, root, in path, value, inout out);
+}
+
+fn empty_array(inout b: B) -> T {
+    let z = nat_u64(inout b, 0);
+    gapp1(inout b, in "Array", in "emptyWithCapacity", z)
+}
+
+// `seq_op(op, es, out)` after its refusals (the encoder's route).
+fn seq_op(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    op: u64,
+    in es: ChunkSeq[u64],
+    inout out: ChunkSeq[T]
+) -> T {
+    let terms = operands(inout b, inout t, in y, inout g, in es, inout out);
+    let e0 = match es.try_get(0) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    let a0 = get(in terms, 0);
+    let a1 = get(in terms, 1);
+    let a2 = get(in terms, 2);
+    if op == Q_NEW {
+        return empty_array(inout b);
+    }
+    if op == Q_WITH_CAPACITY {
+        let n = to_nat(inout b, a0);
+        return gapp1(inout b, in "Array", in "emptyWithCapacity", n);
+    }
+    if op == Q_LEN {
+        let s = size(inout b, a0);
+        return gapp1(inout b, in "Nat", in "toUInt64", s);
+    }
+    if op == Q_PUSH {
+        let v = gapp2(inout b, in "Array", in "push", a0, a1);
+        seq_update(inout b, inout t, in y, inout g, e0, v, inout out);
+        return unit(inout b);
+    }
+    if op == Q_POP {
+        let tmp = temp(inout b, inout g);
+        let back = gapp1(inout b, in "Array", in "back?", a0);
+        let none = unit(inout b);
+        let_local(inout b, inout out, tmp, back, false, none, false);
+        let v = gapp1(inout b, in "Array", in "pop", a0);
+        seq_update(inout b, inout t, in y, inout g, e0, v, inout out);
+        return lref(inout b, tmp);
+    }
+    if op == Q_GET {
+        let n = to_nat(inout b, a1);
+        let value = gapp2(inout b, in "GetElem?", in "getElem!", a0, n);
+        let ok = in_bounds(inout b, a0, a1);
+        return seq_checked(inout b, inout g, ok, value, inout out);
+    }
+    if op == Q_SET {
+        let n = to_nat(inout b, a1);
+        let value = gapp3(inout b, in "Array", in "setIfInBounds", a0, n, a2);
+        let ok = in_bounds(inout b, a0, a1);
+        let updated = seq_checked(inout b, inout g, ok, value, inout out);
+        seq_update(inout b, inout t, in y, inout g, e0, updated, inout out);
+        return unit(inout b);
+    }
+    if op == Q_TRY_GET {
+        let n = to_nat(inout b, a1);
+        return gapp2(inout b, in "GetElem?", in "getElem?", a0, n);
+    }
+    if op == Q_LAST {
+        return gapp1(inout b, in "Array", in "back?", a0);
+    }
+    if op == Q_TRY_SET {
+        let tmp = temp(inout b, inout g);
+        let ok = in_bounds(inout b, a0, a1);
+        let none = unit(inout b);
+        let_local(inout b, inout out, tmp, ok, false, none, false);
+        let n = to_nat(inout b, a1);
+        let value = gapp3(inout b, in "Array", in "setIfInBounds", a0, n, a2);
+        seq_update(inout b, inout t, in y, inout g, e0, value, inout out);
+        return lref(inout b, tmp);
+    }
+    if op == Q_CLEAR {
+        let value = empty_array(inout b);
+        seq_update(inout b, inout t, in y, inout g, e0, value, inout out);
+        return unit(inout b);
+    }
+    if op == Q_TRUNCATE {
+        let z = nat_u64(inout b, 0);
+        let n = to_nat(inout b, a1);
+        let value = gapp3(inout b, in "Array", in "extract", a0, z, n);
+        seq_update(inout b, inout t, in y, inout g, e0, value, inout out);
+        return unit(inout b);
+    }
+    if op == Q_RESERVE {
+        return unit(inout b);
+    }
+    if op == Q_EXTEND {
+        let value = gapp2(inout b, in "Array", in "append", a0, a1);
+        seq_update(inout b, inout t, in y, inout g, e0, value, inout out);
+        return unit(inout b);
+    }
+    if op == Q_FINISH {
+        let s = size(inout b, a0);
+        let z = nat_u64(inout b, 0);
+        let emp = binary(inout b, OP_BOOL_EQ, s, z);
+        let u = unit(inout b);
+        return seq_checked(inout b, inout g, emp, u, inout out);
+    }
+    if op == Q_AS_SLICE {
+        return a0;
+    }
+    // Q_SUB_SLICE
+    let lo = to_nat(inout b, a1);
+    let hi = to_nat(inout b, a2);
+    gapp3(inout b, in "Array", in "extract", a0, lo, hi)
+}
+
+// ----- calls ---------------------------------------------------------------------
+
+fn fail_sym(inout b: B, s: u32) {
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    b.names.write(s, inout o);
+    match String::from_utf8(in o.as_slice()) {
+        Option::Some(x) => b.fail(in x.as_str()),
+        Option::None => b.fail(in "refused"),
+    }
+}
+
+fn fail_with_name(inout b: B, in prefix: Str, n: u32, in suffix: Str) {
+    let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put(inout o, in prefix);
+    b.names.write(n, inout o);
+    put(inout o, in suffix);
+    match String::from_utf8(in o.as_slice()) {
+        Option::Some(x) => b.fail(in x.as_str()),
+        Option::None => b.fail(in prefix),
+    }
+}
+
+// Whether world function `n` has an `inout` Slice parameter.
+fn inout_slice(in b: B, in t: Types, in y: Y, n: u32) -> bool {
+    let si = y.x.fx.find(n);
+    if si == NONE32 {
+        return false;
+    }
+    let s = y.x.fx.sig(w(si));
+    for i in 0..s.pn {
+        let p = y.x.fx.param(s, i);
+        if widen_u64(p.pass) == PASS_INOUT {
+            let pt = t.node(p.ty);
+            if pt.kind == K_NAMED && pt.n == 1 && spells(in b, pt.name, in "Slice") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn starts_with(in b: B, s: u32, in prefix: Str) -> bool {
+    let p = prefix.as_bytes();
+    if b.names.size(s) < p.len() {
+        return false;
+    }
+    for i in 0..p.len() {
+        let c = match p.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        if b.names.byte(s, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// The effect of `eff::op` when `eff` is an effect of the world.
+fn effect_call(inout b: B, in y: Y, n: u32) -> bool {
+    let size = b.names.size(n);
+    let mut i: u64 = 0;
+    loop {
+        if inc(i) >= size {
+            return false;
+        }
+        if b.names.byte(n, i) == 58 && b.names.byte(n, inc(i)) == 58 {
+            break;
+        }
+        i = inc(i);
+    }
+    let mut q: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for j in 0..i {
+        q.push(b.names.byte(n, j));
+    }
+    let qs = b.names.lookup(in q.as_slice());
+    qs != NONE32 && y.x.wd.effect_index(qs) != NONE32
+}
+
+// The tiled operation's term (`tiled_op_term`); `mutates` reports a write.
+fn tiled_term(inout b: B, op: u64, extra: u64, in terms: ChunkSeq[T], inout mutates: bool) -> T {
+    let a0 = get(in terms, 0);
+    let a1 = get(in terms, 1);
+    let a2 = get(in terms, 2);
+    mutates = false;
+    if op == TO_NEW {
+        return empty_array(inout b);
+    }
+    if op == TO_WITH_CAPACITY || op == TO_WITH_REGION {
+        let n = to_nat(inout b, a0);
+        return gapp1(inout b, in "Array", in "emptyWithCapacity", n);
+    }
+    if op == TO_LEN {
+        let s = size(inout b, a0);
+        return gapp1(inout b, in "Nat", in "toUInt64", s);
+    }
+    if op == TO_TILE_COUNT {
+        let s = size(inout b, a0);
+        let wm = nat_u64(inout b, wrapping_sub(extra, 1));
+        let num = binary(inout b, OP_ADD, s, wm);
+        let wd = nat_u64(inout b, extra);
+        let tiles = binary(inout b, OP_DIV, num, wd);
+        return gapp1(inout b, in "Nat", in "toUInt64", tiles);
+    }
+    if op == TO_GET {
+        let n = to_nat(inout b, a1);
+        return gapp2(inout b, in "GetElem?", in "getElem!", a0, n);
+    }
+    if op == TO_COL_GET {
+        let n = to_nat(inout b, a1);
+        let row = gapp2(inout b, in "GetElem?", in "getElem!", a0, n);
+        return project(inout b, row, n32(extra));
+    }
+    if op == TO_PUSH {
+        mutates = true;
+        return gapp2(inout b, in "Array", in "push", a0, a1);
+    }
+    if op == TO_SET {
+        mutates = true;
+        let n = to_nat(inout b, a1);
+        return gapp3(inout b, in "Array", in "setIfInBounds", a0, n, a2);
+    }
+    if op == TO_COL_SET {
+        mutates = true;
+        let idx = to_nat(inout b, a1);
+        let cur = gapp2(inout b, in "GetElem?", in "getElem!", a0, idx);
+        let mut fs = empty();
+        let f = record_field(inout b, n32(extra), a2);
+        fs.push(f);
+        let updated = update(inout b, cur, in fs);
+        return gapp3(inout b, in "Array", in "setIfInBounds", a0, idx, updated);
+    }
+    b.fail(in "Lean extraction does not lower SIMD load_tile_vec");
+    unit(inout b)
+}
+
+// Words of the call row of `e`: callee 0, n 1, (pass, id)..., m, types...,
+// then 10 route words.
+fn route_at(in y: Y, e: u64) -> u64 {
+    let n = y.a.x(e, 1);
+    let m_at = add(2, wrapping_mul(n, 2));
+    let m = y.a.x(e, m_at);
+    add(inc(m_at), m)
+}
+
+// `call(e, callee, args, out)`. `rewritten` is the method name symbol
+// when the callee is the rewritten `Type::method` of a method call, else
+// NONE32 (the callee expression is then `callee`).
+fn call(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    callee: u64,
+    rewritten: u32,
+    in args: ChunkSeq[u64],
+    inout out: ChunkSeq[T]
+) -> T {
+    let ra = route_at(in y, e);
+    let ck = if rewritten != NONE32 {
+        X_NAME
+    } else {
+        y.a.kind(callee)
+    };
+    let n = if rewritten != NONE32 {
+        rewritten
+    } else if ck == X_NAME {
+        y.a.xs(callee, 0)
+    } else {
+        NONE32
+    };
+    if ck == X_NAME && inout_slice(in b, in t, in y, n) {
+        b.fail(in INOUT_SLICE);
+        return unit(inout b);
+    }
+    // seq_expr: the call's route (Name callees only when not a local).
+    let sk = y.a.x(e, ra);
+    let sw = y.a.x(e, inc(ra));
+    let seq_applies = sk != 0 && (y.a.kind(callee) != X_NAME || !g.has(y.a.xs(callee, 0)));
+    if seq_applies {
+        if sk == 2 {
+            fail_sym(inout b, y.a.sym(sw));
+            return unit(inout b);
+        }
+        let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if y.a.kind(callee) == X_FIELD {
+            es.push(y.a.x(callee, 0));
+        }
+        let na = y.a.x(e, 1);
+        for i in 0..na {
+            es.push(y.a.x(e, add(3, wrapping_mul(i, 2))));
+        }
+        return seq_op(inout b, inout t, in y, inout g, sw, in es, inout out);
+    }
+    // tiled
+    if rewritten != NONE32 {
+        if starts_with(in b, rewritten, in "TiledSeq::") {
+            skip(inout b, inout g);
+            return unit(inout b);
+        }
+    } else {
+        let top = y.a.x(e, add(ra, 2));
+        let tiled_applies = top != 0 && (ck != X_NAME || !g.has(n));
+        if tiled_applies {
+            // Column operations carry a name-table index; tile widths a number.
+            let raw = y.a.x(e, add(ra, 3));
+            let extra = if top == TO_COL_GET || top == TO_COL_SET {
+                widen_u64(y.a.sym(raw))
+            } else {
+                raw
+            };
+            let skip_first = y.a.x(e, add(ra, 4)) != 0;
+            let place = y.a.x(e, add(ra, 5));
+            let mut es: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            if ck == X_FIELD {
+                es.push(y.a.x(callee, 0));
+            }
+            for i in 0..args.len() {
+                if !(skip_first && i == 0) {
+                    es
+                        .push(
+                        match args.try_get(i) {
+                            Option::Some(x) => x,
+                            Option::None => 0,
+                        }
+                    );
+                }
+            }
+            let terms = operands(inout b, inout t, in y, inout g, in es, inout out);
+            let mut mutates = false;
+            let term = tiled_term(inout b, top, extra, in terms, inout mutates);
+            if mutates {
+                let mut pe = NONE;
+                if place == 1 {
+                    pe = y.a.x(callee, 0);
+                } else if place == 2 {
+                    pe = match args.try_get(0) {
+                        Option::Some(x) => x,
+                        Option::None => NONE,
+                    };
+                }
+                let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                let root = if pe == NONE {
+                    NONE32
+                } else {
+                    place_of(in y, pe, inout path)
+                };
+                if root == NONE32 {
+                    b.fail(in "mutable TiledSeq argument requires a place");
+                    return unit(inout b);
+                }
+                assign(inout b, inout t, in y, inout g, root, in path, term, inout out);
+                return unit(inout b);
+            }
+            return term;
+        }
+    }
+    // method call sugar: `local.method(args)`
+    if ck == X_FIELD {
+        let base = y.a.x(callee, 0);
+        if y.a.kind(base) == X_NAME && g.has(y.a.xs(base, 0)) {
+            let l = g.local(g.find(y.a.xs(base, 0)));
+            let tn = t.name(l.ty);
+            let method = y.a.xs(callee, 1);
+            let mut o: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            if tn != 0 {
+                b.names.write(tn, inout o);
+            }
+            put(inout o, in "::");
+            b.names.write(method, inout o);
+            let mn = b.names.lookup(in o.as_slice());
+            if mn != NONE32 && y.x.fx.find(mn) != NONE32 {
+                let mut actual: ChunkSeq[u64] = ChunkSeq::new[u64]();
+                actual.push(base);
+                for i in 0..args.len() {
+                    actual
+                        .push(
+                        match args.try_get(i) {
+                            Option::Some(x) => x,
+                            Option::None => 0,
+                        }
+                    );
+                }
+                return call(inout b, inout t, in y, inout g, e, callee, mn, in actual, inout out);
+            }
+        }
+    }
+    if ck != X_NAME {
+        b.fail(in "Lean extraction of method and indirect calls requires named functions");
+        return unit(inout b);
+    }
+    let is_fn = y.x.fx.find(n) != NONE32;
+    let local = g.has(n);
+    if rewritten == NONE32 {
+        let float = y.a.x(e, add(ra, 6));
+        let int = y.a.x(e, add(ra, 7)) != 0;
+        let wrapping = y.a.x(e, add(ra, 8));
+        if float != NONE && !local && !is_fn {
+            fail_sym(inout b, y.a.sym(float));
+            return unit(inout b);
+        }
+        if int && !local && !is_fn {
+            fail_with_name(
+                inout b,
+                in "Lean extraction does not model the integer intrinsic '",
+                n,
+                in "' yet (vesper.arith.checked/1 bit operations, shifts and conversions are refused)"
+            );
+            return unit(inout b);
+        }
+        if wrapping != NONE && !local && !is_fn && args.len() == 2 {
+            let vs = operands(inout b, inout t, in y, inout g, in args, inout out);
+            return arith_term(inout b, y.a.sym(wrapping), 0, get(in vs, 0), get(in vs, 1));
+        }
+    }
+    if effect_call(inout b, in y, n) {
+        skip(inout b, inout g);
+        return unit(inout b);
+    }
+    if y.fip && (spells(in b, n, in "Box::new") || spells(in b, n, in "Box::new_in_caller")) {
+        if args.len() != 1 {
+            b.fail(in "Box::new expects one argument");
+            return unit(inout b);
+        }
+        let x = match args.try_get(0) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        return expr(inout b, inout t, in y, inout g, x, inout out);
+    }
+    if lookup_constructor(inout b, in y.x.wd, n) != NONE64 && !local {
+        let vs = operands(inout b, inout t, in y, inout g, in args, inout out);
+        let c = constructor(inout b, in y, n);
+        return app(inout b, c, in vs);
+    }
+    if local {
+        return local_call(inout b, inout t, in y, inout g, e, n, in args, inout out);
+    }
+    if !is_fn {
+        fail_with_name(inout b, in "unknown Lean callee ", n, in "");
+        return unit(inout b);
+    }
+    let s = y.x.fx.sig(w(y.x.fx.find(n)));
+    if s.effectful {
+        skip(inout b, inout g);
+        return unit(inout b);
+    }
+    let ci = y.x.fx.call(y.a.start(e), y.a.end(e));
+    let mut arguments = empty();
+    for i in 0..s.gn {
+        let gen = y.x.fx.generic(s, i);
+        if !gen.row {
+            let solved = y.x.fx.call_var(ci, gen.name);
+            if solved != NONE32 {
+                b.check(gen.name, in "identifier");
+                let tt = ty(inout b, in t, in y, inout g, solved);
+                let na = named_arg_sym(inout b, gen.name, tt);
+                arguments.push(na);
+            }
+        }
+    }
+    let vs = operands(inout b, inout t, in y, inout g, in args, inout out);
+    for i in 0..vs.len() {
+        let p = pos(inout b, get(in vs, i));
+        arguments.push(p);
+    }
+    let f = sref(inout b, n);
+    let callt = app_args(inout b, f, in arguments);
+    let mut states: u64 = 0;
+    for i in 0..s.pn {
+        if widen_u64(y.x.fx.param(s, i).pass) == PASS_INOUT && i < args.len() {
+            states = inc(states);
+        }
+    }
+    if states == 0 {
+        return callt;
+    }
+    let tmp = temp(inout b, inout g);
+    let none = unit(inout b);
+    let_local(inout b, inout out, tmp, callt, false, none, false);
+    let result = lref(inout b, tmp);
+    // restore_states with the callee's parameters and the solved generics
+    let mut vars = vars_new();
+    if ci != NONE32 {
+        let row = y.x.fx.call_at(w(ci));
+        for i in 0..row.n {
+            match y.x.fx.vars.try_get(add(row.a, i)) {
+                Option::Some(v) => vars.set(v.name, v.ty),
+                Option::None => {},
+            }
+        }
+    }
+    let total = inc(states);
+    let mut k: u64 = 0;
+    for i in 0..s.pn {
+        let p = y.x.fx.param(s, i);
+        if widen_u64(p.pass) == PASS_INOUT && i < args.len() {
+            let arg = match args.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            let pty = substitute(inout t, p.ty, in vars);
+            let value = tuple_get(inout b, result, inc(k), total);
+            k = inc(k);
+            let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let root = place_of(in y, arg, inout path);
+            if root == NONE32 {
+                b.fail(in "a mutable Lean argument requires a place");
+                return unit(inout b);
+            }
+            if p.qn == 0 {
+                let projected = value;
+                assign(inout b, inout t, in y, inout g, root, in path, projected, inout out);
+            } else {
+                for q in 0..p.qn {
+                    let qp = y.x.fx.path(add(p.qa, q));
+                    let mut proj: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                    for j in 0..qp.n {
+                        proj.push(y.x.fx.path_sym(qp, j));
+                    }
+                    let mut target: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                    for j in 0..path.len() {
+                        target.push(sym_at(in path, j));
+                    }
+                    for j in 0..proj.len() {
+                        target.push(sym_at(in proj, j));
+                    }
+                    let projected = get_path(inout b, inout t, in y, value, pty, in proj, 0);
+                    assign(inout b, inout t, in y, inout g, root, in target, projected, inout out);
+                }
+            }
+        }
+    }
+    tuple_get(inout b, result, 0, total)
+}
+
+// A call of a local function value.
+fn local_call(
+    inout b: B,
+    inout t: Types,
+    in y: Y,
+    inout g: G,
+    e: u64,
+    n: u32,
+    in args: ChunkSeq[u64],
+    inout out: ChunkSeq[T]
+) -> T {
+    let l = g.local(g.find(n));
+    let ft = t.node(l.ty);
+    if ft.kind != K_FN {
+        b.fail(in "call of a non-function Lean local");
+        return unit(inout b);
+    }
+    let mut vs = operands(inout b, inout t, in y, inout g, in args, inout out);
+    if vs.len() == 0 {
+        let u = unit(inout b);
+        vs.push(u);
+    }
+    let f = lref(inout b, g.cur(l.id));
+    let callt = app(inout b, f, in vs);
+    let row = t.row(ft.r2);
+    let effectful = row.n > 0 || row.tail != 0;
+    let mut states: u64 = 0;
+    for i in 0..w(ft.n) {
+        if i < args.len() && widen_u64(t.param_pass(l.ty, i)) == PASS_INOUT {
+            states = inc(states);
+        }
+    }
+    if effectful {
+        skip(inout b, inout g);
+        return unit(inout b);
+    }
+    if states == 0 {
+        return callt;
+    }
+    let tmp = temp(inout b, inout g);
+    let none = unit(inout b);
+    let_local(inout b, inout out, tmp, callt, false, none, false);
+    let result = lref(inout b, tmp);
+    let total = inc(states);
+    let mut k: u64 = 0;
+    for i in 0..w(ft.n) {
+        if i < args.len() && widen_u64(t.param_pass(l.ty, i)) == PASS_INOUT {
+            let arg = match args.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            let value = tuple_get(inout b, result, inc(k), total);
+            k = inc(k);
+            let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let root = place_of(in y, arg, inout path);
+            if root == NONE32 {
+                b.fail(in "a mutable Lean argument requires a place");
+                return unit(inout b);
+            }
+            assign(inout b, inout t, in y, inout g, root, in path, value, inout out);
+        }
+    }
+    tuple_get(inout b, result, 0, total)
+}
+
+// ----- closures ------------------------------------------------------------------
+
+fn closure(inout b: B, inout t: Types, in y: Y, inout g: G, e: u64, inout out: ChunkSeq[T]) -> T {
+    let ft = y.a.xt(e, 0);
+    if ft == NONE32 || t.node(ft).kind != K_FN {
+        b.fail(in "closure lacks its checked arrow type");
+        return unit(inout b);
+    }
+    let fnode = t.node(ft);
+    let row = t.row(fnode.r2);
+    if row.n > 0 || row.tail != 0 {
+        skip(inout b, inout g);
+        return unit(inout b);
+    }
+    let np = y.a.x(e, 1);
+    let body = y.a.x(e, add(2, np));
+    let nfree = y.a.x(e, add(3, np));
+    let mut captures: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..nfree {
+        let s = y.a.xs(e, add(4, add(np, i)));
+        if g.has(s) {
+            captures.push(s);
+        }
+    }
+    let mut snapshot: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..captures.len() {
+        let n = sym_at(in captures, i);
+        let base = joined(inout b, in "$capture_", n, in "");
+        let c = fresh(inout b, inout g, base);
+        let v = var(inout b, in g, n);
+        let none = unit(inout b);
+        let_local(inout b, inout out, c, v, false, none, false);
+        snapshot.push(c);
+    }
+    let ns = g.scope.len();
+    let nc = g.current.len();
+    // the saved scope's ids of the captures
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..captures.len() {
+        ids.push(g.local(g.find(sym_at(in captures, i))).id);
+    }
+    let mut arg_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut arguments = empty();
+    let pcount = if np < w(fnode.n) {
+        np
+    } else {
+        w(fnode.n)
+    };
+    for i in 0..pcount {
+        let pname = y.a.xs(e, add(2, i));
+        let base = joined(inout b, in "", pname, in "$a");
+        let an = fresh(inout b, inout g, base);
+        let pt = ty(inout b, in t, in y, inout g, t.arg(ft, i));
+        let bd = explicit(inout b, an, pt);
+        arguments.push(bd);
+        arg_names.push(an);
+    }
+    if arguments.len() == 0 {
+        let gu = global(inout b, in "Unit");
+        let bd = anonymous(inout b, B_EXPLICIT, gu);
+        arguments.push(bd);
+    }
+    let mut ss = empty();
+    for i in 0..captures.len() {
+        let n = sym_at(in captures, i);
+        let lean = fresh(inout b, inout g, n);
+        let r = lref(inout b, sym_at(in snapshot, i));
+        let none = unit(inout b);
+        let_local(inout b, inout ss, lean, r, false, none, true);
+        g
+            .set_cur(
+            match ids.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            },
+            lean
+        );
+    }
+    for i in 0..pcount {
+        let pname = y.a.xs(e, add(2, i));
+        let lean = declare(inout b, inout g, pname, t.arg(ft, i));
+        let r = lref(inout b, sym_at(in arg_names, i));
+        let none = unit(inout b);
+        let_local(inout b, inout ss, lean, r, false, none, true);
+    }
+    let value = expr(inout b, inout t, in y, inout g, body, inout ss);
+    let r = temp(inout b, inout g);
+    let rt = ty(inout b, in t, in y, inout g, fnode.r);
+    let_local(inout b, inout ss, r, value, true, rt, false);
+    let mut results = empty();
+    let rr = lref(inout b, r);
+    results.push(rr);
+    for i in 0..pcount {
+        if widen_u64(t.param_pass(ft, i)) == PASS_INOUT {
+            let v = var(inout b, in g, y.a.xs(e, add(2, i)));
+            results.push(v);
+        }
+    }
+    let tp = tuple(inout b, in results);
+    let pr = pure(inout b, tp);
+    let bd = sequence(inout b, in ss, pr);
+    g.scope.truncate(ns);
+    g.current.truncate(nc);
+    let tmp = temp(inout b, inout g);
+    let run = gapp1(inout b, in "Id", in "run", bd);
+    let lam = lambda(inout b, in arguments, run);
+    let none = unit(inout b);
+    let_local(inout b, inout out, tmp, lam, false, none, false);
+    lref(inout b, tmp)
+}
+
+// ----- functions -----------------------------------------------------------------
+
+// `Generator::function(f)` over `Id`, as a module of one `partial def`
+// declaration (no imports).
+pub fn function(inout b: B, inout t: Types, in y: Y, inout g: G, fi: u64) -> T {
+    let f = y.a.function(fi);
+    let si = y.x.fx.find(f.name);
+    let s = y.x.fx.sig(w(si));
+    let mut binders = empty();
+    for i in 0..s.gn {
+        let gen = y.x.fx.generic(s, i);
+        if !gen.row {
+            b.check(gen.name, in "identifier");
+            let m = b.at();
+            b.type0();
+            let t0 = b.since(m);
+            let bd = binder_sym(inout b, B_IMPLICIT, gen.name, t0);
+            binders.push(bd);
+        }
+    }
+    for i in 0..f.pn {
+        let pn = y.a.param_name(f, i);
+        b.check(pn, in "identifier");
+        let pt = ty(inout b, in t, in y, inout g, y.a.param_ty(f, i));
+        let bd = explicit(inout b, pn, pt);
+        binders.push(bd);
+        g.mark_used(pn);
+    }
+    let mut results = empty();
+    let r0 = ty(inout b, in t, in y, inout g, f.result);
+    results.push(r0);
+    for i in 0..f.pn {
+        if y.a.param_pass(f, i) == PASS_INOUT {
+            let pt = ty(inout b, in t, in y, inout g, y.a.param_ty(f, i));
+            results.push(pt);
+        }
+    }
+    let result = product(inout b, in results);
+    let mut out = empty();
+    for i in 0..f.pn {
+        let pn = y.a.param_name(f, i);
+        let r = lref(inout b, pn);
+        let none = unit(inout b);
+        let_local(inout b, inout out, pn, r, false, none, true);
+        let id = declare_as(inout g, pn, y.a.param_ty(f, i), pn);
+    }
+    if f.body == NONE {
+        b.fail(in "missing function body");
+    }
+    let term = expr(inout b, inout t, in y, inout g, f.body, inout out);
+    let r = temp(inout b, inout g);
+    let rt = ty(inout b, in t, in y, inout g, f.result);
+    let_local(inout b, inout out, r, term, true, rt, false);
+    let mut values = empty();
+    let rr = lref(inout b, r);
+    values.push(rr);
+    for i in 0..f.pn {
+        if y.a.param_pass(f, i) == PASS_INOUT {
+            let v = var(inout b, in g, y.a.param_name(f, i));
+            values.push(v);
+        }
+    }
+    let tp = tuple(inout b, in values);
+    let pr = pure(inout b, tp);
+    let body0 = sequence(inout b, in out, pr);
+    let body = gapp1(inout b, in "Id", in "run", body0);
+    // the declaration: imports 0, one declaration
+    let m = b.at();
+    b.w(0);
+    b.w(1);
+    b.w(D_DEF);
+    b.w(K_PARTIAL);
+    b.name(f.name);
+    b.w(binders.len());
+    for i in 0..binders.len() {
+        b.put(get(in binders, i));
+    }
+    b.put(result);
+    b.put(body);
+    b.since(m)
+}

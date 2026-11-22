@@ -1,0 +1,204 @@
+// The cumulative attempt budget of src/optimize/witness.rs (`WitnessBudget`)
+// and the vector capacities it charges for.
+//
+// The Rust checker charges `metadata` for every vector growth by the
+// capacity `Vec::try_reserve_exact` asks for, so the Vesper checker keeps a
+// model of each Rust vector's capacity next to the sequence that plays its
+// part (`reserve`). Every function returns an error code: 0 is success,
+// otherwise the `WitnessError` variant's position plus one (witness.ves).
+
+// `WitnessError::Limit`.
+const E_LIMIT: u8 = 2;
+
+// `WitnessLimits` and the spent counters, in field order.
+pub copy struct Budget {
+    max_terms: u64,
+    max_proofs: u64,
+    max_input_nodes: u64,
+    max_output_nodes: u64,
+    max_depth: u64,
+    max_variables: u64,
+    max_name_bytes: u64,
+    max_metadata_bytes: u64,
+    max_work: u64,
+    work: u64,
+    metadata: u64,
+    names: u64
+}
+
+// `add(a, b)?`: `Limit` on overflow.
+pub fn add_or(a: u64, b: u64, inout out: u64) -> u8 {
+    match checked_add_u64(a, b) {
+        Option::Some(v) => {
+            out = v;
+            0
+        }
+        Option::None => E_LIMIT,
+    }
+}
+
+// `mul(a, b)?`: `Limit` on overflow.
+pub fn mul_or(a: u64, b: u64, inout out: u64) -> u8 {
+    match checked_mul_u64(a, b) {
+        Option::Some(v) => {
+            out = v;
+            0
+        }
+        Option::None => E_LIMIT,
+    }
+}
+
+// `limit(value, max)`.
+pub fn limit(value: u64, max: u64) -> u8 {
+    if value > max {
+        E_LIMIT
+    } else {
+        0
+    }
+}
+
+// `WitnessBudget::work`.
+pub fn work(inout b: Budget, amount: u64) -> u8 {
+    match checked_add_u64(b.work, amount) {
+        Option::Some(next) => {
+            if next > b.max_work {
+                return E_LIMIT;
+            }
+            b.work = next;
+            0
+        }
+        Option::None => E_LIMIT,
+    }
+}
+
+// `WitnessBudget::metadata`: the bytes count as work too.
+pub fn metadata(inout b: Budget, amount: u64) -> u8 {
+    let next = match checked_add_u64(b.metadata, amount) {
+        Option::Some(v) => v,
+        Option::None => return E_LIMIT,
+    };
+    if next > b.max_metadata_bytes {
+        return E_LIMIT;
+    }
+    let e = work(inout b, amount);
+    if e != 0 {
+        return e;
+    }
+    b.metadata = next;
+    0
+}
+
+// `WitnessBudget::names`: the bytes count as work too.
+pub fn names(inout b: Budget, amount: u64) -> u8 {
+    let next = match checked_add_u64(b.names, amount) {
+        Option::Some(v) => v,
+        Option::None => return E_LIMIT,
+    };
+    if next > b.max_name_bytes {
+        return E_LIMIT;
+    }
+    let e = work(inout b, amount);
+    if e != 0 {
+        return e;
+    }
+    b.names = next;
+    0
+}
+
+// `WitnessBudget::reserve(values, additional)` for a Rust vector of `len`
+// elements of `size` bytes and capacity `cap`: a growth asks for the larger
+// of the requirement, twice the capacity and one element, and charges its
+// bytes before it happens. `cap` becomes the new capacity.
+pub fn reserve(inout b: Budget, len: u64, inout cap: u64, additional: u64, size: u64) -> u8 {
+    let required = match checked_add_u64(len, additional) {
+        Option::Some(v) => v,
+        Option::None => return E_LIMIT,
+    };
+    if required <= cap {
+        return 0;
+    }
+    let doubled = match checked_mul_u64(cap, 2) {
+        Option::Some(v) => v,
+        Option::None => return E_LIMIT,
+    };
+    let mut capacity = required;
+    if doubled > capacity {
+        capacity = doubled;
+    }
+    if capacity < 1 {
+        capacity = 1;
+    }
+    let bytes = match checked_mul_u64(capacity, size) {
+        Option::Some(v) => v,
+        Option::None => return E_LIMIT,
+    };
+    let e = metadata(inout b, bytes);
+    if e != 0 {
+        return e;
+    }
+    cap = capacity;
+    0
+}
+
+// `WitnessBudget::new`: every limit in 1..=HARD, else `InvalidLimits` (1).
+pub fn valid_limits(in b: Budget) -> u8 {
+    let ok = b
+        .max_terms
+        >= 1
+        && b
+        .max_terms
+        <= 16384
+        && b
+        .max_proofs
+        >= 1
+        && b
+        .max_proofs
+        <= 32768
+        && b
+        .max_input_nodes
+        >= 1
+        && b
+        .max_input_nodes
+        <= 2048
+        && b
+        .max_output_nodes
+        >= 1
+        && b
+        .max_output_nodes
+        <= 4096
+        && b
+        .max_depth
+        >= 1
+        && b
+        .max_depth
+        <= 128
+        && b
+        .max_variables
+        >= 1
+        && b
+        .max_variables
+        <= 512
+        && b
+        .max_name_bytes
+        >= 1
+        && b
+        .max_name_bytes
+        <= 65536
+        && b
+        .max_metadata_bytes
+        >= 1
+        && b
+        .max_metadata_bytes
+        <= 16777216
+        && b
+        .max_work
+        >= 1
+        && b
+        .max_work
+        <= 8000000;
+    if ok {
+        0
+    } else {
+        1
+    }
+}

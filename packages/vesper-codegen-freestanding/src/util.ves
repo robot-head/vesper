@@ -1,0 +1,225 @@
+// Byte helpers: total little-endian reads, appends and in-place writes, the
+// request reader, and the encodings of strings and errors in results.
+
+// "no such row" for u64 indices.
+const NONE64: u64 = 18446744073709551615;
+
+pub fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+pub fn sub(a: u64, b: u64) -> u64 {
+    wrapping_sub(a, b)
+}
+
+pub fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// `v` rounded up to a multiple of `a` (`a = 0` counts as 1), as
+// `v.div_ceil(a) * a`.
+pub fn align_up(v: u64, a: u64) -> u64 {
+    if a <= 1 {
+        return v;
+    }
+    let q = if v % a != 0 {
+        wrapping_add(v / a, 1)
+    } else {
+        v / a
+    };
+    wrapping_mul(q, a)
+}
+
+pub fn rd8(in b: Slice[u8], at: u64) -> u8 {
+    match b.try_get(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn rd16(in b: Slice[u8], at: u64) -> Option[u16] {
+    b.try_read_u16_le(at)
+}
+
+pub fn rd32(in b: Slice[u8], at: u64) -> Option[u32] {
+    b.try_read_u32_le(at)
+}
+
+pub fn rd64(in b: Slice[u8], at: u64) -> Option[u64] {
+    b.try_read_u64_le(at)
+}
+
+// Appends `width` zero bytes and returns where they start.
+pub fn grow(inout out: ChunkSeq[u8], width: u64) -> u64 {
+    let at = out.len();
+    out.resize(wrapping_add(at, width), 0);
+    at
+}
+
+pub fn push16(inout out: ChunkSeq[u8], v: u16) {
+    let at = grow(inout out, 2);
+    let ok = out.try_write_u16_le(at, v);
+}
+
+pub fn push32(inout out: ChunkSeq[u8], v: u32) {
+    let at = grow(inout out, 4);
+    let ok = out.try_write_u32_le(at, v);
+}
+
+pub fn push64(inout out: ChunkSeq[u8], v: u64) {
+    let at = grow(inout out, 8);
+    let ok = out.try_write_u64_le(at, v);
+}
+
+pub fn put32(inout out: ChunkSeq[u8], at: u64, v: u32) {
+    let ok = out.try_write_u32_le(at, v);
+}
+
+pub fn put64(inout out: ChunkSeq[u8], at: u64, v: u64) {
+    let ok = out.try_write_u64_le(at, v);
+}
+
+pub fn get32(in out: ChunkSeq[u8], at: u64) -> u32 {
+    match out.try_read_u32_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn push_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.extend(in s);
+}
+
+pub fn push_text(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+// Appends `x` in decimal.
+pub fn push_dec(inout out: ChunkSeq[u8], x: u64) {
+    if x >= 10 {
+        push_dec(inout out, x / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(x % 10, 48)));
+}
+
+fn push_hex_digits(inout out: ChunkSeq[u8], x: u64) {
+    if x >= 16 {
+        push_hex_digits(inout out, x >> 4);
+    }
+    let d = x & 15;
+    if d < 10 {
+        out.push(wrapping_u8(wrapping_add(d, 48)));
+    } else {
+        out.push(wrapping_u8(wrapping_add(d, 87)));
+    }
+}
+
+// Appends `x` as Rust's `{:#x}` does: `0x` and lower-case digits.
+pub fn push_hex(inout out: ChunkSeq[u8], x: u64) {
+    out.push(48);
+    out.push(120);
+    push_hex_digits(inout out, x);
+}
+
+// A length-prefixed string of a result: the byte count, then the bytes.
+pub fn put_str(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    push64(inout out, s.len());
+    out.extend(in s);
+}
+
+pub fn put_text(inout out: ChunkSeq[u8], in s: Str) {
+    put_str(inout out, in s.as_bytes());
+}
+
+// Reads a request: little-endian words and length-prefixed strings. A read
+// past the end gives 0 and an empty range and sets `bad`.
+pub struct Reader {
+    pos: u64,
+    bad: bool,
+}
+
+pub fn reader() -> Reader {
+    Reader {
+        pos: 0,
+        bad: false
+    }
+}
+
+impl Reader {
+    pub fn word(inout self, in b: Slice[u8]) -> u64 {
+        match b.try_read_u64_le(self.pos) {
+            Option::Some(v) => {
+                self.pos = wrapping_add(self.pos, 8);
+                v
+            }
+            Option::None => {
+                self.bad = true;
+                0
+            }
+        }
+    }
+
+    // A string's start; its length is in `self.last`. The bytes are
+    // `b[start..start + len]`.
+    pub fn span(inout self, in b: Slice[u8]) -> Span {
+        let len = self.word(in b);
+        let start = self.pos;
+        let end = wrapping_add(start, len);
+        if end < start || end > b.len() {
+            self.bad = true;
+            return Span {
+                start: 0,
+                len: 0
+            };
+        }
+        self.pos = end;
+        Span {
+            start: start,
+            len: len
+        }
+    }
+}
+
+// A byte range of the request.
+pub copy struct Span {
+    start: u64,
+    len: u64,
+}
+
+pub fn span_end(s: Span) -> u64 {
+    wrapping_add(s.start, s.len)
+}
+
+// `a[ia..ia + n] == b[ib..ib + n]`, false when either runs past its end.
+pub fn bytes_eq(in a: Slice[u8], ia: u64, in b: Slice[u8], ib: u64, n: u64) -> bool {
+    if wrapping_add(ia, n) < ia || wrapping_add(ia, n) > a.len() {
+        return false;
+    }
+    if wrapping_add(ib, n) < ib || wrapping_add(ib, n) > b.len() {
+        return false;
+    }
+    a[ia..wrapping_add(ia, n)].eq(in b[ib..wrapping_add(ib, n)])
+}
+
+// The bytes of `s` equal `b[at..at + n]`.
+pub fn text_eq(in b: Slice[u8], at: u64, n: u64, in s: Str) -> bool {
+    let t = s.as_bytes();
+    n == t.len() && bytes_eq(in b, at, in t, 0, n)
+}
+
+// FNV-1a over `b`: symbol-name hashes for the linker's lookups.
+pub fn fnv(in b: Slice[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ c, 0x100000001b3);
+    }
+    h
+}

@@ -2,6 +2,7 @@
 name = "vesper-crucible"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Crucible (design §29): choice-tape property testing, comparison-guided fuzzing, SimPulse schedule exploration and termination-checked shrinking"
 publish = false
 build = "build.rs"

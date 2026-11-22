@@ -33,7 +33,13 @@ use self::util::{
     sw,
     tb_str,
     tb_sym,
-    tb_u64
+    tb_u64,
+    Ascii,
+    Br,
+    GTag,
+    Limit,
+    Out,
+    Wf
 };
 use self::tree::{
     emit_g,
@@ -41,6 +47,74 @@ use self::tree::{
     gsize,
     validate
 };
+
+// Token kinds (`tk_kind`).
+enum Tok: _ {
+    Ident = 0,
+    Arrow = 1,
+    Colon = 2,
+    ColonColon = 3,
+    Semi = 4,
+    Comma = 5,
+    LBrace = 6,
+    RBrace = 7,
+    LParen = 8,
+    RParen = 9,
+    LBracket = 10,
+    RBracket = 11
+}
+
+// Statement kinds (`s_kind`).
+enum Stmt: _ {
+    Message = 1,
+    Choice = 2,
+    Action = 3,
+    Rec = 4,
+    Continue = 5,
+    End = 6
+}
+
+// Error kinds (the `kind` word of `out`).
+enum PErr: _ {
+    TooLong = 0,
+    UnexpectedChar = 1,
+    UnexpectedToken = 2,
+    UnexpectedEof = 3,
+    UnknownRole = 4,
+    IdentifierTooLong = 5,
+    Unreachable = 6,
+    TooDeep = 7,
+    TooLarge = 8,
+    Invalid = 9
+}
+
+// Indexes into the wrapper's table of expected-token texts (`EXPECTED` in
+// src/port.rs).
+enum Expect: _ {
+    RoleName = 0,
+    TypeName = 1,
+    CommaOrRBracket = 2,
+    Label = 3,
+    LParen = 4,
+    RParen = 5,
+    RBrace = 6,
+    LBrace = 7,
+    RecVar = 8,
+    Semi = 9,
+    ActionName = 10,
+    ArmOrRBrace = 11,
+    ColonOrLBrace = 12,
+    ArrowOrColon = 13,
+    Roles = 14,
+    CommaOrSemi = 15
+}
+
+// The source size limit (MAX_SOURCE_BYTES), the nesting and length limits
+// of a type name, and the largest line or column (`u32::MAX`).
+const MAX_SOURCE_BYTES: u64 = 1048576;
+const MAX_TYPE_NESTING: u64 = 32;
+const MAX_TYPE_BYTES: u64 = 512;
+const MAX_LINE_COL: u64 = 4294967295;
 
 fn is_space(cp: u64) -> bool {
     (cp >= 9 && cp <= 13)
@@ -66,8 +140,8 @@ fn is_space(cp: u64) -> bool {
 }
 
 fn sat32(x: u64) -> u64 {
-    if x >= 4294967295 {
-        4294967295
+    if x >= MAX_LINE_COL {
+        MAX_LINE_COL
     } else {
         inc(x)
     }
@@ -98,7 +172,7 @@ fn lex_fail(inout c: C, line: u64, col: u64, kind: u64, x: u64) {
     c.ew.push(line);
     c.ew.push(col);
     c.ew.push(kind);
-    if kind == 1 {
+    if kind == PErr::UnexpectedChar {
         c.ew.push(x);
     }
 }
@@ -124,29 +198,29 @@ fn lex(inout c: C, in t: Slice[u8]) {
         let c0 = col;
         if is_space(ch) {
             p = add(p, w);
-            if ch == 10 {
+            if ch == Ascii::Lf {
                 line = sat32(line);
                 col = 1;
             } else {
                 col = sat32(col);
             }
-        } else if ch == 47 {
+        } else if ch == Ascii::Slash {
             p = inc(p);
             col = sat32(col);
-            if ib(in t, p) == 47 && p < n {
+            if ib(in t, p) == Ascii::Slash && p < n {
                 loop {
                     if p >= n {
                         break;
                     }
                     let (d, dw) = decode(in t, p);
-                    if d == 10 {
+                    if d == Ascii::Lf {
                         break;
                     }
                     p = add(p, dw);
                     col = sat32(col);
                 }
             } else {
-                lex_fail(inout c, l0, c0, 1, 47);
+                lex_fail(inout c, l0, c0, PErr::UnexpectedChar, Ascii::Slash);
                 return;
             }
         } else if is_ident_start(ch) {
@@ -159,8 +233,8 @@ fn lex(inout c: C, in t: Slice[u8]) {
                 if !is_ident_byte(d) {
                     break;
                 }
-                if c.tb.len() >= 128 {
-                    lex_fail(inout c, l0, c0, 5, 0);
+                if c.tb.len() >= Limit::Ident {
+                    lex_fail(inout c, l0, c0, PErr::IdentifierTooLong, 0);
                     return;
                 }
                 c.tb.push(wrapping_u8(d));
@@ -168,7 +242,7 @@ fn lex(inout c: C, in t: Slice[u8]) {
                 col = sat32(col);
             }
             let y = intern_tb(inout c);
-            tok(inout c, 0, y, l0, c0);
+            tok(inout c, Tok::Ident, y, l0, c0);
         } else {
             p = add(p, w);
             col = sat32(col);
@@ -178,35 +252,35 @@ fn lex(inout c: C, in t: Slice[u8]) {
                 0
             };
             let mut kind = none();
-            if ch == 45 && nx == 62 {
+            if ch == Ascii::Minus && nx == Ascii::Greater {
                 p = inc(p);
                 col = sat32(col);
-                kind = 1;
-            } else if ch == 58 && nx == 58 {
+                kind = Tok::Arrow;
+            } else if ch == Ascii::Colon && nx == Ascii::Colon {
                 p = inc(p);
                 col = sat32(col);
-                kind = 3;
-            } else if ch == 58 {
-                kind = 2;
-            } else if ch == 59 {
-                kind = 4;
-            } else if ch == 44 {
-                kind = 5;
-            } else if ch == 123 {
-                kind = 6;
-            } else if ch == 125 {
-                kind = 7;
-            } else if ch == 40 {
-                kind = 8;
-            } else if ch == 41 {
-                kind = 9;
-            } else if ch == 91 {
-                kind = 10;
-            } else if ch == 93 {
-                kind = 11;
+                kind = Tok::ColonColon;
+            } else if ch == Ascii::Colon {
+                kind = Tok::Colon;
+            } else if ch == Ascii::Semi {
+                kind = Tok::Semi;
+            } else if ch == Ascii::Comma {
+                kind = Tok::Comma;
+            } else if ch == Ascii::LBrace {
+                kind = Tok::LBrace;
+            } else if ch == Ascii::RBrace {
+                kind = Tok::RBrace;
+            } else if ch == Ascii::LParen {
+                kind = Tok::LParen;
+            } else if ch == Ascii::RParen {
+                kind = Tok::RParen;
+            } else if ch == Ascii::LBracket {
+                kind = Tok::LBracket;
+            } else if ch == Ascii::RBracket {
+                kind = Tok::RBracket;
             }
             if kind == none() {
-                lex_fail(inout c, l0, c0, 1, ch);
+                lex_fail(inout c, l0, c0, PErr::UnexpectedChar, ch);
                 return;
             }
             tok(inout c, kind, 0, l0, c0);
@@ -256,34 +330,34 @@ fn fail(inout c: C, kind: u64) {
 
 // A well-formedness error at the current token.
 fn fail_wf(inout c: C, code: u64, x: u64) {
-    fail(inout c, 9);
+    fail(inout c, PErr::Invalid);
     c.ew.push(code);
     c.ew.push(x);
 }
 
 fn tok_text(inout c: C, kind: u64) -> u64 {
-    if kind == 0 {
+    if kind == Tok::Ident {
         return sw(in c.tk_sym, c.pos);
     }
-    let s = if kind == 1 {
+    let s = if kind == Tok::Arrow {
         "->"
-    } else if kind == 2 {
+    } else if kind == Tok::Colon {
         ":"
-    } else if kind == 3 {
+    } else if kind == Tok::ColonColon {
         "::"
-    } else if kind == 4 {
+    } else if kind == Tok::Semi {
         ";"
-    } else if kind == 5 {
+    } else if kind == Tok::Comma {
         ","
-    } else if kind == 6 {
+    } else if kind == Tok::LBrace {
         "{"
-    } else if kind == 7 {
+    } else if kind == Tok::RBrace {
         "}"
-    } else if kind == 8 {
+    } else if kind == Tok::LParen {
         "("
-    } else if kind == 9 {
+    } else if kind == Tok::RParen {
         ")"
-    } else if kind == 10 {
+    } else if kind == Tok::LBracket {
         "["
     } else {
         "]"
@@ -294,11 +368,11 @@ fn tok_text(inout c: C, kind: u64) -> u64 {
 fn unexpected(inout c: C, expected: u64) {
     let k = peek(in c);
     if k == none() {
-        fail(inout c, 3);
+        fail(inout c, PErr::UnexpectedEof);
         c.ew.push(expected);
     } else {
         let y = tok_text(inout c, k);
-        fail(inout c, 2);
+        fail(inout c, PErr::UnexpectedToken);
         c.ew.push(expected);
         c.ew.push(y);
     }
@@ -317,7 +391,7 @@ fn is_keyword(in c: C, y: u64) -> bool {
 }
 
 fn ident(inout c: C, expected: u64) -> u64 {
-    if peek(in c) == 0 {
+    if peek(in c) == Tok::Ident {
         let y = sw(in c.tk_sym, c.pos);
         if !is_keyword(in c, y) {
             c.pos = inc(c.pos);
@@ -329,7 +403,7 @@ fn ident(inout c: C, expected: u64) -> u64 {
 }
 
 fn keyword(in c: C, kw: u64) -> bool {
-    peek(in c) == 0 && sw(in c.tk_sym, c.pos) == kw
+    peek(in c) == Tok::Ident && sw(in c.tk_sym, c.pos) == kw
 }
 
 fn role_index(in c: C, y: u64) -> u64 {
@@ -343,14 +417,14 @@ fn role_index(in c: C, y: u64) -> u64 {
 
 fn role(inout c: C) -> u64 {
     let at = c.pos;
-    let name = ident(inout c, 0);
+    let name = ident(inout c, Expect::RoleName);
     if c.failed {
         return none();
     }
     let i = role_index(in c, name);
     if i == none() {
         c.pos = at;
-        fail(inout c, 4);
+        fail(inout c, PErr::UnknownRole);
         c.ew.push(name);
     }
     i
@@ -358,29 +432,29 @@ fn role(inout c: C) -> u64 {
 
 // Appends the type name at the cursor to `tb`.
 fn ty(inout c: C, depth: u64) {
-    if depth > 32 {
-        fail(inout c, 7);
+    if depth > MAX_TYPE_NESTING {
+        fail(inout c, PErr::TooDeep);
         return;
     }
     let start = c.tb.len();
-    let y = ident(inout c, 1);
+    let y = ident(inout c, Expect::TypeName);
     if c.failed {
         return;
     }
     tb_sym(inout c, y);
     loop {
-        if peek(in c) != 3 {
+        if peek(in c) != Tok::ColonColon {
             break;
         }
         c.pos = inc(c.pos);
         tb_str(inout c, "::");
-        let z = ident(inout c, 1);
+        let z = ident(inout c, Expect::TypeName);
         if c.failed {
             return;
         }
         tb_sym(inout c, z);
     }
-    if peek(in c) == 10 {
+    if peek(in c) == Tok::LBracket {
         c.pos = inc(c.pos);
         tb_str(inout c, "[");
         loop {
@@ -389,35 +463,35 @@ fn ty(inout c: C, depth: u64) {
                 return;
             }
             let k = peek(in c);
-            if k == 5 {
+            if k == Tok::Comma {
                 c.pos = inc(c.pos);
                 tb_str(inout c, ", ");
-            } else if k == 11 {
+            } else if k == Tok::RBracket {
                 c.pos = inc(c.pos);
                 tb_str(inout c, "]");
                 break;
             } else {
-                unexpected(inout c, 2);
+                unexpected(inout c, Expect::CommaOrRBracket);
                 return;
             }
         }
     }
-    if wrapping_sub(c.tb.len(), start) > 512 {
-        fail(inout c, 5);
+    if wrapping_sub(c.tb.len(), start) > MAX_TYPE_BYTES {
+        fail(inout c, PErr::IdentifierTooLong);
     }
 }
 
 // The label; the payload type is left in `lp`.
 fn label_payload(inout c: C) -> u64 {
-    let label = ident(inout c, 3);
+    let label = ident(inout c, Expect::Label);
     if c.failed {
         return none();
     }
-    eat(inout c, 8, 4);
+    eat(inout c, Tok::LParen, Expect::LParen);
     if c.failed {
         return none();
     }
-    if peek(in c) == 9 {
+    if peek(in c) == Tok::RParen {
         c.lp = intern_str(inout c, "");
     } else {
         c.tb.clear();
@@ -427,7 +501,7 @@ fn label_payload(inout c: C) -> u64 {
         }
         c.lp = intern_tb(inout c);
     }
-    eat(inout c, 9, 5);
+    eat(inout c, Tok::RParen, Expect::RParen);
     label
 }
 
@@ -444,8 +518,8 @@ fn mk_stmt(inout c: C, kind: u64, a: u64, b: u64, cc: u64, d: u64, line: u64, co
 }
 
 fn block(inout c: C, depth: u64, top: bool) -> u64 {
-    if depth > 64 {
-        fail(inout c, 7);
+    if depth > Limit::Nesting {
+        fail(inout c, PErr::TooDeep);
         return none();
     }
     let base = c.bstk.len();
@@ -455,18 +529,18 @@ fn block(inout c: C, depth: u64, top: bool) -> u64 {
             if top {
                 break;
             }
-            unexpected(inout c, 6);
+            unexpected(inout c, Expect::RBrace);
             c.bstk.truncate(base);
             return none();
         }
-        if k == 7 && !top {
+        if k == Tok::RBrace && !top {
             break;
         }
         let n = c.bstk.len();
         if n > base {
             let last = sw(in c.s_kind, sw(in c.bstk, wrapping_sub(n, 1)));
-            if last == 5 || last == 6 {
-                fail(inout c, 6);
+            if last == Stmt::Continue || last == Stmt::End {
+                fail(inout c, PErr::Unreachable);
                 c.bstk.truncate(base);
                 return none();
             }
@@ -490,7 +564,7 @@ fn block(inout c: C, depth: u64, top: bool) -> u64 {
 }
 
 fn braced(inout c: C, depth: u64) -> u64 {
-    eat(inout c, 6, 7);
+    eat(inout c, Tok::LBrace, Expect::LBrace);
     if c.failed {
         return none();
     }
@@ -498,7 +572,7 @@ fn braced(inout c: C, depth: u64) -> u64 {
     if c.failed {
         return none();
     }
-    eat(inout c, 7, 6);
+    eat(inout c, Tok::RBrace, Expect::RBrace);
     b
 }
 
@@ -521,13 +595,13 @@ fn stmt(inout c: C, depth: u64) -> u64 {
     if keyword(in c, c.kw_rec) {
         c.pos = inc(c.pos);
         let at = c.pos;
-        let var = ident(inout c, 8);
+        let var = ident(inout c, Expect::RecVar);
         if c.failed {
             return none();
         }
         if in_scope(in c, var) {
             c.pos = at;
-            fail_wf(inout c, 8, var);
+            fail_wf(inout c, Wf::ShadowedRecursionVariable, var);
             return none();
         }
         // Sequential loops may reuse a name. Each binder gets a unique
@@ -556,12 +630,12 @@ fn stmt(inout c: C, depth: u64) -> u64 {
         if c.failed {
             return none();
         }
-        return mk_stmt(inout c, 4, unique, body, 0, 0, line, col);
+        return mk_stmt(inout c, Stmt::Rec, unique, body, 0, 0, line, col);
     }
     if keyword(in c, c.kw_continue) {
         c.pos = inc(c.pos);
         let at = c.pos;
-        let var = ident(inout c, 8);
+        let var = ident(inout c, Expect::RecVar);
         if c.failed {
             return none();
         }
@@ -580,42 +654,42 @@ fn stmt(inout c: C, depth: u64) -> u64 {
         }
         if unique == none() {
             c.pos = at;
-            fail_wf(inout c, 9, var);
+            fail_wf(inout c, Wf::UnboundRecursionVariable, var);
             return none();
         }
-        eat(inout c, 4, 9);
+        eat(inout c, Tok::Semi, Expect::Semi);
         if c.failed {
             return none();
         }
-        return mk_stmt(inout c, 5, unique, 0, 0, 0, line, col);
+        return mk_stmt(inout c, Stmt::Continue, unique, 0, 0, 0, line, col);
     }
     if keyword(in c, c.kw_end) {
         c.pos = inc(c.pos);
-        eat(inout c, 4, 9);
+        eat(inout c, Tok::Semi, Expect::Semi);
         if c.failed {
             return none();
         }
-        return mk_stmt(inout c, 6, 0, 0, 0, 0, line, col);
+        return mk_stmt(inout c, Stmt::End, 0, 0, 0, 0, line, col);
     }
     let from = role(inout c);
     if c.failed {
         return none();
     }
     let k = peek(in c);
-    if k == 2 {
+    if k == Tok::Colon {
         c.pos = inc(c.pos);
-        let action = ident(inout c, 10);
+        let action = ident(inout c, Expect::ActionName);
         if c.failed {
             return none();
         }
-        eat(inout c, 4, 9);
+        eat(inout c, Tok::Semi, Expect::Semi);
         if c.failed {
             return none();
         }
-        return mk_stmt(inout c, 3, from, action, 0, 0, line, col);
+        return mk_stmt(inout c, Stmt::Action, from, action, 0, 0, line, col);
     }
-    if k != 1 {
-        unexpected(inout c, 13);
+    if k != Tok::Arrow {
+        unexpected(inout c, Expect::ArrowOrColon);
         return none();
     }
     c.pos = inc(c.pos);
@@ -624,32 +698,32 @@ fn stmt(inout c: C, depth: u64) -> u64 {
         return none();
     }
     let k2 = peek(in c);
-    if k2 == 2 {
+    if k2 == Tok::Colon {
         c.pos = inc(c.pos);
         let label = label_payload(inout c);
         if c.failed {
             return none();
         }
         let payload = c.lp;
-        eat(inout c, 4, 9);
+        eat(inout c, Tok::Semi, Expect::Semi);
         if c.failed {
             return none();
         }
-        return mk_stmt(inout c, 1, from, to, label, payload, line, col);
+        return mk_stmt(inout c, Stmt::Message, from, to, label, payload, line, col);
     }
-    if k2 != 6 {
-        unexpected(inout c, 12);
+    if k2 != Tok::LBrace {
+        unexpected(inout c, Expect::ColonOrLBrace);
         return none();
     }
     c.pos = inc(c.pos);
     let mut arms: ChunkSeq[u64] = ChunkSeq::new[u64]();
     loop {
         let k3 = peek(in c);
-        if k3 == 7 {
+        if k3 == Tok::RBrace {
             break;
         }
         if k3 == none() {
-            unexpected(inout c, 11);
+            unexpected(inout c, Expect::ArmOrRBrace);
             return none();
         }
         let label = label_payload(inout c);
@@ -674,7 +748,7 @@ fn stmt(inout c: C, depth: u64) -> u64 {
         };
         c.sk.push(x);
     }
-    mk_stmt(inout c, 2, from, to, start, arms.len() / 3, line, col)
+    mk_stmt(inout c, Stmt::Choice, from, to, start, arms.len() / Br::Words, line, col)
 }
 
 // ---------------------------------------------------------------------------
@@ -693,8 +767,8 @@ fn at_stmt(inout c: C, s: u64, kind: u64) {
 
 fn charge(inout c: C, n: u64, s: u64) -> bool {
     c.nodes = sat_add(c.nodes, n);
-    if c.nodes > 100000 {
-        at_stmt(inout c, s, 8);
+    if c.nodes > Limit::Nodes {
+        at_stmt(inout c, s, PErr::TooLarge);
         return false;
     }
     true
@@ -718,29 +792,29 @@ fn build(inout c: C, blk: u64, cont0: u64, depth0: u64) -> u64 {
         let kind = sw(in c.s_kind, s);
         let a = sw(in c.s_a, s);
         let b = sw(in c.s_b, s);
-        if kind == 1 {
+        if kind == Stmt::Message {
             let f = c.tmp.len();
             let h131 = sw(in c.s_c, s);
             c.tmp.push(h131);
             let h132 = sw(in c.s_d, s);
             c.tmp.push(h132);
             c.tmp.push(cont);
-            cont = g_mk(inout c, 1, a, b, 1, f);
-        } else if kind == 3 {
-            cont = g_mk(inout c, 2, a, b, cont, 0);
-        } else if kind == 5 {
+            cont = g_mk(inout c, GTag::Comm, a, b, 1, f);
+        } else if kind == Stmt::Action {
+            cont = g_mk(inout c, GTag::Local, a, b, cont, 0);
+        } else if kind == Stmt::Continue {
             depth = 1;
-            cont = g_mk(inout c, 4, a, 0, 0, 0);
-        } else if kind == 6 {
+            cont = g_mk(inout c, GTag::Var, a, 0, 0, 0);
+        } else if kind == Stmt::End {
             depth = 1;
-            cont = g_mk(inout c, 5, 0, 0, 0, 0);
-        } else if kind == 4 {
+            cont = g_mk(inout c, GTag::End, 0, 0, 0, 0);
+        } else if kind == Stmt::Rec {
             let body = build(inout c, b, cont, cont_depth);
             if c.failed {
                 return none();
             }
             depth = inc(c.bd);
-            cont = g_mk(inout c, 3, a, body, 0, 0);
+            cont = g_mk(inout c, GTag::Rec, a, body, 0, 0);
         } else {
             // Each arm continues with the same tree (the Rust build
             // clones it; here the arms share it).
@@ -758,8 +832,8 @@ fn build(inout c: C, blk: u64, cont0: u64, depth0: u64) -> u64 {
             let f = c.tmp.len();
             let mut max: u64 = 0;
             for i in 0..arms {
-                let q = add(at, wrapping_mul(i, 3));
-                let h133 = sw(in c.sk, add(q, 2));
+                let q = add(at, wrapping_mul(i, Br::Words));
+                let h133 = sw(in c.sk, add(q, Br::Next));
                 let next = build(inout c, h133, cont, cont_depth);
                 if c.failed {
                     c.tmp.truncate(f);
@@ -775,10 +849,10 @@ fn build(inout c: C, blk: u64, cont0: u64, depth0: u64) -> u64 {
                 c.tmp.push(next);
             }
             depth = inc(max);
-            cont = g_mk(inout c, 1, a, b, arms, f);
+            cont = g_mk(inout c, GTag::Comm, a, b, arms, f);
         }
-        if depth > 256 {
-            at_stmt(inout c, s, 7);
+        if depth > Limit::Depth {
+            at_stmt(inout c, s, PErr::TooDeep);
             return none();
         }
         cont_depth = depth;
@@ -789,7 +863,7 @@ fn build(inout c: C, blk: u64, cont0: u64, depth0: u64) -> u64 {
 
 fn finish_error(inout c: C) {
     c.out.clear();
-    c.out.push(1);
+    c.out.push(Out::Failed);
     for i in 0..c.ew.len() {
         let x = sw(in c.ew, i);
         c.out.push(x);
@@ -797,11 +871,12 @@ fn finish_error(inout c: C) {
 }
 
 pub fn parse_src(inout c: C, in t: Slice[u8]) {
-    if t.len() > 1048576 {
+    if t.len() > MAX_SOURCE_BYTES {
+        // At line 1, column 1.
+        c.out.push(Out::Failed);
         c.out.push(1);
         c.out.push(1);
-        c.out.push(1);
-        c.out.push(0);
+        c.out.push(PErr::TooLong);
         c.out.push(t.len());
         return;
     }
@@ -816,37 +891,37 @@ pub fn parse_src(inout c: C, in t: Slice[u8]) {
     }
     c.pos = 0;
     if !keyword(in c, c.kw_roles) {
-        unexpected(inout c, 14);
+        unexpected(inout c, Expect::Roles);
         finish_error(inout c);
         return;
     }
     c.pos = inc(c.pos);
     loop {
-        let r = ident(inout c, 0);
+        let r = ident(inout c, Expect::RoleName);
         if c.failed {
             finish_error(inout c);
             return;
         }
-        if c.ro.len() >= 64 {
+        if c.ro.len() >= Limit::Roles {
             let h136 = inc(c.ro.len());
-            fail_wf(inout c, 1, h136);
+            fail_wf(inout c, Wf::TooManyRoles, h136);
             finish_error(inout c);
             return;
         }
         if role_index(in c, r) != none() {
-            fail_wf(inout c, 2, r);
+            fail_wf(inout c, Wf::DuplicateRole, r);
             finish_error(inout c);
             return;
         }
         c.ro.push(r);
         let k = peek(in c);
-        if k == 5 {
+        if k == Tok::Comma {
             c.pos = inc(c.pos);
-        } else if k == 4 {
+        } else if k == Tok::Semi {
             c.pos = inc(c.pos);
             break;
         } else {
-            unexpected(inout c, 15);
+            unexpected(inout c, Expect::CommaOrSemi);
             finish_error(inout c);
             return;
         }
@@ -856,7 +931,7 @@ pub fn parse_src(inout c: C, in t: Slice[u8]) {
         finish_error(inout c);
         return;
     }
-    let end = g_mk(inout c, 5, 0, 0, 0, 0);
+    let end = g_mk(inout c, GTag::End, 0, 0, 0, 0);
     let body = build(inout c, blk, end, 1);
     if c.failed {
         finish_error(inout c);
@@ -864,10 +939,10 @@ pub fn parse_src(inout c: C, in t: Slice[u8]) {
     }
     if !validate(inout c, body) {
         c.out.clear();
+        c.out.push(Out::Failed);
         c.out.push(1);
         c.out.push(1);
-        c.out.push(1);
-        c.out.push(9);
+        c.out.push(PErr::Invalid);
         for i in 0..c.ew.len() {
             let x = sw(in c.ew, i);
             c.out.push(x);
@@ -875,7 +950,7 @@ pub fn parse_src(inout c: C, in t: Slice[u8]) {
         return;
     }
     c.out.clear();
-    c.out.push(0);
+    c.out.push(Out::Ok);
     let h137 = c.ro.len();
     c.out.push(h137);
     for i in 0..c.ro.len() {

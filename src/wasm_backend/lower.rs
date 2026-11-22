@@ -2956,6 +2956,9 @@ impl<'l, 'a> Emit<'l, 'a> {
                 }
                 *n as i64
             }
+            Literal::WideInt(n) => {
+                return Err(WasmError::Invalid(format!("literal {n} does not fit {ty}")));
+            }
             Literal::Bool(b) => i64::from(*b),
             Literal::Float(x) => x.to_bits() as i64,
             Literal::String(_) => return Err(self.err(Unsupported::String, "string literal")),

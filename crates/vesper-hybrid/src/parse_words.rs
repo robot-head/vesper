@@ -200,13 +200,18 @@ fn pass(p: u64) -> Pass {
     }
 }
 
+/// The `u128` with words `hi`:`lo`.
+fn wide(hi: u64, lo: u64) -> u128 {
+    (u128::from(hi) << 64) | u128::from(lo)
+}
+
 impl<'a> Ast<'a> {
     fn read(r: &mut Words<'a>) -> Self {
         let n = r.count();
         let starts = r.take(n + 1);
         let len = r.count();
         let text = String::from_utf8(r.bytes(len)).expect("interned names are UTF-8");
-        let lits = r.arena(3);
+        let lits = r.arena(4);
         let exprs = r.arena(8);
         let pats = r.arena(6);
         let types = r.arena(5);
@@ -307,8 +312,11 @@ impl<'a> Ast<'a> {
     fn lit(&self, i: u64) -> Literal {
         let r = self.lits.row(u(i));
         match r[0] {
-            1 if r[1] == 1 => Literal::Int(-i128::from(r[2])),
-            1 => Literal::Int(i128::from(r[2])),
+            // The 128-bit magnitude is `r[3]`:`r[2]`; a negative Int's is at
+            // most 2^127 (`i128::MIN`).
+            1 if r[1] == 1 => Literal::Int((wide(r[3], r[2]) as i128).wrapping_neg()),
+            1 => Literal::Int(wide(r[3], r[2]) as i128),
+            5 => Literal::WideInt(wide(r[3], r[2])),
             2 => Literal::Float(f64::from_bits(r[2])),
             3 => Literal::Bool(r[2] == 1),
             4 => Literal::String(self.name(r[2])),

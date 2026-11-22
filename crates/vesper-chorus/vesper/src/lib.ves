@@ -23,7 +23,8 @@
 use self::util::{
     inc,
     none,
-    iw
+    iw,
+    Out
 };
 use self::tree::{
     read_chor,
@@ -40,7 +41,8 @@ use self::project::{
     project_role
 };
 use self::explore::{
-    explore_run
+    explore_run,
+    XErr
 };
 use self::parse::{
     parse_src
@@ -239,9 +241,9 @@ pub fn check_chor(in w: Slice[u64], in t: Slice[u8]) -> C {
     let _ = read_chor(inout c, in w, in t, 0);
     let root = c.root;
     if validate(inout c, root) {
-        c.out.push(0);
+        c.out.push(Out::Ok);
     } else {
-        c.out.push(1);
+        c.out.push(Out::Failed);
         for i in 0..c.ew.len() {
             let x = match c.ew.try_get(i) {
                 Option::Some(v) => v,
@@ -270,7 +272,7 @@ pub fn project(in w: Slice[u64], in t: Slice[u8], role: u64) -> C {
         let l = project_role(inout c, r);
         if c.failed {
             c.out.clear();
-            c.out.push(1);
+            c.out.push(Out::Failed);
             for i in 0..c.ew.len() {
                 let x = match c.ew.try_get(i) {
                     Option::Some(v) => v,
@@ -282,7 +284,7 @@ pub fn project(in w: Slice[u64], in t: Slice[u8], role: u64) -> C {
         }
         locals.push(l);
     }
-    c.out.push(0);
+    c.out.push(Out::Ok);
     c.out.push(locals.len());
     for i in 0..locals.len() {
         let l = match locals.try_get(i) {
@@ -315,8 +317,8 @@ pub fn explore(in w: Slice[u64], in t: Slice[u8], nlocals: u64, max_states: u64,
         for r in 0..c.ro.len() {
             let l = project_role(inout c, r);
             if c.failed {
-                c.out.push(1);
-                c.out.push(1);
+                c.out.push(Out::Failed);
+                c.out.push(XErr::Projection);
                 for i in 0..c.ew.len() {
                     let x = match c.ew.try_get(i) {
                         Option::Some(v) => v,

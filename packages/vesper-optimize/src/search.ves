@@ -1,0 +1,2101 @@
+// The bounded proof producer of src/optimize/certificate.rs
+// (`propose_rewrite`) on `@vesper/egraph`: the source's shallow terms, the
+// proof-carrying union forest (`Builder`), constant folding of the prefix,
+// the budgeted equality-saturation search (`run_graph` with its
+// `BoundedScheduler`, `RecordingApplier` and hook), extraction, and the
+// replay of the recorded applications into proofs (`explain_records`).
+//
+// Every charge is Rust's, in Rust's order, with Rust's vector capacities
+// (`grow` and `reserve` over a capacity counter beside each sequence) and
+// its `size_of` values, so a proposal spends the same budget. The one
+// accepted difference is the e-graph's search order: `@vesper/egraph`
+// visits classes in id order where egg uses its hash order, which can pick
+// another term of equal cost.
+//
+// Errors are codes as in witness.ves: 0 is success, otherwise the
+// `WitnessError` variant's position plus one.
+
+use @vesper/egraph::graph::{
+    EGraph,
+    egraph_new
+};
+use @vesper/egraph::rules::{
+    Rules
+};
+use @vesper/egraph::run::{
+    Matches,
+    apply_one,
+    guard_holds,
+    matches_new,
+    search_rule
+};
+use @vesper/egraph::extract::{
+    Extracted,
+    extractor
+};
+use @vesper/egraph::{
+    math_arity,
+    math_rules
+};
+use self::budget::{
+    Budget,
+    limit,
+    metadata,
+    reserve,
+    valid_limits,
+    work
+};
+use self::input::{
+    ProofRow,
+    TermRow,
+    Tree,
+    TypeRow
+};
+use self::witness::{
+    Bound,
+    Ops,
+    bind_source,
+    bound_new,
+    build_candidate,
+    fits,
+    wrap
+};
+
+const NONE: u32 = 4294967295;
+
+const E_INVALID_LIMITS: u8 = 1;
+const E_LIMIT: u8 = 2;
+const E_UNSUPPORTED_AST: u8 = 4;
+const E_INVALID_INTRINSIC_ORIGIN: u8 = 9;
+const E_INVALID_TERM_INDEX: u8 = 11;
+const E_NON_TOPOLOGICAL_TERM: u8 = 12;
+const E_UNKNOWN_RULE: u8 = 15;
+const E_INVALID_SUBSTITUTION: u8 = 16;
+const E_INVALID_RULE_INSTANCE: u8 = 17;
+const E_INVALID_EQUALITY: u8 = 19;
+const E_UNKNOWN_VARIABLE: u8 = 8;
+
+// certificate.rs's caps.
+const RAW_NODES: u64 = 2048;
+const MATCHES: u64 = 128;
+const RECORDS: u64 = 4096;
+const ITERATIONS: u64 = 8;
+const RULE_COUNT: u64 = 18;
+const APPLICATION_NODES: u64 = 8;
+
+// Rust's `size_of` values (64-bit targets).
+const S_TERM: u64 = 48;
+const S_EQUALITY: u64 = 36;
+const S_TERM_ID: u64 = 4;
+const S_OPTION_ID: u64 = 8;
+const S_RANK: u64 = 1;
+const S_BOOL: u64 = 1;
+const S_RECORD: u64 = 16;
+const S_MATH: u64 = 16;
+const S_PROPOSAL: u64 = 400;
+
+const T_CONST: u8 = 0;
+const T_INPUT: u8 = 1;
+const T_CHECKED: u8 = 2;
+const T_WRAPPING: u8 = 3;
+
+const P_REFL: u8 = 0;
+const P_RULE: u8 = 1;
+const P_CONGRUENCE: u8 = 2;
+const P_SYMMETRY: u8 = 3;
+const P_TRANSITIVITY: u8 = 4;
+
+const OP_ADD: u8 = 0;
+const OP_SUB: u8 = 1;
+const OP_MUL: u8 = 2;
+
+// `src/optimize.rs`'s `Math` language (`@vesper/egraph`'s lib.ves).
+const M_NUM: u32 = 0;
+const M_INPUT: u32 = 7;
+
+// The outcome of `propose`.
+pub const O_CANDIDATE: u8 = 0;
+pub const O_BARRIER: u8 = 1;
+pub const O_UNCHANGED: u8 = 2;
+
+// ---------------------------------------------------------------- helpers
+
+fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => NONE,
+    }
+}
+
+fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+fn no_term() -> TermRow {
+    TermRow {
+        kind: 255,
+        tag: 255,
+        op: 0,
+        value: 0,
+        a: 0,
+        b: 0
+    }
+}
+
+fn no_proof() -> ProofRow {
+    ProofRow {
+        from: NONE,
+        to: NONE,
+        tag: 255,
+        rule: 0,
+        b0: 0,
+        b1: 0,
+        b2: 0,
+        len: 0,
+        has_guard: false,
+        guard: 0,
+        p0: 0,
+        p1: 0
+    }
+}
+
+fn term_get(in s: ChunkSeq[TermRow], i: u32) -> TermRow {
+    match s.try_get(w(i)) {
+        Option::Some(v) => v,
+        Option::None => no_term(),
+    }
+}
+
+fn proof_get(in s: ChunkSeq[ProofRow], i: u32) -> ProofRow {
+    match s.try_get(w(i)) {
+        Option::Some(v) => v,
+        Option::None => no_proof(),
+    }
+}
+
+fn const_term(kind: u8, v: i128) -> TermRow {
+    TermRow {
+        kind: kind,
+        tag: T_CONST,
+        op: 0,
+        value: v,
+        a: 0,
+        b: 0
+    }
+}
+
+fn input_term(kind: u8, id: u32) -> TermRow {
+    let zero: i128 = 0;
+    TermRow {
+        kind: kind,
+        tag: T_INPUT,
+        op: 0,
+        value: zero,
+        a: id,
+        b: 0
+    }
+}
+
+fn op_term(kind: u8, tag: u8, op: u8, a: u32, b: u32) -> TermRow {
+    let zero: i128 = 0;
+    TermRow {
+        kind: kind,
+        tag: tag,
+        op: op,
+        value: zero,
+        a: a,
+        b: b
+    }
+}
+
+fn is_binary(t: TermRow) -> bool {
+    t.tag == T_CHECKED || t.tag == T_WRAPPING
+}
+
+fn is_leaf(t: TermRow) -> bool {
+    t.tag == T_CONST || t.tag == T_INPUT
+}
+
+fn same_term(x: TermRow, y: TermRow) -> bool {
+    if x.kind != y.kind || x.tag != y.tag {
+        return false;
+    }
+    if x.tag == T_CONST {
+        x.value == y.value
+    } else if x.tag == T_INPUT {
+        x.a == y.a
+    } else {
+        x.op == y.op && x.a == y.a && x.b == y.b
+    }
+}
+
+fn same_operator(x: TermRow, y: TermRow) -> bool {
+    is_binary(x) && x.tag == y.tag && x.op == y.op
+}
+
+fn proof_row(from: u32, to: u32, tag: u8, p0: u32, p1: u32) -> ProofRow {
+    ProofRow {
+        from: from,
+        to: to,
+        tag: tag,
+        rule: 0,
+        b0: 0,
+        b1: 0,
+        b2: 0,
+        len: 0,
+        has_guard: false,
+        guard: 0,
+        p0: p0,
+        p1: p1
+    }
+}
+
+fn rule_row(from: u32, to: u32, rule: u32, b0: u32, b1: u32, b2: u32, len: u32, guard: u32)
+    -> ProofRow {
+    ProofRow {
+        from: from,
+        to: to,
+        tag: P_RULE,
+        rule: rule,
+        b0: b0,
+        b1: b1,
+        b2: b2,
+        len: len,
+        has_guard: guard != NONE,
+        guard: if guard == NONE {
+            0
+        } else {
+            guard
+        },
+        p0: 0,
+        p1: 0
+    }
+}
+
+fn add_or(a: u64, b: u64, inout out: u64) -> u8 {
+    match checked_add_u64(a, b) {
+        Option::Some(v) => {
+            out = v;
+            0
+        }
+        Option::None => E_LIMIT,
+    }
+}
+
+fn mul_or(a: u64, b: u64, inout out: u64) -> u8 {
+    match checked_mul_u64(a, b) {
+        Option::Some(v) => {
+            out = v;
+            0
+        }
+        Option::None => E_LIMIT,
+    }
+}
+
+fn add_to(inout x: u64, k: u64) -> u8 {
+    match checked_add_u64(x, k) {
+        Option::Some(v) => {
+            x = v;
+            0
+        }
+        Option::None => E_LIMIT,
+    }
+}
+
+fn mul_to(inout x: u64, k: u64) -> u8 {
+    match checked_mul_u64(x, k) {
+        Option::Some(v) => {
+            x = v;
+            0
+        }
+        Option::None => E_LIMIT,
+    }
+}
+
+fn min(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// certificate.rs's `grow`: room for one more element of a vector of `len`
+// elements and capacity `cap`, growing geometrically up to `most`.
+fn grow(inout b: Budget, len: u64, inout cap: u64, most: u64, size: u64) -> u8 {
+    if len < cap {
+        return 0;
+    }
+    let mut target: u64 = 0;
+    if cap == 0 {
+        target = min(most, 4);
+    } else {
+        let mut doubled: u64 = 0;
+        let e = mul_or(cap, 2, inout doubled);
+        if e != 0 {
+            return e;
+        }
+        target = min(doubled, most);
+    }
+    if target <= len {
+        return E_LIMIT;
+    }
+    reserve(inout b, len, inout cap, wrapping_sub(target, len), size)
+}
+
+// certificate.rs's `initialized`: a fresh vector of `count` elements.
+fn initialized(inout b: Budget, count: u64, size: u64) -> u8 {
+    let mut cap: u64 = 0;
+    let e = reserve(inout b, 0, inout cap, count, size);
+    if e != 0 {
+        return e;
+    }
+    work(inout b, count)
+}
+
+// ---------------------------------------------------------------- builder
+
+// certificate.rs's `Builder`: canonical shallow terms and a proof-carrying
+// union forest. `edge` and `leaf` hold NONE for `None`.
+pub struct Builder {
+    kind: u8,
+    max_terms: u64,
+    max_proofs: u64,
+    terms: ChunkSeq[TermRow],
+    terms_cap: u64,
+    proofs: ChunkSeq[ProofRow],
+    proofs_cap: u64,
+    parent: ChunkSeq[u32],
+    parent_cap: u64,
+    edge: ChunkSeq[u32],
+    edge_cap: u64,
+    rank: ChunkSeq[u8],
+    rank_cap: u64,
+    leaf: ChunkSeq[u32],
+    leaf_cap: u64
+}
+
+pub fn builder_new(kind: u8, in lim: Budget) -> Builder {
+    Builder {
+        kind: kind,
+        max_terms: lim.max_terms,
+        max_proofs: lim.max_proofs,
+        terms: ChunkSeq::new[TermRow](),
+        terms_cap: 0,
+        proofs: ChunkSeq::new[ProofRow](),
+        proofs_cap: 0,
+        parent: ChunkSeq::new[u32](),
+        parent_cap: 0,
+        edge: ChunkSeq::new[u32](),
+        edge_cap: 0,
+        rank: ChunkSeq::new[u8](),
+        rank_cap: 0,
+        leaf: ChunkSeq::new[u32](),
+        leaf_cap: 0
+    }
+}
+
+fn intern(inout d: Builder, node: TermRow, inout b: Budget, inout id: u32) -> u8 {
+    let n = d.terms.len();
+    let e = work(inout b, wrapping_add(n, 1));
+    if e != 0 {
+        return e;
+    }
+    for i in 0..n {
+        if same_term(term_get(in d.terms, n32(i)), node) {
+            id = n32(i);
+            return 0;
+        }
+    }
+    if n >= d.max_terms {
+        return E_LIMIT;
+    }
+    if is_binary(node) && (w(node.a) >= n || w(node.b) >= n) {
+        return E_NON_TOPOLOGICAL_TERM;
+    }
+    let most = d.max_terms;
+    let e = grow(inout b, n, inout d.terms_cap, most, S_TERM);
+    if e != 0 {
+        return e;
+    }
+    let e = grow(inout b, n, inout d.parent_cap, most, S_TERM_ID);
+    if e != 0 {
+        return e;
+    }
+    let e = grow(inout b, n, inout d.edge_cap, most, S_OPTION_ID);
+    if e != 0 {
+        return e;
+    }
+    let e = grow(inout b, n, inout d.rank_cap, most, S_RANK);
+    if e != 0 {
+        return e;
+    }
+    let e = grow(inout b, n, inout d.leaf_cap, most, S_OPTION_ID);
+    if e != 0 {
+        return e;
+    }
+    id = n32(n);
+    d.terms.push(node);
+    d.parent.push(id);
+    d.edge.push(NONE);
+    d.rank.push(0);
+    if is_leaf(node) {
+        d.leaf.push(id);
+    } else {
+        d.leaf.push(NONE);
+    }
+    0
+}
+
+fn proof(inout d: Builder, p: ProofRow, inout b: Budget, inout id: u32) -> u8 {
+    let e = work(inout b, 1);
+    if e != 0 {
+        return e;
+    }
+    let n = d.proofs.len();
+    if n >= d.max_proofs {
+        return E_LIMIT;
+    }
+    let most = d.max_proofs;
+    let e = grow(inout b, n, inout d.proofs_cap, most, S_EQUALITY);
+    if e != 0 {
+        return e;
+    }
+    id = n32(n);
+    d.proofs.push(p);
+    0
+}
+
+fn reflexive(inout d: Builder, term: u32, inout b: Budget, inout id: u32) -> u8 {
+    proof(inout d, proof_row(term, term, P_REFL, 0, 0), inout b, inout id)
+}
+
+fn reverse(inout d: Builder, p: u32, inout b: Budget, inout id: u32) -> u8 {
+    let old = proof_get(in d.proofs, p);
+    proof(inout d, proof_row(old.to, old.from, P_SYMMETRY, p, 0), inout b, inout id)
+}
+
+fn transitive(inout d: Builder, first: u32, second: u32, inout b: Budget, inout id: u32) -> u8 {
+    let x = proof_get(in d.proofs, first);
+    let y = proof_get(in d.proofs, second);
+    if x.to != y.from {
+        return E_INVALID_EQUALITY;
+    }
+    proof(inout d, proof_row(x.from, y.to, P_TRANSITIVITY, first, second), inout b, inout id)
+}
+
+fn root(in d: Builder, start: u32, inout b: Budget, inout out: u32) -> u8 {
+    let mut id = start;
+    for i in 0..wrapping_add(d.parent.len(), 1) {
+        let e = work(inout b, 1);
+        if e != 0 {
+            return e;
+        }
+        if w(id) >= d.parent.len() {
+            return E_INVALID_TERM_INDEX;
+        }
+        let next = at32(in d.parent, w(id));
+        if next == id {
+            out = id;
+            return 0;
+        }
+        id = next;
+    }
+    E_INVALID_EQUALITY
+}
+
+// `path`: the ordered proof from a term to its root, NONE when the term is
+// its own root.
+fn path(inout d: Builder, start: u32, inout b: Budget, inout out: u32) -> u8 {
+    let mut id = start;
+    let mut p: u32 = NONE;
+    for i in 0..wrapping_add(d.parent.len(), 1) {
+        let e = work(inout b, 1);
+        if e != 0 {
+            return e;
+        }
+        let next = at32(in d.parent, w(id));
+        if next == id {
+            out = p;
+            return 0;
+        }
+        let edge = at32(in d.edge, w(id));
+        if edge == NONE {
+            return E_INVALID_EQUALITY;
+        }
+        if p == NONE {
+            p = edge;
+        } else {
+            let mut t: u32 = 0;
+            let e = transitive(inout d, p, edge, inout b, inout t);
+            if e != 0 {
+                return e;
+            }
+            p = t;
+        }
+        id = next;
+    }
+    E_INVALID_EQUALITY
+}
+
+fn equality(inout d: Builder, from: u32, to: u32, inout b: Budget, inout out: u32) -> u8 {
+    let mut ra: u32 = 0;
+    let e = root(in d, from, inout b, inout ra);
+    if e != 0 {
+        return e;
+    }
+    let mut rb: u32 = 0;
+    let e = root(in d, to, inout b, inout rb);
+    if e != 0 {
+        return e;
+    }
+    if ra != rb {
+        return E_INVALID_EQUALITY;
+    }
+    let mut pa: u32 = NONE;
+    let e = path(inout d, from, inout b, inout pa);
+    if e != 0 {
+        return e;
+    }
+    let mut pb: u32 = NONE;
+    let e = path(inout d, to, inout b, inout pb);
+    if e != 0 {
+        return e;
+    }
+    if pa != NONE && pb != NONE {
+        let mut r: u32 = 0;
+        let e = reverse(inout d, pb, inout b, inout r);
+        if e != 0 {
+            return e;
+        }
+        return transitive(inout d, pa, r, inout b, inout out);
+    }
+    if pa != NONE {
+        out = pa;
+        return 0;
+    }
+    if pb != NONE {
+        return reverse(inout d, pb, inout b, inout out);
+    }
+    reflexive(inout d, from, inout b, inout out)
+}
+
+fn join(inout d: Builder, p: u32, inout b: Budget, inout changed: bool) -> u8 {
+    let eq = proof_get(in d.proofs, p);
+    let mut ra: u32 = 0;
+    let e = root(in d, eq.from, inout b, inout ra);
+    if e != 0 {
+        return e;
+    }
+    let mut rb: u32 = 0;
+    let e = root(in d, eq.to, inout b, inout rb);
+    if e != 0 {
+        return e;
+    }
+    if ra == rb {
+        changed = false;
+        return 0;
+    }
+    let mut edge = p;
+    let mut pf: u32 = NONE;
+    let e = path(inout d, eq.from, inout b, inout pf);
+    if e != 0 {
+        return e;
+    }
+    if pf != NONE {
+        let mut r: u32 = 0;
+        let e = reverse(inout d, pf, inout b, inout r);
+        if e != 0 {
+            return e;
+        }
+        let mut t: u32 = 0;
+        let e = transitive(inout d, r, edge, inout b, inout t);
+        if e != 0 {
+            return e;
+        }
+        edge = t;
+    }
+    let mut pt: u32 = NONE;
+    let e = path(inout d, eq.to, inout b, inout pt);
+    if e != 0 {
+        return e;
+    }
+    if pt != NONE {
+        let mut t: u32 = 0;
+        let e = transitive(inout d, edge, pt, inout b, inout t);
+        if e != 0 {
+            return e;
+        }
+        edge = t;
+    }
+    let ka = at8(in d.rank, w(ra));
+    let kb = at8(in d.rank, w(rb));
+    let mut child = ra;
+    let mut parent = rb;
+    if ka <= kb {
+        if ka == kb {
+            if kb == 255 {
+                return E_LIMIT;
+            }
+            d.rank.try_set(w(rb), wrapping_add(kb, 1));
+        }
+    } else {
+        child = rb;
+        parent = ra;
+        let mut r: u32 = 0;
+        let e = reverse(inout d, edge, inout b, inout r);
+        if e != 0 {
+            return e;
+        }
+        edge = r;
+    }
+    d.parent.try_set(w(child), parent);
+    d.edge.try_set(w(child), edge);
+    if at32(in d.leaf, w(parent)) == NONE {
+        let l = at32(in d.leaf, w(child));
+        d.leaf.try_set(w(parent), l);
+    }
+    changed = true;
+    0
+}
+
+// `guard`: 0 when the erased term has no proven leaf (`None`), 1 when it is
+// a leaf itself (`Some(None)`), 2 with `out` its equality to a leaf.
+fn guard(inout d: Builder, term: u32, inout b: Budget, inout kind: u8, inout out: u32) -> u8 {
+    if is_leaf(term_get(in d.terms, term)) {
+        kind = 1;
+        return 0;
+    }
+    let mut r: u32 = 0;
+    let e = root(in d, term, inout b, inout r);
+    if e != 0 {
+        return e;
+    }
+    let l = at32(in d.leaf, w(r));
+    if l == NONE {
+        kind = 0;
+        return 0;
+    }
+    kind = 2;
+    equality(inout d, term, l, inout b, inout out)
+}
+
+fn congruence(inout d: Builder, inout b: Budget, inout any: bool) -> u8 {
+    any = false;
+    loop {
+        let count = d.terms.len();
+        let mut sq: u64 = 0;
+        let e = mul_or(count, count, inout sq);
+        if e != 0 {
+            return e;
+        }
+        let e = work(inout b, sq);
+        if e != 0 {
+            return e;
+        }
+        let mut changed = false;
+        for a in 0..count {
+            let ta = term_get(in d.terms, n32(a));
+            if !is_binary(ta) {
+                continue;
+            }
+            for c in 0..a {
+                let tc = term_get(in d.terms, n32(c));
+                if !same_operator(ta, tc) {
+                    continue;
+                }
+                let mut r1: u32 = 0;
+                let e = root(in d, n32(a), inout b, inout r1);
+                if e != 0 {
+                    return e;
+                }
+                let mut r2: u32 = 0;
+                let e = root(in d, n32(c), inout b, inout r2);
+                if e != 0 {
+                    return e;
+                }
+                if r1 == r2 {
+                    continue;
+                }
+                let e = root(in d, ta.a, inout b, inout r1);
+                if e != 0 {
+                    return e;
+                }
+                let e = root(in d, tc.a, inout b, inout r2);
+                if e != 0 {
+                    return e;
+                }
+                if r1 != r2 {
+                    continue;
+                }
+                let e = root(in d, ta.b, inout b, inout r1);
+                if e != 0 {
+                    return e;
+                }
+                let e = root(in d, tc.b, inout b, inout r2);
+                if e != 0 {
+                    return e;
+                }
+                if r1 != r2 {
+                    continue;
+                }
+                let mut first: u32 = 0;
+                let e = equality(inout d, ta.a, tc.a, inout b, inout first);
+                if e != 0 {
+                    return e;
+                }
+                let mut second: u32 = 0;
+                let e = equality(inout d, ta.b, tc.b, inout b, inout second);
+                if e != 0 {
+                    return e;
+                }
+                let mut p: u32 = 0;
+                let e = proof(
+                    inout d,
+                    proof_row(n32(a), n32(c), P_CONGRUENCE, first, second),
+                    inout b,
+                    inout p
+                );
+                if e != 0 {
+                    return e;
+                }
+                let mut joined = false;
+                let e = join(inout d, p, inout b, inout joined);
+                if e != 0 {
+                    return e;
+                }
+                if joined {
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            any = true;
+        } else {
+            return 0;
+        }
+    }
+}
+
+// `IntegerKind::checked` and `wrapping` on two constants of the kind; false
+// when the checked result overflows.
+fn fold_value(kind: u8, wrapping: bool, op: u8, x: i128, y: i128, inout out: i128) -> bool {
+    if wrapping {
+        let raw = if op == OP_ADD {
+            wrapping_add(x, y)
+        } else if op == OP_SUB {
+            wrapping_sub(x, y)
+        } else {
+            wrapping_mul(x, y)
+        };
+        out = wrap(kind, raw);
+        return true;
+    }
+    let exact = if op == OP_ADD {
+        checked_add_i128(x, y)
+    } else if op == OP_SUB {
+        checked_sub_i128(x, y)
+    } else {
+        checked_mul_i128(x, y)
+    };
+    match exact {
+        Option::Some(v) => {
+            if fits(kind, v) {
+                out = v;
+                true
+            } else {
+                false
+            }
+        }
+        Option::None => false,
+    }
+}
+
+fn fold_prefix(inout d: Builder, count: u64, top: u32, inout b: Budget, inout out: u32) -> u8 {
+    let e = initialized(inout b, count, S_TERM_ID);
+    if e != 0 {
+        return e;
+    }
+    let mut mapped: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](count);
+    mapped.resize(count, 0);
+    for index in 0..count {
+        let e = work(inout b, 1);
+        if e != 0 {
+            return e;
+        }
+        let original = term_get(in d.terms, n32(index));
+        if !is_binary(original) {
+            mapped.try_set(index, n32(index));
+            continue;
+        }
+        let n0 = at32(in mapped, w(original.a));
+        let n1 = at32(in mapped, w(original.b));
+        let mut rebuilt: u32 = 0;
+        let e = intern(
+            inout d,
+            op_term(original.kind, original.tag, original.op, n0, n1),
+            inout b,
+            inout rebuilt
+        );
+        if e != 0 {
+            return e;
+        }
+        if w(rebuilt) != index {
+            let mut first: u32 = 0;
+            let e = equality(inout d, original.a, n0, inout b, inout first);
+            if e != 0 {
+                return e;
+            }
+            let mut second: u32 = 0;
+            let e = equality(inout d, original.b, n1, inout b, inout second);
+            if e != 0 {
+                return e;
+            }
+            let mut p: u32 = 0;
+            let e = proof(
+                inout d,
+                proof_row(n32(index), rebuilt, P_CONGRUENCE, first, second),
+                inout b,
+                inout p
+            );
+            if e != 0 {
+                return e;
+            }
+            let mut joined = false;
+            let e = join(inout d, p, inout b, inout joined);
+            if e != 0 {
+                return e;
+            }
+        }
+        let c0 = term_get(in d.terms, n0);
+        let c1 = term_get(in d.terms, n1);
+        let mut value: i128 = 0;
+        let wrapping = original.tag == T_WRAPPING;
+        let folded = c0
+            .tag
+            == T_CONST
+            && c1
+            .tag
+            == T_CONST
+            && fold_value(d.kind, wrapping, original.op, c0.value, c1.value, inout value);
+        if folded {
+            let mut output: u32 = 0;
+            let e = intern(inout d, const_term(d.kind, value), inout b, inout output);
+            if e != 0 {
+                return e;
+            }
+            let base: u32 = if wrapping {
+                22
+            } else {
+                19
+            };
+            let rule = wrapping_add(base, widen_u32(original.op));
+            let mut p: u32 = 0;
+            let e = proof(
+                inout d,
+                rule_row(rebuilt, output, rule, n0, n1, 0, 2, NONE),
+                inout b,
+                inout p
+            );
+            if e != 0 {
+                return e;
+            }
+            let mut joined = false;
+            let e = join(inout d, p, inout b, inout joined);
+            if e != 0 {
+                return e;
+            }
+            mapped.try_set(index, output);
+        } else {
+            mapped.try_set(index, rebuilt);
+        }
+    }
+    out = at32(in mapped, w(top));
+    0
+}
+
+fn checked_op(inout d: Builder, op: u8, x: u32, y: u32, inout b: Budget, inout id: u32) -> u8 {
+    let k = d.kind;
+    intern(inout d, op_term(k, T_CHECKED, op, x, y), inout b, inout id)
+}
+
+fn wrapping_op(inout d: Builder, op: u8, x: u32, y: u32, inout b: Budget, inout id: u32) -> u8 {
+    let k = d.kind;
+    intern(inout d, op_term(k, T_WRAPPING, op, x, y), inout b, inout id)
+}
+
+// `instance`: the two sides of rule `rule` at bindings x, y, z, and the
+// term it erases (NONE when it erases none).
+fn instance(
+    inout d: Builder,
+    rule: u32,
+    x: u32,
+    y: u32,
+    z: u32,
+    inout b: Budget,
+    inout left: u32,
+    inout right: u32,
+    inout erased: u32
+) -> u8 {
+    let k = d.kind;
+    let mut zero: u32 = 0;
+    let e = intern(inout d, const_term(k, 0), inout b, inout zero);
+    if e != 0 {
+        return e;
+    }
+    let mut one: u32 = 0;
+    let e = intern(inout d, const_term(k, 1), inout b, inout one);
+    if e != 0 {
+        return e;
+    }
+    erased = NONE;
+    if rule >= 1 && rule <= 8 {
+        let op = if rule <= 2 {
+            OP_ADD
+        } else if rule == 3 || rule == 8 {
+            OP_SUB
+        } else {
+            OP_MUL
+        };
+        let mut l = x;
+        let mut r = zero;
+        if rule == 2 || rule == 7 {
+            l = zero;
+            r = x;
+        } else if rule == 4 {
+            r = one;
+        } else if rule == 5 {
+            l = one;
+            r = x;
+        } else if rule == 8 {
+            r = x;
+        }
+        let e = checked_op(inout d, op, l, r, inout b, inout left);
+        if e != 0 {
+            return e;
+        }
+        if rule >= 6 {
+            right = zero;
+            erased = x;
+        } else {
+            right = x;
+        }
+        return 0;
+    }
+    if rule >= 9 && rule <= 11 {
+        let op = if rule == 9 {
+            OP_ADD
+        } else if rule == 10 {
+            OP_SUB
+        } else {
+            OP_MUL
+        };
+        let c = if rule == 11 {
+            one
+        } else {
+            zero
+        };
+        right = x;
+        return wrapping_op(inout d, op, x, c, inout b, inout left);
+    }
+    if rule == 12 || rule == 13 {
+        let op = if rule == 12 {
+            OP_ADD
+        } else {
+            OP_MUL
+        };
+        let e = wrapping_op(inout d, op, x, y, inout b, inout left);
+        if e != 0 {
+            return e;
+        }
+        return wrapping_op(inout d, op, y, x, inout b, inout right);
+    }
+    if rule == 14 || rule == 15 {
+        let op = if rule == 14 {
+            OP_ADD
+        } else {
+            OP_MUL
+        };
+        let mut xy: u32 = 0;
+        let e = wrapping_op(inout d, op, x, y, inout b, inout xy);
+        if e != 0 {
+            return e;
+        }
+        let mut yz: u32 = 0;
+        let e = wrapping_op(inout d, op, y, z, inout b, inout yz);
+        if e != 0 {
+            return e;
+        }
+        let e = wrapping_op(inout d, op, xy, z, inout b, inout left);
+        if e != 0 {
+            return e;
+        }
+        return wrapping_op(inout d, op, x, yz, inout b, inout right);
+    }
+    if rule == 16 {
+        let mut s: u32 = 0;
+        let e = wrapping_op(inout d, OP_ADD, x, y, inout b, inout s);
+        if e != 0 {
+            return e;
+        }
+        right = x;
+        erased = y;
+        return wrapping_op(inout d, OP_SUB, s, y, inout b, inout left);
+    }
+    if rule == 17 || rule == 18 {
+        let op = if rule == 17 {
+            OP_MUL
+        } else {
+            OP_SUB
+        };
+        let c = if rule == 17 {
+            zero
+        } else {
+            x
+        };
+        right = zero;
+        erased = x;
+        return wrapping_op(inout d, op, x, c, inout b, inout left);
+    }
+    E_UNKNOWN_RULE
+}
+
+fn rule_arity(rule: u32) -> u32 {
+    if rule == 12 || rule == 13 || rule == 16 {
+        2
+    } else if rule == 14 || rule == 15 {
+        3
+    } else {
+        1
+    }
+}
+
+// ---------------------------------------------------------------- search
+
+// A recorded application (`Record`): the rule (1-based) and the classes of
+// its variables.
+copy struct Rec {
+    rule: u32,
+    b0: u32,
+    b1: u32,
+    b2: u32,
+    len: u32
+}
+
+// certificate.rs's `Capture`, less its error (every error returns at once:
+// after one, egg's run changes nothing more and its result is that error).
+struct Capture {
+    records: ChunkSeq[Rec],
+    records_cap: u64,
+    node_capacity: u64
+}
+
+// `Capture::nodes`: prepaid graph storage for `required` nodes.
+fn capture_nodes(inout c: Capture, required: u64, inout b: Budget) -> u8 {
+    if required > RAW_NODES {
+        return E_LIMIT;
+    }
+    if required <= c.node_capacity {
+        return 0;
+    }
+    let mut doubled: u64 = 0;
+    let e = mul_or(c.node_capacity, 2, inout doubled);
+    if e != 0 {
+        return e;
+    }
+    let target = min(max(required, doubled), RAW_NODES);
+    let mut nodes: u64 = 0;
+    let e = mul_or(target, 512, inout nodes);
+    if e != 0 {
+        return e;
+    }
+    let mut sq: u64 = 0;
+    let e = mul_or(target, target, inout sq);
+    if e != 0 {
+        return e;
+    }
+    let mut cleanup: u64 = 0;
+    let e = mul_or(sq, 128, inout cleanup);
+    if e != 0 {
+        return e;
+    }
+    let mut total: u64 = 0;
+    let e = add_or(nodes, cleanup, inout total);
+    if e != 0 {
+        return e;
+    }
+    let e = metadata(inout b, total);
+    if e != 0 {
+        return e;
+    }
+    c.node_capacity = target;
+    0
+}
+
+// The concrete nodes of each rule's left side (egg's compacted
+// `PatternAst`): its length, and up to two (operator, constant) pairs,
+// constant -1 for an operator node.
+copy struct Lhs {
+    len: u64,
+    n: u64,
+    op0: u32,
+    c0: i64,
+    op1: u32,
+    c1: i64
+}
+
+fn lhs(len: u64, op0: u32, c0: i64, op1: u32, c1: i64) -> Lhs {
+    Lhs {
+        len: len,
+        n: if op1 == NONE {
+            1
+        } else {
+            2
+        },
+        op0: op0,
+        c0: c0,
+        op1: op1,
+        c1: c1
+    }
+}
+
+// rules 1-18 (`optimize::rules()`).
+fn lhs_of(r: u64) -> Lhs {
+    let add: u32 = 1;
+    let sub: u32 = 2;
+    let mul: u32 = 3;
+    let wadd: u32 = 4;
+    let wsub: u32 = 5;
+    let wmul: u32 = 6;
+    let num: u32 = M_NUM;
+    if r == 0 || r == 1 {
+        lhs(3, add, -1, num, 0)
+    } else if r == 2 {
+        lhs(3, sub, -1, num, 0)
+    } else if r == 3 || r == 4 {
+        lhs(3, mul, -1, num, 1)
+    } else if r == 5 || r == 6 {
+        lhs(3, mul, -1, num, 0)
+    } else if r == 7 {
+        lhs(2, sub, -1, NONE, 0)
+    } else if r == 8 {
+        lhs(3, wadd, -1, num, 0)
+    } else if r == 9 {
+        lhs(3, wsub, -1, num, 0)
+    } else if r == 10 {
+        lhs(3, wmul, -1, num, 1)
+    } else if r == 11 {
+        lhs(3, wadd, -1, NONE, 0)
+    } else if r == 12 {
+        lhs(3, wmul, -1, NONE, 0)
+    } else if r == 13 {
+        lhs(5, wadd, -1, wadd, -1)
+    } else if r == 14 {
+        lhs(5, wmul, -1, wmul, -1)
+    } else if r == 15 {
+        lhs(4, wsub, -1, wadd, -1)
+    } else if r == 16 {
+        lhs(3, wmul, -1, num, 0)
+    } else {
+        lhs(2, wsub, -1, NONE, 0)
+    }
+}
+
+// The raw nodes an egg pattern node matches (`Language::matches`: the same
+// operator, and the same constant for `Num`).
+fn count_matching(in g: EGraph, op: u32, c: i64) -> u64 {
+    let mut n: u64 = 0;
+    for k in 0..g.raw_len() {
+        let id = n32(k);
+        if g.raw_op(id) == op && (op != M_NUM || g.raw_data(id) == c) {
+            n = wrapping_add(n, 1);
+        }
+    }
+    n
+}
+
+// `BoundedScheduler::search_rewrite` for rule `r`.
+fn schedule(in g: EGraph, in rules: Rules, r: u64, inout ms: Matches, inout b: Budget) -> u8 {
+    let p = lhs_of(r);
+    let raw = g.raw_len();
+    let mut scan: u64 = 0;
+    let e = mul_or(raw, 2, inout scan);
+    if e != 0 {
+        return e;
+    }
+    let e = add_to(inout scan, p.len);
+    if e != 0 {
+        return e;
+    }
+    let e = work(inout b, scan);
+    if e != 0 {
+        return e;
+    }
+    let mut combinations = count_matching(in g, p.op0, p.c0);
+    if p.n == 2 {
+        let second = count_matching(in g, p.op1, p.c1);
+        let e = mul_to(inout combinations, second);
+        if e != 0 {
+            return e;
+        }
+    }
+    if combinations == 0 {
+        return 0;
+    }
+    let mut cost: u64 = 0;
+    let e = mul_or(raw, combinations, inout cost);
+    if e != 0 {
+        return e;
+    }
+    let e = mul_to(inout cost, 8);
+    if e != 0 {
+        return e;
+    }
+    let e = add_to(inout cost, 32);
+    if e != 0 {
+        return e;
+    }
+    let e = work(inout b, cost);
+    if e != 0 {
+        return e;
+    }
+    let mut scratch: u64 = 0;
+    let e = add_or(raw, combinations, inout scratch);
+    if e != 0 {
+        return e;
+    }
+    let e = mul_to(inout scratch, 512);
+    if e != 0 {
+        return e;
+    }
+    let e = metadata(inout b, scratch);
+    if e != 0 {
+        return e;
+    }
+    let found = search_rule(in g, in rules, r, MATCHES, inout ms);
+    if found >= MATCHES {
+        return E_LIMIT;
+    }
+    0
+}
+
+// `RecordingApplier::apply_one` for match `mi` of rule `r`; `applied` is
+// set when the rule's union merged two classes.
+fn apply(
+    inout g: EGraph,
+    in rules: Rules,
+    r: u64,
+    in ms: Matches,
+    mi: u64,
+    inout ids: ChunkSeq[u32],
+    inout c: Capture,
+    inout b: Budget,
+    inout applied: bool
+) -> u8 {
+    applied = false;
+    let raw = g.raw_len();
+    let mut cost: u64 = 0;
+    let e = mul_or(raw, 4, inout cost);
+    if e != 0 {
+        return e;
+    }
+    let e = add_to(inout cost, 32);
+    if e != 0 {
+        return e;
+    }
+    let e = work(inout b, cost);
+    if e != 0 {
+        return e;
+    }
+    if wrapping_add(raw, APPLICATION_NODES) > RAW_NODES || c.records.len() >= RECORDS {
+        return E_LIMIT;
+    }
+    let e = capture_nodes(inout c, wrapping_add(raw, APPLICATION_NODES), inout b);
+    if e != 0 {
+        return e;
+    }
+    let e = grow(inout b, c.records.len(), inout c.records_cap, RECORDS, S_RECORD);
+    if e != 0 {
+        return e;
+    }
+    let mut bytes: u64 = 0;
+    let e = mul_or(raw, 128, inout bytes);
+    if e != 0 {
+        return e;
+    }
+    let e = add_to(inout bytes, 256);
+    if e != 0 {
+        return e;
+    }
+    let e = metadata(inout b, bytes);
+    if e != 0 {
+        return e;
+    }
+    if !guard_holds(in g, in rules, r, in ms, mi) {
+        return 0;
+    }
+    if apply_one(inout g, in rules, r, in ms, mi, inout ids) {
+        let rule = n32(wrapping_add(r, 1));
+        let arity = rule_arity(rule);
+        let b1 = if arity >= 2 {
+            ms.val(mi, 1)
+        } else {
+            0
+        };
+        let b2 = if arity >= 3 {
+            ms.val(mi, 2)
+        } else {
+            0
+        };
+        c
+            .records
+            .push(
+            Rec {
+                rule: rule,
+                b0: ms.val(mi, 0),
+                b1: b1,
+                b2: b2,
+                len: arity
+            }
+        );
+        applied = true;
+    }
+    0
+}
+
+// `root_has_leaf`: the root class holds a constant of the kind or one of
+// the variables.
+fn root_has_leaf(in g: EGraph, top: u32, kind: u8, vars: u64) -> bool {
+    let r = g.find(top);
+    let s = g.class_start(r);
+    for k in s..wrapping_add(s, g.class_len(r)) {
+        let op = g.node_op(k);
+        let d = g.node_data(k);
+        if op == M_NUM && fits(kind, widen_i128(d)) {
+            return true;
+        }
+        if op == M_INPUT && d >= 0 && wrapping_u64(d) < vars {
+            return true;
+        }
+    }
+    false
+}
+
+const STOP_SATURATED: u8 = 1;
+const STOP_LIMIT: u8 = 2;
+const STOP_HOOK: u8 = 4;
+
+// egg's `Runner::run` with certificate.rs's scheduler, applier and hook;
+// `stop` is how it stopped.
+fn run_search(
+    inout g: EGraph,
+    in rules: Rules,
+    top: u32,
+    kind: u8,
+    vars: u64,
+    inout c: Capture,
+    inout b: Budget,
+    inout stop: u8
+) -> u8 {
+    g.rebuild();
+    let mut ids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut iters: u64 = 0;
+    loop {
+        if g.memo_len() > RAW_NODES || iters >= ITERATIONS {
+            stop = STOP_LIMIT;
+            return 0;
+        }
+        let nodes0 = g.memo_len();
+        let classes0 = g.class_count();
+        // The hook.
+        let e = work(inout b, g.raw_len());
+        if e != 0 {
+            return e;
+        }
+        if root_has_leaf(in g, top, kind, vars) {
+            g.rebuild();
+            stop = STOP_HOOK;
+            return 0;
+        }
+        let mut ms = matches_new();
+        for r in 0..rules.count() {
+            ms.mark();
+            let e = schedule(in g, in rules, r, inout ms, inout b);
+            if e != 0 {
+                return e;
+            }
+        }
+        ms.mark();
+        let mut any = false;
+        let mut over = false;
+        for r in 0..rules.count() {
+            let (lo, hi) = ms.range(r);
+            for mi in lo..hi {
+                let mut applied = false;
+                let e = apply(
+                    inout g,
+                    in rules,
+                    r,
+                    in ms,
+                    mi,
+                    inout ids,
+                    inout c,
+                    inout b,
+                    inout applied
+                );
+                if e != 0 {
+                    return e;
+                }
+                if applied {
+                    any = true;
+                }
+            }
+            if g.memo_len() > RAW_NODES {
+                over = true;
+                break;
+            }
+        }
+        g.rebuild();
+        if over {
+            stop = STOP_LIMIT;
+            return 0;
+        }
+        if !any && g.memo_len() == nodes0 && g.class_count() == classes0 {
+            stop = STOP_SATURATED;
+            return 0;
+        }
+        iters = wrapping_add(iters, 1);
+    }
+}
+
+// One `Math` node of an expression list: operator, data, two children.
+copy struct MathNode {
+    op: u32,
+    data: i64,
+    c0: u32,
+    c1: u32
+}
+
+fn math_op(t: TermRow) -> u32 {
+    let base: u32 = if t.tag == T_WRAPPING {
+        4
+    } else {
+        1
+    };
+    wrapping_add(base, widen_u32(t.op))
+}
+
+// `encode_graph`: the reachable terms below `top` as a `RecExpr`; false
+// (with no error) when a reachable constant is outside `i64`.
+fn encode_graph(
+    in terms: ChunkSeq[TermRow],
+    top: u32,
+    inout b: Budget,
+    inout nodes: ChunkSeq[MathNode],
+    inout ok: bool
+) -> u8 {
+    let n = terms.len();
+    let e = initialized(inout b, n, S_BOOL);
+    if e != 0 {
+        return e;
+    }
+    let mut reachable: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](n);
+    reachable.resize(n, false);
+    reachable.try_set(w(top), true);
+    let i64_min: i128 = -9223372036854775808;
+    let i64_max: i128 = 9223372036854775807;
+    for j in 0..n {
+        let index = wrapping_sub(wrapping_sub(n, 1), j);
+        let e = work(inout b, 1);
+        if e != 0 {
+            return e;
+        }
+        let live = match reachable.try_get(index) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        if !live {
+            continue;
+        }
+        let t = term_get(in terms, n32(index));
+        if t.tag == T_CONST && (t.value < i64_min || t.value > i64_max) {
+            ok = false;
+            return 0;
+        }
+        if is_binary(t) {
+            if w(t.a) >= index || w(t.b) >= index {
+                return E_NON_TOPOLOGICAL_TERM;
+            }
+            reachable.try_set(w(t.a), true);
+            reachable.try_set(w(t.b), true);
+        }
+    }
+    let e = initialized(inout b, n, S_OPTION_ID);
+    if e != 0 {
+        return e;
+    }
+    let mut map: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    map.resize(n, NONE);
+    let mut cap: u64 = 0;
+    nodes.clear();
+    for i in 0..n {
+        let live = match reachable.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => false,
+        };
+        if !live {
+            continue;
+        }
+        let e = work(inout b, 1);
+        if e != 0 {
+            return e;
+        }
+        if nodes.len() >= RAW_NODES {
+            return E_LIMIT;
+        }
+        let t = term_get(in terms, n32(i));
+        let mut node = MathNode {
+            op: M_NUM,
+            data: 0,
+            c0: 0,
+            c1: 0
+        };
+        if t.tag == T_CONST {
+            node.data = wrapping_i64(t.value);
+        } else if t.tag == T_INPUT {
+            node.op = M_INPUT;
+            node.data = widen_i64(t.a);
+        } else {
+            let x = at32(in map, w(t.a));
+            let y = at32(in map, w(t.b));
+            if x == NONE || y == NONE {
+                return E_INVALID_TERM_INDEX;
+            }
+            node.op = math_op(t);
+            node.c0 = x;
+            node.c1 = y;
+        }
+        let e = grow(inout b, nodes.len(), inout cap, RAW_NODES, S_MATH);
+        if e != 0 {
+            return e;
+        }
+        map.try_set(i, n32(nodes.len()));
+        nodes.push(node);
+    }
+    ok = true;
+    0
+}
+
+// `translate_math`: interns each node of an expression list (children
+// first), giving each node's term.
+fn translate(
+    inout d: Builder,
+    in nodes: ChunkSeq[MathNode],
+    vars: u64,
+    inout b: Budget,
+    inout map: ChunkSeq[u32]
+) -> u8 {
+    let mut cap: u64 = 0;
+    let e = reserve(inout b, 0, inout cap, nodes.len(), S_TERM_ID);
+    if e != 0 {
+        return e;
+    }
+    map.clear();
+    let k = d.kind;
+    for i in 0..nodes.len() {
+        let e = work(inout b, 1);
+        if e != 0 {
+            return e;
+        }
+        let node = match nodes.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => return E_INVALID_TERM_INDEX,
+        };
+        let binary = node.op != M_NUM && node.op != M_INPUT;
+        if binary && (w(node.c0) >= i || w(node.c1) >= i) {
+            return E_NON_TOPOLOGICAL_TERM;
+        }
+        let term = if node.op == M_NUM {
+            const_term(k, widen_i128(node.data))
+        } else if node.op == M_INPUT {
+            if wrapping_u64(node.data) >= vars {
+                return E_UNKNOWN_VARIABLE;
+            }
+            input_term(k, wrapping_u32(node.data))
+        } else {
+            let x = at32(in map, w(node.c0));
+            let y = at32(in map, w(node.c1));
+            let tag = if node.op >= 4 {
+                T_WRAPPING
+            } else {
+                T_CHECKED
+            };
+            let base: u32 = if node.op >= 4 {
+                4
+            } else {
+                1
+            };
+            op_term(k, tag, wrapping_u8(wrapping_sub(node.op, base)), x, y)
+        };
+        let mut id: u32 = 0;
+        let e = intern(inout d, term, inout b, inout id);
+        if e != 0 {
+            return e;
+        }
+        map.push(id);
+    }
+    0
+}
+
+fn explain_records(
+    inout d: Builder,
+    in raw: ChunkSeq[u32],
+    in records: ChunkSeq[Rec],
+    from: u32,
+    to: u32,
+    inout b: Budget,
+    inout out: u32
+) -> u8 {
+    let n = records.len();
+    let e = initialized(inout b, n, S_BOOL);
+    if e != 0 {
+        return e;
+    }
+    let mut processed: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](n);
+    processed.resize(n, false);
+    loop {
+        let mut changed = false;
+        let e = congruence(inout d, inout b, inout changed);
+        if e != 0 {
+            return e;
+        }
+        let mut ra: u32 = 0;
+        let e = root(in d, from, inout b, inout ra);
+        if e != 0 {
+            return e;
+        }
+        let mut rb: u32 = 0;
+        let e = root(in d, to, inout b, inout rb);
+        if e != 0 {
+            return e;
+        }
+        if ra == rb {
+            return equality(inout d, from, to, inout b, inout out);
+        }
+        for i in 0..n {
+            let e = work(inout b, 1);
+            if e != 0 {
+                return e;
+            }
+            let done = match processed.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => true,
+            };
+            if done {
+                continue;
+            }
+            let rec = match records.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => return E_INVALID_SUBSTITUTION,
+            };
+            if rec.len != rule_arity(rec.rule) {
+                return E_INVALID_SUBSTITUTION;
+            }
+            let mut x: u32 = 0;
+            let mut y: u32 = 0;
+            let mut z: u32 = 0;
+            if rec.len >= 1 {
+                if w(rec.b0) >= raw.len() {
+                    return E_INVALID_SUBSTITUTION;
+                }
+                x = at32(in raw, w(rec.b0));
+            }
+            if rec.len >= 2 {
+                if w(rec.b1) >= raw.len() {
+                    return E_INVALID_SUBSTITUTION;
+                }
+                y = at32(in raw, w(rec.b1));
+            }
+            if rec.len >= 3 {
+                if w(rec.b2) >= raw.len() {
+                    return E_INVALID_SUBSTITUTION;
+                }
+                z = at32(in raw, w(rec.b2));
+            }
+            let before = d.terms.len();
+            let mut left: u32 = 0;
+            let mut right: u32 = 0;
+            let mut erased: u32 = NONE;
+            let e = instance(
+                inout d,
+                rec.rule,
+                x,
+                y,
+                z,
+                inout b,
+                inout left,
+                inout right,
+                inout erased
+            );
+            if e != 0 {
+                return e;
+            }
+            if d.terms.len() != before {
+                changed = true;
+            }
+            let e = root(in d, left, inout b, inout ra);
+            if e != 0 {
+                return e;
+            }
+            let e = root(in d, right, inout b, inout rb);
+            if e != 0 {
+                return e;
+            }
+            if ra == rb {
+                processed.try_set(i, true);
+                continue;
+            }
+            let mut g: u32 = NONE;
+            if erased != NONE {
+                let mut gk: u8 = 0;
+                let mut gp: u32 = 0;
+                let e = guard(inout d, erased, inout b, inout gk, inout gp);
+                if e != 0 {
+                    return e;
+                }
+                if gk == 0 {
+                    continue;
+                }
+                if gk == 2 {
+                    g = gp;
+                }
+            }
+            let mut p: u32 = 0;
+            let e = proof(
+                inout d,
+                rule_row(left, right, rec.rule, x, y, z, rec.len, g),
+                inout b,
+                inout p
+            );
+            if e != 0 {
+                return e;
+            }
+            let mut joined = false;
+            let e = join(inout d, p, inout b, inout joined);
+            if e != 0 {
+                return e;
+            }
+            if joined {
+                changed = true;
+            }
+            processed.try_set(i, true);
+        }
+        if !changed {
+            return E_INVALID_EQUALITY;
+        }
+    }
+}
+
+// `run_graph` and the translation of its result: the best term of the
+// folded root's class, proven equal to it. `best` is the folded root when
+// the search keeps it.
+fn search(
+    inout d: Builder,
+    in nodes: ChunkSeq[MathNode],
+    folded: u32,
+    vars: u64,
+    inout b: Budget,
+    inout best: u32
+) -> u8 {
+    let e = metadata(inout b, wrapping_mul(wrapping_add(RULE_COUNT, ITERATIONS), 512));
+    if e != 0 {
+        return e;
+    }
+    let e = work(inout b, nodes.len());
+    if e != 0 {
+        return e;
+    }
+    let mut c = Capture {
+        records: ChunkSeq::new[Rec](),
+        records_cap: 0,
+        node_capacity: 0
+    };
+    let e = capture_nodes(inout c, max(nodes.len(), 4), inout b);
+    if e != 0 {
+        return e;
+    }
+    let rules = math_rules();
+    if rules.count() != RULE_COUNT {
+        return E_UNKNOWN_RULE;
+    }
+    let arity = math_arity();
+    let mut g = egraph_new(in arity);
+    let mut ids: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](nodes.len());
+    let mut last: u32 = 0;
+    for i in 0..nodes.len() {
+        let node = match nodes.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => return E_INVALID_TERM_INDEX,
+        };
+        let a = g.arity_of(node.op);
+        let x0 = if a >= 1 {
+            at32(in ids, w(node.c0))
+        } else {
+            0
+        };
+        let x1 = if a >= 2 {
+            at32(in ids, w(node.c1))
+        } else {
+            0
+        };
+        let id = g.add_uncanonical(node.op, node.data, x0, x1);
+        ids.push(id);
+        last = id;
+    }
+    let top = g.find(last);
+    let kind = d.kind;
+    let mut stop: u8 = 0;
+    let e = run_search(inout g, in rules, top, kind, vars, inout c, inout b, inout stop);
+    if e != 0 {
+        return e;
+    }
+    let raw = g.raw_len();
+    let e = work(inout b, raw);
+    if e != 0 {
+        return e;
+    }
+    // `normal_completion`.
+    if raw > RAW_NODES {
+        return E_LIMIT;
+    }
+    let complete = stop
+        == STOP_SATURATED
+        || stop
+        == STOP_HOOK
+        && root_has_leaf(in g, top, kind, vars);
+    if !complete {
+        return E_LIMIT;
+    }
+    let mut sq: u64 = 0;
+    let e = mul_or(raw, raw, inout sq);
+    if e != 0 {
+        return e;
+    }
+    let e = mul_to(inout sq, 8);
+    if e != 0 {
+        return e;
+    }
+    let e = work(inout b, sq);
+    if e != 0 {
+        return e;
+    }
+    let mut x = extractor(in g);
+    let cost = x.cost_of(in g, top);
+    if cost == 0 || cost > b.max_output_nodes {
+        return E_LIMIT;
+    }
+    if !x.find_best(in g, top) {
+        return E_LIMIT;
+    }
+    if x.len() > b.max_terms {
+        return E_LIMIT;
+    }
+    let mut extracted: ChunkSeq[MathNode] = ChunkSeq::with_capacity[MathNode](x.len());
+    for i in 0..x.len() {
+        extracted
+            .push(
+            MathNode {
+                op: x.op_at(i),
+                data: x.data_at(i),
+                c0: x.child_at(i, 0),
+                c1: x.child_at(i, 1)
+            }
+        );
+    }
+    let mut best_map: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let e = translate(inout d, in extracted, vars, inout b, inout best_map);
+    if e != 0 {
+        return e;
+    }
+    if best_map.len() == 0 {
+        return E_INVALID_TERM_INDEX;
+    }
+    best = at32(in best_map, wrapping_sub(best_map.len(), 1));
+    if best != folded {
+        let mut graph_nodes: ChunkSeq[MathNode] = ChunkSeq::with_capacity[MathNode](raw);
+        for k in 0..raw {
+            let id = n32(k);
+            graph_nodes
+                .push(
+                MathNode {
+                    op: g.raw_op(id),
+                    data: g.raw_data(id),
+                    c0: g.raw_child(id, 0),
+                    c1: g.raw_child(id, 1)
+                }
+            );
+        }
+        let mut raw_map: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let e = translate(inout d, in graph_nodes, vars, inout b, inout raw_map);
+        if e != 0 {
+            return e;
+        }
+        let mut p: u32 = 0;
+        let e = explain_records(inout d, in raw_map, in c.records, folded, best, inout b, inout p);
+        if e != 0 {
+            return e;
+        }
+    }
+    0
+}
+
+// ---------------------------------------------------------------- propose
+
+// The proposal of `propose`: the certificate (the builder's terms and
+// proofs, with their capacities) and the candidate expression in the tree.
+pub struct Proposal {
+    outcome: u8,
+    input: u32,
+    output: u32,
+    conclusion: u32,
+    candidate: u32
+}
+
+pub fn proposal_new() -> Proposal {
+    Proposal {
+        outcome: O_UNCHANGED,
+        input: 0,
+        output: 0,
+        conclusion: 0,
+        candidate: 0
+    }
+}
+
+fn is_barrier(e: u8) -> bool {
+    e >= E_UNSUPPORTED_AST && e <= E_INVALID_INTRINSIC_ORIGIN
+}
+
+// `propose_rewrite`: a fresh budget of the limits in `b`, the source
+// expression `root` of `t`. Returns an error code (`Err`), else 0 with the
+// outcome in `p`; for a candidate, `d` holds the certificate, `b` the
+// spent budget and the candidate is built into `t`.
+pub fn propose(
+    inout t: Tree,
+    in o: Ops,
+    in types: ChunkSeq[TypeRow],
+    top: u32,
+    inout b: Budget,
+    inout d: Builder,
+    inout p: Proposal
+) -> u8 {
+    b.work = 0;
+    b.metadata = 0;
+    b.names = 0;
+    if valid_limits(in b) != 0 {
+        return E_INVALID_LIMITS;
+    }
+    let mut bound = bound_new();
+    let e = bind_source(in t, in o, in types, top, inout b, inout bound);
+    if is_barrier(e) {
+        p.outcome = O_BARRIER;
+        return 0;
+    }
+    if e != 0 {
+        return e;
+    }
+    d = builder_new(bound.kind, in b);
+    let vars = bound.names.len();
+    let n = bound.terms.len();
+    let mut cap: u64 = 0;
+    let e = reserve(inout b, 0, inout cap, n, S_TERM_ID);
+    if e != 0 {
+        return e;
+    }
+    let mut source_map: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        let e = work(inout b, 1);
+        if e != 0 {
+            return e;
+        }
+        let mut term = term_get(in bound.terms, n32(i));
+        if is_binary(term) {
+            if w(term.a) >= i || w(term.b) >= i {
+                return E_NON_TOPOLOGICAL_TERM;
+            }
+            term.a = at32(in source_map, w(term.a));
+            term.b = at32(in source_map, w(term.b));
+        }
+        let mut id: u32 = 0;
+        let e = intern(inout d, term, inout b, inout id);
+        if e != 0 {
+            return e;
+        }
+        source_map.push(id);
+    }
+    if w(bound.root) >= source_map.len() {
+        return E_INVALID_TERM_INDEX;
+    }
+    let input = at32(in source_map, w(bound.root));
+    let count = d.terms.len();
+    let mut folded: u32 = 0;
+    let e = fold_prefix(inout d, count, input, inout b, inout folded);
+    if e != 0 {
+        return e;
+    }
+    let mut nodes: ChunkSeq[MathNode] = ChunkSeq::new[MathNode]();
+    let mut searchable = false;
+    let e = encode_graph(in d.terms, folded, inout b, inout nodes, inout searchable);
+    if e != 0 {
+        return e;
+    }
+    let mut output = folded;
+    if searchable {
+        let e = search(inout d, in nodes, folded, vars, inout b, inout output);
+        if e != 0 {
+            return e;
+        }
+    }
+    if output == input {
+        p.outcome = O_UNCHANGED;
+        return 0;
+    }
+    let mut conclusion: u32 = 0;
+    let e = equality(inout d, input, output, inout b, inout conclusion);
+    if e != 0 {
+        return e;
+    }
+    let mut candidate: u32 = 0;
+    let e = build_candidate(inout t, in o, in bound, in d.terms, output, inout b, inout candidate);
+    if e != 0 {
+        return e;
+    }
+    let e = metadata(inout b, S_PROPOSAL);
+    if e != 0 {
+        return e;
+    }
+    p.outcome = O_CANDIDATE;
+    p.input = input;
+    p.output = output;
+    p.conclusion = conclusion;
+    p.candidate = candidate;
+    0
+}

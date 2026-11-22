@@ -1,6 +1,11 @@
 use self::ascii::{
     Ascii
 };
+use @vesper/prism-bytes::{
+    first_control,
+    first_not_path,
+    first_not_token
+};
 // Byte-level grammars of the decoder: tokens, targets, Host (with Rust std's
 // IPv4/IPv6 parsers) and field values.
 
@@ -18,10 +23,6 @@ const U64_MAX_LAST_DIGIT: u64 = 5;
 // bit `b` of LOW for bytes 0-63, bit `b - 64` of HIGH for 64-127.
 const TCHAR_MASK_LOW: u64 = 288068722172624896;
 const TCHAR_MASK_HIGH: u64 = 6341068274398134270;
-// RFC 9110 §5.5 field-value bytes: VCHAR, SP and HTAB (LOW) and 64-126
-// (HIGH); bytes 128-255 (obs-text) pass with `find_not_in`'s high flag.
-const FIELD_VALUE_MASK_LOW: u64 = 18446744069414584832;
-const FIELD_VCHAR_MASK_HIGH: u64 = 9223372036854775807;
 // The bytes RFC 3986 lets an origin-form target carry unescaped (ALPHA,
 // DIGIT and -._~!$&'()*+,;=:@/?): bit `b` of LOW for bytes 0-63, bit
 // `b - 64` of HIGH for 64-127.
@@ -107,7 +108,7 @@ pub fn all_token(in s: Slice[u8], lo: u64, hi: u64) -> bool {
 }
 
 fn tokens(in s: Slice[u8]) -> bool {
-    match s.find_not_in(TCHAR_MASK_LOW, TCHAR_MASK_HIGH, false) {
+    match first_not_token(in s, TCHAR_MASK_LOW, TCHAR_MASK_HIGH) {
         Option::Some(i) => false,
         Option::None => true,
     }
@@ -115,7 +116,7 @@ fn tokens(in s: Slice[u8]) -> bool {
 
 // No control byte but tab (field values; bytes >= 128 are obs-text).
 pub fn value_ok(in s: Slice[u8]) -> bool {
-    match s.find_not_in(FIELD_VALUE_MASK_LOW, FIELD_VCHAR_MASK_HIGH, true) {
+    match first_control(in s, true) {
         Option::Some(i) => false,
         Option::None => true,
     }
@@ -126,7 +127,7 @@ fn same_fold(in a: Slice[u8], in b: Slice[u8]) -> bool {
 }
 
 fn target_run(in t: Slice[u8]) -> Option[u64] {
-    t.find_not_in(TARGET_CHAR_MASK_LOW, TARGET_CHAR_MASK_HIGH, false)
+    first_not_path(in t, TARGET_CHAR_MASK_LOW, TARGET_CHAR_MASK_HIGH)
 }
 
 fn same_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {

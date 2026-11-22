@@ -1,0 +1,369 @@
+// What can change a sequence's length or a local, over a set of blocks
+// (src/bounds_hoist.rs: `stable_place`, `stable`, `invariant_local`,
+// `single_binding`, `box_drops`; facts.rs: `changes_len`,
+// `single_bindings`). A block set is a sorted `ChunkSeq[u32]`.
+
+use self::fun::{
+    Arg,
+    Blk,
+    Fun,
+    Ins,
+    add,
+    has,
+    has_receiver,
+    inc,
+    insert,
+    is_hoisted,
+    keeps_length,
+    n32,
+    u32_at,
+    w
+};
+
+const OP_READ: u8 = 3;
+const OP_BIND: u8 = 4;
+const OP_WRITE: u8 = 5;
+const OP_CALL: u8 = 9;
+const OP_SEQ: u8 = 10;
+const OP_TILED: u8 = 11;
+const OP_FIP: u8 = 12;
+const OP_INDIRECT: u8 = 13;
+const OP_CLOSURE: u8 = 14;
+const OP_HANDLE: u8 = 15;
+const P_IN: u8 = 0;
+const P_SINK: u8 = 2;
+
+// Every block of `f`.
+pub fn all_blocks(in f: Fun) -> ChunkSeq[u32] {
+    let n = f.nblocks();
+    let mut o: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    for b in 0..n {
+        o.push(n32(b));
+    }
+    o
+}
+
+// Whether a box drop of a block in `blocks` reclaims a place overlapping
+// `place` (`box_drops(..).any(|p| p.overlaps(place))`).
+pub fn drop_overlaps(in f: Fun, in blocks: ChunkSeq[u32], place: u32) -> bool {
+    for i in 0..f.drop_b.len() {
+        if has(in blocks, u32_at(in f.drop_b, i)) && f.overlaps(u32_at(in f.drop_p, i), place) {
+            return true;
+        }
+    }
+    false
+}
+
+// The same for block `b` alone.
+pub fn block_drop_overlaps(in f: Fun, b: u32, place: u32) -> bool {
+    for i in 0..f.drop_b.len() {
+        if u32_at(in f.drop_b, i) == b && f.overlaps(u32_at(in f.drop_p, i), place) {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether a box drop of a block in `blocks` reclaims a place rooted at
+// `root`.
+fn drop_rooted(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
+    for i in 0..f.drop_b.len() {
+        if has(in blocks, u32_at(in f.drop_b, i)) && f.root_of(u32_at(in f.drop_p, i)) == root {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether argument `a` lends a place overlapping `place` other than `in`.
+fn lent_overlapping(in f: Fun, a: Arg, place: u32) -> bool {
+    a.pass != P_IN && a.place != 0 && f.overlaps(a.place, place)
+}
+
+// `facts::changes_len`: whether `i` may change the handle or the length of
+// the sequence at `place`.
+pub fn changes_len(in f: Fun, i: Ins, place: u32) -> bool {
+    if i.op == OP_WRITE {
+        return f.overlaps(i.place, place);
+    }
+    if i.op == OP_BIND {
+        return f.binds(i, f.root_of(place));
+    }
+    if i.op == OP_READ {
+        return w(n32(i.sub)) == 2 && f.overlaps(i.place, place);
+    }
+    if i.op == OP_SEQ {
+        let recv = has_receiver(i.sub);
+        let receiver = recv && i.gn > 0 && lent_place(in f, f.arg(w(i.g0)), place);
+        let first: u64 = if recv && i.gn > 0 {
+            1
+        } else {
+            0
+        };
+        if receiver && !keeps_length(i.sub) && !is_hoisted(i.sub) {
+            return true;
+        }
+        for j in first..w(i.gn) {
+            if lent_overlapping(in f, f.arg(add(w(i.g0), j)), place) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if i.op == OP_CALL || i.op == OP_TILED || i.op == OP_FIP {
+        for j in 0..w(i.gn) {
+            if lent_overlapping(in f, f.arg(add(w(i.g0), j)), place) {
+                return true;
+            }
+        }
+        return false;
+    }
+    i.op == OP_CLOSURE || i.op == OP_HANDLE || i.op == OP_INDIRECT
+}
+
+// Whether argument `a` has a place overlapping `place`.
+fn lent_place(in f: Fun, a: Arg, place: u32) -> bool {
+    a.place != 0 && f.overlaps(a.place, place)
+}
+
+// `stable_place`: whether nothing in `blocks` can change the handle or the
+// header of the sequence at `place`.
+pub fn stable_place(in f: Fun, in blocks: ChunkSeq[u32], place: u32) -> bool {
+    if drop_overlaps(in f, in blocks, place) {
+        return false;
+    }
+    for bi in 0..blocks.len() {
+        let k = f.block(w(u32_at(in blocks, bi)));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if changes_len(in f, i, place) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// `stable`: whether nothing in `blocks` can change the length of a
+// sequence rooted at `root`.
+pub fn stable_root(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
+    if drop_rooted(in f, in blocks, root) {
+        return false;
+    }
+    for bi in 0..blocks.len() {
+        let k = f.block(w(u32_at(in blocks, bi)));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            let ok = if i.op == OP_WRITE {
+                f.write_root(i) != root
+            } else if i.op == OP_BIND {
+                !f.binds(i, root)
+            } else if i.op == OP_READ {
+                f.root_of(i.place) != root || w(n32(i.sub)) != 2
+            } else if i.op == OP_SEQ {
+                let recv = has_receiver(i.sub);
+                let receiver = i.gn > 0 && rooted(in f, f.arg(w(i.g0)), root) && recv;
+                let first: u64 = if recv && i.gn > 0 {
+                    1
+                } else {
+                    0
+                };
+                let mut others = true;
+                for jj in first..w(i.gn) {
+                    let a = f.arg(add(w(i.g0), jj));
+                    if rooted(in f, a, root) && a.pass != P_IN {
+                        others = false;
+                    }
+                }
+                (!receiver || keeps_length(i.sub)) && others
+            } else if i.op == OP_CALL || i.op == OP_TILED || i.op == OP_FIP {
+                let mut others = true;
+                for jj in 0..w(i.gn) {
+                    let a = f.arg(add(w(i.g0), jj));
+                    if rooted(in f, a, root) && a.pass != P_IN {
+                        others = false;
+                    }
+                }
+                others
+            } else {
+                true
+            };
+            if !ok {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn rooted(in f: Fun, a: Arg, root: u32) -> bool {
+    a.place != 0 && f.root_of(a.place) == root
+}
+
+// `invariant_local`: whether `blocks` never write, rebind or lend `inout`
+// the local `root`.
+pub fn invariant_local(in f: Fun, in blocks: ChunkSeq[u32], root: u32) -> bool {
+    for bi in 0..blocks.len() {
+        let k = f.block(w(u32_at(in blocks, bi)));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i.op == OP_WRITE {
+                if f.write_root(i) == root {
+                    return false;
+                }
+            } else if i.op == OP_BIND {
+                if f.binds(i, root) {
+                    return false;
+                }
+            } else if f.lends_root(i, root) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// `single_binding`: whether `name` is bound by exactly one `Bind`, never
+// written, never lent other than `in` or by value, and the function has no
+// closure or handler.
+pub fn single_binding(in f: Fun, name: u32) -> bool {
+    let mut count: u64 = 0;
+    for x in 0..f.insts.len() {
+        let i = f.inst(x);
+        if i.op == OP_BIND && f.binds(i, name) {
+            count = inc(count);
+        } else if i.op == OP_WRITE && f.write_root(i) == name {
+            return false;
+        } else if f.lends_root(i, name) {
+            return false;
+        } else if i.op == OP_CLOSURE || i.op == OP_HANDLE {
+            return false;
+        }
+    }
+    count == 1
+}
+
+// `single_bindings`: the names `single_binding` holds for, sorted (none
+// when the function has a closure or handler).
+pub fn single_bindings(in f: Fun) -> ChunkSeq[u32] {
+    let mut names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut twice: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut spoiled: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for x in 0..f.insts.len() {
+        let i = f.inst(x);
+        if i.op == OP_BIND {
+            for j in 0..w(i.nn) {
+                let n = f.at(add(w(i.n0), j));
+                if !insert(inout names, n) {
+                    let new = insert(inout twice, n);
+                }
+            }
+        } else if i.op == OP_WRITE {
+            let new = insert(inout spoiled, f.write_root(i));
+        } else if i
+            .op
+            == OP_CALL
+            || i
+            .op
+            == OP_INDIRECT
+            || i
+            .op
+            == OP_SEQ
+            || i
+            .op
+            == OP_TILED
+            || i
+            .op
+            == OP_FIP {
+            for j in 0..w(i.gn) {
+                let a = f.arg(add(w(i.g0), j));
+                if a.pass != P_IN && a.pass != P_SINK && a.place != 0 {
+                    let new = insert(inout spoiled, f.root_of(a.place));
+                }
+            }
+        } else if i.op == OP_CLOSURE || i.op == OP_HANDLE {
+            return ChunkSeq::new[u32]();
+        }
+    }
+    let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..names.len() {
+        let n = u32_at(in names, k);
+        if !has(in twice, n) && !has(in spoiled, n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+// Whether any instruction of `blocks` is a closure, handler or indirect
+// call, or has an `@fip` call slot.
+pub fn opaque(in f: Fun, in blocks: ChunkSeq[u32]) -> bool {
+    for bi in 0..blocks.len() {
+        let k = f.block(w(u32_at(in blocks, bi)));
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i
+                .op
+                == OP_CLOSURE
+                || i
+                .op
+                == OP_HANDLE
+                || i
+                .op
+                == OP_INDIRECT
+                || f
+                .has_call_slot(i.dest) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// Whether a block outside `blocks` uses a value defined in them (an
+// instruction's result or a block parameter).
+pub fn escapes(in f: Fun, in blocks: ChunkSeq[u32]) -> bool {
+    let mut defined: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for bi in 0..blocks.len() {
+        let k = f.block(w(u32_at(in blocks, bi)));
+        for j in 0..w(k.ic) {
+            let new = insert(inout defined, f.inst(add(w(k.i0), j)).dest);
+        }
+        for j in 0..w(k.pn) {
+            let new = insert(inout defined, f.at(add(w(k.p0), j)));
+        }
+    }
+    for b in 0..f.nblocks() {
+        if has(in blocks, n32(b)) {
+            continue;
+        }
+        let k = f.block(b);
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            for u in 0..w(i.un) {
+                if has(in defined, f.at(add(w(i.u0), u))) {
+                    return true;
+                }
+            }
+        }
+        if term_uses(in f, k, in defined) {
+            return true;
+        }
+    }
+    false
+}
+
+// Whether the terminator of `k` uses a value of the sorted `vs`.
+pub fn term_uses(in f: Fun, k: Blk, in vs: ChunkSeq[u32]) -> bool {
+    if k.term == 0 || k.term == 2 || k.term == 3 {
+        return has(in vs, k.tv);
+    }
+    if k.term == 1 {
+        for j in 0..w(k.tn) {
+            if has(in vs, f.at(add(w(k.t0), j))) {
+                return true;
+            }
+        }
+    }
+    false
+}

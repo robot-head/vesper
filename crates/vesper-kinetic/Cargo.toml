@@ -2,6 +2,7 @@
 name = "vesper-kinetic"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 description = "Vesper Kinetic (design section 36): DetFloat auditing over Cranelift IR, Morton codes, deterministic constraint colouring, AoSoA XPBD and rollback rings"
 publish = false
 build = "build.rs"

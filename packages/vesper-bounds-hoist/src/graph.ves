@@ -1,0 +1,360 @@
+// The control-flow queries of src/bounds_hoist.rs: `successors`, `reached`,
+// `reached_preds`, `idoms`, `dominates` and `natural_loop`, on the whole
+// graph or with some blocks' out-edges cut (the bounds facts' graph, where a
+// block that calls a function returning `Never` falls through nowhere).
+
+use self::fun::{
+    Blk,
+    Fun,
+    add,
+    has,
+    inc,
+    insert,
+    n32,
+    set_u32,
+    set_u8,
+    u32_at,
+    u8_at,
+    w
+};
+
+const NONE32: u32 = 4294967295;
+const T_JUMP: u8 = 1;
+const T_BRANCH: u8 = 2;
+const T_MATCH: u8 = 3;
+
+// The successors of block `b` (`successors`), in order; none when `cut`
+// marks it.
+pub fn successors(in f: Fun, in cut: ChunkSeq[u8], b: u64, inout out: ChunkSeq[u32]) {
+    if u8_at(in cut, b) != 0 {
+        return;
+    }
+    let k = f.block(b);
+    if k.term == T_JUMP {
+        out.push(k.yes);
+    } else if k.term == T_BRANCH {
+        out.push(k.yes);
+        out.push(k.no);
+    } else if k.term == T_MATCH {
+        for i in 0..w(k.tn) {
+            out.push(f.at(add(w(k.t0), i)));
+        }
+    }
+}
+
+pub struct Graph {
+    // 1 for each block the entry reaches
+    reached: ChunkSeq[u8],
+    // the reached blocks, ascending
+    order: ChunkSeq[u32],
+    // predecessors among the reached blocks: preds[p0[b]..p0[b]+pn[b]]
+    p0: ChunkSeq[u32],
+    pn: ChunkSeq[u32],
+    preds: ChunkSeq[u32],
+    // the immediate dominator, NONE32 for the entry and unreached blocks
+    idom: ChunkSeq[u32],
+}
+
+impl Graph {
+    pub fn is_reached(in self, b: u64) -> bool {
+        u8_at(in self.reached, b) != 0
+    }
+
+    pub fn npreds(in self, b: u64) -> u64 {
+        w(u32_at(in self.pn, b))
+    }
+
+    pub fn pred(in self, b: u64, k: u64) -> u32 {
+        u32_at(in self.preds, add(w(u32_at(in self.p0, b)), k))
+    }
+
+    pub fn idom_of(in self, b: u64) -> u32 {
+        match self.idom.try_get(b) {
+            Option::Some(x) => x,
+            Option::None => NONE32,
+        }
+    }
+
+    // Whether block `a` dominates block `b` (`dominates`).
+    pub fn dominates(in self, a: u32, b: u32) -> bool {
+        let mut x = b;
+        loop {
+            if a == x {
+                return true;
+            }
+            let up = self.idom_of(w(x));
+            if up == NONE32 {
+                return false;
+            }
+            x = up;
+        }
+    }
+
+    // Whether the predecessors of `b` are exactly the one block `d`.
+    pub fn only_pred(in self, b: u64, d: u32) -> bool {
+        self.npreds(b) == 1 && self.pred(b, 0) == d
+    }
+}
+
+// The graph of `f` with the out-edges of the blocks `cut` marks removed.
+pub fn graph(in f: Fun, in cut: ChunkSeq[u8]) -> Graph {
+    let n = f.nblocks();
+    let mut reached: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    reached.resize(n, 0);
+    let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if n > 0 {
+        set_u8(inout reached, 0, 1);
+        let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        stack.push(0);
+        loop {
+            let b = match stack.pop() {
+                Option::Some(b) => b,
+                Option::None => break,
+            };
+            succ.clear();
+            successors(in f, in cut, w(b), inout succ);
+            for i in 0..succ.len() {
+                let s = u32_at(in succ, i);
+                if w(s) < n && u8_at(in reached, w(s)) == 0 {
+                    set_u8(inout reached, w(s), 1);
+                    stack.push(s);
+                }
+            }
+        }
+    }
+    let mut order: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for b in 0..n {
+        if u8_at(in reached, b) != 0 {
+            order.push(n32(b));
+        }
+    }
+    // Predecessors: reached blocks ascending, each successor in order.
+    let mut pn: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    pn.resize(n, 0);
+    for j in 0..order.len() {
+        let b = u32_at(in order, j);
+        succ.clear();
+        successors(in f, in cut, w(b), inout succ);
+        for i in 0..succ.len() {
+            let s = w(u32_at(in succ, i));
+            if s < n {
+                set_u32(inout pn, s, wrapping_add(u32_at(in pn, s), 1));
+            }
+        }
+    }
+    let mut p0: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    let mut total: u32 = 0;
+    for b in 0..n {
+        p0.push(total);
+        total = wrapping_add(total, u32_at(in pn, b));
+    }
+    let mut fill: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    fill.resize(n, 0);
+    let mut preds: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(total));
+    preds.resize(w(total), 0);
+    for j in 0..order.len() {
+        let b = u32_at(in order, j);
+        succ.clear();
+        successors(in f, in cut, w(b), inout succ);
+        for i in 0..succ.len() {
+            let s = w(u32_at(in succ, i));
+            if s < n {
+                let at = add(w(u32_at(in p0, s)), w(u32_at(in fill, s)));
+                set_u32(inout preds, at, b);
+                set_u32(inout fill, s, wrapping_add(u32_at(in fill, s), 1));
+            }
+        }
+    }
+    let mut g = Graph {
+        reached: reached,
+        order: order,
+        p0: p0,
+        pn: pn,
+        preds: preds,
+        idom: ChunkSeq::new[u32]()
+    };
+    g.idom = idoms(in f, in cut, in g);
+    g
+}
+
+// `idoms`: Cooper, Harvey and Kennedy's iteration over the reverse
+// postorder of a depth-first walk from the entry.
+fn idoms(in f: Fun, in cut: ChunkSeq[u8], in g: Graph) -> ChunkSeq[u32] {
+    let n = f.nblocks();
+    let mut idom: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    idom.resize(n, NONE32);
+    if n == 0 {
+        return idom;
+    }
+    let mut post: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut seen: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    seen.resize(n, 0);
+    let mut stack_b: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut stack_k: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    stack_b.push(0);
+    stack_k.push(0);
+    set_u8(inout seen, 0, 1);
+    let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    loop {
+        let b = match stack_b.pop() {
+            Option::Some(b) => b,
+            Option::None => break,
+        };
+        let k = match stack_k.pop() {
+            Option::Some(k) => k,
+            Option::None => 0,
+        };
+        succ.clear();
+        successors(in f, in cut, w(b), inout succ);
+        if w(k) < succ.len() {
+            let s = u32_at(in succ, w(k));
+            stack_b.push(b);
+            stack_k.push(wrapping_add(k, 1));
+            if w(s) < n && u8_at(in seen, w(s)) == 0 {
+                set_u8(inout seen, w(s), 1);
+                stack_b.push(s);
+                stack_k.push(0);
+            }
+        } else {
+            post.push(b);
+        }
+    }
+    let mut order: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    order.resize(n, NONE32);
+    for k in 0..post.len() {
+        set_u32(inout order, w(u32_at(in post, k)), n32(k));
+    }
+    set_u32(inout idom, 0, 0);
+    let mut changed = true;
+    loop {
+        if !changed {
+            break;
+        }
+        changed = false;
+        // reverse postorder, skipping the entry (last in postorder)
+        let mut j = post.len();
+        loop {
+            if j <= 1 {
+                break;
+            }
+            j = wrapping_sub(j, 1);
+            let b = u32_at(in post, wrapping_sub(j, 1));
+            let mut new = NONE32;
+            for k in 0..g.npreds(w(b)) {
+                let p = g.pred(w(b), k);
+                if u32_at(in idom, w(p)) == NONE32 {
+                    continue;
+                }
+                if new == NONE32 {
+                    new = p;
+                } else {
+                    // intersect
+                    let mut x = p;
+                    let mut y = new;
+                    loop {
+                        if x == y {
+                            break;
+                        }
+                        loop {
+                            if u32_at(in order, w(x)) >= u32_at(in order, w(y)) {
+                                break;
+                            }
+                            let up = u32_at(in idom, w(x));
+                            x = if up == NONE32 {
+                                0
+                            } else {
+                                up
+                            };
+                        }
+                        loop {
+                            if u32_at(in order, w(y)) >= u32_at(in order, w(x)) {
+                                break;
+                            }
+                            let up = u32_at(in idom, w(y));
+                            y = if up == NONE32 {
+                                0
+                            } else {
+                                up
+                            };
+                        }
+                    }
+                    new = x;
+                }
+            }
+            if new != NONE32 && u32_at(in idom, w(b)) != new {
+                set_u32(inout idom, w(b), new);
+                changed = true;
+            }
+        }
+    }
+    set_u32(inout idom, 0, NONE32);
+    idom
+}
+
+// The natural loop of header `h` (`natural_loop`), sorted: the blocks that
+// reach a back edge into `h` without passing through `h`, and `h`.
+pub fn natural_loop(in g: Graph, h: u32) -> ChunkSeq[u32] {
+    let mut blocks: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    blocks.push(h);
+    let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..g.npreds(w(h)) {
+        let p = g.pred(w(h), k);
+        if g.dominates(h, p) {
+            stack.push(p);
+        }
+    }
+    loop {
+        let b = match stack.pop() {
+            Option::Some(b) => b,
+            Option::None => break,
+        };
+        if insert(inout blocks, b) {
+            for k in 0..g.npreds(w(b)) {
+                stack.push(g.pred(w(b), k));
+            }
+        }
+    }
+    blocks
+}
+
+// Whether `h` heads a loop: a predecessor it dominates.
+pub fn is_loop_header(in g: Graph, h: u32) -> bool {
+    for k in 0..g.npreds(w(h)) {
+        if g.dominates(h, g.pred(w(h), k)) {
+            return true;
+        }
+    }
+    false
+}
+
+// The predecessors of `h` outside `blocks`, in order.
+pub fn outside_preds(in g: Graph, h: u32, in blocks: ChunkSeq[u32]) -> ChunkSeq[u32] {
+    let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for k in 0..g.npreds(w(h)) {
+        let p = g.pred(w(h), k);
+        if !has(in blocks, p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+// Whether a block of `blocks` other than `h` has a predecessor outside them.
+pub fn entered_inside(in g: Graph, h: u32, in blocks: ChunkSeq[u32]) -> bool {
+    for i in 0..blocks.len() {
+        let b = u32_at(in blocks, i);
+        if b == h {
+            continue;
+        }
+        for k in 0..g.npreds(w(b)) {
+            if !has(in blocks, g.pred(w(b), k)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn no_cut() -> ChunkSeq[u8] {
+    ChunkSeq::new[u8]()
+}

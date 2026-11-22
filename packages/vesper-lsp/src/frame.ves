@@ -1,0 +1,280 @@
+// `read_frame` of crates/vesper-lsp/src/transport.rs over a lent byte
+// stream: the bounded CRLF header lines, the header fields and the body.
+// A cursor over the whole stream sees what `BufRead::fill_buf` would hand
+// over in one piece; chunking does not change which error is raised
+// (crates/vesper-lsp/tests/transport.rs reads at every chunk size).
+
+use self::limits::{
+    Ascii,
+    Crlf,
+    Perr,
+    Plimits,
+    add,
+    bound,
+    byte,
+    min64,
+    sat_add,
+    sat_sub,
+    validate
+};
+
+// The bit that tells a lower-case ASCII letter from its capital.
+const CASE_BIT: u8 = 32;
+
+// One frame's body: `start` and `len` in the stream.
+pub copy struct Body {
+    start: u64,
+    len: u64
+}
+
+// The stream cursor of one `read_frame` call.
+pub copy struct Cursor {
+    pos: u64
+}
+
+// A header line in the stream (its CRLF included).
+copy struct Line {
+    start: u64,
+    len: u64
+}
+
+// `header_line`: `None` on a clean end of the stream at a frame boundary.
+fn header_line(in s: Slice[u8], inout c: Cursor, inout total: u64, l: Plimits)
+    -> Option[Line] eff [Fail[Perr]] {
+    let n = s.len();
+    let start = c.pos;
+    let mut len: u64 = 0;
+    loop {
+        if c.pos >= n {
+            if len == 0 && total == 0 {
+                return Option::None;
+            }
+            Fail::raise(Perr::PTruncated);
+        }
+        let remaining = min64(
+            sat_sub(l.max_header_line_bytes, len),
+            sat_sub(l.max_header_bytes, total)
+        );
+        let scan = min64(wrapping_sub(n, c.pos), sat_add(remaining, 1));
+        let count = match s[c.pos..wrapping_add(c.pos, scan)].find_byte(Ascii::Lf) {
+            Option::Some(k) => wrapping_add(k, 1),
+            Option::None => scan,
+        };
+        let next = add(len, count);
+        let all = add(total, count);
+        bound(next, l.max_header_line_bytes, Perr::PHeaderLimit);
+        bound(all, l.max_header_bytes, Perr::PHeaderLimit);
+        len = next;
+        c.pos = wrapping_add(c.pos, count);
+        total = all;
+        if byte(in s, wrapping_sub(c.pos, 1)) == Ascii::Lf {
+            if len < Crlf::Len || byte(in s, wrapping_sub(c.pos, Crlf::Len)) != Ascii::Cr {
+                Fail::raise(Perr::PInvalidHeader);
+            }
+            return Option::Some(
+                Line {
+                    start: start,
+                    len: len
+                }
+            );
+        }
+    }
+}
+
+fn lower(b: u8) -> u8 {
+    if b >= Ascii::UpperA && b <= Ascii::UpperZ {
+        wrapping_add(b, CASE_BIT)
+    } else {
+        b
+    }
+}
+
+// `eq_ignore_ascii_case` of `s[a..b]` and `t`.
+fn eq_ic(in s: Slice[u8], a: u64, b: u64, in t: Str) -> bool {
+    let tb = t.as_bytes();
+    if wrapping_sub(b, a) != tb.len() {
+        return false;
+    }
+    for i in 0..tb.len() {
+        if lower(byte(in s, wrapping_add(a, i))) != lower(byte(in tb, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `str::trim` on header bytes, which hold only printable ASCII and tabs:
+// the bounds of `s[a..b]` without leading and trailing spaces and tabs.
+fn trim(in s: Slice[u8], a: u64, b: u64) -> (u64, u64) {
+    let mut x = a;
+    let mut y = b;
+    loop {
+        if x >= y {
+            break;
+        }
+        let c = byte(in s, x);
+        if c != Ascii::Space && c != Ascii::Tab {
+            break;
+        }
+        x = wrapping_add(x, 1);
+    }
+    loop {
+        if y <= x {
+            break;
+        }
+        let c = byte(in s, wrapping_sub(y, 1));
+        if c != Ascii::Space && c != Ascii::Tab {
+            break;
+        }
+        y = wrapping_sub(y, 1);
+    }
+    (x, y)
+}
+
+// The first `c` in `s[a..b]`, or `b`.
+fn find(in s: Slice[u8], a: u64, b: u64, c: u8) -> u64 {
+    let mut i = a;
+    loop {
+        if i >= b || byte(in s, i) == c {
+            return i;
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// `content_type`.
+fn content_type(in s: Slice[u8], a: u64, b: u64) -> Unit eff [Fail[Perr]] {
+    let first = find(in s, a, b, Ascii::Semicolon);
+    let (ma, mb) = trim(in s, a, first);
+    if !eq_ic(in s, ma, mb, "application/vscode-jsonrpc")
+        && !eq_ic(in s, ma, mb, "application/json") {
+        Fail::raise(Perr::PUnsupportedEncoding);
+    }
+    let mut charset = false;
+    let mut at = first;
+    loop {
+        if at >= b {
+            break;
+        }
+        let pa = wrapping_add(at, 1);
+        let pb = find(in s, pa, b, Ascii::Semicolon);
+        at = pb;
+        let (ta, tb) = trim(in s, pa, pb);
+        let eq = find(in s, ta, tb, Ascii::Equals);
+        if eq >= tb {
+            Fail::raise(Perr::PInvalidHeader);
+        }
+        let (ka, kb) = trim(in s, ta, eq);
+        if !eq_ic(in s, ka, kb, "charset") || charset {
+            Fail::raise(Perr::PInvalidHeader);
+        }
+        charset = true;
+        let (ra, rb) = trim(in s, wrapping_add(eq, 1), tb);
+        let mut va = ra;
+        let mut vb = rb;
+        if ra < rb && byte(in s, ra) == Ascii::Quote {
+            // `strip_prefix('"')` then `strip_suffix('"')`.
+            va = wrapping_add(ra, 1);
+            if vb <= va || byte(in s, wrapping_sub(vb, 1)) != Ascii::Quote {
+                Fail::raise(Perr::PInvalidHeader);
+            }
+            vb = wrapping_sub(vb, 1);
+        }
+        if !eq_ic(in s, va, vb, "utf-8") && !eq_ic(in s, va, vb, "utf8") {
+            Fail::raise(Perr::PUnsupportedEncoding);
+        }
+    }
+}
+
+fn is_name_byte(c: u8) -> bool {
+    (c >= Ascii::Zero && c <= Ascii::Nine)
+        || (c >= Ascii::UpperA && c <= Ascii::UpperZ)
+        || (c >= Ascii::LowerA && c <= Ascii::LowerZ)
+        || c
+        == Ascii::Dash
+}
+
+// `read_frame`: the next body, or `None` at a clean end of the stream.
+pub fn read_frame(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Option[Body] eff [Fail[Perr]] {
+    validate(l);
+    let mut total: u64 = 0;
+    let mut count: u64 = 0;
+    let mut length: u64 = 0;
+    let mut has_length = false;
+    let mut typed = false;
+    loop {
+        let line = match header_line(in s, inout c, inout total, l) {
+            Option::Some(x) => x,
+            Option::None => return Option::None,
+        };
+        if line.len == Crlf::Len {
+            break;
+        }
+        count = wrapping_add(count, 1);
+        bound(count, l.max_headers, Perr::PHeaderLimit);
+        let a = line.start;
+        let b = wrapping_add(line.start, wrapping_sub(line.len, Crlf::Len));
+        for i in a..b {
+            let x = byte(in s, i);
+            if !((x >= Ascii::Space && x <= Ascii::Tilde) || x == Ascii::Tab) {
+                Fail::raise(Perr::PInvalidHeader);
+            }
+        }
+        let colon = find(in s, a, b, Ascii::Colon);
+        if colon >= b || colon == a {
+            Fail::raise(Perr::PInvalidHeader);
+        }
+        for i in a..colon {
+            if !is_name_byte(byte(in s, i)) {
+                Fail::raise(Perr::PInvalidHeader);
+            }
+        }
+        // `trim_matches([' ', '\t'])`.
+        let (va, vb) = trim(in s, wrapping_add(colon, 1), b);
+        if eq_ic(in s, a, colon, "content-length") {
+            if has_length {
+                Fail::raise(Perr::PDuplicateLength);
+            }
+            if va == vb {
+                Fail::raise(Perr::PInvalidLength);
+            }
+            for i in va..vb {
+                let x = byte(in s, i);
+                if x < Ascii::Zero || x > Ascii::Nine {
+                    Fail::raise(Perr::PInvalidLength);
+                }
+            }
+            let mut v: u64 = 0;
+            for i in va..vb {
+                let d = widen_u64(wrapping_sub(byte(in s, i), Ascii::Zero));
+                // `max_body_bytes <= 8 MiB` keeps `v * 10 + d` far from
+                // overflow: each digit is bounded before the next.
+                v = wrapping_add(wrapping_mul(v, 10), d);
+                bound(v, l.max_body_bytes, Perr::PBodyLimit);
+            }
+            length = v;
+            has_length = true;
+        } else if eq_ic(in s, a, colon, "content-type") {
+            if typed {
+                Fail::raise(Perr::PInvalidHeader);
+            }
+            content_type(in s, va, vb);
+            typed = true;
+        } else if eq_ic(in s, a, colon, "content-encoding") && !eq_ic(in s, va, vb, "identity") {
+            Fail::raise(Perr::PUnsupportedEncoding);
+        }
+    }
+    if !has_length {
+        Fail::raise(Perr::PMissingLength);
+    }
+    if wrapping_sub(s.len(), c.pos) < length {
+        c.pos = s.len();
+        Fail::raise(Perr::PTruncated);
+    }
+    let body = Body {
+        start: c.pos,
+        len: length
+    };
+    c.pos = wrapping_add(c.pos, length);
+    Option::Some(body)
+}

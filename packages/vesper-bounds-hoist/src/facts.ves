@@ -1,0 +1,925 @@
+// Bounds facts from comparisons (src/bounds_hoist/facts.rs, self-hosting
+// SH1 lane 3): the comparisons blocks branch on, as facts on their edges,
+// and the proofs that an access's index is below its receiver's length.
+//
+// A `Term` is a node of a pool (`TermNode`); `term(v)` is memoized per
+// value, the depth-0 call Rust makes everywhere.
+
+use self::fun::{
+    Arg,
+    Blk,
+    Fun,
+    Ins,
+    add,
+    has,
+    hoistable,
+    inc,
+    insert,
+    n32,
+    set_u32,
+    set_u8,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::graph::{
+    Graph,
+    graph,
+    successors
+};
+use self::rules::{
+    all_blocks,
+    block_drop_overlaps,
+    changes_len,
+    single_bindings,
+    stable_place
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+const MAX_DEPTH: u64 = 6;
+const MAX_PROOF_DEPTH: u64 = 4;
+
+const OP_INT: u8 = 0;
+const OP_READ: u8 = 3;
+const OP_BIND: u8 = 4;
+const OP_BINARY: u8 = 7;
+const OP_CALL: u8 = 9;
+const OP_SEQ: u8 = 10;
+const T_JUMP: u8 = 1;
+const T_BRANCH: u8 = 2;
+const P_IN: u8 = 0;
+const P_INOUT: u8 = 1;
+const TY_U64: u64 = 1;
+const TY_USIZE: u64 = 2;
+const TY_SLICE: u64 = 8;
+const TY_NEVER: u64 = 32;
+const S_LEN: u64 = 8;
+const S_SLICE_LEN: u64 = 9;
+const S_AS_SLICE: u64 = 10;
+const S_AS_BYTES: u64 = 12;
+const S_STR_LEN: u64 = 13;
+const B_LT: u64 = 1;
+const B_LE: u64 = 2;
+const B_GT: u64 = 3;
+const B_GE: u64 = 4;
+const B_ADD: u64 = 5;
+const B_WADD: u64 = 6;
+
+// Term kinds.
+const K_CONST: u8 = 0;
+const K_LEN: u8 = 1;
+const K_FIXED: u8 = 2;
+const K_SLOT: u8 = 3;
+const K_ADD: u8 = 4;
+const K_PARAM: u8 = 5;
+const K_VALUE: u8 = 6;
+
+// Const: a = low, b = high word. Len: a = place, (b, c) = point. Fixed:
+// a = place. Slot: a = root, (b, c) = point. Add: a = base term, (b, c) =
+// k's words, `exact`. Param, Value: a = value.
+pub copy struct TermNode {
+    kind: u8,
+    a: u64,
+    b: u64,
+    c: u64,
+    exact: bool,
+}
+
+// `lhs < rhs` (`strict`) or `lhs <= rhs` on the edge `from -> to`.
+pub copy struct Edge {
+    from: u32,
+    to: u32,
+    lhs: u32,
+    rhs: u32,
+    strict: bool,
+}
+
+pub struct Facts {
+    cut: ChunkSeq[u8],
+    g: Graph,
+    // value -> 1 + global instruction index (last definition wins)
+    defs: ChunkSeq[u64],
+    // global instruction index -> block
+    iblock: ChunkSeq[u32],
+    // value -> 1 + (block << 32 | parameter index)
+    params: ChunkSeq[u64],
+    // name -> the value a once-bound local holds (NONE32 for none)
+    bound: ChunkSeq[u32],
+    // name -> whether it is a parameter nothing changes
+    fixed: ChunkSeq[u8],
+    edges: ChunkSeq[Edge],
+    // place -> 0 unknown, 1 not stable, 2 stable
+    stable: ChunkSeq[u8],
+    terms: ChunkSeq[TermNode],
+    // value -> 1 + term id of `term(v)`
+    memo: ChunkSeq[u32],
+    all: ChunkSeq[u32],
+}
+
+fn get_u64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    u64_at(in s, i)
+}
+
+fn grow_u64(inout s: ChunkSeq[u64], i: u64) {
+    if i >= s.len() {
+        s.resize(inc(i), 0);
+    }
+}
+
+fn grow_u32(inout s: ChunkSeq[u32], i: u64, fill: u32) {
+    if i >= s.len() {
+        s.resize(inc(i), fill);
+    }
+}
+
+// The blocks that call a function returning `Never`.
+fn cut_blocks(in f: Fun) -> ChunkSeq[u8] {
+    let n = f.nblocks();
+    let mut cut: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    cut.resize(n, 0);
+    for b in 0..n {
+        let k = f.block(b);
+        for j in 0..w(k.ic) {
+            let i = f.inst(add(w(k.i0), j));
+            if i.op == OP_CALL && (i.flags & TY_NEVER) != 0 {
+                set_u8(inout cut, b, 1);
+            }
+        }
+    }
+    cut
+}
+
+pub fn unsigned_word(in f: Fun, v: u32) -> bool {
+    (f.flags(v) & (TY_U64 | TY_USIZE)) != 0
+}
+
+pub fn facts_new(in f: Fun) -> Facts {
+    let cut = cut_blocks(in f);
+    let g = graph(in f, in cut);
+    let mut fa = Facts {
+        cut: cut,
+        g: g,
+        defs: ChunkSeq::new[u64](),
+        iblock: ChunkSeq::new[u32](),
+        params: ChunkSeq::new[u64](),
+        bound: ChunkSeq::new[u32](),
+        fixed: ChunkSeq::new[u8](),
+        edges: ChunkSeq::new[Edge](),
+        stable: ChunkSeq::new[u8](),
+        terms: ChunkSeq::new[TermNode](),
+        memo: ChunkSeq::new[u32](),
+        all: all_blocks(in f)
+    };
+    fa.iblock.resize(f.insts.len(), 0);
+    // Names bound by a whole-value `Bind`, with their values (more than one
+    // marks the name as bound more than once).
+    let nn = f.nlen.len();
+    let mut first: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](nn);
+    first.resize(nn, NONE32);
+    let mut count: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](nn);
+    count.resize(nn, 0);
+    for b in 0..f.nblocks() {
+        let k = f.block(b);
+        for j in 0..w(k.pn) {
+            let v = w(f.at(add(w(k.p0), j)));
+            grow_u64(inout fa.params, v);
+            let ok = fa.params.try_set(v, inc(wrapping_shl_u64(b, 32) | j));
+        }
+        for j in 0..w(k.ic) {
+            let x = add(w(k.i0), j);
+            set_u32(inout fa.iblock, x, n32(b));
+            let i = f.inst(x);
+            grow_u64(inout fa.defs, w(i.dest));
+            let ok = fa.defs.try_set(w(i.dest), inc(x));
+            if i.op == OP_BIND && i.bind != 0 {
+                let name = w(wrapping_sub(i.bind, 1));
+                set_u32(inout count, name, wrapping_add(u32_at(in count, name), 1));
+                if u32_at(in first, name) == NONE32 {
+                    set_u32(inout first, name, i.a);
+                }
+            }
+        }
+    }
+    let single = single_bindings(in f);
+    fa.bound.resize(nn, NONE32);
+    for k in 0..single.len() {
+        let name = u32_at(in single, k);
+        if u32_at(in count, w(name)) == 1 {
+            set_u32(inout fa.bound, w(name), u32_at(in first, w(name)));
+        }
+    }
+    // Parameters nothing in the function changes.
+    fa.fixed.resize(nn, 0);
+    for p in 0..f.params.len() {
+        let name = f.param(p).name;
+        let mut touched = false;
+        for x in 0..f.insts.len() {
+            if f.touches(f.inst(x), name) {
+                touched = true;
+                break;
+            }
+        }
+        if !touched {
+            set_u8(inout fa.fixed, w(name), 1);
+        }
+    }
+    fa.stable.resize(f.pparent.len(), 0);
+    fa.find_edges(in f);
+    fa
+}
+
+impl Facts {
+    pub fn once(in self, name: u32) -> bool {
+        u32_at(in self.bound, w(name)) != NONE32
+    }
+
+    pub fn bound_of(in self, name: u32) -> u32 {
+        u32_at(in self.bound, w(name))
+    }
+
+    pub fn is_fixed(in self, name: u32) -> bool {
+        u8_at(in self.fixed, w(name)) != 0
+    }
+
+    // The global index of the definition of `v`, NONE64 for none.
+    pub fn def(in self, v: u32) -> u64 {
+        let d = u64_at(in self.defs, w(v));
+        if d == 0 {
+            NONE64
+        } else {
+            wrapping_sub(d, 1)
+        }
+    }
+
+    pub fn def_block(in self, x: u64) -> u32 {
+        u32_at(in self.iblock, x)
+    }
+
+    // The block of the block parameter `v`, NONE32 when `v` is none.
+    pub fn param_block(in self, v: u32) -> u32 {
+        let d = u64_at(in self.params, w(v));
+        if d == 0 {
+            NONE32
+        } else {
+            n32(wrapping_sub(d, 1) >> 32)
+        }
+    }
+
+    pub fn param_index(in self, v: u32) -> u64 {
+        wrapping_sub(u64_at(in self.params, w(v)), 1) & 4294967295
+    }
+
+    pub fn nedges(in self) -> u64 {
+        self.edges.len()
+    }
+
+    pub fn edge(in self, e: u64) -> Edge {
+        match self.edges.try_get(e) {
+            Option::Some(x) => x,
+            Option::None => Edge {
+                from: 0,
+                to: 0,
+                lhs: 0,
+                rhs: 0,
+                strict: false
+            },
+        }
+    }
+
+    pub fn node(in self, t: u32) -> TermNode {
+        match self.terms.try_get(w(t)) {
+            Option::Some(x) => x,
+            Option::None => TermNode {
+                kind: K_VALUE,
+                a: 0,
+                b: 0,
+                c: 0,
+                exact: false
+            },
+        }
+    }
+
+    fn mk(inout self, kind: u8, a: u64, b: u64, c: u64, exact: bool) -> u32 {
+        let id = n32(self.terms.len());
+        self
+            .terms
+            .push(
+            TermNode {
+                kind: kind,
+                a: a,
+                b: b,
+                c: c,
+                exact: exact
+            }
+        );
+        id
+    }
+
+    // The successors of `b` on the facts' graph.
+    fn succ(in self, in f: Fun, b: u32, inout out: ChunkSeq[u32]) {
+        successors(in f, in self.cut, w(b), inout out);
+    }
+
+    // `comparison`: the unsigned comparison `condition` computes, as
+    // (operator class, lhs, rhs); class 0 for none.
+    fn comparison(in self, in f: Fun, condition: u32) -> (u64, u32, u32) {
+        let mut v = condition;
+        for step in 0..MAX_DEPTH {
+            let d = self.def(v);
+            if d == NONE64 {
+                return (0, 0, 0);
+            }
+            let i = f.inst(d);
+            if i
+                .op
+                == OP_BINARY
+                && i
+                .sub
+                >= B_LT
+                && i
+                .sub
+                <= B_GE
+                && unsigned_word(in f, i.a)
+                && unsigned_word(in f, i.b) {
+                return (i.sub, i.a, i.b);
+            }
+            if i.op == OP_READ && f.depth(i.place) == 1 && self.once(f.root_of(i.place)) {
+                v = self.bound_of(f.root_of(i.place));
+            } else {
+                return (0, 0, 0);
+            }
+        }
+        (0, 0, 0)
+    }
+
+    fn find_edges(inout self, in f: Fun) {
+        for j in 0..self.g.order.len() {
+            let d = u32_at(in self.g.order, j);
+            let k = f.block(w(d));
+            if k.term != T_BRANCH || k.yes == k.no {
+                continue;
+            }
+            let (op, a, c) = self.comparison(in f, k.tv);
+            if op == 0 {
+                continue;
+            }
+            // (lhs, rhs, strict) on the yes edge, then on the no edge.
+            let mut yl = a;
+            let mut yr = c;
+            let mut ys = true;
+            let mut nl = c;
+            let mut nr = a;
+            let mut ns = false;
+            if op == B_LE {
+                ys = false;
+                ns = true;
+            } else if op == B_GT {
+                yl = c;
+                yr = a;
+                ys = true;
+                nl = a;
+                nr = c;
+                ns = false;
+            } else if op == B_GE {
+                yl = c;
+                yr = a;
+                ys = false;
+                nl = a;
+                nr = c;
+                ns = true;
+            }
+            if k.yes != d && self.g.only_pred(w(k.yes), d) {
+                self
+                    .edges
+                    .push(
+                    Edge {
+                        from: d,
+                        to: k.yes,
+                        lhs: yl,
+                        rhs: yr,
+                        strict: ys
+                    }
+                );
+            }
+            if k.no != d && self.g.only_pred(w(k.no), d) {
+                self
+                    .edges
+                    .push(
+                    Edge {
+                        from: d,
+                        to: k.no,
+                        lhs: nl,
+                        rhs: nr,
+                        strict: ns
+                    }
+                );
+            }
+        }
+    }
+
+    // `is_stable`: whether nothing in the function can change the length
+    // of `place`.
+    pub fn is_stable(inout self, in f: Fun, place: u32) -> bool {
+        let known = u8_at(in self.stable, w(place));
+        if known != 0 {
+            return known == 2;
+        }
+        let root = f.root_of(place);
+        let whole = f.depth(place) == 1;
+        let slice_once = whole && self.once(root) && (f.flags(self.bound_of(root)) & TY_SLICE) != 0;
+        let mut borrowed = false;
+        for p in 0..f.params.len() {
+            let q = f.param(p);
+            if q
+                .name
+                == root
+                && (q.pass == P_IN || (q.pass == P_INOUT && whole && (q.flags & TY_SLICE) != 0)) {
+                borrowed = true;
+            }
+        }
+        if borrowed {
+            for x in 0..f.insts.len() {
+                if f.binds(f.inst(x), root) {
+                    borrowed = false;
+                    break;
+                }
+            }
+        }
+        let ok = slice_once || borrowed || stable_place(in f, in self.all, place);
+        set_u8(
+            inout self.stable,
+            w(place),
+            if ok {
+                2
+            } else {
+                1
+            }
+        );
+        ok
+    }
+
+    // `receiver_read`: whether the first argument of instruction `i` is a
+    // read of `place`.
+    pub fn receiver_read(in self, in f: Fun, i: Ins, place: u32) -> bool {
+        if i.gn == 0 {
+            return false;
+        }
+        let d = self.def(f.arg(w(i.g0)).value);
+        if d == NONE64 {
+            return false;
+        }
+        let r = f.inst(d);
+        r.op == OP_READ && r.place == place
+    }
+
+    // `length_place`: the place whose length `place`'s length is.
+    pub fn length_place(inout self, in f: Fun, place: u32) -> u32 {
+        let mut p = place;
+        for step in 0..MAX_DEPTH {
+            if f.depth(p) != 1 || !self.once(f.root_of(p)) {
+                break;
+            }
+            let d = self.def(self.bound_of(f.root_of(p)));
+            if d == NONE64 {
+                break;
+            }
+            let i = f.inst(d);
+            if i.op != OP_SEQ || !(i.sub == S_AS_SLICE || i.sub == S_AS_BYTES) || i.gn == 0 {
+                break;
+            }
+            let viewed = f.arg(w(i.g0)).place;
+            if viewed == 0 {
+                break;
+            }
+            if self.receiver_read(in f, i, viewed) && self.is_stable(in f, viewed) {
+                p = viewed;
+            } else {
+                break;
+            }
+        }
+        p
+    }
+
+    pub fn term(inout self, in f: Fun, v: u32) -> u32 {
+        let m = u32_at(in self.memo, w(v));
+        if m != 0 {
+            return wrapping_sub(m, 1);
+        }
+        let t = self.term_at(in f, v, 0);
+        grow_u32(inout self.memo, w(v), 0);
+        set_u32(inout self.memo, w(v), wrapping_add(t, 1));
+        t
+    }
+
+    fn term_at(inout self, in f: Fun, v: u32, depth: u64) -> u32 {
+        if u64_at(in self.params, w(v)) != 0 {
+            return self.mk(K_PARAM, w(v), 0, 0, false);
+        }
+        let d = self.def(v);
+        if d == NONE64 {
+            return self.mk(K_VALUE, w(v), 0, 0, false);
+        }
+        if depth >= MAX_DEPTH {
+            return self.mk(K_VALUE, w(v), 0, 0, false);
+        }
+        let i = f.inst(d);
+        let b = w(self.def_block(d));
+        let k = wrapping_sub(d, w(f.block(b).i0));
+        if i.op == OP_INT && !i.neg {
+            return self.mk(K_CONST, i.lo, i.hi, 0, false);
+        }
+        if i.op == OP_READ {
+            let root = f.root_of(i.place);
+            let whole = f.depth(i.place) == 1;
+            if whole && self.once(root) {
+                let bv = self.bound_of(root);
+                return self.term_at(in f, bv, inc(depth));
+            }
+            if self.is_fixed(root) {
+                return self.mk(K_FIXED, w(i.place), 0, 0, false);
+            }
+            if whole {
+                return self.mk(K_SLOT, w(root), b, k, false);
+            }
+            return self.mk(K_VALUE, w(v), 0, 0, false);
+        }
+        if i.op == OP_SEQ && (i.sub == S_LEN || i.sub == S_SLICE_LEN || i.sub == S_STR_LEN) {
+            if i.gn > 0 {
+                let place = f.arg(w(i.g0)).place;
+                if place != 0 && self.receiver_read(in f, i, place) {
+                    let lp = self.length_place(in f, place);
+                    return self.mk(K_LEN, w(lp), b, k, false);
+                }
+            }
+            return self.mk(K_VALUE, w(v), 0, 0, false);
+        }
+        if i.op == OP_BINARY && (i.sub == B_ADD || i.sub == B_WADD) {
+            let exact = i.sub == B_ADD;
+            let x = self.term_at(in f, i.a, inc(depth));
+            let y = self.term_at(in f, i.b, inc(depth));
+            let ny = self.node(y);
+            if ny.kind == K_CONST {
+                return self.mk(K_ADD, w(x), ny.a, ny.b, exact);
+            }
+            let nx = self.node(x);
+            if nx.kind == K_CONST {
+                return self.mk(K_ADD, w(y), nx.a, nx.b, exact);
+            }
+            return self.mk(K_VALUE, w(v), 0, 0, false);
+        }
+        self.mk(K_VALUE, w(v), 0, 0, false)
+    }
+
+    // Structural equality (`Term`'s derived `PartialEq`).
+    pub fn term_eq(in self, a: u32, b: u32) -> bool {
+        let x = self.node(a);
+        let y = self.node(b);
+        if x.kind != y.kind {
+            return false;
+        }
+        if x.kind == K_ADD {
+            return x
+                .b
+                == y
+                .b
+                && x
+                .c
+                == y
+                .c
+                && x
+                .exact
+                == y
+                .exact
+                && self
+                .term_eq(n32(x.a), n32(y.a));
+        }
+        x.a == y.a && x.b == y.b && x.c == y.c
+    }
+
+    // `dominates_point`: whether point `p` dominates point `q`.
+    fn dominates_point(in self, pb: u32, pk: u64, qb: u32, qk: u64) -> bool {
+        if pb == qb {
+            pk <= qk
+        } else {
+            self.g.dominates(pb, qb)
+        }
+    }
+
+    // Whether instruction `i` changes what `mode` watches: 0, the local
+    // `arg`; 1, the length of the place `arg`.
+    fn changes(in self, in f: Fun, i: Ins, mode: u8, arg: u32) -> bool {
+        if mode == 0 {
+            f.touches(i, arg)
+        } else {
+            changes_len(in f, i, arg)
+        }
+    }
+
+    fn block_changes(in self, in f: Fun, b: u32, mode: u8, arg: u32) -> bool {
+        mode == 1 && block_drop_overlaps(in f, b, arg)
+    }
+
+    fn any_changes(in self, in f: Fun, b: u32, from: u64, to: u64, mode: u8, arg: u32) -> bool {
+        let k = f.block(w(b));
+        let end = if to < w(k.ic) {
+            to
+        } else {
+            w(k.ic)
+        };
+        let mut j = from;
+        loop {
+            if j >= end {
+                return false;
+            }
+            if self.changes(in f, f.inst(add(w(k.i0), j)), mode, arg) {
+                return true;
+            }
+            j = inc(j);
+        }
+    }
+
+    // `unchanged_by`: whether nothing `mode` watches changes between the
+    // points `p` and `q`, one of which dominates the other.
+    pub fn unchanged_by(
+        in self,
+        in f: Fun,
+        pb0: u32,
+        pk0: u64,
+        qb0: u32,
+        qk0: u64,
+        mode: u8,
+        arg: u32
+    ) -> bool {
+        let mut pb = pb0;
+        let mut pk = pk0;
+        let mut qb = qb0;
+        let mut qk = qk0;
+        if !self.dominates_point(pb0, pk0, qb0, qk0) {
+            if !self.dominates_point(qb0, qk0, pb0, pk0) {
+                return false;
+            }
+            pb = qb0;
+            pk = qk0;
+            qb = pb0;
+            qk = pk0;
+        }
+        if pb == qb && pk <= qk {
+            let from = if inc(pk) < qk {
+                inc(pk)
+            } else {
+                qk
+            };
+            return !self
+                .block_changes(in f, pb, mode, arg)
+                && !self
+                .any_changes(in f, pb, from, qk, mode, arg);
+        }
+        let n = f.nblocks();
+        // Forward from p's successors, never through p's block again.
+        let mut forward: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+        forward.resize(n, 0);
+        let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self.succ(in f, pb, inout stack);
+        let mut succ: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        loop {
+            let b = match stack.pop() {
+                Option::Some(b) => b,
+                Option::None => break,
+            };
+            if b != pb && self.g.is_reached(w(b)) && u8_at(in forward, w(b)) == 0 {
+                set_u8(inout forward, w(b), 1);
+                succ.clear();
+                self.succ(in f, b, inout succ);
+                for i in 0..succ.len() {
+                    stack.push(u32_at(in succ, i));
+                }
+            }
+        }
+        if u8_at(in forward, w(qb)) == 0 {
+            return false;
+        }
+        let mut back: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+        back.resize(n, 0);
+        for k in 0..self.g.npreds(w(qb)) {
+            stack.push(self.g.pred(w(qb), k));
+        }
+        loop {
+            let b = match stack.pop() {
+                Option::Some(b) => b,
+                Option::None => break,
+            };
+            if b != pb && u8_at(in back, w(b)) == 0 {
+                set_u8(inout back, w(b), 1);
+                for k in 0..self.g.npreds(w(b)) {
+                    stack.push(self.g.pred(w(b), k));
+                }
+            }
+        }
+        if self.block_changes(in f, pb, mode, arg) || self.block_changes(in f, qb, mode, arg) {
+            return false;
+        }
+        if self.any_changes(in f, pb, inc(pk), NONE64, mode, arg) {
+            return false;
+        }
+        let upto = if u8_at(in back, w(qb)) != 0 {
+            NONE64
+        } else {
+            qk
+        };
+        if self.any_changes(in f, qb, 0, upto, mode, arg) {
+            return false;
+        }
+        for b in 0..n {
+            if u8_at(in forward, b) != 0 && u8_at(in back, b) != 0 && n32(b) != qb {
+                if self
+                    .block_changes(in f, n32(b), mode, arg)
+                    || self
+                    .any_changes(in f, n32(b), 0, NONE64, mode, arg) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    pub fn unchanged(in self, in f: Fun, root: u32, pb: u32, pk: u64, qb: u32, qk: u64) -> bool {
+        self.unchanged_by(in f, pb, pk, qb, qk, 0, root)
+    }
+
+    // `length_kept`: whether the length of `place` is the same at the two
+    // points.
+    pub fn length_kept(inout self, in f: Fun, place: u32, pb: u32, pk: u64, qb: u32, qk: u64)
+        -> bool {
+        self.is_stable(in f, place) || self.unchanged_by(in f, pb, pk, qb, qk, 1, place)
+    }
+
+    // `same`: whether the terms are the same number.
+    pub fn same(inout self, in f: Fun, a: u32, b: u32) -> bool {
+        let x = self.node(a);
+        let y = self.node(b);
+        if x.kind == K_SLOT && y.kind == K_SLOT {
+            return x.a == y.a && self.unchanged(in f, n32(x.a), n32(x.b), x.c, n32(y.b), y.c);
+        }
+        if x.kind == K_ADD && y.kind == K_ADD {
+            return x
+                .b
+                == y
+                .b
+                && x
+                .c
+                == y
+                .c
+                && x
+                .exact
+                == y
+                .exact
+                && self
+                .same(in f, n32(x.a), n32(y.a));
+        }
+        if x.kind == K_LEN && y.kind == K_LEN {
+            return x.a == y.a && self.length_kept(in f, n32(x.a), n32(x.b), x.c, n32(y.b), y.c);
+        }
+        self.term_eq(a, b)
+    }
+
+    // Whether edge `e` holds at the start of block `at` (`holding`).
+    pub fn holds(in self, e: Edge, at: u32) -> bool {
+        self.g.dominates(e.to, at)
+    }
+
+    // `index_is` of `below_len` and `loop_candidate`: `l` is `t`, or `t + k`
+    // with exact `+`.
+    pub fn index_is(inout self, in f: Fun, l: u32, t: u32) -> bool {
+        if self.same(in f, l, t) {
+            return true;
+        }
+        let x = self.node(l);
+        x.kind == K_ADD && x.exact && self.same(in f, n32(x.a), t)
+    }
+
+    // `below_len`: whether `t` is below the length of `place` (read at
+    // (tb, tk)) wherever block `at` runs.
+    pub fn below_len(
+        inout self,
+        in f: Fun,
+        t: u32,
+        place: u32,
+        tb: u32,
+        tk: u64,
+        at: u32,
+        depth: u64
+    ) -> bool {
+        if depth > MAX_PROOF_DEPTH {
+            return false;
+        }
+        for ei in 0..self.edges.len() {
+            let e = self.edge(ei);
+            if !self.holds(e, at) {
+                continue;
+            }
+            let l = self.term(in f, e.lhs);
+            let r = self.term(in f, e.rhs);
+            let ok = if e.strict {
+                self
+                    .index_is(in f, l, t)
+                    && self
+                    .at_most_len(in f, r, place, tb, tk, e.from, inc(depth))
+            } else {
+                self.same(in f, l, t) && self.below_len(in f, r, place, tb, tk, e.from, inc(depth))
+            };
+            if ok {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `at_most_len`: whether `t` is at most the length of `place`
+    // wherever block `at` runs.
+    pub fn at_most_len(
+        inout self,
+        in f: Fun,
+        t: u32,
+        place: u32,
+        tb: u32,
+        tk: u64,
+        at: u32,
+        depth: u64
+    ) -> bool {
+        if depth > MAX_PROOF_DEPTH {
+            return false;
+        }
+        let x = self.node(t);
+        if x
+            .kind
+            == K_LEN
+            && n32(x.a)
+            == place
+            && self
+            .length_kept(in f, place, n32(x.b), x.c, tb, tk) {
+            return true;
+        }
+        // A join of values that are each at most the length (`min`).
+        if x.kind == K_PARAM {
+            let v = n32(x.a);
+            let b = self.param_block(v);
+            let k = self.param_index(v);
+            let np = self.g.npreds(w(b));
+            if np > 0 {
+                let mut all = true;
+                for j in 0..np {
+                    let p = self.g.pred(w(b), j);
+                    let pk = f.block(w(p));
+                    if pk.term != T_JUMP || pk.yes != b || k >= w(pk.tn) {
+                        all = false;
+                        break;
+                    }
+                    let a = f.at(add(w(pk.t0), k));
+                    let ta = self.term(in f, a);
+                    if !self.at_most_len(in f, ta, place, tb, tk, p, inc(depth)) {
+                        all = false;
+                        break;
+                    }
+                }
+                if all {
+                    return true;
+                }
+            }
+        }
+        for ei in 0..self.edges.len() {
+            let e = self.edge(ei);
+            if !self.holds(e, at) {
+                continue;
+            }
+            let l = self.term(in f, e.lhs);
+            let r = self.term(in f, e.rhs);
+            if self
+                .same(in f, l, t)
+                && self
+                .at_most_len(in f, r, place, tb, tk, e.from, inc(depth)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The element access at global instruction `x`, when its receiver is
+    // a read of its place (`accesses`): its access, else 4.
+    pub fn access_at(in self, in f: Fun, x: u64) -> u64 {
+        let i = f.inst(x);
+        if i.op != OP_SEQ {
+            return 4;
+        }
+        let a = hoistable(i.sub);
+        if a == 4 || i.gn < 2 {
+            return 4;
+        }
+        let place = f.arg(w(i.g0)).place;
+        if place == 0 || !self.receiver_read(in f, i, place) {
+            return 4;
+        }
+        a
+    }
+}

@@ -1,0 +1,218 @@
+// @vesper/codegen-freestanding: freestanding images of src/native_freestanding.rs
+// and src/freestanding/** in Vesper (self-hosting wave SH4, lane 14, #1288).
+//
+// Part 1 ports what needs no Cranelift emission: the entry stubs (machine
+// code, labels, fixups and their relocatable object), the static linker,
+// the trap-table fill, the ELF64 executable writer and reader, the linker
+// script and the code comparison of the checks. The runtime object, the
+// floating-point check and Silicon's stack and interrupt analysis read
+// Cranelift functions and come with lane 1's lent builders.
+//
+// Rust stays the default; tests/self_host_freestanding.rs runs both on the
+// images of the freestanding tests.
+//
+// Every entry takes one request (`in Slice[u8]`: little-endian words and
+// length-prefixed strings) and returns one result buffer: a status word (0
+// for success, else an error code of error.ves followed by the error's
+// fields), then the entry's fields.
+//
+// - util.ves: byte reads and writes, the request reader.
+// - error.ves: `FreestandingError` codes.
+// - obj.ves: relocatable ELF64 reads and the stub object writer.
+// - stub.ves: the entry stubs.
+// - elf.ves: executables (`elf::write_executable`, `read_executable`).
+// - link.ves: `link::link`, `resolve_traps`, `patch_trap_table`,
+//   `checks::compare_code`.
+// - script.ves: `script::linker_script`.
+
+use self::util::{
+    Reader,
+    Span,
+    add,
+    push64,
+    put_str,
+    reader,
+    span_end
+};
+use self::error::{
+    error_object,
+    error_target
+};
+use self::stub::{
+    packed_constants,
+    stub_object
+};
+use self::script::{
+    linker_script
+};
+use self::link::{
+    LinkOptions,
+    TrapEntry,
+    compare_code,
+    linker_new
+};
+use self::elf::{
+    read_executable
+};
+
+fn bad_request() -> ChunkSeq[u8] {
+    error_object(in "bad request")
+}
+
+// Request: target, ram_base, ram_bytes, image_base, stack_bytes, board name.
+// Result: 0, the script.
+pub fn freestanding_script(in req: Slice[u8]) -> ChunkSeq[u8] {
+    let mut r = reader();
+    let target = r.word(in req);
+    let ram_base = r.word(in req);
+    let ram_bytes = r.word(in req);
+    let image_base = r.word(in req);
+    let stack_bytes = r.word(in req);
+    let name = r.span(in req);
+    if r.bad {
+        return bad_request();
+    }
+    let s = linker_script(
+        target,
+        in req[name.start..span_end(name)],
+        ram_base,
+        ram_bytes,
+        image_base,
+        stack_bytes
+    );
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push64(inout out, 0);
+    put_str(inout out, in s.as_slice());
+    out
+}
+
+// Request: target, exit device, exit device base, e_flags. Result: 0, the
+// stub object.
+pub fn freestanding_stub(in req: Slice[u8]) -> ChunkSeq[u8] {
+    let mut r = reader();
+    let target = r.word(in req);
+    let exit = r.word(in req);
+    let exit_base = r.word(in req);
+    let e_flags = r.word(in req);
+    if r.bad {
+        return bad_request();
+    }
+    let o = stub_object(target, exit, exit_base, wrapping_u32(e_flags));
+    if o.len() == 0 {
+        return error_target(in "semihosting exit on riscv64 (use the SiFive test device)");
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push64(inout out, 0);
+    put_str(inout out, in o.as_slice());
+    out
+}
+
+// Request: target, image_base, ram_base, ram_bytes, stack_bytes; the object
+// count and per object (name, bytes); the trap entry count and per entry
+// (object name, function, offset). Result: 0, the entry address, the
+// (address, bytes) of `.text`, `.rodata`, `.data`, `.bss`, the stack bottom
+// and top, the image end, the segment count and per segment (address, file
+// offset, file bytes, memory bytes, flags), the symbol count and per symbol
+// (object, name, address, size, global), the trap PCs, the image.
+pub fn freestanding_link(in req: Slice[u8]) -> ChunkSeq[u8] {
+    let mut r = reader();
+    let opts = LinkOptions {
+        target: r.word(in req),
+        image_base: r.word(in req),
+        ram_base: r.word(in req),
+        ram_bytes: r.word(in req),
+        stack_bytes: r.word(in req)
+    };
+    let n = r.word(in req);
+    let mut lk = linker_new(opts);
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut names: ChunkSeq[Span] = ChunkSeq::new[Span]();
+    let mut bodies: ChunkSeq[Span] = ChunkSeq::new[Span]();
+    for i in 0..n {
+        if r.bad {
+            return bad_request();
+        }
+        names.push(r.span(in req));
+        bodies.push(r.span(in req));
+    }
+    let traps = r.word(in req);
+    let mut entries: ChunkSeq[TrapEntry] = ChunkSeq::new[TrapEntry]();
+    for i in 0..traps {
+        if r.bad {
+            return bad_request();
+        }
+        let object = r.span(in req);
+        let function = r.span(in req);
+        let offset = r.word(in req);
+        entries
+            .push(
+            TrapEntry {
+                object: object,
+                function: function,
+                offset: offset
+            }
+        );
+    }
+    if r.bad {
+        return bad_request();
+    }
+    for i in 0..n {
+        let name = match names.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => Span {
+                start: 0,
+                len: 0
+            },
+        };
+        let body = match bodies.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => Span {
+                start: 0,
+                len: 0
+            },
+        };
+        if !lk.add_object(in req, name, body.start, body.len, inout err) {
+            return err;
+        }
+    }
+    if !lk.link(in req, inout err) {
+        return err;
+    }
+    let mut pcs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if !lk.patch_traps(in req, in entries, inout pcs, inout err) {
+        return err;
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push64(inout out, 0);
+    lk.put_result(in req, in pcs, inout out);
+    out
+}
+
+// `elf::read_executable`; see elf.ves for the result.
+pub fn freestanding_read_executable(in elf: Slice[u8]) -> ChunkSeq[u8] {
+    read_executable(in elf)
+}
+
+// Request: the object, the symbol, the code. Result: 0, or the error.
+pub fn freestanding_compare_code(in req: Slice[u8]) -> ChunkSeq[u8] {
+    let mut r = reader();
+    let object = r.span(in req);
+    let symbol = r.span(in req);
+    let code = r.span(in req);
+    if r.bad {
+        return bad_request();
+    }
+    let mut err: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    compare_code(in req, object.start, object.len, symbol, code, inout err);
+    if err.len() != 0 {
+        return err;
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    push64(inout out, 0);
+    out
+}
+
+// The stub's constants (stub.ves `packed_constants`).
+pub fn freestanding_constants() -> u64 {
+    packed_constants()
+}

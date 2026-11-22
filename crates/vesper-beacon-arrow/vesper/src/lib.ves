@@ -1,0 +1,20 @@
+// @vesper/beacon-arrow: the Vesper side of `vesper-beacon-arrow` (Rust-exit
+// wave SH6, lane 18, #1413). Part 2 is the `vesper.beacon.spans/1` Arrow IPC
+// stream that `export_batch` and `export_ring` return.
+use self::spans::{
+    stream_into,
+    stream_len
+};
+
+// The exact byte length of the span stream of `rows` rows.
+pub fn span_stream_len(rows: u64) -> u64 {
+    stream_len(rows)
+}
+
+// Writes the span stream of `rows` rows into `out` (see spans.ves for the
+// column layout); returns the bytes written, or 0 when the columns do not
+// match `rows` or `out` is too short.
+pub fn span_stream_into(in wide: Slice[u64], in narrow: Slice[u8], rows: u64, inout out: Slice[u8])
+    -> u64 {
+    stream_into(in wide, in narrow, rows, inout out)
+}

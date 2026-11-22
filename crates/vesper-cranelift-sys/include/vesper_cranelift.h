@@ -163,6 +163,33 @@ vcl_module *vcl_call_module(uint64_t call);
 void vcl_call_return_builder(uint64_t call, vcl_builder *b);
 void vcl_call_return_module(uint64_t call, vcl_module *m);
 
+/* SH5 lane 2 (#1325): extension attributes (0 none, 1 uext, 2 sext),
+ * functions defined from machine code, declaration listing and read-back of
+ * the last compiled or defined function. A relocation is five words: code
+ * offset, kind (src/codes.rs RELOC), target kind (0 function, 1 data,
+ * 2 libcall, 3 known symbol, 4 offset in this function, 5 other user name),
+ * target and addend. vcl_unary opcodes 20 and 21 are fvpromote_low and
+ * fvdemote. */
+#define VCL_EXT_NONE 0u
+#define VCL_EXT_UEXT 1u
+#define VCL_EXT_SEXT 2u
+uint32_t vcl_sig_param_ext(vcl_module *m, uint32_t sig, uint32_t ty_code, uint32_t ext);
+uint32_t vcl_sig_return_ext(vcl_module *m, uint32_t sig, uint32_t ty_code, uint32_t ext);
+uint32_t vcl_define_function_bytes(vcl_module *m, uint32_t func, uint64_t align, const uint8_t *bytes, size_t bytes_len, const uint64_t *relocs, size_t relocs_len);
+uint32_t vcl_module_function_at(vcl_module *m, uint32_t i);
+uint32_t vcl_module_function_linkage(vcl_module *m, uint32_t func);
+uint32_t vcl_module_function_signature(vcl_module *m, uint32_t func);
+uint32_t vcl_module_data_count(const vcl_module *m);
+uint32_t vcl_module_data_at(vcl_module *m, uint32_t i);
+uint64_t vcl_module_data_name(const vcl_module *m, uint32_t data, uint8_t *out, size_t out_len);
+/* Linkage code | writable << 8 | tls << 9. */
+uint32_t vcl_module_data_linkage(vcl_module *m, uint32_t data);
+uint64_t vcl_module_last_clif(const vcl_module *m, uint64_t offset, uint8_t *out, size_t out_len);
+uint64_t vcl_module_last_relocs(const vcl_module *m, uint64_t *out, size_t out_len);
+/* Two words per call site: return offset, frame offset (UINT64_MAX: none). */
+uint64_t vcl_module_last_call_sites(const vcl_module *m, uint64_t *out, size_t out_len);
+uint64_t vcl_module_last_frame_size(const vcl_module *m);
+
 #ifdef __cplusplus
 }
 #endif

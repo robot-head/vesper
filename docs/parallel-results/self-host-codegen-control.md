@@ -123,7 +123,7 @@ variables and each `HandlerControl`); the hook only emits.
 | Op | Rust site | Args | Result |
 |---|---|---|---|
 | `TAG` | `function_tag`, `closure_tag`, the continuation tag of a handler clause | `[id]` | `[value]` |
-| `CAPTURE_SLOT` | `closure_tag`'s capture slots (copied and lent) | `[size]` | `[slot, address]` |
+| `CAPTURE_SLOT` | `closure_tag`'s slot for an owned aggregate capture | `[size]` | `[slot, address]` |
 | `QUALIFY` | `qualify_tag`'s `icmp_imm`/`iconst`/`select` | `[tag, old, new, acc]` | `[value]` |
 | `DISPATCH` | one candidate of `invoke_tag` (`jump` when single, else `brif`) | `[tag, index, single]` | `[yes, no]` |
 | `TRAP` | the end of a dispatch chain (`user 3` closures, `user 4` handler returns) | `[code]` | none |
@@ -155,6 +155,13 @@ answered from Vesper: 1,798 tags, 40 capture slots, 56 qualifies, 538
 dispatches, 1,014 traps, 150 resumption saves and restores, and 516
 return tests. A deliberately wrong hook (the closure-call trap emitted as
 `user 4`) is caught.
+
+After main gained lane 4's register captures (#1278, a8828f2), word-sized
+and lent captures live in frontend variables, so only an owned aggregate
+capture takes a slot, and no corpus world has one. A hand-written program
+covers `CAPTURE_SLOT`. `widened_function_value.ves` is compared at every
+`CODEGEN_SWAP_STEP`, so the macOS and Windows runs (every 4th world)
+still reach `QUALIFY`.
 
 **The default compiler is unchanged.** Lane 1's check, repeated: every `.ves` file under
 examples/, tests/ and bootstrap/ under 200 KB (539 files) emitted with `vesper emit

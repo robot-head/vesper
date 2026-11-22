@@ -13,37 +13,37 @@ pub(crate) mod abi {
 #[path = "../../port/target.rs"]
 mod binding;
 
+/// The value end of a query entry without `=` (`ABSENT` in the package).
+const ABSENT: u64 = u64::MAX;
+
 pub(crate) fn parse(raw: &str, limits: TargetLimits) -> Result<Target, TargetError> {
     let parsed = binding::target_parse(raw.as_bytes(), limits)?;
     let view = parsed.as_ref();
     if view.asterisk() {
         return Ok(Target::Asterisk);
     }
-    let bytes = view.segments().to_vec();
-    let mut segments = Vec::with_capacity(view.segment_ends().len());
+    let (bytes, ends) = (view.bytes().as_slice(), view.ends().as_slice());
+    let (segment_ends, entry_ends) = ends.split_at(view.segments() as usize);
+    let mut segments = Vec::with_capacity(segment_ends.len());
     let mut at = 0;
-    for end in view.segment_ends().iter() {
+    for &end in segment_ends {
         let end = end as usize;
         segments.push(Segment(bytes[at..end].to_vec()));
         at = end;
     }
     let query = view.has_query().then(|| {
-        let keys = view.keys().to_vec();
-        let values = view.values().to_vec();
-        let (mut key_at, mut value_at) = (0, 0);
-        let mut entries = Vec::with_capacity(view.key_ends().len());
-        for ((key_end, value_end), present) in view
-            .key_ends()
-            .iter()
-            .zip(view.value_ends().iter())
-            .zip(view.value_present().iter())
-        {
-            let (key_end, value_end) = (key_end as usize, value_end as usize);
-            entries.push(QueryEntry {
-                key: keys[key_at..key_end].to_vec(),
-                value: present.then(|| values[value_at..value_end].to_vec()),
+        let mut entries = Vec::with_capacity(entry_ends.len() / 2);
+        for &[key_end, value_end] in entry_ends.as_chunks::<2>().0 {
+            let key_end = key_end as usize;
+            let key = bytes[at..key_end].to_vec();
+            at = key_end;
+            let value = (value_end != ABSENT).then(|| {
+                let value_end = value_end as usize;
+                let value = bytes[at..value_end].to_vec();
+                at = value_end;
+                value
             });
-            (key_at, value_at) = (key_end, value_end);
+            entries.push(QueryEntry { key, value });
         }
         Query { entries }
     });

@@ -249,15 +249,28 @@ impl Module for UnwindModule {
     fn define_function_bytes(
         &mut self,
         func_id: FuncId,
-        _alignment: u64,
-        _bytes: &[u8],
-        _relocs: &[ModuleReloc],
+        alignment: u64,
+        bytes: &[u8],
+        relocs: &[ModuleReloc],
     ) -> ModuleResult<()> {
-        // Raw bytes carry no prologue description, so their frames could not
-        // be unwound. The native backend never defines functions this way.
-        Err(ModuleError::Compilation(CodegenError::Unsupported(
-            format!("function {func_id} defined from raw bytes has no Windows unwind information"),
-        )))
+        // Raw bytes carry no prologue description. The only ones the native
+        // backend defines are `@vesper-std/cpu`'s instructions
+        // (`ffi_lowering::cpu`): frameless leaf functions that touch neither
+        // the stack nor a nonvolatile register, which Windows unwinds
+        // without a table entry, as it does Cranelift's frameless leaves.
+        let name = self
+            .inner
+            .declarations()
+            .get_function_decl(func_id)
+            .linkage_name(func_id)
+            .into_owned();
+        if crate::ffi_lowering::cpu::function(&name).is_none() || !relocs.is_empty() {
+            return Err(ModuleError::Compilation(CodegenError::Unsupported(
+                format!("function {name} defined from raw bytes has no Windows unwind information"),
+            )));
+        }
+        self.inner
+            .define_function_bytes(func_id, alignment, bytes, relocs)
     }
     fn define_data(&mut self, data_id: DataId, data: &DataDescription) -> ModuleResult<()> {
         self.inner.define_data(data_id, data)

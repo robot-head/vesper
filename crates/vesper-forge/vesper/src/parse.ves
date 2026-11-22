@@ -15,91 +15,18 @@
 //   block   := '{' [ expr { ';' expr } [';'] ] '}'
 //   path    := IDENT { '::' IDENT }
 use self::util::{
+    Code,
+    Node,
+    Row,
+    Tk,
+    Want,
     spells,
     wd
 };
 
-// Error codes shared with the resolver and src/port.rs.
-pub fn err_depth() -> u64 {
-    1
-}
-
-pub fn err_unbalanced() -> u64 {
-    2
-}
-
-pub fn err_parse() -> u64 {
-    3
-}
-
-// The `expected` texts of `ForgeError::Parse`.
-pub fn want_end() -> u64 {
-    1
-}
-
-pub fn want_eq() -> u64 {
-    2
-}
-
-pub fn want_semi() -> u64 {
-    3
-}
-
-pub fn want_with() -> u64 {
-    4
-}
-
-pub fn want_close_paren() -> u64 {
-    5
-}
-
-pub fn want_close_brace() -> u64 {
-    6
-}
-
-pub fn want_open_brace() -> u64 {
-    7
-}
-
-pub fn want_ident() -> u64 {
-    8
-}
-
-pub fn k_ident() -> u64 {
-    1
-}
-
-pub fn k_punct() -> u64 {
-    2
-}
-
-pub fn k_int() -> u64 {
-    3
-}
-
-pub fn k_str() -> u64 {
-    4
-}
-
-pub fn k_open_paren() -> u64 {
-    5
-}
-
-pub fn k_open_brace() -> u64 {
-    7
-}
-
-pub fn k_close_paren() -> u64 {
-    8
-}
-
-pub fn k_close_brace() -> u64 {
-    10
-}
-
 // `check_delimiters` over the kinds of `n` rows of `stride` words from
 // rows[base..]: 0 when balanced and at most `max_depth` deep, else
-// `err_depth()`, or `err_unbalanced()` with the token index in `at`.
+// `Code::Depth`, or `Code::Unbalanced` with the token index in `at`.
 // `stack` is scratch space (left cleared).
 pub fn delimiters(
     in rows: Slice[u64],
@@ -113,28 +40,28 @@ pub fn delimiters(
     stack.clear();
     for i in 0..n {
         let k = wd(in rows, wrapping_add(base, wrapping_mul(i, stride)));
-        if k >= 5 && k <= 7 {
+        if k >= Tk::OpenParen && k <= Tk::OpenBrace {
             stack.push(k);
             if stack.len() > max_depth {
                 stack.clear();
-                return err_depth();
+                return Code::Depth;
             }
-        } else if k >= 8 && k <= 10 {
+        } else if k >= Tk::CloseParen && k <= Tk::CloseBrace {
             let top = match stack.pop() {
                 Option::Some(x) => x,
                 Option::None => 0,
             };
-            if wrapping_add(top, 3) != k {
+            if wrapping_add(top, Tk::Close) != k {
                 at = i;
                 stack.clear();
-                return err_unbalanced();
+                return Code::Unbalanced;
             }
         }
     }
     if stack.len() != 0 {
         at = n;
         stack.clear();
-        return err_unbalanced();
+        return Code::Unbalanced;
     }
     0
 }
@@ -174,25 +101,30 @@ fn kind(in toks: Slice[u64], in p: Parser) -> u64 {
     if p.pos >= p.n {
         0
     } else {
-        wd(in toks, wrapping_mul(p.pos, 3))
+        wd(in toks, wrapping_mul(p.pos, Row::Words))
     }
 }
 
 fn text_is(in toks: Slice[u64], in text: Slice[u8], i: u64, in lit: Str) -> bool {
-    let at = wrapping_mul(i, 3);
-    spells(in text, wd(in toks, wrapping_add(at, 1)), wd(in toks, wrapping_add(at, 2)), in lit)
+    let at = wrapping_mul(i, Row::Words);
+    spells(
+        in text,
+        wd(in toks, wrapping_add(at, Row::Start)),
+        wd(in toks, wrapping_add(at, Row::Len)),
+        in lit
+    )
 }
 
 fn is_punct(in toks: Slice[u64], in text: Slice[u8], in p: Parser, in s: Str) -> bool {
-    kind(in toks, in p) == k_punct() && text_is(in toks, in text, p.pos, in s)
+    kind(in toks, in p) == Tk::Punct && text_is(in toks, in text, p.pos, in s)
 }
 
 fn is_keyword(in toks: Slice[u64], in text: Slice[u8], in p: Parser, in s: Str) -> bool {
-    kind(in toks, in p) == k_ident() && text_is(in toks, in text, p.pos, in s)
+    kind(in toks, in p) == Tk::Ident && text_is(in toks, in text, p.pos, in s)
 }
 
 fn fail(inout p: Parser, expected: u64) {
-    p.err = err_parse();
+    p.err = Code::Parse;
     p.e1 = p.pos;
     p.e2 = expected;
 }
@@ -225,14 +157,14 @@ fn expect_kind(in toks: Slice[u64], inout p: Parser, k: u64, expected: u64) -> u
 // An identifier that is not a keyword (`let`, `handle`, `with`).
 fn ident(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) -> u64 {
     if kind(in toks, in p)
-        == k_ident()
+        == Tk::Ident
         && !text_is(in toks, in text, p.pos, in "let")
         && !text_is(in toks, in text, p.pos, in "handle")
         && !text_is(in toks, in text, p.pos, in "with") {
         p.pos = wrapping_add(p.pos, 1);
         wrapping_sub(p.pos, 1)
     } else {
-        fail(inout p, want_ident());
+        fail(inout p, Want::Ident);
         0
     }
 }
@@ -240,7 +172,7 @@ fn ident(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) -> u64 {
 fn enter(inout p: Parser) {
     p.depth = wrapping_add(p.depth, 1);
     if p.depth > p.max_depth {
-        p.err = err_depth();
+        p.err = Code::Depth;
     }
 }
 
@@ -289,7 +221,7 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
         if p.err != 0 {
             return;
         }
-        expect_punct(in toks, in text, inout p, in "=", want_eq());
+        expect_punct(in toks, in text, inout p, in "=", Want::Eq);
         if p.err != 0 {
             return;
         }
@@ -297,7 +229,7 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
         if p.err != 0 {
             return;
         }
-        expect_punct(in toks, in text, inout p, in ";", want_semi());
+        expect_punct(in toks, in text, inout p, in ";", Want::Semi);
         if p.err != 0 {
             return;
         }
@@ -305,7 +237,7 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
         if p.err != 0 {
             return;
         }
-        p.term.push(3);
+        p.term.push(Node::Let);
         p.term.push(binder);
         return;
     }
@@ -317,7 +249,7 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
             return;
         }
         if !is_keyword(in toks, in text, in p, in "with") {
-            fail(inout p, want_with());
+            fail(inout p, Want::With);
             return;
         }
         p.pos = wrapping_add(p.pos, 1);
@@ -329,7 +261,7 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
         if p.err != 0 {
             return;
         }
-        p.term.push(5);
+        p.term.push(Node::Handle);
         p.term.push(keyword);
         p.term.push(epath);
         p.term.push(handler);
@@ -342,7 +274,7 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
     // Each postfix call nests one level deeper, bounded like any nesting.
     let base_depth = p.depth;
     loop {
-        if kind(in toks, in p) != k_open_paren() {
+        if kind(in toks, in p) != Tk::OpenParen {
             break;
         }
         enter(inout p);
@@ -353,7 +285,7 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
         let open = p.pos;
         p.pos = wrapping_add(p.pos, 1);
         let mut nargs: u64 = 0;
-        if kind(in toks, in p) != k_close_paren() {
+        if kind(in toks, in p) != Tk::CloseParen {
             loop {
                 expr(in toks, in text, inout p);
                 if p.err != 0 {
@@ -367,11 +299,11 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
                 }
             }
         }
-        let close = expect_kind(in toks, inout p, k_close_paren(), want_close_paren());
+        let close = expect_kind(in toks, inout p, Tk::CloseParen, Want::CloseParen);
         if p.err != 0 {
             return;
         }
-        p.term.push(4);
+        p.term.push(Node::Call);
         p.term.push(open);
         p.term.push(close);
         p.term.push(nargs);
@@ -381,37 +313,37 @@ fn expr_inner(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
 
 fn primary(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
     let k = kind(in toks, in p);
-    if k == k_int() || k == k_str() {
+    if k == Tk::Int || k == Tk::Str {
         p.pos = wrapping_add(p.pos, 1);
-        p.term.push(2);
+        p.term.push(Node::Lit);
         p.term.push(wrapping_sub(p.pos, 1));
-    } else if k == k_open_paren() {
+    } else if k == Tk::OpenParen {
         p.pos = wrapping_add(p.pos, 1);
         expr(in toks, in text, inout p);
         if p.err != 0 {
             return;
         }
-        let close = expect_kind(in toks, inout p, k_close_paren(), want_close_paren());
-    } else if k == k_open_brace() {
+        let close = expect_kind(in toks, inout p, Tk::CloseParen, Want::CloseParen);
+    } else if k == Tk::OpenBrace {
         block(in toks, in text, inout p);
     } else {
         let at = path(in toks, in text, inout p);
         if p.err != 0 {
             return;
         }
-        p.term.push(1);
+        p.term.push(Node::Ref);
         p.term.push(at);
     }
 }
 
 fn block(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
-    let open = expect_kind(in toks, inout p, k_open_brace(), want_open_brace());
+    let open = expect_kind(in toks, inout p, Tk::OpenBrace, Want::OpenBrace);
     if p.err != 0 {
         return;
     }
     let mut items: u64 = 0;
     loop {
-        if kind(in toks, in p) == k_close_brace() {
+        if kind(in toks, in p) == Tk::CloseBrace {
             break;
         }
         expr(in toks, in text, inout p);
@@ -425,10 +357,10 @@ fn block(in toks: Slice[u64], in text: Slice[u8], inout p: Parser) {
             break;
         }
     }
-    let close = expect_kind(in toks, inout p, k_close_brace(), want_close_brace());
+    let close = expect_kind(in toks, inout p, Tk::CloseBrace, Want::CloseBrace);
     if p.err != 0 {
         return;
     }
-    p.term.push(6);
+    p.term.push(Node::Block);
     p.term.push(items);
 }

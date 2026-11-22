@@ -882,6 +882,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                     })?
                 }
             }
+            SeqOp::Last => {
+                let (h, start, len) = self.seq_view(arg(0)?, &arg_types[0]);
+                let option = Type::Named("Option".into(), vec![elem.clone()]);
+                let present = self.b.ins().icmp_imm(IntCC::NotEqual, len, 0);
+                self.seq_option(&option, &elem, present, |this| {
+                    let last = this.b.ins().iadd_imm(len, -1);
+                    let addr = this.seq_elem_addr(h, start, last, stride);
+                    this.seq_elem_for_store(addr, &elem)
+                })?
+            }
             SeqOp::Clear => {
                 let h = arg(0)?;
                 let zero = self.zero();

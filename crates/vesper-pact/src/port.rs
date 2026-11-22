@@ -2,8 +2,7 @@
 //! solving, coherence, query canonicalization and derivation checking run in
 //! the Vesper package `vesper/`. This module encodes the DTOs as words for
 //! it and rebuilds the crate's own types from its result words. The types,
-//! their `Display` and `Debug` text, the folds and the stand-alone
-//! `check_orphan`, `conformance_env` and `validate_query` stay Rust.
+//! their `Display` and `Debug` text and the folds stay Rust.
 //!
 //! # Input words
 //!
@@ -21,7 +20,9 @@
 //! is `major minor env binders goal`, an environment `n (kind bound)* n
 //! goal* n (n model*)*`. `check_derivation` reads a program, an environment
 //! and a derivation `goal step n derivation*`, with the step's node tag
-//! (18-26) and fields.
+//! (18-26) and fields. `check_orphan` and `conformance_env` read a program
+//! and one conformance `package n kind* trait_ref n goal* n ty*`;
+//! `validate_query` reads a program and a query.
 //!
 //! # Result words
 //!
@@ -799,6 +800,50 @@ pub(crate) fn check_derivation(
             let message = String::from_utf8_lossy(&d.txt[off..]).into_owned();
             Err(DerivationError { path, message })
         }
+    })
+}
+
+/// A program's words followed by one conformance.
+fn conformance_words(program: &[u64], decl: &ConformanceDecl) -> Vec<u64> {
+    let mut e = Enc {
+        w: program.to_vec(),
+    };
+    e.conformance(decl);
+    e.w
+}
+
+/// `check_orphan`.
+pub(crate) fn check_orphan(program: &Program, decl: &ConformanceDecl) -> Result<(), String> {
+    let s = binding::orphan_check(&conformance_words(program.port_words(), decl));
+    read(&s, |d| match d.next() {
+        0 => Ok(()),
+        1 => Err(String::from_utf8_lossy(d.txt).into_owned()),
+        _ => panic!("conformance names a trait or type constructor the program does not declare"),
+    })
+}
+
+/// `conformance_env`.
+/// The environment does not depend on the program's declarations, so the
+/// conformance follows an empty program.
+pub(crate) fn conformance_env(decl: &ConformanceDecl) -> Env {
+    let empty = program_words(&ProgramDto::new());
+    let s = binding::conformance_env_of(&conformance_words(&empty, decl));
+    read(&s, |d| match d.next() {
+        0 => d.env(),
+        _ => panic!("mode bound names a parameter the conformance does not declare"),
+    })
+}
+
+/// `validate_query`.
+pub(crate) fn validate_query(program: &Program, query: &QueryDto) -> Result<(), Vec<Diagnostic>> {
+    let mut e = Enc {
+        w: program.port_words().to_vec(),
+    };
+    e.query(query);
+    let s = binding::query_check(&e.w);
+    read(&s, |d| match d.next() {
+        0 => Ok(()),
+        _ => Err(d.diagnostics()),
     })
 }
 

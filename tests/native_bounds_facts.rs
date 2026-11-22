@@ -250,6 +250,50 @@ fn reverse_affine_loops_are_guarded() {
     );
 }
 
+/// `ADD_RANK` written with the Bench port's helpers (`cu`, `sub`, `add`).
+/// Inlined twice over (helpers into `add_rank`, `add_rank` into `run`), the
+/// helpers' results reach the loop through block parameters and bound
+/// locals; the index forms still are `max - j` and `max - j + rank`
+/// (SH6 lane 7, #1402, gap 2).
+const ADD_RANK_HELPERS: &str = "fn cu(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+fn sub(a: u64, b: u64) -> u64 { wrapping_sub(a, b) }
+fn add(a: u64, b: u64) -> u64 { wrapping_add(a, b) }
+fn add_rank(inout dist: ChunkSeq[u64], max_sum: u64, rank: u64) {
+    for j in 0..=max_sum {
+        let sum = sub(max_sum, j);
+        let v = cu(in dist, sum);
+        let t = add(sum, rank);
+        dist.try_set(t, add(cu(in dist, t), v));
+    }
+}
+";
+
+#[test]
+fn loops_of_inlined_helpers_are_guarded() {
+    for len in [79, 40] {
+        let source = add_rank_program(12, len).replace(ADD_RANK, ADD_RANK_HELPERS);
+        assert!(source.contains("fn cu("));
+        let program = hoisted(&source);
+        assert!(
+            guards(&program, "run") >= 2,
+            "the doubly inlined loop is guarded in its caller"
+        );
+        assert!(
+            unchecked(&program, "run") >= 3,
+            "its fast copy is unchecked"
+        );
+        assert_eq!(
+            differential(&format!("bounds_add_rank_helpers_{len}"), &source),
+            fold(&rank_distribution(12, len as usize))
+        );
+    }
+}
+
 #[test]
 fn failing_affine_guards_fall_back_at_the_same_iteration() {
     // 40 slots for sums up to 78: later calls overrun and take the checked

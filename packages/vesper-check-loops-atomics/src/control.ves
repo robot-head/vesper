@@ -1,0 +1,363 @@
+// The control-target rules of `src/loops/check.rs` and the `?`-on-Option
+// rule of `src/loops/try_option.rs` (self-hosting wave SH2 lane 10,
+// #1182): where `break`, `continue` and `return` may jump, which ranges a
+// `for` takes, and which functions may use `?` on an `Option` (E0213,
+// E0200).
+//
+// The Rust checker keeps a stack of `ControlFrame`s while it types a body:
+// a function or closure body (the `return` target, which a closure starts
+// afresh), a `loop` or `for` body (the `break` and `continue` target), the
+// handled body of a `handle` or `region` block, and a handler clause. The
+// frames depend only on where an expression sits, so this module walks
+// the body with the same stack and reports what the checker reports. The
+// rules that need the checker's environment (moves on a back edge E0312,
+// linear bindings a jump drops E0302, merges E0309, inout loans and linear
+// handler state E0402) stay with the core typing port (SH2 lane 7).
+
+use @vesper/check-data::types::{
+    Types
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::world::{
+    World
+};
+use self::ast::{
+    Exprs,
+    ExprRow
+};
+use self::out::{
+    line
+};
+
+const NONE32: u32 = 4294967295;
+const K_NAMED: u8 = 1;
+const K_INFER: u8 = 5;
+
+const E_CLOSURE: u8 = 14;
+const E_HANDLE: u8 = 15;
+const E_LOOP: u8 = 16;
+const E_FOR: u8 = 17;
+const E_RANGE: u8 = 18;
+const E_BREAK: u8 = 19;
+const E_CONTINUE: u8 = 20;
+const E_RETURN: u8 = 21;
+const E_TRY: u8 = 7;
+const E_BLOCK: u8 = 4;
+
+// `ControlFrame`.
+const F_FN: u8 = 0;
+const F_LOOP: u8 = 1;
+const F_FOR: u8 = 2;
+const F_BODY: u8 = 3;
+const F_REGION: u8 = 4;
+const F_CLAUSE: u8 = 5;
+
+pub struct Control {
+    frames: ChunkSeq[u8],
+    // The expected result type of each frame (NONE32 except `F_FN`).
+    expected: ChunkSeq[u32],
+    option: u32,
+    never: u32,
+}
+
+pub fn control_new(inout names: Names) -> Control {
+    Control {
+        frames: ChunkSeq::new[u8](),
+        expected: ChunkSeq::new[u32](),
+        option: names.intern(in "Option".as_bytes()),
+        never: names.intern(in "Never".as_bytes())
+    }
+}
+
+impl Control {
+    fn push(inout self, f: u8, ty: u32) {
+        self.frames.push(f);
+        self.expected.push(ty);
+    }
+
+    fn pop(inout self) {
+        let f = self.frames.pop();
+        let t = self.expected.pop();
+    }
+
+    fn frame(in self, i: u64) -> u8 {
+        match self.frames.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => F_FN,
+        }
+    }
+
+    fn last(in self) -> u8 {
+        let n = self.frames.len();
+        if n == 0 {
+            return 255;
+        }
+        self.frame(wrapping_sub(n, 1))
+    }
+
+    fn inside_loop(in self) -> bool {
+        for i in 0..self.frames.len() {
+            let f = self.frame(i);
+            if f == F_LOOP || f == F_FOR {
+                return true;
+            }
+        }
+        false
+    }
+
+    // The expected type of the innermost function frame, NONE32 if none.
+    fn function_result(in self) -> u32 {
+        let mut i = self.frames.len();
+        loop {
+            if i == 0 {
+                return NONE32;
+            }
+            i = wrapping_sub(i, 1);
+            if self.frame(i) == F_FN {
+                return match self.expected.try_get(i) {
+                    Option::Some(t) => t,
+                    Option::None => NONE32,
+                };
+            }
+        }
+    }
+}
+
+fn is_option(in types: Types, option: u32, t: u32) -> bool {
+    if t == NONE32 {
+        return false;
+    }
+    let n = types.node(t);
+    n.kind == K_NAMED && n.name == option && n.n == 1
+}
+
+// The jump message of a `break` (or `continue`) whose innermost frame is
+// not a loop (`break_expr`, `continue_expr`).
+fn jump_error(inout o: ChunkSeq[u8], in c: Control, is_break: bool, r: ExprRow) {
+    let target = c.last();
+    let inside = c.inside_loop();
+    let message = if (target == F_BODY || target == F_REGION) && inside {
+        if is_break {
+            "'break' cannot leave a handled body; return a value from the body instead"
+        } else {
+            "'continue' cannot leave a handled body"
+        }
+    } else if target == F_CLAUSE && inside {
+        if is_break {
+            "'break' cannot leave a handler clause"
+        } else {
+            "'continue' cannot leave a handler clause"
+        }
+    } else if target == F_FN && inside {
+        if is_break {
+            "'break' cannot leave a closure"
+        } else {
+            "'continue' cannot leave a closure"
+        }
+    } else if is_break {
+        "'break' outside of a loop"
+    } else {
+        "'continue' outside of a loop"
+    };
+    line(inout o, "E0213", r.start, r.end, message);
+}
+
+fn visit_kids(
+    inout o: ChunkSeq[u8],
+    inout c: Control,
+    in x: Exprs,
+    in types: Types,
+    in world: World,
+    e: u32
+) {
+    for i in 0..x.kid_count(e) {
+        visit(inout o, inout c, in x, in types, in world, x.kid(e, i));
+    }
+}
+
+// Visits `e` as the checker types it, with the frames `c`.
+pub fn visit(
+    inout o: ChunkSeq[u8],
+    inout c: Control,
+    in x: Exprs,
+    in types: Types,
+    in world: World,
+    e: u32
+) {
+    let r = x.row(e);
+    let k = r.kind;
+    if k == E_LOOP {
+        c.push(F_LOOP, NONE32);
+        visit_kids(inout o, inout c, in x, in types, in world, e);
+        c.pop();
+    } else if k == E_FOR {
+        let iter = x.kid(e, 0);
+        let ir = x.row(iter);
+        if ir.kind != E_RANGE {
+            // Which iterables a `for` takes is a typed rule (E0213 with the
+            // iterable's type, SH3 lane 4, #1243), so it moves with core
+            // typing; the checker leaves the body of a rejected `for`
+            // unchecked.
+            visit(inout o, inout c, in x, in types, in world, iter);
+            return;
+        }
+        visit_kids(inout o, inout c, in x, in types, in world, iter);
+        c.push(F_FOR, NONE32);
+        visit(inout o, inout c, in x, in types, in world, x.kid(e, 1));
+        c.pop();
+    } else if k == E_RANGE {
+        line(
+            inout o,
+            "E0213",
+            r.start,
+            r.end,
+            "a range is only supported as the iterable of a 'for' loop"
+        );
+        visit_kids(inout o, inout c, in x, in types, in world, e);
+    } else if k == E_BREAK {
+        let last = c.last();
+        if last == F_LOOP || last == F_FOR {
+            if r.flag != 0 && last == F_FOR {
+                let v = x.row(x.kid(e, 0));
+                line(inout o, "E0213", v.start, v.end, "'break' in a 'for' loop takes no value");
+            }
+        } else {
+            jump_error(inout o, in c, true, r);
+        }
+        visit_kids(inout o, inout c, in x, in types, in world, e);
+    } else if k == E_CONTINUE {
+        let last = c.last();
+        if last != F_LOOP && last != F_FOR {
+            jump_error(inout o, in c, false, r);
+        }
+    } else if k == E_RETURN {
+        let mut i = c.frames.len();
+        let mut message = "'return' outside of a function";
+        let mut ok = false;
+        loop {
+            if i == 0 {
+                break;
+            }
+            i = wrapping_sub(i, 1);
+            let f = c.frame(i);
+            if f == F_REGION {
+                message = "'return' cannot leave a region block";
+                break;
+            }
+            if f == F_CLAUSE {
+                message = "'return' cannot leave a handler clause";
+                break;
+            }
+            if f == F_FN {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            line(inout o, "E0213", r.start, r.end, message);
+        }
+        visit_kids(inout o, inout c, in x, in types, in world, e);
+    } else if k == E_CLOSURE {
+        // A closure body starts a fresh stack (`enter_function`).
+        let mut inner = Control {
+            frames: ChunkSeq::new[u8](),
+            expected: ChunkSeq::new[u32](),
+            option: c.option,
+            never: c.never
+        };
+        inner.push(F_FN, r.expected);
+        visit_kids(inout o, inout inner, in x, in types, in world, e);
+    } else if k == E_HANDLE && r.unchecked {
+        // `Checker::handle` returned before the handler (E0400, E0797 or a
+        // capability effect): nothing inside it is checked.
+    } else if k == E_HANDLE {
+        let mut i: u64 = 0;
+        if (r.flag & 1) != 0 {
+            visit(inout o, inout c, in x, in types, in world, x.kid(e, 0));
+            i = 1;
+        }
+        if (r.flag & 2) != 0 {
+            c.push(F_REGION, NONE32);
+        } else {
+            c.push(F_BODY, NONE32);
+        }
+        visit(inout o, inout c, in x, in types, in world, x.kid(e, i));
+        c.pop();
+        for j in wrapping_add(i, 1)..x.kid_count(e) {
+            let clause = x.kid(e, j);
+            // A clause for an undeclared operation is skipped (E0405).
+            if !x.row(clause).unchecked {
+                c.push(F_CLAUSE, NONE32);
+                visit(inout o, inout c, in x, in types, in world, clause);
+                c.pop();
+            }
+        }
+    } else if k == E_BLOCK {
+        // The checker stops a block at a statement of type `Never`: what
+        // follows is not checked.
+        let n = x.kid_count(e);
+        let statements = if r.flag != 0 {
+            wrapping_sub(n, 1)
+        } else {
+            n
+        };
+        for i in 0..n {
+            let s = x.kid(e, i);
+            visit(inout o, inout c, in x, in types, in world, s);
+            let sr = x.row(s);
+            if i < statements && !sr.is_let {
+                let t = world.expr_type(sr.start, sr.end);
+                if t != NONE32 {
+                    let tn = types.node(t);
+                    if tn.kind == K_NAMED && tn.name == c.never {
+                        return;
+                    }
+                }
+            }
+        }
+    } else if k == E_TRY {
+        let v = x.kid(e, 0);
+        visit(inout o, inout c, in x, in types, in world, v);
+        let vr = x.row(v);
+        let t = world.expr_type(vr.start, vr.end);
+        if is_option(in types, c.option, t) {
+            let expected = c.function_result();
+            let fine = expected
+                != NONE32
+                && (is_option(in types, c.option, expected) || types.kind(expected) == K_INFER);
+            if !fine {
+                line(
+                    inout o,
+                    "E0200",
+                    r.start,
+                    r.end,
+                    "'?' on Option[T] requires a function returning Option"
+                );
+            }
+        }
+    } else {
+        visit_kids(inout o, inout c, in x, in types, in world, e);
+    }
+}
+
+// Every function body of `x` from a fresh function frame (`enter_function`
+// with the declared result).
+pub fn check_bodies(
+    inout o: ChunkSeq[u8],
+    inout c: Control,
+    in x: Exprs,
+    in types: Types,
+    in world: World
+) {
+    for i in 0..x.fn_count() {
+        let f = x.function(i);
+        if f.body != NONE32 {
+            c.frames.clear();
+            c.expected.clear();
+            c.push(F_FN, f.result);
+            visit(inout o, inout c, in x, in types, in world, f.body);
+        }
+    }
+}

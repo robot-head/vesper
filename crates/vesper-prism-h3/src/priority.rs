@@ -11,12 +11,7 @@
 //! responses one at a time in stream order, then incremental responses
 //! sharing the remaining capacity round-robin in fixed quanta.
 
-#[cfg(not(feature = "vesper-port"))]
-use vesper_warp::varint;
-
 use crate::frame::FrameError;
-#[cfg(not(feature = "vesper-port"))]
-use crate::frame::{put_varint, write_frame};
 
 /// PRIORITY_UPDATE for a request stream and for a push (RFC 9218 §7.2).
 pub const PRIORITY_UPDATE_REQUEST: u64 = 0xf0700;
@@ -27,22 +22,9 @@ pub const SETTINGS_NO_RFC7540_PRIORITIES: u64 = 0x09;
 pub const DEFAULT_URGENCY: u8 = 3;
 /// The least urgent level (RFC 9218 §4.1: urgency is 0 to 7).
 pub const MAX_URGENCY: u8 = 7;
-/// The number of urgency levels.
-#[cfg(not(feature = "vesper-port"))]
-const URGENCY_LEVELS: usize = MAX_URGENCY as usize + 1;
 
-/// RFC 8941 §3.3.1: an integer has at most 15 digits.
-#[cfg(not(feature = "vesper-port"))]
-const MAX_INTEGER_DIGITS: usize = 15;
-/// RFC 8941 §3.3.2: a decimal has at most 12 integer digits and 3
-/// fractional digits.
-#[cfg(not(feature = "vesper-port"))]
-const MAX_DECIMAL_INT_DIGITS: usize = 12;
-#[cfg(not(feature = "vesper-port"))]
-const MAX_DECIMAL_FRAC_DIGITS: usize = 3;
 /// Words per stream handed to the port's scheduler: id, urgency,
 /// incremental.
-#[cfg(feature = "vesper-port")]
 const STREAM_WORDS: usize = 3;
 
 /// One response's priority.
@@ -70,271 +52,15 @@ impl Priority {
         }
     }
 
-    /// Parses a `priority` field value or a PRIORITY_UPDATE value.
-    ///
-    /// A value that is not a valid Structured Field Dictionary is ignored
-    /// as a whole (RFC 9218 §4, RFC 8941 §4.2): the result is the default.
-    /// Within a valid dictionary, unknown members are ignored, and so are
-    /// `u` outside 0..=7 or not an integer and `i` that is not a boolean
-    /// (§4.1, §4.2). A member that appears twice takes its last value
-    /// (RFC 8941 §3.2).
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn parse(value: &[u8]) -> Self {
-        let mut p = Self::default();
-        let Some(members) = parse_dictionary(value) else {
-            return p;
-        };
-        for (key, item) in members {
-            match (key.as_slice(), item) {
-                (b"u", Item::Integer(u)) if (0..=i64::from(MAX_URGENCY)).contains(&u) => {
-                    p.urgency = u as u8
-                }
-                (b"u", _) => {}
-                (b"i", Item::Boolean(b)) => p.incremental = b,
-                _ => {}
-            }
-        }
-        p
-    }
-
     /// Parses a `priority` field value (the Vesper build).
-    #[cfg(feature = "vesper-port")]
     pub fn parse(value: &[u8]) -> Self {
         port::h3_priority_parse(value)
     }
 
     /// The field value (the Vesper build).
-    #[cfg(feature = "vesper-port")]
     pub fn serialize(&self) -> String {
         String::from_utf8(port::h3_priority_serialize(*self)).expect("the value is ASCII")
     }
-
-    /// The field value, with default parameters omitted (an empty string
-    /// is the default priority).
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn serialize(&self) -> String {
-        let mut s = String::new();
-        if self.urgency != DEFAULT_URGENCY {
-            s.push_str(&format!("u={}", self.urgency));
-        }
-        if self.incremental {
-            if !s.is_empty() {
-                s.push_str(", ");
-            }
-            s.push('i');
-        }
-        s
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// A Structured Field bare item, reduced to what priorities need.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Item {
-    Integer(i64),
-    Boolean(bool),
-    /// Any other valid item (decimal, string, token, byte sequence, inner
-    /// list): ignored by the priority parameters.
-    Other,
-}
-
-#[cfg(not(feature = "vesper-port"))]
-fn ows(v: &[u8], at: &mut usize) {
-    while *at < v.len() && matches!(v[*at], b' ' | b'\t') {
-        *at += 1;
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-fn sp(v: &[u8], at: &mut usize) {
-    while *at < v.len() && v[*at] == b' ' {
-        *at += 1;
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-fn key(v: &[u8], at: &mut usize) -> Option<Vec<u8>> {
-    let start = *at;
-    match v.get(*at) {
-        Some(c) if c.is_ascii_lowercase() || *c == b'*' => *at += 1,
-        _ => return None,
-    }
-    while let Some(c) = v.get(*at) {
-        if c.is_ascii_lowercase() || c.is_ascii_digit() || b"_-.*".contains(c) {
-            *at += 1;
-        } else {
-            break;
-        }
-    }
-    Some(v[start..*at].to_vec())
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// RFC 8941 §4.2.3: a bare item.
-fn bare_item(v: &[u8], at: &mut usize) -> Option<Item> {
-    let c = *v.get(*at)?;
-    if c == b'-' || c.is_ascii_digit() {
-        let start = *at;
-        if c == b'-' {
-            *at += 1;
-        }
-        let digits = *at;
-        while v.get(*at).is_some_and(u8::is_ascii_digit) {
-            *at += 1;
-        }
-        let int_digits = *at - digits;
-        if int_digits == 0 {
-            return None;
-        }
-        if v.get(*at) == Some(&b'.') {
-            if int_digits > MAX_DECIMAL_INT_DIGITS {
-                return None;
-            }
-            *at += 1;
-            let frac = *at;
-            while v.get(*at).is_some_and(u8::is_ascii_digit) {
-                *at += 1;
-            }
-            if *at == frac || *at - frac > MAX_DECIMAL_FRAC_DIGITS {
-                return None;
-            }
-            return Some(Item::Other);
-        }
-        if int_digits > MAX_INTEGER_DIGITS {
-            return None;
-        }
-        let n: i64 = std::str::from_utf8(&v[start..*at]).ok()?.parse().ok()?;
-        return Some(Item::Integer(n));
-    }
-    match c {
-        b'"' => {
-            *at += 1;
-            loop {
-                let c = *v.get(*at)?;
-                *at += 1;
-                match c {
-                    b'\\' => {
-                        let e = *v.get(*at)?;
-                        if e != b'"' && e != b'\\' {
-                            return None;
-                        }
-                        *at += 1;
-                    }
-                    b'"' => return Some(Item::Other),
-                    b' '..=b'~' => {}
-                    _ => return None,
-                }
-            }
-        }
-        b'?' => {
-            *at += 1;
-            let b = match v.get(*at)? {
-                b'0' => false,
-                b'1' => true,
-                _ => return None,
-            };
-            *at += 1;
-            Some(Item::Boolean(b))
-        }
-        b':' => {
-            *at += 1;
-            loop {
-                let c = *v.get(*at)?;
-                *at += 1;
-                match c {
-                    b':' => return Some(Item::Other),
-                    c if c.is_ascii_alphanumeric() || b"+/=".contains(&c) => {}
-                    _ => return None,
-                }
-            }
-        }
-        c if c.is_ascii_alphabetic() || c == b'*' => {
-            *at += 1;
-            while let Some(c) = v.get(*at) {
-                if c.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~:/".contains(c) {
-                    *at += 1;
-                } else {
-                    break;
-                }
-            }
-            Some(Item::Other)
-        }
-        _ => None,
-    }
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// RFC 8941 §4.2.3.2: parameters (parsed and dropped).
-fn parameters(v: &[u8], at: &mut usize) -> Option<()> {
-    while v.get(*at) == Some(&b';') {
-        *at += 1;
-        sp(v, at);
-        key(v, at)?;
-        if v.get(*at) == Some(&b'=') {
-            *at += 1;
-            bare_item(v, at)?;
-        }
-    }
-    Some(())
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// An item or inner list with its parameters.
-fn member_value(v: &[u8], at: &mut usize) -> Option<Item> {
-    if v.get(*at) == Some(&b'(') {
-        *at += 1;
-        loop {
-            sp(v, at);
-            if v.get(*at) == Some(&b')') {
-                *at += 1;
-                parameters(v, at)?;
-                return Some(Item::Other);
-            }
-            bare_item(v, at)?;
-            parameters(v, at)?;
-            match v.get(*at) {
-                Some(b' ') | Some(b')') => {}
-                _ => return None,
-            }
-        }
-    }
-    let item = bare_item(v, at)?;
-    parameters(v, at)?;
-    Some(item)
-}
-
-#[cfg(not(feature = "vesper-port"))]
-/// RFC 8941 §4.2.2. `None` if the value is not a valid dictionary.
-fn parse_dictionary(v: &[u8]) -> Option<Vec<(Vec<u8>, Item)>> {
-    let mut at = 0;
-    sp(v, &mut at);
-    let mut out = Vec::new();
-    while at < v.len() {
-        let k = key(v, &mut at)?;
-        let item = if v.get(at) == Some(&b'=') {
-            at += 1;
-            member_value(v, &mut at)?
-        } else {
-            parameters(v, &mut at)?;
-            Item::Boolean(true)
-        };
-        out.push((k, item));
-        // Bounded: each member consumes at least one byte.
-        ows(v, &mut at);
-        if at >= v.len() {
-            break;
-        }
-        if v[at] != b',' {
-            return None;
-        }
-        at += 1;
-        ows(v, &mut at);
-        if at >= v.len() {
-            // A trailing comma.
-            return None;
-        }
-    }
-    Some(out)
 }
 
 /// A parsed PRIORITY_UPDATE frame.
@@ -348,84 +74,18 @@ pub struct PriorityUpdate {
 
 impl PriorityUpdate {
     /// Parses a PRIORITY_UPDATE payload (the Vesper build).
-    #[cfg(feature = "vesper-port")]
     pub fn parse(frame_type: u64, payload: &[u8]) -> Result<Self, FrameError> {
         port::h3_priority_update_parse(frame_type, payload)
     }
 
     /// The PRIORITY_UPDATE frame (the Vesper build).
-    #[cfg(feature = "vesper-port")]
     pub fn encode(&self, out: &mut Vec<u8>) {
         crate::frame::written(out, port::h3_priority_update_encode(*self));
     }
-
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn parse(frame_type: u64, payload: &[u8]) -> Result<Self, FrameError> {
-        let (element_id, n) = varint::decode(payload).map_err(|_| FrameError::Malformed)?;
-        let value = &payload[n..];
-        // The field value is ASCII (RFC 8941 §4.2).
-        if value.iter().any(|b| !(b' '..=b'~').contains(b)) {
-            return Err(FrameError::Malformed);
-        }
-        Ok(Self {
-            push: frame_type == PRIORITY_UPDATE_PUSH,
-            element_id,
-            priority: Priority::parse(value),
-        })
-    }
-
-    #[cfg(not(feature = "vesper-port"))]
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        let mut payload = Vec::new();
-        put_varint(&mut payload, self.element_id);
-        payload.extend_from_slice(self.priority.serialize().as_bytes());
-        let ty = if self.push {
-            PRIORITY_UPDATE_PUSH
-        } else {
-            PRIORITY_UPDATE_REQUEST
-        };
-        write_frame(out, ty, &payload);
-    }
-}
-
-/// The order in which streams with queued bytes are offered to the
-/// transport (RFC 9218 §10).
-///
-/// `streams` are `(stream_id, priority)` pairs. Returns groups in urgency
-/// order. A group of one stream is a non-incremental stream, served until
-/// it is blocked or empty before the next group. A group of several
-/// streams holds the incremental streams of one urgency, which take turns
-/// in quanta; `rotate` picks which of them goes first.
-#[cfg(not(feature = "vesper-port"))]
-pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
-    let mut by_urgency: [Vec<(u64, bool)>; URGENCY_LEVELS] = Default::default();
-    for (id, p) in streams {
-        by_urgency[usize::from(p.urgency.min(MAX_URGENCY))].push((*id, p.incremental));
-    }
-    let mut groups = Vec::new();
-    for mut g in by_urgency {
-        if g.is_empty() {
-            continue;
-        }
-        g.sort_by_key(|(id, inc)| (*inc, *id));
-        // Non-incremental streams each form their own group, in order.
-        let split = g.iter().position(|(_, inc)| *inc).unwrap_or(g.len());
-        for (id, _) in &g[..split] {
-            groups.push(vec![*id]);
-        }
-        let mut inc: Vec<u64> = g[split..].iter().map(|(id, _)| *id).collect();
-        if !inc.is_empty() {
-            let r = rotate % inc.len();
-            inc.rotate_left(r);
-            groups.push(inc);
-        }
-    }
-    groups
 }
 
 /// The order in which streams with queued bytes are offered to the
 /// transport (RFC 9218 §10), in the Vesper build.
-#[cfg(feature = "vesper-port")]
 pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
     let mut flat = Vec::with_capacity(streams.len() * STREAM_WORDS);
     for (id, p) in streams {
@@ -442,7 +102,6 @@ pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
     groups
 }
 
-#[cfg(feature = "vesper-port")]
 use crate::qpack::port::binding as port;
 
 #[cfg(test)]

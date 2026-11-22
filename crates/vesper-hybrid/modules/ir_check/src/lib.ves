@@ -9,7 +9,12 @@
 
 // @export abi 4
 
+use @vesper/check-data::input::{
+    Ctx,
+    ctx_new
+};
 use @vesper/ir-check::{
+    ir_check_part,
     ir_check_words
 };
 
@@ -20,6 +25,25 @@ pub fn format() -> u64 {
 
 pub fn validate_words(in input: Slice[u8]) -> ChunkSeq[u64] {
     ir_check_words(in input)
+}
+
+// One compilation's world, decoded once (self-hosting SH4 lane 2, #1276):
+// the first call's part carries every ADT and effect, later calls only the
+// new names and types; each then carries its program
+// (`WorldLog::part` in tests/common/check_words.rs).
+pub struct IrInput {
+    c: Ctx,
+}
+
+pub fn ir_input_new() -> IrInput {
+    IrInput {
+        c: ctx_new()
+    }
+}
+
+// `validate_words` over the world this input holds, after adding `part`.
+pub fn ir_input_validate(inout s: IrInput, in part: Slice[u8]) -> ChunkSeq[u64] {
+    ir_check_part(inout s.c, in part)
 }
 
 // The divergent build's stream (build.rs `divergent-ir-check`): one made-up

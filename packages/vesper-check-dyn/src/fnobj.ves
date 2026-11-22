@@ -1035,11 +1035,16 @@ fn infer(inout d: D, e: u32) -> u32 {
             Lit {
                 kind: 0,
                 neg: false,
-                bits: 0
+                bits: 0,
+                hi: 0
             }
         );
         if lit.kind == 1 {
             return d.t_i64;
+        }
+        // A literal past `i128::MAX` (`Literal::WideInt`): not evident.
+        if lit.kind == 5 {
+            return d.t_infer;
         }
         if lit.kind == 3 {
             return d.t_bool;

@@ -263,7 +263,7 @@ pub fn compile(
         .ok_or_else(|| WasmError::Entry(format!("unknown entry function '{entry}'")))?;
     let mut program = crate::ir::lower_world(world);
     if options.optimize {
-        crate::ir_opt::optimize(world, &mut program).map_err(WasmError::Invalid)?;
+        crate::ir_opt_policy::optimize(world, &mut program).map_err(WasmError::Invalid)?;
     }
     let stack_switching = options.effects == EffectLowering::StackSwitching;
     let plan = analysis::plan(

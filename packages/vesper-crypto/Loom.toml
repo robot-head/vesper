@@ -1,0 +1,11 @@
+[package]
+name = "@vesper/crypto"
+version = "0.1.0"
+edition = "2026"
+# Every primitive reaches the vetted libraries through the `.vsys` library
+# in src/lib.ves.
+capability_ceiling = ["Fail", "Alloc", "Ffi"]
+# The `.vsys` library, so a package that depends on this one imports it
+# (#1275). It is the `// @export vsys` directive of src/lib.ves, copied;
+# tests/crypto_shim.rs keeps the two equal.
+vsys = ["crypto.vsys"]

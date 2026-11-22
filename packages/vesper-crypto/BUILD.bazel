@@ -1,0 +1,19 @@
+load("//tools/bazel:vesper_port.bzl", "vesper_package")
+
+# @vesper/crypto (SH6 lane 17, #1412): the `.vsys` library over
+# crates/vesper-crypto-sys and its typed wrappers, which tests/crypto_shim.rs
+# and the crypto ports load.
+filegroup(
+    name = "files",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+    visibility = ["//visibility:public"],
+)
+
+# The package as a path dependency of port builds.
+vesper_package(
+    name = "crypto_package",
+    srcs = glob(["src/**/*.ves"]),
+    manifest = "Loom.toml",
+    visibility = ["//visibility:public"],
+    vsys = ["crypto.vsys"],
+)

@@ -79,12 +79,19 @@ fn big_stack<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     })
 }
 
-/// The corpus worlds with a `main`, every `step()`-th.
+/// Corpus worlds compared at every `step()`: each reaches an op that few
+/// worlds do (`qualify_tag`), so a sampled run still answers every op.
+const PINNED: [&str; 1] = ["tests/fixtures/native_handlers/widened_function_value.ves"];
+
+/// The corpus worlds with a `main`, every `step()`-th, and the pinned ones.
 fn worlds() -> Vec<&'static check_harness::Case> {
+    let step = step();
     check_harness::corpus()
         .iter()
         .filter(|c| c.world.functions.contains_key("main"))
-        .step_by(step())
+        .enumerate()
+        .filter(|(i, c)| i % step == 0 || PINNED.contains(&c.name.as_str()))
+        .map(|(_, c)| c)
         .collect()
 }
 
@@ -94,6 +101,25 @@ fn worlds() -> Vec<&'static check_harness::Case> {
 fn runs(case: &check_harness::Case) -> bool {
     let f = &case.world.functions["main"];
     f.params.is_empty() && f.effects.instances.is_empty() && f.effects.tail.is_none()
+}
+
+/// Programs for the ops the corpus may not reach. Since #1278 only an
+/// owned aggregate capture takes a capture slot (word-sized and lent
+/// captures live in variables).
+const HANDWRITTEN: [(&str, &str); 1] = [(
+    "owned aggregate capture",
+    "struct Pair {\n    a: u64,\n    b: u64\n}\n\
+     fn main() -> u64 {\n    let p = Pair {\n        a: 2,\n        b: 3\n    };\n    \
+     let f = |x: u64| x ^ p.a ^ p.b;\n    f(4)\n}\n",
+)];
+
+/// The checked world of a hand-written program.
+fn accepted(source: &str) -> vesper::check::World {
+    let parsed = vesper::parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let checked = vesper::check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    checked.world
 }
 
 /// The swap: 0 CLIF differences, byte-identical objects and equal runs,
@@ -116,6 +142,12 @@ fn control_swap() {
                 optimize,
                 runs(case),
             ));
+        }
+    }
+    for (name, source) in HANDWRITTEN {
+        let world = accepted(source);
+        for optimize in [true, false] {
+            total.add(compare(name, &world, "main", hooks(), optimize, true));
         }
     }
     let counts: Vec<(&str, u64)> = OPS

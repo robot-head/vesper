@@ -67,6 +67,82 @@ fn rules() -> Vec<Rewrite<Math, ()>> {
         rewrite!("wself-sub";"(wrapping_sub ?x ?x)"=>"0" if total("?x")),
     ]
 }
+/// This module as a function table: the swap-in point for the hybrid Stage 2
+/// build (`crates/vesper-hybrid`, self-hosting SH3 lane 10, #1249), which
+/// installs `@vesper/optimize`'s functions here before the CLI starts.
+/// Nothing in the default compiler installs a table, so it always runs the
+/// Rust code below, unchanged.
+#[derive(Debug, Clone, Copy)]
+pub struct OptimizeTable {
+    /// The install gate: checks a proposal's certificate against the exact
+    /// source and candidate, continuing the producer's budget (`limits`,
+    /// already `spent`). [`witness::verify_spent`] is the Rust one.
+    pub verify: VerifyFn,
+    /// The untrusted producer of one island's proposal; `None` keeps the
+    /// Rust one ([`propose_rust`]).
+    pub propose: Option<ProposeFn>,
+}
+
+/// The producer's signature ([`OptimizeTable::propose`]): `propose_rewrite`
+/// on a fresh budget of `limits`.
+pub type ProposeFn =
+    fn(source: &Expr, types: &TypeMap, limits: WitnessLimits) -> Result<Proposal, WitnessError>;
+
+/// A producer's answer for one expression.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Proposal {
+    /// Not an integer island: its children are visited instead.
+    Barrier,
+    /// An island the search leaves as it is.
+    Unchanged,
+    Candidate(Box<Produced>),
+}
+
+/// A candidate, its certificate and the budget its production spent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Produced {
+    pub candidate: Expr,
+    pub certificate: witness::RewriteCertificate,
+    pub limits: WitnessLimits,
+    pub spent: witness::Spent,
+}
+
+/// The Rust producer (`certificate::propose_rewrite`) behind [`ProposeFn`].
+pub fn propose_rust(
+    source: &Expr,
+    types: &TypeMap,
+    limits: WitnessLimits,
+) -> Result<Proposal, WitnessError> {
+    Ok(match certificate::propose_rewrite(source, types, limits)? {
+        RewriteOutcome::Barrier => Proposal::Barrier,
+        RewriteOutcome::Unchanged => Proposal::Unchanged,
+        RewriteOutcome::Candidate(p) => Proposal::Candidate(Box::new(Produced {
+            limits: p.budget.limits(),
+            spent: p.budget.spent(),
+            candidate: p.candidate,
+            certificate: p.certificate,
+        })),
+    })
+}
+
+/// The install gate's signature ([`OptimizeTable::verify`]).
+pub type VerifyFn = fn(
+    source: &Expr,
+    candidate: &Expr,
+    types: &TypeMap,
+    certificate: &witness::RewriteCertificate,
+    limits: WitnessLimits,
+    spent: &mut witness::Spent,
+) -> Result<(), WitnessError>;
+
+static OPTIMIZE: std::sync::OnceLock<OptimizeTable> = std::sync::OnceLock::new();
+
+/// Replace the Rust install gate for the rest of the process. Only the first
+/// call takes effect; a later one returns its table back.
+pub fn install_optimize(table: OptimizeTable) -> Result<(), OptimizeTable> {
+    OPTIMIZE.set(table)
+}
+
 // This is the only expression-installation seam. The producer is untrusted:
 // verify the exact source/candidate and every proof with its cumulative budget.
 fn install_proposal(
@@ -74,13 +150,25 @@ fn install_proposal(
     types: &TypeMap,
     mut proposal: Box<RewriteProposal>,
 ) -> Result<(), WitnessError> {
-    witness::verify_with_budget(
-        expression,
-        &proposal.candidate,
-        types,
-        &proposal.certificate,
-        &mut proposal.budget,
-    )?;
+    if let Some(table) = OPTIMIZE.get() {
+        let mut spent = proposal.budget.spent();
+        (table.verify)(
+            expression,
+            &proposal.candidate,
+            types,
+            &proposal.certificate,
+            proposal.budget.limits(),
+            &mut spent,
+        )?;
+    } else {
+        witness::verify_with_budget(
+            expression,
+            &proposal.candidate,
+            types,
+            &proposal.certificate,
+            &mut proposal.budget,
+        )?;
+    }
     *expression = proposal.candidate;
     Ok(())
 }
@@ -104,18 +192,56 @@ pub fn optimize(module: &mut Module, types: &TypeMap) {
         }
     }
 }
+/// An installed producer's step at `e`: true when `e` is done (installed,
+/// unchanged or refused), false at a barrier.
+fn installed_step(
+    e: &mut Expr,
+    types: &TypeMap,
+    table: &OptimizeTable,
+    propose: ProposeFn,
+) -> bool {
+    match propose(e, types, WitnessLimits::default()) {
+        Ok(Proposal::Candidate(p)) => {
+            let Produced {
+                candidate,
+                certificate,
+                limits,
+                mut spent,
+            } = *p;
+            if (table.verify)(e, &candidate, types, &certificate, limits, &mut spent).is_ok() {
+                *e = candidate;
+            }
+            true
+        }
+        Ok(Proposal::Unchanged) | Err(_) => true,
+        Ok(Proposal::Barrier) => false,
+    }
+}
+
 fn visit(e: &mut Expr, types: &TypeMap) {
     // Admit maximal islands before child edits so type/callee origins still
     // refer to the checked source. Refusal never retries an admitted island's
     // children; only a true unsupported barrier permits ordinary traversal.
-    match certificate::propose_rewrite(e, types, WitnessLimits::default()) {
-        Ok(RewriteOutcome::Candidate(proposal)) => {
-            let _ = install_proposal(e, types, proposal);
+    if let Some(table) = OPTIMIZE.get()
+        && let Some(propose) = table.propose
+    {
+        if installed_step(e, types, table, propose) {
             return;
         }
-        Ok(RewriteOutcome::Unchanged) | Err(_) => return,
-        Ok(RewriteOutcome::Barrier) => {}
+    } else {
+        match certificate::propose_rewrite(e, types, WitnessLimits::default()) {
+            Ok(RewriteOutcome::Candidate(proposal)) => {
+                let _ = install_proposal(e, types, proposal);
+                return;
+            }
+            Ok(RewriteOutcome::Unchanged) | Err(_) => return,
+            Ok(RewriteOutcome::Barrier) => {}
+        }
     }
+    visit_children(e, types);
+}
+
+fn visit_children(e: &mut Expr, types: &TypeMap) {
     match &mut e.kind {
         ExprKind::Tuple(es) => {
             for e in es {

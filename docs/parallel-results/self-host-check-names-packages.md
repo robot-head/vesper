@@ -167,3 +167,45 @@ Not gaps, but notes for later lanes:
    imports into the `World` tables), on `@vesper/check-data`'s fields.
 4. A Linux port shard 7 entry once the module has a divergent build to
    check (today the differential runs in `Test all targets` and Bazel).
+
+## Value enums and importable constants (#1310)
+
+#1239 added value enums (`enum E: T { A = e, .. }`) and importable
+constants to `src/packages.rs`, and the crate ports moved to them (#1263,
+#1266, #1268). The port did not know them, so 11 crate port packages
+differed from Rust. CI missed this because the test's Bazel data left out
+the crate ports, which are under `crates/*/vesper`.
+
+The follow-up ports #1239's changes:
+
+- `lookup` falls back to the constant `const$NAME`.
+- `Resolver::group` handles value enums that are declared or re-exported,
+  listed by `(module, enum)`.
+- Group imports, including the E0112 for a private enum and the E0113 for
+  an enum name that is both declared and imported or imported from two
+  enums.
+- Re-exported groups, and root re-exports of constants, which keep
+  their `const$` prefix.
+- `m::E::M` paths.
+- In the renamer: `E::M` member names, literal patterns for imported
+  constants, untyped members as literals, and calls of imported
+  constants, with an empty callee span as the lowering gives.
+
+A `values` mutant covers each form. The Bazel data now includes the
+crate ports' `:files`, and the package floor is 75 everywhere.
+
+The cost of the fix, measured with callgrind on `packages/vesper-compiler`
+(whole Vesper load):
+
+| Build | Vesper Ir | Rust Ir | Ratio |
+|---|--:|--:|--:|
+| main before the fix | 262,135,502 | 165,218,242 | 1.59x |
+| the fix | 267,391,635 | 165,218,242 | 1.62x |
+
+The fix adds 2.0% to Vesper's load. One parse of every module is now
+104.8M Ir, so the assembler alone is about 57.7M Ir, against 52.5M before
+the fix. An earlier draft of the fix checked every name expression through
+two hash tables. That cost 20M Ir, so the constant checks now use an array
+indexed by symbol id, and a callee node the renamer makes is recognized by
+its index. Wall clock on this host moved by more than the fix costs, so
+the earlier wall table is not re-measured here.

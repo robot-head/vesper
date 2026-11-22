@@ -1,0 +1,54 @@
+// Module report of @vesper/backend-checks (see lib.ves): building the
+// report's text and rows.
+
+use self::input::{
+    Cx
+};
+use self::util::{
+    put
+};
+
+const RW: u64 = 7;
+
+// Records a verifier's own finding: its message is `c.r.tx[msg..]` (just
+// written); the rule text is appended after it.
+pub fn raw_finding(inout c: Cx, function: u64, has_inst: bool, inst: u64, in rule: Str, msg: u64) {
+    let len = wrapping_sub(c.r.tx.len(), msg);
+    let at = c.r.tx.len();
+    put(inout c.r.tx, rule);
+    c.raw.push(function);
+    if has_inst {
+        c.raw.push(1);
+    } else {
+        c.raw.push(0);
+    }
+    c.raw.push(inst);
+    c.raw.push(at);
+    c.raw.push(wrapping_sub(c.r.tx.len(), at));
+    c.raw.push(msg);
+    c.raw.push(len);
+}
+
+// A note whose text is `c.r.tx[at..]`.
+pub fn note(inout c: Cx, at: u64) {
+    c.r.notes.push(at);
+    c.r.notes.push(wrapping_sub(c.r.tx.len(), at));
+}
+
+pub fn dnote(inout c: Cx, at: u64) {
+    c.dnotes.push(at);
+    c.dnotes.push(wrapping_sub(c.r.tx.len(), at));
+}
+
+// Fails the run: `c.emsg` holds the error.
+pub fn fail(inout c: Cx) {
+    c.err = true;
+}
+
+pub fn clear_raw(inout c: Cx) {
+    c.raw.truncate(0);
+}
+
+pub fn raw_count(in c: Cx) -> u64 {
+    c.raw.len() / RW
+}

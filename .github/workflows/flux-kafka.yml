@@ -27,20 +27,24 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
   pull_request:
+    # Cargo.toml/Cargo.lock are left out here on purpose (#1321): nearly every
+    # PR touches the lock file, and these integration lanes then queued behind
+    # the account's job limit. Pushes to main still run on those changes.
     paths:
       - 'crates/vesper-flux/**'
       - 'crates/vesper-quarry/**'
       - 'crates/vesper-loom-cas/**'
       - 'crates/vesper-simpulse/**'
       - '.github/workflows/flux-kafka.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
 
 permissions:
   contents: read
+  # The merge gate reads open pull requests and cancels blocked runs.
+  actions: write
+  pull-requests: read
 
 concurrency:
-  group: flux-kafka-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: flux-kafka-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -60,6 +64,24 @@ jobs:
     env:
       VESPER_KAFKA_REQUIRE: '1'
     steps:
+      # Merge gate (#1321, #1479): a pull request that cannot merge yet runs no CI.
+      - name: Check out the pull request head for the merge gate
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: .gate
+          fetch-depth: 0
+          sparse-checkout: |
+            .github/actions
+            scripts/ci
+      - name: Merge gate
+        if: github.event_name == 'pull_request'
+        uses: ./.gate/.github/actions/merge-gate
+        with:
+          number: ${{ github.event.pull_request.number }}
+          base-ref: ${{ github.event.pull_request.base.ref }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:

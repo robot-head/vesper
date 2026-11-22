@@ -1,0 +1,267 @@
+// What both passes read from a function of the tables: the type of each
+// value, the locals, the operands' layout, and the place a memory operation
+// names as text.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types
+};
+use @vesper/place-ir::{
+    BlockRow,
+    FnRow,
+    InstRow,
+    Program
+};
+
+pub const NONE: u32 = 4294967295;
+
+// Opcodes (tests/common/ir_words.rs `OP_NAMES`).
+pub const OP_READ: u8 = 2;
+pub const OP_BIND: u8 = 3;
+pub const OP_WRITE: u8 = 4;
+pub const OP_CALL: u8 = 11;
+pub const OP_HANDLE: u8 = 15;
+pub const OP_FIP: u8 = 19;
+
+// Operand tags.
+pub const T_RAW: u8 = 0;
+pub const T_VALUE: u8 = 6;
+pub const T_BLOCK: u8 = 7;
+
+// Terminators.
+pub const TERM_RETURN: u8 = 0;
+pub const TERM_JUMP: u8 = 1;
+
+// `PatternKind::Bind`, `Pass::Sink`.
+pub const PAT_BIND: u64 = 1;
+pub const P_SINK: u64 = 2;
+
+// Type classes (`type_classes`).
+pub const C_SCALAR: u8 = 1;
+pub const C_NEVER: u8 = 2;
+
+// The scalar names of `numeric::is_scalar_name` other than `Never`.
+fn scalar_name(in names: Names, s: u32) -> bool {
+    names
+        .spells(s, in "u8".as_bytes())
+        || names
+        .spells(s, in "u16".as_bytes())
+        || names
+        .spells(s, in "u32".as_bytes())
+        || names
+        .spells(s, in "u64".as_bytes())
+        || names
+        .spells(s, in "usize".as_bytes())
+        || names
+        .spells(s, in "i8".as_bytes())
+        || names
+        .spells(s, in "i16".as_bytes())
+        || names
+        .spells(s, in "i32".as_bytes())
+        || names
+        .spells(s, in "i64".as_bytes())
+        || names
+        .spells(s, in "isize".as_bytes())
+        || names
+        .spells(s, in "i128".as_bytes())
+        || names
+        .spells(s, in "u128".as_bytes())
+        || names
+        .spells(s, in "f32".as_bytes())
+        || names
+        .spells(s, in "f64".as_bytes())
+        || names
+        .spells(s, in "bool".as_bytes())
+        || names
+        .spells(s, in "Unit".as_bytes())
+}
+
+// Per type id: `C_SCALAR` when ir_opt's `scalar` holds (a scalar name other
+// than `Never`, or the unit tuple), `C_NEVER` for `Never`, else 0.
+pub fn type_classes(in t: Types, in names: Names) -> ChunkSeq[u8] {
+    let n = t.nodes.len();
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for id in 0..n {
+        let ty = n32(id);
+        let mut c: u8 = 0;
+        if ty == t.unit {
+            c = C_SCALAR;
+        } else {
+            let s = t.name(ty);
+            if s != 0 {
+                if names.spells(s, in "Never".as_bytes()) {
+                    c = C_NEVER;
+                } else if scalar_name(in names, s) {
+                    c = C_SCALAR;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+pub fn class_of(in cls: ChunkSeq[u8], ty: u32) -> u8 {
+    if ty == NONE {
+        return 0;
+    }
+    u8_at(in cls, w(ty))
+}
+
+pub fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => NONE,
+    }
+}
+
+// A function's values (value id -> type id, `NONE` when absent), the next
+// unused value id (`max + 1`, Rust's `next_join_id`) and its locals.
+pub struct FnView {
+    vty: ChunkSeq[u32],
+    next_value: u64,
+    locals: ChunkSeq[u32]
+}
+
+impl FnView {
+    pub fn vtype(in self, v: u64) -> u32 {
+        at32(in self.vty, v)
+    }
+}
+
+// The header: params (name, pass, k, k paths, type, start, end), result,
+// effects, bounds (name, mode), captures, values (value, type), locals
+// (name, type).
+pub fn fn_view(in p: Program, f: FnRow) -> FnView {
+    let mut at = f.ha;
+    let np = p.op(at);
+    at = inc(at);
+    for i in 0..np {
+        let k = p.op(add(at, 2));
+        at = add(at, add(6, k));
+    }
+    at = add(at, 2);
+    let nb = p.op(at);
+    at = add(inc(at), wrapping_mul(nb, 2));
+    let nc = p.op(at);
+    at = add(inc(at), nc);
+    let nv = p.op(at);
+    at = inc(at);
+    let mut next: u64 = 0;
+    let v0 = at;
+    for i in 0..nv {
+        let v = p.op(at);
+        if inc(v) > next {
+            next = inc(v);
+        }
+        at = add(at, 2);
+    }
+    let mut vty: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](next);
+    vty.resize(next, NONE);
+    let mut k = v0;
+    for i in 0..nv {
+        let ok = vty.try_set(p.op(k), n32(p.op(inc(k))));
+        k = add(k, 2);
+    }
+    let nl = p.op(at);
+    at = inc(at);
+    let mut locals: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](nl);
+    for i in 0..nl {
+        locals.push(n32(p.op(at)));
+        at = add(at, 2);
+    }
+    FnView {
+        vty: vty,
+        next_value: next,
+        locals: locals
+    }
+}
+
+// A block header: entry token, ni, ni x (block, token), outgoing token,
+// np, the params.
+pub fn block_params_at(in p: Program, bk: BlockRow) -> u64 {
+    let ni = p.op(inc(bk.ha));
+    add(bk.ha, add(3, wrapping_mul(ni, 2)))
+}
+
+pub fn block_entry(in p: Program, bk: BlockRow) -> u64 {
+    p.op(bk.ha)
+}
+
+// The place a `Read` (root, path), `Write` (dotted place) or `Bind` of a
+// plain name observes, interned by its text (`Place::display`, which is
+// what ir_opt's `PlaceGraph` keys its nodes by); `NONE` for none.
+pub fn place_text(
+    in p: Program,
+    in names: Names,
+    inout pn: Names,
+    inout buf: ChunkSeq[u8],
+    i: InstRow
+) -> u32 {
+    buf.clear();
+    if i.op == OP_READ {
+        names.write(n32(p.op(i.a)), inout buf);
+        let path = p.op(inc(i.a));
+        let row = p.path(path);
+        for k in 0..row.n {
+            buf.push(46);
+            names.write(p.path_name(path, k), inout buf);
+        }
+    } else if i.op == OP_WRITE {
+        names.write(n32(p.op(i.a)), inout buf);
+    } else if i.op == OP_BIND && p.op(inc(i.a)) == PAT_BIND {
+        names.write(n32(p.op(add(i.a, 4))), inout buf);
+    } else {
+        return NONE;
+    }
+    pn.intern(in buf.as_slice())
+}
+
+// Whether two places overlap in ir_opt's place graph: the same node, or
+// one a dotted prefix of the other (a path between their nodes).
+pub fn overlaps(in pn: Names, a: u32, b: u32) -> bool {
+    if a == b {
+        return true;
+    }
+    let (s, l) = if pn.size(a) < pn.size(b) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let n = pn.size(s);
+    if n == pn.size(l) {
+        return false;
+    }
+    if pn.byte(l, n) != 46 {
+        return false;
+    }
+    for k in 0..n {
+        if pn.byte(s, k) != pn.byte(l, k) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn resolve(in aliases: ChunkSeq[u32], v: u32) -> u32 {
+    let mut x = v;
+    loop {
+        let n = at32(in aliases, w(x));
+        if n == NONE || n == x {
+            break;
+        }
+        x = n;
+    }
+    x
+}

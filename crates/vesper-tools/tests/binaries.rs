@@ -22,12 +22,31 @@ fn every_tool_prints_its_usage() {
         (env!("CARGO_BIN_EXE_vesper-resolve"), "vesper resolve"),
         (env!("CARGO_BIN_EXE_vesper-sbom"), "vesper sbom"),
         (env!("CARGO_BIN_EXE_vesper-tee"), "vesper-tee measure"),
+        (env!("CARGO_BIN_EXE_vesper-attest"), "attest"),
+        (env!("CARGO_BIN_EXE_vesper-cas"), "cas"),
+        (env!("CARGO_BIN_EXE_vesper-fuzz"), "fuzz"),
+        (env!("CARGO_BIN_EXE_vesper-highlight"), "highlight"),
+        (env!("CARGO_BIN_EXE_vesper-migrate"), "migrate"),
+        (env!("CARGO_BIN_EXE_vesper-refute"), "refute"),
+        (env!("CARGO_BIN_EXE_vesper-replay"), "replay"),
+        (env!("CARGO_BIN_EXE_vesper-semver"), "semver"),
+        (env!("CARGO_BIN_EXE_vesper-simd"), "simd"),
+        (env!("CARGO_BIN_EXE_vesper-top"), "top"),
+        (env!("CARGO_BIN_EXE_vesper-traceparent"), "traceparent"),
     ] {
         let out = run(exe, &["--help"]);
         assert!(out.status.success(), "{exe}: {out:?}");
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(text.contains(usage), "{exe}: {text}");
     }
+}
+
+/// `vesper shot` treats `--help` as a usage error, as the compiler did.
+#[test]
+fn shot_prints_its_usage_as_an_error() {
+    let out = run(env!("CARGO_BIN_EXE_vesper-shot"), &["--help"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).starts_with("vesper: Usage:\n  vesper shot"));
 }
 
 #[test]

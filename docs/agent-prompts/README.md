@@ -41,6 +41,13 @@ toolchain pilots and a real self-hosted front end. The crate-by-crate plan and
 the later waves are in
 [self-hosting-plan.md](../maintenance/self-hosting-plan.md).
 
+The [Rust-exit wave SH6](self-host-sh6/README.md) drives the repository to
+no Rust except the irreducible minimum: Stage 2 and a committed wasm seed,
+every ported library flipped at the 1.5x bar, the OS and C-API crates on
+`.vsys`, one crypto shim, and the Rust tests moved to Vesper. The program and
+the census are in [rust-exit-plan.md](../maintenance/rust-exit-plan.md) and
+[rust-census.md](../maintenance/rust-census.md).
+
 Earlier assignments retained as dependencies:
 
 - [06-source-simulation](next-wave/06-source-simulation.md)

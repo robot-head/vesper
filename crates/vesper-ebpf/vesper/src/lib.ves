@@ -96,7 +96,11 @@ use self::btf_ext::{
     parse_ext
 };
 use self::interp::{
-    RunOut,
+    Mach,
+    clone_mach,
+    map_has,
+    map_key_spans,
+    map_value,
     new_env,
     run_program
 };
@@ -105,13 +109,16 @@ use self::core::{
     filter_candidates,
     local_value,
     patch_insn,
+    target_value,
     values_over
 };
 use self::callgraph::{
     check_stack
 };
 use self::verifier::{
+    new_pools,
     Outcome,
+    Pools,
     verify_program
 };
 use self::wire::{
@@ -382,6 +389,10 @@ pub fn callgraph_check_stack(
 
 // verifier.rs
 
+pub fn verifier_new_pools() -> Pools {
+    new_pools()
+}
+
 pub fn verifier_verify(
     in slots: Slice[RawInsn],
     ptype: ProgramType,
@@ -392,7 +403,8 @@ pub fn verifier_verify(
     in text: Slice[u8],
     max_insns: u64,
     max_states: u64,
-    widen_loops: bool
+    widen_loops: bool,
+    inout pools: Pools
 ) -> Outcome {
     verify_program(
         in slots,
@@ -404,7 +416,8 @@ pub fn verifier_verify(
         in text,
         max_insns,
         max_states,
-        widen_loops
+        widen_loops,
+        inout pools
     )
 }
 
@@ -470,6 +483,35 @@ pub fn core_values(
     values_over(kind, in lt, in ltext, in access, in tab, in idx, in strs, in cands)
 }
 
+// `CoreSpec::target_value_with` without split modules, in one call: the
+// result code, with the value and the bad member index in `value` and `bad`.
+pub fn core_target_value(
+    kind: u64,
+    in lt: Slice[u64],
+    in ltext: Slice[u8],
+    in access: Slice[u32],
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    in ids: Slice[u32],
+    inout value: u64,
+    inout bad: u64
+) -> u64 {
+    target_value(
+        kind,
+        in lt,
+        in ltext,
+        in access,
+        in tab,
+        in idx,
+        in strs,
+        in ids,
+        0,
+        inout value,
+        inout bad
+    )
+}
+
 pub fn core_combine(kind: u64, in values: Slice[u64]) -> ChunkSeq[u64] {
     let mut out: u64 = 0;
     let code = combine(kind, in values, inout out);
@@ -515,8 +557,24 @@ pub fn btf_ext_maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Sl
 
 // interp.rs
 
-pub fn interp_new_env(in maps: Slice[u64]) -> RunOut {
+pub fn interp_new_env(in maps: Slice[u64]) -> Mach {
     new_env(in maps)
+}
+
+pub fn interp_clone(in m: Mach) -> Mach {
+    clone_mach(in m)
+}
+
+pub fn interp_map_has(in m: Mach, map: u64, in key: Slice[u8]) -> bool {
+    map_has(in m, map, in key)
+}
+
+pub fn interp_map_value(in m: Mach, map: u64, in key: Slice[u8]) -> ChunkSeq[u8] {
+    map_value(in m, map, in key)
+}
+
+pub fn interp_map_key_spans(in m: Mach, map: u64) -> ChunkSeq[u64] {
+    map_key_spans(in m, map)
 }
 
 pub fn interp_run(
@@ -532,11 +590,9 @@ pub fn interp_run(
     in tails: Slice[u64],
     in tslots: Slice[RawInsn],
     in taux: Slice[u64],
-    in st: Slice[u64],
-    in keys: Slice[u8],
-    in mem: Slice[u8],
-    in spill: Slice[u64]
-) -> RunOut {
+    reuse: bool,
+    inout m: Mach
+) {
     run_program(
         in slots,
         in kf,
@@ -550,9 +606,7 @@ pub fn interp_run(
         in tails,
         in tslots,
         in taux,
-        in st,
-        in keys,
-        in mem,
-        in spill
+        reuse,
+        inout m
     )
 }
