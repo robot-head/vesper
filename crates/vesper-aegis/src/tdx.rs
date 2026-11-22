@@ -20,12 +20,8 @@ use crate::claims::{
     AttestationClaims, ENCLAVE_FLAG_DEBUG_DISABLED, GuestRuntimeClaims, RegisterHash,
     SupplyChainEvidence, TeeArch, ct_eq, single_extend,
 };
-#[cfg(not(vesper_port))]
-use crate::error::Format;
 use crate::error::{AttestError, ParseError};
 use crate::intel::{TdxCollateral, VerifiedTdxQuote, verify_tdx_collateral};
-#[cfg(not(vesper_port))]
-use crate::reader::Reader;
 use ring::digest;
 
 pub const TDX_QUOTE_VERSION: u16 = 4;
@@ -48,9 +44,6 @@ pub const CERT_DATA_PCK_CHAIN_PEM: u16 = 5;
 pub const MAX_SIG_DATA_LEN: usize = 64 * 1024;
 /// A v5 body descriptor: `body_type` (u16) and `body_size` (u32).
 const TDX_BODY_DESCRIPTOR_LEN: usize = 6;
-/// `vm_index` of a TD 1.5 "ex" body: 0 to 3.
-#[cfg_attr(vesper_port, allow(dead_code))]
-const TD15_MAX_VM_INDEX: u8 = 3;
 /// `TDATTRIBUTES.DEBUG` (bit 0).
 pub const TD_ATTRIBUTE_DEBUG: u64 = 1;
 
@@ -106,14 +99,6 @@ pub struct Td15ExFields {
 }
 
 impl Td15Fields {
-    #[cfg(not(vesper_port))]
-    fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
-        Ok(Td15Fields {
-            tee_tcb_svn2: r.array("body.tee_tcb_svn2")?,
-            mr_service_td: r.array("body.mr_service_td")?,
-        })
-    }
-
     fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.tee_tcb_svn2);
         out.extend_from_slice(&self.mr_service_td);
@@ -121,26 +106,6 @@ impl Td15Fields {
 }
 
 impl Td15ExFields {
-    #[cfg(not(vesper_port))]
-    fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
-        let vm_index: [u8; 1] = r.array("body.vm_index")?;
-        if vm_index[0] > TD15_MAX_VM_INDEX {
-            return Err(unsupported("body.vm_index", vm_index[0].into()));
-        }
-        Ok(Td15ExFields {
-            vm_index: vm_index[0],
-            td_id: r.array("body.td_id")?,
-            dev_info_hash: r.array("body.dev_info_hash")?,
-            init_service_td_hash: r.array("body.init_service_td_hash")?,
-            init_service_td_attributes: r.array("body.init_service_td_attributes")?,
-            init_cpu_svn: r.array("body.init_cpu_svn")?,
-            init_tee_tcb_svn: r.array("body.init_tee_tcb_svn")?,
-            init_tee_fmspc: r.array("body.init_tee_fmspc")?,
-            cur_service_td_hash: r.array("body.cur_service_td_hash")?,
-            cur_service_td_attributes: r.array("body.cur_service_td_attributes")?,
-        })
-    }
-
     fn encode(&self, out: &mut Vec<u8>) {
         out.push(self.vm_index);
         out.extend_from_slice(&self.td_id);
@@ -190,45 +155,6 @@ pub struct TdxQuote {
 }
 
 impl TdxQuoteHeader {
-    #[cfg(not(vesper_port))]
-    fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
-        let h = TdxQuoteHeader {
-            version: r.u16("header.version")?,
-            att_key_type: r.u16("header.att_key_type")?,
-            tee_type: r.u32("header.tee_type")?,
-            qe_svn: r.u16("header.qe_svn")?,
-            pce_svn: r.u16("header.pce_svn")?,
-            qe_vendor_id: r.array("header.qe_vendor_id")?,
-            user_data: r.array("header.user_data")?,
-        };
-        for (field, ok, value) in [
-            (
-                "header.version",
-                h.version == TDX_QUOTE_VERSION || h.version == TDX_QUOTE_VERSION_5,
-                u64::from(h.version),
-            ),
-            (
-                "header.att_key_type",
-                h.att_key_type == TDX_ATT_KEY_ECDSA_P256,
-                u64::from(h.att_key_type),
-            ),
-            (
-                "header.tee_type",
-                h.tee_type == TDX_TEE_TYPE,
-                u64::from(h.tee_type),
-            ),
-        ] {
-            if !ok {
-                return Err(ParseError::UnsupportedValue {
-                    format: Format::TdxQuoteV4,
-                    field,
-                    value,
-                });
-            }
-        }
-        Ok(h)
-    }
-
     fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.version.to_le_bytes());
         out.extend_from_slice(&self.att_key_type.to_le_bytes());
@@ -241,29 +167,6 @@ impl TdxQuoteHeader {
 }
 
 impl TdReportBody {
-    #[cfg(not(vesper_port))]
-    fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
-        Ok(TdReportBody {
-            tee_tcb_svn: r.array("body.tee_tcb_svn")?,
-            mr_seam: r.array("body.mr_seam")?,
-            mr_signer_seam: r.array("body.mr_signer_seam")?,
-            seam_attributes: r.u64("body.seam_attributes")?,
-            td_attributes: r.u64("body.td_attributes")?,
-            xfam: r.u64("body.xfam")?,
-            mr_td: r.array("body.mr_td")?,
-            mr_config_id: r.array("body.mr_config_id")?,
-            mr_owner: r.array("body.mr_owner")?,
-            mr_owner_config: r.array("body.mr_owner_config")?,
-            rtmr: [
-                r.array("body.rtmr0")?,
-                r.array("body.rtmr1")?,
-                r.array("body.rtmr2")?,
-                r.array("body.rtmr3")?,
-            ],
-            report_data: r.array("body.report_data")?,
-        })
-    }
-
     fn encode(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&self.tee_tcb_svn);
         out.extend_from_slice(&self.mr_seam);
@@ -284,7 +187,6 @@ impl TdReportBody {
 
 impl QeReportBody {
     /// The QE report fields of a port parse (vesper/src/tdx.ves `qe_report`).
-    #[cfg(vesper_port)]
     pub(crate) fn from_port(f: &mut crate::port::Fields<'_>) -> Self {
         QeReportBody {
             cpu_svn: f.array(),
@@ -296,37 +198,6 @@ impl QeReportBody {
             isv_svn: f.u16(),
             report_data: f.array(),
         }
-    }
-
-    #[cfg(not(vesper_port))]
-    pub(crate) fn parse_from(r: &mut Reader<'_>) -> Result<Self, ParseError> {
-        Self::parse(r)
-    }
-
-    #[cfg(not(vesper_port))]
-    fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
-        let cpu_svn = r.array("qe_report.cpu_svn")?;
-        let misc_select = r.u32("qe_report.misc_select")?;
-        r.reserved(28, "qe_report.reserved1")?;
-        let attributes = r.array("qe_report.attributes")?;
-        let mr_enclave = r.array("qe_report.mr_enclave")?;
-        r.reserved(32, "qe_report.reserved2")?;
-        let mr_signer = r.array("qe_report.mr_signer")?;
-        r.reserved(96, "qe_report.reserved3")?;
-        let isv_prod_id = r.u16("qe_report.isv_prod_id")?;
-        let isv_svn = r.u16("qe_report.isv_svn")?;
-        r.reserved(60, "qe_report.reserved4")?;
-        let report_data = r.array("qe_report.report_data")?;
-        Ok(QeReportBody {
-            cpu_svn,
-            misc_select,
-            attributes,
-            mr_enclave,
-            mr_signer,
-            isv_prod_id,
-            isv_svn,
-            report_data,
-        })
     }
 
     pub fn encode(&self) -> Vec<u8> {
@@ -349,57 +220,26 @@ impl QeReportBody {
 
 impl TdxQuote {
     /// Bounds-checked parse; the input must contain exactly one quote.
-    #[cfg(vesper_port)]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         Ok(Self::parse_port(bytes, crate::port::TAIL_EXACT)?.0)
     }
 
     /// Parse a quote from a fixed-size quote buffer: bytes after the
     /// quote's declared length must all be zero.
-    #[cfg(vesper_port)]
     pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
         Ok(Self::parse_port(bytes, crate::port::TAIL_PADDED)?.0)
     }
 
-    /// Bounds-checked parse; the input must contain exactly one quote.
-    #[cfg(not(vesper_port))]
-    pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
-        let (quote, used) = Self::parse_prefix(bytes)?;
-        if used != bytes.len() {
-            return Err(ParseError::TrailingBytes {
-                format: Format::TdxQuoteV4,
-                extra: bytes.len() - used,
-            });
-        }
-        Ok(quote)
-    }
-
-    /// Parse a quote from a fixed-size quote buffer: bytes after the
-    /// quote's declared length must all be zero.
-    #[cfg(not(vesper_port))]
-    pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
-        let (quote, used) = Self::parse_prefix(bytes)?;
-        if bytes[used..].iter().any(|&b| b != 0) {
-            return Err(ParseError::TrailingBytes {
-                format: Format::TdxQuoteV4,
-                extra: bytes.len() - used,
-            });
-        }
-        Ok(quote)
-    }
-
     /// Parse one quote from the start of `bytes`; returns it and the number
     /// of bytes it occupies (header, body, length and signature data).
-    #[cfg(vesper_port)]
     pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
         Self::parse_port(bytes, crate::port::TAIL_PREFIX)
     }
 
     /// `mode`: 0 exact, 1 zero padded, 2 prefix (vesper/src/reader.ves).
-    #[cfg(vesper_port)]
     fn parse_port(bytes: &[u8], mode: u64) -> Result<(Self, usize), ParseError> {
         let (used, p) =
-            crate::port::parse(|w, d| crate::port::vesper::tdx_parse(bytes, mode, w, d))?;
+            crate::port::parse(bytes, |w, _| crate::port::vesper::tdx_parse(bytes, mode, w))?;
         let mut f = p.fields();
         let header = TdxQuoteHeader {
             version: f.u16(),
@@ -457,86 +297,6 @@ impl TdxQuote {
             pck_chain_pem: f.vec(),
         };
         Ok((quote, used as usize))
-    }
-
-    #[cfg(not(vesper_port))]
-    pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
-        let mut r = Reader::new(bytes, Format::TdxQuoteV4);
-        let header = TdxQuoteHeader::parse(&mut r)?;
-        let (body, td15, td15_ex) = if header.version == TDX_QUOTE_VERSION_5 {
-            let body_type = r.u16("body.type")?;
-            let body_size = r.u32("body.size")? as usize;
-            let want = match body_type {
-                TDX_BODY_TYPE_TD10 => TDX_BODY_LEN,
-                TDX_BODY_TYPE_TD15 => TDX_BODY_TD15_LEN,
-                TDX_BODY_TYPE_TD15_EX => TDX_BODY_TD15_EX_LEN,
-                other => return Err(unsupported("body.type", other.into())),
-            };
-            if body_size != want {
-                return Err(unsupported("body.size", body_size as u64));
-            }
-            let body_bytes = r.take(body_size, "body")?;
-            let mut b = Reader::new(body_bytes, Format::TdxQuoteV4);
-            let body = TdReportBody::parse(&mut b)?;
-            let td15 = match body_type {
-                TDX_BODY_TYPE_TD10 => None,
-                _ => Some(Td15Fields::parse(&mut b)?),
-            };
-            let td15_ex = match body_type {
-                TDX_BODY_TYPE_TD15_EX => Some(Td15ExFields::parse(&mut b)?),
-                _ => None,
-            };
-            b.finish()?;
-            (body, td15, td15_ex)
-        } else {
-            (TdReportBody::parse(&mut r)?, None, None)
-        };
-        let sig_len = r.u32("signature_data_len")? as usize;
-        if sig_len > MAX_SIG_DATA_LEN {
-            return Err(over_budget("signature_data_len", MAX_SIG_DATA_LEN, sig_len));
-        }
-        let sig = r.take(sig_len, "signature_data")?;
-        let used = r.position();
-
-        let mut s = Reader::new(sig, Format::TdxQuoteV4);
-        let quote_signature = s.array("quote_signature")?;
-        let attestation_key = s.array("attestation_key")?;
-        let cert_type = s.u16("cert_data.type")?;
-        if cert_type != CERT_DATA_QE_REPORT {
-            return Err(unsupported("cert_data.type", cert_type.into()));
-        }
-        let cert_size = s.u32("cert_data.size")? as usize;
-        let cert = s.take(cert_size, "cert_data")?;
-        s.finish()?;
-
-        let mut c = Reader::new(cert, Format::TdxQuoteV4);
-        let qe_report = QeReportBody::parse(&mut c)?;
-        let qe_report_signature = c.array("qe_report_signature")?;
-        let auth_len = c.u16("qe_auth_data.size")? as usize;
-        let qe_auth_data = c.take(auth_len, "qe_auth_data")?.to_vec();
-        let inner_type = c.u16("pck_cert_data.type")?;
-        if inner_type != CERT_DATA_PCK_CHAIN_PEM {
-            return Err(unsupported("pck_cert_data.type", inner_type.into()));
-        }
-        let inner_size = c.u32("pck_cert_data.size")? as usize;
-        let pck_chain_pem = c.take(inner_size, "pck_cert_data")?.to_vec();
-        c.finish()?;
-
-        Ok((
-            TdxQuote {
-                header,
-                body,
-                td15,
-                td15_ex,
-                quote_signature,
-                attestation_key,
-                qe_report,
-                qe_report_signature,
-                qe_auth_data,
-                pck_chain_pem,
-            },
-            used,
-        ))
     }
 
     /// The v5 body type (`None` for a v4 quote).
@@ -735,23 +495,4 @@ pub fn verify_tdx_quote_with_collateral(
     let verified = verify_tdx_collateral(bytes, collateral, root, now_ns)?;
     let claims = tdx_vesper_claims(&verified.quote, runtime)?;
     Ok((claims, verified))
-}
-
-#[cfg(not(vesper_port))]
-fn unsupported(field: &'static str, value: u64) -> ParseError {
-    ParseError::UnsupportedValue {
-        format: Format::TdxQuoteV4,
-        field,
-        value,
-    }
-}
-
-#[cfg(not(vesper_port))]
-fn over_budget(field: &'static str, limit: usize, value: usize) -> ParseError {
-    ParseError::OverBudget {
-        format: Format::TdxQuoteV4,
-        field,
-        limit,
-        value: value as u64,
-    }
 }

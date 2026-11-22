@@ -1,0 +1,385 @@
+// @vesper/hybrid-checks: the layout and the IR check of the hybrid Stage 2
+// build in ONE Vesper library over ONE decoded world (self-hosting SH5
+// lane 10, #1333).
+//
+// The modules `check_layout` and `ir_check` are separate libraries, each
+// with its own runtime and its own copy of `@vesper/check-data`, so a
+// `Ctx` one of them decoded cannot be lent to the other and each decoded
+// its own copy of the world. Here both swaps link into one library and
+// share one `Checks` value per compilation: the hybrid sends the world's
+// ADTs and effects once (`checks_extend`), then each layout and IR-check
+// call only what is new (`WorldLog::part` in tests/common/check_words.rs).
+//
+// Layout answers cross as words that name the input's own names and types
+// (format 2, `put_ids`), not as text and type trees: Rust already holds
+// every input name and type by index (crates/vesper-hybrid/src/crossing.rs
+// reads them back). Only a name or type the layout made itself (a tuple
+// field's digit name, a substituted field type) crosses in full. The
+// answer is written into the value's own `out` buffer, which Rust reads in
+// place, so a call allocates nothing on either side once the buffers grew.
+
+// @export abi 4
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    n32,
+    u32_at,
+    w
+};
+use @vesper/check-data::input::{
+    Ctx,
+    Reader,
+    ctx_new,
+    extend_ctx
+};
+use @vesper/check-layout::{
+    Layouts,
+    layout_of,
+    layouts_new,
+    put_bytes
+};
+use @vesper/ir-check::{
+    ir_check_task
+};
+
+// Copies of check-data's and check-layout's constants (constants cannot be
+// imported across packages here yet; check-data gap 1).
+const NONE32: u32 = 4294967295;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const K_ROW: u8 = 4;
+const L_PRODUCT: u8 = 1;
+const L_ENUM: u8 = 2;
+
+// 2^32: a stamp's unit in `nix` and `tix`.
+const STAMP: u64 = 4294967296;
+
+// The answer format of `checks_layout_of`; crates/vesper-hybrid checks it.
+pub fn format() -> u64 {
+    2
+}
+
+// One compilation's world, decoded once and shared by both swaps.
+pub struct Checks {
+    c: Ctx,
+    // The layout arena, kept between calls (each call resets it).
+    ls: Layouts,
+    // symbol -> input name index + 1 (the inverse of `c.nmap`).
+    rn: ChunkSeq[u32],
+    // type id -> input type index + 1 (the inverse of `c.tmap`).
+    rt: ChunkSeq[u32],
+    // How much of `c.nmap` and `c.tmap` `rn` and `rt` cover.
+    nsync: u64,
+    tsync: u64,
+    // This answer's own names and types: symbol or type id ->
+    // stamp * 2^32 + answer index + 1 (an older stamp is unset).
+    nix: ChunkSeq[u64],
+    tix: ChunkSeq[u64],
+    stamp: u64,
+    new_names: u64,
+    new_types: u64,
+    // The answer's sections, then the answer itself (read in place).
+    names: ChunkSeq[u64],
+    types: ChunkSeq[u64],
+    body: ChunkSeq[u64],
+    out: ChunkSeq[u64],
+}
+
+pub fn checks_new() -> Checks {
+    Checks {
+        c: ctx_new(),
+        ls: layouts_new(),
+        rn: ChunkSeq::new[u32](),
+        rt: ChunkSeq::new[u32](),
+        nsync: 0,
+        tsync: 0,
+        nix: ChunkSeq::new[u64](),
+        tix: ChunkSeq::new[u64](),
+        stamp: 0,
+        new_names: 0,
+        new_types: 0,
+        names: ChunkSeq::new[u64](),
+        types: ChunkSeq::new[u64](),
+        body: ChunkSeq::new[u64](),
+        out: ChunkSeq::new[u64](),
+    }
+}
+
+fn grow32(inout s: ChunkSeq[u32], i: u64) {
+    if s.len() <= i {
+        s.resize(inc(i), 0);
+    }
+}
+
+fn grow64(inout s: ChunkSeq[u64], i: u64) {
+    if s.len() <= i {
+        s.resize(inc(i), 0);
+    }
+}
+
+fn u64_of(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Adds a part (names, types, world section) to the shared world. The
+// hybrid sends the whole world's ADTs and effects this way first, in name
+// order, so the IR check's constructor lookup (first ADT in name order)
+// and the layout read the same tables.
+pub fn checks_extend(inout s: Checks, in part: Slice[u8]) {
+    let mut r = Reader {
+        pos: 0
+    };
+    extend_ctx(inout r, in part, inout s.c);
+}
+
+// `ir_check::validate` over the shared world, after adding `part` (the
+// part `WorldLog::ir_part` writes).
+pub fn checks_validate(inout s: Checks, in part: Slice[u8]) -> ChunkSeq[u64] {
+    let mut r = Reader {
+        pos: 0
+    };
+    extend_ctx(inout r, in part, inout s.c);
+    ir_check_task(inout r, in part, inout s.c)
+}
+
+// `Layout::of` over the shared world, after adding `part` (the part
+// `WorldLog::layout_part` writes). The answer is in `s.out`; returns its
+// word count.
+pub fn checks_layout_of(inout s: Checks, in part: Slice[u8]) -> u64 {
+    let mut r = Reader {
+        pos: 0
+    };
+    extend_ctx(inout r, in part, inout s.c);
+    let ty = u32_at(in s.c.tmap, r.word(in part));
+    s.sync();
+    s.out.clear();
+    let m = s.ls.mark();
+    let l = layout_of(inout s.ls, inout s.c.types, inout s.c.names, in s.c.world, ty);
+    if l == NONE32 {
+        s.out.push(0);
+        put_bytes(inout s.out, in s.ls.err.as_slice());
+    } else {
+        s.stamp = inc(s.stamp);
+        s.new_names = 0;
+        s.new_types = 0;
+        s.names.clear();
+        s.types.clear();
+        s.body.clear();
+        s.layout(l);
+        s.out.push(2);
+        s.out.push(s.new_names);
+        s.out.extend(in s.names.as_slice());
+        s.out.push(s.new_types);
+        s.out.extend(in s.types.as_slice());
+        s.out.extend(in s.body.as_slice());
+    }
+    s.ls.reset(m);
+    s.out.len()
+}
+
+// ----- format 2 -------------------------------------------------------------
+//
+// `2`, then the answer's own names (count, then each as `put_bytes`), its
+// own types (count, then each type's words), then the layout:
+//
+//   layout = type, size, kind (0 scalar, 1 product, 2 enum), then
+//            product: field count and per field (name, type, offset, layout)
+//            enum: variant count and per variant (name, field count, fields)
+//
+// Types are written as in format 1 (`Out::ty` of @vesper/check-layout):
+// literal (0, negative, magnitude), named (1, name, count, args), tuple (2,
+// count, args), function (3, count, (pass, type) per parameter, result,
+// row, mode), row (4, row), other (5); a row is the effect count, per
+// effect (label, name, arg count, args), then the tail.
+//
+// Every name and type in the stream is a reference: `2 * i` is the input's
+// name or type `i`, `2 * k + 1` the answer's own name or type `k` (earlier
+// in its table). An optional name is 0 for none, else its reference + 1.
+// A failed layout is `0`, then the message as `put_bytes`.
+impl Checks {
+    // Extends `rn` and `rt` over the names and types added since.
+    fn sync(inout self) {
+        for i in self.nsync..self.c.nmap.len() {
+            let sym = u32_at(in self.c.nmap, i);
+            grow32(inout self.rn, w(sym));
+            if u32_at(in self.rn, w(sym)) == 0 {
+                let ok = self.rn.try_set(w(sym), n32(inc(i)));
+            }
+        }
+        self.nsync = self.c.nmap.len();
+        for i in self.tsync..self.c.tmap.len() {
+            let id = u32_at(in self.c.tmap, i);
+            grow32(inout self.rt, w(id));
+            if u32_at(in self.rt, w(id)) == 0 {
+                let ok = self.rt.try_set(w(id), n32(inc(i)));
+            }
+        }
+        self.tsync = self.c.tmap.len();
+    }
+
+    fn name(inout self, sym: u32) -> u64 {
+        let x = u32_at(in self.rn, w(sym));
+        if x != 0 {
+            return wrapping_mul(wrapping_sub(w(x), 1), 2);
+        }
+        grow64(inout self.nix, w(sym));
+        let y = u64_of(in self.nix, w(sym));
+        if y / STAMP == self.stamp {
+            return inc(wrapping_mul(wrapping_sub(y % STAMP, 1), 2));
+        }
+        let k = self.new_names;
+        self.new_names = inc(k);
+        let ok = self.nix.try_set(w(sym), add(wrapping_mul(self.stamp, STAMP), inc(k)));
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.c.names.write(sym, inout text);
+        put_bytes(inout self.names, in text.as_slice());
+        inc(wrapping_mul(k, 2))
+    }
+
+    fn opt_name(inout self, opt: u32) -> u64 {
+        if opt == 0 {
+            0
+        } else {
+            inc(self.name(wrapping_sub(opt, 1)))
+        }
+    }
+
+    // A row's words, appended to `out`.
+    fn row(inout self, r: u32, inout out: ChunkSeq[u64]) {
+        let row = self.c.types.row(r);
+        out.push(w(row.n));
+        for i in 0..w(row.n) {
+            let e = self.c.types.effect_at(add(w(row.a), i));
+            let mut args: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for j in 0..w(e.n) {
+                let a = self.ty(u32_at(in self.c.types.items, add(w(e.a), j)));
+                args.push(a);
+            }
+            let label = self.opt_name(e.label);
+            out.push(label);
+            let name = self.name(e.name);
+            out.push(name);
+            out.push(w(e.n));
+            out.extend(in args.as_slice());
+        }
+        let tail = self.opt_name(row.tail);
+        out.push(tail);
+    }
+
+    // The reference of type `ty`: the input's index, or the answer's own
+    // type, written (after its parts) the first time.
+    fn ty(inout self, ty: u32) -> u64 {
+        let x = u32_at(in self.rt, w(ty));
+        if x != 0 {
+            return wrapping_mul(wrapping_sub(w(x), 1), 2);
+        }
+        grow64(inout self.tix, w(ty));
+        let y = u64_of(in self.tix, w(ty));
+        if y / STAMP == self.stamp {
+            return inc(wrapping_mul(wrapping_sub(y % STAMP, 1), 2));
+        }
+        let n = self.c.types.node(ty);
+        let mut words: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        if n.kind == K_LIT {
+            words.push(0);
+            words.push(widen_u64(n.mode));
+            words.push(wrapping_u64(n.lit));
+        } else if n.kind == K_NAMED || n.kind == K_TUPLE {
+            let mut args: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for i in 0..w(n.n) {
+                let a = self.ty(u32_at(in self.c.types.items, add(w(n.a), i)));
+                args.push(a);
+            }
+            if n.kind == K_NAMED {
+                words.push(1);
+                let s = self.name(n.name);
+                words.push(s);
+            } else {
+                words.push(2);
+            }
+            words.push(w(n.n));
+            words.extend(in args.as_slice());
+        } else if n.kind == K_FN {
+            let mut ps: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            for i in 0..w(n.n) {
+                let p = self.ty(u32_at(in self.c.types.items, add(w(n.a), i)));
+                ps.push(p);
+            }
+            let r = self.ty(n.r);
+            words.push(3);
+            words.push(w(n.n));
+            for i in 0..ps.len() {
+                words.push(widen_u64(self.c.types.param_pass(ty, i)));
+                words.push(u64_of(in ps, i));
+            }
+            words.push(r);
+            self.row(n.r2, inout words);
+            words.push(widen_u64(n.mode));
+        } else if n.kind == K_ROW {
+            words.push(4);
+            self.row(n.r2, inout words);
+        } else {
+            words.push(5);
+        }
+        let k = self.new_types;
+        self.new_types = inc(k);
+        let ok = self.tix.try_set(w(ty), add(wrapping_mul(self.stamp, STAMP), inc(k)));
+        self.types.extend(in words.as_slice());
+        inc(wrapping_mul(k, 2))
+    }
+
+    fn fields(inout self, a: u64, n: u64) {
+        self.body.push(n);
+        for i in 0..n {
+            let f = self.ls.lfield(add(a, i));
+            let fname = self.name(f.name);
+            self.body.push(fname);
+            let fty = self.ty(f.ty);
+            self.body.push(fty);
+            self.body.push(wrapping_u64(widen_i64(f.offset)));
+            self.layout(f.layout);
+        }
+    }
+
+    fn layout(inout self, l: u32) {
+        let n = self.ls.node(l);
+        let ty = self.ty(n.ty);
+        self.body.push(ty);
+        self.body.push(w(n.size));
+        self.body.push(widen_u64(n.kind));
+        if n.kind == L_PRODUCT {
+            self.fields(w(n.a), w(n.n));
+        }
+        if n.kind == L_ENUM {
+            self.body.push(w(n.n));
+            for i in 0..w(n.n) {
+                let v = self.ls.lvariant(add(w(n.a), i));
+                let vname = self.name(v.name);
+                self.body.push(vname);
+                self.fields(w(v.fa), w(v.fc));
+            }
+        }
+    }
+}
+// The divergent build's stream (build.rs `divergent-ir-check`), as in
+// modules/ir_check: one made-up E0410 for every program.
+fn divergent_words(in input: Slice[u8]) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(1);
+    o.push(5);
+    o.push(206983934021);
+    o.push(9);
+    o.push(7954878057846040932);
+    o.push(116);
+    o.push(0);
+    o.push(0);
+    o.push(0);
+    o.push(0);
+    o
+}

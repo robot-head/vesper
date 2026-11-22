@@ -159,8 +159,57 @@ Part 2 changes no Rust compiler source. The default compiler installs no hook. O
 4. **`x >> wrapping_mul(..)`** is E0401 (`>>` is checked). The workaround is to use `wrapping_shr_u64`.
 5. **A hybrid module cannot return a pass's count beside its words.** The hook counts versioned loops on the decoded result instead; no caller reads the count.
 
+## Part 3: the flip gate and two native bounds gaps
+
+### Flip gate verdict
+
+`scripts/ci/flip-gate/bounds-hoist.toml` configures SH6 lane 1's gate (`scripts/ci/flip_gate.py`, #1418) for this module. The new `flip_gate` test in `tests/self_host_bounds_hoist_pass.rs` prints the gate's `flip-gate pairs` lines for two workloads, one pair per ABBA epoch over the whole corpus:
+
+- `pass` is the pass on input bytes, minus the place-ir identity read and write timed in the same epoch.
+- `hook` is what the hybrid's `hoist` hook runs, encoding and decoding included.
+
+The run below used a release build on the cloud host, with 12 epochs and the corpus before this part's analysis change.
+
+```text
+flip-gate bounds-hoist: FAIL (bar: 0 differences, every test, 95% upper <= 1.50x) | tests 2/2 pass | differential 0 differences on 313 cases | ABBA vesper/rust pass 1.53x [1.46x, 1.54x] n=12; hook 2.14x [2.07x, 2.27x] n=12
+```
+
+Bounds hoisting does not flip yet:
+
+- The pass alone sits at the bar: its median is 1.53x and its interval crosses 1.5x.
+- The installed hook pays the program's encoding and decoding, and is 2.14x.
+
+Even once it passes, `src/bounds_hoist.rs` is compiler code: the plan deletes it with the Rust compiler's retirement (SH6 lane 2). It also holds `stable_views`, `header_hoists` and `calls_out`, which native code generation uses and which are not ported. The speed fix stays the same: update the tables in place instead of re-encoding the function after each rewrite.
+
+### Gap 1: proven array indexes kept their check (SH6 lane 7, #1402)
+
+`a[i]` on an array or tuple, and `a[i] op= v`, always emitted `icmp; brif; trap` in native code, even for `dist[t & 2047]` on a `[u64; 2048]`.
+
+- The check is now one helper, `Codegen::index_check` (`src/native_arrays.rs`). It emits nothing when the index's own instructions bound it below the length: a constant, `x & m` with `m < len`, `x % m` with `0 < m <= len`, or a `uextend` or `select` of those.
+- The decision rests only on those instructions, never on the checker's proof. An index they do not bound keeps its check, and keeps its `IndexOutOfBounds` raise where the row has one.
+- `tests/arrays.rs` `masked_and_constant_indices_need_no_native_check` covers both cases:
+  - Lane 7's repro has no `trap user2` left.
+  - A mask wider than the array keeps its compare and raises.
+
+### Gap 2: counted loops lost hoisting once inlined (SH6 lane 7, #1402)
+
+Bench's `add_rank`, as a counted loop through the helpers `sub`, `cu` and `add`, was versioned on its own but not after it was inlined into `accepts`. Inlining twice leaves two kinds of alias chain:
+
+- The helper's result reaches the loop through the parameter of a block that one jump enters.
+- The chains of once-bound locals can be longer than `MAX_DEPTH`.
+
+`Affine::linear` now follows the parameter of a block that one jump enters to that jump's argument. That hop, and the read of a once-bound local, cost no depth. Both chains end, because a binding's value and a jump's argument are defined before them. The Vesper port (`plans.ves`, `Counted.passed`) makes the same change.
+
+Results:
+
+- The pass differential over the whole corpus (release build) finds 0 of 313 programs differ. Rust versions 2,655 loops and changes 82 programs.
+- The part 1 differential, on its sampled corpus, finds 0 steps differ.
+- `tests/native_bounds_facts.rs` `loops_of_inlined_helpers_are_guarded` checks the doubly inlined loop: it is guarded in its caller, and it agrees in every backend with both long and short sequences.
+
+Not done here: vectorizing these `try_get`/`try_set` loops. Cranelift does not vectorize loops, so that needs its own loop vectorizer in the native backend.
+
 ## What is left
 
-- Part 2's PR waits on lane 1. It needs #1259, and also lane 1's pass harness (`compare_pass`, `through_vesper`, the hybrid `place_ir` module), which is not pushed yet.
-- Speed: update the tables in place instead of re-encoding the function after each rewrite.
+- Speed: update the tables in place instead of re-encoding the function after each rewrite. That should bring the `pass` workload under 1.5x. The hook also needs the IR pipeline around it in Vesper, so that it skips encoding and decoding.
+- Vectorizing `try_get`/`try_set` loops (part of gap 2).
 - SH3 lane 14's single-build scoreboard measures the whole corpus through the hybrid with every SH3 swap installed.

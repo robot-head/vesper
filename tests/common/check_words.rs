@@ -44,6 +44,10 @@ pub struct Enc {
     pub types: TypeBuckets,
     pub type_words: Vec<u64>,
     pub type_count: u64,
+    /// Every interned type by index: answers that name input types by
+    /// index (format 2 of the shared checks module, SH5 lane 10, #1333)
+    /// are read back from it.
+    pub type_list: Vec<Type>,
 }
 
 pub fn mode_word(m: Mode) -> u64 {
@@ -144,6 +148,7 @@ impl Enc {
         let i = self.type_count;
         self.type_count += 1;
         self.types.entry(key).or_default().push((t.clone(), i));
+        self.type_list.push(t.clone());
         self.type_words.extend(words);
         i
     }

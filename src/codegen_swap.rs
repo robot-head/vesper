@@ -61,6 +61,17 @@
 //! ([`NO_VALUE`] for an operand with no value yet), and its one result is
 //! the instruction's value. The [`Site`] names the instruction, so a hook
 //! reads the instruction itself from the `Program`.
+//!
+//! # Walk state and re-entry
+//!
+//! An [`INSTRUCTION`] request also lends the graph walk's own state for
+//! the length of the request ([`walk`], SH5 lane 1): queries of the
+//! instruction's facts and the walk's maps (variables, home slots,
+//! register locals, split words, the walk's plans), effects that keep the
+//! Rust bookkeeping of what the hook emitted (`use_var`, `def_var`,
+//! `store`, `jump`, `ir_temp`), and continuation re-entry: a hook asks
+//! Rust to emit the instruction or its place, declines, and is asked again
+//! with the value kept. A hook that never calls them is unaffected.
 use crate::ast::Type;
 use crate::check::World;
 use crate::ir::{Op, Program};
@@ -70,6 +81,8 @@ use cranelift_module::Module;
 use std::cell::Cell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+pub mod walk;
 
 /// An argument word for an operand that has no Cranelift value.
 pub const NO_VALUE: u64 = u64::MAX;
@@ -652,6 +665,81 @@ pub mod numeric {
     pub const TILED_COL_GET: u32 = 9;
     pub const TILED_COL_SET: u32 = 10;
     pub const TILED_LOAD_TILE_VEC: u32 = 11;
+    /// A float math intrinsic (`Codegen::math`, src/float_math/native.rs):
+    /// `[op, v operands...]`, with `op` the position of the intrinsic in
+    /// `MathOp::ALL` from 1 (`sqrt` 1 ... `fma` 9). Result `[value]`.
+    pub const FLOAT_MATH: u32 = 4;
+    /// A conversion to a float kind: `[to, from, v]`, `to` a float word
+    /// ([`FROM_F32`] or [`FROM_F64`]) and `from` one of the `FROM_*` classes
+    /// (the Rust code emits nothing for a same-kind conversion). Result
+    /// `[value]`.
+    pub const FLOAT_CONVERT: u32 = 5;
+    /// The saturating truncation of a float to an integer kind's canonical
+    /// 64-bit lane (`float_to_integer`): `[signed, bits, min, max, v]`, with
+    /// the kind's bounds as two's complement words. Result `[value]`.
+    pub const FLOAT_TO_INT: u32 = 6;
+    /// `to_bits_k` (`to_bits` 1) or `from_bits_k` (0) of float kind `kind`:
+    /// `[to_bits, kind, v]`. Result `[value]`.
+    pub const FLOAT_BITS: u32 = 7;
+    /// The range test of a checked float narrowing: `[kind, lo, hi, v]`,
+    /// with the truncation bounds as `f64` bit patterns. Result
+    /// `[overflow]`; the Rust code raises.
+    pub const FLOAT_NARROW_TEST: u32 = 8;
+    /// The software flush-to-zero of a subnormal float (`Codegen::flush`,
+    /// requested only when the flush applies): `[v]`. Result `[value]`.
+    pub const FLOAT_FLUSH: u32 = 9;
+    /// One step of a region block (src/regions/native.rs), with the region
+    /// runtime already defined in an object module: `[kind, jit, ...]`,
+    /// `kind` one of the `REGION_*` codes below and `jit` 1 in a JIT module
+    /// (the runtime is then imported). By kind (`v` is a value; a payload
+    /// is `[size, aggregate, type]`, with `type` a [`super::ty_code`], 0
+    /// for an aggregate; a 128-bit payload is never requested):
+    ///
+    /// - `OPEN`: `[capacity]`; result the region id;
+    /// - `CLOSE`, `CHECKPOINT`, `USED`: `[v id]`;
+    /// - `REWIND`, `COMMIT`: `[v id, v mark]`;
+    /// - `BOX`: `[v id, v value, payload...]`; result the handle;
+    /// - `GET`, `TAKE`: `[v id, v handle, payload...]`; result the value;
+    /// - `SET`: `[v id, v handle, v value, payload...]`; result `0`.
+    ///
+    /// Result `[value]`.
+    pub const REGION: u32 = 10;
+    pub const REGION_OPEN: u64 = 1;
+    pub const REGION_CLOSE: u64 = 2;
+    pub const REGION_BOX: u64 = 3;
+    pub const REGION_GET: u64 = 4;
+    pub const REGION_TAKE: u64 = 5;
+    pub const REGION_SET: u64 = 6;
+    pub const REGION_CHECKPOINT: u64 = 7;
+    pub const REGION_REWIND: u64 = 8;
+    pub const REGION_COMMIT: u64 = 9;
+    pub const REGION_USED: u64 = 10;
+    /// The element address of an `Atomic[T]` receiver (`atomic_call`):
+    /// `[v receiver]`. Result `[address]` (two trusted loads).
+    pub const ATOMIC_CELL: u32 = 11;
+    /// One atomic operation besides `compare_exchange` (the shim has no
+    /// `atomic_cas`): `[op, type, signed, v address, v operands...]`, `op`
+    /// one of the `ATOMIC_*` codes below, `type` the narrow lane's
+    /// [`super::ty_code`] and the operands already narrowed. Result
+    /// `[value]`, the old value as a canonical lane (`0` for a store).
+    pub const ATOMIC: u32 = 12;
+    pub const ATOMIC_LOAD: u64 = 1;
+    pub const ATOMIC_STORE: u64 = 2;
+    pub const ATOMIC_SWAP: u64 = 3;
+    pub const ATOMIC_ADD: u64 = 4;
+    pub const ATOMIC_SUB: u64 = 5;
+    pub const ATOMIC_AND: u64 = 6;
+    pub const ATOMIC_OR: u64 = 7;
+    pub const ATOMIC_XOR: u64 = 8;
+    /// The `vesper_parallel_for(body, data, n)` call of `parallel_for_call`:
+    /// `[body FuncRef, v data, v n]`. Result `[value]` (`0`).
+    pub const PARALLEL_FOR: u32 = 13;
+    /// The classes of a [`FLOAT_CONVERT`] operand (`FROM_F32` and
+    /// `FROM_F64` are also the float words of the other requests).
+    pub const FROM_F32: u64 = 1;
+    pub const FROM_F64: u64 = 2;
+    pub const FROM_SIGNED: u64 = 3;
+    pub const FROM_UNSIGNED: u64 = 4;
 }
 
 /// The `scalar` family's requests besides [`INSTRUCTION`] (SH4 lane 6,

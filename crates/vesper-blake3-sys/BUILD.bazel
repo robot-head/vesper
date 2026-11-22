@@ -1,0 +1,16 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# build.rs compiles the BLAKE3 C sources of @vesper-std/hash-sys (the
+# official C implementation and its `.vsys` glue); the test checks the
+# vendored header's version.
+vesper_crate(
+    build_script_data = [
+        "//:blake3_c_header",
+        "//:blake3_c_sources",
+    ],
+    build_script_env = {
+        # rules_rust makes the execpath absolute.
+        "VESPER_BLAKE3_C_HEADER": "$(execpath //:blake3_c_header)",
+    },
+    extra_integration_compile_data = ["//:blake3_c_sources"],
+)
