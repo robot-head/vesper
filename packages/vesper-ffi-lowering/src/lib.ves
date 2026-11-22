@@ -74,6 +74,8 @@ const P_CSTR: u8 = 4;
 const P_FUNCTION: u8 = 5;
 // A `Pinned[T]` buffer of scalar `psc`.
 const P_PINNED: u8 = 6;
+// `nocapture in argv: CStrList`: NUL-ended strings in one `Slice[u8]`.
+const P_CSTR_LIST: u8 = 7;
 
 // Accesses: `Access` (in, inout), `PointerAccess` (in, out, inout) and
 // `HandleAccess` (in, inout, sink) share these codes.
@@ -1097,6 +1099,9 @@ fn read_param(inout r: Reader, in b: Slice[u8], inout s: S) -> Par {
         p.tag = P_FUNCTION;
         let keep = r.field(in b);
         p.pname = field_sym(inout r, in b, inout s);
+    } else if field_is(in b, a, e, in "nocapture-cstr-list") {
+        // Only a `CStr` can refuse a call, so a list keeps its own tag.
+        p.tag = P_CSTR_LIST;
     } else if field_is(in b, a, e, in "pinned-buffer") {
         p.tag = P_PINNED;
         let (c, d) = r.field(in b);

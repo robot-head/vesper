@@ -927,7 +927,7 @@ fn embedded_sources(text: &str) -> Vec<String> {
 /// address, unit and handle parameters, pointer results, nested and
 /// byte-array structs, every slice and pointer form, `errno`, `CStr`,
 /// reserved and duplicate names.
-const HANDWRITTEN: [&str; 8] = [
+const HANDWRITTEN: [&str; 9] = [
     r#"sys library Shapes (
     target = "x86_64-unknown-linux-gnu", abi = "sysv64",
     link = "dynamic", name = "shapes", artifact = "blake3:@DIGEST@",
@@ -1048,6 +1048,14 @@ const HANDWRITTEN: [&str; 8] = [
     fn ring_use(inout r: Ring, in s: Sock) -> ForeignVal[u32];
     fn ring_unmap(sink r: Ring) -> ForeignVal[i32];
     fn sock_free(sink s: Sock) -> ForeignVal[Unit];
+}"#,
+    r#"sys library Argv (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "dynamic", name = "argv", artifact = "blake3:@DIGEST@"
+) {
+    fn execv(nocapture in path: CStr, nocapture in argv: CStrList) -> ForeignVal[i32] errno;
+    fn spawn(nocapture in argv: CStrList, nocapture in envp: CStrList, flags: u32) -> ForeignVal[i32];
+    fn count(nocapture in argv: CStrList) -> ForeignVal[u64];
 }"#,
 ];
 
