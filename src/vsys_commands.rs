@@ -143,27 +143,32 @@ fn host_symbols(
                     library.link().name()
                 )
             })?;
-            for f in library.functions() {
-                let address = lib.symbol(f.symbol()).ok_or_else(|| {
+            // A function-pointer type has no symbol; `#[link_name]` gives
+            // the C name a function binds to.
+            for f in library.functions().iter().filter(|f| !f.is_indirect()) {
+                let address = lib.symbol(f.link_symbol()).ok_or_else(|| {
                     format!(
                         "{command}: {}::{} is not a symbol of {}",
                         library.name(),
-                        f.symbol(),
+                        f.link_symbol(),
                         lib.shown()
                     )
                 })?;
-                bind(&mut out, f.symbol(), address, command)?;
+                bind(&mut out, f.link_symbol(), address, command)?;
             }
             continue;
         }
-        for f in library.functions() {
-            let (name, address) = std.iter().find(|(n, _)| *n == f.symbol()).ok_or_else(|| {
-                format!(
-                    "{command}: {}::{} is not a function of {STD_HOST}",
-                    library.name(),
-                    f.symbol()
-                )
-            })?;
+        for f in library.functions().iter().filter(|f| !f.is_indirect()) {
+            let (name, address) =
+                std.iter()
+                    .find(|(n, _)| *n == f.link_symbol())
+                    .ok_or_else(|| {
+                        format!(
+                            "{command}: {}::{} is not a function of {STD_HOST}",
+                            library.name(),
+                            f.symbol()
+                        )
+                    })?;
             bind(&mut out, name, *address, command)?;
         }
     }

@@ -1,0 +1,187 @@
+// The portable naming policy of tree entry names (`validate_name` in
+// src/tree.rs), and the UTF-8 and control-character scans the derivation
+// labels share.
+
+fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn cont(in s: Slice[u8], i: u64) -> bool {
+    i < s.len() && byte(in s, i) >= 128 && byte(in s, i) < 192
+}
+
+// The length of the UTF-8 sequence that starts at `i`, or 0 when it is
+// not valid UTF-8 (overlong forms, surrogates and code points above
+// U+10FFFF are invalid, as in `std::str::from_utf8`).
+pub fn seq_len(in s: Slice[u8], i: u64) -> u64 {
+    let b0 = byte(in s, i);
+    if b0 < 128 {
+        return 1;
+    }
+    if b0 < 194 {
+        return 0;
+    }
+    if b0 < 224 {
+        if cont(in s, wrapping_add(i, 1)) {
+            return 2;
+        }
+        return 0;
+    }
+    if b0 < 240 {
+        let b1 = byte(in s, wrapping_add(i, 1));
+        if !cont(in s, wrapping_add(i, 1)) || !cont(in s, wrapping_add(i, 2)) {
+            return 0;
+        }
+        if b0 == 224 && b1 < 160 {
+            return 0;
+        }
+        if b0 == 237 && b1 >= 160 {
+            return 0;
+        }
+        return 3;
+    }
+    if b0 < 245 {
+        let b1 = byte(in s, wrapping_add(i, 1));
+        if !cont(in s, wrapping_add(i, 1))
+            || !cont(in s, wrapping_add(i, 2))
+            || !cont(in s, wrapping_add(i, 3)) {
+            return 0;
+        }
+        if b0 == 240 && b1 < 144 {
+            return 0;
+        }
+        if b0 == 244 && b1 >= 144 {
+            return 0;
+        }
+        return 4;
+    }
+    0
+}
+
+// Whether `s` is valid UTF-8.
+pub fn is_utf8(in s: Slice[u8]) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            return true;
+        }
+        let n = seq_len(in s, i);
+        if n == 0 {
+            return false;
+        }
+        i = wrapping_add(i, n);
+    }
+}
+
+// Whether the character at `i` (of UTF-8 length `n`) is a control
+// character (`char::is_control`: U+0000..U+001F, U+007F..U+009F).
+pub fn is_control_at(in s: Slice[u8], i: u64, n: u64) -> bool {
+    let b0 = byte(in s, i);
+    if n == 1 {
+        return b0 < 32 || b0 == 127;
+    }
+    if n == 2 && b0 == 194 {
+        return byte(in s, wrapping_add(i, 1)) < 160;
+    }
+    false
+}
+
+// Whether valid UTF-8 `s` holds a control character.
+pub fn has_control(in s: Slice[u8]) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            return false;
+        }
+        let n = seq_len(in s, i);
+        if n == 0 {
+            return false;
+        }
+        if is_control_at(in s, i, n) {
+            return true;
+        }
+        i = wrapping_add(i, n);
+    }
+}
+
+fn upper(b: u8) -> u8 {
+    if b >= 97 && b <= 122 {
+        wrapping_sub(b, 32)
+    } else {
+        b
+    }
+}
+
+// Whether the stem (the name up to its first '.') is a Windows device
+// name: CON, PRN, AUX, NUL, or COM/LPT followed by one ASCII digit.
+fn reserved(in s: Slice[u8]) -> bool {
+    let mut stem: u64 = 0;
+    loop {
+        if stem >= s.len() || byte(in s, stem) == 46 {
+            break;
+        }
+        stem = wrapping_add(stem, 1);
+    }
+    let a = upper(byte(in s, 0));
+    let b = upper(byte(in s, 1));
+    let c = upper(byte(in s, 2));
+    if stem == 3 {
+        return (a == 67 && b == 79 && c == 78)
+            || (a == 80 && b == 82 && c == 78)
+            || (a == 65 && b == 85 && c == 88)
+            || (a == 78 && b == 85 && c == 76);
+    }
+    if stem == 4 {
+        let d = byte(in s, 3);
+        let com = a == 67 && b == 79 && c == 77;
+        let lpt = a == 76 && b == 80 && c == 84;
+        return (com || lpt) && d >= 48 && d <= 57;
+    }
+    false
+}
+
+// 0 for a valid name, else the NameError code (see `name_error`).
+pub fn name_code(in s: Slice[u8]) -> u64 {
+    if !is_utf8(in s) {
+        return 9;
+    }
+    let n = s.len();
+    if n == 0 {
+        return 1;
+    }
+    if n > 255 {
+        return 2;
+    }
+    if (n == 1 && byte(in s, 0) == 46) || (n == 2 && byte(in s, 0) == 46 && byte(in s, 1) == 46) {
+        return 3;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let len = seq_len(in s, i);
+        let b = byte(in s, i);
+        if b == 47 || b == 92 {
+            return 4;
+        }
+        if b == 58 || b == 60 || b == 62 || b == 34 || b == 124 || b == 63 || b == 42 {
+            return 5;
+        }
+        if is_control_at(in s, i, len) {
+            return 6;
+        }
+        i = wrapping_add(i, len);
+    }
+    let last = byte(in s, wrapping_sub(n, 1));
+    if last == 46 || last == 32 {
+        return 8;
+    }
+    if reserved(in s) {
+        return 7;
+    }
+    0
+}
