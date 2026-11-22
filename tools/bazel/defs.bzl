@@ -69,6 +69,9 @@ _SELF_HOST_CODEGEN = (
     "wasm_backend",
 )
 
+# Bazel's memory reservation for each "Self-host differentials" test.
+_SELF_HOST_MEMORY = "resources:memory:6144"
+
 def _fix_label(label):
     # rules_rs renders a path dependency on the workspace root crate as
     # "//" + <absolute workspace path>; the root crate is //:vesper.
@@ -283,9 +286,16 @@ def vesper_crate(
         # differentials"; the rest run as "Self-host differentials".
         test_name = label.split("/")[-1]
         self_host = ["self_host"] if test_name.startswith("self_host_") else []
+        label_tags = test_tags.get(label, [])
         if self_host and test_name[len("self_host_"):].startswith(_SELF_HOST_CODEGEN):
             self_host.append("self_host_codegen")
-        return test_tags.get(label, []) + self_host + ([] if "*" in remote_tests or label in remote_tests else ["no-remote-exec"])
+        elif self_host and not [tag for tag in label_tags if tag.startswith("resources:memory:")]:
+            # Four of these at once outgrew the 22 GB runner: the kernel killed
+            # the Bazel server mid-run ("Server terminated abruptly", no JVM
+            # error) on main at 2ed400d8 and on #1372. Reserving 6 GiB of the
+            # 18 GiB --local_resources budget runs three at a time.
+            self_host.append(_SELF_HOST_MEMORY)
+        return label_tags + self_host + ([] if "*" in remote_tests or label in remote_tests else ["no-remote-exec"])
 
     def wrapped_test(label, path_binaries = [], **kwargs):
         # The rust_test itself is an implementation detail of the cargo_test
