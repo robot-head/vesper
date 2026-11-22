@@ -103,12 +103,38 @@ const practice = {
 };
 
 const figures = {
+  '6.1': '<!-- diagram:continuation-fission -->',
+  '8.1': '<!-- diagram:compiler-pipeline -->',
+  '9.2': '<!-- diagram:lean-extraction -->',
+  '13.4': '<!-- diagram:aosoa-tile-layout -->',
+  '15.4': '<!-- diagram:pulse-nursery-dma -->',
+  '16.2': '<!-- diagram:wire-struct-layout -->',
+  '18.2': '<!-- diagram:lens-early-cutoff -->',
+  '23.2': '<!-- diagram:chrono-flight-recorder -->',
+  '25.3': '<!-- diagram:silicon-lifo-mmio -->',
+  '29.3': '<!-- diagram:aegis-bounce-grant -->',
+  '33.2': '<!-- diagram:warp-umem-rings -->',
+  '37.2': '<!-- diagram:flux-dbsp-circuit -->',
+  '39.2': '<!-- diagram:ignis-render-graph -->',
+  '42.4': '<!-- diagram:tensor-kv-paged -->',
+  'A.1': '<!-- diagram:metatheory-map -->',
+  'B.2': '<!-- diagram:prism-cad-grid -->',
   '1.4': '<!-- diagram:linear-transaction -->',
   '5.1': '<!-- diagram:effect-resumption -->',
   '7.4': '<!-- diagram:macro-substitution -->',
   '4.3': '<!-- figure:broker -->',
   'B.1': `<figure class="concept-figure prism"><img data-brand-mark src="../brand/vesper-mark-dusk.svg" width="256" height="256" loading="lazy" alt="A V-shaped prism with an upper chevron and open channels between three blades."><figcaption>The blades mark consumption, exclusive access, and shared access or an effect. The gaps keep the three visible in monochrome.</figcaption></figure>`,
 };
+
+function renderEntry(blocks, figure = '') {
+  const detail = blocks.indexOf('<!-- technical-detail -->');
+  if (detail < 0) return renderBlocks(blocks) + figure;
+  return renderBlocks(blocks.slice(0, detail)) + figure + `<details class="technical-detail">
+    <summary>Technical details</summary>
+    <p class="scope-note">These notes describe the manuscript design. Code listings are illustrative unless linked to a checked example.</p>
+    ${renderBlocks(blocks.slice(detail + 1))}
+  </details>`;
+}
 
 const search = `<div class="docs-search" hidden>
   <label for="topic-query">Search the docs, guide, and tour</label>
@@ -156,13 +182,13 @@ function article(chapter, previous, next, models) {
       <p class="chapter-label">${label(id)} · Manuscript guide</p>
       <h1>${escape(title)}</h1>
       <p class="scope-note"><strong>${status[0]}</strong> · ${status[1]} <a href="${review}">Review status</a></p>
-      ${renderBlocks(chapter.blocks)}
+      ${renderEntry(chapter.blocks)}
     </div>
     <nav class="contents" aria-label="Chapter contents"><h2>In this chapter</h2>
       ${sections.map(s => `<a href="#${sectionId(s.id)}">${escape(s.title)}</a>`).join('\n')}
     </nav>
     <div class="reader-body">
-      ${sections.map(s => `<section id="${sectionId(s.id)}"><h2>${escape(s.title)}</h2>${renderBlocks(s.blocks)}${figures[s.id] ?? ''}
+      ${sections.map(s => `<section id="${sectionId(s.id)}"><h2>${escape(s.title)}</h2>${renderEntry(s.blocks, figures[s.id])}
         <p class="source-ref"><a href="reference.html#${s.original.anchor}">Manuscript §${s.id} (HTML)</a> · <a href="${pdf(s.original.anchor)}" aria-label="Manuscript section ${s.id}, ${escape(s.title)} (PDF)">PDF</a></p></section>`).join('\n')}
       <div class="chapter-sources">
         <a href="${pdf(chapter.original.anchor)}">Read ${label(id).toLowerCase()} in the specification (PDF)</a>
