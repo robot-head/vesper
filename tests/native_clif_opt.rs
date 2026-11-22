@@ -170,3 +170,82 @@ fn chosen_aggregates_and_options_leave_no_slot() {
     }
     assert_eq!(agree(AGGREGATES), "198");
 }
+
+/// A helper that writes through an `inout` slice with a fallback, inlined
+/// three times: every write used to read the view's handle, offset and
+/// data pointer again in each arm (SH6 lane 11 item 1, warp-shard #1448).
+const HEADERS: &str = r#"
+fn wr16(inout b: Slice[u8], i: u64, v: u16) {
+    if !b.try_write_u16_be(i, v) {
+        b.try_set(i, wrapping_u8(v >> 8));
+        b.try_set(wrapping_add(i, 1), wrapping_u8(v));
+    }
+}
+
+fn put(inout out: Slice[u8], a: u16, b: u16, c: u16) -> u64 {
+    if out.len() < 6 {
+        return 0;
+    }
+    wr16(inout out, 0, a);
+    wr16(inout out, 2, b);
+    wr16(inout out, 4, c);
+    6
+}
+
+fn main() -> u64 {
+    let mut v = ChunkSeq::new[u8]();
+    let n: u64 = 8;
+    for i in 0..n {
+        v.push(0);
+    }
+    let w = put(inout v.as_slice_mut(), 258, 772, 1286);
+    let mut sum: u64 = w;
+    for i in 0..n {
+        sum = match v.try_get(i) {
+            Option::Some(x) => wrapping_add(wrapping_mul(sum, 31), widen_u64(x)),
+            Option::None => sum,
+        };
+    }
+    sum
+}
+"#;
+
+#[test]
+fn view_header_words_are_read_once() {
+    let c = accepted(HEADERS);
+    let mut seen = 0;
+    native::object_with_observer(
+        &c.world,
+        "main",
+        None,
+        true,
+        Some(&mut |f: native::EmittedFunction| {
+            if f.source != "put" {
+                return;
+            }
+            seen += 1;
+            let func = &f.function;
+            let entry = func.layout.entry_block().unwrap();
+            let view = func.dfg.block_params(entry)[0];
+            // Loads of the view, then of the handle it holds.
+            let mut header = std::collections::HashSet::new();
+            header.insert(view);
+            let mut words = vec![];
+            for block in func.layout.blocks() {
+                for inst in func.layout.block_insts(block) {
+                    if let InstructionData::Load { arg, offset, .. } = func.dfg.insts[inst]
+                        && header.contains(&func.dfg.resolve_aliases(arg))
+                    {
+                        words.push((func.dfg.resolve_aliases(arg), i32::from(offset)));
+                        header.insert(func.dfg.first_result(inst));
+                    }
+                }
+            }
+            let distinct: std::collections::HashSet<_> = words.iter().collect();
+            assert_eq!(words.len(), distinct.len(), "{words:?}\n{}", func.display());
+        }),
+    )
+    .unwrap();
+    assert!(seen > 0, "put was not emitted");
+    assert_eq!(agree(HEADERS), "5146723582377");
+}
