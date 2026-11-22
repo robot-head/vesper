@@ -71,6 +71,28 @@ fn random_and_replayed_sources_match_the_rust_build() {
 }
 
 #[test]
+fn replayed_byte_strings_stop_clamp_and_overrun_like_the_rust_build() {
+    // Flags clamp to 1 and bytes to 255; a 0 flag ends the string.
+    let mut src = Source::replay(&ChoiceTape::new(vec![1, 7, 5, 300, 0, 4]));
+    assert_eq!(src.draw_bytes(10), Ok(vec![7, 255]));
+    assert_eq!(src.realized_values(), &[1, 7, 1, 255, 0]);
+    assert_eq!(src.draw_u8(), Ok(4));
+
+    // At `max_len` bytes no further flag is drawn.
+    let mut src = Source::replay(&ChoiceTape::new(vec![1, 2, 1, 3, 1, 4]));
+    assert_eq!(src.draw_bytes(2), Ok(vec![2, 3]));
+    assert_eq!(src.realized_values(), &[1, 2, 1, 3]);
+    assert_eq!(src.draw_bytes(0), Ok(vec![]));
+    assert_eq!(src.draws(), 4);
+
+    // A tape that ends inside the string overruns; the draws before the
+    // overrun stay realized.
+    let mut src = Source::replay(&ChoiceTape::new(vec![1, 9, 1]));
+    assert!(src.draw_bytes(10).is_err());
+    assert_eq!(src.realized_values(), &[1, 9, 1]);
+}
+
+#[test]
 fn tape_text_and_keys_match_the_rust_build() {
     let tape = ChoiceTape::new(vec![0, 1, 0xabc_def0, u64::MAX, 16]);
     assert_eq!(

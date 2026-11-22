@@ -14,7 +14,7 @@ carries #915 (Crucible), #965 (TOML reader) and #1068 (Chorus). Started
 | vesper-loom-audit | flipped, Rust in the seed (part 3, this PR) | 8 pkgs 1.37x [1.34, 1.41] (n=54); 64 pkgs 1.15x [1.05, 1.27]; 256 pkgs 0.96x [0.91, 1.04] | the seed; input-size checks and BLAKE3 context digests (serde_json + blake3), until `vesper-blake3-sys` lands |
 | vesper-semver | above the bar | 64 exports 1.63-1.81x; 8 exports 1.93-2.29x; empty interfaces 3.2x | encoder cost and checker codegen (below) |
 | vesper-beacon | above the bar | exp 3.5x, hist 4.5x, spans 2.1x, traceparent 1.0x | per-call FFI cost (calls of a few ns) |
-| vesper-crucible | partly above the bar | draws 1.81x, tape 1.80x, shrink 2.62x, fuzz 2.66x, dpor 0.80x, cached 0.92x | not ported: fuzzer driver, schedule explorers, arena |
+| vesper-crucible | partly above the bar | draws 1.47x, tape 0.85x, shrink 1.57x, fuzz 1.34x, dpor 0.79x, cached 0.89x | per-draw boundary cost (below); not ported: fuzzer driver, schedule explorers, arena |
 | vesper-chorus | front end Vesper-only (#1072) | parse+project 0.70x | Raft cluster model, sessions, simnet, durable, warpnet, rdma (part 2 of #1068) |
 
 Ratios are Hodges-Lehmann medians of paired ABBA epochs with their 95%
@@ -83,6 +83,35 @@ read carries a bounds check and an `Option` match (see the `try_get` gap
 below). Version parsing pays a sequence allocation per input and per
 message.
 
+## Crucible
+
+Medians of 21 ABBA epochs (`bench-abba.sh 21 20`), before → after this
+lane's crucible PR: draws 1.81x → 1.47x, tape text 1.80x → 0.85x, shrink
+2.62x → 1.57x, fuzz 2.66x → 1.34x; DPOR (0.79x) and the cached explorer
+(0.89x) were already faster than Rust. The changes:
+
+- `source_draw` takes the one replayed word instead of the whole tape, so a
+  draw no longer marshals a slice (29 instructions a draw).
+- `draw_bytes` runs its whole flag and byte loop in one Vesper call
+  (`source_draw_bytes`), with the tape read through `try_get` in the loop so
+  `source_draw` inlines.
+- `rng_below_inclusive` skips both divisions for power-of-two bounds
+  (bytes, flags): Rust folds them because the bound is a constant after
+  inlining, and the port's bound arrives as a variable.
+- The shrinker copies tapes with `extend` instead of element by element,
+  and keeps the best tape's key instead of re-summing it on every attempt.
+- Tape text writes digits most-significant first with `leading_zeros_u64`
+  and decodes them without a branch per digit: random hex digits
+  mispredicted about half the time (115k mispredictions a run → 22k).
+
+What keeps draws and shrink above 1.5x on some runs: every draw from a
+Rust property closure is one call into Vesper (9 arguments, 4 on the
+stack, results through memory), plus the Rust wrapper's bookkeeping. That
+is about 100 instructions a draw against about 40 for Rust's inlined draw.
+`source_draw` also zeroes 8 stack slots twice on entry (a codegen gap,
+below). Collections drawn by a closure (`draw_vec`) cannot batch the way
+`draw_bytes` does.
+
 ## Compiler gaps
 
 - **Slice parameters block inlining** (also reported by the P1 semver lane).
@@ -102,6 +131,10 @@ message.
   checked on entry. This is the bounds-hoisting lane's open item
   ("vectorizing try_get loops"); semver's `validate_*` functions are a small
   reproducer.
+- **Dead stack stores on entry.** `vesper_crucible_source_draw` zeroes each
+  of its 8 spill slots twice before any use (16 stores per call). Small
+  functions called once per draw pay for it on every call (see the native
+  code size lane).
 
 ## Checks run (Linux x86_64)
 
