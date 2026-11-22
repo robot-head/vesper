@@ -916,6 +916,8 @@ fn emit_preopens(inout a: A, in h: Host) {
     let nl = a.loc();
     let s = a.loc();
     let t = a.loc();
+    let over = a.loc();
+    a.setk(over, 0);
     a.lda(h.misc, OP_I64_LOAD);
     a.op(OP_I64_EQZ);
     a.op(OP_I32_EQZ);
@@ -941,10 +943,15 @@ fn emit_preopens(inout a: A, in h: Host) {
     a.get(ln);
     a.op(OP_I64_GE_U);
     a.br_if(1);
+    // More preopens than the table holds: a partial table could resolve
+    // a path under the wrong directory, so every path fails instead.
     a.get(cnt);
     a.ku(NPRE);
     a.op(OP_I64_GE_U);
-    a.br_if(1);
+    a.open(OP_IF);
+    a.setk(over, 1);
+    a.br(2);
+    a.end();
     // e = lp + 12 i
     a.get(lp);
     a.get(i);
@@ -986,19 +993,28 @@ fn emit_preopens(inout a: A, in h: Host) {
     a.op(OP_I64_ADD);
     a.set(off);
     a.addk(cnt, 1);
+    a.op(OP_ELSE);
+    a.setk(over, 1);
+    a.br(2);
     a.end();
     a.addk(i, 1);
     a.br(0);
     a.end();
     a.end();
+    // count, or -1 when the preopens did not fit
     a.sta_begin();
+    a.k(-1);
     a.get(cnt);
+    a.get(over);
+    a.op(OP_I64_EQZ);
+    a.op(OP_I32_EQZ);
+    a.op(OP_SELECT);
     a.st_end(h.pre);
     a.k(0);
 }
 
 // H_RESOLVE(path view) -> the preopen's descriptor, -1 when none fits, -2
-// for a NUL byte; the relative path's view goes to misc[8].
+// for a NUL byte, -3 when the preopens overflowed the table; the relative path's view goes to misc[8].
 fn emit_resolve(inout a: A, in h: Host, pre: u32) {
     let pa = a.loc();
     let pn = a.loc();
@@ -1043,6 +1059,12 @@ fn emit_resolve(inout a: A, in h: Host, pre: u32) {
     a.end();
     a.lda(h.pre, OP_I64_LOAD);
     a.set(cnt);
+    a.get(cnt);
+    a.k(-1);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    a.retk(-3);
+    a.end();
     a.setk(best, -1);
     a.setk(bl, 0);
     // absolute: pn > 0 && byte 0 == '/'
@@ -1407,7 +1429,8 @@ fn failed(inout a: A, in h: Host) {
     a.op(OP_I32_EQZ);
 }
 
-// `desc = H_RESOLVE(path)`; on -2 or -1 store the error and return `fail`.
+// `desc = H_RESOLVE(path)`; on -3, -2 or -1 store the error and return
+// `fail`.
 // Leaves the relative path in `ra`, `rn`.
 fn resolve(
     inout b: Builder,
@@ -1429,6 +1452,14 @@ fn resolve(
     a.op(OP_I64_EQ);
     a.open(OP_IF);
     put_errk(inout a, err, 7);
+    a.retk(fail);
+    a.end();
+    a.get(desc);
+    a.k(-3);
+    a.op(OP_I64_EQ);
+    a.open(OP_IF);
+    // Unsupported | ENOTSUP << 32: too many preopens for the table
+    put_errk(inout a, err, 11 | (95 << 32));
     a.retk(fail);
     a.end();
     a.get(desc);
@@ -1837,8 +1868,18 @@ fn emit_fs(inout b: Builder, inout h: Host, inout a: A, k: u64) eff [Fail[WErr]]
         a.lda(add(h.scr, 4), OP_I64_LOAD32_U);
         a.set(nd);
         if k == FS_SYNC_DIR {
+            // Flush the directory entries (a rename into it), then release
+            // the descriptor on both paths.
+            a.w32(nd);
+            a.i32k(h.scr);
+            a.call(h.i_sync);
             a.w32(nd);
             a.call(h.i_drop_desc);
+            failed(inout a, in h);
+            a.open(OP_IF);
+            put_wasi_err(inout b, inout h, inout a, err, add(h.scr, 1));
+            a.retk(1);
+            a.end();
             put_errk(inout a, err, 0);
             a.k(0);
             return;
