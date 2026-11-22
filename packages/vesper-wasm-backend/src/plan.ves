@@ -125,6 +125,11 @@ pub copy struct Syms {
     trace: u32,
     eq: u32,
     empty: u32,
+    chunkseq: u32,
+    slice: u32,
+    str_: u32,
+    some: u32,
+    none: u32,
 }
 
 pub fn syms_new(inout n: Names) -> Syms {
@@ -153,6 +158,11 @@ pub fn syms_new(inout n: Names) -> Syms {
         trace: n.intern(in "Trace".as_bytes()),
         eq: n.intern(in "=".as_bytes()),
         empty: n.intern(in "".as_bytes()),
+        chunkseq: n.intern(in "ChunkSeq".as_bytes()),
+        slice: n.intern(in "Slice".as_bytes()),
+        str_: n.intern(in "Str".as_bytes()),
+        some: n.intern(in "Some".as_bytes()),
+        none: n.intern(in "None".as_bytes()),
     }
 }
 

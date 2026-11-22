@@ -304,6 +304,9 @@ vesper_crate(
             "packages/**",
             "tests/fixtures/**",
         ]) + ["tests/wasm_backend.rs"],
+        # Rust exit gap wave 1 lane 9 (#1506): the port's sequences and
+        # strings under Wasmtime against the evaluator.
+        "test/wasm_seed_breadth": glob(["packages/**"]),
         # SH5 lane 11 (#1334): @vesper/wit-component against wit-component
         # over the same programs.
         "test/self_host_wit_component": glob([
@@ -697,6 +700,7 @@ vesper_crate(
         "test/self_host_ir_opt": 4,
         "test/self_host_place_ir_jit": 4,
         "test/self_host_swap_inputs": 4,
+        "test/wasm_seed_breadth": 4,
     },
     # Reservations include subprocess overhead; they do not enforce RSS limits.
     # `lean_replay` marks the Lean/Logos suite run by "Native and acceptance
@@ -993,6 +997,8 @@ vesper_crate(
         "test/self_host_codegen_seq": "long",
         # The wasm backend differential: about 10 min in a debug build.
         "test/self_host_wasm_backend": "long",
+        # Loads the port package, then 17 compilations and Wasmtime runs.
+        "test/wasm_seed_breadth": "long",
         # The component wrapping differential (#1334): ~2 min release.
         "test/self_host_wit_component": "long",
         "test/self_host_codegen_scalar": "long",
