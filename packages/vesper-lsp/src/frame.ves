@@ -5,6 +5,8 @@
 // (crates/vesper-lsp/tests/transport.rs reads at every chunk size).
 
 use self::limits::{
+    Ascii,
+    Crlf,
     Perr,
     Plimits,
     add,
@@ -16,18 +18,8 @@ use self::limits::{
     validate
 };
 
-const LF: u8 = 10;
-const CR: u8 = 13;
-const TAB: u8 = 9;
-const SPACE: u8 = 32;
-const TILDE: u8 = 126;
-const COLON: u8 = 58;
-const SEMICOLON: u8 = 59;
-const EQUALS: u8 = 61;
-const QUOTE: u8 = 34;
-const DASH: u8 = 45;
-const ZERO: u8 = 48;
-const NINE: u8 = 57;
+// The bit that tells a lower-case ASCII letter from its capital.
+const CASE_BIT: u8 = 32;
 
 // One frame's body: `start` and `len` in the stream.
 pub copy struct Body {
@@ -64,7 +56,7 @@ fn header_line(in s: Slice[u8], inout c: Cursor, inout total: u64, l: Plimits)
             sat_sub(l.max_header_bytes, total)
         );
         let scan = min64(wrapping_sub(n, c.pos), sat_add(remaining, 1));
-        let count = match s[c.pos..wrapping_add(c.pos, scan)].find_byte(LF) {
+        let count = match s[c.pos..wrapping_add(c.pos, scan)].find_byte(Ascii::Lf) {
             Option::Some(k) => wrapping_add(k, 1),
             Option::None => scan,
         };
@@ -75,8 +67,8 @@ fn header_line(in s: Slice[u8], inout c: Cursor, inout total: u64, l: Plimits)
         len = next;
         c.pos = wrapping_add(c.pos, count);
         total = all;
-        if byte(in s, wrapping_sub(c.pos, 1)) == LF {
-            if len < 2 || byte(in s, wrapping_sub(c.pos, 2)) != CR {
+        if byte(in s, wrapping_sub(c.pos, 1)) == Ascii::Lf {
+            if len < Crlf::Len || byte(in s, wrapping_sub(c.pos, Crlf::Len)) != Ascii::Cr {
                 Fail::raise(Perr::PInvalidHeader);
             }
             return Option::Some(
@@ -90,8 +82,8 @@ fn header_line(in s: Slice[u8], inout c: Cursor, inout total: u64, l: Plimits)
 }
 
 fn lower(b: u8) -> u8 {
-    if b >= 65 && b <= 90 {
-        wrapping_add(b, 32)
+    if b >= Ascii::UpperA && b <= Ascii::UpperZ {
+        wrapping_add(b, CASE_BIT)
     } else {
         b
     }
@@ -121,7 +113,7 @@ fn trim(in s: Slice[u8], a: u64, b: u64) -> (u64, u64) {
             break;
         }
         let c = byte(in s, x);
-        if c != SPACE && c != TAB {
+        if c != Ascii::Space && c != Ascii::Tab {
             break;
         }
         x = wrapping_add(x, 1);
@@ -131,7 +123,7 @@ fn trim(in s: Slice[u8], a: u64, b: u64) -> (u64, u64) {
             break;
         }
         let c = byte(in s, wrapping_sub(y, 1));
-        if c != SPACE && c != TAB {
+        if c != Ascii::Space && c != Ascii::Tab {
             break;
         }
         y = wrapping_sub(y, 1);
@@ -152,7 +144,7 @@ fn find(in s: Slice[u8], a: u64, b: u64, c: u8) -> u64 {
 
 // `content_type`.
 fn content_type(in s: Slice[u8], a: u64, b: u64) -> Unit eff [Fail[Perr]] {
-    let first = find(in s, a, b, SEMICOLON);
+    let first = find(in s, a, b, Ascii::Semicolon);
     let (ma, mb) = trim(in s, a, first);
     if !eq_ic(in s, ma, mb, "application/vscode-jsonrpc")
         && !eq_ic(in s, ma, mb, "application/json") {
@@ -165,10 +157,10 @@ fn content_type(in s: Slice[u8], a: u64, b: u64) -> Unit eff [Fail[Perr]] {
             break;
         }
         let pa = wrapping_add(at, 1);
-        let pb = find(in s, pa, b, SEMICOLON);
+        let pb = find(in s, pa, b, Ascii::Semicolon);
         at = pb;
         let (ta, tb) = trim(in s, pa, pb);
-        let eq = find(in s, ta, tb, EQUALS);
+        let eq = find(in s, ta, tb, Ascii::Equals);
         if eq >= tb {
             Fail::raise(Perr::PInvalidHeader);
         }
@@ -180,10 +172,10 @@ fn content_type(in s: Slice[u8], a: u64, b: u64) -> Unit eff [Fail[Perr]] {
         let (ra, rb) = trim(in s, wrapping_add(eq, 1), tb);
         let mut va = ra;
         let mut vb = rb;
-        if ra < rb && byte(in s, ra) == QUOTE {
+        if ra < rb && byte(in s, ra) == Ascii::Quote {
             // `strip_prefix('"')` then `strip_suffix('"')`.
             va = wrapping_add(ra, 1);
-            if vb <= va || byte(in s, wrapping_sub(vb, 1)) != QUOTE {
+            if vb <= va || byte(in s, wrapping_sub(vb, 1)) != Ascii::Quote {
                 Fail::raise(Perr::PInvalidHeader);
             }
             vb = wrapping_sub(vb, 1);
@@ -195,7 +187,11 @@ fn content_type(in s: Slice[u8], a: u64, b: u64) -> Unit eff [Fail[Perr]] {
 }
 
 fn is_name_byte(c: u8) -> bool {
-    (c >= ZERO && c <= NINE) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == DASH
+    (c >= Ascii::Zero && c <= Ascii::Nine)
+        || (c >= Ascii::UpperA && c <= Ascii::UpperZ)
+        || (c >= Ascii::LowerA && c <= Ascii::LowerZ)
+        || c
+        == Ascii::Dash
 }
 
 // `read_frame`: the next body, or `None` at a clean end of the stream.
@@ -211,20 +207,20 @@ pub fn read_frame(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Option[Body] 
             Option::Some(x) => x,
             Option::None => return Option::None,
         };
-        if line.len == 2 {
+        if line.len == Crlf::Len {
             break;
         }
         count = wrapping_add(count, 1);
         bound(count, l.max_headers, Perr::PHeaderLimit);
         let a = line.start;
-        let b = wrapping_add(line.start, wrapping_sub(line.len, 2));
+        let b = wrapping_add(line.start, wrapping_sub(line.len, Crlf::Len));
         for i in a..b {
             let x = byte(in s, i);
-            if !((x >= SPACE && x <= TILDE) || x == TAB) {
+            if !((x >= Ascii::Space && x <= Ascii::Tilde) || x == Ascii::Tab) {
                 Fail::raise(Perr::PInvalidHeader);
             }
         }
-        let colon = find(in s, a, b, COLON);
+        let colon = find(in s, a, b, Ascii::Colon);
         if colon >= b || colon == a {
             Fail::raise(Perr::PInvalidHeader);
         }
@@ -244,13 +240,13 @@ pub fn read_frame(in s: Slice[u8], inout c: Cursor, l: Plimits) -> Option[Body] 
             }
             for i in va..vb {
                 let x = byte(in s, i);
-                if x < ZERO || x > NINE {
+                if x < Ascii::Zero || x > Ascii::Nine {
                     Fail::raise(Perr::PInvalidLength);
                 }
             }
             let mut v: u64 = 0;
             for i in va..vb {
-                let d = widen_u64(wrapping_sub(byte(in s, i), ZERO));
+                let d = widen_u64(wrapping_sub(byte(in s, i), Ascii::Zero));
                 // `max_body_bytes <= 8 MiB` keeps `v * 10 + d` far from
                 // overflow: each digit is bounded before the next.
                 v = wrapping_add(wrapping_mul(v, 10), d);
