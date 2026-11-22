@@ -2667,6 +2667,8 @@ fn immediates(in words: Slice[u32]) -> ChunkSeq[u8] eff [Fail[RuntimeError], Fai
     s.image
 }
 
+// With `dry`, every tensor function makes all of its checks and records
+// nothing, so a caller can report a shape error before an ownership one.
 fn dispatch(
     in d: Dev,
     inout r: Rec,
@@ -2675,7 +2677,11 @@ fn dispatch(
     in imm: Slice[u32],
     gx: u32,
     gy: u32,
+    dry: bool,
 ) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
+    if dry {
+        return;
+    }
     let bytes = immediates(in imm);
     rec_dispatch(in d, inout r, in k, in buffers, in bytes.as_slice(), gx, gy, 1);
 }
@@ -2718,6 +2724,7 @@ pub fn tk_matmul(
     n: u64,
     k: u64,
     accumulate: bool,
+    dry: bool,
 ) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     need(in a, mul_or(m, k, TensorLimit::MK), TensorShape::MatmulA);
     need(in w, mul_or(n, k, TensorLimit::NK), TensorShape::MatmulW);
@@ -2737,7 +2744,7 @@ pub fn tk_matmul(
     let gx = groups_for(n, 64);
     let gy = u32_of(m, TensorLimit::MatmulRows);
     let bufs = handles3(in a, in w, in out);
-    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, gy);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, gy, dry);
 }
 
 // RMSNorm of each of `rows` rows of width `n`; `epsilon` is an f32's bits
@@ -2752,6 +2759,7 @@ pub fn tk_rms_norm(
     rows: u64,
     n: u64,
     epsilon: u32,
+    dry: bool,
 ) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     if !(finite(epsilon) && epsilon & F32_SIGN == 0 && epsilon != 0) {
         fail(Kind::Shape, TensorShape::RmsEpsilon, 0);
@@ -2765,7 +2773,7 @@ pub fn tk_rms_norm(
     imm.push(epsilon);
     let gx = u32_of(rows, TensorLimit::RmsRows);
     let bufs = handles3(in x, in weight, in out);
-    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
 }
 
 // RoPE in place over `len` floats of whole heads of width `head_dim`, with
@@ -2779,6 +2787,7 @@ pub fn tk_rope(
     len: u64,
     head_dim: u64,
     position: u64,
+    dry: bool,
 ) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     let whole = head_dim != 0 && head_dim % 2 == 0 && len % head_dim == 0;
     if !whole {
@@ -2792,24 +2801,26 @@ pub fn tk_rope(
     imm.push(u32_of(position, TensorLimit::Position));
     let gx = groups_for(len / 2, 64);
     let bufs = handles2(in x, in freqs);
-    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
 }
 
 // `gate[i] = silu(gate[i]) * up[i]` for `n` elements.
-pub fn tk_swiglu(in d: Dev, inout r: Rec, in kern: Kern, in gate: Buf, in up: Buf, n: u64) eff [
-    Ffi[Vk],
-    Ffi[LibC],
-    Fail[GpuErr],
-    Fail[RuntimeError],
-    Fail[ArithOverflow]
-] {
+pub fn tk_swiglu(
+    in d: Dev,
+    inout r: Rec,
+    in kern: Kern,
+    in gate: Buf,
+    in up: Buf,
+    n: u64,
+    dry: bool
+) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     need(in gate, n, TensorShape::SwigluGate);
     need(in up, n, TensorShape::SwigluUp);
     let mut imm: ChunkSeq[u32] = ChunkSeq::new[u32]();
     imm.push(u32_of(n, TensorLimit::N));
     let gx = groups_for(n, 64);
     let bufs = handles2(in gate, in up);
-    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
 }
 
 // Stores `k` and `v` (`kv_dim` floats each) at `position` of the paged
@@ -2825,6 +2836,7 @@ pub fn tk_kv_write(
     in values: Buf,
     position: u64,
     kv_dim: u64,
+    dry: bool,
 ) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     need(in k, kv_dim, TensorShape::KvK);
     need(in v, kv_dim, TensorShape::KvV);
@@ -2839,7 +2851,7 @@ pub fn tk_kv_write(
     imm.push(u32_of(kv_dim, TensorLimit::KvDim));
     let gx = groups_for(kv_dim, 64);
     let bufs = handles5(in k, in v, in table, in keys, in values);
-    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
 }
 
 // Paged grouped-query attention of `q` (`[query_heads, head_dim]`) over
@@ -2858,6 +2870,7 @@ pub fn tk_attention(
     kv_heads: u64,
     head_dim: u64,
     tokens: u64,
+    dry: bool,
 ) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     if head_dim == 0 || head_dim > MAX_HEAD_DIM {
         fail(Kind::Limit, TensorLimit::AttHeadDim, 0);
@@ -2889,7 +2902,7 @@ pub fn tk_attention(
     imm.push(u32_of(tokens, TensorLimit::Tokens));
     let gx = u32_of(query_heads, TensorLimit::QueryHeads);
     let bufs = handles5(in q, in keys, in values, in table, in out);
-    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1);
+    dispatch(in d, inout r, in kern, in bufs.as_slice(), in imm.as_slice(), gx, 1, dry);
 }
 
 // A model's shape for one decode step.
@@ -2954,6 +2967,7 @@ pub fn tk_step(
     in s: StepSession,
     in m: StepModel,
     in layers: Slice[u64],
+    dry: bool,
 ) eff [Ffi[Vk], Ffi[LibC], Fail[GpuErr], Fail[RuntimeError], Fail[ArithOverflow]] {
     for l in 0..c.layers {
         let rms_attention = layer_buf(in layers, l, 0);
@@ -2976,13 +2990,48 @@ pub fn tk_step(
             in s.xb,
             1,
             c.dim,
-            c.epsilon
+            c.epsilon,
+            dry
         );
-        tk_matmul(in d, inout r, in ks.matmul, in s.xb, in wq, in s.q, 1, c.dim, c.dim, false);
-        tk_matmul(in d, inout r, in ks.matmul, in s.xb, in wk, in s.k, 1, c.kv_dim, c.dim, false);
-        tk_matmul(in d, inout r, in ks.matmul, in s.xb, in wv, in s.v, 1, c.kv_dim, c.dim, false);
-        tk_rope(in d, inout r, in ks.rope, in s.q, in m.freqs, c.dim, c.head_dim, c.position);
-        tk_rope(in d, inout r, in ks.rope, in s.k, in m.freqs, c.kv_dim, c.head_dim, c.position);
+        tk_matmul(in d, inout r, in ks.matmul, in s.xb, in wq, in s.q, 1, c.dim, c.dim, false, dry);
+        tk_matmul(
+            in d,
+            inout r,
+            in ks.matmul,
+            in s.xb,
+            in wk,
+            in s.k,
+            1,
+            c.kv_dim,
+            c.dim,
+            false,
+            dry
+        );
+        tk_matmul(
+            in d,
+            inout r,
+            in ks.matmul,
+            in s.xb,
+            in wv,
+            in s.v,
+            1,
+            c.kv_dim,
+            c.dim,
+            false,
+            dry
+        );
+        tk_rope(in d, inout r, in ks.rope, in s.q, in m.freqs, c.dim, c.head_dim, c.position, dry);
+        tk_rope(
+            in d,
+            inout r,
+            in ks.rope,
+            in s.k,
+            in m.freqs,
+            c.kv_dim,
+            c.head_dim,
+            c.position,
+            dry
+        );
         tk_kv_write(
             in d,
             inout r,
@@ -2993,7 +3042,8 @@ pub fn tk_step(
             in keys,
             in values,
             c.position,
-            c.kv_dim
+            c.kv_dim,
+            dry
         );
         tk_attention(
             in d,
@@ -3007,9 +3057,10 @@ pub fn tk_step(
             c.heads,
             c.kv_heads,
             c.head_dim,
-            c.position + 1
+            c.position + 1,
+            dry
         );
-        tk_matmul(in d, inout r, in ks.matmul, in s.att, in wo, in s.x, 1, c.dim, c.dim, true);
+        tk_matmul(in d, inout r, in ks.matmul, in s.att, in wo, in s.x, 1, c.dim, c.dim, true, dry);
         tk_rms_norm(
             in d,
             inout r,
@@ -3019,7 +3070,8 @@ pub fn tk_step(
             in s.xb,
             1,
             c.dim,
-            c.epsilon
+            c.epsilon,
+            dry
         );
         tk_matmul(
             in d,
@@ -3031,7 +3083,8 @@ pub fn tk_step(
             1,
             c.hidden_dim,
             c.dim,
-            false
+            false,
+            dry
         );
         tk_matmul(
             in d,
@@ -3043,9 +3096,10 @@ pub fn tk_step(
             1,
             c.hidden_dim,
             c.dim,
-            false
+            false,
+            dry
         );
-        tk_swiglu(in d, inout r, in ks.swiglu, in s.hb, in s.hb2, c.hidden_dim);
+        tk_swiglu(in d, inout r, in ks.swiglu, in s.hb, in s.hb2, c.hidden_dim, dry);
         tk_matmul(
             in d,
             inout r,
@@ -3056,7 +3110,8 @@ pub fn tk_step(
             1,
             c.dim,
             c.hidden_dim,
-            true
+            true,
+            dry
         );
     }
     tk_rms_norm(
@@ -3068,7 +3123,8 @@ pub fn tk_step(
         in s.xb,
         1,
         c.dim,
-        c.epsilon
+        c.epsilon,
+        dry
     );
     tk_matmul(
         in d,
@@ -3080,6 +3136,7 @@ pub fn tk_step(
         1,
         c.vocab,
         c.dim,
-        false
+        false,
+        dry
     );
 }

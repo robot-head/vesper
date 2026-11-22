@@ -732,16 +732,24 @@ impl<'a> Recording<'a> {
     }
 
     /// Records `dispatches` dispatches made by another Vesper-driven module
-    /// of the crate: `record` gets the device and the command buffer, and may
-    /// bind only `kernels` and `buffers`, which the recording then keeps
-    /// alive as [`Recording::dispatch`] does.
+    /// of the crate: `record` gets the device, the command buffer and `dry`,
+    /// and may bind only `kernels` and `buffers`, which the recording then
+    /// keeps alive as [`Recording::dispatch`] does. It is called first with
+    /// `dry` set, to make every check of its own without recording, so its
+    /// shape errors come before an ownership error as they did in Rust; then
+    /// once to record.
     pub(crate) fn record_with(
         &mut self,
         kernels: &[&'a Kernel],
         buffers: &[&'a Buffer],
         dispatches: usize,
-        record: impl FnOnce(Dev, &mut Rec) -> Result<(), GpuError>,
+        record: impl Fn(Dev, &mut Rec, bool) -> Result<(), GpuError>,
     ) -> Result<(), GpuError> {
+        let dev = self.ctx.inner.dev;
+        if let Some(rec) = self.commands.rec.as_mut() {
+            // A dry run records nothing, so nothing is retained on failure.
+            record(dev, rec, true)?;
+        }
         if kernels
             .iter()
             .any(|k| !Arc::ptr_eq(&k.inner.ctx, &self.ctx.inner))
@@ -754,7 +762,7 @@ impl<'a> Recording<'a> {
             .rec
             .as_mut()
             .ok_or(GpuError::Shape("recording already submitted"))?;
-        let recorded = record(self.ctx.inner.dev, rec);
+        let recorded = record(dev, rec, false);
         // Kept even when `record` failed part way: the command buffer may
         // already name them.
         self.commands

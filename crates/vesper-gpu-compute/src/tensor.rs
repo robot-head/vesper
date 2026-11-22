@@ -124,10 +124,10 @@ impl TensorKernels {
         accumulate: bool,
     ) -> Result<(), GpuError> {
         let (kern, ra, rw, ro) = (self.matmul.raw(), a.raw(), w.raw(), out.raw());
-        rec.record_with(&[&self.matmul], &[a, w, out], 1, |dev, r| {
+        rec.record_with(&[&self.matmul], &[a, w, out], 1, |dev, r, dry| {
             vesper!(
                 binding::tk_matmul(
-                    dev, r, kern, ra, rw, ro, m as u64, n as u64, k as u64, accumulate
+                    dev, r, kern, ra, rw, ro, m as u64, n as u64, k as u64, accumulate, dry
                 ),
                 TkMatmulError
             )
@@ -148,9 +148,9 @@ impl TensorKernels {
     ) -> Result<(), GpuError> {
         let (kern, rx, rw, ro) = (self.rms_norm.raw(), x.raw(), weight.raw(), out.raw());
         let eps = epsilon.to_bits();
-        rec.record_with(&[&self.rms_norm], &[x, weight, out], 1, |dev, r| {
+        rec.record_with(&[&self.rms_norm], &[x, weight, out], 1, |dev, r, dry| {
             vesper!(
-                binding::tk_rms_norm(dev, r, kern, rx, rw, ro, rows as u64, n as u64, eps),
+                binding::tk_rms_norm(dev, r, kern, rx, rw, ro, rows as u64, n as u64, eps, dry),
                 TkRmsNormError
             )
         })
@@ -169,7 +169,7 @@ impl TensorKernels {
         position: usize,
     ) -> Result<(), GpuError> {
         let (kern, rx, rf) = (self.rope.raw(), x.raw(), freqs.raw());
-        rec.record_with(&[&self.rope], &[x, freqs], 1, |dev, r| {
+        rec.record_with(&[&self.rope], &[x, freqs], 1, |dev, r, dry| {
             vesper!(
                 binding::tk_rope(
                     dev,
@@ -179,7 +179,8 @@ impl TensorKernels {
                     rf,
                     len as u64,
                     head_dim as u64,
-                    position as u64
+                    position as u64,
+                    dry
                 ),
                 TkRopeError
             )
@@ -195,9 +196,9 @@ impl TensorKernels {
         n: usize,
     ) -> Result<(), GpuError> {
         let (kern, rg, ru) = (self.swiglu.raw(), gate.raw(), up.raw());
-        rec.record_with(&[&self.swiglu], &[gate, up], 1, |dev, r| {
+        rec.record_with(&[&self.swiglu], &[gate, up], 1, |dev, r, dry| {
             vesper!(
-                binding::tk_swiglu(dev, r, kern, rg, ru, n as u64),
+                binding::tk_swiglu(dev, r, kern, rg, ru, n as u64, dry),
                 TkSwigluError
             )
         })
@@ -224,7 +225,7 @@ impl TensorKernels {
             &[&self.kv_write],
             &[k, v, table, keys, values],
             1,
-            |dev, r| {
+            |dev, r, dry| {
                 vesper!(
                     binding::tk_kv_write(
                         dev,
@@ -236,7 +237,8 @@ impl TensorKernels {
                         rkeys,
                         rvalues,
                         position as u64,
-                        kv_dim as u64
+                        kv_dim as u64,
+                        dry
                     ),
                     TkKvWriteError
                 )
@@ -274,7 +276,7 @@ impl TensorKernels {
             &[&self.attention],
             &[q, keys, values, table, out],
             1,
-            |dev, r| {
+            |dev, r, dry| {
                 vesper!(
                     binding::tk_attention(
                         dev,
@@ -288,7 +290,8 @@ impl TensorKernels {
                         query_heads as u64,
                         kv_heads as u64,
                         head_dim as u64,
-                        tokens as u64
+                        tokens as u64,
+                        dry
                     ),
                     TkAttentionError
                 )
@@ -514,12 +517,17 @@ impl GpuModel {
         let k = &self.kernels;
         let kernels = k.raw();
         let mut rec = self.ctx.record()?;
-        rec.record_with(&k.all(), &buffers, 14 * self.layers.len() + 2, |dev, r| {
-            vesper!(
-                binding::tk_step(dev, r, kernels, step, raw_session, model, &layers),
-                TkStepError
-            )
-        })?;
+        rec.record_with(
+            &k.all(),
+            &buffers,
+            14 * self.layers.len() + 2,
+            |dev, r, dry| {
+                vesper!(
+                    binding::tk_step(dev, r, kernels, step, raw_session, model, &layers, dry),
+                    TkStepError
+                )
+            },
+        )?;
         rec.submit()?.wait()?;
         session.logits.read(0, &mut session.host_logits)?;
         if session.host_logits.iter().any(|v| !v.is_finite()) {
